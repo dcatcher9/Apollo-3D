@@ -69,8 +69,9 @@ static void check_snapshot_row(const depth_selection_resource &a, const depth_st
 		x.total.drawcalls_indirect == y.total.drawcalls_indirect && x.total.scene_writes == y.total.scene_writes &&
 		x.total.has_work() == y.total.has_work() && x.total.work_count() == y.total.work_count() &&
 		same_snapshot_viewport(x.total.last_viewport, y.total.last_viewport) && same_snapshot_viewport(x.copied_viewport, y.copied_viewport) &&
-		x.copied_during_frame == y.copied_during_frame && x.copy_provenance_ambiguous == y.copy_provenance_ambiguous,
-		"Snapshot changed draw, mesh/copy work, viewport or copied-frame flags");
+		x.copied_during_frame == y.copied_during_frame && x.copy_provenance_ambiguous == y.copy_provenance_ambiguous &&
+		x.depth_erased == y.depth_erased,
+		"Snapshot changed draw, mesh/copy work, viewport, copied-frame or hold-gate flags");
 	require_snapshot(effective_capture_region(a) == effective_capture_region(b) &&
 		candidate_matches_shape(a, 3840, 2160) == candidate_matches_shape(b, 3840, 2160),
 		"Snapshot changed capture region or candidate shape admission");
@@ -318,11 +319,90 @@ static void check_transfer_lineage()
 	require_snapshot(active(frame, history), "A destination that also drew lost its activity");
 }
 
+// The hold gate (docs/reshade-sbs.md, Selecting scene depth): a Present that
+// cleared or discarded the anchor's capture set without any of it working
+// holds nothing. A set left untouched, or worked on, may hold.
+static void check_hold_gates()
+{
+	enum class work { none, draw, clear, clear_draw, discard, copy };
+	struct source
+	{
+		uint32_t width, height;
+		uint16_t samples;
+		std::vector<work> frames; // Frames 1.. in order; none = not used.
+	};
+	const auto stats_of = [](work kind) {
+		depth_stencil_frame_stats stats;
+		if (kind == work::draw || kind == work::clear_draw) { stats.total.observed_work = true; ++stats.total.drawcalls; }
+		if (kind == work::copy) { stats.total.observed_work = true; ++stats.total.scene_writes; }
+		if (kind == work::clear || kind == work::clear_draw) { stats.clear_zero = true; stats.depth_erased = true; }
+		if (kind == work::discard) stats.depth_erased = true;
+		return stats;
+	};
+	// Records every source's last used frame, then judges the last frame with
+	// `set` as the capture set and `held` held.
+	const auto judge = [&](const std::vector<source> &sources, std::initializer_list<unsigned> set, unsigned held = 1) {
+		std::unordered_map<resource, depth_stencil_resource, resource_hash> resources;
+		uint64_t frames = 0;
+		for (unsigned i = 0; i != sources.size(); ++i)
+		{
+			depth_stencil_resource info;
+			info.desc.type = resource_type::texture_2d;
+			info.desc.texture = { sources[i].width, sources[i].height, 1, 1, format::d32_float, sources[i].samples };
+			info.identity = i + 1;
+			for (unsigned frame = 0; frame != sources[i].frames.size(); ++frame)
+				if (sources[i].frames[frame] != work::none)
+				{
+					info.last_frame_stats = stats_of(sources[i].frames[frame]);
+					info.last_used_in_frame = frame + 1;
+				}
+			frames = std::max<uint64_t>(frames, sources[i].frames.size());
+			resources.emplace(resource { 0x1000 + uint64_t(i) * 16 }, info);
+		}
+		sunshine_depth_capture::capture_set captures;
+		for (const unsigned id : set) captures.records[captures.count++].identity = id;
+		const auto snapshot = snapshot_depth_selection(resources);
+		return judge_hold_gate(snapshot, captures, held, frames);
+	};
+	using w = work;
+	const source anchor { 1920, 1080, 1, { w::draw, w::draw, w::draw } };
+	// Untouched, or worked on: the hold stays open.
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::draw, w::draw, w::draw } } }, { 1 }) == hold_gate::open,
+		"A HUD drawing every Present into its own depth-stencil refused the anchor's hold");
+	require_snapshot(judge({ anchor }, { 1 }) == hold_gate::open, "A set that drew (a refused or failed copy, a missing frame) refused its hold");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::clear_draw } } }, { 1 }) == hold_gate::open,
+		"A set that cleared and drew refused its hold");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::copy } } }, { 1 }) == hold_gate::open,
+		"A set that received its own copy refused its hold");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::none, w::none } }, { 1920, 1080, 1, { w::none, w::draw, w::none } },
+		{ 1920, 1080, 1, { w::draw, w::draw, w::draw } } }, { 1, 2 }, 2) == hold_gate::open,
+		"An alternating set left untouched on a Present with other depth work refused its hold");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::clear } }, { 1920, 1080, 1, { w::none, w::none, w::draw } } }, { 1, 2 }) == hold_gate::open,
+		"A set member that cleared while another drew refused the hold");
+	// Cleared without any of the set working: a screen without its scene.
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::clear } } }, { 1 }) == hold_gate::cleared,
+		"A Present that cleared the anchor and drew nothing held its last scene");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::discard } } }, { 1 }) == hold_gate::cleared,
+		"A Present that discarded the anchor's depth and drew nothing held its last scene");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::none } }, { 1920, 1080, 1, { w::none, w::draw, w::clear } } }, { 1, 2 }) == hold_gate::cleared,
+		"A cleared alternating set member with nothing drawn left the hold open");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::clear } } }, {}) == hold_gate::cleared,
+		"Clearing the held source outside the routed set left the hold open");
+	require_snapshot(judge({ { 1920, 1080, 1, { w::draw, w::draw, w::clear } }, { 1920, 1080, 1, { w::draw, w::draw, w::draw } } }, { 1 }) == hold_gate::cleared,
+		"An every-Present HUD drawing beside a cleared anchor left the hold open");
+	// The erased mark survives merging recordings into the queue.
+	state_tracking queue(true), list(false);
+	list.stats_per_used_depth_stencil[resource { 0x1000 }].depth_erased = true;
+	queue.merge(list);
+	require_snapshot(queue.stats_per_used_depth_stencil[resource { 0x1000 }].depth_erased, "Merging lost a depth clear or discard");
+}
+
 static void check_depth_snapshot_contract()
 {
 	check_candidate_shape_table();
 	check_capture_extent();
 	check_transfer_lineage();
+	check_hold_gates();
 
 	// Candidate counters follow the capture-owner count (or the opt-in trace).
 	generic_depth_device_data demand_device;

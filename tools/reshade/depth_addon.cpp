@@ -491,6 +491,34 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool validate_capture_record(effect_runtime *runti
 		current.shape == record.shape && current.frame == record.frame && current.present == record.present;
 }
 
+// The hold gate (docs/reshade-sbs.md, Selecting scene depth), judged on a
+// Present that advanced the depth frame from its snapshot, before any hold:
+// cleared: the anchor's capture set (with the held source) was cleared or
+// discarded and none of it worked: the game shows a screen without its scene
+// (a pause, inventory, loading screen or video that keeps clearing depth), so
+// the Present holds nothing: it is mono. A set left untouched keeps its hold
+// (a frame presented twice, frame generation, a colour-only pass, the Presents
+// an every-other-Present source skips), and so does one that worked but whose
+// copy was refused or failed (a missing frame). One pass over the snapshot.
+SUNSHINE_DEPTH_ADDON_INTERNAL hold_gate judge_hold_gate(const depth_selection_snapshot &snapshot,
+	const sunshine_depth_capture::capture_set &captures, uint64_t held, uint64_t frame)
+{
+	const auto in_set = [&](uint64_t id) {
+		if (id == held) return true;
+		for (unsigned i = 0; i != captures.count; ++i)
+			if (captures.records[i].identity == id) return true;
+		return false;
+	};
+	bool erased = false, worked = false;
+	for (const auto &[value, info] : snapshot)
+	{
+		if (info.last_used_in_frame != frame || !in_set(info.identity)) continue;
+		erased = erased || info.last_frame_stats.depth_erased;
+		worked = worked || info.last_frame_stats.total.has_work();
+	}
+	return erased && !worked ? hold_gate::cleared : hold_gate::open;
+}
+
 // Whether this Present may show the capture shown on the runtime's previous
 // Present again, as reused depth, when no current copy can be shown: the owner's
 // hold of the last good depth for at most the source age (freshness.h), the
@@ -500,14 +528,16 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool validate_capture_record(effect_runtime *runti
 // copy it showed (its content serial; any later copy into it ends the hold),
 // of the same source lifetime, layout and crop, for the same runtime epoch,
 // anchor and colour size, within the source age of the Present on which it was
-// current. A hold never advances the frame, calibration or coverage records.
+// current, on a Present whose hold gate is open (judge_hold_gate). A hold
+// never advances the frame, calibration or coverage records.
 // check_age is false for get_frame_depth's revalidation within the same Present.
 static bool hold_shown_capture(effect_runtime *runtime, const generic_depth_data &data,
 	const generic_depth_device_data &device_data, uint32_t color_width, uint32_t color_height, bool check_age = true)
 {
 	const auto &shown = data.shown;
 	const auto &record = shown.record;
-	if (!record.identity || record.direct || !shown.content_serial || !data.using_backup_texture ||
+	if (data.hold_verdict != hold_gate::open ||
+		!record.identity || record.direct || !shown.content_serial || !data.using_backup_texture ||
 		record.runtime != data.runtime_epoch || shown.anchor != data.anchor_identity ||
 		record.identity != data.selected_identity || record.source != data.selected_depth_stencil.handle ||
 		record.view != data.selected_shader_resource.handle ||
@@ -1686,6 +1716,7 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 		stats.clear_zero |= *depth == 0.0f;
 		stats.clear_one |= *depth == 1.0f;
 		stats.clear_other |= *depth != 0.0f && *depth != 1.0f;
+		stats.depth_erased |= sampled_plane;
 		// A full clear of the sampled plane erases the extent drawn so far; the
 		// next draw starts the capture crop again (observe_viewport). Only the
 		// D3D10/11/12 clears are known to cover the whole view.
@@ -1710,6 +1741,27 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 	}
 	if (depth_stencil_desc != nullptr && depth_stencil_desc->depth_load_op == render_pass_load_op::clear)
 		on_clear_depth_stencil(cmd_list, depth_stencil_desc->view, &depth_stencil_desc->clear_depth, nullptr, 0, nullptr);
+	else if (depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 && depth_stencil_desc->depth_load_op == render_pass_load_op::discard &&
+		cmd_list->get_device()->get_api() == device_api::d3d12)
+	{
+		// A D3D12 depth DISCARD leaves the sampled plane undefined: it erases what
+		// was there as a clear does (the hold's cleared gate), but has no value,
+		// so it adds no clear convention and does not restart the capture crop.
+		// Vulkan's DONT_CARE is left to the draw-statistics picker as before.
+		device *const device = cmd_list->get_device();
+		const auto view = device->get_resource_view_desc(depth_stencil_desc->view);
+		if (view.texture.first_level == 0 && view.texture.first_layer == 0)
+		{
+			auto &state = *cmd_list->get_private_data<state_tracking>();
+			const resource depth_stencil = device->get_resource_from_view(depth_stencil_desc->view);
+			std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
+			if (state.is_queue)
+				lock.lock();
+			auto &stats = state.stats_per_used_depth_stencil[depth_stencil];
+			stats.limit_tracking(tracking_demand(device));
+			stats.depth_erased = true;
+		}
+	}
 	// ReShade runs this event before the native BeginRenderPass, so the clear
 	// above is observed outside the pass. The capture owner sees the pass from
 	// here on, before the synthesized binding below.
@@ -2733,6 +2785,11 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	data.stable_current = false; // Set again below by this Present's stable copy.
 	auto *member_binding = select_captured_depth(runtime, cmd_list, data, *device_data, current_depth_stencil_resources,
 		automatic, selected_depth_stencil, selected_depth_stencil_info);
+	// Judged on the Present that advanced the depth frame, from its own work. A
+	// later Present without depth work can hold only what that one showed.
+	data.hold_verdict = device_data->native_depth_present_index == native_present_index ?
+		judge_hold_gate(current_depth_stencil_resources, data.captures, data.shown.record.identity, device_data->frame_index) :
+		hold_gate::open;
 	const uint64_t selected_id = selected_depth_stencil_info ? selected_depth_stencil_info->identity : 0;
 	if (member_binding)
 	{
@@ -2898,6 +2955,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.binding_state = data.capture_ready || data.held ? depth_binding_state::ready : depth_binding_state::waiting_capture;
 		data.binding_detail = data.capture_ready ? "Depth is bound and its current frame is available." :
 			data.held ? "Depth is bound; this Present shows the last current frame again, within the source age." :
+			data.hold_verdict == hold_gate::cleared ? "The game cleared its depth without drawing (a screen without its scene); nothing is held." :
 			(source_active ? "Current buffer is selected; waiting for a valid end-of-frame copy." : "Current buffer is selected but inactive; waiting for it to render again.");
 	} while (0);
 	else do

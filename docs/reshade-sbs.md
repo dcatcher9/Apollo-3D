@@ -6171,11 +6171,23 @@ at most the source age (250 ms, [`freshness.h`](../tools/reshade/freshness.h)) a
 which that capture was current, then the view is mono. This covers Presents that draw no depth
 (a frame presented twice, in-game frame generation without DLSS-G, a colour-only UI pass), Presents
 on which only other depth is drawn (a HUD with its own depth-stencil, or the frames an
-every-other-Present source skips), and a refused or failed end-of-frame copy. Only the capture
-the previous Present showed can be held, so older depth never follows newer; a held Present shows
-it from the same view of the same backup, which must still hold exactly that copy (any later copy
-into the backup ends the hold), for the same source lifetime, layout, crop, anchor, runtime epoch
-and colour size. A newer current copy always wins. The exporter renders a held Present with the
+every-other-Present source skips), and a missing frame: a Present on which the anchor's capture
+set drew but whose end-of-frame copy was refused or failed holds within the source age, as the
+providers' missing frame does (its colour is then one frame ahead of the held depth). A gate
+refuses the hold, judged from the work of each Present that advances the depth frame
+(`judge_hold_gate`), so such a Present is mono from the first:
+
+- *Cleared:* the anchor's capture set, or the held source, was cleared (`ClearDepthStencilView` of
+  the sampled plane, with or without rectangles, or a D3D12 render pass's depth `CLEAR`) or had its
+  depth discarded (a D3D12 render pass's `DISCARD`), and none of it drew or received depth of its
+  own. The game is showing a screen without its scene: a pause, inventory or loading screen, or a
+  video, that keeps clearing depth.
+
+A refused Present shows no Generic depth, so nothing is held after it until a new current copy.
+Only the capture the previous Present showed can be held, so older depth never follows newer; a
+held Present shows it from the same view of the same backup, which must still hold exactly that
+copy (any later copy into the backup ends the hold), for the same source lifetime, layout, crop,
+anchor, runtime epoch and colour size. A newer current copy always wins. The exporter renders a held Present with the
 scene its real frame was shown with (`restore_reused_scene`), so calibration, raw samples and the
 strength ramp do not advance; `Sunshine_DepthReady` reads ready, and the `Sunshine 3D depth:` line
 counts held Presents (`ready_copies held=`). A held Present is not a current copy: Present coverage
@@ -6360,12 +6372,19 @@ accepted consequences:
   three-interval guard is what keeps a single hitch from switching sources and recalibrating; it
   awaits an owner ruling against switching sooner.
 - **Held Generic depth.** A Present without a current copy shows the previous Present's depth
-  again for at most the source age (see [Selecting scene depth](#selecting-scene-depth)). The
-  first Presents of a video, a loading screen or a 2D menu that draws no depth therefore still
-  show the last scene's depth, for at most 250 ms after it was current, as with the API
-  providers; then the view is mono. A Present whose colour was rendered with depth Generic cannot
-  copy (an unqualified member of an alternating set, or a refused copy) shows the held depth one
-  frame behind its colour within the same bound.
+  again for at most the source age, then mono, as the API providers' missing-frame hold does (see
+  [Selecting scene depth](#selecting-scene-depth)). That includes a Present whose anchor drew but
+  whose copy was refused or failed, or whose drawn source is an unqualified member of the anchor's
+  capture set: a missing frame, whose held depth is one frame behind its colour within that
+  bound. A Present is mono at once, holding nothing, when it clears or discards the anchor's depth
+  without drawing (a pause, inventory or loading screen, or a video, that keeps clearing depth).
+  The gate does not see a screen change on which the game stops drawing its scene without clearing
+  depth: those Presents show the last scene's depth for at most 250 ms after it was current,
+  exactly as with the API providers, then mono, and so does a new scene drawn into another depth
+  buffer (a cutscene, photo mode or 3D menu), whose colour that depth does not match. The gate
+  judges a Present by the work submitted since the previous one, so a frame-generation Present that lands between one frame's
+  own submissions, after its depth clear and before its draws, is taken for a cleared screen and
+  is mono (fail-safe; whether any game presents that way has not been measured).
 - **Copies of scene depth.** A copy of another same-geometry candidate is never current depth of
   its destination, except a whole copy of a pass the source then cleared away (see
   [Selecting scene depth](#selecting-scene-depth)). A game whose only copy of the scene depth is

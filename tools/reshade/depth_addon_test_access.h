@@ -140,6 +140,10 @@ struct depth_stencil_frame_stats
 	// Only this reservation may publish an EOF capture for the source/frame.
 	uint64_t preservation_reservation = 0;
 	bool clear_zero = false, clear_one = false, clear_other = false;
+	// This frame cleared the sampled plane's depth (with or without rectangles,
+	// and a render pass's depth CLEAR) or began a D3D12 render pass that DISCARDs it:
+	// what was there is gone. The hold's cleared gate (judge_hold_gate) reads it.
+	bool depth_erased = false;
 	// This frame's copy is the end-of-frame one (preserve_depth_at_effects).
 	// Counted for the status line only.
 	bool end_of_frame_copy = false;
@@ -310,6 +314,7 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 			stats.clear_zero |= source_stats.clear_zero;
 			stats.clear_one |= source_stats.clear_one;
 			stats.clear_other |= source_stats.clear_other;
+			stats.depth_erased |= source_stats.depth_erased;
 		}
 	}
 };
@@ -325,6 +330,9 @@ struct capture_region
 };
 
 enum class depth_binding_state { waiting_game, waiting_activity, filtered, binding_failed, waiting_capture, ready };
+// Whether a Present may hold the shown capture (judge_hold_gate): open, or
+// refused because the anchor's set was cleared without drawing (cleared).
+enum class hold_gate { open, cleared };
 enum class native_depth_ui_state { inactive, waiting_depth, calibrating, waiting_orientation, ready };
 
 struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_data
@@ -375,6 +383,8 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	// The source is selected only to be held: current-copy routing chose no
 	// source (select_captured_depth), so its own copy, if any, is not shown.
 	bool hold_only = false;
+	// This Present's hold gate (judge_hold_gate); a refused gate holds nothing.
+	hold_gate hold_verdict = hold_gate::open;
 	resource anchor_depth_stencil {};
 	uint64_t anchor_identity = 0;
 	struct member_view
@@ -540,7 +550,7 @@ struct depth_selection_resource
 	{
 		draw_stats total;
 		viewport copied_viewport;
-		bool copied_during_frame, copy_provenance_ambiguous;
+		bool copied_during_frame, copy_provenance_ambiguous, depth_erased;
 	} last_frame_stats;
 	uint64_t last_used_in_frame, first_used_in_frame;
 
@@ -548,7 +558,8 @@ struct depth_selection_resource
 		desc(info.desc), identity(info.identity), layout_epoch(info.layout_epoch),
 		preserved_region(info.preserved_region), have_preserved_region(info.have_preserved_region),
 		last_frame_stats { info.last_frame_stats.total, info.last_frame_stats.copied_viewport,
-			info.last_frame_stats.copied_during_frame, info.last_frame_stats.copy_provenance_ambiguous },
+			info.last_frame_stats.copied_during_frame, info.last_frame_stats.copy_provenance_ambiguous,
+			info.last_frame_stats.depth_erased },
 		last_used_in_frame(info.last_used_in_frame), first_used_in_frame(info.first_used_in_frame) {}
 };
 static_assert(std::is_trivially_copyable_v<depth_selection_resource>);
@@ -785,5 +796,7 @@ bool on_copy_buffer_to_texture(command_list *cmd_list, resource, uint64_t, uint3
 bool on_resolve_texture_region(command_list *cmd_list, resource source, uint32_t source_subresource, const subresource_box *source_box,
 	resource dest, uint32_t subresource, uint32_t dest_x, uint32_t dest_y, uint32_t dest_z, format);
 void resolve_transfer_lineage(state_tracking &state, const generic_depth_device_data &device_data);
+hold_gate judge_hold_gate(const depth_selection_snapshot &snapshot, const sunshine_depth_capture::capture_set &captures,
+	uint64_t held, uint64_t frame);
 sunshine_streamline::provider::source_status describe_streamline_source(effect_runtime *runtime);
 #endif

@@ -1420,8 +1420,8 @@ not an uncontended frame-time benchmark. Execution is opt-in and serial, outside
 The same fixture accepts one optional isolated case after its four normal arguments:
 `--overlap`, `--interrupted-startup`, `--moving-startup`, `--rotating-startup`,
 `--crowded-rotating-startup`, `--flat-startup`, `--layout`, `--copy-history`, `--copy-end`,
-`--copy-rescue`, `--gap-none`, `--gap-double`, `--gap-ui`, `--gap-overlay` or `--gap-long`. Each
-case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
+`--copy-rescue`, `--gap-none`, `--gap-double`, `--gap-ui`, `--gap-overlay`, `--gap-long`
+or `--gap-cleared`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
 before the scene: a history copy at the start of the frame (the destination cleared on its first
 frames), a copy after the scene draw, and a copy of a pass the scene's allocation then clears for a
 small first-person draw. The scene, or in the last case the destination, must be the current
@@ -1429,7 +1429,13 @@ depth on every Present, with this frame's raw center and full stereo. The gap ca
 every other Present (one in 40 for `--gap-long`) with nothing, a repeated colour, a colour-only UI
 pass or a HUD into its own depth-stencil in between: every in-between Present must hold its real
 frame's depth at full stereo, and with one real frame in 40 the hold must end at the source age
-and stereo fade in again. They cover complementary rotation becoming concurrent rendering,
+and stereo fade in again. `--gap-cleared` erases the scene's depth without drawing every other
+Present, then on every Present for at least 400 ms (a pause screen), by `ClearDepthStencilView`, a
+render pass whose depth access is CLEAR and one that DISCARDs it in turn: each such Present must be
+mono from the first, never held ([hold gates](../../docs/reshade-sbs.md#selecting-scene-depth)),
+the real frames full stereo, and the scene must recover after the pause. The snapshot CTest checks
+the gate's rule on synthetic snapshots. The other cases
+cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,
 and a stable captured crop despite unrelated viewport activity. The layout case also requires

@@ -9,7 +9,7 @@
 namespace {
   struct rotation_fixture:raw_runtime_fixture {
     enum class cadence { single,abc,aabb,offturn,offturn_history,missing,concurrent,interrupted,moving,auxiliary,copy_history,copy_end,copy_rescue,
-      gap_double,gap_ui,gap_overlay,gap_long };
+      gap_double,gap_ui,gap_overlay,gap_long,gap_cleared,paused };
     using action_t=BOOL (*)(api::effect_runtime *);
     native_game3d_observer game3d{*this};
     // What the native render of the latest Present consumed.
@@ -24,6 +24,9 @@ namespace {
     std::uint64_t step_before=0,step_after=0;
     float last_raw=-1; // The raw center pixels() read from this Present's captured depth.
     unsigned held_presents=0;
+    // This Present erased the scene's depth and drew no depth (gap_cleared, paused).
+    bool erased=false;
+    unsigned erase_count=0;
     std::unique_ptr<target_t> overlay; // A HUD pass with its own full-size depth every Present (gap_overlay).
     com_ptr<ID3D12PipelineState> color_pipeline;com_ptr<ID3D12Resource> ui_color;com_ptr<ID3D12DescriptorHeap> ui_rtv;
     std::uint64_t rendered_sequence=0;
@@ -137,6 +140,26 @@ namespace {
       transition(commands.p,to.texture.p,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_DEPTH_WRITE);
       transition(commands.p,from.texture.p,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_DEPTH_WRITE);
     }
+    // A screen without the scene (a pause, inventory or loading screen, a
+    // video) that keeps erasing the scene's depth and draws none: by
+    // ClearDepthStencilView, a render pass whose depth access is CLEAR, or one
+    // that DISCARDs it, in turn.
+    void erase_scene(unsigned route){
+      auto &target=*scene;const auto dsv=target.heap->GetCPUDescriptorHandleForHeapStart();
+      if(route==0){commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,target.clear_depth,0,0,nullptr);return;}
+      com_ptr<ID3D12GraphicsCommandList4> list4;
+      checked(commands->QueryInterface(IID_PPV_ARGS(list4.put())),"The game's list lacks render passes");
+      D3D12_RENDER_PASS_DEPTH_STENCIL_DESC pass{};
+      pass.cpuDescriptor=dsv;
+      pass.DepthBeginningAccess.Type=route==1 ? D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR : D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD;
+      pass.DepthBeginningAccess.Clear.ClearValue.Format=target.format;
+      pass.DepthBeginningAccess.Clear.ClearValue.DepthStencil.Depth=target.clear_depth;
+      pass.DepthEndingAccess.Type=D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+      pass.StencilBeginningAccess.Type=D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
+      pass.StencilEndingAccess.Type=D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
+      list4->BeginRenderPass(0,nullptr,&pass,D3D12_RENDER_PASS_FLAG_NONE);
+      list4->EndRenderPass();
+    }
     void clear_depth(target_t &target){
       const auto dsv=target.heap->GetCPUDescriptorHandleForHeapStart();
       commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,target.clear_depth,0,0,nullptr);
@@ -230,11 +253,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       else if(mode==cadence::copy_rescue)drawn=2; // The destination holds this frame's scene.
       else if(mode==cadence::aabb)drawn=(phase_present/2)%2+1;
       else if(mode==cadence::concurrent || mode==cadence::moving || mode==cadence::auxiliary)drawn=1;
-      else if(mode==cadence::interrupted || mode==cadence::gap_double || mode==cadence::gap_ui || mode==cadence::gap_overlay)
+      else if(mode==cadence::interrupted || mode==cadence::gap_double || mode==cadence::gap_ui || mode==cadence::gap_overlay ||
+        mode==cadence::gap_cleared)
         drawn=phase_present%2 ? 0 : 1;
       else if(mode==cadence::gap_long)drawn=phase_present%40 ? 0 : 1;
       if(mode==cadence::gap_overlay)overlay_pass();
       if(mode==cadence::gap_ui && !drawn)ui_color_pass();
+      erased=(mode==cadence::gap_cleared || mode==cadence::paused) && !drawn;
+      if(erased)erase_scene(erase_count++%3);
       if(mode==cadence::moving){
         if(!movement_started)movement_started=GetTickCount64();
         // Looking repeatedly between coherent near/middle/far center patches
@@ -382,10 +408,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       else{
         require(!capture_ready || (drawn && current(drawn)),"Wrong/old physical depth admitted for this rendered present");
         // Nothing here invalidates the shown capture: a Present with no
-        // current depth within its source age must show it again.
-        require(capture_ready || drawn || !shown.valid || step_after-shown.before>=250,
+        // current depth within its source age must show it again, unless it
+        // erased the scene's depth and drew none (below).
+        require(capture_ready || drawn || erased || !shown.valid || step_after-shown.before>=250,
           "A Present without depth within the source age of the previous Present's depth was flat");
       }
+      // A screen without the scene holds nothing: mono from its first Present.
+      if(erased)require(!held && !capture_ready && !ready() && blend()==0.f,
+        "A Present that erased the scene's depth and drew none held or showed depth");
       require(!ready() || capture_ready,"Camera ready without current legally preserved depth");
       require(drawn || held || (!capture_ready && !ready() && blend()==0.f),"Color-only Present beyond the source age reused depth or stereo");
       if(capture_ready && !held){
@@ -662,6 +692,31 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       }
       std::printf("PASS %s: %u real frames full stereo, %u in-between Presents held their real frame's depth\n",label,real,between);
     }
+    // The game erases the scene's depth without drawing every other Present
+    // (gap_cleared), by ClearDepthStencilView, a render pass whose depth
+    // access is CLEAR or one that DISCARDs it in turn, then on every Present
+    // (paused): a screen without its scene, so each such Present holds nothing
+    // and is mono from the first (tick()). The real frames stay full stereo,
+    // and after the pause the scene recovers.
+    void check_gap_cleared(){
+      set_mode(cadence::gap_cleared);
+      const auto started=GetTickCount64();unsigned consecutive=0;
+      while(consecutive<20 && GetTickCount64()-started<15000){tick("gap-cleared");if(drawn){if(full())++consecutive;else consecutive=0;}}
+      require(consecutive>=20,"Real frames between cleared Presents never reached full stereo");
+      unsigned real=0,cleared=0;
+      for(unsigned i=0;i<120;++i){
+        tick("gap-cleared");
+        if(drawn){require(full(),"A real frame between cleared Presents lost full stereo");++real;}
+        else{require(erased && !held && !capture_ready && !ready() && blend()==0.f,"A Present that erased the scene's depth was not mono");++cleared;}
+      }
+      std::printf("PASS gap-cleared: %u real frames full stereo, %u Presents that cleared or discarded the scene's depth mono\n",real,cleared);
+      set_mode(cadence::single,1);warm("before-pause");
+      set_mode(cadence::paused);
+      const auto paused=GetTickCount64();unsigned mono=0;
+      do{tick("pause-erases-depth");++mono;}while(mono<20 || GetTickCount64()-paused<400);
+      set_mode(cadence::single,1);warm("after-pause");stable("after-pause",20);
+      std::printf("PASS pause: %u Presents that keep erasing the scene's depth mono from the first, then the scene recovers\n",mono);
+    }
     void finish(){
       render_tracked_depth={};
     }
@@ -680,7 +735,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         gap_pipelines();
         if(test_case=="--gap-overlay")overlay=target(width,height,1,19);
         set_mode(test_case=="--gap-double" ? cadence::gap_double : test_case=="--gap-ui" ? cadence::gap_ui :
-          test_case=="--gap-overlay" ? cadence::gap_overlay : test_case=="--gap-long" ? cadence::gap_long : cadence::interrupted);
+          test_case=="--gap-overlay" ? cadence::gap_overlay : test_case=="--gap-long" ? cadence::gap_long :
+          test_case=="--gap-cleared" ? cadence::gap_cleared : cadence::interrupted);
       }
       if(test_case=="--overlap")for(unsigned role=1;role<=3;++role)member(role).pattern=14;
       if(test_case=="--interrupted-startup")set_mode(cadence::interrupted);
@@ -719,6 +775,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         else if(test_case=="--gap-ui")check_gap(cadence::gap_ui,"gap-color-only-ui");
         else if(test_case=="--gap-overlay")check_gap(cadence::gap_overlay,"gap-own-hud-depth");
         else if(test_case=="--gap-long")check_gap(cadence::gap_long,"gap-one-real-frame-in-40");
+        else if(test_case=="--gap-cleared")check_gap_cleared();
         else throw std::runtime_error("Unknown isolated rotation case");
         finish();return;
       }
@@ -779,13 +836,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long]\n",stderr);return 2;}
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
     require(test_case.empty() || test_case=="--overlap" || test_case=="--interrupted-startup" || test_case=="--moving-startup" || test_case=="--rotating-startup" || test_case=="--crowded-rotating-startup" || test_case=="--flat-startup" || test_case=="--layout" ||
       test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue" || test_case=="--gap-none" || test_case=="--gap-double" ||
-      test_case=="--gap-ui" || test_case=="--gap-overlay" || test_case=="--gap-long","Unknown isolated rotation case");
+      test_case=="--gap-ui" || test_case=="--gap-overlay" || test_case=="--gap-long" || test_case=="--gap-cleared",
+      "Unknown isolated rotation case");
     select_native_boot();
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");
     rotation_fixture f;f.runtime_directory=fs::absolute(argv[4]);
