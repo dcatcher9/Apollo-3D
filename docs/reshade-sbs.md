@@ -6195,12 +6195,13 @@ A refused Present shows no Generic depth, so nothing is held after it until a ne
 Only the capture the previous Present showed can be held, so older depth never follows newer; a
 held Present shows it from the same view of the same backup, which must still hold exactly that
 copy (any later copy into the backup ends the hold), for the same source lifetime, layout, crop,
-anchor, runtime epoch and colour size. A newer current copy always wins. The exporter renders a held Present with the
-scene its real frame was shown with (`restore_reused_scene`), so calibration, raw samples and the
-strength ramp do not advance; `Sunshine_DepthReady` reads ready, and the `Sunshine 3D depth:` line
-counts held Presents (`ready_copies held=`). A held Present is not a current copy: Present coverage
-and sampling see only current copies. The hold belongs to the effect runtime that showed the
-capture: the runtime of another swapchain (a second window of the game) never holds it.
+anchor, runtime epoch and colour size. A newer current copy always wins. The exporter renders a
+held Present with the scene its real frame was shown with (`restore_reused_scene`), so
+calibration, raw samples and the strength ramp do not advance; `Sunshine_DepthReady` reads ready,
+and the `Sunshine 3D depth:` line counts held Presents (`ready_copies held=`). A held Present is
+not a current copy: Present coverage and sampling see only current copies. The hold belongs to the
+effect runtime that showed the capture: the runtime of another swapchain (a second window of the
+game) never holds it.
 Binding, sampling and the public current depth accessor use the same capture record and currentness
 checks. The view/backup cache is bounded and retains retiring resources until their existing
 retirement period ends; ordinary rotation reuses views rather than allocating or waiting for the
@@ -6392,8 +6393,9 @@ accepted consequences:
   before (a cutscene, photo mode or 3D menu, including an unqualified buffer of the same size;
   the first turn of a new rotation member is one too, its later turns hold). Neither gate sees a
   screen change on which the game simply stops drawing its scene without clearing depth or drawing
-  into another buffer: those Presents show the last scene's depth for at most 250 ms after it was
-  current, exactly as with the API providers, then mono. Both gates judge a Present by the work
+  into another buffer, or starts the new scene in a buffer that already drew within those three
+  Presents: those Presents show the last scene's depth for at most 250 ms after it was current,
+  exactly as with the API providers, then mono. Both gates judge a Present by the work
   submitted since the previous one, so a frame-generation Present that lands between one frame's
   own submissions, after its depth clear and before its draws, is taken for a cleared screen and
   is mono (fail-safe; whether any game presents that way has not been measured).
