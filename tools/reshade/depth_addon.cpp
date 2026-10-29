@@ -4,8 +4,8 @@
  *
  * Sunshine changes: bounded content-based scene depth selection and upscaler
  * eligibility, based on ReShade 6.8.0 example 09-depth, commit
- * 18deaa52de0c425a78b329e9cb3c497281cd00ec. The original manual depth controls
- * and capture paths remain available inside the Sunshine 3D add-on. This module
+ * 18deaa52de0c425a78b329e9cb3c497281cd00ec. Depth selection is always
+ * automatic; the original manual depth controls were removed. This module
  * never reads another add-on's private C++ objects.
  */
 
@@ -302,7 +302,7 @@ static bool check_aspect_ratio(float width_to_check, float height_to_check, floa
 	// Ultra Performance are outside the original 1.85 output/input ratio limit.
 	// Only extend the default mode. Explicit exact/custom/multiple filters retain
 	// their established meaning, and the existing larger-buffer cases below stay.
-	if (s_sunshine_auto && s_aspect_ratio_heuristic == aspect_ratio_heuristic::similar_aspect_ratio &&
+	if (s_aspect_ratio_heuristic == aspect_ratio_heuristic::similar_aspect_ratio &&
 		sunshine_depth::auto_candidate_shape(static_cast<uint32_t>(width_to_check), static_cast<uint32_t>(height_to_check),
 			static_cast<uint32_t>(width), static_cast<uint32_t>(height)))
 		return true;
@@ -408,7 +408,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool candidate_matches_shape(const DepthInfo &info
 	// Padded allocations may contain a smaller active DLSS/FSR viewport. Keep
 	// explicit filters exact and admit this evidence only in the default mode.
 	const auto region = effective_capture_region(info);
-	return s_sunshine_auto && s_aspect_ratio_heuristic == aspect_ratio_heuristic::similar_aspect_ratio &&
+	return s_aspect_ratio_heuristic == aspect_ratio_heuristic::similar_aspect_ratio &&
 		check_aspect_ratio(static_cast<float>(region.width), static_cast<float>(region.height), static_cast<float>(width), static_cast<float>(height));
 }
 
@@ -1105,10 +1105,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void on_clear_depth_impl(command_list *cmd_list, s
 	{
 	case clear_op::clear_depth_stencil_view:
 		// Mirror's Edge and Portal occasionally render something into a small viewport (16x16 in Mirror's Edge, 512x512 in Portal to render underwater geometry)
-		do_copy = s_sunshine_auto ?
-			check_aspect_ratio(current_stats.last_viewport.width, current_stats.last_viewport.height,
-				backup_frame_width, backup_frame_height) :
-			(current_stats.last_viewport.width > 1024 || (current_stats.last_viewport.width == 0 || backup_frame_width <= 1024));
+		do_copy = check_aspect_ratio(current_stats.last_viewport.width, current_stats.last_viewport.height, backup_frame_width, backup_frame_height);
 		break;
 	case clear_op::fullscreen_draw:
 		// Mass Effect 3 in Mass Effect Legendary Edition sometimes uses a larger common depth buffer for shadow map and scene rendering, where the former uses a 1024x1024 viewport and the latter uses a viewport matching the render resolution
@@ -1362,7 +1359,6 @@ static void on_init_device(device *device)
 		sunshine_upscaler_trace::poll();
 	// The content sampler's shader compiles off the first sample's Present.
 	sunshine_depth::warm();
-	reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", s_sunshine_auto);
 
 	reshade::get_config_value(nullptr, "DEPTH", "DisableINTZ", s_disable_intz);
 	reshade::get_config_value(nullptr, "DEPTH", "DepthCopyBeforeClears", s_preserve_depth_buffers);
@@ -2160,11 +2156,6 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 	if (queue_state.stats_per_used_depth_stencil.empty())
 		return;
 
-	// Also skip update when there has been very little activity (special case for emulators like PCSX2 which may present more often than they render a frame)
-	if (!s_sunshine_auto && queue_state.stats_per_used_depth_stencil.size() == 1 && queue_state.stats_per_used_depth_stencil.begin()->second.total.drawcalls != 0 &&
-		queue_state.stats_per_used_depth_stencil.begin()->second.total.drawcalls <= 8 && queue_state.stats_per_used_depth_stencil.begin()->second.total.scene_writes == 0)
-		return;
-
 	device_data->frame_index++;
 	device_data->native_depth_present_index = device_data->native_present_index;
 	if (trace)
@@ -2228,15 +2219,6 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 			s_challenger_owner = nullptr;
 	}
 	if (device->get_api() != device_api::d3d11 && device->get_api() != device_api::d3d12)
-		return;
-	if (!s_sunshine_auto && data.native_depth_requested)
-	{
-		// Calibration remains available with content-based selection disabled.
-		// Sample only the selected backup; never allocate challengers or switch it.
-		data.probe_target_id = data.selected_identity;
-		return;
-	}
-	if (!s_sunshine_auto)
 		return;
 
 	if (data.challenger_depth_stencil == data.selected_depth_stencil && data.challenger_depth_stencil != 0)
@@ -2485,8 +2467,7 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 		}
 	const bool raw_selected_due = due_member != nullptr;
 	const uint64_t target_id = due_member ? due_member->identity : data.probe_target_id;
-	if ((!s_sunshine_auto && !data.native_depth_requested && !data.raw_scene_requested) || target_id == 0 ||
-		sunshine_depth::busy() || (!raw_selected_due && now < data.next_sample_tick))
+	if (target_id == 0 || sunshine_depth::busy() || (!raw_selected_due && now < data.next_sample_tick))
 		return;
 	device *const device = runtime->get_device();
 	auto *device_data = device->get_private_data<generic_depth_device_data>();
@@ -2612,7 +2593,7 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 	// A rotating group can refresh a different raw member every few frames.
 	// Those independent deadlines must not continually postpone challenger work.
 	if (!raw_selected_due || target_id == data.probe_target_id)
-		data.next_sample_tick = now + (data.raw_scene_requested ? 125 : (!s_sunshine_auto ? 1000 : 250));
+		data.next_sample_tick = now + (data.raw_scene_requested ? 125 : 250);
 	if (data.raw_scene_requested)
 		if (auto *member = raw_member(data, target_id)) member->next_tick = now + 250;
 	if (!sunshine_depth::submit(runtime, cmd_list, request))
@@ -2660,7 +2641,8 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		return;
 
 	auto &data = *runtime->get_private_data<generic_depth_data>();
-	const bool automatic = s_sunshine_auto && (device->get_api() == device_api::d3d11 || device->get_api() == device_api::d3d12);
+	// D3D11/12 select by content; other APIs keep ReShade's draw-statistics picker.
+	const bool automatic = device->get_api() == device_api::d3d11 || device->get_api() == device_api::d3d12;
 	// Native mode runs this every Present, also while ReShade skips its effects
 	// (globally disabled, none loaded) and so never recounts the technique flag.
 	const bool effects_may_read_depth = data.effects_read_depth && runtime->get_effects_state();
@@ -3259,14 +3241,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL sunshine_streamline::provider::source_status descr
 // Capture policy remains unchanged; opening these controls never changes it.
 static void draw_capture_settings(device *device, bool &force_reset)
 {
-	if (ImGui::Checkbox("Automatically select scene depth", &s_sunshine_auto))
-	{
-		reshade::set_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", s_sunshine_auto);
-		force_reset = true;
-	}
-	ImGui::SetItemTooltip("Uses confirmed game depth from Streamline or NGX. Other games use generic depth detection. A missing provider frame stays 2D until current depth returns. Reduced rendering resolutions are supported.");
-	ImGui::Spacing();
-
 	const char *const draw_stats_heuristic_items[] = {
 		"Default",
 		"Higher vertices",

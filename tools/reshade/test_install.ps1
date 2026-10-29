@@ -92,7 +92,7 @@ $exeBefore = (Get-FileHash -LiteralPath (Join-Path $game 'Test Game.exe')).Hash
 & $installer -GameExecutable (Join-Path $game 'Test Game.exe') -AddonDirectory $fixturePackage -ShaderDirectory $fixtureShaders
 $ini = [IO.File]::ReadAllText((Join-Path $game 'ReShade.ini'))
 $afterPreset = [IO.File]::ReadAllText((Join-Path $game 'custom preset.ini'))
-Require ($ini -match 'AutoSelectSceneDepth=0') 'Installer changed an explicit automatic-selection preference.'
+Require ($ini.Contains("[SUNSHINE_DEPTH]`nAutoSelectSceneDepth=0`n")) 'The installer changed the stale [SUNSHINE_DEPTH] line; it must be left byte-for-byte untouched.'
 Require ($ini -match 'DisabledAddons=Other Addon,Generic Depth,Sunshine Depth') 'Other disabled add-ons were lost or legacy depth was not disabled by name.'
 Require ($afterPreset -match '(?m)^Techniques=Curves@Curves.fx,SunshineDepth3D@SunshineDepth3D.fx$') 'The new technique was not uniquely enabled or the old warp remains active.'
 Require ($afterPreset.Replace('Techniques=Curves@Curves.fx,SunshineDepth3D@SunshineDepth3D.fx',
@@ -123,7 +123,7 @@ $fresh = New-Fixture 'new game without Depth3D' "[GENERAL]`n" '' $false
 Require (-not (Test-Path -LiteralPath (Join-Path $fresh 'reshade-shaders\Shaders\Depth3D'))) 'A new installation unexpectedly requires or creates upstream Depth3D.'
 $freshIni = [IO.File]::ReadAllText((Join-Path $fresh 'ReShade.ini'))
 Require ($freshIni -match '(?m)^EffectSearchPaths=\.\\reshade-shaders\\Shaders\\Sunshine3D$') 'The independent effect search path is missing.'
-Require ($freshIni -match 'AutoSelectSceneDepth=1') 'New installations did not enable automatic selection.'
+Require ($freshIni -notmatch 'AutoSelectSceneDepth') 'New installations wrote the removed selection key.'
 Require ([IO.File]::ReadAllText((Join-Path $fresh 'ReShadePreset.ini')) -match '(?m)^Techniques=SunshineDepth3D@SunshineDepth3D.fx$') 'Fresh installation did not enable its effect.'
 Require (Test-Path -LiteralPath (Join-Path $fresh 'SunshineSBS.addon64')) 'Default add-on path was not used.'
 Write-Output 'PASS an explicitly selected independent reference installs without a Depth3D checkout or existing shader.'
@@ -135,7 +135,7 @@ $spaced = "  [ADDON]  `n  AddonPath = .\custom addons  `n  DisabledAddons = Othe
 $spacedGame = New-Fixture 'whitespace and shader override' $spaced $preset
 & $installer -GameExecutable (Join-Path $spacedGame 'Test Game.exe') -AddonDirectory $fixturePackage -ShaderDirectory $override
 $spacedAfter = [IO.File]::ReadAllText((Join-Path $spacedGame 'ReShade.ini'))
-Require ($spacedAfter -match 'AutoSelectSceneDepth\s*=\s*0') 'Whitespace caused an explicit preference to be overwritten.'
+Require ($spacedAfter.Contains(" [SUNSHINE_DEPTH]`n AutoSelectSceneDepth = 0 `n")) 'The installer changed the stale whitespace-padded [SUNSHINE_DEPTH] line; it must be left byte-for-byte untouched.'
 Require (Test-Path -LiteralPath (Join-Path $spacedGame 'custom addons\SunshineSBS.addon64')) 'Whitespace caused installation in the wrong add-on path.'
 Require ((Get-FileHash -LiteralPath (Join-Path $spacedGame 'reshade-shaders\Shaders\Sunshine3D\SunshineDepth3D.fx')).Hash -eq
     (Get-FileHash -LiteralPath (Join-Path $override 'SunshineDepth3D.fx')).Hash) 'The explicit shader override was not used.'

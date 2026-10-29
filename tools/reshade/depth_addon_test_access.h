@@ -4,8 +4,8 @@
  *
  * Sunshine changes: bounded content-based scene depth selection and upscaler
  * eligibility, based on ReShade 6.8.0 example 09-depth, commit
- * 18deaa52de0c425a78b329e9cb3c497281cd00ec. The original manual depth controls
- * and capture paths remain available inside the Sunshine 3D add-on. This module
+ * 18deaa52de0c425a78b329e9cb3c497281cd00ec. Depth selection is always
+ * automatic; the original manual depth controls were removed. This module
  * never reads another add-on's private C++ objects.
  */
 
@@ -68,7 +68,6 @@
 using namespace reshade::api;
 
 SUNSHINE_DEPTH_ADDON_SHARED std::shared_mutex s_mutex;
-SUNSHINE_DEPTH_ADDON_SHARED bool s_sunshine_auto = true;
 SUNSHINE_DEPTH_ADDON_SHARED bool s_registered = false;
 SUNSHINE_DEPTH_ADDON_SHARED bool s_initialized = false;
 // Fixed for each add-on registration; changing the diagnostic requires restart.

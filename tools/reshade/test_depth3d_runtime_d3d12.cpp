@@ -379,7 +379,7 @@ namespace {
                  << "\nUseAspectRatioHeuristics=1\n";
 #endif
         #ifdef SUNSHINE_RAW_SCENE_RUNTIME
-        config << "[SUNSHINE_DEPTH]\nAutoSelectSceneDepth=1\n";
+        config << "[SUNSHINE_DEPTH]\n";
         if (sunshine_camera_fixture::flag("SUNSHINE_DEPTH_GENERIC_ONLY_TEST"))
           config << "StreamlineDepthSource=0\nNGXDepthSource=0\nStreamlineCameraProbe=0\nUpscalerCallTrace=0\n";
         if (!sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC")) config << "RawSceneAutomation=1\n";

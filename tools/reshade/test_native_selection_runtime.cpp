@@ -16,7 +16,7 @@ namespace {
       bool normal = false, flat = false;
     };
     std::unique_ptr<target_t> scene, decoy;
-    bool statistics_mode = false;
+    bool stale_config = false;
     com_ptr<ID3D12RootSignature> root;
     com_ptr<ID3D12PipelineState> pipeline;
 
@@ -31,9 +31,13 @@ namespace {
       size_t length = sizeof(disabled);
       require(reshade::get_config_value(nullptr, "ADDON", "DisabledAddons", disabled, &length) && std::strcmp(disabled, "Generic Depth") == 0,
         "Actual ReShade Generic Depth is not disabled");
-      bool automatic = true;
-      require(reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", automatic) && automatic != statistics_mode,
-        "Actual runtime did not load the requested automatic/statistics selection mode");
+      // ReShade parsed the stale value the add-on no longer reads, so the
+      // unchanged automatic expectations below prove that it does not apply.
+      if (stale_config) {
+        bool stale_automatic = true;
+        require(reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", stale_automatic) && !stale_automatic,
+          "Actual runtime did not load the stale AutoSelectSceneDepth=0 value");
+      }
       const auto mapping_name = std::wstring(reshade_bridge::mapping_prefix) + std::to_wstring(GetCurrentProcessId());
       HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, mapping_name.c_str());
       require(mapping != nullptr, "Production exporter did not initialize its mapping");
@@ -95,7 +99,8 @@ float ps(float4 position : SV_Position) : SV_Depth {
       result->x = x; result->y = y;
       result->w = flat ? width : width / 2;
       result->h = flat ? height : height / 2;
-      result->draws = statistics_mode ? (flat ? 12 : 200) : (flat ? 200 : 1);
+      // A draw-statistics pick would choose the flat decoy's many draws.
+      result->draws = flat ? 200 : 1;
       result->flat = flat; result->normal = normal;
       const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
       D3D12_RESOURCE_DESC desc {};
@@ -222,8 +227,8 @@ float ps(float4 position : SV_Position) : SV_Depth {
         minimum = std::min(minimum, pixel); maximum = std::max(maximum, pixel);
       }
       require(maximum - minimum > .3f, "Production depth diagnostic is flat despite a real scene gradient");
-      std::printf("PASS %s: real %s scene selected, before-clear copy, exact offset viewport, raw calibration and full-eye pixels\n",
-        phase, statistics_mode ? "statistics-selected" : "low-draw");
+      std::printf("PASS %s: real low-draw scene selected, before-clear copy, exact offset viewport, raw calibration and full-eye pixels\n",
+        phase);
       return depth;
     }
 
@@ -321,18 +326,18 @@ float ps(float4 position : SV_Position) : SV_Depth {
 
       reload_with_unchanged_depth();
       require(!observed.inject && observed.ready_uniforms.empty(), "Fixture unexpectedly injected production inputs");
-      std::printf("PASS production native depth selection/calibration integration (%s; no manual override)\n",
-        statistics_mode ? "Auto-select OFF, draw statistics" : "Auto-select ON, content selection");
+      std::printf("PASS production native depth selection/calibration integration (automatic content selection%s)\n",
+        stale_config ? "; stale AutoSelectSceneDepth=0 ignored" : "");
     }
   };
 }
 
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  const bool statistics_mode = argc > 6 && std::strcmp(argv[argc - 1], "--statistics") == 0;
-  const int arguments = argc - int(statistics_mode);
+  const bool stale_config = argc > 6 && std::strcmp(argv[argc - 1], "--stale-config") == 0;
+  const int arguments = argc - int(stale_config);
   if (arguments != 6 && arguments != 8) {
-    std::fputs("usage: test_native_selection_runtime <official-ReShade64.dll> <Sunshine-Shaders> <isolated-output-directory> <SunshineSBS.addon64> <srgb|scrgb|pq> [width height] [--statistics]\n", stderr);
+    std::fputs("usage: test_native_selection_runtime <official-ReShade64.dll> <Sunshine-Shaders> <isolated-output-directory> <SunshineSBS.addon64> <srgb|scrgb|pq> [width height] [--stale-config]\n", stderr);
     return 2;
   }
   std::thread([] { Sleep(180000); std::fputs("FAIL native selection fixture watchdog\n", stderr); TerminateProcess(GetCurrentProcess(), 124); }).detach();
@@ -344,8 +349,8 @@ int main(int argc, char **argv) {
       require(width >= 640 && height >= 360 && width <= 3840 && height <= 2160 && width % 2 == 0 && height % 2 == 0, "Fixture dimensions must be even, from 640x360 to 3840x2160");
     }
     native_selection_fixture_t fixture;
-    fixture.statistics_mode = statistics_mode;
-    fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fs::absolute(argv[3]), color, 0, fs::absolute(argv[4]), !statistics_mode);
+    fixture.stale_config = stale_config;
+    fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fs::absolute(argv[3]), color, 0, fs::absolute(argv[4]), stale_config);
     fixture.run_production();
     return 0;
   } catch (const std::exception &error) {

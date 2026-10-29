@@ -24,7 +24,7 @@ function Assert-UnambiguousIni([string] $Text, [string] $Path) {
             $closing = $trimmed.IndexOf(']')
             if ($closing -lt 0) { throw "Malformed section header in $Path. Fix it before installing." }
             $section = $trimmed.Substring(1,$closing-1).Trim()
-            if ($section -cin @('ADDON','GENERAL','SUNSHINE_DEPTH','SUNSHINE_GAME3D') -and -not $sections.Add($section)) {
+            if ($section -cin @('ADDON','GENERAL','SUNSHINE_GAME3D') -and -not $sections.Add($section)) {
                 throw "Duplicate [$section] sections in $Path. Merge them before installing."
             }
             continue
@@ -36,7 +36,6 @@ function Assert-UnambiguousIni([string] $Text, [string] $Path) {
             ($section -ceq '' -and $key -ceq 'Techniques') -or
             ($section -ceq 'ADDON' -and $key -cin @('AddonPath','DisabledAddons')) -or
             ($section -ceq 'GENERAL' -and $key -cin @('PresetPath','EffectSearchPaths')) -or
-            ($section -ceq 'SUNSHINE_DEPTH' -and $key -ceq 'AutoSelectSceneDepth') -or
             ($section -ceq 'SUNSHINE_GAME3D' -and $key -cin @('Strength','DepthView','Enabled'))
         if ($relevant -and -not $keys.Add($section + "`0" + $key)) {
             throw "Duplicate $key entries in [$section] in $Path. Merge them before installing."
@@ -263,9 +262,6 @@ foreach ($name in @('Generic Depth','Sunshine Depth')) {
     if ($disabled -cnotcontains $name) { $disabled += $name }
 }
 $iniAfter = Set-IniValue $iniAfter 'ADDON' 'DisabledAddons' (Join-ReShadeList $disabled)
-if (-not (Get-IniScalarValue $iniAfter 'SUNSHINE_DEPTH' 'AutoSelectSceneDepth')) {
-    $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_DEPTH' 'AutoSelectSceneDepth' '1'
-}
 $iniAfter = Set-IniValue $iniAfter 'GENERAL' 'PresetPath' (Join-ReShadeList @($presetSetting))
 if (-not $nativeGame3D) {
     $searchPaths = @(Split-ReShadeList (Get-IniValue $iniAfter 'GENERAL' 'EffectSearchPaths'))

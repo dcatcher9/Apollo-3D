@@ -314,7 +314,7 @@ namespace {
       submit();
     }
 
-    void initialize(const fs::path &runtime, const fs::path &shader_root, const fs::path &directory, unsigned source_color, unsigned requested_performance_mode, const fs::path &depth_addon = {}, bool automatic_depth = true) {
+    void initialize(const fs::path &runtime, const fs::path &shader_root, const fs::path &directory, unsigned source_color, unsigned requested_performance_mode, const fs::path &depth_addon = {}, bool stale_depth_config = false) {
       color = source_color;
       performance_mode = requested_performance_mode;
       require(fs::is_regular_file(shader_root / "SunshineDepth3D.fx"), "Missing packaged SunshineDepth3D shader");
@@ -341,10 +341,12 @@ namespace {
         config << "[ADDON]\nAddonPath=.\\addons\n";
         // The independent reference renderer is calibrated only while native
         // Game 3D, enabled by default, is off (docs/reshade-sbs.md).
-        if (!depth_addon.empty())
-          config << "DisabledAddons=Generic Depth\n[DEPTH]\nDepthCopyBeforeClears=1\nUseAspectRatioHeuristics=1\n"
-                    "[SUNSHINE_DEPTH]\nAutoSelectSceneDepth=" << (automatic_depth ? 1 : 0) << "\n"
-                    "[SUNSHINE_GAME3D]\nEnabled=0\n";
+        if (!depth_addon.empty()) {
+          config << "DisabledAddons=Generic Depth\n[DEPTH]\nDepthCopyBeforeClears=1\nUseAspectRatioHeuristics=1\n";
+          // Removed selection keys a game's ini may still hold; none may apply.
+          if (stale_depth_config) config << "[SUNSHINE_DEPTH]\nAutoSelectSceneDepth=0\n";
+          config << "[SUNSHINE_GAME3D]\nEnabled=0\n";
+        }
         config << "[GENERAL]\nEffectSearchPaths=.\\effects\nPresetPath=.\\preset.ini\n"
                   "PerformanceMode=" << performance_mode << "\nSkipLoadingDisabledEffects=0\nIntermediateCachePath=.\\cache\n"
                   "[OVERLAY]\nTutorialProgress=4\nShowFPS=0\nShowClock=0\nShowPresetName=0\n";
