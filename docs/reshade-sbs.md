@@ -6236,6 +6236,12 @@ Evidence is judged from the challenger's oldest comparison capture onward, with 
 or count. A larger target that draws only every second or third Present therefore cannot
 displace depth drawn on every Present, promotes once it draws every Present, and loses those
 Presents again to the every-Present source when it returns to drawing some of them.
+A challenger that has won takes over only on a Present that advances the depth frame with its own
+work, so the first Present it anchors shows its own current copy; the other members of an A/B or
+A/B/C set get theirs from their next turns. On another member's turn, or on a Present that renders
+no depth, the new anchor would have no current copy and could not hold the old anchor's depth
+(a hold belongs to one anchor), so the Present would be mono: the incumbent keeps it, current or
+held, and the won comparison waits for the challenger's next rendered Present.
 
 Initial selection, and recovery when the selected source stops being usable (inactive for more
 than three depth-active Presents, three bad samples, or a crop change that erases its evidence),

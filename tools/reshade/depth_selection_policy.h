@@ -412,7 +412,15 @@ namespace sunshine_depth {
 
     // Choosing tracks relative superiority across fresh captures. Repeated
     // presents with the same evidence never manufacture comparison rounds.
-    selection_result choose(std::uint64_t frame, std::uint64_t current_id = 0) {
+    // `depth_present`: this call is for the Present that advanced `frame` (one
+    // that rendered depth). A won comparison takes over only on such a Present
+    // on which the challenger itself rendered, so the first Present it anchors
+    // has its own current copy. On any other Present (another member of its
+    // A/B/C set rendered, or none) the new anchor would have none and could not
+    // hold the old anchor's depth, so the Present would be mono: the incumbent
+    // keeps it (current or held) and the won comparison waits for the
+    // challenger's next rendered Present.
+    selection_result choose(std::uint64_t frame, std::uint64_t current_id = 0, bool depth_present = true) {
       const auto current = candidates_.find(current_id);
       const bool current_active = current != candidates_.end() && active(current->second, frame);
       const bool current_good = current_active && good(current->second, frame);
@@ -489,6 +497,9 @@ namespace sunshine_depth {
             pending_.interval = frame;
             pending_.wins = std::min(pending_.wins + 1, std::max(options_.comparison_samples_required, 1u));
           }
+          if (pending_.wins >= std::max(options_.comparison_samples_required, 1u) &&
+              !(depth_present && challenger->info.last_seen_frame == frame))
+            return {current_id, "waiting for the challenger's next rendered Present"};
           if (pending_.wins >= std::max(options_.comparison_samples_required, 1u))
             return {challenger->info.id, challenger_priority == 4 ? "sustained fuller nonendpoint depth support" :
                                         challenger_priority == 3 ? "sustained comparable depth on more Presents" :

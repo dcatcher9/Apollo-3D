@@ -2,6 +2,7 @@
 #include "depth_selection_policy.h"
 #include "depth_moments.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
@@ -917,6 +918,14 @@ namespace {
     capture(2, broad, 13); // An out-of-order completion must not count.
     require(policy.choose(14, 1).id == 1, "a second challenger sample cannot reuse the incumbent capture");
     capture(1, narrow, 15);
+    // The third paired win completes on a Present that only the incumbent
+    // rendered: the challenger has no current copy there, so it takes over on
+    // the next Present that advances the depth frame with its own work.
+    const auto waiting = policy.choose(15, 1);
+    require(waiting.id == 1 && std::string(waiting.reason) == "waiting for the challenger's next rendered Present" &&
+            policy.pending_challenger_id() == 2, "a won comparison took over on a Present its challenger did not render");
+    policy.observe(candidate(2, 15, 1, 1280, 720));
+    require(policy.choose(15, 1, false).id == 1, "a won comparison took over on a Present that did not advance the depth frame");
     require(policy.choose(15, 1).id == 2, "three distinct paired wins must eventually promote a better same-size source");
     require(policy.choose(15, 2).id == 2 && policy.pending_challenger_id() == 0,
             "adopting the promoted source must release its old pending comparison");
@@ -1086,17 +1095,22 @@ namespace {
   };
 
   // Replays depth-active Presents as the add-on reports them: every source
-  // with work is observed, gets a fresh capture every fourth frame it works,
-  // the policy chooses, then the routed set reports this Present's coverage. A
+  // with work is observed, gets a fresh capture every fourth frame it works
+  // (read back `latency` depth-active Presents later, as the add-on's sampler
+  // completes it), the policy chooses, then the routed set reports this
+  // Present's coverage. A
   // routed set shows a ready current copy exactly when one of its members had
   // work and none of them faulted. flat counts Presents from count_from on
-  // whose chosen source showed no current depth.
+  // whose chosen source showed no current depth; unrendered, promotions on a
+  // Present the promoted source itself did not render.
   struct present_run {
     selection_policy policy;
     std::vector<present_source> sources;
     std::uint64_t current = 0, frame = 0, count_from = std::numeric_limits<std::uint64_t>::max();
-    unsigned changes = 0, flat = 0;
+    unsigned changes = 0, flat = 0, unrendered = 0, latency = 0;
     const char *reason = "";
+    struct readback { std::uint64_t id, frame; depth_quality quality; };
+    std::vector<readback> readbacks;
 
     template <class Member>
     bool any_member(std::uint64_t id, Member &&member) const {
@@ -1117,10 +1131,20 @@ namespace {
         for (const auto &source : sources) {
           if (!source.draws(frame)) continue;
           policy.observe(candidate(source.id, frame, 1, source.width, source.height));
-          if (frame / source.cadence % 4 == 0) policy.sample(source.id, source.quality, frame);
+          if (frame / source.cadence % 4 == 0) readbacks.push_back({source.id, frame, source.quality});
         }
+        for (auto it = readbacks.begin(); it != readbacks.end();)
+          if (it->frame + latency <= frame) { policy.sample(it->id, it->quality, it->frame); it = readbacks.erase(it); }
+          else ++it;
         const auto choice = policy.choose(frame, current);
-        if (choice.id != current) { ++changes; reason = choice.reason; }
+        if (choice.id != current) {
+          ++changes; reason = choice.reason;
+          // A promotion on a Present its source did not render has no current
+          // copy of the new anchor and no hold of the old one: mono.
+          if (current && std::string(choice.reason).rfind("sustained", 0) == 0 &&
+              std::none_of(sources.begin(), sources.end(), [&](const auto &s) { return s.id == choice.id && s.draws(frame); }))
+            ++unrendered;
+        }
         current = choice.id;
         const auto anchor = presence(current, frame);
         const bool faulted = any_member(current, [this](const present_source &s) {
@@ -1201,19 +1225,27 @@ namespace {
     held.run(600);
     require(held.current == native && held.changes == 1, "lower-resolution depth displaced an A/B native set that covers every Present");
 
-    // (6) A/B and A/B/C native challengers are judged by their whole set and
-    // still regain native resolution from an every-Present smaller source.
-    for (unsigned members : {2u, 3u}) {
-      present_run sets;
-      sets.sources = {{1, 640, 360, useful}};
-      sets.run(40);
-      for (unsigned i = 0; i < members; ++i)
-        sets.sources.push_back({2 + i, 1280, 720, useful, members, i, 9, 40});
-      sets.run(800);
-      require(sets.current >= 2 && sets.current < 2 + members && sets.changes == 2,
-              "alternating native allocations were judged one member at a time");
-    }
-    std::puts("PASS Present coverage by capture set: A/B native incumbent holds; A/B and A/B/C native challengers promote");
+    // (6) A/B, A/B/C and A/B/C/D native challengers are judged by their whole
+    // set and still regain native resolution from an every-Present smaller
+    // source. They take over on a Present the promoted member rendered (its
+    // own current copy; the other members' copies start after it), never on
+    // another member's turn, which would have no copy and no hold.
+    for (unsigned members : {2u, 3u, 4u})
+      for (unsigned turn = 0; turn < members; ++turn)
+      for (unsigned latency = 0; latency < members; ++latency) {
+        present_run sets;
+        sets.latency = latency;
+        sets.sources = {{1, 640, 360, useful}};
+        sets.run(40);
+        for (unsigned i = 0; i < members; ++i)
+          sets.sources.push_back({2 + i, 1280, 720, useful, members, (i + turn) % members, 9, 40});
+        sets.run(800);
+        require(sets.current >= 2 && sets.current < 2 + members && sets.changes == 2,
+                "alternating native allocations were judged one member at a time");
+        require(sets.unrendered == 0, "an alternating native set took over on a Present its promoted member did not render");
+      }
+    std::puts("PASS Present coverage by capture set: A/B native incumbent holds; A/B, A/B/C and A/B/C/D native challengers "
+              "promote on the promoted member's own Present");
   }
 
   void test_present_coverage_hitches() {
@@ -1246,6 +1278,7 @@ namespace {
     fuller.run(600);
     require(fuller.current == 2 && fuller.changes == 2 && std::string(fuller.reason) == "sustained fuller nonendpoint depth support",
             "Present coverage overruled materially fuller scene support");
+    require(fuller.unrendered == 0, "an every-other-Present challenger took over on a Present it did not render");
     std::puts("PASS Present coverage evidence: one incumbent or challenger miss cannot flip selection; completeness class still ranks first");
   }
 

@@ -1395,8 +1395,10 @@ or camera values are injected. `--native-priority` runs the late-native case ins
 `--set-challenger` reverses the rotating case's roles: three native allocations with the same
 content, one drawn per Present, challenge the calibrated every-Present lower-resolution
 incumbent. Judged as one capture set they cover every Present and must promote within 12 s,
-and no Present may be without depth on the way (a member without its own current copy yet holds
-the previous Present's depth); judged one member at a time they never promote.
+and no Present may be without depth on the way: the set takes over on the promoted member's own
+turn (a comparison won on another member's turn waits for it), and a member without its own
+current copy yet holds the previous Present's depth; judged one member at a time they never
+promote.
 
 `reshade_depth_alternating_runtime_test` uses those same four arguments and, like the
 probe-round fixture, renders through native Game 3D with no FX and no environment settings

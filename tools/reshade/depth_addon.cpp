@@ -2756,7 +2756,10 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	sunshine_depth::selection_result choice;
 	if (automatic)
 	{
-		choice = data.selection.choose(device_data->frame_index, current_id);
+		// A challenger takes over only on a Present that advanced the depth frame
+		// with its own work, so its first anchored Present has its own current copy.
+		choice = data.selection.choose(device_data->frame_index, current_id,
+			device_data->native_depth_present_index == native_present_index);
 		for (const auto &[candidate, info] : current_depth_stencil_resources)
 		{
 			if (info.identity == choice.id || (!choice.id && info.identity == current_id &&
