@@ -2635,8 +2635,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
 role stays retired is the viewport's ordinary source, a copy selected before an Off and copied
 after it is still the consumed frame (`complete_frame`; until 10-28 an SR copy of an earlier frame
 published after it showed next), and an FG copy an Off race left of an older frame
-than a readable, never shown SR copy loses to it at FG On, while alone it shows (the newest frame
-across `completed_snapshot` and `lineage_snapshot`, 10-28); each Present establishes any selected copy, as
+than a readable, never shown SR copy loses to it at FG On, while alone it shows (the newer frame
+across `completed_snapshot` and `lineage_snapshot` for a copy of the retired role, 10-28; the Off's
+serial is 30 there); each Present establishes any selected copy, as
   `acquire` does, so an FG owner meets a later SR copy at FG Off only after a late Off or a list
   executed after its Present), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of

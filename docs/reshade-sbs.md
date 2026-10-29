@@ -4567,10 +4567,12 @@ supersedes the viewport's FG view (not one whose FG is merely unknown, busy or l
 10-28 such a copy became the viewport's FG view again beside its SR view: every Present after the
 Off read two active views (`ambiguous_views`), moved the gap watermark over each readable SR copy
 and held the stale FG copy until it expired (the 10-28 review's P1, in any game whose FG depth tag
-is copied at its Present, and at any Off racing DLSS-G's evaluation). Where both a pending or
-missing FG head's own completed copy and its lineage's SR stand-in are admissible, the newer frame
-by sequence shows (an FG copy recorded after the Off can be of an older frame than a readable SR
-copy; until 10-28 the FG copy, tried first, showed at FG On). Until
+is copied at its Present, and at any Off racing DLSS-G's evaluation). Where a pending or missing
+FG head's own completed copy is of a frame before FG Off retired the role (its sequence at or below
+the retiring options call's serial: a copy a race recorded after the Off) and its lineage's SR
+stand-in is admissible, the newer frame by sequence shows (until 10-28 the FG copy, tried first,
+showed at FG On beside a readable SR copy of a later frame); any other completed FG copy keeps its
+precedence over the SR stand-in, as the scope's copies own their viewport. Until
 10-28 FG Off moved the owner's admission watermark to the newest capture, or left a namespace head
 no view named, which the next Present read as an interruption: either revoked the viewport's SR
 copies recorded since the shown FG copy, so a Present before the next SR copy was readable held the

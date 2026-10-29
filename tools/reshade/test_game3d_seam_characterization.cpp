@@ -1859,8 +1859,10 @@ namespace sunshine_streamline::depth_capture {
           value.metadata = selected_later->metadata;
           complete_frame(value, selected_present);
         };
+        // FG Off: the options call after the evaluations before it (its
+        // observation serial at or above their sequences, 30 at most).
         const auto off = [&](provider_kind provider, std::uint64_t retired_epoch, std::uint64_t source) {
-          retire_source(provider, retired_epoch, source);
+          retire_source(provider, retired_epoch, source, 30);
           const auto floor = owner.admission_after;
           const auto text = floor == 0 ? std::string("0") : f && floor == f->id ? std::string("F") : floor == serial.load() ? std::string("serial") : std::to_string(floor);
           trace += "; OFF floor=" + text;

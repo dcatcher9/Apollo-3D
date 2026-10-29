@@ -1243,13 +1243,20 @@ namespace sunshine_streamline::depth_capture {
         if (pending) chosen.selection = selection_reason::completed_not_readable;
         return chosen;
       }
-      // Both paths admissible: the newest frame of the lineage, by its
-      // sequence, whichever path names it. A copy recorded later can be of
-      // an older frame (an FG copy of a frame before FG Off made after it,
-      // then FG On within the source age: until 10-28 it stood in for FG
-      // On's pending head before the lineage's newer readable SR copy of a
-      // later frame was tried, the 10-28 review's P5 and J8).
-      if (auto *standin = lineage_snapshot(owner, native, present, identity, now);
+      // An FG copy of a frame before FG Off retired its role (its sequence
+      // at or below the retiring options call's serial), recorded after the
+      // Off by a race past the retirement (frame_generation_retired), then
+      // FG On within the source age: the newer frame of the lineage shows,
+      // whichever path names it (until 10-28 that copy stood in for FG On's
+      // pending head before the lineage's newer readable SR copy of a later
+      // frame was tried, the 10-28 review's P5 and J8). Any other completed
+      // FG copy keeps its precedence over the SR stand-in, as the scope's
+      // copies own their viewport (a live compute scope's copy in flight at
+      // 4K holds the scope's previous copy, not SR).
+      const auto *retired = completed->metadata.frame_generation_input ?
+        fg_retirement_of(completed->metadata.epoch, completed->metadata.viewport) : nullptr;
+      if (auto *standin = retired && completed->metadata.sequence <= retired->serial ?
+            lineage_snapshot(owner, native, present, identity, now) : nullptr;
           standin && standin->metadata.epoch == completed->metadata.epoch &&
           standin->metadata.sequence > completed->metadata.sequence) {
         chosen.value = standin;
