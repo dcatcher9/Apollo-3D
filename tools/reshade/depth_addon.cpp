@@ -1621,8 +1621,9 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 		stats.clear_one |= *depth == 1.0f;
 		stats.clear_other |= *depth != 0.0f && *depth != 1.0f;
 		// A full clear of the sampled plane erases the extent drawn so far; the
-		// next draw starts the capture crop again (observe_viewport).
-		if (rect_count == 0 && sampled_plane) stats.observe_full_clear();
+		// next draw starts the capture crop again (observe_viewport). Only the
+		// D3D10/11/12 clears are known to cover the whole view.
+		stats.observe_depth_clear(cmd_list->get_device()->get_api(), rect_count, sampled_plane);
 	}
 
 	return false;

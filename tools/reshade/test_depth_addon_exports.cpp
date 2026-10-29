@@ -223,6 +223,28 @@ static void check_capture_extent()
 		"A later recording's trailing clear changed the extent or was lost");
 	trailing.observe_viewport(quarter);
 	require_snapshot(same(trailing.total.last_viewport, quarter), "A merged pending clear did not restart at the next draw");
+
+	// A rect-less depth clear covers the whole view only on D3D10/11/12. D3D9's
+	// Clear(0, NULL) clears the current viewport (a HUD model panel after the
+	// scene), glClear the scissor and a Vulkan render pass's CLEAR its render
+	// area: there the crop keeps the largest viewport drawn in the frame.
+	for (const auto api : { device_api::d3d9, device_api::d3d10, device_api::d3d11, device_api::d3d12,
+		device_api::opengl, device_api::vulkan })
+	{
+		const bool whole_view = api == device_api::d3d10 || api == device_api::d3d11 || api == device_api::d3d12;
+		depth_stencil_frame_stats panel;
+		panel.observe_depth_clear(api, 0, true); panel.observe_viewport(full);
+		panel.observe_depth_clear(api, 0, true); panel.observe_viewport(quarter);
+		require_snapshot(same(panel.total.last_viewport, whole_view ? quarter : full),
+			whole_view ? "A whole-view depth clear did not restart the capture crop" :
+				"A viewport-limited depth clear narrowed the scene's capture crop to a later small pass");
+		depth_stencil_frame_stats rects;
+		rects.observe_viewport(full); rects.observe_depth_clear(api, 1, true); rects.observe_viewport(quarter);
+		depth_stencil_frame_stats other_plane;
+		other_plane.observe_viewport(full); other_plane.observe_depth_clear(api, 0, false); other_plane.observe_viewport(quarter);
+		require_snapshot(same(rects.total.last_viewport, full) && same(other_plane.total.last_viewport, full),
+			"A clear limited to rectangles or another plane restarted the capture crop");
+	}
 }
 
 static void check_depth_snapshot_contract()

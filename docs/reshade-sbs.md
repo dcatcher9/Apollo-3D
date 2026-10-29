@@ -6139,11 +6139,15 @@ transferred there (an open gap, see [scene-depth selection limits](#scene-depth-
 No relationship to the swapchain buffer index is assumed.
 
 Capture layout follows the actual captured crop: the largest viewport drawn into the source since
-its last full depth clear in the frame, in execution order across command lists. A clear of the
-sampled plane without rectangles erases what was drawn before it, so a larger pass that the game
-clears before drawing the scene in a smaller viewport does not widen the scene's crop; a clear with
-nothing drawn after it keeps the earlier extent, and a clear limited to rectangles does not restart
-it.
+its last full depth clear in the frame, in execution order across command lists. On D3D10, D3D11
+and D3D12 a clear of the sampled plane without rectangles (`ClearDepthStencilView`, or a D3D12
+render pass's depth `CLEAR`) covers the whole view and erases what was drawn before it, so a larger
+pass that the game clears before drawing the scene in a smaller viewport does not widen the
+scene's crop; a clear with nothing drawn after it keeps the earlier extent, and a clear limited to
+rectangles does not restart it. D3D9's `Clear` covers only the current viewport and scissor,
+`glClear` the scissor and a Vulkan render pass's `CLEAR` its render area, and ReShade reports
+none of them, so on those APIs no clear restarts the crop: it stays the largest viewport drawn in
+the frame.
 Aggregate activity and off-turn writes cannot change that identity without a new usable capture;
 a real captured-crop change advances the layout and invalidates the corresponding numeric basis.
 Binding, sampling and the public current depth accessor use the same capture record and currentness
