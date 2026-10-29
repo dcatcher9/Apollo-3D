@@ -36,17 +36,6 @@ namespace sunshine_ngx {
     // before these hooks or before the add-on's current epoch.
     constexpr std::uint32_t recovered_feature = 0xfffffffeu;
     constexpr unsigned max_features = 64;
-    enum class availability { missing_getter, failed, empty, present };
-    struct optional_pointer {
-      availability state{availability::missing_getter};
-      std::uintptr_t address{}; // Identity only, never retained or dereferenced.
-    };
-    struct calibration_observation {
-      std::uint64_t sequence{}, depth{}, source_id{}, revision{};
-      sunshine_scene_depth::extent area;
-      bool reversed{};
-      optional_pointer position, world_to_view, view_to_clip, inv_view_projection, clip_to_prev_clip;
-    };
     struct feature {
       HMODULE owner{};
       const void *handle{};
@@ -182,16 +171,6 @@ namespace sunshine_ngx {
       ++missing_other_feature;
     }
     std::uint64_t next_report{};
-    bool calibration_probe_requested{}; // Protected by feature_lock, like the feature records.
-    struct calibration_slot {
-      std::uint64_t source_id{}, next_tick{}, reported_sequence{};
-      calibration_observation observation;
-    };
-    // Diagnostics must not introduce exclusive feature-lock ownership: capture
-    // completion blocks on a shared acquisition (after_evaluate) on the
-    // game's evaluating thread, which only bounded POD sections may delay.
-    SRWLOCK calibration_lock = SRWLOCK_INIT;
-    std::array<calibration_slot, max_features> calibration_slots;
     struct capture_rejection {
       sunshine_streamline::depth_capture::record_diagnostic diagnostic;
       sunshine_scene_depth::extent area;
@@ -327,56 +306,6 @@ namespace sunshine_ngx {
       diagnostic::observe_ngx(out);
       return out.observation;
     }
-    const char *name(availability state) {
-      switch (state) {
-      case availability::missing_getter: return "missing-getter";
-      case availability::failed: return "failed";
-      case availability::empty: return "null";
-      default: return "present";
-      }
-    }
-    optional_pointer probe_pointer(decltype(parameter_api::resource) getter, const void *parameters, const char *key) {
-      if (!getter) return {};
-      void *pointer{};
-      // A failed getter can leave garbage in its out parameter. Success with a
-      // null pointer is a separate result: the game may populate optional keys
-      // with null. Neither proves that this SDK can never supply the parameter.
-      if (!success(getter(const_cast<void *>(parameters), key, &pointer))) return {availability::failed, 0};
-      return {pointer ? availability::present : availability::empty, reinterpret_cast<std::uintptr_t>(pointer)};
-    }
-    calibration_observation probe_calibration(const parameter_api &api, const void *parameters,
-        const sunshine_scene_depth::frame &value) {
-      calibration_observation observation;
-      observation.sequence = value.sequence;
-      observation.depth = value.resource.native;
-      observation.source_id = value.source_id;
-      observation.revision = value.feedback.revision;
-      observation.area = value.resource.area;
-      observation.reversed = value.projection.reversed;
-      // Position.ViewSpace is an optional SR research ID3D12Resource*. RR's
-      // matrices are void-pointer parameters. Probe only their presence: no
-      // assumed payload layout, GPU copy, lifetime extension or camera binding.
-      observation.position = probe_pointer(api.resource, parameters, "Position.ViewSpace");
-      observation.world_to_view = probe_pointer(api.void_pointer, parameters, "WorldToViewMatrix");
-      observation.view_to_clip = probe_pointer(api.void_pointer, parameters, "ViewToClipMatrix");
-      observation.inv_view_projection = probe_pointer(api.void_pointer, parameters, "InvViewProjectionMatrix");
-      observation.clip_to_prev_clip = probe_pointer(api.void_pointer, parameters, "ClipToPrevClipMatrix");
-      return observation;
-    }
-    void report_calibration(const calibration_observation &value) {
-      char message[1100]{};
-      std::snprintf(message, sizeof(message),
-        "Sunshine NGX calibration probe: source=%llu sequence=%llu revision=%llu Depth=0x%llx area=%u,%u,%u,%u inverted=%u "
-        "Position.ViewSpace=%s(0x%llx) WorldToViewMatrix=%s ViewToClipMatrix=%s InvViewProjectionMatrix=%s ClipToPrevClipMatrix=%s; "
-        "presence only, optional pointers not read, no cross-API camera/depth association established",
-        static_cast<unsigned long long>(value.source_id), static_cast<unsigned long long>(value.sequence),
-        static_cast<unsigned long long>(value.revision), static_cast<unsigned long long>(value.depth),
-        value.area.left, value.area.top, value.area.width, value.area.height, value.reversed ? 1 : 0,
-        name(value.position.state), static_cast<unsigned long long>(value.position.address),
-        name(value.world_to_view.state), name(value.view_to_clip.state),
-        name(value.inv_view_projection.state), name(value.clip_to_prev_clip.state));
-      sunshine_log::message(reshade::log::level::info, message);
-    }
     bool valid_dimension(unsigned value) { return value && value <= 16384; }
     bool get_uint(const parameter_api &api, const void *parameters, const char *key, unsigned &out) {
       return api.unsigned_integer && success(api.unsigned_integer(const_cast<void *>(parameters), key, &out));
@@ -458,17 +387,13 @@ namespace sunshine_ngx {
     value.floating = reinterpret_cast<decltype(value.floating)>(export_pointer(owner, "NVSDK_NGX_Parameter_GetF"));
     return value;
   }
-  void initialize(bool requested, bool calibration_probe) {
+  void initialize(bool requested) {
     if (sunshine_addon_lifetime::stopping()) return;
     preserve_error error;
     active_epoch.store(0, std::memory_order_release);
     AcquireSRWLockExclusive(&feature_lock);
     features = {};
     released_handles = {}; next_released = 0;
-    calibration_probe_requested = calibration_probe;
-    AcquireSRWLockExclusive(&calibration_lock);
-    calibration_slots = {};
-    ReleaseSRWLockExclusive(&calibration_lock);
     evaluations = nominations = copy_recorded = metadata_only = unknown = missing_parameters = failed = feature_overflow = recovered = 0;
     fg_owned = fg_feature = missing_other_feature = 0;
     reset_frame_generation_counters();
@@ -687,7 +612,6 @@ namespace sunshine_ngx {
     value.epoch = attempt.epoch;
     int reset{};
     const bool reset_available = success(api.integer(const_cast<void *>(parameters), "Reset", &reset));
-    bool probe_requested = false;
     // A reset pulse must survive frames that produce no depth/readback. Commit
     // it and the observation sequence together after calling the game getter:
     // concurrent getter completion must not stamp an older scene revision onto
@@ -700,7 +624,6 @@ namespace sunshine_ngx {
       value.sequence = ++sequence;
       value.feedback.revision = entry->scene_revision;
       value.feedback.reset = reset_available && reset != 0;
-      probe_requested = calibration_probe_requested;
     }
     ReleaseSRWLockExclusive(&feature_lock);
     if (!value.sequence) return attempt;
@@ -726,7 +649,7 @@ namespace sunshine_ngx {
     using namespace sunshine_streamline;
     // Its nomination is in progress from this begin until its copy is
     // recorded or refused, whichever path returns, so a Present on another
-    // thread while the getters, the calibration probe, the FG owner query and
+    // thread while the getters, the FG owner query and
     // retain_source below run does not read the attempt as refused: the
     // snapshot completed before it stands in, as it does once a refused
     // attempt is a missing frame (depth_capture::select_capture).
@@ -757,38 +680,6 @@ namespace sunshine_ngx {
       // Missing jitter does not invalidate a usable depth nomination.
       if (have_x && have_y && std::isfinite(jitter_x) && std::isfinite(jitter_y))
         value.jitter = {jitter_x, jitter_y, area.width, area.height, true};
-    }
-    if (probe_requested) {
-      // Only a usable depth input consumes a probe slot. A loading frame with
-      // no depth must not delay the first valid gameplay observation.
-      probe_requested = false;
-      if (TryAcquireSRWLockExclusive(&calibration_lock)) {
-        auto &slot = calibration_slots[selected_slot];
-        if (value.epoch == active_epoch.load(std::memory_order_acquire) && slot.source_id <= value.source_id) {
-          if (slot.source_id != value.source_id) slot = {value.source_id, 0, 0, {}};
-          if (value.tick >= slot.next_tick) {
-            slot.next_tick = value.tick + 5000;
-            probe_requested = true;
-          }
-        }
-        ReleaseSRWLockExclusive(&calibration_lock);
-      }
-    }
-    if (probe_requested) {
-      const auto observation = probe_calibration(api, parameters, value);
-      // Getter calls run outside locks. Revalidate the epoch and generation
-      // before publishing so release/recreate cannot inherit stale diagnostics.
-      if (TryAcquireSRWLockShared(&feature_lock)) {
-        const auto &entry = features[selected_slot];
-        if (entry.generation == selected.generation && value.epoch == active_epoch.load(std::memory_order_acquire) &&
-            TryAcquireSRWLockExclusive(&calibration_lock)) {
-          auto &slot = calibration_slots[selected_slot];
-          if (slot.source_id == value.source_id && observation.sequence > slot.observation.sequence)
-            slot.observation = observation;
-          ReleaseSRWLockExclusive(&calibration_lock);
-        }
-        ReleaseSRWLockShared(&feature_lock);
-      }
     }
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
     // Confirmed Streamline FG owns depth (frame_generation_owns_depth). The
@@ -892,25 +783,13 @@ namespace sunshine_ngx {
     if (now < next_report) return;
     next_report = now + 5000;
     unsigned count = 0, capture_eligible = 0;
-    std::array<calibration_observation, max_features> probes;
-    unsigned probe_count = 0;
     AcquireSRWLockShared(&feature_lock);
-    const bool read_probes = calibration_probe_requested && TryAcquireSRWLockExclusive(&calibration_lock);
     for (unsigned i = 0; i < features.size(); ++i) {
       const auto &value = features[i];
       count += value.handle != nullptr;
       capture_eligible += value.handle && value.parameters.valid;
-      if (read_probes) {
-        auto &slot = calibration_slots[i];
-        if (value.handle && slot.source_id == value.generation && slot.observation.sequence > slot.reported_sequence) {
-          probes[probe_count++] = slot.observation;
-          slot.reported_sequence = slot.observation.sequence;
-        }
-      }
     }
-    if (read_probes) ReleaseSRWLockExclusive(&calibration_lock);
     ReleaseSRWLockShared(&feature_lock);
-    for (unsigned i = 0; i < probe_count; ++i) report_calibration(probes[i]);
     // missing_parameters by feature ID, e.g. "1:3,13:7" (other: IDs past the table).
     char by_feature[160]{};
     std::size_t used = 0;

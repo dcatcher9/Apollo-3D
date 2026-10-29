@@ -2959,14 +2959,12 @@ namespace sunshine_streamline {
     reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "UpscalerCallTrace", call_trace_enabled);
     bool ngx_source_enabled = true;
     reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "NGXDepthSource", ngx_source_enabled);
-    bool ngx_calibration_probe = false;
-    reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "NGXCalibrationProbe", ngx_calibration_probe);
     // Queue order (Step 4; docs/reshade-sbs.md, Queue order): the queue
     // Signal/Wait and fence Signal hooks. 0 turns them off.
     bool queue_fence_order = true;
     reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "QueueFenceOrder", queue_fence_order);
     native_observer::set_queue_order(queue_fence_order);
-    sunshine_upscaler_trace::initialize(addon, call_trace_enabled, ngx_source_enabled, ngx_calibration_probe);
+    sunshine_upscaler_trace::initialize(addon, call_trace_enabled, ngx_source_enabled);
     // A pool install may still be discovering after device recreation; wait
     // for it before resetting the state it reads and writes.
     AcquireSRWLockExclusive(&poll_lock);

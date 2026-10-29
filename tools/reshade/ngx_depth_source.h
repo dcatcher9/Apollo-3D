@@ -21,7 +21,7 @@ namespace sunshine_ngx {
   // Only exact named exports of the already loaded NGX SDK owner are used.
   // No assumed C++ parameter vtable and no parameter mutation.
   parameter_api resolve_parameter_api(HMODULE owner);
-  void initialize(bool enabled, bool calibration_probe = false);
+  void initialize(bool enabled);
   void shutdown();
   bool enabled();
   std::uint64_t epoch();

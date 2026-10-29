@@ -555,7 +555,7 @@ namespace sunshine_upscaler_trace {
     }
   }
 
-  void initialize(HMODULE addon, bool requested, bool capture, bool calibration_probe) {
+  void initialize(HMODULE addon, bool requested, bool capture) {
     if (sunshine_addon_lifetime::stopping()) return;
     last_error_guard error;
     active_epoch.store(0, std::memory_order_release);
@@ -573,7 +573,7 @@ namespace sunshine_upscaler_trace {
     addon_module.store(addon);
     if (requested) active_epoch.store(++next_epoch, std::memory_order_release);
     ReleaseSRWLockExclusive(&records_lock);
-    sunshine_ngx::initialize(capture, calibration_probe);
+    sunshine_ngx::initialize(capture);
     if (requested || capture) watch_modules();
   }
   void shutdown() {

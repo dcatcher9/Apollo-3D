@@ -64,7 +64,6 @@ namespace {
   const void *nested_parameters{};
   const void *nested_handle{}; // The nested call's feature (default: the outer call's).
   bool release_in_original{};
-  bool release_in_probe{};
   struct fixture_parameters {
     int flags{8};
     unsigned width{1920}, height{1080}, render_width{1280}, render_height{720}, x{3}, y{2};
@@ -277,10 +276,6 @@ extern "C" __declspec(dllexport) FIXTURE_NOINLINE result __cdecl NVSDK_NGX_Param
   const auto &value = *static_cast<fixture_parameters *>(opaque);
   SetLastError(0xfade);
   probe_requests.emplace_back(std::string("Pointer:") + key);
-  if (release_in_probe) {
-    release_in_probe = false;
-    sunshine_ngx::after_release(GetModuleHandleW(nullptr), reinterpret_cast<void *>(handle_bits), sunshine_ngx::epoch(), true);
-  }
   constexpr const char *names[] = {"WorldToViewMatrix", "ViewToClipMatrix", "InvViewProjectionMatrix", "ClipToPrevClipMatrix"};
   for (unsigned i = 0; i != 4; ++i)
     if (std::strcmp(key, names[i]) == 0) return optional_pointer_reply(value.probe_values[i + 1], output);
@@ -1037,128 +1032,6 @@ namespace {
     shutdown();
     sunshine_ngx::testing::set_callbacks({});
   }
-  void calibration_probe_test() {
-    const auto owner = GetModuleHandleW(nullptr);
-    initialize(owner, false, true);
-    sunshine_ngx::initialize(true, true);
-    sunshine_ngx::testing::set_callbacks({
-      [](std::uint64_t, const sunshine_scene_depth::frame &value) -> std::uint64_t {
-        captured_frame = value;
-        ++captures;
-        SetLastError(0xfaded);
-        return 77;
-      }, nullptr, nullptr});
-    const auto api = sunshine_ngx::resolve_parameter_api(owner);
-    require(api && api.void_pointer, "optional named pointer getter export was not discovered");
-    fixture_parameters parameters;
-    parameters.probe_values = {probe_reply::present, probe_reply::present, probe_reply::failed,
-      probe_reply::null_value, probe_reply::present};
-    void *handle{};
-    require(create_entry(reinterpret_cast<void *>(0x123), 1, &parameters, &handle) == ngx_success,
-      "calibration probe fixture create failed");
-    const std::vector<std::string> expected = {"Resource:Position.ViewSpace", "Pointer:WorldToViewMatrix",
-      "Pointer:ViewToClipMatrix", "Pointer:InvViewProjectionMatrix", "Pointer:ClipToPrevClipMatrix"};
-    probe_requests.clear();
-    messages.clear();
-    parameters.missing_depth = true;
-    const auto missing_depth_captures = captures, missing_depth_originals = actual_evaluations.load();
-    SetLastError(input_error);
-    require(evaluate_entry(reinterpret_cast<void *>(0x123), handle, &parameters, &callback) == ngx_success &&
-      GetLastError() == output_error && actual_evaluations == missing_depth_originals + 1 &&
-      captures == missing_depth_captures && probe_requests.empty(),
-      "missing required depth queried optional calibration fields or changed original evaluation");
-    parameters.missing_depth = false;
-    auto evaluate_feature = [&] {
-      const auto originals = actual_evaluations.load(), before = captures;
-      SetLastError(input_error);
-      const auto result = evaluate_entry(reinterpret_cast<void *>(0x123), handle, &parameters, &callback);
-      require(result == ngx_success && GetLastError() == output_error && observed.incoming_error == input_error &&
-        actual_evaluations == originals + 1 && observed.parameters == &parameters && observed.handle == handle &&
-        observed.callback == &callback && captures == before + 1 &&
-        captured_frame.resource.native == reinterpret_cast<std::uint64_t>(parameters.depth) &&
-        !captured_frame.projection.supplied && captured_frame.projection.reversed,
-        "calibration presence probe changed evaluation arguments/result/LastError or depth capture");
-    };
-    evaluate_feature();
-    require(probe_requests == expected, "calibration probe used incorrect keys or getter types");
-    require(messages.empty(), "calibration probe logged inside the evaluation callback");
-    SetLastError(input_error);
-    sunshine_ngx::poll();
-    require(GetLastError() == input_error && logged("Sunshine NGX calibration probe:") &&
-      logged("Position.ViewSpace=present") && logged("WorldToViewMatrix=present") &&
-      logged("ViewToClipMatrix=failed") && logged("InvViewProjectionMatrix=null") &&
-      logged("ClipToPrevClipMatrix=present"), "calibration report lost typed presence or treated failed poisoned pointer as present");
-    for (unsigned i = 0; i != 100; ++i) evaluate_feature();
-    require(probe_requests == expected, "calibration probe queried optional getters for every evaluation");
-
-    // The time gate belongs to the confirmed feature, not a global timer which
-    // could hide a second viewport/feature's first observation indefinitely.
-    const auto other = reinterpret_cast<void *>(handle_bits + 16);
-    sunshine_ngx::after_create(owner, other, sunshine_ngx::before_create(api, 1, &parameters), true);
-    auto attempt = sunshine_ngx::before_evaluate(owner, api, 0x123, other, &parameters);
-    sunshine_ngx::after_evaluate(attempt, true);
-    require(attempt.ticket == 77 && probe_requests.size() == 2 * expected.size(),
-      "one feature's calibration throttle suppressed another confirmed feature");
-
-    // Reinitialization isolates availability scenarios without waiting or
-    // making assumptions about scheduler timing during a test run.
-    for (const auto state : {probe_reply::null_value, probe_reply::failed}) {
-      sunshine_ngx::initialize(true, true);
-      parameters.probe_values.fill(state);
-      sunshine_ngx::after_create(owner, handle, sunshine_ngx::before_create(api, 1, &parameters), true);
-      messages.clear();
-      probe_requests.clear();
-      SetLastError(input_error);
-      attempt = sunshine_ngx::before_evaluate(owner, api, 0x123, handle, &parameters);
-      sunshine_ngx::after_evaluate(attempt, true);
-      sunshine_ngx::poll();
-      require(GetLastError() == input_error && attempt.ticket == 77 && probe_requests == expected,
-        "unavailable optional metadata changed LastError/capture or probe coverage");
-      const char *label = state == probe_reply::null_value ? "=null" : "=failed";
-      for (const auto *name : {"Position.ViewSpace", "WorldToViewMatrix", "ViewToClipMatrix",
-          "InvViewProjectionMatrix", "ClipToPrevClipMatrix"})
-        require(logged((std::string(name) + label).c_str()), "null/failed optional metadata state was misreported");
-      if (state == probe_reply::failed)
-        require(logged("Position.ViewSpace=failed(0x0)"), "failed getter's poisoned address leaked into the identity report");
-    }
-
-    auto missing = api;
-    missing.void_pointer = nullptr;
-    require(static_cast<bool>(missing), "missing optional getter disabled required depth API");
-    sunshine_ngx::initialize(true, true);
-    parameters.probe_values.fill(probe_reply::present);
-    sunshine_ngx::after_create(owner, handle, sunshine_ngx::before_create(missing, 1, &parameters), true);
-    messages.clear();
-    probe_requests.clear();
-    SetLastError(input_error);
-    attempt = sunshine_ngx::before_evaluate(owner, missing, 0x123, handle, &parameters);
-    sunshine_ngx::after_evaluate(attempt, true);
-    sunshine_ngx::poll();
-    require(GetLastError() == input_error && attempt.ticket == 77 &&
-      probe_requests == std::vector<std::string>{"Resource:Position.ViewSpace"} &&
-      logged("Position.ViewSpace=present"), "missing optional getter changed capture or called an unavailable function");
-    for (const auto *name : {"WorldToViewMatrix", "ViewToClipMatrix", "InvViewProjectionMatrix", "ClipToPrevClipMatrix"})
-      require(logged((std::string(name) + "=missing-getter").c_str()), "missing optional getter was reported as field absence");
-    require(parameters.flags == 8 && parameters.width == 1920 && parameters.height == 1080 && parameters.x == 3 &&
-      parameters.y == 2 && parameters.render_width == 1280 && parameters.render_height == 720 &&
-      parameters.depth == reinterpret_cast<void *>(0xface0000), "calibration probe mutated game parameters");
-
-    sunshine_ngx::initialize(true, true);
-    sunshine_ngx::after_create(owner, handle, sunshine_ngx::before_create(api, 1, &parameters), true);
-    messages.clear();
-    probe_requests.clear();
-    release_in_probe = true;
-    SetLastError(input_error);
-    attempt = sunshine_ngx::before_evaluate(owner, api, 0x123, handle, &parameters);
-    sunshine_ngx::after_evaluate(attempt, true);
-    sunshine_ngx::poll();
-    require(!release_in_probe && GetLastError() == input_error && probe_requests == expected &&
-      !logged("Sunshine NGX calibration probe:") && logged("confirmed_features=0"),
-      "reentrant release inside an optional getter revived retired calibration metadata");
-    sunshine_ngx::shutdown();
-    sunshine_ngx::testing::set_callbacks({});
-    shutdown();
-  }
   void jitter_metadata_test() {
     sunshine_ngx::initialize(true);
     sunshine_ngx::testing::set_callbacks({
@@ -1257,6 +1130,18 @@ namespace {
     evaluate_metadata(api);
     expect_unsupplied();
     require(jitter_requests.size() == getter_calls, "missing float getter was called");
+    // GetVoidPointer is optional too (the DLSS-G input reads and the armed
+    // parameter dump use it when present): without it the parameter API stays
+    // usable and capture still records.
+    auto missing = sunshine_ngx::resolve_parameter_api(owner);
+    missing.void_pointer = nullptr;
+    require(static_cast<bool>(missing), "missing optional getter disabled required depth API");
+    const auto captures_before = captures;
+    SetLastError(input_error);
+    const auto attempt = sunshine_ngx::before_evaluate(owner, missing, 0x123, handle, &parameters);
+    sunshine_ngx::after_evaluate(attempt, true);
+    require(GetLastError() == input_error && attempt.ticket == 77 && captures == captures_before + 1,
+      "missing optional getter changed capture or called an unavailable function");
     sunshine_ngx::testing::set_callbacks({});
     sunshine_ngx::shutdown();
   }
@@ -1845,8 +1730,6 @@ int main() {
     std::puts("PASS RR hardware/linear depth, explicit encoding, failed/released features, and capture-authority-based SL/NGX nesting");
     reset_feedback_test();
     std::puts("PASS per-evaluation reset feedback, persistent scene revisions, no unused metadata queries and unchanged calls/LastError");
-    calibration_probe_test();
-    std::puts("PASS opt-in typed NGX calibration presence, poisoned pointers, per-feature throttle, missing getters and unchanged calls/LastError/capture");
     jitter_metadata_test();
     std::puts("PASS per-evaluation NGX jitter, signed/zero offsets, cropped/legacy render domains, missing/nonfinite inputs and optional float export");
     concurrent_feedback_test();

@@ -4779,7 +4779,7 @@ still applies. Neither reuse nor a new pending nomination extends the age limit.
 The capture owner publishes an in-progress nomination with its evaluation watermark: every
 nominated evaluation's, and an NGX or live DLSS-G evaluation's from its begin
 (`depth_capture::evaluation_nomination`), under the same lock, until its copy is recorded or refused
-on whichever path its hook returns (NGX reads its parameters, its calibration probe and the FG
+on whichever path its hook returns (NGX reads its parameters and the FG
 owner and retains its source in between; since the review of the 10-26 hotfix, before which only
 the `nominate()` call itself was covered).
 A Present between this publication and snapshot registration can identify the same established
@@ -5504,7 +5504,6 @@ and view association must be established first. AMD support remains unimplemente
 
 The NGX adapter queries depth, source identity and reset parameters. Motion-based calibration,
 its auxiliary capture and fitting worker have been removed; there is no calibration build flag.
-Optional camera diagnostic metadata is queried only by the separate opt-in diagnostic below.
 The capture adapter reads typed `Reset`
 every evaluation for the shared scene-history control described under
 [zero-plane tracking](#experimental-raw-depth-automation).
@@ -5512,24 +5511,6 @@ Streamline Frame Generation is a separate possible source of per-frame camera co
 when Super Resolution uses NGX. Its camera observations still require frame/view association;
 loading its DLL or enabling frame generation does not automatically authorize a projection for
 an NGX capture.
-
-### NGX direct-calibration diagnostic
-
-`[SUNSHINE_DEPTH] NGXCalibrationProbe=1` enables a default-off availability check after restart.
-At most once per five seconds per observed capture-eligible D3D12 feature, it queries the optional
-research `Position.ViewSpace` texture with the SDK's typed resource getter and the public
-`WorldToViewMatrix`, `ViewToClipMatrix`, `InvViewProjectionMatrix`, and `ClipToPrevClipMatrix`
-names with its optional void-pointer getter. Failed queries, successful null values, non-null values
-and a missing getter are reported separately. A failed getter's output is discarded.
-
-The probe records bounded POD metadata in the evaluation callback and logs from the existing poll.
-It never dereferences or retains these optional pointers, copies their resources, or changes rendering.
-A non-null position texture would justify a separate capture experiment: paired raw depth and valid
-view-space Z could fit `raw = A + B/Z` within one frame. Presence alone does not establish contents,
-encoding, frame alignment or that the feature successfully evaluated. Likewise, matching an NGX depth
-address with an SL tag does not establish that stale SL projection constants apply after FG changes.
-No matrix or position data from this diagnostic is used to calibrate depth. Set the option to `0`
-and restart after the investigation.
 
 ### Upscaler call-route diagnostic
 

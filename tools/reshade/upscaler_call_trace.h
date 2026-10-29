@@ -8,7 +8,7 @@ namespace sunshine_upscaler_trace {
   // independent. Owner serializes initialize/poll/shutdown outside loader lock.
   // Hooks are additive and process-pinned, never removed while a game can be
   // inside an original. Shutdown makes them pure pass-through.
-  void initialize(HMODULE addon, bool enabled, bool capture = false, bool calibration_probe = false);
+  void initialize(HMODULE addon, bool enabled, bool capture = false);
   void shutdown();
   bool enabled();
   bool capture_enabled();
