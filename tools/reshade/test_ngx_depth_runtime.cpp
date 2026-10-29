@@ -664,9 +664,9 @@ RWTexture2D<float> depth : register(u0);
       require(observed.runtime && observed.renders && !observed.inject,"NGX HDR runtime failed to initialize");
       check_unified_addon();
       const auto module=GetModuleHandleW(L"SunshineSBSTest.addon64");
-      manual=reinterpret_cast<select_t>(GetProcAddress(module,"SunshineDepthTestSelectManual"));
+      tracked=reinterpret_cast<tracked_t>(GetProcAddress(module,"SunshineDepthTestTracked"));
       query_provider_status=reinterpret_cast<provider_status_t>(GetProcAddress(module,"SunshineDepthTestProviderStatus"));
-      require(manual && query_provider_status,"NGX fixture requires passive provider/UI observation adapters");
+      require(tracked && query_provider_status,"NGX fixture requires passive provider/UI observation adapters");
       game3d.start();game3d.attach_export();game3d.set_strength(100);
 
       // Failed evaluations may be seen, but must not establish provider ownership.
@@ -680,8 +680,8 @@ RWTexture2D<float> depth : register(u0);
       using accounting_t=BOOL (*)(api::effect_runtime *,std::uint64_t);
       const auto accounting=reinterpret_cast<accounting_t>(GetProcAddress(module,"SunshineDepthTestActivityAccounting"));
       require(accounting && accounting(observed.runtime,native(*depth_stencil_crop)),
-        "Hidden candidate accounting, UI expiry or preservation recovery failed");
-      std::puts("PASS candidate counters pause while hidden, visible UI resumes them, expiry stops them, and preservation activity remains valid");
+        "Hidden candidate accounting, Generic capture resume or preservation recovery failed");
+      std::puts("PASS candidate counters pause while no Generic capture is wanted and resume with it, and preservation activity remains valid");
 
       valid_evaluation=true;
       invalid_extent=true;
@@ -719,7 +719,7 @@ RWTexture2D<float> depth : register(u0);
         ngx_tick("NGX-stable-native-ownership");require_status(true,true);
         require(status.ready(),"Steady native NGX frames interrupted Automatic readiness");
       }
-      require(!manual(observed.runtime,native(*selected)),"NGX-only non-DSV source unexpectedly entered Generic inventory");
+      require(!in_generic_inventory(native(*selected)),"NGX-only non-DSV source unexpectedly entered Generic inventory");
       require(status.basis==unsigned(sunshine_game3d::automatic_scale_basis::relative_depth) && status.active_scale() &&
         established.depth_scale==status.scale,
         "NGX depth without projection did not initialize an active relative-depth scale applied by native rendering");

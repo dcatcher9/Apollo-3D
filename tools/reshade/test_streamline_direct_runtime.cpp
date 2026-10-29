@@ -15,7 +15,7 @@ namespace {
     const sunshine_streamline::camera_data *, std::uint64_t, bool);
   using finish_capture_t = void (*)(std::uint64_t, bool);
   using provider_status_t = BOOL (*)(api::effect_runtime *, sunshine_streamline::provider::source_status *);
-  using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
+  using tracked_t = BOOL (*)(api::effect_runtime *, std::uint64_t, BOOL *);
   using action_t = BOOL (*)(api::effect_runtime *);
   std::uint64_t game_native_command{};
   constexpr GUID streamline_v1_state_guid{0x694b3e1c,0x0e33,0x416f,{0xba,0x83,0xfe,0x24,0x8d,0xa1,0xe8,0x5d}};
@@ -52,7 +52,7 @@ namespace {
     bool large_submission{}, idle_only_after_submission{}, large_barriers{};
     unsigned batch_producer_index{}, submitted_large_batches{}, submitted_idle_batches{}, recorded_large_barriers{};
     std::array<bool,2> packed_layout_logged{};
-    select_t manual{};
+    tracked_t tracked{};
     // Compatibility field name shared with the derived NGX fixture; the action
     // now explicitly resets both the reference and the zero plane.
     action_t recenter{};
@@ -1022,6 +1022,13 @@ RWTexture2D<float> depth : register(u0);
       std::printf("PASS submission/completion ordering preserves current packed depth; failed evaluation and %u actual producer replays stay current-color mono; fresh recordings recover\n",
         replayed_recordings);
     }
+    // Whether the Generic depth inventory holds the resource, used this frame
+    // (the test add-on's read-only query; it never changes selection).
+    bool in_generic_inventory(std::uint64_t resource) {
+      BOOL value=TRUE;
+      require(tracked(observed.runtime,resource,&value),"Generic depth inventory query failed");
+      return value!=FALSE;
+    }
     void check_provider_status(bool expected_ready) {
       if(!query_provider_status) return;
       sunshine_streamline::provider::source_status status;
@@ -1114,16 +1121,8 @@ RWTexture2D<float> depth : register(u0);
       verify_large_batch_phase("large-batch-valid-recovery");
       large_submission=large_barriers=false;
       batch_idle.clear();retained.clear();
-      if(query_provider_status) {
-        require(manual(observed.runtime,reinterpret_cast<std::uint64_t>(decoy->texture.p)),"Cannot pin generic depth for overlay status check");
-        tick("large-batch-ui-manual-pin");
-        sunshine_streamline::provider::source_status status;
-        require(query_provider_status(observed.runtime,&status) && !status.selected && !status.ready && !status.current.resource,
-          "Overlay provider status remained active after explicit generic manual pin");
-        require(manual(observed.runtime,0),"Cannot restore API depth after overlay status check");
-        settle("large-batch-ui-auto-recovery");verify_packed_depth();check_provider_status(true);
-        std::puts("PASS actual overlay snapshot reports current source, historical-only source during failure, and manual override ownership");
-      }
+      if(query_provider_status)
+        std::puts("PASS actual overlay snapshot reports current source and historical-only source during failure");
       require(!v2_capture_calls && v1_capture_calls,"Large-batch regression invoked a V2 warming path");
       std::printf("PASS large native batches case=%s preserve exact packed/source-stencil/shader pixels and failed-frame mono/recovery\n",
         barriers_only?"barriers":"all");
@@ -1161,9 +1160,9 @@ RWTexture2D<float> depth : register(u0);
         finish_capture=reinterpret_cast<finish_capture_t>(GetProcAddress(module,"SunshineStreamlineTestFinishCapture"));
         require(begin_capture_v1 && finish_capture,"Pending-evaluation fixture requires TEST ONLY split capture/completion adapters");
       }
-      manual=reinterpret_cast<select_t>(GetProcAddress(module,"SunshineDepthTestSelectManual"));
+      tracked=reinterpret_cast<tracked_t>(GetProcAddress(module,"SunshineDepthTestTracked"));
       recenter=reinterpret_cast<action_t>(GetProcAddress(module,"SunshineGame3DTestRecalibrate"));
-      require(capture && capture_v1 && manual && recenter,"Direct fixture requires TEST ONLY native input and UI adapters");
+      require(capture && capture_v1 && tracked && recenter,"Direct fixture requires TEST ONLY native input and UI adapters");
       // Remove the boot FX and present until the renderer has compiled, all
       // without middleware calls: the cold and private-state regressions
       // require an unwarmed capture.
@@ -1198,7 +1197,7 @@ RWTexture2D<float> depth : register(u0);
         "Device allocator creation after rejected middleware command pointer");
       std::puts("PASS actual device rejected as command list; later CreateCommandAllocator keeps its native arguments and succeeds");
       settle("direct-low-UAV-over-native-DSV");verify_depth();
-      require(!manual(observed.runtime,native(*first)),"Non-DSV UAV incorrectly appeared in generic depth inventory");
+      require(!in_generic_inventory(native(*first)),"Non-DSV UAV incorrectly appeared in generic depth inventory");
       std::puts("PASS real lower-resolution R32_FLOAT UAV outside generic inventory drives projection stereo over an unrelated full-resolution DSV");
       if(matrix_change) {
         matrix_change_cases();render_tracked_depth={};
@@ -1206,15 +1205,6 @@ RWTexture2D<float> depth : register(u0);
         return;
       }
 
-      require(manual(observed.runtime,reinterpret_cast<std::uint64_t>(decoy->texture.p)),"Cannot pin the real full-resolution DSV");
-      const auto pinned_until=GetTickCount64()+15000;
-      do {tick("manual-DSV-over-native-tag");} while((!ready() || !captured_ready || captured.projection.supplied ||
-        captured.source_resource.handle!=reinterpret_cast<std::uint64_t>(decoy->texture.p)) && GetTickCount64()<pinned_until);
-      require(ready() && captured_ready && !captured.projection.supplied &&
-        captured.source_resource.handle==reinterpret_cast<std::uint64_t>(decoy->texture.p),"Native provider ignored an explicit user pin");
-      require(manual(observed.runtime,0),"Cannot release explicit DSV pin");
-      settle("manual-release-to-native");check_projection();
-      std::puts("PASS explicit generic-depth pin takes priority; Auto resumes the direct tagged source and its projection scale");
       {
         // A game hitch longer than the source age before a frame's SR
         // evaluation, then one between the evaluation and its Present: the

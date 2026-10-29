@@ -157,7 +157,7 @@ namespace sunshine_game3d {
     source_alpha_ui_decision update(bool requested, frame_generation_mode observed, bool observer_active) {
       // Contention or ambiguous/lost observations cannot turn a known FG mode
       // off. Only an observed mode change or genuine observer/runtime shutdown
-      // clears it. In particular, manually pinning Generic depth is not FG Off.
+      // clears it.
       if (!observer_active) mode = {};
       else if (observed.known) mode = observed;
       source_alpha_ui_decision result;
@@ -301,6 +301,6 @@ namespace sunshine_game3d {
   void draw_status(reshade::api::effect_runtime *runtime);
   void draw_calibration(reshade::api::effect_runtime *runtime);
   // Preview and source overrides, ahead of live diagnostics. Does not request
-  // candidate enumeration; the depth owner handles its manual buffer list.
+  // candidate enumeration.
   bool draw_diagnostics(reshade::api::effect_runtime *runtime);
 }  // namespace sunshine_game3d

@@ -322,87 +322,6 @@ namespace {
     std::puts("PASS native incumbent and startup: native selection preserves ordinary scan; absent or oversized anchor permits priority");
   }
 
-  void test_manual_recovery_watch() {
-    manual_recovery_watch watch;
-    require(watch.inactive_frame() == 0, "a new manual watch must have no inactive interval");
-    require(!watch.update(7, true, 10, 1000), "a rendered manual choice must remain pinned");
-    require(watch.inactive_frame() == 0, "rendered manual depth cannot start recovery evidence");
-    require(!watch.update(7, false, 11, 1100), "the first missed render must begin a grace interval");
-    require(watch.inactive_frame() == 11, "replacement evidence must follow the first inactive observation");
-    require(!watch.update(7, false, 12, 3099), "1999 milliseconds of inactivity must retain a manual choice");
-    require(watch.update(7, false, 13, 3100), "2000 milliseconds of continuous inactivity must allow recovery checks");
-    require(watch.inactive_frame() == 11, "expired grace must retain its original evidence boundary");
-    require(watch.update(7, false, 14, 3500), "continued inactivity must not restart an expired grace interval");
-    require(!watch.update(7, true, 15, 3501), "the original buffer rendering again must cancel recovery");
-    require(watch.inactive_frame() == 0, "resumed manual depth must clear the old evidence boundary");
-
-    // A buffer used on alternating presents is healthy. Separate short gaps may
-    // not accumulate into a reload timeout, irrespective of the frame rate.
-    for (std::uint64_t round = 0; round < 8; ++round) {
-      const auto frame = 20 + 2 * round, now = 4000 + 2000 * round;
-      require(!watch.update(7, false, frame, now), "each new short gap must start a fresh grace interval");
-      require(!watch.update(7, true, frame + 1, now + 1999), "intermittently rendered manual depth must stay pinned");
-      require(watch.inactive_frame() == 0, "a rendered frame must prevent banking earlier inactive time");
-    }
-
-    require(!watch.update(7, false, 40, 20000), "an inactive manual source must begin a new interval");
-    require(!watch.update(8, false, 41, 21999), "a newly chosen manual identity cannot inherit the old timeout");
-    require(watch.inactive_frame() == 41, "a new manual lifetime must establish its own evidence boundary");
-    require(!watch.update(8, false, 42, 23998), "replacement manual identity must receive the full grace interval");
-    require(watch.update(8, false, 43, 23999), "a new manual identity may recover only after its own grace expires");
-    require(!watch.update(0, false, 44, 24000), "automatic mode has no manual timeout to expire");
-    require(watch.inactive_frame() == 0, "clearing manual selection must discard its inactive interval");
-    require(!watch.update(8, false, 45, 27000), "reselecting a previous identity cannot resurrect its expired timeout");
-
-    manual_recovery_watch rollback;
-    require(!rollback.update(9, false, 50, 10000), "clock rollback scenario must begin inactive");
-    require(!rollback.update(9, false, 51, 9999), "a backward clock must not underflow into immediate recovery");
-    require(rollback.inactive_frame() == 51, "clock rollback must restart the evidence boundary with its timer");
-    require(!rollback.update(9, false, 52, 11998), "clock rollback must preserve a complete new grace interval");
-    require(rollback.update(9, false, 53, 11999), "recovery must resume after the restarted grace interval");
-    std::puts("PASS manual inactivity: active pins, intermittent presents, exact two-second grace, identity changes, reset and clock rollback");
-  }
-
-  void test_manual_recovery_evidence() {
-    selection_policy policy;
-    const auto useful = analyze(gradient());
-    const auto flat = analyze(std::vector<float>(width * height, 1.f));
-    policy.observe(candidate(2, 100, 1, 1280, 720));
-    for (std::uint64_t frame : {98u, 99u, 100u}) policy.sample(2, useful, frame);
-    require(policy.evidence(2)->confirmed_good, "replacement scenario must begin with historical useful evidence");
-    require(!policy.confirmed_since(2, 100, 100), "pre-reload evidence and a capture exactly on the boundary cannot release a manual pin");
-    policy.observe(candidate(2, 101, 1, 1280, 720));
-    policy.sample(2, useful, 101);
-    require(!policy.confirmed_since(2, 101, 100), "one post-reload positive capture cannot borrow historical confirmation");
-    policy.sample(2, useful, 101);
-    require(!policy.confirmed_since(2, 101, 100), "duplicate post-reload captures cannot manufacture replacement confirmation");
-    policy.sample(2, useful, 99);
-    require(!policy.confirmed_since(2, 101, 100), "late historical readback cannot advance recovery evidence");
-    policy.observe(candidate(2, 102, 1, 1280, 720));
-    policy.sample(2, useful, 102);
-    require(policy.confirmed_since(2, 102, 100), "two independent useful captures after inactivity must qualify a currently rendered replacement");
-    require(!policy.confirmed_since(2, 103, 100), "ordinary activity grace cannot make a nonrendering replacement safe for manual recovery");
-    policy.observe(candidate(2, 103, 1, 1280, 720));
-    require(policy.confirmed_since(2, 103, 100), "a currently rendered replacement may use its recent completed readbacks");
-    policy.sample(2, flat, 103);
-    require(policy.evidence(2)->confirmed_good, "ordinary negative hysteresis must retain historical confirmation for this scenario");
-    require(!policy.confirmed_since(2, 103, 100), "a latest flat capture must prevent recovery even before ordinary bad-content hysteresis expires");
-    require(!policy.confirmed_since(0, 103, 100) && !policy.confirmed_since(999, 103, 100), "missing replacement identities cannot provide recovery evidence");
-
-    policy.erase(2);
-    policy.sample(2, useful, 104);
-    require(!policy.confirmed_since(2, 104, 100), "late readbacks must not resurrect a destroyed replacement");
-    policy.observe(candidate(20, 104, 1, 1280, 720)); // Same native pointer, new lifetime.
-    policy.sample(2, useful, 105);
-    require(!policy.confirmed_since(20, 104, 100), "a reused resource address must not inherit the destroyed lifetime's evidence");
-    policy.sample(20, useful, 104);
-    require(!policy.confirmed_since(20, 104, 100), "a replacement lifetime must independently collect two positive captures");
-    policy.observe(candidate(20, 105, 1, 1280, 720));
-    policy.sample(20, useful, 105);
-    require(policy.confirmed_since(20, 105, 100), "a new lifetime may qualify once its own post-reload captures are confirmed");
-    std::puts("PASS manual recovery evidence: strict post-inactivity boundary, independent positive captures, live rendering, bad latest contents and resource lifetimes");
-  }
-
   void test_clear_only_activity() {
     selection_policy policy;
     const auto useful = analyze(gradient());
@@ -410,59 +329,23 @@ namespace {
     policy.sample(1, useful, 99);
     policy.sample(1, useful, 100);
     require(policy.choose(100).id == 1, "rendered scene must qualify before a clear-only frame");
-    require(policy.confirmed_since(1, 100, 98), "rendered source must initially provide fresh recovery evidence");
 
-    // A pinned resource is observed even when the caller's automatic loop skips
-    // it. Cached positive captures cannot turn its later clear into scene work.
+    // The automatic loop observes every live candidate, including an incumbent
+    // whose frame only cleared it. Cached positive captures cannot turn that
+    // clear into scene work.
     policy.observe(candidate(1, 101, 0));
     require(policy.choose(101, 1).id == 0, "clear-only current source cannot remain an active automatic candidate");
     require(policy.next_probe(101) == 0, "clear-only source cannot schedule a content capture");
-    require(!policy.confirmed_since(1, 101, 98), "clear-only activity cannot release another manual pin using cached proof");
     policy.sample(1, useful, 101); // Late preserved pixels still cannot establish current rendering.
-    require(!policy.confirmed_since(1, 101, 98), "new readback cannot substitute for a current scene draw");
+    require(policy.choose(101, 1).id == 0, "new readback cannot substitute for a current scene draw");
 
     policy.observe(candidate(2, 101, 1));
     policy.sample(2, useful, 100);
     policy.sample(2, useful, 101);
-    require(policy.choose(101, 1).id == 2, "current useful replacement must outrank a clear-only pinned resource");
-    require(policy.confirmed_since(2, 101, 99), "replacement scene must retain ordinary fresh recovery eligibility");
+    require(policy.choose(101, 1).id == 2, "current useful replacement must outrank a clear-only incumbent");
     policy.observe(candidate(1, 102, 1));
     require(policy.choose(102, 1).id == 1, "resumed rendering must restore the retained scene without inventing a new lifetime");
-    require(policy.confirmed_since(1, 102, 99), "resumed rendering may use its fresh positive samples");
-    std::puts("PASS clear-only activity: no ready candidate/probe/recovery proof, fresh replacement and resumed rendering");
-  }
-
-  void test_manual_recovery_evidence_freshness() {
-    policy_options options;
-    options.evidence_stale_frames = 5;
-    selection_policy policy(options);
-    const auto useful = analyze(gradient());
-    policy.observe(candidate(1, 102, 1));
-    policy.sample(1, useful, 101);
-    policy.sample(1, useful, 102);
-    require(policy.confirmed_since(1, 102, 100), "fresh post-inactivity evidence should qualify initially");
-    require(!policy.confirmed_since(1, 101, 100), "a reversed frame clock cannot qualify evidence from a future rendered frame");
-    policy.observe(candidate(1, 108, 1));
-    require(!policy.confirmed_since(1, 108, 100), "rendering again cannot revive expired content confidence without fresh readbacks");
-    policy.sample(1, useful, 108);
-    require(!policy.confirmed_since(1, 108, 100), "one capture after evidence expiration cannot revive the old positive count");
-    policy.observe(candidate(1, 109, 1));
-    policy.sample(1, useful, 109);
-    require(policy.confirmed_since(1, 109, 100), "two fresh captures must restore recovery eligibility after evidence expires");
-
-    options.good_samples_required = 3;
-    selection_policy three_samples(options);
-    three_samples.observe(candidate(3, 201, 1));
-    three_samples.sample(3, useful, 199);
-    three_samples.sample(3, useful, 200);
-    three_samples.sample(3, useful, 201);
-    three_samples.observe(candidate(3, 202, 1));
-    three_samples.sample(3, useful, 202);
-    require(!three_samples.confirmed_since(3, 202, 200), "manual recovery must honor a configured three-capture requirement after the boundary");
-    three_samples.observe(candidate(3, 203, 1));
-    three_samples.sample(3, useful, 203);
-    require(three_samples.confirmed_since(3, 203, 200), "three new positive captures must satisfy the configured recovery requirement");
-    std::puts("PASS manual recovery freshness: expired evidence, frame ordering and configured confirmation count");
+    std::puts("PASS clear-only activity: no ready candidate or probe, no late-readback substitute for a draw, fresh replacement and resumed rendering");
   }
 
   depth_quality quality_score(float score) {
@@ -1196,9 +1079,6 @@ int main() {
     test_native_probe_activity_and_coverage();
     test_native_incumbent_probe_order();
     test_staleness_and_order();
-    test_manual_recovery_watch();
-    test_manual_recovery_evidence();
-    test_manual_recovery_evidence_freshness();
     test_clear_only_activity();
     test_qualified_native_challenge();
     test_equal_size_and_quality_blips();

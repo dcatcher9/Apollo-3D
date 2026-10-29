@@ -16,8 +16,6 @@ namespace {
     // Completed-frame intervals over 250 ms (pauses in Presents) between two
     // Presents with ready depth, which earn adaptation no time.
     std::uint64_t paused_ms = 0;
-    using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
-    select_t select_manual = nullptr;
     native_game3d_observer game3d{*this};
     // What the native render of the latest Present consumed.
     sunshine_game3d::test::last_render latest;
@@ -186,9 +184,6 @@ namespace {
       while ((!observed.runtime || !observed.renders) && GetTickCount64() < load_end) step();
       require(observed.runtime && observed.renders && !observed.inject, "Actual adaptive fixture did not initialize without injected depth");
       check_unified_addon();
-      const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
-      select_manual = reinterpret_cast<select_t>(GetProcAddress(module, "SunshineDepthTestSelectManual"));
-      require(select_manual, "Adaptive fixture requires the test-only real UI-selection adapter");
       game3d.start();
       game3d.set_strength(100);
       rendered_sequence = game3d.await_render([&] { step(); });
@@ -202,12 +197,9 @@ namespace {
       const auto binding = latest.depth.resource.handle;
       const float constant_gain = gain(), constant_zero = zero();
       const auto constant = [&] { require(ready() && blend() == 1.f && gain() == constant_gain && zero() == constant_zero &&
-        latest.depth.resource.handle == binding, "Constant-source pin/unpin changed scale, zero, binding or ready strength"); };
-      require(select_manual(observed.runtime, reinterpret_cast<std::uint64_t>(scene->texture.p)), "Cannot pin actual adaptive source");
-      pump(1200, "constant-pin", constant);
-      require(select_manual(observed.runtime, 0), "Cannot release actual adaptive source");
-      pump(1200, "constant-unpin", constant);
-      std::printf("PASS constant scene and same-source pin/unpin retain H=%.9g, t0=%.9g, binding, readiness and full blend\n",
+        latest.depth.resource.handle == binding, "Constant source changed scale, zero, binding or ready strength"); };
+      pump(2400, "constant-steady", constant);
+      std::printf("PASS constant scene retains H=%.9g, t0=%.9g, binding, readiness and full blend in steady state\n",
         constant_gain, constant_zero);
 
       // Only the center patch changes: the nearest reference Q, hence the

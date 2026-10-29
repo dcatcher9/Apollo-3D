@@ -39,7 +39,7 @@ namespace sunshine_depth_capture {
       *this = {};
       sources_.epoch = epoch;
     }
-    source_set update(std::uint64_t anchor, const std::vector<source_observation> &live, bool manual) {
+    source_set update(std::uint64_t anchor, const std::vector<source_observation> &live, bool single_anchor) {
       const auto find = [&](std::uint64_t id) {
         return std::find_if(live.begin(), live.end(), [id](const auto &o) { return id && o.id == id; });
       };
@@ -57,7 +57,7 @@ namespace sunshine_depth_capture {
         kept[next.count++] = o;
       };
       append(*primary);
-      if (!manual) {
+      if (!single_anchor) {
         // A temporarily inactive/flat member still owns the same capture slot
         // and numeric basis. Remove it only on authoritative tuple change or
         // replacement by a newly qualified source when the budget is full.
@@ -121,9 +121,9 @@ namespace sunshine_depth_capture {
     std::uint64_t anchor{};
     std::array<std::uint64_t, maximum_sources> qualified{};
     unsigned count{};
-    bool manual{};
+    bool single_anchor{};
   };
-  enum class selection_status { current_anchor, current_peer, no_current_copy, unqualified, manual_missing };
+  enum class selection_status { current_anchor, current_peer, no_current_copy, unqualified, anchor_missing };
   struct selection_result { std::uint64_t source{}; selection_status reason{selection_status::no_current_copy}; };
   inline const char *name(selection_status value) {
     switch (value) {
@@ -131,7 +131,7 @@ namespace sunshine_depth_capture {
       case selection_status::current_peer: return "current_peer";
       case selection_status::no_current_copy: return "no_current_copy";
       case selection_status::unqualified: return "unqualified";
-      case selection_status::manual_missing: return "manual_missing";
+      case selection_status::anchor_missing: return "anchor_missing";
     }
     return "unknown";
   }
@@ -146,9 +146,9 @@ namespace sunshine_depth_capture {
       return std::find(preferred.qualified.begin(), preferred.qualified.begin() + preferred.count, id) !=
         preferred.qualified.begin() + preferred.count;
     };
-    if (current(preferred.anchor) && (preferred.manual || qualified(preferred.anchor)))
+    if (current(preferred.anchor) && (preferred.single_anchor || qualified(preferred.anchor)))
       return {preferred.anchor, selection_status::current_anchor};
-    if (preferred.manual) return {0, selection_status::manual_missing};
+    if (preferred.single_anchor) return {0, selection_status::anchor_missing};
     for (unsigned i = 0; i != preferred.count; ++i)
       if (current(preferred.qualified[i])) return {preferred.qualified[i], selection_status::current_peer};
     for (unsigned i = 0; i != captures.count; ++i)

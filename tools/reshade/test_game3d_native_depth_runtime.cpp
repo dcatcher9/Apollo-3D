@@ -10,12 +10,8 @@ namespace {
   struct native_depth_fixture : selection_fixture_t {
     using query_automatic_t = BOOL (*)(api::effect_runtime *, unsigned *);
     using query_scale_t = BOOL (*)(api::effect_runtime *, unsigned *, unsigned *, float *);
-    using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
-    using manual_state_t = BOOL (*)(api::effect_runtime *, std::uint64_t *, BOOL *);
     query_automatic_t query_automatic = nullptr;
     query_scale_t query_scale = nullptr;
-    select_t select_manual = nullptr;
-    manual_state_t manual_state = nullptr;
     std::ofstream report;
     unsigned fx_renders = 0;
 
@@ -70,17 +66,13 @@ namespace {
       return std::isfinite(a) && std::isfinite(b) && std::abs(a - b) <= std::max(1.f, std::abs(b)) * 1e-5f;
     }
 
-    void stable(unsigned milliseconds, std::uint64_t pin, float scale) {
+    void stable(unsigned milliseconds, float scale) {
       const auto until = GetTickCount64() + milliseconds;
       do {
         step(); no_effects();
         const auto value = current();
-        std::uint64_t selected = UINT64_MAX;
-        BOOL recovering = TRUE;
-        require(manual_state(observed.runtime, &selected, &recovering) && selected == pin && !recovering,
-          "Same-source pin action left an unexpected override/recovery state");
         require(value.ready() && value.state == unsigned(sunshine_game3d::automatic_scale_state::active) &&
-          same_scale(value.scale, scale), "Same-source pin action restarted calibration or changed native scale");
+          same_scale(value.scale, scale), "Steady drawn source restarted calibration or changed native scale");
       } while (GetTickCount64() < until);
     }
 
@@ -99,7 +91,7 @@ namespace {
       require(observed.reloads > reloads, "Unrelated empty FX reload did not complete");
       // Continue after the reload callback too: delayed source/epoch resets
       // must not hide behind the UI snapshot retained during compilation.
-      stable(700, 0, scale);
+      stable(700, scale);
       record("native-depth-across-fx-reload", current());
       std::printf("PASS native capture/scale survives actual empty FX reload across %u submitted frames\n", frames);
     }
@@ -114,10 +106,7 @@ namespace {
       const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
       query_automatic = reinterpret_cast<query_automatic_t>(GetProcAddress(module, "SunshineGame3DTestQueryAutomatic"));
       query_scale = reinterpret_cast<query_scale_t>(GetProcAddress(module, "SunshineGame3DTestQueryScale"));
-      select_manual = reinterpret_cast<select_t>(GetProcAddress(module, "SunshineDepthTestSelectManual"));
-      manual_state = reinterpret_cast<manual_state_t>(GetProcAddress(module, "SunshineDepthTestManualState"));
-      require(query_automatic && query_scale && select_manual && manual_state,
-        "Test add-on lacks native UI observations or existing pin actions");
+      require(query_automatic && query_scale, "Test add-on lacks native UI observations");
 
       // The shared setup copies the frozen effect. Remove it before creating any
       // game depth target: neither calibration nor capture can depend on FX state.
@@ -144,14 +133,8 @@ namespace {
       scene = target(width, height, 1, 10, false, true);
       render_tracked_depth = [&] { draw(*scene); };
       const auto initial = wait_ready("initial-drawn-depth");
-      stable(600, 0, initial.scale);
-
-      const auto source = reinterpret_cast<std::uint64_t>(scene->texture.p);
-      require(select_manual(observed.runtime, source), "Could not pin the actual drawn depth source");
-      stable(700, source, initial.scale);
-      require(select_manual(observed.runtime, 0), "Could not release the actual drawn depth source");
-      stable(700, 0, initial.scale);
-      record("same-source-pin-unpin", current());
+      stable(600, initial.scale);
+      record("steady-before-fx-reload", current());
 
       reload_without_depth_reset(initial.scale);
 
@@ -170,11 +153,11 @@ namespace {
       render_tracked_depth = [&] { draw(*scene); };
       const auto recovered = wait_ready("same-source-recovered");
       require(same_scale(recovered.scale, initial.scale), "Recovering the same drawn source reset native scale");
-      stable(600, 0, initial.scale);
+      stable(600, initial.scale);
       render_tracked_depth = {};
       no_effects();
       require(report.good(), "Could not write native depth evidence");
-      std::puts("PASS actual D3D12 native capture without FX: drawn DSV, automatic positive scale, stable pin/unpin, unrelated FX reload continuity, color-only loss and same-source recovery");
+      std::puts("PASS actual D3D12 native capture without FX: drawn DSV, automatic positive scale, steady scale, unrelated FX reload continuity, color-only loss and same-source recovery");
     }
   };
 }

@@ -36,8 +36,8 @@ namespace {
     require(choose_current(frames, ranking).source == 3, "Unqualified anchor overruled a qualified current copy");
     ranking.count = 0;
     require(choose_current(frames, ranking).reason == selection_status::unqualified, "Unqualified current storage rendered automatically");
-    ranking.manual = true;
-    require(choose_current(frames, ranking).source == 1, "Explicit pin/statistics choice was made dependent on automatic qualification");
+    ranking.single_anchor = true;
+    require(choose_current(frames, ranking).source == 1, "Single-anchor statistics choice was made dependent on automatic qualification");
   }
   void overlapping_copies_keep_anchor() {
     auto frames = captures(); auto ranking = preferred();
@@ -48,9 +48,9 @@ namespace {
     require(choose_current(frames, ranking).source == 3, "Same-copy ambiguity did not reject only its own source");
     frames.records[2].active = false;
     require(!choose_current(frames, ranking).source, "Stale/inactive storage rendered");
-    ranking.manual = true;
-    require(choose_current(captures(), ranking).source == 1, "Exact manual source not chosen");
-    require(choose_current(frames, ranking).reason == selection_status::manual_missing, "Manual pin silently switched resources");
+    ranking.single_anchor = true;
+    require(choose_current(captures(), ranking).source == 1, "Exact single-anchor source not chosen");
+    require(choose_current(frames, ranking).reason == selection_status::anchor_missing, "Single-anchor choice silently switched resources");
   }
   void exact_currentness() {
     const auto good = copy(1);
@@ -108,9 +108,9 @@ namespace {
     auto recrop = slots.update(1, live, false);
     require(std::find(recrop.members.begin(), recrop.members.begin() + recrop.count, 5) == recrop.members.begin() + recrop.count,
       "Changed captured crop inherited compatible slot");
-    auto pinned = slots.update(1, live, true);
-    require(pinned.count == 1 && pinned.members[0] == 1 && pinned.epoch == first.epoch, "Same-source pin restarted capture generation");
-    require(slots.update(1, live, false).epoch == pinned.epoch, "Same-source unpin restarted capture generation");
+    auto single = slots.update(1, live, true);
+    require(single.count == 1 && single.members[0] == 1 && single.epoch == first.epoch, "Same-source single anchor restarted capture generation");
+    require(slots.update(1, live, false).epoch == single.epoch, "Same-source return from a single anchor restarted capture generation");
     live.push_back(source(100));
     auto changed = slots.update(100, live, false);
     require(changed.epoch > first.epoch && changed.members[0] == 100, "New anchor outside budget did not replace generation");

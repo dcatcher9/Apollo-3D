@@ -10,9 +10,6 @@ namespace {
   struct rotation_fixture:raw_runtime_fixture {
     enum class cadence { single,abc,aabb,offturn,missing,concurrent,interrupted,moving,auxiliary };
     using action_t=BOOL (*)(api::effect_runtime *);
-    using select_t=BOOL (*)(api::effect_runtime *,std::uint64_t);
-    using state_t=BOOL (*)(api::effect_runtime *,std::uint64_t *,BOOL *);
-    select_t select_manual=nullptr;state_t manual_state=nullptr;
     native_game3d_observer game3d{*this};
     // What the native render of the latest Present consumed.
     sunshine_game3d::test::last_render latest;
@@ -464,10 +461,6 @@ namespace {
       while((!observed.runtime || !observed.renders) && GetTickCount64()<until)step();
       require(observed.runtime && observed.renders && !observed.inject,"Actual rotation fixture did not initialize");
       check_unified_addon();
-      const auto module=GetModuleHandleW(L"SunshineSBSTest.addon64");
-      select_manual=reinterpret_cast<select_t>(GetProcAddress(module,"SunshineDepthTestSelectManual"));
-      manual_state=reinterpret_cast<state_t>(GetProcAddress(module,"SunshineDepthTestManualState"));
-      require(select_manual && manual_state,"Existing UI-action adapters required");
       game3d.start();game3d.attach_export();game3d.set_strength(100);
       rendered_sequence=game3d.await_render([&]{update_marker();step();});
       for(unsigned band=0;band<4;++band)for(unsigned i=0;i<8;++i)points[band*8+i]={(2*band+1)*width/8+i-4,height/4};
@@ -487,17 +480,6 @@ namespace {
       set_mode(cadence::abc);warm("ABC-independent-warmup");stable("ABC-independent",90);
       set_mode(cadence::aabb);warm("AABB-independent-warmup");stable("AABB-independent",64);
       set_mode(cadence::offturn);warm("offturn-transfer-warmup");stable("offturn-transfer",60);
-
-      const auto pinned=reinterpret_cast<std::uint64_t>(scene->texture.p);
-      require(select_manual(observed.runtime,pinned),"Cannot pin real A");continuous(1);
-      set_mode(cadence::abc);
-      for(unsigned i=0;i<36;++i){
-        tick("manual-pin-ABC");std::uint64_t actual=0;BOOL recovering=TRUE;
-        require(manual_state(observed.runtime,&actual,&recovering) && actual==pinned && !recovering,"Live manual pin was replaced or entered recovery");
-        if(drawn!=1)require(!capture_ready && !ready(),"Manual pin silently switched to another rotating member");
-      }
-      require(select_manual(observed.runtime,0),"Cannot release real manual pin");set_mode(cadence::abc);
-      warm("manual-release-warmup");stable("manual-release",30);
 
       const auto old_b=lifetimes[1];decoy.reset();decoy=target(width,height,1,14);set_mode(cadence::abc);
       warm("member-B-replacement",true,[&](std::uint64_t elapsed){
@@ -540,7 +522,7 @@ namespace {
       // H/t0 and actual eye-difference traces support continuity review; no tiny
       // post-hoc threshold is invented for independently timed controllers.
       for(unsigned r=0;r<3;++r)require(stereo_observed[r]>0,"A member never produced nonzero actual stereo separation");
-      std::puts("PASS actual rotating sources: ABC/AABB, independent raw bases, current-color SBS, transfer-only decoys, pin/release, lifetime/layout reset, gaps, same-basis trajectory");
+      std::puts("PASS actual rotating sources: ABC/AABB, independent raw bases, current-color SBS, transfer-only decoys, lifetime/layout reset, gaps, same-basis trajectory");
       finish();
     }
   };

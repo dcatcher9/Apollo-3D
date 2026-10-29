@@ -6,10 +6,6 @@
 
 namespace {
   struct probe_round_fixture : raw_runtime_fixture {
-    using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
-    using state_t = BOOL (*)(api::effect_runtime *, std::uint64_t *, BOOL *);
-    select_t select_manual = nullptr;
-    state_t manual_state = nullptr;
     native_game3d_observer game3d{*this};
     // What the native render of the latest Present consumed.
     sunshine_game3d::test::last_render frame;
@@ -177,10 +173,6 @@ namespace {
       while ((!observed.runtime || !observed.renders) && GetTickCount64()<until) step();
       require(observed.runtime && observed.renders && !observed.inject, "Actual probe-round fixture did not initialize");
       check_unified_addon();
-      const auto module=GetModuleHandleW(L"SunshineSBSTest.addon64");
-      select_manual=reinterpret_cast<select_t>(GetProcAddress(module,"SunshineDepthTestSelectManual"));
-      manual_state=reinterpret_cast<state_t>(GetProcAddress(module,"SunshineDepthTestManualState"));
-      require(select_manual && manual_state,"Probe fixture needs the real manual-selection adapters");
       game3d.start();
       game3d.set_strength(100);
       rendered_sequence=game3d.await_render([&]{ step(); });
@@ -226,24 +218,6 @@ namespace {
       verify_pattern("uncaptured-candidate-yields",*decoy);
       std::puts("PASS uncaptured active candidate cannot starve a later useful source or become selected");
       missing.reset();
-
-      // An explicitly pinned and continuously rendered source is an ownership
-      // boundary, even with a already-confirmed better-resolution alternative.
-      const auto pinned=reinterpret_cast<std::uint64_t>(scene->texture.p);
-      require(select_manual(observed.runtime,pinned),"Cannot invoke real manual depth-selection action");
-      await_current("manual-pin-becomes-current",*scene,1000);
-      const auto pin_until=GetTickCount64()+3000;
-      do {
-        tick("manual-pin-retained");
-        std::uint64_t actual=0; BOOL recovering=TRUE;
-        require(manual_state(observed.runtime,&actual,&recovering) && actual==pinned && !recovering && current(*scene),
-                "Challenger scheduling replaced an active manual depth pin");
-      } while (GetTickCount64()<pin_until);
-      verify_pattern("manual-pin-retained",*scene);
-      require(select_manual(observed.runtime,0),"Cannot return to automatic selection");
-      await_current("manual-release-native-recovery",*decoy,12000);
-      verify_pattern("manual-release-native-recovery",*decoy);
-      std::puts("PASS active manual pin remains authoritative and explicit release restores automatic native selection");
       check_rotating_lower_promotion();
       render_tracked_depth={};
     }

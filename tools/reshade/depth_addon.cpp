@@ -727,7 +727,7 @@ bool sunshine_depth::copy_selected_depth(effect_runtime *runtime, command_list *
 }
 
 static generic_depth_data::member_view *select_captured_depth(effect_runtime *runtime, command_list *cmd_list, generic_depth_data &data,
-	generic_depth_device_data &device_data, const depth_selection_snapshot &snapshot, bool automatic, bool manual,
+	generic_depth_device_data &device_data, const depth_selection_snapshot &snapshot, bool automatic,
 	uint32_t frame_width, uint32_t frame_height, resource &selected, const depth_selection_resource *&selected_info)
 {
 	data.capture_wait_detail = nullptr;
@@ -745,7 +745,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 			e && e->confirmed_good && e->quality.kind == sunshine_depth::content_kind::useful});
 	}
 	const uint64_t anchor = selected_info ? selected_info->identity : 0;
-	const auto group = data.capture_budget.update(anchor, observations, manual || !automatic);
+	const auto group = data.capture_budget.update(anchor, observations, !automatic);
 	data.anchor_depth_stencil = selected;
 	data.anchor_identity = anchor;
 	data.rotating = group.count > 1;
@@ -832,7 +832,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	data.captures.frame = device_data.frame_index;
 	data.captures.runtime = data.runtime_epoch;
 	sunshine_depth_capture::preference preferred;
-	preferred.anchor = anchor; preferred.manual = manual || !automatic;
+	preferred.anchor = anchor; preferred.single_anchor = !automatic;
 	for (unsigned i = 0; i != group.count; ++i)
 	{
 		const auto observed = std::find_if(observations.begin(), observations.end(), [&](const auto &o) { return o.id == group.members[i]; });
@@ -858,7 +858,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	// round robin returns here. The hint changes only the next probe visit: the
 	// candidate still needs its own preserved copies and ordinary content checks.
 	uint64_t discovery_id = 0, discovery_layout = 0, discovery_draws = 0;
-	if (automatic && !manual && data.raw_scene_requested &&
+	if (automatic && data.raw_scene_requested &&
 		decision.reason == sunshine_depth_capture::selection_status::no_current_copy)
 	{
 		const auto primary = std::find_if(observations.begin(), observations.end(),
@@ -921,7 +921,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 				}
 		}
 	}
-	if (data.raw_scene_requested || (!manual && automatic && group.count > 1))
+	if (data.raw_scene_requested || (automatic && group.count > 1))
 	{
 		const depth_selection_resource *current_info = nullptr;
 		resource current_source {};
@@ -957,7 +957,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 				selected = {}; selected_info = nullptr;
 				data.capture_wait_detail = "The depth backup is newly assigned; waiting for its first current capture.";
 				if (s_frame_activity_trace) data.trace_capture.reason = "new_assignment_floor";
-				return nullptr; // Repeated effects/manual changes cannot bypass the new-assignment floor.
+				return nullptr; // Repeated selection or effects changes cannot bypass the new-assignment floor.
 			}
 			return &entry;
 		}
@@ -1036,19 +1036,8 @@ static void set_generic_capture_enabled(effect_runtime *runtime, generic_depth_d
 		data.selected_record = {};
 		data.selected_capture = {};
 		// Keep bounded selected/member allocations and CPU preference history for
-		// manual pins/fallback. Their GPU copies are gated below; no wait/reset or
-		// unsafe immediate view/resource destruction is required for API handover.
-	}
-}
-
-static const char *content_kind_name(sunshine_depth::content_kind kind)
-{
-	switch (kind)
-	{
-	case sunshine_depth::content_kind::useful: return "scene";
-	case sunshine_depth::content_kind::flat: return "flat";
-	case sunshine_depth::content_kind::unreliable: return "unreliable";
-	default: return "unmeasured";
+		// fallback. Their GPU copies are gated below; no wait/reset or unsafe
+		// immediate view/resource destruction is required for API handover.
 	}
 }
 
@@ -1151,8 +1140,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void on_clear_depth_impl(command_list *cmd_list, s
 				// Several recording threads can count clears under the shared lock.
 				do_copy = static_cast<uint32_t>(InterlockedIncrement(&depth_stencil_backup->current_clear_index) - 1) == force_clear_index - 1;
 			}
-
-			if (demand.clear_history) stats.clears.push_back({ current_stats, op, do_copy });
 		}
 
 		// Make a backup copy of the depth texture before it is cleared
@@ -1864,7 +1851,6 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 		stats.limit_tracking(tracking_demand(cmd_list->get_device()));
 		if (cmd_list->get_device()->get_api() == device_api::d3d12 && !state.inside_render_pass)
 			stats.direct_clear_depth_write = true;
-		stats.reversed_clear_value |= *depth != 1.0f; // Preserve the inherited UI hint.
 		stats.clear_zero |= *depth == 0.0f;
 		stats.clear_one |= *depth == 1.0f;
 		stats.clear_other |= *depth != 0.0f && *depth != 1.0f;
@@ -2150,7 +2136,6 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 	if (s_frame_activity_trace) trace.emplace(swapchain, presenting_queue);
 	std::unique_lock<std::shared_mutex> lock(s_mutex);
 	++device_data->native_present_index;
-	consume_depth_candidate_list_request(*device_data);
 	const auto demand = tracking_demand(*device_data);
 	if (trace) trace->begin(*device_data);
 
@@ -2244,7 +2229,7 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 	}
 	if (device->get_api() != device_api::d3d11 && device->get_api() != device_api::d3d12)
 		return;
-	if ((data.override_depth_stencil != 0 && !data.manual_recovery_probing) || (!s_sunshine_auto && data.native_depth_requested))
+	if (!s_sunshine_auto && data.native_depth_requested)
 	{
 		// Calibration remains available with content-based selection disabled.
 		// Sample only the selected backup; never allocate challengers or switch it.
@@ -2500,7 +2485,7 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 		}
 	const bool raw_selected_due = due_member != nullptr;
 	const uint64_t target_id = due_member ? due_member->identity : data.probe_target_id;
-	if ((!s_sunshine_auto && data.override_depth_stencil == 0 && !data.native_depth_requested && !data.raw_scene_requested) || target_id == 0 ||
+	if ((!s_sunshine_auto && !data.native_depth_requested && !data.raw_scene_requested) || target_id == 0 ||
 		sunshine_depth::busy() || (!raw_selected_due && now < data.next_sample_tick))
 		return;
 	device *const device = runtime->get_device();
@@ -2627,7 +2612,7 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 	// A rotating group can refresh a different raw member every few frames.
 	// Those independent deadlines must not continually postpone challenger work.
 	if (!raw_selected_due || target_id == data.probe_target_id)
-		data.next_sample_tick = now + (data.raw_scene_requested ? 125 : ((data.override_depth_stencil != 0 && !data.manual_recovery_probing) || !s_sunshine_auto ? 1000 : 250));
+		data.next_sample_tick = now + (data.raw_scene_requested ? 125 : (!s_sunshine_auto ? 1000 : 250));
 	if (data.raw_scene_requested)
 		if (auto *member = raw_member(data, target_id)) member->next_tick = now + 250;
 	if (!sunshine_depth::submit(runtime, cmd_list, request))
@@ -2705,10 +2690,10 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	const bool api_selected = [&] {
 		const slow_step step("Streamline depth acquisition");
 		return sunshine_streamline::provider::begin(runtime, cmd_list, device_data->native_present_index,
-			automatic && data.override_depth_stencil == 0 && s_streamline_source_events);
+			automatic && s_streamline_source_events);
 	}();
-	// A native API snapshot needs no Generic work. Manual pins and fallback
-	// resume capture before entering the selector.
+	// A native API snapshot needs no Generic work. Fallback resumes capture
+	// before entering the selector.
 	{
 		const slow_step step("generic capture switch");
 		set_generic_capture_enabled(runtime, data, !api_selected);
@@ -2819,39 +2804,17 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			selected_depth_stencil_info = &info;
 		}
 	}
-	data.manual_recovery_probing = false;
-	if (data.override_depth_stencil != 0)
+	if (!automatic && (data.native_depth_requested || data.raw_scene_requested) && selected_depth_stencil_info != nullptr)
 	{
-		const auto manual = find_depth_selection(current_depth_stencil_resources, data.override_depth_stencil);
-		if (manual != current_depth_stencil_resources.end() && manual->second.identity == data.override_identity)
-		{
-			eligible_ids.push_back(manual->second.identity);
-			observe_candidate(data, manual->second, frame_width, frame_height);
-			const bool rendered = manual->second.last_used_in_frame == device_data->frame_index &&
-				manual->second.last_frame_stats.total.has_work();
-			data.manual_recovery_probing = data.manual_recovery.update(automatic ? data.override_identity : 0,
-				rendered, device_data->frame_index, GetTickCount64());
-		}
-		else
-		{
-			sunshine_log::message(reshade::log::level::info, "Sunshine 3D depth: manual buffer was destroyed or recreated; returning to automatic selection.");
-			data.override_depth_stencil = { 0 };
-			data.override_identity = 0;
-		}
-	}
-	if (data.override_depth_stencil == 0)
-		data.manual_recovery = {};
-	if (!automatic && (data.native_depth_requested || data.raw_scene_requested) && data.override_depth_stencil == 0 && selected_depth_stencil_info != nullptr)
-	{
-		// Disabling content-based selection keeps the original statistics choice,
-		// but its native calibration still needs current capture-region metadata.
-		// Observe only that choice; never admit a challenger or overrule a manual row.
+		// Other APIs keep the original statistics choice, but its native
+		// calibration still needs current capture-region metadata. Observe only
+		// that choice; never admit a challenger.
 		eligible_ids.push_back(selected_depth_stencil_info->identity);
 		observe_candidate(data, *selected_depth_stencil_info, frame_width, frame_height);
 	}
-	// Every eligible ID came from this live snapshot; a live manual row is
-	// included even while inactive. This one pass therefore removes destroyed
-	// and filtered candidates before consuming readbacks or choosing a source.
+	// Every eligible ID came from this live snapshot. This one pass therefore
+	// removes destroyed and filtered candidates before consuming readbacks or
+	// choosing a source.
 	prune_depth_selection(data, eligible_ids);
 
 	if (completed_sample)
@@ -2886,19 +2849,6 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	if (automatic)
 	{
 		choice = data.selection.choose(device_data->frame_index, current_id);
-		if (data.manual_recovery_probing && choice.id != data.override_identity &&
-			data.selection.confirmed_since(choice.id, device_data->frame_index, data.manual_recovery.inactive_frame()))
-		{
-			char message[256];
-			std::snprintf(message, std::size(message),
-				"Sunshine 3D depth: unused manual source=%llu replaced by freshly confirmed scene source=%llu; returning to automatic selection.",
-				static_cast<unsigned long long>(data.override_identity), static_cast<unsigned long long>(choice.id));
-			sunshine_log::message(reshade::log::level::info, message);
-			data.override_depth_stencil = { 0 };
-			data.override_identity = 0;
-			data.manual_recovery = {};
-			data.manual_recovery_probing = false;
-		}
 		for (const auto &[candidate, info] : current_depth_stencil_resources)
 		{
 			if (info.identity == choice.id || (!choice.id && info.identity == current_id &&
@@ -2920,7 +2870,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		// probe deadline: an incomplete comparison must still yield to others.
 		// Automatic raw sampling independently refreshes the incumbent while
 		// this probe holds the challenger. Other modes retain their old cadence.
-		const bool comparison_pending = automatic && data.raw_scene_requested && data.override_depth_stencil == 0 &&
+		const bool comparison_pending = automatic && data.raw_scene_requested &&
 			choice.id == current_id && data.selection.pending_challenger_id() == data.challenger_id;
 		if (completed_sample->token == data.challenger_id &&
 			(++data.challenger_samples < 3 || comparison_pending))
@@ -2930,33 +2880,16 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			release_challenger(runtime, data);
 	}
 
-	if (data.override_depth_stencil != 0)
-	{
-		const auto it = find_depth_selection(current_depth_stencil_resources, data.override_depth_stencil);
-		if (it != current_depth_stencil_resources.end() && it->second.identity == data.override_identity)
-		{
-			selected_depth_stencil = it->first;
-			selected_depth_stencil_info = &it->second;
-			selection_reason = "manual override";
-		}
-		else
-		{
-			data.override_depth_stencil = { 0 };
-			data.override_identity = 0;
-		}
-	}
-
-	const bool manual = data.override_depth_stencil != 0;
 	data.selection_reason = selection_reason;
 
-	if (!automatic || (manual && !data.manual_recovery_probing) || (data.probe_target_id != 0 &&
+	if (!automatic || (data.probe_target_id != 0 &&
 		std::find(eligible_ids.begin(), eligible_ids.end(), data.probe_target_id) == eligible_ids.end()))
 		release_challenger(runtime, data);
 
 	const resource_view prev_shader_resource = data.selected_shader_resource;
 	data.stable_current = false; // Set again below by this Present's stable copy.
 	auto *member_binding = select_captured_depth(runtime, cmd_list, data, *device_data, current_depth_stencil_resources,
-		automatic, manual, frame_width, frame_height, selected_depth_stencil, selected_depth_stencil_info);
+		automatic, frame_width, frame_height, selected_depth_stencil, selected_depth_stencil_info);
 	const uint64_t selected_id = selected_depth_stencil_info ? selected_depth_stencil_info->identity : 0;
 	if (member_binding)
 	{
@@ -3062,7 +2995,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			data.selected_identity = selected_id;
 			data.selected_desc = selected_depth_stencil_info->desc;
 		}
-		// Clears alone cannot make a manual source ready; raster, mesh and copied depth can.
+		// Clears alone cannot make a source ready; raster, mesh and copied depth can.
 		const bool source_active = selected_depth_stencil_info->last_used_in_frame == device_data->frame_index &&
 			selected_depth_stencil_info->last_frame_stats.total.has_work();
 
@@ -3136,27 +3069,27 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	update_effect_runtime(runtime);
 	if (prev_shader_resource != data.selected_shader_resource && !owns_member_view(data, prev_shader_resource))
 		device->destroy_resource_view(prev_shader_resource);
-	const bool selection_changed = data.last_logged_id != data.anchor_identity || data.last_logged_manual != manual;
+	const bool selection_changed = data.last_logged_id != data.anchor_identity;
 	const bool binding_changed = data.last_logged_state != data.binding_state;
 	// The game may alternate its tagged allocation every present. Ordinary
-	// source changes share the status rate limit; manual handovers/errors remain
+	// source changes share the status rate limit; binding errors remain
 	// immediate. Logging must never turn physical rotation into per-frame I/O.
 	// The copy counts alone repeat the line at most every 10 s.
 	const uint64_t copy_frames = data.boundary_copy_frames + data.end_of_frame_copy_frames + data.end_of_frame_refused;
 	if (data.status_log.due(GetTickCount64(), selection_changed || binding_changed,
-		data.last_logged_manual != manual || (binding_changed && data.binding_state == depth_binding_state::binding_failed),
+		binding_changed && data.binding_state == depth_binding_state::binding_failed,
 		copy_frames != data.logged_copy_frames))
 	{
 		char message[1024];
 		const auto proven = sunshine_streamline::depth_capture::proven_counts();
 		std::snprintf(message, std::size(message),
-			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu; "
+			"Sunshine 3D depth: %s; source=%llu %ux%u %s; %s; %s; ready_copies boundary=%llu end_of_frame=%llu; "
 			"end_of_frame_refused=%llu last=%s; proven tracked=%llu unobserved={unrecorded=%llu unreported=%llu invalidated=%llu "
 			"missed_reset=%llu uncovered=%llu} changed_copies=%llu latched=%llu%s earlier_layout={copied=%llu refused=%llu} "
 			"copy_out={made=%llu ring_busy=%llu failed=%llu predicted=%llu taken=%llu unstored=%llu released=%llu skipped=%llu "
 			"reader_moves=%llu move_unreadable=%llu}",
 			binding_state_name(data.binding_state), static_cast<unsigned long long>(data.selected_identity),
-			data.selected_desc.texture.width, data.selected_desc.texture.height, format_to_string(data.selected_desc.texture.format), manual ? "manual" : "auto",
+			data.selected_desc.texture.width, data.selected_desc.texture.height, format_to_string(data.selected_desc.texture.format),
 			data.selection_reason, data.binding_detail, static_cast<unsigned long long>(data.boundary_copy_frames),
 			static_cast<unsigned long long>(data.end_of_frame_copy_frames), static_cast<unsigned long long>(data.end_of_frame_refused),
 			sunshine_streamline::depth_capture::name(data.end_of_frame_refusal), static_cast<unsigned long long>(proven.tracked),
@@ -3172,7 +3105,6 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			static_cast<unsigned long long>(proven.reader_moves), static_cast<unsigned long long>(proven.reader_move_unreadable));
 		sunshine_log::message(data.binding_state == depth_binding_state::binding_failed ? reshade::log::level::error : reshade::log::level::info, message);
 		data.last_logged_id = data.anchor_identity;
-		data.last_logged_manual = manual;
 		data.last_logged_state = data.binding_state;
 		data.logged_copy_frames = copy_frames;
 	}
@@ -3266,24 +3198,10 @@ static const char *const format_to_string(format format)
 	}
 }
 
-SUNSHINE_DEPTH_ADDON_INTERNAL void set_manual_depth_override(generic_depth_data &data, resource depth_stencil, uint64_t identity)
-{
-	data.override_depth_stencil = depth_stencil;
-	data.override_identity = identity;
-	data.manual_recovery = {};
-	data.manual_recovery_probing = false;
-	// Changing the override does not invalidate captured contents or their history.
-	// The next frame applies ordinary lifetime/eligibility checks and changes the
-	// binding only if the chosen source changes. In particular, unpinning a useful
-	// current source must not destroy its backup or restart selection from workload.
-}
-
 static void reset_depth_selection(effect_runtime *runtime, generic_depth_data &data)
 {
 	device *const device = runtime->get_device();
 	auto *device_data = device->get_private_data<generic_depth_device_data>();
-	data.manual_recovery = {};
-	data.manual_recovery_probing = false;
 	release_challenger(runtime, data);
 	data.selection = sunshine_depth::selection_policy {};
 	data.discovery_hint = {};
@@ -3346,7 +3264,7 @@ static void draw_capture_settings(device *device, bool &force_reset)
 		reshade::set_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", s_sunshine_auto);
 		force_reset = true;
 	}
-	ImGui::SetItemTooltip("Uses confirmed game depth from Streamline or NGX. Other games use generic depth detection. A missing provider frame stays 2D until current depth returns. Reduced rendering resolutions are supported. A checked buffer takes manual priority while it renders.");
+	ImGui::SetItemTooltip("Uses confirmed game depth from Streamline or NGX. Other games use generic depth detection. A missing provider frame stays 2D until current depth returns. Reduced rendering resolutions are supported.");
 	ImGui::Spacing();
 
 	const char *const draw_stats_heuristic_items[] = {
@@ -3443,9 +3361,8 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 	auto &data = *runtime->get_private_data<generic_depth_data>();
 	device *const device = runtime->get_device();
 	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
-	const bool manual = data.override_depth_stencil != 0;
 	const auto provided = describe_streamline_source(runtime);
-	const bool game_provided = provided.selected && !manual;
+	const bool game_provided = provided.selected;
 	const char *provider_name = provided.provider == sunshine_scene_depth::provider_kind::ngx ? "NGX" : "Streamline";
 	bool generic_current = false;
 	{
@@ -3466,23 +3383,18 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 				ImGui::TextWrapped("Depth: %s | waiting for first depth", provider_name);
 			ImGui::SetItemTooltip("The game-provided source remains selected through capture gaps. Dimensions are from its last valid capture. Current availability and depth freshness are shown in the status rows.");
 		}
-		else if (manual && (provided.selected || data.selected_depth_stencil != data.override_depth_stencil ||
-			data.selected_identity != data.override_identity))
-			ImGui::TextWrapped("Depth: Generic (manual) | waiting for selected buffer");
 		else if (data.selected_shader_resource != 0 && data.selected_depth_stencil != 0)
-			ImGui::TextWrapped("Depth: %s | %ux%u | %s", manual ? "Generic (manual)" : "Generic",
+			ImGui::TextWrapped("Depth: Generic | %ux%u | %s",
 				data.selected_desc.texture.width, data.selected_desc.texture.height,
 				format_to_string(data.selected_desc.texture.format));
 		else
-			ImGui::TextWrapped("Depth: %s | waiting for a usable buffer", manual ? "Generic (manual)" : "Generic");
+			ImGui::TextWrapped("Depth: Generic | waiting for a usable buffer");
 		if (!game_provided && generic_current)
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
 			ImGui::TextWrapped("Generic depth fallback is in use. Game-provided depth and camera data are not used.");
 			ImGui::PopStyleColor();
 		}
-		if (data.manual_recovery_probing)
-			ImGui::TextWrapped("Selected buffer is no longer rendering. Checking for replacement scene depth...");
 
 		if (!provided.selected && data.binding_state != depth_binding_state::ready)
 			ImGui::TextWrapped("%s", data.binding_detail);
@@ -3553,210 +3465,11 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 	}
 	if (!sunshine_game3d::draw_diagnostics(runtime))
 		return;
-	ImGui::BeginDisabled(!manual && s_sunshine_auto);
-	if (ImGui::Button("Use automatic depth"))
-	{
-		set_manual_depth_override(data, {}, 0);
-		s_sunshine_auto = true;
-		reshade::set_config_value(nullptr, "SUNSHINE_DEPTH", "AutoSelectSceneDepth", s_sunshine_auto);
-	}
-	ImGui::SetItemTooltip("Release any manual depth override and let Sunshine choose scene depth.");
-	ImGui::EndDisabled();
 	ImGui::Spacing();
 	if (ImGui::CollapsingHeader("Advanced capture settings"))
 	{
 		ImGui::Indent();
 		draw_capture_settings(device, force_reset);
-		ImGui::Unindent();
-	}
-
-	// Request optional candidate statistics only while this list is visible.
-	// Source routing and the shared capture lifetime stay independent of the UI.
-	const bool manual_open = ImGui::CollapsingHeader("Manual depth selection");
-	ImGui::SetItemTooltip("Depth is chosen automatically. Check a buffer only to override it manually. ACTIVE marks the current source; automatic selection leaves the boxes unchecked.");
-	if (manual_open)
-	{
-		ImGui::Indent();
-		const bool is_d3d12_or_vulkan = device->get_api() == device_api::d3d12 || device->get_api() == device_api::vulkan;
-		request_depth_candidate_list(device_data);
-
-		std::shared_lock<std::shared_mutex> lock(s_mutex);
-
-		const bool no_buffers = device_data == nullptr || device_data->depth_stencil_resources.empty();
-		const uint64_t list_frame = device_data ? device_data->frame_index : 0;
-		std::vector<std::pair<resource, depth_stencil_resource>> sorted_item_list;
-		if (!no_buffers)
-			sorted_item_list.assign(device_data->depth_stencil_resources.begin(), device_data->depth_stencil_resources.end());
-		// Unlock while calling into device below
-		lock.unlock();
-		resource active_depth_stencil = {};
-		const uint64_t active_identity = game_provided && provided.ready ? provided.current.identity :
-			generic_current ? data.selected_identity : 0;
-		if (game_provided && provided.ready && active_identity)
-		{
-			// Match the native lifetime, not dimensions or a reusable address.
-			// Prefer the exact interface row if the inventory contains aliases.
-			for (const auto &[depth_stencil, info] : sorted_item_list)
-			{
-				if (!info.api_identity || info.identity != active_identity) continue;
-				if (active_depth_stencil == 0 || depth_stencil.handle == provided.current.resource)
-					active_depth_stencil = depth_stencil;
-			}
-		}
-		else if (generic_current)
-			active_depth_stencil = data.selected_depth_stencil;
-
-		if (game_provided && provided.ready && active_depth_stencil == 0)
-		{
-			// Compute-generated/API-only depth may never appear as a ReShade DSV.
-			// Show its real source without inventing a selectable Generic buffer.
-			ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_ButtonActive],
-				"%ux%u | %s | ACTIVE (%s)", provided.current.width, provided.current.height,
-				format_to_string(static_cast<format>(provided.current.format)), provider_name);
-			ImGui::SetItemTooltip("Game-provided depth: 0x%016llx\nThis source is not a selectable generic buffer.",
-				static_cast<unsigned long long>(provided.current.resource));
-		}
-		if (no_buffers)
-			ImGui::TextUnformatted(game_provided ? "No generic buffers available for manual selection." : "No depth buffers found.");
-
-		// Sort pointer list so that added/removed items do not change the GUI much
-		std::sort(sorted_item_list.begin(), sorted_item_list.end(),
-			[active_depth_stencil](const std::pair<resource, depth_stencil_resource> &a, const std::pair<resource, depth_stencil_resource> &b) {
-				if ((a.first == active_depth_stencil) != (b.first == active_depth_stencil))
-					return a.first == active_depth_stencil;
-				return ((a.second.desc.texture.width > b.second.desc.texture.width || (a.second.desc.texture.width == b.second.desc.texture.width && a.second.desc.texture.height > b.second.desc.texture.height)) ||
-						(a.second.desc.texture.width == b.second.desc.texture.width && a.second.desc.texture.height == b.second.desc.texture.height && a.first < b.first));
-			});
-
-		uint32_t frame_width, frame_height;
-		runtime->get_screenshot_width_and_height(&frame_width, &frame_height);
-
-		bool has_msaa_depth_stencil = false;
-		bool has_no_clear_operations = false;
-		unsigned visible_rows = 0;
-
-		for (const auto &[depth_stencil, info] : sorted_item_list)
-		{
-			const bool selected = active_identity && depth_stencil == active_depth_stencil && info.identity == active_identity;
-			if (!selected && (info.last_used_in_frame == std::numeric_limits<uint64_t>::max() || list_frame > (info.last_used_in_frame + 30)))
-				continue; // Hide from list when not used for a couple of frames
-			++visible_rows;
-
-			const bool inactive = info.last_used_in_frame == std::numeric_limits<uint64_t>::max() || list_frame > (info.last_used_in_frame + 5);
-			bool disabled = inactive;
-			if (info.desc.texture.samples > 1 && !device->check_capability(device_caps::resolve_depth_stencil)) // Disable widget for multisampled textures
-				has_msaa_depth_stencil = disabled = true;
-
-			const bool candidate =
-				!(!info.last_frame_stats.total.has_work() || (!s_sunshine_auto && info.last_frame_stats.total.vertices <= 3 && info.last_frame_stats.total.drawcalls_indirect == 0 && info.last_frame_stats.total.scene_writes == 0)) &&
-				!(s_format_filtering != 0 && !check_depth_format(info.desc.texture.format)) &&
-				candidate_matches_shape(info, frame_width, frame_height);
-
-			char label[128];
-			// Keep the checkbox ID stable when the ACTIVE label moves on rotation.
-			std::snprintf(label, std::size(label), "Buffer %llu | %ux%u | %s%s###depth-%016llx-%016llx",
-				static_cast<unsigned long long>(info.identity),
-				info.desc.texture.width, info.desc.texture.height, format_to_string(info.desc.texture.format),
-				selected ? " | ACTIVE" : "",
-				static_cast<unsigned long long>(depth_stencil.handle), static_cast<unsigned long long>(info.identity));
-
-			ImGui::BeginDisabled(disabled);
-			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[selected ? ImGuiCol_ButtonActive : disabled ? ImGuiCol_TextDisabled : candidate ? ImGuiCol_ButtonActive : ImGuiCol_Text]);
-
-			if (bool value = (depth_stencil == data.override_depth_stencil && info.identity == data.override_identity);
-				ImGui::Checkbox(label, &value))
-			{
-				set_manual_depth_override(data, value ? depth_stencil : resource { 0 }, value ? info.identity : 0);
-			}
-
-			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-			{
-				const auto *evidence = data.selection.evidence(info.identity);
-				ImGui::SetTooltip("Buffer: 0x%016llx | Lifetime: %llu\n"
-					"Draw calls: %u (%u indirect) | Vertices: %u\n"
-					"Depth quality: %s%s\n%s%s%s%s",
-					static_cast<unsigned long long>(depth_stencil.handle), static_cast<unsigned long long>(info.identity),
-					info.last_frame_stats.total.drawcalls, info.last_frame_stats.total.drawcalls_indirect,
-					info.last_frame_stats.total.vertices,
-					evidence ? content_kind_name(evidence->quality.kind) : "Not yet sampled",
-					evidence && evidence->confirmed_good ? " (confirmed)" : "",
-					selected && game_provided ? provider_name : "Generic",
-					inactive ? " | Inactive" : "",
-					info.desc.texture.samples > 1 ? " | Multisampled" : "",
-					info.last_frame_stats.reversed_clear_value ? " | Reversed" : "");
-			}
-
-			ImGui::PopStyleColor();
-			ImGui::EndDisabled();
-
-			if (!provided.selected && s_preserve_depth_buffers && depth_stencil == data.selected_depth_stencil)
-			{
-				if (info.last_frame_stats.clears.empty())
-				{
-					has_no_clear_operations = !is_d3d12_or_vulkan;
-					continue;
-				}
-
-				depth_stencil_backup *const depth_stencil_backup = device_data->find_depth_stencil_backup(depth_stencil);
-				if (depth_stencil_backup == nullptr || depth_stencil_backup->backup_texture == 0)
-					continue;
-
-				for (uint32_t clear_index = 1; clear_index <= static_cast<uint32_t>(info.last_frame_stats.clears.size()); ++clear_index)
-				{
-					const clear_stats &clear_stats = info.last_frame_stats.clears[clear_index - 1];
-
-					std::snprintf(label, std::size(label), "Clear %u%s###clear-%016llx-%016llx-%u", clear_index,
-						clear_stats.copied_during_frame ? " | CAPTURED" : "",
-						static_cast<unsigned long long>(depth_stencil.handle), static_cast<unsigned long long>(info.identity), clear_index);
-
-					if (bool value = (depth_stencil_backup->force_clear_index == clear_index);
-						ImGui::Checkbox(label, &value))
-					{
-						generic_depth_device_data::configure_backup(*depth_stencil_backup, depth_stencil_backup->frame_width,
-							depth_stencil_backup->frame_height, value ? clear_index : 0u);
-						reshade::set_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", depth_stencil_backup->force_clear_index);
-					}
-
-					ImGui::SetItemTooltip("Draw calls: %u (%u indirect) | Vertices: %u%s",
-						clear_stats.drawcalls,
-						clear_stats.drawcalls_indirect,
-						clear_stats.vertices,
-						clear_stats.clear_op == clear_op::fullscreen_draw ? "\nFullscreen draw call" : "");
-				}
-
-				if (!is_d3d12_or_vulkan)
-				{
-					if (bool value = (depth_stencil_backup->force_clear_index == std::numeric_limits<uint32_t>::max());
-						ImGui::Checkbox("Use last busy clear", &value))
-					{
-						generic_depth_device_data::configure_backup(*depth_stencil_backup, depth_stencil_backup->frame_width,
-							depth_stencil_backup->frame_height, value ? std::numeric_limits<uint32_t>::max() : 0u);
-						reshade::set_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", depth_stencil_backup->force_clear_index);
-					}
-					ImGui::SetItemTooltip("Choose the last clear operation with a high number of draw calls.");
-				}
-			}
-		}
-
-		if (visible_rows == 0 && !no_buffers)
-			ImGui::TextWrapped("%s", game_provided ? "No recently active generic depth buffers; game-provided depth is shown above." :
-				"No recently active depth buffers. Waiting for the game to render; check the current-buffer status above.");
-
-		if (!game_provided && (has_msaa_depth_stencil || has_no_clear_operations))
-		{
-			ImGui::Spacing();
-			ImGui::Separator();
-			ImGui::Spacing();
-
-			ImGui::PushTextWrapPos();
-			if (has_msaa_depth_stencil)
-				ImGui::TextUnformatted("Not all depth buffers are available.\nYou may have to disable MSAA (Multisample Anti-Aliasing) in the game settings for depth buffer detection to work!");
-			if (has_no_clear_operations)
-				ImGui::Text("No clear operations were found for the selected depth buffer.\n%s",
-					s_preserve_depth_buffers != 2 ? "Try enabling \"Copy depth buffer before fullscreen draw calls\" or disable \"Copy depth buffer before clear operations\"!" : "Disable \"Copy depth buffer before clear operations\" or select a different depth buffer!");
-			ImGui::PopTextWrapPos();
-		}
-
 		ImGui::Unindent();
 	}
 

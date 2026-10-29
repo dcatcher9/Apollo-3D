@@ -342,9 +342,6 @@ namespace {
       require(fs::is_regular_file(shader_root / effect_file), "Missing separately supplied Depth3D shader");
       const char *addon_filename = "SunshineSBS.addon64";
       bool automatic_performance = false;
-#ifdef SUNSHINE_DEPTH_SELECTION_RUNTIME
-      if (sunshine_camera_fixture::flag("SUNSHINE_DEPTH_MANUAL_RECOVERY_TEST")) addon_filename = "SunshineSBSTest.addon64";
-#endif
 #ifdef SUNSHINE_RAW_SCENE_RUNTIME
       automatic_performance = sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_PERFORMANCE");
       if (sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST")) addon_filename = "SunshineSBSTest.addon64";

@@ -129,7 +129,6 @@ enum class clear_op : uint8_t
 struct depth_tracking_demand
 {
 	bool counters = true;
-	bool clear_history = true;
 };
 
 struct draw_stats
@@ -163,12 +162,6 @@ struct draw_stats
 			work_count() > other.work_count());
 	}
 };
-struct clear_stats : public draw_stats
-{
-	clear_op clear_op = clear_op::clear_depth_stencil_view;
-	bool copied_during_frame = false;
-};
-
 struct depth_stencil_frame_stats
 {
 	draw_stats total;
@@ -182,14 +175,12 @@ struct depth_stencil_frame_stats
 	bool copy_provenance_ambiguous = false;
 	sunshine_streamline::commands::recording_marker capture_marker {};
 	sunshine_streamline::content::copy_snapshot depth_copy {};
-	std::vector<clear_stats> clears;
 	bool copied_during_frame = false;
 	// Pixel storage and GPU lifetime belong to the common capture owner. This
 	// lease survives recording reset until the submitted frame is consumed.
 	sunshine_streamline::depth_capture::preservation_ticket capture_ticket;
 	// Only this reservation may publish an EOF capture for the source/frame.
 	uint64_t preservation_reservation = 0;
-	bool reversed_clear_value = false;
 	bool clear_zero = false, clear_one = false, clear_other = false;
 	// Passive transport capability: a real scene was followed by a boundary
 	// where this preservation mode can copy. This is never pixel-readiness proof.
@@ -206,7 +197,6 @@ struct depth_stencil_frame_stats
 			current.clear_counters();
 			best_copy_stats.clear_counters();
 		}
-		if (!demand.clear_history) clears.clear();
 	}
 };
 
@@ -303,8 +293,6 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 				stats.total.last_viewport.width * stats.total.last_viewport.height)
 				stats.total.last_viewport = source_stats.total.last_viewport;
 
-			if (demand.clear_history)
-				stats.clears.insert(stats.clears.end(), source_stats.clears.begin(), source_stats.clears.end());
 			if (source_stats.copied_during_frame)
 			{
 				stats.copied_viewport = source_stats.copied_viewport;
@@ -315,7 +303,6 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 			}
 
 			stats.copied_during_frame |= source_stats.copied_during_frame;
-			stats.reversed_clear_value = source_stats.reversed_clear_value;
 			stats.clear_zero |= source_stats.clear_zero;
 			stats.clear_one |= source_stats.clear_one;
 			stats.clear_other |= source_stats.clear_other;
@@ -395,12 +382,6 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	const char *binding_detail = "Waiting for the game to create a depth buffer.";
 	const char *selection_reason = "waiting for depth";
 
-	// Resource used to override automatic depth-stencil selection
-	resource override_depth_stencil = { 0 };
-	uint64_t override_identity = 0; // Resource lifetime; DLSS viewport changes retain the manual choice.
-	sunshine_depth::manual_recovery_watch manual_recovery;
-	bool manual_recovery_probing = false;
-
 	// The current depth shader resource view bound to shaders
 	// This can be created from either the selected depth-stencil resource (if it supports shader access) or from a backup resource
 	resource_view selected_shader_resource = { 0 };
@@ -456,7 +437,6 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	// Raw calibration summaries only; no textures or native pointers are cached.
 	std::unordered_map<uint64_t, sunshine_depth::native_depth_calibration> native_calibrations;
 	uint64_t last_logged_id = 0;
-	bool last_logged_manual = false;
 	depth_binding_state last_logged_state = depth_binding_state::waiting_game;
 	sunshine_diagnostics::log_gate status_log;
 	// Observation only: Presents whose ready capture was a boundary's copy or
@@ -539,8 +519,8 @@ struct depth_stencil_resource
 };
 
 // Selection needs only these values. In particular, it does not consume the
-// per-clear history, command provenance or orientation history retained by the
-// recording/capture paths. Keep the unlocked snapshot contiguous and owned.
+// command provenance or orientation history retained by the recording/capture
+// paths. Keep the unlocked snapshot contiguous and owned.
 struct depth_selection_resource
 {
 	resource_desc desc;
@@ -589,11 +569,8 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
     query_heap deferred_copy_marker{};
     const uint64_t device_epoch = s_next_sample_scope.fetch_add(1, std::memory_order_relaxed);
 	// Draw/clear recording can run on other threads. A shared backup is still
-	// needed if any effect runtime on this device uses generic/manual capture.
+	// needed if any effect runtime on this device uses generic capture.
 	std::atomic<unsigned> generic_capture_users { 0 };
-	// UI requests expire at Present, including when the whole overlay is closed.
-	// Bit 0 is the request since last Present, bit 1 is the current frame demand.
-	std::atomic<unsigned> candidate_list_request { 0 };
 	uint64_t frame_index = 0;
 	uint64_t native_present_index = 0, native_depth_present_index = 0;
 	// Callback ordinals, NOT game/frame-generation IDs. At most four short
@@ -777,22 +754,9 @@ __CRT_UUID_DECL(generic_depth_data, 0xc072221d, 0x786d, 0x4b6d, 0x8f, 0x0b, 0x52
 __CRT_UUID_DECL(generic_depth_device_data, 0x94e283ef, 0x6714, 0x4d50, 0xb9, 0x36, 0x71, 0xd6, 0x30, 0x8a, 0x4b, 0xe4)
 #endif
 
-SUNSHINE_DEPTH_ADDON_SHARED void request_depth_candidate_list(generic_depth_device_data *data)
-{
-	if (data) data->candidate_list_request.fetch_or(3, std::memory_order_relaxed);
-}
-
-SUNSHINE_DEPTH_ADDON_SHARED void consume_depth_candidate_list_request(generic_depth_device_data &data)
-{
-	auto request = data.candidate_list_request.load(std::memory_order_relaxed);
-	while (!data.candidate_list_request.compare_exchange_weak(request, (request & 1) ? 2u : 0u,
-		std::memory_order_relaxed)) {}
-}
-
 SUNSHINE_DEPTH_ADDON_SHARED depth_tracking_demand tracking_demand(const generic_depth_device_data &data)
 {
-	const bool visible = data.candidate_list_request.load(std::memory_order_relaxed) != 0;
-	return {visible || s_frame_activity_trace || data.generic_capture_users.load(std::memory_order_relaxed) != 0, visible};
+	return {s_frame_activity_trace || data.generic_capture_users.load(std::memory_order_relaxed) != 0};
 }
 
 SUNSHINE_DEPTH_ADDON_SHARED depth_tracking_demand tracking_demand(device *device)
@@ -826,6 +790,5 @@ bool on_copy_buffer_to_texture(command_list *cmd_list, resource, uint64_t, uint3
 	resource dest, uint32_t subresource, const subresource_box *dest_box);
 bool on_resolve_texture_region(command_list *cmd_list, resource, uint32_t, const subresource_box *source_box,
 	resource dest, uint32_t subresource, uint32_t, uint32_t, uint32_t, format);
-void set_manual_depth_override(generic_depth_data &data, resource depth_stencil, uint64_t identity);
 sunshine_streamline::provider::source_status describe_streamline_source(effect_runtime *runtime);
 #endif

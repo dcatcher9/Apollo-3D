@@ -198,34 +198,6 @@ namespace sunshine_depth {
            std::abs(double(width) / height - double(output_width) / output_height) <= .1;
   }
 
-  // An inactive manual pin remains authoritative while fresh alternatives are
-  // checked. A brief missing present is not a request to undo the user's choice.
-  class manual_recovery_watch {
-  public:
-    bool update(std::uint64_t id, bool rendered, std::uint64_t frame, std::uint64_t now_ms) {
-      if (id != id_) {
-        *this = {};
-        id_ = id;
-      }
-      if (id == 0 || rendered) {
-        inactive_ = false;
-        return false;
-      }
-      if (!inactive_ || now_ms < since_ms_ || frame < since_frame_) {
-        inactive_ = true;
-        since_ms_ = now_ms;
-        since_frame_ = frame;
-      }
-      return now_ms - since_ms_ >= 2000;
-    }
-
-    std::uint64_t inactive_frame() const { return inactive_ ? since_frame_ : 0; }
-
-  private:
-    std::uint64_t id_ = 0, since_ms_ = 0, since_frame_ = 0;
-    bool inactive_ = false;
-  };
-
   struct candidate_info {
     // This is a lifetime generation, never a resource pointer or reusable slot.
     std::uint64_t id = 0;
@@ -375,19 +347,6 @@ namespace sunshine_depth {
     // Lets the sampler finish a live comparison within its existing probe
     // deadline. Reading this never adds wins or changes round-robin order.
     std::uint64_t pending_challenger_id() const { return pending_.challenger; }
-
-    // Recovery may revoke an unused manual pin only with current rendering and
-    // new positive captures from this inactivity interval, never cached proof.
-    bool confirmed_since(std::uint64_t id, std::uint64_t frame, std::uint64_t after_frame) const {
-      const auto found = candidates_.find(id);
-      if (found == candidates_.end() || found->second.info.draws == 0 ||
-          found->second.info.last_seen_frame != frame || !good(found->second, frame))
-        return false;
-      const auto &e = found->second.evidence;
-      const auto required = std::min(std::max(options_.good_samples_required, 1u), 3u);
-      return e.value.quality.kind == content_kind::useful && e.value.good_samples >= required &&
-             e.positive_count >= required && e.positive_frames[required - 1] > after_frame;
-    }
 
     // Choosing tracks relative superiority across fresh captures. Repeated
     // presents with the same evidence never manufacture comparison rounds.

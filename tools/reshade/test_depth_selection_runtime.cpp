@@ -23,10 +23,9 @@ namespace {
     com_ptr<ID3D12PipelineState> depth32_pipeline, depth32s8_pipeline;
 
     void check_unified_addon() {
-      const char *manual_test = std::getenv("SUNSHINE_DEPTH_MANUAL_RECOVERY_TEST");
-      bool actions_test = manual_test && std::strcmp(manual_test, "1") == 0;
+      bool actions_test = false;
 #ifdef SUNSHINE_RAW_SCENE_RUNTIME
-      actions_test = actions_test || sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST");
+      actions_test = sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST");
 #endif
       const HMODULE module = GetModuleHandleW(actions_test ? L"SunshineSBSTest.addon64" : L"SunshineSBS.addon64");
       require(module != nullptr, "Unified SunshineSBS addon was not loaded by the official runtime");
@@ -377,235 +376,6 @@ float ps(float4 position : SV_Position) : SV_Depth {
       render_tracked_depth = {};
     }
 
-    void check_manual_handover() {
-      const char *enabled = std::getenv("SUNSHINE_DEPTH_MANUAL_RECOVERY_TEST");
-      require(enabled && std::strcmp(enabled, "1") == 0,
-              "Manual handover fixture requires explicit SUNSHINE_DEPTH_MANUAL_RECOVERY_TEST=1");
-      const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
-      using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
-      using state_t = BOOL (*)(api::effect_runtime *, std::uint64_t *, BOOL *);
-      const auto select_manual = reinterpret_cast<select_t>(GetProcAddress(module, "SunshineDepthTestSelectManual"));
-      const auto manual_state = reinterpret_cast<state_t>(GetProcAddress(module, "SunshineDepthTestManualState"));
-      require(module && select_manual && manual_state, "Manual handover requires the test add-on's UI-selection adapter");
-      const auto ready = [&] {
-        bool value = false;
-        observed.runtime->get_uniform_value_bool(uniform("Sunshine_DepthReady"), &value, 1);
-        return value;
-      };
-      const auto require_mode = [&](std::uint64_t expected) {
-        std::uint64_t selected = 0;
-        BOOL recovering = TRUE;
-        require(manual_state(observed.runtime, &selected, &recovering) && selected == expected && !recovering,
-                "Manual handover retained an override or recovery watch");
-      };
-      const auto pump = [&](unsigned milliseconds, const std::function<void()> &check) {
-        const auto until = GetTickCount64() + milliseconds;
-        do { step(); check(); } while (GetTickCount64() < until);
-      };
-
-      shadow.reset();
-      scene = target(width, height, 1, 9, true, true);
-      // Comparable real scene contents: the lower-resolution source wins cold
-      // workload fallback, but cannot displace confirmed native depth on workload.
-      decoy = target(width / 2, height / 2, 8, 1);
-      wait_for_scene("manual handover starts with confirmed native depth", width, height, 9);
-      const auto native_handle = reinterpret_cast<std::uint64_t>(scene->texture.p);
-      require(select_manual(observed.runtime, native_handle), "Could not pin the live native scene depth");
-      pump(3200, [&] { require_mode(native_handle); });
-      require(ready() && varied_linear_depth(9), "Pinned native depth did not become ready before handover");
-      const auto view = selected_binding();
-      const auto backup = observed.runtime->get_device()->get_resource_from_view(view);
-      const auto native_description = selected_description();
-      require(view.handle && backup.handle, "Pinned native depth has no actual shader binding");
-
-      // Zero invokes the UI's explicit automatic-selection action. A frozen old
-      // selector can expose this action through an adapter-only control build;
-      // no new export or synthetic depth injection is needed to reach this check.
-      require(select_manual(observed.runtime, 0), "Could not invoke the automatic-selection UI action");
-      require_mode(0);
-      require(selected_binding() == view && ready(),
-              "Returning to automatic selection discarded the current depth binding or readiness");
-      pump(2500, [&] {
-        require_mode(0);
-        require(selected_binding() == view && ready(), "Automatic handover recreated or replaced useful native depth");
-        require(observed.runtime->get_device()->get_resource_from_view(view) == backup,
-                "Automatic handover changed the preserved depth backup");
-      });
-      require(varied_linear_depth(9), "Automatic handover lost the actual native scene contents");
-      std::puts("PASS manual-to-automatic handover preserves the native shader binding, backup, readiness and useful scene depth against higher-workload scaled depth");
-
-      scene->pattern = 0;
-      wait_for_scene("released native source may be replaced after its contents become flat", decoy->width, decoy->height);
-      require_mode(0);
-      scene->pattern = 9;
-      wait_for_scene("native source requalifies after real depth returns", width, height, 9);
-
-      // Trying a different manual source must not erase the previously useful
-      // native candidate. This flat peer is a real DSV and remains allocated;
-      // after release, the first frame should reuse existing good evidence.
-      shadow = target(width, height, 1, 0);
-      for (unsigned i = 0; i < 3; ++i) step();
-      const auto flat_handle = reinterpret_cast<std::uint64_t>(shadow->texture.p);
-      require(select_manual(observed.runtime, flat_handle), "Could not pin the flat native peer for recovery");
-      pump(1200, [&] { require_mode(flat_handle); });
-      require(select_manual(observed.runtime, 0), "Could not release the flat native peer");
-      step();
-      require_mode(0);
-      const auto recovered = selected_description();
-      require(recovered.Width == width && recovered.Height == height && recovered.Format == native_description.Format && ready(),
-              "Trying a manual peer erased useful native evidence and caused cold workload fallback");
-      pump(1800, [&] {
-        require_mode(0);
-        const auto actual = selected_description();
-        require(actual.Width == width && actual.Height == height, "Recovered native depth lost continuity after manual handover");
-      });
-      // The selected binding changes in the first frame; the existing processed
-      // depth history is allowed to settle before checking its pixel contents.
-      require(varied_linear_depth(9), "Recovered native binding did not restore its actual scene pixels");
-      std::puts("PASS manual peer selection preserves useful native history; invalid released depth recovers immediately, without a permanent pin");
-    }
-
-    void check_manual_reload() {
-      const char *enabled = std::getenv("SUNSHINE_DEPTH_MANUAL_RECOVERY_TEST");
-      require(enabled && std::strcmp(enabled, "1") == 0,
-              "Manual recovery fixture requires explicit SUNSHINE_DEPTH_MANUAL_RECOVERY_TEST=1");
-      const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
-      using select_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
-      using state_t = BOOL (*)(api::effect_runtime *, std::uint64_t *, BOOL *);
-      const auto select_manual = reinterpret_cast<select_t>(GetProcAddress(module, "SunshineDepthTestSelectManual"));
-      const auto manual_state = reinterpret_cast<state_t>(GetProcAddress(module, "SunshineDepthTestManualState"));
-      require(module && select_manual && manual_state,
-              "Manual recovery requires the separately named test add-on's UI-selection adapter");
-
-      shadow.reset();
-      scene = target(width, height, 1, 1, true, true);
-      wait_for_scene("manual reload starts with a captured native D32S8 source", width, height);
-      decoy->draws = 1;
-      decoy->pattern = 6;
-      wait_for_scene("useful peer has positive evidence before the manual choice", width, height, 6);
-      const auto original_handle = reinterpret_cast<std::uint64_t>(scene->texture.p);
-      require(select_manual(observed.runtime, original_handle), "Could not select the live native source through the UI-selection adapter");
-
-      const auto require_manual = [&](bool expected_recovery, bool check_recovery = true) {
-        std::uint64_t selected = 0;
-        BOOL recovering = FALSE;
-        require(manual_state(observed.runtime, &selected, &recovering), "Could not query manual source state");
-        require(selected == original_handle, "A live or temporarily missing manual choice was unexpectedly cleared");
-        require(!check_recovery || bool(recovering) == expected_recovery, "Manual recovery state does not match actual source activity");
-      };
-      const auto pump = [&](unsigned milliseconds, const std::function<void()> &check) {
-        const auto until = GetTickCount64() + milliseconds;
-        do { step(); check(); } while (GetTickCount64() < until);
-      };
-      bool draw_original = true, draw_replacement = true, interleaved = false;
-      unsigned present = 0;
-      render_tracked_depth = [&] {
-        if (shadow) draw(*shadow);
-        if (draw_replacement && decoy && (!interleaved || ++present % 2 == 0)) draw(*decoy);
-        if (draw_original) draw(*scene);
-      };
-      // A broader useful peer still cannot steal an active manual selection.
-      pump(2500, [&] { require_manual(false); });
-      require(varied_linear_depth(1), "Active manual source was replaced by a broader useful peer");
-      std::puts("PASS active native manual selection retains priority over another useful native source");
-
-      draw_original = false;
-      pump(700, [&] { require_manual(false); });
-      draw_original = true;
-      pump(600, [&] { require_manual(false); });
-      require(varied_linear_depth(1), "Manual source failed to resume after a brief rendering gap");
-      std::puts("PASS short manual-source rendering gap preserves the choice and resumes normally");
-
-      // Keep the manual resource current through real clears, with no depth
-      // draws. The pin remains, but the public shader readiness must go false.
-      scene->draws = 0;
-      pump(700, [&] {
-        require_manual(false);
-        bool ready = true;
-        observed.runtime->get_uniform_value_bool(uniform("Sunshine_DepthReady"), &ready, 1);
-        require(!ready, "A clear-only manual depth resource retained shader readiness");
-      });
-      scene->draws = 1;
-      pump(600, [&] { require_manual(false); });
-      bool resumed_ready = false;
-      observed.runtime->get_uniform_value_bool(uniform("Sunshine_DepthReady"), &resumed_ready, 1);
-      require(resumed_ready && varied_linear_depth(1), "Manual depth failed to recover after clear-only activity");
-      std::puts("PASS clear-only manual activity retains the pin, suspends shader readiness and recovers on real draws");
-
-      using accounting_t = BOOL (*)(api::effect_runtime *, std::uint64_t);
-      const auto accounting = reinterpret_cast<accounting_t>(GetProcAddress(module, "SunshineDepthTestActivityAccounting"));
-      require(accounting && accounting(observed.runtime, original_handle),
-              "Mesh/copy/indirect callbacks failed diagnostic-off depth activity accounting");
-      std::puts("PASS callback accounting: mesh and copied depth, direct/indexed/indirect draws, no fabricated vertices, merge/reset, nonraster and zero-count rejection; no mesh GPU raster test");
-
-      // The selected DSV is cleared and then filled only by a real GPU copy.
-      // A final clear exercises preservation of copied depth without any draw
-      // into that destination; donor rendering alone cannot authorize its pin.
-      auto copied_scene = target(width, height, 1, 9, true, false);
-      const auto ordinary_rendering = render_tracked_depth;
-      scene->draws = 0;
-      scene->before_final_clear = [&] {
-        transition(commands.p, copied_scene->texture.p, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        transition(commands.p, scene->texture.p, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_DEST);
-        commands->CopyResource(scene->texture.p, copied_scene->texture.p);
-        transition(commands.p, scene->texture.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        transition(commands.p, copied_scene->texture.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-      };
-      render_tracked_depth = [&] { draw(*copied_scene); draw(*scene); };
-      pump(2500, [&] {
-        require_manual(false);
-        bool ready = false;
-        observed.runtime->get_uniform_value_bool(uniform("Sunshine_DepthReady"), &ready, 1);
-        require(ready, "Copy-produced manual scene depth lost current shader readiness");
-      });
-      require(varied_linear_depth(9), "Copy-only manual source did not preserve its current spatial depth before clear");
-      scene->before_final_clear = {};
-      scene->draws = 1;
-      render_tracked_depth = ordinary_rendering;
-      pump(600, [&] { require_manual(false); });
-      require(varied_linear_depth(1), "Manual source did not resume raster depth after copy-produced frames");
-      std::puts("PASS actual copy-only D32S8 manual depth remains ready and pinned beyond recovery grace, preserves current scene before clear, then resumes raster depth");
-
-      // A loading screen has draws, but they are all clear depth. Time alone
-      // cannot revoke the manual choice without fresh useful replacement depth.
-      draw_original = false;
-      decoy->pattern = 0;
-      pump(4200, [&] { require_manual(false, false); });
-      require_manual(false, false);
-      draw_replacement = false;
-      pump(600, [&] { require_manual(false, false); });
-      std::puts("PASS sustained flat loading and no-depth presents retain the manual pin without a valid replacement");
-      draw_original = true;
-      pump(600, [&] { require_manual(false); });
-      require(varied_linear_depth(1), "Original source did not cancel recovery when gameplay resumed");
-      std::puts("PASS original manual source resumes and cancels pending recovery");
-
-      // The old DSV remains allocated throughout reload. A distinct lower-res
-      // target advances the tracker on every present, while recreated native
-      // depth renders every other present, matching the reported live sequence.
-      draw_original = false;
-      decoy = target(width, height, 1, 9, true, true);
-      shadow = target(width / 2, height / 2, 1, 1);
-      draw_replacement = interleaved = true;
-      wait_for_scene("inactive allocated manual source recovers to recreated native depth", width, height, 9);
-      std::uint64_t selected = original_handle;
-      BOOL recovering = TRUE;
-      require(manual_state(observed.runtime, &selected, &recovering) && selected == 0 && !recovering,
-              "Confirmed automatic replacement did not clear the inactive manual pin");
-      require(scene->texture.p && reinterpret_cast<std::uint64_t>(scene->texture.p) == original_handle,
-              "Manual reload fixture accidentally destroyed the old game depth allocation");
-      pump(1800, [&] {
-        require(manual_state(observed.runtime, &selected, &recovering) && selected == 0,
-                "Automatic recovery restored the abandoned manual pin");
-        const auto actual = selected_description();
-        require(actual.Width == width && actual.Height == height,
-                "Interleaved presents evicted the recovered native depth source");
-      });
-      require(varied_linear_depth(9), "Recovered native depth lost its expected spatial contents");
-      std::puts("PASS allocated-but-unused manual source recovers through real DSV sampling to stable native depth; no semantic injection");
-      render_tracked_depth = {};
-    }
-
     void run_selection(const std::string &only = {}) {
       create_pipeline();
       scene = target(width / 2, height / 2, 1, 1);
@@ -631,8 +401,6 @@ float ps(float4 position : SV_Position) : SV_Depth {
         if (only == "--viewport-only") check_multiple_viewports();
         else if (only == "--coverage-only") check_scene_completeness();
         else if (only == "--reload-only") check_reload_interleaved();
-        else if (only == "--manual-reload-only") check_manual_reload();
-        else if (only == "--manual-handover-only") check_manual_handover();
         else check_histogram_breadth();
         render_tracked_depth = {};
         return;
@@ -685,14 +453,14 @@ float ps(float4 position : SV_Position) : SV_Depth {
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (argc != 5 && argc != 7 && argc != 8) {
-    std::fputs("usage: depth_selection_runtime <official-ReShade64.dll> <Depth3D-Shaders> <SunshineSBS.addon64> <isolated-output> [width height [--viewport-only|--coverage-only|--histogram-only|--reload-only|--manual-reload-only|--manual-handover-only]]\n", stderr);
+    std::fputs("usage: depth_selection_runtime <official-ReShade64.dll> <Depth3D-Shaders> <SunshineSBS.addon64> <isolated-output> [width height [--viewport-only|--coverage-only|--histogram-only|--reload-only]]\n", stderr);
     return 2;
   }
   std::thread([] { Sleep(150000); std::fputs("FAIL selection runtime watchdog\n", stderr); TerminateProcess(GetCurrentProcess(), 124); }).detach();
   try {
     width = argc >= 7 ? unsigned(std::stoul(argv[5])) : 1280;
     height = argc >= 7 ? unsigned(std::stoul(argv[6])) : 720;
-    require(argc != 8 || std::string(argv[7]) == "--viewport-only" || std::string(argv[7]) == "--coverage-only" || std::string(argv[7]) == "--histogram-only" || std::string(argv[7]) == "--reload-only" || std::string(argv[7]) == "--manual-reload-only" || std::string(argv[7]) == "--manual-handover-only", "Unknown fixture option");
+    require(argc != 8 || std::string(argv[7]) == "--viewport-only" || std::string(argv[7]) == "--coverage-only" || std::string(argv[7]) == "--histogram-only" || std::string(argv[7]) == "--reload-only", "Unknown fixture option");
     require(width >= 640 && width <= 3840 && height >= 360 && height <= 2160 && width % 2 == 0 && height % 2 == 0, "Invalid fixture size");
     selection_fixture_t fixture;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fs::absolute(argv[4]), 2, 0, fs::absolute(argv[3]));
