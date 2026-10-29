@@ -2839,10 +2839,12 @@ use `1` for the dedicated dynamic-calibration/readiness specialization check. Op
 height arguments enable 4K source testing. D3D11 additionally accepts a final source-bit-depth
 argument: `srgb 0 640 360 10` exercises SDR10, whose texture has no native sRGB view.
 Append `--stale-config` to the automatic-selection fixture to write every removed selection
-setting into its `ReShade.ini` with a value that would change the result if it still applied
-(the old auto-select switch off, a copy-at-clear mode and clear index, a draw-statistics
-heuristic, a 1x1 custom size filter and a D16-only format filter). It checks that ReShade reads
-each one back and requires the same automatic result as the default run. It replaces the former
+setting into its `ReShade.ini` (the old auto-select switch off, a copy-at-clear mode and clear
+index, a draw-statistics heuristic, a 1x1 custom size filter and a D16-only format filter). It
+checks that ReShade reads each one back and requires the same automatic result as the default
+run. The auto-select, draw-statistics, size and format values would change that result if they
+still applied; the copy-mode and clear-index values are read-back checks only, because the scene
+is static, so a copy before its clear would read the same gradient. It replaces the former
 `--statistics` mode, which disabled content-based selection on D3D12; that combination no longer
 exists. That fixture writes `[SUNSHINE_GAME3D] Enabled=0` itself, as reference effects require,
 and also reloads the effect while it keeps drawing the same depth: the rebuilt `Sunshine_DepthReady` must

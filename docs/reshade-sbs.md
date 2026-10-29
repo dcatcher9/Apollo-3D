@@ -3912,13 +3912,14 @@ watched when its enhanced barrier executed (an adapter's source first retained a
 only once a later executed list names it, and a copy recorded before the latching list executed
 still used its claim.
 
-The Generic status line (`Sunshine 3D depth:`) ends with four groups of counts since the runtime
+The Generic status line (`Sunshine 3D depth:`) ends with five groups of counts since the runtime
 started:
-- `ready_copies boundary=N end_of_frame=M`: the ready Presents whose capture was not an
-  end-of-frame copy, and those whose ready capture was the end-of-frame copy. No copy is made at a
-  clear, unbind or clear-like draw any more, so `boundary` counts only Presents that sampled the
-  source directly (D3D9, D3D10 and OpenGL) and is always 0 on D3D11 and D3D12; the field keeps its
-  name so the line keeps its shape.
+- `ready_copies boundary=N end_of_frame=M held=H`: the ready Presents whose capture was not an
+  end-of-frame copy, those whose ready capture was the end-of-frame copy, and the Presents that
+  held the previous Present's capture within the source age ([Selecting scene
+  depth](#selecting-scene-depth)). No copy is made at a clear, unbind or clear-like draw any more,
+  so `boundary` counts only Presents that sampled the source directly (D3D9, D3D10 and OpenGL) and
+  is always 0 on D3D11 and D3D12; the field keeps its name so the line keeps its shape.
 - `end_of_frame_refused=R last=<stage>`: end-of-frame copies the capture owner refused, with the
   latest refusal's stage (`missing_state` when nothing proves the state).
 - `proven tracked=T unobserved={unrecorded=.. unreported=.. invalidated=.. missed_reset=..
@@ -3930,6 +3931,9 @@ started:
   enhanced layouts (`latch_lost` once the record of forgotten latched textures overflowed), and the
   copies of a latched source whose recording named nothing, copied from its `SHADER_RESOURCE` proof
   or refused.
+- `copy_out={made=.. ring_busy=.. failed=.. predicted=.. taken=.. unstored=.. released=.. skipped=..
+  reader_moves=.. move_unreadable=..}`: the API copies' copy-out on the producer queue (below),
+  which Generic's own end-of-frame copy does not use.
 
 While these counts change, the line repeats at most every 10 s.
 
@@ -6334,10 +6338,27 @@ accepted consequences:
   format/resolution filter value there (including values left from earlier use of ReShade's
   Generic Depth, which installation disables) loses that behavior on its next launch, because the
   value is ignored. A game that relied on a copy at a clear ends in the cleared-depth case above at
-  worst; on D3D12, a game that renders on another queue than it presents on then has no Generic
-  depth at all. Installation never edits `[DEPTH]` and leaves the stale `[SUNSHINE_DEPTH]`
-  auto-select line untouched; both are inert.
-
+  worst. Installation never edits `[DEPTH]` and leaves the stale `[SUNSHINE_DEPTH]` auto-select
+  line untouched; both are inert.
+- **D3D12 scene depth written on another queue.** At the default, when the scene depth is written
+  on a queue whose state the presenting queue's executed work never proves (BF6, Clair Obscur, RE9,
+  Stellar Blade, The Witcher 3 and Hogwarts, and Shadows once DLSS-G presents; see
+  [Generic's D3D12 end-of-frame copy](#streamline-depth-selection)), Generic refuses every
+  end-of-frame copy (`end_of_frame_refused` grows with `last=missing_state`) and such a game has no
+  Generic depth: without API depth it is mono. That is fail-safe, not a wrong picture, and it was
+  the default before the copy controls were removed too (the before-clear copy reached it only when
+  set by hand). Admitting it is Step 4 queue-order work and an open owner decision: a snapshot
+  recorded on the producer's own queue (a ring, as the API copies' copy-out), read at Present only
+  when its producer fence completed or the game's own waits order the presenting queue after it
+  (U-C1). A copy recorded on the presenting queue on a read-after-write proof alone is not enough,
+  because nothing orders the producer queue's next-frame writes after that copy.
+- **A source whose cadence drops to some Presents.** When the selected source starts drawing only
+  some Presents while a comparable source draws every Present, the every-Present source reclaims
+  after three fresh paired comparisons (about 0.4 s); until then each skipped Present holds the
+  selected source's last frame (one frame behind its colour), so none is flat. A source not
+  calibrated before then calibrates first (about 1 s of mono, the camera's own three samples). The
+  three-interval guard is what keeps a single hitch from switching sources and recalibrating; it
+  awaits an owner ruling against switching sooner.
 - **Held Generic depth.** A Present without a current copy shows the previous Present's depth
   again for at most the source age (see [Selecting scene depth](#selecting-scene-depth)). The
   first Presents of a video, a loading screen or a 2D menu that draws no depth therefore still
@@ -6349,9 +6370,9 @@ accepted consequences:
   its destination, except a whole copy of a pass the source then cleared away (see
   [Selecting scene depth](#selecting-scene-depth)). A game whose only copy of the scene depth is
   partial, or is made on another queue than the one that drew it, then has none Generic can
-  show while the source holds something else at Present: that frame fails safe to mono. A copy
-  from a buffer, an MSAA or mipped depth, or another size or format keeps its activity and is
-  judged by its content like any buffer.
+  show while the source holds something else at Present: that frame fails safe (the previous
+  Present's depth held within the source age, then mono). A copy from a buffer, an MSAA or mipped
+  depth, or another size or format keeps its activity and is judged by its content like any buffer.
 
 ## Activation and recovery
 
@@ -6991,9 +7012,11 @@ It verifies source contents, direction, fresh calibration, the exact rectangle a
 diagnostic pixels; color-only frames (held with calibration within the source age, unready and
 uncalibrated beyond it), resource recreation, and an offset-only layout change exercise
 invalidation and recovery. These checks complement the existing broader selector tests.
-Its `--stale-config` mode writes every removed selection setting into `ReShade.ini` with a value
-that would change the result if it still applied, checks that ReShade reads each one back, and
-requires the same automatic result as the default run.
+Its `--stale-config` mode writes every removed selection setting into `ReShade.ini`, checks that
+ReShade reads each one back, and requires the same automatic result as the default run. The
+auto-select, draw-statistics, size and format values would change that result if they still
+applied; the copy-mode and clear-index values are read-back checks only, because the fixture's
+scene is static, so a copy before its clear would read the same gradient.
 The separately supplied full-pipeline fixtures can select SuperDepth3D or SunshineGame3D.
 Their source is not packaged with the add-on. The [add-on guide](../tools/reshade/README.md)
 describes the explicit effect selector and baseline comparison workflow.
