@@ -368,18 +368,11 @@ namespace {
         std::ofstream config(directory / "ReShade.ini");
         config << "[ADDON]\nAddonPath=.\\addons\n";
         if (!depth_addon.empty())
-#ifdef SUNSHINE_COMMAND_ASSOCIATION_RUNTIME
-          // The reference effect reads its frame's depth at begin-effects only
-          // while native Game 3D, enabled by default, is off.
-          config << "DisabledAddons=Generic Depth\n"
-                    "[SUNSHINE_DEPTH]\nStreamlineCameraProbe=1\n[SUNSHINE_GAME3D]\nEnabled=0\n";
-#else
           config << "DisabledAddons=Generic Depth\n";
-#endif
         #ifdef SUNSHINE_RAW_SCENE_RUNTIME
         config << "[SUNSHINE_DEPTH]\n";
         if (sunshine_camera_fixture::flag("SUNSHINE_DEPTH_GENERIC_ONLY_TEST"))
-          config << "StreamlineDepthSource=0\nNGXDepthSource=0\nStreamlineCameraProbe=0\nUpscalerCallTrace=0\n";
+          config << "StreamlineDepthSource=0\nNGXDepthSource=0\nUpscalerCallTrace=0\n";
         if (!sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC")) config << "RawSceneAutomation=1\n";
         #endif
         config << "[GENERAL]\nEffectSearchPaths=.\\effects\nPresetPath=.\\preset.ini\n"

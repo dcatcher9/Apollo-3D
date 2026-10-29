@@ -8,7 +8,6 @@
 #include "scene_feedback.h"
 #include "streamline_command_association.h"
 #include "streamline_depth_content.h"
-#include "native_discard_observer.h"
 #include "streamline_depth_capture.h"
 #include "frame_generation_inputs.h"
 #include "freshness.h"
@@ -31,15 +30,13 @@ namespace sunshine_streamline {
     effects_input_observation effects_input;
   };
 
-  // The optional diagnostic branch never changes selected depth or geometry;
-  // it is enabled by ReShade.ini [SUNSHINE_DEPTH] StreamlineCameraProbe=1.
-  // Independent source adapters also share these hooks and can nominate/copy
-  // current depth. All branches preserve the application's original API data.
+  // Source adapters share these hooks and can nominate/copy current depth.
+  // All branches preserve the application's original API data.
   // Discovery and deferred logging occur only from poll, outside loader callbacks.
   void initialize(HMODULE addon);
+  // Constant false since the StreamlineCameraProbe research ledger was removed.
   bool enabled();
-  // Lightweight supported-DLL source nomination is enabled by default. This is
-  // independent of the opt-in command/content diagnostic above.
+  // Lightweight supported-DLL source nomination is enabled by default.
   bool source_enabled();
   // Existing source-observation invalidation counter only. An unchanged value
   // does not prove frame correspondence; a changed value revokes retained depth.
@@ -51,17 +48,6 @@ namespace sunshine_streamline {
   // process exit. This never waits for game threads or removes a live trampoline.
   void shutdown();
 
-  // D3D12 native identities only. Root invokes these at ReShade lifecycle,
-  // reset/close/execute events and captures a marker at the ACTUAL depth copy.
-  // Pre-call callbacks establish observed recording/submission order, not native
-  // call success, GPU completion, depth-content identity or final-color alignment.
-  void command_initialized(std::uint64_t native, std::uint64_t device, std::uint64_t cookie = 0);
-  void command_destroyed(std::uint64_t native);
-  void command_reset(std::uint64_t native, std::uint64_t device = 0, std::uint64_t cookie = 0);
-  void command_closed(std::uint64_t native);
-  void queue_initialized(std::uint64_t native, std::uint64_t device, std::uint64_t cookie = 0);
-  void queue_destroyed(std::uint64_t native);
-  void command_executed(std::uint64_t queue, std::uint64_t command);
   // ReShade's present event on queue, before that Present (and before
   // depth_capture::present ends the tags' lifetimes): makes the copies a tag
   // call deferred to its frame's Present (owner ruling R2,
@@ -73,22 +59,11 @@ namespace sunshine_streamline {
   // True when it recorded a copy: the caller submits immediate before the
   // Present.
   bool present_deferred(std::uint64_t queue, std::uint64_t immediate);
-  void command_secondary_executed(std::uint64_t primary, std::uint64_t secondary);
-  commands::recording_marker capture_command_marker(std::uint64_t native);
-  // Valid native D3D12 COM object only: queue standard DiscardResource target
-  // discovery from init/reset; actual hook installation is deferred to poll.
-  void observe_native_discard_command(std::uint64_t native);
 
-  // Relative content identity within one D3D12 recording, based only on observed
-  // operations. Resource lifetime IDs must be unique caller-owned identities.
-  // This does not claim coverage of unobservable native commands or final color.
+  // The source-resource table query_depth_source reads (its only callers
+  // are tests). Resource lifetime IDs must be unique caller-owned identities.
   void depth_resource_initialized(std::uint64_t native, std::uint64_t lifetime, std::uint64_t device, bool supported);
   void depth_resource_destroyed(std::uint64_t native, std::uint64_t lifetime);
-  void depth_content_write(std::uint64_t command, std::uint64_t native, std::uint64_t lifetime = 0);
-  void depth_content_invalidate(std::uint64_t command, std::uint64_t native = 0, std::uint64_t lifetime = 0);
-  content::copy_snapshot record_depth_copy(std::uint64_t command, content::resource_key source, content::resource_key backup);
-  content::copy_snapshot forward_depth_copy(std::uint64_t command, const content::copy_snapshot &preserved,
-    content::resource_key destination);
 
   enum class frame_identity_kind { unavailable, v1_numeric, v2_observed_token, v2_constants_call };
   struct frame_identity {
@@ -132,7 +107,6 @@ namespace sunshine_streamline {
     tag_scope scope{};
     bool present{}, supported{};
     std::uint64_t observed_tick{}, observation_sequence{};
-    content::use_snapshot content_use;
     std::uint64_t resource_lifetime{}, resource_device{};
     std::uint32_t native_state{0xffffffffu};
     bool state_requires_observation{};
@@ -173,20 +147,16 @@ namespace sunshine_streamline {
     decode_status decoded{decode_status::short_buffer};
     frame_identity frame;
     std::array<evaluated_depth_tag, 3> tags{}; // raw, high-resolution raw, linear
-    std::array<evaluated_color_tag, 6> colors{}; // HUDless2, scaling input3/output4, backbuffer53, UI23, alpha69
+    std::array<evaluated_color_tag, 6> colors{}; // HUDless2, scaling input3/output4 (not observed), backbuffer53, UI23, alpha69
     std::uint64_t epoch{}, sequence{}, tick{}, camera_tick{}, camera_sequence{}, loss_revision{};
     sunshine_scene_feedback::sample feedback;
     std::uintptr_t command_buffer{};
     std::uint32_t viewport{}, feature{}, matched_tag{};
     selected_depth selection;
-    commands::recording_marker evaluation_recording;
-    commands::association command_association;
-    content::association content_association;
     // Constants and applicable tags were copied before the original evaluation.
-    // Additional command/content evidence is explicit in the association fields;
-    // even a match does not establish complete native mutation coverage, GPU
+    // That does not establish complete native mutation coverage, GPU
     // completion, ReShade presentation or final-color/jitter registration.
-    bool successful_evaluation{}, frame_correlated{}, recording_stable{};
+    bool successful_evaluation{}, frame_correlated{};
     bool tag_boundary{}; // Copied synchronously while an OnlyValidNow tag is valid.
     bool frame_generation_input{}; // An independently observed enabled FG role, not implied by tagging.
     // Depth direction is a fixed convention of a viewport. Without a

@@ -15,32 +15,12 @@
 #define SUNSHINE_PROBE_INTERNAL inline namespace probe_test_access
 #include "depth_refusal.h"
 #include "frame_generation_inputs.h"
-#include <atomic>
 #include <cstdint>
-#include <functional>
 
 namespace sunshine_streamline {
   SUNSHINE_PROBE_INTERNAL {
-    // Defined in streamline_camera_probe.cpp. Default arguments stay with the
-    // definitions there; the exports pass every argument.
-    extern SRWLOCK poll_lock;
-    extern content::ledger content_ledger;
-    extern bool content_observing;
-    extern std::atomic<bool> test_content_requested, test_capture_requested;
-    extern std::atomic<bool> command_observation_lost;
-    extern std::atomic<std::uint64_t> loss_revision;
+    // Defined in streamline_camera_probe.cpp.
     template<class T> bool read(const T *source, T &destination);
-    void dropped_observation(loss_diagnostics::reason cause, const char *site, std::uint32_t line,
-      loss_diagnostics::context details);
-    // A lambda's command_event instantiation is local to its file; the exports
-    // pass this one, which the probe file instantiates.
-    using command_function = std::function<void(commands::tracker &)>;
-    template<class Function> void command_event(Function &&function);
-    commands::association associate_commands(const commands::recording_marker &evaluation,
-      const commands::recording_marker &copy, std::uint64_t queue);
-    bool install_discard_observations();
-    content::association associate_content(const content::use_snapshot &use, const content::copy_snapshot &copy,
-      content::resource_key source, content::resource_key backup);
 
     // Defined in test_streamline_camera_probe_exports.cpp and called where the
     // probe decides a refusal, for SunshineDepthTestLastRefusal

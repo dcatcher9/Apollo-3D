@@ -70,7 +70,6 @@ SUNSHINE_DEPTH_ADDON_SHARED std::shared_mutex s_mutex;
 SUNSHINE_DEPTH_ADDON_SHARED bool s_registered = false;
 SUNSHINE_DEPTH_ADDON_SHARED bool s_initialized = false;
 // Fixed for each add-on registration; changing the diagnostic requires restart.
-SUNSHINE_DEPTH_ADDON_SHARED bool s_streamline_probe_events = false;
 SUNSHINE_DEPTH_ADDON_SHARED bool s_streamline_source_events = false;
 SUNSHINE_DEPTH_ADDON_SHARED bool s_frame_activity_trace = false; // Opt-in metadata only; never changes capture policy.
 SUNSHINE_DEPTH_ADDON_SHARED const char *s_status_message = "Depth selection has not been initialized.";
@@ -704,9 +703,6 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 				backup.published_depth_copy = {};
 				backup.content_serial = 0;
 				backup.content_layout_supported = content_supported(existing_desc);
-				if (s_streamline_probe_events && api == device_api::d3d12)
-					sunshine_streamline::depth_resource_initialized(backup.backup_texture.handle, backup.content_identity,
-						device->get_native(), content_supported(existing_desc));
 
 				return &backup;
 			}
@@ -720,9 +716,6 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 			device->set_resource_name(new_backup.backup_texture, "Sunshine depth presentation texture");
 			new_backup.content_identity = sunshine_native_identity::allocate_identity();
 			new_backup.content_layout_supported = content_supported(desc);
-			if (s_streamline_probe_events && api == device_api::d3d12)
-				sunshine_streamline::depth_resource_initialized(new_backup.backup_texture.handle, new_backup.content_identity,
-					device->get_native(), content_supported(desc));
 
 			// Growth can move every entry: exclude recording-thread lookups.
 			const std::unique_lock<std::shared_mutex> lock(s_mutex);
@@ -751,8 +744,6 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 			return;
 
 		depth_stencil_backup &backup = *it;
-		if (s_streamline_probe_events && device->get_api() == device_api::d3d12)
-			sunshine_streamline::depth_resource_destroyed(backup.backup_texture.handle, backup.content_identity);
 		{
 			// Recording threads look backups up by this source under the shared lock.
 			const std::unique_lock<std::shared_mutex> lock(s_mutex);

@@ -48,17 +48,14 @@ extern "C" __declspec(dllexport) void ReShadeLogMessage(void *, int, const char 
 }
 
 // Fixtures set these through the same public config API as the game: the
-// shipping configuration (StreamlineCameraProbe=0, StreamlineDepthSource=1)
-// unless a ledger test opts in (probe_config::ledger). nullptr models a
-// missing setting for the default-off regression.
-static const char *probe_setting = "0";
+// shipping configuration (StreamlineDepthSource=1). nullptr models a
+// missing setting for the default-on regression.
 static const char *source_setting = "1";
 static const char *call_trace_setting = nullptr;
 extern "C" __declspec(dllexport) bool ReShadeGetConfigValue(void *, reshade::api::effect_runtime *,
     const char *section, const char *key, char *value, size_t *size) {
   if (std::strcmp(section, "SUNSHINE_DEPTH") != 0 || !size) return false;
-  const char *setting = std::strcmp(key, "StreamlineCameraProbe") == 0 ? probe_setting :
-    std::strcmp(key, "StreamlineDepthSource") == 0 ? source_setting :
+  const char *setting = std::strcmp(key, "StreamlineDepthSource") == 0 ? source_setting :
     std::strcmp(key, "NGXDepthSource") == 0 ? "0" :
     std::strcmp(key, "UpscalerCallTrace") == 0 ? call_trace_setting : nullptr;
   if (!setting) return false;
@@ -247,14 +244,10 @@ namespace {
   const testing::targets presentation_v2_targets {v2_targets.constants, v2_targets.tag, v2_targets.tag_for_frame,
     v2_targets.evaluate, reinterpret_cast<void *>(&fake_v2_new_token), reinterpret_cast<void *>(&fake_get_feature_function)};
 
-  // The configuration a fixture initializes the probe with: shipping, or that
-  // of the default-off StreamlineCameraProbe research ledger (probe on, source
-  // selection off), which only the ledger group's tests in main() use.
-  enum class probe_config { shipping, ledger };
+  // A fixture initializes the probe in the shipping configuration.
   struct fixture {
-    explicit fixture(probe_config config = probe_config::shipping) {
-      probe_setting = config == probe_config::ledger ? "1" : "0";
-      source_setting = config == probe_config::ledger ? "0" : "1";
+    fixture() {
+      source_setting = "1";
       testing::clear();
       constants_call = tag_call = framed_tag_call = evaluate_call = new_token_call = feature_function_call = fg_call = {};
       returned_token = nullptr;
@@ -598,55 +591,6 @@ namespace {
     require(call_v2_constants(constants, token.ref(), view) == 0 && testing::counts().constants == 1, "delayed hook did not begin observing");
   }
 
-  void test_diagnostic_opt_in() {
-    fixture cleanup{probe_config::ledger};
-    for (const char *setting : {static_cast<const char *>(nullptr), "0", "invalid"}) {
-      probe_setting = setting;
-      initialize(nullptr);
-      require(!enabled(), "Missing, disabled or invalid diagnostic setting enabled observation");
-      require(!testing::install(testing::abi::v1_1_1, v1_targets), "Disabled probe installed middleware hooks");
-      const auto before = testing::counts();
-      const auto native_before = native_discard::counts();
-      command_initialized(100, 10, 1);
-      command_reset(100, 10, 1);
-      queue_initialized(200, 10, 2);
-      depth_resource_initialized(300, 3, 10, true);
-      depth_content_write(100, 300, 3);
-      depth_content_invalidate(100, 300, 3);
-      const auto copy = record_depth_copy(100, {300, 3}, {400, 4});
-      command_closed(100);
-      command_executed(200, 100);
-      observe_native_discard_command(1); // Disabled discovery must not even read this invalid pointer.
-      poll({});
-      require(!capture_command_marker(100) && !copy.recording, "Disabled probe retained command/copy tracking");
-      evaluation_snapshot evaluation;
-      require(query_evaluation({}, evaluation) == evidence_status::inactive, "Disabled probe exposed camera evidence");
-      const auto after = testing::counts();
-      unchanged(before, after, "Disabled probe observed middleware calls");
-      require(before.dropped == after.dropped && before.invalid == after.invalid,
-        "Disabled tracking changed loss counters");
-      const auto native_after = native_discard::counts();
-      require(native_after.targets == native_before.targets && native_after.installed == native_before.installed &&
-        native_after.unreadable == native_before.unreadable && native_after.dropped == native_before.dropped,
-        "Disabled probe discovered or installed native hooks");
-    }
-    probe_setting = "1";
-    initialize(nullptr);
-    require(enabled() && testing::install(testing::abi::v1_1_1, v1_targets), "Explicit diagnostic opt-in did not enable hooks");
-    const auto constants = old_camera();
-    require(call_v1_constants(constants, 1, 1) && testing::counts().constants == 1, "Opted-in middleware was not observed");
-    command_initialized(100, 10, 1);
-    command_reset(100, 10, 1);
-    require(bool(capture_command_marker(100)), "Opted-in command tracking was unavailable");
-    shutdown();
-    probe_setting = "0";
-    initialize(nullptr);
-    const auto before = testing::counts();
-    require(!enabled() && call_v1_constants(constants, 2, 1), "Disabling retained hooks broke pass-through");
-    unchanged(before, testing::counts(), "Reinitialized disabled probe still observed retained hooks");
-    require(!capture_command_marker(100), "Disabling probe retained old command evidence");
-  }
-
   void test_shutdown(bool modern, bool restart = false) {
     fixture cleanup;
     require(testing::install(modern ? testing::abi::v2_7_30 : testing::abi::v1_1_1, modern ? v2_targets : v1_targets), "shutdown fixture install failed");
@@ -898,12 +842,6 @@ namespace {
     value.ready = true;
     return value;
   }
-  void expect_evidence(const selected_depth &selected, evidence_status expected, const char *message) {
-    evaluation_snapshot value;
-    const auto actual = query_evaluation(selected, value);
-    if (actual != expected) std::fprintf(stderr, "evidence expected %s, got %s\n", name(expected), name(actual));
-    require(actual == expected && value.status == actual, message);
-  }
   void mint(opaque_token &token, const std::uint32_t *index) {
     returned_token = const_cast<abi_v2::frame_token *>(&token.ref());
     abi_v2::frame_token *output{};
@@ -925,7 +863,7 @@ namespace {
     const base_structure *inputs[1]{&view.base};
     std::uint32_t number{401};
     token_source_fixture() {
-      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      source_setting = "1"; initialize(nullptr);
       require(!enabled() && source_enabled(), "Token isolation enabled the optional full probe");
       require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "Token isolation hook install failed");
       depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&native), 91, 10, true);
@@ -1234,7 +1172,7 @@ namespace {
   }
   void test_first_local_raw_entry() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "First-local-raw hook install failed");
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
     void *function{};
@@ -1258,8 +1196,7 @@ namespace {
 #endif
   void test_source_nomination_v1() {
     fixture cleanup;
-    probe_setting = nullptr;
-    source_setting = nullptr; // Missing key means production nomination on, diagnostics off.
+    source_setting = nullptr; // Missing key means production nomination on.
     initialize(nullptr);
     require(!enabled() && source_enabled(), "source default changed diagnostic opt-in");
     require(testing::install(testing::abi::v1_1_1, v1_targets), "production-only v1 install failed");
@@ -1298,15 +1235,6 @@ namespace {
     evaluation_snapshot diagnostic;
     require(query_evaluation(selection(&native), diagnostic) == evidence_status::inactive,
       "production nomination upgraded diagnostic/geometry evidence");
-    command_initialized(100, 10, 1); command_reset(100, 10, 1); queue_initialized(200, 10, 2);
-    const auto counters_before = testing::counts();
-    const auto native_before = native_discard::counts();
-    for (unsigned i = 0; i != 10000; ++i) { depth_content_write(100, address, 41); depth_content_invalidate(100, address, 41); }
-    observe_native_discard_command(1);
-    require(!capture_command_marker(100) && !record_depth_copy(100, {address, 41}, {600, 60}).recording,
-      "production-only nomination enabled per-command/content tracking");
-    require(testing::counts().dropped == counters_before.dropped && native_discard::counts().targets == native_before.targets,
-      "production-only path observed expensive diagnostic events");
     query(evidence_status::source_associated_evaluation, "ignored draw diagnostics poisoned semantic nomination");
     depth_resource_destroyed(address, 41);
     depth_resource_initialized(address, 42, 10, true);
@@ -1355,7 +1283,7 @@ namespace {
 
   void test_source_lifecycle_contention() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v1_1_1, v1_targets), "source contention hook install failed");
     int native_a{}, native_b{};
     const auto a = reinterpret_cast<std::uintptr_t>(&native_a), b = reinterpret_cast<std::uintptr_t>(&native_b);
@@ -1407,7 +1335,7 @@ namespace {
 
   void test_source_nomination_v2() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "production-only v2 install failed");
     auto view = viewport(3); auto constants = modern_camera(); opaque_token token;
     int native_a{}, native_b{}, native_high{};
@@ -1472,7 +1400,7 @@ namespace {
   // their version-1 fields; nativeFormat is read only from a typed Resource.
   void test_struct_versions() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "struct-version install failed");
     auto view = viewport(5); auto constants = modern_camera(); opaque_token token;
     int native{};
@@ -1554,7 +1482,7 @@ namespace {
     const expectation cases[]{{{2, 4, 0, 0}, false}, {{2, 6, 10, 0}, false}, {{2, 7, 2, 0}, true}, {testing::abi::v2_12_0, true}};
     for (const auto &c : cases) {
       fixture cleanup;
-      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      source_setting = "1"; initialize(nullptr);
       require(testing::install(c.version, presentation_v2_targets), "eUnknown release install failed");
       auto view = viewport(5); auto constants = modern_camera(); opaque_token token;
       int native{};
@@ -1576,7 +1504,7 @@ namespace {
 
   void test_rr_and_linear_depth_source() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "RR/linear source install failed");
     auto view = viewport(3); auto constants = modern_camera(); opaque_token token;
     constants.common.jitter_offset[0] = .25f;
@@ -1687,7 +1615,7 @@ namespace {
   void test_mixed_clear_and_linear_depth() {
     for (const bool framed : {false, true}) for (const bool reverse_order : {false, true}) {
       fixture cleanup;
-      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      source_setting = "1"; initialize(nullptr);
       require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Mixed clear source install failed");
       auto view = viewport(3); auto constants = modern_camera(); opaque_token old_token, token;
       int native{}, linear_native{}, commands{};
@@ -1755,7 +1683,7 @@ namespace {
 
   void test_source_without_frame_tag_export() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     auto exports = tracked_v2_targets;
     exports.tag_for_frame = nullptr;
     require(testing::install(testing::abi::v2_7_30, exports), "v2 global-only source install failed");
@@ -1817,7 +1745,7 @@ namespace {
 
   void test_jitter_frame_and_render_domain(bool modern) {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(modern ? testing::abi::v2_7_30 : testing::abi::v1_1_1,
       modern ? tracked_v2_targets : v1_targets), "jitter source hook install failed");
     auto view = viewport(9);
@@ -1870,7 +1798,7 @@ namespace {
 
   void test_high_resolution_jitter_domain() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "high-res jitter hook install failed");
     auto view = viewport(6); auto constants = modern_camera(); opaque_token token;
     constants.common.jitter_offset[0] = .25f; constants.common.jitter_offset[1] = -.375f;
@@ -1905,7 +1833,7 @@ namespace {
 
   void test_source_without_projection() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "projection-independent source hook install failed");
     auto view = viewport(9); auto constants = modern_camera(); opaque_token token;
     int native{}; auto resource = modern_resource(&native); auto tag = depth_tag_for(resource);
@@ -2005,7 +1933,7 @@ namespace {
 
   void test_until_evaluate_lifetime() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "UntilEvaluate hook install failed");
     auto view = viewport(8); auto constants = modern_camera(); opaque_token token;
     // An UntilEvaluate tag call needs a command list (sl_core_api.h; S2).
@@ -2216,7 +2144,7 @@ namespace {
 
   void test_depth_observation_loss_diagnostics(bool modern) {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(!enabled() && source_enabled(), "Loss journal enabled the optional command/content probe");
     require(testing::install(modern ? testing::abi::v2_7_30 : testing::abi::v1_1_1,
       modern ? tracked_v2_targets : v1_targets), "Loss journal hook install failed");
@@ -2360,20 +2288,18 @@ namespace {
     require(!enabled() && source_enabled(), "Loss diagnostics enabled the optional full probe during recovery");
   }
 
-  // Shipping-configuration ports of the research ledger tests' checks of
-  // kept behaviour (refactor D2-pre). Each ledger test below
-  // (test_diagnostic_opt_in, and test_evaluation_v1 to
-  // test_color_tag_snapshots) runs in the ledger's configuration and reads
-  // its evaluation through query_evaluation, which only the ledger serves.
-  // Each test_*_shipping repeats its calls in the shipping configuration and
-  // reads the same outcome through the testing seams, with the same expected
-  // values: the evaluation snapshot finish_evaluation stores per viewport
-  // after the game's call (testing::latest_snapshot: the snapshot source
-  // nomination received before the call, with the call's result applied;
-  // no shipping code reads this store), the depth normalized from it
-  // (testing::normalized_source, which re-runs the nomination gates on the
-  // stored snapshot when called), the forwarded results and arguments, the
-  // counters and the observation revision.
+  // The checks of kept behaviour from the StreamlineCameraProbe research
+  // ledger's tests, which ran in the ledger's configuration and read the
+  // evaluation through query_evaluation, which only the ledger served. Each
+  // test_*_shipping repeats its ledger test's calls in the shipping
+  // configuration and reads the same outcome through the testing seams,
+  // with the same expected values: the evaluation snapshot finish_evaluation
+  // stores per viewport after the game's call (testing::latest_snapshot: the
+  // snapshot source nomination received before the call, with the call's
+  // result applied; no shipping code reads this store), the depth normalized
+  // from it (testing::normalized_source, which re-runs the nomination gates
+  // on the stored snapshot when called), the forwarded results and
+  // arguments, the counters and the observation revision.
   // Where a ledger test read an earlier frame's camera record through a
   // later query, the port evaluates that frame again. Checks of the
   // ledger's own logic (the selected-depth match, active-tag revalidation,
@@ -2782,257 +2708,15 @@ namespace {
         "legal null v2 backbuffer fabricated identity or poisoned depth");
     }
   }
-  void test_evaluation_v1() {
-    fixture cleanup{probe_config::ledger};
-    require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 evidence install failed");
-    int native{}, commands{};
-    abi_v1::resource resource{};
-    resource.native = &native;
-    auto selected = selection(&native);
-    auto constants = old_camera();
-    call_v1_constants(constants, 10, 4);
-    call_v1_tag(&resource, 0, 4, nullptr);
-    expect_evidence(selected, evidence_status::missing_evaluation, "constants/tags alone fabricated evaluation evidence");
-    auto next = constants;
-    set_camera_near(next.common, 1.f);
-    call_v1_constants(next, 11, 4);
-    call_v1_evaluate(&commands, 0, 10, 4);
-    evaluation_snapshot captured;
-    require(query_evaluation(selected, captured) == evidence_status::source_associated_evaluation,
-      "v1 exact constants frame not retained across frames in flight");
-    require(captured.frame_correlated && captured.successful_evaluation && captured.frame.has_numeric &&
-        captured.frame.numeric == 10 && captured.frame.kind == frame_identity_kind::v1_numeric &&
-        captured.camera.near_plane == .5f &&
-        captured.projection.valid() && captured.projection.depth_scale == .5 &&
-        captured.command_buffer == reinterpret_cast<std::uintptr_t>(&commands) &&
-        captured.tags[0].scope == tag_scope::active_global && captured.selection.frame_index == 999,
-      "v1 snapshot did not preserve camera/tag/evaluation identities");
-    captured.camera.near_plane = 999;
-    evaluation_snapshot copied;
-    query_evaluation(selected, copied);
-    require(copied.camera.near_plane == .5f, "query exposed mutable internal storage");
-    auto wrong = selected;
-    wrong.active_width--;
-    expect_evidence(wrong, evidence_status::extent_mismatch, "whole-resource tag accepted a different selected crop");
-    wrong = selected;
-    wrong.resource++;
-    expect_evidence(wrong, evidence_status::source_mismatch, "wrong native source accepted");
-    wrong = selected;
-    wrong.ready = false;
-    expect_evidence(wrong, evidence_status::depth_not_ready, "old evidence substituted for current depth readiness");
-
-    call_v1_evaluate(nullptr, 0, 12, 4);
-    expect_evidence(selected, evidence_status::missing_constants, "latest camera substituted for missing exact frame");
-    call_v1_evaluate(nullptr, 0, 11, 4);
-    require(query_evaluation(selected, copied) == evidence_status::source_associated_evaluation &&
-        copied.camera.near_plane == 1.f && copied.projection.depth_scale == 1.,
-      "older unsuccessful correlation poisoned a later complete tuple");
-    result_v1 = false;
-    call_v1_evaluate(nullptr, 0, 11, 4);
-    expect_evidence(selected, evidence_status::evaluation_failed, "failed evaluation left previous success available");
-    result_v1 = true;
-    call_v1_constants(constants, 13, 4);
-    call_v1_tag(&resource, 0, 4, nullptr);
-    call_v1_evaluate(nullptr, 0, 13, 4);
-    expect_evidence(selected, evidence_status::source_associated_evaluation, "fresh complete observations did not recover");
-    testing::lose_observation();
-    expect_evidence(selected, evidence_status::observation_lost, "dropped callback left stale evidence accepted");
-    call_v1_evaluate(nullptr, 0, 13, 4);
-    expect_evidence(selected, evidence_status::observation_lost, "evaluation reused inputs from before observation loss");
-    call_v1_constants(constants, 14, 4);
-    call_v1_tag(&resource, 0, 4, nullptr);
-    call_v1_evaluate(nullptr, 0, 14, 4);
-    sunshine_scene_depth::frame before_reset;
-    require(testing::normalized_source(4, 0, before_reset) &&
-        before_reset.observation_revision == depth_observation_revision(),
-      "v1 normalized depth omitted its source observation revision");
-    // A later frame's reset or invalid camera is observed metadata; it never
-    // revokes the depth already evaluated for an earlier frame.
-    constants.reset = 1;
-    call_v1_constants(constants, 15, 4);
-    require(depth_observation_revision() == before_reset.observation_revision,
-      "v1 camera reset was recorded as a lost observation");
-    expect_evidence(selected, evidence_status::source_associated_evaluation, "camera reset revoked earlier evidence");
-    constants.reset = 0;
-    call_v1_constants(constants, 16, 4);
-    call_v1_tag(&resource, 0, 4, nullptr);
-    call_v1_evaluate(nullptr, 0, 16, 4);
-    constants.common.clip_to_camera_view.m[0][0] = 2;
-    call_v1_constants(constants, 17, 4);
-    expect_evidence(selected, evidence_status::source_associated_evaluation, "invalid projection revoked earlier evidence");
-    shutdown();
-    expect_evidence(selected, evidence_status::inactive, "shutdown left evidence available");
-  }
-  void test_evaluation_immutable_and_ordered() {
-    fixture cleanup{probe_config::ledger};
-    require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 ordered evidence install failed");
-    int native{};
-    abi_v1::resource resource{};
-    resource.native = &native;
-    const auto selected = selection(&native);
-    auto first = old_camera(), second = old_camera();
-    set_camera_near(second.common, 1.f);
-    call_v1_constants(first, 1, 8);
-    call_v1_constants(second, 2, 8);
-    call_v1_tag(&resource, 0, 8, nullptr);
-    block_original = true;
-    std::thread older([] { call_v1_evaluate(nullptr, 0, 1, 8); });
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!original_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
-    const bool entered = original_entered.load(std::memory_order_acquire);
-    block_original = false;
-    if (entered) call_v1_evaluate(nullptr, 0, 2, 8);
-    release_original = true;
-    older.join();
-    require(entered, "blocked evaluation never entered original");
-    evaluation_snapshot snapshot;
-    require(query_evaluation(selected, snapshot) == evidence_status::source_associated_evaluation &&
-        snapshot.frame.numeric == 2 && snapshot.camera.near_plane == 1.f && snapshot.projection.depth_scale == 1.,
-      "out-of-order evaluation completion replaced newer immutable tuple");
-    set_camera_near(second.common, 2.f);
-    call_v1_constants(second, 2, 8);
-    require(query_evaluation(selected, snapshot) == evidence_status::stale && snapshot.camera.near_plane == 1.f &&
-        snapshot.projection.depth_scale == 1.,
-      "later same-frame constants mutated or retained applicability of previously published evaluation");
-    call_v1_evaluate(nullptr, 0, 2, 8);
-    std::this_thread::sleep_for(std::chrono::milliseconds(3));
-    require(query_evaluation(selected, snapshot, 1) == evidence_status::stale, "explicit evidence age bound ignored");
-    // Bounded frame storage evicts old frames instead of guessing from latest.
-    for (unsigned frame = 3; frame != 38; ++frame) call_v1_constants(first, frame, 8);
-    call_v1_evaluate(nullptr, 0, 1, 8);
-    expect_evidence(selected, evidence_status::missing_constants, "evicted frame reused a different camera");
-  }
-  void test_evaluation_v2_tokens() {
-    fixture cleanup{probe_config::ledger};
-    require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 tracked evidence install failed");
-    auto view = viewport(3);
-    auto constants = modern_camera();
-    opaque_token first, second;
-    int native_a{}, native_b{}, native_local{};
-    auto resource_a = modern_resource(&native_a), resource_b = modern_resource(&native_b), resource_local = modern_resource(&native_local);
-    auto tag_a = depth_tag_for(resource_a), tag_b = depth_tag_for(resource_b), tag_local = depth_tag_for(resource_local);
-    const base_structure *inputs[] {&view.base};
-    call_v2_constants(constants, first.ref(), view);
-    call_v2_framed_tag(first.ref(), view, &tag_a, 1, nullptr);
-    call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    expect_evidence(selection(&native_a), evidence_status::untracked_frame, "opaque address alone became a frame identity");
-    const std::uint32_t number = 101;
-    mint(first, &number);
-    mint(second, nullptr);
-    call_v2_constants(constants, first.ref(), view);
-    call_v2_framed_tag(first.ref(), view, &tag_a, 1, nullptr);
-    set_camera_near(constants.common, 1.f);
-    call_v2_constants(constants, second.ref(), view);
-    call_v2_framed_tag(second.ref(), view, &tag_b, 1, nullptr);
-    call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    evaluation_snapshot snapshot;
-    require(query_evaluation(selection(&native_a), snapshot) == evidence_status::source_associated_evaluation &&
-        snapshot.frame.kind == frame_identity_kind::v2_observed_token && snapshot.frame.generation &&
-        snapshot.frame.has_numeric && snapshot.frame.numeric == 101 && snapshot.camera.near_plane == .5f &&
-        snapshot.tags[0].scope == tag_scope::explicit_frame,
-      "v2 frame-specific constants/tags mixed frames in flight");
-    const auto old_generation = snapshot.frame.generation;
-    call_v2_evaluate(0, second.ref(), inputs, 1, nullptr);
-    require(query_evaluation(selection(&native_b), snapshot) == evidence_status::source_associated_evaluation &&
-        !snapshot.frame.has_numeric && snapshot.frame.generation != old_generation && snapshot.camera.near_plane == 1.f &&
-        snapshot.projection.depth_scale == 1.,
-      "internal token counter was invented as a game numeric frame");
-    const base_structure *local_inputs[] {&view.base, &tag_local.base};
-    call_v2_evaluate(0, first.ref(), local_inputs, 2, nullptr);
-    require(query_evaluation(selection(&native_local), snapshot) == evidence_status::source_associated_evaluation &&
-        snapshot.tags[0].scope == tag_scope::evaluation_local, "evaluation-local tag did not override frame tag");
-    call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    expect_evidence(selection(&native_a), evidence_status::source_associated_evaluation, "local override leaked into next evaluation");
-    // Streamline recycles the address for a later frame index: a new generation. (The
-    // same index returns the same frame's token; see test_repeated_token_request_keeps_frame.)
-    const std::uint32_t recycled_number = number + 3;
-    mint(first, &recycled_number);
-    expect_evidence(selection(&native_a), evidence_status::untracked_frame, "token reuse left old frame evidence accepted");
-    call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    expect_evidence(selection(&native_a), evidence_status::missing_constants, "recycled token reused old constants/frame tags");
-    call_v2_constants(constants, first.ref(), view);
-    call_v2_framed_tag(first.ref(), view, &tag_a, 1, nullptr);
-    call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    require(query_evaluation(selection(&native_a), snapshot) == evidence_status::source_associated_evaluation &&
-        snapshot.frame.generation != old_generation, "fresh recycled-token tuple failed recovery");
-    resource_a.width = 3840;
-    call_v2_framed_tag(first.ref(), view, &tag_a, 1, nullptr);
-    expect_evidence(selection(&native_a), evidence_status::source_mismatch, "same-pointer frame tag dimension change left old tuple applicable");
-    call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    expect_evidence(selection(&native_a), evidence_status::extent_mismatch, "tagged resource size mismatch accepted");
-    resource_a.width = 1920;
-    call_v2_framed_tag(first.ref(), view, &tag_a, 1, nullptr);
-    call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    tag_a.lifecycle = 0;
-    call_v2_framed_tag(first.ref(), view, &tag_a, 1, nullptr);
-    require(query_evaluation(selection(&native_a), snapshot) != evidence_status::source_associated_evaluation,
-      "same-pointer unsupported lifecycle left old frame tag applicable");
-    tag_a.lifecycle = 1;
-    call_v2_constants(constants, first.ref(), view);
-    call_v2_framed_tag(first.ref(), view, &tag_a, 1, nullptr);
-    call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    abi_v2::frame_token *output{};
-    call_v2_new_token(output, reinterpret_cast<const std::uint32_t *>(1));
-    expect_evidence(selection(&native_a), evidence_status::observation_lost, "unreadable token index left accepted evidence");
-  }
   // BF6 10-22: over its video-memory budget, Streamline answered every DLSS
   // evaluation with eWarnOutOfVRAM (39) while SR and DLSS-G kept running. The
   // warning accepts the call's inputs; every other non-zero result fails it.
-  void test_sdk_vram_warning() {
-    fixture cleanup{probe_config::ledger};
-    require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 warning install failed");
-    auto view = viewport(3);
-    auto constants = modern_camera();
-    opaque_token token;
-    std::uint32_t number = 200;
-    int native{};
-    auto resource = modern_resource(&native);
-    auto tag = depth_tag_for(resource);
-    const base_structure *inputs[] {&view.base};
-    const auto frame = [&](std::int32_t inputs_result, std::int32_t evaluate_result) {
-      ++number; mint(token, &number);
-      result_v2 = inputs_result;
-      require(call_v2_constants(constants, token.ref(), view) == inputs_result &&
-        call_v2_framed_tag(token.ref(), view, &tag, 1, nullptr) == inputs_result, "input call result changed");
-      result_v2 = evaluate_result;
-      const auto returned = call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-      result_v2 = 0;
-      require(returned == evaluate_result, "evaluation result changed");
-    };
-    const auto accepted = [&](const char *message) {
-      evaluation_snapshot snapshot;
-      require(query_evaluation(selection(&native), snapshot) == evidence_status::source_associated_evaluation &&
-        snapshot.successful_evaluation && snapshot.sequence, message);
-    };
-    frame(0, 0);
-    accepted("warning fixture baseline was not accepted");
-    const auto revision = depth_observation_revision();
-    frame(0, abi_v2::result_warn_out_of_vram);
-    accepted("an over-budget warning on a DLSS evaluation discarded its accepted inputs");
-    require(depth_observation_revision() == revision && testing::counts().vram_warnings == 1,
-      "an over-budget warning on a DLSS evaluation was counted as an observation loss");
-    frame(abi_v2::result_warn_out_of_vram, abi_v2::result_warn_out_of_vram);
-    accepted("over-budget warnings on constants and tags discarded them");
-    require(depth_observation_revision() == revision && testing::counts().vram_warnings == 4,
-      "over-budget warnings on constants and tags were counted as observation losses");
-    // Errors next to the warning (eErrorInvalidState 38, the unknown 40, a
-    // negative value) still fail the evaluation and lose its observation.
-    for (const std::int32_t error : {38, 40, -39}) {
-      const auto before = depth_observation_revision();
-      frame(0, error);
-      expect_evidence(selection(&native), evidence_status::evaluation_failed, "an SDK error was accepted like the warning");
-      require(depth_observation_revision() > before && testing::counts().vram_warnings == 4,
-        "an SDK error was not an observation loss, or was counted as a warning");
-      frame(0, 0);
-      accepted("a successful evaluation did not recover after an SDK error");
-    }
-  }
   // The same warning on DLSS-G options (BF6 10-22: success=0 retired the FG
   // source while frame generation kept running) keeps FG knowledge and the FG
   // depth source; a real error still revokes them.
   void test_frame_generation_vram_warning() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG warning hook install failed");
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
     void *function{};
@@ -3088,7 +2772,7 @@ namespace {
   // game call and does not count as one.
   void test_frame_generation_warned_discovery() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
     void *cached_entry{};
     require(call_feature_function(1000, "slDLSSGSetOptions", cached_entry) == 0 && cached_entry == returned_feature_function,
@@ -3106,344 +2790,11 @@ namespace {
     require(cached_options(view, options) == 0 && fg_call.calls == calls + 1 && query_frame_generation(view.value, fg) &&
         fg.enabled, "a warned FG discovery lookup left the cached options pointer unobserved");
   }
-  void test_evaluation_ambiguity_and_invalid_tags() {
-    fixture cleanup{probe_config::ledger};
-    require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 ambiguity install failed");
-    int native{};
-    abi_v1::resource resource{};
-    resource.native = &native;
-    auto constants = old_camera();
-    for (unsigned view : {1, 2}) {
-      call_v1_constants(constants, 1, view);
-      call_v1_tag(&resource, 0, view, nullptr);
-      call_v1_evaluate(nullptr, 0, 1, view);
-    }
-    expect_evidence(selection(&native), evidence_status::ambiguous_viewport, "same native resource in two viewports guessed a camera");
-    resource.ext = reinterpret_cast<void *>(1);
-    call_v1_tag(&resource, 0, 1, nullptr);
-    evaluation_snapshot value;
-    require(query_evaluation(selection(&native), value) != evidence_status::source_associated_evaluation,
-      "new unsupported tag retained accepted evidence");
-  }
-
-  void test_evaluation_global_contract() {
-    fixture cleanup{probe_config::ledger};
-    require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 global contract install failed");
-    opaque_token token;
-    mint(token, nullptr);
-    auto constants = modern_camera();
-    auto view = viewport(21);
-    int native{};
-    auto resource = modern_resource(&native);
-    auto tag = depth_tag_for(resource);
-    const auto selected = selection(&native);
-    const base_structure *inputs[] {&view.base};
-    call_v2_constants(constants, token.ref(), view);
-    call_v2_tag(view, &tag, 1, nullptr);
-    call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    expect_evidence(selected, evidence_status::source_associated_evaluation, "global tag fixture did not start valid");
-    resource.height = 2160;
-    call_v2_tag(view, &tag, 1, nullptr);
-    expect_evidence(selected, evidence_status::source_mismatch, "same-pointer global dimensions were not rechecked");
-    resource.height = 1080;
-    call_v2_tag(view, &tag, 1, nullptr);
-    call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    tag.lifecycle = 0;
-    call_v2_tag(view, &tag, 1, nullptr);
-    evaluation_snapshot snapshot;
-    require(query_evaluation(selected, snapshot) != evidence_status::source_associated_evaluation,
-      "same-pointer global lifetime was not rechecked");
-  }
-
-  void test_evaluation_input_age() {
-    fixture cleanup{probe_config::ledger};
-    require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 input-age install failed");
-    int native{};
-    auto constants = old_camera();
-    abi_v1::resource resource{};
-    resource.native = &native;
-    block_original = true;
-    std::thread delayed([&] { call_v1_constants(constants, 1, 1); });
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!original_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
-    const bool entered = original_entered.load(std::memory_order_acquire);
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    block_original = false;
-    release_original = true;
-    delayed.join();
-    require(entered, "delayed constants never entered original");
-    call_v1_tag(&resource, 0, 1, nullptr);
-    call_v1_evaluate(nullptr, 0, 1, 1);
-    evaluation_snapshot snapshot;
-    require(query_evaluation(selection(&native), snapshot, 10) == evidence_status::stale &&
-        snapshot.tick >= snapshot.camera_tick + 10,
-      "blocked constants call completion made old input look newly observed");
-  }
-
-  void test_evaluation_command_markers() {
-    fixture cleanup{probe_config::ledger};
-    require(testing::install(testing::abi::v1_1_1, v1_targets), "command-marker hook install failed");
-    int native{}, copy_native{}, evaluation_native{};
-    const auto copy_command = reinterpret_cast<std::uintptr_t>(&copy_native);
-    const auto evaluation_command = reinterpret_cast<std::uintptr_t>(&evaluation_native);
-    constexpr std::uint64_t queue = 100, device = 200;
-    queue_initialized(queue, device);
-    command_initialized(copy_command, device);
-    command_initialized(evaluation_command, device);
-    auto selected = selection(&native);
-    selected.command_queue = queue;
-    selected.capture_marker = capture_command_marker(copy_command);
-    command_closed(copy_command);
-    command_executed(queue, copy_command);
-    auto constants = old_camera();
-    abi_v1::resource resource{};
-    resource.native = &native;
-    call_v1_constants(constants, 1, 1);
-    call_v1_tag(&resource, 0, 1, nullptr);
-    call_v1_evaluate(&evaluation_native, 0, 1, 1);
-    evaluation_snapshot snapshot;
-    require(query_evaluation(selected, snapshot) == evidence_status::source_associated_evaluation && snapshot.recording_stable &&
-        snapshot.evaluation_recording.command == evaluation_command && snapshot.command_association.state == commands::status::open_recording,
-      "evaluation marker fabricated submission before close/execute observations");
-    command_closed(evaluation_command);
-    command_executed(queue, evaluation_command);
-    require(query_evaluation(selected, snapshot) == evidence_status::source_associated_evaluation &&
-        snapshot.command_association.state == commands::status::same_queue_callbacks_order_unverified &&
-        !snapshot.command_association.associated() && snapshot.command_association.ordering == commands::order::unknown &&
-        !snapshot.command_association.content_registered && !snapshot.command_association.final_color_registered,
-      "cross-recording callback order was promoted into execution association");
-    command_executed(queue, copy_command);
-    require(query_evaluation(selected, snapshot) == evidence_status::source_associated_evaluation &&
-        snapshot.command_association.state == commands::status::repeated_submission,
-      "repeated submission retained command-associated evidence");
-
-    command_reset(evaluation_command);
-    selected.capture_marker = capture_command_marker(evaluation_command);
-    call_v1_constants(constants, 3, 1);
-    call_v1_tag(&resource, 0, 1, nullptr);
-    call_v1_evaluate(&evaluation_native, 0, 3, 1);
-    command_closed(evaluation_command);
-    command_executed(queue, evaluation_command);
-    require(query_evaluation(selected, snapshot) == evidence_status::command_associated_evaluation &&
-        snapshot.command_association.associated() && snapshot.command_association.same_recording &&
-        snapshot.command_association.ordering == commands::order::copy_before_evaluation,
-      "same-recording event order did not retain narrow command association");
-
-    command_reset(copy_command);
-    command_reset(evaluation_command);
-    selected.capture_marker = capture_command_marker(copy_command);
-    command_closed(copy_command);
-    command_executed(queue, copy_command);
-    call_v1_constants(constants, 2, 1);
-    call_v1_tag(&resource, 0, 1, nullptr);
-    block_original = true;
-    std::thread delayed([&] { call_v1_evaluate(&evaluation_native, 0, 2, 1); });
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!original_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
-    const bool entered = original_entered.load(std::memory_order_acquire);
-    command_reset(evaluation_command);
-    block_original = false;
-    release_original = true;
-    delayed.join();
-    require(entered, "delayed evaluation never entered original");
-    require(query_evaluation(selected, snapshot, 5000) == evidence_status::source_associated_evaluation &&
-        snapshot.evaluation_recording && !snapshot.recording_stable &&
-        snapshot.command_association.state == commands::status::recording_changed,
-      "reset inside original evaluation retained stable recording association");
-  }
-
-  void test_evaluation_content() {
-    fixture cleanup{probe_config::ledger};
-    require(testing::install(testing::abi::v1_1_1, v1_targets), "content hook install failed");
-    int native{}, command_native{}, backup_native{};
-    const auto command = reinterpret_cast<std::uintptr_t>(&command_native);
-    constexpr std::uint64_t queue = 501, device = 502;
-    auto selected = selection(&native);
-    selected.command_queue = queue;
-    selected.backup_resource = reinterpret_cast<std::uintptr_t>(&backup_native);
-    selected.backup_id = 8;
-    const content::resource_key source{selected.resource, selected.source_id}, backup{selected.backup_resource, selected.backup_id};
-    queue_initialized(queue, device, 1);
-    command_initialized(command, device, 2);
-    depth_resource_initialized(source.native, source.lifetime, device, true);
-    depth_resource_initialized(backup.native, backup.lifetime, device, true);
-    // Global unsupported operations can precede command destruction without a
-    // Reset. Their retired bans must not saturate future content observations.
-    for (unsigned i = 0; i != 600; ++i) {
-      const std::uint64_t retired = 10000 + i;
-      command_initialized(retired, device, retired);
-      depth_content_invalidate(retired);
-      command_destroyed(retired);
-    }
-    auto constants = old_camera();
-    abi_v1::resource resource{};
-    resource.native = &native;
-    std::uint32_t frame{};
-    auto setup = [&] {
-      command_reset(command, device, 2);
-      call_v1_constants(constants, ++frame, 1);
-      call_v1_tag(&resource, 0, 1, nullptr);
-    };
-    auto copy = [&] {
-      selected.depth_copy = record_depth_copy(command, source, backup);
-      selected.capture_marker = selected.depth_copy.recording;
-      require(selected.depth_copy.valid(), "copy observation unexpectedly invalid");
-    };
-    auto evaluate = [&] { call_v1_evaluate(&command_native, 0, frame, 1); };
-    auto submit = [&] { command_closed(command); command_executed(queue, command); };
-    evaluation_snapshot snapshot;
-    setup(); copy(); evaluate(); submit();
-    require(query_evaluation(selected, snapshot) == evidence_status::tracked_content_evaluation &&
-        snapshot.content_association.matched() && !snapshot.content_association.coverage_complete &&
-        !snapshot.content_association.final_color_registered && !snapshot.command_association.content_registered,
-      "real hook did not associate immutable observed content with incomplete coverage");
-    command_initialized(50000, device, 50000);
-    depth_content_invalidate(50000);
-    require(query_evaluation(selected, snapshot) == evidence_status::command_associated_evaluation &&
-        !snapshot.content_association.matched(), "another recording's unknown-resource mutation retained content association");
-    command_destroyed(50000);
-    setup(); copy(); evaluate(); submit();
-    require(query_evaluation(selected, snapshot) == evidence_status::tracked_content_evaluation,
-      "fresh snapshots after cross-recording invalidation failed to recover");
-    auto changed = selected;
-    changed.backup_id++;
-    require(query_evaluation(changed, snapshot) == evidence_status::command_associated_evaluation &&
-        !snapshot.content_association.matched(), "selected backup generation mismatch retained content match");
-    changed = selected; changed.capture_marker.event++;
-    require(query_evaluation(changed, snapshot) != evidence_status::tracked_content_evaluation,
-      "selected command marker substituted for actual copy event");
-
-    setup(); copy(); depth_content_write(command, source.native, source.lifetime); evaluate(); submit();
-    require(query_evaluation(selected, snapshot) == evidence_status::command_associated_evaluation &&
-        snapshot.content_association.state == content::status::different_source_content,
-      "real hook accepted copy/clear/evaluate mismatch");
-    setup(); evaluate(); depth_content_write(command, source.native, source.lifetime); copy(); submit();
-    require(query_evaluation(selected, snapshot) == evidence_status::command_associated_evaluation &&
-        snapshot.content_association.state == content::status::different_source_content,
-      "real hook accepted evaluate/write/copy mismatch");
-    setup(); evaluate(); copy(); depth_content_write(command, source.native, source.lifetime); submit();
-    require(query_evaluation(selected, snapshot) == evidence_status::tracked_content_evaluation,
-      "source clear after evaluation/copy incorrectly rejected preserved backup");
-    command_reset(command, device, 2);
-    depth_content_write(command, backup.native); // Native-only destination lookup covers game copies too.
-    require(query_evaluation(selected, snapshot) != evidence_status::tracked_content_evaluation,
-      "later backup overwrite retained old content association");
-
-    setup(); copy();
-    block_original = true;
-    std::thread delayed([&] { evaluate(); });
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!original_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
-    const bool entered = original_entered.load(std::memory_order_acquire);
-    depth_content_write(command, source.native, source.lifetime);
-    block_original = false; release_original = true; delayed.join();
-    require(entered, "blocked content evaluation never entered original");
-    submit();
-    require(query_evaluation(selected, snapshot, 5000) == evidence_status::command_associated_evaluation &&
-        snapshot.tags[snapshot.matched_tag].content_use.state == content::status::different_source_content,
-      "mutation inside original evaluation was published as stable content");
-
-    setup(); copy(); evaluate(); submit();
-    require(query_evaluation(selected, snapshot) == evidence_status::tracked_content_evaluation, "content baseline did not recover");
-    depth_resource_destroyed(source.native, source.lifetime);
-    depth_resource_initialized(source.native, source.lifetime, device, true);
-    require(query_evaluation(selected, snapshot) != evidence_status::tracked_content_evaluation,
-      "resource re-registration resurrected immutable evaluation/copy association");
-  }
-
-  void test_inactive_content_transition() {
-    fixture cleanup{probe_config::ledger};
-    int native{}, backup_native{}, command_native{};
-    const auto command = reinterpret_cast<std::uintptr_t>(&command_native);
-    constexpr std::uint64_t device = 611, queue = 612;
-    auto selected = selection(&native);
-    selected.command_queue = queue;
-    selected.backup_resource = reinterpret_cast<std::uintptr_t>(&backup_native);
-    selected.backup_id = 8;
-    const content::resource_key source{selected.resource, selected.source_id}, backup{selected.backup_resource, selected.backup_id};
-    command_initialized(command, device, 1); queue_initialized(queue, device, 2);
-    depth_resource_initialized(source.native, source.lifetime, device, true);
-    depth_resource_initialized(backup.native, backup.lifetime, device, true);
-    selected.depth_copy = record_depth_copy(command, source, backup);
-    selected.capture_marker = selected.depth_copy.recording;
-    require(selected.capture_marker && !selected.depth_copy.valid(), "inactive content observation lost command-only marker or fabricated content");
-    depth_content_write(command, source.native, source.lifetime);
-    depth_content_invalidate(command); // Ignored while no supported observer exists.
-    require(testing::install(testing::abi::v1_1_1, v1_targets), "inactive transition hook install failed");
-    auto constants = old_camera(); abi_v1::resource resource{}; resource.native = &native;
-    call_v1_constants(constants, 1, 1); call_v1_tag(&resource, 0, 1, nullptr);
-    call_v1_evaluate(&command_native, 0, 1, 1);
-    command_closed(command); command_executed(queue, command);
-    evaluation_snapshot snapshot;
-    require(query_evaluation(selected, snapshot) == evidence_status::command_associated_evaluation &&
-        !snapshot.content_association.matched(), "inactive copy was promoted after observation started");
-    command_reset(command, device, 1);
-    selected.depth_copy = record_depth_copy(command, source, backup);
-    selected.capture_marker = selected.depth_copy.recording;
-    require(selected.depth_copy.valid(), "observer transition did not preserve tracked resource lifetimes");
-    call_v1_constants(constants, 2, 1); call_v1_evaluate(&command_native, 0, 2, 1);
-    command_closed(command); command_executed(queue, command);
-    require(query_evaluation(selected, snapshot) == evidence_status::tracked_content_evaluation,
-      "fresh active copy/evaluation could not recover after inactive content interval");
-  }
-
-  void test_non_renderer_evaluations() {
-    {
-      fixture cleanup{probe_config::ledger};
-      require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 feature filter install failed");
-      int native{}; abi_v1::resource resource{}; resource.native = &native;
-      auto constants = old_camera();
-      call_v1_constants(constants, 77, 0); call_v1_tag(&resource, 0, 0, nullptr); call_v1_evaluate(nullptr, 0, 77, 0);
-      const auto selected = selection(&native);
-      evaluation_snapshot baseline, next;
-      require(query_evaluation(selected, baseline) == evidence_status::source_associated_evaluation, "missing DLSS filter baseline");
-      for (const auto feature : {3u, 1u, 2u, 0xffffffffu}) for (const auto marker : {0u, 4u}) for (const auto success : {true, false}) {
-        result_v1 = success;
-        const auto before = evaluate_call.calls;
-        SetLastError(incoming_error);
-        require(call_v1_evaluate(nullptr, feature, 78, marker) == success && GetLastError() == outgoing_error,
-          "non-renderer v1 call changed return/LastError");
-        require(evaluate_call.calls == before + 1 && evaluate_call.first == nullptr && evaluate_call.a == feature &&
-            evaluate_call.b == 78 && evaluate_call.c == marker && evaluate_call.incoming_error == incoming_error,
-          "non-renderer v1 call changed count/arguments");
-        require(query_evaluation(selected, next) == evidence_status::source_associated_evaluation &&
-            next.sequence == baseline.sequence && next.frame.numeric == 77 && next.viewport == 0 && next.feature == 0,
-          "Reflex/other feature overwrote DLSS viewport or failure revoked renderer evidence");
-        require(!latest(4).found, "Reflex PresentStart marker fabricated viewport 4");
-      }
-    }
-    {
-      fixture cleanup{probe_config::ledger};
-      require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 feature filter install failed");
-      opaque_token token; mint(token, nullptr);
-      int native{}; auto view = viewport(0); auto constants = modern_camera();
-      auto resource = modern_resource(&native); auto tag = depth_tag_for(resource);
-      const base_structure *inputs[]{&view.base};
-      call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, nullptr); call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-      const auto selected = selection(&native);
-      evaluation_snapshot baseline, next;
-      require(query_evaluation(selected, baseline) == evidence_status::source_associated_evaluation &&
-          baseline.frame.kind == frame_identity_kind::v2_observed_token, "missing v2 DLSS filter baseline");
-      for (const auto feature : {3u, 7u, 0xffffffffu}) for (const auto result : {0, -7}) {
-        result_v2 = result;
-        auto *opaque_inputs = reinterpret_cast<const base_structure **>(1);
-        const auto before = evaluate_call.calls;
-        SetLastError(incoming_error);
-        require(call_v2_evaluate(feature, token.ref(), opaque_inputs, 0xffffffffu, nullptr) == result && GetLastError() == outgoing_error,
-          "non-renderer v2 call changed result/LastError");
-        require(evaluate_call.calls == before + 1 && evaluate_call.a == feature && evaluate_call.second == opaque_inputs &&
-            evaluate_call.b == 0xffffffffu && evaluate_call.incoming_error == incoming_error,
-          "non-renderer v2 opaque input forwarding changed");
-        require(query_evaluation(selected, next) == evidence_status::source_associated_evaluation && next.sequence == baseline.sequence,
-          "non-renderer v2 input was parsed or failure revoked DLSS evidence");
-      }
-    }
-  }
 
   void test_feature_independent_depth_contracts() {
     {
       fixture cleanup;
-      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      source_setting = "1"; initialize(nullptr);
       require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 feature-contract install failed");
       int native{}, commands{}; abi_v1::resource resource{}; resource.native = &native;
       auto constants = old_camera();
@@ -3468,7 +2819,7 @@ namespace {
     }
     {
       fixture cleanup;
-      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      source_setting = "1"; initialize(nullptr);
       require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 feature-contract install failed");
       opaque_token token; mint(token, nullptr);
       int native{}, commands{}; auto view = viewport(0);
@@ -3502,62 +2853,6 @@ namespace {
     }
   }
 
-  void test_color_tag_snapshots() {
-    {
-      fixture cleanup{probe_config::ledger};
-      require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 color fixture install failed");
-      int depth{}, hudless{}, input{}, output{};
-      abi_v1::resource d{}, h{}, i{}, o{}; d.native = &depth; h.native = &hudless; i.native = &input; o.native = &output;
-      auto constants = old_camera();
-      call_v1_constants(constants, 1, 0);
-      call_v1_tag(&d, 0, 0, nullptr); call_v1_tag(&h, 2, 0, nullptr); call_v1_tag(&i, 3, 0, nullptr); call_v1_tag(&o, 4, 0, nullptr);
-      call_v1_evaluate(nullptr, 0, 1, 0);
-      evaluation_snapshot value;
-      require(query_evaluation(selection(&depth), value) == evidence_status::source_associated_evaluation &&
-          value.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&depth) &&
-          value.colors[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&hudless) &&
-          value.colors[1].value.native_resource == reinterpret_cast<std::uintptr_t>(&input) &&
-          value.colors[2].value.native_resource == reinterpret_cast<std::uintptr_t>(&output) && !value.colors[3].present,
-        "v1 colors were conflated with depth or each other");
-      call_v1_tag(nullptr, 3, 0, nullptr);
-      query_evaluation(selection(&depth), value);
-      require(value.colors[1].identity_available, "later color untag mutated immutable old evaluation");
-      call_v1_constants(constants, 2, 0); call_v1_evaluate(nullptr, 0, 2, 0);
-      require(query_evaluation(selection(&depth), value) == evidence_status::source_associated_evaluation &&
-          value.colors[1].present && !value.colors[1].identity_available && value.colors[2].identity_available,
-        "v1 null color untag erased another color or poisoned depth");
-    }
-    {
-      fixture cleanup{probe_config::ledger};
-      require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 color fixture install failed");
-      opaque_token token; mint(token, nullptr);
-      int depth{}, hudless{}, input{}, framed_input{}, output{}, local_output{};
-      auto d = modern_resource(&depth), h = modern_resource(&hudless), i = modern_resource(&input), fi = modern_resource(&framed_input);
-      auto o = modern_resource(&output), lo = modern_resource(&local_output);
-      auto dt = depth_tag_for(d), ht = depth_tag_for(h), it = depth_tag_for(i), ot = depth_tag_for(o), bt = depth_tag_for(o);
-      ht.type = 2; it.type = 3; ot.type = 4; bt.type = 53; bt.resource_ptr = nullptr;
-      const abi_v2::resource_tag global[]{dt, ht, it, ot, bt};
-      auto view = viewport(0); auto constants = modern_camera();
-      call_v2_constants(constants, token.ref(), view); call_v2_tag(view, global, 5, nullptr);
-      auto ft = depth_tag_for(fi); ft.type = 3;
-      call_v2_framed_tag(token.ref(), view, &ft, 1, nullptr);
-      auto lt = depth_tag_for(lo); lt.type = 4;
-      const base_structure *inputs[]{&view.base, &lt.base};
-      call_v2_evaluate(0, token.ref(), inputs, 2, nullptr);
-      evaluation_snapshot value;
-      require(query_evaluation(selection(&depth), value) == evidence_status::source_associated_evaluation &&
-          value.colors[0].scope == tag_scope::active_global && value.colors[0].identity_available &&
-          value.colors[1].scope == tag_scope::explicit_frame && value.colors[1].value.native_resource == reinterpret_cast<std::uintptr_t>(&framed_input) &&
-          value.colors[2].scope == tag_scope::evaluation_local && value.colors[2].value.native_resource == reinterpret_cast<std::uintptr_t>(&local_output),
-        "v2 independent color scope overrides lost");
-      require(value.colors[3].present && value.colors[3].supported && !value.colors[3].identity_available &&
-          value.colors[3].value.type == 53 && value.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&depth),
-        "legal null v2 backbuffer fabricated identity or poisoned depth");
-      value.colors[2].value.native_resource = 999;
-      query_evaluation(selection(&depth), value);
-      require(value.colors[2].value.native_resource == reinterpret_cast<std::uintptr_t>(&local_output), "color snapshot exposed mutable storage");
-    }
-  }
   // A v2 slGetFeatureFunction lookup other than the FG options entry passes
   // through unchanged (result, returned pointer, arguments and LastError),
   // with the Diagnostics switch on as well.
@@ -3621,7 +2916,7 @@ namespace {
       {testing::abi::v2_7_30, 68, false}, {testing::abi::v2_7_30, 69, false}};
     for (const auto &c : cases) {
       fixture cleanup;
-      probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+      source_setting = "1"; initialize(nullptr);
       require(testing::install(c.version, presentation_v2_targets), "versioned UI alpha hook install failed");
       const auto contract = buffers::active();
       require(contract.known && buffers::ui_alpha_authenticated(contract) == !(c.version == testing::abi::v2_7_30),
@@ -3710,7 +3005,7 @@ namespace {
   void test_frame_generation_color_only_alpha() {
     namespace mask = sunshine_game3d::ui_mask;
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     // UIAlpha is tag 69 only from Streamline 2.12.0 onward.
     require(testing::install(testing::abi::v2_12_0, presentation_v2_targets), "FG alpha hook install failed");
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
@@ -3841,7 +3136,7 @@ namespace {
   void test_ui_gate_viewport_zero_mixed_batch() {
     namespace mask = sunshine_game3d::ui_mask;
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Mixed UI hook install failed");
     auto view = viewport(0);
     int depth{}, motion{}, hudless{}, commands{};
@@ -3884,7 +3179,7 @@ namespace {
   void test_repeated_fg_off_preserves_independent_ui() {
     namespace mask = sunshine_game3d::ui_mask;
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Repeated FG Off hook install failed");
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
     void *function{};
@@ -3954,7 +3249,7 @@ namespace {
   void test_ui_scope_without_frame_generation_options() {
     namespace mask = sunshine_game3d::ui_mask;
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     // Includes UIAlpha, which is tag 69 only from Streamline 2.12.0 onward.
     require(testing::install(testing::abi::v2_12_0, presentation_v2_targets), "Automatic UI hook install failed");
     auto view = viewport(11);
@@ -4003,7 +3298,7 @@ namespace {
 
   void test_standalone_depth_tags() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Standalone depth hook install failed");
     auto view = viewport(0);
     int native{}, commands{};
@@ -4105,7 +3400,7 @@ namespace {
   // its FG untags as "zero-base resource compatibility ... native=0x0").
   void test_depth_untag_reporting() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Untag hook install failed");
     auto view = viewport(0);
     int native{}, commands{};
@@ -4142,7 +3437,7 @@ namespace {
 
   void test_frame_generation_tags() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
     void *function{};
@@ -4418,7 +3713,7 @@ namespace {
 
   void test_frame_generation_cached_options_and_global_camera() {
     fixture cleanup;
-    probe_setting = "0"; source_setting = "1"; initialize(nullptr);
+    source_setting = "1"; initialize(nullptr);
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
     void *cached_entry{};
     require(call_feature_function(1000, "slDLSSGSetOptions", cached_entry) == 0 && cached_entry == returned_feature_function,
@@ -4738,7 +4033,6 @@ namespace {
 static void test_call_trace_only(bool modern) {
   using namespace sunshine_streamline;
   fixture cleanup;
-  probe_setting = "0";
   source_setting = "0";
   call_trace_setting = "1";
   initialize(nullptr);
@@ -4762,7 +4056,7 @@ static void test_call_trace_only(bool modern) {
   const auto after = sunshine_upscaler_trace::testing::counts();
   require(after.streamline == before.streamline + 2 && after.streamline_covered,
     "Trace-only SL evaluations or coverage missing");
-  require(testing::counts().evaluations == 0 && !capture_command_marker(1),
+  require(testing::counts().evaluations == 0,
     "Trace-only calls entered source or content diagnostics");
   shutdown();
   const auto stopped = sunshine_upscaler_trace::testing::counts().streamline;
@@ -4771,7 +4065,7 @@ static void test_call_trace_only(bool modern) {
   require(sunshine_upscaler_trace::testing::counts().streamline == stopped,
     "Disabled call trace observed retained pass-through hook");
   call_trace_setting = nullptr;
-  probe_setting = "0"; source_setting = "1";
+  source_setting = "1";
 }
 
 int main(int argc, char **argv) {
@@ -4953,7 +4247,7 @@ int main(int argc, char **argv) {
     test_call_trace_only(true);
     std::puts("PASS v1/v2 call-route trace remains independent of depth selection and full content diagnostics");
     // The research ledger tests' checks of kept behaviour, in the shipping
-    // configuration (refactor D2-pre), in the ledger group's order.
+    // configuration.
     test_source_rollback_shipping();
     std::puts("PASS source rollback installs and observes nothing; disabled retained hooks pass through");
     test_evaluation_v1_shipping();
@@ -4969,37 +4263,6 @@ int main(int argc, char **argv) {
     std::puts("PASS Reflex/unknown feature passthrough preserves the stored DLSS evaluation and ignores non-renderer failures");
     test_color_tag_snapshots_shipping();
     std::puts("PASS stored HUD-less and legal null-backbuffer colour tags stay separate from depth");
-    // The StreamlineCameraProbe research ledger's own tests: each reads what
-    // only the ledger records (query_evaluation's evaluation evidence, command
-    // and content tracking, the probe's own opt-in), so they run in the
-    // ledger's configuration (probe_config::ledger); every test above runs in
-    // the shipping one. The group is deleted with the ledger (refactor D2).
-    test_diagnostic_opt_in();
-    std::puts("PASS default-off diagnostic config, absent command/native tracking, opt-in hooks and disabled retained pass-through");
-    test_evaluation_v1();
-    std::puts("PASS v1 evaluation evidence, exact frame history, copy isolation and fail-closed recovery");
-    test_evaluation_immutable_and_ordered();
-    std::puts("PASS immutable evaluation ordering, bounded frame eviction and age limits");
-    test_evaluation_v2_tokens();
-    std::puts("PASS v2 observed token generations, numeric provenance, frame tags and local overrides");
-    test_sdk_vram_warning();
-    std::puts("PASS eWarnOutOfVRAM keeps evaluations and inputs; other SDK results still fail");
-    test_evaluation_ambiguity_and_invalid_tags();
-    std::puts("PASS ambiguous viewport and newer invalid tag rejection");
-    test_evaluation_global_contract();
-    std::puts("PASS complete active global/frame tag contract revalidation");
-    test_evaluation_input_age();
-    std::puts("PASS age uses observation entry rather than delayed original completion");
-    test_evaluation_command_markers();
-    std::puts("PASS real-hook recording markers, submit association, repeats and in-flight reset rejection");
-    test_evaluation_content();
-    std::puts("PASS real-hook observed content, copy/clear orders, backup identities and in-flight mutation rejection");
-    test_inactive_content_transition();
-    std::puts("PASS inactive content gating preserves command markers and restarts content evidence on observer activation");
-    test_non_renderer_evaluations();
-    std::puts("PASS Reflex/unknown feature passthrough preserves DLSS viewport/frame evidence and ignores non-renderer failures");
-    test_color_tag_snapshots();
-    std::puts("PASS separate immutable HUDless/input/output/backbuffer color tags and legal null-backbuffer metadata");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL Streamline probe: %s\n", error.what());

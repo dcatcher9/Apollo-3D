@@ -4891,8 +4891,7 @@ consult it, and it is not proof of what caused the loss. Recovery repeats the fr
 first-loss evidence, rather than attributing the interruption to a later callback.
 The observation owner keeps a fixed 64-entry diagnostic journal of revision changes, including
 the reason, call site, tick, thread, call sequence, and known viewport, feature, SDK result and
-camera reset. It operates with the lightweight source observer even when `StreamlineCameraProbe`
-is disabled. Publication and lookup each try one independent slot lock without waiting;
+camera reset. It operates with the lightweight source observer. Publication and lookup each try one independent slot lock without waiting;
 contention, overwritten entries and an in-flight publication report `found=0` / `unavailable`.
 They never substitute another revision, alter the production loss counter or authorize reuse.
 Unknown viewport, feature and reset values are `UINT32_MAX`; `sdk_known=0` means no SDK result
@@ -5104,8 +5103,7 @@ Native command observation is scoped to the authenticated COM interface's vtable
 Implementation addresses are not unique method identities: Streamline can share one forwarding
 function between command-list and device methods with incompatible signatures. Discovery validates
 the exact interface and retains module-owned table storage; installation replaces only that slot
-and readiness requires that it still contains our hook. The same slot mechanism serves optional
-discard diagnostics. Disabled hooks retain a callable original and pass through for process life.
+and readiness requires that it still contains our hook. Disabled hooks retain a callable original and pass through for process life.
 A slot whose discovery is refused is remembered: its table or original function lies outside a
 loaded module image (for example another tool's trampoline), or its method already has eight
 slots. Every later object sharing that slot would be refused identically, so the refusal
@@ -5573,7 +5571,7 @@ yet no SR/RR evaluation found its framed tag. A repeated request for the same in
 nothing and takes no writer, so the about 30 requests a frame from several threads in The Witcher
 3 no longer contend for the token store. Without a numeric index, every request is a new frame.
 Camera reset, SDK failures, token-generation checks, resource lifetimes and depth expiry remain
-authoritative. The command/content ledger retains its independent observation contract.
+authoritative.
 
 When the diagnostic is enabled, the actual depth-sampling submission freezes a compact camera
 observation in its existing immutable sample envelope. The coefficients, evidence level and
@@ -5585,48 +5583,9 @@ up to three tagged addresses in the selector's existing resource map with a nonb
 Unknown or busy lookups remain explicit and never override selection. These queries, lookups and
 reports are skipped when the probe is disabled.
 
-The probe compares tags with the **original game depth resource**, not the selector's backup
-texture. The diagnostic branch of hook callbacks performs bounded observation only; its validation and throttled logging run
-from the effect callback. Once hooked, the observer module and interposer remain resident until
-process exit so in-flight return paths remain valid. Disabling/unloading the add-on stops observation
-and leaves safe pass-through calls; updating the DLL therefore requires a game restart.
-
-On D3D12, evaluation entry and the selector's actual copy sites also record command
-object lifetimes and recording generations. The log distinguishes source-address matches from
-two markers in the same recording with one observed close and submission on the runtime's queue.
-Repeated submissions, retired objects, missing callbacks, unknown native identities, secondary
-execution and incompatible queues do not earn this association. These are pre-call API
-observations, not proof of native API success or GPU completion. Different recordings on the
-same queue remain explicitly order-unverified: concurrent native submissions can occur in a
-different order from their ReShade callbacks. A D3D12 Generic capture is recorded only at the end
-of the frame, on the runtime's own immediate list, which the tracker never sees reset: both its
-snapshot and the published copy read as an unknown recording that never inherits content
-correspondence. Markers that share a recording with an evaluation come from the API adapters.
-
-The tracking store is bounded and nonblocking. A missed lifecycle event revokes old evidence;
-independent per-ReShade-object lifetime cookies allow an ordinary reset and submission to
-reestablish tracking without restarting the game. A busy marker capture simply drops that
-marker. D3D11 has different deferred-context semantics and does not use this D3D12 model.
-For an opted-in diagnostic, while no supported Streamline observer is active, content write/invalidation callbacks return
-before taking the tracker lock or scanning the ledger. Lifecycle discovery and command-only copy
-markers remain available. Activation starts a fresh content-observation epoch, preserving current
-resource lifetimes but rejecting proof from the inactive interval.
-
-The content observer adds immutable use/copy snapshots to that same recording. Observed draws,
-depth clears and copies advance the source's content version; resource lifetime, backup reuse and
-later backup writes revoke mismatched snapshots. A copy followed by a source clear and then an
-evaluation is rejected, while an evaluation followed by a matching copy and then a clear can
-retain their observed correspondence; a Generic copy, recorded at the end of the frame on the
-runtime's own list, never shares the evaluation's recording. Partial writes and ambiguous alias/barrier events revoke
-evidence rather than infer which pixels survived. Recording destruction retires its uncertainty
-entry so short-lived command lists do not exhaust the bounded store permanently.
-
-The add-on separately observes native D3D12 `DiscardResource`, which ReShade 6.8 does not expose
-as an add-on event. It discovers the standard COM entry from live native command lists, retains
-at most eight interface slots, and installs hooks later during polling. Partial discards
-revoke whole-resource evidence without reading the optional rectangle array. Hook targets and the
-add-on stay loaded for process lifetime; shutdown leaves pass-through hooks in place. Activating
-new observation coverage starts a fresh content epoch, so earlier snapshots cannot inherit it.
+Once hooked, the observer module and interposer remain resident until process exit so in-flight
+return paths remain valid. Disabling/unloading the add-on stops observation and leaves safe
+pass-through calls; updating the DLL therefore requires a game restart.
 
 Evaluations with validated scene-depth contracts publish diagnostic camera/depth evidence,
 independently of their feature ID. Typed 2.x inputs and exact legacy frame/view contracts use the
@@ -5635,25 +5594,12 @@ invalidating another source. The separate v2 tag adapter can capture `OnlyValidN
 tag boundary independently of FG. Legacy Reflex uses the apparent viewport argument for a timing marker; treating marker
 0 as viewport 0 would overwrite the rendering evidence.
 
-The observer separately retains HUD-less, scaling-input, scaling-output, backbuffer, UIColorAndAlpha
-and UIAlpha tags. Live UI capture at tag boundaries independent of FG is described under the UI protection
+The observer separately retains HUD-less, backbuffer, UIColorAndAlpha and UIAlpha tags (scaling
+input and output colors are not observed). Live UI capture at tag boundaries independent of FG is described under the UI protection
 contract; merely retaining diagnostic color metadata does not authorize a mask. Actual effects-input
 identity comes from ReShade's begin-effects render-target view,
 which may differ from the swapchain after a resolve/copy. These are frame, identity and
 declared-extent observations; none establishes final spatial alignment.
-
-An accepted result is explicitly **observed-content-match, coverage-incomplete**. Other native
-mutations and some enhanced-barrier and render-pass resolve information remain unobserved.
-These diagnostic observations alone do not authorize rendering across aliasing or generated frames,
-or establish final-color/depth registration. Production capture and jitter admission are described above.
-Different command recordings remain unverified even on the same queue. Direct sampling and copies
-recorded inside the current effects pass may have no submitted copy marker. None of these results
-changes existing depth selection, readiness or stereo output.
-
-To test, enable the diagnostic setting, start a supported game, enter actual gameplay, and inspect `ReShade.log` for the camera
-probe report. A present but unused Streamline library may supply no camera constants. That outcome
-is recorded rather than treated as support. The separate production Streamline path above consumes
-supported capture-bound projection data; the passive diagnostic alone cannot authorize rendering.
 
 ### Controlled camera-depth candidate
 

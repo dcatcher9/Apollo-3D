@@ -617,7 +617,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
   };
 }
 
-#if !defined(SUNSHINE_COMMAND_ASSOCIATION_RUNTIME) && !defined(SUNSHINE_RAW_SCENE_RUNTIME)
+#if !defined(SUNSHINE_RAW_SCENE_RUNTIME)
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (argc != 5 && argc != 7 && argc != 8) {

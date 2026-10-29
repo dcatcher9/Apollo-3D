@@ -803,7 +803,7 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestTracked(effect_runtime *r
 // command state. It checks accounting only; no mesh/copy GPU command is issued.
 extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect_runtime *runtime, uint64_t native_resource)
 {
-	if (!s_registered || runtime == nullptr || native_resource == 0 || s_streamline_probe_events) return FALSE;
+	if (!s_registered || runtime == nullptr || native_resource == 0) return FALSE;
 	auto *queue = runtime->get_command_queue();
 	if (queue == nullptr) return FALSE;
 	auto *cmd = queue->get_immediate_command_list();

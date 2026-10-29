@@ -140,7 +140,6 @@ namespace sunshine_streamline {
     // particular there is no destructible C++ mutex or worker used by detours.
     SRWLOCK presentations_lock = SRWLOCK_INIT;
     SRWLOCK poll_lock = SRWLOCK_INIT;
-    SRWLOCK commands_lock = SRWLOCK_INIT;
     SRWLOCK source_resources_lock = SRWLOCK_INIT;
     struct source_resource { std::uint64_t native{}, lifetime{}, device{}; };
     std::array<source_resource, 512> source_resources{};
@@ -148,14 +147,6 @@ namespace sunshine_streamline {
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
     std::atomic<unsigned> source_lifecycle_waiters{};
 #endif
-    commands::tracker command_tracker;
-    content::ledger content_ledger;
-    bool content_observing{}; // Guarded by commands_lock.
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-    std::atomic<bool> test_content_requested{};
-    std::atomic<bool> test_capture_requested{};
-#endif
-    std::atomic<bool> command_observation_lost{};
     struct metadata_state {
       viewport_record records[slot_count]{};
       frame_record frames[frame_count]{};
@@ -184,7 +175,6 @@ namespace sunshine_streamline {
       return update;
     }
     std::atomic<bool> observing{};
-    std::atomic<bool> requested{};
     std::atomic<bool> source_requested{};
     std::atomic<std::uint64_t> observation_generation{};
     std::atomic<std::uint64_t> constant_calls{}, tag_calls{}, evaluation_calls{}, dropped{}, invalid{};
@@ -417,8 +407,7 @@ namespace sunshine_streamline {
       ~loss_context_scope() { loss_context = previous; }
     };
     std::atomic<std::uint64_t> epoch{};
-    std::uint64_t next_discovery{}, next_report{}, last_report_activity{UINT64_MAX};
-    selected_depth last_selected{};
+    std::uint64_t next_discovery{};
     HMODULE addon_module{};
     abi installed_abi{};
     // Header numbering of the hooked interposer; raw tags are canonicalized once.
@@ -471,9 +460,6 @@ namespace sunshine_streamline {
       return source && ReadProcessMemory(GetCurrentProcess(), source, destination, size, &copied) && copied == size;
     }
     template<class T> bool read(const T *source, T &destination) { return read_bytes(source, &destination, sizeof(T)); }
-    const char *source_name(origin source) {
-      return source == origin::local ? "evaluate-local" : source == origin::frame ? "frame-tag" : "global-tag";
-    }
     void message(const char *text) { sunshine_log::message(reshade::log::level::info, text); }
     // `line` is a frozen site id, not a live line number: each loss site below
     // passes the literal that its source line number had at ff50be30 (where it
@@ -496,13 +482,11 @@ namespace sunshine_streamline {
       ++dropped; lose(cause, site, line, details);
     }
     bool middleware_requested() {
-      return !sunshine_addon_lifetime::stopping() &&
-        (requested.load(std::memory_order_acquire) || source_requested.load(std::memory_order_acquire));
+      return !sunshine_addon_lifetime::stopping() && source_requested.load(std::memory_order_acquire);
     }
     unsigned tag_index(std::uint32_t type) {
-      // Scaling input/output colors are diagnostic-only observations.
-      if (!requested.load(std::memory_order_acquire) &&
-          (type == buffers::scaling_input_color || type == buffers::scaling_output_color))
+      // Scaling input/output colors are not observed.
+      if (type == buffers::scaling_input_color || type == buffers::scaling_output_color)
         return static_cast<unsigned>(observed_tag_types.size());
       return slot_of(type);
     }
@@ -550,148 +534,6 @@ namespace sunshine_streamline {
         for (const auto &entry : source_resources) if (entry.native == native) { result = entry; break; }
       ReleaseSRWLockShared(&source_resources_lock);
       return result;
-    }
-    std::uint64_t command_ticket() {
-      const auto ticket = observation_generation.load(std::memory_order_acquire);
-      return !sunshine_addon_lifetime::stopping() && requested.load(std::memory_order_acquire) &&
-        observation_generation.load(std::memory_order_acquire) == ticket ? ticket : 0;
-    }
-    bool current_commands(std::uint64_t ticket) {
-      return !sunshine_addon_lifetime::stopping() && ticket && requested.load(std::memory_order_acquire) &&
-        observation_generation.load(std::memory_order_acquire) == ticket;
-    }
-    bool content_requested() {
-      if (sunshine_addon_lifetime::stopping()) return false;
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-      if (test_content_requested.load(std::memory_order_acquire)) return true;
-#endif
-      return requested.load(std::memory_order_acquire) && observing.load(std::memory_order_acquire);
-    }
-    void sync_content_observation() {
-      const bool active = content_requested();
-      if (active != content_observing) {
-        content_ledger.restart_observations();
-        content_observing = active;
-        native_discard::set_active(active);
-      }
-    }
-    template<class Function> void command_event(Function &&function) {
-      const auto ticket = command_ticket();
-      if (!ticket) return;
-      if (!TryAcquireSRWLockExclusive(&commands_lock)) {
-        command_observation_lost.store(true, std::memory_order_release);
-        dropped_observation(loss_diagnostics::reason::commands_busy, __func__, 601);
-        return;
-      }
-      if (current_commands(ticket)) {
-        // A missed lifecycle callback cannot be reconstructed from native pointer
-        // equality. Require fresh lifecycle observations after a tracking loss.
-        if (command_observation_lost.exchange(false, std::memory_order_acq_rel)) {
-          command_tracker.clear();
-          content_ledger.clear();
-        }
-        sync_content_observation();
-        function(command_tracker);
-      }
-      ReleaseSRWLockExclusive(&commands_lock);
-    }
-    void native_discard_invalidated(std::uint64_t command, std::uint64_t resource) {
-      if (!content_requested()) return;
-      if (!command) {
-        command_event([](commands::tracker &) { content_ledger.restart_observations(); });
-      } else depth_content_invalidate(command, resource);
-    }
-    bool recording_unchanged(const commands::recording_marker &marker) {
-      const auto ticket = command_ticket();
-      if (!ticket || !TryAcquireSRWLockShared(&commands_lock)) return false;
-      const bool same = !command_observation_lost.load(std::memory_order_acquire) &&
-        command_tracker.same_open_recording(marker, loss_revision.load(std::memory_order_acquire));
-      ReleaseSRWLockShared(&commands_lock);
-      return same && current_commands(ticket);
-    }
-    [[maybe_unused]] commands::association associate_commands(const commands::recording_marker &evaluation,
-        const commands::recording_marker &copy, std::uint64_t queue) {
-      commands::association out;
-      const auto ticket = command_ticket();
-      if (!ticket) return out;
-      if (!TryAcquireSRWLockShared(&commands_lock)) { out.state = commands::status::busy; return out; }
-      const auto loss = loss_revision.load(std::memory_order_acquire);
-      out = command_tracker.associate(evaluation, copy, queue, loss);
-      if (command_observation_lost.load(std::memory_order_acquire)) out.state = commands::status::lost_observation;
-      ReleaseSRWLockShared(&commands_lock);
-      if (!current_commands(ticket) || loss != loss_revision.load(std::memory_order_acquire))
-        out.state = commands::status::lost_observation;
-      return out;
-    }
-    void capture_content(evaluation_snapshot &out) {
-      const auto ticket = command_ticket();
-      if (!ticket) return;
-      if (!TryAcquireSRWLockExclusive(&commands_lock)) {
-        auto details = loss_context;
-        details.sequence = out.sequence; details.viewport = out.viewport; details.feature = out.feature;
-        dropped_observation(loss_diagnostics::reason::commands_busy, __func__, 650, details); return;
-      }
-      if (current_commands(ticket) && !command_observation_lost.load(std::memory_order_acquire)) {
-        sync_content_observation();
-        const auto loss = loss_revision.load(std::memory_order_acquire);
-        // Tags are immutable copies by now. Atomically capture the command marker
-        // and all content uses before entering the game's original evaluation.
-        out.evaluation_recording = command_tracker.mark(out.command_buffer, loss);
-        const auto device = command_tracker.recording_device(out.evaluation_recording);
-        for (auto &tag : out.tags) if (content_observing && tag.present && tag.supported && tag.value.native_resource)
-          tag.content_use = content_ledger.use(out.evaluation_recording, tag.value.native_resource, device);
-      }
-      ReleaseSRWLockExclusive(&commands_lock);
-    }
-    void finish_content(evaluation_snapshot &value) {
-      const auto ticket = command_ticket();
-      if (!ticket || !TryAcquireSRWLockShared(&commands_lock)) {
-        for (auto &tag : value.tags) tag.content_use.state = content::status::lost_observation;
-        return;
-      }
-      const bool valid = current_commands(ticket) && !command_observation_lost.load(std::memory_order_acquire) &&
-        content_observing && content_requested() &&
-        command_tracker.same_open_recording(value.evaluation_recording, loss_revision.load(std::memory_order_acquire));
-      for (auto &tag : value.tags) if (tag.content_use.valid())
-        tag.content_use.state = valid ? content_ledger.unchanged(tag.content_use) : content::status::lost_observation;
-      ReleaseSRWLockShared(&commands_lock);
-    }
-    [[maybe_unused]] content::association associate_content(const content::use_snapshot &use, const content::copy_snapshot &copy,
-        content::resource_key source, content::resource_key backup) {
-      content::association out;
-      const auto ticket = command_ticket();
-      if (!ticket || !TryAcquireSRWLockShared(&commands_lock)) { out.state = content::status::lost_observation; return out; }
-      const auto loss = loss_revision.load(std::memory_order_acquire);
-      out = content_ledger.associate(use, copy, source, backup);
-      if (!content_observing || !content_requested() || command_observation_lost.load(std::memory_order_acquire) ||
-          use.recording.loss != loss || copy.recording.loss != loss)
-        out.state = content::status::lost_observation;
-      ReleaseSRWLockShared(&commands_lock);
-      if (!current_commands(ticket) || loss != loss_revision.load(std::memory_order_acquire)) out.state = content::status::lost_observation;
-      return out;
-    }
-    void associate_evidence(evaluation_snapshot &out, const selected_depth &selected) {
-      const auto ticket = command_ticket();
-      if (!ticket || !TryAcquireSRWLockShared(&commands_lock)) {
-        out.command_association.state = commands::status::busy;
-        return;
-      }
-      const auto loss = loss_revision.load(std::memory_order_acquire);
-      // One lock gives the combined command/content result one observation point.
-      // A destroy/reset between two independent queries must not splice evidence.
-      out.command_association = command_tracker.associate(out.evaluation_recording, selected.capture_marker, selected.command_queue, loss);
-      if (out.evaluation_recording && !out.recording_stable) out.command_association.state = commands::status::recording_changed;
-      if (out.command_association.associated()) {
-        out.status = evidence_status::command_associated_evaluation;
-        if (content_observing && content_requested() && content::same_recording(selected.capture_marker, selected.depth_copy.recording) &&
-            selected.capture_marker.event == selected.depth_copy.recording.event)
-          out.content_association = content_ledger.associate(out.tags[out.matched_tag].content_use, selected.depth_copy,
-            {selected.resource, selected.source_id}, {selected.backup_resource, selected.backup_id});
-        if (out.content_association.matched()) out.status = evidence_status::tracked_content_evaluation;
-      }
-      if (command_observation_lost.load(std::memory_order_acquire)) out.status = evidence_status::observation_lost;
-      ReleaseSRWLockShared(&commands_lock);
-      if (!current_commands(ticket) || loss != loss_revision.load(std::memory_order_acquire)) out.status = evidence_status::observation_lost;
     }
     std::uint64_t observation_ticket() {
       const auto ticket = observation_generation.load(std::memory_order_acquire);
@@ -1135,7 +977,7 @@ namespace sunshine_streamline {
     evaluation_snapshot capture_evaluation(std::uint32_t viewport, std::uint32_t feature,
         const frame_identity &identity, void *commands, std::uint64_t ticket, std::uint64_t serial,
         std::uint64_t loss, const batch *local = nullptr, const metadata_state *selected_state = nullptr,
-        bool tag_boundary = false, bool track_contents = true) {
+        bool tag_boundary = false) {
       evaluation_snapshot out;
       out.viewport = viewport;
       out.feature = feature;
@@ -1272,7 +1114,6 @@ namespace sunshine_streamline {
         value.observation_sequence = tag->source == origin::local ? serial : tag->serial;
       }
       pin.reset();
-      if (track_contents) capture_content(out);
       if (out.frame_correlated) {
         out.projection = validate(out.camera);
         if (out.decoded != decode_status::ok) out.status = evidence_status::rejected_constants;
@@ -1294,8 +1135,6 @@ namespace sunshine_streamline {
       details.reset = value.frame_correlated && value.decoded == decode_status::ok ? value.camera.reset : UINT32_MAX;
       value.successful_evaluation = success;
       value.tick = GetTickCount64();
-      value.recording_stable = success && recording_unchanged(value.evaluation_recording);
-      if (success) finish_content(value);
       if (!success) {
         value.status = evidence_status::evaluation_failed;
         lose(loss_diagnostics::reason::sdk_failure, __func__, 1486, details);
@@ -2281,13 +2120,12 @@ namespace sunshine_streamline {
         const auto serial = ++call_sequence;
         loss_context.sequence = serial;
         snapshot = capture_evaluation(viewport, feature, numeric_frame(frame), commands, ticket,
-          serial, loss_revision.load(std::memory_order_acquire), nullptr, nullptr, false, known_contract);
+          serial, loss_revision.load(std::memory_order_acquire), nullptr, nullptr, false);
       }
       const bool sample = inspect && (known_contract || (snapshot.frame_correlated &&
         snapshot.decoded == decode_status::ok && snapshot.projection.valid() && direct_source_admissible(snapshot) &&
         std::any_of(snapshot.tags.begin(), snapshot.tags.end(),
           [&](const evaluated_depth_tag &tag) { return direct_tag_admissible(snapshot, tag); })));
-      if (sample && !known_contract) capture_content(snapshot);
       bool copy_recorded{};
       const auto captured = sample ? nominate_depth_source(snapshot, true, &copy_recorded) : 0;
       call_trace.claim_depth_capture(sample && owns_nested_depth_capture(snapshot, copy_recorded));
@@ -2852,11 +2690,10 @@ namespace sunshine_streamline {
       const auto alpha = ui_inputs ? capture_ui_inputs(out, commands) : alpha_attempts{};
       evaluation_snapshot snapshot;
       if (ticket && out.valid_viewport)
-        snapshot = capture_evaluation(out.viewport, feature, identity, commands, ticket, serial, loss, &out, nullptr, false, known_contract);
+        snapshot = capture_evaluation(out.viewport, feature, identity, commands, ticket, serial, loss, &out, nullptr, false);
       const bool sample = ticket && (known_contract || (commands && out.valid_viewport &&
         direct_source_admissible(snapshot) && std::any_of(snapshot.tags.begin(), snapshot.tags.end(),
           [&](const evaluated_depth_tag &tag) { return direct_tag_admissible(snapshot, tag); })));
-      if (sample && !known_contract) capture_content(snapshot);
       const auto diagnostic = dump_stamp(ticket, serial, entry_tick, out.valid_viewport ? out.viewport : UINT32_MAX,
         reinterpret_cast<std::uintptr_t>(&frame), identity.numeric, identity.has_numeric, reinterpret_cast<std::uint64_t>(commands));
       if (sample && diagnostic.session) dump_metadata::observe_sl_inputs_v2(diagnostic, inputs, count);
@@ -3014,17 +2851,6 @@ namespace sunshine_streamline {
       installed_abi = version;
       hooks_installed = true;
       return true;
-    }
-    bool install_discard_observations() {
-      if (!content_requested()) return false;
-      if (!minhook_initialized) {
-        const auto status = MH_Initialize();
-        if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return false;
-        minhook_initialized = true;
-      }
-      // Content mode may have changed at discovery before the next command event.
-      native_discard::set_active(true);
-      return native_discard::install_pending();
     }
     versioning::information module_version(HMODULE module) {
       wchar_t path[32768]{};
@@ -3193,8 +3019,6 @@ namespace sunshine_streamline {
   }
 
   void initialize(HMODULE addon) {
-    bool diagnostic_enabled = false;
-    reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "StreamlineCameraProbe", diagnostic_enabled);
     bool source_enabled = true;
     reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "StreamlineDepthSource", source_enabled);
     bool call_trace_enabled = false;
@@ -3212,22 +3036,9 @@ namespace sunshine_streamline {
     // A pool install may still be discovering after device recreation; wait
     // for it before resetting the state it reads and writes.
     AcquireSRWLockExclusive(&poll_lock);
-    requested.store(false, std::memory_order_release);
     source_requested.store(false, std::memory_order_release);
     observing.store(false, std::memory_order_release);
     observation_generation.fetch_add(1, std::memory_order_acq_rel);
-    AcquireSRWLockExclusive(&commands_lock);
-    command_tracker.clear();
-    content_ledger.clear();
-    content_observing = false;
-    if (diagnostic_enabled) native_discard::initialize(native_discard_invalidated);
-    else native_discard::shutdown();
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-    test_content_requested.store(false, std::memory_order_release);
-    test_capture_requested.store(false, std::memory_order_release);
-#endif
-    command_observation_lost.store(false, std::memory_order_release);
-    ReleaseSRWLockExclusive(&commands_lock);
     AcquireSRWLockExclusive(&source_resources_lock);
     source_resources.fill({});
     source_resources_lost.store(false, std::memory_order_release);
@@ -3242,17 +3053,14 @@ namespace sunshine_streamline {
     ++history_loss; // Camera records were released: every viewport's history restarts.
     ++epoch;
     ReleaseSRWLockExclusive(&presentations_lock);
-    next_discovery = next_report = 0;
-    last_report_activity = UINT64_MAX;
-    last_selected = {};
-    requested.store(diagnostic_enabled, std::memory_order_release);
+    next_discovery = 0;
     source_requested.store(source_enabled, std::memory_order_release);
-    if (hooks_installed) observing.store(diagnostic_enabled || source_enabled, std::memory_order_release);
+    if (hooks_installed) observing.store(source_enabled, std::memory_order_release);
     ReleaseSRWLockExclusive(&poll_lock);
-    if (!diagnostic_enabled)
-      message("Sunshine Streamline: diagnostic probe disabled; command/content tracking is off");
+    message("Sunshine Streamline: diagnostic probe disabled; command/content tracking is off");
   }
-  bool enabled() { return requested.load(std::memory_order_acquire); }
+  // Constant false: the StreamlineCameraProbe research ledger was removed.
+  bool enabled() { return false; }
   bool source_enabled() { return source_requested.load(std::memory_order_acquire); }
   std::uint64_t depth_observation_revision() { return loss_revision.load(std::memory_order_acquire); }
   bool query_depth_observation_loss(std::uint64_t revision, loss_diagnostics::event &out) {
@@ -3260,8 +3068,6 @@ namespace sunshine_streamline {
   }
   void shutdown() {
     sunshine_upscaler_trace::shutdown();
-    native_discard::shutdown();
-    requested.store(false, std::memory_order_release);
     source_requested.store(false, std::memory_order_release);
     observing.store(false, std::memory_order_release);
     observation_generation.fetch_add(1, std::memory_order_acq_rel);
@@ -3418,85 +3224,11 @@ namespace sunshine_streamline {
     return recorded;
   }
 
-  void command_initialized(std::uint64_t native, std::uint64_t device, std::uint64_t cookie) {
-    command_event([&](commands::tracker &tracker) { tracker.command_initialized(native, device, cookie); });
-  }
-  void command_destroyed(std::uint64_t native) {
-    command_event([&](commands::tracker &tracker) { tracker.command_destroyed(native); content_ledger.command_destroyed(native); });
-  }
-  void command_reset(std::uint64_t native, std::uint64_t device, std::uint64_t cookie) {
-    command_event([&](commands::tracker &tracker) { tracker.command_reset(native, device, cookie); content_ledger.command_reset(native); });
-  }
-  void command_closed(std::uint64_t native) {
-    command_event([&](commands::tracker &tracker) { tracker.command_closed(native); });
-  }
-  void queue_initialized(std::uint64_t native, std::uint64_t device, std::uint64_t cookie) {
-    command_event([&](commands::tracker &tracker) { tracker.queue_initialized(native, device, cookie); });
-  }
-  void queue_destroyed(std::uint64_t native) {
-    command_event([&](commands::tracker &tracker) { tracker.queue_destroyed(native); });
-  }
-  void command_executed(std::uint64_t queue, std::uint64_t command) {
-    command_event([&](commands::tracker &tracker) { tracker.command_executed(queue, command); });
-  }
-  void command_secondary_executed(std::uint64_t primary, std::uint64_t secondary) {
-    command_event([&](commands::tracker &tracker) { tracker.command_secondary_executed(primary, secondary); });
-  }
-  commands::recording_marker capture_command_marker(std::uint64_t native) {
-    commands::recording_marker out;
-    const auto ticket = command_ticket();
-    if (!ticket) return out;
-    if (!TryAcquireSRWLockExclusive(&commands_lock)) {
-      // A missed optional marker does not lose lifecycle identity or destroy the
-      // live-object maps. Revoke only evidence that depended on this observation.
-      dropped_observation(loss_diagnostics::reason::commands_busy, __func__, 3597);
-      return out;
-    }
-    if (current_commands(ticket) && !command_observation_lost.load(std::memory_order_acquire))
-      out = command_tracker.mark(native, loss_revision.load(std::memory_order_acquire));
-    ReleaseSRWLockExclusive(&commands_lock);
-    return out;
-  }
-  void observe_native_discard_command(std::uint64_t native) { native_discard::observe_command(native); }
-
   void depth_resource_initialized(std::uint64_t native, std::uint64_t lifetime, std::uint64_t device, bool supported) {
     if (supported) source_resource_event(native, lifetime, device, true);
-    command_event([&](commands::tracker &) { content_ledger.resource_initialized({native, lifetime}, device, supported); });
   }
   void depth_resource_destroyed(std::uint64_t native, std::uint64_t lifetime) {
     source_resource_event(native, lifetime, 0, false);
-    command_event([&](commands::tracker &) { content_ledger.resource_destroyed({native, lifetime}); });
-  }
-  void depth_content_write(std::uint64_t command, std::uint64_t native, std::uint64_t lifetime) {
-    if (!content_requested()) return;
-    command_event([&](commands::tracker &tracker) {
-      if (content_observing) content_ledger.write(tracker.mark(command, loss_revision.load(std::memory_order_acquire)), {native, lifetime});
-    });
-  }
-  void depth_content_invalidate(std::uint64_t command, std::uint64_t native, std::uint64_t lifetime) {
-    if (!content_requested()) return;
-    command_event([&](commands::tracker &tracker) {
-      if (content_observing) content_ledger.invalidate(tracker.mark(command, loss_revision.load(std::memory_order_acquire)), {native, lifetime});
-    });
-  }
-  content::copy_snapshot record_depth_copy(std::uint64_t command, content::resource_key source, content::resource_key backup) {
-    content::copy_snapshot out;
-    command_event([&](commands::tracker &tracker) {
-      const auto marker = tracker.mark(command, loss_revision.load(std::memory_order_acquire));
-      if (content_observing) out = content_ledger.copy(marker, source, backup, tracker.recording_device(marker));
-      else out.recording = marker; // Preserve the earlier command-only contract.
-    });
-    return out;
-  }
-  content::copy_snapshot forward_depth_copy(std::uint64_t command, const content::copy_snapshot &preserved,
-      content::resource_key destination) {
-    content::copy_snapshot out;
-    command_event([&](commands::tracker &tracker) {
-      const auto marker = tracker.mark(command, loss_revision.load(std::memory_order_acquire));
-      if (content_observing) out = content_ledger.forward(marker, preserved, destination, tracker.recording_device(marker));
-      else out.recording = marker;
-    });
-    return out;
   }
 
   evidence_status query_depth_source(depth_source_snapshot &output, std::uint32_t max_age_ms) {
@@ -3659,7 +3391,6 @@ namespace sunshine_streamline {
       return fail(!newest.sequence ? evidence_status::missing_evaluation :
         newest.status == evidence_status::source_associated_evaluation ? evidence_status::source_mismatch : newest.status);
     }
-    if (output.status == evidence_status::source_associated_evaluation) associate_evidence(output, selected);
     if (!current(ticket)) return fail(evidence_status::inactive);
     if (loss != loss_revision.load(std::memory_order_acquire)) return fail(evidence_status::observation_lost);
     return output.status;
@@ -3783,7 +3514,7 @@ namespace sunshine_streamline {
       // correlation, jitter or reset pulse is claimed. Busy or lost metadata
       // refuses, as a tag boundary does.
       else if (const auto viewport = capture_evaluation(fg.viewport, 1000, frame_identity{},
-                 reinterpret_cast<void *>(value.command), ticket, serial, loss, nullptr, nullptr, false, false);
+                 reinterpret_cast<void *>(value.command), ticket, serial, loss, nullptr, nullptr, false);
                viewport.status == evidence_status::busy || viewport.status == evidence_status::inactive ||
                viewport.epoch != fg.epoch)
         out.depth = depth_outcome::scope_changed;
@@ -4031,137 +3762,9 @@ namespace sunshine_streamline {
         }
       }
     }
-    // Opt-in StreamlineCameraProbe five-second evidence report.
-    void report_probe_diagnostics(const selected_depth &selected, std::uint64_t now) {
-      if (!enabled() || !hooks_installed || !observing.load(std::memory_order_acquire) || now < next_report) return;
-      next_report = now + 5000;
-      auto pin = read_metadata();
-      if (!pin) return;
-      const auto &copy = pin->records;
-      const auto copied_revision = pin->revision;
-      const auto snapshot_now = GetTickCount64();
-      // Stable/no-call states are reported only once. Active games have bounded
-      // five-second numeric snapshots, never per-frame text or file I/O in hooks.
-      const auto activity = copied_revision + constant_calls.load() + tag_calls.load() + evaluation_calls.load();
-      const bool selection_changed = selected.resource != last_selected.resource || selected.source_id != last_selected.source_id ||
-        selected.layout_epoch != last_selected.layout_epoch || selected.ready != last_selected.ready ||
-        selected.width != last_selected.width || selected.height != last_selected.height ||
-        selected.x != last_selected.x || selected.y != last_selected.y ||
-        selected.active_width != last_selected.active_width || selected.active_height != last_selected.active_height;
-      if (last_report_activity == activity && !selection_changed) return;
-      last_report_activity = activity;
-      last_selected = selected;
-      char text[3072];
-      std::snprintf(text, sizeof(text),
-        "Sunshine Streamline: epoch=%llu calls constants=%llu tags=%llu evaluations=%llu dropped=%llu invalid=%llu selected=0x%llx source=%llu layout=%llu present=%llu ready=%d dimensions=%ux%u region=%u,%u,%u,%u diagnostic_only=1",
-        static_cast<unsigned long long>(epoch), static_cast<unsigned long long>(constant_calls.load()),
-        static_cast<unsigned long long>(tag_calls.load()), static_cast<unsigned long long>(evaluation_calls.load()),
-        static_cast<unsigned long long>(dropped.load()), static_cast<unsigned long long>(invalid.load()),
-        static_cast<unsigned long long>(selected.resource), static_cast<unsigned long long>(selected.source_id),
-        static_cast<unsigned long long>(selected.layout_epoch), static_cast<unsigned long long>(selected.frame_index),
-        selected.ready ? 1 : 0, selected.width, selected.height, selected.x, selected.y, selected.active_width, selected.active_height);
-      message(text);
-      evaluation_snapshot evidence;
-      query_evaluation(selected, evidence);
-      std::snprintf(text, sizeof(text),
-        "Sunshine Streamline evaluation: status=%s viewport=%u sequence=%llu success=%d constants_frame_correlated=%d frame_kind=%u token_generation=%llu numeric_frame=%llu explicit_numeric=%d commands=0x%llx camera_age_ms=%llu reshade_frame_correlated=0 units=unknown diagnostic_only=1",
-        name(evidence.status), evidence.viewport, static_cast<unsigned long long>(evidence.sequence),
-        evidence.successful_evaluation ? 1 : 0, evidence.frame_correlated ? 1 : 0, static_cast<unsigned>(evidence.frame.kind),
-        static_cast<unsigned long long>(evidence.frame.generation), static_cast<unsigned long long>(evidence.frame.numeric),
-        evidence.frame.has_numeric ? 1 : 0, static_cast<unsigned long long>(evidence.command_buffer),
-        static_cast<unsigned long long>(evidence.camera_tick ? GetTickCount64() - evidence.camera_tick : UINT64_MAX));
-      message(text);
-      // Keep projection and association in one evaluated tuple. The latest viewport
-      // constants printed below can belong to a different frame and must not be joined by time.
-      const auto &camera = evidence.camera;
-      const auto &tag = evidence.tags[evidence.matched_tag < evidence.tags.size() ? evidence.matched_tag : 0];
-      std::snprintf(text, sizeof(text),
-        "Sunshine Streamline evaluated camera: status=%s viewport=%u sequence=%llu frame_kind=%u numeric_frame=%llu explicit_numeric=%d token_generation=%llu validation=%s A=%.17g B=%.17g near=%.9g far=%.9g fov=%.9g aspect=%.9g reset=%u selected=0x%llx source=%llu layout=%llu reshade_present=%llu dimensions=%ux%u tag_present=%d tag_type=%u tag_resource=0x%llx tag_extent=%u,%u,%u,%u units=game-units metric_scale_known=0 diagnostic_only=1",
-        name(evidence.status), evidence.viewport, static_cast<unsigned long long>(evidence.sequence),
-        static_cast<unsigned>(evidence.frame.kind), static_cast<unsigned long long>(evidence.frame.numeric),
-        evidence.frame.has_numeric ? 1 : 0, static_cast<unsigned long long>(evidence.frame.generation),
-        name(evidence.projection.status), evidence.projection.depth_offset, evidence.projection.depth_scale,
-        camera.near_plane, camera.far_plane, camera.fov, camera.aspect, camera.reset,
-        static_cast<unsigned long long>(selected.resource), static_cast<unsigned long long>(selected.source_id),
-        static_cast<unsigned long long>(selected.layout_epoch), static_cast<unsigned long long>(selected.frame_index),
-        selected.width, selected.height, tag.present ? 1 : 0, tag.value.type,
-        static_cast<unsigned long long>(tag.value.native_resource), tag.value.area.left, tag.value.area.top,
-        tag.value.area.width, tag.value.area.height);
-      message(text);
-      std::snprintf(text, sizeof(text),
-        "Sunshine Streamline command association: status=%s stable_recording=%d queue=0x%llx queue_generation=%llu copy_submission=%llu evaluation_submission=%llu order=%u same_recording=%d depth_content_registered=0 final_color_registered=0 gpu_completion_proven=0",
-        commands::name(evidence.command_association.state), evidence.recording_stable ? 1 : 0,
-        static_cast<unsigned long long>(evidence.command_association.queue),
-        static_cast<unsigned long long>(evidence.command_association.queue_generation),
-        static_cast<unsigned long long>(evidence.command_association.copy_submission),
-        static_cast<unsigned long long>(evidence.command_association.evaluation_submission),
-        static_cast<unsigned>(evidence.command_association.ordering), evidence.command_association.same_recording ? 1 : 0);
-      message(text);
-      std::snprintf(text, sizeof(text),
-        "Sunshine Streamline content association: status=%s observed_content_match=%d coverage_complete=0 final_color_registered=0 diagnostic_only=1",
-        content::name(evidence.content_association.state), evidence.content_association.matched() ? 1 : 0);
-      message(text);
-      const auto discard = native_discard::counts();
-      std::snprintf(text, sizeof(text),
-        "Sunshine native discard observation: targets=%llu installed=%llu calls=%llu observed=%llu unreadable=%llu dropped=%llu rejected=%llu complete_mutation_coverage=0",
-        static_cast<unsigned long long>(discard.targets), static_cast<unsigned long long>(discard.installed),
-        static_cast<unsigned long long>(discard.calls), static_cast<unsigned long long>(discard.observed),
-        static_cast<unsigned long long>(discard.unreadable), static_cast<unsigned long long>(discard.dropped),
-        static_cast<unsigned long long>(discard.rejected));
-      message(text);
-      for (const auto &color : evidence.colors) if (color.present) {
-        const bool identity = selected.effects_input.ready && color.identity_available && color.value.native_resource == selected.effects_input.resource;
-        const bool dimensions = color.value.resource_width && color.value.resource_height && selected.effects_input.ready &&
-          color.value.resource_width == selected.effects_input.width && color.value.resource_height == selected.effects_input.height;
-        std::snprintf(text, sizeof(text),
-          "Sunshine Streamline color: type=%u scope=%u native=0x%llx size=%ux%u extent=%u,%u,%u,%u lifecycle=%u supported=%d identity_available=%d effects_identity_match=%d declared_size_match=%d final_color_registered=0",
-          color.value.type, static_cast<unsigned>(color.scope), static_cast<unsigned long long>(color.value.native_resource),
-          color.value.resource_width, color.value.resource_height, color.value.area.left, color.value.area.top, color.value.area.width, color.value.area.height,
-          color.value.lifecycle, color.supported ? 1 : 0, color.identity_available ? 1 : 0, identity ? 1 : 0, dimensions ? 1 : 0);
-        message(text);
-      }
-      for (const auto &record : copy) {
-        if (!record.used) continue;
-        const auto checked = validate(record.camera);
-        std::snprintf(text, sizeof(text),
-          "Sunshine Streamline camera: viewport=%u age_ms=%llu decode=%s validation=%s numeric_frame=%llu explicit_frame=%d token=0x%llx feature=%u evaluate_age_ms=%llu near=%.9g far=%.9g fov=%.9g aspect=%.9g inverted=%u orthographic=%u reset=%u inactive=%u A=%.17g B=%.17g inverse_error=%.9g matrix_near=%.9g matrix_far=%.9g matrix_fov=%.9g matrix_aspect=%.9g right_handed=%d infinite_far=%d units=unknown",
-          record.viewport, static_cast<unsigned long long>(record.has_camera ? snapshot_now - record.camera_tick : UINT64_MAX),
-          name(record.decoded), record.has_camera ? name(checked.status) : "missing-constants",
-          static_cast<unsigned long long>(record.key.frame_key), record.key.explicit_frame ? 1 : 0,
-          static_cast<unsigned long long>(record.camera_token), record.feature,
-          static_cast<unsigned long long>(record.evaluation_tick ? snapshot_now - record.evaluation_tick : UINT64_MAX),
-          record.camera.near_plane, record.camera.far_plane, record.camera.fov, record.camera.aspect,
-          record.camera.depth_inverted, record.camera.orthographic,
-          record.camera.reset, record.camera.not_rendering_game_frames, checked.depth_offset, checked.depth_scale,
-          checked.inverse_error, checked.near_from_matrix, checked.far_from_matrix, checked.fov_from_matrix,
-          checked.aspect_from_matrix, checked.right_handed ? 1 : 0, checked.infinite_far ? 1 : 0);
-        message(text);
-        const float *p = &record.camera.projection.m[0][0], *q = &record.camera.inverse_projection.m[0][0];
-        std::snprintf(text, sizeof(text),
-          "Sunshine Streamline matrices: viewport=%u viewToClip=[%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g] clipToView=[%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g]",
-          record.viewport, p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
-          q[0],q[1],q[2],q[3],q[4],q[5],q[6],q[7],q[8],q[9],q[10],q[11],q[12],q[13],q[14],q[15]);
-        message(text);
-        for (const auto *group : {&record.global_tags, &record.local_tags}) for (const auto &value : *group) {
-          const auto *tag = &value;
-          if (!tag->present || tag_index(tag->value.type) >= 3) continue;
-          const auto matching = match(record.key, tag->value);
-          std::snprintf(text, sizeof(text),
-            "Sunshine Streamline depth: viewport=%u scope=%s age_ms=%llu native=0x%llx type=%u lifecycle=%u extent=%u,%u,%u,%u resource_size=%ux%u supported=%d pairing=%s token=0x%llx same_token_address=%d exact_frame=0 selected_identity_match=%d freshness_is_not_frame_proof=1",
-            record.viewport, source_name(tag->source), static_cast<unsigned long long>(snapshot_now - tag->tick),
-            static_cast<unsigned long long>(tag->value.native_resource), tag->value.type, tag->value.lifecycle,
-            tag->value.area.left, tag->value.area.top, tag->value.area.width, tag->value.area.height,
-            tag->value.resource_width, tag->value.resource_height, tag->supported ? 1 : 0,
-            !tag->supported ? "unsupported-tag-metadata" : record.has_camera ? name(matching) : "missing-constants", static_cast<unsigned long long>(tag->token),
-            record.camera_token && record.camera_token == tag->token ? 1 : 0,
-            selected.ready && selected.resource != 0 && selected.resource == tag->value.native_resource ? 1 : 0);
-          message(text);
-        }
-      }
-    }
   }
 
-  void poll(const selected_depth &selected) {
+  void poll(const selected_depth &) {
     const bool api_requested = middleware_requested() || sunshine_upscaler_trace::enabled() ||
       sunshine_upscaler_trace::capture_enabled();
     if (!api_requested && !depth_capture::active()) return;
@@ -4179,7 +3782,6 @@ namespace sunshine_streamline {
     sunshine_upscaler_trace::set_streamline_coverage(hooks_installed);
     sunshine_upscaler_trace::poll();
     report_camera_availability(now);
-    if (content_requested()) install_discard_observations();
     // The common copy owner also serves Generic depth without an upscaler API.
     // Middleware presence and selection preferences cannot gate its lifecycle.
     if (depth_capture::active()) {
@@ -4194,15 +3796,13 @@ namespace sunshine_streamline {
     }
     if (middleware_requested() && observing.load(std::memory_order_acquire) && fg_targets_pending())
       schedule_install();
-    report_probe_diagnostics(selected, now);
   }
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   // The test add-on's exports (test_streamline_camera_probe_exports.cpp) read
-  // camera data and run command events through these instantiations.
+  // camera data through this instantiation.
   SUNSHINE_PROBE_INTERNAL {
     template bool read(const camera_data *, camera_data &);
-    template void command_event(command_function &&);
   }
 #endif
 

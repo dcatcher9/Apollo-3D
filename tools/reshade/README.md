@@ -811,11 +811,8 @@ add-on's diagnostic-only per-frame work: per-pass GPU timing
 (see [Diagnostics switch](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)). It
 is off by default and changes no decision, candidate binding or exported pixel.
 
-The separate [Streamline camera probe](../../docs/reshade-sbs.md#streamline-camera-metadata-experiment)
-is disabled by default. `StreamlineCameraProbe=1` enables detailed diagnostics after restart;
-leave it off for ordinary play. Production source selection does not enable its per-draw content
-tracking. The passive diagnostic does not control rendering; production Streamline capture and
-scale are described above. Generic fallback retains raw-scene calibration. The shared
+Production Streamline capture and scale are described above. Generic fallback retains raw-scene
+calibration. The shared
 [ABI compatibility](../../docs/reshade-sbs.md#streamline-abi-compatibility) uses three public families:
 early 1.x resources without state, later 1.x resources with state, and typed 2.x structures. The
 official-header survey covers all 28 public tags from 1.0.0 through 2.14.1. Optional frame-tag,
@@ -825,8 +822,7 @@ remain separate from public ABI admission.
 
 For call-route investigation only, `[SUNSHINE_DEPTH] UpscalerCallTrace=1` enables the
 [separate runtime trace](../../docs/reshade-sbs.md#upscaler-call-route-diagnostic) after restart.
-It reports actual Streamline/NGX calls and their callers without enabling the full camera probe
-or changing depth selection. A loaded DLL or zero observed calls does not prove the rendering
+It reports actual Streamline/NGX calls and their callers without changing depth selection. A loaded DLL or zero observed calls does not prove the rendering
 route; inspect the positive call evidence and reported hook coverage. Disable it after testing.
 
 Opening ReShade's overlay keeps the game in stereo, with its real controls composed at the same
@@ -1022,8 +1018,8 @@ Run these functional cases serially when they share resources or output director
 is not performance evidence. The NGX, direct Streamline, probe-round,
 rotating-allocation and adaptive raw-depth runtime fixtures below use the same zero-FX native
 lifecycle. They select their frozen `SunshineGame3D.fx` boot effect and the test add-on themselves,
-so they need no environment settings. The command-association, native-selection and
-native-present fixtures exercise the reference effects with native Game 3D off.
+so they need no environment settings. The native-selection and native-present fixtures
+exercise the reference effects with native Game 3D off.
 
 The optional `reshade_streamline_direct_runtime_test` is a component integration fixture.
 Its metadata seam bypasses SDK discovery; the real SDK-entry NGX/Streamline cases below remain
@@ -1375,9 +1371,8 @@ an FX reload; native capture and scale deliberately survive an FX reload
 the shared Generic/API readiness owner. The fixture requires the separate test add-on for the
 real **Recalibrate** action. The production package excludes these test exports.
 `SUNSHINE_DEPTH_GENERIC_ONLY_TEST=1`, which `reshade_game3d_native_depth_runtime_test` sets
-itself, writes `StreamlineDepthSource=0`, `NGXDepthSource=0`, `StreamlineCameraProbe=0` and
-`UpscalerCallTrace=0` into the fixture's `ReShade.ini`, so its Generic capture runs without API
-discovery.
+itself, writes `StreamlineDepthSource=0`, `NGXDepthSource=0` and `UpscalerCallTrace=0` into the
+fixture's `ReShade.ini`, so its Generic capture runs without API discovery.
 
 `reshade_depth_probe_round_runtime_test` takes four arguments: the runtime DLL, frozen shader
 directory, test add-on and fresh output directory. Like the NGX fixture, it renders through

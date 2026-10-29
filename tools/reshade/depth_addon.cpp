@@ -253,18 +253,6 @@ static void clear_raw_sample_request(generic_depth_data &data)
 	data.raw_members = {};
 }
 
-static uint64_t depth_lifetime(device *device, resource value)
-{
-	const auto *data = device->get_private_data<generic_depth_device_data>();
-	if (data == nullptr || value == 0) return 0;
-	const std::shared_lock<std::shared_mutex> lock(s_mutex);
-	const auto found = data->depth_stencil_resources.find(value);
-	if (s_streamline_probe_events && found != data->depth_stencil_resources.end() && device->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_resource_initialized(value.handle, found->second.identity, device->get_native(),
-			content_supported(found->second.desc));
-	return found != data->depth_stencil_resources.end() ? found->second.identity : 0;
-}
-
 // Checks whether the aspect ratio of the two sets of dimensions is similar or not
 static bool check_aspect_ratio(float width_to_check, float height_to_check, float width, float height)
 {
@@ -678,10 +666,6 @@ static void publish_preserved_depth(effect_runtime *runtime, command_list *comma
 	if (!sunshine_streamline::depth_capture::copy_preserved(commands->get_native(), runtime->get_command_queue()->get_native(),
 		ticket, destination.handle, D3D12_RESOURCE_STATE_COPY_DEST)) return;
 	sunshine_streamline::content::copy_snapshot presented;
-	if (s_streamline_probe_events) {
-		sunshine_streamline::depth_resource_initialized(destination.handle, assignment, runtime->get_device()->get_native(), true);
-		presented = sunshine_streamline::forward_depth_copy(commands->get_native(), current.metadata.depth_copy, {destination.handle, assignment});
-	}
 	const std::unique_lock<std::shared_mutex> lock(s_mutex);
 	for (auto &backup : device_data.depth_stencil_backups)
 		if (backup.backup_texture == destination) backup.content_serial = ++device_data.next_content_serial;
@@ -736,10 +720,6 @@ static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *com
 			data->end_of_frame_refusal = refusal.stage;
 		}
 		sunshine_streamline::content::copy_snapshot copied;
-		if (ticket && s_streamline_probe_events) {
-			sunshine_streamline::depth_resource_initialized(ticket.texture, ticket.resource_id, runtime->get_device()->get_native(), true);
-			copied = sunshine_streamline::record_depth_copy(commands->get_native(), {source.handle, identity}, {ticket.texture, ticket.resource_id});
-		}
 		{
 			const std::unique_lock<std::shared_mutex> lock(s_mutex);
 			const auto found = device_data.depth_stencil_resources.find(source);
@@ -838,12 +818,6 @@ static void preserve_depth_at_effects(effect_runtime *runtime, command_list *cmd
 	stats.end_of_frame_copy = true;
 	observe_preserved_layout(found->second, stats);
 	stats.depth_copy = {};
-	if (s_streamline_probe_events && api == device_api::d3d12)
-	{
-		sunshine_streamline::depth_resource_initialized(source.handle, identity, device->get_native(), content_supported(desc));
-		sunshine_streamline::depth_resource_initialized(backup_texture.handle, assignment, device->get_native(), backup->content_layout_supported);
-		stats.depth_copy = sunshine_streamline::record_depth_copy(cmd_list->get_native(), { source.handle, identity }, { backup_texture.handle, assignment });
-	}
 	stats.capture_marker = stats.depth_copy.recording;
 }
 
@@ -1364,13 +1338,8 @@ static void on_destroy_device(device *device)
 	// Destroy any remaining resources
 	for (const depth_stencil_backup &backup : device_data->depth_stencil_backups)
 	{
-		if (s_streamline_probe_events && device->get_api() == device_api::d3d12)
-			sunshine_streamline::depth_resource_destroyed(backup.backup_texture.handle, backup.content_identity);
 		device->destroy_resource(backup.backup_texture);
 	}
-	if (s_streamline_probe_events && device->get_api() == device_api::d3d12)
-		for (const auto &[value, info] : device_data->depth_stencil_resources)
-			sunshine_streamline::depth_resource_destroyed(value.handle, info.identity);
 	if (device_data->deferred_copy_marker != 0)
 		device->destroy_query_heap(device_data->deferred_copy_marker);
 
@@ -1401,18 +1370,10 @@ static void on_init_command_list(command_list *cmd_list)
 	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::created);
 	if (cmd_list->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::depth_capture::observe_command(cmd_list->get_native());
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-	{
-		sunshine_streamline::command_initialized(cmd_list->get_native(), cmd_list->get_device()->get_native(),
-			cmd_list->get_private_data<state_tracking>()->command_identity);
-		sunshine_streamline::observe_native_discard_command(cmd_list->get_native());
-	}
 }
 static void on_destroy_command_list(command_list *cmd_list)
 {
 	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::destroyed); // Retires its recording.
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::command_destroyed(cmd_list->get_native());
 	cmd_list->destroy_private_data<state_tracking>();
 }
 
@@ -1421,9 +1382,6 @@ static void on_init_command_queue(command_queue *cmd_queue)
 	cmd_queue->create_private_data<state_tracking>(true);
 	if (cmd_queue->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::depth_capture::observe_queue(cmd_queue->get_native());
-	if (s_streamline_probe_events && cmd_queue->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::queue_initialized(cmd_queue->get_native(), cmd_queue->get_device()->get_native(),
-			cmd_queue->get_private_data<state_tracking>()->command_identity);
 
 	if ((cmd_queue->get_type() & command_queue_type::graphics) == 0)
 		return;
@@ -1435,8 +1393,6 @@ static void on_destroy_command_queue(command_queue *cmd_queue)
 {
 	if (cmd_queue->get_device()->get_api() == device_api::d3d12)
 		sunshine_streamline::depth_capture::retire_queue(cmd_queue->get_native());
-	if (s_streamline_probe_events && cmd_queue->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::queue_destroyed(cmd_queue->get_native());
 	cmd_queue->destroy_private_data<state_tracking>();
 
 	device *const device = cmd_queue->get_device();
@@ -1608,8 +1564,6 @@ static void on_init_resource(device *device, const resource_desc &desc, const su
 		const auto native = sunshine_native_identity::identify_resource(resource.handle);
 		if (native && native.device == device_data->native_identity) { info.identity = native.resource; info.api_identity = true; }
 	}
-	if (s_streamline_probe_events && device->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_resource_initialized(resource.handle, info.identity, device->get_native(), content_supported(desc));
 	device_data->depth_stencil_resources.emplace(resource, std::move(info));
 }
 static void on_destroy_resource(device *device, resource resource)
@@ -1627,8 +1581,6 @@ static void on_destroy_resource(device *device, resource resource)
 	if (const auto it = device_data->depth_stencil_resources.find(resource);
 		it != device_data->depth_stencil_resources.end())
 	{
-		if (s_streamline_probe_events && device->get_api() == device_api::d3d12)
-			sunshine_streamline::depth_resource_destroyed(resource.handle, it->second.identity);
 		// The capture owner's proven-state table forgets it (resource_created
 		// tracked it under this native identity).
 		if (it->second.api_identity)
@@ -1655,8 +1607,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw(command_list *cmd_list, uint32_t vert
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 	if (state.current_depth_stencil == 0)
 		return false; // This is a draw call with no depth-stencil bound
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12 && state.current_depth_lifetime)
-		sunshine_streamline::depth_content_write(cmd_list->get_native(), state.current_depth_stencil.handle, state.current_depth_lifetime);
 
 	// If this is queue state (happens if this is a immediate command list), need to protect access to it, since another thread may be in a present call, which can reset it
 	std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
@@ -1691,8 +1641,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw_indirect(command_list *cmd_list, indi
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 	if (state.current_depth_stencil == 0)
 		return false; // This is a draw call with no depth-stencil bound
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12 && state.current_depth_lifetime)
-		sunshine_streamline::depth_content_write(cmd_list->get_native(), state.current_depth_stencil.handle, state.current_depth_lifetime);
 
 	// If this is queue state (happens if this is a immediate command list), need to protect access to it, since another thread may be in a present call, which can reset it
 	std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
@@ -1732,8 +1680,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void on_bind_depth_stencil_impl(command_list *cmd_
 	const resource depth_stencil = (depth_stencil_view != 0) ? cmd_list->get_device()->get_resource_from_view(depth_stencil_view) : resource { 0 };
 
 	state.current_depth_stencil = depth_stencil;
-	if (cmd_list->get_device()->get_api() == device_api::d3d12)
-		state.current_depth_lifetime = s_streamline_probe_events ? depth_lifetime(cmd_list->get_device(), depth_stencil) : 0;
 }
 static void on_bind_depth_stencil(command_list *cmd_list, uint32_t, const resource_view *, resource_view depth_stencil_view)
 {
@@ -1755,8 +1701,6 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 		if (cmd_list->get_device()->get_api() == device_api::d3d12 && sampled_plane)
 			sunshine_streamline::depth_capture::observe_depth_clear(cmd_list->get_native(), depth_stencil.handle);
 		// The game clear changes the source; no copy is made here.
-		if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-			sunshine_streamline::depth_content_write(cmd_list->get_native(), depth_stencil.handle);
 
 		std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
 		if (state.is_queue)
@@ -1777,18 +1721,6 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 }
 static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint32_t, const render_pass_render_target_desc *, const render_pass_depth_stencil_desc *depth_stencil_desc, render_pass_flags)
 {
-	if (s_streamline_probe_events)
-	{
-		auto &pass_state = *cmd_list->get_private_data<state_tracking>();
-		pass_state.render_pass_depth = depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 ?
-			cmd_list->get_device()->get_resource_from_view(depth_stencil_desc->view) : resource {};
-		// The generic API loses native ending-resolve details. Retain that boundary
-		// as incomplete evidence rather than assuming that store means preservation.
-		pass_state.render_pass_depth_uncertain = pass_state.render_pass_depth != 0;
-		if (cmd_list->get_device()->get_api() == device_api::d3d12 && pass_state.render_pass_depth != 0 &&
-			depth_stencil_desc->depth_load_op == render_pass_load_op::discard)
-			sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), pass_state.render_pass_depth.handle);
-	}
 	if (depth_stencil_desc != nullptr && depth_stencil_desc->depth_load_op == render_pass_load_op::clear)
 		on_clear_depth_stencil(cmd_list, depth_stencil_desc->view, &depth_stencil_desc->clear_depth, nullptr, 0, nullptr);
 	else if (depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 && depth_stencil_desc->depth_load_op == render_pass_load_op::discard &&
@@ -1827,8 +1759,6 @@ static bool on_end_render_pass(command_list *cmd_list)
 {
 	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_end);
 	auto &state = *cmd_list->get_private_data<state_tracking>();
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12 && state.render_pass_depth_uncertain)
-		sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), state.render_pass_depth.handle);
 	state.render_pass_depth = {};
 	state.render_pass_depth_uncertain = false;
 	return false;
@@ -1926,8 +1856,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_dispatch_mesh(command_list *cmd_list, uint
 {
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 	if (!groups_x || !groups_y || !groups_z || state.current_depth_stencil == 0) return false;
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12 && state.current_depth_lifetime)
-		sunshine_streamline::depth_content_write(cmd_list->get_native(), state.current_depth_stencil.handle, state.current_depth_lifetime);
 	std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
 	if (state.is_queue) lock.lock();
 	record_scene_write(state, state.current_depth_stencil, state.current_viewport, tracking_demand(cmd_list->get_device()), true);
@@ -1936,8 +1864,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_dispatch_mesh(command_list *cmd_list, uint
 SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_resource(command_list *cmd_list, resource source, resource dest)
 {
 	record_copied_depth(cmd_list, source, dest, 0, true);
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_content_write(cmd_list->get_native(), dest.handle);
 	return false;
 }
 static bool empty_copy_box(const subresource_box *box)
@@ -1949,8 +1875,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_texture_region(command_list *cmd_list
 {
 	if (empty_copy_box(source_box) || empty_copy_box(dest_box)) return false;
 	record_copied_depth(cmd_list, source, dest, subresource, source_subresource == 0 && !source_box && !dest_box);
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), dest.handle);
 	return false;
 }
 SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_buffer_to_texture(command_list *cmd_list, resource, uint64_t, uint32_t, uint32_t,
@@ -1958,8 +1882,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_buffer_to_texture(command_list *cmd_l
 {
 	if (empty_copy_box(dest_box)) return false;
 	record_copied_depth(cmd_list, {}, dest, subresource, false); // A buffer is never another depth candidate.
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), dest.handle);
 	return false;
 }
 SUNSHINE_DEPTH_ADDON_INTERNAL bool on_resolve_texture_region(command_list *cmd_list, resource source, uint32_t source_subresource,
@@ -1967,55 +1889,26 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_resolve_texture_region(command_list *cmd_l
 {
 	if (empty_copy_box(source_box)) return false;
 	record_copied_depth(cmd_list, source, dest, subresource, source_subresource == 0 && !source_box && !dest_x && !dest_y && !dest_z);
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), dest.handle);
 	return false;
 }
-static void on_content_barrier(command_list *cmd_list, uint32_t count, const resource *resources,
-	const resource_usage *old_states, const resource_usage *new_states)
+// Its only work was the StreamlineCameraProbe content ledger's; it stays
+// registered so the registered event set is unchanged.
+static void on_content_barrier(command_list *, uint32_t, const resource *, const resource_usage *, const resource_usage *)
 {
-	if (cmd_list->get_device()->get_api() != device_api::d3d12 || !s_streamline_probe_events) return;
-	for (uint32_t i = 0; i != count; ++i)
-	{
-		// ReShade's alias callback retains only the resource after the alias.
-		// The previous resource can be our depth or backup even when this handle
-		// is unrelated, so its undefined old state invalidates all prior evidence.
-		if (resources[i] == 0 || old_states[i] == resource_usage::undefined)
-			sunshine_streamline::depth_content_invalidate(cmd_list->get_native());
-		else if (new_states[i] == resource_usage::undefined ||
-			(old_states[i] & resource_usage::unordered_access) != 0 || (new_states[i] & resource_usage::unordered_access) != 0)
-			sunshine_streamline::depth_content_invalidate(cmd_list->get_native(), resources[i].handle);
-	}
 }
 
 static void on_reset(command_list *cmd_list)
 {
 	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::reset);
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-	{
-		sunshine_streamline::command_reset(cmd_list->get_native(), cmd_list->get_device()->get_native(),
-			cmd_list->get_private_data<state_tracking>()->command_identity);
-		sunshine_streamline::observe_native_discard_command(cmd_list->get_native());
-	}
 	auto &target_state = *cmd_list->get_private_data<state_tracking>();
 	target_state.reset();
 }
 static void on_close(command_list *cmd_list)
 {
 	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::closed);
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::command_closed(cmd_list->get_native());
 }
 static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 {
-	if (s_streamline_probe_events && queue->get_device()->get_api() == device_api::d3d12)
-	{
-		// A missed lifecycle callback revokes old evidence. The independently
-		// owned lifetime cookie lets the next reset/execute recover live objects.
-		sunshine_streamline::queue_initialized(queue->get_native(), queue->get_device()->get_native(),
-			queue->get_private_data<state_tracking>()->command_identity);
-		sunshine_streamline::command_executed(queue->get_native(), cmd_list->get_native());
-	}
 	// Skip merging state when this execution event is just the immediate command list getting flushed
 	if (cmd_list == queue->get_immediate_command_list())
 		return;
@@ -2031,8 +1924,6 @@ static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 }
 static void on_execute_secondary(command_list *cmd_list, command_list *secondary_cmd_list)
 {
-	if (s_streamline_probe_events && cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::command_secondary_executed(cmd_list->get_native(), secondary_cmd_list->get_native());
 	auto &target_state = *cmd_list->get_private_data<state_tracking>();
 	const auto &source_state = *secondary_cmd_list->get_private_data<state_tracking>();
 
@@ -3384,7 +3275,6 @@ static void finish_sampler_present(command_queue *queue, swapchain *swapchain)
 
 static void register_depth_events()
 {
-	s_streamline_probe_events = sunshine_streamline::enabled();
 	s_streamline_source_events = sunshine_streamline::source_enabled() || sunshine_upscaler_trace::capture_enabled();
 	sunshine_streamline::depth_capture::initialize(true); // Shared D3D12 capture also serves Generic fallback.
 	s_frame_activity_trace = false;
