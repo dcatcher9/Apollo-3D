@@ -1421,7 +1421,7 @@ The same fixture accepts one optional isolated case after its four normal argume
 `--overlap`, `--interrupted-startup`, `--moving-startup`, `--rotating-startup`,
 `--crowded-rotating-startup`, `--flat-startup`, `--layout`, `--copy-history`, `--copy-end`,
 `--copy-rescue`, `--gap-none`, `--gap-double`, `--gap-ui`, `--gap-overlay`, `--gap-long`,
-`--gap-cleared` or `--gap-cut`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
+`--gap-cleared`, `--gap-cut` or `--second-swapchain`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
 before the scene: a history copy at the start of the frame (the destination cleared on its first
 frames), a copy after the scene draw, and a copy of a pass the scene's allocation then clears for a
 small first-person draw. The scene, or in the last case the destination, must be the current
@@ -1437,7 +1437,12 @@ the real frames full stereo, and the scene must recover after the pause. `--gap-
 established scene untouched and starts a full-view scene in another allocation, first one of half
 the size, then one of the same size that was never qualified: from the cut Present on nothing may
 be held and the cut Present must be mono, then the new allocation must reach full stereo on its
-own depth. The snapshot CTest checks both gates' rules on synthetic snapshots. The other cases
+own depth. `--second-swapchain` adds a hidden second window of the game (its own swapchain on the
+game's queue, so its own effect runtime) that presents colour only after every Present of the
+game's window, whose scene draws every other Present: the game's window must hold its in-between
+Presents at full stereo while the second runtime, rendering natively on each of its Presents,
+never shows or holds Generic depth; the hold is per runtime, so this case passes with and without
+the gates (the snapshot CTest checks both gates' rules on synthetic snapshots). The other cases
 cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,

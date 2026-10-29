@@ -6199,7 +6199,8 @@ anchor, runtime epoch and colour size. A newer current copy always wins. The exp
 scene its real frame was shown with (`restore_reused_scene`), so calibration, raw samples and the
 strength ramp do not advance; `Sunshine_DepthReady` reads ready, and the `Sunshine 3D depth:` line
 counts held Presents (`ready_copies held=`). A held Present is not a current copy: Present coverage
-and sampling see only current copies.
+and sampling see only current copies. The hold belongs to the effect runtime that showed the
+capture: the runtime of another swapchain (a second window of the game) never holds it.
 Binding, sampling and the public current depth accessor use the same capture record and currentness
 checks. The view/backup cache is bounded and retains retiring resources until their existing
 retirement period ends; ordinary rotation reuses views rather than allocating or waiting for the
