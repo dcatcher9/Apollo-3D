@@ -4551,6 +4551,10 @@ published after it could show next); the scope's newest nomination, when it is t
 the viewport's ordinary source as a missing frame of the lineage (the interruption rule below), so
 the newest SR/RR snapshot recorded since the shown FG copy stands in at once
 (`selection=completed_snapshot`, `current_capture`, or `lineage_snapshot` when FG turns on again).
+A pending head whose own copy completes between the selection's look at it and the stand-in's
+(each reads its producer fence anew) is decided again, as the current capture: until 10-28 it read
+`completed_not_older` and the Present held an older copy beside it (at FG Off, the FG copy beside
+the frame's own readable tag copy while its SR copy on the game's queue completed then).
 While another viewport's view in that epoch is active, that FG nomination goes as before: an
 ordinary view beside it would keep the picks ambiguous (a view that stopped evaluating, past the
 source age, makes nothing ambiguous). An NGX copy published after the shown

@@ -1219,6 +1219,18 @@ namespace sunshine_streamline::depth_capture {
       // A missing frame or a nomination in progress without a stand-in keeps
       // its own result and reason.
       auto *completed = completed_snapshot(identity, now, native);
+      // The pending head's own copy completed between select_latest_capture's
+      // look and this one (each reads its producer fence anew): the frame's
+      // newest copy is readable now, so it is decided again, as the current
+      // capture. Until 10-28 it read completed_not_older here and the Present
+      // held an older copy beside it: at FG Off, the FG copy beside the
+      // frame's own readable tag copy, while the frame's SR copy on the
+      // game's queue completed during that Present's selection (the 10-28
+      // review's J2, once in a few fixed-set runs).
+      if (pending && completed && completed == latest) {
+        auto again = select_latest_capture(owner, native, present, provider, now);
+        if (again.value == completed && again.result == status::ready) return again;
+      }
       if (!completed) {
         if (pending) chosen.selection = selection_reason::no_completed_snapshot;
         if (auto *standin = lineage_snapshot(owner, native, present, identity, now)) {

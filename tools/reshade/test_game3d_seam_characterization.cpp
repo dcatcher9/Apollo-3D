@@ -2096,6 +2096,65 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P6 FG Off retires only the FG role: %zu rows\n", std::size(rows));
     }
 
+    // P6: a pending head's own copy, on another queue, that completes between
+    // the selection's look at it (select_latest_capture) and the stand-in's
+    // (completed_snapshot), each reading its producer fence anew: it is
+    // decided again as the current capture (10-28). Until then it read
+    // completed_not_older and the Present held an older copy beside the
+    // frame's own readable one (the 10-28 review's J2: the FG Off frame of
+    // seed dda773a575be6561, once in a few fixed-set runs).
+    void head_completes_between_looks() {
+      constexpr std::uint64_t epoch = 13, device = 41;
+      for (const bool between : {false, true}) {
+        reset();
+        fixture::completion_fence fence;
+        fence.completed = 4;
+        if (between) {
+          fence.completed_later = 5;
+          fence.later_after = 2;  // select_latest_capture's two looks.
+        }
+        auto &place = queues[0];
+        place = std::make_unique<queue_state>();
+        place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
+        place->fence.p = &fence;
+        place->device_identity = device;
+        struct release_place {
+          std::unique_ptr<queue_state> &entry;
+          ~release_place() { entry->queue.p = nullptr; entry->fence.p = nullptr; entry.reset(); }
+        } release{place};
+        queue_state owner;
+        owner.device_identity = device;
+        // The frame's own copy on the presenting queue (sequence 10), then
+        // its head, an SR copy on the game's queue (sequence 20), copied out
+        // (immutable) and complete only from the stand-in's look on; both of
+        // one source.
+        auto storage = std::make_shared<source_reference>();
+        storage->device_identity = device;
+        storage->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        storage->desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        auto &own = make(0, provider_kind::streamline, epoch, 10, 0);
+        own.texture = std::make_shared<texture_reference>();
+        own.source_nominated = true;
+        own.metadata.source = storage;
+        auto &head = make(1, provider_kind::streamline, epoch, 20, 0);
+        head.texture = std::make_shared<texture_reference>();
+        head.source_nominated = true;
+        head.metadata.source = storage;
+        head.queue = reinterpret_cast<std::uint64_t>(&fence);
+        head.producer_fence = 5;
+        head.copied_out = true;
+        const auto now = GetTickCount64();
+        pin_clock(now);
+        const auto pick = select_provider(owner, native, 2, now, {});
+        const auto got = std::string(1, label(pick, &own, 'O', &head, 'H')) + " " + name(pick.result) + " " + name(pick.selection);
+        const char *expected = between ? "H ready current_capture" : "O ready completed_snapshot";
+        if (got != expected) {
+          fail(std::string("P6 head completing between looks, ") + (between ? "completes between them" : "still in flight") + ": got " + got + ", expected " + expected);
+        }
+      }
+      std::printf("PASS P6 a pending head completing between the selection's looks: 2 rows\n");
+    }
+
     // P6/P7: a head refused before its capture slot existed names its source
     // to the display (capture_pick::named, classify_acquisition), also
     // beside ambiguous or inactive views. The display then holds only a copy
@@ -2925,6 +2984,7 @@ int main() {
   dlssg_tag_precedence_steps();
   deferral_present_steps();
   deferral_age_rows();
+  head_completes_between_looks();
   select_provider_rows();
   ownership_timelines();
   freshness_edges();

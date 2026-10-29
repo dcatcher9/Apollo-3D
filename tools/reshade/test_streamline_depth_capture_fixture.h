@@ -43,9 +43,11 @@ namespace sunshine_streamline::depth_capture::fixture {
   }
 
   // A queue's private fence as selection reads it: only GetCompletedValue,
-  // which returns completed.
+  // which returns completed (after reads reads, completed_later when set:
+  // the GPU completes the work between two looks of one selection).
   struct completion_fence final : ID3D12Fence {
-    UINT64 completed{};
+    UINT64 completed{}, completed_later{};
+    unsigned reads{}, later_after{};
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
     ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
     ULONG STDMETHODCALLTYPE Release() override { return 1; }
@@ -54,7 +56,9 @@ namespace sunshine_streamline::depth_capture::fixture {
     HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown *) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
-    UINT64 STDMETHODCALLTYPE GetCompletedValue() override { return completed; }
+    UINT64 STDMETHODCALLTYPE GetCompletedValue() override {
+      return completed_later && reads++ >= later_after ? completed_later : completed;
+    }
     HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64, HANDLE) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE Signal(UINT64) override { return E_NOTIMPL; }
   };
