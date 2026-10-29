@@ -2196,11 +2196,67 @@ namespace sunshine_streamline {
       }
       return any;
     }
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+    // The nomination tap (testing::latest_nomination). Only the thread that
+    // armed it records, so an unarmed fixture runs exactly as before. Each
+    // nominate_depth_source call evaluates its gates as it begins (pending),
+    // and its finish_capture keeps the result, while the observation is
+    // current, as its viewport's newest nomination, never over a newer one
+    // (finish_evaluation's rule).
+    struct tapped_nomination {
+      sunshine_streamline::testing::nomination value;
+      std::uint64_t epoch{}, observation{};
+      bool used{};
+    };
+    thread_local bool nomination_tap_armed{};
+    bool nomination_tap_pending{};
+    sunshine_streamline::testing::nomination nomination_tap_value;
+    std::array<tapped_nomination, 8> nomination_tap{};
+    bool nomination_tap_current(const tapped_nomination &entry) {
+      return entry.used && entry.epoch == epoch.load(std::memory_order_acquire) &&
+        entry.observation == observation_generation.load(std::memory_order_acquire);
+    }
+    void tap_nomination(const evaluation_snapshot &snapshot, bool version_one) {
+      auto &out = nomination_tap_value;
+      out = {};
+      out.path_selected = source_path_selected(snapshot);
+      out.source_admissible = direct_source_admissible(snapshot);
+      for (unsigned i = 0; i != snapshot.tags.size(); ++i) {
+        out.tag_admissible[i] = direct_tag_admissible(snapshot, snapshot.tags[i]);
+        if (out.path_selected && out.source_admissible && out.tag_admissible[i])
+          out.frames[i] = normalize_depth_frame(snapshot, snapshot.tags[i], version_one);
+      }
+      out.snapshot = snapshot;
+      for (auto &tag : out.snapshot.tags) { tag.direct_source.reset(); tag.ended.direct_source.reset(); }
+      nomination_tap_pending = true;
+    }
+    void finish_tap(bool successful, std::uint64_t ticket) {
+      if (!nomination_tap_pending) return;
+      nomination_tap_pending = false;
+      if (!current(ticket)) return;
+      auto &value = nomination_tap_value;
+      value.successful = successful;
+      tapped_nomination *chosen = nullptr;
+      for (auto &entry : nomination_tap) if (entry.used && entry.value.snapshot.viewport == value.snapshot.viewport) {
+        chosen = &entry; break;
+      }
+      if (chosen && nomination_tap_current(*chosen) && chosen->value.snapshot.sequence >= value.snapshot.sequence) return;
+      for (auto &entry : nomination_tap) if (!chosen && !nomination_tap_current(entry)) chosen = &entry;
+      if (!chosen) {
+        chosen = &nomination_tap[0];
+        for (auto &entry : nomination_tap) if (entry.value.snapshot.sequence < chosen->value.snapshot.sequence) chosen = &entry;
+      }
+      *chosen = {std::move(value), epoch.load(std::memory_order_acquire), observation_generation.load(std::memory_order_acquire), true};
+    }
+#endif
     // deferred: a frame-generation tag call's depth that is copied before its
     // frame's Present instead (R2, deferred_copy); observe_tag_call keeps it
     // once the SDK accepted the call.
     std::uint64_t nominate_depth_source(const evaluation_snapshot &snapshot, bool version_one, bool *copy_recorded = nullptr,
         deferred_depth *deferred = nullptr) {
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+      if (nomination_tap_armed) tap_nomination(snapshot, version_one);
+#endif
       if (copy_recorded) *copy_recorded = false;
       if (deferred) *deferred = {};
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return 0;
@@ -2391,6 +2447,9 @@ namespace sunshine_streamline {
     // A copy survives a successful SDK call. Unrelated metadata observed or
     // lost while the original ran does not change the pixels it copied.
     void finish_capture(std::uint64_t captured, bool successful, std::uint64_t ticket) {
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+      if (nomination_tap_armed) finish_tap(successful, ticket);
+#endif
       if (!captured) return;
       depth_capture::finish(captured, successful && current(ticket), depth_capture::capture_failure::evaluation_failed);
     }
@@ -4434,6 +4493,16 @@ namespace sunshine_streamline {
         out = record.evaluation; found = true; break;
       }
       return found;
+    }
+    void arm_nomination_tap(bool armed) {
+      nomination_tap_armed = armed;
+      nomination_tap_pending = false;
+    }
+    bool latest_nomination(std::uint32_t viewport, nomination &out) {
+      for (const auto &entry : nomination_tap) if (nomination_tap_current(entry) && entry.value.snapshot.viewport == viewport) {
+        out = entry.value; return true;
+      }
+      return false;
     }
     void lock_source_resources() { AcquireSRWLockExclusive(&source_resources_lock); }
     void unlock_source_resources() { ReleaseSRWLockExclusive(&source_resources_lock); }

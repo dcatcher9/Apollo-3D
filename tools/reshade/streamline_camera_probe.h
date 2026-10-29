@@ -306,6 +306,25 @@ namespace sunshine_streamline {
     bool latest_snapshot(std::uint32_t viewport, evaluation_snapshot &out);
     // Value translation only, never a post-return permission to read the source.
     bool normalized_source(std::uint32_t viewport, unsigned index, sunshine_scene_depth::frame &out);
+    // The nomination tap, on a thread that armed it: nominate_depth_source
+    // records the evaluation it received (without its retained sources) and,
+    // as the call begins, what normalized_source replays on a stored one; the
+    // call's finish_capture adds the SDK result. latest_nomination returns a
+    // viewport's newest finished nomination of the current observation.
+    struct nomination {
+      evaluation_snapshot snapshot;
+      bool successful{};
+      bool path_selected{}, source_admissible{}; // source_path_selected, direct_source_admissible.
+      std::array<bool, 3> tag_admissible{}; // direct_tag_admissible of each tag.
+      // normalize_depth_frame of each tag that the two call gates and its own admit.
+      std::array<sunshine_scene_depth::frame, 3> frames{};
+      // normalized_source's answer for snapshot.tags[index].
+      bool nominates(unsigned index) const {
+        return successful && path_selected && source_admissible && index < tag_admissible.size() && tag_admissible[index];
+      }
+    };
+    void arm_nomination_tap(bool armed);
+    bool latest_nomination(std::uint32_t viewport, nomination &out);
     // Fixture only: caller guarantees no callback can be running.
     void clear();
     // Exercise fail-closed observation loss without relying on scheduler luck.
