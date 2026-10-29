@@ -2449,7 +2449,9 @@ once in a full check's fixed set held a 93 ms old FG copy at the FG Off frame be
 copy, J2: the frame's SR copy on the game's queue completed between the selection's two reads of
 its fence, so the pending head itself was its newest completed copy (`completed_not_older`, as the
 add-on's FG switch line named it), and it is now decided again as the current capture; the seam
-characterization pins that race with a fence that completes between the reads),
+characterization pins that race with a fence that completes between the reads; it also pins the
+lineage stand-in for an FG head whose own completed copy is refused, which the lineage judge found
+in the extra shard's seed d0dd7845ac141ad2 at frame 113),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes

@@ -4554,7 +4554,11 @@ the newest SR/RR snapshot recorded since the shown FG copy stands in at once
 A pending head whose own copy completes between the selection's look at it and the stand-in's
 (each reads its producer fence anew) is decided again, as the current capture: until 10-28 it read
 `completed_not_older` and the Present held an older copy beside it (at FG Off, the FG copy beside
-the frame's own readable tag copy while its SR copy on the game's queue completed then).
+the frame's own readable tag copy while its SR copy on the game's queue completed then). An FG head
+whose own completed copy is refused (published before a gap, consumed, of another storage) or not
+readable here takes its lineage's stand-in as one with none does: until 10-28 the Present held the
+display's older copy beside the lineage's readable SR copy (the session timelines' seed
+d0dd7845ac141ad2, at an FG renewal after the scope's held copy was dropped).
 While another viewport's view in that epoch is active, that FG nomination goes as before: an
 ordinary view beside it would keep the picks ambiguous (a view that stopped evaluating, past the
 source age, makes nothing ambiguous). An NGX copy published after the shown

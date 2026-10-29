@@ -2155,6 +2155,81 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P6 a pending head completing between the selection's looks: 2 rows\n");
     }
 
+    // P6: an FG head whose own completed copy is refused (published before a
+    // gap) or not readable: its lineage's newest legal SR copy stands in, as
+    // where it has none (10-28; until then the Present held the display's
+    // older copy beside that readable SR copy: the extra shard's seed
+    // d0dd7845ac141ad2 at frame 113). Without an SR copy the head keeps its
+    // own refusal.
+    void lineage_after_refused_completed() {
+      enum class variant { before_gap, before_gap_no_sr, not_readable };
+      struct row {
+        const char *pins;
+        variant kind;
+        const char *outcome;
+      };
+      const row rows[] {
+        {"The FG copy completed before a gap, a newer SR copy of the lineage readable: SR stands in", variant::before_gap, "S ready lineage_snapshot"},
+        {"The same without an SR copy: the head keeps its refusal", variant::before_gap_no_sr, "- recorded completed_before_gap"},
+        {"The FG copy complete on another queue but not readable here, a newer SR copy readable: SR stands in", variant::not_readable, "S ready lineage_snapshot"},
+      };
+      constexpr std::uint64_t epoch = 17, device = 41;
+      for (const auto &r : rows) {
+        reset();
+        fixture::completion_fence fence;
+        fence.completed = 4;
+        auto &place = queues[0];
+        place = std::make_unique<queue_state>();
+        place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
+        place->fence.p = &fence;
+        place->device_identity = device;
+        struct release_place {
+          std::unique_ptr<queue_state> &entry;
+          ~release_place() { entry->queue.p = nullptr; entry->fence.p = nullptr; entry.reset(); }
+        } release{place};
+        queue_state owner;
+        owner.device_identity = device;
+        auto storage = std::make_shared<source_reference>();
+        storage->device_identity = device;
+        storage->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        storage->desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        const auto copy = [&](slot &value) -> slot & {
+          value.texture = std::make_shared<texture_reference>();
+          value.source_nominated = true;
+          value.metadata.source = storage;
+          return value;
+        };
+        // The scope's completed FG copy (sequence 10).
+        auto &fg = copy(make(0, provider_kind::streamline, epoch, 10, fg_source, 0, 0));
+        if (r.kind == variant::not_readable) {
+          // On DLSS-G's compute queue, its producer fence not passed yet.
+          fg.queue = reinterpret_cast<std::uint64_t>(&fence);
+          fg.producer_fence = 5;
+          fg.copied_out = true;
+        } else {
+          // A gap since: the queue's admission floor above it.
+          owner.admission_after = fg.id;
+        }
+        // The viewport's SR copy of a later frame (sequence 20), readable.
+        slot *sr = nullptr;
+        if (r.kind != variant::before_gap_no_sr) {
+          sr = &copy(make(1, provider_kind::streamline, epoch, 20, 0, 0, UINT64_MAX));
+        }
+        // The scope's next FG copy, pending (sequence 30).
+        auto &head = copy(make(2, provider_kind::streamline, epoch, 30, fg_source, 0, 0));
+        head.finished = false;
+        const auto now = GetTickCount64();
+        pin_clock(now);
+        const selection_policy policy {true, epoch, 0, false, now - 16};
+        const auto pick = select_provider(owner, native, 2, now, policy);
+        const auto got = std::string(1, label(pick, sr, 'S', &fg, 'F')) + " " + name(pick.result) + " " + name(pick.selection);
+        if (got != r.outcome) {
+          fail(std::string("P6 lineage after a refused completed FG copy, ") + r.pins + ": got " + got + ", expected " + r.outcome);
+        }
+      }
+      std::printf("PASS P6 lineage stand-in after a refused completed FG copy: %zu rows\n", std::size(rows));
+    }
+
     // P6/P7: a head refused before its capture slot existed names its source
     // to the display (capture_pick::named, classify_acquisition), also
     // beside ambiguous or inactive views. The display then holds only a copy
@@ -2985,6 +3060,7 @@ int main() {
   deferral_present_steps();
   deferral_age_rows();
   head_completes_between_looks();
+  lineage_after_refused_completed();
   select_provider_rows();
   ownership_timelines();
   freshness_edges();

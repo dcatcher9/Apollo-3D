@@ -1241,18 +1241,33 @@ namespace sunshine_streamline::depth_capture {
         }
         return chosen;
       }
+      // An FG head whose own completed copy is refused (published before a
+      // gap, consumed, of another storage) or not readable here: its
+      // lineage's newest legal SR copy stands in, as where it has none
+      // (10-28; until then the Present held the display's older copy beside
+      // that readable SR copy: the extra shard's seed d0dd7845ac141ad2 at
+      // frame 113, under the lineage judge).
+      const auto lineage_stand_in = [&] {
+        auto *standin = lineage_snapshot(owner, native, present, identity, now);
+        if (!standin) return false;
+        chosen.value = standin;
+        chosen.progress = standin->queue == native ? queue_progress{} : producer_progress(*standin);
+        chosen.result = status::ready;
+        chosen.selection = selection_reason::lineage_snapshot;
+        return true;
+      };
       const auto reason = completed_fallback_reason(owner, present, identity, *completed, latest != nullptr);
       if (reason != selection_reason::completed_snapshot) {
-        if (pending) {
-          chosen.selection = reason;
-          if (reason == selection_reason::completed_already_consumed && completed->metadata.sequence == owner.last_sequence)
-            chosen.consumed_completed_capture = completed->id;
-        }
+        if (pending) chosen.selection = reason;
+        if (lineage_stand_in()) return chosen;
+        if (pending && reason == selection_reason::completed_already_consumed && completed->metadata.sequence == owner.last_sequence)
+          chosen.consumed_completed_capture = completed->id;
         return chosen;
       }
       const auto progress = producer_progress(*completed);
       if (submission_status(*completed, native, owner.device_identity, progress) != status::ready) {
         if (pending) chosen.selection = selection_reason::completed_not_readable;
+        lineage_stand_in();
         return chosen;
       }
       // An FG copy of a frame before FG Off retired its role (its sequence
