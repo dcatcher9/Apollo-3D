@@ -610,6 +610,7 @@ namespace game3d_contract {
   // before the end-of-frame copy.
   enum class generic_boundary {
     clear_before_draws,
+    render_pass_clear,  // BeginRenderPass with a depth CLEAR (D11), the draws in the pass.
     unbind_writable_dsv,
     end_of_frame
   };
@@ -823,7 +824,7 @@ namespace game3d_contract {
     if (!legal_flags(value.depth.flags) || !depth_stencil(value.depth.flags)) {
       return false;
     }
-    const bool clears = value.boundary == generic_boundary::clear_before_draws;
+    const bool clears = value.boundary == generic_boundary::clear_before_draws || value.boundary == generic_boundary::render_pass_clear;
     if (value.cleared != clear_target::depth_of_subresource_zero && !clears) {
       return false;
     }

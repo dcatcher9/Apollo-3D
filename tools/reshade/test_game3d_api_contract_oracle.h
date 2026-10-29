@@ -1039,7 +1039,8 @@ namespace game3d_contract {
       default:
         break;
     }
-    if (value.boundary == generic_boundary::clear_before_draws && value.cleared == clear_target::depth_of_subresource_zero) {
+    if ((value.boundary == generic_boundary::clear_before_draws || value.boundary == generic_boundary::render_pass_clear) &&
+        value.cleared == clear_target::depth_of_subresource_zero) {
       return capture(rules::D11, legacy(D3D12_RESOURCE_STATE_DEPTH_WRITE));
     }
     // A state proven on the game's recording names the state exactly.
@@ -1553,6 +1554,7 @@ namespace game3d_contract {
     static_assert(captures(expect(with(ngx_case {}, &ngx_case::lifetime, ngx_lifetime::nested_in_streamline)), rules::N9b, nps));
 
     static_assert(captures(expect(generic_case {}), rules::D11, depth_write));
+    static_assert(captures(expect(with(generic_case {}, &generic_case::boundary, generic_boundary::render_pass_clear)), rules::D11, depth_write));
     static_assert(undecided(expect(with(generic_case {}, &generic_case::boundary, generic_boundary::end_of_frame)), rules::D10));
     static_assert(captures(expect(with(with(generic_case {}, &generic_case::boundary, generic_boundary::end_of_frame), &generic_case::proven, depth_read)), rules::D10b, depth_read));
     static_assert(captures(expect(with(with(generic_case {}, &generic_case::cleared, clear_target::stencil_only), &generic_case::proven, depth_write)), rules::D10b, depth_write));

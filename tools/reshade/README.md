@@ -1280,8 +1280,8 @@ same-size competitors, content changes, multi-viewport drawing within the same r
 the source's identity; this case does not check the copied rectangle, which the rotation
 fixture's `--layout` case does),
 and a single active one-draw buffer. A negative control keeps a lone scene that is cleared after
-drawing unready (mono) on every frame, then requires it to become ready once the trailing clear
-stops. It also
+drawing unready (mono) on every frame, by `ClearDepthStencilView` and then by a render pass whose
+depth access is CLEAR, then requires it to become ready once the trailing clear stops. It also
 checks a useful foreground-only incumbent against a full scene at the same resolution, a
 lower-resolution full scene against native foreground depth, and scenes containing clear sky.
 Histogram cases compare equally complete, equal-size buffers with narrow and broad depth
@@ -1402,7 +1402,8 @@ first rendered scene, fresh ABC rotation without any prior continuous-source cal
 and a stable captured crop despite unrelated viewport activity. The layout case also requires
 an actual captured-crop change to establish a fresh numeric basis. Its auxiliary pass draws a
 larger viewport (three quarters or all of the allocation) into the scene's allocation and is
-cleared before the half-view scene: the end-of-frame copy's crop must stay the scene's half view
+cleared before the half-view scene, by `ClearDepthStencilView` and, every other frame, by a render
+pass whose depth access is CLEAR: the end-of-frame copy's crop must stay the scene's half view
 and the depth at its center the scene's, because a full depth clear restarts the crop's extent
 ([capture layout](../../docs/reshade-sbs.md#selecting-scene-depth)). The snapshot CTest checks the
 same rule across merged command lists.

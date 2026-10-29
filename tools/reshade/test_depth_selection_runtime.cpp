@@ -17,6 +17,7 @@ namespace {
       float clear_depth = 0.f;
       bool segmented_viewport = false;
       bool partial_viewport = false; // Draws only the top-left quarter: the frame's largest viewport.
+      bool render_pass_clear = false; // clear_after by a render pass whose depth access is CLEAR.
       std::function<void()> before_final_clear;
     };
     std::unique_ptr<target_t> scene, decoy, shadow;
@@ -192,7 +193,20 @@ float ps(float4 position : SV_Position) : SV_Depth {
       } else if (target.partial_viewport) draw_region(target.width / 2, target.height / 2, target.pattern, 4);
       else draw_region(target.width, target.height, target.pattern, target.draws);
       if (target.before_final_clear) target.before_final_clear();
-      if (target.clear_after) commands->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, target.clear_depth, 0, 0, nullptr);
+      if (target.clear_after && target.render_pass_clear) {
+        com_ptr<ID3D12GraphicsCommandList4> list4;
+        checked(commands->QueryInterface(IID_PPV_ARGS(list4.put())), "The game's list lacks render passes");
+        D3D12_RENDER_PASS_DEPTH_STENCIL_DESC pass {};
+        pass.cpuDescriptor = dsv;
+        pass.DepthBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
+        pass.DepthBeginningAccess.Clear.ClearValue.Format = target.format;
+        pass.DepthBeginningAccess.Clear.ClearValue.DepthStencil.Depth = target.clear_depth;
+        pass.DepthEndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+        pass.StencilBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
+        pass.StencilEndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
+        list4->BeginRenderPass(0, nullptr, &pass, D3D12_RENDER_PASS_FLAG_NONE);
+        list4->EndRenderPass();
+      } else if (target.clear_after) commands->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, target.clear_depth, 0, 0, nullptr);
       if (unbind) commands->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
     }
 
@@ -462,6 +476,18 @@ float ps(float4 position : SV_Position) : SV_Depth {
         require(!depth_ready(), "Flat depth cleared after the scene was shown as ready scene depth");
       }
       std::printf("PASS lone scene cleared after drawing keeps DEPTH unready (mono) for %u frames\n", frames);
+      // The same trailing clear as a render pass whose depth access is CLEAR
+      // (ReShade reports it as a clear).
+      scene->render_pass_clear = true;
+      const auto pass_until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+      frames = 0;
+      while (std::chrono::steady_clock::now() < pass_until) {
+        step();
+        ++frames;
+        require(!depth_ready(), "Flat depth cleared by a render pass after the scene was shown as ready scene depth");
+      }
+      std::printf("PASS lone scene cleared by a render pass after drawing keeps DEPTH unready (mono) for %u frames\n", frames);
+      scene->render_pass_clear = false;
       scene->clear_after = false;
       wait_for_scene("the same scene without its trailing clear becomes ready", width, height);
     }

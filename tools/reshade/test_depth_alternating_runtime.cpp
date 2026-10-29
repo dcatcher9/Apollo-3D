@@ -91,7 +91,9 @@ namespace {
       // A non-scene pass uses the same allocation with a changing valid larger
       // viewport. Its later full clear is followed by the actual half-view
       // scene and restarts the crop, so the end-of-frame copy's crop and
-      // layout are the scene's, not the larger pass's.
+      // layout are the scene's, not the larger pass's. Every other frame that
+      // clear is a render pass whose depth access is CLEAR (ReShade reports it
+      // as a clear), so both routes restart the crop alike.
       auto &target=*scene;
       const auto dsv=target.heap->GetCPUDescriptorHandleForHeapStart();
       commands->OMSetRenderTargets(0,nullptr,FALSE,&dsv);
@@ -106,7 +108,20 @@ namespace {
       struct {float w,h;unsigned pattern;} constants{viewport.Width,viewport.Height,18};
       commands->SetGraphicsRoot32BitConstants(0,3,&constants,0);
       commands->DrawInstanced(3,1,0,0);
-      commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,0.f,0,0,nullptr);
+      if(phase_present%2){
+        com_ptr<ID3D12GraphicsCommandList4> list4;
+        checked(commands->QueryInterface(IID_PPV_ARGS(list4.put())),"The game's list lacks render passes");
+        D3D12_RENDER_PASS_DEPTH_STENCIL_DESC pass{};
+        pass.cpuDescriptor=dsv;
+        pass.DepthBeginningAccess.Type=D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
+        pass.DepthBeginningAccess.Clear.ClearValue.Format=target.format;
+        pass.DepthEndingAccess.Type=D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+        pass.StencilBeginningAccess.Type=D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
+        pass.StencilEndingAccess.Type=D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
+        list4->BeginRenderPass(0,nullptr,&pass,D3D12_RENDER_PASS_FLAG_NONE);
+        list4->EndRenderPass();
+        commands->OMSetRenderTargets(0,nullptr,FALSE,&dsv);
+      }else commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,0.f,0,0,nullptr);
       const D3D12_VIEWPORT captured_view{0,0,float(width/2),float(height/2),0,1};
       const D3D12_RECT captured_scissor{0,0,LONG(width/2),LONG(height/2)};
       commands->RSSetViewports(1,&captured_view);commands->RSSetScissorRects(1,&captured_scissor);
