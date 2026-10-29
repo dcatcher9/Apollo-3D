@@ -47,10 +47,12 @@ extern "C" __declspec(dllexport) void ReShadeLogMessage(void *, int, const char 
   if (message && logged_lines.size() < 4096) logged_lines.emplace_back(message);
 }
 
-// Diagnostic fixtures explicitly opt in through the same public config API as
-// the game. nullptr models a missing setting for the default-off regression.
-static const char *probe_setting = "1";
-static const char *source_setting = "0"; // Existing diagnostic tests isolate their opt-in contract.
+// Fixtures set these through the same public config API as the game: the
+// shipping configuration (StreamlineCameraProbe=0, StreamlineDepthSource=1)
+// unless a ledger test opts in (probe_config::ledger). nullptr models a
+// missing setting for the default-off regression.
+static const char *probe_setting = "0";
+static const char *source_setting = "1";
 static const char *call_trace_setting = nullptr;
 extern "C" __declspec(dllexport) bool ReShadeGetConfigValue(void *, reshade::api::effect_runtime *,
     const char *section, const char *key, char *value, size_t *size) {
@@ -254,10 +256,14 @@ namespace {
   const testing::targets presentation_v2_targets {v2_targets.constants, v2_targets.tag, v2_targets.tag_for_frame,
     v2_targets.evaluate, reinterpret_cast<void *>(&fake_v2_new_token), reinterpret_cast<void *>(&fake_get_feature_function)};
 
+  // The configuration a fixture initializes the probe with: shipping, or that
+  // of the default-off StreamlineCameraProbe research ledger (probe on, source
+  // selection off), which only the ledger group's tests in main() use.
+  enum class probe_config { shipping, ledger };
   struct fixture {
-    fixture() {
-      probe_setting = "1";
-      source_setting = "0";
+    explicit fixture(probe_config config = probe_config::shipping) {
+      probe_setting = config == probe_config::ledger ? "1" : "0";
+      source_setting = config == probe_config::ledger ? "0" : "1";
       testing::clear();
       constants_call = tag_call = framed_tag_call = evaluate_call = new_token_call = feature_function_call = pcl_call = fg_call = {};
       returned_token = nullptr;
@@ -603,7 +609,7 @@ namespace {
   }
 
   void test_diagnostic_opt_in() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     for (const char *setting : {static_cast<const char *>(nullptr), "0", "invalid"}) {
       probe_setting = setting;
       initialize(nullptr);
@@ -2365,7 +2371,7 @@ namespace {
   }
 
   void test_evaluation_v1() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 evidence install failed");
     int native{}, commands{};
     abi_v1::resource resource{};
@@ -2446,7 +2452,7 @@ namespace {
     expect_evidence(selected, evidence_status::inactive, "shutdown left evidence available");
   }
   void test_evaluation_immutable_and_ordered() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 ordered evidence install failed");
     int native{};
     abi_v1::resource resource{};
@@ -2485,7 +2491,7 @@ namespace {
     expect_evidence(selected, evidence_status::missing_constants, "evicted frame reused a different camera");
   }
   void test_evaluation_v2_tokens() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 tracked evidence install failed");
     auto view = viewport(3);
     auto constants = modern_camera();
@@ -2561,7 +2567,7 @@ namespace {
   // evaluation with eWarnOutOfVRAM (39) while SR and DLSS-G kept running. The
   // warning accepts the call's inputs; every other non-zero result fails it.
   void test_sdk_vram_warning() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 warning install failed");
     auto view = viewport(3);
     auto constants = modern_camera();
@@ -2689,7 +2695,7 @@ namespace {
         fg.enabled, "a warned FG discovery lookup left the cached options pointer unobserved");
   }
   void test_evaluation_ambiguity_and_invalid_tags() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 ambiguity install failed");
     int native{};
     abi_v1::resource resource{};
@@ -2709,7 +2715,7 @@ namespace {
   }
 
   void test_evaluation_global_contract() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 global contract install failed");
     opaque_token token;
     mint(token, nullptr);
@@ -2738,7 +2744,7 @@ namespace {
   }
 
   void test_evaluation_input_age() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 input-age install failed");
     int native{};
     auto constants = old_camera();
@@ -2763,7 +2769,7 @@ namespace {
   }
 
   void test_evaluation_command_markers() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     require(testing::install(testing::abi::v1_1_1, v1_targets), "command-marker hook install failed");
     int native{}, copy_native{}, evaluation_native{};
     const auto copy_command = reinterpret_cast<std::uintptr_t>(&copy_native);
@@ -2835,7 +2841,7 @@ namespace {
   }
 
   void test_evaluation_content() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     require(testing::install(testing::abi::v1_1_1, v1_targets), "content hook install failed");
     int native{}, command_native{}, backup_native{};
     const auto command = reinterpret_cast<std::uintptr_t>(&command_native);
@@ -2934,7 +2940,7 @@ namespace {
   }
 
   void test_inactive_content_transition() {
-    fixture cleanup;
+    fixture cleanup{probe_config::ledger};
     int native{}, backup_native{}, command_native{};
     const auto command = reinterpret_cast<std::uintptr_t>(&command_native);
     constexpr std::uint64_t device = 611, queue = 612;
@@ -2971,7 +2977,7 @@ namespace {
 
   void test_non_renderer_evaluations() {
     {
-      fixture cleanup;
+      fixture cleanup{probe_config::ledger};
       require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 feature filter install failed");
       int native{}; abi_v1::resource resource{}; resource.native = &native;
       auto constants = old_camera();
@@ -2995,7 +3001,7 @@ namespace {
       }
     }
     {
-      fixture cleanup;
+      fixture cleanup{probe_config::ledger};
       require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 feature filter install failed");
       opaque_token token; mint(token, nullptr);
       int native{}; auto view = viewport(0); auto constants = modern_camera();
@@ -3086,7 +3092,7 @@ namespace {
 
   void test_color_tag_snapshots() {
     {
-      fixture cleanup;
+      fixture cleanup{probe_config::ledger};
       require(testing::install(testing::abi::v1_1_1, v1_targets), "v1 color fixture install failed");
       int depth{}, hudless{}, input{}, output{};
       abi_v1::resource d{}, h{}, i{}, o{}; d.native = &depth; h.native = &hudless; i.native = &input; o.native = &output;
@@ -3110,7 +3116,7 @@ namespace {
         "v1 null color untag erased another color or poisoned depth");
     }
     {
-      fixture cleanup;
+      fixture cleanup{probe_config::ledger};
       require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "v2 color fixture install failed");
       opaque_token token; mint(token, nullptr);
       int depth{}, hudless{}, input{}, framed_input{}, output{}, local_output{};
@@ -4468,7 +4474,7 @@ static void test_call_trace_only(bool modern) {
   require(sunshine_upscaler_trace::testing::counts().streamline == stopped,
     "Disabled call trace observed retained pass-through hook");
   call_trace_setting = nullptr;
-  probe_setting = "1";
+  probe_setting = "0"; source_setting = "1";
 }
 
 int main(int argc, char **argv) {
@@ -4560,8 +4566,6 @@ int main(int argc, char **argv) {
     std::puts("PASS 162 source states preserve unrelated depth and named alias/split blocks; Reset reuses storage; wildcard/identity/allocation loss rejects without retiring owned copies");
     test_version_identity();
     std::puts("PASS ABI families, optional version strings, exact private-state scope and unknown/conflicting rejection");
-    test_diagnostic_opt_in();
-    std::puts("PASS default-off diagnostic config, absent command/native tracking, opt-in hooks and disabled retained pass-through");
     test_source_nomination_v1();
     test_source_nomination_v2();
     test_rr_and_linear_depth_source();
@@ -4633,22 +4637,38 @@ int main(int argc, char **argv) {
     test_depth_observation_loss_diagnostics(false);
     test_depth_observation_loss_diagnostics(true);
     std::puts("PASS source-only v1/v2 exact-revision reset, invalid camera, SDK failure and lock contention causes preserve forwarding and source recovery");
-    test_evaluation_v1();
-    std::puts("PASS v1 evaluation evidence, exact frame history, copy isolation and fail-closed recovery");
     test_scene_feedback(false);
     test_scene_feedback(true);
     test_scene_feedback_inflight();
     test_reset_constants_observation_loss(false);
     test_reset_constants_observation_loss(true);
     std::puts("PASS v1/v2 fresh reset depth/projection, immutable feedback, and rejection of pre-reset tags, in-flight completion and interrupted reset constants");
+    test_frame_generation_vram_warning();
+    test_frame_generation_warned_discovery();
+    std::puts("PASS eWarnOutOfVRAM keeps FG knowledge and the FG depth source; other SDK results still fail");
+    test_feature_independent_depth_contracts();
+    std::puts("PASS arbitrary feature IDs with proven depth contracts; opaque v2 and unproven legacy/Reflex inputs remain pass-through");
+    test_presentation_v1();
+    test_presentation_v2();
+    std::puts("PASS v1 Reflex/v2 dynamic PCL presentation brackets, thread isolation, failures, token reuse and repeated-frame rejection");
+    test_call_trace_only(false);
+    test_call_trace_only(true);
+    std::puts("PASS v1/v2 call-route trace remains independent of depth selection and full content diagnostics");
+    // The StreamlineCameraProbe research ledger's own tests: each reads what
+    // only the ledger records (query_evaluation's evaluation evidence, command
+    // and content tracking, the probe's own opt-in), so they run in the
+    // ledger's configuration (probe_config::ledger); every test above runs in
+    // the shipping one. The group is deleted with the ledger (refactor D2).
+    test_diagnostic_opt_in();
+    std::puts("PASS default-off diagnostic config, absent command/native tracking, opt-in hooks and disabled retained pass-through");
+    test_evaluation_v1();
+    std::puts("PASS v1 evaluation evidence, exact frame history, copy isolation and fail-closed recovery");
     test_evaluation_immutable_and_ordered();
     std::puts("PASS immutable evaluation ordering, bounded frame eviction and age limits");
     test_evaluation_v2_tokens();
     std::puts("PASS v2 observed token generations, numeric provenance, frame tags and local overrides");
     test_sdk_vram_warning();
-    test_frame_generation_vram_warning();
-    test_frame_generation_warned_discovery();
-    std::puts("PASS eWarnOutOfVRAM keeps evaluations, inputs, FG knowledge and the FG depth source; other SDK results still fail");
+    std::puts("PASS eWarnOutOfVRAM keeps evaluations and inputs; other SDK results still fail");
     test_evaluation_ambiguity_and_invalid_tags();
     std::puts("PASS ambiguous viewport and newer invalid tag rejection");
     test_evaluation_global_contract();
@@ -4662,17 +4682,9 @@ int main(int argc, char **argv) {
     test_inactive_content_transition();
     std::puts("PASS inactive content gating preserves command markers and restarts content evidence on observer activation");
     test_non_renderer_evaluations();
-    test_feature_independent_depth_contracts();
-    std::puts("PASS arbitrary feature IDs with proven depth contracts; opaque v2 and unproven legacy/Reflex inputs remain pass-through");
     std::puts("PASS Reflex/unknown feature passthrough preserves DLSS viewport/frame evidence and ignores non-renderer failures");
     test_color_tag_snapshots();
     std::puts("PASS separate immutable HUDless/input/output/backbuffer color tags and legal null-backbuffer metadata");
-    test_presentation_v1();
-    test_presentation_v2();
-    std::puts("PASS v1 Reflex/v2 dynamic PCL presentation brackets, thread isolation, failures, token reuse and repeated-frame rejection");
-    test_call_trace_only(false);
-    test_call_trace_only(true);
-    std::puts("PASS v1/v2 call-route trace remains independent of depth selection and full content diagnostics");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL Streamline probe: %s\n", error.what());
