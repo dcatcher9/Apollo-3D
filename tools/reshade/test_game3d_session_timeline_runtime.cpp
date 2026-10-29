@@ -2015,18 +2015,22 @@ namespace {
           sr_gate_closed = true;
         }
         // A copy recorded on a game list never executed with a copy before,
-        // after copies on the presenting queue, may have no copy-out storage
-        // (the add-on predicts a new list to run where the newest direct-list
-        // copy ran, record_impl, and takes an idle slot's storage only where
-        // one exists: copy_out's unstored): another queue reads it only once
-        // its recording retired (the Reset rule, immutable_for_other_queues),
-        // never through the order fence nor at its completion alone. Until
+        // when no copy of the source was submitted on the game's queue within
+        // the source age (after copies on the presenting queue), may have no
+        // copy-out storage (the add-on predicts a new list to run where the
+        // newest direct-list copy ran, record_impl, and gives copy-out storage
+        // to a source read elsewhere within the source age; it takes an idle
+        // slot's storage only where one exists: copy_out's unstored): another
+        // queue reads it only once its recording retired (the Reset rule,
+        // immutable_for_other_queues), never through the order fence nor at
+        // its completion alone. Until
         // 10-28 the judge took it as readable once complete, so a fresh
         // process's first SR copy on the game's queue failed as stale_shown
         // (seed c28965dca8d7c76c at frame 11, 3 of 3 runs, copy_out
         // unstored=1), and inside the fixed set, whose earlier timelines had
         // run every list, it passed (the 10-28 review's H5).
-        const bool cold = !game_work_carried[n];
+        const bool cold = !game_work_carried[n] &&
+                          !(other_queue_copy && GetTickCount64() - other_queue_copy < sunshine_freshness::source_age_ms);
         const bool readable = execute_elsewhere(game_work, n, game_order, cold);
         auto completion = game_work.completion();
         if (cold) {

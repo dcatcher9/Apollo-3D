@@ -2035,8 +2035,10 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
   submitted after Present moved takes an idle slot's cached storage of its shape at its submission,
   with no allocation there; with none it keeps the Reset rule (`copy_out={... unstored=}`), as a
   copy on a game list never executed with a copy does while the newest `DIRECT`-list copy ran on the
-  reader's queue: the session timelines judge the first copy on each entry of the game's ring
-  readable only once its recording retired, never through the order fence nor a CPU wait (since
+  reader's queue and no copy of its source was read elsewhere within the source age: the session
+  timelines judge such a first copy on an entry of the game's ring (no copy on the game's queue or
+  DLSS-G's compute queue within the source age before it) readable only once its recording retired,
+  never through the order fence nor a CPU wait (since
   10-28; the judge took it as readable once complete or ordered, so a fresh process's first SR copy
   on the game's queue failed: seed c28965dca8d7c76c's frame 11 with `unstored=1`, stale_shown in 3
   of 3 runs, and seed 6e5b9c154ddc34d8's frame 10 under a CPU wait, a gap in 1 of 3, while the fixed
