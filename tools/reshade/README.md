@@ -572,7 +572,7 @@ as a normal exit.
 Since 10-23 these checks judge each event by its origin rather than warning at any count:
 
 - `Export`: each `export inactive (reason, class)` line names its class (`export_pause_class` in
-  `exporter.cpp`). A `routine` pause comes from the host, the game or the player (`no_consumer`,
+  `exporter/export_ring.inl`). A `routine` pause comes from the host, the game or the player (`no_consumer`,
   `ring_replaced`, `consumer_transfer_changed`, `consumer_without_pq`, `not_foreground`,
   `runtime_reset`, `runtime_gone`, `present_without_render`, `color_space_changed`,
   `swapchain_unknown`, `frame_not_prepared`) and warns only as a storm: 7 or more within 60 s, more
@@ -1651,7 +1651,9 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 
 #### Exporter
 
-- [`exporter.cpp`](exporter.cpp): the add-on's entry and present pipeline: session glue, the export ring and wire, scene placement, diagnostics and UI status publication. Docs: [GPU handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract).
+- [`exporter.cpp`](exporter.cpp): the add-on's entry and present pipeline (the shell of the `exporter/` parts): session glue, the publisher and its export gates, scene placement, diagnostics and UI status publication. Docs: [GPU handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract).
+- [`exporter/export_ring.inl`](exporter/export_ring.inl): part of `exporter.cpp` (included where its definitions stood, before the window-verdict constants): the wire helpers (slot states, the consumer's nonce, capabilities and protocol), the transfer and pause-class rules, the export colour and source descriptions, and one export ring's slots and GPU resources (`generation_t`). Docs: [GPU handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract).
+- [`exporter/export_ring_class.inl`](exporter/export_ring_class.inl): part of `exporter.cpp` (included immediately before `publisher_t`): `export_ring`, the export slot owner and wire producer: the shared state's view, the published metadata, the active, retired and cached rings and their renewal, slot admission (`acquire_slot`), publication and its fence signal, export pauses (`deactivate`) and idle release. Docs: [GPU handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract).
 - [`automatic_scene_transition.h`](automatic_scene_transition.h): the gradual return to stereo after depth was lost. Docs: [Activation and recovery](../../docs/reshade-sbs.md#activation-and-recovery).
 - [`game3d_frame_record.cpp`](game3d_frame_record.cpp), [`game3d_frame_record.h`](game3d_frame_record.h): the typed per-Present record of what each depth rung and UI candidate did. Docs: [Frame record](../../docs/reshade-sbs.md#frame-record).
 - [`game3d_diagnostics.h`](game3d_diagnostics.h), [`game3d_vram.h`](game3d_vram.h), [`game3d_slow_step.h`](game3d_slow_step.h), [`async_log.h`](async_log.h): the Diagnostics switch, the VRAM budget line, slow-step throttles and the off-Present log writer. Docs: [Diagnostics switch and per-Present cost](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost).

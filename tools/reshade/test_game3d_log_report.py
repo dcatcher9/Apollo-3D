@@ -2788,6 +2788,16 @@ def source(name):
     return (Path(__file__).resolve().parent / name).read_text(encoding='utf-8')
 
 
+# exporter.cpp and its parts (tools/reshade/exporter/), one translation unit. Each exporter move that creates a part
+# adds it here.
+EXPORTER_PARTS = ('exporter/export_ring.inl', 'exporter/export_ring_class.inl')
+
+
+def exporter_sources():
+    """exporter.cpp and its parts, as one text."""
+    return ''.join(source(name) for name in ('exporter.cpp',) + EXPORTER_PARTS)
+
+
 def enum_names(text, enum):
     """The enumerators of `enum class <enum> { ... }`, in order."""
     body = re.search(rf'enum class {enum} \{{([^}}]*)\}}', text).group(1)
@@ -2811,7 +2821,7 @@ class SchemaMirrors(unittest.TestCase):
         'source_unavailable', 'unsupported_api'))
 
     def test_export_pauses(self):
-        text = source('exporter.cpp')
+        text = exporter_sources()
         routine = re.search(r'routine_export_pauses\{([^}]*)\}', text).group(1)
         self.assertEqual(report.ROUTINE_INACTIVE, frozenset(re.findall(r'"(\w+)"', routine)))
         # Every reason the exporter pauses with is routine or a listed fault, never both, and every call names its

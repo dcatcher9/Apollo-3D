@@ -1409,11 +1409,11 @@ namespace {
     }
 
     static void activate(publisher_t &publisher, bool rendered = true) {
-      auto metadata = publisher.identity_;
+      auto metadata = publisher.ring_.identity_;
       metadata.window = reinterpret_cast<std::uint64_t>(GetForegroundWindow());
       metadata.generation = 1;
       publisher.runtimes_[owner()].rendered_since_present = rendered;
-      publisher.publish(metadata, true, owner());
+      publisher.ring_.publish(metadata, true, owner());
     }
 
     static std::unique_ptr<generation_t> pending_generation() {
@@ -1434,18 +1434,18 @@ namespace {
       require(publisher.init(), "mapping creation failed");
       activate(publisher);
       publisher.present(owner());
-      require(publisher.shared_->metadata.generation == 1, "executing technique was invalidated");
+      require(publisher.ring_.shared_->metadata.generation == 1, "executing technique was invalidated");
       // A paused game has no callback and retains this valid frame. A new Present without
       // an executing technique is an explicit disable/failure and invalidates immediately.
       publisher.present(owner());
-      require(publisher.shared_->metadata.generation == 0, "disabled technique retained a stale image");
-      const auto sequence = publisher.shared_->metadata_sequence;
+      require(publisher.ring_.shared_->metadata.generation == 0, "disabled technique retained a stale image");
+      const auto sequence = publisher.ring_.shared_->metadata_sequence;
       publisher.present(owner());
-      require(publisher.shared_->metadata_sequence == sequence, "inactive metadata was rewritten each present");
+      require(publisher.ring_.shared_->metadata_sequence == sequence, "inactive metadata was rewritten each present");
       activate(publisher, false);
-      publisher.shared_->metadata.generation = 0;
+      publisher.ring_.shared_->metadata.generation = 0;
       publisher.present(owner());
-      require(!publisher.shared_->metadata.window, "consumer-free discovery identity remained active after disable");
+      require(!publisher.ring_.shared_->metadata.window, "consumer-free discovery identity remained active after disable");
     }
 
     static void contended_reload() {
@@ -1465,8 +1465,8 @@ namespace {
       lock.unlock();
       invalidation.get();
       require_fx_proof_cleared(publisher, owner());
-      require(!publisher.published_runtime_, "reload retained published runtime proof");
-      require(!publisher.shared_->metadata.generation, "reload retained published metadata");
+      require(!publisher.ring_.published_runtime_, "reload retained published runtime proof");
+      require(!publisher.ring_.shared_->metadata.generation, "reload retained published metadata");
     }
 
     static void overlay_reload() {
@@ -1474,20 +1474,20 @@ namespace {
       require(publisher.init(), "mapping creation failed");
       activate(publisher);
       seed_fx_proof(publisher.runtimes_.at(owner()));
-      const auto before_open = publisher.shared_->metadata_sequence;
+      const auto before_open = publisher.ring_.shared_->metadata_sequence;
       publisher.set_overlay_open(owner(), true);
-      require(publisher.overlay_open(owner()) && publisher.shared_->metadata.generation == 1, "overlay opening discarded live stereo proof");
-      require(publisher.shared_->metadata_sequence == before_open, "overlay opening churned metadata without a source change");
+      require(publisher.overlay_open(owner()) && publisher.ring_.shared_->metadata.generation == 1, "overlay opening discarded live stereo proof");
+      require(publisher.ring_.shared_->metadata_sequence == before_open, "overlay opening churned metadata without a source change");
       publisher.set_overlay_open(owner(), false);
-      require(!publisher.overlay_open(owner()) && publisher.shared_->metadata.generation == 1, "overlay closing discarded live stereo proof");
-      require(publisher.shared_->metadata_sequence == before_open, "overlay closing churned metadata without a source change");
+      require(!publisher.overlay_open(owner()) && publisher.ring_.shared_->metadata.generation == 1, "overlay closing discarded live stereo proof");
+      require(publisher.ring_.shared_->metadata_sequence == before_open, "overlay closing churned metadata without a source change");
       publisher.set_overlay_open(owner(), true);
       publisher.invalidate(owner(), false);
       require(publisher.overlay_open(owner()), "shader reload forgot that the overlay is open");
       require_fx_proof_cleared(publisher, owner());
-      require(!publisher.shared_->metadata.generation, "shader reload retained stale stereo proof while overlay was open");
+      require(!publisher.ring_.shared_->metadata.generation, "shader reload retained stale stereo proof while overlay was open");
       publisher.set_overlay_open(owner(), false);
-      require(!publisher.overlay_open(owner()) && !publisher.shared_->metadata.generation, "overlay close must permit a fresh technique rather than restore stale metadata");
+      require(!publisher.overlay_open(owner()) && !publisher.ring_.shared_->metadata.generation, "overlay close must permit a fresh technique rather than restore stale metadata");
       publisher.set_overlay_open(owner(), true);
       publisher.invalidate(owner(), true);
       require(!publisher.overlay_open(owner()), "runtime destruction retained overlay state across pointer reuse");
@@ -1825,7 +1825,7 @@ namespace {
       seed_fx_proof(proof);
       publish_automatic_ui(owner(), {phase::ready, true});
       publisher.set_overlay_open(owner(), true);
-      const auto before_reload = publisher.shared_->metadata_sequence;
+      const auto before_reload = publisher.ring_.shared_->metadata_sequence;
       publisher.invalidate(owner(), false);
       require_fx_proof_cleared(publisher, owner());
       const auto &reloaded = publisher.runtimes_.at(owner());
@@ -1837,13 +1837,13 @@ namespace {
           reloaded.frame.scene_source == std::array<std::uint64_t, 4>{1, 2, 3, 4} &&
           reloaded.raw_supported && reloaded.raw_basis_epoch == 77,
         "Native effects reload discarded a matching depth frame or scene calibration");
-      require(publisher.shared_->metadata_sequence == before_reload && publisher.shared_->metadata.generation == 1 &&
-          publisher.published_runtime_ == owner() && publisher.overlay_open(owner()) &&
+      require(publisher.ring_.shared_->metadata_sequence == before_reload && publisher.ring_.shared_->metadata.generation == 1 &&
+          publisher.ring_.published_runtime_ == owner() && publisher.overlay_open(owner()) &&
           sunshine_game3d::query_automatic(owner()).phase == phase::ready,
         "Native effects reload churned active metadata, overlay or automatic status");
       publisher.invalidate(owner(), true, 99);
-      require(publisher.runtimes_.empty() && !publisher.published_runtime_ &&
-          !publisher.shared_->metadata.generation && !publisher.overlay_open(owner()) &&
+      require(publisher.runtimes_.empty() && !publisher.ring_.published_runtime_ &&
+          !publisher.ring_.shared_->metadata.generation && !publisher.overlay_open(owner()) &&
           sunshine_game3d::query_automatic(owner()).phase == phase::unavailable,
         "Native runtime destruction retained output, owner or automatic status");
     }
@@ -1863,20 +1863,20 @@ namespace {
         generation->native_swapchain = native;
         return generation;
       };
-      publisher.generation_ = ring(99);
-      publisher.cached_ring_ = ring(99);
-      publisher.cached_ring_->runtime = nullptr;
-      const auto *current = publisher.generation_.get();
-      const auto *cached = publisher.cached_ring_.get();
+      publisher.ring_.generation_ = ring(99);
+      publisher.ring_.cached_ring_ = ring(99);
+      publisher.ring_.cached_ring_->runtime = nullptr;
+      const auto *current = publisher.ring_.generation_.get();
+      const auto *cached = publisher.ring_.cached_ring_.get();
       require(current->finished() && cached->finished(), "fixture rings are not finished");
       publisher.invalidate(owner(), true, 99);
-      require(publisher.generation_.get() == current && publisher.cached_ring_.get() == cached &&
+      require(publisher.ring_.generation_.get() == current && publisher.ring_.cached_ring_.get() == cached &&
           !current->owner_destroyed && !cached->owner_destroyed && !current->runtime,
         "A runtime reset (a resize) discarded the export rings kept for a colour toggle back");
       publisher.swapchain_destroyed(98);
-      require(publisher.generation_ && publisher.cached_ring_, "Another swapchain's destruction released this swapchain's rings");
+      require(publisher.ring_.generation_ && publisher.ring_.cached_ring_, "Another swapchain's destruction released this swapchain's rings");
       publisher.swapchain_destroyed(99);
-      require(!publisher.generation_ && !publisher.cached_ring_ && !publisher.retired_,
+      require(!publisher.ring_.generation_ && !publisher.ring_.cached_ring_ && !publisher.ring_.retired_,
         "The destroyed swapchain's finished rings were not released");
       std::puts("PASS runtime reset keeps the toggle rings until its swapchain is destroyed");
     }
@@ -1956,7 +1956,7 @@ namespace {
       require(decode_export_color("scrgb", 3, proof.color), "PQ export contract rejected");
       require(publisher.source_color_matches(owner(), proof, api::color_space::hdr10_pq), "matching PQ source rejected");
       require(!publisher.source_color_matches(owner(), proof, api::color_space::scrgb), "stale PQ decoder accepted a scRGB source");
-      require(!publisher.shared_->metadata.generation, "changed game transfer retained stale HDR publication");
+      require(!publisher.ring_.shared_->metadata.generation, "changed game transfer retained stale HDR publication");
       require(decode_export_color("srgb", 1, proof.color), "SDR source contract rejected");
       require(publisher.source_color_matches(owner(), proof, api::color_space::srgb), "SDR game requires an SDR desktop");
 
@@ -1964,23 +1964,23 @@ namespace {
       source_t source;
       source.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
       source.color = proof.color;
-      publisher_t::set_source(metadata, source);
+      export_ring::set_source(metadata, source);
       require(metadata.color_transfer == wire::transfer::srgb, "floating point format incorrectly implied HDR");
       require(decode_export_color("scrgb", 2, source.color), "native scRGB contract rejected");
-      publisher_t::set_source(metadata, source);
+      export_ring::set_source(metadata, source);
       require(metadata.color_transfer == wire::transfer::scrgb && metadata.dxgi_format == 10, "explicit scRGB metadata lost its transfer");
       require(metadata.protocol_version == wire::version, "an FP16 export left protocol 4");
       // The 10-bit PQ export (docs/reshade-sbs.md, PQ wire transfer): the same protocol, R10G10B10A2 only.
       require(decode_export_color("pq", 3, source.color), "PQ export declaration rejected");
       source.format = DXGI_FORMAT_R10G10B10A2_UNORM;
-      publisher_t::set_source(metadata, source);
+      export_ring::set_source(metadata, source);
       require(metadata.color_transfer == wire::transfer::pq && metadata.dxgi_format == 24 &&
           metadata.protocol_version == wire::version, "a PQ export is not protocol 4 R10G10B10A2 PQ");
       require(wire::supported_format(metadata.dxgi_format, metadata.color_transfer) &&
           !wire::supported_format(10, wire::transfer::pq), "the PQ transfer accepted FP16");
       // Capabilities and the declared protocol count only for the nonce they
       // answer; a replaced consumer's declaration grants nothing.
-      auto &shared = *publisher.shared_;
+      auto &shared = *publisher.ring_.shared_;
       shared.consumer_capabilities = wire::consumer_accepts_pq;
       shared.consumer_protocol = wire::version;
       shared.capability_nonce = 41;
@@ -2054,41 +2054,41 @@ namespace {
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
       activate(publisher);
-      auto &shared = *publisher.shared_;
+      auto &shared = *publisher.ring_.shared_;
       const auto request = [&](std::uint64_t nonce, std::uint32_t protocol) {
         shared.consumer_protocol = protocol;
         shared.capability_nonce = nonce;
         shared.consumer_nonce = nonce;
       };
       request(7, wire::version - 1);
-      require(!publisher.consumer_speaks_protocol(owner(), 7) && publisher.refused_nonce_ == 7, "a host of protocol 3 was answered or not named");
-      require(!publisher.shared_->metadata.generation, "a refused host kept the published generation");
-      require(!publisher.consumer_speaks_protocol(owner(), 7) && publisher.refused_nonce_ == 7, "a refused host was answered on its next Present");
+      require(!publisher.ring_.consumer_speaks_protocol(owner(), 7) && publisher.ring_.refused_nonce_ == 7, "a host of protocol 3 was answered or not named");
+      require(!publisher.ring_.shared_->metadata.generation, "a refused host kept the published generation");
+      require(!publisher.ring_.consumer_speaks_protocol(owner(), 7) && publisher.ring_.refused_nonce_ == 7, "a refused host was answered on its next Present");
       request(8, 0);
-      require(!publisher.consumer_speaks_protocol(owner(), 8) && publisher.refused_nonce_ == 7, "an undeclared request was answered or named");
+      require(!publisher.ring_.consumer_speaks_protocol(owner(), 8) && publisher.ring_.refused_nonce_ == 7, "an undeclared request was answered or named");
       request(9, wire::version);
-      require(publisher.consumer_speaks_protocol(owner(), 9), "a host of this protocol was refused");
-      require(!publisher.consumer_speaks_protocol(owner(), 10), "another request's declaration was answered");
+      require(publisher.ring_.consumer_speaks_protocol(owner(), 9), "a host of this protocol was refused");
+      require(!publisher.ring_.consumer_speaks_protocol(owner(), 10), "another request's declaration was answered");
       std::puts("PASS export protocol: only a host declaring protocol 4 is answered; another is refused by name, once per request");
     }
 
     static void bounded_retirement() {
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
-      publisher.generation_ = pending_generation();
-      require(!publisher.generation_->finished(), "unsubmitted copy appeared complete");
-      publisher.generation_->owner_destroyed = true;
-      publisher.retire_destroyed_generation();
-      require(!publisher.generation_ && publisher.retired_, "destroyed runtime blocked its successor");
-      publisher.generation_ = pending_generation();
-      publisher.generation_->owner_destroyed = true;
-      publisher.retire_destroyed_generation();
-      require(publisher.generation_ && publisher.retired_ && publisher.retirement_limit_logged_, "unconfirmed generations were not bounded");
+      publisher.ring_.generation_ = pending_generation();
+      require(!publisher.ring_.generation_->finished(), "unsubmitted copy appeared complete");
+      publisher.ring_.generation_->owner_destroyed = true;
+      publisher.ring_.retire_destroyed_generation(publisher_t::export_views{publisher});
+      require(!publisher.ring_.generation_ && publisher.ring_.retired_, "destroyed runtime blocked its successor");
+      publisher.ring_.generation_ = pending_generation();
+      publisher.ring_.generation_->owner_destroyed = true;
+      publisher.ring_.retire_destroyed_generation(publisher_t::export_views{publisher});
+      require(publisher.ring_.generation_ && publisher.ring_.retired_ && publisher.ring_.retirement_limit_logged_, "unconfirmed generations were not bounded");
       // No GPU commands exist in this test; mark those synthetic copies discarded.
-      publisher.generation_->pending_slot = publisher.retired_->pending_slot = wire::slot_count;
-      publisher.generation_->last_submitted = publisher.retired_->last_submitted = 0;
-      publisher.retire_destroyed_generation();
-      require(!publisher.generation_ && !publisher.retired_, "completed retired generations were not reclaimed");
+      publisher.ring_.generation_->pending_slot = publisher.ring_.retired_->pending_slot = wire::slot_count;
+      publisher.ring_.generation_->last_submitted = publisher.ring_.retired_->last_submitted = 0;
+      publisher.ring_.retire_destroyed_generation(publisher_t::export_views{publisher});
+      require(!publisher.ring_.generation_ && !publisher.ring_.retired_, "completed retired generations were not reclaimed");
     }
 
     static void d3d12_deferred_signal(bool retire_before_signal) {
@@ -2101,27 +2101,27 @@ namespace {
       require(SUCCEEDED(generation->device12->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(generation->queue12.put()))), "D3D12 queue creation failed");
       require(SUCCEEDED(generation->device12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(generation->fence12.put()))), "D3D12 shared fence creation failed");
       const auto native_queue = reinterpret_cast<std::uint64_t>(generation->queue12.get());
-      publisher.generation_ = std::move(generation);
-      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&publisher.shared_->consumer_nonce), 42);
-      publisher.generation_->pending_ui_parallax_uv = .0037f;
-      store_state(publisher.shared_->slots[0], 1, wire::slot_state::writing);
+      publisher.ring_.generation_ = std::move(generation);
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&publisher.ring_.shared_->consumer_nonce), 42);
+      publisher.ring_.generation_->pending_ui_parallax_uv = .0037f;
+      store_state(publisher.ring_.shared_->slots[0], 1, wire::slot_state::writing);
       publisher.finish_present(native_queue + 1, 99);
       publisher.finish_present(native_queue, 100);
-      require(publisher.generation_->pending_slot == 0, "unrelated queue/swapchain consumed a pending publication");
-      require(publisher.shared_->slots[0].sequence == 0, "copy became visible before matching finish_present");
+      require(publisher.ring_.generation_->pending_slot == 0, "unrelated queue/swapchain consumed a pending publication");
+      require(publisher.ring_.shared_->slots[0].sequence == 0, "copy became visible before matching finish_present");
       if (retire_before_signal) {
         publisher.begin_present(99, api::color_space::srgb_nonlinear);
-        require(!publisher.shared_->metadata.generation, "missing finish_present retained stale metadata");
-        require(!publisher.generation_->finished(), "missing finish_present released pending resources");
+        require(!publisher.ring_.shared_->metadata.generation, "missing finish_present retained stale metadata");
+        require(!publisher.ring_.generation_->finished(), "missing finish_present released pending resources");
       }
       publisher.finish_present(native_queue, 99);
-      require(publisher.generation_->pending_slot == wire::slot_count, "matching Present did not fence the copy");
+      require(publisher.ring_.generation_->pending_slot == wire::slot_count, "matching Present did not fence the copy");
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-      while (!publisher.generation_->finished() && std::chrono::steady_clock::now() < deadline) {
+      while (!publisher.ring_.generation_->finished() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
-      require(publisher.generation_->finished(), "native D3D12 publication fence did not complete");
-      const auto &slot = publisher.shared_->slots[0];
+      require(publisher.ring_.generation_->finished(), "native D3D12 publication fence did not complete");
+      const auto &slot = publisher.ring_.shared_->slots[0];
       require(wire::control_state(slot.control) == (retire_before_signal ? wire::slot_state::writing : wire::slot_state::ready), "retired copy was republished or valid copy was hidden");
       if (!retire_before_signal) {
         require(slot.sequence == 1 && slot.qpc == 1234, "published copy lost its source timestamp");
@@ -2137,10 +2137,10 @@ namespace {
     static void slot_policy() {
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
-      publisher.generation_ = std::make_unique<generation_t>();
-      auto &generation = *publisher.generation_;
+      publisher.ring_.generation_ = std::make_unique<generation_t>();
+      auto &generation = *publisher.ring_.generation_;
       generation.id = 3;
-      auto &slots = publisher.shared_->slots;
+      auto &slots = publisher.ring_.shared_->slots;
       const auto set = [&](std::array<std::pair<wire::slot_state, std::uint64_t>, wire::slot_count> states) {
         for (std::uint32_t i = 0; i != wire::slot_count; ++i) {
           store_state(slots[i], generation.id, states[i].first);
@@ -2152,41 +2152,41 @@ namespace {
       // The fourth word of most rows is the slot the consumer replaced, still
       // `reading` until its conversion's reads complete.
       set({{{s::ready, 5}, {s::free, 4}, {s::reading, 6}, {s::reading, 3}}});
-      require(publisher.acquire_slot(6, &overwrote) == 1 && !overwrote, "a ready slot was taken over a free one");
+      require(publisher.ring_.acquire_slot(6, &overwrote) == 1 && !overwrote, "a ready slot was taken over a free one");
       set({{{s::ready, 7}, {s::ready, 8}, {s::reading, 6}, {s::reading, 5}}});
-      require(publisher.acquire_slot(8, &overwrote) == 0 && overwrote, "the oldest ready slot was not reused");
+      require(publisher.ring_.acquire_slot(8, &overwrote) == 0 && overwrote, "the oldest ready slot was not reused");
       require(wire::control_state(slots[1].control) == s::ready, "the newest unconsumed frame was claimed");
       set({{{s::reading, 6}, {s::ready, 8}, {s::reading, 7}, {s::reading, 5}}});
-      require(publisher.acquire_slot(8) == wire::slot_count, "the ring's newest unconsumed frame was overwritten");
+      require(publisher.ring_.acquire_slot(8) == wire::slot_count, "the ring's newest unconsumed frame was overwritten");
       set({{{s::reading, 9}, {s::ready, 8}, {s::reading, 7}, {s::reading, 6}}});
-      require(publisher.acquire_slot(9) == 1, "a ready frame older than the consumer's was kept");
+      require(publisher.ring_.acquire_slot(9) == 1, "a ready frame older than the consumer's was kept");
       // Writes 10 and 11 still queued (completed 9): 10 is the frame the
       // consumer claims next once its fence passes, so the Present is dropped
       // rather than written over it.
       set({{{s::reading, 9}, {s::ready, 10}, {s::ready, 11}, {s::reading, 8}}});
-      require(publisher.acquire_slot(9) == wire::slot_count, "a queued write was reused");
+      require(publisher.ring_.acquire_slot(9) == wire::slot_count, "a queued write was reused");
       // 10 completed, 11 still queued: 10 is now the consumer's next frame. A
       // consumer that comes before 11 completes must still find it.
-      require(publisher.acquire_slot(10) == wire::slot_count, "the consumer's next frame was written over");
-      require(publisher.acquire_slot(11, &overwrote) == 1 && overwrote, "a completed ready frame a newer completed one supersedes was kept");
+      require(publisher.ring_.acquire_slot(10) == wire::slot_count, "the consumer's next frame was written over");
+      require(publisher.ring_.acquire_slot(11, &overwrote) == 1 && overwrote, "a completed ready frame a newer completed one supersedes was kept");
       // A free slot whose write is still queued is never reused either.
       set({{{s::reading, 9}, {s::free, 12}, {s::ready, 11}, {s::reading, 8}}});
-      require(publisher.acquire_slot(9) == wire::slot_count, "a free slot's queued write was reused");
+      require(publisher.ring_.acquire_slot(9) == wire::slot_count, "a free slot's queued write was reused");
       // The live FG-on ring (Stellar Blade 10-06): the consumer holds 6, the
       // slot it replaced (5) is still being read, and 7, its next frame, is
       // ready. Three slots had none left for this Present; the fourth takes it.
       set({{{s::reading, 5}, {s::reading, 6}, {s::ready, 7}, {s::free, 4}}});
-      require(publisher.acquire_slot(7, &overwrote) == 3 && !overwrote, "the fourth slot did not take the Present three slots dropped");
+      require(publisher.ring_.acquire_slot(7, &overwrote) == 3 && !overwrote, "the fourth slot did not take the Present three slots dropped");
       // ...and while that write (8) is still queued, the next Present waits for
       // the replaced slot's reads rather than writing over 7 or 8.
       set({{{s::reading, 5}, {s::reading, 6}, {s::ready, 7}, {s::ready, 8}}});
-      require(publisher.acquire_slot(7) == wire::slot_count, "the consumer's next frame or a queued write was reused");
+      require(publisher.ring_.acquire_slot(7) == wire::slot_count, "the consumer's next frame or a queued write was reused");
       set({{{s::free, 5}, {s::reading, 6}, {s::ready, 7}, {s::ready, 8}}});
-      require(publisher.acquire_slot(7, &overwrote) == 0 && !overwrote, "a returned slot was not reused");
+      require(publisher.ring_.acquire_slot(7, &overwrote) == 0 && !overwrote, "a returned slot was not reused");
       // Another generation's words are never claimed.
       set({{{s::free, 0}, {s::free, 0}, {s::free, 0}, {s::free, 0}}});
       for (auto &slot : slots) store_state(slot, generation.id + 1, s::free);
-      require(publisher.acquire_slot(0) == wire::slot_count, "another generation's slot was claimed");
+      require(publisher.ring_.acquire_slot(0) == wire::slot_count, "another generation's slot was claimed");
       std::puts("PASS export slot policy: free first, oldest superseded ready, the consumer's next frame kept, no queued write reused, a fourth slot beside held, retiring and next frames");
     }
 
@@ -2201,10 +2201,10 @@ namespace {
       for (std::uint32_t lag = 0; lag <= 3; ++lag) for (std::uint32_t retire_delay = 0; retire_delay <= 1; ++retire_delay) {
         publisher_t publisher;
         require(publisher.init(), "mapping creation failed");
-        publisher.generation_ = std::make_unique<generation_t>();
-        auto &generation = *publisher.generation_;
+        publisher.ring_.generation_ = std::make_unique<generation_t>();
+        auto &generation = *publisher.ring_.generation_;
         generation.id = 3;
-        auto &slots = publisher.shared_->slots;
+        auto &slots = publisher.ring_.shared_->slots;
         for (auto &slot : slots) {
           store_state(slot, generation.id, s::free);
           slot.sequence = 0;
@@ -2220,7 +2220,7 @@ namespace {
         std::uint32_t retire_at = 0, last_claim = 0, claims = 0;
         constexpr std::uint32_t presents = 64;
         for (std::uint32_t present = 1; present <= presents; ++present) {
-          const auto index = publisher.acquire_slot(fence(present - 1));
+          const auto index = publisher.ring_.acquire_slot(fence(present - 1));
           published.push_back(0);
           if (index != wire::slot_count) {
             slots[index].sequence = published.back() = ++sequence;
@@ -2294,9 +2294,9 @@ namespace {
       constexpr std::int64_t cpu = 400, engine = 5'000;
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
-      publisher.generation_ = std::make_unique<generation_t>();
-      const auto id = publisher.generation_->id = 3;
-      auto &slots = publisher.shared_->slots;
+      publisher.ring_.generation_ = std::make_unique<generation_t>();
+      const auto id = publisher.ring_.generation_->id = 3;
+      auto &slots = publisher.ring_.shared_->slots;
       for (std::uint32_t i = 0; i < wire::slot_count; ++i) {
         store_state(slots[i], i < usable ? id : id + 1, s::free);
         slots[i].sequence = 0;
@@ -2333,7 +2333,7 @@ namespace {
         for (; next_present < presents.size() && presents[next_present] <= now; ++next_present) {
           const auto next_claim = newest_ready(-1, held_sequence, completed);
           bool overwrote = false;
-          const auto index = publisher.acquire_slot(completed, &overwrote);
+          const auto index = publisher.ring_.acquire_slot(completed, &overwrote);
           if (index == wire::slot_count) {
             ++dropped;
             continue;
@@ -2477,11 +2477,11 @@ namespace {
       runtime.queue = &queue;
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
-      auto metadata = publisher.identity_;
+      auto metadata = publisher.ring_.identity_;
       metadata.window = reinterpret_cast<std::uint64_t>(GetForegroundWindow());
       metadata.generation = 1;
       publisher.runtimes_[&runtime].rendered_since_present = true;
-      publisher.publish(metadata, true, &runtime);
+      publisher.ring_.publish(metadata, true, &runtime);
       auto generation = pending_generation();
       generation->runtime = generation->owner_runtime = &runtime;
       com_ptr<ID3D12Fence> gate;
@@ -2503,12 +2503,12 @@ namespace {
           SUCCEEDED(generation->device11->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(generation->fence11.put()))),
           "D3D11 shared fence creation failed");
       }
-      publisher.generation_ = std::move(generation);
-      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&publisher.shared_->consumer_nonce), 42);
-      store_state(publisher.shared_->slots[0], 1, wire::slot_state::writing);
+      publisher.ring_.generation_ = std::move(generation);
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&publisher.ring_.shared_->consumer_nonce), 42);
+      store_state(publisher.ring_.shared_->slots[0], 1, wire::slot_state::writing);
       publisher.present(&runtime);
-      auto &g = *publisher.generation_;
-      const auto &slot = publisher.shared_->slots[0];
+      auto &g = *publisher.ring_.generation_;
+      const auto &slot = publisher.ring_.shared_->slots[0];
       require(g.pending_slot == wire::slot_count && !g.signal_failed, "reshade_present did not signal the export");
       require(wire::control_state(slot.control) == wire::slot_state::ready && slot.sequence == 1 && slot.qpc == 1234,
         "reshade_present did not publish the slot");
@@ -2531,23 +2531,23 @@ namespace {
     static void idle_ring_release() {
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
-      publisher.generation_ = std::make_unique<generation_t>();
-      auto &generation = *publisher.generation_;
+      publisher.ring_.generation_ = std::make_unique<generation_t>();
+      auto &generation = *publisher.ring_.generation_;
       generation.runtime = generation.owner_runtime = owner();
       generation.inactive_since = std::chrono::steady_clock::now() - std::chrono::seconds(30);
-      publisher.release_idle_rings();
-      require(publisher.generation_ != nullptr, "an exporting ring was released");
+      publisher.ring_.release_idle_rings(publisher_t::export_views{publisher});
+      require(publisher.ring_.generation_ != nullptr, "an exporting ring was released");
       generation.runtime = nullptr;
       generation.inactive_since = std::chrono::steady_clock::now() - std::chrono::seconds(9);
-      publisher.release_idle_rings();
-      require(publisher.generation_ != nullptr, "a ring idle for 9 s was released");
+      publisher.ring_.release_idle_rings(publisher_t::export_views{publisher});
+      require(publisher.ring_.generation_ != nullptr, "a ring idle for 9 s was released");
       generation.pending_slot = 0;
       generation.inactive_since = std::chrono::steady_clock::now() - std::chrono::seconds(11);
-      publisher.release_idle_rings();
-      require(publisher.generation_ != nullptr, "a ring with an unfenced recording was released");
+      publisher.ring_.release_idle_rings(publisher_t::export_views{publisher});
+      require(publisher.ring_.generation_ != nullptr, "a ring with an unfenced recording was released");
       generation.pending_slot = wire::slot_count;
-      publisher.release_idle_rings();
-      require(!publisher.generation_, "a finished ring idle for 11 s was kept");
+      publisher.ring_.release_idle_rings(publisher_t::export_views{publisher});
+      require(!publisher.ring_.generation_, "a finished ring idle for 11 s was kept");
       std::puts("PASS idle export ring released after 10 s");
     }
 
@@ -2566,9 +2566,9 @@ namespace {
       next->source.format = DXGI_FORMAT_R8G8B8A8_UNORM;
       require(next->create_native(api::device_api::d3d12, reinterpret_cast<std::uint64_t>(gpu.device.get()),
         reinterpret_cast<std::uint64_t>(gpu.queue.get())), "Async ring production allocations failed");
-      publisher.generation_ = std::move(next);
-      auto &generation = *publisher.generation_;
-      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&publisher.shared_->consumer_nonce), 42);
+      publisher.ring_.generation_ = std::move(next);
+      auto &generation = *publisher.ring_.generation_;
+      InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&publisher.ring_.shared_->consumer_nonce), 42);
       const auto queue = reinterpret_cast<std::uint64_t>(gpu.queue.get());
       std::array<IUnknown *, wire::slot_count> expected_sources{};
       std::array<std::uint64_t, wire::slot_count> timestamps{};
@@ -2584,7 +2584,7 @@ namespace {
         commands.native = gpu.copies[pattern].commands.get();
         generation.submit(&commands, {reinterpret_cast<std::uint64_t>(source.get())}, index, sequence);
         require(generation.last_submitted == sequence, "Production generation failed to record an asynchronous copy");
-        require(publisher.acquire_slot(generation.completed()) == wire::slot_count,
+        require(publisher.ring_.acquire_slot(generation.completed()) == wire::slot_count,
           "An unfenced pending recording admitted another export");
         source.reset(); // Only production slot ownership keeps this source alive.
         expected_sources[index] = source_pointer;
@@ -2596,13 +2596,13 @@ namespace {
         publisher.finish_present(queue, 99);
         require(generation.pending_slot == wire::slot_count && !generation.signal_failed,
           "Native finish_present did not submit the copy's fence");
-        require(wire::control_state(publisher.shared_->slots[index].control) == wire::slot_state::ready &&
-          publisher.shared_->slots[index].sequence == sequence && publisher.shared_->slots[index].qpc == 1000 + sequence,
+        require(wire::control_state(publisher.ring_.shared_->slots[index].control) == wire::slot_state::ready &&
+          publisher.ring_.shared_->slots[index].sequence == sequence && publisher.ring_.shared_->slots[index].qpc == 1000 + sequence,
           "A queued export lost slot ownership, sequence or timestamp");
-        require(publisher.shared_->slots[index].cursor_plane_flags == wire::cursor_plane_present &&
-            publisher.shared_->slots[index].ui_parallax_uv == float(sequence) * .001f,
+        require(publisher.ring_.shared_->slots[index].cursor_plane_flags == wire::cursor_plane_present &&
+            publisher.ring_.shared_->slots[index].ui_parallax_uv == float(sequence) * .001f,
           "A queued export inherited another frame's cursor plane");
-        publisher.next_slot_ = (index + 1) % wire::slot_count;
+        publisher.ring_.next_slot_ = (index + 1) % wire::slot_count;
       };
 
       gpu.hold();
@@ -2610,25 +2610,25 @@ namespace {
       // The old one-copy admission gate fails on the second acquisition.
       for (unsigned index = 0; index != wire::slot_count; ++index) {
         require(generation.completed() == 0, "GPU gate released before asynchronous admission was tested");
-        require(publisher.acquire_slot(generation.completed()) == index,
+        require(publisher.ring_.acquire_slot(generation.completed()) == index,
           "An incomplete earlier export prevented filling a different ring slot");
         record(index, index);
-        timestamps[index] = publisher.shared_->slots[index].qpc;
+        timestamps[index] = publisher.ring_.shared_->slots[index].qpc;
       }
       require(generation.last_submitted == wire::slot_count && generation.completed() == 0 && !generation.finished(),
         "Async regression did not leave every production copy in flight");
       const auto admission_start = GetTickCount64();
-      require(publisher.acquire_slot(generation.completed()) == wire::slot_count,
+      require(publisher.ring_.acquire_slot(generation.completed()) == wire::slot_count,
         "One more in-flight copy exceeded the bounded ring");
       // A receiver may discard an unfinished publication without reading it.
       // Free is a host ownership state, not evidence of producer completion.
-      store_state(publisher.shared_->slots[0], 1, wire::slot_state::free);
-      store_state(publisher.shared_->slots[1], 1, wire::slot_state::reading);
-      require(publisher.acquire_slot(generation.completed()) == wire::slot_count,
+      store_state(publisher.ring_.shared_->slots[0], 1, wire::slot_state::free);
+      store_state(publisher.ring_.shared_->slots[1], 1, wire::slot_state::reading);
+      require(publisher.ring_.acquire_slot(generation.completed()) == wire::slot_count,
         "An unfinished free/reading/ready slot was overwritten");
       require(GetTickCount64() - admission_start < 1000, "Backpressure blocked CPU admission for a second");
       for (unsigned index = 0; index != wire::slot_count; ++index)
-        require(publisher.shared_->slots[index].sequence == index + 1 && publisher.shared_->slots[index].qpc == timestamps[index],
+        require(publisher.ring_.shared_->slots[index].sequence == index + 1 && publisher.ring_.shared_->slots[index].qpc == timestamps[index],
           "Rejected admission modified an in-flight slot's identity");
 
       gpu.release();
@@ -2640,26 +2640,26 @@ namespace {
       wait_completed(wire::slot_count);
       for (unsigned index = 0; index != wire::slot_count; ++index) gpu.check_pixels(index);
       require(generation.finished(), "Completed async copies left their generation in flight");
-      require(wire::control_state(publisher.shared_->slots[1].control) == wire::slot_state::reading,
+      require(wire::control_state(publisher.ring_.shared_->slots[1].control) == wire::slot_state::reading,
         "Producer completion stole the receiver's reading slot");
 
       // GPU completion permits reuse only after the host releases its claim.
-      for (auto &slot : publisher.shared_->slots) store_state(slot, 1, wire::slot_state::reading);
-      require(publisher.acquire_slot(generation.completed()) == wire::slot_count,
+      for (auto &slot : publisher.ring_.shared_->slots) store_state(slot, 1, wire::slot_state::reading);
+      require(publisher.ring_.acquire_slot(generation.completed()) == wire::slot_count,
         "Completed producer work overwrote a receiver-owned slot");
-      store_state(publisher.shared_->slots[0], 1, wire::slot_state::free);
-      require(publisher.acquire_slot(generation.completed()) == 0, "Released completed slot did not resume exports");
+      store_state(publisher.ring_.shared_->slots[0], 1, wire::slot_state::free);
+      require(publisher.ring_.acquire_slot(generation.completed()) == 0, "Released completed slot did not resume exports");
       record(wire::slot_count, 0);
       wait_completed(wire::slot_count + 1);
       gpu.check_pixels(wire::slot_count);
       for (unsigned index = 1; index != wire::slot_count; ++index)
-        require(wire::control_state(publisher.shared_->slots[index].control) == wire::slot_state::reading &&
-          publisher.shared_->slots[index].sequence == index + 1 && publisher.shared_->slots[index].qpc == timestamps[index],
+        require(wire::control_state(publisher.ring_.shared_->slots[index].control) == wire::slot_state::reading &&
+          publisher.ring_.shared_->slots[index].sequence == index + 1 && publisher.ring_.shared_->slots[index].qpc == timestamps[index],
           "Resumed export changed a different receiver-owned slot");
-      store_state(publisher.shared_->slots[0], 1, wire::slot_state::reading);
-      store_state(publisher.shared_->slots[2], 1, wire::slot_state::ready);
-      require(publisher.acquire_slot(generation.completed()) == 2, "Completed unclaimed ready slot could not be reused");
-      store_state(publisher.shared_->slots[2], 1, wire::slot_state::ready); // No copy was recorded by this final ownership check.
+      store_state(publisher.ring_.shared_->slots[0], 1, wire::slot_state::reading);
+      store_state(publisher.ring_.shared_->slots[2], 1, wire::slot_state::ready);
+      require(publisher.ring_.acquire_slot(generation.completed()) == 2, "Completed unclaimed ready slot could not be reused");
+      store_state(publisher.ring_.shared_->slots[2], 1, wire::slot_state::ready); // No copy was recorded by this final ownership check.
       std::printf("PASS native D3D12 async ring: %u gated copies, backpressure on one more, independent source pixels, free/ready/reading ownership, delayed recovery\n", wire::slot_count);
     }
 

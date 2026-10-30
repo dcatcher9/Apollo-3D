@@ -24,7 +24,7 @@ namespace sunshine_game3d::test {
     // convergence and strength blend).
     render_parameters parameters;
     // The frame decision that render placed, for the per-Present trace
-    // (test_game3d_present_trace.h): its depth gap (exporter.cpp depth_gap),
+    // (test_game3d_present_trace.h): its depth gap (exporter/export_ring.inl depth_gap),
     // the real capture its scene was resolved for (frame_decision_t
     // scene_source: epoch, source, sequence, viewport) and the API depth
     // identity of its input (render_frame_input::depth_identity).

@@ -388,84 +388,7 @@ namespace {
     log(reshade::log::level::error, message);
   }
 
-  bool exchange_state(wire::slot_t &slot, std::uint64_t generation, wire::slot_state desired, wire::slot_state expected) {
-    const auto prior = wire::slot_control(generation, expected);
-    return static_cast<std::uint64_t>(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control), static_cast<LONG64>(wire::slot_control(generation, desired)), static_cast<LONG64>(prior))) == prior;
-  }
-
-  void store_state(wire::slot_t &slot, std::uint64_t generation, wire::slot_state state) {
-    InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control), static_cast<LONG64>(wire::slot_control(generation, state)));
-  }
-
-  std::uint64_t read_nonce(wire::shared_state_t &shared) {
-    return static_cast<std::uint64_t>(InterlockedCompareExchange64(
-      reinterpret_cast<volatile LONG64 *>(&shared.consumer_nonce),
-      0,
-      0
-    ));
-  }
-
-  // The capabilities of the consumer answering nonce, zero for a replaced one
-  // (wire::answered_capabilities).
-  std::uint32_t read_capabilities(wire::shared_state_t &shared, std::uint64_t nonce) {
-    const auto answered = static_cast<std::uint64_t>(InterlockedCompareExchange64(
-      reinterpret_cast<volatile LONG64 *>(&shared.capability_nonce), 0, 0));
-    const auto bits = static_cast<std::uint32_t>(InterlockedCompareExchange(
-      reinterpret_cast<volatile LONG *>(&shared.consumer_capabilities), 0, 0));
-    return wire::answered_capabilities(nonce, answered, bits);
-  }
-
-  // The protocol the consumer answering nonce declared, zero for a replaced
-  // one or one that declared none (wire::answered_protocol).
-  std::uint32_t read_consumer_protocol(wire::shared_state_t &shared, std::uint64_t nonce) {
-    const auto answered = static_cast<std::uint64_t>(InterlockedCompareExchange64(
-      reinterpret_cast<volatile LONG64 *>(&shared.capability_nonce), 0, 0));
-    const auto protocol = static_cast<std::uint32_t>(InterlockedCompareExchange(
-      reinterpret_cast<volatile LONG *>(&shared.consumer_protocol), 0, 0));
-    return wire::answered_protocol(nonce, answered, protocol);
-  }
-
-  // The export transfer of an HDR swapchain for the answered consumer's
-  // capabilities (docs/reshade-sbs.md, PQ wire transfer): 10-bit PQ for an
-  // HDR10 source when the consumer accepts PQ, and for any HDR source, native
-  // scRGB included, when it encodes HDR10 PQ (consumer_stream_pq, which
-  // implies acceptance). Every other consumer gets FP16 scRGB.
-  bool exports_pq(api::color_space source, std::uint32_t capabilities) {
-    if (source == api::color_space::hdr10_pq)
-      return (capabilities & (wire::consumer_accepts_pq | wire::consumer_stream_pq)) != 0;
-    return source == api::color_space::scrgb && (capabilities & wire::consumer_stream_pq) != 0;
-  }
-
-  // C3: whether this Present's render may be exported to the consumer read at
-  // export (consumer_pq: exports_pq for it). A native render chose its
-  // transfer from the consumer it read before rendering (pq_requested), so
-  // it is exported only while the consumer answers the same, in either
-  // direction; otherwise the next Present renders for the new consumer and
-  // no ring of the other transfer is created. A reference export cannot
-  // render again: only its PQ output needs a consumer that takes PQ.
-  bool transfer_current(bool native_render, bool pq_requested, wire::transfer output, bool consumer_pq) {
-    return native_render ? consumer_pq == pq_requested : output != wire::transfer::pq || consumer_pq;
-  }
-
-  // The export pauses whose origin is the host, the game or the player rather
-  // than a fault (tools/reshade/README.md, the readiness report): a host that
-  // is absent, attached, replaced or without PQ, a game out of focus, reset,
-  // presenting without a render or changing its colour space, and a
-  // swapchain or frame not yet prepared. Each pause is logged as
-  // "export inactive (reason, routine|fault)"; every other reason, a new one
-  // included, is a fault. game3d_log_report.py reads the class and mirrors
-  // this list for logs without it; its test reads the list from here.
-  constexpr std::array<std::string_view, 11> routine_export_pauses{
-    "no_consumer", "ring_replaced", "consumer_transfer_changed", "consumer_without_pq", "not_foreground",
-    "runtime_reset", "runtime_gone", "present_without_render", "color_space_changed", "swapchain_unknown",
-    "frame_not_prepared"};
-  constexpr const char *export_pause_class(std::string_view reason) {
-    for (const auto routine : routine_export_pauses)
-      if (routine == reason) return "routine";
-    return "fault";
-  }
-  static_assert(std::string_view(export_pause_class("ring_replaced")) == "routine" &&
-    std::string_view(export_pause_class("device_removed")) == "fault" && std::string_view(export_pause_class("")) == "fault");
+#include "exporter/export_ring.inl"
 
   // A child swapchain window's verdicts (report_window_owner) that the player
   // or the game's own window changes explain, as a top-level window's
@@ -479,290 +402,6 @@ namespace {
       if (routine == verdict) return true;
     return false;
   }
-
-  // The colour space a transfer's export is encoded in (the overlay's target).
-  api::color_space export_space(wire::transfer transfer) {
-    return transfer == wire::transfer::srgb ? api::color_space::srgb :
-      transfer == wire::transfer::pq ? api::color_space::hdr10_pq : api::color_space::scrgb;
-  }
-
-  DXGI_FORMAT typed_format(DXGI_FORMAT format) {
-    switch (format) {
-      case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-      case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-        return DXGI_FORMAT_R8G8B8A8_UNORM;
-      case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-      case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-        return DXGI_FORMAT_B8G8R8A8_UNORM;
-      case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-        return DXGI_FORMAT_R10G10B10A2_UNORM;
-      case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-        return DXGI_FORMAT_R16G16B16A16_FLOAT;
-      default:
-        return format;
-    }
-  }
-
-  struct export_color_t {
-    api::color_space input = api::color_space::unknown;
-    wire::transfer output = wire::transfer::srgb;
-  };
-
-  bool decode_export_color(const char *output, std::uint32_t input, export_color_t &color) {
-    if (input == static_cast<std::uint32_t>(api::color_space::srgb) && std::strcmp(output, "srgb") == 0) {
-      color = {api::color_space::srgb, wire::transfer::srgb};
-      return true;
-    }
-    if ((input == static_cast<std::uint32_t>(api::color_space::scrgb) || input == static_cast<std::uint32_t>(api::color_space::hdr10_pq)) && std::strcmp(output, "scrgb") == 0) {
-      color = {static_cast<api::color_space>(input), wire::transfer::scrgb};
-      return true;
-    }
-    // 10-bit PQ (Rec.2020, ST 2084) of an HDR10 source; exported only to a
-    // consumer that accepts it (frame()).
-    if (input == static_cast<std::uint32_t>(api::color_space::hdr10_pq) && std::strcmp(output, "pq") == 0) {
-      color = {api::color_space::hdr10_pq, wire::transfer::pq};
-      return true;
-    }
-    return false;
-  }
-
-  struct source_t {
-    api::resource resource {};
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    export_color_t color;
-    std::uint64_t adapter = 0;
-    HWND window = nullptr;
-  };
-  // A ring idle this long is reused for the next consumer (see generation_t::renew).
-  constexpr auto idle_ring_reuse = std::chrono::milliseconds(500);
-  // Everything a generation's ring textures depend on, besides the consumer.
-  bool same_ring(const source_t &a, const source_t &b) {
-    return a.width == b.width && a.height == b.height && a.format == b.format && a.adapter == b.adapter &&
-      a.color.input == b.color.input && a.color.output == b.color.output && a.window == b.window;
-  }
-
-  // Why a presentation carries no depth, for the SBS output counters. unavailable: the
-  // provider had none this Present (source switch, FG toggle, expiry). The reuse reasons
-  // are a generated/pending frame the provider did give depth, refused here because the
-  // previous presentation had none or resolved its scene for another source.
-  enum class depth_gap : unsigned char { none, unavailable, reuse_after_gap, reuse_other_source };
-  // One Game 3D publication's contribution to the SBS output counters.
-  struct output_sample {
-    bool fg = false;
-    // With depth: rendered as the colour frame (scene not placed or strength
-    // blend zero), or still fading in.
-    bool scene_flat = false, scene_fading = false;
-    bool depth_ready = false, reused_depth = false;
-    depth_gap gap = depth_gap::none;
-  };
-  // Own native objects rather than ReShade wrappers, which disappear during runtime teardown.
-  struct generation_t {
-    api::device_api backend = api::device_api::d3d11;
-    api::effect_runtime *runtime = nullptr;
-    api::effect_runtime *owner_runtime = nullptr;
-    bool owner_destroyed = false;
-    std::uint64_t nonce = 0;
-    std::uint64_t id = 0;
-    std::uint64_t last_submitted = 0;
-    std::uint64_t native_swapchain = 0;
-    std::uint64_t pending_qpc = 0;
-    float pending_ui_parallax_uv = 0.f;
-    std::uint32_t pending_slot = wire::slot_count;
-    bool signal_failed = false;
-    bool pending_overlay = false;
-    bool rendered_directly = false; // Logged once per generation.
-    // When this ring stopped exporting (focus loss, consumer detach). An idle
-    // ring can serve the next consumer under a new generation.
-    std::chrono::steady_clock::time_point inactive_since{};
-    // Diagnostic disposition travels with this copy until its slot is actually
-    // published. A later effects callback must not relabel an earlier copy.
-    std::optional<output_sample> pending_output;
-    std::array<std::unique_ptr<sunshine::overlay::compositor_t>, wire::slot_count> overlays;
-    // A D3D12 command list does not retain the resource referenced by a recorded copy.
-    // Hold the source across effect reload/destruction until submission is completed.
-    std::array<com_ptr<IUnknown>, wire::slot_count> submitted_sources;
-    source_t source;
-    std::array<handle_t, wire::slot_count> texture_handles;
-    handle_t fence_handle;
-    std::array<com_ptr<ID3D11Texture2D>, wire::slot_count> textures11;
-    com_ptr<ID3D11Device5> device11;
-    com_ptr<ID3D11DeviceContext4> context11;
-    com_ptr<ID3D11Fence> fence11;
-    std::array<com_ptr<ID3D12Resource>, wire::slot_count> textures12;
-    com_ptr<ID3D12Device> device12;
-    com_ptr<ID3D12CommandQueue> queue12;
-    com_ptr<ID3D12Fence> fence12;
-
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-    // SunshineGame3DTestTeardownOrder: named by the publisher member that
-    // held it last (publisher_t::note_rings).
-    ~generation_t() {
-      sunshine_game3d::test::teardown::generation_destroyed(this);
-    }
-
-#endif
-    std::uint64_t completed() const {
-      return fence11 ? fence11->GetCompletedValue() : fence12 ? fence12->GetCompletedValue() :
-                                                                0;
-    }
-
-    bool finished() const {
-      const auto value = completed();
-      return value == UINT64_MAX || (pending_slot == wire::slot_count && !signal_failed && value >= last_submitted);
-    }
-
-    api::resource texture(std::uint32_t index) const {
-      return {reinterpret_cast<std::uint64_t>(backend == api::device_api::d3d11 ? static_cast<void *>(textures11[index].get()) : static_cast<void *>(textures12[index].get()))};
-    }
-
-    // Unloading an add-on cannot run a background reaper after its DLL is gone. Preserve only
-    // outstanding native allocations until process exit rather than wait on the game's GPU.
-    void preserve_inflight_on_unload() {
-      if (finished()) {
-        return;
-      }
-      for (auto &texture : textures11) {
-        texture.release();
-      }
-      for (auto &texture : textures12) {
-        texture.release();
-      }
-      fence11.release();
-      fence12.release();
-      for (auto &source : submitted_sources) source.release();
-      for (auto &overlay : overlays) overlay.release();
-      log(reshade::log::level::warning, "Sunshine SBS: preserving one in-flight generation until process exit during add-on unload");
-    }
-
-    // A finished ring kept across a runtime reset (a resize) holds no back
-    // buffer, which would fail ResizeBuffers: neither a submitted source nor
-    // an overlay compositor (its target is the back buffer; one is created
-    // again when the overlay next composes).
-    void release_sources() {
-      if (!finished()) return;
-      for (auto &source : submitted_sources) source.reset();
-      for (auto &overlay : overlays) overlay.reset();
-    }
-
-    // A finished ring idle for idle_ring_reuse serves a new consumer under a new
-    // generation: slots are reset on publication and the consumer reopens the
-    // same shared handles, instead of allocating another 2W x H ring.
-    void renew(api::effect_runtime *owner, std::uint64_t consumer, std::uint64_t generation_id) {
-      runtime = owner;
-      nonce = consumer;
-      id = generation_id;
-      rendered_directly = false;
-    }
-
-    bool create(api::effect_runtime *owner, const source_t &input, std::uint64_t consumer, std::uint64_t generation_id) {
-      runtime = owner;
-      owner_runtime = owner;
-      source = input;
-      nonce = consumer;
-      id = generation_id;
-      native_swapchain = owner->get_native();
-      return create_native(owner->get_device()->get_api(), owner->get_device()->get_native(), owner->get_command_queue()->get_native());
-    }
-
-    bool create_native(api::device_api renderer, std::uint64_t native_device_handle, std::uint64_t native_queue_handle) {
-      backend = renderer;
-      HRESULT hr = E_FAIL;
-      if (backend == api::device_api::d3d11) {
-        auto *native_device = reinterpret_cast<ID3D11Device *>(native_device_handle);
-        auto *native_context = reinterpret_cast<ID3D11DeviceContext *>(native_queue_handle);
-        if (FAILED(hr = native_device->QueryInterface(IID_PPV_ARGS(device11.put()))) || FAILED(hr = native_context->QueryInterface(IID_PPV_ARGS(context11.put())))) {
-          log_hr("D3D11 shared fence interfaces", hr);
-          return false;
-        }
-        if (FAILED(hr = device11->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(fence11.put()))) || FAILED(hr = fence11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fence_handle.put()))) {
-          log_hr("D3D11 shared fence", hr);
-          return false;
-        }
-        D3D11_TEXTURE2D_DESC desc {};
-        desc.Width = source.width * 2;
-        desc.Height = source.height;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = source.format;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        // Modern D3D11 NT sharing with a shared fence. No keyed-mutex waits are involved.
-        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-        for (std::uint32_t index = 0; index < wire::slot_count; ++index) {
-          com_ptr<IDXGIResource1> shared;
-          if (FAILED(hr = device11->CreateTexture2D(&desc, nullptr, textures11[index].put())) || FAILED(hr = textures11[index]->QueryInterface(IID_PPV_ARGS(shared.put()))) || FAILED(hr = shared->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, texture_handles[index].put()))) {
-            log_hr("D3D11 shared texture", hr);
-            return false;
-          }
-        }
-      } else if (backend == api::device_api::d3d12) {
-        auto *native_device = reinterpret_cast<ID3D12Device *>(native_device_handle);
-        auto *native_queue = reinterpret_cast<ID3D12CommandQueue *>(native_queue_handle);
-        if (FAILED(hr = native_device->QueryInterface(IID_PPV_ARGS(device12.put()))) || FAILED(hr = native_queue->QueryInterface(IID_PPV_ARGS(queue12.put()))) || FAILED(hr = device12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(fence12.put()))) || FAILED(hr = device12->CreateSharedHandle(fence12.get(), nullptr, GENERIC_ALL, nullptr, fence_handle.put()))) {
-          log_hr("D3D12 shared fence", hr);
-          return false;
-        }
-        D3D12_HEAP_PROPERTIES heap {};
-        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-        D3D12_RESOURCE_DESC desc {};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = source.width * 2;
-        desc.Height = source.height;
-        desc.DepthOrArraySize = 1;
-        desc.MipLevels = 1;
-        desc.Format = source.format;
-        desc.SampleDesc.Count = 1;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
-        for (std::uint32_t index = 0; index < wire::slot_count; ++index) {
-          if (FAILED(hr = device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(textures12[index].put()))) || FAILED(hr = device12->CreateSharedHandle(textures12[index].get(), nullptr, GENERIC_ALL, nullptr, texture_handles[index].put()))) {
-            log_hr("D3D12 shared texture", hr);
-            return false;
-          }
-        }
-      } else {
-        return false;
-      }
-      return true;
-    }
-
-    // The native renderer wrote this slot directly on the same command list;
-    // its inputs are the renderer's own resources, retained by its fence.
-    void adopt_rendered(std::uint32_t index, std::uint64_t sequence) {
-      submitted_sources[index].reset();
-      last_submitted = sequence;
-    }
-
-    // copy false: the overlay's composite pass, recorded in reshade_present,
-    // writes every pixel of the slot from this same source (composite_ps
-    // returns the source wherever the controls are transparent), so a copy
-    // first would only be overwritten. The source is retained either way.
-    void submit(api::command_list *commands, api::resource input, std::uint32_t index, std::uint64_t sequence,
-        bool copy = true) {
-      auto &submitted_source = submitted_sources[index];
-      submitted_source.reset();
-      auto *source_object = reinterpret_cast<IUnknown *>(input.handle);
-      source_object->AddRef();
-      *submitted_source.put() = source_object;
-      const auto destination = texture(index);
-      // Set this before appending commands: an exception cannot make recorded work appear idle.
-      last_submitted = sequence;
-      if (!copy) return;
-      commands->barrier(input, api::resource_usage::shader_resource, api::resource_usage::copy_source);
-      if (backend == api::device_api::d3d12) {
-        commands->barrier(destination, api::resource_usage::general, api::resource_usage::copy_dest);
-      }
-      commands->copy_resource(input, destination);
-      if (backend == api::device_api::d3d12) {
-        commands->barrier(destination, api::resource_usage::copy_dest, api::resource_usage::general);
-      }
-      commands->barrier(input, api::resource_usage::copy_source, api::resource_usage::shader_resource);
-      // The native overlay is drawn after techniques. Its composition must be included in
-      // this same bounded submission before signalling or exposing the slot to Sunshine.
-    }
-  };
 
   // Value-only decision for one effects pass. Calibration resolves these values
   // first; shader uniforms, UI and export consume the same completed decision.
@@ -1082,6 +721,8 @@ namespace {
     return value ? value : 1;
   }
 
+#include "exporter/export_ring_class.inl"
+
   class publisher_t {
   public:
     ~publisher_t() {
@@ -1101,39 +742,11 @@ namespace {
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
         teardown::note(teardown::step::ui_cleared);
 #endif
-        if (shared_) {
-          publish(identity_);
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-          teardown::note(teardown::step::identity_published);
-#endif
-        }
-        if (generation_) {
-          generation_->preserve_inflight_on_unload();
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-          teardown::note(teardown::step::preserved, teardown::ring_owner::active);
-#endif
-        }
-        if (retired_) {
-          retired_->preserve_inflight_on_unload();
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-          teardown::note(teardown::step::preserved, teardown::ring_owner::retired);
-#endif
-        }
-        if (cached_ring_) {
-          cached_ring_->preserve_inflight_on_unload();
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-          teardown::note(teardown::step::preserved, teardown::ring_owner::cached);
-#endif
-        }
+        ring_.unload();
       }
-      if (shared_) {
-        UnmapViewOfFile(shared_);
+      ring_.unmap();
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-        teardown::note(teardown::step::unmapped);
-#endif
-      }
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-      note_rings();
+      ring_.note_rings();
       teardown::note_mapping(&mapping_);
       teardown::note(teardown::step::publisher_end);
 #endif
@@ -1144,22 +757,22 @@ namespace {
       if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
         return false;
       }
-      identity_.producer_pid = GetCurrentProcessId();
-      identity_.producer_creation_time = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
-      const auto name = std::wstring(wire::mapping_prefix) + std::to_wstring(identity_.producer_pid);
+      ring_.identity_.producer_pid = GetCurrentProcessId();
+      ring_.identity_.producer_creation_time = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+      const auto name = std::wstring(wire::mapping_prefix) + std::to_wstring(ring_.identity_.producer_pid);
       *mapping_.put() = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(wire::shared_state_t), name.c_str());
       if (!mapping_.get() || GetLastError() == ERROR_ALREADY_EXISTS) {
         log(reshade::log::level::error, "Sunshine SBS: cannot create a unique per-process mapping");
         return false;
       }
-      shared_ = static_cast<wire::shared_state_t *>(MapViewOfFile(mapping_.get(), FILE_MAP_ALL_ACCESS, 0, 0, sizeof(wire::shared_state_t)));
-      if (!shared_) {
+      ring_.shared_ = static_cast<wire::shared_state_t *>(MapViewOfFile(mapping_.get(), FILE_MAP_ALL_ACCESS, 0, 0, sizeof(wire::shared_state_t)));
+      if (!ring_.shared_) {
         return false;
       }
       // New paging-file mappings are zeroed; publish the versioned layout before callbacks start.
-      new (shared_) wire::shared_state_t {};
-      publish(identity_);
-      if (!debug_dump_.initialize(identity_.producer_pid, identity_.producer_creation_time))
+      new (ring_.shared_) wire::shared_state_t {};
+      ring_.publish(ring_.identity_);
+      if (!debug_dump_.initialize(ring_.identity_.producer_pid, ring_.identity_.producer_creation_time))
         log(reshade::log::level::warning, "Sunshine Game 3D: optional diagnostic mailbox unavailable");
       // The protocol is named so a pairing with an older host, which ignores this mapping
       // without a log line, can be told apart from a host that is not streaming.
@@ -1501,7 +1114,7 @@ namespace {
           const bool preparing = renderer->preparing();
           if (diagnostic_owner) debug_dump_.unavailable(preparing ? "The foreground Game 3D renderer is still being prepared." :
             "The foreground Game 3D renderer is unavailable for this swapchain format, extent or transition.");
-          deactivate(runtime, "renderer_unavailable");
+          ring_.deactivate(runtime, "renderer_unavailable");
           sunshine_game3d::automatic_status unavailable;
           unavailable.phase = preparing ? sunshine_game3d::automatic_phase::renderer_preparing :
             sunshine_game3d::automatic_phase::renderer_unavailable;
@@ -1517,7 +1130,7 @@ namespace {
         // and a native scRGB one to a consumer that encodes HDR10 PQ; any
         // other consumer gets FP16 scRGB (exports_pq).
         const auto space = swapchain->get_color_space();
-        proof.pq_requested = exports_pq(space, read_capabilities(*shared_, read_nonce(*shared_)));
+        proof.pq_requested = exports_pq(space, read_capabilities(*ring_.shared_, read_nonce(*ring_.shared_)));
         const bool pq = renderer->set_pq_output(proof.pq_requested);
         proof.color = {space, space == api::color_space::srgb ? wire::transfer::srgb : pq ? wire::transfer::pq : wire::transfer::scrgb};
         // The overlay compositor of this export is compiled off the Present
@@ -1591,7 +1204,7 @@ namespace {
         // Without a consumer (or an armed dump) nothing reads the adaptive
         // probe's conditioning: render() keeps running for the depth pool (E4
         // was rejected), but submits no probe.
-        input.adaptive_probe = read_nonce(*shared_) != 0 || proof.diagnostic_armed;
+        input.adaptive_probe = read_nonce(*ring_.shared_) != 0 || proof.diagnostic_armed;
         input.depth_identity = depth_identity(proof);
         {
           const sunshine_game3d::slow_step step("stereo render");
@@ -1693,7 +1306,7 @@ namespace {
         } else renderer->reset_after_runtime_drain();
       }
       sunshine_game3d::depth_input::invalidate_reuse(runtime);
-      deactivate(runtime, "runtime_reset");
+      ring_.deactivate(runtime, "runtime_reset");
       if (destroy) runtimes_.erase(runtime);
       else {
         // FX reload invalidates FX handles, not the runtime identity or native
@@ -1708,18 +1321,18 @@ namespace {
         proof.source_alpha_policy = source_alpha_policy;
       }
       final_counters.session = clear_automatic_ui(runtime);
-      if (generation_ && generation_->owner_runtime == runtime) {
-        if (destroy && generation_->finished() && generation_->completed() != UINT64_MAX) {
+      if (ring_.generation_ && ring_.generation_->owner_runtime == runtime) {
+        if (destroy && ring_.generation_->finished() && ring_.generation_->completed() != UINT64_MAX) {
           // A runtime reset may be a resize: the finished, deactivated ring
           // stays for a toggle back (the export path caches or renews it) until
           // the swapchain is destroyed. It holds no back buffer meanwhile.
-          generation_->release_sources();
+          ring_.generation_->release_sources();
         } else {
-          generation_->owner_destroyed |= destroy;
-          if (generation_->finished()) {
-            release_ring(generation_);
+          ring_.generation_->owner_destroyed |= destroy;
+          if (ring_.generation_->finished()) {
+            ring_.release_ring(ring_.generation_, export_views{*this});
           } else if (destroy) {
-            retire_destroyed_generation();
+            ring_.retire_destroyed_generation(export_views{*this});
           }
         }
       }
@@ -1728,7 +1341,7 @@ namespace {
         overlays_.erase(runtime);
         // The cached ring stays across a runtime reset (swapchain_destroyed
         // releases it with its swapchain); it holds no back buffer meanwhile.
-        if (cached_ring_ && cached_ring_->owner_runtime == runtime) cached_ring_->release_sources();
+        if (ring_.cached_ring_ && ring_.cached_ring_->owner_runtime == runtime) ring_.cached_ring_->release_sources();
       }
     }
 
@@ -1744,14 +1357,14 @@ namespace {
           it = parked_.erase(it);
         } else ++it;
       }
-      if (generation_ && generation_->native_swapchain == native_swapchain && !generation_->runtime) {
-        generation_->owner_destroyed = true;
-        if (generation_->finished()) release_ring(generation_);
-        else retire_destroyed_generation();
+      if (ring_.generation_ && ring_.generation_->native_swapchain == native_swapchain && !ring_.generation_->runtime) {
+        ring_.generation_->owner_destroyed = true;
+        if (ring_.generation_->finished()) ring_.release_ring(ring_.generation_, export_views{*this});
+        else ring_.retire_destroyed_generation(export_views{*this});
       }
-      if (cached_ring_ && cached_ring_->native_swapchain == native_swapchain) {
-        cached_ring_->owner_destroyed = true;
-        if (cached_ring_->finished()) release_ring(cached_ring_);
+      if (ring_.cached_ring_ && ring_.cached_ring_->native_swapchain == native_swapchain) {
+        ring_.cached_ring_->owner_destroyed = true;
+        if (ring_.cached_ring_->finished()) ring_.release_ring(ring_.cached_ring_, export_views{*this});
       }
     }
 
@@ -1780,20 +1393,20 @@ namespace {
       // Disable stale metadata when focus moves, including when no technique executes.
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = runtimes_.find(runtime);
-      const bool foreground = published_runtime_ == runtime && owns_foreground_locked(runtime, reinterpret_cast<HWND>(published_metadata_.window));
-      if (published_runtime_ == runtime && (!foreground || found == runtimes_.end() || !found->second.rendered_since_present)) {
+      const bool foreground = ring_.published_runtime_ == runtime && owns_foreground_locked(runtime, reinterpret_cast<HWND>(ring_.published_metadata_.window));
+      if (ring_.published_runtime_ == runtime && (!foreground || found == runtimes_.end() || !found->second.rendered_since_present)) {
         // The pause line first, then this stop's one reuse invalidation (see
         // the not_foreground stop in frame()).
-        if (deactivate(runtime, !foreground ? "not_foreground" :
+        if (ring_.deactivate(runtime, !foreground ? "not_foreground" :
             found == runtimes_.end() ? "runtime_gone" : "present_without_render"))
           sunshine_game3d::depth_input::invalidate_reuse(runtime);
       }
-      if (generation_ && generation_->owner_runtime == runtime && generation_->pending_slot != wire::slot_count) {
-        if (generation_->pending_overlay) {
-          generation_->pending_overlay = false;
-          if (generation_->runtime && !generation_->overlays[generation_->pending_slot]->finish()) {
-            deactivate(runtime, "overlay_capture_failed");
-            retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      if (ring_.generation_ && ring_.generation_->owner_runtime == runtime && ring_.generation_->pending_slot != wire::slot_count) {
+        if (ring_.generation_->pending_overlay) {
+          ring_.generation_->pending_overlay = false;
+          if (ring_.generation_->runtime && !ring_.generation_->overlays[ring_.generation_->pending_slot]->finish()) {
+            ring_.deactivate(runtime, "overlay_capture_failed");
+            ring_.retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             log(reshade::log::level::warning, "Sunshine SBS: overlay capture unavailable; showing the captured desktop");
           }
         }
@@ -1803,18 +1416,18 @@ namespace {
         // ReShade's immediate list first; ReShade 6.8 fires finish_present only
         // after the real Present returns, so signalling there queued the fence
         // behind the Present packet and the CPU's Present wait.
-        if (generation_->backend == api::device_api::d3d11) {
-          signal_pending(runtime);
+        if (ring_.generation_->backend == api::device_api::d3d11) {
+          ring_.signal_pending(runtime, output_counts{*this});
         } else if (auto *queue = runtime->get_command_queue();
-            queue && queue->get_native() == reinterpret_cast<std::uint64_t>(generation_->queue12.get())) {
+            queue && queue->get_native() == reinterpret_cast<std::uint64_t>(ring_.generation_->queue12.get())) {
           {
             const sunshine_streamline::native_observer::own_flush_scope own;
             queue->flush_immediate_command_list();
           }
-          signal_pending(runtime);
+          ring_.signal_pending(runtime, output_counts{*this});
         }
       }
-      release_idle_rings();
+      ring_.release_idle_rings(export_views{*this});
       if (found != runtimes_.end()) {
         found->second.rendered_since_present = false;
         found->second.native_depth_prepared = false;
@@ -1824,8 +1437,8 @@ namespace {
 
     void draw_overlay(api::effect_runtime *runtime) {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (generation_ && generation_->runtime == runtime && generation_->pending_overlay) {
-        generation_->overlays[generation_->pending_slot]->append_capture_callback();
+      if (ring_.generation_ && ring_.generation_->runtime == runtime && ring_.generation_->pending_overlay) {
+        ring_.generation_->overlays[ring_.generation_->pending_slot]->append_capture_callback();
       }
     }
 
@@ -2268,8 +1881,8 @@ namespace {
       // A preceding Present signalled its export neither in reshade_present nor
       // in finish_present. Retain its recording until a later matching
       // submission can be fenced, but stop exposing the previous cached image.
-      if (generation_ && generation_->pending_slot != wire::slot_count && generation_->native_swapchain == swapchain) {
-        deactivate(generation_->runtime, "present_not_finished");
+      if (ring_.generation_ && ring_.generation_->pending_slot != wire::slot_count && ring_.generation_->native_swapchain == swapchain) {
+        ring_.deactivate(ring_.generation_->runtime, "present_not_finished");
       }
       colors_[swapchain] = color;
     }
@@ -2282,10 +1895,10 @@ namespace {
       // A D3D12 export is normally signalled in reshade_present (present()).
       // One whose reshade_present did not run is fenced here, after the game's
       // Present, which ReShade preceded with a flush of its immediate list.
-      if (!generation_ || generation_->backend != api::device_api::d3d12 || generation_->pending_slot == wire::slot_count || swapchain != generation_->native_swapchain || queue != reinterpret_cast<std::uint64_t>(generation_->queue12.get())) {
+      if (!ring_.generation_ || ring_.generation_->backend != api::device_api::d3d12 || ring_.generation_->pending_slot == wire::slot_count || swapchain != ring_.generation_->native_swapchain || queue != reinterpret_cast<std::uint64_t>(ring_.generation_->queue12.get())) {
         return;
       }
-      signal_pending(nullptr);
+      ring_.signal_pending(nullptr, output_counts{*this});
     }
 
     void frame(api::effect_runtime *runtime, api::effect_technique technique, api::command_list *commands, api::resource_view native_rtv, bool addon_render = false) {
@@ -2306,16 +1919,16 @@ namespace {
       }
       auto &proof = runtimes_[runtime];
       if (proof.addon_native && !addon_render) return;
-      release_idle_rings();
+      ring_.release_idle_rings(export_views{*this});
       if (game && proof.raw_supported && !proof.frame.prepared) {
-        deactivate(runtime, "frame_not_prepared");
+        ring_.deactivate(runtime, "frame_not_prepared");
         return;
       }
       // The renamed primary effect wins over accidentally enabled reference
       // effects. Never alternate producers between techniques in one present.
       if (!game && proof.game_technique.handle && runtime->get_technique_state(proof.game_technique)) return;
       if (native && !proof.native_depth_prepared) {
-        deactivate(runtime, "native_depth_unprepared");
+        ring_.deactivate(runtime, "native_depth_unprepared");
         return;
       }
       // Preserve the older independent-over-reference priority when the renamed
@@ -2331,149 +1944,77 @@ namespace {
       const HWND window = static_cast<HWND>(runtime->get_hwnd());
       DWORD window_pid = 0;
       GetWindowThreadProcessId(window, &window_pid);
-      if (!window || window_pid != identity_.producer_pid || !owns_foreground_locked(runtime, window, true)) {
+      if (!window || window_pid != ring_.identity_.producer_pid || !owns_foreground_locked(runtime, window, true)) {
         // A focus loss stops the export and ends the provider's bounded depth
         // reuse once, after the pause line. While the export stays inactive
         // the provider keeps its own bounded reuse (the renderer still runs):
         // invalidating on every background Present cleared each real frame's
         // copy before its generated frames could hold it, a readiness loss on
         // every generated Present (Assassin's Creed Shadows with FG on, 10-23).
-        if (deactivate(runtime, "not_foreground")) sunshine_game3d::depth_input::invalidate_reuse(runtime);
+        if (ring_.deactivate(runtime, "not_foreground")) sunshine_game3d::depth_input::invalidate_reuse(runtime);
         return;
       }
       const auto color = colors_.find(runtime->get_native());
       if (color == colors_.end()) {
-        deactivate(runtime, "swapchain_unknown");
+        ring_.deactivate(runtime, "swapchain_unknown");
         return;
       }
       // Add-ons may render techniques into deferred lists. Never signal an unrelated queue here.
       auto *queue = runtime->get_command_queue();
       if (!queue || commands != queue->get_immediate_command_list()) {
-        deactivate(runtime, "deferred_command_list");
+        ring_.deactivate(runtime, "deferred_command_list");
         return;
       }
       const auto backend = runtime->get_device()->get_api();
       if (backend != api::device_api::d3d11 && backend != api::device_api::d3d12) {
-        deactivate(runtime, "unsupported_api");
+        ring_.deactivate(runtime, "unsupported_api");
         return;
       }
 
       // The compiled input transfer must match the current game swapchain, including PQ to
       // scRGB switches that keep the exported FP16 format and transfer unchanged.
       if ((addon_render ? !proof.native_output.handle : !proof.texture.handle) || !source_color_matches(runtime, proof, color->second)) {
-        deactivate(runtime, "output_unavailable");
+        ring_.deactivate(runtime, "output_unavailable");
         return;
       }
       source_t source;
       if (!describe(runtime, proof, source)) {
-        deactivate(runtime, "source_unavailable");
+        ring_.deactivate(runtime, "source_unavailable");
         return;
       }
       proof.rendered_since_present = true;
 
-      const auto nonce = read_nonce(*shared_);
+      const auto nonce = read_nonce(*ring_.shared_);
       if (!nonce) {
-        if (generation_) {
-          deactivate(generation_->runtime, "no_consumer");
+        if (ring_.generation_) {
+          ring_.deactivate(ring_.generation_->runtime, "no_consumer");
         }
-        wire::metadata_t metadata = identity_;
-        set_source(metadata, source);
+        wire::metadata_t metadata = ring_.identity_;
+        export_ring::set_source(metadata, source);
         // No consumer means no shared GPU allocations or copies.
-        if (published_runtime_ != runtime || published_metadata_.generation || published_metadata_.window != metadata.window || published_metadata_.source_width != metadata.source_width || published_metadata_.source_height != metadata.source_height || published_metadata_.dxgi_format != metadata.dxgi_format || published_metadata_.adapter_luid != metadata.adapter_luid || published_metadata_.color_transfer != metadata.color_transfer) {
-          publish(metadata, false, runtime);
+        if (ring_.published_runtime_ != runtime || ring_.published_metadata_.generation || ring_.published_metadata_.window != metadata.window || ring_.published_metadata_.source_width != metadata.source_width || ring_.published_metadata_.source_height != metadata.source_height || ring_.published_metadata_.dxgi_format != metadata.dxgi_format || ring_.published_metadata_.adapter_luid != metadata.adapter_luid || ring_.published_metadata_.color_transfer != metadata.color_transfer) {
+          ring_.publish(metadata, false, runtime);
         }
         return;
       }
-      if (!consumer_speaks_protocol(runtime, nonce)) {
+      if (!ring_.consumer_speaks_protocol(runtime, nonce)) {
         return;
       }
       // C3 (transfer_current): a consumer attached, replaced or detached
       // between this Present's render and its export with another transfer
       // gets the next Present's export, rendered for it.
       if (!transfer_current(addon_render, proof.pq_requested, source.color.output,
-            exports_pq(source.color.input, read_capabilities(*shared_, nonce)))) {
-        deactivate(runtime, addon_render ? "consumer_transfer_changed" : "consumer_without_pq");
+            exports_pq(source.color.input, read_capabilities(*ring_.shared_, nonce)))) {
+        ring_.deactivate(runtime, addon_render ? "consumer_transfer_changed" : "consumer_without_pq");
         return;
       }
-      const bool replace = !generation_ || generation_->runtime != runtime || generation_->nonce != nonce ||
-                           !same_ring(generation_->source, source);
-      if (replace) {
-        if (generation_) {
-          deactivate(generation_->runtime, "ring_replaced");
-        }
-        retire_destroyed_generation();
-        if (generation_ && !generation_->finished()) {
-          return;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        if (now < retry_at_) {
-          return;
-        }
-        if (next_generation_ >= wire::max_generation) {
-          deactivate(runtime, "generation_limit");
-          return;
-        }
-        // An abandoned consumer read of a reused slot finishes within frames;
-        // a ring idle this long only ever served consumers that are gone. A
-        // consumer that restarts while exporting still gets fresh resources.
-        // finished() is also true for a removed device; such a ring is never reused.
-        const bool reuse = generation_ && !generation_->owner_destroyed && generation_->owner_runtime == runtime &&
-          generation_->completed() != UINT64_MAX &&
-          generation_->native_swapchain == runtime->get_native() && same_ring(generation_->source, source) &&
-          generation_->inactive_since != std::chrono::steady_clock::time_point{} && now - generation_->inactive_since >= idle_ring_reuse;
-        // The cached ring of the other colour transfer (item 6: one entry,
-        // released after cached_ring_idle) serves a toggle back the same way.
-        const bool cached = !reuse && cached_ring_ && !cached_ring_->owner_destroyed && cached_ring_->owner_runtime == runtime &&
-          cached_ring_->completed() != UINT64_MAX && cached_ring_->finished() &&
-          cached_ring_->native_swapchain == runtime->get_native() && same_ring(cached_ring_->source, source) &&
-          now - cached_ring_->inactive_since >= idle_ring_reuse;
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-        note_rings();  // Names a ring the assignments below destroy.
-#endif
-        // A finished ring that is not reused now stays cached for a toggle back.
-        const auto keep_outgoing = [&] {
-          if (generation_ && generation_->finished() && !generation_->owner_destroyed && generation_->completed() != UINT64_MAX) {
-            if (generation_->inactive_since == std::chrono::steady_clock::time_point{}) generation_->inactive_since = now;
-            cached_ring_ = std::move(generation_);
-            cached_ring_since_ = now;
-          }
-        };
-        if (reuse) {
-          generation_->renew(runtime, nonce, ++next_generation_);
-        } else if (cached) {
-          auto previous = std::move(cached_ring_);
-          keep_outgoing();
-          generation_ = std::move(previous);
-          generation_->renew(runtime, nonce, ++next_generation_);
-        } else {
-          auto next = std::make_unique<generation_t>();
-          if (!next->create(runtime, source, nonce, ++next_generation_)) {
-            deactivate(runtime, "ring_creation_failed");
-            retry_at_ = now + std::chrono::seconds(2);
-            return;
-          }
-          keep_outgoing();
-          generation_ = std::move(next);
-        }
-        wire::metadata_t metadata = identity_;
-        set_source(metadata, source);
-        metadata.generation = generation_->id;
-        metadata.accepted_consumer_nonce = nonce;
-        for (std::uint32_t index = 0; index < wire::slot_count; ++index) {
-          metadata.texture_handles[index] = reinterpret_cast<std::uint64_t>(generation_->texture_handles[index].get());
-        }
-        metadata.ready_fence_handle = reinterpret_cast<std::uint64_t>(generation_->fence_handle.get());
-        publish(metadata, true, runtime);
-        char message[256];
-        std::snprintf(message, sizeof(message), "Sunshine SBS: generation %llu, %ux%u full SBS, DXGI %u, D3D%u, %s, protocol %u (source color %u)%s", static_cast<unsigned long long>(metadata.generation), metadata.packed_width, metadata.packed_height, metadata.dxgi_format, backend == api::device_api::d3d11 ? 11u : 12u, metadata.color_transfer == wire::transfer::scrgb ? "scRGB" : metadata.color_transfer == wire::transfer::pq ? "PQ HDR10" : "sRGB", metadata.protocol_version, static_cast<unsigned>(source.color.input), reuse ? ", reusing the idle export ring" : cached ? ", reusing the cached export ring of this transfer" : "");
-        log(reshade::log::level::info, message);
-      }
-      if (generation_->signal_failed) {
+      if (!ring_.serve(runtime, source, nonce, backend, export_views{*this})) return;
+      if (ring_.generation_->signal_failed) {
         return;
       }
-      const auto completed = generation_->completed();
+      const auto completed = ring_.generation_->completed();
       if (completed == UINT64_MAX) {
-        deactivate(runtime, "device_removed");
+        ring_.deactivate(runtime, "device_removed");
         return;
       }
       // The owed native pack renders straight into the slot. The overlay and
@@ -2483,7 +2024,7 @@ namespace {
       const bool dump = addon_render && proof.diagnostic_armed && debug_dump_.requested();
       const bool direct = renderer && !overlay_open(runtime) && !dump;
       bool overwrote = false;
-      const auto index = acquire_slot(completed, &overwrote);
+      const auto index = ring_.acquire_slot(completed, &overwrote);
       if (index == wire::slot_count) {
         // Logged here too (rate limited), so a ring that drops every Present
         // still reports it with published frozen.
@@ -2491,27 +2032,27 @@ namespace {
         log_output(runtime, proof, GetTickCount64());
       } else if (overwrote) ++proof.output.overwritten_unconsumed;
       if (index != wire::slot_count) {
-        auto &slot = shared_->slots[index];
+        auto &slot = ring_.shared_->slots[index];
         // A nonce replacement races only on metadata. Do not issue new old-generation work.
-        if (read_nonce(*shared_) != generation_->nonce) {
-          store_state(slot, generation_->id, wire::slot_state::free);
+        if (read_nonce(*ring_.shared_) != ring_.generation_->nonce) {
+          store_state(slot, ring_.generation_->id, wire::slot_state::free);
           return;
         }
-        const auto sequence = generation_->last_submitted + 1;
+        const auto sequence = ring_.generation_->last_submitted + 1;
         LARGE_INTEGER timestamp {};
         QueryPerformanceCounter(&timestamp);
         // Mark ownership before recording any work, so reloads and callback failures keep
         // source, ring and overlay resources alive until that work can be fenced.
-        generation_->pending_slot = index;
-        generation_->pending_qpc = static_cast<std::uint64_t>(timestamp.QuadPart);
+        ring_.generation_->pending_slot = index;
+        ring_.generation_->pending_qpc = static_cast<std::uint64_t>(timestamp.QuadPart);
         // The scalar belongs to this exact packed texture, including retained
         // exports. ReShade's own controls and cursor are at screen disparity.
-        generation_->pending_ui_parallax_uv = addon_render && !overlay_open(runtime) ? proof.native_ui_parallax_uv : 0.f;
-        generation_->pending_output = game ? std::optional(classify_output(proof.frame)) : std::nullopt;
-        if (direct) generation_->adopt_rendered(index, sequence);
-        if (direct && renderer->pack(commands, generation_->texture(index), generation_->id)) {
-          if (!generation_->rendered_directly) {
-            generation_->rendered_directly = true;
+        ring_.generation_->pending_ui_parallax_uv = addon_render && !overlay_open(runtime) ? proof.native_ui_parallax_uv : 0.f;
+        ring_.generation_->pending_output = game ? std::optional(classify_output(proof.frame)) : std::nullopt;
+        if (direct) ring_.generation_->adopt_rendered(index, sequence);
+        if (direct && renderer->pack(commands, ring_.generation_->texture(index), ring_.generation_->id)) {
+          if (!ring_.generation_->rendered_directly) {
+            ring_.generation_->rendered_directly = true;
             log(reshade::log::level::info, "Sunshine SBS: rendering stereo directly into export slots (no copy)");
           }
         } else {
@@ -2519,46 +2060,28 @@ namespace {
           // With the overlay open its composite writes the whole slot from the
           // source in reshade_present, so nothing is copied first; a dump, a
           // reference export or a failed direct pack copies the source.
-          generation_->submit(commands, source.resource, index, sequence, !overlay_open(runtime));
+          ring_.generation_->submit(commands, source.resource, index, sequence, !overlay_open(runtime));
         }
-        if (dump) capture_diagnostic(runtime, proof, commands, generation_->id, sequence);
+        if (dump) capture_diagnostic(runtime, proof, commands, ring_.generation_->id, sequence);
         if (overlay_open(runtime)) {
-          auto &overlay = generation_->overlays[index];
+          auto &overlay = ring_.generation_->overlays[index];
           if (!overlay) {
             overlay = std::make_unique<sunshine::overlay::compositor_t>();
           }
-          if (!overlay->prepare(runtime, native_rtv, source.resource, generation_->texture(index), source.width, source.height, source.color.input, export_space(source.color.output))) {
-            deactivate(runtime, "overlay_prepare_failed");
-            retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+          if (!overlay->prepare(runtime, native_rtv, source.resource, ring_.generation_->texture(index), source.width, source.height, source.color.input, export_space(source.color.output))) {
+            ring_.deactivate(runtime, "overlay_prepare_failed");
+            ring_.retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             log(reshade::log::level::warning, "Sunshine SBS: cannot prepare stereo overlay; showing the captured desktop");
             return;
           }
-          generation_->pending_overlay = true;
+          ring_.generation_->pending_overlay = true;
         }
-        next_slot_ = (index + 1) % wire::slot_count;
+        ring_.next_slot_ = (index + 1) % wire::slot_count;
         return;
       }
     }
 
   private:
-    // Only a consumer that declared this export protocol is answered
-    // (docs/reshade-sbs.md, GPU handoff contract): a host of another release
-    // is refused by name, once per request, and gets no ring. Zero is a
-    // request that declared nothing, or one being replaced (its successor's
-    // declaration was read).
-    bool consumer_speaks_protocol(api::effect_runtime *runtime, std::uint64_t nonce) {
-      const auto protocol = read_consumer_protocol(*shared_, nonce);
-      if (protocol == wire::version) return true;
-      if (protocol && refused_nonce_ != nonce) {
-        refused_nonce_ = nonce;
-        char message[256];
-        std::snprintf(message, sizeof(message), "Sunshine SBS: refusing a host that speaks export protocol %u; this add-on speaks protocol %u (%u export slots). Install the Sunshine 3D host and add-on of the same release; no stereo export to this host.", protocol, wire::version, wire::slot_count);
-        log(reshade::log::level::warning, message);
-      }
-      deactivate(runtime, protocol ? "consumer_protocol" : "consumer_undeclared");
-      return false;
-    }
-
     void capture_diagnostic(api::effect_runtime *runtime, runtime_t &proof, api::command_list *commands,
         std::uint64_t generation, std::uint64_t sequence) {
       if (!proof.renderer) return;
@@ -2587,61 +2110,6 @@ namespace {
       debug_dump_.capture(runtime, commands, frame);
     }
 
-    // Claims a slot for this Present's export (docs/reshade-sbs.md, GPU handoff
-    // contract): a free slot first, else the oldest ready slot that a newer
-    // completed frame supersedes. The consumer claims the newest ready frame
-    // whose fence passed, so the newest completed frame of the ready and
-    // reading slots is the one it claims next (or holds) and is never written
-    // over, even while a newer write is still queued: a consumer that comes
-    // late still finds it, instead of nothing until the queued write lands. A
-    // slot is reusable once its previous GPU write completed: a ready slot
-    // whose write is still queued is never reused either. A consumer may
-    // discard a frame without reading it, so a free slot also waits for its
-    // write to complete (every free slot of the current generation has:
-    // reset, or freed by a consumer after its fence passed).
-    // overwrote: a ready slot was claimed.
-    std::uint32_t acquire_slot(std::uint64_t completed, bool *overwrote = nullptr) {
-      if (overwrote) *overwrote = false;
-      // A recorded copy must be fenced before admitting the next. Submitted
-      // work is bounded by the existing ring, not a global one-copy gate.
-      if (!generation_ || generation_->signal_failed || completed == UINT64_MAX ||
-          generation_->pending_slot != wire::slot_count) return wire::slot_count;
-      const auto id = generation_->id;
-      std::array<wire::slot_state, wire::slot_count> states{};
-      std::array<bool, wire::slot_count> current{};
-      std::uint64_t newest_completed = 0;
-      for (std::uint32_t index = 0; index < wire::slot_count; ++index) {
-        const auto control = static_cast<std::uint64_t>(InterlockedCompareExchange64(
-          reinterpret_cast<volatile LONG64 *>(&shared_->slots[index].control), 0, 0));
-        current[index] = wire::control_generation(control) == id;
-        states[index] = wire::control_state(control);
-        if (current[index] && (states[index] == wire::slot_state::ready || states[index] == wire::slot_state::reading) &&
-            shared_->slots[index].sequence <= completed)
-          newest_completed = std::max(newest_completed, shared_->slots[index].sequence);
-      }
-      const auto written = [&](std::uint32_t index) {
-        return current[index] && completed >= shared_->slots[index].sequence;
-      };
-      for (std::uint32_t offset = 0; offset < wire::slot_count; ++offset) {
-        const auto index = (next_slot_ + offset) % wire::slot_count;
-        if (states[index] == wire::slot_state::free && written(index) &&
-            exchange_state(shared_->slots[index], id, wire::slot_state::writing, wire::slot_state::free)) return index;
-      }
-      // Completed ready slots oldest first; a claim the consumer won meanwhile moves on.
-      std::array<std::uint32_t, wire::slot_count> order{};
-      for (std::uint32_t index = 0; index < wire::slot_count; ++index) order[index] = index;
-      std::sort(order.begin(), order.end(), [&](std::uint32_t a, std::uint32_t b) {
-        return shared_->slots[a].sequence < shared_->slots[b].sequence;
-      });
-      for (const auto index : order) {
-        if (states[index] != wire::slot_state::ready || !written(index) || shared_->slots[index].sequence >= newest_completed) continue;
-        if (exchange_state(shared_->slots[index], id, wire::slot_state::writing, wire::slot_state::ready)) {
-          if (overwrote) *overwrote = true;
-          return index;
-        }
-      }
-      return wire::slot_count;
-    }
 #ifdef SUNSHINE_SBS_TEST
     friend struct publisher_tests;
 #endif
@@ -2671,7 +2139,7 @@ namespace {
 
     bool source_color_matches(api::effect_runtime *runtime, const runtime_t &proof, api::color_space current) {
       if (proof.color.input == api::color_space::unknown || proof.color.input != current) {
-        deactivate(runtime, "color_space_changed");
+        ring_.deactivate(runtime, "color_space_changed");
         return false;
       }
       return true;
@@ -2681,27 +2149,6 @@ namespace {
       const auto found = overlays_.find(runtime);
       return found != overlays_.end() && found->second;
     }
-
-    void retire_destroyed_generation() {
-      if (retired_ && retired_->finished()) {
-        release_ring(retired_);
-      }
-      if (!generation_ || !generation_->owner_destroyed) {
-        return;
-      }
-      if (generation_->finished()) {
-        release_ring(generation_);
-        return;
-      }
-      if (!retired_) {
-        retired_ = std::move(generation_);
-        log(reshade::log::level::warning, "Sunshine SBS: retaining a destroyed runtime's pending generation; successor runtime may export");
-      } else if (!retirement_limit_logged_) {
-        retirement_limit_logged_ = true;
-        log(reshade::log::level::error, "Sunshine SBS: two runtime generations have unconfirmed GPU work; restart the game to resume export");
-      }
-    }
-
     // Requires mutex_. Whether `window`, the swapchain window of `runtime`, is the window the user
     // sees in the foreground: the foreground window itself, or a child of it that owns its client
     // area (reshade_bridge::window_owner). When another runtime's window qualifies too, the two
@@ -2760,29 +2207,6 @@ namespace {
       log(routine_window_verdict(reason) ? reshade::log::level::info : reshade::log::level::warning, message);
     }
 
-    // One-shot invalidation also covers identity metadata published before a host connects.
-    // The reason is logged once, when the export actually stops; only then
-    // does this return true.
-    bool deactivate(api::effect_runtime *runtime, const char *reason = "stopped") {
-      if (!runtime) {
-        return false;
-      }
-      const bool stopped = published_runtime_ == runtime;
-      if (stopped) {
-        publish(identity_);
-        char message[160];
-        std::snprintf(message, sizeof(message), "Sunshine SBS: export inactive (%s, %s); waiting for a valid focused technique", reason,
-          export_pause_class(reason));
-        log(reshade::log::level::info, message);
-      }
-      if (generation_ && generation_->runtime == runtime) {
-        for (auto &overlay : generation_->overlays) if (overlay) overlay->cancel();
-        generation_->runtime = nullptr;
-        generation_->inactive_since = std::chrono::steady_clock::now();
-      }
-      return stopped;
-    }
-
     void log_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now) {
       auto &counts = proof.output;
       if (now < counts.next_log) return;
@@ -2795,135 +2219,35 @@ namespace {
         static_cast<unsigned long long>(counts.missing_unavailable), static_cast<unsigned long long>(counts.missing_reuse_after_gap),
         static_cast<unsigned long long>(counts.missing_reuse_other_source),
         static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(runtime)),
-        static_cast<unsigned long long>(generation_ ? generation_->id : 0),
+        static_cast<unsigned long long>(ring_.generation_ ? ring_.generation_->id : 0),
         static_cast<unsigned long long>(counts.dropped), static_cast<unsigned long long>(counts.overwritten_unconsumed));
       log(reshade::log::level::info, text);
       counts.next_log = now + 5000;
     }
 
-    // Publishes the pending export, then queues its fence signal behind the
-    // pack and overlay already submitted on the generation's queue (D3D11
-    // flushes after it). Ready first: the consumer claims a slot only once the
-    // fence reached its sequence, so a ready slot is never read early and
-    // every fence wake finds its slot ready. A recording retired by reload,
-    // focus or nonce changes, or whose overlay composite was never recorded,
-    // is still fenced but never published. A failed signal withdraws the slot
-    // and deactivates the export (runtime: the reshade_present caller, null
-    // from finish_present).
-    void signal_pending(api::effect_runtime *runtime) {
-      auto &g = *generation_;
-      const auto index = std::exchange(g.pending_slot, wire::slot_count);
-      const bool composed = !std::exchange(g.pending_overlay, false);
-      if (!composed && g.overlays[index]) g.overlays[index]->cancel();
-      const bool publish = composed && g.runtime && published_runtime_ == g.runtime && read_nonce(*shared_) == g.nonce;
-      if (publish) complete_slot(index, g.pending_qpc);
-      HRESULT hr = E_FAIL;
-      if (g.backend == api::device_api::d3d11) {
-        hr = g.context11->Signal(g.fence11.get(), g.last_submitted);
-        g.context11->Flush();
-      } else {
-        // The add-on's own fence (signal_own): never a game Signal to the
-        // order hooks.
-        hr = sunshine_streamline::native_observer::signal_own(g.queue12.get(), g.fence12.get(), g.last_submitted);
-      }
-      if (SUCCEEDED(hr)) return;
-      g.signal_failed = true;
-      if (publish) exchange_state(shared_->slots[index], g.id, wire::slot_state::writing, wire::slot_state::ready);
-      log_hr(g.backend == api::device_api::d3d11 ? "D3D11 publication fence signal" : "D3D12 publication fence signal", hr);
-      deactivate(runtime ? runtime : g.runtime, "fence_signal_failed");
-    }
-
-    // A ring that stopped exporting (deactivated: focus loss, no consumer)
-    // and has no unfinished work is released after export_ring_idle, so a
-    // stereo-to-mono switch frees its four 2W x H slots (265-530 MB at 4K); a
-    // later export allocates a new ring. The cached ring of the other colour
-    // transfer keeps its own cached_ring_idle.
-    void release_idle_rings() {
-      const auto now = std::chrono::steady_clock::now();
-      if (generation_ && !generation_->runtime && generation_->finished() &&
-          generation_->inactive_since != std::chrono::steady_clock::time_point{} &&
-          now - generation_->inactive_since >= export_ring_idle) {
-        log(reshade::log::level::info, "Sunshine SBS: released the idle export ring");
-        release_ring(generation_);
-      }
-      if (cached_ring_ && cached_ring_->finished() && now - cached_ring_since_ >= cached_ring_idle) release_ring(cached_ring_);
-    }
-
-    // Releases a ring that no pack follows. Renderers cache render-target
-    // views of the slots they pack into (renderer::pack) and drop them only
-    // at their next pack; a D3D11 view holds its texture, so they are dropped
-    // here first or the slots' VRAM would stay allocated.
-    void release_ring(std::unique_ptr<generation_t> &ring) {
-      if (!ring) return;
-      for (std::uint32_t index = 0; index < wire::slot_count; ++index) {
-        const auto texture = ring->texture(index);
-        if (!texture.handle) continue;
-        for (auto &entry : runtimes_)
+    // What export_ring needs of this publisher (export_ring_class.inl), called
+    // under mutex_. export_views: renderers drop the views they cached of a
+    // released ring's slot texture (renderer::pack). output_counts: a published
+    // slot's sample joins its runtime's SBS output counters (log_output).
+    struct export_views {
+      publisher_t &owner;
+      void operator()(api::resource texture) const {
+        for (auto &entry : owner.runtimes_)
           if (entry.second.renderer) entry.second.renderer->release_export_view(texture);
-        for (auto &parked : parked_)
+        for (auto &parked : owner.parked_)
           if (parked.renderer) parked.renderer->release_export_view(texture);
       }
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-      note_rings();
-#endif
-      ring.reset();
-    }
-
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-    // SunshineGame3DTestTeardownOrder: the member that holds each ring now,
-    // which names the ring when it is destroyed.
-    void note_rings() const {
-      sunshine_game3d::test::teardown::note_rings(generation_.get(), retired_.get(), cached_ring_.get());
-    }
-#endif
-
-    void complete_slot(std::uint32_t index, std::uint64_t qpc) {
-      const auto now = GetTickCount64();
-      auto &slot = shared_->slots[index];
-      slot.sequence = generation_->last_submitted;
-      slot.qpc = qpc;
-      slot.cursor_plane_flags = wire::cursor_plane_present;
-      slot.ui_parallax_uv = generation_->pending_ui_parallax_uv;
-      store_state(slot, generation_->id, wire::slot_state::ready);
-      if (const auto sample = std::exchange(generation_->pending_output, std::nullopt)) {
-        const auto found = runtimes_.find(generation_->runtime);
-        if (found != runtimes_.end()) {
-          found->second.output.add(*sample);
-          log_output(generation_->runtime, found->second, now);
+    };
+    struct output_counts {
+      publisher_t &owner;
+      void operator()(api::effect_runtime *runtime, const output_sample &sample, std::uint64_t now) const {
+        const auto found = owner.runtimes_.find(runtime);
+        if (found != owner.runtimes_.end()) {
+          found->second.output.add(sample);
+          owner.log_output(runtime, found->second, now);
         }
       }
-    }
-
-    void publish(const wire::metadata_t &metadata, bool reset_slots = false, api::effect_runtime *owner = nullptr) {
-      InterlockedIncrement(reinterpret_cast<volatile LONG *>(&shared_->metadata_sequence));
-      published_metadata_ = metadata;
-      published_runtime_ = owner;
-      MemoryBarrier();
-      shared_->metadata = metadata;
-      if (reset_slots) {
-        for (auto &slot : shared_->slots) {
-          slot.sequence = 0;
-          slot.qpc = 0;
-          slot.cursor_plane_flags = 0;
-          slot.ui_parallax_uv = 0.f;
-          store_state(slot, metadata.generation, wire::slot_state::free);
-        }
-      }
-      MemoryBarrier();
-      InterlockedIncrement(reinterpret_cast<volatile LONG *>(&shared_->metadata_sequence));
-    }
-
-    static void set_source(wire::metadata_t &metadata, const source_t &source) {
-      metadata.window = reinterpret_cast<std::uint64_t>(source.window);
-      metadata.adapter_luid = source.adapter;
-      metadata.source_width = source.width;
-      metadata.source_height = source.height;
-      metadata.packed_width = source.width * 2;
-      metadata.packed_height = source.height;
-      metadata.dxgi_format = static_cast<std::uint32_t>(source.format);
-      metadata.color_transfer = source.color.output;
-      metadata.protocol_version = wire::version;
-    }
+    };
 
     static void discover(api::effect_runtime *runtime, runtime_t &proof, const char *effect = "SuperDepth3D.fx") {
       proof.texture = {};
@@ -3013,21 +2337,14 @@ namespace {
 
     handle_t mapping_;
     sunshine_game3d::debug_dump debug_dump_;
-    wire::shared_state_t *shared_ = nullptr;
-    wire::metadata_t identity_;
-    wire::metadata_t published_metadata_;
-    api::effect_runtime *published_runtime_ = nullptr;
     std::mutex mutex_;
     std::unordered_map<api::effect_runtime *, runtime_t> runtimes_;
     std::unordered_map<std::uint64_t, api::color_space> colors_;
     std::unordered_map<api::effect_runtime *, bool> overlays_;
-    std::unique_ptr<generation_t> generation_;
-    // A missing finish_present after runtime destruction must not wedge the next runtime.
-    // Bound this fallback to one retired ring plus the active ring; never allocate indefinitely.
-    std::unique_ptr<generation_t> retired_;
-    // The finished ring of the previous colour transfer or extent, reused on a
-    // toggle back (item 6) and released once cached this long.
-    std::unique_ptr<generation_t> cached_ring_;
+    // The export slots, generations and published metadata (export_ring),
+    // at the active generation's former position: its generations are
+    // destroyed after parked_ and before overlays_, as before.
+    export_ring ring_;
     // Renderers of runtimes reset by ReShade (destroy_effect_runtime), kept
     // for the runtime's reinitialisation after a resize (track_runtime) until
     // the swapchain or device is destroyed.
@@ -3038,15 +2355,6 @@ namespace {
       std::unique_ptr<sunshine_game3d::renderer> renderer;
     };
     std::vector<parked_t> parked_;
-    std::chrono::steady_clock::time_point cached_ring_since_{};
-    static constexpr auto cached_ring_idle = std::chrono::seconds(60);
-    static constexpr auto export_ring_idle = std::chrono::seconds(10);
-    bool retirement_limit_logged_ = false;
-    std::uint64_t next_generation_ = 0;
-    std::uint32_t next_slot_ = 0;
-    // The last request refused for another export protocol, named once.
-    std::uint64_t refused_nonce_ = 0;
-    std::chrono::steady_clock::time_point retry_at_ {};
     // The last child or ambiguous swapchain window verdict (report_window_owner).
     struct {
       HWND window = nullptr;

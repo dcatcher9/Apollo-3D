@@ -44,7 +44,7 @@ COVERAGE = re.compile(
     r'not_open=\{unknown=(\d+) closed=(\d+) pass=(\d+)')
 GENERATION = re.compile(r'Sunshine SBS: generation (\d+), (\d+)x(\d+) full SBS, DXGI (\d+), (\w+), (\w+)')
 # Since 10-23 each export pause names its class after its reason (routine or fault, export_pause_class in
-# exporter.cpp); older lines name the reason only.
+# exporter/export_ring.inl); older lines name the reason only.
 INACTIVE = re.compile(r'Sunshine SBS: export inactive \((\w+)(?:, (\w+))?\)')
 FG_MODE = re.compile(r'Sunshine Streamline frame generation: viewport=\d+ mode=(\d+)')
 SCALE = re.compile(r'Sunshine 3D Streamline scale: (\w+);')
@@ -275,7 +275,7 @@ OWNED_BENIGN = ('Game 3D hitch', 'display scaling limits the game', LAYER_SATURA
 # What tells two lines of one kind apart: quoted names (files, objects) and numbers (addresses, times, counts).
 LINE_KIND = re.compile(r"'[^']*'|\"[^\"]*\"|\b(?:0x)?[0-9A-Fa-f]*\d[0-9A-Fa-f]*\b")
 # Export pauses whose origin is the host, the game or the player rather than a fault (routine_export_pauses in
-# exporter.cpp): a host that is absent, attached, replaced or without PQ (consumer_transfer_changed: between a
+# exporter/export_ring.inl): a host that is absent, attached, replaced or without PQ (consumer_transfer_changed: between a
 # Present's render and its export, which the next Present renders for), a game out of focus, reset, presenting
 # without a render or changing its colour space, and a swapchain or frame not yet prepared. Since 10-23 each line
 # names its class; this set classes the pauses of older lines.
