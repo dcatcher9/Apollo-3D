@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "streamline_camera_probe.h"
 #include "addon_lifetime.h"
+#include "addon_config.h"
 #include "api_contract.h"
 #include "streamline_camera_data.h"
 #include "streamline_camera_version.h"
@@ -1445,16 +1446,10 @@ namespace sunshine_streamline {
   }
 
   void initialize(HMODULE addon) {
-    bool source_enabled = true;
-    reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "StreamlineDepthSource", source_enabled);
-    bool call_trace_enabled = false;
-    reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "UpscalerCallTrace", call_trace_enabled);
-    bool ngx_source_enabled = true;
-    reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "NGXDepthSource", ngx_source_enabled);
-    // Queue order (Step 4; docs/reshade-sbs.md, Queue order): the queue
-    // Signal/Wait and fence Signal hooks. 0 turns them off.
-    bool queue_fence_order = true;
-    reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "QueueFenceOrder", queue_fence_order);
+    const bool source_enabled = sunshine_game3d::addon_config::streamline_depth_source();
+    const bool call_trace_enabled = sunshine_game3d::addon_config::upscaler_call_trace();
+    const bool ngx_source_enabled = sunshine_game3d::addon_config::ngx_depth_source();
+    const bool queue_fence_order = sunshine_game3d::addon_config::queue_fence_order();
     native_observer::set_queue_order(queue_fence_order);
     sunshine_upscaler_trace::initialize(addon, call_trace_enabled, ngx_source_enabled);
     // A pool install may still be discovering after device recreation; wait

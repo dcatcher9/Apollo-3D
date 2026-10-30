@@ -3614,6 +3614,11 @@ surveyed release's own header; every surveyed release agrees with it.
 
 ### Streamline depth selection
 
+The `SUNSHINE_DEPTH` INI readers live in `addon_config.{h,cpp}`. Streamline initialization
+reads its source, call-trace, NGX-source and queue-order flags in that order; the
+FrameActivityTrace reader stays at Generic's event-registration latch. Each owner
+keeps its flag state, defaults and lifecycle policy.
+
 Capture pool, queue-place and observation state have separate owners in the capture shell.
 Their non-trivial members retain their original initialization and destruction order;
 storage-release jobs remain a separate owner at their original position.

@@ -10,6 +10,7 @@
  */
 
 #include "addon_lifetime.h"
+#include "addon_config.h"
 #include <Windows.h>
 #include <TlHelp32.h>
 #include <Unknwn.h>
@@ -1148,7 +1149,7 @@ static void register_depth_events()
 	s_streamline_source_events = sunshine_streamline::source_enabled() || sunshine_upscaler_trace::capture_enabled();
 	sunshine_streamline::depth_capture::initialize(true); // Shared D3D12 capture also serves Generic fallback.
 	s_frame_activity_trace = false;
-	reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "FrameActivityTrace", s_frame_activity_trace);
+	s_frame_activity_trace = sunshine_game3d::addon_config::frame_activity_trace();
 	reshade::register_event<reshade::addon_event::init_device>(sunshine_addon_lifetime::guarded<on_init_device>);
 	reshade::register_event<reshade::addon_event::init_command_list>(sunshine_addon_lifetime::guarded<on_init_command_list>);
 	reshade::register_event<reshade::addon_event::init_command_queue>(sunshine_addon_lifetime::guarded<on_init_command_queue>);
