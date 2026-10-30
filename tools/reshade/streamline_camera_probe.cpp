@@ -93,11 +93,10 @@ namespace sunshine_streamline {
       // evaluate that reads that untag judges the call it ended
       // (ended_depth_tag, tag_call_decided).
       std::array<tag_record, depth_priority.size()> depth_calls{};
-      evaluation_snapshot evaluation;
       frame_generation_snapshot frame_generation;
       frame_identity camera_frame;
       std::uintptr_t camera_token{};
-      std::uint64_t camera_tick{}, camera_serial{}, changed{}, evaluation_tick{};
+      std::uint64_t camera_tick{}, camera_serial{}, changed{};
       // The viewport's newest frame: its key (frame_key; 0
       // unknown, and a repeated key is the same frame) and the observation
       // sequence of the constants call that began it.
@@ -108,7 +107,7 @@ namespace sunshine_streamline {
       // valid cameras of this viewport repeated them exactly.
       camera_validation steady_projection;
       std::uint32_t steady_frames{};
-      std::uint32_t viewport{}, feature{};
+      std::uint32_t viewport{};
       bool used{}, has_camera{};
     };
     // Consecutive identical valid cameras before a viewport's depth
@@ -1036,23 +1035,6 @@ namespace sunshine_streamline {
         }
         if (value.supported && value.value.native_resource) has_depth = true;
       }
-      for (unsigned i = 0; i != out.colors.size(); ++i) {
-        const unsigned index = i + 3;
-        if (tag_boundary && local && !local->tags[index].present) continue;
-        const auto *tag = &record.active_tags[index];
-        if (saved && saved->tags[index].present) tag = &saved->tags[index];
-        if (local && local->tags[index].present) tag = &local->tags[index];
-        if (!tag->present) continue;
-        auto &value = out.colors[i];
-        value.value = tag->value; value.value.observation_epoch = out.epoch;
-        value.scope = tag->source == origin::local ? tag_scope::evaluation_local :
-          tag->source == origin::frame ? tag_scope::explicit_frame : tag_scope::active_global;
-        value.present = true;
-        value.supported = tag->supported && (tag->source == origin::local ? local->loss : tag->loss) == loss;
-        value.identity_available = value.supported && value.value.native_resource != 0;
-        value.observed_tick = tag->source == origin::local ? local->tick : tag->tick;
-        value.observation_sequence = tag->source == origin::local ? serial : tag->serial;
-      }
       pin.reset();
       if (out.frame_correlated) {
         out.projection = validate(out.camera);
@@ -1073,14 +1055,9 @@ namespace sunshine_streamline {
       auto details = loss_context;
       details.sequence = value.sequence; details.viewport = value.viewport; details.feature = value.feature;
       details.reset = value.frame_correlated && value.decoded == decode_status::ok ? value.camera.reset : UINT32_MAX;
-      value.successful_evaluation = success;
-      value.tick = GetTickCount64();
       if (!success) {
-        value.status = evidence_status::evaluation_failed;
         lose(loss_diagnostics::reason::sdk_failure, __func__, 1486, details);
       }
-      else if (value.status == evidence_status::source_associated_evaluation &&
-          value.loss_revision != loss_revision.load(std::memory_order_acquire)) value.status = evidence_status::observation_lost;
       // The game never repeats an evaluation: a writer busy for a moment
       // (another thread's camera or FG update) must not lose it (RE
       // Requiem 10-22 lost one as records_busy).
@@ -1109,12 +1086,7 @@ namespace sunshine_streamline {
             original->direct_source.reset();
           }
         }
-        // Complete calls out of order without replacing a newer evaluation by
-        // an older one. The published camera/tag tuple never follows later writes.
-        if (value.sequence > record.evaluation.sequence) record.evaluation = value;
         if (success) {
-          record.feature = value.feature;
-          record.evaluation_tick = value.tick;
           record.changed = ++state.revision;
         }
       }
@@ -1786,8 +1758,7 @@ namespace sunshine_streamline {
     // armed it records, so an unarmed fixture runs exactly as before. Each
     // nominate_depth_source call evaluates its gates as it begins (pending),
     // and its finish_capture keeps the result, while the observation is
-    // current, as its viewport's newest nomination, never over a newer one
-    // (finish_evaluation's rule).
+    // current, as its viewport's newest nomination, never over a newer one.
     struct tapped_nomination {
       sunshine_streamline::testing::nomination value;
       std::uint64_t epoch{}, observation{};
@@ -3562,24 +3533,6 @@ namespace sunshine_streamline {
 
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   namespace testing {
-    bool normalized_source(std::uint32_t viewport, unsigned index, sunshine_scene_depth::frame &out) {
-      out = {};
-      evaluation_snapshot snapshot;
-      if (!latest_snapshot(viewport, snapshot) || index >= snapshot.tags.size() ||
-          !snapshot.successful_evaluation || !source_path_selected(snapshot) || !direct_source_admissible(snapshot) ||
-          !direct_tag_admissible(snapshot, snapshot.tags[index])) return false;
-      out = normalize_depth_frame(snapshot, snapshot.tags[index], snapshot.frame.kind == frame_identity_kind::v1_numeric);
-      return true;
-    }
-    bool latest_snapshot(std::uint32_t viewport, evaluation_snapshot &out) {
-      auto pin = read_metadata();
-      if (!pin) return false;
-      bool found = false;
-      for (const auto &record : pin->records) if (record.evaluation.sequence && record.evaluation.viewport == viewport) {
-        out = record.evaluation; found = true; break;
-      }
-      return found;
-    }
     void arm_nomination_tap(bool armed) {
       nomination_tap_armed = armed;
       nomination_tap_pending = false;

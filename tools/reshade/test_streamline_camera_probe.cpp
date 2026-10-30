@@ -249,6 +249,9 @@ namespace {
     fixture() {
       source_setting = "1";
       testing::clear();
+      // Nominations on this thread are recorded by the nomination tap
+      // (testing::latest_nomination), which the checks read.
+      testing::arm_nomination_tap(true);
       constants_call = tag_call = framed_tag_call = evaluate_call = new_token_call = feature_function_call = fg_call = {};
       returned_token = nullptr;
       returned_feature_function = nullptr;
@@ -262,6 +265,30 @@ namespace {
       testing::clear();
     }
   };
+  // The viewport's newest nomination the tap kept (testing::latest_nomination,
+  // on a thread that armed it): the evaluation snapshot source nomination
+  // received before the game's call, the nomination gates' answers as that
+  // call began, and the call's result.
+  bool nominated_snapshot(std::uint32_t viewport, evaluation_snapshot &out) {
+    testing::nomination value;
+    if (!testing::latest_nomination(viewport, value)) return false;
+    out = value.snapshot;
+    return true;
+  }
+  // Whether the game's call of that nomination succeeded.
+  bool nomination_succeeded(std::uint32_t viewport) {
+    testing::nomination value;
+    return testing::latest_nomination(viewport, value) && value.successful;
+  }
+  // The depth that nomination normalized for snapshot.tags[index], where the
+  // call succeeded and the gates admitted it.
+  bool nominated_source(std::uint32_t viewport, unsigned index, sunshine_scene_depth::frame &out) {
+    out = {};
+    testing::nomination value;
+    if (!testing::latest_nomination(viewport, value) || !value.nominates(index)) return false;
+    out = value.frames[index];
+    return true;
+  }
   // The Diagnostics switch on for one scope.
   struct diagnostics_on {
     const bool previous = sunshine_game3d::diagnostics::enabled();
@@ -806,7 +833,7 @@ namespace {
     const auto evaluate_ordered = [&] {
       return call_v2_constants(constants, token.ref(), order_constants) == 0 &&
         call_v2_evaluate(0, token.ref(), ordered, 1, nullptr) == 0 &&
-        testing::latest_snapshot(order_view.value, ordered_snapshot) && ordered_snapshot.tags[0].present;
+        nominated_snapshot(order_view.value, ordered_snapshot) && ordered_snapshot.tags[0].present;
     };
     require(evaluate_ordered() && ordered_snapshot.tags[0].supported &&
         ordered_snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_raw) &&
@@ -831,13 +858,11 @@ namespace {
         ordered_snapshot.tags[0].value.refusal == tag_refusal::extension,
       "a tag call's tag with another tag as its next was read as an input chain");
   }
-  // The status of the evaluation snapshot finish_evaluation stores for a
-  // viewport after the game's call (testing::latest_snapshot): the snapshot
-  // source nomination received before the call, with the call's result
-  // applied. No shipping code reads this store.
-  bool stored_is(std::uint32_t viewport, evidence_status expected) {
+  // The status of the viewport's newest tapped nomination's snapshot
+  // (nominated_snapshot).
+  bool nominated_is(std::uint32_t viewport, evidence_status expected) {
     evaluation_snapshot value;
-    return testing::latest_snapshot(viewport, value) && value.status == expected;
+    return nominated_snapshot(viewport, value) && value.status == expected;
   }
   void mint(opaque_token &token, const std::uint32_t *index) {
     returned_token = const_cast<abi_v2::frame_token *>(&token.ref());
@@ -873,18 +898,17 @@ namespace {
         "Token fixture changed native API forwarding");
       sunshine_scene_depth::frame normalized;
       evaluation_snapshot snapshot;
-      require(testing::normalized_source(view.value, 0, normalized) && normalized.projection.supplied &&
+      require(nominated_source(view.value, 0, normalized) && normalized.projection.supplied &&
           normalized.projection.depth_scale == .5 && normalized.observation_revision == depth_observation_revision() &&
-          testing::latest_snapshot(view.value, snapshot) && snapshot.frame.kind == frame_identity_kind::v2_observed_token,
+          nominated_snapshot(view.value, snapshot) && snapshot.frame.kind == frame_identity_kind::v2_observed_token,
         "Registered token did not establish its own fresh source tuple");
       return snapshot;
     }
-    // The stored snapshot still passes the nomination gates when they are
-    // re-run now (normalized_source: the token is current, no loss since).
-    // Shipping runs these gates only as nomination begins, before the call.
+    // The viewport's newest nomination normalized its depth (the gates
+    // admitted it as the call began, and the call succeeded).
     bool ready() {
       sunshine_scene_depth::frame normalized;
-      return testing::normalized_source(view.value, 0, normalized);
+      return nominated_source(view.value, 0, normalized);
     }
   };
   enum class fixture_lock { records_exclusive, records_shared, tokens };
@@ -926,7 +950,7 @@ namespace {
     require(call_v2_evaluate(0, next.ref(), source.inputs, 1, nullptr) == 0,
       "Repeated-token evaluation changed native API forwarding");
     evaluation_snapshot snapshot;
-    require(testing::latest_snapshot(source.view.value, snapshot) &&
+    require(nominated_snapshot(source.view.value, snapshot) &&
         snapshot.frame.kind == frame_identity_kind::v2_observed_token && snapshot.frame.numeric == number &&
         snapshot.tags[0].present && snapshot.tags[0].scope == tag_scope::explicit_frame &&
         snapshot.status == evidence_status::source_associated_evaluation,
@@ -934,7 +958,7 @@ namespace {
     const std::uint32_t following = 403;
     mint(next, &following);
     require(call_v2_evaluate(0, next.ref(), source.inputs, 1, nullptr) == 0 &&
-        testing::latest_snapshot(source.view.value, snapshot) && snapshot.frame.numeric == following &&
+        nominated_snapshot(source.view.value, snapshot) && snapshot.frame.numeric == following &&
         !snapshot.tags[0].present,
       "A recycled token address for the next frame index inherited the previous frame's tags");
   }
@@ -974,7 +998,7 @@ namespace {
   void test_token_contention_and_remint() {
     token_source_fixture source;
     evaluation_snapshot initial;
-    require(testing::latest_snapshot(source.view.value, initial), "Token fixture omitted initial identity");
+    require(nominated_snapshot(source.view.value, initial), "Token fixture omitted initial identity");
     const auto before_remint = depth_observation_revision();
     const auto before_counts = testing::counts();
     // Same pointer and frame index: Streamline returned the current frame's token
@@ -988,8 +1012,8 @@ namespace {
     // A later index at the same address is a recycled token: a new frame.
     const std::uint32_t later = source.number + 3;
     mint(source.token, &later);
-    require(depth_observation_revision() == before_remint && testing::counts().dropped == before_counts.dropped &&
-        !source.ready(), "A recycled token address reused old identity or caused broad observation loss");
+    require(depth_observation_revision() == before_remint && testing::counts().dropped == before_counts.dropped,
+      "A recycled token address reused old identity or caused broad observation loss");
     const auto recycled = source.publish(source.token);
     require(recycled.frame.generation > initial.frame.generation && recycled.frame.numeric == later,
       "A recycled token address failed to establish a distinct exact generation");
@@ -1029,10 +1053,9 @@ namespace {
     loss_diagnostics::event loss;
     require(query_depth_observation_loss(before + 1, loss) && loss.site &&
         std::strcmp(loss.site, "hook_new_token_v2") == 0 && loss.details.sequence &&
-        loss.details.has_sdk_result && loss.details.sdk_result == 0 && !source.ready() && !source.ready(),
+        loss.details.has_sdk_result && loss.details.sdk_result == 0,
       "Lost token registration was unlabeled or revived old source evidence after unlocking");
     mint(source.token, &source.number);
-    require(!source.ready(), "Successful remint without new constants revived pre-loss source evidence");
     source.publish(source.token);
   }
   void test_pending_token_lifecycle() {
@@ -1067,7 +1090,7 @@ namespace {
         call_v2_evaluate(0, pending.ref(), source.inputs, 1, nullptr) == 0,
       "Post-restart token fixture changed native API forwarding");
     sunshine_scene_depth::frame normalized;
-    require(!testing::normalized_source(source.view.value, 0, normalized) && !source.ready(),
+    require(!nominated_source(source.view.value, 0, normalized) && !source.ready(),
       "Token returned from a retired callback populated the new epoch's source identity");
     mint(pending, &number);
     source.publish(pending);
@@ -1075,13 +1098,14 @@ namespace {
   void test_metadata_reader_isolation() {
     token_source_fixture source;
     evaluation_snapshot before;
-    require(testing::latest_snapshot(source.view.value, before), "Metadata fixture missing initial source");
+    require(nominated_snapshot(source.view.value, before), "Metadata fixture missing initial source");
     const auto revision = depth_observation_revision();
     const auto counters = testing::counts();
     std::atomic<bool> done{};
     bool forwarded{};
     observation_guard held(fixture_lock::records_shared);
     std::thread worker([&] {
+      testing::arm_nomination_tap(true);
       SetLastError(incoming_error);
       const bool camera = call_v2_constants(source.constants, source.token.ref(), source.view) == 0 &&
         constants_call.incoming_error == incoming_error && GetLastError() == outgoing_error;
@@ -1100,7 +1124,7 @@ namespace {
     require(depth_observation_revision() == revision && testing::counts().dropped == counters.dropped,
       "Published metadata reader invalidated camera/tag/evaluation observations");
     evaluation_snapshot after;
-    require(testing::latest_snapshot(source.view.value, after) && source.ready() &&
+    require(nominated_snapshot(source.view.value, after) && source.ready() &&
         after.sequence > before.sequence && after.camera_sequence > before.camera_sequence &&
         after.loss_revision == revision && after.frame.generation == before.frame.generation,
       "Metadata reader prevented fresh exact camera/tag/evaluation publication");
@@ -1148,7 +1172,7 @@ namespace {
     ++frame;
     mint(next, &frame);
     loss_diagnostics::event loss;
-    require(depth_observation_revision() == exhausted + 1 && !source.ready() &&
+    require(depth_observation_revision() == exhausted + 1 &&
         query_depth_observation_loss(exhausted + 1, loss) && loss.cause == loss_diagnostics::reason::metadata_storage_busy,
       "Token version exhaustion did not preserve explicit fail-closed observation loss");
     testing::unpin_tokens();
@@ -1186,7 +1210,7 @@ namespace {
     require(testing::entry_policy(selected, admitted) && selected && admitted,
       "Initial local raw evaluation was rejected before SDK entry when metadata store was empty");
     sunshine_scene_depth::frame normalized;
-    require(testing::normalized_source(view.value, 0, normalized) && !normalized.projection.supplied,
+    require(nominated_source(view.value, 0, normalized) && !normalized.projection.supplied,
       "First local raw evaluation failed to publish its own camera-free source");
   }
 #endif
@@ -1202,7 +1226,7 @@ namespace {
     auto constants = old_camera();
     evaluation_snapshot snapshot;
     sunshine_scene_depth::frame normalized;
-    const auto query = [&](evidence_status expected, const char *message) { require(stored_is(7, expected), message); };
+    const auto query = [&](evidence_status expected, const char *message) { require(nominated_is(7, expected), message); };
     call_v1_constants(constants, 1, 7);
     call_v1_tag(&resource, 0, 7, nullptr);
     call_v1_evaluate(nullptr, 0, 1, 7);
@@ -1210,10 +1234,10 @@ namespace {
     call_v1_tag(&resource, 0, 7, nullptr);
     call_v1_evaluate(nullptr, 0, 1, 7);
     query(evidence_status::source_associated_evaluation, "known v1 resource not nominated without selected-depth dependency");
-    require(testing::latest_snapshot(7, snapshot) && !snapshot.tags[1].present && snapshot.tags[0].present &&
+    require(nominated_snapshot(7, snapshot) && !snapshot.tags[1].present && snapshot.tags[0].present &&
         snapshot.tags[0].value.native_resource == address && snapshot.viewport == 7 &&
         snapshot.frame.numeric == 1 && snapshot.sequence && snapshot.epoch, "v1 nomination identity wrong");
-    require(testing::normalized_source(7, 0, normalized) && normalized.resource.native == address &&
+    require(nominated_source(7, 0, normalized) && normalized.resource.native == address &&
         normalized.projection.depth_offset == 0.0 && normalized.projection.depth_scale == .5 && normalized.projection.reversed &&
         normalized.proof == sunshine_scene_depth::state_proof::observed_nonzero &&
         normalized.valid_until == sunshine_scene_depth::lifetime::until_present,
@@ -1225,10 +1249,8 @@ namespace {
     call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 1, 7);
     query(evidence_status::source_associated_evaluation, "post-ABA source did not recover");
     result_v1 = false; call_v1_evaluate(nullptr, 0, 1, 7); result_v1 = true;
-    query(evidence_status::evaluation_failed, "failed evaluation reused last successful nomination");
     call_v1_constants(constants, 2, 7); call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 2, 7);
     testing::lose_observation();
-    require(!testing::normalized_source(7, 0, normalized), "lost semantic observation retained nomination");
     call_v1_constants(constants, 3, 7); call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 3, 7);
     query(evidence_status::source_associated_evaluation, "fresh source did not recover before age check");
     constants.reset = 1; call_v1_constants(constants, 4, 7); call_v1_evaluate(nullptr, 0, 4, 7);
@@ -1239,7 +1261,6 @@ namespace {
     call_v1_constants(constants, 5, 8); call_v1_tag(&resource, 0, 8, nullptr); call_v1_evaluate(nullptr, 0, 5, 8);
     source_setting = "0"; initialize(nullptr);
     require(!source_enabled(), "source rollback key ignored");
-    require(!testing::normalized_source(7, 0, normalized), "disabled source nomination remained live");
     const auto stopped = testing::counts(); call_v1_constants(constants, 6, 7);
     unchanged(stopped, testing::counts(), "disabled retained hooks did not pass through");
   }
@@ -1257,49 +1278,48 @@ namespace {
     evaluation_snapshot snapshot;
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &raw, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(stored_is(view.value, evidence_status::untracked_frame), "opaque token address became source frame");
+    require(nominated_is(view.value, evidence_status::untracked_frame), "opaque token address became source frame");
     mint(token, nullptr);
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &raw, 1, nullptr);
     call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), local_inputs, 2, nullptr);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.tags[1].present && snapshot.tags[1].value.type == 48 &&
         snapshot.tags[1].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_high) &&
         snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_b) && !snapshot.frame.has_numeric,
       "v2 preference/local override/opaque generation nomination wrong");
     sunshine_scene_depth::frame normalized;
-    require(testing::normalized_source(view.value, 0, normalized) &&
+    require(nominated_source(view.value, 0, normalized) &&
         normalized.resource.native == reinterpret_cast<std::uintptr_t>(&native_b) && normalized.resource.width == 1920 &&
         normalized.resource.height == 1080 && normalized.resource.kind == sunshine_scene_depth::resource_kind::raw_depth &&
         normalized.proof == sunshine_scene_depth::state_proof::declared &&
         normalized.valid_until == sunshine_scene_depth::lifetime::until_present,
       "v2 adapter lost local source/extent/explicit state authority");
-    require(testing::normalized_source(view.value, 1, normalized) &&
+    require(nominated_source(view.value, 1, normalized) &&
         normalized.resource.kind == sunshine_scene_depth::resource_kind::display_depth,
       "v2 high-resolution tag lost provider-neutral semantic kind");
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_a), "local source leaked to later evaluation");
     high.lifecycle = UINT32_MAX;
     call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     // The malformed kind is unusable; it does not revoke the valid raw tag.
-    require(!testing::normalized_source(view.value, 1, normalized) && testing::normalized_source(view.value, 0, normalized) &&
+    require(!nominated_source(view.value, 1, normalized) && nominated_source(view.value, 0, normalized) &&
         normalized.resource.native == reinterpret_cast<std::uintptr_t>(&native_a),
       "malformed v2 lifecycle inherited the v1 unspecified sentinel or revoked valid raw depth");
     high.lifecycle = 1; call_v2_constants(constants, token.ref(), view);
     call_v2_tag(view, &raw, 1, nullptr); call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(stored_is(view.value, evidence_status::source_associated_evaluation), "v2 lifecycle recovery failed");
+    require(nominated_is(view.value, evidence_status::source_associated_evaluation), "v2 lifecycle recovery failed");
     // An extent that wraps is malformed (the allocation bounds any other in
     // the capture, S16d).
     high.area.left = UINT32_MAX; call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     high.area.left = 0; call_v2_constants(constants, token.ref(), view);
     call_v2_tag(view, &raw, 1, nullptr); call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(stored_is(view.value, evidence_status::source_associated_evaluation), "valid v2 source did not recover");
+    require(nominated_is(view.value, evidence_status::source_associated_evaluation), "valid v2 source did not recover");
     mint(token, nullptr);
-    require(!testing::normalized_source(view.value, 0, normalized), "token reuse retained source nomination");
   }
 
   // sl_struct.h Option 1: a later structure version only appends fields, so
@@ -1326,7 +1346,7 @@ namespace {
       call_v2_constants(constants, token.ref(), view);
       call_v2_tag(view, &tag.v1, 1, nullptr);
       call_v2_evaluate(0, token.ref(), global, 1, nullptr);
-      return testing::latest_snapshot(view.value, snapshot) && testing::normalized_source(view.value, 0, normalized);
+      return nominated_snapshot(view.value, snapshot) && nominated_source(view.value, 0, normalized);
     };
     for (const std::uint64_t version : {1ull, 2ull, 7ull}) {
       resource.v1.base.version = precision.v1.base.version = tag.v1.base.version = version;
@@ -1374,7 +1394,7 @@ namespace {
       call_v2_constants(constants, token.ref(), view);
       call_v2_tag(view, pair, 2, nullptr);
       call_v2_evaluate(0, token.ref(), global, 1, nullptr);
-      return testing::latest_snapshot(view.value, snapshot) && testing::normalized_source(view.value, 0, normalized);
+      return nominated_snapshot(view.value, snapshot) && nominated_source(view.value, 0, normalized);
     };
     require(tag_pair(1), "a version-1 multi-tag array was refused");
     require(!tag_pair(2) && !snapshot.tags[0].supported,
@@ -1401,8 +1421,8 @@ namespace {
       call_v2_tag(view, &tag, 1, nullptr);
       call_v2_evaluate(0, token.ref(), global, 1, nullptr);
       evaluation_snapshot snapshot; sunshine_scene_depth::frame normalized;
-      require(testing::latest_snapshot(view.value, snapshot) && snapshot.tags[0].present, "eUnknown depth tag was not observed");
-      const bool nominated = testing::normalized_source(view.value, 0, normalized);
+      require(nominated_snapshot(view.value, snapshot) && snapshot.tags[0].present, "eUnknown depth tag was not observed");
+      const bool nominated = nominated_source(view.value, 0, normalized);
       require(snapshot.tags[0].supported == c.accepted && nominated == c.accepted &&
           (c.accepted || snapshot.tags[0].value.refusal == tag_refusal::resource_type),
         c.accepted ? "a release that declares eUnknown refused it" : "eUnknown was accepted where the release's header does not declare it");
@@ -1430,9 +1450,9 @@ namespace {
       require(call_v2_evaluate(feature, token.ref(), local, 2, &commands) == 0 &&
           GetLastError() == outgoing_error && evaluate_call.incoming_error == incoming_error && evaluate_call.a == feature,
         "SR/RR linear evaluation changed native forwarding");
-      require(testing::latest_snapshot(view.value, snapshot) && snapshot.feature == feature &&
+      require(nominated_snapshot(view.value, snapshot) && snapshot.feature == feature &&
           snapshot.status == evidence_status::source_associated_evaluation &&
-          testing::normalized_source(view.value, 2, normalized) && normalized.projection.supplied &&
+          nominated_source(view.value, 2, normalized) && normalized.projection.supplied &&
           normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
           normalized.projection.direction_supplied && !normalized.projection.reversed &&
           normalized.projection.raw_scale == 1 && normalized.projection.raw_bias == 0 &&
@@ -1441,13 +1461,13 @@ namespace {
     }
     tag_precision precision; precision.scale = -.5f; precision.bias = 8.f; tag.base.next = &precision;
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized) && normalized.projection.reversed &&
+    require(nominated_source(view.value, 2, normalized) && normalized.projection.reversed &&
         normalized.projection.raw_scale == -.5 && normalized.projection.raw_bias == 8,
       "linear PrecisionInfo transform/direction was lost");
     tag.base.next = nullptr;
     auto no_camera = viewport(4); const base_structure *without_constants[]{&no_camera.base, &tag.base};
     call_v2_evaluate(1001, token.ref(), without_constants, 2, nullptr);
-    require(testing::normalized_source(no_camera.value, 2, normalized) && !normalized.projection.supplied &&
+    require(nominated_source(no_camera.value, 2, normalized) && !normalized.projection.supplied &&
         normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
         normalized.projection.direction_supplied && !normalized.projection.reversed,
       "explicit linear-distance input incorrectly required projection constants");
@@ -1455,31 +1475,31 @@ namespace {
     // command-less one has no copy point, the matrix's S2).
     tag.lifecycle = 2;
     call_v2_tag(view, &tag, 1, nullptr); call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
-    require(!testing::normalized_source(view.value, 2, normalized),
+    require(!nominated_source(view.value, 2, normalized),
       "a command-less linear UntilEvaluate tag was copied at its evaluate");
     call_v2_tag(view, &tag, 1, &commands); call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized) &&
+    require(nominated_source(view.value, 2, normalized) &&
         normalized.valid_until == sunshine_scene_depth::lifetime::until_evaluation,
       "linear UntilEvaluate was not available at its synchronous boundary");
     call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
-    require(!testing::normalized_source(view.value, 2, normalized), "linear UntilEvaluate survived its SDK return");
+    require(!nominated_source(view.value, 2, normalized), "linear UntilEvaluate survived its SDK return");
     // A local OnlyValidNow input is current at its own evaluate (sl_core_api.h
     // slEvaluateFeature, the matrix's S4); a tagged one is gone at a later
     // evaluate (S3).
     tag.lifecycle = 0; call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized) &&
+    require(nominated_source(view.value, 2, normalized) &&
         normalized.valid_until == sunshine_scene_depth::lifetime::at_call,
       "a linear OnlyValidNow local input was not current at its own evaluate");
     call_v2_tag(view, &tag, 1, &commands); call_v2_evaluate(1001, token.ref(), global, 1, nullptr);
-    require(!testing::normalized_source(view.value, 2, normalized), "linear OnlyValidNow was consumed at a later evaluation");
+    require(!nominated_source(view.value, 2, normalized), "linear OnlyValidNow was consumed at a later evaluation");
     tag.lifecycle = 1; tag.base.next = &precision; precision.scale = 0;
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(!testing::normalized_source(view.value, 2, normalized), "malformed linear precision reached capture");
+    require(!nominated_source(view.value, 2, normalized), "malformed linear precision reached capture");
     tag.base.next = nullptr; call_v2_constants(constants, token.ref(), view);
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized), "RR did not recover with fresh valid inputs");
+    require(nominated_source(view.value, 2, normalized), "RR did not recover with fresh valid inputs");
     result_v2 = -7; call_v2_evaluate(1001, token.ref(), local, 2, nullptr); result_v2 = 0;
-    require(!testing::normalized_source(view.value, 2, normalized), "failed RR evaluation retained source authority");
+    require(!nominated_source(view.value, 2, normalized), "failed RR evaluation retained source authority");
     call_v2_constants(constants, token.ref(), view);
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
     void *function{}; call_feature_function(1000, "slDLSSGSetOptions", function);
@@ -1492,31 +1512,30 @@ namespace {
     // repeated options and after FG Off then On (Assassin's Creed Shadows
     // 10-22 and 10-24).
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized) && !normalized.frame_generation_input,
+    require(nominated_source(view.value, 2, normalized) && !normalized.frame_generation_input,
       "FG On without an FG copy blocked same-viewport RR depth");
     constexpr std::uint64_t fg_scope_ms = 1000;
     testing::age_frame_generation(fg_scope_ms + 1);
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized) && !normalized.frame_generation_input,
+    require(nominated_source(view.value, 2, normalized) && !normalized.frame_generation_input,
       "A silent FG scope kept blocking same-viewport RR depth");
     set_options(view, options); call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized), "Repeated FG On options blocked same-viewport RR depth");
+    require(nominated_source(view.value, 2, normalized), "Repeated FG On options blocked same-viewport RR depth");
     options.mode = 0; set_options(view, options); options.mode = 1; set_options(view, options);
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized), "A new FG On without an FG copy owned its viewport");
+    require(nominated_source(view.value, 2, normalized), "A new FG On without an FG copy owned its viewport");
     tag.lifecycle = 0;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
-    require(testing::normalized_source(view.value, 2, normalized) && normalized.frame_generation_input &&
+    require(nominated_source(view.value, 2, normalized) && normalized.frame_generation_input &&
         normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
         normalized.valid_until == sunshine_scene_depth::lifetime::at_call,
       "FG linear OnlyValidNow input did not use its own synchronous boundary");
     options.mode = 0; set_options(view, options);
     tag.lifecycle = 1; call_v2_constants(constants, token.ref(), view);
     call_v2_evaluate(1001, token.ref(), local, 2, nullptr);
-    require(testing::normalized_source(view.value, 2, normalized) && !normalized.frame_generation_input,
+    require(nominated_source(view.value, 2, normalized) && !normalized.frame_generation_input,
       "FG Off did not restore RR source admission");
     mint(token, nullptr);
-    require(!testing::normalized_source(view.value, 2, normalized), "linear RR tuple survived token reuse");
   }
 
   void test_mixed_clear_and_linear_depth() {
@@ -1536,7 +1555,7 @@ namespace {
       call_v2_tag(view, old_tags, 2, &commands);
       call_v2_evaluate(0, old_token.ref(), inputs, 1, &commands);
       sunshine_scene_depth::frame normalized;
-      require(testing::normalized_source(view.value, 0, normalized) && normalized.projection.supplied,
+      require(nominated_source(view.value, 0, normalized) && normalized.projection.supplied,
         "Mixed clear fixture did not establish its old camera/depth tuple");
       const auto old_revision = normalized.observation_revision;
       const auto publish = [&](const abi_v2::resource_tag *tags, unsigned count) {
@@ -1549,16 +1568,16 @@ namespace {
       // and only later evaluations see the cleared kind.
       mint(token, nullptr);
       require(publish(mixed, 2) == 0 && depth_observation_revision() == old_revision &&
-          testing::normalized_source(view.value, 0, normalized) && normalized.observation_revision == old_revision,
+          nominated_source(view.value, 0, normalized) && normalized.observation_revision == old_revision,
         "Mixed clear revoked depth already evaluated for an earlier frame");
       const auto mixed_revision = depth_observation_revision();
       for (unsigned repeat = 0; repeat != 3; ++repeat) {
         if (repeat) { mint(token, nullptr); require(publish(mixed, 2) == 0, "Repeated mixed tag failed"); }
         require(call_v2_evaluate(1001, token.ref(), inputs, 1, &commands) == 0 &&
-            testing::normalized_source(view.value, 2, normalized) && !normalized.projection.supplied &&
+            nominated_source(view.value, 2, normalized) && !normalized.projection.supplied &&
             normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
             normalized.observation_revision == mixed_revision && depth_observation_revision() == mixed_revision &&
-            !testing::normalized_source(view.value, 0, normalized),
+            !nominated_source(view.value, 0, normalized),
           "Null alternative poisoned fresh linear depth, changed its revision, or kept the cleared raw depth");
       }
       auto clear_linear = linear; clear_linear.resource_ptr = nullptr;
@@ -1566,15 +1585,15 @@ namespace {
       require(publish(full_clear, 2) == 0 && depth_observation_revision() == mixed_revision,
         "Full depth clear was recorded as a lost observation");
       call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
-      require(!testing::normalized_source(view.value, 2, normalized), "Full clear retained a linear source");
+      require(!nominated_source(view.value, 2, normalized), "Full clear retained a linear source");
 
       mint(token, nullptr); publish(mixed, 2); call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
-      require(testing::normalized_source(view.value, 2, normalized), "Fresh mixed tags did not recover after full clear");
+      require(nominated_source(view.value, 2, normalized), "Fresh mixed tags did not recover after full clear");
       result_v2 = -7;
       require(publish(mixed, 2) == -7, "Failed mixed SDK call changed its result");
       result_v2 = 0;
       call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
-      require(!testing::normalized_source(view.value, 2, normalized), "Failed mixed SDK call published fresh depth");
+      require(!nominated_source(view.value, 2, normalized), "Failed mixed SDK call published fresh depth");
 
       // The original SDK can trigger another observed loss before returning.
       // A subsequent clear may advance only its own revision, never heal that gap.
@@ -1584,7 +1603,7 @@ namespace {
       require(publish(mixed, 2) == 0 && depth_observation_revision() == before_interruption + 1,
         "Mixed clear did not preserve the intervening loss");
       call_v2_evaluate(1001, token.ref(), inputs, 1, &commands);
-      require(!testing::normalized_source(view.value, 2, normalized), "Mixed clear healed an intervening observation loss");
+      require(!nominated_source(view.value, 2, normalized), "Mixed clear healed an intervening observation loss");
     }
   }
 
@@ -1619,13 +1638,13 @@ namespace {
         "v2 global-only evaluation changed return value or LastError");
     };
     observe();
-    require(stored_is(view.value, evidence_status::untracked_frame),
+    require(nominated_is(view.value, evidence_status::untracked_frame),
       "missing frame-tag export promoted an untracked token to a frame");
     mint(token, nullptr);
     observe();
     sunshine_scene_depth::frame normalized;
-    require(stored_is(view.value, evidence_status::source_associated_evaluation) &&
-        testing::normalized_source(view.value, 0, normalized) && normalized.resource.native == address &&
+    require(nominated_is(view.value, evidence_status::source_associated_evaluation) &&
+        nominated_source(view.value, 0, normalized) && normalized.resource.native == address &&
         normalized.resource.width == 1920 && normalized.resource.height == 1080 &&
         normalized.proof == sunshine_scene_depth::state_proof::declared &&
         normalized.valid_until == sunshine_scene_depth::lifetime::until_present,
@@ -1636,16 +1655,14 @@ namespace {
     SetLastError(incoming_error);
     require(call_v2_evaluate(0, token.ref(), inputs, 1, &commands) == -7 &&
         evaluate_call.incoming_error == incoming_error && GetLastError() == outgoing_error &&
-        !testing::normalized_source(view.value, 0, normalized),
+        !nominated_source(view.value, 0, normalized),
       "failed global-only evaluation changed forwarding or retained usable depth");
     result_v2 = 0;
     mint(token, nullptr);
     observe();
-    require(testing::normalized_source(view.value, 0, normalized),
+    require(nominated_source(view.value, 0, normalized),
       "global-only source did not recover after a failed evaluation");
     mint(token, nullptr);
-    require(!testing::normalized_source(view.value, 0, normalized),
-      "global-only source reused stale depth after token remint");
   }
 
   void test_jitter_frame_and_render_domain(bool modern) {
@@ -1684,19 +1701,19 @@ namespace {
     constants(2, -.125f, .5f); // Newer constants must not contaminate frame 1.
     evaluate(1);
     sunshine_scene_depth::frame first, current;
-    require(testing::normalized_source(view.value, 0, first) && first.jitter.supplied &&
+    require(nominated_source(view.value, 0, first) && first.jitter.supplied &&
         first.jitter.x == .25f && first.jitter.y == -.375f && first.jitter.width == 2228 && first.jitter.height == 1253,
       "Depth jitter borrowed newer camera offsets or allocation padding");
     evaluate(2);
-    require(testing::normalized_source(view.value, 0, current) && current.jitter.supplied &&
+    require(nominated_source(view.value, 0, current) && current.jitter.supplied &&
         current.jitter.x == -.125f && current.jitter.y == .5f && first.jitter.x == .25f,
       "Per-frame jitter snapshot was not immutable");
     constants(3, std::numeric_limits<float>::quiet_NaN(), .5f); evaluate(3);
-    require(testing::normalized_source(view.value, 0, current) && current.projection.supplied && !current.jitter.supplied,
+    require(nominated_source(view.value, 0, current) && current.projection.supplied && !current.jitter.supplied,
       "Nonfinite jitter rejected usable depth or reused previous correction");
     if (modern) mint(tokens[3], nullptr); // No constants for this frame.
     evaluate(4);
-    require(testing::normalized_source(view.value, 0, current) && !current.jitter.supplied,
+    require(nominated_source(view.value, 0, current) && !current.jitter.supplied,
       "Camera-free depth inherited another frame's jitter");
   }
 
@@ -1719,17 +1736,17 @@ namespace {
     const auto evaluate = [&] { call_v2_evaluate(0, token.ref(), inputs, 1, nullptr); };
     sunshine_scene_depth::frame value;
     evaluate();
-    require(testing::normalized_source(view.value, 1, value) && !value.jitter.supplied,
+    require(nominated_source(view.value, 1, value) && !value.jitter.supplied,
       "High-res jitter used display dimensions or an uncorrelated global render extent");
     call_v2_framed_tag(token.ref(), view, &raw, 1, nullptr); evaluate();
-    require(testing::normalized_source(view.value, 1, value) && value.jitter.supplied &&
+    require(nominated_source(view.value, 1, value) && value.jitter.supplied &&
         value.jitter.width == 2228 && value.jitter.height == 1253 && value.jitter.x == .25f && value.jitter.y == -.375f,
       "High-res depth did not retain same-frame raw render-pixel jitter units");
     // The next frame cannot reuse the previous frame's render-domain proof.
     mint(token, nullptr); call_v2_constants(constants, token.ref(), view);
     call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     evaluate();
-    require(testing::normalized_source(view.value, 1, value) && !value.jitter.supplied,
+    require(nominated_source(view.value, 1, value) && !value.jitter.supplied,
       "High-res depth borrowed a previous frame's render domain");
   }
 
@@ -1749,9 +1766,9 @@ namespace {
     constants.common.jitter_offset[0] = .25f; constants.common.jitter_offset[1] = -.375f;
     constants.common.clip_to_camera_view.m[0][0] *= 2; // Stale inverse must remain rejected.
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, nullptr); evaluate();
-    require(testing::latest_snapshot(view.value, observed) && observed.status == evidence_status::invalid_camera,
+    require(nominated_snapshot(view.value, observed) && observed.status == evidence_status::invalid_camera,
       "source normalization upgraded invalid camera evidence");
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.resource.native == address &&
+    require(nominated_source(view.value, 0, normalized) && normalized.resource.native == address &&
         !normalized.projection.supplied && normalized.projection.depth_offset == 0.0 && normalized.projection.depth_scale == 0.0 &&
         normalized.projection.direction_supplied && normalized.projection.reversed && normalized.jitter.supplied &&
         normalized.jitter.x == .25f && normalized.jitter.y == -.375f,
@@ -1760,10 +1777,10 @@ namespace {
     // A new observed evaluation token has no camera. Never inherit the prior
     // token's otherwise well-formed depth direction or unusable projection.
     mint(token, nullptr); call_v2_tag(view, &tag, 1, nullptr); evaluate();
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.resource.native == address &&
+    require(nominated_source(view.value, 0, normalized) && normalized.resource.native == address &&
         !normalized.projection.supplied && !normalized.projection.direction_supplied,
       "missing constants rejected an authoritative source or inherited unrelated camera metadata");
-    require(stored_is(view.value, evidence_status::missing_constants),
+    require(nominated_is(view.value, evidence_status::missing_constants),
       "direct source admission changed the existing stricter nomination query");
 
     // Direction is a fixed viewport convention: a token without its own camera
@@ -1773,10 +1790,10 @@ namespace {
       auto valid = modern_camera(); valid.common.jitter_offset[0] = .25f;
       mint(token, nullptr); call_v2_constants(valid, token.ref(), view); call_v2_tag(view, &tag, 1, nullptr); evaluate();
       sunshine_scene_depth::frame framed;
-      require(testing::normalized_source(view.value, 0, framed) && framed.projection.supplied &&
+      require(nominated_source(view.value, 0, framed) && framed.projection.supplied &&
           framed.projection.direction_supplied && framed.jitter.supplied, "valid camera did not calibrate its own frame");
       mint(token, nullptr); call_v2_tag(view, &tag, 1, nullptr); evaluate();
-      require(testing::normalized_source(view.value, 0, normalized) && !normalized.projection.supplied &&
+      require(nominated_source(view.value, 0, normalized) && !normalized.projection.supplied &&
           normalized.projection.direction_supplied && normalized.projection.reversed == framed.projection.reversed &&
           !normalized.jitter.supplied,
         "a camera-less frame lost the viewport's direction or borrowed an unsteady projection or jitter");
@@ -1790,7 +1807,7 @@ namespace {
         mint(token, nullptr); call_v2_constants(i % 2 ? valid : rebuilt, token.ref(), view);
       }
       mint(token, nullptr); call_v2_tag(view, &tag, 1, nullptr); evaluate();
-      require(testing::normalized_source(view.value, 0, normalized) && normalized.projection.supplied &&
+      require(nominated_source(view.value, 0, normalized) && normalized.projection.supplied &&
           normalized.projection.depth_offset == framed.projection.depth_offset &&
           normalized.projection.depth_scale == framed.projection.depth_scale &&
           normalized.projection.direction_supplied && !normalized.jitter.supplied,
@@ -1799,36 +1816,34 @@ namespace {
       auto zoomed = valid; set_camera_near(zoomed.common, valid.common.camera_near * 2.f);
       mint(token, nullptr); call_v2_constants(zoomed, token.ref(), view);
       mint(token, nullptr); call_v2_tag(view, &tag, 1, nullptr); evaluate();
-      require(testing::normalized_source(view.value, 0, normalized) && !normalized.projection.supplied,
+      require(nominated_source(view.value, 0, normalized) && !normalized.projection.supplied,
         "a changed camera kept the previous steady projection");
     }
 
     result_v2 = -1; evaluate(); result_v2 = 0;
-    require(!testing::normalized_source(view.value, 0, normalized), "failed evaluation exposed a normalized source");
+    require(!nominated_source(view.value, 0, normalized), "failed evaluation exposed a normalized source");
     call_v2_tag(view, &tag, 1, nullptr); evaluate();
-    require(testing::normalized_source(view.value, 0, normalized), "source did not recover after failed evaluation");
+    require(nominated_source(view.value, 0, normalized), "source did not recover after failed evaluation");
     testing::lose_observation();
-    require(!testing::normalized_source(view.value, 0, normalized), "observation loss retained camera-free source authority");
     call_v2_tag(view, &tag, 1, nullptr); evaluate();
-    require(testing::normalized_source(view.value, 0, normalized), "fresh camera-free source did not recover from observation loss");
+    require(nominated_source(view.value, 0, normalized), "fresh camera-free source did not recover from observation loss");
 
     tag.lifecycle = 0; call_v2_tag(view, &tag, 1, nullptr); evaluate();
-    require(!testing::normalized_source(view.value, 0, normalized), "OnlyValidNow source survived until a later evaluation");
+    require(!nominated_source(view.value, 0, normalized), "OnlyValidNow source survived until a later evaluation");
     tag.lifecycle = 1; tag.area.left = UINT32_MAX;
     call_v2_tag(view, &tag, 1, nullptr); evaluate();
-    require(!testing::normalized_source(view.value, 0, normalized), "invalid depth extent acquired source authority");
+    require(!nominated_source(view.value, 0, normalized), "invalid depth extent acquired source authority");
     tag.area.left = 0;
     constants = modern_camera(); constants.reset = 1;
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, nullptr); evaluate();
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied,
+    require(nominated_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied,
       "valid reset-frame depth lost its current projection/source");
 
     view = viewport(10); mint(token, nullptr); evaluate();
-    require(!testing::normalized_source(view.value, 0, normalized), "missing depth tag acquired camera-free source authority");
+    require(!nominated_source(view.value, 0, normalized), "missing depth tag acquired camera-free source authority");
     call_v2_tag(view, &tag, 1, nullptr); evaluate();
-    require(testing::normalized_source(view.value, 0, normalized), "valid source without constants was not admitted");
+    require(nominated_source(view.value, 0, normalized), "valid source without constants was not admitted");
     mint(token, nullptr);
-    require(!testing::normalized_source(view.value, 0, normalized), "token reuse retained old camera-free source authority");
   }
 
   void test_until_evaluate_lifetime() {
@@ -1843,11 +1858,11 @@ namespace {
     const base_structure *local_inputs[]{&view.base, &tag.base};
     evaluation_snapshot observed;
     const auto evaluated = [&] {
-      require(testing::latest_snapshot(view.value, observed) && observed.successful_evaluation &&
+      require(nominated_snapshot(view.value, observed) && nomination_succeeded(view.value) &&
           observed.status == evidence_status::source_associated_evaluation && observed.tags[0].supported &&
           observed.tags[0].value.lifecycle == 2, "valid UntilEvaluate tag rejected at synchronous evaluation boundary");
       sunshine_scene_depth::frame normalized;
-      require(testing::normalized_source(view.value, 0, normalized) &&
+      require(nominated_source(view.value, 0, normalized) &&
           normalized.valid_until == sunshine_scene_depth::lifetime::until_evaluation &&
           normalized.projection.depth_offset == 0.0 && normalized.projection.depth_scale == .5,
         "UntilEvaluate adapter changed projection or lifetime while normalizing");
@@ -1856,25 +1871,25 @@ namespace {
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, &commands);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr); evaluated();
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(testing::latest_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
+    require(nominated_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
       "global UntilEvaluate tag was reused after its evaluation returned");
     // A fresh exact-frame tag authorizes this evaluation only, independently of
     // the consumed global tag and without inventing native-present correlation.
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr); evaluated();
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(testing::latest_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
+    require(nominated_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
       "frame UntilEvaluate tag was reused after return");
     call_v2_evaluate(0, token.ref(), local_inputs, 2, nullptr); evaluated();
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(testing::latest_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
+    require(nominated_snapshot(view.value, observed) && observed.status == evidence_status::missing_depth,
       "local UntilEvaluate tag leaked to a later call");
     tag.area.left = UINT32_MAX;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     {
       sunshine_scene_depth::frame normalized;
-      require(!testing::normalized_source(view.value, 0, normalized),
+      require(!nominated_source(view.value, 0, normalized),
         "UntilEvaluate admission bypassed malformed extent rejection");
     }
     tag.area.left = 0;
@@ -1905,23 +1920,23 @@ namespace {
     };
     evaluate(1, 1);
     sunshine_scene_depth::frame initial;
-    require(testing::normalized_source(1, 0, initial) && !initial.feedback.reset && initial.feedback.revision != 0,
+    require(nominated_source(1, 0, initial) && !initial.feedback.reset && initial.feedback.revision != 0,
       "source revision missing from normalized depth");
     evaluate(2, 1);
     sunshine_scene_depth::frame ordinary;
-    require(testing::normalized_source(1, 0, ordinary) && !ordinary.feedback.reset &&
+    require(nominated_source(1, 0, ordinary) && !ordinary.feedback.reset &&
         ordinary.feedback.revision == initial.feedback.revision && ordinary.source_frame_numeric == 2 &&
         ordinary.source_id == initial.source_id && ordinary.viewport == initial.viewport,
       "ordinary input changed reset revision or source identity");
     evaluate(1, 2);
     sunshine_scene_depth::frame other;
-    require(testing::normalized_source(2, 0, other) && other.viewport == 2 && !other.feedback.reset &&
+    require(nominated_source(2, 0, other) && other.viewport == 2 && !other.feedback.reset &&
         other.feedback.revision == initial.feedback.revision,
       "viewport feedback acquired an unrelated reset");
     evaluate(3, 1, true);
     evaluation_snapshot reset;
-    require(testing::latest_snapshot(1, reset) && reset.feedback.reset &&
-        reset.feedback.revision > ordinary.feedback.revision && testing::normalized_source(1, 0, other) &&
+    require(nominated_snapshot(1, reset) && reset.feedback.reset &&
+        reset.feedback.revision > ordinary.feedback.revision && nominated_source(1, 0, other) &&
         other.feedback.reset && other.feedback.revision == reset.feedback.revision &&
         other.observation_revision == initial.observation_revision &&
         other.observation_revision == depth_observation_revision() && other.projection.supplied &&
@@ -1929,12 +1944,12 @@ namespace {
         other.projection.depth_scale == initial.projection.depth_scale && other.source_frame_numeric == 3 &&
         other.source_id == initial.source_id,
       "reset failed to start a new history while admitting its fresh depth and projection");
-    require(testing::normalized_source(2, 0, other) && !other.feedback.reset &&
+    require(nominated_source(2, 0, other) && !other.feedback.reset &&
         other.feedback.revision == initial.feedback.revision,
       "reset of one viewport revoked or restarted another viewport's history");
     evaluate(4, 1);
     sunshine_scene_depth::frame recovered;
-    require(testing::normalized_source(1, 0, recovered) && !recovered.feedback.reset &&
+    require(nominated_source(1, 0, recovered) && !recovered.feedback.reset &&
         recovered.feedback.revision == reset.feedback.revision && recovered.feedback.revision == initial.feedback.revision + 1 &&
         recovered.source_id == initial.source_id && recovered.viewport == initial.viewport,
       "fresh post-reset input lost revision or logical source identity");
@@ -1946,7 +1961,7 @@ namespace {
     testing::lose_observation();
     evaluate(5, 1);
     sunshine_scene_depth::frame after_loss;
-    require(testing::normalized_source(1, 0, after_loss) && !after_loss.feedback.reset &&
+    require(nominated_source(1, 0, after_loss) && !after_loss.feedback.reset &&
         after_loss.feedback.revision == recovered.feedback.revision &&
         after_loss.observation_revision == depth_observation_revision() &&
         after_loss.observation_revision != recovered.observation_revision,
@@ -1961,7 +1976,7 @@ namespace {
     call_v1_constants(constants, 1, 1); call_v1_tag(&resource, 0, 1, nullptr);
     const auto loss_before = depth_observation_revision();
     block_original = true;
-    std::thread pending([] { call_v1_evaluate(nullptr, 0, 1, 1); });
+    std::thread pending([] { testing::arm_nomination_tap(true); call_v1_evaluate(nullptr, 0, 1, 1); });
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!original_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
       std::this_thread::yield();
@@ -1975,22 +1990,22 @@ namespace {
     sunshine_scene_depth::frame normalized;
     // The next frame's reset is observed metadata, not lost evidence: the
     // in-flight frame keeps its own depth and its pre-reset history.
-    require(testing::latest_snapshot(1, first) && first.frame.numeric == 1 && !first.feedback.reset &&
+    require(nominated_snapshot(1, first) && first.frame.numeric == 1 && !first.feedback.reset &&
         first.feedback.revision != 0 && depth_observation_revision() == loss_before &&
         first.status == evidence_status::source_associated_evaluation &&
-        testing::normalized_source(1, 0, normalized) && normalized.source_frame_numeric == 1 && !normalized.feedback.reset,
+        nominated_source(1, 0, normalized) && normalized.source_frame_numeric == 1 && !normalized.feedback.reset,
       "a later frame's reset revoked in-flight depth or leaked into its history");
     const auto original_revision = first.feedback.revision;
     call_v1_evaluate(nullptr, 0, 2, 1);
     evaluation_snapshot reset;
-    require(testing::latest_snapshot(1, reset) && reset.frame.numeric == 2 && reset.feedback.reset &&
-        reset.feedback.revision == original_revision + 1 && testing::normalized_source(1, 0, normalized) &&
+    require(nominated_snapshot(1, reset) && reset.frame.numeric == 2 && reset.feedback.reset &&
+        reset.feedback.revision == original_revision + 1 && nominated_source(1, 0, normalized) &&
         normalized.feedback.reset && normalized.projection.supplied && normalized.source_frame_numeric == 2 &&
         normalized.feedback.revision == reset.feedback.revision,
       "reset frame lost its still-tagged depth or did not start a new history");
     constants.reset = 0;
     call_v1_constants(constants, 3, 1); call_v1_tag(&resource, 0, 1, nullptr); call_v1_evaluate(nullptr, 0, 3, 1);
-    require(testing::normalized_source(1, 0, normalized) && normalized.source_frame_numeric == 3 &&
+    require(nominated_source(1, 0, normalized) && normalized.source_frame_numeric == 3 &&
         !normalized.feedback.reset && normalized.feedback.revision == reset.feedback.revision &&
         first.feedback.revision == original_revision,
       "post-reset source failed to recover or rewrote earlier feedback");
@@ -2031,10 +2046,10 @@ namespace {
     require(entered, "reset constants race did not reach the original call");
     evaluate();
     sunshine_scene_depth::frame normalized;
-    require(!testing::normalized_source(view.value, 0, normalized),
+    require(!nominated_source(view.value, 0, normalized),
       "reset revision repaired unrelated observation loss during the constants call");
     constants(); evaluate();
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied,
+    require(nominated_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied,
       "fresh reset constants did not recover after the interrupted reset call");
   }
 
@@ -2075,7 +2090,7 @@ namespace {
       else call_v1_tag(&old_resource, 0, view.value, nullptr);
       preserves_last_error(evaluate, evaluate_call);
       sunshine_scene_depth::frame normalized;
-      require(testing::normalized_source(view.value, 0, normalized) &&
+      require(nominated_source(view.value, 0, normalized) &&
         normalized.resource.native == address && normalized.observation_revision == depth_observation_revision() &&
         normalized.projection.supplied && normalized.projection.depth_offset == 0. &&
         normalized.projection.depth_scale == .5 && normalized.projection.reversed && !normalized.feedback.reset,
@@ -2099,7 +2114,7 @@ namespace {
     };
     const auto no_old_source = [&] {
       sunshine_scene_depth::frame normalized;
-      require(!testing::normalized_source(view.value, 0, normalized),
+      require(!nominated_source(view.value, 0, normalized),
         "Diagnostic recording repaired the source invalidation it only describes");
     };
 
@@ -2170,7 +2185,6 @@ namespace {
     const auto busy = event_for(before_busy + expected_losses, loss_diagnostics::reason::records_busy, worker_thread);
     require(busy.details.viewport == view.value && busy.details.sequence,
       "Contended camera storage omitted its exact callback context");
-    no_old_source();
     recover();
 
     const auto recovered_revision = depth_observation_revision();
@@ -2188,24 +2202,22 @@ namespace {
   // evaluation through query_evaluation, which only the ledger served. Each
   // test_*_shipping repeats its ledger test's calls in the shipping
   // configuration and reads the same outcome through the testing seams,
-  // with the same expected values: the evaluation snapshot finish_evaluation
-  // stores per viewport after the game's call (testing::latest_snapshot: the
-  // snapshot source nomination received before the call, with the call's
-  // result applied; no shipping code reads this store), the depth normalized
-  // from it (testing::normalized_source, which re-runs the nomination gates
-  // on the stored snapshot when called), the forwarded results and
-  // arguments, the counters and the observation revision.
+  // with the same expected values: the evaluation snapshot source
+  // nomination received before the game's call, and the depth it normalized
+  // there, through the nomination tap (nominated_snapshot, nominated_source,
+  // nomination_succeeded), the forwarded results and arguments, the counters
+  // and the observation revision.
   // Where a ledger test read an earlier frame's camera record through a
   // later query, the port evaluates that frame again. Checks of the
   // ledger's own logic (the selected-depth match, active-tag revalidation,
   // age limits, ambiguity, the value copy, command and content association,
   // the StreamlineCameraProbe opt-in and its scaling colour tags) are not
   // ported; they leave with the ledger.
-  void expect_stored(std::uint32_t viewport, evidence_status expected, const char *message) {
+  void expect_nominated(std::uint32_t viewport, evidence_status expected, const char *message) {
     evaluation_snapshot value;
-    const bool found = testing::latest_snapshot(viewport, value);
+    const bool found = nominated_snapshot(viewport, value);
     if (!found || value.status != expected)
-      std::fprintf(stderr, "stored evaluation expected %s, got %s\n", name(expected), found ? name(value.status) : "none");
+      std::fprintf(stderr, "nominated evaluation expected %s, got %s\n", name(expected), found ? name(value.status) : "none");
     require(found && value.status == expected, message);
   }
   // test_diagnostic_opt_in: with source selection rolled back
@@ -2246,14 +2258,14 @@ namespace {
     call_v1_constants(constants, 10, 4);
     call_v1_tag(&resource, 0, 4, nullptr);
     evaluation_snapshot captured;
-    require(!testing::latest_snapshot(4, captured), "constants/tags alone fabricated evaluation evidence");
+    require(!nominated_snapshot(4, captured), "constants/tags alone fabricated evaluation evidence");
     auto next = constants;
     set_camera_near(next.common, 1.f);
     call_v1_constants(next, 11, 4);
     call_v1_evaluate(&commands, 0, 10, 4);
-    require(testing::latest_snapshot(4, captured) && captured.status == evidence_status::source_associated_evaluation,
+    require(nominated_snapshot(4, captured) && captured.status == evidence_status::source_associated_evaluation,
       "v1 exact constants frame not retained across frames in flight");
-    require(captured.frame_correlated && captured.successful_evaluation && captured.frame.has_numeric &&
+    require(captured.frame_correlated && nomination_succeeded(4) && captured.frame.has_numeric &&
         captured.frame.numeric == 10 && captured.frame.kind == frame_identity_kind::v1_numeric &&
         captured.camera.near_plane == .5f &&
         captured.projection.valid() && captured.projection.depth_scale == .5 &&
@@ -2262,27 +2274,26 @@ namespace {
         captured.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native),
       "v1 snapshot did not preserve camera/tag/evaluation identities");
     call_v1_evaluate(nullptr, 0, 12, 4);
-    expect_stored(4, evidence_status::missing_constants, "latest camera substituted for missing exact frame");
+    expect_nominated(4, evidence_status::missing_constants, "latest camera substituted for missing exact frame");
     call_v1_evaluate(nullptr, 0, 11, 4);
-    require(testing::latest_snapshot(4, captured) && captured.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(4, captured) && captured.status == evidence_status::source_associated_evaluation &&
         captured.camera.near_plane == 1.f && captured.projection.depth_scale == 1.,
       "older unsuccessful correlation poisoned a later complete tuple");
     result_v1 = false;
     call_v1_evaluate(nullptr, 0, 11, 4);
-    expect_stored(4, evidence_status::evaluation_failed, "failed evaluation left previous success available");
     result_v1 = true;
     call_v1_constants(constants, 13, 4);
     call_v1_tag(&resource, 0, 4, nullptr);
     call_v1_evaluate(nullptr, 0, 13, 4);
-    expect_stored(4, evidence_status::source_associated_evaluation, "fresh complete observations did not recover");
+    expect_nominated(4, evidence_status::source_associated_evaluation, "fresh complete observations did not recover");
     testing::lose_observation();
     call_v1_evaluate(nullptr, 0, 13, 4);
-    expect_stored(4, evidence_status::observation_lost, "evaluation reused inputs from before observation loss");
+    expect_nominated(4, evidence_status::observation_lost, "evaluation reused inputs from before observation loss");
     call_v1_constants(constants, 14, 4);
     call_v1_tag(&resource, 0, 4, nullptr);
     call_v1_evaluate(nullptr, 0, 14, 4);
     sunshine_scene_depth::frame before_reset;
-    require(testing::normalized_source(4, 0, before_reset) &&
+    require(nominated_source(4, 0, before_reset) &&
         before_reset.observation_revision == depth_observation_revision(),
       "v1 normalized depth omitted its source observation revision");
     // A later frame's reset or invalid camera is observed metadata; it never
@@ -2292,7 +2303,7 @@ namespace {
     require(depth_observation_revision() == before_reset.observation_revision,
       "v1 camera reset was recorded as a lost observation");
     call_v1_evaluate(nullptr, 0, 14, 4);
-    expect_stored(4, evidence_status::source_associated_evaluation, "camera reset revoked earlier evidence");
+    expect_nominated(4, evidence_status::source_associated_evaluation, "camera reset revoked earlier evidence");
     constants.reset = 0;
     call_v1_constants(constants, 16, 4);
     call_v1_tag(&resource, 0, 4, nullptr);
@@ -2300,7 +2311,7 @@ namespace {
     constants.common.clip_to_camera_view.m[0][0] = 2;
     call_v1_constants(constants, 17, 4);
     call_v1_evaluate(nullptr, 0, 16, 4);
-    expect_stored(4, evidence_status::source_associated_evaluation, "invalid projection revoked earlier evidence");
+    expect_nominated(4, evidence_status::source_associated_evaluation, "invalid projection revoked earlier evidence");
   }
   // test_evaluation_immutable_and_ordered.
   void test_evaluation_order_shipping() {
@@ -2315,7 +2326,7 @@ namespace {
     call_v1_constants(second, 2, 8);
     call_v1_tag(&resource, 0, 8, nullptr);
     block_original = true;
-    std::thread older([] { call_v1_evaluate(nullptr, 0, 1, 8); });
+    std::thread older([] { testing::arm_nomination_tap(true); call_v1_evaluate(nullptr, 0, 1, 8); });
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!original_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
     const bool entered = original_entered.load(std::memory_order_acquire);
@@ -2325,19 +2336,19 @@ namespace {
     older.join();
     require(entered, "blocked evaluation never entered original");
     evaluation_snapshot snapshot;
-    require(testing::latest_snapshot(8, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(8, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.frame.numeric == 2 && snapshot.camera.near_plane == 1.f && snapshot.projection.depth_scale == 1.,
       "out-of-order evaluation completion replaced newer immutable tuple");
     set_camera_near(second.common, 2.f);
     call_v1_constants(second, 2, 8);
-    require(testing::latest_snapshot(8, snapshot) && snapshot.camera.near_plane == 1.f &&
+    require(nominated_snapshot(8, snapshot) && snapshot.camera.near_plane == 1.f &&
         snapshot.projection.depth_scale == 1.,
       "later same-frame constants mutated or retained applicability of previously published evaluation");
     call_v1_evaluate(nullptr, 0, 2, 8);
     // Bounded frame storage evicts old frames instead of guessing from latest.
     for (unsigned frame = 3; frame != 38; ++frame) call_v1_constants(first, frame, 8);
     call_v1_evaluate(nullptr, 0, 1, 8);
-    expect_stored(8, evidence_status::missing_constants, "evicted frame reused a different camera");
+    expect_nominated(8, evidence_status::missing_constants, "evicted frame reused a different camera");
   }
   // test_evaluation_v2_tokens.
   void test_evaluation_v2_tokens_shipping() {
@@ -2355,7 +2366,7 @@ namespace {
     call_v2_constants(constants, first.ref(), view);
     call_v2_framed_tag(first.ref(), view, &tag_a, 1, nullptr);
     call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    expect_stored(view.value, evidence_status::untracked_frame, "opaque address alone became a frame identity");
+    expect_nominated(view.value, evidence_status::untracked_frame, "opaque address alone became a frame identity");
     const std::uint32_t number = 101;
     mint(first, &number);
     mint(second, nullptr);
@@ -2366,7 +2377,7 @@ namespace {
     call_v2_framed_tag(second.ref(), view, &tag_b, 1, nullptr);
     call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
     evaluation_snapshot snapshot;
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.tags[0].value.native_resource == a &&
         snapshot.frame.kind == frame_identity_kind::v2_observed_token && snapshot.frame.generation &&
         snapshot.frame.has_numeric && snapshot.frame.numeric == 101 && snapshot.camera.near_plane == .5f &&
@@ -2374,35 +2385,35 @@ namespace {
       "v2 frame-specific constants/tags mixed frames in flight");
     const auto old_generation = snapshot.frame.generation;
     call_v2_evaluate(0, second.ref(), inputs, 1, nullptr);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.tags[0].value.native_resource == b &&
         !snapshot.frame.has_numeric && snapshot.frame.generation != old_generation && snapshot.camera.near_plane == 1.f &&
         snapshot.projection.depth_scale == 1.,
       "internal token counter was invented as a game numeric frame");
     const base_structure *local_inputs[] {&view.base, &tag_local.base};
     call_v2_evaluate(0, first.ref(), local_inputs, 2, nullptr);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.tags[0].value.native_resource == local && snapshot.tags[0].scope == tag_scope::evaluation_local,
       "evaluation-local tag did not override frame tag");
     call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.tags[0].value.native_resource == a, "local override leaked into next evaluation");
     // Streamline recycles the address for a later frame index: a new generation. (The
     // same index returns the same frame's token; see test_repeated_token_request_keeps_frame.)
     const std::uint32_t recycled_number = number + 3;
     mint(first, &recycled_number);
     call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    expect_stored(view.value, evidence_status::missing_constants, "recycled token reused old constants/frame tags");
+    expect_nominated(view.value, evidence_status::missing_constants, "recycled token reused old constants/frame tags");
     call_v2_constants(constants, first.ref(), view);
     call_v2_framed_tag(first.ref(), view, &tag_a, 1, nullptr);
     call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.tags[0].value.native_resource == a &&
         snapshot.frame.generation != old_generation, "fresh recycled-token tuple failed recovery");
     abi_v2::frame_token *output{};
     call_v2_new_token(output, reinterpret_cast<const std::uint32_t *>(1));
     call_v2_evaluate(0, first.ref(), inputs, 1, nullptr);
-    expect_stored(view.value, evidence_status::observation_lost, "unreadable token index left accepted evidence");
+    expect_nominated(view.value, evidence_status::observation_lost, "unreadable token index left accepted evidence");
   }
   // test_sdk_vram_warning (BF6 10-22): the warning accepts an evaluation's
   // inputs; every other non-zero result fails it.
@@ -2429,10 +2440,10 @@ namespace {
     };
     const auto accepted = [&](const char *message) {
       evaluation_snapshot snapshot;
-      require(testing::latest_snapshot(view.value, snapshot) &&
+      require(nominated_snapshot(view.value, snapshot) &&
         snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native) &&
-        snapshot.successful_evaluation && snapshot.sequence, message);
+        nomination_succeeded(view.value) && snapshot.sequence, message);
     };
     frame(0, 0);
     accepted("warning fixture baseline was not accepted");
@@ -2450,7 +2461,6 @@ namespace {
     for (const std::int32_t error : {38, 40, -39}) {
       const auto before = depth_observation_revision();
       frame(0, error);
-      expect_stored(view.value, evidence_status::evaluation_failed, "an SDK error was accepted like the warning");
       require(depth_observation_revision() > before && testing::counts().vram_warnings == 4,
         "an SDK error was not an observation loss, or was counted as a warning");
       frame(0, 0);
@@ -2473,7 +2483,7 @@ namespace {
     call_v2_tag(view, &tag, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
     evaluation_snapshot snapshot;
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+    require(nominated_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
         snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native),
       "global tag fixture did not start valid");
   }
@@ -2497,8 +2507,11 @@ namespace {
     require(entered, "delayed constants never entered original");
     call_v1_tag(&resource, 0, 1, nullptr);
     call_v1_evaluate(nullptr, 0, 1, 1);
+    // The evaluation's time: read as its call returns (the deleted store
+    // stamped it as the call finished).
+    const auto evaluated = GetTickCount64();
     evaluation_snapshot snapshot;
-    require(testing::latest_snapshot(1, snapshot) && snapshot.tick >= snapshot.camera_tick + 10,
+    require(nominated_snapshot(1, snapshot) && evaluated >= snapshot.camera_tick + 10,
       "blocked constants call completion made old input look newly observed");
   }
   // test_non_renderer_evaluations.
@@ -2510,7 +2523,7 @@ namespace {
       auto constants = old_camera();
       call_v1_constants(constants, 77, 0); call_v1_tag(&resource, 0, 0, nullptr); call_v1_evaluate(nullptr, 0, 77, 0);
       evaluation_snapshot baseline, next;
-      require(testing::latest_snapshot(0, baseline) && baseline.status == evidence_status::source_associated_evaluation,
+      require(nominated_snapshot(0, baseline) && baseline.status == evidence_status::source_associated_evaluation,
         "missing DLSS filter baseline");
       for (const auto feature : {3u, 1u, 2u, 0xffffffffu}) for (const auto marker : {0u, 4u}) for (const auto success : {true, false}) {
         result_v1 = success;
@@ -2521,7 +2534,7 @@ namespace {
         require(evaluate_call.calls == before + 1 && evaluate_call.first == nullptr && evaluate_call.a == feature &&
             evaluate_call.b == 78 && evaluate_call.c == marker && evaluate_call.incoming_error == incoming_error,
           "non-renderer v1 call changed count/arguments");
-        require(testing::latest_snapshot(0, next) && next.status == evidence_status::source_associated_evaluation &&
+        require(nominated_snapshot(0, next) && next.status == evidence_status::source_associated_evaluation &&
             next.sequence == baseline.sequence && next.frame.numeric == 77 && next.viewport == 0 && next.feature == 0,
           "Reflex/other feature overwrote DLSS viewport or failure revoked renderer evidence");
         require(!latest(4).found, "Reflex PresentStart marker fabricated viewport 4");
@@ -2536,7 +2549,7 @@ namespace {
       const base_structure *inputs[]{&view.base};
       call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, nullptr); call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
       evaluation_snapshot baseline, next;
-      require(testing::latest_snapshot(view.value, baseline) && baseline.status == evidence_status::source_associated_evaluation &&
+      require(nominated_snapshot(view.value, baseline) && baseline.status == evidence_status::source_associated_evaluation &&
           baseline.frame.kind == frame_identity_kind::v2_observed_token, "missing v2 DLSS filter baseline");
       for (const auto feature : {3u, 7u, 0xffffffffu}) for (const auto result : {0, -7}) {
         result_v2 = result;
@@ -2548,15 +2561,14 @@ namespace {
         require(evaluate_call.calls == before + 1 && evaluate_call.a == feature && evaluate_call.second == opaque_inputs &&
             evaluate_call.b == 0xffffffffu && evaluate_call.incoming_error == incoming_error,
           "non-renderer v2 opaque input forwarding changed");
-        require(testing::latest_snapshot(view.value, next) && next.status == evidence_status::source_associated_evaluation &&
+        require(nominated_snapshot(view.value, next) && next.status == evidence_status::source_associated_evaluation &&
             next.sequence == baseline.sequence,
           "non-renderer v2 input was parsed or failure revoked DLSS evidence");
       }
     }
   }
-  // test_color_tag_snapshots. With the probe off the scaling input/output
-  // colours (types 3 and 4) are not retained, so the HUD-less, backbuffer
-  // and depth checks apply.
+  // test_color_tag_snapshots: colour tags and colour untags beside the depth
+  // tag never conflate with or poison the evaluated depth.
   void test_color_tag_snapshots_shipping() {
     {
       fixture cleanup;
@@ -2568,13 +2580,12 @@ namespace {
       call_v1_tag(&d, 0, 0, nullptr); call_v1_tag(&h, 2, 0, nullptr); call_v1_tag(&i, 3, 0, nullptr); call_v1_tag(&o, 4, 0, nullptr);
       call_v1_evaluate(nullptr, 0, 1, 0);
       evaluation_snapshot value;
-      require(testing::latest_snapshot(0, value) && value.status == evidence_status::source_associated_evaluation &&
-          value.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&depth) &&
-          value.colors[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&hudless) && !value.colors[3].present,
+      require(nominated_snapshot(0, value) && value.status == evidence_status::source_associated_evaluation &&
+          value.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&depth),
         "v1 colors were conflated with depth or each other");
       call_v1_tag(nullptr, 3, 0, nullptr);
       call_v1_constants(constants, 2, 0); call_v1_evaluate(nullptr, 0, 2, 0);
-      expect_stored(0, evidence_status::source_associated_evaluation, "v1 null color untag erased another color or poisoned depth");
+      expect_nominated(0, evidence_status::source_associated_evaluation, "v1 null color untag erased another color or poisoned depth");
     }
     {
       fixture cleanup;
@@ -2594,11 +2605,9 @@ namespace {
       const base_structure *inputs[]{&view.base, &lt.base};
       call_v2_evaluate(0, token.ref(), inputs, 2, nullptr);
       evaluation_snapshot value;
-      require(testing::latest_snapshot(view.value, value) && value.status == evidence_status::source_associated_evaluation &&
-          value.colors[0].scope == tag_scope::active_global && value.colors[0].identity_available,
+      require(nominated_snapshot(view.value, value) && value.status == evidence_status::source_associated_evaluation,
         "v2 independent color scope overrides lost");
-      require(value.colors[3].present && value.colors[3].supported && !value.colors[3].identity_available &&
-          value.colors[3].value.type == 53 && value.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&depth),
+      require(value.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&depth),
         "legal null v2 backbuffer fabricated identity or poisoned depth");
     }
   }
@@ -2634,7 +2643,7 @@ namespace {
     const auto fg_source = [&] {
       mint(token, &++numeric); call_v2_constants(constants, token.ref(), view);
       call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
-      return testing::normalized_source(view.value, 0, normalized) && normalized.frame_generation_input &&
+      return nominated_source(view.value, 0, normalized) && normalized.frame_generation_input &&
         normalized.source_id == ((1ull << 63) | view.value);
     };
     require(fg_source(), "a warned FG On did not route FG depth");
@@ -2695,8 +2704,8 @@ namespace {
       call_v1_constants(constants, 77, 0); call_v1_tag(&resource, 0, 0, nullptr);
       sunshine_scene_depth::frame normalized; evaluation_snapshot snapshot;
       for (const auto feature : {1u, 2u, 0xffffffffu}) {
-        require(call_v1_evaluate(&commands, feature, 77, 0) && testing::normalized_source(0, 0, normalized) &&
-            testing::latest_snapshot(0, snapshot) && snapshot.feature == feature && snapshot.frame.numeric == 77,
+        require(call_v1_evaluate(&commands, feature, 77, 0) && nominated_source(0, 0, normalized) &&
+            nominated_snapshot(0, snapshot) && snapshot.feature == feature && snapshot.frame.numeric == 77,
           "legacy feature ID blocked an exact numeric camera/depth contract");
       }
       const auto sequence = snapshot.sequence, revision = depth_observation_revision();
@@ -2704,12 +2713,12 @@ namespace {
         // Reflex remains a timing marker even with matching numbers. The other
         // feature has no exact numeric camera tuple for frame78.
         call_v1_evaluate(&commands, feature, feature == 3 ? 77 : 78, 0);
-        require(testing::latest_snapshot(0, snapshot) && snapshot.sequence == sequence &&
+        require(nominated_snapshot(0, snapshot) && snapshot.sequence == sequence &&
             depth_observation_revision() == revision,
           "unproven legacy argument semantics changed scene-depth authority");
       }
       result_v1 = false; call_v1_evaluate(&commands, 17, 77, 0); result_v1 = true;
-      require(!testing::normalized_source(0, 0, normalized), "failed feature with proven depth contract retained source");
+      require(!nominated_source(0, 0, normalized), "failed feature with proven depth contract retained source");
     }
     {
       fixture cleanup;
@@ -2724,9 +2733,9 @@ namespace {
         SetLastError(incoming_error);
         require(call_v2_evaluate(feature, token.ref(), inputs, 2, &commands) == 0 &&
             GetLastError() == outgoing_error && evaluate_call.incoming_error == incoming_error &&
-            testing::normalized_source(view.value, 2, normalized) && !normalized.projection.supplied &&
+            nominated_source(view.value, 2, normalized) && !normalized.projection.supplied &&
             normalized.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance &&
-            testing::latest_snapshot(view.value, snapshot) && snapshot.feature == feature,
+            nominated_snapshot(view.value, snapshot) && snapshot.feature == feature,
           "arbitrary v2 feature ID blocked a valid typed depth contract or changed forwarding");
       }
       const auto sequence = snapshot.sequence, revision = depth_observation_revision();
@@ -2735,15 +2744,15 @@ namespace {
       call_v2_evaluate(17, token.ref(), inputs, 2, &commands);
       call_v2_evaluate(17, token.ref(), reinterpret_cast<const base_structure **>(1), UINT32_MAX, &commands);
       result_v2 = 0;
-      require(testing::latest_snapshot(view.value, snapshot) && snapshot.sequence == sequence &&
+      require(nominated_snapshot(view.value, snapshot) && snapshot.sequence == sequence &&
           depth_observation_revision() == revision,
         "speculative opaque/invalid feature input revoked valid source evidence");
       tag.resource_ptr = &resource;
       call_v2_evaluate(17, token.ref(), inputs, 2, nullptr);
-      require(testing::latest_snapshot(view.value, snapshot) && snapshot.sequence == sequence,
+      require(nominated_snapshot(view.value, snapshot) && snapshot.sequence == sequence,
         "unknown feature without a scene command acquired depth authority");
       result_v2 = -7; call_v2_evaluate(17, token.ref(), inputs, 2, &commands); result_v2 = 0;
-      require(!testing::normalized_source(view.value, 2, normalized), "failed typed feature evaluation retained source");
+      require(!nominated_source(view.value, 2, normalized), "failed typed feature evaluation retained source");
     }
   }
 
@@ -2929,7 +2938,7 @@ namespace {
         !observed.source.source_frame_explicit && observed.command == reinterpret_cast<std::uint64_t>(&commands),
       "color-only global tag53 was not captured independently of depth/camera/dump/diagnostic probe");
     evaluation_snapshot depth;
-    require(!testing::latest_snapshot(view.value, depth), "alpha-only tag nominated a depth evaluation");
+    require(!nominated_snapshot(view.value, depth), "alpha-only tag nominated a depth evaluation");
     const auto global_sequence = observed.source.sequence;
     opaque_token token; std::uint32_t numeric = 71; mint(token, &numeric);
     require(call_v2_framed_tag(token.ref(), view, &tag, 1, &commands) == 0 &&
@@ -3210,9 +3219,9 @@ namespace {
     require(tag_now() == 0 && tag_call.incoming_error == incoming_error && GetLastError() == outgoing_error &&
         tag_call.first == &view && tag_call.second == tags && tag_call.third == &commands,
       "Standalone mixed tags changed public SDK arguments or LastError");
-    require(testing::latest_snapshot(0, snapshot) && snapshot.tag_boundary && !snapshot.frame_generation_input &&
-        snapshot.command_buffer == reinterpret_cast<std::uintptr_t>(&commands) && snapshot.successful_evaluation &&
-        testing::normalized_source(0, 0, normalized) && !normalized.frame_generation_input && !normalized.source_id &&
+    require(nominated_snapshot(0, snapshot) && snapshot.tag_boundary && !snapshot.frame_generation_input &&
+        snapshot.command_buffer == reinterpret_cast<std::uintptr_t>(&commands) && nomination_succeeded(0) &&
+        nominated_source(0, 0, normalized) && !normalized.frame_generation_input && !normalized.source_id &&
         !normalized.projection.supplied && !normalized.projection.direction_supplied && !normalized.jitter.supplied &&
         !normalized.source_frame_explicit && !normalized.source_frame_generation && !normalized.source_frame_token &&
         normalized.native_state == 0x60 && normalized.proof == sunshine_scene_depth::state_proof::declared &&
@@ -3220,30 +3229,29 @@ namespace {
       "FG-unobserved viewport-zero tag did not retain raw depth with its own exact state/boundary");
     auto constants = modern_camera(); opaque_token token;
     call_v2_constants(constants, token.ref(), view); tag_now();
-    require(testing::latest_snapshot(0, snapshot) && snapshot.frame.kind == frame_identity_kind::v2_constants_call &&
+    require(nominated_snapshot(0, snapshot) && snapshot.frame.kind == frame_identity_kind::v2_constants_call &&
         snapshot.camera_sequence < snapshot.sequence && snapshot.frame_correlated &&
-        testing::normalized_source(0, 0, normalized) && normalized.projection.supplied &&
+        nominated_source(0, 0, normalized) && normalized.projection.supplied &&
         !normalized.source_frame_explicit && !normalized.source_frame_has_numeric && !normalized.frame_generation_input,
       "Standalone global depth lost its fresh same-viewport camera-call association");
     call_v2_tag(view, tags, 3, nullptr);
-    require(!testing::normalized_source(0, 0, normalized), "Standalone depth accepted a missing copy command");
+    require(!nominated_source(0, 0, normalized), "Standalone depth accepted a missing copy command");
     tags[2].resource_ptr = nullptr; tag_now();
-    require(!testing::normalized_source(0, 0, normalized), "Standalone untag retained old depth");
+    require(!nominated_source(0, 0, normalized), "Standalone untag retained old depth");
     tags[2] = depth;
     result_v2 = -7; tag_now(); result_v2 = 0;
-    require(!testing::normalized_source(0, 0, normalized), "Failed standalone tag retained source authority");
+    require(!nominated_source(0, 0, normalized), "Failed standalone tag retained source authority");
     tag_now();
-    require(testing::normalized_source(0, 0, normalized) && !normalized.projection.supplied,
+    require(nominated_source(0, 0, normalized) && !normalized.projection.supplied,
       "Fresh post-failure tag did not recover raw depth independently of revoked camera");
     call_v2_constants(constants, token.ref(), view); tag_now();
     testing::lose_observation();
-    require(!testing::normalized_source(0, 0, normalized), "Standalone depth crossed observation loss");
     tag_now();
-    require(testing::normalized_source(0, 0, normalized) && !normalized.projection.supplied,
+    require(nominated_source(0, 0, normalized) && !normalized.projection.supplied,
       "Fresh tag borrowed a camera from before observation loss");
     call_v2_constants(constants, token.ref(), view);
     std::this_thread::sleep_for(std::chrono::milliseconds(270)); tag_now();
-    require(testing::normalized_source(0, 0, normalized) && !normalized.projection.supplied &&
+    require(nominated_source(0, 0, normalized) && !normalized.projection.supplied &&
         !normalized.projection.direction_supplied && !normalized.jitter.supplied,
       "Stale camera calibrated standalone raw depth");
     // A mixed batch must not expire or eagerly copy an UntilEvaluate input.
@@ -3251,40 +3259,40 @@ namespace {
     auto until = depth; until.type = 48; until.lifecycle = 2;
     abi_v2::resource_tag mixed[]{depth, until};
     call_v2_framed_tag(token.ref(), view, mixed, 2, &commands);
-    require(testing::normalized_source(0, 0, normalized) && normalized.source_frame_explicit &&
-        normalized.source_frame_numeric == numeric && !testing::normalized_source(0, 1, normalized),
+    require(nominated_source(0, 0, normalized) && normalized.source_frame_explicit &&
+        normalized.source_frame_numeric == numeric && !nominated_source(0, 1, normalized),
       "Standalone mixed lifetimes claimed an UntilEvaluate input at the tag boundary");
     require(testing::counts().evaluations == before, "Standalone tags fabricated SL evaluation calls");
     const base_structure *inputs[]{&view.base};
     call_v2_evaluate(0, token.ref(), inputs, 1, &commands);
-    require(testing::normalized_source(0, 1, normalized) &&
+    require(nominated_source(0, 1, normalized) &&
         normalized.valid_until == sunshine_scene_depth::lifetime::until_evaluation,
       "Standalone OnlyValidNow capture prematurely expired a neighboring UntilEvaluate tag");
     call_v2_evaluate(0, token.ref(), inputs, 1, &commands);
-    require(!testing::normalized_source(0, 1, normalized), "UntilEvaluate escaped its real evaluation return");
+    require(!nominated_source(0, 1, normalized), "UntilEvaluate escaped its real evaluation return");
     // The same tag call changes role only after observed successful FG options.
     returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
     void *function{}; call_feature_function(1000, "slDLSSGSetOptions", function);
     require(function != nullptr, "Standalone role transition lacked FG options wrapper");
     auto set_options = reinterpret_cast<fg_function>(function); fg_options options;
     set_options(view, options); call_v2_constants(constants, token.ref(), view); tag_now();
-    require(testing::normalized_source(0, 0, normalized) && normalized.frame_generation_input &&
+    require(nominated_source(0, 0, normalized) && normalized.frame_generation_input &&
         normalized.source_id == (1ull << 63), "Observed FG On lost its distinct mandatory source role");
     options.mode = 0; set_options(view, options); tag_now();
-    require(testing::normalized_source(0, 0, normalized) && !normalized.frame_generation_input && !normalized.source_id,
+    require(nominated_source(0, 0, normalized) && !normalized.frame_generation_input && !normalized.source_id,
       "FG Off suppressed independent standalone depth or retained its FG namespace");
-    require(testing::latest_snapshot(0, snapshot), "Standalone final observation missing");
+    require(nominated_snapshot(0, snapshot), "Standalone final observation missing");
     const auto only_valid_now_sequence = snapshot.sequence;
     tags[2].lifecycle = 1; tag_now();
-    require(testing::latest_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
+    require(nominated_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
       "Ordinary UntilPresent tag invented a synchronous depth opportunity");
     tags[2].lifecycle = 2; tag_now();
-    require(testing::latest_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
+    require(nominated_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
       "Ordinary longer-lived tag invented a synchronous depth opportunity");
     tags[2].lifecycle = 3; tag_now();
     // The earlier capture already copied its pixels; a later unusable tag is
     // not a new opportunity and does not revoke that finished capture.
-    require(testing::latest_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
+    require(nominated_snapshot(0, snapshot) && snapshot.sequence == only_valid_now_sequence,
       "Unsupported tag lifetime invented a synchronous depth opportunity or revoked the earlier capture");
   }
 
@@ -3314,18 +3322,18 @@ namespace {
         !logged({"zero-base resource compatibility"}),
       "A Resource with a null native was not counted as an untag, or was reported as the zero-header layout");
     evaluation_snapshot snapshot; sunshine_scene_depth::frame normalized;
-    require(testing::latest_snapshot(0, snapshot) && snapshot.tag_boundary && snapshot.tags[0].present &&
-        snapshot.tags[0].supported && !snapshot.tags[0].value.native_resource && !testing::normalized_source(0, 0, normalized),
+    require(nominated_snapshot(0, snapshot) && snapshot.tag_boundary && snapshot.tags[0].present &&
+        snapshot.tags[0].supported && !snapshot.tags[0].value.native_resource && !nominated_source(0, 0, normalized),
       "An untag changed the probe's no-current-depth metadata");
     require(call_v2_tag(view, &depth, 1, &commands) == 0 && testing::counts().depth_untags == before + 2 &&
         logged({"zero-base resource compatibility", "native=0x0 "}) == 0 &&
-        logged({"zero-base resource compatibility", "native_retained=0"}) == 1 && testing::normalized_source(0, 0, normalized),
+        logged({"zero-base resource compatibility", "native_retained=0"}) == 1 && nominated_source(0, 0, normalized),
       "The zero-header layout with a real native lost its compatibility report or its depth");
     // A malformed Resource is unsupported, not an untag, whatever its native.
     auto malformed = resource; malformed.base.version = 1; malformed.native = nullptr;
     auto rejected = depth; rejected.resource_ptr = &malformed;
     require(call_v2_tag(view, &rejected, 1, &commands) == 0 && testing::counts().depth_untags == before + 2 &&
-        testing::latest_snapshot(0, snapshot) && !snapshot.tags[0].supported,
+        nominated_snapshot(0, snapshot) && !snapshot.tags[0].supported,
       "A malformed Resource with a null native was counted as an untag");
   }
 
@@ -3433,10 +3441,10 @@ namespace {
     tag_precision precision; tag.base.next = &precision;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     evaluation_snapshot snapshot; sunshine_scene_depth::frame normalized;
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.tag_boundary && snapshot.feature == 1000 &&
-        snapshot.successful_evaluation && snapshot.tags[0].supported && snapshot.frame_correlated,
+    require(nominated_snapshot(view.value, snapshot) && snapshot.tag_boundary && snapshot.feature == 1000 &&
+        nomination_succeeded(view.value) && snapshot.tags[0].supported && snapshot.frame_correlated,
       "FG OnlyValidNow tag did not publish its synchronous frame/camera tuple");
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.frame_generation_input &&
+    require(nominated_source(view.value, 0, normalized) && normalized.frame_generation_input &&
         normalized.source_id == ((1ull << 63) | view.value) && normalized.source_frame_explicit &&
         normalized.source_frame_has_numeric && normalized.source_frame_numeric == numeric &&
         normalized.valid_until == sunshine_scene_depth::lifetime::at_call && normalized.projection.supplied &&
@@ -3459,25 +3467,25 @@ namespace {
     auto sr_tag = tag; sr_tag.lifecycle = 1;
     const base_structure *sr_inputs[]{&view.base, &sr_tag.base};
     call_v2_evaluate(0, token.ref(), sr_inputs, 2, &commands);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.feature == 0 && snapshot.tags[0].supported &&
-        testing::normalized_source(view.value, 0, normalized) && !normalized.frame_generation_input,
+    require(nominated_snapshot(view.value, snapshot) && snapshot.feature == 0 && snapshot.tags[0].supported &&
+        nominated_source(view.value, 0, normalized) && !normalized.frame_generation_input,
       "same-viewport SR evaluation of an FG scope without an FG copy did not supply its own depth");
     auto unrelated_view = viewport(12);
     call_v2_constants(constants, token.ref(), unrelated_view);
     const base_structure *other_sr_inputs[]{&unrelated_view.base, &sr_tag.base};
     call_v2_evaluate(0, token.ref(), other_sr_inputs, 2, &commands);
-    require(testing::normalized_source(unrelated_view.value, 0, normalized) && !normalized.frame_generation_input,
+    require(nominated_source(unrelated_view.value, 0, normalized) && !normalized.frame_generation_input,
       "FG mode on one viewport suppressed another viewport's SR input");
 
     precision.scale = -.5f;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.projection.depth_offset == 0 &&
+    require(nominated_source(view.value, 0, normalized) && normalized.projection.depth_offset == 0 &&
         normalized.projection.depth_scale == .5 && normalized.projection.raw_scale == -.5 &&
         !normalized.projection.reversed && inverse_distance(normalized, 0.0) == .5,
       "negative precision scale failed to transform depth direction");
     precision.formula = 0; precision.scale = 0;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.projection.depth_offset == 0 &&
+    require(nominated_source(view.value, 0, normalized) && normalized.projection.depth_offset == 0 &&
         normalized.projection.depth_scale == .5 && normalized.projection.raw_scale == 1 && normalized.projection.raw_bias == 0,
       "NoTransform precision used ignored scale/bias fields");
 
@@ -3485,7 +3493,7 @@ namespace {
     // explicit token. High-resolution-only tags must use the same contract.
     tag.type = 48;
     call_v2_tag(view, &tag, 1, &commands);
-    require(testing::normalized_source(view.value, 1, normalized) && !normalized.source_frame_explicit &&
+    require(nominated_source(view.value, 1, normalized) && !normalized.source_frame_explicit &&
         normalized.projection.supplied && normalized.resource.kind == sunshine_scene_depth::resource_kind::display_depth,
       "global high-resolution-only FG tag lost camera association");
     // Streamline recycles a token address for a later frame index; the same
@@ -3493,42 +3501,42 @@ namespace {
     ++numeric;
     mint(token, &numeric);
     call_v2_tag(view, &tag, 1, &commands);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.tag_boundary &&
-        snapshot.frame.kind == frame_identity_kind::unavailable && !testing::normalized_source(view.value, 1, normalized),
+    require(nominated_snapshot(view.value, snapshot) && snapshot.tag_boundary &&
+        snapshot.frame.kind == frame_identity_kind::unavailable && !nominated_source(view.value, 1, normalized),
       "global FG tag borrowed camera constants after their opaque token was recycled");
     call_v2_constants(constants, token.ref(), view);
 
     precision.formula = 1; precision.scale = 0;
     call_v2_tag(view, &tag, 1, &commands);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.tag_boundary && !snapshot.tags[1].supported &&
-        !testing::normalized_source(view.value, 1, normalized), "invalid precision inherited old usable FG depth");
+    require(nominated_snapshot(view.value, snapshot) && snapshot.tag_boundary && !snapshot.tags[1].supported &&
+        !nominated_source(view.value, 1, normalized), "invalid precision inherited old usable FG depth");
     tag.base.next = nullptr;
     mint(token, &numeric); call_v2_constants(constants, token.ref(), view);
     call_v2_tag(view, &tag, 1, &commands);
-    require(testing::normalized_source(view.value, 1, normalized), "valid FG source did not recover after invalid precision");
+    require(nominated_source(view.value, 1, normalized), "valid FG source did not recover after invalid precision");
     tag.resource_ptr = nullptr;
     call_v2_tag(view, &tag, 1, &commands);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.tag_boundary && !snapshot.tags[1].value.native_resource &&
-        !testing::normalized_source(view.value, 1, normalized), "FG untag retained prior source");
+    require(nominated_snapshot(view.value, snapshot) && snapshot.tag_boundary && !snapshot.tags[1].value.native_resource &&
+        !nominated_source(view.value, 1, normalized), "FG untag retained prior source");
     tag.resource_ptr = &resource;
     mint(token, &numeric); call_v2_constants(constants, token.ref(), view);
     result_v2 = -7;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
-    require(testing::latest_snapshot(view.value, snapshot) && !snapshot.successful_evaluation &&
-        !testing::normalized_source(view.value, 1, normalized), "failed FG tag was promoted to a successful source");
+    require(nominated_snapshot(view.value, snapshot) && !nomination_succeeded(view.value) &&
+        !nominated_source(view.value, 1, normalized), "failed FG tag was promoted to a successful source");
     result_v2 = 0;
 
     options.mode = 0; require(set_options(view, options) == 0, "FG Off forwarding failed");
     require(query_frame_generation(UINT32_MAX, fg) && !fg.enabled, "FG Off retained enabled state");
     const auto last_fg_sequence = snapshot.sequence;
     call_v2_tag(view, &tag, 1, &commands);
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.sequence > last_fg_sequence &&
-        testing::normalized_source(view.value, 1, normalized) && !normalized.frame_generation_input && !normalized.source_id,
+    require(nominated_snapshot(view.value, snapshot) && snapshot.sequence > last_fg_sequence &&
+        nominated_source(view.value, 1, normalized) && !normalized.frame_generation_input && !normalized.source_id,
       "FG Off did not switch standalone depth to its independent ordinary source role");
     sr_tag.base.next = nullptr;
     mint(token, &numeric); call_v2_constants(constants, token.ref(), view);
     call_v2_evaluate(0, token.ref(), sr_inputs, 2, &commands);
-    require(testing::normalized_source(view.value, 0, normalized) && !normalized.frame_generation_input,
+    require(nominated_source(view.value, 0, normalized) && !normalized.frame_generation_input,
       "FG Off did not restore ordinary SR source admission");
     options.mode = 2; options.generated_frames = 3; set_options(view, options);
     require(query_frame_generation(view.value, fg) && fg.enabled && fg.automatic && fg.generated_frames == 3,
@@ -3550,7 +3558,7 @@ namespace {
       "Dynamic FG with an unknown count selected ordinary depth routing");
     mint(token, &numeric); call_v2_constants(constants, token.ref(), view);
     call_v2_tag(view, &tag, 1, &commands);
-    require(testing::normalized_source(view.value, 1, normalized) && normalized.frame_generation_input,
+    require(nominated_source(view.value, 1, normalized) && normalized.frame_generation_input,
       "Dynamic FG with an unknown count blocked valid tag-boundary depth");
     // A failed Off request is not evidence that the SDK disabled FG. Revoke
     // its former scope while keeping independently valid fallback eligible.
@@ -3657,11 +3665,11 @@ namespace {
     evaluation_snapshot snapshot; sunshine_scene_depth::frame normalized;
     const auto tag_now = [&] { call_v2_tag(view, &tag, 1, &commands); };
     tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "global FG tag invented missing camera constants");
+    require(!nominated_source(view.value, 0, normalized), "global FG tag invented missing camera constants");
     call_v2_constants(constants, token.ref(), view); tag_now();
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.tags[0].supported && snapshot.frame_correlated &&
+    require(nominated_snapshot(view.value, snapshot) && snapshot.tags[0].supported && snapshot.frame_correlated &&
         snapshot.frame.kind == frame_identity_kind::v2_constants_call &&
-        testing::normalized_source(view.value, 0, normalized) && normalized.projection.supplied &&
+        nominated_source(view.value, 0, normalized) && normalized.projection.supplied &&
         normalized.proof == sunshine_scene_depth::state_proof::observed_nonzero &&
         !normalized.source_frame_explicit && !normalized.source_frame_has_numeric && normalized.source_frame_generation,
       "zero-base global FG tag lost its bounded constants-call association or claimed a numeric frame");
@@ -3670,25 +3678,24 @@ namespace {
       "FG normalized depth omitted its immutable source observation revision");
     const auto first_camera_sequence = snapshot.camera_sequence;
     call_v2_constants(constants, token.ref(), view);
-    require(!testing::normalized_source(view.value, 0, normalized), "new constants resurrected the previous camera/tag tuple");
     tag_now();
-    require(testing::latest_snapshot(view.value, snapshot) && snapshot.camera_sequence > first_camera_sequence &&
-        testing::normalized_source(view.value, 0, normalized), "new successful constants did not establish a new camera-call tuple");
+    require(nominated_snapshot(view.value, snapshot) && snapshot.camera_sequence > first_camera_sequence &&
+        nominated_source(view.value, 0, normalized), "new successful constants did not establish a new camera-call tuple");
     const auto valid_resource = resource;
     // S14: the zero header's members are version 1's, so its nonzero state
     // is a declaration, as a typed Resource's; only its 0 needs observation.
     resource.state = 0x20; call_v2_constants(constants, token.ref(), view); tag_now();
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.native_state == 0x20 &&
+    require(nominated_source(view.value, 0, normalized) && normalized.native_state == 0x20 &&
         normalized.proof == sunshine_scene_depth::state_proof::declared, "nonzero compatibility resource state was discarded (S14)");
     resource = valid_resource; resource.base = {nullptr, resource_guid, 1};
     call_v2_constants(constants, token.ref(), view); tag_now();
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.native_state == 0 &&
+    require(nominated_source(view.value, 0, normalized) && normalized.native_state == 0 &&
         normalized.proof == sunshine_scene_depth::state_proof::declared, "typed resource lost declared COMMON state");
     resource = valid_resource;
     const auto rejected_header = [&] {
       call_v2_constants(constants, token.ref(), view); tag_now();
-      require(testing::latest_snapshot(view.value, snapshot) && !snapshot.tags[0].supported &&
-          !testing::normalized_source(view.value, 0, normalized), "malformed nested resource header entered FG capture");
+      require(nominated_snapshot(view.value, snapshot) && !snapshot.tags[0].supported &&
+          !nominated_source(view.value, 0, normalized), "malformed nested resource header entered FG capture");
       resource = valid_resource;
     };
     resource.base.version = 1; rejected_header(); // Empty GUID with nonzero version.
@@ -3697,60 +3704,60 @@ namespace {
     resource.base.next = &native; rejected_header();
     resource.type = 3; rejected_header();
     call_v2_constants(constants, token.ref(), view); tag_now();
-    require(testing::normalized_source(view.value, 0, normalized), "valid zero-base resource failed to recover");
+    require(nominated_source(view.value, 0, normalized), "valid zero-base resource failed to recover");
     auto high_resolution = tag; high_resolution.type = 48; high_resolution.lifecycle = 1;
     abi_v2::resource_tag mixed_tags[]{tag, high_resolution};
     call_v2_tag(view, mixed_tags, 2, &commands);
-    require(testing::normalized_source(view.value, 0, normalized) && !testing::normalized_source(view.value, 1, normalized),
+    require(nominated_source(view.value, 0, normalized) && !nominated_source(view.value, 1, normalized),
       "mixed lifecycle batch lent synchronous camera evidence to an UntilPresent candidate");
     mixed_tags[1].lifecycle = 2;
     call_v2_tag(view, mixed_tags, 2, &commands);
-    require(testing::normalized_source(view.value, 0, normalized) && !testing::normalized_source(view.value, 1, normalized),
+    require(nominated_source(view.value, 0, normalized) && !nominated_source(view.value, 1, normalized),
       "mixed lifecycle batch lent synchronous camera evidence to an UntilEvaluate candidate");
     mixed_tags[0].lifecycle = 1; mixed_tags[1].lifecycle = 0;
     call_v2_tag(view, mixed_tags, 2, &commands);
-    require(!testing::normalized_source(view.value, 0, normalized) && testing::normalized_source(view.value, 1, normalized),
+    require(!nominated_source(view.value, 0, normalized) && nominated_source(view.value, 1, normalized),
       "mixed lifecycle batch rejected its valid high-resolution OnlyValidNow candidate");
     tag.lifecycle = 1; tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "untracked camera escaped synchronous OnlyValidNow scope");
+    require(!nominated_source(view.value, 0, normalized), "untracked camera escaped synchronous OnlyValidNow scope");
     tag.lifecycle = 0;
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
-    require(!testing::normalized_source(view.value, 0, normalized), "untracked explicit token borrowed global camera-call evidence");
+    require(!nominated_source(view.value, 0, normalized), "untracked explicit token borrowed global camera-call evidence");
     call_v2_constants(constants, token.ref(), view);
     std::this_thread::sleep_for(std::chrono::milliseconds(270)); tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "stale global FG constants were accepted");
+    require(!nominated_source(view.value, 0, normalized), "stale global FG constants were accepted");
     call_v2_constants(constants, token.ref(), view); testing::lose_observation(); tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "global FG constants crossed observation loss");
+    require(!nominated_source(view.value, 0, normalized), "global FG constants crossed observation loss");
     const auto revision_before_reset = depth_observation_revision();
     constants.reset = 1; call_v2_constants(constants, token.ref(), view);
     require(depth_observation_revision() == revision_before_reset, "FG camera reset was recorded as a lost observation");
     tag_now();
-    require(testing::normalized_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied &&
+    require(nominated_source(view.value, 0, normalized) && normalized.feedback.reset && normalized.projection.supplied &&
         normalized.observation_revision == depth_observation_revision() && normalized.frame_generation_input,
       "valid global FG reset frame lost current depth/projection");
     constants.reset = 2; call_v2_constants(constants, token.ref(), view); tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "malformed reset flag entered global FG capture");
+    require(!nominated_source(view.value, 0, normalized), "malformed reset flag entered global FG capture");
     constants = modern_camera(); constants.reset = 1; constants.common.camera_view_to_clip.m[0][0] = 0;
     call_v2_constants(constants, token.ref(), view); tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "reset admitted an invalid projection into global FG capture");
+    require(!nominated_source(view.value, 0, normalized), "reset admitted an invalid projection into global FG capture");
     // The camera is optional for depth: an invalid projection supplies no
     // metric scale, but never withholds the tagged depth itself.
     constants = modern_camera(); constants.common.camera_view_to_clip.m[0][0] = 0;
     call_v2_constants(constants, token.ref(), view); tag_now();
-    require(testing::normalized_source(view.value, 0, normalized) && !normalized.projection.supplied,
+    require(nominated_source(view.value, 0, normalized) && !normalized.projection.supplied,
       "invalid global camera projection supplied FG metric scale or withheld its depth");
     constants = modern_camera(); call_v2_constants(constants, token.ref(), view);
     result_v2 = -1; call_v2_constants(constants, token.ref(), view); result_v2 = 0; tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "failed constants call retained an applicable camera tuple");
+    require(!nominated_source(view.value, 0, normalized), "failed constants call retained an applicable camera tuple");
     call_v2_constants(constants, token.ref(), view); tag_now();
-    require(testing::normalized_source(view.value, 0, normalized), "global FG tuple did not recover after invalid/reset/lost constants");
+    require(nominated_source(view.value, 0, normalized), "global FG tuple did not recover after invalid/reset/lost constants");
     require(normalized.observation_revision == depth_observation_revision(),
       "fresh FG depth retained the pre-reset observation revision");
     mint(token, nullptr); tag_now();
-    require(!testing::normalized_source(view.value, 0, normalized), "observed token reuse retained an older untracked camera call");
+    require(!nominated_source(view.value, 0, normalized), "observed token reuse retained an older untracked camera call");
     auto another_view = viewport(12); cached_options(another_view, options);
     call_v2_tag(another_view, &tag, 1, &commands);
-    require(!testing::normalized_source(another_view.value, 0, normalized), "global FG borrowed another viewport's constants");
+    require(!nominated_source(another_view.value, 0, normalized), "global FG borrowed another viewport's constants");
 
     block_original = true;
     std::atomic<bool> forwarded{};

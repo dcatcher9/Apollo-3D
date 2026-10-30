@@ -101,12 +101,6 @@ namespace sunshine_streamline {
     // An untag at an evaluate: the tag call it ended.
     ended_depth_tag ended;
   };
-  struct evaluated_color_tag {
-    depth_tag value; // Shared resource/extent/lifecycle metadata only; not a depth interpretation.
-    tag_scope scope{};
-    bool present{}, supported{}, identity_available{};
-    std::uint64_t observed_tick{}, observation_sequence{};
-  };
   enum class evidence_status {
     inactive, busy, missing_evaluation, evaluation_failed, observation_lost,
     untracked_frame, missing_constants, rejected_constants, invalid_camera,
@@ -121,15 +115,14 @@ namespace sunshine_streamline {
     decode_status decoded{decode_status::short_buffer};
     frame_identity frame;
     std::array<evaluated_depth_tag, 3> tags{}; // raw, high-resolution raw, linear
-    std::array<evaluated_color_tag, 6> colors{}; // HUDless2, scaling input3/output4 (not observed), backbuffer53, UI23, alpha69
-    std::uint64_t epoch{}, sequence{}, tick{}, camera_tick{}, camera_sequence{}, loss_revision{};
+    std::uint64_t epoch{}, sequence{}, camera_tick{}, camera_sequence{}, loss_revision{};
     sunshine_scene_feedback::sample feedback;
     std::uintptr_t command_buffer{};
     std::uint32_t viewport{}, feature{};
     // Constants and applicable tags were copied before the original evaluation.
     // That does not establish complete native mutation coverage, GPU
     // completion, ReShade presentation or final-color/jitter registration.
-    bool successful_evaluation{}, frame_correlated{};
+    bool frame_correlated{};
     bool tag_boundary{}; // Copied synchronously while an OnlyValidNow tag is valid.
     bool frame_generation_input{}; // An independently observed enabled FG role, not implied by tagging.
     // Depth direction is a fixed convention of a viewport. Without a
@@ -203,12 +196,9 @@ namespace sunshine_streamline {
     counters counts();
     bool latest(std::uint32_t viewport, std::uint64_t &resource, bool &has_camera,
       bool &explicit_same_frame, bool &same_token_address);
-    bool latest_snapshot(std::uint32_t viewport, evaluation_snapshot &out);
-    // Value translation only, never a post-return permission to read the source.
-    bool normalized_source(std::uint32_t viewport, unsigned index, sunshine_scene_depth::frame &out);
     // The nomination tap, on a thread that armed it: nominate_depth_source
     // records the evaluation it received (without its retained sources) and,
-    // as the call begins, what normalized_source replays on a stored one; the
+    // as the call begins, its gates' answers and the depth they admit; the
     // call's finish_capture adds the SDK result. latest_nomination returns a
     // viewport's newest finished nomination of the current observation.
     struct nomination {
@@ -218,7 +208,8 @@ namespace sunshine_streamline {
       std::array<bool, 3> tag_admissible{}; // direct_tag_admissible of each tag.
       // normalize_depth_frame of each tag that the two call gates and its own admit.
       std::array<sunshine_scene_depth::frame, 3> frames{};
-      // normalized_source's answer for snapshot.tags[index].
+      // Value translation only, never a post-return permission to read the
+      // source: whether the call succeeded and the gates admitted snapshot.tags[index].
       bool nominates(unsigned index) const {
         return successful && path_selected && source_admissible && index < tag_admissible.size() && tag_admissible[index];
       }

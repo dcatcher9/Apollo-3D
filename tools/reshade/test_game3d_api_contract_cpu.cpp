@@ -57,14 +57,11 @@
 // a file, each judged hook case appends its JSON line there
 // (test_game3d_api_contract_jsonl.h, Invoke-Game3DContractMatrix.ps1).
 //
-// A Streamline case reads the probe at its copy point twice in one run:
-// through the stored evaluation (testing::latest_snapshot and
-// normalized_source) and through the nomination tap
-// (testing::latest_nomination: what nominate_depth_source received and its
-// gates gave, with the SDK result its finish_capture saw). Both must give the
-// same observations and the same verdict. Where
-// SUNSHINE_CONTRACT_MATRIX_L1_CELLS names a file, it is replaced by one line
-// per judged Streamline case of what the tap gave (tap_line).
+// A Streamline case reads the probe at its copy point through the
+// nomination tap (testing::latest_nomination: what nominate_depth_source
+// received and its gates gave, with the SDK result its finish_capture saw).
+// Where SUNSHINE_CONTRACT_MATRIX_L1_CELLS names a file, it is replaced by one
+// line per judged Streamline case of what the tap gave (tap_line).
 #include "capture_state_policy.h"
 #include "depth_refusal.h"
 #include "depth_view_format.h"
@@ -78,7 +75,6 @@
 #include "test_game3d_api_contract_tally.h"
 #include "test_sl_fixture_sdk.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -87,7 +83,6 @@
 #include <reshade.hpp>
 #include <stdexcept>
 #include <string>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -1362,38 +1357,20 @@ namespace {
     // e31c9d2c).
     constexpr sunshine_streamline::extent changing_from {0, 0, 2206, 1240};
 
-    // A viewport's newest published sequence through the stored evaluation
-    // and through the nomination tap.
-    struct sequences {
-      std::uint64_t stored {}, tapped {};
-    };
-
-    sequences latest_sequence(std::uint32_t viewport) {
-      sequences out;
-      sunshine_streamline::evaluation_snapshot snapshot;
-      out.stored = sunshine_streamline::testing::latest_snapshot(viewport, snapshot) ? snapshot.sequence : 0;
+    // A viewport's newest published sequence through the nomination tap.
+    std::uint64_t latest_sequence(std::uint32_t viewport) {
       sunshine_streamline::testing::nomination nomination;
-      out.tapped = sunshine_streamline::testing::latest_nomination(viewport, nomination) ? nomination.snapshot.sequence : 0;
-      return out;
+      return sunshine_streamline::testing::latest_nomination(viewport, nomination) ? nomination.snapshot.sequence : 0;
     }
 
-    void observe(observation &out, std::uint32_t viewport, const sequences &before) {
-      out.published = sunshine_streamline::testing::latest_snapshot(viewport, out.snapshot) && out.snapshot.sequence > before.stored;
-      out.nominated = out.published && sunshine_streamline::testing::normalized_source(viewport, 0, out.frame);
+    void observe(observation &out, std::uint32_t viewport, std::uint64_t before) {
       auto &tap = out.tap;
-      tap.published = sunshine_streamline::testing::latest_nomination(viewport, tap.nomination) && tap.nomination.snapshot.sequence > before.tapped;
+      tap.published = sunshine_streamline::testing::latest_nomination(viewport, tap.nomination) && tap.nomination.snapshot.sequence > before;
       tap.nominated = tap.published && tap.nomination.nominates(0);
-    }
-
-    // The observation through the tap alone, as the cells read it once the
-    // stored evaluation is gone.
-    observation through_tap(const observation &value) {
-      auto out = value;
-      out.published = value.tap.published;
-      out.nominated = value.tap.nominated;
-      out.snapshot = value.tap.nomination.snapshot;
-      out.frame = value.tap.nominated ? value.tap.nomination.frames[0] : sunshine_scene_depth::frame {};
-      return out;
+      out.published = tap.published;
+      out.nominated = tap.nominated;
+      out.snapshot = tap.nomination.snapshot;
+      out.frame = tap.nominated ? tap.nomination.frames[0] : sunshine_scene_depth::frame {};
     }
 
     // One case through the real hooks: frame-generation options, then four
@@ -1721,73 +1698,8 @@ namespace {
       out.verdict = gaps::judge_each(gaps::sl_rows, out.value, out.satisfied, {out.actual, out.twin_same && out.continuous}, out.matched);
     }
 
-    bool same_frame(const sunshine_scene_depth::frame &a, const sunshine_scene_depth::frame &b) {
-      const auto &p = a.projection, &q = b.projection;
-      const auto &r = a.resource, &s = b.resource;
-      return a.epoch == b.epoch && a.sequence == b.sequence && a.viewport == b.viewport && p.depth_offset == q.depth_offset && p.depth_scale == q.depth_scale &&
-             p.supplied == q.supplied && p.reversed == q.reversed && p.direction_supplied == q.direction_supplied && p.raw_scale == q.raw_scale && p.raw_bias == q.raw_bias &&
-             p.encoding == q.encoding && a.jitter.x == b.jitter.x && a.jitter.y == b.jitter.y && a.jitter.width == b.jitter.width && a.jitter.height == b.jitter.height &&
-             a.jitter.supplied == b.jitter.supplied && r.native == s.native && r.width == s.width && r.height == s.height && r.area.left == s.area.left && r.area.top == s.area.top &&
-             r.area.width == s.area.width && r.area.height == s.area.height && r.kind == s.kind && r.native_format == s.native_format && a.native_state == b.native_state &&
-             a.proof == b.proof && a.valid_until == b.valid_until && a.provider == b.provider && a.source_id == b.source_id && a.source_frame_generation == b.source_frame_generation &&
-             a.source_frame_token == b.source_frame_token && a.source_frame_numeric == b.source_frame_numeric && a.source_frame_has_numeric == b.source_frame_has_numeric &&
-             a.source_frame_explicit == b.source_frame_explicit && a.frame_generation_input == b.frame_generation_input && a.observation_revision == b.observation_revision &&
-             a.feedback.revision == b.feedback.revision && a.feedback.reset == b.feedback.reset;
-    }
-
-    // Where the stored evaluation's observation and the tap's differ: every
-    // field the cells read, the frame but its tick (normalize_depth_frame's
-    // clock), and the status only where both nominate (finish_evaluation
-    // marks a failed call in the stored copy, after the tap).
-    const char *differs(const observation &a, const observation &b) {
-      if (a.published != b.published || a.nominated != b.nominated) {
-        return "published or nominated";
-      }
-      if (a.published) {
-        const auto &x = a.snapshot, &y = b.snapshot;
-        if (x.sequence != y.sequence || x.epoch != y.epoch || x.viewport != y.viewport || x.feature != y.feature || x.tag_boundary != y.tag_boundary || x.frame_generation_input != y.frame_generation_input || x.command_buffer != y.command_buffer || x.frame.kind != y.frame.kind) {
-          return "snapshot";
-        }
-        for (std::size_t i = 0; i != x.tags.size(); ++i) {
-          const auto &s = x.tags[i], &t = y.tags[i];
-          if (s.present != t.present || s.supported != t.supported || s.scope != t.scope || s.own_frame != t.own_frame || s.value.lifecycle != t.value.lifecycle || s.value.type != t.value.type || s.value.refusal != t.value.refusal || s.value.native_resource != t.value.native_resource) {
-            return "snapshot tag";
-          }
-        }
-      }
-      if (a.nominated && (a.snapshot.status != b.snapshot.status || !same_frame(a.frame, b.frame))) {
-        return "status or frame";
-      }
-      return nullptr;
-    }
-
-    std::string differs(const judgement &a, const judgement &b) {
-      for (const auto &[what, x, y] : {std::tuple {"observed", &a.observed, &b.observed}, std::tuple {"previous", &a.previous, &b.previous}, std::tuple {"twin", &a.twin, &b.twin}}) {
-        if (const auto *field = differs(*x, *y)) {
-          return std::string(what) + " " + field;
-        }
-      }
-      const auto &p = a.actual, &q = b.actual;
-      if (p.kind != q.kind || p.why != q.why || p.basis.enhanced != q.basis.enhanced || p.basis.state != q.basis.state || p.basis.layout != q.basis.layout || p.basis.access != q.basis.access || p.basis_known != q.basis_known || p.deferred != q.deferred) {
-        return "admission";
-      }
-      if (a.twin_checked != b.twin_checked || a.twin_same != b.twin_same || a.continuity_checked != b.continuity_checked || a.continuous != b.continuous) {
-        return "twin or continuity";
-      }
-      if (a.satisfied != b.satisfied || a.verdict != b.verdict || !std::equal(std::begin(a.matched), std::end(a.matched), std::begin(b.matched))) {
-        return "verdict";
-      }
-      return {};
-    }
-
-    void describe(const char *what, const generator::family &owner, const generator::row &assignment, const judgement &value);
-
     // Any complete assignment, legal or not: illegal input must be refused.
-    // One run reads the probe through the stored evaluation
-    // (testing::latest_snapshot, normalized_source) and through the
-    // nomination tap; both must give the same observations and the same
-    // verdict. tapped: the case through the tap alone.
-    judgement judge(const generator::row &assignment, judgement *tapped = nullptr) {
+    judgement judge(const generator::row &assignment) {
       judgement out;
       out.value = to_case(assignment);
       out.legal = legal(assignment);
@@ -1796,30 +1708,13 @@ namespace {
       out.observed = run(out.value, &out.previous);
       require(out.observed.forwarded, "the probe changed a Streamline result or LastError");
       require(out.observed.installed || out.value.version.major != 2, "the probe did not hook a 2.x fixture SDK");
-      auto through = out;
-      through.observed = through_tap(out.observed);
-      through.previous = through_tap(out.previous);
       admit(out);
-      admit(through);
       if (out.legal && matrix::permits(out.expected, matrix::outcome_kind::capture) && newer_struct(out.value)) {
         const auto twin = newest_twin(out.value);
         out.twin = run(twin);
-        through.twin = through_tap(out.twin);
         admit_twin(out, twin);
-        admit_twin(through, twin);
       }
       conclude(out);
-      conclude(through);
-      if (const auto field = differs(out, through); !field.empty()) {
-        const auto owner = family();
-        describe("stored evaluation", owner, assignment, out);
-        describe("nomination tap", owner, assignment, through);
-        std::fprintf(stderr, "  the tap differs in: %s\n", field.c_str());
-        require(false, "the nomination tap and the stored evaluation disagree on a Streamline hook cell");
-      }
-      if (tapped) {
-        *tapped = through;
-      }
       return out;
     }
 
@@ -2177,10 +2072,9 @@ namespace {
       if (!options.selected(i)) {
         continue;
       }
-      sl_cells::judgement tapped;
-      const auto value = sl_cells::judge(streamline[i], &tapped);
+      const auto value = sl_cells::judge(streamline[i]);
       if (tap_lines.is_open()) {
-        tap_lines << sl_cells::tap_line(sl, streamline[i], tapped) << '\n';
+        tap_lines << sl_cells::tap_line(sl, streamline[i], value) << '\n';
       }
       if (lines.is_open()) {
         lines << game3d_contract::jsonl::line("L1", sl, streamline[i], sl_cells::seed_name(sl, streamline[i]), value.legal, value.expected, value.actual, value.verdict, gaps::sl_rows, value.matched).dump() << '\n';

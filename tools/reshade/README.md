@@ -1585,11 +1585,10 @@ pair of DXGI allocation and declared formats through
 The hook layer drives the real adapters without a device. Streamline cases go through the probe's
 own hooks on fixture entry points (`testing::install` takes the release's version number and selects
 the ABI and buffer contract as discovery does for that version resource). Each case reads the probe
-at its copy point twice in one run, through the stored evaluation (`testing::latest_snapshot` and
-`normalized_source`) and through the nomination tap (`testing::latest_nomination`: what
-`nominate_depth_source` received and its gates gave, with the SDK result its `finish_capture` saw),
-and both must give the same observations and verdict; where `SUNSHINE_CONTRACT_MATRIX_L1_CELLS`
-names a file, it is replaced by one line per Streamline case of what the tap gave. They cover the full
+at its copy point through the nomination tap (`testing::latest_nomination`: what
+`nominate_depth_source` received and its gates gave, with the SDK result its `finish_capture` saw);
+where `SUNSHINE_CONTRACT_MATRIX_L1_CELLS` names a file, it is replaced by one line per Streamline
+case of what the tap gave. They cover the full
 product of tag entry point, lifecycle, command list, copy point and generated Presents; every
 other value alone; a pairwise covering array over all dimensions, seeded with rows from the games
 the add-on was tuned on; and one row per owner question the known-gap table held pending (S14 and
