@@ -1428,6 +1428,48 @@ RWTexture2D<float> depth : register(u0);
       mode=capture_mode::v1_observed_state;
       settle("v1-fresh-nonzero-recovery");verify_depth();
       std::puts("PASS V1 omitted state rejects missing/COMMON proof; actual same-recording nonzero transitions capture correct pixels and recover");
+      {
+        // An effect reload with Game 3D unticked: Generic Depth's reload
+        // handler finds the native driver off, so it resets the API
+        // provider's runtime state (provider::reload: ownership, readiness
+        // and binding caches) instead of only refreshing the FX bindings it
+        // keeps while Game 3D renders (depth_addon.cpp
+        // on_reload_effect_runtime). The exporter's reload resets its record
+        // of the runtime as well (exporter.cpp invalidate: native can be
+        // re-enabled after a disabled reload), so the last native render
+        // reads sequence 0 until Game 3D renders again. Ticked again, the SL
+        // source establishes itself anew and renders projection stereo. The
+        // trace records the reset as T8 site provider_runtime_reload
+        // (refactor plan 3.4, the runtime reload case).
+        settle("before-disabled-reload");
+        direct_native.set_enabled(false);
+        // The next Present tells Generic Depth the native driver is off.
+        for(unsigned i=0;i<4;++i) { step(); direct_native.no_effects(); }
+        require(direct_native.last_render().sequence==rendered_sequence,"A Present rendered native Game 3D while it was disabled");
+        if(query_provider_status) require(query_provider_status(observed.runtime,&provider),"SL provider UI observation failed");
+        const bool selected_before=query_provider_status && provider.selected;
+        const auto reloads=observed.reloads;
+        observed.runtime->reload_effect_next_frame(nullptr);
+        const auto reload_until=GetTickCount64()+15000;
+        unsigned disabled_presents=4;
+        do { step(); direct_native.no_effects(); ++disabled_presents; } while(observed.reloads==reloads && GetTickCount64()<reload_until);
+        require(observed.reloads>reloads,"An effect reload with Game 3D disabled did not complete");
+        for(unsigned i=0;i<4;++i) { step(); direct_native.no_effects(); ++disabled_presents; }
+        const auto after_reload=direct_native.last_render().sequence;
+        require(after_reload==0 || after_reload==rendered_sequence,"A Present rendered native Game 3D while it was disabled");
+        bool selected_after=false;
+        if(query_provider_status) {
+          require(query_provider_status(observed.runtime,&provider),"SL provider UI observation failed");
+          selected_after=provider.selected;
+        }
+        rendered_sequence=after_reload;
+        direct_native.set_enabled(true);
+        settle("enabled-after-disabled-reload");
+        std::printf("MEASURE disabled-reload disabled_presents=%u render_sequence_after_reload=%llu provider_selected_before=%d provider_selected_after=%d\n",
+          disabled_presents,static_cast<unsigned long long>(after_reload),int(selected_before),int(selected_after));
+        require(!selected_after,"An effect reload with Game 3D disabled kept the API provider's ownership");
+        std::puts("PASS an effect reload with Game 3D disabled resets the API provider's runtime state; enabled again, Game 3D renders projection stereo from a new SL copy");
+      }
       std::puts("PASS actual native copy/queue/fence/projection/HDR regression; no generic DSV dependency or fabricated GPU readiness; no FX");
       render_tracked_depth={};
       reshade::unregister_event<reshade::addon_event::reset_command_list>(observe_reset);
