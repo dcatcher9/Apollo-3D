@@ -44,7 +44,6 @@
 #include "streamline_depth_provider.h"
 #include "streamline_native_observer.h"
 #include "native_resource_identity.h"
-#include "camera_sample_observation.h"
 #include "game3d_slow_step.h"
 #include "game3d_frame_record.h"
 #include "depth_addon_test_access.h"
@@ -423,7 +422,6 @@ static captured_depth capture_record(effect_runtime *runtime, const generic_dept
 	resource sampled = source;
 	uint64_t assignment = identity;
 	bool published = true;
-	auto displayed_copy = info.last_frame_stats.depth_copy;
 	if (using_backup)
 	{
 		const auto backup = std::find_if(device_data.depth_stencil_backups.begin(), device_data.depth_stencil_backups.end(),
@@ -435,7 +433,6 @@ static captured_depth capture_record(effect_runtime *runtime, const generic_dept
 			const auto &ticket = info.last_frame_stats.capture_ticket;
 			published = ticket && backup->published_ticket == ticket.id &&
 				backup->published_present == device_data.native_present_index;
-			if (presentation) displayed_copy = backup->published_depth_copy;
 			if (!presentation)
 			{
 				sampled = {ticket.texture}; assignment = ticket.resource_id;
@@ -463,10 +460,6 @@ static captured_depth capture_record(effect_runtime *runtime, const generic_dept
 	depth.layout_epoch = info.layout_epoch; depth.frame_index = info.last_used_in_frame; depth.runtime_epoch = data.runtime_epoch;
 	depth.detected_orientation = info.orientation_evidence.detected();
 	depth.orientation_agreeing_frames = info.orientation_evidence.agreeing_frames();
-	// The capture marker is the actual preserved copy's recording, also when a
-	// D3D12 backup is published later on the runtime's own list (the displayed
-	// copy below): that forward records no command evidence of its own.
-	depth.capture_marker = info.last_frame_stats.capture_marker; depth.depth_copy = displayed_copy;
 	depth.ready = out.current(device_data.native_present_index, device_data.frame_index, data.runtime_epoch);
 	lock.unlock();
 	if (view != 0 && runtime->get_device()->get_resource_from_view(view) != sampled) return {};
@@ -665,7 +658,6 @@ static void publish_preserved_depth(effect_runtime *runtime, command_list *comma
 	}
 	if (!sunshine_streamline::depth_capture::copy_preserved(commands->get_native(), runtime->get_command_queue()->get_native(),
 		ticket, destination.handle, D3D12_RESOURCE_STATE_COPY_DEST)) return;
-	sunshine_streamline::content::copy_snapshot presented;
 	const std::unique_lock<std::shared_mutex> lock(s_mutex);
 	for (auto &backup : device_data.depth_stencil_backups)
 		if (backup.backup_texture == destination) backup.content_serial = ++device_data.next_content_serial;
@@ -676,7 +668,6 @@ static void publish_preserved_depth(effect_runtime *runtime, command_list *comma
 		device_data.frame_index != frame || device_data.native_present_index != present) return;
 	view->published_ticket = ticket.id;
 	view->published_present = present;
-	view->published_depth_copy = presented;
 }
 
 static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *commands,
@@ -719,7 +710,6 @@ static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *com
 			++data->end_of_frame_refused;
 			data->end_of_frame_refusal = refusal.stage;
 		}
-		sunshine_streamline::content::copy_snapshot copied;
 		{
 			const std::unique_lock<std::shared_mutex> lock(s_mutex);
 			const auto found = device_data.depth_stencil_resources.find(source);
@@ -733,7 +723,6 @@ static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *com
 				return;
 			}
 			stats.capture_ticket = std::move(ticket);
-			stats.depth_copy = copied; stats.capture_marker = copied.recording;
 			stats.copied_during_frame = true; stats.copied_viewport = copied_viewport;
 			stats.end_of_frame_copy = true;
 			observe_preserved_layout(found->second, stats);
@@ -817,8 +806,6 @@ static void preserve_depth_at_effects(effect_runtime *runtime, command_list *cmd
 	stats.copy_provenance_ambiguous = false;
 	stats.end_of_frame_copy = true;
 	observe_preserved_layout(found->second, stats);
-	stats.depth_copy = {};
-	stats.capture_marker = stats.depth_copy.recording;
 }
 
 bool sunshine_depth::copy_selected_depth(effect_runtime *runtime, command_list *commands,
@@ -2386,21 +2373,8 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 		binding.camera.frame = { captured.record.frame, captured.record.runtime };
 		binding.camera.source = binding.selection.original;
 		binding.projection_associated = false;
-		const auto &copy = captured.metadata.depth_copy;
-		binding.copy = sunshine_camera_binding::observed_copy_key(copy);
 		binding.capture_frame = captured.record.frame;
 		binding.capture_ms = now;
-		if (sunshine_streamline::enabled())
-		{
-			// This is the actual submitted backup, not a subsequently selected
-			// source or a camera fetched when its asynchronous readback arrives.
-			auto frame = captured.metadata;
-			if (device->get_api() == device_api::d3d12) frame.command_queue = runtime->get_command_queue()->get_native();
-			const auto selected = sunshine_depth::camera_selection_snapshot(frame);
-			sunshine_streamline::evaluation_snapshot evidence;
-			sunshine_streamline::query_evaluation(selected, evidence);
-			sunshine_camera_binding::capture_camera_observation(binding, selected, evidence);
-		}
 		data.raw_sample_binding.cancel(); // Sampler is idle; no valid old slot remains.
 		if (data.raw_sample_binding.begin(binding, now, request.capture_id) == sunshine_camera_binding::status::submitted)
 		{
@@ -3698,100 +3672,6 @@ std::uint32_t sunshine_depth::validate_raw_history(effect_runtime *runtime,
 		live |= std::uint32_t{1} << i;
 	}
 	return live;
-}
-
-bool sunshine_depth::get_latest_camera_observation(effect_runtime *runtime,
-	sunshine_camera_binding::submission &output, std::uint64_t &capture_id)
-{
-	output = {};
-	capture_id = 0;
-	if (!sunshine_streamline::enabled()) return false;
-	// Reuse the production current-selection/lifetime/viewport/freshness checks.
-	// This diagnostic is throttled; it does not add work to disabled gameplay.
-	sunshine_raw_scene::sample sample;
-	if (!get_latest_raw_sample(runtime, sample)) return false;
-	auto *data = runtime->get_private_data<generic_depth_data>();
-	const auto *member = raw_member(*data, sample.metadata.source.lifetime);
-	if (!member) return false;
-	output = member->submission;
-	output.camera.proof_admitted = false;
-	capture_id = sample.id;
-	return true;
-}
-
-void sunshine_depth::report_camera_observations(effect_runtime *runtime, const sunshine_streamline::selected_depth &selected)
-{
-	if (!sunshine_streamline::enabled() || !s_registered || runtime == nullptr) return;
-	auto *data = runtime->get_private_data<generic_depth_data>();
-	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
-	if (!data || !device_data) return;
-	const auto now = GetTickCount64();
-	if (now < data->next_camera_observation_report) return;
-	data->next_camera_observation_report = now + 5000;
-	char text[1400];
-	sunshine_camera_binding::submission sample;
-	std::uint64_t capture = 0;
-	const bool available = get_latest_camera_observation(runtime, sample, capture);
-	const auto &observation = sample.observation;
-	std::snprintf(text, sizeof(text),
-		"Sunshine camera sample: current_selection_sample=%d capture=%llu capture_frame=%llu source=%llu backup=%llu copy=%llu status=%s binding=%s level=%s projection_observed=%d evaluation=%llu camera_sequence=%llu frame_kind=%u numeric_frame=%llu token_generation=%llu capture_tick=%llu evaluation_tick=%llu A=%.17g B=%.17g proof_admitted=0 geometry_unchanged=1",
-		available ? 1 : 0, static_cast<unsigned long long>(capture), static_cast<unsigned long long>(sample.capture_frame),
-		static_cast<unsigned long long>(sample.selection.original.lifetime), static_cast<unsigned long long>(sample.selection.sampled.lifetime),
-		static_cast<unsigned long long>(sample.copy.copy_id), sunshine_streamline::name(static_cast<sunshine_streamline::evidence_status>(observation.evidence_status)),
-		sunshine_camera_binding::name(observation.binding), sunshine_camera_binding::name(observation.level),
-		sample.projection_associated ? 1 : 0, static_cast<unsigned long long>(observation.sequence),
-		static_cast<unsigned long long>(observation.camera_sequence), observation.frame_kind,
-		static_cast<unsigned long long>(observation.frame_numeric), static_cast<unsigned long long>(observation.frame_generation),
-		static_cast<unsigned long long>(sample.capture_ms), static_cast<unsigned long long>(observation.tick), sample.camera.A, sample.camera.B);
-	sunshine_log::message(reshade::log::level::info, text);
-
-	sunshine_streamline::evaluation_snapshot evidence;
-	sunshine_streamline::query_evaluation(selected, evidence);
-	struct lookup {
-		bool present{}, known{}, current{}, copied{}, ambiguous{}, selected{};
-		std::uint64_t native{}, lifetime{}, layout{}, last_frame{};
-		std::uint32_t type{}, width{}, height{}, format{};
-		capture_region region;
-	};
-	std::array<lookup, 3> found{};
-	bool map_busy = false;
-	{
-		const std::shared_lock<std::shared_mutex> lock(s_mutex, std::try_to_lock);
-		map_busy = !lock.owns_lock();
-		if (!map_busy) for (std::size_t i = 0; i != evidence.tags.size(); ++i)
-		{
-			const auto &tag = evidence.tags[i];
-			if (!tag.present || !tag.value.native_resource) continue;
-			auto &entry = found[i];
-			entry.present = true; entry.native = tag.value.native_resource; entry.type = tag.value.type;
-			const auto candidate = device_data->depth_stencil_resources.find(resource{entry.native});
-			if (candidate == device_data->depth_stencil_resources.end()) continue;
-			const auto &info = candidate->second;
-			entry.known = true; entry.lifetime = info.identity; entry.layout = info.layout_epoch;
-			entry.width = info.desc.texture.width; entry.height = info.desc.texture.height; entry.format = static_cast<std::uint32_t>(info.desc.texture.format);
-			entry.last_frame = info.last_used_in_frame; entry.current = info.last_used_in_frame == device_data->frame_index;
-			entry.copied = info.last_frame_stats.copied_during_frame; entry.ambiguous = info.last_frame_stats.copy_provenance_ambiguous;
-			entry.selected = candidate->first == data->selected_depth_stencil && info.identity == data->selected_identity;
-			entry.region = effective_capture_region(info);
-		}
-	}
-	if (map_busy)
-	{
-		sunshine_log::message(reshade::log::level::info,
-			"Sunshine camera depth lookup: status=resource-map-busy lookup_available=0 geometry_unchanged=1");
-		return;
-	}
-	for (const auto &entry : found) if (entry.present)
-	{
-		std::snprintf(text, sizeof(text),
-			"Sunshine camera depth lookup: evaluation=%llu type=%u native=0x%llx known=%d source=%llu size=%ux%u format=%u region=%u,%u,%u,%u layout=%llu last_frame=%llu current=%d copied=%d ambiguous=%d selected=%d address_lookup_only=1 geometry_unchanged=1",
-			static_cast<unsigned long long>(evidence.sequence), entry.type, static_cast<unsigned long long>(entry.native), entry.known ? 1 : 0,
-			static_cast<unsigned long long>(entry.lifetime), entry.width, entry.height, entry.format,
-			entry.region.x, entry.region.y, entry.region.width, entry.region.height, static_cast<unsigned long long>(entry.layout),
-			static_cast<unsigned long long>(entry.last_frame), entry.current ? 1 : 0, entry.copied ? 1 : 0,
-			entry.ambiguous ? 1 : 0, entry.selected ? 1 : 0);
-		sunshine_log::message(reshade::log::level::info, text);
-	}
 }
 
 bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &output, depth_orientation orientation_override, bool request_calibration)

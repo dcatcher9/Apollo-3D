@@ -53,7 +53,6 @@
 #include "streamline_depth_capture.h"
 #include "streamline_depth_provider.h"
 #include "native_resource_identity.h"
-#include "camera_sample_observation.h"
 #include "game3d_slow_step.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -130,8 +129,6 @@ struct depth_stencil_frame_stats
 	draw_stats total;
 	viewport copied_viewport = {}; // Last submitted copy, independent of greatest workload.
 	bool copy_provenance_ambiguous = false;
-	sunshine_streamline::commands::recording_marker capture_marker {};
-	sunshine_streamline::content::copy_snapshot depth_copy {};
 	bool copied_during_frame = false;
 	// Pixel storage and GPU lifetime belong to the common capture owner. This
 	// lease survives recording reset until the submitted frame is consumed.
@@ -304,8 +301,6 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 			{
 				stats.copied_viewport = source_stats.copied_viewport;
 				stats.copy_provenance_ambiguous = source_stats.copy_provenance_ambiguous;
-				stats.capture_marker = source_stats.capture_marker;
-				stats.depth_copy = source_stats.depth_copy;
 				stats.capture_ticket = source_stats.capture_ticket;
 			}
 
@@ -350,7 +345,6 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
     sunshine_raw_scene::selected_frame raw_pending_metadata;
     sunshine_camera_binding::submission raw_latest_submission;
     sunshine_raw_scene::sample raw_latest_sample;
-    uint64_t next_camera_observation_report = 0;
 	struct raw_member_sample
 	{
 		uint64_t identity = 0, next_tick = 0;
@@ -510,7 +504,6 @@ struct depth_stencil_backup
 	// This allocation is a stable shader/probe presentation surface. D3D12
 	// end-of-frame pixels are owned by capture_ticket, never by this cache.
 	uint64_t published_ticket = 0, published_present = 0;
-	sunshine_streamline::content::copy_snapshot published_depth_copy {};
 	// Changes with every copy written into the backup (both APIs), so a held
 	// capture can prove its pixels are still the ones it showed; zero: none.
 	uint64_t content_serial = 0;
@@ -700,7 +693,6 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 				backup.destroy_after_frame = std::numeric_limits<uint64_t>::max();
 				backup.content_identity = sunshine_native_identity::allocate_identity();
 				backup.published_ticket = backup.published_present = 0;
-				backup.published_depth_copy = {};
 				backup.content_serial = 0;
 				backup.content_layout_supported = content_supported(existing_desc);
 

@@ -74,7 +74,6 @@ namespace sunshine_streamline {
       bool present{}, supported{};
       std::uint64_t serial{}, loss{};
       frame_identity frame;
-      std::uint64_t resource_lifetime{}, resource_device{};
       std::uint32_t native_state{0xffffffffu};
       bool state_requires_observation{};
       // Its call supplied a command list (an evaluate input's evaluation always does).
@@ -140,13 +139,6 @@ namespace sunshine_streamline {
     // particular there is no destructible C++ mutex or worker used by detours.
     SRWLOCK presentations_lock = SRWLOCK_INIT;
     SRWLOCK poll_lock = SRWLOCK_INIT;
-    SRWLOCK source_resources_lock = SRWLOCK_INIT;
-    struct source_resource { std::uint64_t native{}, lifetime{}, device{}; };
-    std::array<source_resource, 512> source_resources{};
-    std::atomic<bool> source_resources_lost{};
-#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-    std::atomic<unsigned> source_lifecycle_waiters{};
-#endif
     struct metadata_state {
       viewport_record records[slot_count]{};
       frame_record frames[frame_count]{};
@@ -489,51 +481,6 @@ namespace sunshine_streamline {
       if (type == buffers::scaling_input_color || type == buffers::scaling_output_color)
         return static_cast<unsigned>(observed_tag_types.size());
       return slot_of(type);
-    }
-    // Lifecycle-only table: no draw callbacks, COM/GPU calls, or nested locks.
-    // These rare, bounded metadata updates must not drop a destroy event or
-    // forget every existing resource merely because a reader held the table.
-    void source_resource_event(std::uint64_t native, std::uint64_t lifetime, std::uint64_t device, bool add) {
-      const auto generation = observation_generation.load(std::memory_order_acquire);
-      if (!source_requested.load(std::memory_order_acquire) || !native || !lifetime) return;
-#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-      ++source_lifecycle_waiters;
-#endif
-      AcquireSRWLockExclusive(&source_resources_lock);
-#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-      --source_lifecycle_waiters;
-#endif
-      if (!source_requested.load(std::memory_order_acquire) ||
-          generation != observation_generation.load(std::memory_order_acquire)) {
-        ReleaseSRWLockExclusive(&source_resources_lock); return;
-      }
-      if (source_resources_lost.exchange(false, std::memory_order_acq_rel)) source_resources.fill({});
-      source_resource *empty = nullptr;
-      for (auto &entry : source_resources) {
-        if (!entry.native && !empty) empty = &entry;
-        if (entry.native != native) continue;
-        if (add) entry = {native, lifetime, device};
-        else if (entry.lifetime == lifetime) entry = {};
-        ReleaseSRWLockExclusive(&source_resources_lock); return;
-      }
-      if (add && empty) *empty = {native, lifetime, device};
-      else if (add) {
-        source_resources_lost.store(true, std::memory_order_release);
-        dropped_observation(loss_diagnostics::reason::resource_table_full, __func__, 556, {});
-      }
-      ReleaseSRWLockExclusive(&source_resources_lock);
-    }
-    source_resource source_identity(std::uint64_t native) {
-      source_resource result;
-      const auto generation = observation_generation.load(std::memory_order_acquire);
-      if (!source_requested.load(std::memory_order_acquire) || !native) return result;
-      AcquireSRWLockShared(&source_resources_lock);
-      if (source_requested.load(std::memory_order_acquire) &&
-          generation == observation_generation.load(std::memory_order_acquire) &&
-          !source_resources_lost.load(std::memory_order_acquire))
-        for (const auto &entry : source_resources) if (entry.native == native) { result = entry; break; }
-      ReleaseSRWLockShared(&source_resources_lock);
-      return result;
     }
     std::uint64_t observation_ticket() {
       const auto ticket = observation_generation.load(std::memory_order_acquire);
@@ -1049,7 +996,7 @@ namespace sunshine_streamline {
         const bool at_boundary = local && tag == &local->tags[i];
         auto &value = out.tags[i];
         value = {tag->value, tag->source == origin::local ? tag_scope::evaluation_local :
-          tag->source == origin::frame ? tag_scope::explicit_frame : tag_scope::active_global, true, tag->supported, {}, {}, {}};
+          tag->source == origin::frame ? tag_scope::explicit_frame : tag_scope::active_global, true, tag->supported, {}, {}};
         value.value.observation_epoch = out.epoch;
         value.observed_tick = at_boundary ? local->tick : tag->tick;
         value.observation_sequence = at_boundary ? serial : tag->serial;
@@ -1082,13 +1029,6 @@ namespace sunshine_streamline {
         }
         value.precision_scale = tag->precision_scale;
         value.precision_bias = tag->precision_bias;
-        const auto identity = source_identity(value.value.native_resource);
-        // Freeze only the same lifetime seen when tagging; a recycled pointer
-        // cannot acquire a fresh identity just because evaluation comes later.
-        if (identity.lifetime == tag->resource_lifetime && identity.device == tag->resource_device) {
-          value.resource_lifetime = identity.lifetime;
-          value.resource_device = identity.device;
-        }
         const auto tag_loss = at_boundary ? local->loss : tag->loss;
         if (tag_loss != loss) {
           if (out.status == evidence_status::source_associated_evaluation) out.status = evidence_status::observation_lost;
@@ -1281,9 +1221,6 @@ namespace sunshine_streamline {
       if (value.supported && index < 3)
         value.direct_source = depth_capture::retain_source(value.value.native_resource);
       value.source_present_generation = depth_capture::source_present_generation(value.direct_source);
-      const auto identity = source_identity(value.value.native_resource);
-      value.resource_lifetime = identity.lifetime;
-      value.resource_device = identity.device;
       // An opaque FrameToken address can be reused. Its identity is diagnostic
       // only and must never be promoted to an exact numeric frame identifier.
       value.value.explicit_frame = false;
@@ -1434,9 +1371,6 @@ namespace sunshine_streamline {
             if (tag.supported && index < 3)
               tag.direct_source = depth_capture::retain_source(tag.value.native_resource);
             tag.source_present_generation = depth_capture::source_present_generation(tag.direct_source);
-            const auto identity = source_identity(tag.value.native_resource);
-            tag.resource_lifetime = identity.lifetime;
-            tag.resource_device = identity.device;
           } else {
             invalid_observation(loss_diagnostics::reason::invalid_input, __func__, 1787);
             out.count = index + 1;
@@ -1466,7 +1400,7 @@ namespace sunshine_streamline {
     const char *source_rejection(const evaluation_snapshot &snapshot) {
       // A depth tag names the renderer's source independently of whether its
       // optional camera matrices can supply a scale. Preserve the stricter
-      // camera status for diagnostic queries rather than upgrading that evidence.
+      // camera status rather than upgrading it.
       switch (snapshot.status) {
         case evidence_status::source_associated_evaluation:
         case evidence_status::camera_reset:
@@ -3039,10 +2973,6 @@ namespace sunshine_streamline {
     source_requested.store(false, std::memory_order_release);
     observing.store(false, std::memory_order_release);
     observation_generation.fetch_add(1, std::memory_order_acq_rel);
-    AcquireSRWLockExclusive(&source_resources_lock);
-    source_resources.fill({});
-    source_resources_lost.store(false, std::memory_order_release);
-    ReleaseSRWLockExclusive(&source_resources_lock);
     addon_module = addon;
     // ReShade may re-register this process-pinned add-on after device recreation.
     // Keep the existing hooks and only start a fresh observation epoch.
@@ -3059,8 +2989,6 @@ namespace sunshine_streamline {
     ReleaseSRWLockExclusive(&poll_lock);
     message("Sunshine Streamline: diagnostic probe disabled; command/content tracking is off");
   }
-  // Constant false: the StreamlineCameraProbe research ledger was removed.
-  bool enabled() { return false; }
   bool source_enabled() { return source_requested.load(std::memory_order_acquire); }
   std::uint64_t depth_observation_revision() { return loss_revision.load(std::memory_order_acquire); }
   bool query_depth_observation_loss(std::uint64_t revision, loss_diagnostics::event &out) {
@@ -3222,178 +3150,6 @@ namespace sunshine_streamline {
     report_deferrals();
     SetLastError(incoming);
     return recorded;
-  }
-
-  void depth_resource_initialized(std::uint64_t native, std::uint64_t lifetime, std::uint64_t device, bool supported) {
-    if (supported) source_resource_event(native, lifetime, device, true);
-  }
-  void depth_resource_destroyed(std::uint64_t native, std::uint64_t lifetime) {
-    source_resource_event(native, lifetime, 0, false);
-  }
-
-  evidence_status query_depth_source(depth_source_snapshot &output, std::uint32_t max_age_ms) {
-    output = {};
-    const auto fail = [&](evidence_status status) { output.status = status; output.tags = {}; return status; };
-    const auto ticket = observation_ticket();
-    if (!source_enabled() || !ticket) return fail(evidence_status::inactive);
-    auto pin = read_metadata();
-    if (!pin) return fail(evidence_status::missing_evaluation);
-    const auto loss = loss_revision.load(std::memory_order_acquire);
-    const auto now = GetTickCount64();
-    const viewport_record *chosen = nullptr;
-    unsigned recent_viewports = 0;
-    for (const auto &record : pin->records) {
-      const auto &value = record.evaluation;
-      if (!value.sequence) continue;
-      if (!chosen || value.sequence > chosen->evaluation.sequence) chosen = &record;
-      if (sunshine_freshness::fresh_le(value.tick, now, max_age_ms)) ++recent_viewports;
-    }
-    auto status = evidence_status::missing_evaluation;
-    if (chosen) {
-      const auto &value = chosen->evaluation;
-      output.epoch = value.epoch; output.sequence = value.sequence; output.tick = value.tick;
-      output.loss_revision = value.loss_revision; output.frame = value.frame; output.viewport = value.viewport;
-      status = value.status;
-      const auto *frame = find_frame(*pin, value.viewport, value.frame);
-      if (recent_viewports > 1) status = evidence_status::ambiguous_viewport;
-      else if (status == evidence_status::source_associated_evaluation) {
-        if (!value.successful_evaluation || !value.frame_correlated || !value.projection.valid()) status = evidence_status::invalid_camera;
-        else if (value.loss_revision != loss) status = evidence_status::observation_lost;
-        else if (!token_current(*pin, value.frame)) status = evidence_status::untracked_frame;
-        else if (!frame || frame->camera_serial != value.camera_sequence) status = evidence_status::stale;
-        else if (!sunshine_freshness::fresh_le(value.tick, now, max_age_ms) ||
-            !sunshine_freshness::fresh_le(value.camera_tick, now, max_age_ms)) status = evidence_status::stale;
-      }
-      if (status == evidence_status::source_associated_evaluation) {
-        bool available = false;
-        for (unsigned order = 0; order != depth_priority.size(); ++order) {
-          const unsigned index = depth_priority[order];
-          const auto &tag = value.tags[index];
-          if (!tag.present || !tag.value.native_resource) continue;
-          if (!tag.supported || match({value.viewport, value.epoch, 0, false}, tag.value) != match_status::same_epoch_only) {
-            status = evidence_status::unsupported_depth; break;
-          }
-          if (tag.scope != tag_scope::evaluation_local) {
-            const auto *active = tag.scope == tag_scope::active_global ? &chosen->active_tags[index] :
-              frame ? &frame->tags[index] : nullptr;
-            if (!active || !active->present || !active->supported ||
-                active->value.native_resource != tag.value.native_resource || active->value.lifecycle != tag.value.lifecycle ||
-                active->value.resource_width != tag.value.resource_width || active->value.resource_height != tag.value.resource_height ||
-                active->resource_lifetime != tag.resource_lifetime || active->resource_device != tag.resource_device ||
-                std::memcmp(&active->value.area, &tag.value.area, sizeof(extent)) != 0) {
-              status = evidence_status::source_mismatch; break;
-            }
-          }
-          // This identity was bound before the evaluation, not looked up and
-          // attached to an old tag after a native pointer was recycled.
-          const auto live = source_identity(tag.value.native_resource);
-          if (!tag.resource_lifetime || !tag.resource_device ||
-              live.lifetime != tag.resource_lifetime || live.device != tag.resource_device) continue;
-          output.tags[order] = {tag.value, tag.resource_lifetime, tag.resource_device, true};
-          available = true;
-        }
-        if (status == evidence_status::source_associated_evaluation && !available) status = evidence_status::missing_depth;
-      }
-    }
-    pin.reset();
-    if (!current(ticket) || !source_enabled()) return fail(evidence_status::inactive);
-    if (loss != loss_revision.load(std::memory_order_acquire) || source_resources_lost.load(std::memory_order_acquire))
-      return fail(evidence_status::observation_lost);
-    if (status != evidence_status::source_associated_evaluation) return fail(status);
-    output.status = status;
-    return status;
-  }
-
-  evidence_status query_evaluation(const selected_depth &selected, evaluation_snapshot &output, std::uint32_t max_age_ms) {
-    output = {};
-    const auto ticket = observation_ticket();
-    const auto fail = [&](evidence_status status) { output.status = status; return status; };
-    if (!ticket || !enabled()) return fail(evidence_status::inactive);
-    if (!selected.ready || !selected.resource || !selected.width || !selected.height ||
-        !selected.active_width || !selected.active_height ||
-        static_cast<std::uint64_t>(selected.x) + selected.active_width > selected.width ||
-        static_cast<std::uint64_t>(selected.y) + selected.active_height > selected.height)
-      return fail(evidence_status::depth_not_ready);
-    auto pin = read_metadata();
-    if (!pin) return fail(evidence_status::missing_evaluation);
-    const auto loss = loss_revision.load(std::memory_order_acquire);
-    const auto now = GetTickCount64();
-    evaluation_snapshot newest;
-    bool found = false, ambiguous = false;
-    for (const auto &record : pin->records) {
-      const auto &candidate = record.evaluation;
-      if (!candidate.sequence) continue;
-      if (candidate.sequence > newest.sequence) newest = candidate;
-      unsigned matching = static_cast<unsigned>(candidate.tags.size());
-      bool source_seen = false;
-      auto status = candidate.status;
-      const auto *frame_state = find_frame(*pin, candidate.viewport, candidate.frame);
-      // Generic ReShade depth evidence has no linear-encoding transport. Native
-      // provider capture handles tag49 with its explicit encoding instead.
-      for (unsigned i = 0; i != 2; ++i) {
-        const auto &tag = candidate.tags[i];
-        if (!tag.present || tag.value.native_resource != selected.resource) continue;
-        source_seen = true;
-        const auto paired = match({candidate.viewport, candidate.epoch, 0, false}, tag.value);
-        if (!tag.supported || paired != match_status::same_epoch_only) {
-          if (candidate.status == evidence_status::source_associated_evaluation) status = evidence_status::unsupported_depth;
-          continue;
-        }
-        // A null extent is the whole allocation (normalized_extent, S16).
-        const auto area = sunshine_api_contract::normalized_extent(tag.value.area, selected.width, selected.height);
-        if ((tag.value.resource_width && tag.value.resource_width != selected.width) ||
-            (tag.value.resource_height && tag.value.resource_height != selected.height) ||
-            area.left != selected.x || area.top != selected.y || area.width != selected.active_width ||
-            area.height != selected.active_height) {
-          if (candidate.status == evidence_status::source_associated_evaluation) status = evidence_status::extent_mismatch;
-          continue;
-        }
-        // A global tag changed after evaluation entry. The old immutable tuple
-        // remains diagnostic evidence but is no longer an applicable binding.
-        if (tag.scope != tag_scope::evaluation_local) {
-          const auto *active = tag.scope == tag_scope::active_global ? &record.active_tags[i] :
-            frame_state ? &frame_state->tags[i] : nullptr;
-          if (!active || !active->present || !active->supported ||
-              active->value.native_resource != tag.value.native_resource || active->value.lifecycle != tag.value.lifecycle ||
-              active->value.resource_width != tag.value.resource_width || active->value.resource_height != tag.value.resource_height ||
-              std::memcmp(&active->value.area, &tag.value.area, sizeof(extent)) != 0) {
-            if (candidate.status == evidence_status::source_associated_evaluation) status = evidence_status::source_mismatch;
-            continue;
-          }
-        }
-        matching = i;
-        status = candidate.status;
-        break;
-      }
-      if (!source_seen) continue;
-      if (found) { ambiguous = true; continue; }
-      found = true;
-      output = candidate;
-      output.selection = selected;
-      if (matching != candidate.tags.size()) output.matched_tag = matching;
-      if (status == evidence_status::source_associated_evaluation) {
-        if (!candidate.successful_evaluation || !candidate.frame_correlated || !candidate.projection.valid()) status = evidence_status::invalid_camera;
-        else if (candidate.loss_revision != loss) status = evidence_status::observation_lost;
-        else if (!token_current(*pin, candidate.frame)) status = evidence_status::untracked_frame;
-        else if (!frame_state || frame_state->camera_serial != candidate.camera_sequence) status = evidence_status::stale;
-        else if (!sunshine_freshness::fresh_le(candidate.tick, now, max_age_ms) ||
-            !sunshine_freshness::fresh_le(candidate.camera_tick, now, max_age_ms)) status = evidence_status::stale;
-      }
-      output.status = status;
-    }
-    pin.reset();
-    if (!current(ticket)) return fail(evidence_status::inactive);
-    if (loss != loss_revision.load(std::memory_order_acquire)) return fail(evidence_status::observation_lost);
-    if (ambiguous) return fail(evidence_status::ambiguous_viewport);
-    if (!found) {
-      output = newest;
-      output.selection = selected;
-      return fail(!newest.sequence ? evidence_status::missing_evaluation :
-        newest.status == evidence_status::source_associated_evaluation ? evidence_status::source_mismatch : newest.status);
-    }
-    if (!current(ticket)) return fail(evidence_status::inactive);
-    if (loss != loss_revision.load(std::memory_order_acquire)) return fail(evidence_status::observation_lost);
-    return output.status;
   }
 
   bool query_ui_scope(std::uint32_t viewport, ui_observation_scope &output, std::uint32_t max_age_ms) {
@@ -3764,7 +3520,7 @@ namespace sunshine_streamline {
     }
   }
 
-  void poll(const selected_depth &) {
+  void poll() {
     const bool api_requested = middleware_requested() || sunshine_upscaler_trace::enabled() ||
       sunshine_upscaler_trace::capture_enabled();
     if (!api_requested && !depth_capture::active()) return;
@@ -3836,9 +3592,6 @@ namespace sunshine_streamline {
       }
       return false;
     }
-    void lock_source_resources() { AcquireSRWLockExclusive(&source_resources_lock); }
-    void unlock_source_resources() { ReleaseSRWLockExclusive(&source_resources_lock); }
-    unsigned waiting_source_resources() { return source_lifecycle_waiters.load(std::memory_order_acquire); }
     thread_local metadata_owner::transaction held_metadata_writer;
     thread_local metadata_owner::read_pin held_metadata_reader;
     void lock_records() { while (!(held_metadata_writer = metadata.try_write())) SwitchToThread(); }

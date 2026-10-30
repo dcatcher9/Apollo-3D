@@ -48,50 +48,9 @@ namespace sunshine_camera_binding {
         crop == r.crop && layout_epoch == r.layout_epoch;
     }
   };
-  struct depth_copy_key {
-    // Opaque captured provenance; zero means unknown. Association never promotes
-    // these fields into proof. Later copies of the same backup must not rewrite
-    // this submission's key, camera or frame metadata.
-    std::uint64_t copy_id{}, ledger_epoch{}, recording_command{}, recording_generation{};
-    std::uint64_t source_content_version{}, backup_registration{};
-  };
-  enum class observation_level { unavailable, source, command, content };
-  enum class observation_binding_status { unavailable, captured, selection_mismatch, copy_mismatch, rejected_camera, rejected_frame };
-  inline const char *name(observation_level value) noexcept {
-    switch (value) {
-      case observation_level::source: return "source";
-      case observation_level::command: return "command";
-      case observation_level::content: return "content-coverage-incomplete";
-      default: return "unavailable";
-    }
-  }
-  inline const char *name(observation_binding_status value) noexcept {
-    switch (value) {
-      case observation_binding_status::captured: return "captured";
-      case observation_binding_status::selection_mismatch: return "selection-mismatch";
-      case observation_binding_status::copy_mismatch: return "copy-mismatch";
-      case observation_binding_status::rejected_camera: return "rejected-camera";
-      case observation_binding_status::rejected_frame: return "rejected-frame";
-      default: return "unavailable";
-    }
-  }
-  struct camera_observation {
-    // Opaque Streamline evidence/frame discriminants, retained as values without
-    // importing native hooks into this transport. Their meanings come from the
-    // probe enums. A source match is explicitly weaker than a content match.
-    std::uint32_t evidence_status{}, frame_kind{}, viewport{}, tag_type{};
-    std::uint64_t epoch{}, sequence{}, camera_sequence{}, tick{}, camera_tick{}, loss_revision{};
-    std::uint64_t frame_generation{}, frame_numeric{};
-    std::uintptr_t frame_token{};
-    bool frame_has_numeric{};
-    observation_level level{observation_level::unavailable};
-    observation_binding_status binding{observation_binding_status::unavailable};
-  };
   struct submission {
     scene::registration camera;
     selection_key selection;
-    depth_copy_key copy;
-    camera_observation observation;
     std::uint64_t capture_frame{}, capture_ms{};
     bool projection_associated{}; // Caller observed this camera/source pairing.
     // Freeze the requested point layout with the crop. Defaults preserve the

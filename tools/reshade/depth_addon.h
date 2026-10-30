@@ -5,8 +5,6 @@
 #include <Unknwn.h>
 #include <reshade_api.hpp>
 #include "native_depth_calibration.h"
-#include "streamline_command_association.h"
-#include "streamline_depth_content.h"
 #include "raw_scene_policy.h"
 #include "raw_scene_pool.h"
 #include "camera_sample_binding.h"
@@ -52,10 +50,6 @@ namespace sunshine_depth {
     std::uint64_t source_id = 0, layout_epoch = 0, frame_index = 0;
     std::uint64_t runtime_epoch = 0;
     bool aligned_viewport_assumed = false;
-    // Observed command recording for the actual preserved copy. This is not a
-    // source-content or final-color correspondence proof.
-    sunshine_streamline::commands::recording_marker capture_marker {};
-    sunshine_streamline::content::copy_snapshot depth_copy {};
     std::uint64_t backup_id = 0;
     std::uint64_t command_queue = 0;
     bool ready = false;
@@ -82,19 +76,6 @@ namespace sunshine_depth {
     reshade::api::command_list *commands, const sunshine_streamline::depth_capture::packet &selection,
     reshade::api::resource destination, frame_depth &captured,
     sunshine_streamline::depth_capture::consumer_diagnostic *diagnostic = nullptr);
-
-  // Shared value-only conversion for both effects diagnostics and the exact
-  // preserved source/backup that is about to be sampled. No GPU calls or proof.
-  inline sunshine_streamline::selected_depth camera_selection_snapshot(const frame_depth &depth) {
-    sunshine_streamline::selected_depth selected;
-    selected.resource = depth.source_resource.handle; selected.source_id = depth.source_id;
-    selected.layout_epoch = depth.layout_epoch; selected.frame_index = depth.frame_index;
-    selected.capture_marker = depth.capture_marker; selected.command_queue = depth.command_queue;
-    selected.depth_copy = depth.depth_copy; selected.backup_resource = depth.resource.handle; selected.backup_id = depth.backup_id;
-    selected.width = depth.width; selected.height = depth.height; selected.x = depth.x; selected.y = depth.y;
-    selected.active_width = depth.active_width; selected.active_height = depth.active_height; selected.ready = depth.ready;
-    return selected;
-  }
 
   // Read immediately after this module's reshade_begin_effects callback and
   // before reshade_finish_effects. Handles are borrowed for that callback only;
@@ -126,12 +107,4 @@ namespace sunshine_depth {
   // The mask indexes the supplied immutable history snapshot; no GPU access.
   std::uint32_t validate_raw_history(reshade::api::effect_runtime *runtime,
     const std::array<sunshine_raw_scene::source_basis, sunshine_raw_scene::maximum_history_sources> &history);
-  // Probe-only value copy; changed selection/lifetime/layout and stale samples
-  // fail closed. This API cannot enable either numerical policy or rendering.
-  bool get_latest_camera_observation(reshade::api::effect_runtime *runtime,
-    sunshine_camera_binding::submission &output, std::uint64_t &capture_id);
-  // Throttled lookup of up to three observed depth tags in the existing resource
-  // map, and reporting of submission-bound observations. Never selects a buffer.
-  void report_camera_observations(reshade::api::effect_runtime *runtime,
-    const sunshine_streamline::selected_depth &selected);
 }

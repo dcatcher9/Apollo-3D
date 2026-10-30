@@ -179,11 +179,6 @@ namespace sunshine_streamline::provider {
       out.x = packet.area.left; out.y = packet.area.top;
       out.active_width = packet.area.width; out.active_height = packet.area.height;
       out.command_queue = packet.queue;
-      // Retain the upstream preserved-copy observation through the owned
-      // display copy. These IDs describe that capture, not the display texture
-      // or a color/depth frame match. Native snapshots leave them unavailable.
-      out.capture_marker = captured.capture_marker;
-      out.depth_copy = captured.depth_copy;
       out.backup_id = captured.backup_id;
       out.ready = true;
       out.aligned_viewport_assumed = true;

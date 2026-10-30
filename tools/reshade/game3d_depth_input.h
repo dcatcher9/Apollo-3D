@@ -43,7 +43,7 @@ namespace sunshine_game3d::depth_input {
   void invalidate_reuse(reshade::api::effect_runtime *runtime);
   void set_ready(reshade::api::effect_runtime *runtime, bool ready);
 
-  // Passive hook discovery and optional camera/effects-input diagnostics.
+  // Passive hook discovery.
   // The selected frame is immutable input; this cannot select a different
   // resource, enable calibration or associate unrelated camera/depth evidence.
   void observe(reshade::api::effect_runtime *runtime, reshade::api::command_list *commands,

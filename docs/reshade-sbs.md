@@ -5573,16 +5573,6 @@ nothing and takes no writer, so the about 30 requests a frame from several threa
 Camera reset, SDK failures, token-generation checks, resource lifetimes and depth expiry remain
 authoritative.
 
-When the diagnostic is enabled, the actual depth-sampling submission freezes a compact camera
-observation in its existing immutable sample envelope. The coefficients, evidence level and
-evaluation identity must agree with that submission's source, lifetime, crop and preserved-copy
-facts. The capture owner's frame and Streamline's frame remain separate. Readback cannot attach
-a newer camera to older pixels, and rejected observations clear the coefficients. All observation
-levels retain `proof_admitted=false`; none authorizes rendering. Throttled diagnostics may inspect
-up to three tagged addresses in the selector's existing resource map with a nonblocking lock.
-Unknown or busy lookups remain explicit and never override selection. These queries, lookups and
-reports are skipped when the probe is disabled.
-
 Once hooked, the observer module and interposer remain resident until process exit so in-flight
 return paths remain valid. Disabling/unloading the add-on stops observation and leaves safe
 pass-through calls; updating the DLL therefore requires a game restart.
@@ -5596,10 +5586,8 @@ tag boundary independently of FG. Legacy Reflex uses the apparent viewport argum
 
 The observer separately retains HUD-less, backbuffer, UIColorAndAlpha and UIAlpha tags (scaling
 input and output colors are not observed). Live UI capture at tag boundaries independent of FG is described under the UI protection
-contract; merely retaining diagnostic color metadata does not authorize a mask. Actual effects-input
-identity comes from ReShade's begin-effects render-target view,
-which may differ from the swapchain after a resolve/copy. These are frame, identity and
-declared-extent observations; none establishes final spatial alignment.
+contract; merely retaining diagnostic color metadata does not authorize a mask. These are frame,
+identity and declared-extent observations; none establishes final spatial alignment.
 
 ### Controlled camera-depth candidate
 
@@ -6062,9 +6050,9 @@ shader compilation failure disables sampling permanently. Reuse introduces no wa
 in-flight sample.
 
 Selection takes one owned, contiguous snapshot of resource identity, dimensions, activity and
-capture-region facts under the tracking lock, then releases that lock before device calls. It
-does not copy camera-observation records. One eligibility-pruning pass removes destroyed and
-filtered candidates while retaining evidence for live eligible sources during inactivity.
+capture-region facts under the tracking lock, then releases that lock before device calls. One
+eligibility-pruning pass removes destroyed and filtered candidates while retaining evidence for
+live eligible sources during inactivity.
 
 `depth_capture_policy.h` separates the bounded source budget, immutable current capture records,
 and pure current-copy selection. Independently useful sources with matching dimensions, format

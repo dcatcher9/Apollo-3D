@@ -589,13 +589,6 @@ namespace {
       captured.source_id = 7;
       captured.backup_id = 231;
       captured.frame_index = 11190;
-      captured.capture_marker = {400, 8, 9, 10, 11, 0};
-      captured.depth_copy.state = content::status::valid_observation;
-      captured.depth_copy.copy_id = 541;
-      captured.depth_copy.source.resource = {100, 7};
-      captured.depth_copy.source.version = 812;
-      captured.depth_copy.backup = {300, 231};
-      captured.depth_copy.recording = captured.capture_marker;
       sunshine_depth::frame_depth out;
       provider::test_describe_copied_depth(out, packet, captured, {500}, {501}, 11193);
       require(out.ready && out.resource.handle == 500 && out.shader_resource.handle == 501 &&
@@ -603,23 +596,14 @@ namespace {
           out.source_id == 9 && out.width == 2228 && out.height == 1256 && out.active_height == 1253 &&
           out.command_queue == 200 && out.orientation == sunshine_depth::depth_orientation::reversed,
         "Preservation diagnostics replaced the renderer's current display or SDK metadata");
-      require(out.backup_id == 231 && out.capture_marker.command == 400 && out.capture_marker.event == 10 &&
-          out.depth_copy.valid() && out.depth_copy.copy_id == 541 &&
-          out.depth_copy.source.resource.lifetime == 7 && out.depth_copy.source.version == 812 &&
-          out.depth_copy.backup.native == 300 && out.depth_copy.backup.lifetime == 231 &&
-          content::same_recording(out.depth_copy.recording, captured.capture_marker),
+      require(out.backup_id == 231,
         "SDK display publication discarded the preserved depth's copy/content/recording identity");
-      const auto selected = sunshine_depth::camera_selection_snapshot(out);
-      require(selected.capture_marker.command == 400 && selected.depth_copy.copy_id == 541 && selected.backup_id == 231,
-        "Renderer diagnostic selection discarded the consumed preservation provenance");
 
       // Independent native snapshots do not supply ReShade preservation
       // metadata. An already populated output must not retain the prior copy.
       ++packet.metadata.sequence;
       provider::test_describe_copied_depth(out, packet, {}, {500}, {501}, 11194);
-      require(out.ready && out.provided.sequence == 10473 && !out.backup_id && !out.capture_marker &&
-          out.depth_copy.state == content::status::unavailable && !out.depth_copy.copy_id &&
-          !out.depth_copy.source.version && !out.depth_copy.backup.lifetime,
+      require(out.ready && out.provided.sequence == 10473 && !out.backup_id,
         "An unobserved native snapshot inherited or invented preservation provenance");
     }
 

@@ -36,8 +36,7 @@ namespace {
     value.width = 1920; value.height = 1080;
     value.x = 13; value.y = 19; value.active_width = 1600; value.active_height = 900;
     value.source_id = 23; value.layout_epoch = 61; value.frame_index = 71; value.runtime_epoch = 73;
-    value.aligned_viewport_assumed = true; value.capture_marker = {79, 83, 89, 97, 101, 103};
-    value.depth_copy.copy_id = 107; value.depth_copy.backup = {53, 109}; value.backup_id = 109;
+    value.aligned_viewport_assumed = true; value.backup_id = 109;
     value.command_queue = 113; value.ready = true; value.frame_generation_active = true;
     value.detected_orientation = sunshine_depth::depth_orientation::reversed;
     value.orientation = sunshine_depth::depth_orientation::normal;
@@ -92,12 +91,6 @@ namespace {
       a.aligned_viewport_assumed == b.aligned_viewport_assumed && a.backup_id == b.backup_id &&
       a.command_queue == b.command_queue && a.ready == b.ready && a.frame_generation_active == b.frame_generation_active,
       "hold changed private copy identity, crop or source policy");
-    require(a.capture_marker.command == b.capture_marker.command &&
-      a.capture_marker.object_generation == b.capture_marker.object_generation &&
-      a.capture_marker.recording_generation == b.capture_marker.recording_generation &&
-      a.capture_marker.event == b.capture_marker.event && a.capture_marker.epoch == b.capture_marker.epoch &&
-      a.capture_marker.loss == b.capture_marker.loss && a.depth_copy.copy_id == b.depth_copy.copy_id &&
-      content::same(a.depth_copy.backup, b.depth_copy.backup), "hold changed copy provenance");
     require(a.detected_orientation == b.detected_orientation && a.orientation == b.orientation &&
       a.orientation_agreeing_frames == b.orientation_agreeing_frames && a.calibrated == b.calibrated &&
       a.calibration_samples == b.calibration_samples && a.calibration_frame == b.calibration_frame &&

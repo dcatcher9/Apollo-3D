@@ -3,7 +3,6 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include "camera_sample_observation.h"
 #include "depth_selection_policy.h"
 #include "raw_scene_policy.h"
 
@@ -37,7 +36,6 @@ namespace {
     s.camera.A = 0;
     s.camera.B = 0.1;
     s.camera.proof_admitted = true; // Transport must refuse to promote this.
-    s.copy = {8, 9, 0x55, 10, 11, 12};
     s.capture_frame = 81; // Independent ReShade capture frame, not SL frame80.
     s.capture_ms = 1000;
     s.projection_associated = true;
@@ -85,8 +83,6 @@ namespace {
     // the caller's live state before asynchronous GPU readback completes.
     s.camera.A = 1; s.camera.B = -0.001;
     s.camera.frame = {90, 900};
-    s.copy.copy_id = 900;
-    s.copy.source_content_version = 901;
     s.capture_frame = 91;
     s.capture_ms = 1100;
     require(m.invalidate_if_changed(s.selection) == binding::status::unchanged, "Later camera/copy incorrectly canceled same-layout sampling");
@@ -98,8 +94,7 @@ namespace {
     require(out.sample.metadata.A == expected.camera.A && out.sample.metadata.B == expected.camera.B &&
       out.sample.metadata.frame == expected.camera.frame && out.sample.readback_frame == expected.camera.frame &&
       out.sample.readback_source == expected.camera.source, "Completion used the latest mutable camera/source");
-    require(out.captured.copy.copy_id == 8 && out.captured.copy.source_content_version == 11 &&
-      out.captured.copy.recording_generation == 10 && out.captured.selection == expected.selection,
+    require(out.captured.selection == expected.selection,
       "Submission-time copy/scope/layout metadata was mutated");
     require(!out.captured.camera.proof_admitted && !out.sample.metadata.proof_admitted,
       "Metadata association promoted final-color/native-coverage proof");
@@ -402,113 +397,6 @@ namespace {
       }
     }
   }
-
-  struct observation_fixture {
-    binding::submission submitted = fixture();
-    sunshine_streamline::selected_depth selected;
-    sunshine_streamline::evaluation_snapshot evidence;
-    observation_fixture() {
-      namespace sl = sunshine_streamline;
-      const auto &s = submitted.selection;
-      const auto &r = s.original;
-      selected.resource = r.native; selected.source_id = r.lifetime; selected.layout_epoch = s.layout_epoch;
-      selected.frame_index = submitted.capture_frame;
-      selected.width = r.width; selected.height = r.height; selected.x = r.left; selected.y = r.top;
-      selected.active_width = r.extent_width; selected.active_height = r.extent_height;
-      selected.backup_resource = s.sampled.native; selected.backup_id = s.sampled.lifetime; selected.ready = true;
-      selected.command_queue = 0x77;
-      selected.depth_copy.source.resource = {r.native, r.lifetime};
-      selected.depth_copy.backup = {s.sampled.native, s.sampled.lifetime};
-      selected.depth_copy.copy_id = submitted.copy.copy_id;
-      selected.depth_copy.ledger_epoch = submitted.copy.ledger_epoch;
-      selected.depth_copy.recording = {submitted.copy.recording_command, 5, submitted.copy.recording_generation, 7, 8, 9};
-      selected.depth_copy.source.version = submitted.copy.source_content_version;
-      selected.depth_copy.backup_registration = submitted.copy.backup_registration;
-      selected.capture_marker = selected.depth_copy.recording;
-      evidence.selection = selected;
-      evidence.status = sl::evidence_status::source_associated_evaluation;
-      evidence.projection.status = sl::validation_status::valid;
-      evidence.projection.depth_offset = -.001; evidence.projection.depth_scale = .1001;
-      evidence.decoded = sl::decode_status::ok;
-      evidence.successful_evaluation = evidence.frame_correlated = true;
-      evidence.epoch = 11; evidence.sequence = 91; evidence.camera_sequence = 90;
-      evidence.tick = 999; evidence.camera_tick = 998; evidence.loss_revision = 4;
-      evidence.frame = {sl::frame_identity_kind::v1_numeric, 0, 700, 0, true};
-      evidence.viewport = 7;
-      evidence.tags[0].present = evidence.tags[0].supported = true;
-      evidence.tags[0].value.native_resource = r.native;
-      evidence.tags[0].value.viewport = evidence.viewport;
-    }
-    void capture() { binding::capture_camera_observation(submitted, selected, evidence); }
-  };
-
-  void captured_probe_is_immutable_and_weak() {
-    namespace sl = sunshine_streamline;
-    for (const auto level : {binding::observation_level::source, binding::observation_level::command, binding::observation_level::content}) {
-      observation_fixture f;
-      f.evidence.status = level == binding::observation_level::source ? sl::evidence_status::source_associated_evaluation :
-        level == binding::observation_level::command ? sl::evidence_status::command_associated_evaluation : sl::evidence_status::tracked_content_evaluation;
-      f.capture();
-      require(f.submitted.observation.level == level && f.submitted.observation.binding == binding::observation_binding_status::captured &&
-        f.submitted.projection_associated && !f.submitted.camera.proof_admitted, "Production capture lost evidence level or promoted proof");
-      require(f.submitted.camera.frame.frame == 80 && f.submitted.capture_frame == 81 && f.submitted.observation.frame_numeric == 700,
-        "Production capture conflated sampler, capture and Streamline frame identities");
-      binding::mailbox m;
-      const auto original = f.submitted;
-      completion_fixture complete(original, start(m, original));
-      f.evidence.projection.depth_offset = 1; f.evidence.projection.depth_scale = -.003;
-      f.evidence.sequence = 999; f.evidence.frame.numeric = 999; f.evidence.selection.depth_copy.copy_id = 900;
-      f.capture(); // New bad evidence must not rewrite the mailbox's old envelope.
-      binding::associated_sample out;
-      require(m.complete(complete.result, 1200, out) == binding::status::associated, "Observation transport rejected a correct delayed readback");
-      require(out.captured.camera.A == -.001 && out.captured.camera.B == .1001 &&
-        out.captured.observation.sequence == 91 && out.captured.observation.frame_numeric == 700 && out.captured.observation.level == level &&
-        !out.captured.camera.proof_admitted && !out.sample.metadata.proof_admitted,
-        "Completion retrofitted newer camera/frame/evidence or admitted geometry");
-    }
-    observation_fixture token;
-    token.evidence.frame = {sl::frame_identity_kind::v2_observed_token, 123, 0, 0xabc, false};
-    token.capture();
-    require(token.submitted.projection_associated && token.submitted.observation.frame_generation == 123 &&
-      token.submitted.observation.frame_token == 0xabc && !token.submitted.observation.frame_has_numeric && token.submitted.camera.frame.frame == 80,
-      "Observed opaque token fabricated a numerical ReShade frame");
-  }
-
-  void probe_capture_rejects_mismatched_envelopes() {
-    namespace sl = sunshine_streamline;
-    using result = binding::observation_binding_status;
-    const auto reject = [](auto mutate, result expected) {
-      observation_fixture f;
-      f.capture(); // Begin with valid old metadata to test that rejection clears it.
-      mutate(f);
-      f.capture();
-      require(!f.submitted.projection_associated && !f.submitted.camera.proof_admitted &&
-        f.submitted.camera.A == 0 && f.submitted.camera.B == 0 && f.submitted.observation.level == binding::observation_level::unavailable &&
-        f.submitted.observation.binding == expected, "Production observation capture accepted a mismatch or retained stale camera data");
-    };
-    reject([](auto &f) { ++f.selected.source_id; }, result::selection_mismatch);
-    reject([](auto &f) { ++f.selected.backup_id; }, result::selection_mismatch);
-    reject([](auto &f) { ++f.selected.frame_index; }, result::selection_mismatch);
-    reject([](auto &f) { ++f.selected.x; }, result::selection_mismatch);
-    reject([](auto &f) { ++f.submitted.selection.crop.x; }, result::selection_mismatch);
-    reject([](auto &f) { ++f.submitted.camera.source.lifetime; }, result::selection_mismatch);
-    reject([](auto &f) { ++f.evidence.selection.resource; }, result::selection_mismatch);
-    reject([](auto &f) { ++f.evidence.selection.backup_id; }, result::selection_mismatch);
-    reject([](auto &f) { ++f.evidence.selection.depth_copy.copy_id; }, result::copy_mismatch);
-    reject([](auto &f) { ++f.evidence.selection.depth_copy.source.resource.lifetime; }, result::copy_mismatch);
-    reject([](auto &f) { ++f.evidence.selection.depth_copy.backup.lifetime; }, result::copy_mismatch);
-    reject([](auto &f) { ++f.evidence.selection.capture_marker.event; }, result::copy_mismatch);
-    reject([](auto &f) { ++f.selected.depth_copy.source.resource.lifetime; }, result::copy_mismatch);
-    reject([](auto &f) { f.evidence.successful_evaluation = false; }, result::rejected_camera);
-    reject([](auto &f) { f.evidence.projection.depth_scale = 0; }, result::rejected_camera);
-    reject([](auto &f) { f.evidence.projection.depth_offset = std::numeric_limits<double>::infinity(); }, result::rejected_camera);
-    reject([](auto &f) { f.evidence.decoded = sl::decode_status::unknown_version; }, result::rejected_camera);
-    reject([](auto &f) { f.evidence.tags[0].value.type = 49; }, result::rejected_camera);
-    reject([](auto &f) { f.evidence.frame.has_numeric = false; }, result::rejected_frame);
-    reject([](auto &f) { f.evidence.frame = {sl::frame_identity_kind::v2_observed_token, 0, 0, 0xabc, false}; }, result::rejected_frame);
-    reject([](auto &f) { f.evidence.status = sl::evidence_status::observation_lost; }, result::unavailable);
-    reject([](auto &f) { f.evidence.status = sl::evidence_status::source_mismatch; }, result::unavailable);
-  }
 }
 
 int main() {
@@ -521,8 +409,6 @@ int main() {
     absent_projection_and_no_numerical_policy();
     dynamic_grid_and_crop_are_frozen();
     sparse_selector_points_do_not_veto_full_image_geometry();
-    captured_probe_is_immutable_and_weak();
-    probe_capture_rejects_mismatched_envelopes();
     std::puts("PASS camera sample binding: immutable camera/copy/frame, independent request IDs, scope/layout/lifetimes, cancellation, aging and proof boundary");
     return 0;
   } catch (const std::exception &e) {

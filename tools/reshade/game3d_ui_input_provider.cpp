@@ -167,7 +167,7 @@ namespace sunshine_game3d::ui_input {
     presentation result;
     if (sunshine_streamline::query_frame_generation(UINT32_MAX, fg))
       result.mode = {fg.known, fg.enabled, fg.automatic, fg.generated_frames, fg.viewport, fg.epoch, fg.sequence};
-    result.observer_active = sunshine_streamline::source_enabled() || sunshine_streamline::enabled();
+    result.observer_active = sunshine_streamline::source_enabled();
     return result;
   }
   source_alpha_ui_decision resolve(source_alpha_ui_policy &policy, const render_settings &settings, const presentation &observed) {

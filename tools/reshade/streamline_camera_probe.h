@@ -6,36 +6,16 @@
 #include <array>
 #include "streamline_camera_data.h"
 #include "scene_feedback.h"
-#include "streamline_command_association.h"
-#include "streamline_depth_content.h"
 #include "streamline_depth_capture.h"
 #include "frame_generation_inputs.h"
 #include "freshness.h"
 #include "observation_loss_journal.h"
 
 namespace sunshine_streamline {
-  struct effects_input_observation {
-    std::uint64_t runtime{}, device{}, resource{}, command{};
-    std::uint32_t width{}, height{}, format{};
-    bool ready{};
-  };
-  struct selected_depth {
-    std::uint64_t resource{}, source_id{}, layout_epoch{}, frame_index{};
-    std::uint32_t width{}, height{}, x{}, y{}, active_width{}, active_height{};
-    bool ready{};
-    commands::recording_marker capture_marker;
-    std::uint64_t command_queue{};
-    content::copy_snapshot depth_copy;
-    std::uint64_t backup_resource{}, backup_id{};
-    effects_input_observation effects_input;
-  };
-
   // Source adapters share these hooks and can nominate/copy current depth.
   // All branches preserve the application's original API data.
   // Discovery and deferred logging occur only from poll, outside loader callbacks.
   void initialize(HMODULE addon);
-  // Constant false since the StreamlineCameraProbe research ledger was removed.
-  bool enabled();
   // Lightweight supported-DLL source nomination is enabled by default.
   bool source_enabled();
   // Existing source-observation invalidation counter only. An unchanged value
@@ -43,7 +23,7 @@ namespace sunshine_streamline {
   std::uint64_t depth_observation_revision();
   // Exact-revision diagnostics only; absence never changes observation validity.
   bool query_depth_observation_loss(std::uint64_t revision, loss_diagnostics::event &out);
-  void poll(const selected_depth &selected);
+  void poll();
   // Installed hooks and their pinned modules remain alive as pure pass-through until
   // process exit. This never waits for game threads or removes a live trampoline.
   void shutdown();
@@ -59,11 +39,6 @@ namespace sunshine_streamline {
   // True when it recorded a copy: the caller submits immediate before the
   // Present.
   bool present_deferred(std::uint64_t queue, std::uint64_t immediate);
-
-  // The source-resource table query_depth_source reads (its only callers
-  // are tests). Resource lifetime IDs must be unique caller-owned identities.
-  void depth_resource_initialized(std::uint64_t native, std::uint64_t lifetime, std::uint64_t device, bool supported);
-  void depth_resource_destroyed(std::uint64_t native, std::uint64_t lifetime);
 
   enum class frame_identity_kind { unavailable, v1_numeric, v2_observed_token, v2_constants_call };
   struct frame_identity {
@@ -107,7 +82,6 @@ namespace sunshine_streamline {
     tag_scope scope{};
     bool present{}, supported{};
     std::uint64_t observed_tick{}, observation_sequence{};
-    std::uint64_t resource_lifetime{}, resource_device{};
     std::uint32_t native_state{0xffffffffu};
     bool state_requires_observation{};
     // Its tag call supplied a command list (an evaluate input's evaluation
@@ -151,8 +125,7 @@ namespace sunshine_streamline {
     std::uint64_t epoch{}, sequence{}, tick{}, camera_tick{}, camera_sequence{}, loss_revision{};
     sunshine_scene_feedback::sample feedback;
     std::uintptr_t command_buffer{};
-    std::uint32_t viewport{}, feature{}, matched_tag{};
-    selected_depth selection;
+    std::uint32_t viewport{}, feature{};
     // Constants and applicable tags were copied before the original evaluation.
     // That does not establish complete native mutation coverage, GPU
     // completion, ReShade presentation or final-color/jitter registration.
@@ -170,32 +143,7 @@ namespace sunshine_streamline {
     std::uint32_t viewport_inverted{};
     camera_validation viewport_projection;
   };
-  // Returns a value copy, never live pointers or mutable internal storage. Even
-  // tracked_content_evaluation is NOT permission to drive geometry: complete
-  // native coverage and final-color registration remain unverified. A newer invalid/drop event,
-  // failed evaluation, token reuse, unsupported inputs, or age limit fails closed.
-  evidence_status query_evaluation(const selected_depth &selected, evaluation_snapshot &output,
-    std::uint32_t max_age_ms = sunshine_freshness::evidence_age_ms);
   const char *name(evidence_status value);
-
-  struct depth_source_tag {
-    depth_tag value;
-    std::uint64_t resource_lifetime{}, device{};
-    bool present{};
-  };
-  struct depth_source_snapshot {
-    evidence_status status{evidence_status::missing_evaluation};
-    std::uint64_t epoch{}, sequence{}, tick{}, loss_revision{};
-    frame_identity frame;
-    std::uint32_t viewport{};
-    std::array<depth_source_tag, 3> tags{}; // Preferred display-resolution48, raw0, then linear49.
-  };
-  // Nomination only: no selected-depth prerequisite and no geometry/content
-  // proof. The owner must consume a fresh sequence once per native present and
-  // match the frozen lifetime/device/extent to a valid current captured source.
-  // Streamline frame identity is never a ReShade presentation frame identity.
-  evidence_status query_depth_source(depth_source_snapshot &output,
-    std::uint32_t max_age_ms = sunshine_freshness::evidence_age_ms);
 
   struct frame_generation_snapshot {
     std::uint64_t epoch{}, sequence{}, tick{}, loss_revision{};
@@ -283,9 +231,6 @@ namespace sunshine_streamline {
     void lose_observation();
     bool discover_frame_generation_hooks();
     // Deterministic CPU-only contention fixture; lock/unlock on the same thread.
-    void lock_source_resources();
-    void unlock_source_resources();
-    unsigned waiting_source_resources();
     void lock_records();
     void unlock_records();
     void lock_records_shared();

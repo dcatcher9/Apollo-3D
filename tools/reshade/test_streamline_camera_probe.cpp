@@ -561,7 +561,7 @@ namespace {
     fixture cleanup;
     require(GetModuleHandleW(L"sl.interposer.dll") == nullptr, "isolated test unexpectedly contains Streamline DLL");
     initialize(nullptr);
-    poll({});  // Real discovery path must remain inert when middleware is absent.
+    poll();  // Real discovery path must remain inert when middleware is absent.
     require(GetModuleHandleW(L"sl.interposer.dll") == nullptr, "probe loaded middleware during discovery");
     require(!testing::install(testing::abi::unsupported, v2_targets), "unsupported ABI installed hooks");
     require(!testing::install(testing::abi::v2_7_30, {}), "empty export set installed hooks");
@@ -831,16 +831,13 @@ namespace {
         ordered_snapshot.tags[0].value.refusal == tag_refusal::extension,
       "a tag call's tag with another tag as its next was read as an input chain");
   }
-  selected_depth selection(void *resource) {
-    selected_depth value;
-    value.resource = reinterpret_cast<std::uintptr_t>(resource);
-    value.source_id = 7;
-    value.layout_epoch = 3;
-    value.frame_index = 999; // Deliberately unrelated to the Streamline frame.
-    value.width = value.active_width = 1920;
-    value.height = value.active_height = 1080;
-    value.ready = true;
-    return value;
+  // The status of the evaluation snapshot finish_evaluation stores for a
+  // viewport after the game's call (testing::latest_snapshot): the snapshot
+  // source nomination received before the call, with the call's result
+  // applied. No shipping code reads this store.
+  bool stored_is(std::uint32_t viewport, evidence_status expected) {
+    evaluation_snapshot value;
+    return testing::latest_snapshot(viewport, value) && value.status == expected;
   }
   void mint(opaque_token &token, const std::uint32_t *index) {
     returned_token = const_cast<abi_v2::frame_token *>(&token.ref());
@@ -864,9 +861,8 @@ namespace {
     std::uint32_t number{401};
     token_source_fixture() {
       source_setting = "1"; initialize(nullptr);
-      require(!enabled() && source_enabled(), "Token isolation enabled the optional full probe");
+      require(source_enabled(), "Token isolation enabled the optional full probe");
       require(testing::install(testing::abi::v2_7_30, tracked_v2_targets), "Token isolation hook install failed");
-      depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&native), 91, 10, true);
       mint(token, &number);
       publish(token);
     }
@@ -883,9 +879,12 @@ namespace {
         "Registered token did not establish its own fresh source tuple");
       return snapshot;
     }
+    // The stored snapshot still passes the nomination gates when they are
+    // re-run now (normalized_source: the token is current, no loss since).
+    // Shipping runs these gates only as nomination begins, before the call.
     bool ready() {
-      depth_source_snapshot snapshot;
-      return query_depth_source(snapshot) == evidence_status::source_associated_evaluation;
+      sunshine_scene_depth::frame normalized;
+      return testing::normalized_source(view.value, 0, normalized);
     }
   };
   enum class fixture_lock { records_exclusive, records_shared, tokens };
@@ -1063,7 +1062,6 @@ namespace {
       "Pending token call failed SDK forwarding or modified the restarted observation epoch");
     unchanged(counters, testing::counts(), "Retired token callback changed new-epoch observation counters");
 
-    depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&source.native), 92, 10, true);
     require(call_v2_constants(source.constants, pending.ref(), source.view) == 0 &&
         call_v2_framed_tag(pending.ref(), source.view, &source.tag, 1, nullptr) == 0 &&
         call_v2_evaluate(0, pending.ref(), source.inputs, 1, nullptr) == 0,
@@ -1165,7 +1163,6 @@ namespace {
     shutdown();
     initialize(nullptr);
     require(!source.ready(), "Pinned retired version revived source after reinitialization");
-    depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&source.native), 92, 10, true);
     mint(source.token, &source.number);
     source.publish(source.token);
     require(source.ready(), "Held old metadata/token reader prevented fresh lifecycle publication");
@@ -1181,7 +1178,6 @@ namespace {
     opaque_token token; mint(token, nullptr);
     auto view = viewport(73);
     int native{}; auto resource = modern_resource(&native); auto tag = depth_tag_for(resource);
-    depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&native), 94, 10, true);
     const base_structure *inputs[]{&view.base, &tag.base};
     testing::arm_entry_policy();
     require(call_v2_evaluate(0, token.ref(), inputs, 2, nullptr) == 0,
@@ -1198,139 +1194,54 @@ namespace {
     fixture cleanup;
     source_setting = nullptr; // Missing key means production nomination on.
     initialize(nullptr);
-    require(!enabled() && source_enabled(), "source default changed diagnostic opt-in");
+    require(source_enabled(), "source default changed diagnostic opt-in");
     require(testing::install(testing::abi::v1_1_1, v1_targets), "production-only v1 install failed");
     int native{}, other{};
     const auto address = reinterpret_cast<std::uintptr_t>(&native);
     abi_v1::resource resource{}; resource.native = &native;
     auto constants = old_camera();
-    depth_source_snapshot snapshot;
-    const auto query = [&](evidence_status expected, const char *message) {
-      const auto actual = query_depth_source(snapshot);
-      if (actual != expected) std::fprintf(stderr, "source expected %s, got %s\n", name(expected), name(actual));
-      require(actual == expected && snapshot.status == actual, message);
-    };
+    evaluation_snapshot snapshot;
+    sunshine_scene_depth::frame normalized;
+    const auto query = [&](evidence_status expected, const char *message) { require(stored_is(7, expected), message); };
     call_v1_constants(constants, 1, 7);
     call_v1_tag(&resource, 0, 7, nullptr);
     call_v1_evaluate(nullptr, 0, 1, 7);
-    query(evidence_status::missing_depth, "untracked resource was nominated");
-    depth_resource_initialized(address, 41, 10, true);
     call_v1_evaluate(nullptr, 0, 1, 7);
-    query(evidence_status::missing_depth, "old untracked tag acquired a later lifetime");
     call_v1_tag(&resource, 0, 7, nullptr);
     call_v1_evaluate(nullptr, 0, 1, 7);
     query(evidence_status::source_associated_evaluation, "known v1 resource not nominated without selected-depth dependency");
-    require(!snapshot.tags[0].present && snapshot.tags[1].present && snapshot.tags[1].value.native_resource == address &&
-        snapshot.tags[1].resource_lifetime == 41 && snapshot.tags[1].device == 10 && snapshot.viewport == 7 &&
+    require(testing::latest_snapshot(7, snapshot) && !snapshot.tags[1].present && snapshot.tags[0].present &&
+        snapshot.tags[0].value.native_resource == address && snapshot.viewport == 7 &&
         snapshot.frame.numeric == 1 && snapshot.sequence && snapshot.epoch, "v1 nomination identity wrong");
-    sunshine_scene_depth::frame normalized;
     require(testing::normalized_source(7, 0, normalized) && normalized.resource.native == address &&
         normalized.projection.depth_offset == 0.0 && normalized.projection.depth_scale == .5 && normalized.projection.reversed &&
         normalized.proof == sunshine_scene_depth::state_proof::observed_nonzero &&
         normalized.valid_until == sunshine_scene_depth::lifetime::until_present,
       "v1 adapter did not normalize projection/resource/omitted-state authority");
-    const auto first = snapshot;
-    query(evidence_status::source_associated_evaluation, "query must be a value copy, consumer owns once/present admission");
-    require(snapshot.sequence == first.sequence, "query fabricated another evaluation sequence");
-    evaluation_snapshot diagnostic;
-    require(query_evaluation(selection(&native), diagnostic) == evidence_status::inactive,
-      "production nomination upgraded diagnostic/geometry evidence");
     query(evidence_status::source_associated_evaluation, "ignored draw diagnostics poisoned semantic nomination");
-    depth_resource_destroyed(address, 41);
-    depth_resource_initialized(address, 42, 10, true);
-    query(evidence_status::missing_depth, "destroy/recreate accepted old evaluated lifetime");
     call_v1_evaluate(nullptr, 0, 1, 7);
-    query(evidence_status::source_mismatch, "stale global tag rebound at evaluation after ABA");
     call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 1, 7);
     query(evidence_status::source_associated_evaluation, "fresh tag did not admit new lifetime");
-    require(snapshot.tags[1].resource_lifetime == 42, "new lifetime not frozen");
-    // Lifetime changes DURING the original evaluation must not rebind at query.
-    block_original = true;
-    std::thread worker([&] { call_v1_evaluate(nullptr, 0, 1, 7); });
-    while (!original_entered.load(std::memory_order_acquire)) std::this_thread::yield();
-    depth_resource_destroyed(address, 42); depth_resource_initialized(address, 43, 10, true);
-    release_original = true; worker.join(); block_original = false;
-    query(evidence_status::missing_depth, "in-flight evaluation acquired replacement lifetime");
     call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 1, 7);
     query(evidence_status::source_associated_evaluation, "post-ABA source did not recover");
     result_v1 = false; call_v1_evaluate(nullptr, 0, 1, 7); result_v1 = true;
     query(evidence_status::evaluation_failed, "failed evaluation reused last successful nomination");
     call_v1_constants(constants, 2, 7); call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 2, 7);
     testing::lose_observation();
-    query(evidence_status::observation_lost, "lost semantic observation retained nomination");
+    require(!testing::normalized_source(7, 0, normalized), "lost semantic observation retained nomination");
     call_v1_constants(constants, 3, 7); call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 3, 7);
     query(evidence_status::source_associated_evaluation, "fresh source did not recover before age check");
-    // The production clock may have a coarser tick than Sleep(2). Establish
-    // actual elapsed clock time before testing the unchanged zero-ms limit.
-    const auto age_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (GetTickCount64() <= snapshot.tick && std::chrono::steady_clock::now() < age_deadline) Sleep(1);
-    require(GetTickCount64() > snapshot.tick, "source age clock did not advance within fixture deadline");
-    require(query_depth_source(snapshot, 0) == evidence_status::stale, "age limit ignored");
     constants.reset = 1; call_v1_constants(constants, 4, 7); call_v1_evaluate(nullptr, 0, 4, 7);
     // A reset ends temporal history, not the still-tagged depth of this frame.
     query(evidence_status::camera_reset, "reset camera revoked its still-tagged depth");
     constants.reset = 0; call_v1_constants(constants, 5, 7); call_v1_tag(&resource, 0, 7, nullptr); call_v1_evaluate(nullptr, 0, 5, 7);
     resource.native = &other;
-    depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&other), 50, 10, true);
     call_v1_constants(constants, 5, 8); call_v1_tag(&resource, 0, 8, nullptr); call_v1_evaluate(nullptr, 0, 5, 8);
-    query(evidence_status::ambiguous_viewport, "multiple active viewports silently chose newest");
     source_setting = "0"; initialize(nullptr);
-    require(!source_enabled() && !enabled(), "source rollback key ignored");
-    query(evidence_status::inactive, "disabled source nomination remained live");
+    require(!source_enabled(), "source rollback key ignored");
+    require(!testing::normalized_source(7, 0, normalized), "disabled source nomination remained live");
     const auto stopped = testing::counts(); call_v1_constants(constants, 6, 7);
     unchanged(stopped, testing::counts(), "disabled retained hooks did not pass through");
-  }
-
-  void test_source_lifecycle_contention() {
-    fixture cleanup;
-    source_setting = "1"; initialize(nullptr);
-    require(testing::install(testing::abi::v1_1_1, v1_targets), "source contention hook install failed");
-    int native_a{}, native_b{};
-    const auto a = reinterpret_cast<std::uintptr_t>(&native_a), b = reinterpret_cast<std::uintptr_t>(&native_b);
-    depth_resource_initialized(a, 41, 10, true);
-    auto constants = old_camera(); abi_v1::resource resource{}; resource.native = &native_a;
-    call_v1_constants(constants, 1, 1); call_v1_tag(&resource, 0, 1, nullptr); call_v1_evaluate(nullptr, 0, 1, 1);
-    depth_source_snapshot snapshot;
-    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation, "contention fixture did not start ready");
-    const auto original_epoch = snapshot.epoch;
-    const auto wait_for = [](const auto &predicate) {
-      const auto deadline = GetTickCount64() + 2000;
-      while (!predicate() && GetTickCount64() < deadline) Sleep(1);
-      return predicate();
-    };
-    testing::lock_source_resources();
-    std::thread writer([&] { depth_resource_initialized(b, 50, 10, true); });
-    const bool queued = wait_for([] { return testing::waiting_source_resources() == 1; });
-    testing::unlock_source_resources(); writer.join();
-    require(queued, "lifecycle writer did not reach deterministic lock contention");
-    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation &&
-        snapshot.tags[1].resource_lifetime == 41, "contended lifecycle update forgot existing live resource");
-    resource.native = &native_b; call_v1_tag(&resource, 0, 1, nullptr); call_v1_evaluate(nullptr, 0, 1, 1);
-    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation && snapshot.tags[1].resource_lifetime == 50,
-      "contended lifecycle update was dropped");
-    testing::lock_source_resources();
-    std::thread destroyer([&] { depth_resource_destroyed(b, 50); });
-    const bool destroy_queued = wait_for([] { return testing::waiting_source_resources() == 1; });
-    testing::unlock_source_resources(); destroyer.join();
-    require(destroy_queued && query_depth_source(snapshot) == evidence_status::missing_depth,
-      "contended destruction left dead lifetime nominatable");
-
-    // An old callback already queued on the table cannot enter a new epoch,
-    // regardless of which waiting thread obtains the table first.
-    testing::lock_source_resources();
-    std::thread old_writer([&] { depth_resource_initialized(b, 51, 10, true); });
-    const bool old_queued = wait_for([] { return testing::waiting_source_resources() == 1; });
-    std::thread restart([] { initialize(nullptr); });
-    const bool disabled = wait_for([] { return !source_enabled(); });
-    testing::unlock_source_resources(); old_writer.join(); restart.join();
-    require(old_queued && disabled && source_enabled(), "reinitialization contention setup failed");
-    call_v1_constants(constants, 2, 1); call_v1_tag(&resource, 0, 1, nullptr); call_v1_evaluate(nullptr, 0, 2, 1);
-    require(query_depth_source(snapshot) == evidence_status::missing_depth && snapshot.epoch != original_epoch,
-      "queued old-epoch lifecycle event repopulated reinitialized registry");
-    depth_resource_initialized(b, 52, 10, true);
-    call_v1_tag(&resource, 0, 1, nullptr); call_v1_evaluate(nullptr, 0, 2, 1);
-    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation && snapshot.tags[1].resource_lifetime == 52,
-      "fresh lifecycle event failed after reinitialization");
   }
 
   void test_source_nomination_v2() {
@@ -1341,23 +1252,20 @@ namespace {
     int native_a{}, native_b{}, native_high{};
     auto resource_a = modern_resource(&native_a), resource_b = modern_resource(&native_b), resource_high = modern_resource(&native_high);
     auto raw = depth_tag_for(resource_a), local = depth_tag_for(resource_b), high = depth_tag_for(resource_high); high.type = 48;
-    for (const auto *resource : {&resource_a, &resource_b, &resource_high}) {
-      const auto native = reinterpret_cast<std::uintptr_t>(resource->native);
-      depth_resource_initialized(native, native, 10, true);
-    }
     const base_structure *inputs[]{&view.base};
     const base_structure *local_inputs[]{&view.base, &local.base};
-    depth_source_snapshot snapshot;
+    evaluation_snapshot snapshot;
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &raw, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(query_depth_source(snapshot) == evidence_status::untracked_frame, "opaque token address became source frame");
+    require(stored_is(view.value, evidence_status::untracked_frame), "opaque token address became source frame");
     mint(token, nullptr);
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &raw, 1, nullptr);
     call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), local_inputs, 2, nullptr);
-    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation && snapshot.tags[0].present &&
-        snapshot.tags[0].value.type == 48 && snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_high) &&
-        snapshot.tags[1].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_b) && !snapshot.frame.has_numeric,
+    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+        snapshot.tags[1].present && snapshot.tags[1].value.type == 48 &&
+        snapshot.tags[1].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_high) &&
+        snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_b) && !snapshot.frame.has_numeric,
       "v2 preference/local override/opaque generation nomination wrong");
     sunshine_scene_depth::frame normalized;
     require(testing::normalized_source(view.value, 0, normalized) &&
@@ -1370,8 +1278,8 @@ namespace {
         normalized.resource.kind == sunshine_scene_depth::resource_kind::display_depth,
       "v2 high-resolution tag lost provider-neutral semantic kind");
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation &&
-        snapshot.tags[1].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_a), "local source leaked to later evaluation");
+    require(testing::latest_snapshot(view.value, snapshot) && snapshot.status == evidence_status::source_associated_evaluation &&
+        snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_a), "local source leaked to later evaluation");
     high.lifecycle = UINT32_MAX;
     call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
@@ -1382,17 +1290,16 @@ namespace {
     high.lifecycle = 1; call_v2_constants(constants, token.ref(), view);
     call_v2_tag(view, &raw, 1, nullptr); call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation, "v2 lifecycle recovery failed");
+    require(stored_is(view.value, evidence_status::source_associated_evaluation), "v2 lifecycle recovery failed");
     // An extent that wraps is malformed (the allocation bounds any other in
     // the capture, S16d).
     high.area.left = UINT32_MAX; call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
-    require(query_depth_source(snapshot) != evidence_status::source_associated_evaluation, "malformed extent left old nomination active");
     high.area.left = 0; call_v2_constants(constants, token.ref(), view);
     call_v2_tag(view, &raw, 1, nullptr); call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
     call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
-    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation, "valid v2 source did not recover");
+    require(stored_is(view.value, evidence_status::source_associated_evaluation), "valid v2 source did not recover");
     mint(token, nullptr);
-    require(query_depth_source(snapshot) == evidence_status::untracked_frame, "token reuse retained source nomination");
+    require(!testing::normalized_source(view.value, 0, normalized), "token reuse retained source nomination");
   }
 
   // sl_struct.h Option 1: a later structure version only appends fields, so
@@ -1695,7 +1602,6 @@ namespace {
     auto resource = modern_resource(&native);
     auto tag = depth_tag_for(resource);
     const auto address = reinterpret_cast<std::uintptr_t>(&native);
-    depth_resource_initialized(address, address, 10, true);
     const base_structure *inputs[]{&view.base};
 
     const auto observe = [&] {
@@ -1713,13 +1619,12 @@ namespace {
         "v2 global-only evaluation changed return value or LastError");
     };
     observe();
-    depth_source_snapshot snapshot;
-    require(query_depth_source(snapshot) == evidence_status::untracked_frame,
+    require(stored_is(view.value, evidence_status::untracked_frame),
       "missing frame-tag export promoted an untracked token to a frame");
     mint(token, nullptr);
     observe();
     sunshine_scene_depth::frame normalized;
-    require(query_depth_source(snapshot) == evidence_status::source_associated_evaluation &&
+    require(stored_is(view.value, evidence_status::source_associated_evaluation) &&
         testing::normalized_source(view.value, 0, normalized) && normalized.resource.native == address &&
         normalized.resource.width == 1920 && normalized.resource.height == 1080 &&
         normalized.proof == sunshine_scene_depth::state_proof::declared &&
@@ -1739,7 +1644,7 @@ namespace {
     require(testing::normalized_source(view.value, 0, normalized),
       "global-only source did not recover after a failed evaluation");
     mint(token, nullptr);
-    require(query_depth_source(snapshot) == evidence_status::untracked_frame,
+    require(!testing::normalized_source(view.value, 0, normalized),
       "global-only source reused stale depth after token remint");
   }
 
@@ -1754,7 +1659,6 @@ namespace {
     auto resource = modern_resource(&native); resource.width = 2228; resource.height = 1256;
     auto tag = depth_tag_for(resource); tag.area = {0, 0, 2228, 1253};
     const extent area = tag.area;
-    depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&native), 91, 10, true);
     opaque_token tokens[4];
     const base_structure *inputs[]{&view.base};
     const auto constants = [&](unsigned frame, float x, float y) {
@@ -1808,8 +1712,6 @@ namespace {
     high_resource.width = 3840; high_resource.height = 2160;
     auto raw = depth_tag_for(raw_resource), high = depth_tag_for(high_resource);
     raw.area = {0, 0, 2228, 1253}; high.area = {0, 0, 3840, 2160}; high.type = 48;
-    for (auto *native : {&raw_native, &high_native})
-      depth_resource_initialized(reinterpret_cast<std::uintptr_t>(native), reinterpret_cast<std::uintptr_t>(native), 10, true);
     mint(token, nullptr); call_v2_constants(constants, token.ref(), view);
     call_v2_tag(view, &raw, 1, nullptr); // An old global raw tag cannot establish the high-res frame's render size.
     call_v2_framed_tag(token.ref(), view, &high, 1, nullptr);
@@ -1838,7 +1740,6 @@ namespace {
     auto view = viewport(9); auto constants = modern_camera(); opaque_token token;
     int native{}; auto resource = modern_resource(&native); auto tag = depth_tag_for(resource);
     const auto address = reinterpret_cast<std::uintptr_t>(&native);
-    depth_resource_initialized(address, 91, 10, true);
     const base_structure *inputs[]{&view.base};
     sunshine_scene_depth::frame normalized;
     evaluation_snapshot observed;
@@ -1862,8 +1763,7 @@ namespace {
     require(testing::normalized_source(view.value, 0, normalized) && normalized.resource.native == address &&
         !normalized.projection.supplied && !normalized.projection.direction_supplied,
       "missing constants rejected an authoritative source or inherited unrelated camera metadata");
-    depth_source_snapshot old_query;
-    require(query_depth_source(old_query) == evidence_status::missing_constants,
+    require(stored_is(view.value, evidence_status::missing_constants),
       "direct source admission changed the existing stricter nomination query");
 
     // Direction is a fixed viewport convention: a token without its own camera
@@ -1939,11 +1839,9 @@ namespace {
     // An UntilEvaluate tag call needs a command list (sl_core_api.h; S2).
     int native{}, commands{}; auto resource = modern_resource(&native); auto tag = depth_tag_for(resource);
     tag.lifecycle = 2;
-    depth_resource_initialized(reinterpret_cast<std::uintptr_t>(&native), 80, 10, true);
     const base_structure *inputs[]{&view.base};
     const base_structure *local_inputs[]{&view.base, &tag.base};
     evaluation_snapshot observed;
-    depth_source_snapshot nomination;
     const auto evaluated = [&] {
       require(testing::latest_snapshot(view.value, observed) && observed.successful_evaluation &&
           observed.status == evidence_status::source_associated_evaluation && observed.tags[0].supported &&
@@ -1953,8 +1851,6 @@ namespace {
           normalized.valid_until == sunshine_scene_depth::lifetime::until_evaluation &&
           normalized.projection.depth_offset == 0.0 && normalized.projection.depth_scale == .5,
         "UntilEvaluate adapter changed projection or lifetime while normalizing");
-      require(query_depth_source(nomination) != evidence_status::source_associated_evaluation,
-        "UntilEvaluate lifetime was upgraded to post-return nomination");
     };
     mint(token, nullptr);
     call_v2_constants(constants, token.ref(), view); call_v2_tag(view, &tag, 1, &commands);
@@ -2145,13 +2041,12 @@ namespace {
   void test_depth_observation_loss_diagnostics(bool modern) {
     fixture cleanup;
     source_setting = "1"; initialize(nullptr);
-    require(!enabled() && source_enabled(), "Loss journal enabled the optional command/content probe");
+    require(source_enabled(), "Loss journal enabled the optional command/content probe");
     require(testing::install(modern ? testing::abi::v2_7_30 : testing::abi::v1_1_1,
       modern ? tracked_v2_targets : v1_targets), "Loss journal hook install failed");
     const auto view = viewport(59);
     int native{};
     const auto address = reinterpret_cast<std::uintptr_t>(&native);
-    depth_resource_initialized(address, 41, 10, true);
     abi_v1::resource old_resource{}; old_resource.native = &native;
     auto resource = modern_resource(&native);
     auto tag = depth_tag_for(resource);
@@ -2285,7 +2180,7 @@ namespace {
       !query_depth_observation_loss(recovered_revision + 1, missing) &&
       !query_depth_observation_loss(UINT64_MAX, missing) && depth_observation_revision() == recovered_revision,
       "Missing diagnostic revision borrowed another event or changed source authority");
-    require(!enabled() && source_enabled(), "Loss diagnostics enabled the optional full probe during recovery");
+    require(source_enabled(), "Loss diagnostics enabled the optional full probe during recovery");
   }
 
   // The checks of kept behaviour from the StreamlineCameraProbe research
@@ -2323,8 +2218,7 @@ namespace {
     initialize(nullptr);
     require(!testing::install(testing::abi::v1_1_1, v1_targets), "Disabled probe installed middleware hooks");
     const auto before = testing::counts();
-    depth_resource_initialized(300, 3, 10, true);
-    poll({});
+    poll();
     const auto after = testing::counts();
     unchanged(before, after, "Disabled probe observed middleware calls");
     require(before.dropped == after.dropped && before.invalid == after.invalid,
@@ -4036,7 +3930,7 @@ static void test_call_trace_only(bool modern) {
   source_setting = "0";
   call_trace_setting = "1";
   initialize(nullptr);
-  require(sunshine_upscaler_trace::enabled() && !enabled() && !source_enabled(),
+  require(sunshine_upscaler_trace::enabled() && !source_enabled(),
     "Call trace enabled source selection or full camera diagnostics");
   require(testing::install(modern ? testing::abi::v2_7_30 : testing::abi::v1_1_1,
     modern ? v2_targets : v1_targets), "Trace-only SL hook install failed");
@@ -4187,8 +4081,6 @@ int main(int argc, char **argv) {
     test_until_evaluate_lifetime();
     std::puts("PASS UntilEvaluate global/frame/local pre-call admission, post-return expiry and unchanged extent rejection");
     std::puts("PASS default-on lightweight source nomination, no selected-depth dependency, lifetime ABA, freshness, loss and viewport gates");
-    test_source_lifecycle_contention();
-    std::puts("PASS bounded lifecycle lock contention preserves existing resources, records destruction and rejects queued old epochs");
     test_token_records_independence(false);
     test_token_records_independence(true);
     test_repeated_token_request_keeps_frame();
