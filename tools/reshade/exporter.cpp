@@ -3,6 +3,7 @@
 // Original Sunshine exporter. ReShade's SDK headers are BSD-3-Clause OR MIT.
 #include "overlay_compositor.h"
 #include "depth_addon.h"
+#include "depth_output.h"
 #include "depth_jitter.h"
 #include "projection_depth_controller.h"
 #include "raw_scene_pool.h"
@@ -307,7 +308,7 @@ namespace {
     sunshine_game3d::source_alpha_ui_decision source_alpha;
     // Identify the real capture for which scene parameters were resolved. A
     // later pending/generated presentation may reuse that scene, never another source's.
-    // A Generic capture is runtime epoch, source, frame and layout | generic_scene_source.
+    // A Generic capture is runtime epoch, source, frame and layout | the Generic marker.
     std::array<std::uint64_t, 4> scene_source{}; // epoch, source, sequence, viewport
     sunshine_game3d::ui_adaptive::source ui_source;
     scene_parameters_t scene;
@@ -318,41 +319,11 @@ namespace {
     std::uint64_t decided_ms = 0, present_ordinal = 0;
   };
 
-  // Marks a Generic capture's scene identity, which shares no numbering with
-  // the providers' epochs and sequences.
-  constexpr std::uint64_t generic_scene_source = std::uint64_t{1} << 63;
-  bool generic_depth(const sunshine_depth::frame_depth &depth) {
-    return depth.ready && !depth.provided.epoch && !depth.provided.sequence;
-  }
-
-  sunshine_game3d::ui_adaptive::source resolve_ui_observation(const sunshine_depth::frame_depth &depth,
+  sunshine_game3d::ui_adaptive::source resolve_ui_observation(const sunshine_game3d::depth_output::shown_depth &shown,
       const sunshine_game3d::ui_adaptive::source &previous, const scene_parameters_t &scene,
       std::uint64_t raw_basis_epoch, std::uint64_t now) {
-    sunshine_game3d::ui_adaptive::source input;
-    input.now_ms = now;
-    input.tick_ms = depth.provided.tick;
-    input.epoch = depth.provided.epoch;
-    input.revision = depth.provided.observation_revision;
-    input.source_id = depth.provided.source_id;
-    input.sequence = depth.provided.sequence;
-    input.viewport = depth.provided.viewport;
-    input.eligible = depth.ready && scene.ready;
-    if ((!depth.provided.sequence && depth.ready && !depth.reused_depth) || (generic_depth(depth) && depth.reused_depth)) {
-      // A held Generic capture is the same capture, so it keeps its tick.
-      // Generic capture identity remains physical provenance. Placement follows
-      // the admitted capture group across its rotating, independently calibrated
-      // members; per-resource layout epochs cannot identify that logical group.
-      input.epoch = depth.runtime_epoch;
-      input.revision = depth.layout_epoch;
-      input.source_id = depth.source_id;
-      input.sequence = depth.frame_index;
-      input.generic_basis_epoch = raw_basis_epoch;
-      input.generic_routing_epoch = scene.generic_routing_epoch;
-      input.eligible = input.eligible && input.generic_basis_epoch && input.generic_routing_epoch;
-      input.tick_ms = previous.epoch == input.epoch && previous.revision == input.revision &&
-        previous.source_id == input.source_id && previous.sequence == input.sequence ? previous.tick_ms : now;
-    }
-    return input;
+    return sunshine_game3d::depth_output::ui_observation(shown, previous, scene.ready,
+      scene.generic_routing_epoch, raw_basis_epoch, now);
   }
 
   // Raw and projection controllers report the same placement quantities under
@@ -412,7 +383,7 @@ namespace {
     // camera cut) flickered generated frames flat at up to four per real frame.
     frame.scene.owned = supported;
     if (frame.reused_depth && frame.depth_ready && previous.depth_ready &&
-        frame.scene_source[0] && frame.scene_source[2] && previous.scene_source == frame.scene_source)
+        sunshine_game3d::depth_output::same_capture(frame.scene_source, previous.scene_source))
       frame.scene = previous.scene;
     else if (supported) {
       frame.scene.ui = {sunshine_game3d::automatic_phase::waiting_for_depth, true};
@@ -452,8 +423,7 @@ namespace {
     const auto shown_until = next_present && previous.decided_ms <= now ? previous.decided_ms : now;
     if (own_camera || !depth.ready || !previous.depth_ready || !held ||
         !sunshine_freshness::fresh_le(held, shown_until, sunshine_freshness::source_age_ms) || !frame.scene_source[0] ||
-        previous.scene_source[0] != frame.scene_source[0] || previous.scene_source[1] != frame.scene_source[1] ||
-        previous.scene_source[3] != frame.scene_source[3]) return false;
+        !sunshine_game3d::depth_output::same_source_except_sequence(previous.scene_source, frame.scene_source)) return false;
     frame.scene = previous.scene;
     return true;
   }
@@ -574,17 +544,8 @@ namespace {
   // source, sequence and viewport (a reused generated-frame presentation
   // repeats them exactly). Generic depth and missing depth give 0.
   std::uint64_t depth_identity(const runtime_t &proof) {
-    const auto &source = proof.frame.scene_source; // epoch, source, sequence, viewport
-    if (!proof.borrowed_depth.handle || !proof.frame.depth_ready || !source[0] || !source[2] ||
-        (source[3] & generic_scene_source)) return 0;
-    std::uint64_t value = 0x9e3779b97f4a7c15ull;
-    for (const auto part : source) {
-      value ^= part + 0x9e3779b97f4a7c15ull + (value << 6) + (value >> 2);
-      value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ull;
-      value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
-      value ^= value >> 31;
-    }
-    return value ? value : 1;
+    return sunshine_game3d::depth_output::depth_identity(proof.frame.scene_source,
+      proof.borrowed_depth.handle != 0, proof.frame.depth_ready);
   }
 
 #include "exporter/export_ring_class.inl"
@@ -1282,9 +1243,8 @@ namespace {
         frame.jitter = sunshine_depth_jitter::make(depth.provided.jitter, depth.width, depth.height,
           {depth.x, depth.y, depth.active_width, depth.active_height});
       frame.reused_depth = depth.reused_depth;
-      frame.scene_source = generic_depth(depth) ?
-        std::array<std::uint64_t, 4>{depth.runtime_epoch, depth.source_id, depth.frame_index, depth.layout_epoch | generic_scene_source} :
-        std::array<std::uint64_t, 4>{depth.provided.epoch, depth.provided.source_id, depth.provided.sequence, depth.provided.viewport};
+      const auto shown = sunshine_game3d::depth_output::describe(depth);
+      frame.scene_source = shown.scene_source;
       // Source choice and bounded reuse are resolved once by the depth provider.
       // Another fallible metadata query here could contradict this same frame.
       frame.diagnostics.frame_generation_active = game_enabled && depth.frame_generation_active;
@@ -1304,15 +1264,16 @@ namespace {
         if (provided && proof.raw_supported && game_enabled && hold_projection_scene(frame, previous_frame, depth, now)) {
           ++proof.camera_missing_holds;
           proof.reentry_heard = true; // The held scene, as for reused depth.
-        } else frame.scene = resolve_raw_scene(runtime, proof, depth, game_enabled, provided, now);
+        } else frame.scene = resolve_raw_scene(runtime, proof, depth, shown, game_enabled, provided, now);
       }
-      frame.ui_source = resolve_ui_observation(depth, previous_frame.ui_source, frame.scene, proof.raw_basis_epoch, now);
+      frame.ui_source = resolve_ui_observation(shown, previous_frame.ui_source, frame.scene, proof.raw_basis_epoch, now);
       const sunshine_game3d::slow_step step("frame publication");
       publish_frame(runtime, proof, std::move(frame));
     }
 
     scene_parameters_t resolve_raw_scene(api::effect_runtime *runtime, runtime_t &proof,
-        const sunshine_depth::frame_depth &depth, bool game_enabled, bool api_selected, std::uint64_t now) {
+        const sunshine_depth::frame_depth &depth, const sunshine_game3d::depth_output::shown_depth &shown,
+        bool game_enabled, bool api_selected, std::uint64_t now) {
       scene_parameters_t scene;
       scene.admitted_strength = proof.frame_strength;
       scene.owned = proof.raw_supported;
@@ -1412,15 +1373,7 @@ namespace {
         }
         state = proof.provided_raw_policy.evaluate(current, now);
       } else {
-        sunshine_raw_scene::selected_frame current;
-        current.basis_epoch = proof.raw_basis_epoch;
-        current.layout_epoch = depth.layout_epoch;
-        current.source = {depth.source_resource.handle, depth.source_id, 0, depth.width, depth.height,
-          depth.x, depth.y, depth.active_width, depth.active_height};
-        current.frame = {depth.frame_index, depth.runtime_epoch};
-        current.direction = depth.detected_orientation;
-        current.depth_ready = depth.ready;
-        current.aligned_viewport_assumed = depth.aligned_viewport_assumed;
+        const auto current = sunshine_game3d::depth_output::raw_frame(shown, proof.raw_basis_epoch);
         sunshine_depth::raw_source_roster roster;
         if (sunshine_depth::get_raw_source_roster(runtime, roster))
           scene.generic_routing_epoch = roster.routing_epoch;

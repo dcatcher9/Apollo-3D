@@ -122,48 +122,48 @@ namespace {
       depth.source_id = 100; depth.layout_epoch = 7; depth.frame_index = 50;
       scene_parameters_t scene;
       scene.ready = true; scene.generic_routing_epoch = 12;
-      const auto a = resolve_ui_observation(depth, {}, scene, 17, 1000);
+      const auto a = resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), {}, scene, 17, 1000);
       require(a.eligible && a.epoch == 3 && a.source_id == 100 && a.revision == 7 &&
           a.sequence == 50 && a.tick_ms == 1000 && a.generic_basis_epoch == 17 && a.generic_routing_epoch == 12,
         "Generic UI observation lost capture provenance or logical placement scope");
       depth.source_id = 200; depth.layout_epoch = 11; depth.frame_index = 51;
-      const auto b = resolve_ui_observation(depth, a, scene, 17, 1016);
+      const auto b = resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), a, scene, 17, 1016);
       require(b.eligible && b.source_id != a.source_id && b.revision != a.revision && b.sequence == 51 &&
           b.tick_ms == 1016 && b.epoch == a.epoch && b.generic_basis_epoch == a.generic_basis_epoch &&
           b.generic_routing_epoch == a.generic_routing_epoch && sunshine_game3d::ui_adaptive::same_scope(a, b),
         "Physical buffer rotation changed the logical UI scope or erased member provenance");
-      const auto repeated = resolve_ui_observation(depth, b, scene, 17, 1050);
+      const auto repeated = resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), b, scene, 17, 1050);
       require(repeated.tick_ms == b.tick_ms && repeated.sequence == b.sequence,
         "Repeated access made the same generic depth capture fresh again");
       scene.generic_routing_epoch = 13;
-      const auto rerouted = resolve_ui_observation(depth, b, scene, 17, 1066);
+      const auto rerouted = resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), b, scene, 17, 1066);
       require(rerouted.generic_routing_epoch == 13 && !sunshine_game3d::ui_adaptive::same_scope(b, rerouted),
         "A new preferred capture group retained the old UI routing identity");
-      require(!resolve_ui_observation(depth, b, scene, 0, 1066).eligible,
+      require(!resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), b, scene, 0, 1066).eligible,
         "Generic UI observation without a basis fell back to provider matching");
       scene.generic_routing_epoch = 0;
-      require(!resolve_ui_observation(depth, b, scene, 17, 1066).eligible,
+      require(!resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), b, scene, 17, 1066).eligible,
         "Generic UI observation without authoritative routing was admitted");
       scene.generic_routing_epoch = 12; scene.ready = false;
-      require(!resolve_ui_observation(depth, b, scene, 17, 1066).eligible,
+      require(!resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), b, scene, 17, 1066).eligible,
         "Uncalibrated generic depth became adaptive UI evidence");
       scene.ready = true;
       depth.provided.epoch = 9; depth.provided.observation_revision = 4;
       depth.provided.source_id = 1000; depth.provided.viewport = 2;
       depth.provided.sequence = 55; depth.provided.tick = 990;
-      const auto provided = resolve_ui_observation(depth, b, scene, 17, 1066);
+      const auto provided = resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), b, scene, 17, 1066);
       require(provided.eligible && provided.epoch == 9 && provided.revision == 4 && provided.source_id == 1000 &&
           provided.viewport == 2 && provided.sequence == 55 && provided.tick_ms == 990 &&
           provided.generic_basis_epoch == 0 && provided.generic_routing_epoch == 0,
         "Provider logical identity was replaced by generic resource or roster metadata");
       depth.reused_depth = true;
-      const auto held = resolve_ui_observation(depth, provided, scene, 19, 1100);
+      const auto held = resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), provided, scene, 19, 1100);
       require(held.eligible && held.epoch == provided.epoch && held.revision == provided.revision &&
           held.source_id == provided.source_id && held.sequence == provided.sequence && held.tick_ms == provided.tick_ms &&
           held.generic_basis_epoch == 0 && held.generic_routing_epoch == 0,
         "FG reuse fabricated new UI evidence or acquired a generic placement scope");
       depth.ready = false;
-      require(!resolve_ui_observation(depth, held, scene, 19, 1116).eligible,
+      require(!resolve_ui_observation(sunshine_game3d::depth_output::describe(depth), held, scene, 19, 1116).eligible,
         "Unavailable depth remained eligible for adaptive UI observation");
     }
 
@@ -843,18 +843,18 @@ namespace {
             sunshine_game3d::query_automatic(&runtime).phase == scene.ui.phase,
           "Native publication dropped the resolved depth crop or calibration status");
         proof.addon_native = false;
-        const auto unsupported_fx = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, now);
+        const auto unsupported_fx = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, now);
         require(!unsupported_fx.ready && unsupported_fx.ui.phase == sunshine_game3d::automatic_phase::unavailable,
           "Legacy FX without camera-rect support accepted padded scene depth");
         proof.camera_rect = {991};
-        const auto supported_fx = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, now);
+        const auto supported_fx = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, now);
         require(supported_fx.ready == (scene.basis != 2) && supported_fx.rect == active_rect,
           "Legacy FX crop support changed affine readiness or admitted unsupported linear depth");
         proof.camera_rect = {};
         proof.addon_native = true;
       };
       {
-        const auto pending = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 1000);
+        const auto pending = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 1000);
         require(!pending.ready && (!native_cropped || pending.rect == active_rect) &&
             pending.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction &&
             pending.ui.phase == sunshine_game3d::automatic_phase::calibrating &&
@@ -880,7 +880,7 @@ namespace {
         proof.provided_raw_policy.update(current, &sample, now);
       };
       for (unsigned i = 0; i != 4; ++i) measure(.25f, 1000 + i * 250);
-      const auto scene = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 1750);
+      const auto scene = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 1750);
       const double initial_L = sunshine_scene_gain::render_limits(37.f, 1920, 1080).normalization;
       require(scene.ready && scene.basis == 1 && std::abs(scene.scale - initial_L / .375) < 1e-5 && std::isfinite(scene.zero[1]) &&
           scene.admitted_strength == 37.f,
@@ -897,7 +897,7 @@ namespace {
       check_native_crop(scene, 1750);
       measure(.125f, 2000);
       proof.frame_strength = 83.f;
-      const auto tracking = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2000);
+      const auto tracking = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 2000);
       require(tracking.ready && tracking.scale > scene.scale && tracking.scale <= scene.scale * std::exp2(.25) * (1. + 2e-7) &&
           tracking.admitted_strength == 83.f,
         "NGX resolver stopped bounded live range learning or failed to admit current strength");
@@ -907,7 +907,7 @@ namespace {
         "NGX resolver derived measured statistics from smoothed scale");
 
       proof.width = 1080; proof.height = 1920;
-      const auto portrait = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2000);
+      const auto portrait = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 2000);
       const double portrait_L = sunshine_scene_gain::render_limits(83.f, 1080, 1920).normalization;
       require(portrait.ready && portrait.ui.scale.depth_statistics_valid() &&
           portrait.ui.scale.reference_inverse == tracking.ui.scale.reference_inverse &&
@@ -918,7 +918,7 @@ namespace {
         "Output aspect change altered captured depth or zero instead of updating only normalization and the gain target");
       proof.width = 1920; proof.height = 1080;
       proof.frame_strength = 0.f;
-      const auto zero_strength_resize = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2000);
+      const auto zero_strength_resize = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 2000);
       require(zero_strength_resize.ready && zero_strength_resize.admitted_strength == 0.f &&
           zero_strength_resize.ui.scale.depth_statistics_valid() && zero_strength_resize.ui.scale.has_target() &&
           zero_strength_resize.ui.scale.reference_inverse == portrait.ui.scale.reference_inverse &&
@@ -938,7 +938,7 @@ namespace {
       proof.projection_policy.reset(proof.projection_domain, 2000);
       const auto coefficients = sunshine_projection_depth::make(depth.projection.A, depth.projection.B);
       {
-        const auto pending = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2000);
+        const auto pending = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 2000);
         require(!pending.ready && (!native_cropped || pending.rect == active_rect) &&
             pending.ui.phase == sunshine_game3d::automatic_phase::calibrating &&
             pending.ui.scale.basis == sunshine_game3d::automatic_scale_basis::camera_matrix &&
@@ -965,7 +965,7 @@ namespace {
         proof.projection_policy.observe(sample, sample.capture_ms);
       }
       proof.frame_strength = 71.f;
-      const auto matrix = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 2751);
+      const auto matrix = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 2751);
       const float expected_far = (.125f - coefficients.shader_A) * coefficients.inverseB;
       const float expected_near = (.375f - coefficients.shader_A) * coefficients.inverseB;
       require(matrix.ready && matrix.basis == 0 && matrix.projection[0] == coefficients.shader_A &&
@@ -990,7 +990,7 @@ namespace {
       depth.projection.supplied = false;
       depth.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
       depth.projection.A = depth.projection.B = NAN;
-      auto linear = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 3000);
+      auto linear = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 3000);
       require(!linear.ready && linear.basis == 2 &&
           linear.ui.scale.basis == sunshine_game3d::automatic_scale_basis::linear_distance &&
           linear.ui.phase == (native_cropped ? sunshine_game3d::automatic_phase::calibrating : sunshine_game3d::automatic_phase::suspended),
@@ -1012,14 +1012,14 @@ namespace {
           m.tiles_x = 32; m.tiles_y = 18;
           proof.projection_policy.observe(sample, sample.capture_ms);
         }
-        linear = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 3751);
+        linear = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 3751);
         require(linear.ready && linear.basis == 2 && linear.projection == std::array<float, 2>{0.f, 1.f} &&
             linear.ui.scale.minimum_inverse == .125 && linear.ui.scale.maximum_inverse == .5 &&
             !linear.ui.scale.has_projection_conversion,
           "Linear depth did not publish calibrated reciprocal geometry without camera matrices");
         check_native_crop(linear, 3751);
         ++depth.provided.source_id;
-        const auto handoff = publisher.resolve_raw_scene(&runtime, proof, depth, true, true, 4000);
+        const auto handoff = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 4000);
         require(!handoff.ready && !(proof.projection_domain == logical_domain),
           "New feature generation inherited another source's inverse-distance calibration");
       }
@@ -1074,7 +1074,7 @@ namespace {
         const auto resolve = [&](sunshine_depth::frame_depth &d, std::uint64_t now) {
           ++d.provided.sequence;
           d.provided.tick = now;
-          return publisher.resolve_raw_scene(&runtime, fg, d, true, true, now);
+          return publisher.resolve_raw_scene(&runtime, fg, d, sunshine_game3d::depth_output::describe(d), true, true, now);
         };
         // The return is resolved before any packet captured after it completes.
         const auto expect_retained = [&](const scene_parameters_t &back, float scale, const char *message) {
@@ -1083,7 +1083,7 @@ namespace {
         };
         resolve(ngx, 10000); // Binds NGX and applies the current render budget.
         for (unsigned i = 0; i != 4; ++i) fg_sample(.25f, 10000 + i * 250);
-        const auto retained = publisher.resolve_raw_scene(&runtime, fg, ngx, true, true, 10750);
+        const auto retained = publisher.resolve_raw_scene(&runtime, fg, ngx, sunshine_game3d::depth_output::describe(ngx), true, true, 10750);
         require(retained.ready && std::abs(retained.scale - initial_L / .375) < 1e-5,
           "FG round-trip fixture did not calibrate NGX");
 
@@ -1097,11 +1097,11 @@ namespace {
         expect_retained(resolve(ngx, 46000), retained.scale,
           "Returning NGX rendered without a fresh target or lost its retained reference");
         fg_sample(.125f, 46010);
-        auto resumed = publisher.resolve_raw_scene(&runtime, fg, ngx, true, true, 46010);
+        auto resumed = publisher.resolve_raw_scene(&runtime, fg, ngx, sunshine_game3d::depth_output::describe(ngx), true, true, 46010);
         require(resumed.ready && resumed.ui.phase == phase::ready && resumed.scale == retained.scale && resumed.blend == 0.f,
           "First fresh NGX target restarted calibration, credited the absence or skipped the re-entry fade");
         fg_sample(.125f, 46110);
-        resumed = publisher.resolve_raw_scene(&runtime, fg, ngx, true, true, 46110);
+        resumed = publisher.resolve_raw_scene(&runtime, fg, ngx, sunshine_game3d::depth_output::describe(ngx), true, true, 46110);
         require(resumed.ready && resumed.scale > retained.scale &&
             resumed.scale <= retained.scale * std::exp2(.1) * (1. + 1e-6) && resumed.blend == .2f,
           "Retained NGX reference did not resume bounded adaptation and the 0.5 s fade");
@@ -1113,7 +1113,7 @@ namespace {
         expect_retained(resolve(ngx, 81200), resumed.scale,
           "Return from the projection path rendered NGX's old target");
         fg_sample(.125f, 81210);
-        const auto after_projection = publisher.resolve_raw_scene(&runtime, fg, ngx, true, true, 81210);
+        const auto after_projection = publisher.resolve_raw_scene(&runtime, fg, ngx, sunshine_game3d::depth_output::describe(ngx), true, true, 81210);
         require(after_projection.ready && after_projection.scale == resumed.scale && after_projection.blend == 0.f,
           "Return from the projection path did not resume from a fresh target");
 

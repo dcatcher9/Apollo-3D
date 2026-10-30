@@ -1635,6 +1635,8 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 
 ##### depth_output
 
+- [`depth_output.h`](depth_output.h), [`depth_output.cpp`](depth_output.cpp): value-only shown-depth identities for the scene, renderer, UI observation and Generic raw selection. Docs: [depth_output](../../docs/reshade-sbs.md#depth_output).
+
 ##### depth_hold
 
 - [`depth_hold.h`](depth_hold.h): distinct API and Generic hold decisions and the retained private display copy. Docs: [depth_hold](../../docs/reshade-sbs.md#depth_hold).

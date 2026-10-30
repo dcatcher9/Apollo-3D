@@ -6009,6 +6009,14 @@ changes; without that metadata the raw fallback cannot establish physical equiva
 
 #### depth_output
 
+`depth_output.{h,cpp}` builds one value-only `shown_depth` from the selected
+`frame_depth` within the exporter preparation try-lock. Generic scene identity
+and the fresh-Generic UI identity predicate stay distinct. Scene reuse, the
+partial same-source comparison, renderer content identity, UI observation and
+Generic raw selection read this immutable provenance; readiness, borrowed-view
+checks, calibration epochs and observation time are supplied at their original
+call sites. The record retains no resource ownership or independent lifetime.
+
 #### depth_hold
 
 `depth_hold.h` owns the pure API display decision and private display-copy value,
