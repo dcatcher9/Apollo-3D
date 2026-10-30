@@ -8,9 +8,9 @@
 // hidden-scene guard that holds the CPU's verdicts of D and refutes claims
 // per signature (scene_guard::state, M5), the sample decode and counter
 // commit (ui_temporal::decode_detection_sample, sample_counters), Present
-// counting under frame generation (ui_mask::generated_without_input: inputs
+// counting under frame generation (ui_evidence::generated_without_input: inputs
 // tagged on real frames only, a HUD-less image offered on every Present it
-// pairs, inexact by ui_mask::pair_hudless_present) and the exact counters
+// pairs, inexact by ui_evidence::pair_hudless_present) and the exact counters
 // (ui_counters). A stream's GPU input is what one detection counts:
 // decision texels 0-11 that ui_detection_replay --verbose recorded on
 // labelled dumps with the fix-1 shader, or synthetic counts. Every decision
@@ -42,6 +42,7 @@
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_mask.h"
+#include "ui_evidence.h"
 #include "game3d_ui_selection.h"
 #include "game3d_ui_temporal.h"
 
@@ -619,7 +620,7 @@ namespace {
     // T1 identity by Present counting (ui_temporal::present_identity): a
     // generated Present, one that offers nothing within the reported
     // generated count of the last Present that offered a UI tag
-    // (ui_mask::generated_without_input; fg_pacer computes it).
+    // (ui_evidence::generated_without_input; fg_pacer computes it).
     bool hold_previous {};
     // The provider offered the previous render's inexact HUD-less snapshot
     // again (ui_detection_inputs::hudless_reoffer); the renderer pushes
@@ -1019,7 +1020,7 @@ namespace {
   // UI color tag, the Backbuffer) for real frames only, while an image
   // offered on every Present (a HUD-less image, paired inexactly by Present
   // counting, or the offscreen UI layer copy) is offered there too. As the
-  // input provider does (ui_mask::generated_without_input), a Present that
+  // input provider does (ui_evidence::generated_without_input), a Present that
   // offers nothing within the multiplier the provider reports, which can lag
   // or lead the cadence (dynamic or automatic frame generation, a multiplier
   // change), of the last Present that offered a UI tag is generated
@@ -1049,7 +1050,7 @@ namespace {
       if (real.offered & tags) {
         input_present = presented;
       }
-      real.hold_previous = !real.offered && ui_mask::generated_without_input(presented, input_present, true, reported);
+      real.hold_previous = !real.offered && ui_evidence::generated_without_input(presented, input_present, true, reported);
       return {is_real, real};
     }
   };
@@ -1876,7 +1877,7 @@ namespace {
     // frame's Backbuffer, layer and UIAlpha instead of offering nothing
     // (Expedition 33, Stellar Blade and The Witcher 3 at 2x-4x). The provider
     // holds a Present whose snapshot identities equal those of the last
-    // Present that detected (ui_mask::same_snapshot_inputs): it never
+    // Present that detected (ui_evidence::same_snapshot_inputs): it never
     // detects, and shows the real frame's decision, held.generated once per
     // generated Present. A real frame's new tickets detect afresh.
     alpha_auto_policy session;
@@ -1884,16 +1885,16 @@ namespace {
     sequence s(session, backbuffer_frame);
     present p;
     p.offered = candidate::backbuffer;
-    ui_mask::snapshot_inputs detected{};
+    ui_evidence::snapshot_inputs detected{};
     std::uint64_t now = 10000, ticket = 100, layer = (std::uint64_t(1) << 62) | 7;
     std::size_t generated_presents = 0, real_presents = 0;
     for (const std::uint32_t generated : {1u, 2u, 3u, 1u}) {
       for (unsigned frame = 0; frame != 40; ++frame) {
-        const ui_mask::snapshot_inputs offered{++ticket, 0, ++ticket, 0, ++layer};
+        const ui_evidence::snapshot_inputs offered{++ticket, 0, ++ticket, 0, ++layer};
         for (std::uint32_t i = 0; i <= generated; ++i) {
           p.now_ms = now;
           now += 8;
-          p.hold_previous = ui_mask::same_snapshot_inputs(offered, detected, true, false);
+          p.hold_previous = ui_evidence::same_snapshot_inputs(offered, detected, true, false);
           const auto &r = s.step(p);
           if (!p.hold_previous) {
             detected = offered;
@@ -1910,8 +1911,8 @@ namespace {
     }
     // Current colour or an inexact HUD-less image is the Present's own: it
     // never holds, nor does the same set without frame generation.
-    const ui_mask::snapshot_inputs again{ticket, 0, ticket, 0, layer};
-    require(!ui_mask::same_snapshot_inputs(again, detected, true, true) && !ui_mask::same_snapshot_inputs(again, detected, false, false), "Own inputs or a Present without frame generation held");
+    const ui_evidence::snapshot_inputs again{ticket, 0, ticket, 0, layer};
+    require(!ui_evidence::same_snapshot_inputs(again, detected, true, true) && !ui_evidence::same_snapshot_inputs(again, detected, false, false), "Own inputs or a Present without frame generation held");
     require(!s.discards && invariants.generated_detections == 0, "A generated Present detected or discarded a sample");
     check_counters(s, "re-offered snapshots hold");
     std::size_t committed_generated = 0;
@@ -2273,7 +2274,7 @@ namespace {
     // E33 FG on at 2x, 3x and 4x: the Backbuffer tag comes with real Presents
     // only and no HUD-less image pairs, so generated Presents offer nothing.
     // The input provider counts Presents from the last one that offered a
-    // tag (ui_mask::generated_without_input): one within the reported
+    // tag (ui_evidence::generated_without_input): one within the reported
     // generated count is generated and shows its real frame's decision
     // (T1, held.generated), before acceptance (3 samples over 2 s, A1: the
     // inferred Backbuffer decides nothing, S1) and after it. A count reported
@@ -2366,7 +2367,7 @@ namespace {
   // Hogwarts Legacy 10-05 (Epic launch, DLSS-G 4x multi-frame generation)
   // tagged only HUDLessColor: no Backbuffer and no UI color. Without a
   // same-batch Backbuffer, counting proposes the presented colour after the
-  // tag (ui_mask::pair_hudless_present), which is never exact (E2): only V2
+  // tag (ui_evidence::pair_hudless_present), which is never exact (E2): only V2
   // validates the pair, and only a same-batch Backbuffer makes it exact.
 
   // The input provider's HUD-less offers under a frame-generation cadence:
@@ -2376,7 +2377,7 @@ namespace {
   // snapshot, from `delay` Presents into the window (a capture that
   // completes late, on another queue); until then the previous window's
   // snapshot is offered again. Each offer pairs as the provider pairs it
-  // under frame generation (ui_mask::pair_hudless_offer: a first offer on
+  // under frame generation (ui_evidence::pair_hudless_offer: a first offer on
   // the Present after the tag with that Present, a later first offer and
   // every later offer with its own Present's colour), and the pair compares
   // the snapshot's own real frame only when the compared Present is that
@@ -2396,8 +2397,8 @@ namespace {
       const std::size_t window = generated + 1, j = present_index % window, real_at = real_first ? 0 : generated;
       const std::uint64_t tagged = 1000 + window * (present_index / window), current = tagged + j + 1;
       const std::uint64_t snapshot = j < delay ? tagged - window : tagged;
-      const auto pairing = ui_mask::pair_hudless_offer(snapshot, current, j != delay, true);
-      require(pairing.kind != ui_mask::hudless_present::unpaired && pairing.presents_ago <= j, "An on-time HUD-less offer did not pair");
+      const auto pairing = ui_evidence::pair_hudless_offer(snapshot, current, j != delay, true);
+      require(pairing.kind != ui_evidence::hudless_present::unpaired && pairing.presents_ago <= j, "An on-time HUD-less offer did not pair");
       return {j == real_at, j == delay, current - pairing.presents_ago == snapshot + 1 + real_at};
     }
   };
@@ -2408,7 +2409,7 @@ namespace {
     // multiplier had read every one as generated and held 49 s without a
     // decision).
     for (std::uint64_t after = 1; after <= 3; ++after) {
-      require(ui_mask::pair_hudless_present(3725, 3725 + after).kind != ui_mask::hudless_present::unpaired, "A pipelined HUD-less tag did not pair");
+      require(ui_evidence::pair_hudless_present(3725, 3725 + after).kind != ui_evidence::hudless_present::unpaired, "A pipelined HUD-less tag did not pair");
     }
     for (const auto [generated, real_first, delay] : {std::tuple {3u, false, 0u}, std::tuple {3u, true, 0u}, std::tuple {1u, false, 0u},
            std::tuple {1u, true, 0u}, std::tuple {1u, false, 1u}, std::tuple {3u, false, 1u}}) {
@@ -2608,7 +2609,7 @@ namespace {
       // FG off, a stale re-offer: the game misses a few HUD-less tags (a busy
       // capture reservation), so the provider offers the last snapshot again.
       // Without frame generation a re-offer pairs as its first offer did,
-      // with the snapshot's own frame retained (ui_mask::pair_hudless_offer:
+      // with the snapshot's own frame retained (ui_evidence::pair_hudless_offer:
       // earlier_present, a valid pair that decides its own change set), and
       // more than max_late_presents Presents after its tag it is unpaired
       // and not offered at all: the accepted pair is missing, so the T1
@@ -2626,8 +2627,8 @@ namespace {
         // Snapshot 19 (tagged 1019) is offered again on renders 20-29.
         const bool stale = i >= 20 && i < 30;
         const std::uint64_t tagged = stale ? 1019 : 1000 + i, current = 1001 + i;
-        const auto pairing = ui_mask::pair_hudless_offer(tagged, current, stale, false);
-        const bool offered = pairing.kind != ui_mask::hudless_present::unpaired;
+        const auto pairing = ui_evidence::pair_hudless_offer(tagged, current, stale, false);
+        const bool offered = pairing.kind != ui_evidence::hudless_present::unpaired;
         // The compared color is the snapshot's own frame, the Present after its tag.
         require(!offered || current - pairing.presents_ago == tagged + 1, "An FG-off offer did not pair with its own frame");
         offers.push_back({offered, stale, offered});

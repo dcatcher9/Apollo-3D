@@ -59,7 +59,7 @@ namespace sunshine_game3d {
     bool current_color = false;
     // A generated Present by Present counting (UI framework T1): one that
     // offers nothing within the reported generated count of the last Present
-    // that offered a UI tag (ui_mask::generated_without_input). It never
+    // that offered a UI tag (ui_evidence::generated_without_input). It never
     // detects: it shows the last real decision, or has no mask
     // (ui_temporal::detection_state::arbitrate).
     bool hold_previous = false;
@@ -68,7 +68,7 @@ namespace sunshine_game3d {
     // hudless_presents_ago is not used.
     reshade::api::resource_view hudless_pair{};
     // Otherwise counting proposes the color presented this many Presents ago
-    // (ui_mask::pair_hudless_offer): the retained color, or the current one
+    // (ui_evidence::pair_hudless_offer): the retained color, or the current one
     // for zero, as under frame generation for a late first offer and every
     // later offer of the same snapshot. Such a pair is inexact; only V2
     // validates its pixels.

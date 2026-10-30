@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "game3d_ui_temporal.h"
+#include "ui_evidence.h"
 #include <type_traits>
 
 namespace sunshine_game3d {
@@ -60,7 +61,7 @@ namespace sunshine_game3d {
     static bool generated_hold(bool capturing, bool available, uint64_t frame_sequence, uint64_t input_present,
       bool fg_active, uint32_t generated_frames);
     static bool snapshot_hold(bool capturing, bool available, bool hold_previous,
-      const std::array<uint64_t, 5> &offered_inputs, const std::array<uint64_t, 5> &detected_before,
+      const ui_evidence::snapshot_inputs &offered_inputs, const ui_evidence::snapshot_inputs &detected_before,
       bool fg_active, bool own_input);
   };
   static_assert(std::is_trivially_destructible_v<ui_decision>);

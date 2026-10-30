@@ -95,7 +95,7 @@ namespace sunshine_game3d::ui_detection {
   // A2 (selection revision 10): the offered UIAlpha (0x1000) or UI color tag
   // (0x2000), its candidate bit shifted by per_frame_unaligned_shift, was not
   // captured in the exact HUD-less pair's tag batch (its Present interval is
-  // not the same-batch Backbuffer's, ui_mask::same_tag_interval). A tag of
+  // not the same-batch Backbuffer's, ui_evidence::same_tag_interval). A tag of
   // another frame is no same-sample evidence (E2): the tiles pass counts no
   // strong pixel of it, so the one-way test does not judge it there.
   inline constexpr std::uint32_t per_frame_unaligned_shift = 12u, per_frame_unaligned_mask = 0x3000u;

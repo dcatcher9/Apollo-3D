@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_input_provider.h"
 #include "game3d_ui_mask.h"
+#include "ui_evidence.h"
 #include "game3d_ui_decision.h"
 #include "game3d_ui_layer.h"
 #include "game3d_capture_diagnostic.h"
@@ -21,7 +22,7 @@
 #include <utility>
 
 namespace sunshine_game3d::ui_input {
-  static_assert(ui_detection_inputs::max_retained_presents == ui_mask::max_late_presents,
+  static_assert(ui_detection_inputs::max_retained_presents == ui_evidence::max_late_presents,
     "The renderer must retain the color of every admitted late HUD-less frame");
   namespace api = reshade::api;
   namespace capture = sunshine_streamline::depth_capture;
@@ -60,17 +61,17 @@ namespace sunshine_game3d::ui_input {
       std::array<std::uint32_t, hudless_outcome_count> hudless_outcomes{};
       // T1 Present counting without a HUD-less pairing: the frame_sequence of
       // the last render that offered a Streamline UI tag, in this epoch and
-      // viewport (ui_mask::generated_without_input).
+      // viewport (ui_evidence::generated_without_input).
       std::uint64_t input_present{}, input_epoch{};
       std::uint32_t input_viewport{};
-      // The HUD-less snapshot offered last (ui_mask::pair_hudless_offer): a
+      // The HUD-less snapshot offered last (ui_evidence::pair_hudless_offer): a
       // later offer of the same one pairs with its own Present's color under
       // frame generation, and one directly after the render that offered it
       // is a re-offer for the T1 grace (ui_detection::per_frame_reoffer).
       offered_snapshot hudless_offered;
-      // T1 by snapshot identity (ui_mask::same_snapshot_inputs): the inputs
+      // T1 by snapshot identity (ui_evidence::same_snapshot_inputs): the inputs
       // the last render that detected offered, in this epoch and viewport.
-      ui_mask::snapshot_inputs detected_inputs{};
+      ui_evidence::snapshot_inputs detected_inputs{};
       std::uint64_t detected_epoch{};
       std::uint32_t detected_viewport{};
       bool suspended{};
@@ -253,10 +254,7 @@ namespace sunshine_game3d::ui_input {
       GetTickCount64());
   }
   const char *current_color_refusal(const source_alpha_ui_decision &status, std::uint32_t output_format, choice wanted) {
-    if (!status.requested) return "not_requested";
-    if (status.fg_active()) return "FG_active";
-    if (!present_has_alpha(output_format)) return "no_present_alpha";
-    return wanted == choice::automatic || wanted == choice::current_color ? nullptr : "not_selected";
+    return ui_evidence::current_color_refusal(status, output_format, wanted, present_has_alpha);
   }
   frame acquire(api::effect_runtime *runtime, renderer &renderer, source_alpha_ui_decision status,
       alpha_auto_policy &session, bool diagnostic) {
@@ -269,7 +267,7 @@ namespace sunshine_game3d::ui_input {
     ui_qualification::status before;
     std::uint64_t instance{}, frame_sequence{}, input_present{};
     offered_snapshot hudless_before;
-    ui_mask::snapshot_inputs detected_before{}, offered_inputs{};
+    ui_evidence::snapshot_inputs detected_before{}, offered_inputs{};
     {
       std::lock_guard<std::mutex> lock(source_mutex);
       const auto found = sources.find(runtime);
@@ -376,14 +374,14 @@ namespace sunshine_game3d::ui_input {
       // Without a same-batch Backbuffer, counting proposes the presented color
       // after the tag for a snapshot's first offer, or retained color for a
       // late one; under frame generation a late first offer and every later
-      // offer pair with the current color instead (ui_mask::pair_hudless_offer),
+      // offer pair with the current color instead (ui_evidence::pair_hudless_offer),
       // all inexact; only V2 then validates the pair's pixels. Streamline can
       // present on its own queue; pixels from another queue were already
       // admitted only after the producer completed and its recording retired.
       const auto tagged = selected.origin.source_present_generation, current = selected.current_source_present_generation;
       const bool offered_before = hudless && hudless_before.same(selected);
-      const auto pairing = ui_mask::pair_hudless_offer(tagged, current, offered_before, fg_active);
-      using ui_mask::hudless_present;
+      const auto pairing = ui_evidence::pair_hudless_offer(tagged, current, offered_before, fg_active);
+      using ui_evidence::hudless_present;
       const bool batch = hudless && backbuffer.view.handle &&
         ui_mask::same_batch(selected.origin, current, *backbuffer.origin, backbuffer.current);
       const bool paired = batch || pairing.kind != hudless_present::unpaired;
@@ -523,7 +521,7 @@ namespace sunshine_game3d::ui_input {
     // T1 by Present counting: a render that offers nothing, within the
     // reported generated count of the last one that offered a Streamline UI
     // tag, is a generated Present and shows that real frame's decision
-    // (ui_mask::generated_without_input); the count bounds it.
+    // (ui_evidence::generated_without_input); the count bounds it.
     const bool tag_offered = result.detection.masks[0].handle || result.detection.masks[1].handle ||
       result.detection.masks[2].handle;
     // T1 (ui_detection::per_frame_reoffer): the render before offered this

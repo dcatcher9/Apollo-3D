@@ -1681,6 +1681,7 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 #### UI
 
 - [`game3d_ui_input_provider.cpp`](game3d_ui_input_provider.cpp), [`game3d_ui_input_provider.h`](game3d_ui_input_provider.h): the API UI-input adapter and its pairing with final color. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).
+- [`ui_evidence.h`](ui_evidence.h): pure HUD-less pairing, Present counting, snapshot identity and current-color eligibility; the capture owner keeps its public aliases. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).
 - [`game3d_ui_mask.cpp`](game3d_ui_mask.cpp), [`game3d_ui_mask.h`](game3d_ui_mask.h): the bounded owner of SL's UI alpha/color, the real back buffer and HUD-less color. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).
 - [`game3d_ui_capture.cpp`](game3d_ui_capture.cpp), [`game3d_ui_capture.h`](game3d_ui_capture.h): request-scoped optional UI pixels. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).
 - [`game3d_ui_layer.cpp`](game3d_ui_layer.cpp), [`game3d_ui_layer.h`](game3d_ui_layer.h): offscreen UI layers found from cleared color targets. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_decision.h"
-#include "game3d_ui_mask.h"
+#include "ui_evidence.h"
 
 namespace sunshine_game3d {
   ui_decision::requested_mode ui_decision::request(const alpha_auto_source *automatic, bool has_detection) {
@@ -140,11 +140,11 @@ namespace sunshine_game3d {
 
   bool ui_decision::generated_hold(bool capturing, bool available, uint64_t frame_sequence, uint64_t input_present,
       bool fg_active, uint32_t generated_frames) {
-    return capturing && !available && ui_mask::generated_without_input(frame_sequence, input_present, fg_active, generated_frames);
+    return capturing && !available && ui_evidence::generated_without_input(frame_sequence, input_present, fg_active, generated_frames);
   }
   bool ui_decision::snapshot_hold(bool capturing, bool available, bool hold_previous,
-      const std::array<uint64_t, 5> &offered_inputs, const std::array<uint64_t, 5> &detected_before,
+      const ui_evidence::snapshot_inputs &offered_inputs, const ui_evidence::snapshot_inputs &detected_before,
       bool fg_active, bool own_input) {
-    return capturing && available && !hold_previous && ui_mask::same_snapshot_inputs(offered_inputs, detected_before, fg_active, own_input);
+    return capturing && available && !hold_previous && ui_evidence::same_snapshot_inputs(offered_inputs, detected_before, fg_active, own_input);
   }
 }

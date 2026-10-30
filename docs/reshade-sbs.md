@@ -3279,6 +3279,8 @@ code values (`sbs_transfer` 3) and there is no `linear_color` artifact.
 
 ### UI source discovery and snapshot qualification
 
+`ui_evidence.h` owns the pure pairing, Present-counting, snapshot-identity and current-color eligibility rules. The capture owner and input adapter call those definitions; the capture header retains aliases for its existing public names.
+
 The inspector's `ui_discovery` report separates interface observation, native capture,
 pixel content, optional offline review and the input actually consumed by the renderer. It reads the
 production catalog from `producer_metadata.latest_observations.ui_resources`; older flat

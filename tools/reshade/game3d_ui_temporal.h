@@ -16,7 +16,7 @@
 //        candidate_signatures of the offered kinds; identity: the provider's
 //        present_identity {hold_previous} (Present counting: a Present that
 //        offers nothing within the reported generated count of the last one
-//        that offered a UI tag, ui_mask::generated_without_input);
+//        that offered a UI tag, ui_evidence::generated_without_input);
 //     2. accepted = session.accepted(bits, signatures) (manual On: every
 //        offered candidate, without the ledger);
 //     3. t = state.arbitrate(identity, observation, bits);
@@ -246,7 +246,7 @@ namespace sunshine_game3d::ui_temporal {
 
   // T1 identity of one Present (M6), by Present counting: whether it offers
   // nothing within the reported generated count of the last Present that
-  // offered a UI tag (ui_mask::generated_without_input, hold_previous). A
+  // offered a UI tag (ui_evidence::generated_without_input, hold_previous). A
   // HUD-less pairing names no real frame: an offered image makes the Present
   // real.
   struct present_identity {
@@ -305,7 +305,7 @@ namespace sunshine_game3d::ui_temporal {
     // decision (detected_mask) while that was made in the same identity
     // scope (hold_scope_changed: an observation revision alone keeps it);
     // otherwise it has no mask and the chain ends. No multiplier constant and
-    // no time bound: Present counting (ui_mask::generated_without_input)
+    // no time bound: Present counting (ui_evidence::generated_without_input)
     // classifies only Presents that offer nothing, so a count reported too
     // high holds only those, and one too low leaves the later ones to the
     // grace below. A real
