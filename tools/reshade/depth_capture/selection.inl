@@ -39,6 +39,7 @@ namespace sunshine_streamline::depth_capture {
       return readable_elsewhere(value, native, progress) ? status::ready : status::submitted;
     }
 
+    // Nomination authority can survive pixel failure; it does not require completed_pixels.
     status nomination_status(const slot &value, std::uint64_t consumer_device) {
       if (!value.source_nominated || !value.id || !value.finished || !value.success || !value.producer_submitted)
         return value.invalid || (value.finished && !value.success) ? status::failed : status::recorded;
@@ -166,10 +167,8 @@ namespace sunshine_streamline::depth_capture {
     bool pending_frame(const capture_pick &chosen, const queue_state &owner) {
       if (chosen.pending_nomination) return true;
       const auto *value = chosen.latest;
-      return value && !value->nomination_only &&
-        (chosen.result == status::submitted || chosen.result == status::recorded) &&
-        value->metadata.frame_generation_input && (!value->finished || value->success) &&
-        !value->invalid && !value->nomination_invalid && owner.provider_established &&
+      return value && pending_snapshot_core(*value, chosen.result) &&
+        value->metadata.frame_generation_input && owner.provider_established &&
         owner.provider == value->metadata.provider && owner.source_id == value->metadata.source_id &&
         owner.last_epoch == value->metadata.epoch && value->metadata.sequence > owner.last_sequence;
     }
@@ -252,9 +251,7 @@ namespace sunshine_streamline::depth_capture {
       slot *best = nullptr;
       for (auto &value : slots) {
         const auto &metadata = value.metadata;
-        if (!value.id || !value.texture || value.nomination_only || value.preservation_only ||
-            !value.source_nominated || !value.finished || !value.success || value.invalid || value.nomination_invalid ||
-            !value.producer_submitted ||
+        if (!completed_pixels(value) ||
             metadata.provider != current.provider || metadata.frame_generation_input != current.frame_generation_input ||
             metadata.epoch != current.epoch || metadata.source_id != current.source_id || metadata.viewport != current.viewport ||
             metadata.sequence > current.sequence ||
@@ -323,9 +320,7 @@ namespace sunshine_streamline::depth_capture {
     // lineage_fallback).
     bool lineage_candidate(const slot &value, const input &fg, std::uint64_t now) {
       const auto &metadata = value.metadata;
-      return value.id && value.texture && !value.nomination_only && !value.preservation_only &&
-        value.source_nominated && value.finished && value.success && !value.invalid && !value.nomination_invalid &&
-        value.producer_submitted && metadata.provider == provider_kind::streamline && !metadata.frame_generation_input &&
+      return completed_pixels(value) && metadata.provider == provider_kind::streamline && !metadata.frame_generation_input &&
         metadata.epoch == fg.epoch && metadata.viewport == fg.viewport && metadata.sequence <= fg.sequence &&
         (within_source_age(metadata.tick, now) || frame_presenting(presented_by(value)));
     }
@@ -387,15 +382,15 @@ namespace sunshine_streamline::depth_capture {
         std::uint64_t present, provider_kind provider, std::uint64_t now) {
       auto chosen = select_latest_capture(owner, native, present, provider, now);
       const auto *latest = chosen.latest;
+      // This live check is source age or this frame being presented; unlike
+      // select_provider's live, it does not interpret status::stale or a pending nomination.
       const bool live = latest && (within_source_age(latest->metadata.tick, now) || frame_presenting(presented_by(*latest)));
       // A live source whose newest snapshot is pending may use its own newest
       // completed one; completed_snapshot matches its identity. Ownership does
       // not gate this: a pipelined source is otherwise never readable, so it
       // could never (re)establish itself after a reset, a source change or
       // another provider's expired capture.
-      const bool pending = live && (chosen.result == status::recorded || chosen.result == status::submitted) &&
-        !latest->invalid && !latest->nomination_invalid && !latest->nomination_only &&
-        !(latest->finished && !latest->success);
+      const bool pending = live && pending_snapshot_core(*latest, chosen.result);
       // A missing frame takes the same path: the one active view's fresh head
       // failed, was refused (before its capture slot existed too), is invalid,
       // or names its source without pixels this queue can read (a nomination-
@@ -606,6 +601,8 @@ namespace sunshine_streamline::depth_capture {
       };
       // A source is live while its newest nomination is within the source age.
       // Readable implies live; liveness never extends that age.
+      // Unlike select_capture's live, this includes pending_nomination and
+      // uses expired, which also refuses status::stale. Keep these two rules distinct.
       const auto live = [&](const capture_pick &value) {
         return value.pending_nomination || (value.latest && !expired(value));
       };
@@ -616,9 +613,7 @@ namespace sunshine_streamline::depth_capture {
       // one is legal, already stood in (select_capture).
       const auto pending = [&](const capture_pick &value) {
         const auto *latest = value.latest;
-        return value.pending_nomination || (live(value) && !latest->nomination_only && !latest->invalid &&
-          !latest->nomination_invalid && (!latest->finished || latest->success) &&
-          (value.result == status::recorded || value.result == status::submitted));
+        return value.pending_nomination || (live(value) && pending_snapshot_core(*latest, value.result));
       };
       // Ownership only arbitrates between live sources. Only a delivering owner
       // (one frame copied within the source age) keeps its own live source:

@@ -4,6 +4,7 @@
 
 namespace sunshine_streamline::depth_capture {
   SUNSHINE_CAPTURE_INTERNAL {
+    // Current source authority allows unfinished nominations and has no texture/fence requirement.
     bool current_source_nomination(const slot &value) {
       if (!value.id || !value.source_nominated || value.preservation_only || value.invalid ||
           value.nomination_invalid || (value.finished && !value.success) || !valid_provider(value.metadata.provider))
@@ -13,6 +14,7 @@ namespace sunshine_streamline::depth_capture {
         value.metadata.source_id == head.source_id;
     }
 
+    // Logical retention keeps metadata-only authority separately from completed fallback pixels.
     source_retention logical_source_retention(slot &value) {
       if (value.nomination_only) {
         // Metadata-only nominations carry source authority but no GPU storage.

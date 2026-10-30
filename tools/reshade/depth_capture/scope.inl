@@ -96,6 +96,7 @@ namespace sunshine_streamline::depth_capture {
     // when its queue has no place, or never readable keeps no other depth out
     // of its viewport. Called at the copy's call, its submission and each
     // liveness query (frame_generation_scope_live).
+    // Compute-copy acceptance needs a producer fence, but does not test nomination_invalid.
     void accept_compute_copy(const slot &value) {
       const auto &m = value.metadata;
       if (!value.compute_list || !value.source_nominated || !value.finished || !value.success || value.invalid ||

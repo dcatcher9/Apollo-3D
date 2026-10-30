@@ -49,11 +49,7 @@ namespace sunshine_streamline::depth_capture {
     std::unique_lock lock(mutex);
     // A queue already registered (observe_present, once per Present) needs no
     // second interface check, observation and lock round trip here.
-    if (local && !known_queue(consumer_queue)) {
-      lock.unlock();
-      observe_queue(consumer_queue);
-      lock.lock();
-    }
+    if (local) ensure_queue(lock, consumer_queue);
     const auto *consumer = local ? queue(consumer_queue) : nullptr;
     if (local && (!consumer || consumer->retiring)) return result(status::unsupported_queue);
     const auto native_consumer = consumer ? reinterpret_cast<std::uint64_t>(consumer->queue.p) : 0;
@@ -333,11 +329,7 @@ namespace sunshine_streamline::depth_capture {
     packet selected;
     {
       std::unique_lock lock(mutex);
-      if (!known_queue(consumer_queue)) {
-        lock.unlock();
-        observe_queue(consumer_queue);
-        lock.lock();
-      }
+      ensure_queue(lock, consumer_queue);
       auto *owner = queue(consumer_queue);
       if (!owner || owner->retiring) return reject(consumer_status::missing_device);
       const auto found = std::find_if(diagnostic_slots.begin(), diagnostic_slots.end(),
@@ -441,11 +433,7 @@ namespace sunshine_streamline::depth_capture {
     packet selected;
     {
       std::unique_lock lock(mutex);
-      if (!known_queue(consumer_queue)) {
-        lock.unlock();
-        observe_queue(consumer_queue);
-        lock.lock();
-      }
+      ensure_queue(lock, consumer_queue);
       auto *owner = queue(consumer_queue);
       if (!owner || owner->retiring) return reject(consumer_status::missing_device);
       const auto native_queue = reinterpret_cast<std::uint64_t>(owner->queue.p);

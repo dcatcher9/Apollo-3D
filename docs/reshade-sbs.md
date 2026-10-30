@@ -3614,6 +3614,11 @@ surveyed release's own header; every surveyed release agrees with it.
 
 ### Streamline depth selection
 
+The capture selection field predicates live in `depth_capture/rules.h`. They name completed
+pixels and a pending snapshot core; identity, ownership and fence reads stay with each caller.
+`select_capture` tests liveness by source age or the presented frame, while `select_provider`
+also accepts a pending nomination and treats `status::stale` as expired. Those rules remain distinct.
+
 The capture owner keeps Present ordinals and frame-generation windows in `scope_state`,
 with one constant-initialized instance under its existing locks. The counters stay distinct:
 Generic `native_present_index` supplies the capture `acquire` argument `device_present`;

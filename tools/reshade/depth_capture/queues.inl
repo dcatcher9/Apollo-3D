@@ -19,6 +19,14 @@ namespace sunshine_streamline::depth_capture {
       }
       return nullptr;
     }
+    // The caller owns mutex. Keep the one lookup and unlock/observe/relock order.
+    void ensure_queue(std::unique_lock<std::mutex> &lock, std::uint64_t native) {
+      if (!known_queue(native)) {
+        lock.unlock();
+        observe_queue(native);
+        lock.lock();
+      }
+    }
     queue_state *queue(std::uint64_t native) {
       if (auto *value = known_queue(native)) return value;
       // A COM wrapper and its native queue share private data, just like the
@@ -59,6 +67,7 @@ namespace sunshine_streamline::depth_capture {
       // remains unavailable to acquire(), but a later success can admit it.
       else if (value.finished && !value.success) invalidate(value, capture_failure::evaluation_failed);
     }
+    // Submission to this queue accepts metadata-only nominations and otherwise needs its fence.
     bool submitted_success(const slot &value, std::uint64_t native) {
       return value.id && !value.invalid && value.finished && value.success &&
         value.producer_submitted && value.queue == native && (value.nomination_only || value.producer_fence);
