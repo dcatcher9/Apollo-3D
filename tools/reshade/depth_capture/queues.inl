@@ -56,6 +56,8 @@ namespace sunshine_streamline::depth_capture {
       // own Present after a hitch never counted it as current (the 10-27
       // review's P2). The call stamp stays for a copy whose submission on
       // a presenting queue was not seen (presented_by).
+      // Cross-section read: producer submission uses this native place's
+      // diagnostic chosen flag as evidence that it has presented; reader differs.
       if (!value.producer_submitted && !value.submitted_present)
         if (const auto *presenting = known_queue(native); presenting && presenting->chosen)
           value.submitted_present = present_ordinal();
@@ -313,6 +315,8 @@ namespace sunshine_streamline::depth_capture {
       const auto now = GetTickCount64();
       // The reader's own queue copies out too while FG may move Present off
       // it (reader_may_move); only a copy read elsewhere stamps its source.
+      // Cross-section read: producer copy-out consults current consumer reader,
+      // not this place's persistent diagnostic chosen flag.
       const bool elsewhere = read_elsewhere(owner);
       if (!elsewhere && !(reader == owner.cookie && !owner.compute_producer && reader_may_move(now))) return out;
       bool any = false;

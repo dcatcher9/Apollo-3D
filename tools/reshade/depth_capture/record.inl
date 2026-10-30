@@ -596,6 +596,8 @@ namespace sunshine_streamline::depth_capture {
       // queue (reader_may_move: the copies of FG's first Present).
       const auto record_tick = GetTickCount64();
       const bool read_elsewhere_before = read_elsewhere_recently(*value.source, record_tick);
+      // Cross-section read: storage prediction consults the current consumer
+      // reader; a queue's diagnostic chosen flag is not this ownership fact.
       const bool predicted = !read_elsewhere_before && !on_compute && reader_live() &&
         ((owner->executed_queue ? owner->executed_queue != reader : last_direct_copy_queue != reader) ||
           reader_may_move(record_tick));

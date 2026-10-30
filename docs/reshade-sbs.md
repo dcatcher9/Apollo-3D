@@ -3617,6 +3617,11 @@ surveyed release's own header; every surveyed release agrees with it.
 Capture pool, queue-place and observation state have separate owners in the capture shell.
 Their non-trivial members retain their original initialization and destruction order;
 storage-release jobs remain a separate owner at their original position.
+Within them, named member groups separate queue native-place, consumer-ownership and diagnostic
+choice facts, and snapshot storage, producer, consumer-lease, selection and reservation facts.
+The producer's submission uses a queue's `chosen` flag as evidence that it presented; copy-out
+and predicted storage read the current `reader` instead. These cross-section reads remain at
+their original sites, and `reader` and `chosen` keep their distinct meanings.
 
 The capture selection field predicates live in `depth_capture/rules.h`. They name completed
 pixels and a pending snapshot core; identity, ownership and fence reads stay with each caller.

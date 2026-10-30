@@ -152,26 +152,37 @@ namespace sunshine_streamline::depth_capture {
       com_ptr<ID3D12GraphicsCommandList> list;
       std::uint64_t fence{};
     };
+    // Named member groups retain declaration order, including the places where
+    // native-place and consumer-ownership fields share a declaration.
     struct queue_state {
+      // Native place: COM owners, native cookie and the local fence sequence.
       com_ptr<ID3D12CommandQueue> queue;
       com_ptr<ID3D12Device> device;
       com_ptr<ID3D12Fence> fence;
+      // Consumer ownership starts at last_epoch on this shared declaration;
+      // cookie and next_fence are native-place identity, not frame watermarks.
       std::uint64_t cookie{}, next_fence{}, last_epoch{}, last_sequence{}, nominated_epoch{}, present{}, present_capture{};
       std::uint64_t admission_after{}, last_source_tick{};
+      // Native place (continued): device identity, use order and queue kind.
       std::uint64_t device_identity{};
       // When a lookup last found this place (known_queue, queue): a reclaimed
       // idle place is the longest unused (free_place).
       std::uint64_t last_use{};
       // compute_producer: a COMPUTE queue (register_compute_producer).
+      // retiring/compute_producer belong to the native place;
+      // provider_established is consumer ownership between them in member order.
       bool retiring{}, provider_established{}, compute_producer{};
+      // Consumer ownership (continued): the provider/source association.
       provider_kind provider{provider_kind::streamline};
       std::uint64_t source_id{};
       std::uint32_t viewport{};
+      // Diagnostic choice: this place's recorded acquisition, not reader.
       // The newest acquisition's choice (depth_choice), when chosen. Whether
       // depth is read elsewhere is the newest acquisition's (the capture's
       // reader, read_elsewhere), not this flag, which stays once set.
       depth_choice choice;
       bool chosen{};
+      // Native place (continued): this producer queue's copy-out command ring.
       std::array<copy_out_list, copy_out_lists> copy_out;
     };
   }
@@ -239,7 +250,11 @@ namespace sunshine_streamline::depth_capture {
 #endif
   SUNSHINE_CAPTURE_INTERNAL {
     struct fence_point { std::uint64_t queue{}, value{}; };
+    // Named member groups keep every member and initializer in its old order.
+    // Groups continue where storage, producer, consumer-lease and selection
+    // facts interleave; reservation is admission bookkeeping, not a GPU lease.
     struct slot {
+      // Storage: the snapshot and its immutable copy-out allocation.
       std::shared_ptr<texture_reference> texture;
       // Copy-out (docs/reshade-sbs.md, Copy-out on the producer queue): the
       // add-on's private copy of texture, of the same shape, format and view
@@ -253,31 +268,46 @@ namespace sunshine_streamline::depth_capture {
       // with it, kept as an idle slot's cached storage (release_idle_slots)
       // and released with its device.
       std::shared_ptr<texture_reference> published;
+      // Selection: the source/frame identity carried by this snapshot.
       input metadata;
+      // Consumer lease: the retained auxiliary copy destination.
       // One auxiliary copy destination per snapshot. Keep the actual resource
       // alive through consumer Reset AND GPU completion, including legal replay.
       source_ref auxiliary_destination;
+      // Selection id, producer command/queue/fence, then consumer-lease queue:
+      // these share the original declaration and retain that exact member order.
       std::uint64_t id{}, command{}, queue{}, producer_fence{}, consumer_queue{};
+      // Producer: its submission position in the queue-order model.
       // The queue-order position another queue's read must follow before
       // producer_fence completed (U-C1, readable_elsewhere): the copy-out list
       // once copied out, else the game's submission (read only once its
       // recording retired); empty without a ticket.
       native_observer::position producer_position;
+      // Consumer lease: every consumer's independent retirement obligation.
       // Values are comparable only within their own private queue timeline.
       // Reset may discard recording identities, never these GPU obligations.
       std::array<fence_point, consumer_queue_limit> retirements{};
+      // Producer (continued): the recording that owns the original copy.
       recording_ref producer_recording;
+      // Consumer lease (continued): recording owners and the pending read.
       std::array<std::uint64_t, 4> consumers{};
       std::array<recording_ref, 4> consumer_recordings;
       // A runtime immediate list that recorded a read and has not yet been
       // observed in a submission on consumer_queue. See consume_owned.
       std::uint64_t pending_immediate{};
+      // Producer finished/success/producer_submitted, consumer-lease acquired/
+      // retirement_unknown, and selection invalid remain in declaration order.
       bool finished{}, success{}, acquired{}, invalid{}, producer_submitted{}, retirement_unknown{};
+      // Selection (continued): capture kind and nomination authority.
       bool preservation_only{};
+      // diagnostic_only is selection, diagnostic_released is consumer lifetime,
+      // and diagnostic_reusable is storage caching; keep the shared declaration.
       bool diagnostic_only{}, diagnostic_released{}, diagnostic_reusable{};
       bool source_nominated{}, nomination_only{}, nomination_invalid{};
+      // Producer (continued): command-list kind.
       // Recorded on a COMPUTE list (record_impl; S22, N7).
       bool compute_list{};
+      // Storage (continued): publication and prediction of the copy-out.
       // published holds the copy-out of this slot's first submission, ordered
       // before producer_fence (copy_out); cleared when the slot is reused.
       bool copied_out{};
@@ -286,28 +316,34 @@ namespace sunshine_streamline::depth_capture {
       // the idle sweep once the slot's first submission made no copy-out
       // (release_idle_slots).
       bool predicted_storage{};
+      // Selection (continued): pixel admission and failure/provenance diagnostics.
       status pixel_failure{status::unavailable};
       capture_failure failure{capture_failure::none};
       // The pre-copy state's provenance of an auxiliary snapshot (diagnostic;
       // nothing here admits, retires or reuses a slot).
       state_basis basis{state_basis::unknown};
+      // Reservation: one record attempt's bounded allocation claim.
       // An empty slot reserved by a record attempt that allocates its storage
       // without the lock (record_impl). Expires after reservation_timeout_ms;
       // publication never trusts it. reserved_bytes counts toward the
       // diagnostic budget while live.
       std::uint64_t reservation{}, reservation_tick{}, reserved_bytes{};
       bool reserved_live{}; // The reservation is for a live snapshot (its budget).
+      // Storage (continued): age of a cached allocation after capture retirement.
       // When a colour/mask slot's capture retired and it kept only its cached
       // live allocation (collect_diagnostics). poll() releases old idle storage.
       std::uint64_t idle_tick{};
+      // Consumer lease (continued): a runtime's direct binding interval.
       // Direct binding (lease_local_view): the runtime list and recording on
       // which this snapshot sits in the shader-resource state until
       // end_local_views returns it to COMMON.
       std::uint64_t lease_list{}, lease_cookie{};
+      // Producer (continued): state proof checked when its recording executes.
       // A copy from its source's last proven state (record_preserved at the
       // end of the frame): that proof's source, version and queue, checked
       // when its recording is executed (0 none).
       std::uint64_t proven_source{}, proven_version{}, proven_queue{};
+      // Producer / selection: recording and first submitted Present stamps.
       // present_ordinal() when recorded (frame_presenting), and when its
       // producer list was first seen submitted on a presenting queue, else
       // zero (presented_by).
