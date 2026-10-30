@@ -2,6 +2,7 @@
 #include "streamline_camera_probe.h"
 #include "addon_lifetime.h"
 #include "addon_config.h"
+#include "hook_host.h"
 #include "api_contract.h"
 #include "streamline_camera_data.h"
 #include "streamline_camera_version.h"
@@ -1236,11 +1237,7 @@ namespace sunshine_streamline {
     bool install_hooks(abi version, const targets &functions, const buffers::contract &contract) {
       if (version == abi::unsupported || !functions.constants || !functions.tag || !functions.evaluate) return false;
       if (!contract.known) return false;
-      if (!minhook_initialized) {
-        const auto status = MH_Initialize();
-        if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return false;
-        minhook_initialized = true;
-      }
+      if (!sunshine_game3d::hook_host::minhook_ready(minhook_initialized)) return false;
       struct entry { void *target, *hook; void **original; };
       std::array<entry, 6> entries{};
       unsigned count{};
@@ -1977,11 +1974,7 @@ namespace sunshine_streamline {
   }
 
   void depth_capture_step() {
-    if (!minhook_initialized) {
-      const auto initialized = MH_Initialize();
-      minhook_initialized = initialized == MH_OK || initialized == MH_ERROR_ALREADY_INITIALIZED;
-    }
-    if (minhook_initialized) depth_capture::poll();
+    if (sunshine_game3d::hook_host::minhook_ready(minhook_initialized)) depth_capture::poll();
   }
 
   void queue_order_step(std::uint64_t now) {

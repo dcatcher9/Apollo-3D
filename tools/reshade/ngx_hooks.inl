@@ -120,11 +120,7 @@ namespace sunshine_upscaler_trace {
         ++rejected;
         return false;
       }
-      if (!minhook_ready) {
-        const auto status = MH_Initialize();
-        minhook_ready = status == MH_OK || status == MH_ERROR_ALREADY_INITIALIZED;
-      }
-      if (!minhook_ready) { ++rejected; return false; }
+      if (!sunshine_game3d::hook_host::minhook_ready(minhook_ready)) { ++rejected; return false; }
       const unsigned index = target_count++;
       auto &hook = targets[index];
       hook.entry = entry;

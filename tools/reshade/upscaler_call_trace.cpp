@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "upscaler_call_trace.h"
 #include "addon_lifetime.h"
+#include "hook_host.h"
 #include "ngx_depth_source.h"
 
 #include <MinHook.h>
