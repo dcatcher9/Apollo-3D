@@ -1619,6 +1619,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 #### Native observer
 
 - [`streamline_native_observer.cpp`](streamline_native_observer.cpp), [`streamline_native_observer.h`](streamline_native_observer.h): the D3D12 method-table hooks for resource states, submissions and queue order, and recording cookies. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
+- [`native_queue_order.inl`](native_queue_order.inl): part of `streamline_native_observer.cpp` (end of the shell): Step 4 signal/wait detours, queue and fence identities, coverage and queue-order evidence. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
 - [`queue_order.h`](queue_order.h): the pure queue-order model (Step 4). Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
 - [`native_vtable_slot.h`](native_vtable_slot.h): the shared vtable-slot patch critical section. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
 - [`observer_snapshot.h`](observer_snapshot.h): bounded, pinned publication of the observers' private metadata. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
