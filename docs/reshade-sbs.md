@@ -6036,6 +6036,16 @@ with the Present's status-publication block in `provider_report_present.inl`;
 formatting declarations stay in `streamline_depth_provider_log.h`. Provider state
 and types remain in the shell, and the GPU calls keep their original sequence.
 
+### Scene placement
+
+`exporter/scene_placement.inl` defines the scene/frame value types, placement
+reports and exact-source reuse helpers at their original exporter position.
+`exporter/scene_placement_impl.inl` holds the same-TU frame-decision, raw and
+projection calibration, and stereo-reentry member bodies. Their runtime fields
+stay in the exporter shell in their original order. Preparation's try-lock,
+clock reads, resource calls and publication remain at their original call sites;
+held scenes keep their source identity and previously resolved calibration.
+
 ### Selecting scene depth
 
 If **Normal Depth View** shows a white field, stripes or dots during gameplay, the selected source
