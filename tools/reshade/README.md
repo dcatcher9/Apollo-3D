@@ -1574,6 +1574,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 - [`streamline_buffer_contract.h`](streamline_buffer_contract.h), [`streamline_buffer_types.h`](streamline_buffer_types.h): the translation of each SDK release's raw buffer-type numbers into the canonical ones the add-on compares. Docs: [Streamline buffer-type contract](../../docs/reshade-sbs.md#streamline-buffer-type-contract).
 - [`streamline_v1_resource_state.h`](streamline_v1_resource_state.h): the exact Streamline 1.1.1 resource-state adapter. Docs: [Streamline ABI compatibility](../../docs/reshade-sbs.md#streamline-abi-compatibility).
 - [`observation_loss_journal.h`](observation_loss_journal.h): the bounded journal of observation losses, keyed by static site text. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`sl_observation.inl`](sl_observation.inl): part of `streamline_camera_probe.cpp` (end of the shell): the Streamline ABI decode, observation tickets and loss reporting, the tag/camera store, evaluation assembly, the v2 tag, constants and token hooks, and the present-thread queries (`query_ui_scope`, `query_frame_generation`). Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 
 #### Hook host and configuration
 
