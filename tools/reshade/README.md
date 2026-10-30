@@ -1630,7 +1630,7 @@ move makes stale is reshade_diagnostic_texture_capture_test's); on subresource 0
 retained before its earlier list executes, so the capture owner watches it for the enhanced-layout
 latch as an adapter's retention does. Then comes the copy at its point: an adapter's copy with the
 proof its claim selects,
-Generic's end-of-frame copy (`record_preserved` with the contract `depth_addon.cpp` passes: the
+Generic's end-of-frame copy (`record_preserved` with the contract `generic_capture.inl` passes: the
 source's last proven state on the copy's queue, which the earlier list proved; each depth-stencil
 source is tracked from its creation, as ReShade's `init_resource` reports it), or the UI clear
 boundary (the barriers `game3d_ui_layer.cpp` records through ReShade where the capture owner's
