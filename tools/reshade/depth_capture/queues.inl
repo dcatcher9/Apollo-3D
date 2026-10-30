@@ -7,8 +7,9 @@
 // queue, the submission hook, retired queues, and each queue's newest game
 // execution. Every global these functions use stays in the shell in its
 // original order; the shell's part declarations name the ones shell code
-// calls. readable_elsewhere still holds the Step 4 queue-order branch, which
-// a later move (depth_capture/queue_order_consumer.inl) takes out.
+// calls. The Step 4 queue-order reads (readable_elsewhere's ordered branch,
+// the producer positions in submitted) are calls into
+// depth_capture/queue_order_consumer.inl.
 namespace sunshine_streamline::depth_capture {
   SUNSHINE_CAPTURE_INTERNAL {
     queue_state *known_queue(std::uint64_t native) {
@@ -97,10 +98,7 @@ namespace sunshine_streamline::depth_capture {
         sunshine_queue_order::verdict *relied) {
       if (!progress.valid() || !value.producer_fence) return false;
       if (progress.completed >= value.producer_fence) return true;
-      if (!consumer || value.retirement_unknown || !value.producer_position) return false;
-      const auto verdict = native_observer::queue_ordered(consumer, value.producer_position);
-      if (relied) *relied = verdict;
-      return verdict.ordered;
+      return ordered_after_producer(value, consumer, relied);
     }
     // Requires mutex. Whether the newest acquisition's queue (reader) is a
     // live place.
@@ -369,9 +367,7 @@ namespace sunshine_streamline::depth_capture {
       return out;
     }
     void submitted(std::uint64_t native, std::uint32_t count, const native_observer::command_identity *values) {
-      // This game submission's queue-order position, read before any list of
-      // the add-on's own runs on this thread (copy_out takes the next one).
-      const auto game_at = native_observer::last_execute_position();
+      const auto game_at = game_submission_position();
       std::lock_guard lock(mutex);
       apply_executed(native, count, values);
       auto *owner = queue(native);
@@ -402,8 +398,7 @@ namespace sunshine_streamline::depth_capture {
       const bool needs_fence = auxiliary_used || needs_submission_fence(producers, consumers);
       const auto fence = needs_fence ? ++owner->next_fence : 0;
       const auto copied = depth_used ? copy_out(*owner, producers, fence) : std::array<bool, slot_limit>{};
-      const auto copy_at = std::find(copied.begin(), copied.end(), true) != copied.end() ?
-        native_observer::last_execute_position() : native_observer::position{};
+      const auto copy_at = copy_out_position(copied);
       // This callback runs AFTER the actual native ExecuteCommandLists. Signal
       // therefore follows the copied/consumed pixels (and copy-outs) on this queue.
       const bool signaled = !needs_fence || SUCCEEDED(owner->queue->Signal(owner->fence.p, fence));
@@ -413,10 +408,7 @@ namespace sunshine_streamline::depth_capture {
         auto &value = slots[i];
         if (producers[i]) {
           producer_submitted(value, native, value.nomination_only ? 0 : fence, value.nomination_only || signaled);
-          // The position another queue's read must be ordered after (U-C1):
-          // the copy-out list, else this submission (read only once its
-          // recording retired). A replay moves it, as it moves the fence.
-          value.producer_position = copied[i] && signaled ? copy_at : game_at;
+          set_producer_position(value, copied[i], signaled, copy_at, game_at);
           if (copied[i] && signaled) {
             value.copied_out = true;
             copy_out_counters.made.fetch_add(1, std::memory_order_relaxed);
