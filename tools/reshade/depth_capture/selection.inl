@@ -82,7 +82,7 @@ namespace sunshine_streamline::depth_capture {
         return value.id && !value.preservation_only && value.metadata.provider == provider && value.metadata.epoch == current.epoch &&
           value.metadata.sequence == current.sequence && value.metadata.source_id == current.source_id;
       };
-      for (const auto &value : slots) if (is_latest(value) && (!out.latest || value.id > out.latest->id)) out.latest = &value;
+      for (const auto &value : capture_pool.slots) if (is_latest(value) && (!out.latest || value.id > out.latest->id)) out.latest = &value;
       out.selection = out.latest ? selection_reason::no_admissible_capture : selection_reason::no_current_nomination;
       if (out.latest && out.latest->queue != native) out.progress = producer_progress(*out.latest);
       // Active: its newest evaluation is younger than the source age, or is
@@ -123,7 +123,7 @@ namespace sunshine_streamline::depth_capture {
         out.selection = selection_reason::pending_nomination;
         return out;
       }
-      for (auto &value : slots) {
+      for (auto &value : capture_pool.slots) {
         if (!is_latest(value) || value.id <= owner.admission_after) continue;
         const auto progress = value.queue == native ? queue_progress{} : producer_progress(value);
         if ((value.source_nominated ? nomination_status(value, owner.device_identity) :
@@ -249,7 +249,7 @@ namespace sunshine_streamline::depth_capture {
     slot *completed_snapshot(const input &current, std::uint64_t now, std::uint64_t consumer) {
       if (!valid_provider(current.provider) || !current.epoch) return nullptr;
       slot *best = nullptr;
-      for (auto &value : slots) {
+      for (auto &value : capture_pool.slots) {
         const auto &metadata = value.metadata;
         if (!completed_pixels(value) ||
             metadata.provider != current.provider || metadata.frame_generation_input != current.frame_generation_input ||
@@ -334,7 +334,7 @@ namespace sunshine_streamline::depth_capture {
       const auto &fg = head;
       if (!lineage_head(fg) || (owner.present == present && owner.present_capture)) return nullptr;
       slot *best = nullptr;
-      for (auto &value : slots) {
+      for (auto &value : capture_pool.slots) {
         const auto &metadata = value.metadata;
         if (!lineage_candidate(value, fg, now) || value.id <= owner.admission_after) continue;
         if (owner.provider == provider_kind::streamline && owner.last_epoch == metadata.epoch &&
@@ -358,7 +358,7 @@ namespace sunshine_streamline::depth_capture {
     const slot *lineage_fallback(const input &fg, std::uint64_t now) {
       if (!lineage_head(fg)) return nullptr;
       const slot *best = nullptr;
-      for (const auto &value : slots) {
+      for (const auto &value : capture_pool.slots) {
         if (!lineage_candidate(value, fg, now) || !immutable_for_other_queues(value) ||
             !readable_elsewhere(value, 0, producer_progress(value))) continue;
         if (!best || value.metadata.sequence > best->metadata.sequence ||

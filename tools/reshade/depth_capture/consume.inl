@@ -32,7 +32,7 @@ namespace sunshine_streamline::depth_capture {
   void finish_diagnostic_texture(const diagnostic_ticket &ticket, bool successful) {
     if (!ticket) return;
     std::lock_guard lock(mutex);
-    for (auto &entry : diagnostic_slots) if (entry.id == ticket.id && entry.texture == ticket.ownership) {
+    for (auto &entry : capture_pool.diagnostic_slots) if (entry.id == ticket.id && entry.texture == ticket.ownership) {
       if (entry.finished) return;
       entry.finished = true; entry.success = successful;
       if (!successful) invalidate(entry, capture_failure::evaluation_failed);
@@ -53,7 +53,7 @@ namespace sunshine_streamline::depth_capture {
     const auto *consumer = local ? queue(consumer_queue) : nullptr;
     if (local && (!consumer || consumer->retiring)) return result(status::unsupported_queue);
     const auto native_consumer = consumer ? reinterpret_cast<std::uint64_t>(consumer->queue.p) : 0;
-    for (auto &entry : diagnostic_slots) if (entry.id == ticket.id && entry.texture == ticket.ownership) {
+    for (auto &entry : capture_pool.diagnostic_slots) if (entry.id == ticket.id && entry.texture == ticket.ownership) {
       retire_dead_recordings(entry);
       out.capture_id = entry.id; out.producer_queue = entry.queue; out.producer_fence = entry.producer_fence;
       out.failure = entry.failure; out.producer_recording_retired = producer_recording_retired(entry);
@@ -90,7 +90,7 @@ namespace sunshine_streamline::depth_capture {
     if (!ticket) return;
     pooled_storage discard;
     std::lock_guard lock(mutex);
-    for (auto &entry : diagnostic_slots) if (entry.id == ticket.id && entry.texture == ticket.ownership) {
+    for (auto &entry : capture_pool.diagnostic_slots) if (entry.id == ticket.id && entry.texture == ticket.ownership) {
       entry.diagnostic_released = true;
       // A canceled in-progress API call cannot become an accepted diagnostic.
       // Its command/fence obligations survive regardless of ticket ownership.
@@ -177,8 +177,8 @@ namespace sunshine_streamline::depth_capture {
       if (recording->invalid) return result(consumer_status::recording_invalid);
     } else recording = {};
     bool matching_id = false;
-    auto *begin = auxiliary ? diagnostic_slots.data() : slots.data();
-    auto *end = begin + (auxiliary ? diagnostic_slots.size() : slots.size());
+    auto *begin = auxiliary ? capture_pool.diagnostic_slots.data() : capture_pool.slots.data();
+    auto *end = begin + (auxiliary ? capture_pool.diagnostic_slots.size() : capture_pool.slots.size());
     for (auto *current = begin; current != end; ++current) if (current->id == value.capture_id) {
       auto &entry = *current;
       matching_id = true;
@@ -332,9 +332,9 @@ namespace sunshine_streamline::depth_capture {
       ensure_queue(lock, consumer_queue);
       auto *owner = queue(consumer_queue);
       if (!owner || owner->retiring) return reject(consumer_status::missing_device);
-      const auto found = std::find_if(diagnostic_slots.begin(), diagnostic_slots.end(),
+      const auto found = std::find_if(capture_pool.diagnostic_slots.begin(), capture_pool.diagnostic_slots.end(),
         [&](const auto &entry) { return entry.id == ticket.id; });
-      if (found == diagnostic_slots.end()) return reject(consumer_status::slot_missing);
+      if (found == capture_pool.diagnostic_slots.end()) return reject(consumer_status::slot_missing);
       if (found->texture != ticket.ownership) return reject(consumer_status::ownership_mismatch);
       if (found->texture->device_identity != owner->device_identity) return reject(consumer_status::device_mismatch);
       const auto native_consumer = reinterpret_cast<std::uint64_t>(owner->queue.p);
@@ -388,7 +388,7 @@ namespace sunshine_streamline::depth_capture {
     std::array<D3D12_RESOURCE_BARRIER, diagnostic_slot_limit> barriers{};
     UINT count = 0;
     std::lock_guard lock(mutex);
-    for (auto &entry : diagnostic_slots) {
+    for (auto &entry : capture_pool.diagnostic_slots) {
       if (!entry.lease_list || entry.lease_list != command) continue;
       // A submitted recording already ended: simultaneous-access storage
       // decayed to COMMON at its execution.
@@ -437,8 +437,8 @@ namespace sunshine_streamline::depth_capture {
       auto *owner = queue(consumer_queue);
       if (!owner || owner->retiring) return reject(consumer_status::missing_device);
       const auto native_queue = reinterpret_cast<std::uint64_t>(owner->queue.p);
-      auto found = std::find_if(slots.begin(), slots.end(), [&](const auto &entry) { return entry.id == ticket.id; });
-      if (found == slots.end()) return reject(consumer_status::slot_missing);
+      auto found = std::find_if(capture_pool.slots.begin(), capture_pool.slots.end(), [&](const auto &entry) { return entry.id == ticket.id; });
+      if (found == capture_pool.slots.end()) return reject(consumer_status::slot_missing);
       const auto admission = preserved_admission(*found, ticket, native_queue, owner->device_identity, cookie);
       if (admission != consumer_status::ready) return reject(admission);
       found->consumer_queue = native_queue;

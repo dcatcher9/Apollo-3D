@@ -139,7 +139,7 @@ namespace sunshine_streamline::depth_capture {
       const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
       // A compute-list copy of this scope counts once readable (accept_compute_copy).
       if (compute_copies_recorded)
-        for (const auto &value : slots)
+        for (const auto &value : capture_pool.slots)
           if (value.id && value.compute_list && value.metadata.epoch == epoch && value.metadata.viewport == viewport &&
               value.metadata.source_id == source)
             accept_compute_copy(value);
@@ -220,7 +220,7 @@ namespace sunshine_streamline::depth_capture {
     return mark && (mark->active || (serial && serial <= mark->serial));
   }
 
-  std::uint64_t game_executions() { return game_execution_count.load(std::memory_order_acquire); }
+  std::uint64_t game_executions() { return capture_queues.game_execution_count.load(std::memory_order_acquire); }
 
   std::uint64_t next_present_ordinal() { return present_ordinal(); }
 
@@ -241,7 +241,7 @@ namespace sunshine_streamline::depth_capture {
     if (!owner) return;
     const auto device = device_cookie(owner->device.p);
     if (!device) return;
-    for (const auto &weak : sources) if (const auto source = weak.lock())
+    for (const auto &weak : capture_pool.sources) if (const auto source = weak.lock())
       if (source->device_identity == device) ++source->present_generation;
   }
 }

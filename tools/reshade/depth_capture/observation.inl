@@ -16,11 +16,11 @@ namespace sunshine_streamline::depth_capture {
       auto entry = command_storage::acquire(reinterpret_cast<ID3D12Object *>(native), create);
       if (!entry) return {};
       if (!entry->cookie && create) {
-        entry->cookie = cookie; entry->observation_generation = command_generation;
+        entry->cookie = cookie; entry->observation_generation = capture_observation.command_generation;
         entry.life()->cookie.store(cookie, std::memory_order_release);
       }
       if (entry->cookie != cookie) return {};
-      if (entry->observation_generation != command_generation) {
+      if (entry->observation_generation != capture_observation.command_generation) {
         if (!entry->invalid) entry->invalidation = recording_loss::global_observation_loss;
         entry->invalid = true;
       }
@@ -44,7 +44,7 @@ namespace sunshine_streamline::depth_capture {
         invalidate(*owner, recording_loss::source_identity_unavailable);
         return;
       }
-      owner->restart(cookie, command_generation);
+      owner->restart(cookie, capture_observation.command_generation);
       owner.life()->cookie.store(cookie, std::memory_order_release);
       *out_cookie = cookie;
     }
@@ -82,9 +82,9 @@ namespace sunshine_streamline::depth_capture {
     void invalidate_all() {
       std::lock_guard lock(mutex);
       for_each_capture([](auto &value) { invalidate(value, capture_failure::observer_loss); });
-      ++command_generation;
+      ++capture_observation.command_generation;
       // Lists executed meanwhile may have gone unobserved.
-      proven.unprove_all();
+      capture_observation.proven.unprove_all();
       reason = status::unavailable;
     }
     // Every game ResourceBarrier/Barrier arrives here. A recording's payload is
@@ -206,7 +206,7 @@ namespace sunshine_streamline::depth_capture {
       if (!native_observer::set_recording_cookie(native, cookie)) {
         invalidate(*owner, recording_loss::source_identity_unavailable); return;
       }
-      owner->restart(cookie, command_generation);
+      owner->restart(cookie, capture_observation.command_generation);
       owner->reported = reported;
       owner.life()->cookie.store(cookie, std::memory_order_release);
     }
@@ -250,8 +250,8 @@ namespace sunshine_streamline::depth_capture {
     // transition until the split's end barrier.
     void enhanced_textures(std::uint64_t native, std::uint64_t cookie, unsigned count,
         const native_observer::enhanced_texture *textures) {
-      if (count && !enhanced_barriers_seen.load(std::memory_order_relaxed))
-        enhanced_barriers_seen.store(true, std::memory_order_relaxed);
+      if (count && !capture_observation.enhanced_barriers_seen.load(std::memory_order_relaxed))
+        capture_observation.enhanced_barriers_seen.store(true, std::memory_order_relaxed);
       // No capture lock, exactly as barriers().
       auto owner = command(native, cookie, true);
       if (!owner) return;
@@ -327,7 +327,7 @@ namespace sunshine_streamline::depth_capture {
     // invalidation is suppressed like any nested notification.
     bool states_covered(std::uint64_t native) {
       const auto table = *reinterpret_cast<const std::uintptr_t *>(native);
-      const auto generation = command_generation.load();
+      const auto generation = capture_observation.command_generation.load();
       for (const auto &entry : covered_tables)
         if (entry.table == table && entry.generation == generation) return entry.covered;
       const auto now = GetTickCount64();
@@ -345,9 +345,9 @@ namespace sunshine_streamline::depth_capture {
       if (!cookie) return;
       for_each_capture([&](slot &value) {
         if (!value.id || !value.proven_version || value.command != cookie) return;
-        if (value.proven_queue != queue || proven.version(value.proven_source) != value.proven_version) {
+        if (value.proven_queue != queue || capture_observation.proven.version(value.proven_source) != value.proven_version) {
           invalidate(value, capture_failure::proven_state_changed);
-          proven_counters.changed_copies.fetch_add(1, std::memory_order_relaxed);
+          capture_observation.proven_counters.changed_copies.fetch_add(1, std::memory_order_relaxed);
         }
         value.proven_version = 0;
       });
@@ -367,7 +367,7 @@ namespace sunshine_streamline::depth_capture {
     void apply_executed(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
       for (std::uint32_t n = 0; n != count; ++n) {
         verify_proven_copies(queue, values[n].recording_cookie);
-        if (!proven.size()) continue;
+        if (!capture_observation.proven.size()) continue;
         const auto native = values[n].native_command;
         // A list that never had a recording state, while the hooks cover its
         // method table, recorded no barrier through them (the first would
@@ -376,29 +376,29 @@ namespace sunshine_streamline::depth_capture {
         if (!values[n].recording_cookie && native && native_observer::recording_cookie_absent(native) && states_covered(native))
           continue;
         auto owner = command(native, values[n].recording_cookie, false);
-        auto &c = proven_counters;
+        auto &c = capture_observation.proven_counters;
         auto *unobserved = !owner ? &c.unrecorded : !owner->reported ? &c.unreported : owner->invalid ? &c.invalidated :
           owner->missed_reset ? &c.missed_reset : !states_covered(native) ? &c.uncovered : nullptr;
         if (unobserved) {
-          proven.unprove_all();
+          capture_observation.proven.unprove_all();
           unobserved->fetch_add(1, std::memory_order_relaxed);
           continue;
         }
-        if (owner->wildcard_alias) proven.unprove_all();
+        if (owner->wildcard_alias) capture_observation.proven.unprove_all();
         sort_aliases(*owner);
         // Each aliased texture once (the marks are sorted by source).
         for (std::size_t i = 0; i != owner->aliases.size(); ++i)
-          if (!i || owner->aliases[i].source != owner->aliases[i - 1].source) proven.unprove(owner->aliases[i].source);
+          if (!i || owner->aliases[i].source != owner->aliases[i - 1].source) capture_observation.proven.unprove(owner->aliases[i].source);
         for (const auto &entry : owner->states) {
-          if (!proven.held(entry.source)) continue;
+          if (!capture_observation.proven.held(entry.source)) continue;
           // Any enhanced barrier naming it latches its layout (D6), whatever
           // state the list left it in.
-          if (entry.enhanced_named) proven.set_latch(entry.source);
+          if (entry.enhanced_named) capture_observation.proven.set_latch(entry.source);
           if (!entry.known || entry.blocked || entry.pending_split || owner->wildcard_alias > entry.order ||
               aliased_after(*owner, entry.source, entry.order))
-            proven.unprove(entry.source);
-          else if (entry.enhanced) proven.prove_layout(entry.source, queue, entry.layout, entry.access);
-          else proven.prove(entry.source, queue, entry.value);
+            capture_observation.proven.unprove(entry.source);
+          else if (entry.enhanced) capture_observation.proven.prove_layout(entry.source, queue, entry.layout, entry.access);
+          else capture_observation.proven.prove(entry.source, queue, entry.value);
         }
         // A depth clear after a texture's last barrier proves what the D3D12
         // clear contract requires, in recording order, unless aliased after
@@ -407,18 +407,18 @@ namespace sunshine_streamline::depth_capture {
         // texture's proof; proven_state.h clear_regime). A legacy proof there
         // would let a copy record legacy barriers on an enhanced layout (D6).
         for (const auto &mark : owner->clears) {
-          if (!proven.held(mark.source)) continue;
+          if (!capture_observation.proven.held(mark.source)) continue;
           const auto entry = std::find_if(owner->states.begin(), owner->states.end(),
             [&](const source_state &value) { return value.source == mark.source; });
           if (entry != owner->states.end() && entry->order > mark.order) continue;
           using sunshine_proven_state::regime;
-          const auto kind = entry == owner->states.end() ? proven.clear_regime(mark.source) :
+          const auto kind = entry == owner->states.end() ? capture_observation.proven.clear_regime(mark.source) :
             entry->enhanced ? regime::enhanced : regime::legacy;
           if (kind == regime::unknown || owner->wildcard_alias > mark.order || aliased_after(*owner, mark.source, mark.order))
-            proven.unprove(mark.source);
+            capture_observation.proven.unprove(mark.source);
           else if (kind == regime::enhanced)
-            proven.prove_layout(mark.source, queue, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE);
-          else proven.prove(mark.source, queue, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            capture_observation.proven.prove_layout(mark.source, queue, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE);
+          else capture_observation.proven.prove(mark.source, queue, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         }
       }
     }
@@ -442,19 +442,19 @@ namespace sunshine_streamline::depth_capture {
   }
   namespace {
     bool runtime_list(std::uint64_t native) {
-      if (!native || !runtime_lists_known.load(std::memory_order_acquire)) return false;
-      AcquireSRWLockShared(&runtime_lock);
-      const bool found = std::find(runtime_lists.begin(), runtime_lists.end(), native) != runtime_lists.end();
-      ReleaseSRWLockShared(&runtime_lock);
+      if (!native || !capture_observation.runtime_lists_known.load(std::memory_order_acquire)) return false;
+      AcquireSRWLockShared(&capture_observation.runtime_lock);
+      const bool found = std::find(capture_observation.runtime_lists.begin(), capture_observation.runtime_lists.end(), native) != capture_observation.runtime_lists.end();
+      ReleaseSRWLockShared(&capture_observation.runtime_lock);
       return found;
     }
     // ReShade reports only game lists, so a reported list at a runtime list's
     // address is a game list that reused it.
     void forget_runtime_list(std::uint64_t native) {
       if (!runtime_list(native)) return;
-      AcquireSRWLockExclusive(&runtime_lock);
-      for (auto &value : runtime_lists) if (value == native) value = 0;
-      ReleaseSRWLockExclusive(&runtime_lock);
+      AcquireSRWLockExclusive(&capture_observation.runtime_lock);
+      for (auto &value : capture_observation.runtime_lists) if (value == native) value = 0;
+      ReleaseSRWLockExclusive(&capture_observation.runtime_lock);
     }
     // ReShade's lifecycle is the only source of a list's recording. created: a
     // recording opens (a new list's first, or a registered runtime list's
@@ -497,11 +497,11 @@ namespace sunshine_streamline::depth_capture {
     com_ptr<ID3D12GraphicsCommandList> checked;
     if (!query_native(native, IID_ID3D12GraphicsCommandList, checked) || reinterpret_cast<std::uint64_t>(checked.p) != native) return;
     bool added = false;
-    AcquireSRWLockExclusive(&runtime_lock);
-    if (std::find(runtime_lists.begin(), runtime_lists.end(), native) == runtime_lists.end())
-      for (auto &value : runtime_lists) if (!value) { value = native; added = true; break; }
-    if (added) runtime_lists_known.store(true, std::memory_order_release);
-    ReleaseSRWLockExclusive(&runtime_lock);
+    AcquireSRWLockExclusive(&capture_observation.runtime_lock);
+    if (std::find(capture_observation.runtime_lists.begin(), capture_observation.runtime_lists.end(), native) == capture_observation.runtime_lists.end())
+      for (auto &value : capture_observation.runtime_lists) if (!value) { value = native; added = true; break; }
+    if (added) capture_observation.runtime_lists_known.store(true, std::memory_order_release);
+    ReleaseSRWLockExclusive(&capture_observation.runtime_lock);
     // Registered while ReShade records it: its current recording is open.
     if (added) try { lifecycle_recording(native, list_event::created); } catch (...) {}
   }
@@ -593,14 +593,14 @@ namespace sunshine_streamline::depth_capture {
     if (!identity) return;
     std::lock_guard lock(mutex);
     forget_destroyed();
-    proven.track(identity, initial_state != UINT32_MAX, initial_state);
+    capture_observation.proven.track(identity, initial_state != UINT32_MAX, initial_state);
   }
   void resource_destroyed(std::uint64_t identity) {
     if (!identity || !requested.load()) return;
-    for (auto &slot : destroyed) {
+    for (auto &slot : capture_observation.destroyed) {
       std::uint64_t free{};
       if (slot.compare_exchange_strong(free, identity, std::memory_order_acq_rel)) {
-        destroyed_pending.store(true, std::memory_order_release);
+        capture_observation.destroyed_pending.store(true, std::memory_order_release);
         return;
       }
     }
@@ -610,7 +610,7 @@ namespace sunshine_streamline::depth_capture {
         (source->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) return;
     std::lock_guard lock(mutex);
     forget_destroyed();
-    proven.adopt(source->cookie);
+    capture_observation.proven.adopt(source->cookie);
   }
   void observe_depth_clear(std::uint64_t native, std::uint64_t resource) {
     if (!requested.load() || !native || !resource) return;
@@ -645,8 +645,8 @@ namespace sunshine_streamline::depth_capture {
     }
     std::lock_guard lock(mutex);
     forget_destroyed();
-    proven.watch(identity);
-    return !proven.latched(identity).latched;
+    capture_observation.proven.watch(identity);
+    return !capture_observation.proven.latched(identity).latched;
   }
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   // Test view only (streamline_depth_capture_test_access.h); no shipping
@@ -661,7 +661,7 @@ namespace sunshine_streamline::depth_capture {
     const auto identity = source_cookie(checked.p);
     if (!identity || !native_observer::queue_ready(queue)) return false;
     std::lock_guard lock(mutex);
-    out = proven.query(identity, queue, !enhanced_barriers_seen.load(std::memory_order_relaxed));
+    out = capture_observation.proven.query(identity, queue, !capture_observation.enhanced_barriers_seen.load(std::memory_order_relaxed));
     return bool(out);
   }
 #endif

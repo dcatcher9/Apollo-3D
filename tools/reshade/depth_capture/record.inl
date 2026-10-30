@@ -44,10 +44,10 @@ namespace sunshine_streamline::depth_capture {
       // Keep the GPU-capable pool available while trying alternate tags in one
       // evaluation. A metadata-only high-resolution nomination must not occupy
       // the last slot that could capture the ordinary depth tag.
-      const auto pixel_end = slots.begin() + pixel_slot_limit;
-      auto found = std::find_if(pixel_end, slots.end(), reclaimable);
-      if (found == slots.end()) {
-        found = std::find_if(slots.begin(), pixel_end, reclaimable);
+      const auto pixel_end = capture_pool.slots.begin() + pixel_slot_limit;
+      auto found = std::find_if(pixel_end, capture_pool.slots.end(), reclaimable);
+      if (found == capture_pool.slots.end()) {
+        found = std::find_if(capture_pool.slots.begin(), pixel_end, reclaimable);
         if (found == pixel_end) return 0;
       }
       *found = {};
@@ -75,7 +75,7 @@ namespace sunshine_streamline::depth_capture {
     // The retired source's copies, recorded or still recording, never show
     // again: an FG Off/On transition cannot resurrect a copy of the FG scope
     // before it.
-    for (auto &value : slots) if (value.id && !value.preservation_only && matches(value.metadata)) {
+    for (auto &value : capture_pool.slots) if (value.id && !value.preservation_only && matches(value.metadata)) {
       invalidate(value, capture_failure::source_retired);
     }
     // FG Off (slDLSSGSetOptions mode=0, or an options call that failed)
@@ -115,7 +115,7 @@ namespace sunshine_streamline::depth_capture {
       }
       *mark = {epoch, std::max(kept, retiring_serial), viewport, true};
     }
-    for (auto &owner : queues) if (owner && owner->provider_established && owner->provider == provider &&
+    for (auto &owner : capture_queues.queues) if (owner && owner->provider_established && owner->provider == provider &&
         owner->nominated_epoch == epoch && owner->source_id == source_id) {
       owner->provider_established = false;
       if (fg_role) {
@@ -317,7 +317,7 @@ namespace sunshine_streamline::depth_capture {
         // submission without fabricating an owned copy or another source.
         const auto ticket = record_nomination(value, nomination_source, nomination_command, nomination_recording);
         if (ticket) {
-          for (auto &entry : slots) if (entry.id == ticket) {
+          for (auto &entry : capture_pool.slots) if (entry.id == ticket) {
             entry.nomination_only = entry.source_nominated = true;
             entry.pixel_failure = result; break;
           }
@@ -477,7 +477,7 @@ namespace sunshine_streamline::depth_capture {
       // recording aliased it before the copy (proven_state.h).
       sunshine_proven_state::state proven_basis;
       if (proven_basis_allowed && !observed && !owner->wildcard_alias && !aliased_after(*owner, value.source->cookie, 0))
-        proven_basis = proven.query(value.source->cookie, proven_queue, !enhanced_barriers_seen.load(std::memory_order_relaxed));
+        proven_basis = capture_observation.proven.query(value.source->cookie, proven_queue, !capture_observation.enhanced_barriers_seen.load(std::memory_order_relaxed));
       // Otherwise a source an enhanced barrier on an earlier executed list
       // latched (proven_state.h) takes no legacy barrier from its claim: the
       // claim is checked against its proof from that list (copy_state's
@@ -487,7 +487,7 @@ namespace sunshine_streamline::depth_capture {
       // known; else the copy is refused.
       sunshine_proven_state::latch earlier;
       if (!observed && !proven_basis) {
-        earlier = proven.latched(value.source->cookie);
+        earlier = capture_observation.proven.latched(value.source->cookie);
         if (!states_observed || owner->wildcard_alias || aliased_after(*owner, value.source->cookie, 0) ||
             (proven_queue && earlier.proven.queue != proven_queue))
           earlier.proven = {};
@@ -504,7 +504,7 @@ namespace sunshine_streamline::depth_capture {
       evidence.earlier = earlier.latched;
       const auto chosen = copy_state::resolve(state_rule, value.native_state, evidence, desc.Flags);
       if (!chosen.admitted) {
-        if (earlier.latched) proven_counters.earlier_refused.fetch_add(1, std::memory_order_relaxed);
+        if (earlier.latched) capture_observation.proven_counters.earlier_refused.fetch_add(1, std::memory_order_relaxed);
         return reject(chosen.result, chosen.stage);
       }
       // A compute list's copy leaves and restores only a state or layout that
@@ -529,7 +529,7 @@ namespace sunshine_streamline::depth_capture {
       // the same source snapshot before anyone reads it. Old tickets are retired
       // by ID; their CPU leases alone do not represent recorded GPU reads.
       if (diagnostic_copy) collect_diagnostics(discarded);
-      auto *pixel_begin = diagnostic_copy ? diagnostic_slots.data() : slots.data();
+      auto *pixel_begin = diagnostic_copy ? capture_pool.diagnostic_slots.data() : capture_pool.slots.data();
       auto *pixel_end = pixel_begin + (diagnostic_copy ? diagnostic_slot_limit : pixel_slot_limit);
       const auto texture_format = diagnostic_copy ? diagnostic_storage_format(desc.Format, value.resource.native_format) :
         typeless(desc.Format);
@@ -619,14 +619,14 @@ namespace sunshine_streamline::depth_capture {
         need_published = false;
         published = nullptr;
         copy_out_refused = true;
-        copy_out_counters.skipped.fetch_add(1, std::memory_order_relaxed);
+        capture_queues.copy_out_counters.skipped.fetch_add(1, std::memory_order_relaxed);
       }
       if (!need_texture && !need_published) {
         if (texture_prepared) {
           // Storage allocated by an earlier attempt. Its budget was reserved on
           // the slot it reserved; a different slot must admit it again.
           if (diagnostic_copy && found->reservation != reservation &&
-              !reserve_diagnostic_bytes(diagnostic_slots, found, prepared->allocation_bytes, reusable_storage, reservation, &discarded))
+              !reserve_diagnostic_bytes(capture_pool.diagnostic_slots, found, prepared->allocation_bytes, reusable_storage, reservation, &discarded))
             return reject(status::exhausted, record_stage::capacity);
           texture = std::move(prepared);
         }
@@ -654,7 +654,7 @@ namespace sunshine_streamline::depth_capture {
             return reject(status::unsupported_resource, record_stage::resource_region);
           destination.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
           const auto allocation = plan.device->GetResourceAllocationInfo(0, 1, &destination);
-          if (!reserve_diagnostic_bytes(diagnostic_slots, found, allocation.SizeInBytes, reusable_storage, reservation, &discarded))
+          if (!reserve_diagnostic_bytes(capture_pool.diagnostic_slots, found, allocation.SizeInBytes, reusable_storage, reservation, &discarded))
             return reject(status::exhausted, record_stage::capacity);
           plan.allocation_bytes = allocation.SizeInBytes;
           plan.shared = !reusable_storage;
@@ -700,7 +700,7 @@ namespace sunshine_streamline::depth_capture {
         if (published_failed) {
           discarded.push_back(std::move(prepared_published));
           copy_out_refused = true;
-          copy_out_counters.failed.fetch_add(1, std::memory_order_relaxed);
+          capture_queues.copy_out_counters.failed.fetch_add(1, std::memory_order_relaxed);
           copy_out_failure = {plan.device_identity, plan.desc.Width, plan.desc.Height, GetTickCount64(), plan.desc.Format};
         }
         release_on_exit.keep = true;
@@ -714,7 +714,7 @@ namespace sunshine_streamline::depth_capture {
       found->texture = std::move(texture); found->published = std::move(published); found->metadata = value; found->metadata.native_state = before;
       retire_frame_generation_role(found->metadata);
       found->predicted_storage = predicted && found->published;
-      if (found->predicted_storage) copy_out_counters.predicted.fetch_add(1, std::memory_order_relaxed);
+      if (found->predicted_storage) capture_queues.copy_out_counters.predicted.fetch_add(1, std::memory_order_relaxed);
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
       found->present = present_ordinal();
       if (found->metadata.frame_generation_input) scope.frame_generation_present = std::max(scope.frame_generation_present, found->present);
@@ -724,11 +724,11 @@ namespace sunshine_streamline::depth_capture {
         found->proven_source = value.source->cookie; found->proven_version = proof.version;
         found->proven_queue = proven_basis ? proven_queue : proof.queue;
       }
-      if (earlier.latched) proven_counters.earlier_copied.fetch_add(1, std::memory_order_relaxed);
+      if (earlier.latched) capture_observation.proven_counters.earlier_copied.fetch_add(1, std::memory_order_relaxed);
       found->preservation_only = preservation_only;
       found->diagnostic_only = diagnostic_copy;
       found->diagnostic_reusable = reusable_storage;
-      if (diagnostic_copy) diagnostic_slots_active = true;
+      if (diagnostic_copy) capture_pool.diagnostic_slots_active = true;
       found->source_nominated = nominate_source;
       found->finished = found->success = preservation_only && !diagnostic_copy;
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -804,7 +804,7 @@ namespace sunshine_streamline::depth_capture {
       const auto id = record_impl(command, value, diagnostic, true, nullptr, false, true, reusable_storage, state_policy);
       if (!id) return {};
       std::lock_guard lock(mutex);
-      for (const auto &entry : diagnostic_slots) if (entry.id == id) return {id, entry.texture};
+      for (const auto &entry : capture_pool.diagnostic_slots) if (entry.id == id) return {id, entry.texture};
     } catch (...) {
       // Like depth preservation, every allocation precedes the injected copy.
       // An allocation failure never escapes into the application's API call.
@@ -944,7 +944,7 @@ namespace sunshine_streamline::depth_capture {
 
   void finish(std::uint64_t ticket, bool successful, capture_failure failure) {
     std::lock_guard lock(mutex);
-    for (auto &value : slots) if (value.id == ticket) {
+    for (auto &value : capture_pool.slots) if (value.id == ticket) {
       value.finished = true; value.success = successful;
       if (!successful) invalidate(value, failure == capture_failure::none ? capture_failure::evaluation_failed : failure);
       // The view's run of rejected evaluations (expire_association) and its

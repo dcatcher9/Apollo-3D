@@ -180,27 +180,16 @@ namespace sunshine_streamline::depth_capture {
       if (!supported_description(desc)) { out = {}; return status::unsupported_resource; }
       return source_region(desc, resource, out);
     }
-    // Advanced under mutex (invalidate_all); read without it by the barrier
-    // hooks, which keep their recording's payload without the capture lock.
-    std::atomic<std::uint64_t> command_generation{1};
   }
 
   SUNSHINE_CAPTURE_INTERNAL {
-    std::array<slot, slot_limit> slots;
-    std::array<slot, diagnostic_slot_limit> diagnostic_slots;
-    bool diagnostic_slots_active{}; // Protected by mutex; idle callbacks skip this pool.
+    pool_state capture_pool;
 
     template<class Operation> void for_each_capture(Operation operation) {
-      for (auto &value : slots) operation(value);
-      if (diagnostic_slots_active) for (auto &value : diagnostic_slots) operation(value);
+      for (auto &value : capture_pool.slots) operation(value);
+      if (capture_pool.diagnostic_slots_active) for (auto &value : capture_pool.diagnostic_slots) operation(value);
     }
-    std::array<std::weak_ptr<const source_reference>, source_limit> sources;
-    // Every snapshot storage allocated (allocate_storage), as long as anyone
-    // holds it: release_device releases a device's storage whoever holds it
-    // (a packet, a ticket). Protected by mutex; expired entries are dropped
-    // when it would grow, so it stays as long as the storage alive.
-    std::vector<std::weak_ptr<texture_reference>> storage;
-    std::array<std::unique_ptr<queue_state>, queue_limit> queues;
+    queue_places capture_queues;
     // Protected by mutex: the cookie of the queue whose acquisition is the
     // newest (acquire), the queue that now reads depth; 0 before any. A
     // queue that read depth earlier stops being the reader once another
@@ -223,7 +212,7 @@ namespace sunshine_streamline::depth_capture {
     // copy's (presented_by).
     bool view_presenting(const evaluation_head &view, provider_kind provider) {
       if (frame_presenting(view.present)) return true;
-      for (const auto &value : slots)
+      for (const auto &value : capture_pool.slots)
         if (value.id && !value.preservation_only && value.metadata.provider == provider && value.metadata.epoch == view.epoch &&
             value.metadata.source_id == view.source_id && value.metadata.viewport == view.viewport &&
             value.metadata.sequence == view.sequence && frame_presenting(presented_by(value)))
@@ -352,53 +341,16 @@ namespace sunshine_streamline::depth_capture {
         std::vector<std::shared_ptr<texture_reference>> *discard = nullptr);
     record_stage allocate_storage(const storage_plan &plan, std::shared_ptr<texture_reference> &out);
     bool register_storage(const std::shared_ptr<texture_reference> &value);
-    // Protected by mutex: orders the queue places by their last use
-    // (queue_state::last_use), so free_place reclaims the longest unused.
-    std::uint64_t place_clock{};
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
     bool fail_state_growth{};
 #endif
-    // The per-resource last-proven state (proven_state.h), under mutex: at
-    // most proven_limit textures, the least recently used forgotten first.
-    constexpr unsigned proven_limit = 128;
-    sunshine_proven_state::table<proven_limit> proven;
-    // Depth-stencil textures ReShade destroyed (resource_destroyed), queued
-    // without a lock (destroy_resource may run where this owner's lock is
-    // held) and forgotten before the table next holds a texture (0: a free
-    // slot). A full queue drops one: the table then forgets it as least
-    // recently used.
-    std::array<std::atomic<std::uint64_t>, proven_limit> destroyed{};
-    std::atomic<bool> destroyed_pending{};
+    observation_state capture_observation;
     // Requires mutex.
     void forget_destroyed() {
-      if (!destroyed_pending.load(std::memory_order_acquire) || !destroyed_pending.exchange(false, std::memory_order_acq_rel)) return;
-      for (auto &slot : destroyed)
-        if (const auto identity = slot.exchange(0, std::memory_order_acq_rel)) proven.forget(identity);
+      if (!capture_observation.destroyed_pending.load(std::memory_order_acquire) || !capture_observation.destroyed_pending.exchange(false, std::memory_order_acq_rel)) return;
+      for (auto &slot : capture_observation.destroyed)
+        if (const auto identity = slot.exchange(0, std::memory_order_acq_rel)) capture_observation.proven.forget(identity);
     }
-    // A creation state stops proving a texture once enhanced barriers were
-    // seen: ReShade reports a texture created in an initial layout like one
-    // created in a legacy state. Set without the lock.
-    std::atomic<bool> enhanced_barriers_seen{};
-    struct {
-      std::atomic<std::uint64_t> unrecorded{}, unreported{}, invalidated{}, missed_reset{}, uncovered{}, changed_copies{};
-      // Copies of a latched source with nothing on their recording (D6, N8).
-      std::atomic<std::uint64_t> earlier_copied{}, earlier_refused{};
-    } proven_counters;
-    // Copy-outs (copy_out): made, and copies left to the Reset rule because
-    // every list of the queue's ring was in flight or a list call failed, or
-    // (failed too) their copy-out storage could not be allocated.
-    // U-C1b: copies recorded with storage because their list was not known
-    // to execute on the reader's queue (predicted), copies given an idle
-    // slot's cached storage at their submission (taken), copies submitted
-    // on another queue than the reader's with no storage at all, left to
-    // the Reset rule (unstored: recorded for the reader's queue before
-    // Present moved, with no idle storage of their shape), and predicted
-    // storage the idle sweep released unused (released), and copies that sought no storage
-    // of their own because an allocation of their shape had just failed
-    // (skipped, copy_out_failure).
-    struct {
-      std::atomic<std::uint64_t> made{}, ring_busy{}, failed{}, predicted{}, taken{}, unstored{}, released{}, skipped{};
-    } copy_out_counters;
     // Protected by mutex: the last copy-out storage allocation that failed
     // (record_impl), by device, shape and format. For the source age after
     // it, a copy of that shape does not allocate copy-out storage again on
@@ -497,7 +449,7 @@ namespace sunshine_streamline::depth_capture {
       std::lock_guard lock(mutex);
       evaluations = {};
       for (auto &attempt : attempt_status) attempt = status::unavailable;
-      for (auto &owner : queues) if (owner) {
+      for (auto &owner : capture_queues.queues) if (owner) {
         owner->provider_established = false;
         owner->source_id = owner->last_epoch = owner->last_sequence = owner->last_source_tick = owner->nominated_epoch = owner->present_capture = 0;
         owner->admission_after = 0;
@@ -516,7 +468,7 @@ namespace sunshine_streamline::depth_capture {
   bool active() {
     if (!requested.load()) return false;
     std::lock_guard lock(mutex);
-    return std::any_of(queues.begin(), queues.end(), [](const auto &value) { return value && !value->retiring; });
+    return std::any_of(capture_queues.queues.begin(), capture_queues.queues.end(), [](const auto &value) { return value && !value->retiring; });
   }
   namespace {
     // Capture admissions, for the five-second report.
@@ -526,39 +478,14 @@ namespace sunshine_streamline::depth_capture {
     enum class list_view { unknown, open, closed, pass };
     list_view lifecycle_view(const command_state *owner);
     void count_admission(list_view view, bool states_observed);
-    // ReShade's own immediate lists, which its list events never report.
-    SRWLOCK runtime_lock = SRWLOCK_INIT;
-    std::array<std::uint64_t, 8> runtime_lists{}; // Guarded by runtime_lock.
-    std::atomic<bool> runtime_lists_known{};
     // Part declarations (depth_capture/observation.inl), in this namespace.
     bool runtime_list(std::uint64_t native);
     void lifecycle_recording(std::uint64_t native, list_event event);
-    std::atomic<std::uint64_t> game_execution_count{};
-    // The newest game execution (its game_execution_count) per queue, as the
-    // submission hook reports it. The queue places' safety bound, not a
-    // budget: a queue with no entry takes a free one, else the entry of the
-    // queue whose newest execution is oldest, and a retired queue's entry is
-    // freed (retire_queue). So no number of queues, nor their churn over a
-    // session, leaves an executing queue without its record; a queue whose
-    // entry was taken records again at its next execution, and until then a
-    // deferred copy that needs it waits. Its 8 entries were once claimed for
-    // good, so a presenting queue beyond them, or one recreated after them,
-    // never recorded; Assassin's Creed Shadows (10-25) created 9 queues, its
-    // presenting queue the 7th and one recreated mid-session.
-    // The entries in use are the first queue_execution_count, so a lookup
-    // scans only the queues that execute. A known queue's submission raises
-    // its newest execution under a shared hold (atomically, as submissions
-    // race), so only a queue's first one, or one after its entry was taken,
-    // holds the lock exclusively. Readers read newest under a shared hold.
-    struct queue_execution { std::uint64_t queue{}, newest{}; };
-    std::array<queue_execution, queue_limit> queue_executions{};
-    std::size_t queue_execution_count{};
-    SRWLOCK queue_execution_lock = SRWLOCK_INIT;
     // Part declarations (depth_capture/queues.inl), in this namespace.
     queue_execution *find_queue_execution(std::uint64_t queue);
     void forget_queue_execution(std::uint64_t queue);
   }
-  namespace {
+  SUNSHINE_CAPTURE_INTERNAL {
     // A released device's objects whose GPU work had not finished
     // (release_device), kept for good: under ReShade each resource of a
     // destroyed device calls into that device as it is destroyed, so none may
@@ -569,7 +496,8 @@ namespace sunshine_streamline::depth_capture {
       std::vector<source_ref> sources;
       std::vector<std::unique_ptr<queue_state>> places;
     };
-    kept_objects *kept{};
+  }
+  namespace {
     // release_device's bound on the wait for a device's queues, which the game
     // has drained before it releases its device. A safety bound, not a
     // tuning: it keeps a queue that never reaches its fence (one waiting on a
@@ -602,10 +530,10 @@ namespace sunshine_streamline::depth_capture {
     if (!queue || !query_native(queue, IID_ID3D12CommandQueue, checked)) return 0;
     queue = reinterpret_cast<std::uint64_t>(checked.p); // As the submission hook reports it.
     std::uint64_t newest{};
-    AcquireSRWLockShared(&queue_execution_lock);
+    AcquireSRWLockShared(&capture_queues.queue_execution_lock);
     if (auto *entry = find_queue_execution(queue))
       newest = std::atomic_ref<std::uint64_t>(entry->newest).load(std::memory_order_relaxed);
-    ReleaseSRWLockShared(&queue_execution_lock);
+    ReleaseSRWLockShared(&capture_queues.queue_execution_lock);
     return newest;
   }
 

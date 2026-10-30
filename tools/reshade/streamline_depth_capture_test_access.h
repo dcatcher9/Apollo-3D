@@ -313,6 +313,126 @@ namespace sunshine_streamline::depth_capture {
       // zero (presented_by).
       std::uint64_t present{}, submitted_present{};
     };
+    struct kept_objects;
+    // The non-trivial members retain their original order. The sole object
+    // stays at slots' shell position; kept is only a constant-initialized pointer.
+    struct pool_state {
+      std::array<slot, slot_limit> slots;
+      std::array<slot, diagnostic_slot_limit> diagnostic_slots;
+      bool diagnostic_slots_active{}; // Protected by mutex; idle callbacks skip this pool.
+      std::array<std::weak_ptr<const source_reference>, source_limit> sources;
+      // Every snapshot storage allocated (allocate_storage), as long as anyone
+      // holds it: release_device releases a device's storage whoever holds it
+      // (a packet, a ticket). Protected by mutex; expired entries are dropped
+      // when it would grow, so it stays as long as the storage alive.
+      std::vector<std::weak_ptr<texture_reference>> storage;
+      kept_objects *kept{};
+    };
+    static_assert(std::is_trivially_destructible_v<decltype(pool_state::diagnostic_slots_active)> &&
+      std::is_trivially_destructible_v<decltype(pool_state::kept)>);
+    static_assert([] {
+      decltype(pool_state::diagnostic_slots_active) active{};
+      decltype(pool_state::kept) kept{};
+      return !active && !kept;
+    }());
+
+    struct queue_execution { std::uint64_t queue{}, newest{}; };
+    // The queue array keeps its shell anchor. All joining members have trivial
+    // destructors and constant initializers; no acquisition mode changes.
+    struct queue_places {
+      std::array<std::unique_ptr<queue_state>, queue_limit> queues;
+      // Protected by mutex: orders the queue places by their last use
+      // (queue_state::last_use), so free_place reclaims the longest unused.
+      std::uint64_t place_clock{};
+      // Copy-outs (copy_out): made, and copies left to the Reset rule because
+      // every list of the queue's ring was in flight or a list call failed, or
+      // (failed too) their copy-out storage could not be allocated.
+      // U-C1b: copies recorded with storage because their list was not known
+      // to execute on the reader's queue (predicted), copies given an idle
+      // slot's cached storage at their submission (taken), copies submitted
+      // on another queue than the reader's with no storage at all, left to
+      // the Reset rule (unstored: recorded for the reader's queue before
+      // Present moved, with no idle storage of their shape), and predicted
+      // storage the idle sweep released unused (released), and copies that sought no storage
+      // of their own because an allocation of their shape had just failed
+      // (skipped, copy_out_failure).
+      struct {
+        std::atomic<std::uint64_t> made{}, ring_busy{}, failed{}, predicted{}, taken{}, unstored{}, released{}, skipped{};
+      } copy_out_counters;
+      std::atomic<std::uint64_t> game_execution_count{};
+      // The newest game execution (its game_execution_count) per queue, as the
+      // submission hook reports it. The queue places' safety bound, not a
+      // budget: a queue with no entry takes a free one, else the entry of the
+      // queue whose newest execution is oldest, and a retired queue's entry is
+      // freed (retire_queue). So no number of queues, nor their churn over a
+      // session, leaves an executing queue without its record; a queue whose
+      // entry was taken records again at its next execution, and until then a
+      // deferred copy that needs it waits. Its 8 entries were once claimed for
+      // good, so a presenting queue beyond them, or one recreated after them,
+      // never recorded; Assassin's Creed Shadows (10-25) created 9 queues, its
+      // presenting queue the 7th and one recreated mid-session.
+      // The entries in use are the first queue_execution_count, so a lookup
+      // scans only the queues that execute. A known queue's submission raises
+      // its newest execution under a shared hold (atomically, as submissions
+      // race), so only a queue's first one, or one after its entry was taken,
+      // holds the lock exclusively. Readers read newest under a shared hold.
+      std::array<queue_execution, queue_limit> queue_executions{};
+      std::size_t queue_execution_count{};
+      SRWLOCK queue_execution_lock = SRWLOCK_INIT;
+    };
+    static_assert(std::is_trivially_destructible_v<decltype(queue_places::place_clock)> &&
+      std::is_trivially_destructible_v<decltype(queue_places::copy_out_counters)> &&
+      std::is_trivially_destructible_v<decltype(queue_places::game_execution_count)> &&
+      std::is_trivially_destructible_v<decltype(queue_places::queue_executions)> &&
+      std::is_trivially_destructible_v<decltype(queue_places::queue_execution_count)> &&
+      std::is_trivially_destructible_v<decltype(queue_places::queue_execution_lock)>);
+    // Construct each exact joining type in constant evaluation. Atomics are
+    // constructed here, not loaded (atomic loads are not constexpr in C++20).
+    static_assert([] {
+      decltype(queue_places::place_clock) clock{};
+      decltype(queue_places::copy_out_counters) counters;
+      decltype(queue_places::game_execution_count) executions{};
+      decltype(queue_places::queue_executions) entries{};
+      decltype(queue_places::queue_execution_count) count{};
+      decltype(queue_places::queue_execution_lock) lock = SRWLOCK_INIT;
+      (void)counters; (void)executions;
+      return !clock && !entries[0].queue && !entries[0].newest && !count && !lock.Ptr;
+    }());
+
+    constexpr unsigned proven_limit = 128;
+    // Entirely constant-initialized and trivially destructible. Its sole object
+    // stays at proven's shell position; command_generation retains initial value1.
+    struct observation_state {
+      // The per-resource last-proven state (proven_state.h), under mutex: at
+      // most proven_limit textures, the least recently used forgotten first.
+      sunshine_proven_state::table<proven_limit> proven;
+      // Depth-stencil textures ReShade destroyed (resource_destroyed), queued
+      // without a lock (destroy_resource may run where this owner's lock is
+      // held) and forgotten before the table next holds a texture (0: a free
+      // slot). A full queue drops one: the table then forgets it as least
+      // recently used.
+      std::array<std::atomic<std::uint64_t>, proven_limit> destroyed{};
+      std::atomic<bool> destroyed_pending{};
+      // A creation state stops proving a texture once enhanced barriers were
+      // seen: ReShade reports a texture created in an initial layout like one
+      // created in a legacy state. Set without the lock.
+      std::atomic<bool> enhanced_barriers_seen{};
+      struct {
+        std::atomic<std::uint64_t> unrecorded{}, unreported{}, invalidated{}, missed_reset{}, uncovered{}, changed_copies{};
+        // Copies of a latched source with nothing on their recording (D6, N8).
+        std::atomic<std::uint64_t> earlier_copied{}, earlier_refused{};
+      } proven_counters;
+      // Advanced under mutex (invalidate_all); read without it by the barrier
+      // hooks, which keep their recording's payload without the capture lock.
+      std::atomic<std::uint64_t> command_generation{1};
+      // ReShade's own immediate lists, which its list events never report.
+      SRWLOCK runtime_lock = SRWLOCK_INIT;
+      std::array<std::uint64_t, 8> runtime_lists{}; // Guarded by runtime_lock.
+      std::atomic<bool> runtime_lists_known{};
+    };
+    static_assert(std::is_trivially_destructible_v<observation_state>);
+    static_assert([] { observation_state value; (void)value; return true; }());
+
     struct evaluation_head {
       std::uint64_t epoch{}, sequence{}, tick{}, source_id{};
       std::uint32_t viewport{};
@@ -456,6 +576,9 @@ namespace sunshine_streamline::depth_capture {
     extern std::atomic<bool> requested;
     extern std::mutex mutex;
     extern scope_state scope;
+    extern pool_state capture_pool;
+    extern queue_places capture_queues;
+    extern observation_state capture_observation;
     std::uint64_t present_ordinal();
     bool frame_presenting(std::uint64_t ordinal);
     std::uint64_t presented_by(const slot &value);
@@ -469,10 +592,6 @@ namespace sunshine_streamline::depth_capture {
       const sunshine_scene_depth::resource_description &resource, copy_region &out);
     status capture_region(const D3D12_RESOURCE_DESC &desc,
       const sunshine_scene_depth::resource_description &resource, copy_region &out);
-    extern std::atomic<std::uint64_t> command_generation;
-    extern std::array<slot, slot_limit> slots;
-    extern std::array<slot, diagnostic_slot_limit> diagnostic_slots;
-    extern std::array<std::unique_ptr<queue_state>, queue_limit> queues;
     extern std::array<evaluation_namespace, provider_count> evaluations;
     // A copy was ever recorded on a COMPUTE list (record_impl); liveness
     // queries look for readable compute-list copies only then.
@@ -553,7 +672,7 @@ namespace sunshine_streamline::depth_capture {
     // one per owner of the state it clears, so that regrouping an owner's
     // globals changes its reset here instead of every regression.
     // Snapshot pool: no capture slots.
-    inline void reset_pool() { slots = {}; }
+    inline void reset_pool() { capture_pool.slots = {}; }
     // API evaluation bookkeeping: no evaluations.
     inline void reset_evaluations() { evaluations = {}; }
     // Presentation scope: no FG role retirement, no evaluation or frame
@@ -571,7 +690,7 @@ namespace sunshine_streamline::depth_capture {
     }
     // Queue places: no queue owners.
     inline void reset_queues() {
-      for (auto &entry : queues) {
+      for (auto &entry : capture_queues.queues) {
         entry.reset();
       }
     }

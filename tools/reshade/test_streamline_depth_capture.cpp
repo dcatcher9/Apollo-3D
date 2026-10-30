@@ -33,18 +33,18 @@ namespace sunshine_streamline::depth_capture {
   namespace testing {
     void age_idle_storage(std::uint64_t ms) {
       std::lock_guard lock(mutex);
-      for (auto &value : diagnostic_slots)
+      for (auto &value : capture_pool.diagnostic_slots)
         if (!value.id && value.texture) value.idle_tick -= std::min(value.idle_tick, ms);
     }
     bool holds_copy_out_storage(std::uint64_t capture) {
       std::lock_guard lock(mutex);
-      for (const auto &value : slots)
+      for (const auto &value : capture_pool.slots)
         if (capture && value.id == capture) return value.published != nullptr;
       return false;
     }
     std::uint64_t copy_out_resource(std::uint64_t capture) {
       std::lock_guard lock(mutex);
-      for (const auto &value : slots)
+      for (const auto &value : capture_pool.slots)
         if (capture && value.id == capture && value.published) return reinterpret_cast<std::uint64_t>(value.published->resource.p);
       return 0;
     }
@@ -314,14 +314,14 @@ namespace sunshine_streamline::depth_capture {
       // Exercise the production acquisition policy without COM/GPU operations.
       // Pixel ownership/fences remain covered by the native runtime fixtures.
       struct cleanup {
-        std::array<slot, slot_limit> saved_slots{slots};
+        std::array<slot, slot_limit> saved_slots{capture_pool.slots};
         std::array<evaluation_namespace, provider_count> saved_evaluations{evaluations};
         std::array<status, provider_count> saved_attempts{attempt_status[0].load(), attempt_status[1].load()};
         bool saved_requested{requested.load()};
         status saved_reason{reason.load()};
         std::uint64_t saved_serial{serial.load()};
         ~cleanup() {
-          slots = saved_slots; evaluations = saved_evaluations;
+          capture_pool.slots = saved_slots; evaluations = saved_evaluations;
           for (unsigned i = 0; i != provider_count; ++i) attempt_status[i] = saved_attempts[i];
           requested = saved_requested; reason = saved_reason; serial = saved_serial;
         }
@@ -354,11 +354,11 @@ namespace sunshine_streamline::depth_capture {
         // and a late older rejection does not restart it.
         auto &view = evaluations[provider_index(provider_kind::streamline)].views[0];
         const auto finished = [&](std::uint64_t id, std::uint64_t sequence, bool successful) {
-          slots[0] = {}; slots[0].id = id;
-          slots[0].metadata.provider = provider_kind::streamline; slots[0].metadata.epoch = 5;
-          slots[0].metadata.sequence = sequence; slots[0].metadata.viewport = 0; slots[0].metadata.source_id = 0;
+          capture_pool.slots[0] = {}; capture_pool.slots[0].id = id;
+          capture_pool.slots[0].metadata.provider = provider_kind::streamline; capture_pool.slots[0].metadata.epoch = 5;
+          capture_pool.slots[0].metadata.sequence = sequence; capture_pool.slots[0].metadata.viewport = 0; capture_pool.slots[0].metadata.source_id = 0;
           finish(id, successful);
-          return slots[0].finished && slots[0].success == successful;
+          return capture_pool.slots[0].finished && capture_pool.slots[0].success == successful;
         };
         if (view.sequence != 3 || !finished(41, 3, false) || !view.rejected_since) return false;
         expire_association(sr, GetTickCount64());
@@ -384,12 +384,12 @@ namespace sunshine_streamline::depth_capture {
         constexpr std::uint64_t epoch = 7, fg = (1ull << 63) | 2;
         const auto finished = [&](std::uint64_t id, std::uint64_t source, std::uint32_t viewport, std::uint64_t sequence,
             bool successful, bool metadata_only = false) {
-          slots[0] = {}; slots[0].id = id; slots[0].nomination_only = metadata_only;
-          slots[0].metadata.provider = provider_kind::streamline; slots[0].metadata.epoch = epoch;
-          slots[0].metadata.sequence = sequence; slots[0].metadata.viewport = viewport; slots[0].metadata.source_id = source;
-          slots[0].metadata.tick = GetTickCount64();
+          capture_pool.slots[0] = {}; capture_pool.slots[0].id = id; capture_pool.slots[0].nomination_only = metadata_only;
+          capture_pool.slots[0].metadata.provider = provider_kind::streamline; capture_pool.slots[0].metadata.epoch = epoch;
+          capture_pool.slots[0].metadata.sequence = sequence; capture_pool.slots[0].metadata.viewport = viewport; capture_pool.slots[0].metadata.source_id = source;
+          capture_pool.slots[0].metadata.tick = GetTickCount64();
           finish(id, successful);
-          return slots[0].finished;
+          return capture_pool.slots[0].finished;
         };
         const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
         // FG On alone owns nothing.
@@ -455,8 +455,8 @@ namespace sunshine_streamline::depth_capture {
         constexpr std::uint64_t epoch = 8, fg = (1ull << 63) | 2;
         fixture::completion_fence fence;
         // The compute queue's place: selection reads only its private fence.
-        const auto entry = std::find_if(queues.begin(), queues.end(), [](const auto &item) { return !item; });
-        if (entry == queues.end()) return false;
+        const auto entry = std::find_if(capture_queues.queues.begin(), capture_queues.queues.end(), [](const auto &item) { return !item; });
+        if (entry == capture_queues.queues.end()) return false;
         *entry = std::make_unique<queue_state>();
         (*entry)->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
         (*entry)->fence.p = &fence;
@@ -468,16 +468,16 @@ namespace sunshine_streamline::depth_capture {
         const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
         const auto copy = [&](std::uint64_t id, std::uint64_t sequence, bool compute, bool submitted) {
           begin_evaluation(epoch, sequence, 2, provider_kind::streamline, fg, 0);
-          slots[0] = {}; slots[0].id = id; slots[0].compute_list = compute; slots[0].source_nominated = true;
-          slots[0].metadata.provider = provider_kind::streamline; slots[0].metadata.epoch = epoch;
-          slots[0].metadata.sequence = sequence; slots[0].metadata.viewport = 2; slots[0].metadata.source_id = fg;
-          slots[0].metadata.frame_generation_input = true; slots[0].metadata.tick = GetTickCount64();
-          slots[0].command = id; slots[0].producer_recording = std::make_shared<sunshine_native_command::recording_lifetime>();
-          slots[0].producer_recording->cookie = id;
-          if (submitted) { slots[0].producer_submitted = true; slots[0].producer_fence = sequence; slots[0].queue = compute_queue; }
+          capture_pool.slots[0] = {}; capture_pool.slots[0].id = id; capture_pool.slots[0].compute_list = compute; capture_pool.slots[0].source_nominated = true;
+          capture_pool.slots[0].metadata.provider = provider_kind::streamline; capture_pool.slots[0].metadata.epoch = epoch;
+          capture_pool.slots[0].metadata.sequence = sequence; capture_pool.slots[0].metadata.viewport = 2; capture_pool.slots[0].metadata.source_id = fg;
+          capture_pool.slots[0].metadata.frame_generation_input = true; capture_pool.slots[0].metadata.tick = GetTickCount64();
+          capture_pool.slots[0].command = id; capture_pool.slots[0].producer_recording = std::make_shared<sunshine_native_command::recording_lifetime>();
+          capture_pool.slots[0].producer_recording->cookie = id;
+          if (submitted) { capture_pool.slots[0].producer_submitted = true; capture_pool.slots[0].producer_fence = sequence; capture_pool.slots[0].queue = compute_queue; }
         };
         // Its recording's Reset starts another recording on the list.
-        const auto reset = [&] { slots[0].producer_recording->cookie = slots[0].command + 1000; };
+        const auto reset = [&] { capture_pool.slots[0].producer_recording->cookie = capture_pool.slots[0].command + 1000; };
         const auto live = [&] { return frame_generation_scope_live(epoch, 2, silent_since()); };
         struct recorded_flag {
           bool saved{compute_copies_recorded};
@@ -490,9 +490,9 @@ namespace sunshine_streamline::depth_capture {
           return std::uint64_t{};
         };
         copy(61, 20, true, false); finish(61, true);
-        if (!slots[0].finished || live()) return false;
-        slots[0].producer_submitted = true; slots[0].producer_fence = 20; slots[0].queue = compute_queue;
-        accept_compute_copy(slots[0]);
+        if (!capture_pool.slots[0].finished || live()) return false;
+        capture_pool.slots[0].producer_submitted = true; capture_pool.slots[0].producer_fence = 20; capture_pool.slots[0].queue = compute_queue;
+        accept_compute_copy(capture_pool.slots[0]);
         if (live()) return false; // Submitted, but its recording is not reset.
         reset();
         if (live()) return false; // Reset, but its fence has not passed.
@@ -503,20 +503,20 @@ namespace sunshine_streamline::depth_capture {
         if (!live() || accepted() != 20) return false;
         finish(62, true);
         if (!live() || accepted() != 21) return false;
-        invalidate(slots[0], capture_failure::replay);
+        invalidate(capture_pool.slots[0], capture_failure::replay);
         if (live()) return false;
         copy(63, 22, true, true); finish(63, true); reset(); fence.completed = 22;
         if (!live()) return false;
-        invalidate(slots[0], capture_failure::consumer_capacity);
+        invalidate(capture_pool.slots[0], capture_failure::consumer_capacity);
         if (!live()) return false;
-        copy(64, 23, true, true); slots[0].producer_fence = 0; finish(64, true);
-        invalidate(slots[0], capture_failure::discarded_recording);
+        copy(64, 23, true, true); capture_pool.slots[0].producer_fence = 0; finish(64, true);
+        invalidate(capture_pool.slots[0], capture_failure::discarded_recording);
         if (live()) return false;
         // An auxiliary compute copy (no nominated depth) is never accepted.
-        copy(66, 25, true, true); slots[0].source_nominated = false; finish(66, true); reset(); fence.completed = 25;
+        copy(66, 25, true, true); capture_pool.slots[0].source_nominated = false; finish(66, true); reset(); fence.completed = 25;
         if (live()) return false;
         copy(65, 24, false, false); finish(65, true);
-        invalidate(slots[0], capture_failure::replay);
+        invalidate(capture_pool.slots[0], capture_failure::replay);
         if (!live()) return false;
         fixture::clear_captures();
       }
@@ -648,18 +648,18 @@ namespace sunshine_streamline::depth_capture {
       // source takes priority on the next presentation; repeated effects
       // within the already-selected presentation remain on NGX.
       make(1, provider_kind::streamline, 1, 101, 0);
-      if (select(1).value != &ngx || select(2).value != &slots[1]) return false;
-      slots[1].metadata.frame_generation_input = true;
-      slots[1].metadata.source_id = 1ull << 63;
-      slots[1].metadata.sequence = 102;
-      begin_evaluation(1, 102, 0, provider_kind::streamline, slots[1].metadata.source_id, 0);
-      if (select(2).value != &slots[1] || select_provider(owner, native, 2, GetTickCount64(), {true, 1, 0}).value != &slots[1]) return false;
+      if (select(1).value != &ngx || select(2).value != &capture_pool.slots[1]) return false;
+      capture_pool.slots[1].metadata.frame_generation_input = true;
+      capture_pool.slots[1].metadata.source_id = 1ull << 63;
+      capture_pool.slots[1].metadata.sequence = 102;
+      begin_evaluation(1, 102, 0, provider_kind::streamline, capture_pool.slots[1].metadata.source_id, 0);
+      if (select(2).value != &capture_pool.slots[1] || select_provider(owner, native, 2, GetTickCount64(), {true, 1, 0}).value != &capture_pool.slots[1]) return false;
       queue_state takeover;
       takeover.provider_established = true; takeover.provider = provider_kind::ngx;
       takeover.source_id = 99; takeover.nominated_epoch = takeover.last_epoch = 1; takeover.last_sequence = 999;
-      establish_provider(takeover, slots[1], 2);
-      if (select_provider(takeover, native, 3, GetTickCount64(), {}).value != &slots[1]) return false;
-      slots[1].metadata.frame_generation_input = false;
+      establish_provider(takeover, capture_pool.slots[1], 2);
+      if (select_provider(takeover, native, 3, GetTickCount64(), {}).value != &capture_pool.slots[1]) return false;
+      capture_pool.slots[1].metadata.frame_generation_input = false;
       begin_evaluation(0, 9999, UINT32_MAX, provider_kind::streamline);
       if (select(1).value != &ngx) return false;
       begin_evaluation(1, 3, 0, provider_kind::ngx, 99);
@@ -737,8 +737,8 @@ namespace sunshine_streamline::depth_capture {
         begin_evaluation(70, 3, 0, provider_kind::streamline);
         if (pick(3).value != &next_fallback) return false;
       }
-      const auto empty_queue = std::find_if(queues.begin(), queues.end(), [](const auto &entry) { return !entry; });
-      if (empty_queue == queues.end()) return false;
+      const auto empty_queue = std::find_if(capture_queues.queues.begin(), capture_queues.queues.end(), [](const auto &entry) { return !entry; });
+      if (empty_queue == capture_queues.queues.end()) return false;
       *empty_queue = std::make_unique<queue_state>();
       struct release_queue { std::unique_ptr<queue_state> &entry; ~release_queue() { entry.reset(); } } queue_cleanup{*empty_queue};
       auto &established = **empty_queue;
@@ -1093,7 +1093,7 @@ namespace sunshine_streamline::depth_capture {
       }
       candidate = prepare_pending();
       if (!begin_nomination(candidate, UINT64_MAX)) return false;
-      auto &published = slots[1];
+      auto &published = capture_pool.slots[1];
       published.id = ++serial; published.metadata = candidate;
       published.source_nominated = published.nomination_only = true;
       published.pixel_failure = status::unsupported_resource;
@@ -1122,24 +1122,24 @@ namespace sunshine_streamline::depth_capture {
       fixture::clear_captures();
       begin_evaluation(candidate.epoch, candidate.sequence, candidate.viewport, candidate.provider, candidate.source_id);
       for (unsigned i = 0; i + 1 < pixel_slot_limit; ++i) {
-        slots[i].id = ++serial;
-        slots[i].retirement_unknown = true; // Live GPU obligations cannot be reclaimed.
+        capture_pool.slots[i].id = ++serial;
+        capture_pool.slots[i].retirement_unknown = true; // Live GPU obligations cannot be reclaimed.
       }
-      const auto pixel_end = slots.begin() + pixel_slot_limit;
+      const auto pixel_end = capture_pool.slots.begin() + pixel_slot_limit;
       for (unsigned i = pixel_slot_limit; i < slot_limit; ++i) {
         const auto ticket = record_nomination(candidate, candidate.resource.native, 0, {});
-        if (!ticket || slots[i].id != ticket ||
-            std::find_if(slots.begin(), pixel_end, reclaimable) != pixel_end - 1) return false;
+        if (!ticket || capture_pool.slots[i].id != ticket ||
+            std::find_if(capture_pool.slots.begin(), pixel_end, reclaimable) != pixel_end - 1) return false;
       }
       // The reservation is a preference, not an artificial nomination limit:
       // when it is full, unused pixel capacity can still retain source authority.
       const auto overflow = record_nomination(candidate, candidate.resource.native, 0, {});
-      if (!overflow || slots[pixel_slot_limit - 1].id != overflow ||
+      if (!overflow || capture_pool.slots[pixel_slot_limit - 1].id != overflow ||
           record_nomination(candidate, candidate.resource.native, 0, {})) return false;
-      finish(slots[pixel_slot_limit].id, false);
+      finish(capture_pool.slots[pixel_slot_limit].id, false);
       const auto recycled = record_nomination(candidate, candidate.resource.native, 0, {});
-      if (!recycled || slots[pixel_slot_limit].id != recycled ||
-          slots[pixel_slot_limit - 1].id != overflow) return false;
+      if (!recycled || capture_pool.slots[pixel_slot_limit].id != recycled ||
+          capture_pool.slots[pixel_slot_limit - 1].id != overflow) return false;
       return true;
     }
     bool live_source_admission_regression() {
@@ -1149,14 +1149,14 @@ namespace sunshine_streamline::depth_capture {
       // watermark, establishment and consumption bookkeeping of acquire() and
       // complete_frame(); only the producer fences are supplied by the CPU.
       struct cleanup {
-        std::array<slot, slot_limit> saved_slots{slots};
+        std::array<slot, slot_limit> saved_slots{capture_pool.slots};
         std::array<evaluation_namespace, provider_count> saved_evaluations{evaluations};
         std::array<status, provider_count> saved_attempts{attempt_status[0].load(), attempt_status[1].load()};
         bool saved_requested{requested.load()};
         status saved_reason{reason.load()};
         std::uint64_t saved_serial{serial.load()};
         ~cleanup() {
-          slots = saved_slots; evaluations = saved_evaluations;
+          capture_pool.slots = saved_slots; evaluations = saved_evaluations;
           for (unsigned i = 0; i != provider_count; ++i) attempt_status[i] = saved_attempts[i];
           requested = saved_requested; reason = saved_reason; serial = saved_serial;
         }
@@ -1179,8 +1179,8 @@ namespace sunshine_streamline::depth_capture {
       // provider selection exactly as in acquire(), so retire_source sees it.
       std::array<producer_queue, 3> producers;
       for (auto &value : producers) {
-        const auto entry = std::find_if(queues.begin(), queues.end(), [](const auto &item) { return !item; });
-        if (entry == queues.end()) return false;
+        const auto entry = std::find_if(capture_queues.queues.begin(), capture_queues.queues.end(), [](const auto &item) { return !item; });
+        if (entry == capture_queues.queues.end()) return false;
         *entry = std::make_unique<queue_state>();
         value.entry = &*entry;
         (*entry)->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&value);
@@ -1217,7 +1217,7 @@ namespace sunshine_streamline::depth_capture {
       // Present, while its previous one completes on the GPU.
       const auto advance = [&](pipeline &p) -> slot & {
         if (p.pending) p.queue->fence.completed = std::max<UINT64>(p.queue->fence.completed, p.pending->producer_fence);
-        auto &value = slots[p.first + p.written++ % 4];
+        auto &value = capture_pool.slots[p.first + p.written++ % 4];
         value = {};
         value.id = ++serial; value.queue = p.queue->native(); value.producer_fence = ++p.queue->signaled;
         value.texture = std::make_shared<texture_reference>();
@@ -1249,7 +1249,7 @@ namespace sunshine_streamline::depth_capture {
         constexpr auto age = sunshine_freshness::source_age_ms + 1;
         for (auto &view : evaluations[provider_index(p.provider)].views)
           if (view.source_id == p.source_id && view.tick > age) view.tick -= age;
-        for (auto &value : slots)
+        for (auto &value : capture_pool.slots)
           if (value.id && value.metadata.provider == p.provider && value.metadata.source_id == p.source_id &&
               value.metadata.tick > age) value.metadata.tick -= age;
         if (queue.provider == p.provider && queue.source_id == p.source_id && queue.last_source_tick > age)
@@ -1736,7 +1736,7 @@ namespace sunshine_streamline::depth_capture {
         if (!deliver(owner, own, present)) return false;
         // Time passes: every tick ages by ms.
         const auto age = [&](std::uint64_t ms) {
-          for (auto &value : slots) if (value.id && value.metadata.tick > ms) value.metadata.tick -= ms;
+          for (auto &value : capture_pool.slots) if (value.id && value.metadata.tick > ms) value.metadata.tick -= ms;
           for (auto &view : evaluations[provider_index(provider_kind::streamline)].views) if (view.tick > ms) view.tick -= ms;
           if (owner.last_source_tick > ms) owner.last_source_tick -= ms;
           if (retained.metadata.tick > ms) retained.metadata.tick -= ms;
@@ -1926,7 +1926,7 @@ namespace sunshine_streamline::depth_capture {
           const auto cookie = ++serial;
           if (!native_observer::set_recording_cookie(native_object(*objects[i]), cookie)) return false;
           auto owner = command(native_object(*objects[i]), cookie, true);
-          if (!owner || owner->invalid || owner->observation_generation != command_generation) return false;
+          if (!owner || owner->invalid || owner->observation_generation != capture_observation.command_generation) return false;
           lives[i] = owner.life();
           close(native_object(*objects[i]), cookie, S_OK);
           if (!owner->closed || lives[i]->cookie.load() != cookie) return false;
@@ -2094,10 +2094,10 @@ namespace sunshine_streamline::depth_capture {
       // Exercise actual global loss and allocation together. Existing named
       // recordings remain rejected; a distinct new recording starts clean.
       struct cleanup {
-        std::array<slot, slot_limit> saved_slots{slots};
+        std::array<slot, slot_limit> saved_slots{capture_pool.slots};
         status saved_reason{reason.load()};
-        std::uint64_t saved_generation{command_generation};
-        ~cleanup() { slots = saved_slots; reason = saved_reason; command_generation = saved_generation; }
+        std::uint64_t saved_generation{capture_observation.command_generation};
+        ~cleanup() { capture_pool.slots = saved_slots; reason = saved_reason; capture_observation.command_generation = saved_generation; }
       } restore;
       private_object old_object, fresh_object;
       const auto old_cookie = ++serial;
@@ -2189,7 +2189,7 @@ namespace sunshine_streamline::depth_capture {
       const auto selected = copy_state::select(sunshine_scene_depth::state_proof::observed_nonzero,
         texture_state_policy::source_contract);
       const auto run = [&](std::initializer_list<D3D12_RESOURCE_BARRIER> sequence, bool enhanced_block = false) {
-        recording->restart(cookie, command_generation);
+        recording->restart(cookie, capture_observation.command_generation);
         recording->reported = true;
         recording.life()->cookie.store(cookie);
         private_object depth;
@@ -2240,14 +2240,14 @@ namespace sunshine_streamline::depth_capture {
       const auto native_command = native_object(command_object);
       const auto cookie = ++serial;
       auto recording = command(native_command, cookie, true);
-      auto capture = std::find_if(slots.begin(), slots.end(), [](const auto &v) { return !v.id; });
-      if (!recording || capture == slots.end()) return false;
+      auto capture = std::find_if(capture_pool.slots.begin(), capture_pool.slots.end(), [](const auto &v) { return !v.id; });
+      if (!recording || capture == capture_pool.slots.end()) return false;
       struct cleanup {
         slot *capture;
         ~cleanup() { *capture = {}; }
       } restore{&*capture};
       const auto restart_case = [&] {
-        recording->restart(cookie, command_generation);
+        recording->restart(cookie, capture_observation.command_generation);
         recording->reported = true; // ReShade's lifecycle drives this recording.
         recording.life()->cookie.store(cookie);
       };
@@ -2566,12 +2566,12 @@ namespace sunshine_streamline::depth_capture {
     }
     bool source_authority_regression() {
       struct cleanup {
-        std::array<slot, slot_limit> saved_slots{slots};
+        std::array<slot, slot_limit> saved_slots{capture_pool.slots};
         decltype(evaluations) saved_evaluations{evaluations};
         std::array<status, provider_count> attempts{attempt_status[0].load(), attempt_status[1].load()};
         bool enabled{requested.load()}; status saved_reason{reason.load()};
         ~cleanup() {
-          slots = saved_slots; evaluations = saved_evaluations; requested = enabled; reason = saved_reason;
+          capture_pool.slots = saved_slots; evaluations = saved_evaluations; requested = enabled; reason = saved_reason;
           for (unsigned i = 0; i != provider_count; ++i) attempt_status[i] = attempts[i];
         }
       } restore;
@@ -2591,8 +2591,8 @@ namespace sunshine_streamline::depth_capture {
       if (source_region(source->desc, malformed, region) != status::malformed) return false;
       begin_evaluation(1, 1, 0, provider_kind::streamline, 19);
       const auto ticket = record_nomination(metadata, metadata.resource.native, 77, {});
-      const auto nominated = std::find_if(slots.begin(), slots.end(), [&](const auto &value) { return value.id == ticket; });
-      if (!ticket || nominated == slots.end()) return false;
+      const auto nominated = std::find_if(capture_pool.slots.begin(), capture_pool.slots.end(), [&](const auto &value) { return value.id == ticket; });
+      if (!ticket || nominated == capture_pool.slots.end()) return false;
       auto &value = *nominated;
       value.source_nominated = value.nomination_only = true; value.pixel_failure = status::unsupported_resource;
       queue_state owner; owner.device_identity = 41;
@@ -2647,19 +2647,19 @@ namespace sunshine_streamline::depth_capture {
     }
     bool preservation_owner_regression() {
       struct cleanup {
-        std::array<slot, slot_limit> saved_slots{slots};
+        std::array<slot, slot_limit> saved_slots{capture_pool.slots};
         decltype(evaluations) saved_evaluations{evaluations};
         std::array<status, provider_count> attempts{attempt_status[0].load(), attempt_status[1].load()};
         status saved_reason{reason.load()};
         ~cleanup() {
-          slots = saved_slots; evaluations = saved_evaluations; reason = saved_reason;
+          capture_pool.slots = saved_slots; evaluations = saved_evaluations; reason = saved_reason;
           for (unsigned i = 0; i != provider_count; ++i) attempt_status[i] = attempts[i];
         }
       } restore;
       fixture::clear_captures();
       constexpr std::uint64_t device = 11, source_id = 12, producer = 17, consumer = 19, recording = 21;
       auto source = std::make_shared<source_reference>(); source->cookie = source_id; source->device_identity = device;
-      auto &value = slots[0];
+      auto &value = capture_pool.slots[0];
       value.id = 101; value.preservation_only = true; value.finished = value.success = true;
       value.command = recording; value.metadata.source = source;
       value.metadata.epoch = 3; value.metadata.sequence = 4; value.metadata.source_id = 5;
@@ -2719,8 +2719,8 @@ namespace sunshine_streamline::depth_capture {
       return reclaimable(value);
     }
     bool submission_completion_regression() {
-      auto available = std::find_if(slots.begin(), slots.end(), [](const auto &value) { return !value.id; });
-      if (available == slots.end()) return false;
+      auto available = std::find_if(capture_pool.slots.begin(), capture_pool.slots.end(), [](const auto &value) { return !value.id; });
+      if (available == capture_pool.slots.end()) return false;
       struct cleanup {
         slot &value;
         slot saved;
@@ -2788,9 +2788,9 @@ namespace sunshine_streamline::depth_capture {
       std::vector<unsigned> stand_ins, made_busy, held_retiring;
       const auto restore = [&] {
         std::lock_guard lock(mutex);
-        for (const auto i : stand_ins) if (queues[i] && queues[i]->queue.p == named.p) queues[i].reset();
-        for (const auto i : made_busy) if (queues[i]) queues[i]->provider_established = false;
-        for (const auto i : held_retiring) if (queues[i]) { queues[i]->provider_established = false; queues[i]->retiring = true; }
+        for (const auto i : stand_ins) if (capture_queues.queues[i] && capture_queues.queues[i]->queue.p == named.p) capture_queues.queues[i].reset();
+        for (const auto i : made_busy) if (capture_queues.queues[i]) capture_queues.queues[i]->provider_established = false;
+        for (const auto i : held_retiring) if (capture_queues.queues[i]) { capture_queues.queues[i]->provider_established = false; capture_queues.queues[i]->retiring = true; }
       };
       {
         std::vector<std::shared_ptr<texture_reference>> discard;
@@ -2798,10 +2798,10 @@ namespace sunshine_streamline::depth_capture {
         collect_retired(discard);
         if (known_queue(target)) return false;
         // Earlier cases may have filled the table: one place for a stand-in.
-        if (std::none_of(queues.begin(), queues.end(), [](const auto &entry) { return !entry; }))
+        if (std::none_of(capture_queues.queues.begin(), capture_queues.queues.end(), [](const auto &entry) { return !entry; }))
           if (auto *place = free_place()) place->reset();
-        for (unsigned i = 0; i != queues.size(); ++i) {
-          auto &entry = queues[i];
+        for (unsigned i = 0; i != capture_queues.queues.size(); ++i) {
+          auto &entry = capture_queues.queues[i];
           if (entry) {
             if (entry->retiring) { entry->retiring = false; entry->provider_established = true; held_retiring.push_back(i); }
             else if (!entry->provider_established) { entry->provider_established = true; made_busy.push_back(i); }
@@ -2829,13 +2829,13 @@ namespace sunshine_streamline::depth_capture {
       unsigned idle = queue_limit;
       {
         std::lock_guard lock(mutex);
-        if (!stand_ins.empty()) { idle = stand_ins.back(); queues[idle]->provider_established = false; }
+        if (!stand_ins.empty()) { idle = stand_ins.back(); capture_queues.queues[idle]->provider_established = false; }
       }
       observe_queue(target);
       bool placed = false;
       {
         std::lock_guard lock(mutex);
-        placed = idle != queue_limit && known_queue(target) == queues[idle].get() && places_reclaimed;
+        placed = idle != queue_limit && known_queue(target) == capture_queues.queues[idle].get() && places_reclaimed;
       }
       restore();
       retire_queue(target);

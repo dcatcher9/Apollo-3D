@@ -13,8 +13,8 @@
 namespace sunshine_streamline::depth_capture {
   SUNSHINE_CAPTURE_INTERNAL {
     queue_state *known_queue(std::uint64_t native) {
-      for (auto &value : queues) if (value && reinterpret_cast<std::uint64_t>(value->queue.p) == native) {
-        value->last_use = ++place_clock;
+      for (auto &value : capture_queues.queues) if (value && reinterpret_cast<std::uint64_t>(value->queue.p) == native) {
+        value->last_use = ++capture_queues.place_clock;
         return value.get();
       }
       return nullptr;
@@ -35,8 +35,8 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t cookie{}; UINT size = sizeof(cookie);
       if (!query_native(native, IID_ID3D12CommandQueue, object) ||
           FAILED(object->GetPrivateData(queue_guid, &size, &cookie)) || size != sizeof(cookie) || !cookie) return nullptr;
-      for (auto &value : queues) if (value && value->cookie == cookie) {
-        value->last_use = ++place_clock;
+      for (auto &value : capture_queues.queues) if (value && value->cookie == cookie) {
+        value->last_use = ++capture_queues.place_clock;
         return value.get();
       }
       return nullptr;
@@ -112,13 +112,13 @@ namespace sunshine_streamline::depth_capture {
     // Requires mutex. Whether the newest acquisition's queue (reader) is a
     // live place.
     bool reader_live() {
-      return reader && std::any_of(queues.begin(), queues.end(), [](const auto &entry) {
+      return reader && std::any_of(capture_queues.queues.begin(), capture_queues.queues.end(), [](const auto &entry) {
         return entry && entry->cookie == reader && !entry->retiring;
       });
     }
     // Requires mutex. The native queue of the newest acquisition (reader).
     std::uint64_t reader_queue() {
-      for (const auto &entry : queues)
+      for (const auto &entry : capture_queues.queues)
         if (entry && reader && entry->cookie == reader && !entry->retiring) return reinterpret_cast<std::uint64_t>(entry->queue.p);
       return 0;
     }
@@ -148,8 +148,8 @@ namespace sunshine_streamline::depth_capture {
     }
     bool needs_submission_fence(const std::array<bool, slot_limit> &producers,
         const std::array<bool, slot_limit> &consumers) {
-      for (unsigned i = 0; i != slots.size(); ++i)
-        if ((!slots[i].nomination_only && producers[i]) || consumers[i]) return true;
+      for (unsigned i = 0; i != capture_pool.slots.size(); ++i)
+        if ((!capture_pool.slots[i].nomination_only && producers[i]) || consumers[i]) return true;
       return false;
     }
     void capacity_refused(capacity_bound bound) { capacity_hits.fetch_or(bound, std::memory_order_relaxed); }
@@ -161,9 +161,9 @@ namespace sunshine_streamline::depth_capture {
     // (observe_present), so no number of queues created over a session
     // exhausts the table.
     std::unique_ptr<queue_state> *free_place() {
-      for (auto &entry : queues) if (!entry) return &entry;
+      for (auto &entry : capture_queues.queues) if (!entry) return &entry;
       std::unique_ptr<queue_state> *idle = nullptr;
-      for (auto &entry : queues) {
+      for (auto &entry : capture_queues.queues) {
         if (entry->retiring || entry->provider_established || (idle && (*idle)->last_use <= entry->last_use)) continue;
         const auto native = reinterpret_cast<std::uint64_t>(entry->queue.p);
         bool used = false;
@@ -199,7 +199,7 @@ namespace sunshine_streamline::depth_capture {
       value->AddRef(); next->queue.p = value;
       next->compute_producer = type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
       next->cookie = ++serial;
-      next->last_use = ++place_clock;
+      next->last_use = ++capture_queues.place_clock;
       if (FAILED(value->SetPrivateData(queue_guid, sizeof(next->cookie), &next->cookie))) { reason = status::unsupported_queue; return nullptr; }
       *entry = std::move(next); return entry->get();
     }
@@ -211,7 +211,7 @@ namespace sunshine_streamline::depth_capture {
     // place (compute_unplaced), record_impl refuses compute-list copies until
     // one is free again (collect_retired, free_place).
     bool compute_producer_placed() {
-      return std::any_of(queues.begin(), queues.end(),
+      return std::any_of(capture_queues.queues.begin(), capture_queues.queues.end(),
         [](const auto &value) { return value && !value->retiring && value->compute_producer; });
     }
     queue_state *register_compute_producer(std::uint64_t native, std::uint32_t count,
@@ -226,7 +226,7 @@ namespace sunshine_streamline::depth_capture {
         }
         return false;
       };
-      if (!awaits(slots) && !(diagnostic_slots_active && awaits(diagnostic_slots))) return nullptr;
+      if (!awaits(capture_pool.slots) && !(capture_pool.diagnostic_slots_active && awaits(capture_pool.diagnostic_slots))) return nullptr;
       com_ptr<ID3D12CommandQueue> checked;
       if (!query_native(native, IID_ID3D12CommandQueue, checked)) return nullptr;
       auto *owner = register_queue(checked.p, true);
@@ -238,7 +238,7 @@ namespace sunshine_streamline::depth_capture {
     // acquired: a render queue that presented with FG off reads elsewhere
     // once FG presents on DLSS-G's queue, and no longer once FG is off again.
     bool read_elsewhere(const queue_state &owner) {
-      return reader && reader != owner.cookie && std::any_of(queues.begin(), queues.end(), [&](const auto &entry) {
+      return reader && reader != owner.cookie && std::any_of(capture_queues.queues.begin(), capture_queues.queues.end(), [&](const auto &entry) {
         return entry && entry->cookie == reader && !entry->retiring;
       });
     }
@@ -296,7 +296,7 @@ namespace sunshine_streamline::depth_capture {
         const auto desc = storage->resource->GetDesc();
         return desc.Width == shape.Width && desc.Height == shape.Height && desc.Format == shape.Format;
       };
-      for (auto &entry : slots) {
+      for (auto &entry : capture_pool.slots) {
         if (entry.id || reserved_by_other(entry, 0)) continue;
         for (auto *storage : {&entry.published, &entry.texture})
           if (fits(*storage)) {
@@ -316,14 +316,14 @@ namespace sunshine_streamline::depth_capture {
       const bool elsewhere = read_elsewhere(owner);
       if (!elsewhere && !(reader == owner.cookie && !owner.compute_producer && reader_may_move(now))) return out;
       bool any = false;
-      for (unsigned i = 0; i != slots.size(); ++i) {
-        auto &value = slots[i];
+      for (unsigned i = 0; i != capture_pool.slots.size(); ++i) {
+        auto &value = capture_pool.slots[i];
         if (!producers[i] || value.nomination_only || value.preservation_only || value.producer_submitted) continue;
         if (elsewhere && value.metadata.source) value.metadata.source->foreign_tick.store(now, std::memory_order_relaxed);
         if (value.invalid || !value.texture || value.copied_out) continue;
         if (!value.published) {
           const bool taken = take_idle_storage(value, owner.compute_producer);
-          (taken ? copy_out_counters.taken : copy_out_counters.unstored).fetch_add(1, std::memory_order_relaxed);
+          (taken ? capture_queues.copy_out_counters.taken : capture_queues.copy_out_counters.unstored).fetch_add(1, std::memory_order_relaxed);
           if (!taken) continue;
         }
         // A COMPUTE queue names only COMMON of these (record_impl's rest).
@@ -338,14 +338,14 @@ namespace sunshine_streamline::depth_capture {
         return out;
       };
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-      if (refuse_copy_outs.load(std::memory_order_acquire)) return refuse(copy_out_counters.ring_busy);
+      if (refuse_copy_outs.load(std::memory_order_acquire)) return refuse(capture_queues.copy_out_counters.ring_busy);
 #endif
       // A list whose last execution completed (its fence value passed).
       const auto completed = owner.fence->GetCompletedValue();
       copy_out_list *entry = nullptr;
       for (auto &candidate : owner.copy_out)
         if (!candidate.list.p || (completed != UINT64_MAX && completed >= candidate.fence)) { entry = &candidate; break; }
-      if (!entry) return refuse(copy_out_counters.ring_busy);
+      if (!entry) return refuse(capture_queues.copy_out_counters.ring_busy);
       const auto type = owner.compute_producer ? D3D12_COMMAND_LIST_TYPE_COMPUTE : D3D12_COMMAND_LIST_TYPE_DIRECT;
       const bool opened = entry->list.p ?
         SUCCEEDED(entry->allocator->Reset()) && SUCCEEDED(entry->list->Reset(entry->allocator.p, nullptr)) :
@@ -354,9 +354,9 @@ namespace sunshine_streamline::depth_capture {
         SUCCEEDED(owner.device->CreateCommandList(0, type, entry->allocator.p, nullptr, __uuidof(ID3D12GraphicsCommandList),
           reinterpret_cast<void **>(entry->list.put())));
       auto *list = entry->list.p;
-      if (opened) for (unsigned i = 0; i != slots.size(); ++i) {
+      if (opened) for (unsigned i = 0; i != capture_pool.slots.size(); ++i) {
         if (!out[i]) continue;
-        const auto &value = slots[i];
+        const auto &value = capture_pool.slots[i];
         D3D12_RESOURCE_BARRIER transitions[2]{};
         transitions[0].Type = transitions[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         transitions[0].Transition = {value.texture->resource.p, 0, value.texture->rest, D3D12_RESOURCE_STATE_COPY_SOURCE};
@@ -368,7 +368,7 @@ namespace sunshine_streamline::depth_capture {
       }
       if (!opened || FAILED(list->Close())) {
         entry->list.reset(); entry->allocator.reset(); // Not executed since its last fence completed.
-        return refuse(copy_out_counters.failed);
+        return refuse(capture_queues.copy_out_counters.failed);
       }
       ID3D12CommandList *lists[]{list};
       owner.queue->ExecuteCommandLists(1, lists); // The hooks are suppressed in this callback.
@@ -384,12 +384,12 @@ namespace sunshine_streamline::depth_capture {
       if (!owner) return;
       native = reinterpret_cast<std::uint64_t>(owner->queue.p);
       std::array<bool, slot_limit> producers{}, consumers{};
-      const bool depth_used = identify_submissions(slots, count, values, producers, consumers);
+      const bool depth_used = identify_submissions(capture_pool.slots, count, values, producers, consumers);
       std::array<bool, diagnostic_slot_limit> auxiliary_producers, auxiliary_consumers;
       bool auxiliary_used = false;
-      if (diagnostic_slots_active) {
+      if (capture_pool.diagnostic_slots_active) {
         auxiliary_producers.fill(false); auxiliary_consumers.fill(false);
-        auxiliary_used = identify_submissions(diagnostic_slots, count, values, auxiliary_producers, auxiliary_consumers);
+        auxiliary_used = identify_submissions(capture_pool.diagnostic_slots, count, values, auxiliary_producers, auxiliary_consumers);
       }
       if (!depth_used && !auxiliary_used) return;
       // The queue of each list that carried a depth copy, which its next
@@ -398,7 +398,7 @@ namespace sunshine_streamline::depth_capture {
       if (depth_used) for (std::uint32_t n = 0; n != count; ++n) {
         const auto cookie = values[n].recording_cookie;
         bool carried = false;
-        for (unsigned i = 0; i != slots.size() && !carried; ++i) carried = producers[i] && cookie && slots[i].command == cookie;
+        for (unsigned i = 0; i != capture_pool.slots.size() && !carried; ++i) carried = producers[i] && cookie && capture_pool.slots[i].command == cookie;
         if (!carried) continue;
         if (auto list = command_storage::acquire(reinterpret_cast<ID3D12Object *>(values[n].native_command), false))
           list->executed_queue = owner->cookie;
@@ -413,14 +413,14 @@ namespace sunshine_streamline::depth_capture {
       const bool signaled = !needs_fence || SUCCEEDED(owner->queue->Signal(owner->fence.p, fence));
       if (!signaled)
         for (auto &entry : owner->copy_out) if (entry.fence == fence) entry.fence = UINT64_MAX; // Never reused.
-      for (unsigned i = 0; i != slots.size(); ++i) {
-        auto &value = slots[i];
+      for (unsigned i = 0; i != capture_pool.slots.size(); ++i) {
+        auto &value = capture_pool.slots[i];
         if (producers[i]) {
           producer_submitted(value, native, value.nomination_only ? 0 : fence, value.nomination_only || signaled);
           set_producer_position(value, copied[i], signaled, copy_at, game_at);
           if (copied[i] && signaled) {
             value.copied_out = true;
-            copy_out_counters.made.fetch_add(1, std::memory_order_relaxed);
+            capture_queues.copy_out_counters.made.fetch_add(1, std::memory_order_relaxed);
           }
           // An executed copy-out without its fence is never released unused.
           if (copied[i]) value.predicted_storage = false;
@@ -433,17 +433,17 @@ namespace sunshine_streamline::depth_capture {
           submitted_immediate(value, count, values);
         }
       }
-      if (auxiliary_used) for (unsigned i = 0; i != diagnostic_slots.size(); ++i) {
-        if (auxiliary_producers[i]) producer_submitted(diagnostic_slots[i], native, fence, signaled);
+      if (auxiliary_used) for (unsigned i = 0; i != capture_pool.diagnostic_slots.size(); ++i) {
+        if (auxiliary_producers[i]) producer_submitted(capture_pool.diagnostic_slots[i], native, fence, signaled);
         if (auxiliary_consumers[i]) {
-          consumer_submitted(diagnostic_slots[i], native, fence, signaled);
-          submitted_immediate(diagnostic_slots[i], count, values);
+          consumer_submitted(capture_pool.diagnostic_slots[i], native, fence, signaled);
+          submitted_immediate(capture_pool.diagnostic_slots[i], count, values);
         }
       }
     }
     // Requires mutex. The retired slots' storage moves to discard.
     void collect_retired(std::vector<std::shared_ptr<texture_reference>> &discard) {
-      for (auto &owner : queues) {
+      for (auto &owner : capture_queues.queues) {
         if (!owner || !owner->retiring) continue;
         const auto native = reinterpret_cast<std::uint64_t>(owner->queue.p);
         const bool removed = FAILED(owner->device->GetDeviceRemovedReason());
@@ -472,38 +472,38 @@ namespace sunshine_streamline::depth_capture {
       while (seen < newest && !value.compare_exchange_weak(seen, newest, std::memory_order_relaxed)) {}
     }
     queue_execution *find_queue_execution(std::uint64_t queue) {
-      for (std::size_t i = 0; i != queue_execution_count; ++i)
-        if (queue_executions[i].queue == queue) return &queue_executions[i];
+      for (std::size_t i = 0; i != capture_queues.queue_execution_count; ++i)
+        if (capture_queues.queue_executions[i].queue == queue) return &capture_queues.queue_executions[i];
       return nullptr;
     }
     void note_queue_execution(std::uint64_t queue, std::uint64_t newest) {
       if (!queue) return;
-      AcquireSRWLockShared(&queue_execution_lock);
+      AcquireSRWLockShared(&capture_queues.queue_execution_lock);
       auto *known = find_queue_execution(queue);
       if (known) raise_execution(*known, newest);
-      ReleaseSRWLockShared(&queue_execution_lock);
+      ReleaseSRWLockShared(&capture_queues.queue_execution_lock);
       if (known) return;
-      AcquireSRWLockExclusive(&queue_execution_lock);
+      AcquireSRWLockExclusive(&capture_queues.queue_execution_lock);
       auto *entry = find_queue_execution(queue);
       if (!entry) {
-        if (queue_execution_count != queue_executions.size()) entry = &queue_executions[queue_execution_count++];
+        if (capture_queues.queue_execution_count != capture_queues.queue_executions.size()) entry = &capture_queues.queue_executions[capture_queues.queue_execution_count++];
         else {
-          entry = &queue_executions.front();
-          for (auto &value : queue_executions) if (value.newest < entry->newest) entry = &value;
+          entry = &capture_queues.queue_executions.front();
+          for (auto &value : capture_queues.queue_executions) if (value.newest < entry->newest) entry = &value;
         }
         *entry = {queue, 0};
       }
       entry->newest = std::max(entry->newest, newest);
-      ReleaseSRWLockExclusive(&queue_execution_lock);
+      ReleaseSRWLockExclusive(&capture_queues.queue_execution_lock);
     }
     void forget_queue_execution(std::uint64_t queue) {
       if (!queue) return;
-      AcquireSRWLockExclusive(&queue_execution_lock);
+      AcquireSRWLockExclusive(&capture_queues.queue_execution_lock);
       if (auto *entry = find_queue_execution(queue)) {
-        *entry = queue_executions[--queue_execution_count];
-        queue_executions[queue_execution_count] = {};
+        *entry = capture_queues.queue_executions[--capture_queues.queue_execution_count];
+        capture_queues.queue_executions[capture_queues.queue_execution_count] = {};
       }
-      ReleaseSRWLockExclusive(&queue_execution_lock);
+      ReleaseSRWLockExclusive(&capture_queues.queue_execution_lock);
     }
     void observed_submission(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values) {
       submitted(queue, count, values);
@@ -515,7 +515,7 @@ namespace sunshine_streamline::depth_capture {
         if (runtime_list(values[i].native_command))
           try { lifecycle_recording(values[i].native_command, list_event::reset); } catch (...) {}
         else if (values[i].recording_cookie) game = true;
-      if (game) note_queue_execution(queue, game_execution_count.fetch_add(1, std::memory_order_acq_rel) + 1);
+      if (game) note_queue_execution(queue, capture_queues.game_execution_count.fetch_add(1, std::memory_order_acq_rel) + 1);
     }
   }
   void observe_queue(std::uint64_t native) {

@@ -72,22 +72,22 @@ namespace sunshine_streamline::depth_capture {
     proven_state_counts out;
     {
       std::lock_guard lock(mutex);
-      out.tracked = proven.size();
-      out.latched = proven.latched_count();
-      out.latch_lost = proven.latch_lost();
+      out.tracked = capture_observation.proven.size();
+      out.latched = capture_observation.proven.latched_count();
+      out.latch_lost = capture_observation.proven.latch_lost();
     }
-    const auto &c = proven_counters;
+    const auto &c = capture_observation.proven_counters;
     constexpr auto relaxed = std::memory_order_relaxed;
     out.unrecorded = c.unrecorded.load(relaxed); out.unreported = c.unreported.load(relaxed);
     out.invalidated = c.invalidated.load(relaxed); out.missed_reset = c.missed_reset.load(relaxed);
     out.uncovered = c.uncovered.load(relaxed); out.changed_copies = c.changed_copies.load(relaxed);
     out.earlier_copied = c.earlier_copied.load(relaxed); out.earlier_refused = c.earlier_refused.load(relaxed);
-    out.copied_out = copy_out_counters.made.load(relaxed); out.copy_out_busy = copy_out_counters.ring_busy.load(relaxed);
-    out.copy_out_failed = copy_out_counters.failed.load(relaxed);
-    out.copy_out_predicted = copy_out_counters.predicted.load(relaxed); out.copy_out_taken = copy_out_counters.taken.load(relaxed);
-    out.copy_out_released = copy_out_counters.released.load(relaxed);
-    out.copy_out_unstored = copy_out_counters.unstored.load(relaxed);
-    out.copy_out_skipped = copy_out_counters.skipped.load(relaxed);
+    out.copied_out = capture_queues.copy_out_counters.made.load(relaxed); out.copy_out_busy = capture_queues.copy_out_counters.ring_busy.load(relaxed);
+    out.copy_out_failed = capture_queues.copy_out_counters.failed.load(relaxed);
+    out.copy_out_predicted = capture_queues.copy_out_counters.predicted.load(relaxed); out.copy_out_taken = capture_queues.copy_out_counters.taken.load(relaxed);
+    out.copy_out_released = capture_queues.copy_out_counters.released.load(relaxed);
+    out.copy_out_unstored = capture_queues.copy_out_counters.unstored.load(relaxed);
+    out.copy_out_skipped = capture_queues.copy_out_counters.skipped.load(relaxed);
     out.reader_moves = reader_moves.load(relaxed);
     out.reader_move_unreadable = reader_move_unreadable.load(relaxed);
     return out;

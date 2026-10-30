@@ -62,7 +62,7 @@ namespace sunshine_streamline::depth_capture::fixture {
   // evaluation that nominated it (begin_evaluation, which superseded may make
   // replace another source of the same viewport).
   inline slot &make_capture(unsigned index, std::uint64_t queue, provider_kind provider, std::uint64_t epoch, std::uint64_t sequence, std::uint64_t source, std::uint32_t viewport = 0, std::uint64_t superseded = UINT64_MAX) {
-    auto &value = slots[index];
+    auto &value = capture_pool.slots[index];
     value = {};
     value.id = ++serial;
     value.queue = queue;

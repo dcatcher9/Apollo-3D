@@ -23,7 +23,7 @@
   extern "C" __declspec(dllexport) BOOL SunshineStreamlineTestCaptureReadsCopyOut(std::uint64_t capture, BOOL *copy_out) {
     if (!capture || !copy_out) return FALSE;
     std::lock_guard lock(mutex);
-    for (const auto &value : slots)
+    for (const auto &value : capture_pool.slots)
       if (value.id == capture) { *copy_out = value.copied_out && value.published ? TRUE : FALSE; return TRUE; }
     return FALSE;
   }

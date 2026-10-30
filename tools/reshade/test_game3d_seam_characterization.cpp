@@ -64,7 +64,7 @@ namespace sunshine_streamline::depth_capture {
     // one run in 46: the FG owner whose own copies are gone). Stamps a row
     // ages on purpose (now - source_age - 1) stay as they are.
     void pin_clock(std::uint64_t now) {
-      for (auto &value : slots) {
+      for (auto &value : capture_pool.slots) {
         if (value.metadata.tick > now) {
           value.metadata.tick = now;
         }
@@ -830,10 +830,10 @@ namespace sunshine_streamline::depth_capture {
         // owned.
         const char *timeline = "per-queue ownership";
         reset();
-        queues[0] = std::make_unique<queue_state>();
-        queues[1] = std::make_unique<queue_state>();
-        auto &a = *queues[0];
-        auto &b = *queues[1];
+        capture_queues.queues[0] = std::make_unique<queue_state>();
+        capture_queues.queues[1] = std::make_unique<queue_state>();
+        auto &a = *capture_queues.queues[0];
+        auto &b = *capture_queues.queues[1];
         auto &previous = make(1, provider_kind::ngx, epoch, 1, ngx_source);
         establish_provider(a, previous, 1);
         deliver(a, previous);
@@ -858,8 +858,8 @@ namespace sunshine_streamline::depth_capture {
         check_pick(timeline, 6, select_provider(b, native, 3, GetTickCount64(), {}), 'S', sl, ngx);
         sl = &make(2, provider_kind::streamline, epoch, 3, 0);
         check_pick(timeline, 7, select_provider(a, native, 3, GetTickCount64(), {}), 'S', sl, ngx);
-        queues[0].reset();
-        queues[1].reset();
+        capture_queues.queues[0].reset();
+        capture_queues.queues[1].reset();
       }
       {
         // establish_provider keeps the delivered watermark for the same exact
@@ -1505,7 +1505,7 @@ namespace sunshine_streamline::depth_capture {
         // The producer queue (another render queue, or DLSS-G's compute queue):
         // selection compares its identity and reads its fence.
         fixture::completion_fence fence;
-        auto &place = queues[0];
+        auto &place = capture_queues.queues[0];
         place = std::make_unique<queue_state>();
         place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
         place->fence.p = &fence;
@@ -1774,26 +1774,26 @@ namespace sunshine_streamline::depth_capture {
         reset();
         // The producer queue (the game's own queue), whose fence selection reads.
         fixture::completion_fence fence;
-        auto &place = queues[0];
+        auto &place = capture_queues.queues[0];
         place = std::make_unique<queue_state>();
         place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
         place->fence.p = &fence;
         place->device_identity = device;
-        queues[1] = std::make_unique<queue_state>();
+        capture_queues.queues[1] = std::make_unique<queue_state>();
         // The owner's own queue, by which complete_frame finds it.
         fixture::completion_fence owner_queue;
-        queues[1]->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&owner_queue);
+        capture_queues.queues[1]->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&owner_queue);
         struct release_places {
           ~release_places() {
-            queues[0]->queue.p = nullptr;
-            queues[0]->fence.p = nullptr;
-            queues[0].reset();
-            queues[1]->queue.p = nullptr;
-            queues[1].reset();
+            capture_queues.queues[0]->queue.p = nullptr;
+            capture_queues.queues[0]->fence.p = nullptr;
+            capture_queues.queues[0].reset();
+            capture_queues.queues[1]->queue.p = nullptr;
+            capture_queues.queues[1].reset();
           }
         } release;
         const auto producer = reinterpret_cast<std::uint64_t>(&fence);
-        auto &owner = *queues[1];
+        auto &owner = *capture_queues.queues[1];
         owner.device_identity = device;
         auto storage = std::make_shared<source_reference>();
         storage->device_identity = device;
@@ -2113,7 +2113,7 @@ namespace sunshine_streamline::depth_capture {
           fence.completed_later = 5;
           fence.later_after = 2;  // select_latest_capture's two looks.
         }
-        auto &place = queues[0];
+        auto &place = capture_queues.queues[0];
         place = std::make_unique<queue_state>();
         place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
         place->fence.p = &fence;
@@ -2178,7 +2178,7 @@ namespace sunshine_streamline::depth_capture {
         reset();
         fixture::completion_fence fence;
         fence.completed = 4;
-        auto &place = queues[0];
+        auto &place = capture_queues.queues[0];
         place = std::make_unique<queue_state>();
         place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
         place->fence.p = &fence;
@@ -2477,7 +2477,7 @@ namespace sunshine_streamline::depth_capture {
       {
         reset();
         int stand_in {};
-        auto &place = queues[0];
+        auto &place = capture_queues.queues[0];
         place = std::make_unique<queue_state>();
         place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&stand_in);
         place->chosen = true;

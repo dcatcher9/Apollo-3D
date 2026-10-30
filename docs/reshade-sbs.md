@@ -3614,6 +3614,10 @@ surveyed release's own header; every surveyed release agrees with it.
 
 ### Streamline depth selection
 
+Capture pool, queue-place and observation state have separate owners in the capture shell.
+Their non-trivial members retain their original initialization and destruction order;
+storage-release jobs remain a separate owner at their original position.
+
 The capture selection field predicates live in `depth_capture/rules.h`. They name completed
 pixels and a pending snapshot core; identity, ownership and fence reads stay with each caller.
 `select_capture` tests liveness by source age or the presented frame, while `select_provider`

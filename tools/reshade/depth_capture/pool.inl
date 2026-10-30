@@ -36,7 +36,7 @@ namespace sunshine_streamline::depth_capture {
       const auto provider = value.metadata.provider;
       const auto &head = evaluations[provider_index(provider)];
       const slot *latest = nullptr;
-      for (const auto &candidate : slots)
+      for (const auto &candidate : capture_pool.slots)
         if (candidate.id && !candidate.preservation_only && candidate.metadata.provider == provider &&
             candidate.metadata.epoch == head.epoch && candidate.metadata.sequence == head.sequence &&
             candidate.metadata.source_id == head.source_id && (!latest || candidate.id > latest->id)) latest = &candidate;
@@ -160,10 +160,10 @@ namespace sunshine_streamline::depth_capture {
     }
 
     void collect_diagnostics(storage_list &discard) {
-      if (!diagnostic_slots_active) return;
+      if (!capture_pool.diagnostic_slots_active) return;
       bool retained = false;
       const auto now = GetTickCount64();
-      for (auto &value : diagnostic_slots) {
+      for (auto &value : capture_pool.diagnostic_slots) {
         if (value.id && reclaimable(value)) {
           // Retire the capture identity/leases, not its reusable allocation.
           // Live FG alpha uses this owner every real frame; destroying storage
@@ -176,7 +176,7 @@ namespace sunshine_streamline::depth_capture {
         }
         retained |= value.id != 0;
       }
-      diagnostic_slots_active = retained;
+      capture_pool.diagnostic_slots_active = retained;
     }
 
     // Requires the lock. A live reservation of another record attempt.
@@ -191,8 +191,8 @@ namespace sunshine_streamline::depth_capture {
       const auto clear = [token](slot &entry) {
         if (entry.reservation == token) { entry.reservation = entry.reservation_tick = entry.reserved_bytes = 0; entry.reserved_live = false; }
       };
-      for (auto &entry : slots) clear(entry);
-      for (auto &entry : diagnostic_slots) clear(entry);
+      for (auto &entry : capture_pool.slots) clear(entry);
+      for (auto &entry : capture_pool.diagnostic_slots) clear(entry);
     }
 
     // Idle cached storage is always live: dump copies are never cached.
@@ -270,10 +270,10 @@ namespace sunshine_streamline::depth_capture {
     // Requires mutex. New storage joins the registry (storage).
     bool register_storage(const std::shared_ptr<texture_reference> &value) {
       try {
-        if (storage.size() == storage.capacity())
-          storage.erase(std::remove_if(storage.begin(), storage.end(), [](const auto &entry) { return entry.expired(); }),
-            storage.end());
-        storage.push_back(value);
+        if (capture_pool.storage.size() == capture_pool.storage.capacity())
+          capture_pool.storage.erase(std::remove_if(capture_pool.storage.begin(), capture_pool.storage.end(), [](const auto &entry) { return entry.expired(); }),
+            capture_pool.storage.end());
+        capture_pool.storage.push_back(value);
         return true;
       } catch (...) {
         return false;
@@ -286,7 +286,7 @@ namespace sunshine_streamline::depth_capture {
     // No owner keeps a consumed frame or a shown copy without its source
     // (only retire_source's FG role does, select_latest_capture).
     { std::lock_guard lock(mutex);
-      for (auto &owner : queues) if (owner) {
+      for (auto &owner : capture_queues.queues) if (owner) {
         owner->provider_established = false;
         owner->last_epoch = owner->last_sequence = owner->present_capture = 0;
       } }
@@ -326,7 +326,7 @@ namespace sunshine_streamline::depth_capture {
       // The add-on's own queue calls under the capture mutex are never game
       // calls to the order hooks (design finding 8).
       native_observer::suppression_scope suppress;
-      for (auto &owner : queues) if (owner && owner->device_identity == device) {
+      for (auto &owner : capture_queues.queues) if (owner && owner->device_identity == device) {
         owner->retiring = true;
         owner->provider_established = false;
         const auto value = ++owner->next_fence;
@@ -367,15 +367,15 @@ namespace sunshine_streamline::depth_capture {
       // Everything below moves without allocating.
       try {
         constexpr std::size_t slot_count = slot_limit + diagnostic_slot_limit;
-        storage_held.reserve(slot_count + storage.size());
+        storage_held.reserve(slot_count + capture_pool.storage.size());
         sources_held.reserve(2 * slot_count + source_limit);
         places_held.reserve(queue_limit);
-        released.reserve(source_limit + 2 * storage.size());
+        released.reserve(source_limit + 2 * capture_pool.storage.size());
         if (!finished) {
-          if (!kept) kept = new kept_objects;
-          kept->storage.reserve(kept->storage.size() + storage_held.capacity());
-          kept->sources.reserve(kept->sources.size() + sources_held.capacity());
-          kept->places.reserve(kept->places.size() + places_held.capacity());
+          if (!capture_pool.kept) capture_pool.kept = new kept_objects;
+          capture_pool.kept->storage.reserve(capture_pool.kept->storage.size() + storage_held.capacity());
+          capture_pool.kept->sources.reserve(capture_pool.kept->sources.size() + sources_held.capacity());
+          capture_pool.kept->places.reserve(capture_pool.kept->places.size() + places_held.capacity());
         }
         reserved = true;
       } catch (...) {
@@ -383,7 +383,7 @@ namespace sunshine_streamline::depth_capture {
       }
       if (reserved) {
         std::array<std::uint64_t, queue_limit> natives{};
-        for (auto &owner : queues) if (owner && owner->device_identity == device) {
+        for (auto &owner : capture_queues.queues) if (owner && owner->device_identity == device) {
           const auto queue = reinterpret_cast<std::uint64_t>(owner->queue.p);
           natives[places++] = queue;
           forget_queue_execution(queue);
@@ -409,9 +409,9 @@ namespace sunshine_streamline::depth_capture {
           empty.reserved_bytes = value.reserved_bytes; empty.reserved_live = value.reserved_live;
           value = std::move(empty);
         };
-        for (auto &value : slots) release_slot(value);
-        for (auto &value : diagnostic_slots) release_slot(value);
-        for (auto &weak : sources) if (const auto value = weak.lock()) if (value->device_identity == device) {
+        for (auto &value : capture_pool.slots) release_slot(value);
+        for (auto &value : capture_pool.diagnostic_slots) release_slot(value);
+        for (auto &weak : capture_pool.sources) if (const auto value = weak.lock()) if (value->device_identity == device) {
           weak.reset();
           ++released_sources;
           if (!finished) { sources_held.push_back(value); continue; }
@@ -419,7 +419,7 @@ namespace sunshine_streamline::depth_capture {
           value->device = nullptr;
           released.push_back(std::exchange(value->resource.p, nullptr));
         }
-        for (auto &weak : storage) if (const auto value = weak.lock()) if (value->device_identity == device) {
+        for (auto &weak : capture_pool.storage) if (const auto value = weak.lock()) if (value->device_identity == device) {
           weak.reset();
           ++released_storage;
           if (!finished) { storage_held.push_back(value); continue; }
@@ -430,9 +430,9 @@ namespace sunshine_streamline::depth_capture {
           released.push_back(std::exchange(value->views.p, nullptr));
         }
         if (!finished) {
-          for (auto &value : storage_held) kept->storage.push_back(std::move(value));
-          for (auto &value : sources_held) kept->sources.push_back(std::move(value));
-          for (auto &value : places_held) kept->places.push_back(std::move(value));
+          for (auto &value : storage_held) capture_pool.kept->storage.push_back(std::move(value));
+          for (auto &value : sources_held) capture_pool.kept->sources.push_back(std::move(value));
+          for (auto &value : places_held) capture_pool.kept->places.push_back(std::move(value));
         }
       }
     }
@@ -469,7 +469,7 @@ namespace sunshine_streamline::depth_capture {
         return metadata.epoch == current.epoch && metadata.sequence == current.sequence && metadata.source_id == current.source_id;
       };
       std::uint64_t idle = 0;
-      for (auto &value : slots) {
+      for (auto &value : capture_pool.slots) {
         // Predicted storage (U-C1b) whose submission made no copy-out: the
         // reader's queue executed it after all, or the copy keeps the Reset
         // rule. No list wrote it.
@@ -477,7 +477,7 @@ namespace sunshine_streamline::depth_capture {
             value.published.use_count() == 1) {
           discard.push_back(std::move(value.published));
           value.predicted_storage = false;
-          copy_out_counters.released.fetch_add(1, std::memory_order_relaxed);
+          capture_queues.copy_out_counters.released.fetch_add(1, std::memory_order_relaxed);
         }
         if (value.id && !head(value) && reclaimable(value)) {
           slot idle_slot;
@@ -502,7 +502,7 @@ namespace sunshine_streamline::depth_capture {
     // ages out instead of waiting for budget pressure. Released storage moves to
     // discard, for release after the lock.
     void release_idle_diagnostics(std::vector<std::shared_ptr<texture_reference>> &discard, std::uint64_t now) {
-      for (auto &value : diagnostic_slots)
+      for (auto &value : capture_pool.diagnostic_slots)
         if (!value.id && value.texture && !reserved_by_other(value, 0) && now - value.idle_tick >= idle_live_storage_ms)
           discard.push_back(std::move(value.texture));
     }
@@ -552,7 +552,7 @@ namespace sunshine_streamline::depth_capture {
     if (!query_native(native, IID_ID3D12Resource, checked)) return result({}, status::unsupported_resource, record_stage::source_interface);
     auto *resource = checked.p;
     const auto retained = [](std::uint64_t cookie) -> source_ref {
-      if (cookie) for (const auto &weak : sources) if (auto value = weak.lock()) if (value->cookie == cookie) return value;
+      if (cookie) for (const auto &weak : capture_pool.sources) if (auto value = weak.lock()) if (value->cookie == cookie) return value;
       return {};
     };
     {
@@ -589,8 +589,8 @@ namespace sunshine_streamline::depth_capture {
     std::lock_guard lock(mutex);
     // Another call may have retained it meanwhile.
     if (auto existing = retained(value->cookie)) return result(existing, status::ready, record_stage::retained);
-    auto entry = std::find_if(sources.begin(), sources.end(), [](const auto &value) { return value.expired(); });
-    if (entry == sources.end()) {
+    auto entry = std::find_if(capture_pool.sources.begin(), capture_pool.sources.end(), [](const auto &value) { return value.expired(); });
+    if (entry == capture_pool.sources.end()) {
       capacity_refused(source_table);
       reason = status::exhausted; return result({}, status::exhausted, record_stage::capacity);
     }
@@ -600,7 +600,7 @@ namespace sunshine_streamline::depth_capture {
     if (value->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
         !(value->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) {
       forget_destroyed();
-      proven.watch(value->cookie);
+      capture_observation.proven.watch(value->cookie);
     }
     *entry = value;
     return result(value, status::ready, record_stage::retained);
