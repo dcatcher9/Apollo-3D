@@ -4,7 +4,24 @@
 
 namespace sunshine_streamline::depth_capture {
   SUNSHINE_CAPTURE_INTERNAL {
-    std::uint64_t present_ordinal() { return presents.load(std::memory_order_acquire) + 1; }
+    void miss_invalidated_frame(const slot &value, capture_failure why) {
+      // An FG copy recorded on a COMPUTE list (DLSS-G's own input, or an FG
+      // tag's: S22, N7) whose producer can no longer supply its frame (its
+      // recording discarded unsubmitted, as when its queue has no place,
+      // replayed, or its queue gone) leaves that frame without an FG copy,
+      // exactly as frame_generation_missed records: an accepted copy that
+      // never reaches a consumer keeps no SR depth out.
+      const auto &m = value.metadata;
+      if (value.compute_list && value.source_nominated && m.frame_generation_input &&
+          m.provider == provider_kind::streamline && m.epoch && m.sequence &&
+          why != capture_failure::consumer_signal_failed && why != capture_failure::consumer_capacity &&
+          why != capture_failure::consumer_queue_changed)
+        for (auto &view : evaluations[provider_index(m.provider)].views)
+          if (view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id)
+            view.missed_sequence = std::max(view.missed_sequence, m.sequence);
+    }
+
+    std::uint64_t present_ordinal() { return scope.presents.load(std::memory_order_acquire) + 1; }
 
     // Requires mutex. Whether a stamp is the frame the Present being decided
     // presents: no other Present came since its call (above), or, for a
@@ -21,10 +38,10 @@ namespace sunshine_streamline::depth_capture {
     // at its (generated + 2)-th Present as before.
     bool frame_presenting(std::uint64_t ordinal) {
       if (!ordinal) return false;
-      const auto n = presents.load(std::memory_order_acquire);
+      const auto n = scope.presents.load(std::memory_order_acquire);
       if (ordinal >= n) return true;
-      const std::uint64_t generated = ordinal == frame_generation_present ? presenting_generated : 0;
-      return generated && ordinal >= newest_evaluation_present && n - ordinal <= generated;
+      const std::uint64_t generated = ordinal == scope.frame_generation_present ? scope.presenting_generated : 0;
+      return generated && ordinal >= scope.newest_evaluation_present && n - ordinal <= generated;
     }
 
     // The present ordinal of the frame a copy is: its submission's on a
@@ -36,7 +53,7 @@ namespace sunshine_streamline::depth_capture {
     // Requires mutex. The viewport's FG retirement in epoch, or null.
     fg_retirement *fg_retirement_of(std::uint64_t epoch, std::uint32_t viewport) {
       if (!epoch) return nullptr;
-      for (auto &mark : fg_retirements) if (mark.epoch == epoch && mark.viewport == viewport) return &mark;
+      for (auto &mark : scope.fg_retirements) if (mark.epoch == epoch && mark.viewport == viewport) return &mark;
       return nullptr;
     }
 
@@ -153,17 +170,17 @@ namespace sunshine_streamline::depth_capture {
   }
 
   void frame_generation_enabled(std::uint64_t enabled_tick) {
-    frame_generation_on_moves.store(reader_moves.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    frame_generation_on_tick.store(enabled_tick, std::memory_order_relaxed);
-    if (!enabled_tick) frame_generation_run_tick.store(0, std::memory_order_relaxed);
+    scope.frame_generation_on_moves.store(reader_moves.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    scope.frame_generation_on_tick.store(enabled_tick, std::memory_order_relaxed);
+    if (!enabled_tick) scope.frame_generation_run_tick.store(0, std::memory_order_relaxed);
   }
 
   void frame_generation_activity(std::uint64_t now) {
-    const auto last = frame_generation_activity_tick.exchange(now, std::memory_order_relaxed);
-    const auto on = frame_generation_on_tick.load(std::memory_order_relaxed);
+    const auto last = scope.frame_generation_activity_tick.exchange(now, std::memory_order_relaxed);
+    const auto on = scope.frame_generation_on_tick.load(std::memory_order_relaxed);
     if (!last || now < last || now - last >= sunshine_freshness::fg_silent_ms || (on && on >= last)) {
-      frame_generation_run_moves.store(reader_moves.load(std::memory_order_relaxed), std::memory_order_relaxed);
-      frame_generation_run_tick.store(now, std::memory_order_relaxed);
+      scope.frame_generation_run_moves.store(reader_moves.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      scope.frame_generation_run_tick.store(now, std::memory_order_relaxed);
     }
   }
 
@@ -209,14 +226,14 @@ namespace sunshine_streamline::depth_capture {
   void evaluation_called(std::uint64_t epoch) {
     if (!requested.load() || !epoch) return;
     std::lock_guard lock(mutex);
-    newest_evaluation_present = std::max(newest_evaluation_present, present_ordinal());
+    scope.newest_evaluation_present = std::max(scope.newest_evaluation_present, present_ordinal());
   }
 
   void present(std::uint64_t native) {
     // Counted for every Present, also one the capture owner does not serve
     // (frame_presenting must never take a frame older than the last Present
     // for the current one).
-    presents.fetch_add(1, std::memory_order_acq_rel);
+    scope.presents.fetch_add(1, std::memory_order_acq_rel);
     if (!requested.load() || !native) return;
     std::lock_guard lock(mutex);
     const auto *owner = queue(native);

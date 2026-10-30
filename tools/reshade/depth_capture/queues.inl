@@ -246,8 +246,8 @@ namespace sunshine_streamline::depth_capture {
         return start && at.load(std::memory_order_relaxed) == moves &&
           sunshine_freshness::fresh_lt(start, now, sunshine_freshness::source_age_ms);
       };
-      return open(frame_generation_on_tick, frame_generation_on_moves) ||
-        open(frame_generation_run_tick, frame_generation_run_moves);
+      return open(scope.frame_generation_on_tick, scope.frame_generation_on_moves) ||
+        open(scope.frame_generation_run_tick, scope.frame_generation_run_moves);
     }
     // Requires mutex. The newest acquisition's queue (place cookie).
     void read_on(std::uint64_t cookie, bool pixels) {

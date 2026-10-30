@@ -34,7 +34,7 @@ namespace sunshine_streamline::depth_capture::fixture {
   // them is the frame the Present being decided presents only for a count
   // of one (presented_frame).
   inline void presents_since(unsigned count) {
-    presents.fetch_add(count);
+    scope.presents.fetch_add(count);
   }
 
   // A queue's private fence as selection reads it: only GetCompletedValue,

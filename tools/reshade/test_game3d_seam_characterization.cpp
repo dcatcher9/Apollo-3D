@@ -2342,11 +2342,11 @@ namespace sunshine_streamline::depth_capture {
       for (const auto &r : rows) {
         reset();
         const auto stamp = present_ordinal();
-        newest_evaluation_present = stamp;
+        scope.newest_evaluation_present = stamp;
         if (r.fg_call) {
-          frame_generation_present = stamp;
+          scope.frame_generation_present = stamp;
         }
-        presenting_generated = r.generated;
+        scope.presenting_generated = r.generated;
         if (r.presents > 1) {
           fixture::presents_since(r.presents - 1);
         }
@@ -2355,10 +2355,10 @@ namespace sunshine_streamline::depth_capture {
           fixture::presents_since(1);
         }
         if (r.later_evaluation) {
-          newest_evaluation_present = present_ordinal();
+          scope.newest_evaluation_present = present_ordinal();
         }
         const bool got = frame_presenting(stamp);
-        if (got != r.expected || (!r.generated && got != (stamp && stamp >= presents.load(std::memory_order_acquire)))) {
+        if (got != r.expected || (!r.generated && got != (stamp && stamp >= scope.presents.load(std::memory_order_acquire)))) {
           fail(std::string("F1 frame_presenting, ") + r.pins + ": got " + (got ? "presenting" : "not presenting"));
         }
       }
@@ -2455,7 +2455,7 @@ namespace sunshine_streamline::depth_capture {
             }
           }
           if (r.kind == variant::second_present_without_fg) {
-            frame_generation_present = 0;
+            scope.frame_generation_present = 0;
           }
           const unsigned since = r.kind == variant::own_present ? 1 : r.kind == variant::third_present ? 3 : 2;
           fixture::presents_since(since);

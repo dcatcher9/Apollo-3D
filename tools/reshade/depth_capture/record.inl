@@ -109,8 +109,8 @@ namespace sunshine_streamline::depth_capture {
       auto *mark = fg_retirement_of(epoch, viewport);
       const auto kept = mark ? mark->serial : 0;
       if (!mark) {
-        mark = &fg_retirements[0];
-        for (auto &value : fg_retirements)
+        mark = &scope.fg_retirements[0];
+        for (auto &value : scope.fg_retirements)
           if (value.epoch < mark->epoch || (value.epoch == mark->epoch && value.serial < mark->serial)) mark = &value;
       }
       *mark = {epoch, std::max(kept, retiring_serial), viewport, true};
@@ -194,10 +194,10 @@ namespace sunshine_streamline::depth_capture {
     const auto now = GetTickCount64();
     const auto ordinal = present_ordinal();
     if (epoch) {
-      newest_evaluation_present = std::max(newest_evaluation_present, ordinal);
+      scope.newest_evaluation_present = std::max(scope.newest_evaluation_present, ordinal);
       if (provider == provider_kind::streamline &&
           source_id == sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport)))
-        frame_generation_present = std::max(frame_generation_present, ordinal);
+        scope.frame_generation_present = std::max(scope.frame_generation_present, ordinal);
     }
     for (auto &value : current.views) if (value.epoch == epoch && value.viewport == viewport && value.source_id == source_id) {
       // A new call does not end a run of rejected ones; only its result can.
@@ -717,7 +717,7 @@ namespace sunshine_streamline::depth_capture {
       if (found->predicted_storage) copy_out_counters.predicted.fetch_add(1, std::memory_order_relaxed);
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
       found->present = present_ordinal();
-      if (found->metadata.frame_generation_input) frame_generation_present = std::max(frame_generation_present, found->present);
+      if (found->metadata.frame_generation_input) scope.frame_generation_present = std::max(scope.frame_generation_present, found->present);
       found->basis = basis; found->compute_list = on_compute;
       compute_copies_recorded |= on_compute;
       if (proof) {

@@ -3614,6 +3614,12 @@ surveyed release's own header; every surveyed release agrees with it.
 
 ### Streamline depth selection
 
+The capture owner keeps Present ordinals and frame-generation windows in `scope_state`,
+with one constant-initialized instance under its existing locks. The counters stay distinct:
+Generic `native_present_index` supplies the capture `acquire` argument `device_present`;
+the exporter counts `presentation_ordinal`, the renderer counts `present_number`, and UI
+counts `frame_sequence`. These clocks retain their existing call sites and meanings.
+
 Supported D3D12 Streamline integrations identify depth at successful evaluations or supported
 enabled-FG tag boundaries. This path defaults on (`[SUNSHINE_DEPTH] StreamlineDepthSource=1`).
 Admission is based on the resource contract, not a feature-ID allowlist. Typed 2.x evaluation

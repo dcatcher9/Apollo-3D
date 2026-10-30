@@ -44,25 +44,7 @@ namespace sunshine_streamline::depth_capture {
     // Present's own selection. An evaluation's view and its snapshot are
     // stamped with present_ordinal() at their call: the ordinal of the
     // Present that presents the frame being recorded then.
-    std::atomic<std::uint64_t> presents{};
-    // A stamp is the frame the Present being decided presents when no other
-    // Present came since its call (frame_presenting's first rule, the only
-    // one without frame generation). Such a view is active and such a
-    // snapshot current however long the frame took after its call (a hitch
-    // between an SR evaluation and its Present), as they are the depth of
-    // the frame that Present shows: the source age bounds holds over later
-    // Presents, never a frame's own depth at its own Present (10-27; until
-    // then that Present was mono, inactive_views, after a hitch of the source
-    // age). A Present of any swapchain, a generated one too, ends it, so a
-    // generated Present between an evaluation and its frame's Present leaves
-    // the wall-clock rule alone.
-    // Require mutex. The newest present_ordinal() an evaluation began with
-    // (begin_evaluation_locked), the newest one a frame-generation input's
-    // evaluation began with or its copy was stamped with, and the Presents
-    // DLSS-G adds per real frame that the selection being decided grants
-    // (select_provider, selection_policy::generated_presents).
-    std::uint64_t newest_evaluation_present{}, frame_generation_present{};
-    std::uint32_t presenting_generated{};
+    scope_state scope{};
 
     // Present ordinals and frame-generation scope (depth_capture/scope.inl).
     std::uint64_t present_ordinal();
@@ -228,30 +210,12 @@ namespace sunshine_streamline::depth_capture {
     // executed yet is predicted to run (record_impl's copy-out storage); 0
     // before any.
     std::uint64_t last_direct_copy_queue{};
-    // FG moves Present to DLSS-G's queue at its first Present, after the
-    // render queue's copies of that frame were recorded and submitted while
-    // that queue still read depth, so for the source age after FG turns on
-    // the reader's own copies are copied out too (U-C1b, reader_may_move).
-    // Two windows, each closed once Present moved to another queue since it
-    // opened (reader_moves): from FG options turning on
-    // (frame_generation_enabled; 0 never), and from the first FG activity
-    // of a run (an FG frame's begin, DLSS-G's NGX evaluation:
-    // frame_generation_activity) after FG options turned on or after
-    // fg_silent_ms without any. The second covers a game that turns FG on
-    // away from gameplay (a menu, a loading screen, saved settings at boot),
-    // whose first FG Present comes long after the options call, and DLSS-G
-    // seen only through NGX, with no options call at all.
-    std::atomic<std::uint64_t> frame_generation_on_tick{}, frame_generation_on_moves{};
-    std::atomic<std::uint64_t> frame_generation_run_tick{}, frame_generation_run_moves{}, frame_generation_activity_tick{};
     // Changes of the reader (acquire): Present seen on another queue.
     std::atomic<std::uint64_t> reader_moves{};
     // A reader change whose first acquisition had no ready pixels (the flat
     // Present at FG On or Off that U-C1b's copy-outs exist to prevent).
     std::atomic<std::uint64_t> reader_move_unreadable{};
     std::array<evaluation_namespace, provider_count> evaluations;
-    // Protected by mutex: the viewports whose FG role FG Off retired, per
-    // epoch (retire_source; the oldest gives way).
-    std::array<fg_retirement, 4> fg_retirements;
 
     // Requires mutex. Whether a view's newest evaluation is the frame the
     // Present being decided presents: by its call's stamp, or by its newest
@@ -266,26 +230,14 @@ namespace sunshine_streamline::depth_capture {
       return false;
     }
 
+    void miss_invalidated_frame(const slot &value, capture_failure why);
     void invalidate(slot &value, capture_failure why) {
       if (value.failure == capture_failure::none) value.failure = why;
       value.invalid = true;
       if (why != capture_failure::producer_signal_failed && why != capture_failure::consumer_signal_failed &&
           why != capture_failure::consumer_capacity && why != capture_failure::consumer_queue_changed)
         value.nomination_invalid = true;
-      // An FG copy recorded on a COMPUTE list (DLSS-G's own input, or an FG
-      // tag's: S22, N7) whose producer can no longer supply its frame (its
-      // recording discarded unsubmitted, as when its queue has no place,
-      // replayed, or its queue gone) leaves that frame without an FG copy,
-      // exactly as frame_generation_missed records: an accepted copy that
-      // never reaches a consumer keeps no SR depth out.
-      const auto &m = value.metadata;
-      if (value.compute_list && value.source_nominated && m.frame_generation_input &&
-          m.provider == provider_kind::streamline && m.epoch && m.sequence &&
-          why != capture_failure::consumer_signal_failed && why != capture_failure::consumer_capacity &&
-          why != capture_failure::consumer_queue_changed)
-        for (auto &view : evaluations[provider_index(m.provider)].views)
-          if (view.epoch == m.epoch && view.viewport == m.viewport && view.source_id == m.source_id)
-            view.missed_sequence = std::max(view.missed_sequence, m.sequence);
+      miss_invalidated_frame(value, why);
     }
 
     // Part declarations: functions defined in depth_capture/observation.inl,

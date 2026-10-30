@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -345,6 +346,48 @@ namespace sunshine_streamline::depth_capture {
       std::uint32_t viewport{};
       bool active{};
     };
+    // Constant-initialized Present/FG state; the sole object stays at the
+    // original presents position in streamline_depth_capture.cpp.
+    struct scope_state {
+      std::atomic<std::uint64_t> presents{};
+      // A stamp is the frame the Present being decided presents when no other
+      // Present came since its call (frame_presenting's first rule, the only
+      // one without frame generation). Such a view is active and such a
+      // snapshot current however long the frame took after its call (a hitch
+      // between an SR evaluation and its Present), as they are the depth of
+      // the frame that Present shows: the source age bounds holds over later
+      // Presents, never a frame's own depth at its own Present (10-27; until
+      // then that Present was mono, inactive_views, after a hitch of the source
+      // age). A Present of any swapchain, a generated one too, ends it, so a
+      // generated Present between an evaluation and its frame's Present leaves
+      // the wall-clock rule alone.
+      // Require mutex. The newest present_ordinal() an evaluation began with
+      // (begin_evaluation_locked), the newest one a frame-generation input's
+      // evaluation began with or its copy was stamped with, and the Presents
+      // DLSS-G adds per real frame that the selection being decided grants
+      // (select_provider, selection_policy::generated_presents).
+      std::uint64_t newest_evaluation_present{}, frame_generation_present{};
+      std::uint32_t presenting_generated{};
+      // FG moves Present to DLSS-G's queue at its first Present, after the
+      // render queue's copies of that frame were recorded and submitted while
+      // that queue still read depth, so for the source age after FG turns on
+      // the reader's own copies are copied out too (U-C1b, reader_may_move).
+      // Two windows, each closed once Present moved to another queue since it
+      // opened (reader_moves): from FG options turning on
+      // (frame_generation_enabled; 0 never), and from the first FG activity
+      // of a run (an FG frame's begin, DLSS-G's NGX evaluation:
+      // frame_generation_activity) after FG options turned on or after
+      // fg_silent_ms without any. The second covers a game that turns FG on
+      // away from gameplay (a menu, a loading screen, saved settings at boot),
+      // whose first FG Present comes long after the options call, and DLSS-G
+      // seen only through NGX, with no options call at all.
+      std::atomic<std::uint64_t> frame_generation_on_tick{}, frame_generation_on_moves{};
+      std::atomic<std::uint64_t> frame_generation_run_tick{}, frame_generation_run_moves{}, frame_generation_activity_tick{};
+      // Protected by mutex: the viewports whose FG role FG Off retired, per
+      // epoch (retire_source; the oldest gives way).
+      std::array<fg_retirement, 4> fg_retirements{};
+    };
+    static_assert(std::is_trivially_destructible_v<scope_state>);
     struct queue_progress {
       std::uint64_t device_identity{}, completed{};
       bool queried{};
@@ -412,10 +455,8 @@ namespace sunshine_streamline::depth_capture {
     extern std::array<std::atomic<status>, provider_count> attempt_status;
     extern std::atomic<bool> requested;
     extern std::mutex mutex;
-    extern std::atomic<std::uint64_t> presents;
+    extern scope_state scope;
     std::uint64_t present_ordinal();
-    extern std::uint64_t newest_evaluation_present, frame_generation_present;
-    extern std::uint32_t presenting_generated;
     bool frame_presenting(std::uint64_t ordinal);
     std::uint64_t presented_by(const slot &value);
     bool view_presenting(const evaluation_head &view, provider_kind provider);
@@ -433,7 +474,6 @@ namespace sunshine_streamline::depth_capture {
     extern std::array<slot, diagnostic_slot_limit> diagnostic_slots;
     extern std::array<std::unique_ptr<queue_state>, queue_limit> queues;
     extern std::array<evaluation_namespace, provider_count> evaluations;
-    extern std::array<fg_retirement, 4> fg_retirements;
     // A copy was ever recorded on a COMPUTE list (record_impl); liveness
     // queries look for readable compute-list copies only then.
     extern bool compute_copies_recorded, compute_unplaced;
@@ -518,9 +558,9 @@ namespace sunshine_streamline::depth_capture {
     // Presentation scope: no FG role retirement, no evaluation or frame
     // generation Present, and no generated Presents.
     inline void reset_scope() {
-      fg_retirements = {};
-      newest_evaluation_present = frame_generation_present = 0;
-      presenting_generated = 0;
+      scope.fg_retirements = {};
+      scope.newest_evaluation_present = scope.frame_generation_present = 0;
+      scope.presenting_generated = 0;
     }
     // Record admission: every provider's last attempt unavailable.
     inline void reset_attempts() {

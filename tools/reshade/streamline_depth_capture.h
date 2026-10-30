@@ -692,12 +692,12 @@ namespace sunshine_streamline::depth_capture {
   // including a rejected latest slot when no output packet can be returned.
   // A true result selects valid current source metadata, independent of pixel
   // readiness. Inspect pixel_ready. Diagnostics retain the pixel status.
-  bool acquire(std::uint64_t queue, std::uint64_t present, packet &out, capture_diagnostic *diagnostic = nullptr,
+  bool acquire(std::uint64_t queue, std::uint64_t device_present, packet &out, capture_diagnostic *diagnostic = nullptr,
     selection_policy policy = {});
   // Rendering consumes this explicit decision. The overload above is a
   // convenience overload for tests and callers that do not need the
   // decision; it computes the same decision without returning it.
-  bool acquire(std::uint64_t queue, std::uint64_t present, packet &out, acquisition_decision &decision,
+  bool acquire(std::uint64_t queue, std::uint64_t device_present, packet &out, acquisition_decision &decision,
     capture_diagnostic *diagnostic = nullptr, selection_policy policy = {});
   // Commit only after the selected snapshot was successfully copied for this
   // effects pass. Nomination/acquisition alone must not consume a frame.
