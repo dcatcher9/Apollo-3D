@@ -41,6 +41,10 @@ namespace sunshine_game3d::test::depth_events {
     generic_bind = 6,  // depth_addon.cpp update_effect_runtime(): the binding of a changed view.
     generic_ready = 7,  // update_effect_runtime(): its readiness.
     native_ready = 8,  // exporter.cpp apply_native_depth(): depth_input::set_ready.
+    // streamline_depth_provider.cpp reload(): the runtime reload's reset of
+    // the provider's binding and readiness caches (it calls neither), which
+    // depth_addon.cpp on_reload_effect_runtime makes only with Game 3D off.
+    provider_runtime_reload = 9,
   };
 
   // view or ready of a record that has none.
@@ -55,8 +59,8 @@ namespace sunshine_game3d::test::depth_events {
     std::uint64_t present;
     handler phase;
     site_id site;
-    std::uint8_t view;  // A binding: 1 a view, 0 null. A readiness write: not_applicable.
-    std::uint8_t ready;  // A readiness write: the value, 1 or 0. A binding: not_applicable.
+    std::uint8_t view;  // A binding: 1 a view, 0 null. A readiness write or a reset: not_applicable.
+    std::uint8_t ready;  // A readiness write: the value, 1 or 0. A binding or a reset: not_applicable.
     std::uint8_t reserved[4];
   };
   static_assert(sizeof(event) == 32);
@@ -112,6 +116,12 @@ namespace sunshine_game3d::test::depth_events {
   // A readiness write, about to be made.
   inline void readiness(const void *runtime, site_id site, bool ready) {
     detail::record(runtime, site, not_applicable, ready ? 1 : 0);
+  }
+
+  // A reset of a binding or readiness cache that writes neither, about to be
+  // made.
+  inline void reset(const void *runtime, site_id site) {
+    detail::record(runtime, site, not_applicable, not_applicable);
   }
 
   // Marks an event handler for the writes on its thread until it returns;

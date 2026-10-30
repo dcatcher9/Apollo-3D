@@ -124,7 +124,8 @@ namespace {
     // separated, oldest first. runtime: its rank; present: the newest
     // event's Present ordinal minus its own (0: the newest Present's);
     // phase and site: game3d_test_depth_events.h's ids; value: b1 or b0 for
-    // a binding (a view or null), r1 or r0 for a readiness write. t8skip=n
+    // a binding (a view or null), r1 or r0 for a readiness write, x for a
+    // reset that writes neither (provider_runtime_reload). t8skip=n
     // (only when n is not 0): events missing from the list. A trace's first
     // line lists only its newest Present's events: the older ones came with
     // Presents before the trace's first line, whose number is timing (a
@@ -142,7 +143,8 @@ namespace {
         out.add("%s%u.%llu.%u.%u.", listed ? "," : "", out.rank(game3d_present_trace::runtimes, event.runtime),
           static_cast<unsigned long long>(newest - event.present), unsigned(event.phase), unsigned(event.site));
         if (event.view != not_applicable) out.add("b%u", unsigned(event.view));
-        else out.add("r%u", unsigned(event.ready));
+        else if (event.ready != not_applicable) out.add("r%u", unsigned(event.ready));
+        else out.add("x");
         listed = true;
       }
       if (events_skipped_ && !first) out.add(" t8skip=%llu", static_cast<unsigned long long>(events_skipped_));

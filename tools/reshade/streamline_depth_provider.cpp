@@ -811,6 +811,9 @@ namespace sunshine_streamline::provider {
   void reload(api::effect_runtime *runtime) {
     if (auto *data = runtime->get_private_data<state>()) {
       const auto evidence = before_decision(*data, data->output.frame_index);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      depth_events::reset(runtime, depth_events::site_id::provider_runtime_reload);
+#endif
       data->depth_ready.invalidate();
       data->open = data->owns_pass = data->have_latest = false;
       data->cache.invalidate("runtime_reload");
