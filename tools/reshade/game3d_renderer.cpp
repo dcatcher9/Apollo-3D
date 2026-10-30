@@ -10,7 +10,7 @@
 #include "game3d_ui_counters.h"
 #include "game3d_ui_detection_contract.h"
 #include "game3d_ui_selection.h"
-#include "game3d_ui_temporal.h"
+#include "game3d_ui_decision.h"
 #include "streamline_native_observer.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
@@ -204,7 +204,7 @@ namespace sunshine_game3d {
     bool nearest_ui_attempted = false, nearest_ui_ready = false;
     bool front_limit_ui_supported = false, shallow_front_ui_supported = false;
     bool display_fraction_ui_supported = false;
-    alpha_auto_decision consumed_auto;
+    ui_decision decision;
     bool detection_attempted{}, detection_ready{}, detection_active{}, detection_pending{}, detection_awaiting_signal{};
     // Decision, then candidate bits with HUD-less counts, alpha coverage,
     // invalid alpha, lit HUD-less pixels with the accepted candidates, the
@@ -232,26 +232,6 @@ namespace sunshine_game3d {
         detection_decision_texels == ui_detection::decision_texels;
     }
     uint64_t scene_evidence_runs{};
-    // This render's scene guard bits (per_frame_scene_hidden,
-    // per_frame_pre_ui_visible, the refuted candidates and
-    // per_frame_pre_ui_proven), pushed with its detection, and whether its
-    // offered layer's signature is proven the pre-UI scene image (H1 d, the
-    // session ledger's pre-UI proof).
-    uint32_t scene_bits{};
-    bool scene_layer_proven{};
-    // The CPU-side temporal state (game3d_ui_temporal.h): the adopted inputs
-    // (the offered and accepted candidates), which Presents detect and which
-    // show a real frame's decision (T1) and the latest status sample. The GPU
-    // owns the T1 grace of a real frame without a decision of its own, in the
-    // hold store (textures[detection_hold], u5 of the reduce only).
-    ui_temporal::detection_state temporal;
-    // The hidden-scene guard (M5, game3d_scene_guard.h), owned by the depth
-    // path: the held D verdicts and refuted signatures behind H1. Only an
-    // identity change clears it; the layer's pre-UI proof lives in the
-    // session's acceptance ledger, which no identity change clears.
-    scene_guard::state guard;
-    // The pending sample ran the evidence passes (measure: actionable).
-    bool detection_pending_actionable{};
     // The constants of the last detection run, and the run this render's mask
     // came from (fresh, or held on a generated Present).
     ui_detection_snapshot detection_run, consumed_detection;
@@ -263,19 +243,12 @@ namespace sunshine_game3d {
     uint64_t retention_requested_present{};
     std::array<uint64_t, ui_detection_inputs::max_retained_presents> retained_present{};
     uint64_t present_number{};
-    // The status key (ui_temporal::detection_state::status_key) when the
-    // pending sample was submitted; the sample describes frames of that winner.
-    uint32_t detection_pending_status_key{};
-    // The acceptance signatures the pending sample was submitted with; its
-    // read earns or revokes acceptance for exactly these (A1).
-    candidate_signatures detection_pending_signatures;
     float difference_threshold = 4.f / 1023.f;
     // b2 word 4: the offscreen UI layer's pair threshold with the presented
     // color (H1 d, the pre-UI pixel counts); zero without a layer or when the
     // two are not comparable.
     float pre_ui_threshold = 0.f;
     uint64_t detection_fence{}, detection_last_submit{}, detection_submitted{}, detection_mapped{};
-    alpha_auto_source detection_pending_source;
     com<ID3D11Texture2D> detection_readback11;
     com<ID3D12Resource> detection_readback12;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT detection_footprint{};
@@ -291,8 +264,6 @@ namespace sunshine_game3d {
     com<ID3D12Resource> counters_readback12;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT counters_footprint{};
     uint64_t counters_readback_bytes{};
-    ui_counters cpu_counts, pending_counts, committed_counts;
-    std::array<uint32_t, ui_counter_word::count> committed_words{};
     // Adaptive placement has its own observation slot and lifecycle. It never
     // changes UI qualification, depth admission or capture ownership.
     ui_adaptive::policy adaptive_policy;
@@ -319,15 +290,14 @@ namespace sunshine_game3d {
       profile_open = false;
       direct_views = {};
       memo_valid = field_memo_valid = false;
-      temporal = {};
-      guard = {};
-      detection_pending = detection_awaiting_signal = detection_pending_actionable = false;
+      decision.resume_scope();
+      detection_pending = detection_awaiting_signal = decision.detection_pending_actionable = false;
       detection_fence = detection_last_submit = 0;
       counters_pending = false;
-      scene_bits = 0;
-      scene_layer_proven = false;
+      decision.scene_bits = 0;
+      decision.scene_layer_proven = false;
       detection_run = consumed_detection = {};
-      consumed_auto = {};
+      decision.consumed_auto = {};
       retention_wanted = false;
       retained_present.fill(0);
       adaptive_policy.reset();
@@ -927,45 +897,6 @@ namespace sunshine_game3d {
       cmd->push_descriptors(api::shader_stage::compute, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
       for (auto target : targets) cmd->barrier(textures[target].resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
     }
-    void update_alpha_auto(bool eligible, const alpha_auto_source *automatic) {
-      consumed_auto = {};
-      if (!automatic || !automatic->session) {
-        // Explicit offline/replay input is already a resolved choice. An
-        // incomplete live observation never acquires that authority.
-        source_alpha_ui = !automatic && eligible;
-        consumed_auto.enabled = source_alpha_ui;
-        consumed_auto.state = source_alpha_ui ? alpha_auto_state::manual_on : alpha_auto_state::manual_off;
-        return;
-      }
-      const auto requested = automatic->session->decision().state;
-      const bool manual_on = requested == alpha_auto_state::manual_on;
-      if ((manual_on && !detection_active) || requested == alpha_auto_state::manual_off) {
-        // Manual Off, or manual On through the explicit first filtered
-        // candidate where detection cannot run.
-        consumed_auto.state = requested;
-        source_alpha_ui = eligible && manual_on;
-        consumed_auto.enabled = source_alpha_ui;
-        return;
-      }
-      // Current-frame GPU validation chooses the mask. CPU readback is only
-      // a bounded status sample, never authority for a later input image;
-      // poll_detection only updates which sources the session accepts.
-      // Manual On through detection reports the same sample as manual_on.
-      source_alpha_ui = eligible;
-      consumed_auto = temporal.latest;
-      // F1: the latest sample describes this frame while it is fresh, in this
-      // scope and taken under the current winner.
-      if (!temporal.status_fresh(*automatic)) {
-        consumed_auto = {};
-        consumed_auto.state = eligible ? alpha_auto_state::collecting : alpha_auto_state::waiting_for_source;
-      }
-      if (manual_on) {
-        consumed_auto.state = alpha_auto_state::manual_on;
-        consumed_auto.enabled = source_alpha_ui;
-      }
-      consumed_auto.scene_guard = {(scene_bits & ui_detection::per_frame_scene_hidden) != 0,
-        (scene_bits & ui_detection::per_frame_pre_ui_visible) != 0, uint32_t(guard.refuted_count), scene_layer_proven};
-    }
     bool prepare_detection() {
       if (detection_attempted) return detection_ready;
       detection_attempted = true;
@@ -1054,18 +985,14 @@ namespace sunshine_game3d {
         const scene_guard::observation &observed) {
       std::array<uint32_t, ui_counter_word::count> words{};
       if (!counters_pending || !read_counters(words)) return;
-      const auto delta = ui_temporal::sample_counters(sample, pending_counts, committed_counts, words, committed_words,
-        detection_pending_source.now_ms, observed);
-      committed_counts = pending_counts;
-      committed_words = words;
-      if (session) session->add_counters(delta);
+      decision.commit_counters(sample, session, observed, words);
     }
     void poll_detection(const alpha_auto_source &input) {
       if (!detection_pending || detection_awaiting_signal || !detection_fence) return;
       const auto completed = device->get_completed_fence_value(completion);
       if (completed == UINT64_MAX) { failed = true; return; }
       if (completed < detection_fence) return;
-      if (ui_temporal::sample_discarded(input, detection_pending_source)) {
+      if (decision.sample_discarded(input)) {
         // A sample from another scope, or stale on arrival, is no evidence for
         // this one (F1: a change of offered or accepted candidates does not
         // discard it). Its counts are cumulative: the next committed sample
@@ -1093,21 +1020,10 @@ namespace sunshine_game3d {
         }
       }
       detection_pending = false;
-      auto &latest = temporal.latest;
+      auto &latest = decision.temporal.latest;
       latest = {};
       if (!read) { counters_pending = false; return; }
-      latest = ui_temporal::decode_detection_sample(counts.data(), counts.size(), detection_pending_source.now_ms,
-        detection_submitted);
-      temporal.latest_source = detection_pending_source;
-      temporal.latest_key = detection_pending_status_key;
-      // The scene guard reads the decoded sample before the acceptance
-      // ledger observes it (game3d_scene_guard.h).
-      const auto observed = guard.observe(ui_temporal::guard_sample(latest), detection_pending_actionable,
-        detection_pending_signatures.by_kind());
-      // Earns or revokes acceptance of the signatures this sample was taken
-      // for; a session in a manual mode ignores it (S2).
-      if (input.session)
-        input.session->observe(latest.evidence, latest.pixels, detection_pending_source.now_ms, detection_pending_signatures);
+      const auto observed = decision.observe_sample(counts.data(), counts.size(), detection_submitted, input.session);
       commit_counters(latest, input.session, observed);
       counters_pending = false;
     }
@@ -1220,12 +1136,12 @@ namespace sunshine_game3d {
       // (t14) when offered, else the offscreen UI layer's colour (t7), both
       // still bound from the detection passes above, beside the presented
       // color (t6).
-      const bool proven_image = scene_layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
-      detection_pending_actionable = false;
+      const bool proven_image = decision.scene_layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
+      decision.detection_pending_actionable = false;
       if (scene_evidence_supported() && !(per_frame & ui_detection::per_frame_depth_not_current) &&
-          guard.measure(observation.now_ms, proven_image)) {
+          decision.measure_scene(observation.now_ms, proven_image)) {
         namespace scene = ui_detection::scene;
-        detection_pending_actionable = true;
+        decision.detection_pending_actionable = true;
         views[1] = depth;
         views[10] = {};
         dispatch_stage(scene_cells, scene_cell_sums, 6, scene::cells_x / 16, scene::cells_y);
@@ -1267,10 +1183,10 @@ namespace sunshine_game3d {
           reinterpret_cast<ID3D12GraphicsCommandList *>(cmd->get_native())->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
         }
         cmd->barrier(counter_texture.resource, api::resource_usage::copy_source, api::resource_usage::shader_resource);
-        pending_counts = cpu_counts;
+        decision.pending_counts = decision.cpu_counts;
       }
-      detection_pending_source = observation; detection_pending_status_key = temporal.status_key();
-      detection_pending_signatures = input.signatures;
+      decision.detection_pending_source = observation; decision.detection_pending_status_key = decision.temporal.status_key();
+      decision.detection_pending_signatures = input.signatures;
       detection_pending = detection_awaiting_signal = true;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
@@ -1920,12 +1836,13 @@ namespace sunshine_game3d {
     auto &d = *data_;
     // The previous render's owed conditioning, if its pack never came, is dropped.
     d.conditioning_owed = false;
-    const auto mode = automatic && automatic->session ? automatic->session->decision().state : alpha_auto_state::manual_off;
-    const bool auto_mode = automatic && automatic->session && mode != alpha_auto_state::manual_on && mode != alpha_auto_state::manual_off;
+    const auto request = ui_decision::request(automatic, ui.detection != nullptr);
+    const auto mode = request.mode;
+    const bool auto_mode = request.auto_mode;
     // Manual On validates the provider's filtered candidates through detection,
     // each accepted for this session only (S2); where detection cannot run it
     // keeps the explicit first filtered candidate.
-    const bool manual_detection = automatic && automatic->session && mode == alpha_auto_state::manual_on && ui.detection;
+    const bool manual_detection = request.manual_detection;
     namespace candidate = ui_detection::candidate;
     using ui_selection::kind;
     ui_detection_inputs candidates;
@@ -1989,19 +1906,18 @@ namespace sunshine_game3d {
     // Only accepted candidates decide (S1): the session's ledger in Auto,
     // every offered candidate in manual On, none in manual Off. Explicit
     // offline input without a session is already a resolved choice.
-    uint32_t accepted = automatic && automatic->session ? automatic->session->accepted(bits, signatures) :
-      bits & ui_selection::candidate_bits;
+    uint32_t accepted = d.decision.accepted(automatic, bits, signatures);
     // T1 (ui_temporal::detection_state::arbitrate), in the call order
     // game3d_ui_temporal.h documents: a real Present detects from its own
     // inputs; a generated one shows the decision of the real frame it shows,
     // or has no mask (unavailable). Only a real Present whose accepted inputs
     // are all offered adopts them.
-    const auto arbitration = d.temporal.arbitrate({candidates.hold_previous}, observation, bits);
+    const auto arbitration = d.decision.arbitrate(candidates.hold_previous, observation, bits);
     // The layer's and UIAlpha's stored flags are pushed with their detection;
     // nothing on the CPU reads them back.
     const uint32_t flags = ((bits & candidate::layer) ? candidates.layer_flags : 0u) |
       ((bits & candidate::ui_alpha) ? candidates.ui_alpha_flags & ui_detection::stored_ui_alpha_in_alpha : 0u);
-    if (arbitration.adopt) d.temporal.adopt(bits, accepted);
+    d.decision.adopt(arbitration, bits, accepted);
     d.difference_threshold = pair_threshold ? *pair_threshold : ui_selection::comparable(presented, presented).value_or(2.f / 255.f);
     // H1 (d): the offscreen UI layer's pair threshold with the presented
     // color, from the layer signature's format; zero (no matching pre-UI
@@ -2010,13 +1926,13 @@ namespace sunshine_game3d {
     // name a float layer). detect_ui pushes it on sample frames only.
     d.pre_ui_threshold = (bits & candidate::layer) ?
       ui_selection::comparable({signatures.format[std::size_t(kind::ui_layer)], d.color}, presented).value_or(0.f) : 0.f;
-    const bool needs_detection = auto_mode || manual_detection || ui.kind == ui_input_kind::hudless_difference;
-    const bool detection_requested = needs_detection && (!automatic || mode != alpha_auto_state::manual_off);
+    const auto detection = ui_decision::detection_request(auto_mode, manual_detection,
+      ui.kind == ui_input_kind::hudless_difference, automatic, mode, arbitration, bits);
+    const bool needs_detection = detection.needs;
+    const bool detection_requested = detection.requested;
     // A real Present that offers nothing runs detection only for the T1 grace
     // of a missing accepted candidate (the reduce and mask passes only).
-    const bool grace_only = arbitration.detect && !bits &&
-      (arbitration.per_frame & ui_detection::per_frame_accepted_missing);
-    const bool runs = arbitration.hold || (arbitration.detect && (bits || grace_only));
+    const bool runs = detection.runs;
     const bool fits = d.width <= 3840 && d.height <= 3840;
     d.detection_active = detection_requested && runs && fits && d.prepare_detection();
     // A generated hold and a zero-offer grace frame apply the detected mask
@@ -2062,74 +1978,55 @@ namespace sunshine_game3d {
     d.consumed = p;
     d.consumed_plane = plane;
     d.consumed_detection = {};
-    d.scene_bits = 0;
-    d.scene_layer_proven = false;
-    if (detection_requested) ++d.cpu_counts[ui_counter::auto_frames];
+    d.decision.begin_frame(detection_requested);
     if (d.detection_active) {
       if (!observation.now_ms) observation.now_ms = observation.tick_ms = GetTickCount64();
       // H1 (d): the offered layer's signature is proven the pre-UI scene image
       // by the session's acceptance ledger (never cleared by an identity
       // change, FG toggles or acceptance changes); read after any poll, so a
       // sample that just earned it counts at once.
-      const auto layer_proven = [&] {
-        return (bits & candidate::layer) && automatic && automatic->session &&
-          automatic->session->pre_ui_proven(candidates.signatures.of(kind::ui_layer));
-      };
       if (arbitration.hold) {
         // A generated Present: the detected mask as the real frame it shows
         // left it; no detection, poll or sample. Its scene guard bits are
         // reported, never pushed.
-        d.scene_layer_proven = layer_proven();
-        d.scene_bits = d.guard.per_frame(observation.now_ms, bits, candidates.signatures.by_kind(), d.scene_layer_proven);
-        ++d.cpu_counts[ui_counter::held_generated];
-        d.temporal.held();
+        d.decision.scene_frame(observation, bits, candidates.signatures, automatic);
+        d.decision.held();
         d.consumed_detection = d.detection_run;
         d.consumed_detection.state = ui_detection_snapshot::run_state::held;
-        d.consumed_detection.held_presents = d.temporal.holds;
+        d.consumed_detection.held_presents = d.decision.temporal.holds;
       } else {
-        d.temporal.enter_scope(observation);
-        d.guard.enter_scope(observation.epoch, observation.viewport);
+        d.decision.enter_scope(observation);
         d.poll_detection(observation);
         // Per-frame bits: the scene guard's held verdicts and refuted
         // candidates (H1), T1's hold reset or accepted-missing bit, and depth
         // that is not this frame's. The sample just read may hold or release.
-        d.scene_layer_proven = layer_proven();
-        d.scene_bits = d.guard.per_frame(observation.now_ms, bits, candidates.signatures.by_kind(), d.scene_layer_proven);
+        d.decision.scene_frame(observation, bits, candidates.signatures, automatic);
         // T1's re-offer bit: the provider offered the previous render's
         // inexact HUD-less snapshot again (ui_detection::per_frame_reoffer).
         // A tag beside it never clears the bit: an accepted, valid tag
         // decides the frame on its own, and an unaccepted or invalid one
         // cannot, so the held decision serves that frame better than the
         // one-shot grace.
-        const bool reoffer = candidates.hudless_reoffer && (bits & candidate::hudless) && !(bits & candidate::exact);
-        // A2: the offered declared tags outside the exact pair's tag batch,
-        // which the one-way test does not judge
-        // (ui_detection::per_frame_unaligned_shift).
-        const uint32_t unaligned = (bits & candidate::exact) ?
-          candidates.unaligned_declared & bits & (candidate::ui_alpha | candidate::ui_color) : 0u;
-        const uint32_t per_frame = d.scene_bits | arbitration.per_frame |
-          (!input.depth_current ? ui_detection::per_frame_depth_not_current : 0u) |
-          (reoffer ? ui_detection::per_frame_reoffer : 0u) | (unaligned << ui_detection::per_frame_unaligned_shift);
+        const uint32_t per_frame = d.decision.per_frame(candidates.hudless_reoffer, bits,
+          candidates.unaligned_declared, arbitration, input.depth_current);
         d.detect_ui(cmd, p, candidates, observation, hudless_color, depth, bits, accepted, flags, per_frame);
         d.consumed_detection = d.detection_run;
-        d.temporal.detected(observation);
+        d.decision.detected(observation);
       }
       alpha_source = t[impl::detected_mask].srv;
     } else if (unavailable) {
       // A generated Present without a real frame's decision to show ends the
       // chain without a mask.
-      ++d.cpu_counts[ui_counter::held_none];
-      d.temporal.unavailable();
+      d.decision.unavailable();
     } else {
-      if (detection_requested) ++d.cpu_counts[inactive_reason];
-      d.temporal.inactive();
+      d.decision.inactive(detection_requested, inactive_reason);
     }
     d.retain_color(cmd);
     d.mark(cmd, impl::mark_detection);
     // A captured input's RGB never replaces current eye color. Auto consumes a
     // freshly derived mask; explicit manual/replay inputs retain their meaning.
-    d.update_alpha_auto(ui_eligible && ui_mode_supported && (!needs_detection || d.detection_active || explicit_fallback) &&
-      (!automatic || !automatic->retained || alpha_source.handle), automatic);
+    d.decision.update_alpha_auto(ui_eligible && ui_mode_supported && (!needs_detection || d.detection_active || explicit_fallback) &&
+      (!automatic || !automatic->retained || alpha_source.handle), automatic, d.detection_active, d.source_alpha_ui);
     const bool probe_ui = d.prepare_adaptive_frame(p, adaptive) && input.adaptive_probe;
     d.consumed_ui_source = d.source_alpha_ui && alpha_source.handle ? d.resource_of(alpha_source) : api::resource{};
     // The conditioning inputs, resolved now (C2). The views stay valid for
@@ -2307,7 +2204,7 @@ namespace sunshine_game3d {
   render_parameters renderer::consumed_parameters() const { return data_ ? data_->consumed : render_parameters{}; }
   bool renderer::consumed_source_alpha_ui() const { return data_ && data_->source_alpha_ui; }
   ui_mask_channel renderer::consumed_ui_channel() const { return data_ ? data_->consumed_channel : ui_mask_channel::alpha; }
-  alpha_auto_decision renderer::consumed_alpha_auto() const { return data_ ? data_->consumed_auto : alpha_auto_decision{}; }
+  alpha_auto_decision renderer::consumed_alpha_auto() const { return data_ ? data_->decision.consumed_auto : alpha_auto_decision{}; }
   ui_detection_snapshot renderer::consumed_detection() const { return data_ ? data_->consumed_detection : ui_detection_snapshot{}; }
   alpha_probe_counters renderer::alpha_probe_activity() const {
     return data_ ? alpha_probe_counters{data_->detection_submitted, data_->detection_mapped, data_->scene_evidence_runs} :

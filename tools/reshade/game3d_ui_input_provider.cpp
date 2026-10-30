@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_ui_input_provider.h"
 #include "game3d_ui_mask.h"
+#include "game3d_ui_decision.h"
 #include "game3d_ui_layer.h"
 #include "game3d_capture_diagnostic.h"
 #include "game3d_frame_record.h"
@@ -531,8 +532,7 @@ namespace sunshine_game3d::ui_input {
     // matter: an accepted, valid one decides the frame itself, and one that is
     // unaccepted or invalid cannot.
     result.detection.hudless_reoffer = hudless_reoffered_now;
-    if (capturing && !available &&
-        ui_mask::generated_without_input(frame_sequence, input_present, fg_active, status.fg.generated_frames)) {
+    if (ui_decision::generated_hold(capturing, available, frame_sequence, input_present, fg_active, status.fg.generated_frames)) {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
         {"association", "present_count_after_last_ui_tag"}, {"presents_since_ui_tag", frame_sequence - input_present}});
       result.status.retained_alpha_ready = true;
@@ -558,9 +558,9 @@ namespace sunshine_game3d::ui_input {
     // inputs the last detecting Present offered shows that real frame and
     // holds its decision, with no tiles, reduce, mask or sample pass. It never
     // advances Present counting's input_present.
-    const bool same_inputs = capturing && available && !result.detection.hold_previous &&
-      ui_mask::same_snapshot_inputs(offered_inputs, detected_before, fg_active,
-        result.detection.current_color || (result.detection.hudless.handle && !result.detection.hudless_exact));
+    const bool same_inputs = ui_decision::snapshot_hold(capturing, available, result.detection.hold_previous,
+      offered_inputs, detected_before, fg_active,
+      result.detection.current_color || (result.detection.hudless.handle && !result.detection.hudless_exact));
     if (same_inputs) {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
         {"association", "same_snapshot_identities_as_last_detection"}});
