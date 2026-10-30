@@ -509,6 +509,9 @@ namespace sunshine_streamline::provider {
         if (entry.texture != data.display_texture) victim = &entry;
       }
       if (victim->texture.handle) {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+        depth_events::eviction(runtime, depth_events::site_id::provider_display_evict, victim->view == data.effects_view);
+#endif
         // Effects can still name this view only if it was the last binding.
         if (victim->view == data.effects_view) bind(runtime, data, {}, false);
         const auto format = static_cast<api::format>(victim->format);
