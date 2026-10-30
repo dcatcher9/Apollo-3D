@@ -307,7 +307,7 @@ namespace sunshine_streamline::depth_capture {
       // end of the frame): that proof's source, version and queue, checked
       // when its recording is executed (0 none).
       std::uint64_t proven_source{}, proven_version{}, proven_queue{};
-      // present_ordinal() when recorded (presented_frame), and when its
+      // present_ordinal() when recorded (frame_presenting), and when its
       // producer list was first seen submitted on a presenting queue, else
       // zero (presented_by).
       std::uint64_t present{}, submitted_present{};
@@ -329,7 +329,7 @@ namespace sunshine_streamline::depth_capture {
       // newest frame has recorded no copy yet (frame_generation_frame).
       std::uint64_t recorded_sequence{};
       bool awaiting{};
-      // present_ordinal() at the newest evaluation's call (presented_frame).
+      // present_ordinal() at the newest evaluation's call (frame_presenting).
       std::uint64_t present{};
     };
     struct evaluation_namespace {
@@ -414,7 +414,6 @@ namespace sunshine_streamline::depth_capture {
     extern std::mutex mutex;
     extern std::atomic<std::uint64_t> presents;
     std::uint64_t present_ordinal();
-    bool presented_frame(std::uint64_t ordinal);
     extern std::uint64_t newest_evaluation_present, frame_generation_present;
     extern std::uint32_t presenting_generated;
     bool frame_presenting(std::uint64_t ordinal);
@@ -540,5 +539,9 @@ namespace sunshine_streamline::depth_capture {
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   bool begin_nomination(const input &value, std::uint64_t superseded_source_id);
   bool source_lifetime_current(const input &value, std::uint64_t current_generation);
+  // The texture's proven state for a copy that queue executes; false (and an
+  // empty out) when it is unproven there. The diagnostic-texture regressions
+  // read it; no shipping code does.
+  bool last_proven_state(std::uint64_t resource, std::uint64_t queue, proven_state &out);
 #endif
 }

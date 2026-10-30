@@ -1828,7 +1828,7 @@ namespace sunshine_streamline {
       }
       // Observation discovers interfaces; only an accepted submitted capture
       // establishes ownership in the shared capture layer.
-      depth_capture::observe_provider(snapshot.command_buffer);
+      depth_capture::observe_command(snapshot.command_buffer);
       // An ordinary tag boundary, and ordinary evaluation of a viewport whose
       // FG scope is silent or whose FG is observed off, replaces that
       // viewport's FG observation; an FG nomination replaces its ordinary one
@@ -2614,7 +2614,7 @@ namespace sunshine_streamline {
       const auto captured = sample && out.valid_viewport ? nominate_depth_source(snapshot, false, &copy_recorded) : 0;
       call_trace.claim_depth_capture(sample && out.valid_viewport && owns_nested_depth_capture(snapshot, copy_recorded));
       if (sample && !out.valid_viewport && source_requested.load(std::memory_order_acquire) && depth_capture::active()) {
-        depth_capture::observe_provider(reinterpret_cast<std::uintptr_t>(commands));
+        depth_capture::observe_command(reinterpret_cast<std::uintptr_t>(commands));
         depth_capture::begin_evaluation(0, serial, 0xffffffffu);
       }
       SetLastError(incoming);
@@ -3244,7 +3244,7 @@ namespace sunshine_streamline {
                viewport.epoch != fg.epoch)
         out.depth = depth_outcome::scope_changed;
       else {
-        depth_capture::observe_provider(value.command);
+        depth_capture::observe_command(value.command);
         depth_capture::input input;
         input.provider = sunshine_scene_depth::provider_kind::streamline;
         input.epoch = fg.epoch; input.sequence = serial; input.tick = tick; input.viewport = fg.viewport;

@@ -46,8 +46,9 @@ namespace sunshine_streamline::depth_capture {
     // Present that presents the frame being recorded then.
     std::atomic<std::uint64_t> presents{};
     std::uint64_t present_ordinal() { return presents.load(std::memory_order_acquire) + 1; }
-    // Whether a stamp is the frame the Present being decided presents: no
-    // other Present came since its call. Such a view is active and such a
+    // A stamp is the frame the Present being decided presents when no other
+    // Present came since its call (frame_presenting's first rule, the only
+    // one without frame generation). Such a view is active and such a
     // snapshot current however long the frame took after its call (a hitch
     // between an SR evaluation and its Present), as they are the depth of
     // the frame that Present shows: the source age bounds holds over later
@@ -56,7 +57,6 @@ namespace sunshine_streamline::depth_capture {
     // age). A Present of any swapchain, a generated one too, ends it, so a
     // generated Present between an evaluation and its frame's Present leaves
     // the wall-clock rule alone.
-    bool presented_frame(std::uint64_t ordinal) { return ordinal && ordinal >= presents.load(std::memory_order_acquire); }
     // Require mutex. The newest present_ordinal() an evaluation began with
     // (begin_evaluation_locked), the newest one a frame-generation input's
     // evaluation began with or its copy was stamped with, and the Presents
@@ -65,10 +65,10 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t newest_evaluation_present{}, frame_generation_present{};
     std::uint32_t presenting_generated{};
     // Requires mutex. Whether a stamp is the frame the Present being decided
-    // presents: presented_frame, or, for a frame that made a
-    // frame-generation call (its DLSS-G call is what adds Presents for it),
-    // one of the `generated` Presents after its first, as long as no later
-    // evaluation began. With FG on DLSS-G presents a frame's generated
+    // presents: no other Present came since its call (above), or, for a
+    // frame that made a frame-generation call (its DLSS-G call is what adds
+    // Presents for it), one of the `generated` Presents after its first, as
+    // long as no later evaluation began. With FG on DLSS-G presents a frame's generated
     // Presents and its real one in either order, so a hitch between a
     // frame's evaluation and its last Present made every Present after its
     // first mono (inactive_views, retained_depth_expired; the 10-27 review's
@@ -3006,11 +3006,6 @@ namespace sunshine_streamline::depth_capture {
     // discard is released after the lock (declared before it).
   }
 
-  void observe_provider(std::uint64_t native) {
-    // API activity is discovery evidence only. The actual submitted capture's
-    // queue is unknown here, and depth/metadata/evaluation may still be invalid.
-    observe_command(native);
-  }
   SUNSHINE_CAPTURE_INTERNAL {
     // After the association's silence (freshness.h, association_ms).
     // Requires mutex.
@@ -3384,7 +3379,7 @@ namespace sunshine_streamline::depth_capture {
   }
   void present(std::uint64_t native) {
     // Counted for every Present, also one the capture owner does not serve
-    // (presented_frame must never take a frame older than the last Present
+    // (frame_presenting must never take a frame older than the last Present
     // for the current one).
     presents.fetch_add(1, std::memory_order_acq_rel);
     if (!requested.load() || !native) return;
@@ -4377,6 +4372,9 @@ namespace sunshine_streamline::depth_capture {
     proven.watch(identity);
     return !proven.latched(identity).latched;
   }
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+  // Test view only (streamline_depth_capture_test_access.h); no shipping
+  // code reads it.
   bool last_proven_state(std::uint64_t resource, std::uint64_t queue, proven_state &out) {
     out = {};
     com_ptr<ID3D12Resource> checked;
@@ -4390,6 +4388,7 @@ namespace sunshine_streamline::depth_capture {
     out = proven.query(identity, queue, !enhanced_barriers_seen.load(std::memory_order_relaxed));
     return bool(out);
   }
+#endif
   bool read_conflicted(std::uint64_t capture) { return native_observer::queue_order_conflicted(capture); }
   bool queue_order_line(std::uint64_t now, char *out, std::size_t size) {
     static std::uint64_t logged_at{}, logged_total{UINT64_MAX}, checked_at{};

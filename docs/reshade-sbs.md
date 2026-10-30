@@ -3853,8 +3853,9 @@ ordered after the proving list (a fence wait the frozen hook set does not observ
 be recorded on the proving queue. Both are open owner decisions. `DiscardResource` is not hooked
 (the hook set stays frozen until the new reporters), so a discard after the last barrier goes
 unseen; that is a content hazard, as it was before. Later
-copies whose own recording lacks a state can query the same fact
-(`depth_capture::last_proven_state`).
+copies whose own recording lacks a state can query the same fact (the capture owner reads its
+proven-state table when it records them; the test view's `depth_capture::last_proven_state` reads
+the same table).
 
 **Enhanced-layout latch (the contract matrix's D6 and N8).** Any enhanced texture barrier on
 subresource 0 in a list that executes latches its texture's layout to enhanced barriers for good,

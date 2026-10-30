@@ -47,7 +47,7 @@ namespace sunshine_streamline {
       std::uint64_t sequence, bool successful, bool version_one, bool defer_finish = false) {
     // Exercise the real capture boundary using actual native resources/CLs.
     // This seam never supplies readiness, selected depth, fences or uniforms.
-    depth_capture::observe_provider(command);
+    depth_capture::observe_command(command);
     camera_data copied;
     if (!camera || !read(camera, copied) || !sequence) return 0;
     depth_capture::input value;

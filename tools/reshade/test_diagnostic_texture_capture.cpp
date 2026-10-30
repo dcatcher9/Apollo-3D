@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Functional GPU regression for the actual dump snapshot owner. No timing claim.
 #include "streamline_depth_capture.h"
+#include "streamline_depth_capture_test_access.h" // last_proven_state (test view)
 #include "api_contract.h"
 #include "streamline_native_observer.h"
 #include "native_resource_identity.h"

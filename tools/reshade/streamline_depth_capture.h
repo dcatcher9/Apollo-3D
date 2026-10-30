@@ -320,13 +320,15 @@ namespace sunshine_streamline::depth_capture {
   // one log line; false when the device's objects were kept.
   bool release_device(std::uint64_t device, char *out = nullptr, std::size_t size = 0);
   void poll();
-  // Observing an API attempt discovers its command list, never claims ownership.
+  // Observing an API attempt (observe_command on its command list) discovers
+  // its command list, never claims ownership: it is discovery evidence only,
+  // the submitted capture's queue is unknown there, and depth, metadata and
+  // evaluation may still be invalid.
   // Only acquire of a successful, submitted current source establishes a
   // provider on that exact queue. Readable SL takes priority over NGX; pending
   // SL cannot displace working NGX. An established SL source keeps priority
   // through a bounded pending interval, then usable NGX may replace it. Each
   // packet keeps its own camera/encoding. Explicit FG still requires SL FG.
-  void observe_provider(std::uint64_t command);
   bool provider_active(std::uint64_t queue);
   // Handoff evidence only (provider hysteresis): some API provider began a
   // real evaluation (a nonzero epoch; Streamline SR's source 0 included, the
@@ -701,9 +703,6 @@ namespace sunshine_streamline::depth_capture {
   // when command executes it proves that state unless a later barrier on it
   // decides. Call on the thread recording command, before the native clear.
   void observe_depth_clear(std::uint64_t command, std::uint64_t resource);
-  // The texture's proven state for a copy that queue executes; false (and an
-  // empty out) when it is unproven there.
-  bool last_proven_state(std::uint64_t resource, std::uint64_t queue, proven_state &out);
   struct proven_state_counts {
     // The textures held: tracked, or watched from an adapter's retention
     // (retain_source); of those, latched by an executed enhanced barrier, and

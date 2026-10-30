@@ -944,7 +944,7 @@ namespace sunshine_streamline::depth_capture {
       capture_tick,
       view_tick,
       // The same at the Present of the frame that made them: no Present came
-      // since their call but this one (presented_frame).
+      // since their call but this one (frame_presenting).
       capture_tick_own_frame,
       view_tick_own_frame,
       pending_nomination,
@@ -2312,9 +2312,10 @@ namespace sunshine_streamline::depth_capture {
 
     // F1 (the 10-27 review): which Presents count a stamped frame as the
     // frame they present (frame_presenting). Without frame generation only
-    // its first Present (presented_frame); with FG on, a frame that made a
-    // frame-generation call presents at its first Present and the generated
-    // count after it (DLSS-G's real and generated Presents in either order),
+    // its first Present (no other Present since its call); with FG on, a
+    // frame that made a frame-generation call presents at its first Present
+    // and the generated count after it (DLSS-G's real and generated Presents
+    // in either order),
     // until the next frame's first evaluation began.
     void frame_presenting_rows() {
       struct row {
@@ -2357,7 +2358,7 @@ namespace sunshine_streamline::depth_capture {
           newest_evaluation_present = present_ordinal();
         }
         const bool got = frame_presenting(stamp);
-        if (got != r.expected || (!r.generated && got != presented_frame(stamp))) {
+        if (got != r.expected || (!r.generated && got != (stamp && stamp >= presents.load(std::memory_order_acquire)))) {
           fail(std::string("F1 frame_presenting, ") + r.pins + ": got " + (got ? "presenting" : "not presenting"));
         }
       }
