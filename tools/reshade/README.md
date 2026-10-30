@@ -1557,6 +1557,128 @@ runs, compiles `depth_content_sampler.cpp` inside
 [`test_depth_content_sampler_d3d11.cpp`](test_depth_content_sampler_d3d11.cpp) to reach the
 sampler's internal pipeline cache and private command list. Neither links a view.
 
+### Source map
+
+Every production file of the add-on (the core sources in [`CMakeLists.txt`](CMakeLists.txt), the
+headers they include, and the `.inl` parts each shell includes), one block per module, with its job
+and the docs section that owns its contract. A part (`.inl`) is compiled in its shell's translation
+unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), not here.
+
+#### Streamline adapter
+
+- [`streamline_camera_probe.cpp`](streamline_camera_probe.cpp): the Streamline evidence adapter: hook install and discovery, tags and evaluations, admission and nomination, the FG options hook and DLSS-G inputs, the SL UI adapter, and its log lines. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`streamline_camera_probe.h`](streamline_camera_probe.h): the probe's public API for the depth adapters and the exporter. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`streamline_camera_probe_test_access.h`](streamline_camera_probe_test_access.h): the linkage switch of the probe's internals and the test add-on's declarations of them and of the probe's refusal recorders. Docs: [Test builds](#test-builds).
+- [`streamline_camera_data.cpp`](streamline_camera_data.cpp), [`streamline_camera_data.h`](streamline_camera_data.h): the narrow Streamline ABI declarations and the versioned structure reads. Docs: [Streamline ABI compatibility](../../docs/reshade-sbs.md#streamline-abi-compatibility).
+- [`streamline_camera_version.h`](streamline_camera_version.h): the public Streamline ABI families the adapter recognizes. Docs: [Streamline ABI compatibility](../../docs/reshade-sbs.md#streamline-abi-compatibility).
+- [`streamline_buffer_contract.h`](streamline_buffer_contract.h), [`streamline_buffer_types.h`](streamline_buffer_types.h): the translation of each SDK release's raw buffer-type numbers into the canonical ones the add-on compares. Docs: [Streamline buffer-type contract](../../docs/reshade-sbs.md#streamline-buffer-type-contract).
+- [`streamline_v1_resource_state.h`](streamline_v1_resource_state.h): the exact Streamline 1.1.1 resource-state adapter. Docs: [Streamline ABI compatibility](../../docs/reshade-sbs.md#streamline-abi-compatibility).
+- [`observation_loss_journal.h`](observation_loss_journal.h): the bounded journal of observation losses, keyed by static site text. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+
+#### Hook host and configuration
+
+- [`game3d_depth_input.cpp`](game3d_depth_input.cpp), [`game3d_depth_input.h`](game3d_depth_input.h): the per-Present depth-input maintenance the exporter runs (capture observation, deferred hook discovery) and its readiness state. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
+
+#### NGX
+
+- [`upscaler_call_trace.cpp`](upscaler_call_trace.cpp), [`upscaler_call_trace.h`](upscaler_call_trace.h): the live NGX hook host (CreateFeature, EvaluateFeature, ReleaseFeature) shared by NGX depth capture and the default-off call-route diagnostic. Docs: [Upscaler call-route diagnostic](../../docs/reshade-sbs.md#upscaler-call-route-diagnostic).
+- [`ngx_depth_source.cpp`](ngx_depth_source.cpp), [`ngx_depth_source.h`](ngx_depth_source.h): the minimal NGX parameter adapter that nominates DLSS and DLSS-G depth. Docs: [Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection).
+
+#### Presentation scope
+
+- [`frame_generation_inputs.h`](frame_generation_inputs.h): DLSS-G's own inputs of one real frame, read from its NGX evaluation and supplied to the viewport's Streamline FG scope. Docs: [Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection).
+
+#### Depth capture
+
+- [`streamline_depth_capture.cpp`](streamline_depth_capture.cpp): the capture owner's shell: every global in its original order, the part declarations, the public API that is not yet in a part. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`streamline_depth_capture.h`](streamline_depth_capture.h): the capture owner's public API (inputs, packets, nomination, record, consume, reports). Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`streamline_depth_capture_test_access.h`](streamline_depth_capture_test_access.h): the capture owner's internal types and templates, the linkage switch, and the test views' declarations of its internals. Docs: [Test builds](#test-builds).
+- [`capture_state_policy.h`](capture_state_policy.h): how an injected copy chooses its source's pre-copy state. Docs: [API contract matrix](#api-contract-matrix).
+- [`proven_state.h`](proven_state.h): the per-resource last-proven state the capture owner feeds from executed recordings. Docs: [API contract matrix](#api-contract-matrix).
+- [`api_contract.h`](api_contract.h): how an API's declaration of an input becomes the capture input's contract (state proof, lifetime, extent, format). Docs: [API contract matrix](#api-contract-matrix).
+- [`depth_refusal.h`](depth_refusal.h): why a depth input was refused, in the contract matrix's classes. Docs: [API contract matrix](#api-contract-matrix).
+- [`depth_view_format.h`](depth_view_format.h): the one rule for how an API depth input is stored and read. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`native_command_storage.h`](native_command_storage.h), [`native_resource_identity.h`](native_resource_identity.h): recording identity per command list and object identity cookies shared by the API adapters and ReShade preservation. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`game3d_capture_diagnostic.h`](game3d_capture_diagnostic.h): a bounded copy of one native record attempt for diagnostics. Docs: [Dump 3D diagnostics](../../docs/reshade-sbs.md#dump-3d-diagnostics).
+- [`depth_capture/observation.inl`](depth_capture/observation.inl): part of `streamline_depth_capture.cpp` (end of the shell): command-list and recording identity, per-recording source states and barriers, the Reset/Close/render-pass lifecycle, the executed-list state proof, ReShade's list and runtime-list events, Present observation, and the depth-texture lifecycle. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+
+#### Native observer
+
+- [`streamline_native_observer.cpp`](streamline_native_observer.cpp), [`streamline_native_observer.h`](streamline_native_observer.h): the D3D12 method-table hooks for resource states, submissions and queue order, and recording cookies. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
+- [`queue_order.h`](queue_order.h): the pure queue-order model (Step 4). Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
+- [`native_vtable_slot.h`](native_vtable_slot.h): the shared vtable-slot patch critical section. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
+- [`observer_snapshot.h`](observer_snapshot.h): bounded, pinned publication of the observers' private metadata. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+
+#### Depth output and hold
+
+Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
+
+##### depth_output
+
+##### depth_hold
+
+##### depth_display
+
+#### API depth provider
+
+- [`streamline_depth_provider.cpp`](streamline_depth_provider.cpp), [`streamline_depth_provider.h`](streamline_depth_provider.h): the per-Present API depth decision, its display storage, DEPTH binding and readiness. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`streamline_depth_provider_log.h`](streamline_depth_provider_log.h): the provider's status lines, rendered from gathered values. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`scene_depth_source.h`](scene_depth_source.h): the small value snapshot a provider adapter emits after validating its own evidence. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
+- [`depth_cache_update.h`](depth_cache_update.h), [`display_depth_cache.h`](display_depth_cache.h): the last successful private display copy and the check that its storage can still be used. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`depth_ready_uniform_cache.h`](depth_ready_uniform_cache.h): the per-runtime readiness uniform both API and Generic depth publish through. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
+
+#### Generic depth
+
+- [`depth_addon.cpp`](depth_addon.cpp), [`depth_addon.h`](depth_addon.h): Generic depth selection: ReShade event registration, recording, candidate selection, capture routing, its panel and status lines. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`generic_depth_state.h`](generic_depth_state.h): Generic depth's shared state and depth-resource types (add-on flags and locks, per-runtime and per-device private data, selection snapshot; includes the recording tracker from `generic_recording.h`); included only through `depth_addon_test_access.h`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`generic_recording.h`](generic_recording.h): the per-command-list recording tracker (`state_tracking`, `depth_stencil_frame_stats`, `resource_hash`); included by `generic_depth_state.h` at its types' position. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`depth_addon_test_access.h`](depth_addon_test_access.h): the linkage switch of that state (internal in shipping, inline in the test add-on) and the test add-on's declarations of `depth_addon.cpp` internals. Docs: [Test builds](#test-builds).
+- [`capture_inputs.h`](capture_inputs.h): every ReShade-to-capture lifecycle forward of Generic depth (device release, command-list events, queue observe/retire, depth-stencil creation and destruction, depth clears, the Present boundary) as inline forwarders in `capture_inputs::`, called from `depth_addon.cpp`'s and `generic_recording.inl`'s handlers; included only by `depth_addon.cpp`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`generic_capture.inl`](generic_capture.inl): part of `depth_addon.cpp` (included after the candidate-selection declarations, where its definitions stood): the FrameActivityTrace text and Present/access trace types, member views, capture records and their validation, the hold gates (`judge_hold_gate`) and hold (`hold_shown_capture`), Present coverage, the end-of-frame copies and `select_captured_depth`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`generic_trace.inl`](generic_trace.inl): one statement of `select_captured_depth` (included at its place inside that function): the opt-in FrameActivityTrace route record of the capture set. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`generic_recording.inl`](generic_recording.inl): part of `depth_addon.cpp` (end of the shell): the ReShade draw, binding, clear, render-pass, transfer and execute events that fill the tracker, and `resolve_transfer_lineage`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`generic_probe.inl`](generic_probe.inl): part of `depth_addon.cpp` (end of the shell, before `generic_selection.inl`): the challenger probe: `release_challenger`, `prepare_probe_target`'s choice and preservation of the probe target, the raw-sample selection key and `complete_raw_sample`, and `sample_probe_target`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`generic_selection.inl`](generic_selection.inl): part of `depth_addon.cpp` (end of the shell): the aspect, capture-region and shape rules a depth-stencil must meet, the per-candidate observations, and `select_depth_candidate`, `begin_depth_frame`'s choice of this Present's source. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`depth_panel.inl`](depth_panel.inl): part of `depth_addon.cpp` (end of the shell, after `generic_selection.inl`): Generic's status reporting: `log_depth_status` (`begin_depth_frame`'s rate-limited `Sunshine 3D depth:` line), the depth-format names, `describe_streamline_source`, and the overlay's settings panel with its Status, Troubleshooting and Calibration tabs (and the test add-on's `sunshine_game3d_test_draw_production_panel`). Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`generic_raw_evidence.inl`](generic_raw_evidence.inl): part of `depth_addon.cpp` (end of the shell, after `depth_panel.inl`): the raw-scene evidence the exporter reads: `set_raw_scene_request`, `get_raw_samples`, `get_latest_raw_sample`, `get_raw_source_roster` and `validate_raw_history`. Docs: [Experimental raw-depth automation](../../docs/reshade-sbs.md#experimental-raw-depth-automation).
+- [`depth_content_sampler.cpp`](depth_content_sampler.cpp), [`depth_content_sampler.h`](depth_content_sampler.h): the GPU content sampler of candidate depth (points, extrema, moments). Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`depth_selection_policy.h`](depth_selection_policy.h), [`depth_capture_policy.h`](depth_capture_policy.h), [`depth_probe_policy.h`](depth_probe_policy.h): Generic's selection, capture-allocation and probe policies ("Complete scene" included). Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`depth_moments.h`](depth_moments.h), [`depth_presentation_stats.h`](depth_presentation_stats.h): the moment tile layout and the depth-availability statistics of an effects pass. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`native_depth_calibration.h`](native_depth_calibration.h): projection-convention evidence from real depth clears. Docs: [Native depth calibration and rendering](../../docs/reshade-sbs.md#native-depth-calibration-and-rendering).
+- [`diagnostic_log_gate.h`](diagnostic_log_gate.h): when a routing family's diagnostics are logged. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+
+#### Exporter
+
+- [`exporter.cpp`](exporter.cpp): the add-on's entry and present pipeline: session glue, the export ring and wire, scene placement, diagnostics and UI status publication. Docs: [GPU handoff contract](../../docs/reshade-sbs.md#gpu-handoff-contract).
+- [`automatic_scene_transition.h`](automatic_scene_transition.h): the gradual return to stereo after depth was lost. Docs: [Activation and recovery](../../docs/reshade-sbs.md#activation-and-recovery).
+- [`game3d_frame_record.cpp`](game3d_frame_record.cpp), [`game3d_frame_record.h`](game3d_frame_record.h): the typed per-Present record of what each depth rung and UI candidate did. Docs: [Frame record](../../docs/reshade-sbs.md#frame-record).
+- [`game3d_diagnostics.h`](game3d_diagnostics.h), [`game3d_vram.h`](game3d_vram.h), [`game3d_slow_step.h`](game3d_slow_step.h), [`async_log.h`](async_log.h): the Diagnostics switch, the VRAM budget line, slow-step throttles and the off-Present log writer. Docs: [Diagnostics switch and per-Present cost](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost).
+- [`game3d_display_scale.h`](game3d_display_scale.h): the DPI-scaling warning when the back buffer matches the logical display size. Docs: [Setup](../../docs/reshade-sbs.md#setup).
+- [`camera_sample_binding.h`](camera_sample_binding.h), [`camera_scene_policy.h`](camera_scene_policy.h): the immutable camera-sample transport and its shared value types. Docs: [Controlled camera-depth candidate](../../docs/reshade-sbs.md#controlled-camera-depth-candidate).
+- [`projection_depth_controller.h`](projection_depth_controller.h), [`projection_depth_scale.h`](projection_depth_scale.h), [`scene_gain.h`](scene_gain.h), [`scene_feedback.h`](scene_feedback.h): the stereo gain and zero plane from camera coefficients or depth moments, and the frozen feedback of one provider input. Docs: [Native depth calibration and rendering](../../docs/reshade-sbs.md#native-depth-calibration-and-rendering).
+- [`raw_scene_policy.h`](raw_scene_policy.h), [`raw_scene_pool.h`](raw_scene_pool.h), [`provided_raw_scene.h`](provided_raw_scene.h): the relative controls of a raw depth/color pair and its encoding identity across rotating resources. Docs: [Experimental raw-depth automation](../../docs/reshade-sbs.md#experimental-raw-depth-automation).
+- [`depth_encoding.h`](depth_encoding.h), [`depth_jitter.h`](depth_jitter.h): the affine depth decode and the jitter registration of depth samples. Docs: [Depth jitter registration](../../docs/reshade-sbs.md#depth-jitter-registration).
+- [`game3d_test_render.h`](game3d_test_render.h), [`game3d_test_teardown.h`](game3d_test_teardown.h), [`game3d_test_depth_events.h`](game3d_test_depth_events.h), [`game3d_test_event_ring.h`](game3d_test_event_ring.h): test add-on only records (last render, teardown order, DEPTH binding events) and their event ring. Docs: [Test builds](#test-builds).
+
+#### UI
+
+- [`game3d_ui_input_provider.cpp`](game3d_ui_input_provider.cpp), [`game3d_ui_input_provider.h`](game3d_ui_input_provider.h): the API UI-input adapter and its pairing with final color. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).
+- [`game3d_ui_mask.cpp`](game3d_ui_mask.cpp), [`game3d_ui_mask.h`](game3d_ui_mask.h): the bounded owner of SL's UI alpha/color, the real back buffer and HUD-less color. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).
+- [`game3d_ui_capture.cpp`](game3d_ui_capture.cpp), [`game3d_ui_capture.h`](game3d_ui_capture.h): request-scoped optional UI pixels. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).
+- [`game3d_ui_layer.cpp`](game3d_ui_layer.cpp), [`game3d_ui_layer.h`](game3d_ui_layer.h): offscreen UI layers found from cleared color targets. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).
+- [`game3d_ui_qualification.h`](game3d_ui_qualification.h): logical UI source identity supplied by the presentation adapter. Docs: [UI source discovery and snapshot qualification](../../docs/reshade-sbs.md#ui-source-discovery-and-snapshot-qualification).
+- [`game3d_ui_selection.h`](game3d_ui_selection.h), [`game3d_ui_temporal.h`](game3d_ui_temporal.h), [`game3d_alpha_auto.h`](game3d_alpha_auto.h), [`game3d_scene_guard.h`](game3d_scene_guard.h): the UI decision framework's selection, temporal state, acceptance ledger and hidden-scene guard. Docs: [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework).
+- [`game3d_ui_detection_contract.h`](game3d_ui_detection_contract.h), [`game3d_ui_counters.h`](game3d_ui_counters.h): the UI detection flags, decision texels and per-session counters shared with the renderer and Dump 3D. Docs: [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework).
+- [`game3d_ui_adaptive.h`](game3d_ui_adaptive.h), [`game3d_ui_plane.h`](game3d_ui_plane.h): the adaptive UI probe tiles and the UI plane's depth. Docs: [UI decision framework](../../docs/reshade-sbs.md#ui-decision-framework).
+
+#### Renderer, controls and shared files
+
+- [`game3d_renderer.cpp`](game3d_renderer.cpp), [`game3d_renderer.h`](game3d_renderer.h), [`game3d_shader_cache.h`](game3d_shader_cache.h), [`game3d_stereo_contract.h`](game3d_stereo_contract.h): the native Game 3D renderer, its compiled-shader cache and the stereo displacement budget. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
+- [`overlay_compositor.cpp`](overlay_compositor.cpp), [`overlay_compositor.h`](overlay_compositor.h), [`overlay_shaders.h`](overlay_shaders.h): the overlay compositor and its GUI shaders. Docs: [Color and HDR](../../docs/reshade-sbs.md#color-and-hdr).
+- [`game3d_controls.cpp`](game3d_controls.cpp), [`game3d_controls.h`](game3d_controls.h), [`game3d_controls_model.h`](game3d_controls_model.h): the overlay controls and their settings model. Docs: [Setup](../../docs/reshade-sbs.md#setup).
+- [`game3d_debug_dump.cpp`](game3d_debug_dump.cpp), [`game3d_debug_dump.h`](game3d_debug_dump.h), [`game3d_diagnostic_metadata.cpp`](game3d_diagnostic_metadata.cpp), [`game3d_diagnostic_metadata.h`](game3d_diagnostic_metadata.h): Dump 3D and its bounded metadata observation. Docs: [Dump 3D diagnostics](../../docs/reshade-sbs.md#dump-3d-diagnostics).
+- [`addon_lifetime.h`](addon_lifetime.h), [`freshness.h`](freshness.h): the process-exit fence for detours and callbacks, and every API depth age limit, defined once. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+
 ### API contract matrix
 
 The [rules for new game behaviour](../../docs/reshade-sbs.md#rules-for-new-game-behaviour) gate

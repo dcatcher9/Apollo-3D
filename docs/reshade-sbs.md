@@ -5975,6 +5975,14 @@ identical FP32 behavior near the far plane. A screen-plane reference cannot comp
 change of camera encoding. Validated camera metadata supports continuity across known projection
 changes; without that metadata the raw fallback cannot establish physical equivalence.
 
+### Depth output
+
+#### depth_output
+
+#### depth_hold
+
+#### depth_display
+
 ### Selecting scene depth
 
 If **Normal Depth View** shows a white field, stripes or dots during gameplay, the selected source
