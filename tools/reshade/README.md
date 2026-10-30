@@ -1604,6 +1604,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 - [`native_command_storage.h`](native_command_storage.h), [`native_resource_identity.h`](native_resource_identity.h): recording identity per command list and object identity cookies shared by the API adapters and ReShade preservation. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`game3d_capture_diagnostic.h`](game3d_capture_diagnostic.h): a bounded copy of one native record attempt for diagnostics. Docs: [Dump 3D diagnostics](../../docs/reshade-sbs.md#dump-3d-diagnostics).
 - [`depth_capture/observation.inl`](depth_capture/observation.inl): part of `streamline_depth_capture.cpp` (end of the shell): command-list and recording identity, per-recording source states and barriers, the Reset/Close/render-pass lifecycle, the executed-list state proof, ReShade's list and runtime-list events, Present observation, and the depth-texture lifecycle. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`depth_capture/queues.inl`](depth_capture/queues.inl): part of `streamline_depth_capture.cpp` (end of the shell): queue places and their reclaiming, producer and consumer submissions and their fences, whether another queue may read a copy and which queue reads depth, copy-out on the producer queue, the submission hook, retired queues and each queue's newest game execution. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 
 #### Native observer
 

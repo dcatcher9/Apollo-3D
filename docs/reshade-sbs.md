@@ -3954,7 +3954,7 @@ selected but its pixels are unavailable until its private producer fence complet
 game's own fence waits order the reading queue after its copy-out ([Queue order](#queue-order),
 U-C1).
 
-**Copy-out on the producer queue** (10-27; `copy_out` in `streamline_depth_capture.cpp`). Games
+**Copy-out on the producer queue** (10-27; `copy_out` in `depth_capture/queues.inl`). Games
 reset their lists late (Assassin's Creed Shadows every few frames), so with Reset as the only
 rule an SR snapshot on the render queue became readable on the presenting queue 110-235 ms after
 its evaluation, and DLSS-G's compute copies three of its evaluations later. Now the submission
