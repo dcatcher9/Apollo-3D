@@ -12,6 +12,7 @@
 #include "game3d_display_scale.h"
 #include "game3d_renderer.h"
 #include "game3d_depth_input.h"
+#include "hook_host.h"
 #include "game3d_ui_input_provider.h"
 #include "game3d_ui_counters.h"
 #include "game3d_ui_selection.h"
@@ -1179,8 +1180,8 @@ namespace {
       }
     }
 
-    void prepare_native_depth(api::effect_runtime *runtime, api::command_list *commands,
-                              api::resource_view effects_rtv) {
+    void prepare_native_depth(api::effect_runtime *runtime, api::command_list *,
+                              api::resource_view) {
       std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
       if (!lock.owns_lock()) return;
       auto &proof = runtimes_[runtime];
@@ -1269,7 +1270,7 @@ namespace {
 #endif
       {
         const sunshine_game3d::slow_step step("depth input observation");
-        sunshine_game3d::depth_input::observe(runtime, commands, effects_rtv, depth);
+        sunshine_game3d::hook_host::poll();
       }
       const auto now = GetTickCount64();
       frame_decision_t frame;
@@ -2106,7 +2107,7 @@ namespace {
     addon_session().end([&] {
       sunshine_streamline::native_observer::set_submission_listener(nullptr);
       sunshine_game3d::ui_layer::unregister_events();
-      sunshine_game3d::depth_input::shutdown_observers();
+      sunshine_game3d::hook_host::shutdown();
       sunshine_depth::shutdown();
       reshade::unregister_addon(addon, reshade);
     });
@@ -2314,7 +2315,7 @@ extern "C" {
       }
       // Generic Depth is registered before external add-ons. On a first manual
       // installation the module can request a restart while export stays available.
-      sunshine_game3d::depth_input::initialize_observers(addon);
+      sunshine_game3d::hook_host::initialize(addon);
       sunshine_depth::initialize(addon);
       reshade::register_event<reshade::addon_event::init_effect_runtime>(sunshine_addon_lifetime::guarded<on_init_runtime>);
       reshade::register_event<reshade::addon_event::reshade_begin_effects>(sunshine_addon_lifetime::guarded<on_begin_effects>);

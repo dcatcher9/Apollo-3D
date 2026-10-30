@@ -1579,7 +1579,8 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 
 #### Hook host and configuration
 
-- [`game3d_depth_input.cpp`](game3d_depth_input.cpp), [`game3d_depth_input.h`](game3d_depth_input.h): the per-Present depth-input maintenance the exporter runs (capture observation, deferred hook discovery) and its readiness state. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
+- [`game3d_depth_input.cpp`](game3d_depth_input.cpp), [`game3d_depth_input.h`](game3d_depth_input.h): presentation-facing depth/camera queries, completed samples and readiness state. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
+- [`hook_host.cpp`](hook_host.cpp), [`hook_host.h`](hook_host.h): the exporter's per-Present maintenance sequencer and observer lifecycle facade. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
 
 #### NGX
 

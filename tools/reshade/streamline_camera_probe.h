@@ -14,7 +14,7 @@
 namespace sunshine_streamline {
   // Source adapters share these hooks and can nominate/copy current depth.
   // All branches preserve the application's original API data.
-  // Discovery and deferred logging occur only from poll, outside loader callbacks.
+  // Discovery and deferred logging run only through the hook host, outside loader callbacks.
   void initialize(HMODULE addon);
   // Lightweight supported-DLL source nomination is enabled by default.
   bool source_enabled();
@@ -23,7 +23,27 @@ namespace sunshine_streamline {
   std::uint64_t depth_observation_revision();
   // Exact-revision diagnostics only; absence never changes observation validity.
   bool query_depth_observation_loss(std::uint64_t revision, loss_diagnostics::event &out);
-  void poll();
+  // The adapter owns the poll lock and all installation state. The hook host
+  // holds this guard across the whole per-Present maintenance sequence.
+  class poll_guard {
+  public:
+    ~poll_guard();
+    poll_guard(const poll_guard &) = delete;
+    poll_guard &operator=(const poll_guard &) = delete;
+    explicit operator bool() const { return acquired_; }
+  private:
+    explicit poll_guard(bool acquired) : acquired_(acquired) {}
+    bool acquired_;
+    friend poll_guard try_poll();
+  };
+  poll_guard try_poll();
+  bool middleware_requested_for_poll();
+  void discovery_step(bool api_requested, std::uint64_t now);
+  void coverage_step();
+  void camera_availability_step(std::uint64_t now);
+  void depth_capture_step();
+  void queue_order_step(std::uint64_t now);
+  void pending_installs_step();
   // Installed hooks and their pinned modules remain alive as pure pass-through until
   // process exit. This never waits for game threads or removes a live trampoline.
   void shutdown();

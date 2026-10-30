@@ -94,8 +94,9 @@ ReShade / Streamline / NGX adapters
        -> native renderer -> stereo export
 ```
 
-`game3d_depth_input` owns the presentation-facing depth/camera queries and passive
-observer calls. Camera conversion and jitter remain attached to the exact captured depth;
+`game3d_depth_input` owns the presentation-facing depth/camera queries. `hook_host`
+sequences passive observer calls under the Streamline adapter's poll lock; that adapter
+keeps its installation state. Camera conversion and jitter remain attached to the exact captured depth;
 there is no separate camera selection that could mix providers or frames. Current readiness,
 completed calibration evidence and permission to reuse prior pixels remain distinct.
 `game3d_ui_input_provider` owns feature observation, capture requests, mask selection and

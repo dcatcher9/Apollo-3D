@@ -4,6 +4,7 @@
 #include "streamline_camera_data.h"
 #include "addon_lifetime.h"
 #include "streamline_camera_probe.h"
+#include "hook_host.h"
 #include "streamline_buffer_contract.h"
 #include "streamline_depth_provider.h"
 #include "streamline_camera_version.h"
@@ -588,7 +589,7 @@ namespace {
     fixture cleanup;
     require(GetModuleHandleW(L"sl.interposer.dll") == nullptr, "isolated test unexpectedly contains Streamline DLL");
     initialize(nullptr);
-    poll();  // Real discovery path must remain inert when middleware is absent.
+    sunshine_game3d::hook_host::poll();  // Real discovery path must remain inert when middleware is absent.
     require(GetModuleHandleW(L"sl.interposer.dll") == nullptr, "probe loaded middleware during discovery");
     require(!testing::install(testing::abi::unsupported, v2_targets), "unsupported ABI installed hooks");
     require(!testing::install(testing::abi::v2_7_30, {}), "empty export set installed hooks");
@@ -2230,7 +2231,7 @@ namespace {
     initialize(nullptr);
     require(!testing::install(testing::abi::v1_1_1, v1_targets), "Disabled probe installed middleware hooks");
     const auto before = testing::counts();
-    poll();
+    sunshine_game3d::hook_host::poll();
     const auto after = testing::counts();
     unchanged(before, after, "Disabled probe observed middleware calls");
     require(before.dropped == after.dropped && before.invalid == after.invalid,

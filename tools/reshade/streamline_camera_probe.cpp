@@ -1950,36 +1950,52 @@ namespace sunshine_streamline {
     }
   }
 
-  void poll() {
-    const bool api_requested = middleware_requested() || sunshine_upscaler_trace::enabled() ||
-      sunshine_upscaler_trace::capture_enabled();
-    if (!api_requested && !depth_capture::active()) return;
-    if (!TryAcquireSRWLockExclusive(&poll_lock)) return;
-    struct release_poll { ~release_poll() { ReleaseSRWLockExclusive(&poll_lock); } } release;
-    const auto now = GetTickCount64();
+  poll_guard::~poll_guard() {
+    if (acquired_) ReleaseSRWLockExclusive(&poll_lock);
+  }
+
+  poll_guard try_poll() {
+    return poll_guard(TryAcquireSRWLockExclusive(&poll_lock) != FALSE);
+  }
+
+  bool middleware_requested_for_poll() {
+    return middleware_requested();
+  }
+
+  void discovery_step(bool api_requested, std::uint64_t now) {
     if (api_requested && now >= next_discovery) {
       next_discovery = now + 1000;
       if (!hooks_installed && !permanently_rejected) schedule_install();
       if (hooks_installed) discover_v1_private_state();
       if (hooks_installed) discover_fg_options();
     }
+  }
+
+  void coverage_step() {
     // Call routing is independent of per-draw diagnostics and source selection.
     // A zero count is only useful together with actual hook coverage.
     sunshine_upscaler_trace::set_streamline_coverage(hooks_installed);
-    sunshine_upscaler_trace::poll();
+  }
+
+  void camera_availability_step(std::uint64_t now) {
     report_camera_availability(now);
-    // The common copy owner also serves Generic depth without an upscaler API.
-    // Middleware presence and selection preferences cannot gate its lifecycle.
-    if (depth_capture::active()) {
-      if (!minhook_initialized) {
-        const auto initialized = MH_Initialize();
-        minhook_initialized = initialized == MH_OK || initialized == MH_ERROR_ALREADY_INITIALIZED;
-      }
-      if (minhook_initialized) depth_capture::poll();
-      char order_line[1024];
-      if (depth_capture::queue_order_line(now, order_line, sizeof(order_line)))
-        sunshine_log::message(reshade::log::level::info, order_line);
+  }
+
+  void depth_capture_step() {
+    if (!minhook_initialized) {
+      const auto initialized = MH_Initialize();
+      minhook_initialized = initialized == MH_OK || initialized == MH_ERROR_ALREADY_INITIALIZED;
     }
+    if (minhook_initialized) depth_capture::poll();
+  }
+
+  void queue_order_step(std::uint64_t now) {
+    char order_line[1024];
+    if (depth_capture::queue_order_line(now, order_line, sizeof(order_line)))
+      sunshine_log::message(reshade::log::level::info, order_line);
+  }
+
+  void pending_installs_step() {
     if (middleware_requested() && observing.load(std::memory_order_acquire) && fg_targets_pending())
       schedule_install();
   }

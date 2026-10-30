@@ -42,15 +42,4 @@ namespace sunshine_game3d::depth_input {
   // the existing capture-owner lifetime and numerical-history rules unchanged.
   void invalidate_reuse(reshade::api::effect_runtime *runtime);
   void set_ready(reshade::api::effect_runtime *runtime, bool ready);
-
-  // Passive hook discovery.
-  // The selected frame is immutable input; this cannot select a different
-  // resource, enable calibration or associate unrelated camera/depth evidence.
-  void observe(reshade::api::effect_runtime *runtime, reshade::api::command_list *commands,
-    reshade::api::resource_view effects_rtv, const sunshine_depth::frame_depth &depth);
-
-  // Keep source-observer lifecycle ordering explicit at add-on initialization
-  // and shutdown, independently of renderer and per-runtime resource lifetime.
-  void initialize_observers(HMODULE addon);
-  void shutdown_observers();
 }
