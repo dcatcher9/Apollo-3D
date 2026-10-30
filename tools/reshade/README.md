@@ -1640,9 +1640,14 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 
 ##### depth_display
 
+- [`depth_display.inl`](depth_display.inl): provider display binding, allocation and fenced retirement. Docs: [depth_display](../../docs/reshade-sbs.md#depth_display).
+- [`depth_display_copy.inl`](depth_display_copy.inl): the exact-position display-copy block in provider `begin()`. Docs: [depth_display](../../docs/reshade-sbs.md#depth_display).
+
 #### API depth provider
 
 - [`streamline_depth_provider.cpp`](streamline_depth_provider.cpp), [`streamline_depth_provider.h`](streamline_depth_provider.h): the per-Present API depth decision, its display storage, DEPTH binding and readiness. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`provider_report.inl`](provider_report.inl): provider readiness, size and FG status gathering and formatting. Docs: [depth_display](../../docs/reshade-sbs.md#depth_display).
+- [`provider_report_present.inl`](provider_report_present.inl): the exact-position per-Present status publication. Docs: [depth_display](../../docs/reshade-sbs.md#depth_display).
 - [`streamline_depth_provider_log.h`](streamline_depth_provider_log.h): the provider's status lines, rendered from gathered values. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`scene_depth_source.h`](scene_depth_source.h): the small value snapshot a provider adapter emits after validating its own evidence. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
 - [`depth_cache_update.h`](depth_cache_update.h): retained Streamline frame-generation scope predicates. Docs: [depth_hold](../../docs/reshade-sbs.md#depth_hold).

@@ -187,42 +187,8 @@ namespace sunshine_streamline::provider {
         sunshine_depth::depth_orientation::automatic : packet.metadata.projection.reversed ?
           sunshine_depth::depth_orientation::reversed : sunshine_depth::depth_orientation::normal;
     }
-    void bind(api::effect_runtime *runtime, state &data, api::resource_view view, bool ready) {
-      // ReShade 6.8 waits for the whole queue on every update, even if the
-      // handle is unchanged. Keep the descriptor stable while pixels rotate.
-      if (view != data.bound_view) {
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-        depth_events::binding(runtime, depth_events::site_id::provider_bind, view.handle != 0);
-#endif
-        const sunshine_game3d::slow_step step("API depth binding");
-        runtime->update_texture_bindings("DEPTH", view, view);
-        data.bound_view = view;
-        data.effects_view = view;
-      }
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-      depth_events::readiness(runtime, depth_events::site_id::provider_bind_ready, ready);
-#endif
-      set_depth_ready(runtime, ready);
-    }
-    // Requires an idle runtime queue (teardown only).
-    void destroy_display(api::effect_runtime *runtime, state &data) {
-      data.cache.invalidate("display_recreated");
-      auto *device = runtime->get_device();
-      for (auto &entry : data.displays) {
-        if (entry.view.handle) device->destroy_resource_view(entry.view);
-        if (entry.texture.handle) device->destroy_resource(entry.texture);
-        entry = {};
-      }
-      for (auto &entry : data.retired_displays) {
-        if (entry.view.handle) device->destroy_resource_view(entry.view);
-        if (entry.texture.handle) device->destroy_resource(entry.texture);
-      }
-      data.retired_displays.clear();
-      if (data.retire_fence.handle) device->destroy_fence(data.retire_fence);
-      data.retire_fence = {};
-      data.display_view = {}; data.display_texture = {};
-      data.display_width = data.display_height = data.display_format = data.display_view_format = 0;
-    }
+    void bind(api::effect_runtime *runtime, state &data, api::resource_view view, bool ready);
+    void destroy_display(api::effect_runtime *runtime, state &data);
     // Retired displays whose fence completed, released on a pool thread: a
     // texture's last Release frees its video memory in the driver and
     // ReShade's view release takes its device-wide lock, and either can wait
@@ -234,98 +200,11 @@ namespace sunshine_streamline::provider {
       std::shared_ptr<state::release_jobs> owner;
       std::vector<state::retired_display> entries;
     };
-    // pooled: on a pool thread, which logs its own slow release (on the
-    // present thread "depth display retirement" names it). Leaves the count
-    // last: destroy() may return, and the device go, as soon as it is zero.
-    void release_displays(display_release &job, bool pooled) {
-      LARGE_INTEGER start{}, end{}, frequency{};
-      QueryPerformanceCounter(&start);
-      std::uint64_t bytes = 0;
-      // At process exit the device may be gone: nothing is released then.
-      if (!sunshine_addon_lifetime::stopping())
-        for (const auto &entry : job.entries) {
-          if (entry.view.handle) job.device->destroy_resource_view(entry.view);
-          if (entry.texture.handle) job.device->destroy_resource(entry.texture);
-          bytes += entry.bytes;
-        }
-      QueryPerformanceCounter(&end);
-      QueryPerformanceFrequency(&frequency);
-      const double ms = double(end.QuadPart - start.QuadPart) * 1000.0 / double(frequency.QuadPart);
-      static std::atomic<std::uint64_t> next_line{};
-      const auto now = GetTickCount64();
-      auto due = next_line.load(std::memory_order_relaxed);
-      if (pooled && ms >= 8.0 && now >= due && next_line.compare_exchange_strong(due, now + 1000)) {
-        const sunshine_game3d::vram::latest_suffix memory;
-        char text[256];
-        std::snprintf(text, sizeof(text), "Sunshine Game 3D: depth display release took %.1f ms off the present thread "
-          "(%u textures, %.1f MiB)%s", ms, static_cast<unsigned>(job.entries.size()), double(bytes) / 1048576.0, memory.text);
-        sunshine_log::message(reshade::log::level::info, text);
-      }
-      const auto owner = job.owner;
-      {
-        std::lock_guard lock(owner->mutex);
-        --owner->outstanding;
-      }
-      owner->idle.notify_all();
-    }
-    void CALLBACK release_task(PTP_CALLBACK_INSTANCE, void *context) {
-      const std::unique_ptr<display_release> job(static_cast<display_release *>(context));
-      release_displays(*job, true);
-    }
-    // Without a pool thread, the entries go here, as before 10-27.
-    void submit_release(std::unique_ptr<display_release> job) {
-      {
-        std::lock_guard lock(job->owner->mutex);
-        ++job->owner->outstanding;
-      }
-      if (TrySubmitThreadpoolCallback(release_task, job.get(), nullptr)) {
-        job.release();
-        return;
-      }
-      release_displays(*job, false);
-    }
-    // Teardown. Once ExitProcess has begun, every other thread (the pool's
-    // too) has ended: a job that has not run never will, and none runs.
-    void wait_releases(state::release_jobs &jobs) {
-      using shutdown_query = BOOLEAN(NTAPI *)();
-      static const auto shutting_down = reinterpret_cast<shutdown_query>(
-        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress")));
-      if (sunshine_addon_lifetime::stopping() || (shutting_down && shutting_down())) return;
-      std::unique_lock lock(jobs.mutex);
-      jobs.idle.wait(lock, [&jobs] { return !jobs.outstanding; });
-    }
-    // Once per Present. A retired display is fenced on a Present after the one
-    // that replaced it, when every earlier read of it (effects, renderer,
-    // sampler) is already submitted on this queue; once that fence completed
-    // it is handed to a pool thread (display_release). Signaled natively, so
-    // ReShade's immediate list is not flushed early, and as the add-on's own
-    // (signal_own), so it never waits on the queue-order lock. The present
-    // thread only reads the fence and signals it.
-    void collect_displays(api::effect_runtime *runtime, state &data, std::uint64_t present) {
-      if (data.retired_displays.empty()) return;
-      auto *device = runtime->get_device();
-      // Only a fence initialize() failed to create is created here.
-      if (!data.retire_fence.handle && !device->create_fence(0, api::fence_flags::none, &data.retire_fence)) return;
-      auto *fence = reinterpret_cast<ID3D12Fence *>(data.retire_fence.handle);
-      auto *queue = reinterpret_cast<ID3D12CommandQueue *>(runtime->get_command_queue()->get_native());
-      const auto completed = fence->GetCompletedValue();
-      std::unique_ptr<display_release> released;
-      auto keep = data.retired_displays.begin();
-      for (auto &entry : data.retired_displays) {
-        if (!entry.fence_value && present > entry.present) {
-          const sunshine_game3d::slow_step step("depth display retire signal");
-          if (SUCCEEDED(native_observer::signal_own(queue, fence, data.retire_value + 1))) entry.fence_value = ++data.retire_value;
-        }
-        if (entry.fence_value && completed != UINT64_MAX && completed >= entry.fence_value) {
-          if (!released) released.reset(new display_release{device, data.releases, {}});
-          released->entries.push_back(entry);
-          continue;
-        }
-        *keep++ = entry;
-      }
-      data.retired_displays.erase(keep, data.retired_displays.end());
-      if (released) submit_release(std::move(released));
-    }
+    void release_displays(display_release &job, bool pooled);
+    void CALLBACK release_task(PTP_CALLBACK_INSTANCE, void *context);
+    void submit_release(std::unique_ptr<display_release> job);
+    void wait_releases(state::release_jobs &jobs);
+    void collect_displays(api::effect_runtime *runtime, state &data, std::uint64_t present);
     // The frame record's API rows (game3d_frame_record.h): this Present's
     // decision as begin() made it. Nothing reads them.
     void record_depth(api::effect_runtime *runtime, const sunshine_game3d::api_depth_decision &decision,
@@ -333,208 +212,14 @@ namespace sunshine_streamline::provider {
       if (auto *record = sunshine_game3d::frame_record_store::writable(runtime))
         sunshine_game3d::record_api_depth(*record, decision, present, GetTickCount64());
     }
-    // One "Sunshine depth FG switch" line per FG mode change (fg_switch_line),
-    // from every Present's readiness evidence. ready: the Present shows depth
-    // (fresh when copied, else a held copy). Diagnostic only.
-    void track_fg_switch(state &data, const readiness_evidence &e, bool ready, const char *why) {
-      auto &line = data.fg_switch;
-      const auto now = e.tick ? e.tick : GetTickCount64();
-      const auto emit = [&] {
-        char text[512]{};
-        format_fg_switch(text, sizeof(text), line);
-        sunshine_log::message(reshade::log::level::info, text);
-        line.active = false;
-      };
-      if (e.fg_query == frame_generation_query_status::observed && e.fg.known && e.fg.mode != data.fg_mode) {
-        if (line.active) emit();
-        line = {};
-        line.active = true;
-        line.viewport = e.fg.viewport; line.from = data.fg_mode; line.to = e.fg.mode; line.tick = now;
-        data.fg_mode = e.fg.mode;
-      }
-      if (!line.active) return;
-      ++line.presents;
-      if (ready && e.copied) {
-        line.fresh_ms = now >= line.tick ? now - line.tick : 0;
-        emit();
-        return;
-      }
-      if (!line.reasoned) {
-        line.reasoned = true;
-        // The display decision's own reason where it decided (a hold names
-        // why it held), else the Present's.
-        line.first_reason = e.source_reason && std::strcmp(e.source_reason, "not_checked") ? e.source_reason : why;
-        line.selection = e.capture.selection;
-      }
-      if (ready) {
-        ++line.held;
-        const auto tick = data.output.provided.tick;
-        if (tick && now >= tick) line.max_held_age = std::max(line.max_held_age, now - tick);
-      } else ++line.mono;
-      if (now - line.tick >= 1000) emit();
-    }
-    // presenting: a Present's decision (not an invalidation between them).
+    void track_fg_switch(state &data, const readiness_evidence &e, bool ready, const char *why);
     void trace_readiness(api::effect_runtime *runtime, state &data, const readiness_evidence &e,
-        bool ready, const char *why, bool presenting = true) {
-      const sunshine_game3d::slow_step step("depth readiness trace");
-      if (presenting) track_fg_switch(data, e, ready, why);
-      const bool changed = data.traced_ready != ready;
-      data.traced_ready = ready;
-      if (!changed) return;
-      const auto now = e.tick ? e.tick : GetTickCount64();
-      if (!ready) {
-        data.trace_loss_tick = now;
-        data.traced_loss = now >= data.next_trace_episode;
-        if (!data.traced_loss) { ++data.suppressed_trace_episodes; return; }
-        // At most four admitted loss episodes per second, each with its paired
-        // recovery. No ready/unavailable decision depends on this diagnostic.
-        data.next_trace_episode = now + 250;
-        const auto lookup = [](std::uint64_t revision) {
-          observation_loss_lookup out;
-          out.requested_revision = revision;
-          out.found = query_depth_observation_loss(revision, out.value);
-          return out;
-        };
-        auto &loss = data.trace_observation_loss;
-        loss.present = e.present;
-        loss.sampled_tick = GetTickCount64();
-        // Contemporaneous evidence only: depth decisions never consult it.
-        loss.sampled = lookup(depth_observation_revision());
-      } else if (!data.traced_loss) return; // No startup/recovery-only noise.
-      // The game process's latest video-memory sample (game3d_vram.h), which
-      // the present thread took before this Present's depth preparation.
-      const sunshine_game3d::vram::latest_suffix memory;
-      readiness_line line;
-      line.ready = ready; line.why = why;
-      line.runtime = reinterpret_cast<std::uint64_t>(runtime); line.native_swapchain = runtime->get_native();
-      line.now = now; line.loss_tick = data.trace_loss_tick; line.suppressed_episodes = data.suppressed_trace_episodes;
-      line.output_reused = data.output.reused_depth; line.current = data.frame.metadata;
-      line.retained_clear = data.cache.reason(); line.memory = memory.text;
-      char text[3072]{};
-      format_readiness(text, sizeof(text), e, line);
-      sunshine_log::message(reshade::log::level::info, text);
-      // Repeat the frozen first-loss evidence on recovery, without querying a
-      // newer revision or retroactively filling a missing/busy journal entry.
-      format_observation_evidence(text, sizeof(text), ready, reinterpret_cast<std::uint64_t>(runtime), data.trace_loss_tick,
-        data.trace_observation_loss);
-      sunshine_log::message(reshade::log::level::info, text);
-      data.suppressed_trace_episodes = 0;
-      if (ready) data.traced_loss = false;
-    }
-    void log_render_size(render_size_state &size, std::uint64_t now) {
-      size.next_line = now + 5000;
-      char text[640]{};
-      format_render_size(text, sizeof(text), size);
-      sunshine_log::message(reshade::log::level::info, text);
-      size.changes = size.held = 0;
-    }
-    // Counts render-size changes of one logical source (dynamic resolution),
-    // which keep depth ready: a fresh copy of a new size is used at once, and
-    // a Present whose newer size is still pending holds the previous copy
-    // (sunshine_game3d::depth_output::decide_display). At most one line every 5 s while the
-    // size changes. A new source, storage format or view first reports the
-    // previous source's unreported changes, then restarts the count.
-    void track_render_size(state &data, bool copied, bool held, bool selected) {
-      auto &size = data.render_size;
-      if (copied) {
-        const auto &packet = data.frame;
-        const auto &metadata = packet.metadata;
-        const std::array<std::uint64_t, 4> source{static_cast<std::uint64_t>(metadata.provider), metadata.epoch,
-          metadata.source_id, metadata.viewport};
-        const bool same = size.width && source == size.source && packet.format == size.format &&
-          packet.srv_format == size.view_format;
-        const bool resized = same && (packet.width != size.width || packet.height != size.height ||
-          packet.area.left != size.area.left || packet.area.top != size.area.top ||
-          packet.area.width != size.area.width || packet.area.height != size.area.height);
-        if (!same) {
-          if (size.changes) log_render_size(size, GetTickCount64());
-          size = {source, 0, 0, 0, 0, {}, 0, 0, 0, size.next_line};
-        }
-        if (resized) {
-          if (!size.changes) {
-            size.min_width = size.max_width = size.area.width;
-            size.min_height = size.max_height = size.area.height;
-          }
-          ++size.changes; ++size.total;
-          size.min_width = std::min(size.min_width, packet.area.width);
-          size.min_height = std::min(size.min_height, packet.area.height);
-          size.max_width = std::max(size.max_width, packet.area.width);
-          size.max_height = std::max(size.max_height, packet.area.height);
-        }
-        size.width = packet.width; size.height = packet.height; size.area = packet.area;
-        size.format = packet.format; size.view_format = packet.srv_format;
-      } else if (held && selected && size.width &&
-          (data.frame.width != data.output.width || data.frame.height != data.output.height ||
-           data.frame.area.width != data.output.active_width || data.frame.area.height != data.output.active_height)) {
-        // The held copy is the previous size; the selected newer one is pending.
-        ++size.held;
-      }
-      if (!size.changes) return;
-      const auto now = GetTickCount64();
-      if (now >= size.next_line) log_render_size(size, now);
-    }
-    void activate_display(state &data, const state::display_entry &entry) {
-      data.display_texture = entry.texture; data.display_view = entry.view;
-      data.display_width = entry.width; data.display_height = entry.height; data.display_format = entry.format;
-      data.display_view_format = entry.view_format;
-    }
+        bool ready, const char *why, bool presenting = true);
+    void log_render_size(render_size_state &size, std::uint64_t now);
+    void track_render_size(state &data, bool copied, bool held, bool selected);
+    void activate_display(state &data, const state::display_entry &entry);
     display_status prepare_display(api::effect_runtime *runtime, state &data, const depth_capture::packet &packet,
-        std::uint64_t present) {
-      const auto matches = [&](const state::display_entry &entry) {
-        return entry.texture.handle && entry.width == packet.width && entry.height == packet.height && entry.format == packet.format &&
-          entry.view_format == packet.srv_format;
-      };
-      if (data.display_texture.handle && data.display_width == packet.width && data.display_height == packet.height &&
-          data.display_format == packet.format && data.display_view_format == packet.srv_format) return display_status::ready;
-      // A new shape or format allocates here, on the present thread, and
-      // retires the inactive entry (released off it, collect_displays).
-      // Dynamic resolution makes that frequent, not rare (ACS 10-27b: 316
-      // render-size changes in one session). Ordinary rotation at one shape
-      // never allocates a texture or changes descriptors. A provider flip
-      // (NGX and Streamline usually differ in shape or format) switches to the
-      // other retained entry; the cache never reuses the other entry's pixels.
-      for (const auto &entry : data.displays) if (matches(entry)) {
-        activate_display(data, entry);
-        data.cache.invalidate("display_switched");
-        return display_status::ready;
-      }
-      // An empty entry, else the inactive one. The active entry is retained.
-      auto *victim = &data.displays[0];
-      for (auto &entry : data.displays) {
-        if (!entry.texture.handle) { victim = &entry; break; }
-        if (entry.texture != data.display_texture) victim = &entry;
-      }
-      if (victim->texture.handle) {
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-        depth_events::eviction(runtime, depth_events::site_id::provider_display_evict, victim->view == data.effects_view);
-#endif
-        // Effects can still name this view only if it was the last binding.
-        if (victim->view == data.effects_view) bind(runtime, data, {}, false);
-        const auto format = static_cast<api::format>(victim->format);
-        data.retired_displays.push_back({victim->texture, victim->view, present, 0,
-          std::uint64_t(api::format_slice_pitch(format, api::format_row_pitch(format, victim->width), victim->height))});
-        if (victim->texture == data.display_texture) { data.display_texture = {}; data.display_view = {}; }
-        *victim = {};
-      }
-      data.cache.invalidate("display_recreated");
-      api::resource_desc desc(packet.width, packet.height, 1, 1, static_cast<api::format>(packet.format), 1,
-        api::memory_heap::default_, api::resource_usage::shader_resource | api::resource_usage::copy_dest);
-      state::display_entry created;
-      if (!runtime->get_device()->create_resource(desc, nullptr, api::resource_usage::shader_resource, &created.texture))
-        return display_status::texture_creation_failed;
-      api::resource_view_desc view(static_cast<api::format>(packet.srv_format));
-      view.type = api::resource_view_type::texture_2d;
-      if (!runtime->get_device()->create_resource_view(created.texture, api::resource_usage::shader_resource, view, &created.view)) {
-        // Never read or bound: no GPU work references it yet.
-        runtime->get_device()->destroy_resource(created.texture);
-        return display_status::view_creation_failed;
-      }
-      created.width = packet.width; created.height = packet.height; created.format = packet.format;
-      created.view_format = packet.srv_format;
-      *victim = created;
-      activate_display(data, created);
-      return display_status::ready;
-    }
+        std::uint64_t present);
   }
 #ifdef SUNSHINE_SBS_TEST
   // Exercise the exact value-only publication used by the renderer and dump
@@ -545,207 +230,28 @@ namespace sunshine_streamline::provider {
     describe_copied_depth(out, packet, captured, display_texture, display_view, present);
   }
 #endif
-  // The status lines (streamline_depth_provider_log.h).
-  const char *name(display_status value) {
-    switch (value) {
-      case display_status::not_attempted: return "not_attempted";
-      case display_status::ready: return "ready";
-      case display_status::reused_depth: return "reused_depth";
-      case display_status::texture_creation_failed: return "texture_creation_failed";
-      case display_status::view_creation_failed: return "view_creation_failed";
-      case display_status::waiting_capture: return "waiting_capture";
-    }
-    return "unknown";
-  }
-  const char *name(sunshine_game3d::depth_output::display_action action) {
-    switch (action) {
-      case sunshine_game3d::depth_output::display_action::copy_fresh: return "copy_fresh";
-      case sunshine_game3d::depth_output::display_action::hold: return "hold";
-      case sunshine_game3d::depth_output::display_action::invalidate: return "invalidate";
-    }
-    return "unknown";
-  }
-  void format_readiness(char *text, std::size_t size, const readiness_evidence &e, const readiness_line &line) {
-    const auto now = line.now;
-    const auto age = [now](std::uint64_t tick) -> unsigned long long {
-      return tick && now >= tick ? now - tick : UINT64_MAX;
-    };
-    const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
-    const auto &c = e.capture;
-    const auto selection_age = [&c](std::uint64_t tick) -> unsigned long long {
-      return c.selection_tick_ms && tick && c.selection_tick_ms >= tick ? c.selection_tick_ms - tick : UINT64_MAX;
-    };
-    const auto &p = e.prior.provided;
-    const auto &current = line.current;
-    const auto provider_name = [](sunshine_scene_depth::provider_kind provider) {
-      return provider == sunshine_scene_depth::provider_kind::ngx ? "NGX" : "Streamline";
-    };
-    // An empty acquisition diagnostic's default enum is not source evidence.
-    // FG policy can still establish Streamline authority before a tag exists.
-    const char *current_provider = c.capture_id || c.sequence ? provider_name(c.provider) :
-      e.selection.require_frame_generation ? "Streamline" : "unknown";
-    std::snprintf(text, size,
-      "Sunshine depth readiness: %s reason=%s runtime=0x%llx native_swapchain=0x%llx present=%llu unavailable_ms=%llu suppressed_episodes=%llu; "
-      "provider=%s prior_provider=%s selected=%u snapshot_ready=%u copied=%u output_reused=%u display=%s selection=%s status=%s failure=%s "
-      "capture=%llu sequence=%llu newest_sequence=%llu epoch=%llu source=%llu viewport=%u "
-      "selection_tick_ms=%llu source_age_ms=%llu newest_view_age_ms=%llu active_views=%u "
-      "finished=%u success=%u submitted=%u invalid=%u capture_pending=%u capture_repeated=%u "
-      "fence=%llu completed=%llu completion_valid=%u producer_retired=%u; "
-      "FG_query=%u FG_known=%u FG_enabled=%u FG_mode=%u FG_generated=%u FG_epoch=%llu FG_viewport=%u require_FG=%u FG_silent=%u policy_epoch=%llu; "
-      "prior_output_ready=%u prior_retained=%u prior_age_ms=%llu prior_present=%llu prior_capture=%llu prior_sequence=%llu prior_epoch=%llu prior_source=%llu "
-      "prior_viewport=%u prior_observation=%llu current_observation=%llu prior_feedback=%llu current_feedback=%llu "
-      "prior_reset=%u current_reset=%u retained_clear=%s; "
-      "source_action=%s source_reason=%s cache_reason=%s "
-      "consumer=%s consumer_loss=%s cookie=%llu slot_invalid=%u%s",
-      line.ready ? "recovered" : "lost", line.why, u(line.runtime), u(line.native_swapchain), u(e.present),
-      line.ready && now >= line.loss_tick ? u(now - line.loss_tick) : 0ull, u(line.suppressed_episodes),
-      current_provider, e.prior_provider_known ? provider_name(e.prior_provider) : "unknown", unsigned(e.available),
-      unsigned(e.snapshot_ready), unsigned(e.copied), unsigned(line.output_reused), name(e.display),
-      depth_capture::name(c.selection), depth_capture::name(c.result), depth_capture::name(c.failure),
-      u(c.capture_id), u(c.sequence), u(c.newest_sequence), u(c.epoch), u(c.source_id), c.viewport,
-      u(c.selection_tick_ms), selection_age(c.source_tick_ms), selection_age(c.newest_view_tick_ms), c.active_view_count,
-      unsigned(c.finished), unsigned(c.success), unsigned(c.submitted), unsigned(c.invalid),
-      unsigned(c.pending_frame), unsigned(c.repeated_frame), u(c.producer_fence),
-      u(c.producer_completed), unsigned(c.producer_completion_valid), unsigned(c.producer_recording_retired),
-      unsigned(e.fg_query), unsigned(e.fg.known), unsigned(e.fg.enabled), e.fg.mode, e.fg.generated_frames,
-      u(e.fg.epoch), e.fg.viewport, unsigned(e.selection.require_frame_generation), unsigned(e.fg_silent), u(e.selection.epoch),
-      unsigned(e.prior_output_ready), unsigned(e.prior.ready), age(p.tick), u(e.prior.frame_index), u(e.prior_capture), u(p.sequence), u(p.epoch),
-      u(p.source_id), p.viewport, u(p.observation_revision), u(current.observation_revision),
-      u(p.feedback.revision), u(current.feedback.revision), unsigned(p.feedback.reset), unsigned(current.feedback.reset),
-      line.retained_clear, name(e.action), e.source_reason, e.cache_reason,
-      depth_capture::name(e.consumer.result), depth_capture::name(e.consumer.invalidation),
-      u(e.consumer.cookie), unsigned(e.consumer.slot_invalid), line.memory);
-  }
+  const char *name(display_status value);
+  const char *name(sunshine_game3d::depth_output::display_action action);
+  void format_readiness(char *text, std::size_t size, const readiness_evidence &e, const readiness_line &line);
   void format_observation_evidence(char *text, std::size_t size, bool ready, std::uint64_t runtime,
-      std::uint64_t loss_tick, const observation_loss_episode &loss) {
-    const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
-    const auto format_loss =[](const observation_loss_lookup &lookup, char *out, std::size_t size) {
-      const auto &event = lookup.value;
-      const auto &context = event.details;
-      std::snprintf(out, size,
-        "revision=%llu found=%u cause=%s site=%s line=%u tick_ms=%llu thread=%u sequence=%llu viewport=%u feature=%u sdk_known=%u sdk_result=%d reset=%u",
-        static_cast<unsigned long long>(lookup.requested_revision), unsigned(lookup.found),
-        lookup.found ? loss_diagnostics::name(event.cause) : "unavailable",
-        lookup.found && event.site ? event.site : "unavailable", event.line,
-        static_cast<unsigned long long>(event.tick), event.thread_id,
-        static_cast<unsigned long long>(context.sequence), context.viewport, context.feature,
-        unsigned(context.has_sdk_result), context.sdk_result, context.reset);
-    };
-    char sampled_loss[512]{};
-    format_loss(loss.sampled, sampled_loss, sizeof(sampled_loss));
-    std::snprintf(text, size,
-      "Sunshine depth observation evidence: %s runtime=0x%llx loss_present=%llu loss_tick_ms=%llu sampled_tick_ms=%llu origin=episode_start; "
-      "sampled_only={%s}",
-      ready ? "recovered" : "lost", u(runtime), u(loss.present),
-      u(loss_tick), u(loss.sampled_tick), sampled_loss);
-  }
-  void format_render_size(char *text, std::size_t size, const render_size_state &value) {
-    const auto provider = static_cast<sunshine_scene_depth::provider_kind>(value.source[0]);
-    std::snprintf(text, size,
-      "Sunshine depth render size: changed=%llu held=%llu total=%llu active=%ux%u..%ux%u now allocation=%ux%u "
-      "active=%u,%u,%u,%u; provider=%s epoch=%llu source=%llu viewport=%llu; dynamic resolution of one source: "
-      "each copy keeps its own size, a new size is used at once and a pending one holds the previous copy, so depth "
-      "stays ready",
-      static_cast<unsigned long long>(value.changes), static_cast<unsigned long long>(value.held),
-      static_cast<unsigned long long>(value.total), value.min_width, value.min_height, value.max_width, value.max_height,
-      value.width, value.height, value.area.left, value.area.top, value.area.width, value.area.height,
-      provider == sunshine_scene_depth::provider_kind::ngx ? "NGX" : "Streamline",
-      static_cast<unsigned long long>(value.source[1]), static_cast<unsigned long long>(value.source[2]),
-      static_cast<unsigned long long>(value.source[3]));
-  }
+      std::uint64_t loss_tick, const observation_loss_episode &loss);
+  void format_render_size(char *text, std::size_t size, const render_size_state &value);
   // The silent line names the FG scope's silence (freshness.h) in its text.
   static_assert(sunshine_freshness::fg_silent_ms == 1000);
   void format_frame_generation_scope(char *text, std::size_t size, bool silent, std::uint32_t viewport,
-      std::uint64_t epoch, std::uint64_t changes) {
-    std::snprintf(text, size, silent ?
-      "Sunshine Streamline frame generation depth scope: silent viewport=%u epoch=%llu changes=%llu; its newest frame has "
-      "no accepted FG depth copy (or none came for 1000 ms), so the viewport's ordinary SR/RR depth may supply depth until "
-      "the next FG copy" :
-      "Sunshine Streamline frame generation depth scope: live viewport=%u epoch=%llu changes=%llu; an accepted FG copy "
-      "owns the viewport's depth again",
-      viewport, static_cast<unsigned long long>(epoch), static_cast<unsigned long long>(changes));
-  }
-  void format_fg_switch(char *text, std::size_t size, const fg_switch_line &line) {
-    char fresh[24] = "none";
-    if (line.fresh_ms != UINT64_MAX) std::snprintf(fresh, sizeof(fresh), "%llu", static_cast<unsigned long long>(line.fresh_ms));
-    std::snprintf(text, size,
-      "Sunshine depth FG switch: viewport=%u mode=%u->%u presents=%llu first_fresh_ms=%s held=%llu max_held_age_ms=%llu "
-      "mono=%llu first_reason=%s selection=%s",
-      line.viewport, line.from, line.to, static_cast<unsigned long long>(line.presents), fresh,
-      static_cast<unsigned long long>(line.held), static_cast<unsigned long long>(line.max_held_age),
-      static_cast<unsigned long long>(line.mono), line.first_reason, depth_capture::name(line.selection));
-  }
+      std::uint64_t epoch, std::uint64_t changes);
+  void format_fg_switch(char *text, std::size_t size, const fg_switch_line &line);
   void format_unassociated(char *text, std::size_t size, depth_capture::status status,
-      const depth_capture::capture_diagnostic &capture, bool hold, std::uint64_t hold_ms) {
-    std::snprintf(text, size, "Sunshine API depth: %s; capture=%llu sequence=%llu epoch=%llu producer_queue=0x%llx consumer_queue=0x%llx requested_queue=0x%llx producer_fence=%llu producer_completed=%llu completion_valid=%u producer_retired=%u finished=%u success=%u submitted=%u invalid=%u cause=%s; using generic depth fallback",
-      depth_capture::name(status), static_cast<unsigned long long>(capture.capture_id),
-      static_cast<unsigned long long>(capture.sequence), static_cast<unsigned long long>(capture.epoch),
-      static_cast<unsigned long long>(capture.queue), static_cast<unsigned long long>(capture.consumer_queue),
-      static_cast<unsigned long long>(capture.requested_queue), static_cast<unsigned long long>(capture.producer_fence),
-      static_cast<unsigned long long>(capture.producer_completed), unsigned(capture.producer_completion_valid),
-      unsigned(capture.producer_recording_retired),
-      unsigned(capture.finished), unsigned(capture.success), unsigned(capture.submitted),
-      unsigned(capture.invalid), depth_capture::name(capture.failure));
-    if (hold) {
-      // The same evidence; ownership is held (mono) for the handoff.
-      const auto suffix = std::strstr(text, "; using generic depth fallback");
-      if (suffix) std::snprintf(suffix, size - std::size_t(suffix - text),
-        "; holding API ownership (mono) for a provider handoff, at most %llu ms",
-        static_cast<unsigned long long>(hold_ms));
-    }
-  }
+      const depth_capture::capture_diagnostic &capture, bool hold, std::uint64_t hold_ms);
   void format_selected(char *text, std::size_t size, const selected_line &line, const depth_capture::packet &frame,
-      const depth_capture::consumer_diagnostic &consumer, const depth_capture::capture_diagnostic &capture) {
-    std::snprintf(text, size, "Sunshine %s depth: %s; source_selected=1 snapshot_ready=%u final_ready=%u display=%s consumer=%s loss=%s; allocation=%ux%u active=%u,%u,%u,%u source=%u viewport=%u; metadata_projection=%u output_projection=%u; state=0x%x proof=%u; capture=%llu sequence=%llu present=%llu command=0x%llx cookie=%llu device=%llu expected_device=%llu slot_invalid=%u tracked_commands=%u; producer_queue=0x%llx consumer_queue=0x%llx producer_fence=%llu producer_completed=%llu completion_valid=%u producer_retired=%u; resource_id=%llu",
-      line.path, depth_capture::name(line.status), unsigned(frame.pixel_ready), unsigned(line.output_ready), name(line.display), depth_capture::name(consumer.result),
-      depth_capture::name(consumer.invalidation),
-      frame.width, frame.height, frame.area.left, frame.area.top, frame.area.width, frame.area.height,
-      unsigned(frame.metadata.resource.kind), frame.metadata.viewport,
-      unsigned(frame.metadata.projection.supplied), unsigned(line.output_projection_supplied),
-      frame.metadata.native_state, unsigned(frame.metadata.proof),
-      static_cast<unsigned long long>(frame.capture_id), static_cast<unsigned long long>(frame.metadata.sequence),
-      static_cast<unsigned long long>(line.present), static_cast<unsigned long long>(line.command),
-      static_cast<unsigned long long>(consumer.cookie), static_cast<unsigned long long>(consumer.device_identity),
-      static_cast<unsigned long long>(consumer.expected_device_identity), unsigned(consumer.slot_invalid), consumer.tracked_commands,
-      static_cast<unsigned long long>(capture.queue), static_cast<unsigned long long>(capture.consumer_queue),
-      static_cast<unsigned long long>(capture.producer_fence), static_cast<unsigned long long>(capture.producer_completed),
-      unsigned(capture.producer_completion_valid), unsigned(capture.producer_recording_retired),
-      static_cast<unsigned long long>(frame.resource_id));
-  }
+      const depth_capture::consumer_diagnostic &consumer, const depth_capture::capture_diagnostic &capture);
   void format_held(char *text, std::size_t size, const char *path, depth_capture::status status, bool output_ready,
-      display_status display, const depth_capture::capture_diagnostic &capture, const native_observer::counters &observer) {
-    std::snprintf(text, size, "Sunshine %s depth: %s; source_selected=0 provider_held=1 final_ready=%u display=%s cause=%s; capture=%llu sequence=%llu epoch=%llu producer_recording=%llu queue=0x%llx consumer_queue=0x%llx producer_fence=%llu producer_completed=%llu completion_valid=%u producer_retired=%u retire_fence=%llu finished=%u success=%u submitted=%u invalid=%u; observer_dropped=%llu unreadable=%llu rejected=%llu barrier_overflow=%llu submission_overflow=%llu discovery_contention=%llu",
-      path, depth_capture::name(status), unsigned(output_ready), name(display), depth_capture::name(capture.failure),
-      static_cast<unsigned long long>(capture.capture_id), static_cast<unsigned long long>(capture.sequence),
-      static_cast<unsigned long long>(capture.epoch), static_cast<unsigned long long>(capture.command),
-      static_cast<unsigned long long>(capture.queue), static_cast<unsigned long long>(capture.consumer_queue),
-      static_cast<unsigned long long>(capture.producer_fence), static_cast<unsigned long long>(capture.producer_completed),
-      unsigned(capture.producer_completion_valid), unsigned(capture.producer_recording_retired),
-      static_cast<unsigned long long>(capture.retire_fence), unsigned(capture.finished), unsigned(capture.success),
-      unsigned(capture.submitted), unsigned(capture.invalid), static_cast<unsigned long long>(observer.dropped),
-      static_cast<unsigned long long>(observer.unreadable), static_cast<unsigned long long>(observer.rejected),
-      static_cast<unsigned long long>(observer.barrier_overflow), static_cast<unsigned long long>(observer.submission_overflow),
-      static_cast<unsigned long long>(observer.discovery_contention));
-  }
+      display_status display, const depth_capture::capture_diagnostic &capture, const native_observer::counters &observer);
   void append_selection(char *text, std::size_t size, const depth_capture::capture_diagnostic &capture,
       const sunshine_game3d::depth_output::display_decision &update, std::uint64_t prior_depth_age,
-      const sunshine_scene_depth::jitter_offset &jitter) {
-    const auto used = std::strlen(text);
-    std::snprintf(text + used, size - used, "; selection=%s source_action=%s source_reason=%s consumed_completed_capture=%llu newest_sequence=%llu prior_depth_age_ms=%llu jitter_supplied=%u jitter_px=(%.6g,%.6g) jitter_render=%ux%u",
-      depth_capture::name(capture.selection), name(update.action), update.reason,
-      static_cast<unsigned long long>(capture.consumed_completed_capture),
-      static_cast<unsigned long long>(capture.newest_sequence),
-      static_cast<unsigned long long>(prior_depth_age), unsigned(jitter.supplied),
-      double(jitter.x), double(jitter.y), jitter.width, jitter.height);
-  }
+      const sunshine_scene_depth::jitter_offset &jitter);
   void append_loss(char *text, std::size_t size, bool known, const loss_diagnostics::event &loss, std::uint64_t age_ms,
-      std::uint64_t losses_since) {
-    const auto tail = std::strlen(text);
-    std::snprintf(text + tail, size - tail, "; last_loss=%s site=%s line=%u age_ms=%llu losses_since_last_line=%llu",
-      known ? sunshine_streamline::loss_diagnostics::name(loss.cause) : "unknown", known && loss.site ? loss.site : "unknown",
-      known ? loss.line : 0u, static_cast<unsigned long long>(age_ms),
-      static_cast<unsigned long long>(losses_since));
-  }
+      std::uint64_t losses_since);
   namespace {
     sunshine_game3d::record_key recorded_source(const sunshine_scene_depth::frame &value) {
       return {sunshine_scene_depth::reporting_api(value.provider), value.viewport, value.source_id};
@@ -789,24 +295,8 @@ namespace sunshine_streamline::provider {
       decision.epoch = shown.epoch; decision.frame_generation_input = shown.frame_generation_input;
     }
   }
-  void initialize(api::effect_runtime *runtime) {
-    auto *data = runtime->create_private_data<state>();
-    // The retire fence comes with the state, never from a Present's first
-    // retirement (a driver create on the present thread).
-    if (data && runtime->get_device()->get_api() == api::device_api::d3d12)
-      runtime->get_device()->create_fence(0, api::fence_flags::none, &data->retire_fence);
-  }
-  void destroy(api::effect_runtime *runtime) {
-    if (auto *data = runtime->get_private_data<state>()) {
-      // Every release job of this runtime finished first: none outlives it.
-      wait_releases(*data->releases);
-      const bool owned = std::any_of(data->displays.begin(), data->displays.end(),
-        [](const auto &entry) { return entry.texture.handle != 0; }) || !data->retired_displays.empty();
-      if (owned) runtime->get_command_queue()->wait_idle();
-      destroy_display(runtime, *data);
-    }
-    runtime->destroy_private_data<state>();
-  }
+  void initialize(api::effect_runtime *runtime);
+  void destroy(api::effect_runtime *runtime);
   void reload(api::effect_runtime *runtime) {
     if (auto *data = runtime->get_private_data<state>()) {
       const auto evidence = before_decision(*data, data->output.frame_index);
@@ -1160,21 +650,7 @@ namespace sunshine_streamline::provider {
     evidence.action = update.action;
     evidence.source_reason = update.reason;
     if (available) display = display_status::waiting_capture;
-    if (update.action == sunshine_game3d::depth_output::display_action::copy_fresh &&
-        (display = [&] { const sunshine_game3d::slow_step step("depth display preparation");
-          return prepare_display(runtime, *data, data->frame, present); }()) == display_status::ready) {
-      const auto &packet = data->frame;
-      copied = [&] { const sunshine_game3d::slow_step step("depth display copy");
-        return sunshine_depth::copy_selected_depth(runtime, commands, packet, data->display_texture, captured, &consumer); }();
-      if (!copied) display = display_status::waiting_capture;
-      else if (!(packet.metadata.projection.supplied || packet.metadata.projection.direction_supplied) &&
-            captured.detected_orientation != sunshine_depth::depth_orientation::automatic) {
-          // Reuse the existing repeated clear-value evidence only when the API
-          // supplies no direction. This never creates projection coefficients.
-          data->frame.metadata.projection.direction_supplied = true;
-          data->frame.metadata.projection.reversed = captured.detected_orientation == sunshine_depth::depth_orientation::reversed;
-      }
-    }
+#include "depth_display_copy.inl"
     if (update.action == sunshine_game3d::depth_output::display_action::copy_fresh && !copied) {
       // A failed fresh copy recorded nothing into the display storage (an
       // observation loss refuses the consumer's recording, for one): its
@@ -1253,44 +729,7 @@ namespace sunshine_streamline::provider {
       data->output.reused_depth ? sunshine_depth_stats::presentation_kind::reused : sunshine_depth_stats::presentation_kind::fresh);
     // Fresh and deliberately reused depth share the existing stable descriptor.
     bind(runtime, *data, data->display_view, data->output.ready);
-    const bool handoff_changed = display != data->last_display || consumer.result != data->last_consumer ||
-      capture_info.selection != data->last_selection ||
-      consumer.invalidation != data->last_loss || data->output.ready != data->last_output_ready;
-    if (data->logging.due(GetTickCount64(), status != data->last_status ||
-        capture_info.failure != data->last_capture_failure || handoff_changed, !previously_owned, !available)) {
-      char text[2560]{};
-      if (available) {
-        selected_line line;
-        line.path = path_name; line.status = status; line.output_ready = data->output.ready;
-        line.output_projection_supplied = data->output.projection.supplied; line.display = display;
-        line.present = present; line.command = commands->get_native();
-        format_selected(text, sizeof(text), line, data->frame, consumer, capture_info);
-      } else {
-        // A failed acquisition has no output packet. Its zeroed fields say
-        // nothing about the resource/camera that the provider actually tagged.
-        format_held(text, sizeof(text), path_name, status, data->output.ready, display, capture_info,
-          native_observer::counts());
-      }
-      append_selection(text, sizeof(text), capture_info, update, prior_depth_age, data->output.provided.jitter);
-      {
-        // The newest observation loss explains a revoked or missing capture;
-        // an absent journal entry is not evidence that nothing was lost.
-        const auto revision = sunshine_streamline::depth_observation_revision();
-        sunshine_streamline::loss_diagnostics::event loss{};
-        const bool known = revision && sunshine_streamline::query_depth_observation_loss(revision, loss);
-        const auto since = revision >= data->logged_loss_revision ? revision - data->logged_loss_revision : 0;
-        data->logged_loss_revision = revision;
-        append_loss(text, sizeof(text), known, loss, known ? GetTickCount64() - loss.tick : 0, since);
-      }
-      sunshine_log::message(reshade::log::level::info, text);
-      data->last_status = status;
-      data->last_selection = capture_info.selection;
-      data->last_capture_failure = capture_info.failure;
-      data->last_display = display;
-      data->last_consumer = consumer.result;
-      data->last_loss = consumer.invalidation;
-      data->last_output_ready = data->output.ready;
-    }
+#include "provider_report_present.inl"
     return true;
   }
   bool finish(api::effect_runtime *runtime, api::command_list *commands) {
@@ -1406,4 +845,7 @@ namespace sunshine_streamline::provider {
     if (out.ready) out.current = data->output.reused_depth ? data->last_valid : describe_source(data->frame);
     return out;
   }
+
+#include "depth_display.inl"
+#include "provider_report.inl"
 }

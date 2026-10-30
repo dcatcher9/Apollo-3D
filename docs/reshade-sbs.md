@@ -6015,6 +6015,14 @@ presentation-scope move. Capture types come from `depth_capture_types.h`.
 
 #### depth_display
 
+`depth_display.inl` implements the provider's display allocation, binding and
+fenced retirement within `streamline_depth_provider.cpp`'s translation unit.
+`depth_display_copy.inl` keeps copy preparation and publication at their original
+position in `begin()`. Status gathering and formatting live in `provider_report.inl`,
+with the Present's status-publication block in `provider_report_present.inl`;
+formatting declarations stay in `streamline_depth_provider_log.h`. Provider state
+and types remain in the shell, and the GPU calls keep their original sequence.
+
 ### Selecting scene depth
 
 If **Normal Depth View** shows a white field, stripes or dots during gameplay, the selected source
