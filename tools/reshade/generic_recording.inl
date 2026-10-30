@@ -114,7 +114,7 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 		// The clear needs DEPTH_WRITE (the D3D12 clear contract): it proves the
 		// state of subresource 0 when its list executes (proven_state.h).
 		if (cmd_list->get_device()->get_api() == device_api::d3d12 && sampled_plane)
-			sunshine_streamline::depth_capture::observe_depth_clear(cmd_list->get_native(), depth_stencil.handle);
+			capture_inputs::observe_depth_clear(cmd_list, depth_stencil);
 		// The game clear changes the source; no copy is made here.
 
 		std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
@@ -162,7 +162,7 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 	// ReShade runs this event before the native BeginRenderPass, so the clear
 	// above is observed outside the pass. The capture owner sees the pass from
 	// here on, before the synthesized binding below.
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_begin);
+	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_begin);
 
 	// If render pass has depth store operation set to 'discard', any copy performed after the render pass will likely contain broken data, so can only hope that the depth buffer can be copied before that ...
 
@@ -172,7 +172,7 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 
 static bool on_end_render_pass(command_list *cmd_list)
 {
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_end);
+	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_end);
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 	state.render_pass_depth = {};
 	state.render_pass_depth_uncertain = false;
@@ -314,13 +314,13 @@ static void on_content_barrier(command_list *, uint32_t, const resource *, const
 
 static void on_reset(command_list *cmd_list)
 {
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::reset);
+	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::reset);
 	auto &target_state = *cmd_list->get_private_data<state_tracking>();
 	target_state.reset();
 }
 static void on_close(command_list *cmd_list)
 {
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::closed);
+	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::closed);
 }
 static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 {

@@ -47,6 +47,7 @@
 #include "game3d_slow_step.h"
 #include "game3d_frame_record.h"
 #include "depth_addon_test_access.h"
+#include "capture_inputs.h"
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
 #include "game3d_test_depth_events.h"
 namespace depth_events = sunshine_game3d::test::depth_events;
@@ -364,37 +365,28 @@ static void on_destroy_device(device *device)
 	if (device->get_api() == device_api::d3d12)
 	{
 		char line[320]{};
-		const bool released = sunshine_streamline::depth_capture::release_device(device->get_native(), line, sizeof(line));
+		const bool released = capture_inputs::release_device(device, line, sizeof(line));
 		if (line[0])
 			sunshine_log::message(released ? reshade::log::level::info : reshade::log::level::warning, line);
 	}
 }
 
-// ReShade's own lifecycle for a D3D12 list; see depth_capture::observe_list_event.
-static void list_event(command_list *cmd_list, sunshine_streamline::depth_capture::list_event event)
-{
-	if (cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_capture::observe_list_event(cmd_list->get_native(), event);
-}
-
 static void on_init_command_list(command_list *cmd_list)
 {
 	cmd_list->create_private_data<state_tracking>(false);
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::created);
-	if (cmd_list->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_capture::observe_command(cmd_list->get_native());
+	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::created);
+	capture_inputs::observe_command(cmd_list);
 }
 static void on_destroy_command_list(command_list *cmd_list)
 {
-	list_event(cmd_list, sunshine_streamline::depth_capture::list_event::destroyed); // Retires its recording.
+	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::destroyed); // Retires its recording.
 	cmd_list->destroy_private_data<state_tracking>();
 }
 
 static void on_init_command_queue(command_queue *cmd_queue)
 {
 	cmd_queue->create_private_data<state_tracking>(true);
-	if (cmd_queue->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_capture::observe_queue(cmd_queue->get_native());
+	capture_inputs::observe_queue(cmd_queue);
 
 	if ((cmd_queue->get_type() & command_queue_type::graphics) == 0)
 		return;
@@ -404,8 +396,7 @@ static void on_init_command_queue(command_queue *cmd_queue)
 }
 static void on_destroy_command_queue(command_queue *cmd_queue)
 {
-	if (cmd_queue->get_device()->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_capture::retire_queue(cmd_queue->get_native());
+	capture_inputs::retire_queue(cmd_queue);
 	cmd_queue->destroy_private_data<state_tracking>();
 
 	device *const device = cmd_queue->get_device();
@@ -541,15 +532,6 @@ static bool on_create_resource_view(device *device, resource resource, resource_
 
 	return true;
 }
-// ReShade reports a D3D12 creation state as its usage: the native state's
-// bits, with COMMON as general. undefined (an UNDEFINED initial layout) and
-// any other value with general's bit name no legacy state.
-static uint32_t creation_state(resource_usage usage)
-{
-	if (usage == resource_usage::general) return D3D12_RESOURCE_STATE_COMMON;
-	const auto value = static_cast<uint32_t>(usage);
-	return usage == resource_usage::undefined || (value & static_cast<uint32_t>(resource_usage::general)) ? UINT32_MAX : value;
-}
 static void on_init_resource(device *device, const resource_desc &desc, const subresource_data *, resource_usage initial_state, resource resource)
 {
 	if (desc.type != resource_type::surface && desc.type != resource_type::texture_2d && (desc.type != resource_type::texture_3d || desc.texture.depth_or_layers > 1))
@@ -561,7 +543,7 @@ static void on_init_resource(device *device, const resource_desc &desc, const su
 	// The end-of-frame copy needs its state proven (record_preserved); the
 	// capture owner tracks it from this creation state.
 	if (device->get_api() == device_api::d3d12)
-		sunshine_streamline::depth_capture::resource_created(resource.handle, creation_state(initial_state));
+		capture_inputs::resource_created(resource, initial_state);
 
 	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
 
@@ -597,7 +579,7 @@ static void on_destroy_resource(device *device, resource resource)
 		// The capture owner's proven-state table forgets it (resource_created
 		// tracked it under this native identity).
 		if (it->second.api_identity)
-			sunshine_streamline::depth_capture::resource_destroyed(it->second.identity);
+			capture_inputs::resource_destroyed(it->second.identity);
 		device_data->depth_stencil_resources.erase(it);
 
 		// A backup resource is always created in D3D12 and Vulkan, so to find out if an effect runtime references this depth-stencil resource, can simply check if a backup resource was created for it
@@ -669,7 +651,7 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 		if (command_list *const immediate = presenting_queue->get_immediate_command_list();
 			immediate != nullptr && marker != 0 && sunshine_streamline::present_deferred(presenting_queue->get_native(), immediate->get_native()))
 			submit_deferred_copies(presenting_queue, immediate, marker);
-		sunshine_streamline::depth_capture::present(presenting_queue->get_native());
+		capture_inputs::present(presenting_queue);
 	}
 	sunshine_depth::begin_present(swapchain);
 	device *const device = swapchain->get_device();
