@@ -1107,9 +1107,6 @@ static void set_generic_capture_enabled(effect_runtime *runtime, generic_depth_d
 	if (device_data == nullptr)
 		return;
 	data.generic_capture_enabled = enabled;
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-	++data.generic_capture_transitions;
-#endif
 	if (enabled)
 		device_data->generic_capture_users.fetch_add(1, std::memory_order_relaxed);
 	else
@@ -1983,12 +1980,6 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 	{
 		auto &state = *queue->get_private_data<state_tracking>();
 		if (content_selection) resolve_transfer_lineage(state, *device_data);
-		for (auto &[depth_stencil, stats] : state.stats_per_used_depth_stencil)
-		{
-			if (const auto earlier_queue = queue_state.stats_per_used_depth_stencil.find(depth_stencil);
-				stats.copied_during_frame && earlier_queue != queue_state.stats_per_used_depth_stencil.end() && earlier_queue->second.copied_during_frame)
-				stats.copy_provenance_ambiguous = true; // Queue iteration is not GPU execution order.
-		}
 		if (trace) trace->add(queue, state, *device_data);
 		queue_state.merge(state, demand);
 
@@ -2013,7 +2004,6 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 			it != device_data->depth_stencil_resources.end()) // Otherwise resource was destroyed
 		{
 			depth_stencil_resource &info = it->second;
-			observe_preserved_layout(info, frame_stats);
 			info.orientation_evidence.observe(device_data->frame_index, frame_stats.clear_zero, frame_stats.clear_one, frame_stats.clear_other);
 
 			// Save to current list of depth-stencils on the device

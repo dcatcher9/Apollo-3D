@@ -296,15 +296,6 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 			else
 				stats.observe_viewport(source_stats.total.last_viewport);
 			stats.viewport_restart_pending |= source_stats.viewport_restart_pending;
-
-			if (source_stats.copied_during_frame)
-			{
-				stats.copied_viewport = source_stats.copied_viewport;
-				stats.copy_provenance_ambiguous = source_stats.copy_provenance_ambiguous;
-				stats.capture_ticket = source_stats.capture_ticket;
-			}
-
-			stats.copied_during_frame |= source_stats.copied_during_frame;
 			stats.clear_zero |= source_stats.clear_zero;
 			stats.clear_one |= source_stats.clear_one;
 			stats.clear_other |= source_stats.clear_other;
@@ -335,9 +326,6 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
     // Runtime ownership, separate from retained backup/view lifetime. API
     // capture can suspend generic work without destroying in-flight resources.
     bool generic_capture_enabled = false;
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-    uint64_t generic_capture_transitions = 0;
-#endif
     uint64_t runtime_epoch = s_next_sample_scope.fetch_add(1, std::memory_order_relaxed);
     bool raw_scene_requested = false, raw_latest_available = false;
     uint64_t raw_basis_epoch = 0, raw_pending_capture_id = 0;

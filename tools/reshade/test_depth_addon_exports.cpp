@@ -519,21 +519,16 @@ static void check_depth_snapshot_contract()
 	state_tracking cached(false), merged(false);
 	auto &cached_stats = cached.stats_per_used_depth_stencil[tracked];
 	cached_stats.total = {1200, 12, 3, 2, {0, 0, 1920, 1080, 0, 1}};
-	cached_stats.copied_during_frame = cached_stats.clear_zero = true;
-	cached_stats.copied_viewport = cached_stats.total.last_viewport;
-	cached_stats.capture_ticket.id = 77;
-	cached_stats.capture_ticket.texture = 88;
+	cached_stats.clear_zero = true;
 	merged.merge(cached); // Existing detailed accumulation must be cleared too.
 	merged.merge(cached, {false});
 	const auto &paused = merged.stats_per_used_depth_stencil.at(tracked);
 	require_snapshot(paused.total.has_work() && paused.total.work_count() == 0 &&
 		paused.total.vertices == 0 && paused.total.drawcalls_indirect == 0,
 		"Cached command lists repopulated paused candidate counters");
-	require_snapshot(paused.copied_during_frame && paused.clear_zero &&
-		paused.capture_ticket.id == 77 && paused.capture_ticket.texture == 88 &&
-		same_snapshot_viewport(paused.total.last_viewport, cached_stats.total.last_viewport) &&
-		same_snapshot_viewport(paused.copied_viewport, cached_stats.copied_viewport),
-		"Pausing candidate details changed preservation eligibility, layout or capture ownership");
+	require_snapshot(paused.clear_zero &&
+		same_snapshot_viewport(paused.total.last_viewport, cached_stats.total.last_viewport),
+		"Pausing candidate details changed clear evidence or layout");
 	state_tracking resumed(false);
 	resumed.merge(merged, {true});
 	require_snapshot(resumed.stats_per_used_depth_stencil.at(tracked).total.has_work() &&
@@ -911,36 +906,6 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 	state.stats_per_used_depth_stencil.clear(); state.current_depth_stencil = {};
 	ok &= !on_dispatch_mesh(cmd, 1, 1, 1) && state.stats_per_used_depth_stencil.empty();
 	return ok ? TRUE : FALSE;
-}
-
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestCaptureDemand(effect_runtime *runtime,
-	BOOL *enabled, unsigned *users, uint64_t *transitions)
-{
-	if (!runtime || !enabled || !users || !transitions) return FALSE;
-	const auto *data = runtime->get_private_data<generic_depth_data>();
-	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
-	if (!data || !device_data) return FALSE;
-	*enabled = data->generic_capture_enabled ? TRUE : FALSE;
-	*users = device_data->generic_capture_users.load(std::memory_order_relaxed);
-	*transitions = data->generic_capture_transitions;
-	return TRUE;
-}
-
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestFrame(effect_runtime *runtime, sunshine_depth::frame_depth *output)
-{
-	return output != nullptr && sunshine_depth::get_frame_depth(runtime, *output, sunshine_depth::depth_orientation::automatic, false);
-}
-
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestLegacyCalibrationState(effect_runtime *runtime, unsigned *requested, unsigned *entries)
-{
-	if (!s_registered || runtime == nullptr || requested == nullptr || entries == nullptr)
-		return FALSE;
-	const auto *data = runtime->get_private_data<generic_depth_data>();
-	if (data == nullptr)
-		return FALSE;
-	*requested = data->native_depth_requested ? 1u : 0u;
-	*entries = static_cast<unsigned>(data->native_calibrations.size());
-	return TRUE;
 }
 
 // The per-Present trace's queries (test_game3d_present_trace.h), last in this
