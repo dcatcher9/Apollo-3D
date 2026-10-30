@@ -3814,7 +3814,7 @@ adapter retains is also watched from its retention, for the enhanced-layout latc
 `ExecuteCommandLists` returns, in submission order, each list that the barrier hooks observed in
 full proves the state its last transition or enhanced barrier left a tracked texture in, for that
 queue only. A depth clear of the texture's subresource 0 after that barrier (`ClearDepthStencilView`
-with the depth flag, or a render pass that clears depth, which `depth_addon.cpp` reports) proves
+with the depth flag, or a render pass that clears depth, which `generic_recording.inl` reports) proves
 what the clear contract requires, so a game that clears its depth every frame re-proves it every
 frame. That is `DEPTH_WRITE`, or the `DEPTH_STENCIL_WRITE` layout (with its write access) where
 enhanced barriers own the texture's layout: the last barrier before the clear on that list was an
