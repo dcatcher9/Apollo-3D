@@ -169,9 +169,9 @@ namespace {
 
     static void retained_depth_decision() {
       using namespace sunshine_streamline;
-      using action = depth_capture::display_action;
+      using action = sunshine_game3d::depth_output::display_action;
       using sunshine_scene_depth::provider_kind;
-      depth_capture::retained_depth previous;
+      sunshine_game3d::depth_output::retained_depth previous;
       previous.capture_id = 500; previous.real_present = 100;
       previous.width = 1920; previous.height = 1080; previous.format = 39; previous.view_format = 41;
       previous.area = {0, 0, 1920, 1080};
@@ -185,11 +185,11 @@ namespace {
       pending.provider = metadata.provider; pending.epoch = metadata.epoch;
       pending.source_id = metadata.source_id; pending.viewport = metadata.viewport;
       pending.sequence = 31; pending.capture_id = 501;
-      const auto decide = [&](const depth_capture::retained_depth &before, const depth_capture::acquisition_decision &proof,
+      const auto decide = [&](const sunshine_game3d::depth_output::retained_depth &before, const depth_capture::acquisition_decision &proof,
           const depth_capture::packet &candidate = {}, depth_capture::selection_policy policy = {}, std::uint64_t now = 1032) {
-        return depth_capture::decide_display(proof, candidate, before, policy, now);
+        return sunshine_game3d::depth_output::decide_display(proof, candidate, before, policy, now);
       };
-      const auto held = [&](const depth_capture::retained_depth &before, const depth_capture::acquisition_decision &proof,
+      const auto held = [&](const sunshine_game3d::depth_output::retained_depth &before, const depth_capture::acquisition_decision &proof,
           const depth_capture::packet &candidate = {}, depth_capture::selection_policy policy = {}, std::uint64_t now = 1032) {
         const auto result = decide(before, proof, candidate, policy, now);
         return result.action == action::hold && std::strcmp(result.reason, "retained_copy") == 0;
@@ -371,7 +371,7 @@ namespace {
     static sunshine_game3d::api_depth_decision provider_decision(
         const sunshine_streamline::depth_capture::acquisition_decision &proof,
         const sunshine_streamline::depth_capture::selection_policy &policy, bool fg_silent, bool associated, bool handoff,
-        const sunshine_streamline::depth_capture::display_decision &shown, bool frame_generation_input,
+        const sunshine_game3d::depth_output::display_decision &shown, bool frame_generation_input,
         sunshine_streamline::depth_capture::selection_reason selection,
         sunshine_streamline::depth_capture::status result = sunshine_streamline::depth_capture::status::ready,
         const sunshine_scene_depth::frame &held = {}) {
@@ -389,8 +389,8 @@ namespace {
       const provider::frame_generation_selection scope{fg_silent ? depth_capture::selection_policy{} : policy, fg_silent};
       auto out = provider::describe_acquisition(policy, scope, associated, handoff, capture,
         proof.source_selected ? &copied : nullptr);
-      const bool fresh = shown.action == depth_capture::display_action::copy_fresh;
-      provider::describe_display(out, fresh, fresh || shown.action == depth_capture::display_action::hold, shown.reason,
+      const bool fresh = shown.action == sunshine_game3d::depth_output::display_action::copy_fresh;
+      provider::describe_display(out, fresh, fresh || shown.action == sunshine_game3d::depth_output::display_action::hold, shown.reason,
         held);
       return out;
     }
@@ -399,7 +399,7 @@ namespace {
       using sunshine_game3d::source_slot;
       using sunshine_game3d::source_state;
       using sunshine_scene_depth::provider_kind;
-      using action = depth_capture::display_action;
+      using action = sunshine_game3d::depth_output::display_action;
       using reason = depth_capture::selection_reason;
       const auto row_is = [](const sunshine_game3d::source_status &row, source_state state, const char *reason,
           source_slot fallback = source_slot::none) {
@@ -408,7 +408,7 @@ namespace {
       // Ordinary SR depth of one pipelined Streamline source (the timeline of
       // retained_depth_decision): fresh, held while its successor is pending,
       // expired to mono under association, released to Generic, a handoff.
-      depth_capture::retained_depth previous;
+      sunshine_game3d::depth_output::retained_depth previous;
       previous.capture_id = 500; previous.width = 1920; previous.height = 1080; previous.format = 39;
       previous.view_format = 41; previous.area = {0, 0, 1920, 1080};
       auto &metadata = previous.metadata;
@@ -425,7 +425,7 @@ namespace {
       selected.provider = metadata.provider; selected.epoch = metadata.epoch; selected.viewport = metadata.viewport;
       selected.sequence = 31; selected.capture_id = 501;
       sunshine_game3d::frame_record record;
-      const auto fresh = depth_capture::decide_display(selected, candidate, {}, {}, 1032);
+      const auto fresh = sunshine_game3d::depth_output::decide_display(selected, candidate, {}, {}, 1032);
       require(fresh.action == action::copy_fresh, "Frame record fixture lost its fresh copy");
       sunshine_game3d::record_api_depth(record, provider_decision(selected, {}, false, true, false, fresh, false,
         reason::current_capture, depth_capture::status::ready, candidate.metadata), 1, 1032);
@@ -444,7 +444,7 @@ namespace {
       // The successor is pending: the display decision holds the finished copy.
       auto pending = selected;
       pending.source_selected = false; pending.pending_frame = true; pending.capture_id = 502; pending.sequence = 32;
-      const auto held = depth_capture::decide_display(pending, {}, previous, {}, 1100);
+      const auto held = sunshine_game3d::depth_output::decide_display(pending, {}, previous, {}, 1100);
       require(held.action == action::hold, "Frame record fixture lost its retained copy");
       sunshine_game3d::record_api_depth(record, provider_decision(pending, {}, false, true, false, held, false,
         reason::no_completed_snapshot, depth_capture::status::recorded, previous.metadata), 2, 1100);
@@ -463,7 +463,7 @@ namespace {
         "A held copy named the other provider's pending capture");
       // The copy outlived the source age: mono under the queue's association.
       auto failed = pending; failed.pending_frame = false; failed.source_valid = false;
-      const auto expired = depth_capture::decide_display(failed, {}, previous, {}, 1250);
+      const auto expired = sunshine_game3d::depth_output::decide_display(failed, {}, previous, {}, 1250);
       require(expired.action == action::invalidate, "Frame record fixture kept an expired copy");
       sunshine_game3d::record_api_depth(record, provider_decision(failed, {}, false, true, false, expired, false,
         reason::not_attempted, depth_capture::status::failed), 3, 1250);
@@ -517,7 +517,7 @@ namespace {
       auto fg_candidate = candidate;
       fg_candidate.metadata.frame_generation_input = true; fg_candidate.metadata.source_id = fg_retained.metadata.source_id;
       auto fg_selected = selected; fg_selected.source_id = fg_retained.metadata.source_id;
-      const auto fg_fresh = depth_capture::decide_display(fg_selected, fg_candidate, fg_retained, fg_policy, 1600);
+      const auto fg_fresh = sunshine_game3d::depth_output::decide_display(fg_selected, fg_candidate, fg_retained, fg_policy, 1600);
       require(fg_fresh.action == action::copy_fresh, "Frame record fixture lost its fresh FG copy");
       sunshine_game3d::record_api_depth(record, provider_decision(fg_selected, fg_policy, false, true, false, fg_fresh,
         true, reason::current_capture), 8, 1600);
@@ -530,7 +530,7 @@ namespace {
       fg_gap.epoch = fg_policy.epoch; fg_gap.viewport = fg_policy.viewport;
       fg_gap.source_id = fg_retained.metadata.source_id;
       fg_retained.metadata.tick = 1600;
-      const auto fg_held = depth_capture::decide_display(fg_gap, {}, fg_retained, fg_policy, 1610);
+      const auto fg_held = sunshine_game3d::depth_output::decide_display(fg_gap, {}, fg_retained, fg_policy, 1610);
       require(fg_held.action == action::hold, "Frame record fixture lost its generated-Present hold");
       sunshine_game3d::record_api_depth(record, provider_decision(fg_gap, fg_policy, false, true, false, fg_held, true,
         reason::fg_scope_missing, depth_capture::status::unavailable, fg_retained.metadata), 9, 1610);
@@ -540,7 +540,7 @@ namespace {
       const auto busy = source_policy.update(frame_generation_query_status::busy, {});
       require(busy.require_frame_generation && busy.epoch == fg_policy.epoch, "Frame record fixture lost a busy FG scope");
       // Silent: the selection runs without FG, and SR depth supplies the viewport.
-      const auto sr_fresh = depth_capture::decide_display(selected, candidate, {}, {}, 2700);
+      const auto sr_fresh = sunshine_game3d::depth_output::decide_display(selected, candidate, {}, {}, 2700);
       sunshine_game3d::record_api_depth(record, provider_decision(selected, busy, true, true, false, sr_fresh, false,
         reason::current_capture), 10, 2700);
       require(record.depth_owner == source_slot::scene_depth && row_is(scene, source_state::ready, "fresh_copy") &&
@@ -555,7 +555,7 @@ namespace {
         "The frame record did not name a silent FG scope held in mono");
       // Ambiguous: FG input authority is revoked, and its pixels are not reused.
       const auto excluded = source_policy.update(frame_generation_query_status::ambiguous, {});
-      const auto refused = depth_capture::decide_display(fg_selected, fg_candidate, fg_retained, excluded, 2720);
+      const auto refused = sunshine_game3d::depth_output::decide_display(fg_selected, fg_candidate, fg_retained, excluded, 2720);
       require(refused.action == action::invalidate && std::strcmp(refused.reason, "FG_scope_unconfirmed") == 0,
         "Frame record fixture reused unconfirmed FG input");
       sunshine_game3d::record_api_depth(record, provider_decision(fg_selected, excluded, false, true, false, refused,

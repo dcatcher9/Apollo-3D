@@ -2,7 +2,8 @@
 #include "streamline_depth_provider.h"
 #include "streamline_depth_provider_log.h"
 #include "streamline_camera_probe.h"
-#include "display_depth_cache.h"
+#include "depth_hold.h"
+#include "depth_cache_update.h"
 #include "game3d_frame_record.h"
 #include "streamline_depth_capture.h"
 #include "streamline_native_observer.h"
@@ -61,7 +62,7 @@ namespace sunshine_streamline::provider {
       depth_capture::packet frame;
       sunshine_scene_depth::frame source_metadata;
       sunshine_depth::frame_depth output;
-      display_depth_cache cache;
+      sunshine_game3d::depth_output::display_depth_cache cache;
       sunshine_depth_stats::presentation_window presentations;
       std::array<std::uint64_t, 5> presentation_source{};
       source_description last_valid;
@@ -430,7 +431,7 @@ namespace sunshine_streamline::provider {
     // Counts render-size changes of one logical source (dynamic resolution),
     // which keep depth ready: a fresh copy of a new size is used at once, and
     // a Present whose newer size is still pending holds the previous copy
-    // (depth_capture::decide_display). At most one line every 5 s while the
+    // (sunshine_game3d::depth_output::decide_display). At most one line every 5 s while the
     // size changes. A new source, storage format or view first reports the
     // previous source's unreported changes, then restarts the count.
     void track_render_size(state &data, bool copied, bool held, bool selected) {
@@ -556,11 +557,11 @@ namespace sunshine_streamline::provider {
     }
     return "unknown";
   }
-  const char *name(depth_capture::display_action action) {
+  const char *name(sunshine_game3d::depth_output::display_action action) {
     switch (action) {
-      case depth_capture::display_action::copy_fresh: return "copy_fresh";
-      case depth_capture::display_action::hold: return "hold";
-      case depth_capture::display_action::invalidate: return "invalidate";
+      case sunshine_game3d::depth_output::display_action::copy_fresh: return "copy_fresh";
+      case sunshine_game3d::depth_output::display_action::hold: return "hold";
+      case sunshine_game3d::depth_output::display_action::invalidate: return "invalidate";
     }
     return "unknown";
   }
@@ -727,7 +728,7 @@ namespace sunshine_streamline::provider {
       static_cast<unsigned long long>(observer.discovery_contention));
   }
   void append_selection(char *text, std::size_t size, const depth_capture::capture_diagnostic &capture,
-      const depth_capture::display_decision &update, std::uint64_t prior_depth_age,
+      const sunshine_game3d::depth_output::display_decision &update, std::uint64_t prior_depth_age,
       const sunshine_scene_depth::jitter_offset &jitter) {
     const auto used = std::strlen(text);
     std::snprintf(text + used, size - used, "; selection=%s source_action=%s source_reason=%s consumed_completed_capture=%llu newest_sequence=%llu prior_depth_age_ms=%llu jitter_supplied=%u jitter_px=(%.6g,%.6g) jitter_render=%ux%u",
@@ -1154,12 +1155,12 @@ namespace sunshine_streamline::provider {
     const auto &cached = data->cache.depth();
     const auto prior_depth_age = cached.ready && reuse_tick >= cached.provided.tick ?
       reuse_tick - cached.provided.tick : UINT64_MAX;
-    auto update = fg_hold ? depth_capture::display_decision{depth_capture::display_action::hold, fg_hold} :
-      depth_capture::decide_display(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
+    auto update = fg_hold ? sunshine_game3d::depth_output::display_decision{sunshine_game3d::depth_output::display_action::hold, fg_hold} :
+      sunshine_game3d::depth_output::decide_display(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
     evidence.action = update.action;
     evidence.source_reason = update.reason;
     if (available) display = display_status::waiting_capture;
-    if (update.action == depth_capture::display_action::copy_fresh &&
+    if (update.action == sunshine_game3d::depth_output::display_action::copy_fresh &&
         (display = [&] { const sunshine_game3d::slow_step step("depth display preparation");
           return prepare_display(runtime, *data, data->frame, present); }()) == display_status::ready) {
       const auto &packet = data->frame;
@@ -1174,12 +1175,12 @@ namespace sunshine_streamline::provider {
           data->frame.metadata.projection.reversed = captured.detected_orientation == sunshine_depth::depth_orientation::reversed;
       }
     }
-    if (update.action == depth_capture::display_action::copy_fresh && !copied) {
+    if (update.action == sunshine_game3d::depth_output::display_action::copy_fresh && !copied) {
       // A failed fresh copy recorded nothing into the display storage (an
       // observation loss refuses the consumer's recording, for one): its
       // frame is a failed newer frame, so the retained copy is held as for a
       // pending one (decide_failed_copy).
-      update = depth_capture::decide_failed_copy(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
+      update = sunshine_game3d::depth_output::decide_failed_copy(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
       evidence.action = update.action;
       evidence.source_reason = update.reason;
     }
@@ -1195,8 +1196,8 @@ namespace sunshine_streamline::provider {
       std::uint32_t color_width{}, color_height{};
       runtime->get_screenshot_width_and_height(&color_width, &color_height);
       data->cache.commit(out, packet.capture_id, packet.format, packet.srv_format, color_width, color_height, packet.present);
-    } else if (update.action == depth_capture::display_action::hold) {
-      display_cache_context context;
+    } else if (update.action == sunshine_game3d::depth_output::display_action::hold) {
+      sunshine_game3d::depth_output::display_cache_context context;
       std::uint32_t color_width{}, color_height{};
       runtime->get_screenshot_width_and_height(&color_width, &color_height);
       context.color_width = color_width; context.color_height = color_height;

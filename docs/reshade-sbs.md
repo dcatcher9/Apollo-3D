@@ -4610,7 +4610,7 @@ recording retired) the FG copy is held (readiness lines show `source_action=hold
 source_reason=FG_successor_pending`). This is one rule for both directions: a viewport's Streamline
 FG input and its ordinary SR/RR source of one epoch are one display lineage, whose newcomer takes
 the viewport at its first readable frame while the predecessor's copy is held within the source age
-(`decide_display`, `depth_capture::detail::lineage_successor`). So FG On, or a scope that supplies
+(`decide_display`, `sunshine_game3d::depth_output::detail::lineage_successor`). So FG On, or a scope that supplies
 again, shows the lineage's newest readable SR snapshot (`selection=lineage_snapshot`, above), else
 holds the viewport's SR copy, until the scope's first FG copy is readable
 (`source_reason=FG_copy_pending`), a live scope included: until 10-27 a live scope dropped every
@@ -4850,11 +4850,11 @@ storage and is otherwise exhausted. Idle live storage is released 2 s after its 
 Capture acquisition returns source authority separately from the packet's pixel readiness.
 Its typed decision carries the selected identity and repeated/pending continuity. The capture
 owner alone classifies SDK success, invalidation, recording retirement and producer completion.
-`depth_cache_update.h` turns those facts and the last successful copy's value description into
+`depth_hold.h` turns those facts and the last successful copy's value description into
 one source decision: `copy_fresh`, `hold`, or `invalidate`. It owns source identity, FG scope,
 depth layout/encoding and source-age policy; it does not consult observation revisions.
 
-`display_depth_cache.h` owns the sole reusable private depth frame. `copy_fresh` permits a copy
+`depth_hold.h` owns the sole reusable private depth frame. `copy_fresh` permits a copy
 attempt; only successful copying commits that frame and its capture identity, original timestamp,
 projection and crop. A failed attempt clears reuse eligibility and cannot fall back to a hold.
 `hold` verifies the cache's local color size, immediate command list, queue, texture/view and age,
@@ -6005,6 +6005,13 @@ changes; without that metadata the raw fallback cannot establish physical equiva
 #### depth_output
 
 #### depth_hold
+
+`depth_hold.h` owns the pure API display decision and private display-copy value,
+plus Generic's pure hold gate and value/age check. API lineage and storage validity
+remain distinct from Generic content serial, anchor and resource-map validity;
+the latter's resource-map and view checks stay in `generic_capture.inl`.
+`depth_cache_update.h` retains the Streamline FG scope predicates until the
+presentation-scope move. Capture types come from `depth_capture_types.h`.
 
 #### depth_display
 

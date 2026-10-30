@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-#include "display_depth_cache.h"
+#include "depth_hold.h"
+#include "depth_cache_update.h"
 #include "provided_raw_scene.h"
 
 #include <array>
@@ -10,8 +11,9 @@
 #include <string>
 
 namespace {
+  using sunshine_game3d::depth_output::display_depth_cache;
+  using sunshine_game3d::depth_output::display_cache_context;
   using namespace sunshine_streamline;
-  using namespace sunshine_streamline::provider;
   using sunshine_depth::frame_depth;
 
   void require(bool condition, const char *message) {
@@ -46,9 +48,9 @@ namespace {
     return value;
   }
   display_cache_context context() { return {3840, 2160, true, 113, 53, 59, 1016}; }
-  depth_capture::display_decision hold() {
-    depth_capture::display_decision out;
-    out.action = depth_capture::display_action::hold;
+  sunshine_game3d::depth_output::display_decision hold() {
+    sunshine_game3d::depth_output::display_decision out;
+    out.action = sunshine_game3d::depth_output::display_action::hold;
     out.reason = "retained_copy";
     return out;
   }
@@ -180,7 +182,7 @@ namespace {
   }
 
   void source_actions_and_commit() {
-    for (const auto action : {depth_capture::display_action::invalidate, depth_capture::display_action::copy_fresh}) {
+    for (const auto action : {sunshine_game3d::depth_output::display_action::invalidate, sunshine_game3d::depth_output::display_action::copy_fresh}) {
       display_depth_cache cache; const auto value = fresh(); auto out = value;
       arm(cache, value);
       auto decision = hold(); decision.action = action; decision.reason = "source_rejected";
@@ -214,7 +216,7 @@ namespace {
   // calibration: its logical domain has no pixel size. Another storage format
   // re-establishes readiness through one fresh copy of that format.
   void dynamic_resolution_sequence() {
-    using action = depth_capture::display_action;
+    using action = sunshine_game3d::depth_output::display_action;
     struct shape { std::uint32_t width, height; sunshine_scene_depth::extent area; };
     const shape sizes[] = {{2206, 1240, {0, 0, 2206, 1240}}, {2442, 1374, {0, 0, 2442, 1374}},
       {2658, 1494, {0, 0, 2658, 1494}}, {2442, 1374, {0, 0, 2048, 1152}}};
@@ -257,12 +259,12 @@ namespace {
     };
     display_depth_cache cache;
     std::uint64_t active_texture{}, present{};
-    depth_capture::display_decision decision;
+    sunshine_game3d::depth_output::display_decision decision;
     // One Present: the decision against the retained copy, then the fresh
     // copy (describe_copied_depth and commit) or the hold.
     const auto publish = [&](const depth_capture::packet &candidate, std::uint64_t now) {
       ++present;
-      decision = depth_capture::decide_display(decision_for(candidate), candidate, cache.reference(), {}, now);
+      decision = sunshine_game3d::depth_output::decide_display(decision_for(candidate), candidate, cache.reference(), {}, now);
       frame_depth out;
       if (decision.action == action::copy_fresh) {
         out.provided = candidate.metadata;
@@ -360,7 +362,7 @@ namespace {
     arm(cache, value);
     depth_capture::selection_policy policy;
     policy.require_frame_generation = true; policy.epoch = 11; policy.viewport = 3; policy.enabled_tick = 900;
-    const auto holds = [&](const depth_capture::retained_depth &retained, const depth_capture::selection_policy &p,
+    const auto holds = [&](const sunshine_game3d::depth_output::retained_depth &retained, const depth_capture::selection_policy &p,
         std::uint64_t now) { return depth_capture::frame_generation_holds(retained, p, now); };
     const auto held = cache.reference();
     require(holds(held, policy, 1000) && holds(held, policy, 1000 + sunshine_freshness::source_age_ms - 1),
@@ -399,33 +401,33 @@ namespace {
     candidate.metadata.frame_generation_input = true;
     depth_capture::selection_policy silent;  // A silent scope selects as without FG.
     for (const auto &selection : {silent, policy}) {
-      const auto decides = [&](const depth_capture::retained_depth &retained, const depth_capture::acquisition_decision &current,
-          std::uint64_t now) { return depth_capture::decide_display(current, candidate, retained, selection, now); };
+      const auto decides = [&](const sunshine_game3d::depth_output::retained_depth &retained, const depth_capture::acquisition_decision &current,
+          std::uint64_t now) { return sunshine_game3d::depth_output::decide_display(current, candidate, retained, selection, now); };
       const char *scope = selection.require_frame_generation ? "a live scope's" : "a silent scope's";
       auto got = decides(sr, pending, 1000 + sunshine_freshness::source_age_ms - 1);
-      require(got.action == depth_capture::display_action::hold && !std::strcmp(got.reason, "FG_copy_pending"),
+      require(got.action == sunshine_game3d::depth_output::display_action::hold && !std::strcmp(got.reason, "FG_copy_pending"),
         (std::string(scope) + " FG copy in flight dropped the viewport's ordinary copy").c_str());
-      require(decides(sr, pending, 1000 + sunshine_freshness::source_age_ms).action != depth_capture::display_action::hold,
+      require(decides(sr, pending, 1000 + sunshine_freshness::source_age_ms).action != sunshine_game3d::depth_output::display_action::hold,
         "An expired ordinary copy was held");
       auto selected = pending; selected.source_selected = true;
-      require(decides(sr, selected, 1000).action == depth_capture::display_action::hold,
+      require(decides(sr, selected, 1000).action == sunshine_game3d::depth_output::display_action::hold,
         "A selected FG capture with pending pixels dropped the ordinary copy");
       candidate.pixel_ready = true;
-      require(decides(sr, selected, 1000).action == depth_capture::display_action::copy_fresh, "A readable FG candidate was held off");
+      require(decides(sr, selected, 1000).action == sunshine_game3d::depth_output::display_action::copy_fresh, "A readable FG candidate was held off");
       candidate.pixel_ready = false;
       auto elsewhere = sr; elsewhere.metadata.viewport = 4;
-      require(decides(elsewhere, pending, 1000).action != depth_capture::display_action::hold,
+      require(decides(elsewhere, pending, 1000).action != sunshine_game3d::depth_output::display_action::hold,
         "Another viewport's ordinary copy was held for this viewport's FG copy in flight");
       auto earlier = sr; earlier.metadata.epoch = 10;
-      require(decides(earlier, pending, 1000).action != depth_capture::display_action::hold,
+      require(decides(earlier, pending, 1000).action != sunshine_game3d::depth_output::display_action::hold,
         "Another epoch's ordinary copy was held for an FG copy in flight");
       auto ngx_copy = sr; ngx_copy.metadata.provider = sunshine_scene_depth::provider_kind::ngx;
-      require(decides(ngx_copy, pending, 1000).action != depth_capture::display_action::hold,
+      require(decides(ngx_copy, pending, 1000).action != sunshine_game3d::depth_output::display_action::hold,
         "An NGX copy was held for a Streamline FG copy in flight");
-      require(decides({}, pending, 1000).action != depth_capture::display_action::hold, "An empty display held");
+      require(decides({}, pending, 1000).action != sunshine_game3d::depth_output::display_action::hold, "An empty display held");
     }
     auto other_ordinary = pending; other_ordinary.source_id = 4;
-    require(depth_capture::decide_display(other_ordinary, candidate, sr, silent, 1000).action != depth_capture::display_action::hold,
+    require(sunshine_game3d::depth_output::decide_display(other_ordinary, candidate, sr, silent, 1000).action != sunshine_game3d::depth_output::display_action::hold,
       "Another ordinary source counted as the copy's lineage");
 
     // FG Off releases the queue's API association, yet the display keeps
@@ -433,7 +435,7 @@ namespace {
     // continuity gap C8 until 10-26): an FG copy younger than the source age
     // keeps the queue under any policy but a revoked (unconfirmed) one. An
     // expired copy, an ordinary or NGX copy and an empty display keep nothing.
-    const auto keeps = [&](const depth_capture::retained_depth &retained, const depth_capture::selection_policy &p,
+    const auto keeps = [&](const sunshine_game3d::depth_output::retained_depth &retained, const depth_capture::selection_policy &p,
         std::uint64_t now) { return depth_capture::frame_generation_retained(retained, p, now); };
     require(keeps(held, {}, 1000) && keeps(held, {}, 1000 + sunshine_freshness::source_age_ms - 1),
       "FG Off released the queue while its FG copy was within the source age");
@@ -468,26 +470,26 @@ namespace {
     depth_capture::packet candidate;
     const auto late = value.provided.tick + sunshine_freshness::source_age_ms + 150;
     current.presenting_floor = 500;
-    auto decision = depth_capture::decide_display(current, candidate, retained, {}, late);
-    require(decision.action == depth_capture::display_action::hold && decision.own_frame && !std::strcmp(decision.reason, "retained_copy"),
+    auto decision = sunshine_game3d::depth_output::decide_display(current, candidate, retained, {}, late);
+    require(decision.action == sunshine_game3d::depth_output::display_action::hold && decision.own_frame && !std::strcmp(decision.reason, "retained_copy"),
       "A frame's own copy 400 ms old at a Present that still presents it was not held");
     auto local = context(); local.now = late; frame_depth out;
     require(cache.reuse(decision, local, 74, out) && out.reused_depth, "The cache refused a frame's own copy at its own Present by its age");
     same_image(out, value);
     current.presenting_floor = 501;
-    decision = depth_capture::decide_display(current, candidate, retained, {}, late);
-    require(decision.action != depth_capture::display_action::hold && !decision.own_frame && !std::strcmp(decision.reason, "retained_depth_expired"),
+    decision = sunshine_game3d::depth_output::decide_display(current, candidate, retained, {}, late);
+    require(decision.action != sunshine_game3d::depth_output::display_action::hold && !decision.own_frame && !std::strcmp(decision.reason, "retained_depth_expired"),
       "An earlier frame's copy past the source age was held as the presented frame's own");
     current.presenting_floor = 0;
-    decision = depth_capture::decide_display(current, candidate, retained, {}, late);
-    require(decision.action != depth_capture::display_action::hold && !std::strcmp(decision.reason, "retained_depth_expired"),
+    decision = sunshine_game3d::depth_output::decide_display(current, candidate, retained, {}, late);
+    require(decision.action != sunshine_game3d::depth_output::display_action::hold && !std::strcmp(decision.reason, "retained_depth_expired"),
       "A copy past the source age was held at a Present that presents no evaluated frame");
     current.presenting_floor = 500;
-    require(depth_capture::decide_display(current, candidate, retained, {}, value.provided.tick + 1).own_frame,
+    require(sunshine_game3d::depth_output::decide_display(current, candidate, retained, {}, value.provided.tick + 1).own_frame,
       "A fresh own copy was not marked own_frame");
     display_depth_cache unstamped;
     unstamped.commit(value, 139, 40, 41, 3840, 2160);
-    require(!depth_capture::decide_display(current, candidate, unstamped.reference(), {}, late).own_frame,
+    require(!sunshine_game3d::depth_output::decide_display(current, candidate, unstamped.reference(), {}, late).own_frame,
       "A copy without its frame's present stamp was held as the presented frame's own");
     require(!cache.reuse(hold(), local, 75, out) && equal(cache.reason(), "retained_depth_expired"),
       "The cache reused a copy past the source age for a hold not marked own_frame");

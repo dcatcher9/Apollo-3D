@@ -39,6 +39,12 @@
 #include <vector>
 
 namespace sunshine_streamline::depth_capture {
+  using sunshine_game3d::depth_output::retained_depth;
+  using sunshine_game3d::depth_output::display_action;
+  using sunshine_game3d::depth_output::display_decision;
+  using sunshine_game3d::depth_output::frame_generation_copy;
+  using sunshine_game3d::depth_output::decide_display;
+  using sunshine_game3d::depth_output::decide_failed_copy;
   namespace {
     unsigned failures {};
 

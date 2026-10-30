@@ -101,7 +101,7 @@ namespace {
     line.present = 1200;
     line.command = 0x2b20;
     provider::format_selected(text, sizeof(text), line, sl_frame(), consumed(), sl_capture());
-    depth_capture::display_decision fresh {depth_capture::display_action::copy_fresh, "fresh_copy_candidate"};
+    sunshine_game3d::depth_output::display_decision fresh {sunshine_game3d::depth_output::display_action::copy_fresh, "fresh_copy_candidate"};
     sunshine_scene_depth::jitter_offset jitter {0.25f, -0.375f, 2400, 1350, true};
     provider::append_selection(text, sizeof(text), sl_capture(), fresh, 16, jitter);
     provider::append_loss(text, sizeof(text), false, {}, 0, 0);
@@ -126,7 +126,7 @@ namespace {
     observer.rejected = 3;
     char text[2560] {};
     provider::format_held(text, sizeof(text), "NGX", c.result, true, provider::display_status::reused_depth, c, observer);
-    depth_capture::display_decision hold {depth_capture::display_action::hold, "retained_copy"};
+    sunshine_game3d::depth_output::display_decision hold {sunshine_game3d::depth_output::display_action::hold, "retained_copy"};
     provider::append_selection(text, sizeof(text), c, hold, 31, {});
     provider::append_loss(text, sizeof(text), true, unpinned_loss(), 1200, 2);
     emit("NGX pending successor held", text);
@@ -200,7 +200,7 @@ namespace {
     e.display = provider::display_status::waiting_capture;
     e.present = 1201;
     e.tick = 50000;
-    e.action = depth_capture::display_action::invalidate;
+    e.action = sunshine_game3d::depth_output::display_action::invalidate;
     e.source_reason = "FG_scope_changed";
     e.cache_reason = "FG_scope_changed";
     provider::readiness_line line;
@@ -231,7 +231,7 @@ namespace {
     e.capture.frame_generation_input = true;
     e.display = provider::display_status::ready;
     e.available = e.copied = e.snapshot_ready = true;
-    e.action = depth_capture::display_action::copy_fresh;
+    e.action = sunshine_game3d::depth_output::display_action::copy_fresh;
     e.source_reason = "fresh_copy_candidate";
     e.cache_reason = "fresh_copy";
     e.present = 1209;

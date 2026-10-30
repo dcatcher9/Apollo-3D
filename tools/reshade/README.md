@@ -1636,6 +1636,8 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 
 ##### depth_hold
 
+- [`depth_hold.h`](depth_hold.h): distinct API and Generic hold decisions and the retained private display copy. Docs: [depth_hold](../../docs/reshade-sbs.md#depth_hold).
+
 ##### depth_display
 
 #### API depth provider
@@ -1643,7 +1645,7 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 - [`streamline_depth_provider.cpp`](streamline_depth_provider.cpp), [`streamline_depth_provider.h`](streamline_depth_provider.h): the per-Present API depth decision, its display storage, DEPTH binding and readiness. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`streamline_depth_provider_log.h`](streamline_depth_provider_log.h): the provider's status lines, rendered from gathered values. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`scene_depth_source.h`](scene_depth_source.h): the small value snapshot a provider adapter emits after validating its own evidence. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
-- [`depth_cache_update.h`](depth_cache_update.h), [`display_depth_cache.h`](display_depth_cache.h): the last successful private display copy and the check that its storage can still be used. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`depth_cache_update.h`](depth_cache_update.h): retained Streamline frame-generation scope predicates. Docs: [depth_hold](../../docs/reshade-sbs.md#depth_hold).
 - [`depth_ready_uniform_cache.h`](depth_ready_uniform_cache.h): the per-runtime readiness uniform both API and Generic depth publish through. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
 
 #### Generic depth
@@ -2387,7 +2389,7 @@ Generic. And the viewport's ordinary source that follows an FG copy (the same vi
 source of the copy's epoch, once FG is off or its scope silent) is no changed source until its first
 readable frame: `decide_display` holds the FG copy meanwhile (`FG_successor_pending`, or
 `retained_after_failed_copy` after a failed copy of that source; the display lineage,
-`depth_capture::detail::lineage_successor`, since 10-27 one rule for both directions), and that source's storage and encoding, which
+`sunshine_game3d::depth_output::detail::lineage_successor`, since 10-27 one rule for both directions), and that source's storage and encoding, which
 compare frames of one source, do not end the hold. A readable frame of any source replaces the copy,
 and another viewport's, epoch's or provider's source still drops it. A silent scope selects as
 without FG, so FG turned on again within the hold keeps the copy until the scope supplies, while
@@ -2489,7 +2491,7 @@ was mono although the real Present before showed an SR copy younger than the sou
 (Assassin's Creed Shadows toggled FG 27 times in its 10-25 session). The owner's C8 ruling (hold
 within the source age, as for any source's missing frame) now holds in both directions: a
 viewport's Streamline FG input and its ordinary SR/RR source of one epoch are one display lineage
-(`decide_display`, `depth_capture::detail::lineage_successor`), whose newcomer takes the viewport at
+(`decide_display`, `sunshine_game3d::depth_output::detail::lineage_successor`), whose newcomer takes the viewport at
 its first readable frame while the predecessor's copy is held. That one rule replaced
 `frame_generation_successor` (FG to SR) and `frame_generation_pending` (SR to FG in a silent scope
 only); `frame_generation_holds` still keeps a silent scope's FG copy over a readable SR copy (its

@@ -9,7 +9,7 @@
 #include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
 #include "streamline_native_observer.h"
-#include "depth_cache_update.h"
+#include "depth_hold.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -17,7 +17,7 @@
 namespace sunshine_streamline::provider {
   enum class display_status { not_attempted, ready, reused_depth, texture_creation_failed, view_creation_failed, waiting_capture };
   const char *name(display_status value);
-  const char *name(depth_capture::display_action action);
+  const char *name(sunshine_game3d::depth_output::display_action action);
   struct observation_loss_lookup {
     std::uint64_t requested_revision{};
     loss_diagnostics::event value;
@@ -39,7 +39,7 @@ namespace sunshine_streamline::provider {
     sunshine_scene_depth::provider_kind prior_provider{sunshine_scene_depth::provider_kind::streamline};
     std::uint64_t present{}, tick{}, prior_capture{};
     bool prior_provider_known{}, prior_output_ready{}, available{}, copied{}, snapshot_ready{}, fg_silent{};
-    depth_capture::display_action action{depth_capture::display_action::invalidate};
+    sunshine_game3d::depth_output::display_action action{sunshine_game3d::depth_output::display_action::invalidate};
     const char *source_reason{"not_checked"}, *cache_reason{"not_checked"};
   };
   // Dynamic resolution of one logical source: the last fresh copy's identity,
@@ -113,7 +113,7 @@ namespace sunshine_streamline::provider {
   // Both status lines end with the selection and display decision, then the
   // newest observation loss (unknown without one; age_ms is its age).
   void append_selection(char *text, std::size_t size, const depth_capture::capture_diagnostic &capture,
-    const depth_capture::display_decision &update, std::uint64_t prior_depth_age,
+    const sunshine_game3d::depth_output::display_decision &update, std::uint64_t prior_depth_age,
     const sunshine_scene_depth::jitter_offset &jitter);
   void append_loss(char *text, std::size_t size, bool known, const loss_diagnostics::event &loss, std::uint64_t age_ms,
     std::uint64_t losses_since);

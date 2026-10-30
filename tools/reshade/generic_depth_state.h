@@ -56,6 +56,7 @@
 #include "streamline_depth_provider.h"
 #include "native_resource_identity.h"
 #include "game3d_slow_step.h"
+#include "depth_hold.h"
 
 using namespace reshade::api;
 
@@ -131,10 +132,7 @@ struct capture_region
 };
 
 enum class depth_binding_state { waiting_game, waiting_activity, filtered, binding_failed, waiting_capture, ready };
-// Whether a Present may hold the shown capture (judge_hold_gate): open, or
-// refused because the anchor's set was cleared without drawing (cleared) or a
-// scene pass started in another depth-stencil (cut).
-enum class hold_gate { open, cleared, cut };
+using sunshine_game3d::depth_output::hold_gate;
 enum class native_depth_ui_state { inactive, waiting_depth, calibrating, waiting_orientation, ready };
 
 struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_data

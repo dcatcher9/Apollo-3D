@@ -131,7 +131,7 @@ namespace sunshine_scene_depth {
     bool frame_generation_input{};
     // Source-adapter observation generation captured with this frame:
     // Streamline's observation loss counter (NGX leaves it zero). Display
-    // reuse never consults it (decide_display, depth_cache_update.h); the UI
+    // reuse never consults it (decide_display, depth_hold.h); the UI
     // qualification scope and the UI mask's capture matching compare it, and
     // the provider's status lines report it.
     std::uint64_t observation_revision{};
