@@ -266,7 +266,6 @@ namespace sunshine_streamline::depth_capture {
       return false;
     }
 
-
     void invalidate(slot &value, capture_failure why) {
       if (value.failure == capture_failure::none) value.failure = why;
       value.invalid = true;
@@ -376,6 +375,7 @@ namespace sunshine_streamline::depth_capture {
         std::uint64_t present, std::uint64_t now, selection_policy policy = {});
     void establish_provider(queue_state &owner, const slot &value, std::uint64_t present);
     void expire_association(queue_state &owner, std::uint64_t now);
+    // Capture diagnostics and report text (depth_capture/report.inl).
     // Pool functions (depth_capture/pool.inl); types and state stay in this shell.
     enum class source_retention;
     struct storage_job;
@@ -570,21 +570,8 @@ namespace sunshine_streamline::depth_capture {
       std::atomic<std::uint64_t> covered{}, unknown{}, closed{}, pass{}, states_observed{}, states_declared{};
     } list_counts;
     enum class list_view { unknown, open, closed, pass };
-    // Requires mutex. Coverage: ReShade's lifecycle (or a registered runtime
-    // list's submissions) reports the recording open and outside a render
-    // pass. Bundles cannot record barriers, clears or copies, so executing
-    // one changes no resource state and leaves coverage alone.
-    list_view lifecycle_view(const command_state *owner) {
-      if (!owner || !owner->reported) return list_view::unknown;
-      return owner->closed ? list_view::closed : owner->render_pass ? list_view::pass : list_view::open;
-    }
-    void count_admission(list_view view, bool states_observed) {
-      constexpr auto relaxed = std::memory_order_relaxed;
-      auto &c = list_counts;
-      if (view == list_view::open) (states_observed ? c.states_observed : c.states_declared).fetch_add(1, relaxed);
-      (view == list_view::open ? c.covered : view == list_view::unknown ? c.unknown :
-        view == list_view::closed ? c.closed : c.pass).fetch_add(1, relaxed);
-    }
+    list_view lifecycle_view(const command_state *owner);
+    void count_admission(list_view view, bool states_observed);
     // ReShade's own immediate lists, which its list events never report.
     SRWLOCK runtime_lock = SRWLOCK_INIT;
     std::array<std::uint64_t, 8> runtime_lists{}; // Guarded by runtime_lock.
@@ -617,49 +604,6 @@ namespace sunshine_streamline::depth_capture {
     queue_execution *find_queue_execution(std::uint64_t queue);
     void forget_queue_execution(std::uint64_t queue);
   }
-  list_coverage_counts list_coverage() {
-    list_coverage_counts out;
-    const auto &c = list_counts;
-    out.covered = c.covered.load(); out.unknown = c.unknown.load(); out.closed = c.closed.load();
-    out.pass = c.pass.load();
-    out.states_observed = c.states_observed.load(); out.states_declared = c.states_declared.load();
-    return out;
-  }
-  bool capacity_report(char *out, std::size_t size) {
-    const auto hits = capacity_hits.load(std::memory_order_relaxed);
-    if (!(hits & ~capacity_reported.load(std::memory_order_relaxed))) return false;
-    const auto fresh = hits & ~capacity_reported.fetch_or(hits, std::memory_order_relaxed);
-    if (!fresh || !out || !size) return false;
-    const auto named = [&](unsigned bit) { return (fresh & bit) != 0; };
-    const auto bound = [&](unsigned bit, const char *text, unsigned limit) {
-      if (!named(bit)) return;
-      const auto used = std::strlen(out);
-      if (used < size) std::snprintf(out + used, size - used, " %s=%u", text, limit);
-    };
-    std::snprintf(out, size, "Sunshine capture capacity: refused at a safety bound:");
-    bound(queue_places, "queue_places", queue_limit);
-    bound(source_table, "source_table", source_limit);
-    bound(snapshot_pool, "depth_snapshots", pixel_slot_limit);
-    bound(auxiliary_pool, "auxiliary_snapshots", diagnostic_slot_limit);
-    const auto used = std::strlen(out);
-    if (used < size)
-      std::snprintf(out + used, size - used, "; every place or entry was in use (queue places: each queue names a "
-        "capture, a provider or an unfinished fence), so that capture was refused as capacity; logged once per bound");
-    return true;
-  }
-  bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size) {
-    static std::atomic<std::uint64_t> next_log{}, logged_admissions{};
-    auto next = next_log.load(std::memory_order_relaxed);
-    if (now_ms < next || !next_log.compare_exchange_strong(next, now_ms + 5000, std::memory_order_relaxed)) return false;
-    const auto c = list_coverage();
-    const auto admissions = c.covered + c.unknown + c.closed + c.pass;
-    if (admissions == logged_admissions.exchange(admissions, std::memory_order_relaxed)) return false;
-    const auto u = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
-    std::snprintf(out, size,
-      "Sunshine list lifecycle: admissions covered=%llu (states observed=%llu declared=%llu) not_open={unknown=%llu closed=%llu pass=%llu}",
-      u(c.covered), u(c.states_observed), u(c.states_declared), u(c.unknown), u(c.closed), u(c.pass));
-    return true;
-  }
   namespace {
     // A released device's objects whose GPU work had not finished
     // (release_device), kept for good: under ReShade each resource of a
@@ -684,10 +628,6 @@ namespace sunshine_streamline::depth_capture {
     constexpr std::uint64_t release_wait_ms = release_wait_bound_ms;
 #endif
   }
-#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-  namespace testing {
-  }
-#endif
   namespace {
     // Idle snapshot storage kept for reuse beyond this is released.
     constexpr std::uint64_t idle_pixel_byte_limit = 256ull * 1024 * 1024;
@@ -700,13 +640,8 @@ namespace sunshine_streamline::depth_capture {
     // to pin the scope's exact edges (streamline_depth_capture_test_access.h).
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
     std::atomic<std::uint64_t> scope_clock{};
-#else
 #endif
   }
-  SUNSHINE_CAPTURE_INTERNAL {
-  }
-
-
 
   std::uint64_t game_executions_on(std::uint64_t queue) {
     com_ptr<ID3D12CommandQueue> checked;
@@ -720,210 +655,14 @@ namespace sunshine_streamline::depth_capture {
     return newest;
   }
 
+#include "depth_capture/runtime_test_exports.inl"
 
-
-  namespace {
-  }
-
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-  namespace {
-    // One Present of an earlier frame landing inside the next nominated copy's
-    // call, between its input's read and the copy (record_impl).
-    std::atomic<bool> present_before_next_copy{};
-  }
-  extern "C" __declspec(dllexport) void SunshineStreamlineTestPresentBeforeNextCopy() {
-    present_before_next_copy.store(true, std::memory_order_release);
-  }
-
-  // Withdraws that Present when no nominated copy took it (the session
-  // timelines' Present inside an SR evaluation that nominated none); whether
-  // it was still pending.
-  extern "C" __declspec(dllexport) BOOL SunshineStreamlineTestCancelPresentBeforeNextCopy() {
-    return present_before_next_copy.exchange(false, std::memory_order_acq_rel) ? TRUE : FALSE;
-  }
-
-  // Whether every consumer of a live capture reads its copy-out storage
-  // (read_storage), not the snapshot its game recording may still replay
-  // into: the NGX cross-queue regression's proof of what it admitted.
-  extern "C" __declspec(dllexport) BOOL SunshineStreamlineTestCaptureReadsCopyOut(std::uint64_t capture, BOOL *copy_out) {
-    if (!capture || !copy_out) return FALSE;
-    std::lock_guard lock(mutex);
-    for (const auto &value : slots)
-      if (value.id == capture) { *copy_out = value.copied_out && value.published ? TRUE : FALSE; return TRUE; }
-    return FALSE;
-  }
-  // While refuse is set, no copy-out is made (counted as ring_busy, every
-  // list of the queue's ring in flight): another queue reads a snapshot only
-  // once its recording retired (the Reset rule, immutable_for_other_queues).
-  extern "C" __declspec(dllexport) void SunshineStreamlineTestRefuseCopyOuts(BOOL refuse) {
-    refuse_copy_outs.store(refuse != FALSE, std::memory_order_release);
-  }
-  namespace {
-    std::atomic<HANDLE> nomination_gate_entered{}, nomination_gate_release{};
-    void wait_nomination_gate() {
-      if (const auto entered = nomination_gate_entered.exchange(nullptr, std::memory_order_acq_rel)) {
-        const auto release = nomination_gate_release.exchange(nullptr, std::memory_order_acq_rel);
-        SetEvent(entered);
-        if (release) WaitForSingleObject(release, 5000);
-      }
-    }
-  }
-  extern "C" __declspec(dllexport) void SunshineStreamlineTestNominationGate(HANDLE entered, HANDLE release) {
-    nomination_gate_release.store(release, std::memory_order_relaxed);
-    nomination_gate_entered.store(entered, std::memory_order_release);
-  }
-  namespace {
-    // The newest nominated pixel copy published (record_impl): its capture
-    // id, with the frame-generation-input flag in the top bit.
-    std::atomic<std::uint64_t> newest_published_copy{};
-  }
-  // The capture id of the newest nominated pixel copy the add-on published,
-  // and whether it is an FG scope's input (false: none yet). The session
-  // timelines read it after each call that may copy, so their freshness
-  // rule names each copy as frame_record::depth_capture does
-  // (test_game3d_continuity.h).
-  extern "C" __declspec(dllexport) BOOL SunshineStreamlineTestNewestCopy(std::uint64_t *id, BOOL *frame_generation_input) {
-    const auto value = newest_published_copy.load(std::memory_order_acquire);
-    if (id) *id = value & ~(1ull << 63);
-    if (frame_generation_input) *frame_generation_input = (value >> 63) ? TRUE : FALSE;
-    return value ? TRUE : FALSE;
-  }
-#endif
-
-#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-  namespace testing {
-    std::atomic<void (*)(void *)> allocation_hook{};
-    std::atomic<void *> allocation_context{};
-    void set_allocation_hook(void (*hook)(void *), void *context) {
-      allocation_context.store(context);
-      allocation_hook.store(hook);
-    }
-    std::atomic<unsigned> copy_out_allocation_failures{};
-    void fail_copy_out_allocations(unsigned count) { copy_out_allocation_failures.store(count); }
-    void settle_storage_releases() { wait_storage_releases(); }
-    bool fail_copy_out_allocation() {
-      for (auto count = copy_out_allocation_failures.load(); count;)
-        if (copy_out_allocation_failures.compare_exchange_weak(count, count - 1)) return true;
-      return false;
-    }
-  }
-#endif
-
-#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-#endif
-  proven_state_counts proven_counts() {
-    proven_state_counts out;
-    {
-      std::lock_guard lock(mutex);
-      out.tracked = proven.size();
-      out.latched = proven.latched_count();
-      out.latch_lost = proven.latch_lost();
-    }
-    const auto &c = proven_counters;
-    constexpr auto relaxed = std::memory_order_relaxed;
-    out.unrecorded = c.unrecorded.load(relaxed); out.unreported = c.unreported.load(relaxed);
-    out.invalidated = c.invalidated.load(relaxed); out.missed_reset = c.missed_reset.load(relaxed);
-    out.uncovered = c.uncovered.load(relaxed); out.changed_copies = c.changed_copies.load(relaxed);
-    out.earlier_copied = c.earlier_copied.load(relaxed); out.earlier_refused = c.earlier_refused.load(relaxed);
-    out.copied_out = copy_out_counters.made.load(relaxed); out.copy_out_busy = copy_out_counters.ring_busy.load(relaxed);
-    out.copy_out_failed = copy_out_counters.failed.load(relaxed);
-    out.copy_out_predicted = copy_out_counters.predicted.load(relaxed); out.copy_out_taken = copy_out_counters.taken.load(relaxed);
-    out.copy_out_released = copy_out_counters.released.load(relaxed);
-    out.copy_out_unstored = copy_out_counters.unstored.load(relaxed);
-    out.copy_out_skipped = copy_out_counters.skipped.load(relaxed);
-    out.reader_moves = reader_moves.load(relaxed);
-    out.reader_move_unreadable = reader_move_unreadable.load(relaxed);
-    return out;
-  }
-
-#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-#endif
-  SUNSHINE_CAPTURE_INTERNAL {
-  }
-  status last_status() { return reason.load(); }
-  const char *name(status value) {
-    switch (value) {
-#define CASE(x) case status::x: return #x
-    CASE(inactive); CASE(unavailable); CASE(malformed); CASE(unsupported_state); CASE(missing_state);
-    CASE(conflicting_state); CASE(incomplete_state); CASE(unsupported_lifetime);
-    CASE(unsupported_resource); CASE(unsupported_queue); CASE(exhausted); CASE(recorded); CASE(submitted);
-    CASE(ready); CASE(stale); CASE(ambiguous); CASE(failed);
-#undef CASE
-    }
-    return "unknown";
-  }
-  const char *name(capture_failure value) {
-    switch (value) {
-#define CASE(x) case capture_failure::x: return #x
-    CASE(none); CASE(observer_loss); CASE(discarded_recording); CASE(close_failed); CASE(replay);
-    CASE(producer_signal_failed); CASE(producer_queue_changed); CASE(consumer_signal_failed); CASE(consumer_queue_changed);
-    CASE(evaluation_failed); CASE(queue_retired); CASE(consumer_capacity); CASE(source_retired);
-    CASE(proven_state_changed);
-#undef CASE
-    }
-    return "unknown";
-  }
-  const char *name(selection_reason value) {
-    switch (value) {
-#define CASE(x) case selection_reason::x: return #x
-    CASE(not_attempted); CASE(no_current_nomination); CASE(inactive_views); CASE(ambiguous_views);
-    CASE(pending_nomination); CASE(current_capture); CASE(current_already_consumed); CASE(no_admissible_capture);
-    CASE(no_completed_snapshot); CASE(completed_before_gap); CASE(completed_not_older);
-    CASE(completed_already_consumed); CASE(presentation_already_selected); CASE(format_changed);
-    CASE(completed_not_readable); CASE(completed_snapshot); CASE(fg_scope_missing); CASE(fg_scope_mismatch);
-    CASE(lineage_snapshot); CASE(completed_older_than_shown);
-#undef CASE
-    }
-    return "unknown";
-  }
-  const char *name(state_basis value) {
-    switch (value) {
-#define CASE(x) case state_basis::x: return #x
-    CASE(unknown); CASE(observed_legacy); CASE(observed_enhanced); CASE(declared); CASE(contract); CASE(proven);
-#undef CASE
-    }
-    return "unknown";
-  }
-  const char *name(consumer_status value) {
-    switch (value) {
-#define CASE(x) case consumer_status::x: return #x
-    CASE(not_attempted); CASE(ready); CASE(missing_input); CASE(unsupported_interface); CASE(observer_not_ready);
-    CASE(missing_cookie); CASE(unsupported_command_type); CASE(missing_device); CASE(missing_device_identity);
-    CASE(device_mismatch); CASE(recording_missing); CASE(recording_closed); CASE(recording_invalid);
-    CASE(recording_render_pass); CASE(slot_missing); CASE(ownership_mismatch); CASE(consumer_capacity);
-    CASE(capture_not_ready); CASE(invalid_destination);
-#undef CASE
-    }
-    return "unknown";
-  }
-  const char *name(recording_loss value) {
-    switch (value) {
-#define CASE(x) case recording_loss::x: return #x
-    CASE(none); CASE(global_observation_loss); CASE(source_identity_unavailable);
-    CASE(source_state_capacity); CASE(close_failed);
-#undef CASE
-    }
-    return "unknown";
-  }
-  const char *name(record_stage value) {
-    switch (value) {
-#define CASE(x) case record_stage::x: return #x
-    CASE(not_attempted); CASE(inactive); CASE(malformed_input); CASE(missing_source);
-    CASE(unsupported_lifetime); CASE(unsupported_proof); CASE(command_interface); CASE(source_identity);
-    CASE(observer_coverage); CASE(command_type); CASE(command_device); CASE(device_identity); CASE(source_lifetime);
-    CASE(recording_missing); CASE(recording_closed); CASE(recording_invalid); CASE(recording_render_pass);
-    CASE(incomplete_state); CASE(missing_state); CASE(conflicting_state); CASE(unsupported_state); CASE(resource_region);
-    CASE(capacity); CASE(texture_allocation); CASE(descriptor_allocation); CASE(recorded);
-    CASE(source_interface); CASE(source_device); CASE(source_description); CASE(source_cookie); CASE(retained);
-#undef CASE
-    }
-    return "unknown";
-  }
 }
 
 #include "depth_capture/consume.inl"
 #include "depth_capture/scope.inl"
 #include "depth_capture/selection.inl"
+#include "depth_capture/report.inl"
 #include "depth_capture/record.inl"
 #include "depth_capture/observation.inl"
 #include "depth_capture/queues.inl"
