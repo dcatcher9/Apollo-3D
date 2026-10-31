@@ -110,9 +110,8 @@ namespace sunshine_upscaler_trace {
       if (target_count == target_limit) { ++rejected; return false; }
       MEMORY_BASIC_INFORMATION memory{};
       HMODULE owner{}, addon{};
-      const auto executable = VirtualQuery(entry, &memory, sizeof(memory)) && memory.Type == MEM_IMAGE &&
-        memory.State == MEM_COMMIT && !(memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
-        (memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+      const auto executable = VirtualQuery(entry, &memory, sizeof(memory)) &&
+        sunshine_game3d::hook_host::executable_image(memory);
       if (!executable || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
             reinterpret_cast<LPCWSTR>(entry), &owner) ||
           !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,

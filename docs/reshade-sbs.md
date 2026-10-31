@@ -98,6 +98,8 @@ ReShade / Streamline / NGX adapters
 sequences passive observer calls under the Streamline adapter's poll lock; that adapter
 keeps its installation state. The inline MinHook initialization helper shares the status check;
 Streamline and NGX keep their separate initialization flags under their own poll locks.
+The executable-memory predicate shares only memory-state, image and protection checks;
+each adapter keeps its query-result test, module-reference or pin flags and add-on identity checks.
 Camera conversion and jitter remain attached to the exact captured depth;
 there is no separate camera selection that could mix providers or frames. Current readiness,
 completed calibration evidence and permission to reuse prior pixels remain distinct.

@@ -478,9 +478,8 @@ namespace sunshine_streamline {
       }
       MEMORY_BASIC_INFORMATION memory{};
       HMODULE owner{};
-      const bool executable = VirtualQuery(entry, &memory, sizeof(memory)) == sizeof(memory) && memory.State == MEM_COMMIT &&
-        memory.Type == MEM_IMAGE && (memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) &&
-        !(memory.Protect & (PAGE_GUARD | PAGE_NOACCESS));
+      const bool executable = VirtualQuery(entry, &memory, sizeof(memory)) == sizeof(memory) &&
+        sunshine_game3d::hook_host::executable_image(memory);
       if (fg_target_count == fg_targets.size() || !executable ||
           !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(entry), &owner)) {
         fg_available = false; ReleaseSRWLockExclusive(&fg_lock); return UINT32_MAX;

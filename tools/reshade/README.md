@@ -1580,7 +1580,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 #### Hook host and configuration
 
 - [`game3d_depth_input.cpp`](game3d_depth_input.cpp), [`game3d_depth_input.h`](game3d_depth_input.h): presentation-facing depth/camera queries, completed samples and readiness state. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
-- [`hook_host.cpp`](hook_host.cpp), [`hook_host.h`](hook_host.h): the exporter's per-Present maintenance sequencer, observer lifecycle facade and MinHook initialization helper; each adapter retains its flag and lock. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
+- [`hook_host.cpp`](hook_host.cpp), [`hook_host.h`](hook_host.h): the exporter's per-Present maintenance sequencer, observer lifecycle facade, MinHook initialization helper and executable-memory predicate. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
 - [`addon_config.cpp`](addon_config.cpp), [`addon_config.h`](addon_config.h): stateless readers of the `SUNSHINE_DEPTH` source, diagnostic and queue-order flags, called at their owners' lifecycle points. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 
 #### NGX
