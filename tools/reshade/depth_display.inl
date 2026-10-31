@@ -2,7 +2,7 @@
 // Provider display binding, storage and fenced retirement.
 // Same TU as streamline_depth_provider.cpp; namespace-scope state and types stay there.
   namespace {
-    void bind(api::effect_runtime *runtime, state &data, api::resource_view view, bool ready) {
+    void bind_api(api::effect_runtime *runtime, state &data, api::resource_view view, bool ready) {
       // ReShade 6.8 waits for the whole queue on every update, even if the
       // handle is unchanged. Keep the descriptor stable while pixels rotate.
       if (view != data.bound_view) {
@@ -174,7 +174,7 @@
         depth_events::eviction(runtime, depth_events::site_id::provider_display_evict, victim->view == data.effects_view);
 #endif
         // Effects can still name this view only if it was the last binding.
-        if (victim->view == data.effects_view) bind(runtime, data, {}, false);
+        if (victim->view == data.effects_view) bind_api(runtime, data, {}, false);
         const auto format = static_cast<api::format>(victim->format);
         data.retired_displays.push_back({victim->texture, victim->view, present, 0,
           std::uint64_t(api::format_slice_pitch(format, api::format_row_pitch(format, victim->width), victim->height))});

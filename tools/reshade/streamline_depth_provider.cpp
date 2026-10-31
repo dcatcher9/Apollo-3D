@@ -187,7 +187,7 @@ namespace sunshine_streamline::provider {
         sunshine_depth::depth_orientation::automatic : packet.metadata.projection.reversed ?
           sunshine_depth::depth_orientation::reversed : sunshine_depth::depth_orientation::normal;
     }
-    void bind(api::effect_runtime *runtime, state &data, api::resource_view view, bool ready);
+    void bind_api(api::effect_runtime *runtime, state &data, api::resource_view view, bool ready);
     void destroy_display(api::effect_runtime *runtime, state &data);
     // Retired displays whose fence completed, released on a pool thread: a
     // texture's last Release frees its video memory in the driver and
@@ -599,7 +599,7 @@ namespace sunshine_streamline::provider {
         data->output.provided = data->source_metadata;
         data->output.projection = projection(data->source_metadata);
         // The stable descriptor stays bound; readiness is withdrawn.
-        bind(runtime, *data, data->display_view, false);
+        bind_api(runtime, *data, data->display_view, false);
         trace_readiness(runtime, *data, evidence, false, "source_handoff");
         describe_display(recorded, false, false, nullptr, {});
         record_depth(runtime, recorded, present);
@@ -728,7 +728,7 @@ namespace sunshine_streamline::provider {
     data->presentations.observe(present, reuse_tick, !data->output.ready ? sunshine_depth_stats::presentation_kind::unavailable :
       data->output.reused_depth ? sunshine_depth_stats::presentation_kind::reused : sunshine_depth_stats::presentation_kind::fresh);
     // Fresh and deliberately reused depth share the existing stable descriptor.
-    bind(runtime, *data, data->display_view, data->output.ready);
+    bind_api(runtime, *data, data->display_view, data->output.ready);
 #include "provider_report_present.inl"
     return true;
   }

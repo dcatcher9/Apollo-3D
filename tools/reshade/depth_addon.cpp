@@ -175,7 +175,7 @@ static const char *const format_to_string(format value);
 static void log_depth_status(generic_depth_data &data);
 static void draw_settings_overlay(effect_runtime *runtime);
 
-static void update_effect_runtime(effect_runtime *runtime)
+static void bind_generic(effect_runtime *runtime)
 {
 	auto &data = *runtime->get_private_data<generic_depth_data>();
 
@@ -284,7 +284,7 @@ static void on_reload_effect_runtime(effect_runtime *runtime)
 		sunshine_streamline::provider::reload_effect_bindings(runtime);
 		data->effects_bound = false; // New effect descriptor tables.
 		data->effects_read_depth_dirty = true;
-		if (!sunshine_streamline::provider::selected(runtime)) update_effect_runtime(runtime);
+		if (!sunshine_streamline::provider::selected(runtime)) bind_generic(runtime);
 		return;
 	}
 	sunshine_streamline::provider::reload(runtime);
@@ -299,7 +299,7 @@ static void on_reload_effect_runtime(effect_runtime *runtime)
 		data->native_ui_state = native_depth_ui_state::inactive;
 		data->native_ui_samples = 0;
 		data->native_ui_present = 0;
-		update_effect_runtime(runtime);
+		bind_generic(runtime);
 	}
 }
 
@@ -829,7 +829,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	if (was_streamline)
 	{
 		const slow_step step("generic depth rebinding");
-		update_effect_runtime(runtime);
+		bind_generic(runtime);
 	}
 	// No enabled technique can read the stable copy; this Present unbinds it.
 	if (!effects_may_read_depth && data.stable.texture != 0)
@@ -1066,7 +1066,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 
 	// Rebinds only when the effects view changed; a readiness flip only
 	// publishes readiness.
-	update_effect_runtime(runtime);
+	bind_generic(runtime);
 	if (prev_shader_resource != data.selected_shader_resource && !owns_member_view(data, prev_shader_resource))
 		device->destroy_resource_view(prev_shader_resource);
 	log_depth_status(data); // The status line (depth_panel.inl).

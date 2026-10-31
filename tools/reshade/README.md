@@ -1635,7 +1635,7 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 
 ##### depth_output
 
-- [`depth_output.h`](depth_output.h), [`depth_output.cpp`](depth_output.cpp): per-Present provider-first `begin`/`current` entry points and value-only shown-depth identities for the scene, renderer, UI observation and Generic raw selection. Generic capture switching and its API early return stay in `depth_addon.cpp`. Docs: [depth_output](../../docs/reshade-sbs.md#depth_output).
+- [`depth_output.h`](depth_output.h), [`depth_output.cpp`](depth_output.cpp): per-Present provider-first `begin`/`current` entry points and value-only shown-depth identities for the scene, renderer, UI observation and Generic raw selection. Generic capture switching and its API early return stay in `depth_addon.cpp`. The header names the five binding/readiness writer sites; API and Generic caches stay private to their existing owners. Docs: [depth_output](../../docs/reshade-sbs.md#depth_output).
 
 ##### depth_hold
 

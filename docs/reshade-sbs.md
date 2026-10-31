@@ -6019,6 +6019,12 @@ return; the current-depth lookup still precedes Generic fallback. Both preserve
 the provider ownership result, including a selected mono pass. Capture state,
 clocks, resource operations and locks stay at their existing owners and call sites.
 
+The same header names the binding/readiness writers: provider `bind_api` and
+`reload_effect_bindings`, Generic `bind_generic`, provider `set_depth_ready`,
+and the FX `depth_input::set_ready` call. Internal writers keep internal linkage;
+external writers keep their existing names and namespaces. Each private cache,
+comparison, reset and readiness write keeps its original call point and order.
+
 `depth_output.{h,cpp}` builds one value-only `shown_depth` from the selected
 `frame_depth` within the exporter preparation try-lock. Generic scene identity
 and the fresh-Generic UI identity predicate stay distinct. Scene reuse, the
