@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "depth_output.h"
+#include "streamline_depth_provider.h"
 
 namespace sunshine_game3d::depth_output {
   namespace {
@@ -9,6 +10,15 @@ namespace sunshine_game3d::depth_output {
     bool generic_depth(const sunshine_depth::frame_depth &depth) {
       return depth.ready && !depth.provided.epoch && !depth.provided.sequence;
     }
+  }
+
+  bool begin(reshade::api::effect_runtime *runtime, reshade::api::command_list *commands,
+      std::uint64_t present, bool allowed) {
+    return sunshine_streamline::provider::begin(runtime, commands, present, allowed);
+  }
+
+  bool current(reshade::api::effect_runtime *runtime, sunshine_depth::frame_depth &output) {
+    return sunshine_streamline::provider::current(runtime, output);
   }
 
   shown_depth describe(const sunshine_depth::frame_depth &depth) {

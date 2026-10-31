@@ -34,6 +34,7 @@
 #include <type_traits>
 #include "upscaler_call_trace.h"
 #include "depth_addon.h"
+#include "depth_output.h"
 #include "depth_content_sampler.h"
 #include "depth_selection_policy.h"
 #include "depth_capture_policy.h"
@@ -791,7 +792,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	const bool was_streamline = sunshine_streamline::provider::selected(runtime);
 	const bool api_selected = [&] {
 		const slow_step step("Streamline depth acquisition");
-		return sunshine_streamline::provider::begin(runtime, cmd_list, device_data->native_present_index,
+		return sunshine_game3d::depth_output::begin(runtime, cmd_list, device_data->native_present_index,
 			automatic && s_streamline_source_events);
 	}();
 	// A native API snapshot needs no Generic work. Fallback resumes capture
@@ -1451,7 +1452,7 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 	output = {};
 	if (!s_registered || runtime == nullptr)
 		return false;
-	if (sunshine_streamline::provider::current(runtime, output)) return output.ready;
+	if (sunshine_game3d::depth_output::current(runtime, output)) return output.ready;
 	device *const device = runtime->get_device();
 	auto *data = runtime->get_private_data<generic_depth_data>();
 	auto *device_data = device->get_private_data<generic_depth_device_data>();

@@ -6013,6 +6013,12 @@ changes; without that metadata the raw fallback cannot establish physical equiva
 
 #### depth_output
 
+`depth_output::begin` and `current` forward the per-Present API provider entry
+points. Acquisition still precedes Generic capture switching and its API early
+return; the current-depth lookup still precedes Generic fallback. Both preserve
+the provider ownership result, including a selected mono pass. Capture state,
+clocks, resource operations and locks stay at their existing owners and call sites.
+
 `depth_output.{h,cpp}` builds one value-only `shown_depth` from the selected
 `frame_depth` within the exporter preparation try-lock. Generic scene identity
 and the fresh-Generic UI identity predicate stay distinct. Scene reuse, the

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// Value-only shown-depth identity for one Present. The capture API retains
+// Per-Present provider entry and value-only shown-depth identity. The capture API retains
 // ownership of all resources; this record holds only immutable provenance.
 #include "depth_addon.h"
 #include "game3d_ui_adaptive.h"
@@ -21,6 +21,12 @@ namespace sunshine_game3d::depth_output {
     sunshine_raw_scene::selected_frame raw_source;
   };
   static_assert(std::is_trivially_destructible_v<shown_depth>);
+
+  // True means the API provider owns this effects pass, including mono.
+  // Generic capture switching and the early return stay at the caller.
+  bool begin(reshade::api::effect_runtime *runtime, reshade::api::command_list *commands,
+    std::uint64_t present, bool allowed);
+  bool current(reshade::api::effect_runtime *runtime, sunshine_depth::frame_depth &output);
 
   shown_depth describe(const sunshine_depth::frame_depth &depth);
   bool same_capture(const source_identity &source, const source_identity &previous);
