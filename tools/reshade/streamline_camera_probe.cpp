@@ -684,25 +684,16 @@ namespace sunshine_streamline {
     bool depth_untag(const evaluation_snapshot &snapshot);
     sunshine_scene_depth::jitter_offset depth_frame_jitter(const evaluation_snapshot &snapshot,
         const evaluated_depth_tag &tag);
-    // A declared Resource size that disagrees with the allocation is ignored
-    // when the tag's extent defines the region (depth_capture::source_region);
-    // name it once per process.
-    void report_declared_size(const evaluated_depth_tag &tag) {
-      static std::atomic<bool> reported{};
-      const auto &value = tag.value;
-      std::uint32_t width{}, height{};
-      if (sunshine_api_contract::null_extent(value.area) || reported.load(std::memory_order_relaxed) ||
-          !depth_capture::source_extent(tag.direct_source, width, height) ||
-          !((value.resource_width && value.resource_width != width) || (value.resource_height && value.resource_height != height)) ||
-          reported.exchange(true, std::memory_order_relaxed)) return;
-      char text[320]{};
-      std::snprintf(text, sizeof(text),
-        "Sunshine Streamline depth: declared resource size %ux%u differs from the %ux%u allocation; the tag extent %u,%u %ux%u "
-        "defines the region and the declared size is ignored (tag_type=%u viewport=%u; logged once)",
-        value.resource_width, value.resource_height, width, height, value.area.left, value.area.top, value.area.width,
-        value.area.height, value.type, value.viewport);
-      message(text);
-    }
+    // Defined in sl_report.inl; calls keep the original guarded reporting points.
+    void report_tag_resource(const batch &out, const abi_v2::resource_tag &tag, origin source,
+        const tag_record &value, const abi_v2::resource &resource, unsigned index, bool zero_resource_header);
+    void report_rejected_tag(const batch &out, const abi_v2::resource_tag &tag, const tag_record &value,
+        const abi_v2::resource &resource, bool precision_ok, bool resource_ok, std::atomic<std::uint64_t> &next_tag_report);
+    void report_v1_state_lookup(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag,
+        const depth_capture::input &value, const v1_resource_state::read_details &state_details,
+        std::atomic<std::uint64_t> &next_state_report);
+    // Defined in sl_report.inl.
+    void report_declared_size(const evaluated_depth_tag &tag);
     // Defined in sl_nomination.inl.
     sunshine_scene_depth::frame normalize_depth_frame(const evaluation_snapshot &snapshot,
         const evaluated_depth_tag &tag, bool version_one);
@@ -717,76 +708,12 @@ namespace sunshine_streamline {
     fg_route frame_generation_route(std::uint32_t viewport, bool *disabled = nullptr);
     bool source_path_selected(const evaluation_snapshot &snapshot);
     bool owns_nested_depth_capture(const evaluation_snapshot &snapshot, bool copy_recorded);
-    const char *name(frame_identity_kind value) {
-      switch (value) {
-        case frame_identity_kind::unavailable: return "unavailable";
-        case frame_identity_kind::v1_numeric: return "v1_numeric";
-        case frame_identity_kind::v2_observed_token: return "v2_observed_token";
-        case frame_identity_kind::v2_constants_call: return "v2_constants_call";
-      }
-      return "unknown";
-    }
-    // Why an FG tag boundary named no capturable depth, at most every 5 s.
-    // The tag described is the call's first present depth tag in priority
-    // order; reason is its first failing gate. A live FG scope is withdrawn,
-    // unless DLSS-G's own evaluation supplies its copies (dlssg_supplied); a
-    // silent one has no FG capture to withdraw. Either way the frame has no
-    // FG copy, so the scope owns no depth for it (miss_frame_generation).
-    // Diagnostic only.
+    // Defined in sl_report.inl.
+    const char *name(frame_identity_kind value);
     void report_fg_refusal(const evaluation_snapshot &snapshot, const char *reason, bool withdrawn, bool live,
-        bool supplied = false) {
-      const auto count = fg_refusals.fetch_add(1, std::memory_order_relaxed) + 1;
-      const auto now = GetTickCount64();
-      auto next = next_fg_refusal_report.load(std::memory_order_relaxed);
-      if (now < next || !next_fg_refusal_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
-      static const evaluated_depth_tag none;
-      const auto *tag = &none;
-      for (const unsigned index : depth_priority) if (snapshot.tags[index].present) { tag = &snapshot.tags[index]; break; }
-      char text[720]{};
-      std::snprintf(text, sizeof(text),
-        "Sunshine Streamline FG depth refused: reason=%s viewport=%u tag_type=%u scope=%s lifecycle=%u native=0x%llx "
-        "command=0x%llx frame=%s status=%s fg=%u fg_scope=%s withdrawn=%u dlssg_supplied=%u refusals=%llu; this FG tag call "
-        "names no capturable depth; %s",
-        reason, snapshot.viewport, tag->present ? tag->value.type : UINT32_MAX,
-        !tag->present ? "absent" : tag->scope == tag_scope::active_global ? "global" :
-          tag->scope == tag_scope::explicit_frame ? "frame" : "local",
-        tag->present ? tag->value.lifecycle : UINT32_MAX, static_cast<unsigned long long>(tag->value.native_resource),
-        static_cast<unsigned long long>(snapshot.command_buffer), name(snapshot.frame.kind), name(snapshot.status),
-        unsigned(snapshot.frame_generation_input), live ? "live" : "silent", unsigned(withdrawn), unsigned(supplied),
-        static_cast<unsigned long long>(count),
-        withdrawn ? "the viewport's FG depth source is withdrawn, and the FG scope owns no depth for this frame, so the "
-          "viewport's ordinary SR/RR depth may supply it" :
-          supplied ? "DLSS-G's own NGX evaluation copies this FG scope's depth (DLSSG.Depth), so nothing is withdrawn" :
-          "the FG scope owns no depth for this frame, so nothing is withdrawn and the viewport's ordinary SR/RR depth "
-          "may supply it");
-      message(text);
-    }
-    // A depth copy recorded inside a frame-generation tag call (diagnostic:
-    // the recorded candidate's): counted, and with it a copy made from the
-    // state the call's list recorded over a declaration of the tag's later
-    // use that named another (S11). The bounded line comes at most every 5 s,
-    // only after such a copy.
+        bool supplied = false);
     void count_tag_call_copy(const depth_capture::input *candidates, std::size_t count,
-        const depth_capture::record_diagnostic &diagnostic) {
-      tag_call_copies.copied.fetch_add(1, std::memory_order_relaxed);
-      bool over = false;
-      for (std::size_t i = 0; i != count && !over; ++i)
-        over = candidates[i].resource.native == diagnostic.resource &&
-          candidates[i].proof == sunshine_scene_depth::state_proof::declared_for_use && diagnostic.used_observed_state;
-      if (!over) return;
-      const auto over_total = tag_call_copies.recorded_over_declared.fetch_add(1, std::memory_order_relaxed) + 1;
-      const auto now = GetTickCount64();
-      auto next = next_tag_call_report.load(std::memory_order_relaxed);
-      if (now < next || !next_tag_call_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
-      char text[480]{};
-      std::snprintf(text, sizeof(text),
-        "Sunshine Streamline FG tag-call copies: copied=%llu recorded_over_declared=%llu state=0x%x declared=0x%x; a "
-        "ValidUntilPresent or ValidUntilEvaluate declaration describes the tag's later use, so a tag call copies its "
-        "tag from the state the call's list records",
-        static_cast<unsigned long long>(tag_call_copies.copied.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(over_total), diagnostic.copy_state, diagnostic.native_state);
-      message(text);
-    }
+        const depth_capture::record_diagnostic &diagnostic);
     // Defined in sl_nomination.inl.
     const char *candidate_rejection(const evaluation_snapshot &snapshot);
     bool tag_call_decided(const evaluation_snapshot &snapshot, bool version_one);
@@ -1177,93 +1104,8 @@ namespace sunshine_streamline {
   namespace {
     // Diagnostic only: whether this game also sends Streamline camera constants,
     // reported beside NGX capture. Never a cross-API frame match.
-    void report_camera_availability(std::uint64_t now) {
-      if (!sunshine_upscaler_trace::capture_enabled() || !hooks_installed) return;
-      static std::uint64_t camera_report_at{}, camera_report_count{UINT64_MAX};
-      auto camera_pin = now >= camera_report_at ? read_metadata() : metadata_owner::read_pin{};
-      if (camera_pin) {
-        unsigned cameras = 0, valid_recent = 0;
-        camera_data camera_sample;
-        camera_key camera_sample_key;
-        camera_validation camera_sample_validation;
-        std::uint64_t camera_sample_tick{};
-        struct depth_tag_sample {
-          depth_tag value;
-          std::uint64_t tick{};
-          origin scope{};
-          bool present{}, supported{};
-        };
-        std::array<depth_tag_sample, 3> depth_samples{};
-        for (const auto &record : camera_pin->records) if (record.used && record.has_camera) {
-          ++cameras;
-          const auto checked = validate(record.camera);
-          valid_recent += sunshine_freshness::fresh_le(record.camera_tick, now, sunshine_freshness::camera_age_ms) &&
-            record.decoded == decode_status::ok && checked.valid();
-          if (record.decoded == decode_status::ok && record.camera_tick >= camera_sample_tick) {
-            camera_sample = record.camera;
-            camera_sample_key = record.key;
-            camera_sample_validation = checked;
-            camera_sample_tick = record.camera_tick;
-            depth_samples = {};
-            for (const auto *group : {&record.active_tags, &record.global_tags, &record.local_tags}) {
-              for (const auto &tag : *group) {
-                if (!tag.present || !buffers::is_depth(tag.value.type)) continue;
-                auto &sample = depth_samples[slot_of(tag.value.type)];
-                if (!sample.present || tag.tick > sample.tick)
-                  sample = {tag.value, tag.tick, tag.source, tag.present, tag.supported};
-              }
-            }
-          }
-        }
-        const auto calls = constant_calls.load(std::memory_order_relaxed);
-        camera_pin.reset();
-        camera_report_at = now + 5000;
-        if (calls != camera_report_count) {
-          // vram_warnings: SDK calls answered with eWarnOutOfVRAM since the
-          // observation began, each accepted as a success.
-          char availability[352]{};
-          std::snprintf(availability, sizeof(availability),
-            "Sunshine Streamline camera availability: constants_calls=%llu cameras=%u recent_valid_projection=%u vram_warnings=%llu; NGX_frame_match=unproven; availability does not authorize cross-API scale",
-            static_cast<unsigned long long>(calls), cameras, valid_recent,
-            static_cast<unsigned long long>(vram_warnings.load(std::memory_order_relaxed)));
-          message(availability);
-          if (camera_sample_tick) {
-            char detail[1800]{};
-            std::snprintf(detail, sizeof(detail),
-              "Sunshine Streamline camera sample: viewport=%u frame=%llu explicit_frame=%u age_ms=%llu projection=%s A=%.9g B=%.9g matrix_near=%.9g matrix_far=%.9g infinite_far=%u checked_fov_rad=%.9g checked_aspect=%.9g declared_near=%.9g declared_far=%.9g declared_fov_rad=%.9g declared_aspect=%.9g inverted=%u orthographic=%u reset=%u; checked fields may be incomplete on failure; observation only, NGX_frame_match=unproven",
-              camera_sample_key.viewport, static_cast<unsigned long long>(camera_sample_key.frame_key),
-              camera_sample_key.explicit_frame ? 1u : 0u,
-              static_cast<unsigned long long>(camera_sample_tick <= now ? now - camera_sample_tick : 0),
-              name(camera_sample_validation.status), camera_sample_validation.depth_offset,
-              camera_sample_validation.depth_scale, camera_sample_validation.near_from_matrix,
-              camera_sample_validation.far_from_matrix, camera_sample_validation.infinite_far ? 1u : 0u,
-              camera_sample_validation.fov_from_matrix, camera_sample_validation.aspect_from_matrix,
-              camera_sample.near_plane, camera_sample.far_plane, camera_sample.fov, camera_sample.aspect,
-              unsigned(camera_sample.depth_inverted), unsigned(camera_sample.orthographic),
-              unsigned(camera_sample.reset));
-            message(detail);
-            char tag_details[3][480]{};
-            for (unsigned i = 0; i < depth_samples.size(); ++i) {
-              const auto &sample = depth_samples[i];
-              const auto &tag = sample.value;
-              std::snprintf(tag_details[i], sizeof(tag_details[i]),
-                "type=%u present=%u supported=%u scope=%u native=0x%llx declared_size=%ux%u area_xywh=%u,%u,%u,%u lifetime=%u age_ms=%llu tag_viewport=%u frame=%llu explicit_frame=%u",
-                observed_tag_types[i], sample.present ? 1u : 0u,
-                sample.supported ? 1u : 0u, static_cast<unsigned>(sample.scope),
-                static_cast<unsigned long long>(tag.native_resource), tag.resource_width, tag.resource_height,
-                tag.area.left, tag.area.top, tag.area.width, tag.area.height, tag.lifecycle,
-                static_cast<unsigned long long>(sample.present && sample.tick <= now ? now - sample.tick : UINT64_MAX),
-                tag.viewport, static_cast<unsigned long long>(tag.frame_key), tag.explicit_frame ? 1u : 0u);
-            }
-            std::snprintf(detail, sizeof(detail),
-              "Sunshine Streamline depth tag sample: camera_viewport=%u depth={%s} highres_depth={%s} linear_depth={%s}; observation only, NGX_resource_overlap=unproven",
-              camera_sample_key.viewport, tag_details[0], tag_details[1], tag_details[2]);
-            message(detail);
-          }
-          camera_report_count = calls;
-        }
-      }
-    }
+    // Defined in sl_report.inl in this same anonymous namespace.
+    void report_camera_availability(std::uint64_t now);
   }
 
   poll_guard::~poll_guard() {
@@ -1433,3 +1275,4 @@ namespace sunshine_streamline {
 #include "sl_nomination.inl"
 #include "sl_frame_generation.inl"
 #include "sl_ui_capture.inl"
+#include "sl_report.inl"

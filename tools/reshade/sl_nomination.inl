@@ -405,19 +405,7 @@ namespace sunshine_streamline {
           // Bound failure reporting at the immutable evaluation boundary. An
           // enabled version adapter alone does not prove a usable state read.
           static std::atomic<std::uint64_t> next_state_report{};
-          const auto now = GetTickCount64();
-          auto next = next_state_report.load(std::memory_order_relaxed);
-          if (now >= next && next_state_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
-            char text[640]{};
-            std::snprintf(text, sizeof(text),
-              "Sunshine Streamline V1 state lookup: %s; resource=0x%llx tag=%u viewport=%u sequence=%llu; %llux%u format=%u mips=%u layers=%u samples=%u; hr=0x%08lx bytes=%u chi=0x%x; tagged=0x%x; requires observed state",
-              state_details.stage, static_cast<unsigned long long>(tag.value.native_resource), tag.value.type, snapshot.viewport,
-              static_cast<unsigned long long>(snapshot.sequence), static_cast<unsigned long long>(state_details.description.Width),
-              state_details.description.Height, unsigned(state_details.description.Format), state_details.description.MipLevels,
-              state_details.description.DepthOrArraySize, state_details.description.SampleDesc.Count,
-              static_cast<unsigned long>(state_details.result), state_details.bytes, state_details.encoded, value.native_state);
-            message(text);
-          }
+          report_v1_state_lookup(snapshot, tag, value, state_details, next_state_report);
         }
         value.native_state = state.native;
         if (!tag.state_requires_observation) value.proof = state.proof;

@@ -1578,6 +1578,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 - [`sl_nomination.inl`](sl_nomination.inl): part of `streamline_camera_probe.cpp` (end of the shell, after `sl_observation.inl`): Streamline depth admission (source and tag rejection, depth frame normalization), the FG routing questions (`frame_generation_route`, `source_path_selected`, `owns_nested_depth_capture`), nomination (`nominate_depth_source`, `finish_capture`) and the v1/v2 evaluate hooks. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`sl_frame_generation.inl`](sl_frame_generation.inl): part of `streamline_camera_probe.cpp` (end of the shell, after the observation and nomination parts): FG options, deferred tag copies and the shared DLSS-G input wrappers. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`sl_ui_capture.inl`](sl_ui_capture.inl): part of `streamline_camera_probe.cpp` (end of the shell, after `sl_frame_generation.inl`): SL tag and DLSS-G UI-input capture through the public UI-mask API. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`sl_report.inl`](sl_report.inl): part of `streamline_camera_probe.cpp` (end of the shell, after the capture parts): existing Streamline reporting functions and formatting fragments. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 
 #### Hook host and configuration
 

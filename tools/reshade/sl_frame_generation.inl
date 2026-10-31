@@ -93,36 +93,7 @@ namespace sunshine_streamline {
       SetLastError(outgoing);
       return result;
     }
-    // The bounded deferral line, at most every 5 s and only after its totals
-    // changed: what the copies deferred to their frame's Present (R2) became.
-    void report_deferrals() {
-      const auto activity = deferrals.depth.load(std::memory_order_relaxed) + deferrals.ui.load(std::memory_order_relaxed) +
-        deferrals.cancelled.load(std::memory_order_relaxed) + deferrals.lapsed.load(std::memory_order_relaxed);
-      const auto now = GetTickCount64();
-      auto next = next_deferral_report.load(std::memory_order_relaxed);
-      if (activity == reported_deferrals.load(std::memory_order_relaxed) || now < next ||
-          !next_deferral_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
-      reported_deferrals.store(activity, std::memory_order_relaxed);
-      char text[640]{};
-      std::snprintf(text, sizeof(text),
-        "Sunshine Streamline deferred tag copies: depth={deferred=%llu copied=%llu refused=%llu last_refusal=%s} "
-        "ui={deferred=%llu copied=%llu refused=%llu} cancelled_by_untag=%llu lapsed=%llu waited_for_frame=%llu "
-        "pending=%u; a ValidUntilPresent tag whose call has no command list, or a frame-generation or UI input whose "
-        "call's list records no state of it or a write state, is copied on the Present queue right before its frame's "
-        "Present",
-        static_cast<unsigned long long>(deferrals.depth.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(deferrals.depth_copied.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(deferrals.depth_refused.load(std::memory_order_relaxed)),
-        depth_capture::name(static_cast<depth_capture::record_stage>(deferrals.refusal.load(std::memory_order_relaxed))),
-        static_cast<unsigned long long>(deferrals.ui.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(deferrals.ui_copied.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(deferrals.ui_refused.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(deferrals.cancelled.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(deferrals.lapsed.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(deferrals.waited.load(std::memory_order_relaxed)),
-        deferral_pending.load(std::memory_order_relaxed));
-      message(text);
-    }
+    // report_deferrals is defined in sl_report.inl.
     // Requires evaluation_supply_lock. Recounts the used deferral entries.
     void count_deferred() {
       unsigned used = 0;

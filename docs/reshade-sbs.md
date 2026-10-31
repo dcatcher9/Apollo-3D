@@ -3622,6 +3622,8 @@ surveyed release's own header; every surveyed release agrees with it.
 and shared DLSS-G input wrappers in the probe's translation unit; their state stays in its shell.
 `sl_ui_capture.inl` contains SL-side tag and DLSS-G UI-input capture, calling `ui_mask`
 through its public API at the input wrappers' original UI boundaries.
+`sl_report.inl` holds the existing Streamline reporting functions and formatting; rate state
+and guarded report call points retain their original owners and order.
 
 The `SUNSHINE_DEPTH` INI readers live in `addon_config.{h,cpp}`. Streamline initialization
 reads its source, call-trace, NGX-source and queue-order flags in that order; the

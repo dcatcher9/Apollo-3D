@@ -579,50 +579,10 @@ namespace sunshine_streamline {
       // An opaque FrameToken address can be reused. Its identity is diagnostic
       // only and must never be promoted to an exact numeric frame identifier.
       value.value.explicit_frame = false;
-      // A null Resource also reads as the zero header; only a real native is
-      // the compatibility layout. An untag is reported on its own line.
-      if (value.supported && zero_resource_header && index < 3 && tag.resource_ptr && value.value.native_resource) {
-        const auto now = GetTickCount64();
-        auto next = next_compatibility_report.load(std::memory_order_relaxed);
-        if (now >= next && next_compatibility_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
-          char text[384]{};
-          std::snprintf(text, sizeof(text),
-            "Sunshine Streamline zero-base resource compatibility: tag_type=%u viewport=%u native=0x%llx type=%u state=0x%x state_proof=%s declared_extent=%ux%u native_retained=%u",
-            tag.type, out.viewport, static_cast<unsigned long long>(value.value.native_resource), resource.type, resource.state,
-            value.state_requires_observation ? "requires-observed-state" : "declared", resource.width, resource.height,
-            value.direct_source ? 1u : 0u);
-          message(text);
-        }
-      }
-      if (value.supported && index < 3 && !value.value.native_resource) {
-        const auto count = depth_untags.fetch_add(1, std::memory_order_relaxed) + 1;
-        const auto now = GetTickCount64();
-        auto next = next_untag_report.load(std::memory_order_relaxed);
-        if (now >= next && next_untag_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
-          char text[320]{};
-          std::snprintf(text, sizeof(text),
-            "Sunshine Streamline depth untag: tag_type=%u viewport=%u scope=%s lifecycle=%u resource=%s untags=%llu; "
-            "a depth tag without a native resource ends that tag and names no depth source",
-            tag.type, out.viewport, source == origin::global ? "global" : source == origin::frame ? "frame" : "local",
-            tag.lifecycle, tag.resource_ptr ? "null_native" : "null", static_cast<unsigned long long>(count));
-          message(text);
-        }
-      }
+      report_tag_resource(out, tag, source, value, resource, index, zero_resource_header);
       if (!value.supported && index < 3) {
         static std::atomic<std::uint64_t> next_tag_report{};
-        const auto now = GetTickCount64();
-        auto next = next_tag_report.load(std::memory_order_relaxed);
-        if (now >= next && next_tag_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
-          char text[700]{};
-          std::snprintf(text, sizeof(text),
-            "Sunshine Streamline rejected depth tag: refusal=%s tag_type=%u viewport=%u tag_guid=%08x tag_version=%llu tag_extension=0x%llx precision_supported=%u lifecycle=%u resource_read=%u resource_guid=%08x resource_version=%llu resource_type=%u resource_extension=0x%llx declared_native=0x%llx state=0x%x declared_extent=%ux%u",
-            name(value.value.refusal), tag.type, out.viewport, tag.base.type.a, static_cast<unsigned long long>(tag.base.version),
-            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(tag.base.next)), precision_ok, tag.lifecycle, resource_ok,
-            resource.base.type.a, static_cast<unsigned long long>(resource.base.version), resource.type,
-            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(resource.base.next)),
-            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(resource.native)), resource.state, resource.width, resource.height);
-          message(text);
-        }
+        report_rejected_tag(out, tag, value, resource, precision_ok, resource_ok, next_tag_report);
       }
       out.tags[index] = value;
       out.count = std::max(out.count, index + 1);
