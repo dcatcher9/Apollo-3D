@@ -111,23 +111,7 @@
     wire::transfer output = wire::transfer::srgb;
   };
 
-  bool decode_export_color(const char *output, std::uint32_t input, export_color_t &color) {
-    if (input == static_cast<std::uint32_t>(api::color_space::srgb) && std::strcmp(output, "srgb") == 0) {
-      color = {api::color_space::srgb, wire::transfer::srgb};
-      return true;
-    }
-    if ((input == static_cast<std::uint32_t>(api::color_space::scrgb) || input == static_cast<std::uint32_t>(api::color_space::hdr10_pq)) && std::strcmp(output, "scrgb") == 0) {
-      color = {static_cast<api::color_space>(input), wire::transfer::scrgb};
-      return true;
-    }
-    // 10-bit PQ (Rec.2020, ST 2084) of an HDR10 source; exported only to a
-    // consumer that accepts it (frame()).
-    if (input == static_cast<std::uint32_t>(api::color_space::hdr10_pq) && std::strcmp(output, "pq") == 0) {
-      color = {api::color_space::hdr10_pq, wire::transfer::pq};
-      return true;
-    }
-    return false;
-  }
+
 
   struct source_t {
     api::resource resource {};

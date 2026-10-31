@@ -89,6 +89,13 @@ static void select_depth_candidate(effect_runtime *runtime, device *const device
 	depth_selection_snapshot &current_depth_stencil_resources,
 	bool &any_recent_activity, bool &any_filtered, bool &any_warming);
 
+// FX-reference request/calibration fragments; definitions in generic_fx_reference.inl.
+namespace sunshine_depth {
+  static void begin_fx_reference_query(generic_depth_data *data, bool request_calibration);
+  static void resolve_fx_reference_calibration(generic_depth_data *data, frame_depth &output, depth_orientation orientation_override);
+  static void finish_fx_reference_query(generic_depth_data *data, const frame_depth &output);
+}
+
 // Generic depth's capture routing, defined in generic_capture.inl (included
 // here): the FrameActivityTrace types, member views, capture records, the hold
 // gates and hold, Present coverage, the end-of-frame copies and
@@ -1461,13 +1468,7 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 	activity_access_trace trace { runtime, data, device_data };
 	if (data != nullptr)
 	{
-		// This is the current renderer's request, not a latch until effect reload.
-		// Passive observation releases an earlier independent-renderer request
-		// without changing scene selection, histogram evidence or capture state.
-		data->native_depth_requested = request_calibration;
-		data->native_ui_state = request_calibration ? native_depth_ui_state::waiting_depth : native_depth_ui_state::inactive;
-		data->native_ui_samples = 0;
-		data->native_ui_present = request_calibration ? data->native_access_present : 0;
+		begin_fx_reference_query(data, request_calibration);
 	}
 	if (data == nullptr || device_data == nullptr) return trace.reject("missing_state");
 	if (!data->native_access_open) return trace.reject("access_closed");
@@ -1490,20 +1491,7 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 			validate_capture_record(runtime, *data, *device_data, data->selected_record)))
 		return trace.reject("capture_changed");
 	output = data->selected_capture;
-	output.orientation = orientation_override == depth_orientation::normal || orientation_override == depth_orientation::reversed ?
-		orientation_override : output.detected_orientation;
-	const depth_calibration_key key { output.source_id, output.layout_epoch, output.width, output.height,
-		output.x, output.y, output.active_width, output.active_height };
-	if (const auto calibration = data->native_calibrations.find(output.source_id);
-		calibration != data->native_calibrations.end() && calibration->second.matches(key))
-	{
-		const auto result = calibration->second.result(output.orientation);
-		output.calibrated = result.calibrated;
-		output.calibration_samples = result.samples;
-		output.calibration_frame = result.sampled_frame;
-		output.raw_anchor = result.raw_anchor;
-		output.raw_gain = result.raw_gain;
-	}
+	resolve_fx_reference_calibration(data, output, orientation_override);
 	// The runtime owns this view until finish_effects; the lookup cannot outlive
 	// that callback. Do not hold the resource map lock while calling the device.
 	output.shader_resource = data->selected_shader_resource;
@@ -1522,10 +1510,7 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 		output.command_queue = runtime->get_command_queue()->get_native();
 	if (request_calibration)
 	{
-		data->native_ui_samples = output.calibration_samples;
-		data->native_ui_state = output.calibrated ? native_depth_ui_state::ready :
-			(output.calibration_samples >= 3 && output.orientation == depth_orientation::automatic ?
-				native_depth_ui_state::waiting_orientation : native_depth_ui_state::calibrating);
+		finish_fx_reference_query(data, output);
 	}
 	return true;
 }
@@ -1535,3 +1520,4 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 #include "generic_selection.inl"
 #include "depth_panel.inl"
 #include "generic_raw_evidence.inl"
+#include "generic_fx_reference.inl"

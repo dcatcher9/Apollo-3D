@@ -6062,6 +6062,18 @@ stay in the exporter shell in their original order. Preparation's try-lock,
 clock reads, resource calls and publication remain at their original call sites;
 held scenes keep their source identity and previously resolved calibration.
 
+### FX reference
+
+`exporter/fx_reference.inl` contains the same-TU reference-effect discovery,
+readiness, preparation, publication and technique-priority path. Its
+`fx_reference_types.inl` state occupies the original consecutive `runtime_t`
+field slot, with the same field/default and string-leaf lifetime order.
+Native effects reload keeps its selective handle reset: the prepared-depth
+flag and effect name retain their prior values. The separate
+`generic_fx_reference.inl` holds the request/calibration/status fragments at
+their original Generic call points. The two parts name each other; Generic
+and exporter types keep internal linkage and their own resource/lock owners.
+
 ### Selecting scene depth
 
 If **Normal Depth View** shows a white field, stripes or dots during gameplay, the selected source

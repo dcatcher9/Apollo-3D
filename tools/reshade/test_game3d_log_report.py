@@ -2790,7 +2790,7 @@ def source(name):
 
 # exporter.cpp and its parts (tools/reshade/exporter/), one translation unit. Each exporter move that creates a part
 # adds it here.
-EXPORTER_PARTS = ('exporter/export_ring.inl', 'exporter/export_ring_class.inl', 'exporter/present_diagnostics.inl', 'exporter/ui_status.inl', 'exporter/scene_placement.inl', 'exporter/scene_placement_impl.inl')
+EXPORTER_PARTS = ('exporter/export_ring.inl', 'exporter/export_ring_class.inl', 'exporter/present_diagnostics.inl', 'exporter/ui_status.inl', 'exporter/scene_placement.inl', 'exporter/scene_placement_impl.inl', 'exporter/fx_reference_types.inl', 'exporter/fx_reference.inl')
 
 
 def exporter_sources():

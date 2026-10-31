@@ -124,7 +124,7 @@ namespace {
     const bool cropped = depth.ready && (depth.x || depth.y || depth.active_width != depth.width || depth.active_height != depth.height);
     // Native constants always carry the active rectangle. Only reference
     // effects need to prove that their older uniform interface supports it.
-    if (proof.addon_native || proof.camera_rect.handle) {
+    if (proof.addon_native || fx_reference_has_rect(proof)) {
       if (depth.ready && depth.width && depth.height) {
         scene.rect = {float(depth.x) / depth.width, float(depth.y) / depth.height,
           float(depth.active_width) / depth.width, float(depth.active_height) / depth.height};
@@ -250,9 +250,9 @@ namespace {
       }
       coefficients = projection::make(depth.projection.encoding, depth.projection.A, depth.projection.B,
         depth.projection.raw_scale, depth.projection.raw_bias);
-      if (linear && !proof.addon_native) coefficients = {}; // Legacy FX has no reciprocal input basis.
+      if (fx_reference_rejects_linear(proof, linear)) coefficients = {}; // Legacy FX has no reciprocal input basis.
       proof.projection_policy.configure(budget);
-      if (!proof.addon_native && !proof.camera_raw_range.handle &&
+      if (!proof.addon_native && !fx_reference_has_raw_range(proof) &&
           (depth.projection.raw_scale != 1.0 || depth.projection.raw_bias != 0.0)) coefficients = {};
       proof.projection_policy.synchronize_feedback(depth.provided.feedback);
       sunshine_game3d::depth_input::sample measured;

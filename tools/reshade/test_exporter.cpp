@@ -617,7 +617,7 @@ namespace {
         }
       } runtime;
       runtime_t proof;
-      proof.depth_jitter = {101};
+      proof.fx.depth_jitter = {101};
       frame_decision_t frame;
       frame.jitter = sunshine_depth_jitter::make({.5f, -.25f, 1920, 1080, true},
         2048, 1152, {32, 16, 1920, 1080});
@@ -759,8 +759,8 @@ namespace {
         }
       } runtime;
       runtime_t proof;
-      proof.camera_ready = {101}; proof.camera_basis = {102}; proof.camera_projection = {103};
-      proof.camera_scale = {104}; proof.camera_zero = {105}; proof.camera_blend = {106};
+      proof.fx.camera_ready = {101}; proof.fx.camera_basis = {102}; proof.fx.camera_projection = {103};
+      proof.fx.camera_scale = {104}; proof.fx.camera_zero = {105}; proof.fx.camera_blend = {106};
       proof.frame_strength = 50.f;
       frame_decision_t fresh;
       fresh.depth_ready = fresh.diagnostics.frame_generation_active = true;
@@ -831,7 +831,7 @@ namespace {
       const std::array<float, 4> active_rect{0.f, 0.f, 1.f, 1253.f / 1256.f};
       const auto check_native_crop = [&](const scene_parameters_t &scene, std::uint64_t now) {
         if (!native_cropped) return;
-        require(!proof.camera_rect.handle && scene.rect == active_rect,
+        require(!proof.fx.camera_rect.handle && scene.rect == active_rect,
           "Native scene ignored the active depth rect because no FX camera-rect uniform exists");
         frame_decision_t frame;
         frame.depth_ready = depth.ready;
@@ -846,11 +846,11 @@ namespace {
         const auto unsupported_fx = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, now);
         require(!unsupported_fx.ready && unsupported_fx.ui.phase == sunshine_game3d::automatic_phase::unavailable,
           "Legacy FX without camera-rect support accepted padded scene depth");
-        proof.camera_rect = {991};
+        proof.fx.camera_rect = {991};
         const auto supported_fx = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, now);
         require(supported_fx.ready == (scene.basis != 2) && supported_fx.rect == active_rect,
           "Legacy FX crop support changed affine readiness or admitted unsupported linear depth");
-        proof.camera_rect = {};
+        proof.fx.camera_rect = {};
         proof.addon_native = true;
       };
       {
@@ -1379,32 +1379,32 @@ namespace {
     }
 
     static void seed_fx_proof(runtime_t &proof) {
-      proof.texture = {101};
-      proof.effect_name = "RetiredReference.fx";
-      proof.game_technique = {102};
-      proof.native_technique = {103};
+      proof.fx.texture = {101};
+      proof.fx.effect_name = "RetiredReference.fx";
+      proof.fx.game_technique = {102};
+      proof.fx.native_technique = {103};
       std::uint64_t handle = 104;
-      for (auto *uniform : {&proof.depth_ready, &proof.calibrated, &proof.raw_anchor,
-          &proof.raw_gain, &proof.depth_rect, &proof.direction, &proof.camera_ready,
-          &proof.camera_basis, &proof.camera_projection, &proof.camera_scale,
-          &proof.camera_zero, &proof.camera_blend, &proof.camera_rect,
-          &proof.camera_raw_range, &proof.depth_jitter, &proof.effect_strength})
+      for (auto *uniform : {&proof.fx.depth_ready, &proof.fx.calibrated, &proof.fx.raw_anchor,
+          &proof.fx.raw_gain, &proof.fx.depth_rect, &proof.fx.direction, &proof.fx.camera_ready,
+          &proof.fx.camera_basis, &proof.fx.camera_projection, &proof.fx.camera_scale,
+          &proof.fx.camera_zero, &proof.fx.camera_blend, &proof.fx.camera_rect,
+          &proof.fx.camera_raw_range, &proof.fx.depth_jitter, &proof.fx.effect_strength})
         uniform->handle = handle++;
-      proof.native_uniforms_checked = proof.proof_checked = true;
+      proof.fx.native_uniforms_checked = proof.proof_checked = true;
     }
 
     static void require_fx_proof_cleared(const publisher_t &publisher, api::effect_runtime *runtime) {
       const auto found = publisher.runtimes_.find(runtime);
       require(found != publisher.runtimes_.end(), "Effect reload erased the live runtime owner");
       const auto &proof = found->second;
-      require(!proof.texture.handle && !proof.game_technique.handle && !proof.native_technique.handle &&
-          !proof.native_uniforms_checked && !proof.proof_checked,
+      require(!proof.fx.texture.handle && !proof.fx.game_technique.handle && !proof.fx.native_technique.handle &&
+          !proof.fx.native_uniforms_checked && !proof.proof_checked,
         "Effect reload retained cached FX texture, technique or proof");
-      for (const auto uniform : {proof.depth_ready, proof.calibrated, proof.raw_anchor,
-          proof.raw_gain, proof.depth_rect, proof.direction, proof.camera_ready,
-          proof.camera_basis, proof.camera_projection, proof.camera_scale,
-          proof.camera_zero, proof.camera_blend, proof.camera_rect,
-          proof.camera_raw_range, proof.depth_jitter, proof.effect_strength})
+      for (const auto uniform : {proof.fx.depth_ready, proof.fx.calibrated, proof.fx.raw_anchor,
+          proof.fx.raw_gain, proof.fx.depth_rect, proof.fx.direction, proof.fx.camera_ready,
+          proof.fx.camera_basis, proof.fx.camera_projection, proof.fx.camera_scale,
+          proof.fx.camera_zero, proof.fx.camera_blend, proof.fx.camera_rect,
+          proof.fx.camera_raw_range, proof.fx.depth_jitter, proof.fx.effect_strength})
         require(!uniform.handle, "Effect reload retained a stale FX uniform handle");
     }
 
@@ -1816,7 +1816,7 @@ namespace {
       proof.renderer = std::make_unique<sunshine_game3d::renderer>();
       const auto *renderer = proof.renderer.get();
       proof.native_output = {777};
-      proof.native_depth_prepared = proof.frame.prepared = proof.frame.depth_ready = true;
+      proof.fx.native_depth_prepared = proof.frame.prepared = proof.frame.depth_ready = true;
       proof.frame.scene.ready = true;
       proof.frame.scene.scale = 4.f;
       proof.frame.scene_source = {1, 2, 3, 4};
@@ -1832,7 +1832,7 @@ namespace {
       require(reloaded.addon_native && reloaded.swapchain == 99 && reloaded.renderer.get() == renderer &&
           reloaded.native_output.handle == 777 && reloaded.rendered_since_present,
         "Native effects reload invalidated its runtime, renderer or published output");
-      require(reloaded.native_depth_prepared && reloaded.frame.prepared && reloaded.frame.depth_ready &&
+      require(reloaded.fx.native_depth_prepared && reloaded.frame.prepared && reloaded.frame.depth_ready &&
           reloaded.frame.scene.ready && reloaded.frame.scene.scale == 4.f &&
           reloaded.frame.scene_source == std::array<std::uint64_t, 4>{1, 2, 3, 4} &&
           reloaded.raw_supported && reloaded.raw_basis_epoch == 77,

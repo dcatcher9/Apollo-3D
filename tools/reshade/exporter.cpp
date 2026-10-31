@@ -279,6 +279,7 @@ namespace {
   }
 
 #include "exporter/scene_placement.inl"
+#include "exporter/fx_reference_types.inl"
 
   struct runtime_t {
     bool addon_native = false;
@@ -302,14 +303,7 @@ namespace {
     sunshine_depth::frame_depth test_depth;
     sunshine_game3d::test::last_render test_render;
 #endif
-    api::effect_texture_variable texture {};
-    std::string effect_name;
-    api::effect_technique game_technique {}, native_technique {};
-    api::effect_uniform_variable depth_ready {}, calibrated {}, raw_anchor {}, raw_gain {}, depth_rect {}, direction {};
-    bool native_uniforms_checked = false;
-    bool native_depth_prepared = false;
-    api::effect_uniform_variable camera_ready {}, camera_basis {}, camera_projection {}, camera_scale {}, camera_zero {}, camera_blend {}, camera_rect {}, camera_raw_range {};
-    api::effect_uniform_variable depth_jitter {}, effect_strength {};
+    fx_reference_state fx;
     bool raw_supported = false;
     std::uint64_t raw_basis_epoch = 0;
     sunshine_raw_scene::pool raw_policy;
@@ -806,11 +800,7 @@ namespace {
         // Effects can disappear while the native owner and scene continue.
         // Any later return to a reference must rediscover all FX handles.
         auto &proof = current->second;
-        proof.native_uniforms_checked = false;
-        proof.game_technique = proof.native_technique = {};
-        proof.depth_ready = proof.calibrated = proof.raw_anchor = proof.raw_gain = proof.depth_rect = proof.direction = {};
-        proof.camera_ready = proof.camera_basis = proof.camera_projection = proof.camera_scale = proof.camera_zero = proof.camera_blend = proof.camera_rect = proof.camera_raw_range = proof.depth_jitter = proof.effect_strength = {};
-        proof.texture = {}; proof.proof_checked = false;
+        reset_fx_reference(proof);
         return;
       }
       // The reset discards the runtime's timing window: its partial window is
@@ -960,7 +950,7 @@ namespace {
       ring_.release_idle_rings(export_views{*this});
       if (found != runtimes_.end()) {
         found->second.rendered_since_present = false;
-        found->second.native_depth_prepared = false;
+        found->second.fx.native_depth_prepared = false;
         found->second.frame.prepared = false;
       }
     }
@@ -982,82 +972,14 @@ namespace {
       if (!lock.owns_lock()) return;
       auto &proof = runtimes_[runtime];
       const auto previous_frame = proof.frame;
-      proof.native_depth_prepared = false;
+      proof.fx.native_depth_prepared = false;
       proof.frame = {};
       if (proof.addon_native) proof.raw_supported = true;
-      if (!proof.addon_native && !proof.native_uniforms_checked) {
-        proof.native_uniforms_checked = true;
-        runtime->enumerate_techniques("SunshineGame3D.fx", [&](api::effect_runtime *owner, api::effect_technique technique) {
-          char name[128] {};
-          owner->get_technique_name(technique, name);
-          if (std::strcmp(name, "SunshineGame3D") == 0) proof.game_technique = technique;
-        });
-        runtime->enumerate_techniques("SunshineDepth3D.fx", [&](api::effect_runtime *owner, api::effect_technique technique) {
-          char name[128] {};
-          owner->get_technique_name(technique, name);
-          if (std::strcmp(name, "SunshineDepth3D") == 0) proof.native_technique = technique;
-        });
-        runtime->enumerate_uniform_variables("SunshineDepth3D.fx", [&](api::effect_runtime *owner, api::effect_uniform_variable variable) {
-          char qualified[160] {};
-          owner->get_uniform_variable_name(variable, qualified);
-          const char *name = std::strrchr(qualified, ':');
-          name = name ? name + 1 : qualified;
-          if (std::strcmp(name, "Sunshine_DepthReady") == 0) proof.depth_ready = variable;
-          else if (std::strcmp(name, "Sunshine_Calibrated") == 0) proof.calibrated = variable;
-          else if (std::strcmp(name, "Sunshine_RawAnchor") == 0) proof.raw_anchor = variable;
-          else if (std::strcmp(name, "Sunshine_RawGain") == 0) proof.raw_gain = variable;
-          else if (std::strcmp(name, "Sunshine_DepthRect") == 0) proof.depth_rect = variable;
-          else if (std::strcmp(name, "DepthDirection") == 0) proof.direction = variable;
-        });
-        runtime->enumerate_uniform_variables("SunshineGame3D.fx", [&](api::effect_runtime *owner, api::effect_uniform_variable variable) {
-          char qualified[160] {};
-          owner->get_uniform_variable_name(variable, qualified);
-          const char *name = std::strrchr(qualified, ':');
-          name = name ? name + 1 : qualified;
-          if (std::strcmp(name, "Sunshine_CameraDepthReady") == 0) proof.camera_ready = variable;
-          else if (std::strcmp(name, "Sunshine_CameraCoordinateBasis") == 0) proof.camera_basis = variable;
-          else if (std::strcmp(name, "Sunshine_CameraProjection") == 0) proof.camera_projection = variable;
-          else if (std::strcmp(name, "Sunshine_CameraDepthScale") == 0) proof.camera_scale = variable;
-          else if (std::strcmp(name, "Sunshine_CameraConvergence") == 0) proof.camera_zero = variable;
-          else if (std::strcmp(name, "Sunshine_CameraStrengthBlend") == 0) proof.camera_blend = variable;
-          else if (std::strcmp(name, "Sunshine_CameraDepthRect") == 0) proof.camera_rect = variable;
-          else if (std::strcmp(name, "Sunshine_DepthJitter") == 0) proof.depth_jitter = variable;
-          else if (std::strcmp(name, "Sunshine_CameraRawDepthRange") == 0) proof.camera_raw_range = variable;
-          else if (std::strcmp(name, "Depth_Adjustment") == 0) proof.effect_strength = variable;
-        });
-        // Require the source-owned geometry interface; preset mode macros no
-        // longer select an alternate renderer.
-        proof.raw_supported = proof.camera_ready.handle && proof.camera_basis.handle &&
-          proof.camera_projection.handle && proof.camera_scale.handle && proof.camera_zero.handle &&
-          proof.camera_blend.handle && proof.camera_rect.handle;
-
-      }
-      if (!proof.addon_native && proof.effect_strength.handle)
-        runtime->get_uniform_value_float(proof.effect_strength, &proof.frame_strength, 1);
-      proof.frame_strength = std::isfinite(proof.frame_strength) ? std::clamp(proof.frame_strength, 0.f, 100.f) : 0.f;
-      // Fail closed before reading mutable capture/policy state. Publication
-      // below is the only writer that can enable the resolved camera branch.
-      if (!proof.addon_native && proof.camera_ready.handle) runtime->set_uniform_value_bool(proof.camera_ready, false);
+      refresh_fx_reference(runtime, proof);
       // The selector's begin-effects callback runs first. Its current capture is
       // shader-readable now; calibration history never substitutes for readiness.
       sunshine_depth::frame_depth depth;
-      const bool game_enabled = proof.addon_native || (proof.game_technique.handle && runtime->get_technique_state(proof.game_technique));
-      if (!game_enabled) sunshine_game3d::depth_input::invalidate_reuse(runtime);
-      const bool independent_enabled = !game_enabled && proof.native_technique.handle && runtime->get_technique_state(proof.native_technique);
-      if (independent_enabled && proof.depth_ready.handle && proof.calibrated.handle && proof.raw_anchor.handle &&
-          proof.raw_gain.handle && proof.depth_rect.handle && proof.direction.handle) {
-        int direction = 0;
-        runtime->get_uniform_value_int(proof.direction, &direction, 1);
-        sunshine_game3d::depth_input::query(runtime, depth, direction == 1 ? sunshine_depth::depth_orientation::normal :
-          direction == 2 ? sunshine_depth::depth_orientation::reversed : sunshine_depth::depth_orientation::automatic, true);
-        apply_native_depth(runtime, proof, depth);
-      } else {
-        // The original-derived effect owns its preparation and convergence.
-        // Camera diagnostics may inspect capture identity without enabling the
-        // independent renderer's percentile calibration or altering uniforms.
-        const sunshine_game3d::slow_step step("depth input query");
-        sunshine_game3d::depth_input::query(runtime, depth);
-      }
+      const bool game_enabled = query_fx_reference(runtime, proof, depth);
       proof.borrowed_depth = proof.addon_native && depth.ready ? depth.shader_resource : api::resource_view{};
       proof.diagnostic_armed = proof.addon_native && debug_dump_.requested();
       proof.diagnostic_depth = proof.diagnostic_armed ? depth : sunshine_depth::frame_depth{};
@@ -1084,24 +1006,9 @@ namespace {
         const sunshine_scene_gain::limits &budget, scene_parameters_t &scene);
 
     static void publish_frame(api::effect_runtime *runtime, runtime_t &proof, frame_decision_t frame) {
-      // Publish from this capture, including on FG reuse. Missing
-      // metadata clears the prior offset; it must not borrow the newest jitter.
-      if (!proof.addon_native && proof.depth_jitter.handle) runtime->set_uniform_value_float(proof.depth_jitter, frame.jitter.offset.data(), 2);
+      publish_fx_reference_jitter(runtime, proof, frame);
       const auto &scene = frame.scene;
-      if (scene.owned && !proof.addon_native) {
-        const float strength_ratio = proof.frame_strength > scene.admitted_strength && proof.frame_strength > 0.f ?
-          scene.admitted_strength / proof.frame_strength : 1.f;
-        if (proof.camera_rect.handle) runtime->set_uniform_value_float(proof.camera_rect, scene.rect.data(), 4);
-        if (proof.camera_blend.handle) runtime->set_uniform_value_float(proof.camera_blend, scene.blend * strength_ratio);
-        if (scene.ready) {
-          runtime->set_uniform_value_int(proof.camera_basis, scene.basis);
-          runtime->set_uniform_value_float(proof.camera_projection, scene.projection.data(), 2);
-          runtime->set_uniform_value_float(proof.camera_scale, scene.scale);
-          runtime->set_uniform_value_float(proof.camera_zero, scene.zero.data(), 2);
-          if (proof.camera_raw_range.handle) runtime->set_uniform_value_float(proof.camera_raw_range, scene.raw_range.data(), 2);
-          runtime->set_uniform_value_bool(proof.camera_ready, true);
-        }
-      }
+      publish_fx_reference_scene(runtime, proof, scene);
       auto ui = scene.ui;
       if (proof.addon_native && (proof.width > 3840 || proof.height > 3840))
         ui.phase = sunshine_game3d::automatic_phase::unsupported_resolution;
@@ -1152,38 +1059,13 @@ namespace {
         return;
       }
       char effect[128] {}, name[128] {};
-      if (!addon_render) {
-        runtime->get_technique_effect_name(technique, effect);
-        runtime->get_technique_name(technique, name);
-      }
-      const bool native = std::strcmp(effect, "SunshineDepth3D.fx") == 0 && std::strcmp(name, "SunshineDepth3D") == 0;
-      const bool legacy = std::strcmp(effect, "SuperDepth3D.fx") == 0 && std::strcmp(name, "SuperDepth3D") == 0;
-      const bool game = addon_render || (std::strcmp(effect, "SunshineGame3D.fx") == 0 && std::strcmp(name, "SunshineGame3D") == 0);
+      const auto kind = classify_fx_reference(runtime, technique, addon_render, effect, name);
+      const bool native = kind.native, legacy = kind.legacy, game = kind.game;
       if (!native && !legacy && !game) {
         return;
       }
       auto &proof = runtimes_[runtime];
-      if (proof.addon_native && !addon_render) return;
-      ring_.release_idle_rings(export_views{*this});
-      if (game && proof.raw_supported && !proof.frame.prepared) {
-        ring_.deactivate(runtime, "frame_not_prepared");
-        return;
-      }
-      // The renamed primary effect wins over accidentally enabled reference
-      // effects. Never alternate producers between techniques in one present.
-      if (!game && proof.game_technique.handle && runtime->get_technique_state(proof.game_technique)) return;
-      if (native && !proof.native_depth_prepared) {
-        ring_.deactivate(runtime, "native_depth_unprepared");
-        return;
-      }
-      // Preserve the older independent-over-reference priority when the renamed
-      // primary effect is not enabled.
-      if (legacy && proof.native_technique.handle && runtime->get_technique_state(proof.native_technique)) {
-        return;
-      }
-      if (!addon_render && (!proof.proof_checked || proof.effect_name != effect)) {
-        discover(runtime, proof, effect);
-      }
+      if (!prepare_fx_reference_frame(runtime, proof, effect, addon_render, native, legacy, game)) return;
       // Diagnostics also cover unfocused/consumer-free frames and failed export
       // validation. A successful publication is not evidence of useful depth.
       const HWND window = static_cast<HWND>(runtime->get_hwnd());
@@ -1218,7 +1100,7 @@ namespace {
 
       // The compiled input transfer must match the current game swapchain, including PQ to
       // scRGB switches that keep the exported FP16 format and transfer unchanged.
-      if ((addon_render ? !proof.native_output.handle : !proof.texture.handle) || !source_color_matches(runtime, proof, color->second)) {
+      if ((addon_render ? !proof.native_output.handle : !proof.fx.texture.handle) || !source_color_matches(runtime, proof, color->second)) {
         ring_.deactivate(runtime, "output_unavailable");
         return;
       }
@@ -1358,29 +1240,20 @@ namespace {
 #ifdef SUNSHINE_SBS_TEST
     friend struct publisher_tests;
 #endif
-    static void apply_native_depth(api::effect_runtime *runtime, runtime_t &proof, const sunshine_depth::frame_depth &depth) {
-      const bool rectangle = depth.width && depth.height && depth.active_width && depth.active_height &&
-        depth.x <= depth.width && depth.y <= depth.height && depth.active_width <= depth.width - depth.x &&
-        depth.active_height <= depth.height - depth.y;
-      const bool ready = depth.ready && rectangle && depth.shader_resource.handle;
-      const bool calibrated = ready && depth.calibrated;
-      const float rect[] {
-        rectangle ? float(depth.active_width) / depth.width : 1.f,
-        rectangle ? float(depth.active_height) / depth.height : 1.f,
-        rectangle ? float(depth.x) / depth.width : 0.f,
-        rectangle ? float(depth.y) / depth.height : 0.f};
-      const float anchor = calibrated ? depth.raw_anchor : 0.f;
-      const float gain = calibrated ? depth.raw_gain : 0.f;
-      runtime->set_uniform_value_float(proof.raw_anchor, &anchor, 1);
-      runtime->set_uniform_value_float(proof.raw_gain, &gain, 1);
-      runtime->set_uniform_value_float(proof.depth_rect, rect, 4);
-      runtime->set_uniform_value_bool(proof.calibrated, calibrated);
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-      depth_events::readiness(runtime, depth_events::site_id::native_ready, ready);
-#endif
-      sunshine_game3d::depth_input::set_ready(runtime, ready);
-      proof.native_depth_prepared = true;
-    }
+    static void reset_fx_reference(runtime_t &proof);
+    static void refresh_fx_reference(api::effect_runtime *runtime, runtime_t &proof);
+    static bool query_fx_reference(api::effect_runtime *runtime, runtime_t &proof, sunshine_depth::frame_depth &depth);
+    static void publish_fx_reference_jitter(api::effect_runtime *runtime, runtime_t &proof, const frame_decision_t &frame);
+    static void publish_fx_reference_scene(api::effect_runtime *runtime, runtime_t &proof, const scene_parameters_t &scene);
+    static fx_technique_kind classify_fx_reference(api::effect_runtime *runtime, api::effect_technique technique,
+      bool addon_render, char (&effect)[128], char (&name)[128]);
+    bool prepare_fx_reference_frame(api::effect_runtime *runtime, runtime_t &proof, const char *effect,
+      bool addon_render, bool native, bool legacy, bool game);
+    static bool fx_reference_has_rect(const runtime_t &proof);
+    static bool fx_reference_rejects_linear(const runtime_t &proof, bool linear);
+    static bool fx_reference_has_raw_range(const runtime_t &proof);
+
+    static void apply_native_depth(api::effect_runtime *runtime, runtime_t &proof, const sunshine_depth::frame_depth &depth);
 
     bool source_color_matches(api::effect_runtime *runtime, const runtime_t &proof, api::color_space current) {
       if (proof.color.input == api::color_space::unknown || proof.color.input != current) {
@@ -1478,91 +1351,9 @@ namespace {
       }
     };
 
-    static void discover(api::effect_runtime *runtime, runtime_t &proof, const char *effect = "SuperDepth3D.fx") {
-      proof.texture = {};
-      proof.effect_name = effect;
-      proof.proof_checked = true;
-      unsigned exports = 0;
-      runtime->enumerate_texture_variables(effect, [&](api::effect_runtime *owner, api::effect_texture_variable texture) {
-        int enabled = 0;
-        unsigned width = 0, height = 0, input_color = 0;
-        char layout[32] {}, color[32] {};
-        export_color_t export_color;
-        if (!owner->get_annotation_int_from_texture_variable(texture, "sunshine_sbs_export", &enabled, 1) || enabled != 1 || !owner->get_annotation_string_from_texture_variable(texture, "sunshine_sbs_layout", layout) || std::strcmp(layout, "sbs_lr") != 0 || !owner->get_annotation_string_from_texture_variable(texture, "sunshine_sbs_color_space", color) || !owner->get_annotation_uint_from_texture_variable(texture, "sunshine_sbs_source_color_space", &input_color, 1) || !decode_export_color(color, input_color, export_color) || !owner->get_annotation_uint_from_texture_variable(texture, "sunshine_sbs_source_width", &width, 1) || !owner->get_annotation_uint_from_texture_variable(texture, "sunshine_sbs_source_height", &height, 1)) {
-          return;
-        }
-        if (!width || width > wire::max_source_width || width % 2 || !height || height > wire::max_source_height || height % 2) {
-          return;
-        }
-        proof.texture = texture;
-        ++exports;
-        proof.width = width;
-        proof.height = height;
-        proof.color = export_color;
-      });
-      if (exports != 1) proof.texture = {};
-      if (!proof.texture.handle) {
-        log(reshade::log::level::warning, "Sunshine SBS: effect needs exactly one compatible stereo export texture; reinstall the matching Sunshine shader");
-      }
-    }
+    static void discover(api::effect_runtime *runtime, runtime_t &proof, const char *effect = "SuperDepth3D.fx");
 
-    static bool describe(api::effect_runtime *runtime, runtime_t &proof, source_t &source) {
-      std::uint32_t width = 0, height = 0;
-      runtime->get_screenshot_width_and_height(&width, &height);
-      if (width != proof.width || height != proof.height) {
-        return false;
-      }
-      if (proof.addon_native) source.resource = proof.native_output;
-      else {
-        api::resource_view view {};
-        runtime->get_texture_binding(proof.texture, &view, nullptr);
-        if (!view.handle) return false;
-        source.resource = runtime->get_device()->get_resource_from_view(view);
-      }
-      if (!source.resource.handle) {
-        return false;
-      }
-      source.width = width;
-      source.height = height;
-      source.color = proof.color;
-      source.window = static_cast<HWND>(runtime->get_hwnd());
-      // ReShade's aggregate-return getters are not MSVC/MinGW ABI compatible. The build
-      // adapts only get_resource_from_view; native COM supplies the other descriptions,
-      // including MinGW's explicit aggregate-return wrapper for D3D12 GetDesc.
-      if (runtime->get_device()->get_api() == api::device_api::d3d11) {
-        D3D11_TEXTURE2D_DESC desc {};
-        reinterpret_cast<ID3D11Texture2D *>(source.resource.handle)->GetDesc(&desc);
-        if (desc.Width != width * 2 || desc.Height != height || desc.MipLevels != 1 || desc.ArraySize != 1 || desc.SampleDesc.Count != 1) {
-          return false;
-        }
-        source.format = typed_format(desc.Format);
-        if (!proof.adapter_known) {
-          com_ptr<IDXGIDevice> device;
-          com_ptr<IDXGIAdapter> adapter;
-          DXGI_ADAPTER_DESC adapter_desc {};
-          auto *native = reinterpret_cast<ID3D11Device *>(runtime->get_device()->get_native());
-          if (FAILED(native->QueryInterface(IID_PPV_ARGS(device.put()))) || FAILED(device->GetAdapter(adapter.put())) || FAILED(adapter->GetDesc(&adapter_desc))) {
-            return false;
-          }
-          std::memcpy(&proof.adapter_luid, &adapter_desc.AdapterLuid, sizeof(proof.adapter_luid));
-          proof.adapter_known = true;
-        }
-      } else {
-        const auto desc = reinterpret_cast<ID3D12Resource *>(source.resource.handle)->GetDesc();
-        if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.Width != width * 2 || desc.Height != height || desc.MipLevels != 1 || desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1) {
-          return false;
-        }
-        source.format = typed_format(desc.Format);
-        if (!proof.adapter_known) {
-          auto *native = reinterpret_cast<ID3D12Device *>(runtime->get_device()->get_native());
-          const LUID luid = native->GetAdapterLuid();
-          std::memcpy(&proof.adapter_luid, &luid, sizeof(proof.adapter_luid));
-          proof.adapter_known = true;
-        }
-      }
-      source.adapter = proof.adapter_luid;
-      return wire::supported_format(static_cast<std::uint32_t>(source.format), source.color.output);
-    }
+    static bool describe(api::effect_runtime *runtime, runtime_t &proof, source_t &source);
 
     handle_t mapping_;
     sunshine_game3d::debug_dump debug_dump_;
@@ -1860,3 +1651,4 @@ extern "C" {
 #include "exporter/ui_status.inl"
 
 #include "exporter/scene_placement_impl.inl"
+#include "exporter/fx_reference.inl"
