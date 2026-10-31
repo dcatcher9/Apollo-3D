@@ -2,7 +2,7 @@
 // Part of exporter.cpp, included at the end of the same translation unit.
 // UI and scene status publication. Session types and dynamically initialized
 // automatic_ui references stay in the shell at their original positions.
-namespace {
+namespace SUNSHINE_EXPORTER_INTERNAL {
   // Returns the session whose UI counters the runtime had logged, if any.
   sunshine_game3d::alpha_auto_policy *clear_automatic_ui(api::effect_runtime *runtime) {
     std::lock_guard<std::mutex> lock(automatic_ui_mutex);

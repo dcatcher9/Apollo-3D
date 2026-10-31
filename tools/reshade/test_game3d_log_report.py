@@ -2795,7 +2795,7 @@ EXPORTER_PARTS = ('exporter/export_ring.inl', 'exporter/export_ring_class.inl', 
 
 def exporter_sources():
     """exporter.cpp and its parts, as one text."""
-    return ''.join(source(name) for name in ('exporter.cpp',) + EXPORTER_PARTS)
+    return ''.join(source(name) for name in ('exporter.cpp', 'exporter_test_access.h') + EXPORTER_PARTS)
 
 
 def enum_names(text, enum):

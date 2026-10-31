@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Function-only part of exporter.cpp, included at the end of that same TU.
 // Former in-class member bodies retain inline; declarations/defaults and all
-// runtime fields stay in the shell. exporter/scene_placement.inl supplies the
+// runtime fields retain original TU slots through exporter_test_access.h.
+// exporter/scene_placement.inl supplies the
 // decision types and free helpers at their original position.
 // Docs: docs/reshade-sbs.md, Scene placement.
-namespace {
+namespace SUNSHINE_EXPORTER_INTERNAL {
   // Every scene the stereo reentry ramp places tells it this Present's
   // readiness (reentry_update), and a reused or held scene repeats its real
   // frame's as that frame left it.

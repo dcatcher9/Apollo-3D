@@ -7,9 +7,10 @@
 // line (log_output). The members were in-class bodies of publisher_t and stay inline;
 // publisher_t declares them and keeps the present-gap constants and present_gap_t, and
 // the shell's part declarations name the two free functions.
-namespace {
+namespace SUNSHINE_EXPORTER_INTERNAL {
   // This process's video memory on the adapter (game3d_vram.h): two CPU-only
   // DXGI queries, made at most every vram::sample_period_ms.
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   sunshine_game3d::vram::reading query_vram(IDXGIAdapter3 *adapter) {
     using sunshine_game3d::vram::to_mib;
     sunshine_game3d::vram::reading out;
@@ -25,7 +26,11 @@ namespace {
     out.valid = true;
     return out;
   }
+#else
+  sunshine_game3d::vram::reading query_vram(IDXGIAdapter3 *adapter);
+#endif
 
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   output_sample classify_output(const frame_decision_t &frame) {
     const auto &scene = frame.scene;
     const bool placed = scene.ready && scene.blend > 0.f;
@@ -38,6 +43,9 @@ namespace {
     out.gap = frame.gap;
     return out;
   }
+#else
+  output_sample classify_output(const frame_decision_t &frame);
+#endif
 
   inline void publisher_t::finish_present_timing(api::effect_runtime *runtime, const std::array<LARGE_INTEGER, 5> &marks, unsigned count) {
     if (!count) return;

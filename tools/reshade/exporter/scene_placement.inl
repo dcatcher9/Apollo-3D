@@ -45,12 +45,18 @@
     std::uint64_t decided_ms = 0, present_ordinal = 0;
   };
 
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   sunshine_game3d::ui_adaptive::source resolve_ui_observation(const sunshine_game3d::depth_output::shown_depth &shown,
       const sunshine_game3d::ui_adaptive::source &previous, const scene_parameters_t &scene,
       std::uint64_t raw_basis_epoch, std::uint64_t now) {
     return sunshine_game3d::depth_output::ui_observation(shown, previous, scene.ready,
       scene.generic_routing_epoch, raw_basis_epoch, now);
   }
+#else
+  sunshine_game3d::ui_adaptive::source resolve_ui_observation(const sunshine_game3d::depth_output::shown_depth &shown,
+      const sunshine_game3d::ui_adaptive::source &previous, const scene_parameters_t &scene,
+      std::uint64_t raw_basis_epoch, std::uint64_t now);
+#endif
 
   // Raw and projection controllers report the same placement quantities under
   // different names; the panel and dumps describe both through one mapping.
@@ -60,14 +66,23 @@
     bool ready{}, placed{}, limited{}, has_statistics{};
     sunshine_scene_gain::depth_range statistics{};
   };
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   placement_report report(const sunshine_raw_scene::output &state) {
     return {state.H, state.t0, state.ui_midpoint_q, state.target_H, state.target_t0, state.target_ui_midpoint_q,
       state.ready, state.calibrated, state.limited, state.has_depth_statistics, state.depth_statistics};
   }
+#else
+  placement_report report(const sunshine_raw_scene::output &state);
+#endif
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   placement_report report(const sunshine_projection_depth::center_output &center) {
     return {center.K, center.q0, center.ui_midpoint_q, center.target_K, center.target_q0, center.target_ui_midpoint_q,
       center.ready, center.initialized, center.limited, center.has_depth_statistics, center.depth_statistics};
   }
+#else
+  placement_report report(const sunshine_projection_depth::center_output &center);
+#endif
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   sunshine_game3d::automatic_scale describe_scale(sunshine_game3d::automatic_scale_basis basis,
       const placement_report &placement, double normalization) {
     sunshine_game3d::automatic_scale scale{basis, placement.gain, placement.ready, static_cast<float>(placement.target_gain)};
@@ -96,7 +111,12 @@
     scale.depth_tiles_y = statistics.tiles_y;
     return scale;
   }
+#else
+  sunshine_game3d::automatic_scale describe_scale(sunshine_game3d::automatic_scale_basis basis,
+      const placement_report &placement, double normalization);
+#endif
 
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous, bool supported) {
     // Only the depth source can authorize old pixels: an API provider's held
     // or pending copy, or Generic's hold of the capture it showed on the
@@ -117,6 +137,9 @@
       frame.depth_ready = false;
     }
   }
+#else
+  void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous, bool supported);
+#endif
 
   // Part declarations: functions defined in exporter/present_diagnostics.inl (included at
   // the end of this file) that code here calls.
@@ -140,6 +163,7 @@
   // shown time, and a hold never spans two Presents of which neither had
   // the camera: after a second pause the age runs to a Present that only
   // held it.
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   bool hold_projection_scene(frame_decision_t &frame, const frame_decision_t &previous,
       const sunshine_depth::frame_depth &depth, std::uint64_t now) {
     const bool own_camera = depth.projection.supplied ||
@@ -153,4 +177,8 @@
     frame.scene = previous.scene;
     return true;
   }
+#else
+  bool hold_projection_scene(frame_decision_t &frame, const frame_decision_t &previous,
+      const sunshine_depth::frame_depth &depth, std::uint64_t now);
+#endif
 

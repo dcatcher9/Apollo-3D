@@ -2,7 +2,8 @@
 // Function-only part at the end of exporter.cpp; original anonymous namespace.
 // FX state: fx_reference_types.inl at its original runtime member slot.
 // The same reference path has Generic-side helpers in generic_fx_reference.inl.
-namespace {
+namespace SUNSHINE_EXPORTER_INTERNAL {
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   bool decode_export_color(const char *output, std::uint32_t input, export_color_t &color) {
     if (input == static_cast<std::uint32_t>(api::color_space::srgb) && std::strcmp(output, "srgb") == 0) {
       color = {api::color_space::srgb, wire::transfer::srgb};
@@ -20,6 +21,9 @@ namespace {
     }
     return false;
   }
+#else
+  bool decode_export_color(const char *output, std::uint32_t input, export_color_t &color);
+#endif
 
   inline void publisher_t::reset_fx_reference(runtime_t &proof) {
       proof.fx.native_uniforms_checked = false;

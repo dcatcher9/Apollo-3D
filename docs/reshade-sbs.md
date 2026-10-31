@@ -6062,6 +6062,16 @@ stay in the exporter shell in their original order. Preparation's try-lock,
 clock reads, resource calls and publication remain at their original call sites;
 held scenes keep their source identity and previously resolved calibration.
 
+### Exporter test boundary
+
+The publisher and its types are shared with the lifecycle fixture through
+`tools/reshade/exporter_test_access.h`. The source TU supplies the one session,
+UI aliases, callbacks and noninline free definitions; staged type includes retain
+the shipping/runtime-test source order and anonymous namespace. The SBS unit
+view uses one named test namespace, preserves the friend fixture, and shares the
+existing constexpr classifier definitions and three constant objects between its
+TUs. This packaging has no source behavior or fixture-oracle change.
+
 ### FX reference
 
 `exporter/fx_reference.inl` contains the same-TU reference-effect discovery,

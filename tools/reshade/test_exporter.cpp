@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Exercise the actual publisher state transitions without loading an add-on into a game.
-#include "exporter.cpp"
+#include "exporter_test_access.h"
+extern "C" {
+  BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID);
+  __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade);
+}
 #include "depth_cache_update.h"
 #include "streamline_depth_provider.h"
 #include "game3d_frame_record.h"
@@ -18,7 +22,7 @@ namespace sunshine_streamline::provider {
     const sunshine_depth::frame_depth &, reshade::api::resource, reshade::api::resource_view, std::uint64_t);
 }
 
-namespace {
+namespace SUNSHINE_EXPORTER_INTERNAL {
   void require(bool result, const char *message) {
     if (!result) {
       throw std::runtime_error(message);

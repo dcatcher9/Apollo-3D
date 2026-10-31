@@ -4,15 +4,24 @@
 // they stood, so they keep internal linkage and their order. export_ring_class.inl holds the ring
 // itself (export_ring); docs/reshade-sbs.md, GPU handoff contract, owns the protocol.
 
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   bool exchange_state(wire::slot_t &slot, std::uint64_t generation, wire::slot_state desired, wire::slot_state expected) {
     const auto prior = wire::slot_control(generation, expected);
     return static_cast<std::uint64_t>(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control), static_cast<LONG64>(wire::slot_control(generation, desired)), static_cast<LONG64>(prior))) == prior;
   }
+#else
+  bool exchange_state(wire::slot_t &slot, std::uint64_t generation, wire::slot_state desired, wire::slot_state expected);
+#endif
 
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   void store_state(wire::slot_t &slot, std::uint64_t generation, wire::slot_state state) {
     InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&slot.control), static_cast<LONG64>(wire::slot_control(generation, state)));
   }
+#else
+  void store_state(wire::slot_t &slot, std::uint64_t generation, wire::slot_state state);
+#endif
 
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   std::uint64_t read_nonce(wire::shared_state_t &shared) {
     return static_cast<std::uint64_t>(InterlockedCompareExchange64(
       reinterpret_cast<volatile LONG64 *>(&shared.consumer_nonce),
@@ -20,9 +29,13 @@
       0
     ));
   }
+#else
+  std::uint64_t read_nonce(wire::shared_state_t &shared);
+#endif
 
   // The capabilities of the consumer answering nonce, zero for a replaced one
   // (wire::answered_capabilities).
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   std::uint32_t read_capabilities(wire::shared_state_t &shared, std::uint64_t nonce) {
     const auto answered = static_cast<std::uint64_t>(InterlockedCompareExchange64(
       reinterpret_cast<volatile LONG64 *>(&shared.capability_nonce), 0, 0));
@@ -30,9 +43,13 @@
       reinterpret_cast<volatile LONG *>(&shared.consumer_capabilities), 0, 0));
     return wire::answered_capabilities(nonce, answered, bits);
   }
+#else
+  std::uint32_t read_capabilities(wire::shared_state_t &shared, std::uint64_t nonce);
+#endif
 
   // The protocol the consumer answering nonce declared, zero for a replaced
   // one or one that declared none (wire::answered_protocol).
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   std::uint32_t read_consumer_protocol(wire::shared_state_t &shared, std::uint64_t nonce) {
     const auto answered = static_cast<std::uint64_t>(InterlockedCompareExchange64(
       reinterpret_cast<volatile LONG64 *>(&shared.capability_nonce), 0, 0));
@@ -40,17 +57,24 @@
       reinterpret_cast<volatile LONG *>(&shared.consumer_protocol), 0, 0));
     return wire::answered_protocol(nonce, answered, protocol);
   }
+#else
+  std::uint32_t read_consumer_protocol(wire::shared_state_t &shared, std::uint64_t nonce);
+#endif
 
   // The export transfer of an HDR swapchain for the answered consumer's
   // capabilities (docs/reshade-sbs.md, PQ wire transfer): 10-bit PQ for an
   // HDR10 source when the consumer accepts PQ, and for any HDR source, native
   // scRGB included, when it encodes HDR10 PQ (consumer_stream_pq, which
   // implies acceptance). Every other consumer gets FP16 scRGB.
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   bool exports_pq(api::color_space source, std::uint32_t capabilities) {
     if (source == api::color_space::hdr10_pq)
       return (capabilities & (wire::consumer_accepts_pq | wire::consumer_stream_pq)) != 0;
     return source == api::color_space::scrgb && (capabilities & wire::consumer_stream_pq) != 0;
   }
+#else
+  bool exports_pq(api::color_space source, std::uint32_t capabilities);
+#endif
 
   // C3: whether this Present's render may be exported to the consumer read at
   // export (consumer_pq: exports_pq for it). A native render chose its
@@ -59,9 +83,13 @@
   // direction; otherwise the next Present renders for the new consumer and
   // no ring of the other transfer is created. A reference export cannot
   // render again: only its PQ output needs a consumer that takes PQ.
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   bool transfer_current(bool native_render, bool pq_requested, wire::transfer output, bool consumer_pq) {
     return native_render ? consumer_pq == pq_requested : output != wire::transfer::pq || consumer_pq;
   }
+#else
+  bool transfer_current(bool native_render, bool pq_requested, wire::transfer output, bool consumer_pq);
+#endif
 
   // The export pauses whose origin is the host, the game or the player rather
   // than a fault (tools/reshade/README.md, the readiness report): a host that
@@ -71,7 +99,7 @@
   // "export inactive (reason, routine|fault)"; every other reason, a new one
   // included, is a fault. game3d_log_report.py reads the class and mirrors
   // this list for logs without it; its test reads the list from here.
-  constexpr std::array<std::string_view, 11> routine_export_pauses{
+  SUNSHINE_EXPORTER_CONSTANT constexpr std::array<std::string_view, 11> routine_export_pauses{
     "no_consumer", "ring_replaced", "consumer_transfer_changed", "consumer_without_pq", "not_foreground",
     "runtime_reset", "runtime_gone", "present_without_render", "color_space_changed", "swapchain_unknown",
     "frame_not_prepared"};
@@ -84,11 +112,16 @@
     std::string_view(export_pause_class("device_removed")) == "fault" && std::string_view(export_pause_class("")) == "fault");
 
   // The colour space a transfer's export is encoded in (the overlay's target).
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   api::color_space export_space(wire::transfer transfer) {
     return transfer == wire::transfer::srgb ? api::color_space::srgb :
       transfer == wire::transfer::pq ? api::color_space::hdr10_pq : api::color_space::scrgb;
   }
+#else
+  api::color_space export_space(wire::transfer transfer);
+#endif
 
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   DXGI_FORMAT typed_format(DXGI_FORMAT format) {
     switch (format) {
       case DXGI_FORMAT_R8G8B8A8_TYPELESS:
@@ -105,6 +138,9 @@
         return format;
     }
   }
+#else
+  DXGI_FORMAT typed_format(DXGI_FORMAT format);
+#endif
 
   struct export_color_t {
     api::color_space input = api::color_space::unknown;
@@ -123,12 +159,16 @@
     HWND window = nullptr;
   };
   // A ring idle this long is reused for the next consumer (see generation_t::renew).
-  constexpr auto idle_ring_reuse = std::chrono::milliseconds(500);
+  SUNSHINE_EXPORTER_CONSTANT constexpr auto idle_ring_reuse = std::chrono::milliseconds(500);
   // Everything a generation's ring textures depend on, besides the consumer.
+#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   bool same_ring(const source_t &a, const source_t &b) {
     return a.width == b.width && a.height == b.height && a.format == b.format && a.adapter == b.adapter &&
       a.color.input == b.color.input && a.color.output == b.color.output && a.window == b.window;
   }
+#else
+  bool same_ring(const source_t &a, const source_t &b);
+#endif
 
   // Why a presentation carries no depth, for the SBS output counters. unavailable: the
   // provider had none this Present (source switch, FG toggle, expiry). The reuse reasons
