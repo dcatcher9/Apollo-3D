@@ -3618,6 +3618,9 @@ surveyed release's own header; every surveyed release agrees with it.
 
 ### Streamline depth selection
 
+`sl_frame_generation.inl` contains the Streamline options hook, deferred tag-copy execution
+and shared DLSS-G input wrappers in the probe's translation unit; their state stays in its shell.
+
 The `SUNSHINE_DEPTH` INI readers live in `addon_config.{h,cpp}`. Streamline initialization
 reads its source, call-trace, NGX-source and queue-order flags in that order; the
 FrameActivityTrace reader stays at Generic's event-registration latch. Each owner
