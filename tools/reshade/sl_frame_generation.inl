@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Part of streamline_camera_probe.cpp (sl_adapter): FG options, deferred tag
-// copies and the shared DLSS-G input wrappers. UI input statements stay at
-// their original points in those wrappers until the SL UI capture part owns
-// them. The shell keeps every type, namespace-scope variable and thread_local;
+// copies and the shared DLSS-G input wrappers. The UI capture part is called
+// at the original UI statement boundaries. The shell keeps every type,
+// namespace-scope variable and thread_local;
 // this function-only part is included at its end in the same translation unit.
 
 namespace sunshine_streamline {
@@ -412,8 +412,7 @@ namespace sunshine_streamline {
     // An absent key changes nothing and is reported as absent in any scope.
     out.depth = value.depth.state == parameter::absent ? depth_outcome::absent :
       value.depth.state == parameter::null ? depth_outcome::null_resource : depth_outcome::not_offered;
-    for (unsigned i = 0; i != value.ui.size(); ++i)
-      out.ui_result[i] = value.ui[i].state == parameter::absent ? ui_outcome::absent : ui_outcome::no_fg_scope;
+    initialize_frame_generation_ui(value, out);
     // The scope: the one viewport whose FG options were observed enabled in
     // this epoch. Without it no input belongs to any Streamline FG scope.
     const auto ticket = observation_ticket();
@@ -539,43 +538,7 @@ namespace sunshine_streamline {
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
     if (out.depth != depth_outcome::capture) remember_frame_generation_refusal(out, fg.epoch, serial, fg.viewport);
 #endif
-    if (std::any_of(value.ui.begin(), value.ui.end(), [](const auto &item) { return item.state != parameter::absent; })) {
-      const bool interested = mask::interested(source_epoch, loss, fg.viewport, tick);
-      for (unsigned i = 0; i != value.ui.size(); ++i) {
-        const auto &item = value.ui[i];
-        auto &result = out.ui_result[i];
-        if (item.state == parameter::absent) continue;
-        if (!interested) { result = ui_outcome::no_request; continue; }
-        if (!item.area_valid) { result = ui_outcome::subrect; continue; }
-        // The game's own tag of this kind copied it first, or its copy waits
-        // for this frame's Present: no second copy, and its exact pairs stay
-        // the tags' own (ui_tags_supply).
-        if (ui_tags_supply(source_epoch, fg.viewport, i)) {
-          result = ui_outcome::tag_copied;
-          continue;
-        }
-        depth_capture::input input;
-        input.epoch = source_epoch; input.sequence = serial; input.tick = tick;
-        input.viewport = fg.viewport; input.observation_revision = loss;
-        input.source_id = source_id; input.frame_generation_input = true;
-        input.resource.native = item.state == parameter::present ? item.native : 0;
-        input.resource.area = item.area;
-        sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, input);
-        input.force_snapshot = true; input.at_tag_call = true;
-        depth_capture::record_diagnostic retained;
-        input.source = depth_capture::retain_source(input.resource.native, &retained);
-        input.source_present_generation = depth_capture::source_present_generation(input.source);
-        if (input.source) { input.resource.width = retained.width; input.resource.height = retained.height; }
-        mask::boundary where;
-        where.source = input; where.command = value.command; where.tag_scope = 2;
-        where.kind = mask::capture_order[i];
-        where.source_present_generation = input.source_present_generation;
-        where.format = input.source ? retained.format : 0;
-        where.frame_generation_evaluation = true;
-        out.ui[i] = mask::begin(where, input);
-        result = item.state == parameter::present ? ui_outcome::offered : ui_outcome::null_resource;
-      }
-    }
+    capture_frame_generation_ui(value, out, source_epoch, loss, fg, serial, tick, source_id);
     SetLastError(incoming);
     return out;
   }
@@ -587,8 +550,7 @@ namespace sunshine_streamline {
     const bool still_current = current(value.observation);
     if (value.depth_ticket)
       depth_capture::finish(value.depth_ticket, successful && still_current, depth_capture::capture_failure::evaluation_failed);
-    const bool ui_current = successful && still_current && value.loss == loss_revision.load(std::memory_order_acquire);
-    for (const auto &attempt : value.ui) sunshine_game3d::ui_mask::finish(attempt, ui_current);
+    finish_frame_generation_ui(value, successful, still_current);
     SetLastError(incoming);
   }
 
