@@ -119,8 +119,7 @@ namespace sunshine_streamline {
     // the frame's newest tag call.
     void hand_over(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned kinds, std::uint64_t sequence) {
       if (kinds & 1u) {
-        remember_tag_copy(scope_epoch, viewport, false);
-        miss_frame_generation(scope_epoch, viewport, sequence);
+        frame_missed(scope_epoch, viewport, sequence);
       }
       for (unsigned slot = 0; slot != 4; ++slot)
         if (kinds & (2u << slot)) remember_ui_tag_copy(scope_epoch, viewport, slot, false);

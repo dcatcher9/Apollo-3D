@@ -200,3 +200,9 @@
       deferral_pending.store(0, std::memory_order_release);
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
     }
+    // The three default-argument missed-frame sites keep their two calls
+    // and separate lock holds in the same order.
+    void frame_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence) {
+      remember_tag_copy(epoch, viewport, false);
+      miss_frame_generation(epoch, viewport, sequence);
+    }
