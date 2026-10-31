@@ -1567,6 +1567,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 #### Streamline adapter
 
 - [`streamline_camera_probe.cpp`](streamline_camera_probe.cpp): the Streamline evidence adapter: hook install and discovery, tags and evaluations, admission and nomination, the FG options hook and DLSS-G inputs, the SL UI adapter, and its log lines. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`presentation_scope_supply.inl`](presentation_scope_supply.inl): part of `streamline_camera_probe.cpp`, included at the original supply-block position in its existing private namespace: evaluation/tag/UI supply and deferred-frame tables and their lock. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`streamline_camera_probe.h`](streamline_camera_probe.h): the probe's public API for the depth adapters and the exporter. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`streamline_camera_probe_test_access.h`](streamline_camera_probe_test_access.h): the linkage switch of the probe's internals and the test add-on's declarations of them and of the probe's refusal recorders. Docs: [Test builds](#test-builds).
 - [`streamline_camera_data.cpp`](streamline_camera_data.cpp), [`streamline_camera_data.h`](streamline_camera_data.h): the narrow Streamline ABI declarations and the versioned structure reads. Docs: [Streamline ABI compatibility](../../docs/reshade-sbs.md#streamline-abi-compatibility).
