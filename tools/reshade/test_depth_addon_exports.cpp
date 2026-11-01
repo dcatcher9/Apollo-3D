@@ -13,7 +13,9 @@
 #include "depth_addon_test_access.h"
 #include "game3d_frame_record.h"
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
+#include <string>
 #include "depth_refusal.h"
 #include "depth_selection_snapshot_test.h"
 #include "game3d_test_depth_events.h"
@@ -586,6 +588,73 @@ static void check_hold_gates()
 	require_snapshot(queue.stats_per_used_depth_stencil[resource { 0x1000 }].depth_erased, "Merging lost a depth clear or discard");
 }
 
+// b3cd556c's takeover wiring (deferred item 7a), through the add-on's own
+// helpers: a comparison won after its probe visit ended has no tracked backup,
+// so the challenger must not take over (a new capture slot counts copies only
+// from the next Present: a mono takeover Present), it gets the next probe
+// visit, and once that visit tracks its backup it takes over on its Present.
+static void check_won_challenger_takeover()
+{
+	constexpr unsigned w = 32, h = 18;
+	const auto gradient = [](float low, float high) {
+		std::vector<float> values(w * h);
+		for (unsigned y = 0; y < h; ++y)
+			for (unsigned x = 0; x < w; ++x)
+				values[y * w + x] = low + (high - low) * (float(x) / (w - 1) * .7f + float(y) / (h - 1) * .3f);
+		return values;
+	};
+	auto exponential = gradient(0, 1);
+	for (auto &value : exponential) value = std::exp2(-10 + 8 * value);
+	const auto narrow_values = gradient(.04f, .052f);
+	const auto narrow = sunshine_depth::analyze_depth(narrow_values.data(), narrow_values.size(), w, h);
+	const auto broad = sunshine_depth::analyze_depth(exponential.data(), exponential.size(), w, h);
+	const auto candidate = [](uint64_t id, uint64_t frame) {
+		sunshine_depth::candidate_info info;
+		info.id = id; info.width = 1280; info.height = 720; info.viewport_width = 1280; info.viewport_height = 720;
+		info.output_width = 1280; info.output_height = 720; info.last_seen_frame = frame; info.draws = 1; info.vertices = 3;
+		return info;
+	};
+	sunshine_depth::selection_policy policy;
+	const auto capture = [&](uint64_t id, const sunshine_depth::depth_quality &quality, uint64_t frame) {
+		policy.observe(candidate(id, frame));
+		policy.sample(id, quality, frame);
+	};
+	// test_depth_selection's fresh relative wins: the challenger 2 wins its
+	// third paired comparison on a Present only the incumbent 1 rendered.
+	for (uint64_t frame : {8u, 9u, 10u}) { capture(1, narrow, frame); capture(2, broad, frame); }
+	policy.choose(10, 1);
+	for (uint64_t frame : {11u, 12u, 13u}) { capture(2, broad, frame); policy.choose(frame, 1); }
+	capture(1, narrow, 14); policy.choose(14, 1);
+	capture(2, broad, 14); policy.choose(14, 1);
+	capture(1, narrow, 15); policy.choose(15, 1);
+	policy.observe(candidate(2, 15));
+	require_snapshot(policy.won_challenger_id() == 2, "The takeover row's challenger did not win its comparison");
+	std::unordered_map<resource, depth_stencil_resource, resource_hash> resources;
+	for (uint64_t id : {1u, 2u})
+	{
+		depth_stencil_resource info;
+		info.desc.type = resource_type::texture_2d;
+		info.desc.texture = { 1280, 720, 1, 1, format::d32_float, 1 };
+		info.identity = id;
+		resources.emplace(resource { 0x1000 + id * 16 }, info);
+	}
+	const auto snapshot = snapshot_depth_selection(resources);
+	generic_depth_device_data device_data;
+	device_data.frame_index = 15;
+	auto waiting = policy;
+	const auto untracked = choose_generic_source(waiting, device_data, snapshot, 1, true);
+	require_snapshot(untracked.id == 1 && std::string(untracked.reason) == "waiting for the won challenger's capture" &&
+		waiting.won_challenger_id() == 2, "A won challenger without a tracked backup took over (a mono takeover Present)");
+	sunshine_depth_probe::discovery_hint hint;
+	require_snapshot(first_probe_choice(waiting, hint, 15) == 2,
+		"A comparison won without a probe visit did not get the next visit, which allocates its backup");
+	depth_stencil_backup backup;
+	backup.depth_stencil = resource { 0x1000 + 2 * 16 };
+	device_data.depth_stencil_backups.push_back(backup);
+	require_snapshot(choose_generic_source(policy, device_data, snapshot, 1, true).id == 2,
+		"A won challenger whose probe visit tracks its backup did not take over on its rendered Present");
+}
+
 static void check_depth_snapshot_contract()
 {
 	check_candidate_shape_table();
@@ -593,6 +662,7 @@ static void check_depth_snapshot_contract()
 	check_end_discard();
 	check_transfer_lineage();
 	check_hold_gates();
+	check_won_challenger_takeover();
 
 	// Candidate counters follow the capture-owner count (or the opt-in trace).
 	generic_depth_device_data demand_device;

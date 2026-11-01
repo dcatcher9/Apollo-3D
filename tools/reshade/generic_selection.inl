@@ -136,6 +136,21 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool candidate_matches_shape(const DepthInfo &info
 	return check_aspect_ratio(static_cast<float>(region.width), static_cast<float>(region.height), static_cast<float>(width), static_cast<float>(height));
 }
 
+// The selector's choice for one Present (selection_policy::choose). A
+// challenger takes over only on a Present that advanced the depth frame with
+// its own work, and only with a backup already tracked for it (the probe's,
+// or a capture slot's), so its first anchored Present has its own current
+// copy: a new capture slot counts copies only from the next Present.
+SUNSHINE_DEPTH_ADDON_INTERNAL sunshine_depth::selection_result choose_generic_source(sunshine_depth::selection_policy &selection,
+	generic_depth_device_data &device_data, const depth_selection_snapshot &snapshot, uint64_t current_id, bool depth_present)
+{
+	return selection.choose(device_data.frame_index, current_id, depth_present, [&](uint64_t id) {
+		for (const auto &[candidate, info] : snapshot)
+			if (info.identity == id) return device_data.find_depth_stencil_backup(candidate) != nullptr;
+		return false;
+	});
+}
+
 // begin_depth_frame's candidate selection for one Present: snapshots the
 // device's depth-stencils under the shared s_mutex, observes and prunes the
 // eligible candidates, consumes the completed sample, chooses this Present's
@@ -266,16 +281,8 @@ static void select_depth_candidate(effect_runtime *runtime, device *const device
 	sunshine_depth::selection_result choice;
 	if (automatic)
 	{
-		// A challenger takes over only on a Present that advanced the depth frame
-		// with its own work, and only with a backup already tracked for it (the
-		// probe's, or a capture slot's), so its first anchored Present has its
-		// own current copy.
-		choice = data.selection.choose(device_data->frame_index, current_id,
-			device_data->native_depth_present_index == native_present_index, [&](uint64_t id) {
-				for (const auto &[candidate, info] : current_depth_stencil_resources)
-					if (info.identity == id) return device_data->find_depth_stencil_backup(candidate) != nullptr;
-				return false;
-			});
+		choice = choose_generic_source(data.selection, *device_data, current_depth_stencil_resources, current_id,
+			device_data->native_depth_present_index == native_present_index);
 		for (const auto &[candidate, info] : current_depth_stencil_resources)
 		{
 			if (info.identity == choice.id || (!choice.id && info.identity == current_id &&

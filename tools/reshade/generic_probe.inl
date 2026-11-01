@@ -54,6 +54,21 @@ static void release_challenger(effect_runtime *runtime, generic_depth_data &data
 	}
 }
 
+// The probe's next target when no visit runs, before the current-source
+// refresh and the round robin: a comparison won without a visit (it ended on
+// its deadline before the last paired win) gets the next one, since its
+// takeover waits for a tracked backup (choose_generic_source), which this
+// visit allocates; else a discovery hint. A recent hint cannot restore a
+// destroyed or filtered candidate.
+SUNSHINE_DEPTH_ADDON_INTERNAL uint64_t first_probe_choice(sunshine_depth::selection_policy &selection,
+	sunshine_depth_probe::discovery_hint &hint, uint64_t frame)
+{
+	uint64_t id = selection.won_challenger_id();
+	if (!id) id = hint.take(frame);
+	if (id && !selection.evidence(id)) id = 0;
+	return id;
+}
+
 static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list, generic_depth_data &data,
 	generic_depth_device_data &device_data)
 {
@@ -82,14 +97,7 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 		release_challenger(runtime, data);
 	if (data.probe_target_id == 0)
 	{
-		// A comparison won without a visit (it ended on its deadline before the
-		// last paired win) gets the next one: its takeover waits for a tracked
-		// backup (selection_policy::choose), which this visit allocates.
-		data.probe_target_id = data.selection.won_challenger_id();
-		if (!data.probe_target_id)
-			data.probe_target_id = data.discovery_hint.take(device_data.frame_index);
-		if (data.probe_target_id && !data.selection.evidence(data.probe_target_id))
-			data.probe_target_id = 0; // A recent hint cannot restore a destroyed or filtered candidate.
+		data.probe_target_id = first_probe_choice(data.selection, data.discovery_hint, device_data.frame_index);
 		// Refresh the current source between round-robin challenger visits so a
 		// large candidate list cannot age out a working selection's evidence.
 		if (!data.probe_target_id && GetTickCount64() - data.last_current_sample_tick >= 1000)

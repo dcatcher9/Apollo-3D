@@ -58,6 +58,9 @@ void resolve_transfer_lineage(state_tracking &state, const generic_depth_device_
 hold_gate judge_hold_gate(const depth_selection_snapshot &snapshot, const sunshine_depth_capture::capture_set &captures,
 	uint64_t held, uint64_t frame, uint32_t color_width, uint32_t color_height, bool resolve_depth, uint64_t grace);
 sunshine_streamline::provider::source_status describe_streamline_source(effect_runtime *runtime);
+sunshine_depth::selection_result choose_generic_source(sunshine_depth::selection_policy &selection,
+	generic_depth_device_data &device_data, const depth_selection_snapshot &snapshot, uint64_t current_id, bool depth_present);
+uint64_t first_probe_choice(sunshine_depth::selection_policy &selection, sunshine_depth_probe::discovery_hint &hint, uint64_t frame);
 // A fixture's call, made once at the next native depth frame's entry
 // (sunshine_depth::begin_native_frame), between the UI's and depth's reads of
 // the FG mode in that Present (SunshineGame3DTestOptionsAtDepthFrame).

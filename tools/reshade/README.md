@@ -1385,8 +1385,13 @@ synthetic checks do not replace a game's DLSS/TAA acceptance test.
 With runtime tests enabled, the CPU-only `reshade_depth_selection_snapshot` CTest loads the test
 add-on without initializing ReShade or a graphics device. It compares the former deep copy with
 the production compact snapshot, including capture-region parity, independent row ownership,
-resource-address reuse and inactive live-candidate history. Its synthetic workload timings include
-construction, consumption and destruction; reported value bytes exclude allocator overhead.
+resource-address reuse and inactive live-candidate history. It also runs the add-on's own
+takeover wiring (`choose_generic_source`, `first_probe_choice`; deferred item 7a, b3cd556c): a
+comparison won after its probe visit ended has no tracked backup, so the incumbent must keep the
+Present, the won challenger must get the next probe visit, and once a backup is tracked for it it
+must take over (since 11-01; before, only the policy predicate was tested, with its own lambda).
+Its synthetic workload timings include construction, consumption and destruction; reported value
+bytes exclude allocator overhead.
 
 ## Diagnostics and validation
 
