@@ -1063,7 +1063,10 @@ use the same real GPU capture and shader path.
 `SUNSHINE_STREAMLINE_PACKED_V1_TEST=1` is a third exclusive mode for the packed
 `R32G8X24_TYPELESS` depth/stencil format observed in Dead Space. It checks rotating sources,
 prior-recording provider state, plane-aware depth readback, unchanged source stencil, the
-consumed depth and projection, mono fallback and recovery.
+consumed depth and projection, mono fallback and recovery. In each positive phase of these two
+modes, both rotating sources must be covered, and a source counts only from a capture the fixture
+verified: the fresh (not held) depth a native render consumed, matched to the Present that drew
+it. A capture spans a variable number of Presents, so the source of another Present proves nothing.
 `SUNSHINE_STREAMLINE_COMMAND_CAPACITY_TEST=1` is another exclusive mode. It retains
 160 real native-only command lists on the observed vtable, then destroys and recreates them
 while checking packed-depth rotation, shader output and recovery. These lists bypass ReShade's

@@ -520,8 +520,10 @@ RWTexture2D<float> depth : register(u0);
     }
     // One production Dump 3D capture: the exact depth and projection one
     // native render consumed, matched to what its own Present drew.
-    // Which rotating source (1 first, 2 second) the last capture verified.
+    // Which rotating source (1 first, 2 second) the last capture verified, and
+    // whether that render consumed a fresh copy rather than a held one.
     unsigned consumed_source{};
+    bool consumed_fresh{};
     native_render consumed_depth(const char *phase) {
       const auto consumed=direct_native.capture(phase,false,[&]{tick(phase);});
       const auto drawn=std::find_if(drawn_frames.rbegin(),drawn_frames.rend(),[&](const drawn_frame &value) {
@@ -530,6 +532,7 @@ RWTexture2D<float> depth : register(u0);
       require(consumed.depth_ready && drawn!=drawn_frames.rend(),"The captured native render consumed no observed current API depth");
       const auto &target=*(drawn->source==native(*first) ? first : second);
       consumed_source=drawn->source==native(*first) ? 1u : 2u;
+      consumed_fresh=!consumed.reused_depth;
       require(consumed.width==target.width && consumed.height==target.height && consumed.projection_supplied &&
         consumed.coordinate_basis==0 && consumed.projection[0]==camera.projection.m[2][2] &&
         consumed.projection[1]==1.f/camera.projection.m[3][2],
@@ -802,16 +805,19 @@ RWTexture2D<float> depth : register(u0);
           private_phase{private_case::shader_read_present,"private-state-shader-read-present-marker"}}) {
         private_input=phase.value;
         settle(phase.name);
-        unsigned seen=0,verified=0;
+        // Coverage is the source of each capture verify_depth validated (the
+        // render it consumed, matched to the Present that drew it), counted only
+        // for a fresh copy. A capture spans 8 to 10 Presents, so the source of
+        // another Present, such as this iteration's first, says nothing about it.
+        unsigned verified=0;
         for(unsigned i=0;i<4 || verified!=3;++i) {
-          require(i<16,"Provider-private state did not validate both real rotating sources");
+          require(i<16,"Provider-private state did not verify fresh consumed depth of both real rotating sources");
           tick(phase.name);
           require(ticket && current() && ready(),"Provider-private state did not preserve the current native depth");
-          seen|=selected==first.get()?1u:2u;
-          if(i&1) tick(phase.name); // A capture spans a fixed number of Presents: shift its parity.
-          verified|=verify_depth();
+          if(i&1) tick(phase.name); // Shift the next capture's parity, so both sources are consumed.
+          const unsigned source=verify_depth();
+          if(consumed_fresh) verified|=source;
         }
-        require(seen==3,"Provider-private state did not cover both real rotating sources");
       }
       std::puts("PASS provider-private chi PS|NPS with/without Present drive correct native pixels from an earlier submitted recording");
       // Present-only is COMMON, which this colour UAV source may have been
@@ -844,16 +850,16 @@ RWTexture2D<float> depth : register(u0);
         private_input=input;
         const auto phase=input==private_case::common ? "packed-v1-COMMON" : "packed-v1-shader-read";
         settle(phase);
-        unsigned seen=0,verified=0;
+        // Coverage as in private_state_cases: the verified capture's own source.
+        unsigned verified=0;
         for(unsigned i=0;i<4 || verified!=3;++i) {
-          require(i<16,"Packed V1 regression did not validate both real format19 sources");
+          require(i<16,"Packed V1 regression did not verify fresh consumed depth of both real format19 sources");
           tick(phase);
           require(ticket && current() && ready(),"Packed V1 source rotation lost its current independent capture");
-          seen|=selected==first.get()?1u:2u;
-          if(i&1) tick(phase); // A capture spans a fixed number of Presents: shift its parity.
-          verified|=verify_packed_depth();
+          if(i&1) tick(phase); // Shift the next capture's parity, so both sources are consumed.
+          const unsigned source=verify_packed_depth();
+          if(consumed_fresh) verified|=source;
         }
-        require(seen==3,"Packed V1 regression did not cover both real format19 sources");
       }
       std::puts("PASS packed R32G8X24/D32S8 private-state rotation: submitted prior-CL state, exact consumed depth-plane pixels and projection, source depth/stencil preservation");
       private_input=private_case::missing;
