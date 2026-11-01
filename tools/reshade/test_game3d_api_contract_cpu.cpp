@@ -1807,7 +1807,8 @@ namespace {
       fg,
       frames,
       options_result,
-      fg_view
+      fg_view,
+      other_options
     };
 
     generator::family family() {
@@ -1818,6 +1819,7 @@ namespace {
           {"frames", {"1", "0", "3", "5"}},
           {"options_result", {"ok", "warn_out_of_vram", "error"}},
           {"fg_view", {"case", "other"}},
+          {"other_options", {"none", "off", "same"}},
         },
         [](const generator::row &) {
           return true;
@@ -1833,6 +1835,7 @@ namespace {
       out.frames_generated = matrix::frames_generated[value[frames]];
       out.options_result = matrix::sl_result(value[options_result]);
       out.fg_bound_view = bound;
+      out.other_options = matrix::other_view_options(value[other_options]);
       return out;
     }
 
@@ -1840,10 +1843,10 @@ namespace {
     constexpr unsigned row_count = std::size(gaps::view_rows);
     // The family's size: every value of each dimension combined.
     constexpr unsigned cell_count = (unsigned(matrix::fg_mode::undeclared) + 1) * std::size(matrix::frames_generated) *
-      (unsigned(matrix::sl_result::error) + 1) * 2;
+      (unsigned(matrix::sl_result::error) + 1) * 2 * (unsigned(matrix::other_view_options::same) + 1);
 
     void check_sizes(const generator::family &owner) {
-      require(owner.dimensions.size() == fg_view + 1, "the two-viewport family and its dimension enumeration differ");
+      require(owner.dimensions.size() == other_options + 1, "the two-viewport family and its dimension enumeration differ");
       const auto sized = [&](unsigned d, std::size_t count) {
         require(owner.dimensions[d].values.size() == count, "a two-viewport dimension's names and values differ in number");
       };
@@ -1851,6 +1854,7 @@ namespace {
       sized(frames, std::size(matrix::frames_generated));
       sized(options_result, std::size_t(matrix::sl_result::error) + 1);
       sized(fg_view, 2);
+      sized(other_options, std::size_t(matrix::other_view_options::same) + 1);
     }
 
     // One Present's selection: C the case viewport's copy, O the other's, -
@@ -1883,17 +1887,29 @@ namespace {
       // No FG copy in the capture owner: the scope is silent, as at the
       // hook family's evaluate copy points.
       capture::fixture::reset_owner();
-      if (value.fg != matrix::fg_mode::off) {
-        const auto &newest = matrix::newest_known();
+      const auto &newest = matrix::newest_known();
+      // The options call of the viewport FG is bound to, then the other
+      // viewport's own (other_options): a successful Off, or the same call.
+      const auto set_options = [&](std::uint32_t viewport, matrix::fg_mode mode, std::uint32_t frames, matrix::sl_result result) {
         void *function {};
         require(fx::call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "the probe offered no DLSS-G options entry");
-        fx::options_result = sl_cells::sdk_result(value.options_result);
+        fx::options_result = sl_cells::sdk_result(result);
         fx::fg_options options;
         options.base.version = newest.dlssg_options;
-        options.mode = std::uint32_t(value.fg);
-        options.generated_frames = value.frames_generated;
-        const auto view = fx::viewport(value.fg_bound_view ? case_view : other_view, newest.viewport_handle);
+        options.mode = std::uint32_t(mode);
+        options.generated_frames = frames;
+        const auto view = fx::viewport(viewport, newest.viewport_handle);
         require(reinterpret_cast<fx::options_function>(function)(view, options) == fx::options_result, "the probe changed the FG options call's result");
+      };
+      const auto bound_view = value.fg_bound_view ? case_view : other_view;
+      const auto unbound_view = value.fg_bound_view ? other_view : case_view;
+      if (value.fg != matrix::fg_mode::off) {
+        set_options(bound_view, value.fg, value.frames_generated, value.options_result);
+      }
+      if (value.other_options == matrix::other_view_options::off) {
+        set_options(unbound_view, matrix::fg_mode::off, 0, matrix::sl_result::ok);
+      } else if (value.other_options == matrix::other_view_options::same && value.fg != matrix::fg_mode::off) {
+        set_options(unbound_view, value.fg, value.frames_generated, value.options_result);
       }
       sunshine_streamline::frame_generation_snapshot read;
       auto status = sunshine_streamline::frame_generation_query_status::unavailable;
@@ -2324,7 +2340,7 @@ namespace {
       const bool requested = capture::requested.load();
       const auto views = view_cells::family();
       view_cells::check_sizes(views);
-      for (const auto &assignment : generator::product(views, {view_cells::fg, view_cells::frames, view_cells::options_result, view_cells::fg_view}, generator::defaults(views))) {
+      for (const auto &assignment : generator::product(views, {view_cells::fg, view_cells::frames, view_cells::options_result, view_cells::fg_view, view_cells::other_options}, generator::defaults(views))) {
         const auto value = view_cells::judge(assignment);
         if (lines.is_open()) {
           auto line = game3d_contract::jsonl::line("L1", views, assignment, nullptr, true, value.expected, value.actual, value.verdict, gaps::view_rows, value.matched);

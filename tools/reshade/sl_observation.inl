@@ -1000,15 +1000,29 @@ namespace sunshine_streamline {
       if (!store) { read = read_fg_modes(); store = &read; }
       const auto &modes = *store;
       bool found = false, ambiguous = false;
+      const frame_generation_snapshot *off = nullptr;
       const auto options_loss = fg_loss_revision.load(std::memory_order_acquire);
       const auto source_epoch = epoch.load(std::memory_order_acquire);
       for (const auto &slot : modes) {
         const auto &state = slot.state;
         if (!slot.used || slot.observation != ticket || !state.sequence || (viewport != UINT32_MAX && state.viewport != viewport)) continue;
         if (!state.known || state.epoch != source_epoch || state.loss_revision != options_loss) { ambiguous = true; continue; }
+        // A viewport's confirmed Off binds no FG scope: beside another
+        // viewport's enabled options it leaves that one the FG scope, and
+        // with none enabled the read is the newest Off. Until 11-01 any two
+        // viewports' options made the any-viewport read ambiguous, so a game
+        // that sets Off on its second SR viewport each frame never had a
+        // confirmed FG scope: no tie-break of its two active views (owner
+        // ruling R5), no FG input and mono for as long as both rendered
+        // (R5-3).
+        if (!state.enabled) {
+          if (!off || state.sequence > off->sequence) off = &state;
+          continue;
+        }
         if (found) { ambiguous = true; continue; }
         output = state; found = true;
       }
+      if (!found && off) { output = *off; found = true; }
       if (!found || ambiguous || !current(ticket) || options_loss != fg_loss_revision.load(std::memory_order_acquire)) {
         if (status && ambiguous) *status = frame_generation_query_status::ambiguous;
         output = {}; return false;

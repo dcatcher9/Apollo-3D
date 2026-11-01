@@ -77,7 +77,7 @@ namespace game3d_contract {
     inline constexpr rule S17 {"S17", "Buffer type B at release V: a depth source exactly when V's own header declares B as depth", "each release's BufferType declarations (sl-abi-survey headers)"};
     inline constexpr rule S17b {"S17b", "An official release's interposer version resource selects that release's header (its exact version, or an inexact family that includes it) and the structure ABI its Resource defines", "sl-abi-survey all-release-dll-results.json (each release DLL's version resource); each release's sl.h Resource (a state word from 1.0.3) and sl_struct.h (versioned 2.x structures)"};
     inline constexpr rule S18 {"S18", "33 to 73 tags in one call, or 33 or more evaluate inputs, with depth among them: CAPTURE; other slots are not wiped", "SLA:143-173: numTags is a uint32_t with no stated limit; SLA:250-262: nor is numInputs"};
-    inline constexpr rule S19 {"S19", "Two SR viewports active together: with frame generation in scope (S20) the viewport bound to it CAPTUREs and any other REFUSE ambiguous_view; without it both REFUSE ambiguous_view (R5)", "SLT:614-621 ViewportHandle (any number); owner ruling R5"};
+    inline constexpr rule S19 {"S19", "Two SR viewports active together: with frame generation in scope (S20) the viewport bound to it CAPTUREs and any other REFUSE ambiguous_view; without it, or with the same options in scope on both, both REFUSE ambiguous_view; another viewport's successful Off binds nothing (R5)", "SLT:614-621 ViewportHandle (any number); sl_dlss_g.h:208, 218 slDLSSGSetOptions(viewport, options) per viewport and 34-40 eOff; owner ruling R5"};
     inline constexpr rule S19b {"S19b", "Viewports rotating, one active at a time: CAPTURE", "SLT:614-621 ViewportHandle"};
     inline constexpr rule S20 {"S20", "Frame generation is in scope for On, Auto or Dynamic where that release's header declares the mode, with 1 frame or more (above 1 only where the header documents multi frame generation; 0 is no scope for Dynamic too) and options that did not fail. A lifecycle 1 or 2 tag call outside that scope: EITHER REFUSE fg_scope or the CAPTURE it would be in scope, else REFUSE fg_scope; SR is unaffected", "sl_dlss_g.h:34-40 DLSSGMode and 75-79 numFramesToGenerate ('Number of frames to generate inbetween fully rendered frames. Cannot exceed DLSSGState::numFramesToGenerateMax', for every mode), as each release declares them (survey tables; 'Must be 1' before 2.7.2); for Dynamic, 118-120 dynamicTargetFrameRate ('Target frame rate for dynamic frame generation when enabled') and 179-181 bIsDynamicMFGSupported do not say whether a count of 0 generates frames: fail safe, no scope (frame_generation_scope); SLT:402, 404: the lifecycle, not frame generation, bounds a copy at the call"};
     inline constexpr rule S21 {"S21", "Result 39 (eWarnOutOfVRAM): treated as success", "sl_result.h:74: eWarnOutOfVRAM is the only warning"};
@@ -927,7 +927,8 @@ namespace game3d_contract {
       return refuse(rules::S16c, refusal::malformed);
     }
     const bool frame_generation = frame_generation_scope(value);
-    if (value.views == viewports::two_active && !(value.fg_bound_view && frame_generation)) {
+    if (value.views == viewports::two_active &&
+        !(value.fg_bound_view && frame_generation && value.other_options != other_view_options::same)) {
       return refuse(rules::S19, refusal::ambiguous_view);
     }
     if (value.tag_result == sl_result::error || (value.at == copy_point::same_frame_evaluate && value.evaluate_result == sl_result::error)) {
@@ -1518,6 +1519,8 @@ namespace game3d_contract {
     static_assert(refuses(expect(with(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true), &sl_case::options_result, sl_result::error)), rules::S19, refusal::ambiguous_view));
     static_assert(captures(expect(with(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true), &sl_case::fg, fg_mode::dynamic)), rules::S19, nps));
     static_assert(refuses(expect(with(with(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true), &sl_case::fg, fg_mode::dynamic), &sl_case::frames_generated, 0u)), rules::S19, refusal::ambiguous_view));
+    static_assert(captures(expect(with(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true), &sl_case::other_options, other_view_options::off)), rules::S19, nps));
+    static_assert(refuses(expect(with(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true), &sl_case::other_options, other_view_options::same)), rules::S19, refusal::ambiguous_view));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::views, viewports::five_rotating)), rules::S19b, nps));
     static_assert(undecided(expect(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::undeclared)), rules::S20));
     static_assert(undecided(expect(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::off)), rules::S20) && expect(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::off)).deferred);

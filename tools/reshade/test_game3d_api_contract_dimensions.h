@@ -129,6 +129,15 @@ namespace game3d_contract {
     five_rotating
   };
 
+  // With two active viewports, the FG options of the viewport frame
+  // generation is not bound to (sl_dlss_g.h:208, 218 slDLSSGSetOptions takes any
+  // viewport): none, a successful Off, or the same options as the bound one.
+  enum class other_view_options {
+    none,
+    off,
+    same
+  };
+
   // sl_dlss_g.h:34-40 DLSSGMode. Each release's header declares its own values
   // (survey tables: eOff and eOn through 2.2.0, eAuto from 2.2.1, eDynamic from
   // 2.11.1); 4 is never declared.
@@ -529,6 +538,7 @@ namespace game3d_contract {
       frame_generation_options {struct_form::newest_known};
     viewports views {viewports::one};
     bool fg_bound_view {};  // This viewport is the one frame generation is bound to.
+    other_view_options other_options {other_view_options::none};
     fg_mode fg {fg_mode::off};
     std::uint32_t frames_generated {1};
     sl_result tag_result {sl_result::ok}, evaluate_result {sl_result::ok}, options_result {sl_result::ok};

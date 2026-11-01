@@ -2002,16 +2002,20 @@ selection refuses both while both views are within the source age (`ambiguous_vi
 confirmed FG scope's viewport breaks the tie (owner ruling R5, since 11-01): then that viewport's
 display lineage alone is selected ([Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection)).
 `reshade_contract_matrix_cpu` judges this at the capture owner's selection in its family
-`sl_views` (`view_cells`; JSON lines `L1 sl_views`, gap table `view_rows`): 120 cells at the newest
-surveyed release over FG mode, generated frames, the options call's result and the viewport the
-options name (the case's or the other active one's). The options go through the probe's own hooks,
+`sl_views` (`view_cells`; JSON lines `L1 sl_views`, gap table `view_rows`): 360 cells at the newest
+surveyed release over FG mode, generated frames, the options call's result, the viewport the
+options name (the case's or the other active one's) and the other viewport's own options (none, a
+successful Off, or the same call; since 11-01, lane L-fg, R5-3). The options go through the probe's own hooks,
 the FG read (`query_frame_generation`), the FG view's depth projection and
 `provider::select_frame_generation_scope` make the policy, and `select_provider` picks from both
 viewports' SR copies with either viewport's evaluation the newest. Each viewport must meet the
-oracle for its own case, never the other's copy: all 120 meet. The capture owner holds no FG copy
+oracle for its own case, never the other's copy: all 360 meet. Another viewport's confirmed Off
+binds no FG scope, so the FG viewport still breaks the tie; the same enabled options on both leave
+both ambiguous. Until 11-01 any two viewports' known options read ambiguous, and the 36 cells with
+the other viewport's Off and FG in scope refused both viewports. The capture owner holds no FG copy
 before the pick, so every FG cell judges a silent scope (its tie viewport, `tie_epoch` and
 `tie_viewport`); a live (required) scope's tie-break is pinned by the seam characterization's P6
-two-view rows, on viewport 0 and on viewport 1. A whole run requires all 120 cells (11-01). Each
+two-view rows, on viewport 0 and on viewport 1. A whole run requires all 360 cells (11-01). Each
 cell's JSON line also carries, under `evidence`, the other viewport's expected and observed outcome
 (which decide the verdict as well) and both picks with `select_provider`'s result and reason; a
 refusal's `why` is S19's `ambiguous_view` where the other viewport's copy or ambiguous views
