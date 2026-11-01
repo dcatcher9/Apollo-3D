@@ -2951,7 +2951,7 @@ copies are read from the next Present on, so their timing changes no trace. Seed
 keep the default, are judged by their verdicts, which accept either outcome.
 
 `reshade_session_timelines` runs the fixed set (24 seeds and 87 regression timelines, 6903
-frames and about 19150 Presents, with the seeds' hitches and late FG Offs) in about 340 s
+frames and about 19300 Presents, with the seeds' hitches and late FG Offs) in about 340 s
 (lane run f2-P0-int1-followups-c5-sessions, 11-01; 61 rows and about 285 s in the full check's
 registered run of 10-28), registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own
