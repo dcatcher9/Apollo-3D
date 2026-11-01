@@ -286,6 +286,9 @@ namespace sunshine_streamline {
     // Runs seam in an options call after its store commit, before its FG
     // transition entries (frame_generation_restored, retire_source, ...).
     void set_fg_transition_seam(std::function<void()> seam);
+    // Defers candidate, a depth copy of the viewport's frame, to its frame's
+    // Present (present_deferred), as a tag call that could not copy it does.
+    void defer_depth(std::uint32_t viewport, const depth_capture::input &candidate);
     // One explicitly armed fixture observation of the real pre-SDK policy.
     void arm_entry_policy();
     bool entry_policy(bool &selected, bool &admissible);

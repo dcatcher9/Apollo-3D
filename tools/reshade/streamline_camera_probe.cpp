@@ -734,6 +734,19 @@ namespace sunshine_streamline {
     }
     void set_fg_store_read_seam(std::function<void()> seam) { fg_store_read_seam = std::move(seam); }
     void set_fg_transition_seam(std::function<void()> seam) { fg_transition_seam = std::move(seam); }
+    void defer_depth(std::uint32_t viewport, const depth_capture::input &candidate) {
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      for (auto &entry : deferred_frames) if (!entry.used) {
+        entry = {};
+        entry.used = true; entry.observation = observation_ticket(); entry.epoch = epoch.load(std::memory_order_acquire);
+        entry.serial = ++call_sequence; entry.tick = GetTickCount64(); entry.executions = depth_capture::game_executions();
+        entry.viewport = viewport;
+        entry.depth.candidates[0] = candidate; entry.depth.count = 1;
+        break;
+      }
+      count_deferred();
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
     void arm_entry_policy() { entry_policy_armed = true; entry_policy_observed = false; }
     bool entry_policy(bool &selected, bool &admissible) {
       selected = entry_path_selected; admissible = entry_source_admitted;

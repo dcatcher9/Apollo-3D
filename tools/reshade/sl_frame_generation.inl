@@ -420,6 +420,15 @@ namespace sunshine_streamline {
             copied = true;
           } else if (captured) depth_capture::finish(captured, false);
         }
+        // A refused copy is still this frame's call at its own Present: it
+        // ends an earlier frame's presenting window (frame_presenting), as a
+        // recorded copy's begin_evaluation does. DLSS-G's evaluation of the
+        // frame stood aside for it and began nothing. Until 11-01 nothing
+        // ended that window here, so where DLSS-G presented fewer of the
+        // earlier frame's generated Presents than declared, a hitch of the
+        // source age before this Present held the earlier frame's copy past
+        // the source age as this frame's own (F2).
+        if (!copied) depth_capture::evaluation_called(entry.epoch);
         if (!retired) {
           remember_tag_copy(entry.epoch, entry.viewport, copied, entry.serial, entry.frame);
           if (!copied) miss_frame_generation(entry.epoch, entry.viewport, entry.serial);
@@ -518,8 +527,16 @@ namespace sunshine_streamline {
     ReleaseSRWLockExclusive(&evaluation_supply_lock);
     const auto source_id = sunshine_scene_depth::fg_source_id(fg.viewport);
     if (out.depth == depth_outcome::not_offered) {
-      if (!value.depth.area_valid) out.depth = depth_outcome::subrect;
-      else if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) out.depth = depth_outcome::inactive;
+      // Every evaluation of the scope that offered its depth is its frame's
+      // call: one that makes no copy attempt (a malformed subrect, a camera
+      // read lost again after the retry) ends an earlier frame's presenting
+      // window as one that tries does (below; F2, 11-01). One whose frame's
+      // tag copy waits for the frame's Present leaves that to the Present
+      // (present_deferred).
+      if (!value.depth.area_valid) {
+        out.depth = depth_outcome::subrect;
+        depth_capture::evaluation_called(fg.epoch);
+      } else if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) out.depth = depth_outcome::inactive;
       // The frame's own FG tag copied it first, or its copy waits for the
       // frame's Present: no second copy (a later frame without an FG tag of
       // its own is DLSS-G's).
@@ -541,9 +558,10 @@ namespace sunshine_streamline {
       else if (const auto viewport = capture_evaluation(fg.viewport, 1000, frame_identity{},
                  reinterpret_cast<void *>(value.command), ticket, serial, loss, nullptr, nullptr, false);
                viewport.status == evidence_status::busy || viewport.status == evidence_status::inactive ||
-               viewport.epoch != fg.epoch)
+               viewport.epoch != fg.epoch) {
         out.depth = depth_outcome::scope_changed;
-      else {
+        depth_capture::evaluation_called(fg.epoch);
+      } else {
         // An evaluation that tries its own copy is its frame's call whatever
         // its outcome: it ends an earlier frame's presenting window
         // (frame_presenting), as a live scope's nomination does from its

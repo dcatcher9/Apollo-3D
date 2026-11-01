@@ -4192,6 +4192,68 @@ namespace {
       "F3: a repeated FG Off retired the FG role again, or the first Off or a failed call after it retired nothing");
   }
 
+  // A frame call that makes no copy still ends an earlier frame's
+  // presenting window (frame_presenting) at its frame's Present or call
+  // (lane L-fg, F2, 11-01): a deferred FG tag copy refused at its frame's
+  // Present (DLSS-G's evaluation of the frame stood aside for it and began
+  // nothing), and DLSS-G's evaluation that makes no copy attempt (a
+  // malformed subrect). Until then neither did, so where DLSS-G presented
+  // fewer of the earlier frame's generated Presents than declared, a hitch
+  // of the source age before the frame's Present held the earlier frame's
+  // copy past the source age as the frame's own.
+  void test_refused_frame_calls_end_window() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(131);
+    depth_capture::fixture::reset_owner();
+    std::string failed;
+    const auto check = [&](bool passed, const char *what) { if (!passed) failed += std::string(failed.empty() ? "" : "; ") + what; };
+    // A frame's deferred FG depth copy with no source to copy: refused at
+    // the first Present after a game list executed following its tag call.
+    depth_capture::input candidate;
+    candidate.provider = sunshine_scene_depth::provider_kind::streamline;
+    candidate.epoch = 1; candidate.sequence = 1; candidate.viewport = view.value;
+    candidate.frame_generation_input = true; candidate.source_id = sunshine_scene_depth::fg_source_id(view.value);
+    testing::defer_depth(view.value, candidate);
+    depth_capture::capture_queues.game_execution_count.fetch_add(1);
+    depth_capture::fixture::presents_since(3);
+    // A queue and list that implement no interface: nothing reads them.
+    struct no_interface final : IUnknown {
+      HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
+      ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+      ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    } queue, list;
+    constexpr std::uint64_t chain = 0x8000;
+    take_present_fg(chain);
+    present_deferred(chain, reinterpret_cast<std::uint64_t>(&queue), reinterpret_cast<std::uint64_t>(&list));
+    end_present_fg();
+    check(depth_capture::scope.newest_evaluation_present == depth_capture::present_ordinal(),
+      "F2: a deferred FG tag copy refused at its frame's Present ended no earlier frame's presenting window");
+    // DLSS-G's evaluation with a malformed depth subrect.
+    fg_options on; on.generated_frames = 3;
+    require(set_options(view, on) == 0, "FG On options failed");
+    depth_capture::fixture::presents_since(1);
+    int native{}, commands{};
+    frame_generation::inputs inputs;
+    inputs.command = reinterpret_cast<std::uint64_t>(&commands);
+    inputs.depth.state = frame_generation::parameter::present;
+    inputs.depth.native = reinterpret_cast<std::uint64_t>(&native);
+    inputs.depth.area_valid = false;
+    const auto attempt = observe_frame_generation_inputs(inputs);
+    finish_frame_generation_inputs(attempt, true);
+    check(attempt.depth == frame_generation::depth_outcome::subrect &&
+        depth_capture::scope.newest_evaluation_present == depth_capture::present_ordinal(),
+      "F2: DLSS-G's evaluation without a copy attempt ended no earlier frame's presenting window");
+    depth_capture::fixture::reset_owner();
+    depth_capture::requested = false;
+    require(failed.empty(), failed.c_str());
+  }
+
   // DLSS-G's evaluation supply (lane P, PD10 and round 1's C1, 11-01). A
   // refused FG tag boundary reads it once for both of its decisions: whether
   // a command-less boundary withdraws nothing, and whether its frame is missed
@@ -4607,6 +4669,8 @@ int main(int argc, char **argv) {
     std::puts("PASS two options calls' FG transitions follow their store commits");
     test_repeated_fg_off_retires_once();
     std::puts("PASS FG Off retires the FG role once; a repeated Off retires nothing new");
+    test_refused_frame_calls_end_window();
+    std::puts("PASS a refused deferred FG copy and DLSS-G's evaluation without a copy attempt end an earlier frame's presenting window");
     test_evaluation_supply_read();
     std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
     test_camera_read_retry();
