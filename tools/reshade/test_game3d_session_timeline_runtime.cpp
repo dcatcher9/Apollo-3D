@@ -978,6 +978,15 @@ namespace {
     // evaluation).
     {"fg-on-deferred-tag-hitch-before-dlssg-refused", "20*sr=local; fg=on,tag=present_bare,dlssg=direct,generated=1; 5*tag=present_bare,dlssg=direct,generated=1; tag=present_bare,dlssg=direct_unobserved,generated=1,hitch=before_dlssg; 10*tag=present_bare,dlssg=direct,generated=1"},
     {"fg-on-deferred-tag-hitch-before-dlssg-refused-4x", "20*sr=local; fg=on,tag=present_bare,dlssg=direct,generated=3; 5*tag=present_bare,dlssg=direct,generated=3; tag=present_bare,dlssg=direct_unobserved,generated=3,hitch=before_dlssg; 10*tag=present_bare,dlssg=direct,generated=3"},
+    // A frame's FG tag copy deferred to its Present with MFG 4x, the earlier
+    // frame's generated Presents inside its recording and a hitch of the
+    // source age after its calls, while the add-on's metadata reads fail at
+    // its Presents (PD5, lane P 11-01): present_deferred took the FG mode
+    // from the camera records, and a lost read counted as generating with no
+    // generated Presents, so the deferral expired at its own real Present
+    // (three Presents after its tag call) and lapsed unmade. The FG mode now
+    // comes from the FG options store, which no read loses.
+    {"fg-on-lost-metadata-read-hitch", "20*sr=local; fg=on,tag=present_bare,generated=3,at=inside; 5*tag=present_bare,generated=3,at=inside; tag=present_bare,generated=3,at=inside,hitch=after_sources,reads=lost_at_present; 10*tag=present_bare,generated=3,at=inside"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose

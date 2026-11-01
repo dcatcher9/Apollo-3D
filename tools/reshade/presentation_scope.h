@@ -13,14 +13,11 @@
 // presentation_scope (docs/reshade-sbs.md, Presentation scope): the FG policy
 // and value types and their pure predicates, each under its own name. Their
 // instances stay with their consumers (the provider's source_policy, the
-// exporter runtime's source_alpha_policy). The busy variants stay distinct and
-// are not unified: the provider's busy read before any confirmation requires
-// FG (selection_policy{true}); the SL route keeps an existing publication
-// owned; nested capture does not treat busy metadata as ownership; NGX copies;
-// the UI policy keeps its last known mode until an observed change or an
-// inactive observer; present_deferred treats missing metadata as generating.
-// The SL adapter bodies that read live state stay in sl_nomination.inl and
-// sl_frame_generation.inl.
+// exporter runtime's source_alpha_policy). The FG mode itself is the probe's
+// FG options store (presentation_scope_mode.inl), whose reads always get the
+// last committed options: no FG read is busy since 11-01, so the busy rules
+// each reader had for one are gone. The SL adapter bodies that read live state
+// stay in sl_nomination.inl and sl_frame_generation.inl.
 
 // DLSS-G's own inputs of one real frame, read from its NGX evaluation
 // (feature 11, NVSDK_NGX_Feature_FrameGeneration) by ngx_depth_source.cpp and
@@ -396,9 +393,9 @@ namespace sunshine_ngx {
   // scope is live (depth_capture::frame_generation_scope_live). Selection
   // never considers NGX while FG is required, and FG Off raises the admission
   // watermark past every snapshot taken meanwhile, so a copy would have no
-  // consumer. FG Off, a busy or ambiguous FG read, which observes no options
-  // (nested NGX's rule, owns_nested_depth_capture), and a silent scope, which
-  // owns nothing, copy.
+  // consumer. FG Off, an ambiguous FG read, which observes no options (nested
+  // NGX's rule, owns_nested_depth_capture), and a silent scope, which owns
+  // nothing, copy.
   inline bool frame_generation_owns_depth(bool enabled, std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
     return enabled && sunshine_streamline::depth_capture::frame_generation_scope_live(epoch, viewport, enabled_tick);
   }

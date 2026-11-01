@@ -1615,6 +1615,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 #### Streamline adapter
 
 - [`streamline_camera_probe.cpp`](streamline_camera_probe.cpp): the Streamline evidence adapter: hook install and discovery, tags and evaluations, admission and nomination, the FG options hook and DLSS-G inputs, the SL UI adapter, and its log lines. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`presentation_scope_mode.inl`](presentation_scope_mode.inl): part of `streamline_camera_probe.cpp`, included right after `presentation_scope_supply.inl` in its existing private namespace: the FG options store, each viewport's newest committed FG options under a leaf lock, written only by `hook_fg_options`, which every FG mode read uses (11-01, lane P, PD1-PD5). Docs: [Presentation scope](../../docs/reshade-sbs.md#presentation-scope).
 - [`presentation_scope_supply.inl`](presentation_scope_supply.inl): part of `streamline_camera_probe.cpp`, included at the original supply-block position in its existing private namespace: evaluation/tag/UI supply and deferred-frame tables and their lock. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`streamline_camera_probe.h`](streamline_camera_probe.h): the probe's public API for the depth adapters and the exporter. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`streamline_camera_probe_test_access.h`](streamline_camera_probe_test_access.h): the linkage switch of the probe's internals and the test add-on's declarations of them and of the probe's refusal recorders. Docs: [Test builds](#test-builds).
@@ -2816,7 +2817,11 @@ rows for a hitch right before DLSS-G's own evaluation of a frame whose FG depth 
 deferred to its Present, `fg-on-deferred-tag-hitch-before-dlssg-refused` and `-4x` (DLSS-G no
 longer stands aside for that tag copy, past the source age, and its own copy is refused: the
 frame's Present shows its deferred copy and its generated Presents hold it; they passed when added,
-11-01),
+11-01), and one for an MFG 4x frame's FG tag copy deferred to its Present after a hitch since its
+calls while the add-on's metadata reads fail at its Presents, `fg-on-lost-metadata-read-hitch` (PD5,
+11-01: `present_deferred` took a lost read as generating with no generated Presents, so the
+deferral expired at its own real Present, which was mono with the three generated Presents of the
+next frame, continuity gap at frame 26, every run; the FG options store fixed it),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -2848,8 +2853,8 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 79 regression timelines, 6628
-frames and about 18250 Presents, with the seeds' hitches and late FG Offs) in about 340 s
+`reshade_session_timelines` runs the fixed set (24 seeds and 80 regression timelines, 6665
+frames and about 18430 Presents, with the seeds' hitches and late FG Offs) in about 340 s
 (lane run f2-P0-int1-followups-c5-sessions, 11-01; 61 rows and about 285 s in the full check's
 registered run of 10-28), registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own

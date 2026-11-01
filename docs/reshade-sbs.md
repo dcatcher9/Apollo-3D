@@ -817,7 +817,7 @@ When Automatic has identified the relative-depth fallback without associated cam
 suggests trying **Frame Generation**, if available, because some games supply Streamline camera
 data through FG. Availability is not guaranteed. An already observed enabled FG setting instead
 shows that camera data is still unavailable.
-The hint is not shown during the initial unknown-depth state. A busy or ambiguous FG observation
+The hint is not shown during the initial unknown-depth state. An ambiguous FG observation
 does not produce a suggestion to enable a mode that may already be enabled.
 
 **UI protection** offers **On / Off / Auto**, saved per game in ReShade.ini as
@@ -4683,7 +4683,7 @@ own depth of the display lineage, the viewport's ordinary source, never its FG i
 Present and DLSS-G's evaluation racing the options call, and the capture owner records and
 evaluates any FG input of a retired role as the ordinary source as well, under its lock. Every
 ordinary evaluation of a viewport whose FG options are observed off, or whose role is retired,
-supersedes the viewport's FG view (not one whose FG is merely unknown, busy or lost metadata). Until
+supersedes the viewport's FG view (not one whose FG is merely unknown or ambiguous). Until
 10-28 such a copy became the viewport's FG view again beside its SR view: every Present after the
 Off read two active views (`ambiguous_views`), moved the gap watermark over each readable SR copy
 and held the stale FG copy until it expired (the 10-28 review's P1, in any game whose FG depth tag
@@ -4733,8 +4733,10 @@ association at a color-only Present, so in Assassin's Creed Shadows each FG Off 
 until SR was readable (110-235 ms). A failed or ambiguous FG-options observation also revokes the old FG scope
 and its retained display pixels, but does not confirm that FG is Off. Selection excludes those
 unconfirmed FG inputs and permits independently validated ordinary SL or NGX depth, with the
-selected capture's own encoding and camera. A busy query preserves a confirmed policy or this
-revoked-scope fallback policy; it cannot restore the old FG scope. A subsequent successful enabled
+selected capture's own encoding and camera. No FG read is busy since 11-01: every read gets the
+last committed options (the FG options store, [Presentation scope](#presentation-scope)), so a
+confirmed policy or this revoked-scope fallback policy changes only at an observed options change
+and cannot restore the old FG scope. A subsequent successful enabled
 observation restores mandatory FG selection. Older captures from the
 previous ownership interval cannot be resurrected. While a live FG scope owns a viewport, ordinary
 evaluation adapters do not also nominate that same viewport; FG's first attempt supersedes only
@@ -5594,7 +5596,7 @@ a valid native copy, or when SL has confirmed enabled FG authority for that view
 scope is live (above). A direct (not nested) NGX evaluation applies the same FG rule: while SL
 reports FG enabled on its one viewport with a live scope it begins its evaluation (live handoff
 evidence) but records no depth copy, since selection never considers NGX while FG is required; a
-busy or ambiguous FG read, or a silent
+ambiguous FG read, or a silent
 FG scope, copies as before. The `Sunshine NGX depth` line counts
 these evaluations as `fg_owned`. Before the final review a UE title with NVIDIA's DLSS plugin and
 the Streamline DLSS-G plugin copied its full depth plane on every real frame with FG on, for no
@@ -6140,16 +6142,38 @@ adapter bodies and the deferred-frame observations stay at their original sites,
 because they read live Streamline state; the header merges no state and no live
 read.
 
-The busy and unknown FG reads keep six distinct rules, side by side and never
-unified: the provider's busy read before any confirmed mode requires FG
-(`selection_policy{true}`); the SL route keeps an existing publication owned;
-nested capture does not treat busy metadata as ownership; NGX copies; the UI
-policy keeps its last known mode until an observed change or an inactive
-observer; and `present_deferred` treats missing metadata as still generating.
+The FG mode has its own store, `presentation_scope_mode.inl` (11-01, lane P,
+PD1-PD5): each viewport's newest committed FG options, kept apart from the
+per-call camera and tag metadata, which every camera, tag and token call
+republishes. `hook_fg_options` is its only writer, under a leaf lock; every
+reader (`query_frame_generation` and through it the provider, the UI, nested
+and direct NGX, DLSS-G's inputs and the SL UI tags; the SL route;
+`present_deferred`; the camera store's FG frame; the depth tag boundary's FG
+role) gets the last committed options. The validity rules are unchanged: known,
+the current epoch and options loss revision, one viewport for an any-viewport
+query, the current observation, an available FG target. A restart clears it
+(`release_camera_records`), and a fifth viewport replaces the one whose options
+were set longest ago. So no FG read is busy any more (`busy` stays in
+`frame_generation_query_status` and the provider log's `fg_query=` numbers,
+retired), and no options write is lost. Until 11-01 the mode lived in the camera
+records: a read that lost the writers' race (the observer snapshot's eight
+attempts) was busy, with six rules for it (the provider's busy read before any
+confirmed mode required FG; the SL route took an existing publication as owned,
+so an FG-off or silent viewport's SR evaluation was dropped; nested capture did
+not treat it as ownership; NGX copied; the UI kept its last known mode;
+`present_deferred` took the viewport as generating with no generated Presents,
+so an MFG frame's deferred copy lapsed at its own Present after a hitch, row
+`fg-on-lost-metadata-read-hitch`) and two more (DLSS-G's inputs found no FG
+scope; the SL UI tags took FG as off); an options call that lost its write to a
+camera writer bumped `fg_loss_revision`, which left the mode ambiguous for every
+reader (FG input revoked) until the game's next options call; and a fifth
+viewport's camera evicted the FG viewport's record (probe row
+`test_frame_generation_mode_store`). `fg_loss_revision` now changes only with the
+FG target.
 
 The FG options transition has one entry, in `hook_fg_options`
 ([`sl_frame_generation.inl`](../tools/reshade/sl_frame_generation.inl)), right
-after `update.reset()`. Its fan-out stays at that adapter call site, in this
+after the store's lock is released. Its fan-out stays at that adapter call site, in this
 order: `frame_generation_enabled`, `frame_generation_restored`, `retire_source`,
 `ui_mask::invalidate_scope` or `invalidate_all`, then the
 `Sunshine Streamline frame generation:` line.

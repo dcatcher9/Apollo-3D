@@ -219,22 +219,13 @@ namespace sunshine_streamline {
     fg_route frame_generation_route(std::uint32_t viewport, bool *disabled) {
       if (disabled) *disabled = false;
       if (!fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return fg_route::none;
-      auto pin = read_metadata();
-      if (!pin) return metadata.has_publication() ? fg_route::owned : fg_route::none;
-      bool enabled = false;
-      std::uint64_t scope_epoch{}, enabled_tick{};
-      for (const auto &record : pin->records) if (record.used && record.viewport == viewport) {
-        const auto &fg = record.frame_generation;
-        const bool current = fg.known && fg.epoch == pin->epoch &&
-          fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
-        enabled = current && fg.enabled;
-        if (disabled) *disabled = current && !fg.enabled;
-        scope_epoch = fg.epoch; enabled_tick = fg.enabled_tick;
-        break;
-      }
-      pin.reset();
-      if (!enabled) return fg_route::none;
-      return depth_capture::frame_generation_scope_live(scope_epoch, viewport, enabled_tick) ? fg_route::owned : fg_route::silent;
+      // The viewport's committed FG options (the FG options store).
+      const auto fg = read_fg_mode(viewport);
+      const bool current = fg.known && fg.epoch == epoch.load(std::memory_order_acquire) &&
+        fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
+      if (disabled) *disabled = current && !fg.enabled;
+      if (!current || !fg.enabled) return fg_route::none;
+      return depth_capture::frame_generation_scope_live(fg.epoch, viewport, fg.enabled_tick) ? fg_route::owned : fg_route::silent;
     }
     // FG has an explicit lifecycle for its rendered-frame inputs. While its
     // scope is live the same viewport's SR/RR evaluations remain diagnostics
@@ -248,8 +239,8 @@ namespace sunshine_streamline {
       if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) return false;
       frame_generation_snapshot fg;
       // Confirmed same-viewport FG ownership also suppresses nested SR/RR work.
-      // A busy/ambiguous metadata read alone is never ownership evidence, and
-      // neither is a silent FG scope (frame_generation_route).
+      // An ambiguous FG read is never ownership evidence, and neither is a
+      // silent FG scope (frame_generation_route).
       if (query_frame_generation(snapshot.viewport, fg) && fg.enabled &&
           depth_capture::frame_generation_scope_live(fg.epoch, snapshot.viewport, fg.enabled_tick)) return true;
       // A retained resource or metadata-only nomination is not a depth copy.
@@ -336,7 +327,7 @@ namespace sunshine_streamline {
       // evaluation or an FG tag call racing the options call) stayed beside
       // the SR view, so every Present read ambiguous views and revoked the
       // readable SR copies (the 10-28 review's P1). Not where FG is merely
-      // unknown (busy or lost metadata), which keeps a live scope's views.
+      // unknown or ambiguous, which keeps a live scope's views.
       const bool fg_silent = route == fg_route::silent;
       const auto fg_source = sunshine_scene_depth::fg_source_id(snapshot.viewport);
       const auto superseded = snapshot.frame_generation_input ? 0 :

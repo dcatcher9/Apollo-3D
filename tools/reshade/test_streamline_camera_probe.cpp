@@ -3793,6 +3793,81 @@ namespace {
       "shutdown cached/native FG hooks lost pure pass-through");
   }
 
+  // The FG mode under lost metadata reads and a held metadata writer (lane P,
+  // PD1-PD5, 11-01). Until the FG options store (presentation_scope_mode.inl)
+  // the mode lived in the per-viewport camera records, which every camera,
+  // tag and token call republishes: a read that lost that race was "busy",
+  // and each reader had its own rule for it (the query reported busy, the SL
+  // route took the viewport as FG's, DLSS-G's inputs found no FG scope), an
+  // options call lost its write to a held camera writer, which left the
+  // mode ambiguous until the game's next options call, and a fifth
+  // viewport's camera evicted the FG viewport's mode. Each check loses a
+  // metadata read where an FG read used one (testing::fail_metadata_reads).
+  void test_frame_generation_mode_store() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(31), off_view = viewport(32);
+    opaque_token token; std::uint32_t numeric = 7; mint(token, &numeric);
+    const auto constants = modern_camera();
+    // A camera publication exists, so a lost read is a busy one.
+    call_v2_constants(constants, token.ref(), view);
+    fg_options on; on.generated_frames = 3;
+    require(set_options(view, on) == 0, "FG On options failed");
+    // Every check runs, so a run names each FG read a lost metadata read changes.
+    std::string failed;
+    const auto check = [&](bool passed, const char *what) { if (!passed) failed += std::string(failed.empty() ? "" : "; ") + what; };
+    frame_generation_snapshot fg;
+    frame_generation_query_status status{};
+    testing::fail_metadata_reads(1);
+    const bool queried = query_frame_generation(UINT32_MAX, fg, &status);
+    testing::fail_metadata_reads(0);
+    check(queried && status == frame_generation_query_status::observed && fg.enabled && fg.viewport == view.value &&
+        fg.generated_frames == 3,
+      "A lost metadata read hid the committed FG mode from the query");
+    // This fixture's capture owner is inactive, so the enabled scope is silent.
+    testing::fail_metadata_reads(1);
+    const auto silent_route = testing::route_of(view.value);
+    testing::fail_metadata_reads(0);
+    check(silent_route == presentation_scope::fg_route::silent, "A lost metadata read made a silent FG scope own its viewport");
+    int native{}, commands{};
+    frame_generation::inputs inputs;
+    inputs.command = reinterpret_cast<std::uint64_t>(&commands);
+    inputs.depth.state = frame_generation::parameter::present;
+    inputs.depth.native = reinterpret_cast<std::uint64_t>(&native);
+    testing::fail_metadata_reads(1);
+    const auto attempt = observe_frame_generation_inputs(inputs);
+    testing::fail_metadata_reads(0);
+    finish_frame_generation_inputs(attempt, false);
+    check(attempt.depth != frame_generation::depth_outcome::no_fg_scope, "A lost metadata read left DLSS-G's inputs without their FG scope");
+    fg_options on2; on2.generated_frames = 2;
+    testing::lock_records();
+    const auto held = set_options(view, on2);
+    testing::unlock_records();
+    check(held == 0 && query_frame_generation(UINT32_MAX, fg, &status) && status == frame_generation_query_status::observed &&
+        fg.enabled && fg.generated_frames == 2,
+      "An options call under a held metadata writer lost its write, which left the FG mode ambiguous");
+    // The game repeats its options, which commits them in any case.
+    require(set_options(view, on2) == 0, "FG On options failed");
+    for (std::uint32_t i = 0; i != frame_generation::viewport_slots; ++i) {
+      auto other = viewport(40 + i);
+      call_v2_constants(constants, token.ref(), other);
+    }
+    check(query_frame_generation(view.value, fg) && fg.enabled && fg.generated_frames == 2,
+      "Camera calls of four other viewports evicted the FG viewport's mode");
+    fg_options off; off.mode = 0; off.generated_frames = 0;
+    require(set_options(off_view, off) == 0, "FG Off options failed");
+    testing::fail_metadata_reads(1);
+    const auto off_route = testing::route_of(off_view.value);
+    testing::fail_metadata_reads(0);
+    check(off_route == presentation_scope::fg_route::none, "A lost metadata read made an FG Off viewport's route FG's");
+    require(failed.empty(), failed.c_str());
+  }
+
   void test_version_identity() {
     using versioning::abi;
     auto make = [](unsigned major, unsigned minor, unsigned patch, const wchar_t *file, const wchar_t *product) {
@@ -4089,6 +4164,8 @@ int main(int argc, char **argv) {
     std::puts("PASS FG first-call options wrapper, synchronous OnlyValidNow tags, precision transforms, global/explicit frames, Off and failure gates");
     test_frame_generation_cached_options_and_global_camera();
     std::puts("PASS pre-cached FG target detour, single forwarding, zero-base resource compatibility, bounded global camera-call pairing and lifecycle gates");
+    test_frame_generation_mode_store();
+    std::puts("PASS the FG mode survives lost metadata reads, a held metadata writer and a fifth viewport's camera");
     test_until_evaluate_lifetime();
     std::puts("PASS UntilEvaluate global/frame/local pre-call admission, post-return expiry and unchanged extent rejection");
     std::puts("PASS default-on lightweight source nomination, no selected-depth dependency, lifetime ABA, freshness, loss and viewport gates");

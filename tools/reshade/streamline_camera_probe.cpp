@@ -96,7 +96,6 @@ namespace sunshine_streamline {
       // evaluate that reads that untag judges the call it ended
       // (ended_depth_tag, tag_call_decided).
       std::array<tag_record, depth_priority.size()> depth_calls{};
-      frame_generation_snapshot frame_generation;
       frame_identity camera_frame;
       std::uintptr_t camera_token{};
       std::uint64_t camera_tick{}, camera_serial{}, changed{};
@@ -175,6 +174,7 @@ namespace sunshine_streamline {
     // Next tick each bounded tag line may be written (5 s apart).
     std::atomic<std::uint64_t> next_compatibility_report{}, next_untag_report{}, next_fg_refusal_report{};
 #include "presentation_scope_supply.inl"
+#include "presentation_scope_mode.inl"
     // SDK calls answered with eWarnOutOfVRAM: accepted, counted for the log.
     std::atomic<std::uint64_t> vram_warnings{};
     // One verdict per 2.x call (abi_v2::accepted): the warning is a success.
@@ -724,13 +724,12 @@ namespace sunshine_streamline {
     void release_evaluation_supply() { ReleaseSRWLockExclusive(&evaluation_supply_lock); }
     presentation_scope::fg_route route_of(std::uint32_t viewport) { return frame_generation_route(viewport); }
     void age_frame_generation(std::uint64_t ms) {
-      auto update = metadata.try_write();
-      while (!update) { SwitchToThread(); update = metadata.try_write(); }
-      for (auto &record : update->records) {
-        auto &tick = record.frame_generation.enabled_tick;
+      AcquireSRWLockExclusive(&fg_mode_lock);
+      for (auto &slot : fg_modes) {
+        auto &tick = slot.state.enabled_tick;
         if (tick) tick = tick > ms ? tick - ms : 1;
       }
-      update.commit();
+      ReleaseSRWLockExclusive(&fg_mode_lock);
     }
     void arm_entry_policy() { entry_policy_armed = true; entry_policy_observed = false; }
     bool entry_policy(bool &selected, bool &admissible) {

@@ -36,39 +36,40 @@ namespace sunshine_streamline {
       bool confirmed_off{};
       if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, sdk_ok);
       bool changed = false;
-      // A game may set its FG options once: a busy writer must not leave the
-      // mode unknown until the next call.
-      auto update = sample && current(ticket) ? write_metadata(ticket, true) : metadata_owner::transaction{};
-      if (update) {
+      // The FG options store (presentation_scope_mode.inl), whose only writer
+      // this is: the write cannot be lost to the camera and tag writers, so a
+      // game that sets its options once is never left with an unknown mode.
+      if (sample && current(ticket)) {
+        AcquireSRWLockExclusive(&fg_mode_lock);
         if (current(ticket)) {
+          const auto source_epoch = epoch.load(std::memory_order_acquire);
           if (!valid_viewport) {
-            for (auto &record : update->records) {
-              changed |= record.frame_generation.known;
-              record.frame_generation = {};
+            for (auto &slot : fg_modes) {
+              changed |= slot.used && slot.observation == ticket && slot.state.known;
+              slot = {};
             }
           } else {
-            auto &state = slot(*update, id).frame_generation;
+            auto &state = fg_mode_slot_of(id, ticket).state;
             if (serial >= state.sequence) {
               const bool known = valid && sdk_ok;
               changed = !state.sequence || state.known != known ||
                 (known && (state.mode != copy.mode || state.generated_frames != copy.generated_frames));
               // Games repeat their options every frame: FG stays enabled since
               // the call that turned it on in this epoch and options revision.
-              const auto enabled_since = state.known && state.enabled && state.epoch == update->epoch &&
+              const auto enabled_since = state.known && state.enabled && state.epoch == source_epoch &&
                 state.loss_revision == options_loss ? state.enabled_tick : 0;
               const auto now = GetTickCount64();
-              state = {update->epoch, serial, now, options_loss, id, copy.mode, copy.generated_frames,
+              state = {source_epoch, serial, now, options_loss, id, copy.mode, copy.generated_frames,
                 known, known && copy.mode != 0, valid && copy.mode >= 2};
               if (state.enabled) state.enabled_tick = enabled_since ? enabled_since : now;
-              if (state.enabled && !enabled_since) { turned_on = now; turned_on_epoch = update->epoch; }
-              if (!known || copy.mode == 0) { retired_epoch = update->epoch; confirmed_off = known; }
+              if (state.enabled && !enabled_since) { turned_on = now; turned_on_epoch = source_epoch; }
+              if (!known || copy.mode == 0) { retired_epoch = source_epoch; confirmed_off = known; }
             }
           }
         }
+        ReleaseSRWLockExclusive(&fg_mode_lock);
         if (!current(ticket)) retired_epoch = turned_on = 0;
-        else if (!update.commit()) { ++fg_loss_revision; retired_epoch = turned_on = 0; }
-      } else if (sample && current(ticket)) ++fg_loss_revision;
-      update.reset(); // No mutation ownership across capture/COM reentry below.
+      }
       // The one FG options-transition entry (docs/reshade-sbs.md, Presentation
       // scope). After update.reset(), in this order: frame_generation_enabled,
       // frame_generation_restored, retire_source, ui_mask::invalidate_scope or
@@ -248,6 +249,9 @@ namespace sunshine_streamline {
     struct ended_frame { std::uint64_t epoch{}, serial{}; std::uint32_t viewport{}; unsigned kinds{}; };
     std::array<ended_frame, slot_count> ended;
     unsigned ended_count = 0;
+    // The viewports' committed FG options (the FG options store), and the
+    // camera metadata only for whether a later frame began.
+    const auto modes = read_fg_modes();
     auto pin = read_metadata();
     AcquireSRWLockExclusive(&evaluation_supply_lock);
     for (auto &entry : deferred_frames) {
@@ -258,13 +262,19 @@ namespace sunshine_streamline {
       // source age between the frame's calls and its Present keeps it; until
       // 10-28 it lapsed there, and that Present was mono).
       bool past = !ticket || entry.observation != ticket || entry.epoch != source_epoch;
-      // Without the viewport's metadata, frame generation counts as on.
-      bool generating = !pin;
+      // Whether the viewport generates frames, and how many per real one.
+      // Until 11-01 a lost metadata read counted as generating with none
+      // (PD5): an FG-off viewport's copy waited for the FG rule, and an MFG
+      // frame's copy lapsed after a hitch at a Present still its own.
+      bool generating = false;
       std::uint32_t generated = 0;
+      for (const auto &slot : modes) if (slot.used && slot.observation == ticket && slot.state.viewport == entry.viewport) {
+        generating = slot.state.known && slot.state.enabled;
+        generated = generating ? slot.state.generated_frames : 0;
+        break;
+      }
       if (!past && pin) for (const auto &record : pin->records) if (record.used && record.viewport == entry.viewport) {
         past = record.camera_serial > entry.serial && !same_frame(record.camera_frame, entry.frame);
-        generating = record.frame_generation.known && record.frame_generation.enabled;
-        generated = generating ? record.frame_generation.generated_frames : 0;
         break;
       }
       past = past || fg_evaluation.expired(entry.epoch, entry.viewport, entry.evaluations, entry.tick, generated, ordinal, now);

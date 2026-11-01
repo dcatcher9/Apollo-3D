@@ -26,6 +26,7 @@ namespace sunshine_streamline {
       // Lifecycle only: callbacks are already closed. Readers never delay this
       // clear; retired source leases are released outside mutation ownership.
       while (!metadata.clear()) SwitchToThread();
+      clear_fg_modes();
       drop_deferred();
     }
 
@@ -249,7 +250,7 @@ namespace sunshine_streamline {
       // expects the frame to record an FG copy (depth_capture::frame_generation_frame),
       // and DLSS-G's evaluation of it stands aside only for that frame's own
       // FG tag copy (evaluated_frame).
-      const auto &fg = record.frame_generation;
+      const auto fg = read_fg_mode(viewport);
       const bool fg_frame = fg_available.load(std::memory_order_acquire) &&
         current_fg_target.load(std::memory_order_acquire) && fg.known && fg.enabled && fg.epoch == state.epoch &&
         fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
@@ -675,11 +676,12 @@ namespace sunshine_streamline {
       frame_identity identity = out.frame;
       auto pin = read_metadata();
       if (!pin && metadata.has_publication()) return snapshot;
-      bool enabled = false;
+      // The viewport's FG role: its committed options (the FG options store).
+      const auto fg = read_fg_mode(out.viewport);
+      const bool enabled = fg_available.load(std::memory_order_acquire) && current_fg_target.load(std::memory_order_acquire) &&
+        fg.known && fg.enabled && fg.epoch == epoch.load(std::memory_order_acquire) &&
+        fg.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
       if (pin) for (const auto &record : pin->records) if (record.used && record.viewport == out.viewport) {
-        enabled = fg_available.load(std::memory_order_acquire) && current_fg_target.load(std::memory_order_acquire) &&
-          record.frame_generation.known && record.frame_generation.enabled && record.frame_generation.epoch == pin->epoch &&
-          record.frame_generation.loss_revision == fg_loss_revision.load(std::memory_order_acquire);
         const auto &first_tag = out.tags[0].present ? out.tags[0] : out.tags[1].present ? out.tags[1] : out.tags[2];
         const bool synchronous_global_depth = std::any_of(out.tags.begin(), out.tags.begin() + 3, [](const tag_record &tag) {
           return tag.present && tag.source == origin::global && tag.value.lifecycle == sl_contract::only_valid_now;
@@ -960,21 +962,18 @@ namespace sunshine_streamline {
     if (status) *status = frame_generation_query_status::unavailable;
     const auto ticket = observation_ticket();
     if (!ticket || !fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return false;
-    auto pin = read_metadata();
-    if (!pin) {
-      if (status && metadata.has_publication()) *status = frame_generation_query_status::busy;
-      return false;
-    }
+    // The FG options store: every read gets the last committed options.
+    const auto modes = read_fg_modes();
     bool found = false, ambiguous = false;
     const auto options_loss = fg_loss_revision.load(std::memory_order_acquire);
-    for (const auto &record : pin->records) {
-      const auto &state = record.frame_generation;
-      if (!record.used || !state.sequence || (viewport != UINT32_MAX && record.viewport != viewport)) continue;
-      if (!state.known || state.epoch != pin->epoch || state.loss_revision != options_loss) { ambiguous = true; continue; }
+    const auto source_epoch = epoch.load(std::memory_order_acquire);
+    for (const auto &slot : modes) {
+      const auto &state = slot.state;
+      if (!slot.used || slot.observation != ticket || !state.sequence || (viewport != UINT32_MAX && state.viewport != viewport)) continue;
+      if (!state.known || state.epoch != source_epoch || state.loss_revision != options_loss) { ambiguous = true; continue; }
       if (found) { ambiguous = true; continue; }
       output = state; found = true;
     }
-    pin.reset();
     if (!found || ambiguous || !current(ticket) || options_loss != fg_loss_revision.load(std::memory_order_acquire)) {
       if (status && ambiguous) *status = frame_generation_query_status::ambiguous;
       output = {}; return false;
