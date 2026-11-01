@@ -5593,7 +5593,9 @@ fence as its second signaller, the signalling thread records
 type=<direct|compute|copy|other|unknown>} second={queue=<cookie> type=<...> callers=<a<b<...>}
 report=<k>/8`, which the status step logs at the next Present (before its status line). Queue
 cookies are each queue's stable identity (the same in every line); a type is read once per queue
-record at its first logged Signal (`unknown`: that queue's record is gone). `callers=` lists the
+record, at its sighting, and written with the record (`unknown`: that queue's record is gone; until
+11-01 the record's first logged Signal read it and stored it without the order lock, so a record
+reset or evicted in between could name another queue with this one's type, F72). `callers=` lists the
 modules on the signalling thread's stack, from the one that called the hooked Signal outwards,
 consecutive frames of one module merged (at most 8): ReShade's or Streamline's proxy, then the
 game, a Streamline plug-in or the add-on itself. Each queue is reported once (later fences it

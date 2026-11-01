@@ -87,8 +87,9 @@ namespace sunshine_streamline::native_observer {
       return key;
     }
 
-    // The queue's record id, sighting it (GetDevice, slot addresses, then
-    // SetPrivateData outside the lock). Execute never blocks on the lock.
+    // The queue's record id, sighting it (GetDevice, slot addresses, its
+    // type, then SetPrivateData outside the lock). Execute never blocks on
+    // the lock.
     std::uint64_t queue_id(ID3D12CommandQueue *queue, bool blocking) {
       order::queue_memory memory{};
       const bool found = private_bytes(queue, order_queue_guid, &memory, sizeof(memory));
@@ -100,6 +101,13 @@ namespace sunshine_streamline::native_observer {
       const unsigned kinds[3]{static_cast<unsigned>(method::execute), static_cast<unsigned>(method::signal), static_cast<unsigned>(method::wait)};
       for (unsigned i = 0; i != 3; ++i)
         if (!read_slot_address(reinterpret_cast<std::uintptr_t>(queue), kinds[i], slots[i])) slots[i] = nullptr;
+      // The queue's type, for the second-signaller diagnostic (a getter),
+      // written with the record's other facts. Until 11-01 a queue's first
+      // logged Signal read it and stored it without the lock into its
+      // record's slot, which a reset or an eviction in between had given to
+      // another queue: that queue was named with this one's type (F72).
+      D3D12_COMMAND_QUEUE_DESC desc{};
+      queue->lpVtbl->GetDesc(queue, &desc);
       if (blocking) AcquireSRWLockExclusive(&order::lock);
       else if (!TryAcquireSRWLockExclusive(&order::lock)) { ++order::contention; return 0; }
       apply_order_reset();
@@ -109,7 +117,7 @@ namespace sunshine_streamline::native_observer {
       slot.entered.store(0, std::memory_order_relaxed);
       slot.slots = slots;
       slot.cookie = memory.cookie;
-      slot.type.store(0, std::memory_order_relaxed);
+      slot.type.store(static_cast<std::uint8_t>(desc.Type + 1), std::memory_order_relaxed);
       slot.id.store(memory.id, std::memory_order_release);
       ReleaseSRWLockExclusive(&order::lock);
       auto *object = reinterpret_cast<ID3D12Object *>(queue);
@@ -283,13 +291,6 @@ namespace sunshine_streamline::native_observer {
 
     void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value, void *caller) {
       const restore_error incoming{GetLastError()};
-      // The queue's type, once per record, for the second-signaller
-      // diagnostic (a getter; no lock).
-      if (auto *slot = ticket_of(call.order_queue); slot && !slot->type.load(std::memory_order_relaxed)) {
-        D3D12_COMMAND_QUEUE_DESC desc{};
-        queue->lpVtbl->GetDesc(queue, &desc);
-        slot->type.store(static_cast<std::uint8_t>(desc.Type + 1), std::memory_order_relaxed);
-      }
       // The native call is not forwarded yet: a record dropped since the call
       // took its ticket is re-sighted with a fresh ticket, so a signal never
       // goes unlogged against a live fence record (a pending wait would

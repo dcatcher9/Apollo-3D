@@ -3305,7 +3305,10 @@ serial is 30 there); each Present establishes any selected copy, as
   Its second-signaller cells (10-31): a compute queue's Signal on a fence a direct queue signals
   first is reported once with both cookies and types and the test executable as the caller's
   module; that queue's later poisoning, a CPU Signal and the first signaller's own Signals report
-  nothing; of nine queues that each poison a fence, eight are reported (`report=1/8` to `8/8`).
+  nothing; a compute queue whose sighting reads its type while a model reset lets another thread's
+  direct queue take its record's slot is reported with both queues' own types (11-01, F72: the
+  direct queue was named `compute`, its type then read at the first logged Signal without the
+  lock); of nine queues that each poison a fence, eight are reported (`report=1/8` to `8/8`).
 - [`test_proven_state.cpp`](test_proven_state.cpp) (`reshade_proven_state`) pins the per-resource
   last-proven state of [`proven_state.h`](proven_state.h), which admits the Generic end-of-frame
   copy: a creation state holds on every queue until a list uses the texture and not once enhanced

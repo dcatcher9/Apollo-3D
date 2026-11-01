@@ -193,7 +193,10 @@ namespace {
     return queue_signal_result;
   }
   NOINLINE HRESULT STDMETHODCALLTYPE order_queue_wait(void *, void *, UINT64) { ++order_waits; return queue_wait_result; }
+  // Runs once, inside the next GetDesc of a queue.
+  std::function<void()> order_on_desc;
   NOINLINE D3D12_COMMAND_QUEUE_DESC *STDMETHODCALLTYPE order_get_desc(void *native, D3D12_COMMAND_QUEUE_DESC *out) {
+    if (auto hook = std::exchange(order_on_desc, {})) hook();
     *out = {};
     out->Type = static_cast<order_object *>(native)->type;
     return out;
@@ -987,6 +990,10 @@ namespace {
     const auto cpu_signal = [](order_object &on, UINT64 value) {
       return reinterpret_cast<fence_signal_fn>(on.vtable[fence_signal_slot])(&on, value);
     };
+    const auto execute = [](order_object &queue) {
+      reinterpret_cast<execute_fn>(queue.vtable[execute_slot])(&queue, 0, nullptr);
+      return observer::last_execute_position();
+    };
     const auto second = [] {
       return observer::queue_order_counts().model.poisoned[static_cast<unsigned>(sunshine_queue_order::poison::second_signaller)];
     };
@@ -1021,17 +1028,43 @@ namespace {
     require(signal(game, fences[2], 1) == S_OK && cpu_signal(fences[2], 2) == S_OK && signal(game, fences[2], 3) == S_OK,
       "a CPU Signal failed");
     require(!observer::queue_order_signaller_line(line, sizeof(line)), "a queue already reported, or a CPU Signal, was reported");
-    // At most 8 queues: 7 more are reported, the ninth is not.
-    std::vector<order_object> others(8, order_object{tables.queue.data(), object_kind::queue, &device});
+    // A queue's type is its record's (11-01, F72): read at its sighting and
+    // written with the record. Until then its first logged Signal read it and
+    // stored it without the order lock into the slot of its record, which a
+    // model reset in between (here inside that read: another thread's
+    // Execute registers a direct queue, which takes the first slot) had given
+    // to the other queue: the direct queue was named with the compute
+    // queue's type when it later signalled first.
+    {
+      order_object racer{tables.queue.data(), object_kind::queue, &device}, other{tables.queue.data(), object_kind::queue, &device};
+      racer.type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+      order_object raced{tables.fence.data(), object_kind::unknown, &device}, shared{tables.fence.data(), object_kind::unknown, &device};
+      observer::set_queue_order(true);  // A reset: the racer takes the first slot at its sighting.
+      order_on_desc = [&] {
+        observer::set_queue_order(true);
+        execute(other);
+      };
+      require(signal(racer, raced, 1) == S_OK && !order_on_desc, "the racer's type was never read");
+      require(signal(other, shared, 1) == S_OK && signal(racer, shared, 2) == S_OK && second() == poisoned + 3,
+        "the racer did not poison the other queue's fence");
+      require(observer::queue_order_signaller_line(line, sizeof(line)), "the racer's poisoning was not reported");
+      std::snprintf(text, sizeof(text), "first={queue=%llu type=direct} second={queue=%llu type=compute callers=%s",
+        static_cast<unsigned long long>(order_cookie(other)), static_cast<unsigned long long>(order_cookie(racer)), name);
+      require(std::strstr(line, text) && std::strstr(line, " report=2/8"),
+        (std::string("a queue registered in a reset inside another queue's type read was named with that queue's type: ") + line).c_str());
+    }
+    // At most 8 queues: 6 more are reported, the ninth is not.
+    std::vector<order_object> others(7, order_object{tables.queue.data(), object_kind::queue, &device});
     for (unsigned i = 0; i != others.size(); ++i)
       require(signal(game, fences[3 + i], 1) == S_OK && signal(others[i], fences[3 + i], 2) == S_OK, "a further second signal failed");
-    require(second() == poisoned + 2 + others.size(), "the further second signallers did not poison their fences");
+    require(second() == poisoned + 3 + others.size(), "the further second signallers did not poison their fences");
     unsigned reports = 0;
     for (; observer::queue_order_signaller_line(line, sizeof(line)); ++reports)
-      require(std::strstr(line, (" report=" + std::to_string(reports + 2) + "/8").c_str()), "a report's number is wrong");
-    require(reports == 7, ("the reports were not limited to 8 queues: " + std::to_string(reports) + " more").c_str());
+      require(std::strstr(line, (" report=" + std::to_string(reports + 3) + "/8").c_str()), "a report's number is wrong");
+    require(reports == 6, ("the reports were not limited to 8 queues: " + std::to_string(reports) + " more").c_str());
     std::puts("PASS queue order second signaller: each queue that poisons a fence as its second signaller is reported once, "
-      "naming both queues and its calling modules; CPU Signals and repeat poisonings are not; at most 8 queues");
+      "naming both queues and its calling modules; CPU Signals and repeat poisonings are not; a queue's type is its own "
+      "record's through a reset inside its read; at most 8 queues");
   }
 }
 int main() {

@@ -92,9 +92,9 @@ namespace sunshine_streamline::native_observer {
         // The queue's Execute, Signal and Wait vtable slots at first sight
         // (coverage); written under order_lock before id is published.
         std::array<void **, 3> slots{};
-        // The queue's stable cookie (written with slots) and its
-        // D3D12_COMMAND_LIST_TYPE + 1, read at its first logged Signal (0:
-        // not yet): the second-signaller diagnostic names both.
+        // The queue's stable cookie and its D3D12_COMMAND_LIST_TYPE + 1
+        // (read at its sighting), both written with slots: the
+        // second-signaller diagnostic names both.
         std::uint64_t cookie{};
         std::atomic<std::uint8_t> type{};
       };
