@@ -63,12 +63,20 @@ namespace sunshine_streamline {
               // the call that turned it on in this epoch and options revision.
               const auto enabled_since = state.known && state.enabled && state.epoch == source_epoch &&
                 state.loss_revision == options_loss ? state.enabled_tick : 0;
+              // And an Off (or a failed call) that repeats the committed one in
+              // this epoch and options revision retires nothing new: the
+              // first one retired the FG role, which stays retired until FG On,
+              // and every input since is the viewport's ordinary source. Until
+              // 11-01 each repeated Off ran retire_source again under the
+              // capture lock (once per frame in a game played with FG off).
+              const bool retired_already = state.sequence && !state.enabled && state.known == known &&
+                state.epoch == source_epoch && state.loss_revision == options_loss;
               const auto now = GetTickCount64();
               state = {source_epoch, serial, now, options_loss, id, copy.mode, copy.generated_frames,
                 known, known && copy.mode != 0, valid && copy.mode >= 2};
               if (state.enabled) state.enabled_tick = enabled_since ? enabled_since : now;
               if (state.enabled && !enabled_since) { turned_on = now; turned_on_epoch = source_epoch; }
-              if (!known || copy.mode == 0) { retired_epoch = source_epoch; confirmed_off = known; }
+              if ((!known || copy.mode == 0) && !retired_already) { retired_epoch = source_epoch; confirmed_off = known; }
             }
           }
         }

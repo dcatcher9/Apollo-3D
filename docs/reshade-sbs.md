@@ -4737,7 +4737,13 @@ Present of a silent scope, whatever supplies its depth (its viewport's SR/RR sou
 or a direct NGX evaluation; until 11-01 only its own viewport, so NGX depth in a silent scope
 logged FG Presents as non-FG). An observed FG Off (`slDLSSGSetOptions` mode 0, or an
 options call that failed) retires only the FG role of that viewport's display lineage
-(`retire_source`). At an Off the call observed (a successful mode 0 call), the scope's copies
+(`retire_source`), once: an Off that repeats the committed Off, or a failed call that repeats a
+failed one, in the same epoch and options revision retires nothing new (11-01, lane L-fg, F3;
+until then every repeated Off, once per frame in a game played with FG off, ran `retire_source`
+again under the capture lock, moved the retirement's serial to that call and raised the lineage
+owner's floor to its newest shown copy, so a pending SR head's completed copy read
+`completed_before_gap` instead of `completed_already_consumed`; probe row
+`test_repeated_fg_off_retires_once`). At an Off the call observed (a successful mode 0 call), the scope's copies
 published after the copy the lineage's display last showed (the queue owner's `shown_capture`, set
 where its consumer copied a frame, `complete_frame`) are the frames' own depth of the display
 lineage, re-keyed as the viewport's ordinary source as an input admitted after the Off is, so the

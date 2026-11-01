@@ -4152,6 +4152,46 @@ namespace {
       "F81: an FG Off's retirement landed after a newer On's restore and left the FG role retired while FG is on");
   }
 
+  // FG Off retires the viewport's FG role once (lane L-fg, F3, 11-01): an
+  // Off that repeats the committed one, as games repeat their options every
+  // frame, retires nothing new; a failed call after a confirmed Off still
+  // does. Until then each repeated Off ran retire_source again under the
+  // capture lock, which also moved the retirement's serial to that call.
+  void test_repeated_fg_off_retires_once() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(121);
+    fg_options on; on.generated_frames = 1;
+    fg_options off; off.mode = 0; off.generated_frames = 0;
+    depth_capture::fixture::reset_owner();
+    frame_generation_snapshot fg;
+    const auto committed = [&] { return query_frame_generation(view.value, fg) ? fg.sequence : 0; };
+    require(set_options(view, on) == 0 && set_options(view, off) == 0, "FG options failed");
+    const auto first_off = committed();
+    require(set_options(view, off) == 0, "FG Off options failed");
+    const auto repeated_off = committed();
+    require(set_options(view, on) == 0, "FG On options failed");
+    const auto epoch = fg.epoch;
+    const bool first_retired = depth_capture::frame_generation_retired(epoch, view.value, first_off);
+    const bool repeat_retired = depth_capture::frame_generation_retired(epoch, view.value, repeated_off);
+    // A failed call after a confirmed Off retires again.
+    require(set_options(view, off) == 0, "FG Off options failed");
+    result_v2 = -7;
+    set_options(view, off);
+    result_v2 = 0;
+    require(set_options(view, on) == 0, "FG On options failed");
+    const bool failed_retired = depth_capture::frame_generation_retired(epoch, view.value, committed() - 1);
+    depth_capture::fixture::reset_owner();
+    depth_capture::requested = false;
+    require(first_off && repeated_off > first_off && first_retired && !repeat_retired && failed_retired,
+      "F3: a repeated FG Off retired the FG role again, or the first Off or a failed call after it retired nothing");
+  }
+
   // DLSS-G's evaluation supply (lane P, PD10 and round 1's C1, 11-01). A
   // refused FG tag boundary reads it once for both of its decisions: whether
   // a command-less boundary withdraws nothing, and whether its frame is missed
@@ -4565,6 +4605,8 @@ int main(int argc, char **argv) {
     std::puts("PASS another viewport's FG Off binds no FG scope: the enabled viewport breaks the tie; two enabled stay ambiguous");
     test_fg_transition_order();
     std::puts("PASS two options calls' FG transitions follow their store commits");
+    test_repeated_fg_off_retires_once();
+    std::puts("PASS FG Off retires the FG role once; a repeated Off retires nothing new");
     test_evaluation_supply_read();
     std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
     test_camera_read_retry();
