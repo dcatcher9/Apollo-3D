@@ -3742,7 +3742,10 @@ makes that Present mono (`selection=inactive_views`, until 10-27; the session ti
 Presents it adds for it in either order, so a frame that made a frame-generation call (an FG tag or
 DLSS-G's evaluation) is also the frame of the Presents after its first, up to the count the game
 declares (`numFramesToGenerate`, from the confirmed FG policy, also for a silent scope; 1 while FG
-is on with no count), until the next frame's first evaluation begins (`frame_presenting`; a live
+is on with no count; one grant per Present, which the capture owner's Present boundary sets from
+that Present's FG snapshot, `depth_capture::present`: until 11-01 each acquisition set it from its
+own runtime's policy, so another runtime's acquisition could end the FG frame's window, PD8, seam
+row `PD8 grant`), until the next frame's first evaluation begins (`frame_presenting`; a live
 FG scope's SR/RR evaluation, which begins no view, ends it as well since 10-28,
 `depth_capture::evaluation_called`: a hitch frame without an FG call after a frame whose
 generated Present DLSS-G skipped showed that frame's copy, past the source age, as current; so does

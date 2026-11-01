@@ -530,8 +530,8 @@ namespace sunshine_streamline::depth_capture {
       // (begin_evaluation_locked), the first one of the newest frame whose
       // frame-generation input's evaluation began or whose copy was stamped
       // (stamp_frame_generation; its anchor: frame_generation_anchor), and
-      // the Presents DLSS-G adds per real frame that the selection being decided grants
-      // (select_provider, selection_policy::generated_presents).
+      // the Presents DLSS-G adds per real frame that the Present being decided
+      // grants (present(), from its FG snapshot).
       std::uint64_t newest_evaluation_present{}, frame_generation_present{};
       std::uint32_t presenting_generated{};
       // FG moves Present to DLSS-G's queue at its first Present, after the

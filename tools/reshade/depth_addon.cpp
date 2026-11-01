@@ -664,7 +664,7 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 		if (command_list *const immediate = presenting_queue->get_immediate_command_list();
 			immediate != nullptr && marker != 0 && sunshine_streamline::present_deferred(swapchain->get_native(), presenting_queue->get_native(), immediate->get_native()))
 			submit_deferred_copies(presenting_queue, immediate, marker);
-		capture_inputs::present(presenting_queue);
+		capture_inputs::present(presenting_queue, sunshine_streamline::present_frame_generation(swapchain->get_native()).generated_presents());
 	}
 	sunshine_depth::begin_present(swapchain);
 	device *const device = swapchain->get_device();

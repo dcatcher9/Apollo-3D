@@ -522,7 +522,6 @@ namespace sunshine_streamline::depth_capture {
 
     capture_pick select_provider(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, std::uint64_t now, selection_policy policy) {
-      scope.presenting_generated = policy.generated_presents;
       const auto fg_head = [](const evaluation_head *head) {
         return head && sunshine_scene_depth::is_fg_source(head->source_id, head->viewport);
       };

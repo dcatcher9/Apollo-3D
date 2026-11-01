@@ -285,13 +285,20 @@ namespace sunshine_streamline::depth_capture {
     anchor_frame_generation(scope.frame_generation_present, present_ordinal());
   }
 
-  void present(std::uint64_t native) {
+  void present(std::uint64_t native, std::uint32_t generated_presents) {
     // Counted for every Present, also one the capture owner does not serve
     // (frame_presenting must never take a frame older than the last Present
     // for the current one).
     scope.presents.fetch_add(1, std::memory_order_acq_rel);
     if (!requested.load() || !native) return;
     std::lock_guard lock(mutex);
+    // The Presents DLSS-G adds per real frame, from this Present's FG
+    // snapshot: one grant per Present, which every frame_presenting until the
+    // next Present reads (the selection of this Present, a copy's record,
+    // FG Off's retire_source on the options thread). Until 11-01 each
+    // acquisition wrote it from its own runtime's policy (select_provider), so
+    // another runtime's acquisition overwrote the FG frame's grant (PD8).
+    scope.presenting_generated = generated_presents;
     const auto *owner = queue(native);
     if (!owner) return;
     const auto device = device_cookie(owner->device.p);

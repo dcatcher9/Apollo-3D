@@ -90,9 +90,10 @@ namespace capture_inputs
 		sunshine_streamline::depth_capture::observe_depth_clear(cmd_list->get_native(), depth_stencil.handle);
 	}
 
-	// The Present boundary of a D3D12 queue.
-	static inline void present(reshade::api::command_queue *presenting_queue)
+	// The Present boundary of a D3D12 queue, with the Present's grant of
+	// DLSS-G's Presents (sunshine_streamline::depth_capture::present).
+	static inline void present(reshade::api::command_queue *presenting_queue, uint32_t generated_presents)
 	{
-		sunshine_streamline::depth_capture::present(presenting_queue->get_native());
+		sunshine_streamline::depth_capture::present(presenting_queue->get_native(), generated_presents);
 	}
 }

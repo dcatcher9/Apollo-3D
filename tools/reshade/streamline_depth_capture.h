@@ -370,7 +370,11 @@ namespace sunshine_streamline::depth_capture {
   bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height);
   // BEGIN actual native Present: expires future uses of this device's old tags,
   // never an already-copied packet. No SL/native frame-number equivalence.
-  void present(std::uint64_t queue);
+  // generated_presents: the Presents DLSS-G adds per real frame while FG is
+  // confirmed on, from the Present's FG snapshot (1 when the count is
+  // unknown; 0 without FG), which a frame that made a frame-generation call
+  // presents at its first Present and after it (frame_presenting).
+  void present(std::uint64_t queue, std::uint32_t generated_presents);
   // Every observed DLSS attempt advances this watermark, including malformed or
   // failed attempts, so an older success cannot conceal a newer invalid frame:
   // it is never that frame's current capture, only, within its own checks, a

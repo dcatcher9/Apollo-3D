@@ -354,6 +354,12 @@ namespace sunshine_streamline::presentation_scope {
       for (const auto &value : modes) if (value.sequence && value.viewport == viewport) return value;
       return {};
     }
+    // The Presents DLSS-G adds per real frame while depth requires FG (also
+    // for a silent scope; 1 when the count is unknown), 0 without FG: the
+    // Present's grant (depth_capture::present, frame_presenting).
+    std::uint32_t generated_presents() const {
+      return depth.require_frame_generation ? (generated_frames ? generated_frames : 1u) : 0u;
+    }
   };
 }
 

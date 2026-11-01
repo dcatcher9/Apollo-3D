@@ -73,11 +73,6 @@ namespace sunshine_streamline::depth_capture {
     bool exclude_unconfirmed_fg{};
     // Required FG: when its options turned it on (frame_generation_scope_live).
     std::uint64_t enabled_tick{};
-    // The Presents DLSS-G adds per real frame while FG is confirmed on (the
-    // game's numFramesToGenerate; 1 when the count is unknown), also for a
-    // silent scope; 0 without FG. A frame that made a frame-generation call
-    // presents at its first Present and these (frame_presenting).
-    std::uint32_t generated_presents{};
   };
   // Acquisition authority, frozen under the capture lock. Diagnostics may be
   // omitted or reformatted without changing these source/continuity decisions.

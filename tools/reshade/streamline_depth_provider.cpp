@@ -444,12 +444,9 @@ namespace sunshine_streamline::provider {
     // holds the queue in mono when no API source is available (associated).
     const auto scope = select_frame_generation_scope(policy);
     const bool fg_silent = scope.silent;
-    // The Presents DLSS-G adds per real frame, from the confirmed policy, so
-    // a silent scope keeps them (frame_presenting grants them only to a
-    // frame that made a frame-generation call); 1 while FG is on with no
-    // count, 0 without FG.
-    auto selection = scope.selection;
-    selection.generated_presents = policy.require_frame_generation ? std::max(1u, present_fg.generated_frames) : 0u;
+    // The Presents DLSS-G adds per real frame are this Present's grant, set
+    // at its boundary from the same snapshot (depth_capture::present).
+    const auto selection = scope.selection;
     // Logged when a required scope turns silent, and when it is live again
     // (FG Off ends a silent scope without a line of its own). A scope turns
     // at each frame FG supplies or misses, so the line comes at most every
@@ -472,7 +469,7 @@ namespace sunshine_streamline::provider {
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
     data->test_fg_decision = (fg_status == frame_generation_query_status::observed ? 1u : 0u) |
       (policy.require_frame_generation ? 2u : 0u) | (policy.exclude_unconfirmed_fg ? 4u : 0u) |
-      (selection.generated_presents << 8);
+      (present_fg.generated_presents() << 8);
 #endif
     evidence.selection = selection;
     evidence.fg_silent = fg_silent;

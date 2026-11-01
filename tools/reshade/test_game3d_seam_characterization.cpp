@@ -2570,7 +2570,7 @@ namespace sunshine_streamline::depth_capture {
           expected = &sr;
         }
         selection_policy policy {};
-        policy.generated_presents = generated;
+        scope.presenting_generated = generated;
         pin_clock(now);
         const auto pick = select_provider(owner, native, 2, now, policy);
         const char picked = label(pick, expected, 'S', nullptr, '?');
@@ -2608,7 +2608,37 @@ namespace sunshine_streamline::depth_capture {
           fail("P2 producer_submitted: a presenting queue's submission was not stamped, or another queue's was");
         }
       }
-      std::printf("PASS F2/P2 hitch between a frame's evaluation and its Presents: %zu rows\n", std::size(rows) + 1);
+      // PD8 (11-01): the grant is the Present's (present(), from its FG
+      // snapshot), so an acquisition of another runtime whose policy has no
+      // FG, between the FG frame's Presents, leaves the FG frame's window.
+      // Until then each acquisition wrote it (select_provider), and that one
+      // ended the window at the frame's second Present.
+      {
+        reset();
+        int stand_in {};
+        auto &place = capture_queues.queues[0];
+        place = std::make_unique<queue_state>();
+        place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&stand_in);
+        const auto presenting = reinterpret_cast<std::uint64_t>(place->queue.p);
+        const auto stamp = present_ordinal();
+        scope.newest_evaluation_present = stamp;
+        scope.frame_generation_present = stamp;
+        queue_state other;
+        bool windowed = true;
+        for (unsigned n = 1; n <= 4; ++n) {
+          present(presenting, 3);
+          select_provider(other, presenting + 8, n, GetTickCount64(), selection_policy {});
+          windowed = windowed && frame_presenting(stamp);
+        }
+        present(presenting, 3);
+        const bool closed = !frame_presenting(stamp);
+        place->queue.p = nullptr;
+        place.reset();
+        if (!windowed || !closed) {
+          fail("PD8 grant: an acquisition without FG ended an MFG 4x frame's window, or the window outlasted its four Presents");
+        }
+      }
+      std::printf("PASS F2/P2 hitch between a frame's evaluation and its Presents: %zu rows\n", std::size(rows) + 2);
     }
 
     struct display_case {
