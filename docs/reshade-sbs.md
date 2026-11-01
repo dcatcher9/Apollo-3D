@@ -3625,6 +3625,10 @@ position in that translation unit.
 through its public API at the input wrappers' original UI boundaries.
 `sl_report.inl` holds the existing Streamline reporting functions and formatting; rate state
 and guarded report call points retain their original owners and order.
+`sl_hooks.inl` holds target retention, SL hook installation and discovery, the FG-only
+feature-function lookup fragments, install-worker functions, and the public poll guard and
+maintenance steps in the same translation unit. Target state, locks, flags, TLS and the worker
+latch stay in the shell; internal, worker-anonymous and public namespace contexts stay distinct.
 `presentation_scope_supply.inl` keeps the evaluation/tag/UI supply and deferred-frame tables
 and their shared lock at their original private-namespace position, including global lifetimes.
 

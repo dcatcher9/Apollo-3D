@@ -3,7 +3,7 @@
 // functions and formatting fragments. The shell retains namespace state; the
 // tag/state rate statics retain their original owning functions and guards.
 // Helpers receive existing values/references and execute at the old log points.
-// One translation unit, included last. Camera reporting keeps its anonymous
+// One translation unit, included at shell end. Camera reporting keeps its anonymous
 // namespace rather than the runtime-test private view.
 
 namespace sunshine_streamline {

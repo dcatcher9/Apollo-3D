@@ -1580,6 +1580,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 - [`sl_frame_generation.inl`](sl_frame_generation.inl): part of `streamline_camera_probe.cpp` (end of the shell, after the observation and nomination parts): FG options, deferred tag copies and the shared DLSS-G input wrappers. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`sl_ui_capture.inl`](sl_ui_capture.inl): part of `streamline_camera_probe.cpp` (end of the shell, after `sl_frame_generation.inl`): SL tag and DLSS-G UI-input capture through the public UI-mask API. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`sl_report.inl`](sl_report.inl): part of `streamline_camera_probe.cpp` (end of the shell, after the capture parts): existing Streamline reporting functions and formatting fragments. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`sl_hooks.inl`](sl_hooks.inl): part of `streamline_camera_probe.cpp` (end of the shell, after `sl_report.inl`): target retention, SL hook installation and discovery, FG-only feature-function lookup fragments, install-worker functions, and the public poll guard and maintenance steps. Targets, locks, flags, TLS and the worker latch stay in the shell. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 
 #### Hook host and configuration
 
