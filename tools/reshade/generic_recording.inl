@@ -100,36 +100,53 @@ static void on_bind_depth_stencil(command_list *cmd_list, uint32_t, const resour
 {
 	on_bind_depth_stencil_impl(cmd_list, depth_stencil_view, true);
 }
+// A depth-stencil view's resource, and whether the view's first level and
+// layer are the plane Generic samples and copies (subresource 0).
+struct depth_view_target
+{
+	resource depth_stencil;
+	bool sampled_plane;
+};
+static depth_view_target depth_view_target_of(device *device, resource_view dsv)
+{
+	const auto view = device->get_resource_view_desc(dsv);
+	return { device->get_resource_from_view(dsv), view.texture.first_level == 0 && view.texture.first_layer == 0 };
+}
+// A depth clear needs DEPTH_WRITE (the D3D12 clear contract): a clear of the
+// sampled plane proves the state of subresource 0 when its list executes
+// (proven_state.h). Every clear proves it, a render pass's CLEAR too, a
+// resuming pass's included.
+static void prove_depth_clear(command_list *cmd_list, const depth_view_target &target)
+{
+	if (cmd_list->get_device()->get_api() == device_api::d3d12 && target.sampled_plane)
+		capture_inputs::observe_depth_clear(cmd_list, target.depth_stencil);
+}
+// What a depth clear does to the source's content; no copy is made here.
+static void observe_clear_content(command_list *cmd_list, const depth_view_target &target, float depth, uint32_t rect_count)
+{
+	auto &state = *cmd_list->get_private_data<state_tracking>();
+	std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
+	if (state.is_queue)
+		lock.lock();
+	auto &stats = state.stats_per_used_depth_stencil[target.depth_stencil];
+	stats.limit_tracking(tracking_demand(cmd_list->get_device()));
+	stats.clear_zero |= depth == 0.0f;
+	stats.clear_one |= depth == 1.0f;
+	stats.clear_other |= depth != 0.0f && depth != 1.0f;
+	stats.depth_erased |= target.sampled_plane;
+	// A full clear of the sampled plane erases the extent drawn so far; the
+	// next draw starts the capture crop again (observe_viewport). Only the
+	// D3D10/11/12 clears are known to cover the whole view.
+	stats.observe_depth_clear(cmd_list->get_device()->get_api(), rect_count, target.sampled_plane, state.position());
+}
 static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, const float *depth, const uint8_t *, uint32_t rect_count, const rect *)
 {
 	// Ignore clears that do not affect the depth buffer (stencil clears)
 	if (dsv != 0 && depth != nullptr)
 	{
-		auto &state = *cmd_list->get_private_data<state_tracking>();
-
-		const resource depth_stencil = cmd_list->get_device()->get_resource_from_view(dsv);
-		const auto view = cmd_list->get_device()->get_resource_view_desc(dsv);
-		const bool sampled_plane = view.texture.first_level == 0 && view.texture.first_layer == 0;
-
-		// The clear needs DEPTH_WRITE (the D3D12 clear contract): it proves the
-		// state of subresource 0 when its list executes (proven_state.h).
-		if (cmd_list->get_device()->get_api() == device_api::d3d12 && sampled_plane)
-			capture_inputs::observe_depth_clear(cmd_list, depth_stencil);
-		// The game clear changes the source; no copy is made here.
-
-		std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
-		if (state.is_queue)
-			lock.lock();
-		auto &stats = state.stats_per_used_depth_stencil[depth_stencil];
-		stats.limit_tracking(tracking_demand(cmd_list->get_device()));
-		stats.clear_zero |= *depth == 0.0f;
-		stats.clear_one |= *depth == 1.0f;
-		stats.clear_other |= *depth != 0.0f && *depth != 1.0f;
-		stats.depth_erased |= sampled_plane;
-		// A full clear of the sampled plane erases the extent drawn so far; the
-		// next draw starts the capture crop again (observe_viewport). Only the
-		// D3D10/11/12 clears are known to cover the whole view.
-		stats.observe_depth_clear(cmd_list->get_device()->get_api(), rect_count, sampled_plane, state.position());
+		const auto target = depth_view_target_of(cmd_list->get_device(), dsv);
+		prove_depth_clear(cmd_list, target);
+		observe_clear_content(cmd_list, target, *depth, rect_count);
 	}
 
 	return false;
@@ -142,37 +159,33 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 	// applies the beginning access, and a resuming pass's depth CLEAR or
 	// DISCARD erases nothing. Its CLEAR still declares the DEPTH_WRITE state
 	// the pass writes the depth in, so it proves that state as a clear does
-	// (on_clear_depth_stencil). Until 11-01 a resuming pass's CLEAR or DISCARD
+	// (prove_depth_clear). Until 11-01 a resuming pass's CLEAR or DISCARD
 	// was observed as an erase after the draws of the recording before (the
 	// capture crop restarted at its next draw, the cleared gate, the lineage);
 	// 4b3f9cee dropped its state proof with it.
 	const bool resuming = (flags & render_pass_flags::resume) != render_pass_flags::none;
-	if (resuming && depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 &&
-		depth_stencil_desc->depth_load_op == render_pass_load_op::clear && cmd_list->get_device()->get_api() == device_api::d3d12)
+	if (depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 &&
+		depth_stencil_desc->depth_load_op == render_pass_load_op::clear)
 	{
-		device *const device = cmd_list->get_device();
-		const auto view = device->get_resource_view_desc(depth_stencil_desc->view);
-		if (view.texture.first_level == 0 && view.texture.first_layer == 0)
-			capture_inputs::observe_depth_clear(cmd_list, device->get_resource_from_view(depth_stencil_desc->view));
+		const auto target = depth_view_target_of(cmd_list->get_device(), depth_stencil_desc->view);
+		prove_depth_clear(cmd_list, target);
+		if (!resuming)
+			observe_clear_content(cmd_list, target, depth_stencil_desc->clear_depth, 0);
 	}
-	else if (!resuming && depth_stencil_desc != nullptr && depth_stencil_desc->depth_load_op == render_pass_load_op::clear)
-		on_clear_depth_stencil(cmd_list, depth_stencil_desc->view, &depth_stencil_desc->clear_depth, nullptr, 0, nullptr);
 	else if (!resuming && depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 &&
 		depth_stencil_desc->depth_load_op == render_pass_load_op::discard && cmd_list->get_device()->get_api() == device_api::d3d12)
 	{
 		// A D3D12 depth DISCARD (observe_depth_discard). Vulkan's DONT_CARE is
 		// left to the draw-statistics picker as before.
-		device *const device = cmd_list->get_device();
-		const auto view = device->get_resource_view_desc(depth_stencil_desc->view);
-		if (view.texture.first_level == 0 && view.texture.first_layer == 0)
+		const auto target = depth_view_target_of(cmd_list->get_device(), depth_stencil_desc->view);
+		if (target.sampled_plane)
 		{
 			auto &state = *cmd_list->get_private_data<state_tracking>();
-			const resource depth_stencil = device->get_resource_from_view(depth_stencil_desc->view);
 			std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
 			if (state.is_queue)
 				lock.lock();
-			auto &stats = state.stats_per_used_depth_stencil[depth_stencil];
-			stats.limit_tracking(tracking_demand(device));
+			auto &stats = state.stats_per_used_depth_stencil[target.depth_stencil];
+			stats.limit_tracking(tracking_demand(cmd_list->get_device()));
 			stats.observe_depth_discard(state.position());
 		}
 	}
@@ -193,10 +206,9 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 		depth_stencil_desc->depth_store_op == render_pass_store_op::discard &&
 		(flags & render_pass_flags::suspend) == render_pass_flags::none && cmd_list->get_device()->get_api() == device_api::d3d12)
 	{
-		device *const device = cmd_list->get_device();
-		const auto view = device->get_resource_view_desc(depth_stencil_desc->view);
-		if (view.texture.first_level == 0 && view.texture.first_layer == 0)
-			state.render_pass_depth = device->get_resource_from_view(depth_stencil_desc->view);
+		const auto target = depth_view_target_of(cmd_list->get_device(), depth_stencil_desc->view);
+		if (target.sampled_plane)
+			state.render_pass_depth = target.depth_stencil;
 	}
 
 	on_bind_depth_stencil_impl(cmd_list, depth_stencil_desc != nullptr ? depth_stencil_desc->view : resource_view {}, false);
