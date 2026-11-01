@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Private shared class/type view. exporter.cpp stages it at original source points;
-// only SUNSHINE_SBS_TEST consumes the complete header from another TU.
-// Free noninline bodies remain CPP-owned. The constexpr classifier helpers and
-// three constants are shared only by the named SBS unit-test view.
-#ifndef SUNSHINE_EXPORTER_TEST_ACCESS_COMMON
-#define SUNSHINE_EXPORTER_TEST_ACCESS_COMMON
+// The exporter's internal view: the publisher and its types, with the
+// declarations of exporter.cpp's session, UI aliases, callbacks and noninline
+// free definitions. exporter.cpp includes it once (with
+// SUNSHINE_EXPORTER_IMPLEMENTATION, so its parts define their bodies); the SBS
+// unit tests (SUNSHINE_SBS_TEST) include it from their own TU, where the parts'
+// free bodies are declarations of the same entities. The constexpr classifier
+// helpers and three constants are shared only by that named test view.
+#pragma once
 #include "addon_lifetime.h"
 // Original Sunshine exporter. ReShade's SDK headers are BSD-3-Clause OR MIT.
 #include "overlay_compositor.h"
@@ -83,21 +85,14 @@ using namespace sunshine_game3d::exporter_test_access;
 #define SUNSHINE_EXPORTER_INTERNAL
 #define SUNSHINE_EXPORTER_CONSTANT
 #endif
-#endif
 
-#if defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE) || !defined(SUNSHINE_EXPORTER_TEST_ACCESS_CONSUMER)
-#if !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE)
-#define SUNSHINE_EXPORTER_TEST_ACCESS_CONSUMER
 namespace SUNSHINE_EXPORTER_INTERNAL {
   namespace api = reshade::api;
   namespace wire = reshade_bridge;
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   namespace depth_events = sunshine_game3d::test::depth_events;
 #endif
-#endif
 
-#if (!defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE) || SUNSHINE_EXPORTER_TEST_ACCESS_STAGE == 1) && !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_1)
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_1
   struct automatic_ui_entry {
     sunshine_game3d::automatic_status status {};
     sunshine_game3d::source_alpha_ui_decision source_alpha;
@@ -141,8 +136,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       return true;
     }
   };
-#endif // stage 1
-#if !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE)
   extern std::atomic<std::uint64_t> next_raw_basis;
   void log(reshade::log::level level, const char *message);
   addon_session_t &addon_session();
@@ -167,10 +160,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   HWND observed_foreground_window();
   reshade_bridge::window_owner::verdict child_window_verdict(HWND window, HWND foreground);
   void log_hr(const char *operation, HRESULT hr);
-#endif
 
-#if (!defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE) || SUNSHINE_EXPORTER_TEST_ACCESS_STAGE == 2) && !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_2)
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_2
   template<class T>
   class com_ptr {
   public:
@@ -252,15 +242,15 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   private:
     HANDLE value_ = nullptr;
   };
-#endif // stage 2
 
-#if (!defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE) || SUNSHINE_EXPORTER_TEST_ACCESS_STAGE == 3) && !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_3)
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_3
 #include "exporter/export_ring.inl"
-#endif // stage 3
 
-#if (!defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE) || SUNSHINE_EXPORTER_TEST_ACCESS_STAGE == 4) && !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_4)
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_4
+  // A child swapchain window's verdicts (report_window_owner) that the player
+  // or the game's own window changes explain, as a top-level window's
+  // not_foreground pause is routine: the owner, a root out of focus, a hidden
+  // child and one being resized. They are logged at info; a sibling overlap,
+  // another process's window in the chain, an incomplete query, two
+  // qualifying swapchains and any new verdict are warnings.
   SUNSHINE_EXPORTER_CONSTANT constexpr std::array<std::string_view, 4> routine_window_verdicts{"owner", "not_foreground", "not_visible", "partial"};
   constexpr bool routine_window_verdict(std::string_view verdict) {
     for (const auto routine : routine_window_verdicts)
@@ -372,18 +362,10 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       }
     } output;
   };
-#endif // stage 4
-#if !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE)
   std::uint64_t depth_identity(const runtime_t &proof);
-#endif
 
-#if (!defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE) || SUNSHINE_EXPORTER_TEST_ACCESS_STAGE == 5) && !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_5)
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_5
 #include "exporter/export_ring_class.inl"
-#endif // stage 5
 
-#if (!defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE) || SUNSHINE_EXPORTER_TEST_ACCESS_STAGE == 6) && !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_6)
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE_6
   class publisher_t {
   public:
     ~publisher_t() {
@@ -1370,21 +1352,15 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       std::uint64_t next_log = 0;
     } window_report_;
   };
-#endif // stage 6
-#if !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE)
   extern decltype(addon_session_t::publisher) &publisher;
   void on_destroy(api::effect_runtime *runtime);
-#endif
 
-#if !defined(SUNSHINE_EXPORTER_TEST_ACCESS_STAGE)
 } // namespace SUNSHINE_EXPORTER_INTERNAL
-// These original explicit-inline member bodies must be reachable in the test TU.
-// Their free bodies become same-entity declarations in this consumer mode.
+// The parts' bodies: definitions in exporter.cpp. The test TU reaches their
+// explicit-inline member bodies; their free bodies are declarations there.
 #include "exporter/present_diagnostics.inl"
 #include "exporter/scene_placement_impl.inl"
 #include "exporter/fx_reference.inl"
 #ifdef SUNSHINE_SBS_TEST
 using sunshine_game3d::exporter_test_access::publisher;
-#endif
-#endif
 #endif

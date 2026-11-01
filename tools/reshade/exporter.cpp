@@ -1,35 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #define SUNSHINE_EXPORTER_IMPLEMENTATION
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE 0
-#include "exporter_test_access.h"
-#undef SUNSHINE_EXPORTER_TEST_ACCESS_STAGE
+#include "exporter_internal.h"
 namespace SUNSHINE_EXPORTER_INTERNAL {
-  namespace api = reshade::api;
-  namespace wire = reshade_bridge;
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-  namespace depth_events = sunshine_game3d::test::depth_events;
-#endif
   std::atomic<std::uint64_t> next_raw_basis {1};
-  void log(reshade::log::level level, const char *message);
 
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE 1
-#include "exporter_test_access.h"
-#undef SUNSHINE_EXPORTER_TEST_ACCESS_STAGE
-  addon_session_t &addon_session();
   // No ReShade/GPU calls while holding this mutex. UI readers and requests never
   // acquire the publisher mutex, including synchronous uniform-set callbacks.
-  auto &automatic_ui_mutex = addon_session().ui_mutex;
-  auto &automatic_ui = addon_session().ui;
-
-  // Part declarations: UI status publication bodies live in exporter/ui_status.inl.
-  sunshine_game3d::alpha_auto_policy *clear_automatic_ui(api::effect_runtime *runtime);
-  void log_ui_counters(api::effect_runtime *runtime, sunshine_game3d::alpha_auto_policy &session);
-  void publish_automatic_ui(api::effect_runtime *runtime, sunshine_game3d::automatic_status status);
-  void publish_source_alpha_ui(api::effect_runtime *runtime, sunshine_game3d::source_alpha_ui_decision value,
-      bool game3d_enabled = true, sunshine_game3d::alpha_auto_policy *ui_session = nullptr);
-#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
-  bool take_recalibration(api::effect_runtime *runtime);
-#endif
+  decltype(addon_session_t::ui_mutex) &automatic_ui_mutex = addon_session().ui_mutex;
+  decltype(addon_session_t::ui) &automatic_ui = addon_session().ui;
 
 #if defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON) || defined(SUNSHINE_SBS_TEST)
   // Only the distinct test DLL can substitute this observation. Null fails closed
@@ -63,10 +41,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     return owner::classify(chain, reinterpret_cast<std::uintptr_t>(foreground), GetCurrentProcessId(), root);
   }
 
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE 2
-#include "exporter_test_access.h"
-#undef SUNSHINE_EXPORTER_TEST_ACCESS_STAGE
-
   void log(reshade::log::level level, const char *message) {
 #ifdef SUNSHINE_SBS_TEST
     (void) level;
@@ -82,20 +56,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     log(reshade::log::level::error, message);
   }
 
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE 3
-#include "exporter_test_access.h"
-#undef SUNSHINE_EXPORTER_TEST_ACCESS_STAGE
-
-  // A child swapchain window's verdicts (report_window_owner) that the player
-  // or the game's own window changes explain, as a top-level window's
-  // not_foreground pause is routine: the owner, a root out of focus, a hidden
-  // child and one being resized. They are logged at info; a sibling overlap,
-  // another process's window in the chain, an incomplete query, two
-  // qualifying swapchains and any new verdict are warnings.
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE 4
-#include "exporter_test_access.h"
-#undef SUNSHINE_EXPORTER_TEST_ACCESS_STAGE
-
   // The depth view's content identity for the renderer's conditioning memo
   // (render_frame_input::depth_identity): nonzero only for an API capture,
   // whose borrowed view holds that capture's immutable pixels for its epoch,
@@ -105,14 +65,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     return sunshine_game3d::depth_output::depth_identity(proof.frame.scene_source,
       proof.borrowed_depth.handle != 0, proof.frame.depth_ready);
   }
-
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE 5
-#include "exporter_test_access.h"
-#undef SUNSHINE_EXPORTER_TEST_ACCESS_STAGE
-
-#define SUNSHINE_EXPORTER_TEST_ACCESS_STAGE 6
-#include "exporter_test_access.h"
-#undef SUNSHINE_EXPORTER_TEST_ACCESS_STAGE
 
   addon_session_t::addon_session_t() = default;
   addon_session_t::~addon_session_t() = default;
@@ -124,7 +76,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     static auto *const session = new addon_session_t;
     return *session;
   }
-  auto &publisher = addon_session().publisher;
+  decltype(addon_session_t::publisher) &publisher = addon_session().publisher;
 
   void teardown_addon(HMODULE addon, HMODULE reshade) {
     if (sunshine_addon_lifetime::stopping()) return;
@@ -375,11 +327,6 @@ extern "C" {
   }
 }
 
-#include "exporter/present_diagnostics.inl"
-
 #include "exporter/ui_status.inl"
-
-#include "exporter/scene_placement_impl.inl"
-#include "exporter/fx_reference.inl"
 
 #undef SUNSHINE_EXPORTER_IMPLEMENTATION

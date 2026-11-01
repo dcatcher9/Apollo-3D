@@ -308,7 +308,7 @@ if(BUILD_TESTING)
       target_link_options(${target} PRIVATE -Wl,--wrap=MH_CreateHook)
     endif()
   endfunction()
-  # Test views. Exporter tests share exporter_test_access.h with one compiled exporter.cpp.
+  # Test views. Exporter tests share exporter_internal.h with one compiled exporter.cpp.
   sunshine_game3d_core_view(sunshine_game3d_core_sbs_test SEAMS SUNSHINE_SBS_TEST)
   # The Streamline probe, NGX call trace and native observer seams.
   sunshine_game3d_core_view(sunshine_game3d_core_probe_test SEAMS SUNSHINE_STREAMLINE_PROBE_TEST

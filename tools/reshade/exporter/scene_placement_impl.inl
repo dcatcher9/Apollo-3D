@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Function-only part of exporter.cpp, included at the end of that same TU.
-// Former in-class member bodies retain inline; declarations/defaults and all
-// runtime fields retain original TU slots through exporter_test_access.h.
+// Function-only part of exporter.cpp, included at the end of
+// exporter_internal.h. Former in-class member bodies retain inline;
+// declarations/defaults and all runtime fields are in exporter_internal.h.
 // exporter/scene_placement.inl supplies the
 // decision types and free helpers at their original position.
 // Docs: docs/reshade-sbs.md, Scene placement.

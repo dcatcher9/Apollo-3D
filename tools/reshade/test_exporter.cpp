@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Exercise the actual publisher state transitions without loading an add-on into a game.
-#include "exporter_test_access.h"
+#include "exporter_internal.h"
 extern "C" {
   BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID);
   __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade);

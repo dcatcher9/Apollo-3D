@@ -6424,12 +6424,15 @@ held scenes keep their source identity and previously resolved calibration.
 ### Exporter test boundary
 
 The publisher and its types are shared with the lifecycle fixture through
-`tools/reshade/exporter_test_access.h`. The source TU supplies the one session,
-UI aliases, callbacks and noninline free definitions; staged type includes retain
-the shipping/runtime-test source order and anonymous namespace. The SBS unit
-view uses one named test namespace, preserves the friend fixture, and shares the
-existing constexpr classifier definitions and three constant objects between its
-TUs. This packaging has no source behavior or fixture-oracle change.
+`tools/reshade/exporter_internal.h`, which `exporter.cpp` includes once. The
+source TU supplies the one session, UI aliases, callbacks and noninline free
+definitions; shipping and the runtime-test add-on keep the anonymous namespace.
+The SBS unit view uses one named test namespace, preserves the friend fixture,
+and shares the existing constexpr classifier definitions and three constant
+objects between its TUs. This packaging has no source behavior or fixture-oracle
+change. Until 11-01 the header was `exporter_test_access.h`, included in seven
+stages that kept the refactor's original definition order for its identity
+proof.
 
 ### FX reference
 
