@@ -725,6 +725,41 @@ namespace {
     unsigned named {}, stages {}, outcomes {}, paired {};
   };
 
+  // What the source gate does with an evidence status: admit the call, or
+  // refuse it under the status's name. Every enumerator has a case, and the
+  // compiler checks that (-Wswitch as an error here; no default), so a status
+  // added to streamline_camera_probe.h without a decision here fails to
+  // build instead of escaping the refusal-class check (until 11-01 that
+  // check walked a hand-written list of the enumerators, the 11-01 final
+  // review's F17). Not an enumerator: none (the enum's numbers have gaps).
+  enum class gate_use { none, admits, refuses };
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wswitch"
+  constexpr gate_use evidence_gate(sunshine_streamline::evidence_status value) {
+    using sunshine_streamline::evidence_status;
+    switch (value) {
+      case evidence_status::source_associated_evaluation:
+      case evidence_status::missing_constants:
+      case evidence_status::rejected_constants:
+      case evidence_status::invalid_camera:
+      case evidence_status::camera_reset:
+      case evidence_status::untracked_frame:
+        return gate_use::admits;
+      case evidence_status::inactive:
+      case evidence_status::busy:
+      case evidence_status::missing_evaluation:
+      case evidence_status::observation_lost:
+      case evidence_status::missing_depth:
+      case evidence_status::stale:
+        return gate_use::refuses;
+    }
+    return gate_use::none;
+  }
+#pragma GCC diagnostic pop
+  // The numbers the check walks: the enumerators keep their places, with
+  // gaps where statuses were removed, and a new one follows the last (17).
+  constexpr unsigned evidence_numbers = 256;
+
   // Every reason the adapters name classifies. A reason that an input the
   // oracle has a case for produces is checked against that case; the others
   // are outside the contract (internal, absent) or illegal input the
@@ -763,18 +798,18 @@ namespace {
       ++counts.named;
     }
     require(refusal::classify("") == refusal::reason_class::unclassified && refusal::classify(nullptr) == refusal::reason_class::unclassified, "an unknown reason was classified");
-    // The source gate returns these evidence statuses' names; the rest
-    // admit the call.
+    // The source gate returns the refused evidence statuses' names; the rest
+    // admit the call (evidence_gate, which the compiler holds to every
+    // enumerator; their numbers have gaps: streamline_camera_probe.h).
     using sunshine_streamline::evidence_status;
-    // Every enumerator (their numbers have gaps: streamline_camera_probe.h).
-    for (const auto value : {evidence_status::inactive, evidence_status::busy, evidence_status::missing_evaluation,
-           evidence_status::observation_lost, evidence_status::untracked_frame,
-           evidence_status::missing_constants, evidence_status::rejected_constants, evidence_status::invalid_camera,
-           evidence_status::camera_reset, evidence_status::missing_depth, evidence_status::stale,
-           evidence_status::source_associated_evaluation}) {
+    for (unsigned number = 0; number != evidence_numbers; ++number) {
+      const auto value = evidence_status(number);
+      const auto use = evidence_gate(value);
+      if (use == gate_use::none) {
+        continue;
+      }
       require(std::strcmp(sunshine_streamline::name(value), "unknown") != 0, "an evidence status has no name");
-      const bool admitted = value == evidence_status::source_associated_evaluation || value == evidence_status::missing_constants || value == evidence_status::rejected_constants || value == evidence_status::invalid_camera || value == evidence_status::camera_reset || value == evidence_status::untracked_frame;
-      require(admitted || refusal::classify(sunshine_streamline::name(value)) != refusal::reason_class::unclassified, "an evidence status the source gate names has no refusal class");
+      require(use == gate_use::admits || refusal::classify(sunshine_streamline::name(value)) != refusal::reason_class::unclassified, "an evidence status the source gate names has no refusal class");
     }
     // The tag gate returns these match statuses' names; same_epoch_only admits.
     using sunshine_streamline::match_status;
