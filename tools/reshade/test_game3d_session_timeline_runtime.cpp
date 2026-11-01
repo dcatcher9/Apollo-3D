@@ -920,6 +920,19 @@ namespace {
     // was aged from the frame before (the seed, stale at frame 39 about 1
     // run in 3).
     {"fg-off-late-kept-dlssg-copy-hitch-after-sources", "sr=other_queue,state=recorded_other,order=cpu; tag=evaluate_bare,state=recorded_other; tag=evaluate_bare,state=recorded_other; tag=evaluate_bare,state=recorded_other; tag=evaluate_bare,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; untag=before_global,sr=local,state=recorded_other; fg=on,untag=before_global,sr=other_queue,state=recorded_other; untag=before_global,dlssg=direct_unobserved,state=proven; untag=before_global,dlssg=direct,state=proven; untag=before_global,dlssg=direct,state=proven; untag=before_global,dlssg=direct,state=recorded_other; untag=before_global,dlssg=direct; untag=before_global,dlssg=direct; untag=before_global,dlssg=direct; untag=before_global,dlssg=direct,generated=2; untag=before_global,dlssg=direct,state=unprovable,generated=2; untag=before_global,generated=2; untag=after_frame,generated=2; untag=after_frame,generated=2; untag=before_global,generated=2; untag=before_global,generated=2; untag=before_global,dlssg=direct,generated=2; untag=before_global,dlssg=direct,generated=2; tag=now_bare,untag=before_global,dlssg=direct,generated=2; tag=now_bare,untag=before_global,dlssg=direct,generated=2; tag=now_bare,untag=before_global,dlssg=direct,generated=2; fg=off_late,tag=now_bare,entry=global,untag=before_global,sr=tag,dlssg=direct,hitch=after_sources; tag=now_bare,entry=global,untag=before_global,sr=tag; drs=change,tag=now_bare,entry=global,untag=before_global,sr=tag; tag=now_bare,entry=global,untag=before_global,sr=tag,ui=untagged; tag=now_bare,entry=global,untag=before_global,sr=tag,ui=untagged,hitch=brief; tag=now_bare,entry=global,sr=tag,ui=untagged; tag=now_bare,entry=global,sr=tag,ui=untagged; tag=now_bare,entry=global,sr=tag,ui=untagged"},
+    // fg-on-deferred-tag-hitch-after-sources-held with untags on its four
+    // refused frames after the hitch (seed c40a42f921da5ba0's own shape),
+    // in either form. An untag before the frame's tag call ends nothing, as
+    // that call names the depth again, so those Presents must hold the hitch
+    // frame's deferred copy as without the untags (the fourth frame has no
+    // tag, so its untag may end the hold in either form); an untag after the
+    // tag (R7) may end the source's hold, so a mono Present there passes. Until
+    // 11-01 every untag form excused the drop: with the add-on aging that
+    // copy from its tag call again (a temporary mutation of
+    // present_deferred), both forms went mono from frame 29 and passed; the
+    // before form now fails there (dropped_hold), the after form passes.
+    {"fg-on-deferred-tag-hitch-after-sources-held-untag-before", "20*sr=other_queue,sr_gpu=after_present; 3*tag=present_bare,ui=listed; fg=on,tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=proven,ui=listed,hitch=after_sources; tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; fg=off,tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; 2*sr=other_queue,state=unprovable,ui=listed,order=late; sr=other_queue,state=unprovable,order=late; fg=off,sr=other_queue,state=unprovable,order=late; tag=now_list,sr=other_queue,state=unprovable,order=late,sr_gpu=after_present; tag=evaluate_bare,sr=other_queue,state=unprovable,ui=listed,order=late; tag=evaluate_bare,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed,order=late; 3*tag=evaluate_bare,state=proven,ui=listed; 2*ui=listed"},
+    {"fg-on-deferred-tag-hitch-after-sources-held-untag-after", "20*sr=other_queue,sr_gpu=after_present; 3*tag=present_bare,ui=listed; fg=on,tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=proven,ui=listed,hitch=after_sources; tag=present_bare,untag=after_global,sr=other_queue,state=unprovable,ui=listed; tag=present_bare,untag=after_global,sr=other_queue,state=unprovable,ui=listed,order=second; fg=off,tag=present_bare,untag=after_global,sr=other_queue,state=unprovable,ui=listed,order=second; untag=after_global,sr=other_queue,state=unprovable,ui=listed,order=second; 2*sr=other_queue,state=unprovable,ui=listed,order=late; sr=other_queue,state=unprovable,order=late; fg=off,sr=other_queue,state=unprovable,order=late; tag=now_list,sr=other_queue,state=unprovable,order=late,sr_gpu=after_present; tag=evaluate_bare,sr=other_queue,state=unprovable,ui=listed,order=late; tag=evaluate_bare,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed,order=late; 3*tag=evaluate_bare,state=proven,ui=listed; 2*ui=listed"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -2369,9 +2382,17 @@ namespace {
       continuity_log.pending.capture = supply.capture;
       // DLSS-G adds this frame's generated Presents (judge::present, between).
       continuity_log.pending.fg_frame = fg_supplied;
-      // An untag after the tag (R7) may end the source's hold: the judge
-      // does not require this frame's Present to hold depth (strict_holds).
-      continuity_log.pending.drop_permitted = of<untag_form>(value, events::untag) != untag_form::none;
+      // An untag that no tag call of the frame follows (R7: after the frame's
+      // tag, by its token or a global untag, or a global untag in a frame
+      // without a tag) may end the source's hold: the judge does not require
+      // this frame's Present to hold depth (strict_holds). An untag before
+      // the frame's own tag call ends nothing, since that call names the
+      // depth again, so that Present is judged as any. Until 11-01 every
+      // untag form excused it, which passed a mono Present while the frame's
+      // deferred tag copy was holdable
+      // (fg-on-deferred-tag-hitch-after-sources-held-untag-before).
+      const bool tagged_again = untag == untag_form::before_global && form != tag_form::none;
+      continuity_log.pending.drop_permitted = untag != untag_form::none && !tagged_again;
       // The freshness rule: the frame's copies recorded on another queue,
       // readable once complete, except SR copies a live FG scope keeps out as
       // it keeps the presenting queue's own (owned), and copies of a source

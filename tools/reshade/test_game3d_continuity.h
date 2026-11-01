@@ -224,8 +224,10 @@ namespace game3d_continuity {
     // The frame supplied an FG copy its live scope accepts: DLSS-G adds its
     // generated Presents, which present it (judge::present, between).
     bool fg_frame {};
-    // The frame's events may end its source's hold (an untag, the retiring
-    // of its viewport): a mono Present there is no dropped hold.
+    // The frame's events may end its source's hold (an untag no tag call of
+    // the frame follows, R7, or the retiring of its viewport): a mono Present
+    // there is no dropped hold (the session timelines; until 11-01 any untag,
+    // one before the frame's own tag call too).
     bool drop_permitted {};
     // Its Present comes after FG Off (its FG options turned FG off, at the
     // frame's start or after its evaluations): an FG copy it shows is held

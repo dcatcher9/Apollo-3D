@@ -2222,8 +2222,10 @@ Generic's binding ready; H in mono shows none. The judge is armed by a Present t
 Present that shows none disarms it when its frame's own Present reads none of its legal sources and
 nothing it could hold is younger than the source age (an unordered frame, a copy deferred to the
 next Present, a pipelined source; frames whose sources meet a known limitation keep their loss for
-its row), when its frame's events may end its source (an untag, a run's isolation:
-`supply::drop_permitted`), when its frame had no legal source and nothing is holdable, or when it is
+its row), when its frame's events may end its source (an untag no tag call of the frame follows,
+R7, or a run's isolation: `supply::drop_permitted`; until 11-01 an untag before the frame's own tag
+call too, which names the depth again, so a mono Present passed while the frame's deferred tag copy
+was holdable), when its frame had no legal source and nothing is holdable, or when it is
 a violation; a generated Present neither arms nor disarms it. In the session timelines
 (`judge::strict_holds`) a frame with no legal source must hold the last depth while it is younger
 than the source age (a mono Present there is a `dropped_hold`); the native provider fixture's frame
@@ -2779,7 +2781,13 @@ whose frame's DLSS-G copy the add-on keeps and shows at that frame's Present aft
 evaluation, `fg-off-late-kept-dlssg-copy-hitch-after-sources` (fixed-set seed 5d48a3d414f1de10's
 frames 0 to 40 with that hitch: before 11-01 the fixture stripped every FG copy of a late-Off frame
 but its deferred tag copy from the supply, an unsupplied fresh copy at frame 33, every run; without
-the hitch the seed failed stale at frame 39 about 1 run in 3),
+the hitch the seed failed stale at frame 39 about 1 run in 3), and two for the untags on that row's
+refused frames after the hitch, `fg-on-deferred-tag-hitch-after-sources-held-untag-before` and
+`-untag-after` (seed c40a42f921da5ba0's own untags: one before the frame's own tag call must hold the
+deferred copy as without it, one after the tag, or in a frame without a tag, may end its hold; until
+11-01 every untag form excused
+a mono Present there, and with the add-on aging that copy from its tag call again, a temporary
+mutation, both forms passed mono from frame 29; now the before form fails there),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
