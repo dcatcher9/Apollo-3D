@@ -217,6 +217,27 @@ QUEUE_ORDER = re.compile(r'Sunshine 3D queue order: hooks=\{signal=(\d+) wait=(\
                          r'poisoned=\{([^}]*)\} refused=\{([^}]*)\} ordered=(\d+) proofs=\{([^}]*)\} '
                          r'.*?late_conflict=(\d+)(?: reset_conflicts=(\d+) evicted_reads=(\d+))?')
 QUEUE_ORDER_OFF = re.compile(r'Sunshine 3D queue order: disabled \(QueueFenceOrder=0\)')
+# Who signals a fence besides its first signaller (since 10-31): each queue whose Signal poisoned a fence as its second
+# signaller, once, at most 8 per process, with both queues' cookies and types and the second one's calling modules.
+QUEUE_SIGNALLER = re.compile(r'Sunshine 3D queue order: second signaller fence=(\d+) value=(\d+) '
+                             r'first=\{queue=(\d+) type=(\w+)\} second=\{queue=(\d+) type=(\w+) callers=([^}]*)\} '
+                             r'report=(\d+)/(\d+)')
+# The capture lock's wait counter (since 11-01; docs/reshade-sbs.md, Capture lock waits): one line per window of at
+# most 10 s, every window with Diagnostics, else only a window in which a game thread waited a millisecond or more.
+# The present thread's holds come only with Diagnostics (since 11-01; before, every line).
+CAPTURE_LOCK = re.compile(r'Sunshine depth capture lock: window_ms=(\d+) game_locks=(\d+) game_waits=(\d+) '
+                          r'game_wait_ms=([0-9.]+) game_wait_pct=([0-9.]+) game_p50_us=(\d+) game_p99_us=(\d+) '
+                          r'game_max_ms=([0-9.]+) game_waits_1ms=(\d+) present_locks=(\d+) present_waits=(\d+) '
+                          r'present_wait_ms=([0-9.]+) present_p99_us=(\d+) present_max_ms=([0-9.]+)'
+                          r'(?: present_hold_p99_us=\d+ present_hold_max_ms=[0-9.]+)? holders=(\S+)')
+# Owner ruling Q5 (11-01; docs/reshade-sbs.md, Capture lock waits): the capture-lock split is justified when, over a
+# 60 s steady window, game threads wait a millisecond or more at least once a second, or their p99 wait is 0.25 ms or
+# more, or their summed wait 1% or more of wall time, or the present thread's p99 wait is 0.5 ms or more, and the
+# dominant holder sites are present-thread sections that perf items 1 and 2 do not remove. Below a p99 of 0.05 ms and
+# a largest wait of 0.5 ms it stays parked; in between, the named holder is shortened first. The report applies the
+# thresholds to each logged window; the 60 s and the holder sites stay the owner's call.
+Q5_LONG_WAITS_PER_S, Q5_GAME_P99_US, Q5_GAME_WAIT_PCT, Q5_PRESENT_P99_US = 1.0, 250, 1.0, 500
+Q5_PARKED_P99_US, Q5_PARKED_MAX_MS = 50, 0.5
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
@@ -303,8 +324,9 @@ LOSS_ROUTINE = ('lifecycle', 'token_replaced')
 LOSS_FAULT = ('invalid_input', 'sdk_failure', 'test_injected')
 LOSS_BURST, LOSS_BURST_S = 3, 60.0
 SETTLE_S = 3.0  # Recalibration and holds after an FG switch or runtime reset.
-# The next round's named item: flat placement while depth is shown after an FG switch (the calibration restarts at a
-# switch between the FG and SR sources). Listed per switch, never dropped.
+# FG-switch placement warm-up, about 1 s by design (owner 10-28; docs/reshade-sbs.md): flat placement while depth is
+# shown after an FG switch (the calibration restarts at a switch between the FG and SR sources). Listed per switch,
+# never dropped.
 FG_WARM_UP = 'FG-switch placement warm-up'
 # The one step whose hitch a reset, FG switch or overlay opening explains: it rebuilds the export ring and prepares the
 # overlay compositor. Any other step's hitch is listed wherever it falls (until 10-27 every step's was excused there,
@@ -873,6 +895,9 @@ class Session:
     # The last queue order line's fields (QUEUE_ORDER), and whether QueueFenceOrder=0 turned it off.
     queue_order: dict | None = None
     queue_order_off: bool = False
+    # Each second-signaller report (QUEUE_SIGNALLER) and capture-lock window (CAPTURE_LOCK) with its time.
+    second_signallers: list[tuple[float, dict]] = field(default_factory=list)
+    capture_lock: list[tuple[float, dict]] = field(default_factory=list)
     display_scaling: list[tuple[float, tuple[int, ...]]] = field(default_factory=list)
     warnings: list[tuple[float, str]] = field(default_factory=list)  # The add-on's own unexpected WARN/ERROR lines.
     other_warnings: list[tuple[float, str]] = field(default_factory=list)  # Everyone else's (OWNED, CORE_ABOUT_ADDON).
@@ -1087,6 +1112,16 @@ def parse(lines) -> Session:
                              'causes_counted': g[15] is not None}
         elif QUEUE_ORDER_OFF.search(text):
             s.queue_order_off = True
+        if found := QUEUE_SIGNALLER.search(text):
+            g = found.groups()
+            s.second_signallers.append((t, {'fence': g[0], 'value': g[1], 'first': g[2], 'first_type': g[3],
+                                            'second': g[4], 'second_type': g[5], 'callers': g[6]}))
+        if found := CAPTURE_LOCK.search(text):
+            g = found.groups()
+            s.capture_lock.append((t, {'window_ms': int(g[0]), 'game_waits': int(g[2]), 'game_wait_pct': float(g[4]),
+                                       'game_p99_us': int(g[6]), 'game_max_ms': float(g[7]),
+                                       'game_waits_1ms': int(g[8]), 'present_p99_us': int(g[12]),
+                                       'present_max_ms': float(g[13]), 'holders': g[14]}))
         if found := HITCH.search(text):
             s.hitches.append((t, found.group(1), float(found.group(2)),
                               float(found.group(3)) if found.group(3) else None))
@@ -1527,6 +1562,8 @@ def evaluate(s: Session) -> list[Check]:
         add(Check('INFO', 'Depth losses', depth_losses(s)))
     dlssg_checks(s, add)
     queue_order_checks(s, add)
+    second_signaller_checks(s, add)
+    capture_lock_checks(s, add)
     if s.render_sizes:
         # Dynamic resolution keeps depth (since 10-23): a render-size change of one source is no depth gap. Before,
         # each change was a 'depth_shape_changed' loss (Assassin's Creed Shadows with FG on: 125-438 ms, six in 6 s).
@@ -1734,8 +1771,8 @@ def queue_order_checks(s: Session, add) -> None:
     if q['late_conflict']:
         conflicts.append(f"{q['late_conflict']} late conflicts: " + (
             'a fence a read relied on was poisoned within the source age (residual R1)' if q['causes_counted'] else
-            'a fence a read relied on was poisoned within the source age (residual R1), or a model reset or an eviction '
-            'conflicted the read (this add-on counts every cause as a late conflict)'))
+            'a fence a read relied on was poisoned within the source age (residual R1), or a model reset or an '
+            'eviction conflicted the read (this add-on counts every cause as a late conflict)'))
     if q['reset_conflicts'] or q['evicted_reads']:
         conflicts.append(f"relied reads conflicted without a poison (fail-closed bookkeeping, their held copies "
                          f"dropped): {q['reset_conflicts']} at a model reset, {q['evicted_reads']} evicted")
@@ -1746,6 +1783,62 @@ def queue_order_checks(s: Session, add) -> None:
                   'proofs unavailable; ' + detail))
     else:
         add(Check('PASS', 'Queue order', detail))
+
+
+def second_signaller_checks(s: Session, add) -> None:
+    """'Second signaller' (since 10-31): INFO naming each queue whose Signal poisoned a fence as its second signaller,
+    with the fence's first signaller and the second one's calling modules (the game, Streamline or DLSS-G, ReShade or
+    the add-on). The poison stays (11-01); its two relaxations are decided from these lines. A fence poisoned so stops
+    proving, so a read whose proof rested on it keeps the completion rule. No report means no check."""
+    if not s.second_signallers:
+        return
+    parts = [f"{r['second_type']} queue {r['second']} after {r['first_type']} queue {r['first']} "
+             f"(callers {r['callers']})" for _, r in s.second_signallers]
+    add(Check('INFO', 'Second signaller', f'{len(parts)} queues signalled a fence after its first signaller: '
+              + '; '.join(parts), [clock(t) for t, _ in s.second_signallers]))
+
+
+def capture_lock_checks(s: Session, add) -> None:
+    """'Capture lock' (since 11-01): the capture-lock counter's windows against owner ruling Q5. WARN when a window met
+    the split trigger, naming its holder sites (the 60 s steady window and whether the holders are present-thread
+    sections that perf items 1 and 2 do not remove stay the owner's call); PASS when every window stayed parked; INFO
+    in between (the named holder is shortened first). No line means no check: without Diagnostics a line comes only
+    for a window with a game thread's wait of a millisecond or more, so such a session is never parked."""
+    if not s.capture_lock:
+        return
+
+    def trigger(w: dict) -> list[str]:
+        reasons = []
+        if w['game_waits_1ms'] * 1000 >= Q5_LONG_WAITS_PER_S * w['window_ms']:
+            reasons.append(f"{w['game_waits_1ms']} game waits of 1 ms or more in {w['window_ms'] / 1000:.1f} s")
+        if w['game_p99_us'] >= Q5_GAME_P99_US:
+            reasons.append(f"game p99 {w['game_p99_us']} us")
+        if w['game_wait_pct'] >= Q5_GAME_WAIT_PCT:
+            reasons.append(f"game waits {w['game_wait_pct']:.2f}% of wall time")
+        if w['present_p99_us'] >= Q5_PRESENT_P99_US:
+            reasons.append(f"present p99 {w['present_p99_us']} us")
+        return reasons
+
+    windows = s.capture_lock
+    summary = (f"{len(windows)} windows ({sum(w['window_ms'] for _, w in windows) / 1000:.0f} s): game p99 up to "
+               f"{max(w['game_p99_us'] for _, w in windows)} us, largest game wait "
+               f"{max(w['game_max_ms'] for _, w in windows):.3f} ms, "
+               f"{sum(w['game_waits_1ms'] for _, w in windows)} game waits of 1 ms or more, present p99 up to "
+               f"{max(w['present_p99_us'] for _, w in windows)} us")
+    met = [(t, w, reasons) for t, w in windows if (reasons := trigger(w))]
+    if met:
+        t, w, reasons = max(met, key=lambda m: (len(m[2]), m[1]['game_wait_pct']))
+        add(Check('WARN', 'Capture lock', f'{len(met)} of {len(windows)} windows met the capture-lock split trigger '
+                  f"(owner ruling Q5): {', '.join(reasons)} at {clock(t)}, holders {w['holders']}; the split needs it "
+                  'over a 60 s steady window and dominant holders that perf items 1 and 2 do not remove (map the '
+                  f'offsets with the add-on symbols); {summary}', [clock(m[0]) for m in met]))
+        return
+    if all(w['game_p99_us'] <= Q5_PARKED_P99_US and w['game_max_ms'] < Q5_PARKED_MAX_MS for _, w in windows):
+        add(Check('PASS', 'Capture lock', f'{summary}: the split stays parked'))
+        return
+    t, w = max(windows, key=lambda tw: (tw[1]['game_p99_us'], tw[1]['game_max_ms']))
+    add(Check('INFO', 'Capture lock', f'{summary}: between parked and the split trigger, so the named holder is '
+              f"shortened first: holders {w['holders']} at {clock(t)}"))
 
 
 def export_checks(s: Session, add) -> None:

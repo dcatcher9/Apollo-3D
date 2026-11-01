@@ -1009,14 +1009,59 @@ class ReadinessReport(unittest.TestCase):
         # An add-on before 11-01 counted every cause as a late conflict.
         older = run(BASE + [order(late=2, causes='')])
         self.assertEqual(older['Queue order'].status, 'WARN')
-        self.assertIn('2 late conflicts: a fence a read relied on was poisoned within the source age (residual R1), or a '
-                      'model reset or an eviction conflicted the read', older['Queue order'].detail)
+        self.assertIn('2 late conflicts: a fence a read relied on was poisoned within the source age (residual R1), '
+                      'or a model reset or an eviction conflicted the read', older['Queue order'].detail)
         unhooked = run(BASE + [order(hooks='signal=0 wait=0 fence_signal=0 pending=0')])
         self.assertEqual(unhooked['Queue order'].status, 'WARN')
         self.assertIn('cross-queue proofs unavailable', unhooked['Queue order'].detail)
         off = run(BASE + [line('10:00:07', '[Sunshine 3D] Sunshine 3D queue order: disabled (QueueFenceOrder=0)')])
         self.assertEqual(off['Queue order'].status, 'INFO')
         self.assertNotIn('Queue order', run(BASE))
+
+    def test_second_signaller_names_both_queues_and_callers(self):
+        # The line as the add-on prints it (native_queue_order.inl, report_second_signaller).
+        report_line = line('10:00:08', '[Sunshine 3D] Sunshine 3D queue order: second signaller fence=6565265410 '
+                                       'value=4 first={queue=72 type=direct} second={queue=73 type=compute '
+                                       'callers=sl.dlss_g.dll<sl.interposer.dll<Game.exe} report=1/8')
+        checks = run(BASE + [report_line])
+        self.assertEqual(checks['Second signaller'].status, 'INFO')
+        self.assertIn('1 queues signalled a fence after its first signaller: compute queue 73 after direct queue 72 '
+                      '(callers sl.dlss_g.dll<sl.interposer.dll<Game.exe)', checks['Second signaller'].detail)
+        # It is no queue order status line.
+        self.assertNotIn('Queue order', checks)
+        self.assertNotIn('Second signaller', run(BASE))
+
+    def test_capture_lock_applies_the_split_trigger(self):
+        def window(at='10:00:10', waits_1ms=0, p99=50, pct=0.01, max_ms=0.42, present_p99=50, holds=True):
+            # The line as the add-on prints it (depth_capture/lock_stats.inl, capture_lock_report).
+            return line(at, '[Sunshine 3D] Sunshine depth capture lock: window_ms=10000 game_locks=14208 '
+                            f'game_waits=667 game_wait_ms=1.000 game_wait_pct={pct:.3f} game_p50_us=0 '
+                            f'game_p99_us={p99} game_max_ms={max_ms:.3f} game_waits_1ms={waits_1ms} '
+                            'present_locks=19536 present_waits=120 present_wait_ms=0.900 '
+                            f'present_p99_us={present_p99} present_max_ms=0.300'
+                            + (' present_hold_p99_us=100 present_hold_max_ms=0.880' if holds else '')
+                            + ' holders=p+0x1099e4:400/0.600,g+0xf4926:200/0.300,other:5/0.010')
+        parked = run(BASE + [window(), window('10:00:20', holds=False)])
+        self.assertEqual(parked['Capture lock'].status, 'PASS')
+        self.assertIn('2 windows (20 s): game p99 up to 50 us, largest game wait 0.420 ms, 0 game waits of 1 ms or '
+                      'more, present p99 up to 50 us: the split stays parked', parked['Capture lock'].detail)
+        between = run(BASE + [window(), window('10:00:20', p99=100, max_ms=0.9)])
+        self.assertEqual(between['Capture lock'].status, 'INFO')
+        self.assertIn('shortened first: holders p+0x1099e4:400/0.600,g+0xf4926:200/0.300,other:5/0.010 at 10:00:20',
+                      between['Capture lock'].detail)
+        # Each trigger of ruling Q5 alone, and the window that met the most.
+        for kwargs, reason in (({'waits_1ms': 10, 'max_ms': 1.5}, '10 game waits of 1 ms or more in 10.0 s'),
+                               ({'p99': 250}, 'game p99 250 us'),
+                               ({'pct': 1.0}, 'game waits 1.00% of wall time'),
+                               ({'present_p99': 500}, 'present p99 500 us')):
+            met = run(BASE + [window(), window('10:00:20', **kwargs)])
+            self.assertEqual(met['Capture lock'].status, 'WARN', reason)
+            self.assertIn(f'1 of 2 windows met the capture-lock split trigger (owner ruling Q5): {reason} at 10:00:20, '
+                          'holders p+0x1099e4:400/0.600', met['Capture lock'].detail)
+            self.assertEqual(met['Capture lock'].times, ['10:00:20'])
+        below = run(BASE + [window(waits_1ms=9, max_ms=1.5)])
+        self.assertEqual(below['Capture lock'].status, 'INFO')
+        self.assertNotIn('Capture lock', run(BASE))
 
     def test_dlssg_inputs_name_copies_and_refusals(self):
         def ngx(depth, ui, evaluations=300):

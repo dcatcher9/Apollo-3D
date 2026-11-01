@@ -644,7 +644,9 @@ wait a millisecond or more at least once per second, or their p99 wait is 0.25 m
 summed wait is 1% or more of wall time, or the present thread's p99 wait is 0.5 ms or more, and the
 dominant holder sites are present-thread sections that perf items 1 and 2 do not remove. Below a
 p99 of 0.05 ms and a largest wait of 0.5 ms it stays parked; in between, the named holder is
-shortened first.
+shortened first. The readiness report's `Capture lock` check applies these thresholds to each logged
+window (WARN at the trigger with the window's holders, PASS parked, INFO in between, 11-01); the
+60 s steady window and whether the holders are present-thread sections stay the owner's call.
 
 ### Frame record
 
@@ -5614,7 +5616,8 @@ consecutive frames of one module merged (at most 8): ReShade's or Streamline's p
 game, a Streamline plug-in or the add-on itself. Each queue is reported once (later fences it
 poisons, CPU Signals and the first signaller's own Signals add no line) and at most 8 queues per
 process; the stack walk runs only for a queue not yet reported. It changes no decision: the poison,
-its refusals and the status line's counts are as before.
+its refusals and the status line's counts are as before. The readiness report lists the reports
+(INFO `Second signaller`, 11-01).
 
 What a `second` poison costs, and why it stays (11-01, round 2). It removes proofs only, never
 depth: a fence poisoned `second` stops ordering any wait on it, so a read whose only proof rests on

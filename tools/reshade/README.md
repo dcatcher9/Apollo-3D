@@ -742,7 +742,17 @@ UI inputs the game's own Streamline UI tags copied first (`dlssg_ui` `tag_copied
 the refusals when DLSS-G evaluated with no copy (`missing_state`: DLSS-G's command list observed no
 state for its depth; `observer_coverage`: ReShade does not cover that list), and when it copied but
 refused more evaluations than it copied (other than for a tag's copy): each refused frame turns the
-FG scope silent, so FG depth came and went. INFO `Depth losses` counts every loss episode while the
+FG scope silent, so FG depth came and went. `Capture lock` (11-01) applies the owner's capture-lock
+split rule (Q5, docs/reshade-sbs.md, Capture lock waits) to each `Sunshine depth capture lock` window:
+WARN when a window met the trigger (game waits of 1 ms or more at least once a second, game p99 of
+0.25 ms or more, game waits of 1% or more of wall time, or a present p99 of 0.5 ms or more), with
+its holder sites, since the 60 s steady window and whether the holders are present-thread sections
+stay the owner's call; PASS when every window stayed parked (game p99 up to 50 us, largest wait
+below 0.5 ms); INFO in between, naming the holders to shorten first. INFO `Second signaller` (11-01)
+lists each queue that poisoned a fence as its second signaller, with the first signaller and the
+calling modules, the live data the poison's relaxations wait for. `Queue order` warns on a late
+conflict as the residual R1 and names the relied reads a model reset or an eviction conflicted apart
+(`reset_conflicts`, `evicted_reads`, 11-01). INFO `Depth losses` counts every loss episode while the
 export streamed, whatever the 5 s interval gate above: the logged ones plus those the add-on
 counted without logging them (`suppressed_episodes`; it logs at most four a second), their rate
 per streamed minute, the logged ones' time without depth, and their reasons. Compare sessions by
