@@ -21,6 +21,8 @@
 #include <thread>
 #include <vector>
 #include <windows.h>
+#include <dbghelp.h>
+#include <cwchar>
 #include "test_depth3d_effect.h"
 #include "test_color_precision.h"
 #include "test_stereo_parity.h"
@@ -76,6 +78,69 @@ namespace {
       throw std::runtime_error(error);
     }
   }
+
+  // Test-only crash evidence (deferred item 12): an unhandled exception in
+  // any thread, such as the access violation once seen as rc=139 after a
+  // timeline verdict, in the final release of the game's device (10-29, not
+  // reproduced since), writes a minidump to the fixture's output folder and
+  // a CRASH line to stderr. The earlier filter (MinGW's translation into
+  // SIGSEGV) then decides as before, so the exit status is unchanged.
+  // Armed when a fixture initializes and again before it releases the
+  // game's device, in case a loaded library replaced the filter since;
+  // dbghelp is loaded when armed, never inside the filter.
+  namespace crash_dump {
+    using write_function = BOOL(WINAPI *)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
+      PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
+    write_function write {};
+    LPTOP_LEVEL_EXCEPTION_FILTER earlier {};
+    wchar_t folder[MAX_PATH] {};
+    volatile LONG entered {};
+
+    LONG WINAPI filter(EXCEPTION_POINTERS *info) {
+      if (InterlockedExchange(&entered, 1) == 0 && write) {
+        wchar_t path[MAX_PATH + 64] {};
+        std::swprintf(path, std::size(path), L"%ls\\crash-%lu-%llu.dmp", folder, GetCurrentProcessId(),
+          static_cast<unsigned long long>(GetTickCount64()));
+        const auto file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        BOOL written = FALSE;
+        if (file != INVALID_HANDLE_VALUE) {
+          MINIDUMP_EXCEPTION_INFORMATION exception {GetCurrentThreadId(), info, FALSE};
+          const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory |
+            MiniDumpWithUnloadedModules | MiniDumpWithHandleData | MiniDumpWithProcessThreadData);
+          written = write(GetCurrentProcess(), GetCurrentProcessId(), file, type, &exception, nullptr, nullptr);
+          CloseHandle(file);
+        }
+        char line[MAX_PATH * 3 + 160];
+        const int length = std::snprintf(line, sizeof(line), "CRASH exception 0x%08lx at %p on thread %lu: minidump %s %ls\n",
+          static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode), info->ExceptionRecord->ExceptionAddress,
+          GetCurrentThreadId(), written ? "written to" : "not written to", path);
+        DWORD out {};
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, static_cast<DWORD>(std::clamp(length, 0, int(sizeof(line)) - 1)), &out, nullptr);
+      }
+      return earlier ? earlier(info) : EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // directory: where a minidump goes (empty: the folder an earlier arm
+    // named, else the current directory).
+    void arm(const fs::path &directory = {}) {
+      if (!write) {
+        if (const auto module = LoadLibraryW(L"dbghelp.dll")) {
+          write = reinterpret_cast<write_function>(GetProcAddress(module, "MiniDumpWriteDump"));
+        }
+      }
+      if (!directory.empty()) {
+        const auto text = fs::absolute(directory).wstring();
+        if (text.size() < std::size(folder)) {
+          std::wmemcpy(folder, text.c_str(), text.size() + 1);
+        }
+      } else if (!folder[0]) {
+        GetCurrentDirectoryW(DWORD(std::size(folder)), folder);
+      }
+      if (const auto previous = SetUnhandledExceptionFilter(filter); previous != filter) {
+        earlier = previous;
+      }
+    }
+  }  // namespace crash_dump
 
   bool named(const char *name, const char *expected) {
     const std::string value(name), tail(expected);
@@ -234,6 +299,7 @@ namespace {
     // device end: ReShade destroys its runtime and, with its last device,
     // unloads its add-ons (the add-on lifecycle fixture).
     void release_game_device() {
+      crash_dump::arm();
       observed.mono = nullptr;
       exported.reset();
       linear_depth.reset();
@@ -331,6 +397,7 @@ namespace {
     }
 
     void initialize(const fs::path &runtime, const fs::path &shader_root, const fs::path &directory, unsigned source_color, unsigned hdr_compatible, const fs::path &depth_addon = {}) {
+      crash_dump::arm(directory);
       sunshine_depth3d_fixture::select_effect();
       sunshine_parity::configure_timeline();
 #ifdef SUNSHINE_DEPTH_SELECTION_RUNTIME

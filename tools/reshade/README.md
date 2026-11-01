@@ -3403,7 +3403,12 @@ and exercises the same shared-preparation, control-response, diagnostic, exporte
 and depth-loss checks on D3D12. Its zero-strength reference must contain a nonconstant source
 pattern and two complete matching eyes, so blank output cannot satisfy later comparisons.
 Both full-effect fixtures default to 640×360 and use isolated user-supplied shader copies,
-with 70-second D3D11 and 180-second D3D12 process watchdogs. The D3D12 fixture also accepts
+with 70-second D3D11 and 180-second D3D12 process watchdogs. Every runner built on the D3D12
+fixture (`fixture_t`, in the session timelines, the add-on lifecycle, native, native-provider,
+Streamline-direct, NGX, selection and raw-scene runtimes) writes a minidump `crash-<pid>-<tick>.dmp` to its
+output folder and a `CRASH` line to stderr on an unhandled exception in any thread (11-01, after a
+one-off rc=139 in the final release of the game's device), then exits as before (rc=139 under Git
+Bash for an access violation). The D3D12 fixture also accepts
 optional final source-width and source-height arguments up to 3840×2160. The full 4K scRGB
 case passed on 2026-09-12, including measured displacement, identical diagnostic eyes without
 isolated columns, exported AA/sharpening and byte-exact mono. This is not a game performance
