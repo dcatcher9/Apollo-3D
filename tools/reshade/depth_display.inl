@@ -104,6 +104,33 @@
       jobs.idle.wait(lock, [&jobs] { return !jobs.outstanding; });
     }
 
+    void retire_display(state &data, state::display_entry &entry, std::uint64_t present) {
+      const auto format = static_cast<api::format>(entry.format);
+      data.retired_displays.push_back({entry.texture, entry.view, present, 0,
+        std::uint64_t(api::format_slice_pitch(format, api::format_row_pitch(format, entry.width), entry.height))});
+      entry = {};
+    }
+
+    // An inactive display unused this long is retired, so its storage does not
+    // outlive a resolution drop or a provider flip (until 10-31 it stayed until
+    // a third shape evicted it: after 4K then 1080p both stayed allocated). A
+    // shape that returns sooner reuses its entry: dynamic resolution
+    // alternating between two render sizes, or an FG toggle and back.
+    constexpr std::uint64_t display_idle_ms = 2000;
+
+    // The active display and the effects' binding are in use at this Present;
+    // any other entry unused for display_idle_ms is retired as an evicted one
+    // is (fenced on a later Present, released off the present thread). The
+    // effects' binding is never retired here, so no binding changes.
+    void expire_idle_displays(state &data, std::uint64_t present, std::uint64_t now) {
+      for (std::size_t i = 0; i != data.displays.size(); ++i) {
+        auto &entry = data.displays[i];
+        if (!entry.texture.handle) continue;
+        if (entry.texture == data.display_texture || entry.view == data.effects_view) data.display_used[i] = now;
+        else if (now - data.display_used[i] >= display_idle_ms) retire_display(data, entry, present);
+      }
+    }
+
     // Once per Present. A retired display is fenced on a Present after the one
     // that replaced it, when every earlier read of it (effects, renderer,
     // sampler) is already submitted on this queue; once that fence completed
@@ -112,6 +139,7 @@
     // (signal_own), so it never waits on the queue-order lock. The present
     // thread only reads the fence and signals it.
     void collect_displays(api::effect_runtime *runtime, state &data, std::uint64_t present) {
+      expire_idle_displays(data, present, GetTickCount64());
       if (data.retired_displays.empty()) return;
       auto *device = runtime->get_device();
       // Only a fence initialize() failed to create is created here.
@@ -160,6 +188,7 @@
       // other retained entry; the cache never reuses the other entry's pixels.
       for (const auto &entry : data.displays) if (matches(entry)) {
         activate_display(data, entry);
+        data.display_used[&entry - data.displays.data()] = GetTickCount64();
         data.cache.invalidate("display_switched");
         return display_status::ready;
       }
@@ -175,11 +204,8 @@
 #endif
         // Effects can still name this view only if it was the last binding.
         if (victim->view == data.effects_view) bind_api(runtime, data, {}, false);
-        const auto format = static_cast<api::format>(victim->format);
-        data.retired_displays.push_back({victim->texture, victim->view, present, 0,
-          std::uint64_t(api::format_slice_pitch(format, api::format_row_pitch(format, victim->width), victim->height))});
         if (victim->texture == data.display_texture) { data.display_texture = {}; data.display_view = {}; }
-        *victim = {};
+        retire_display(data, *victim, present);
       }
       data.cache.invalidate("display_recreated");
       api::resource_desc desc(packet.width, packet.height, 1, 1, static_cast<api::format>(packet.format), 1,
@@ -198,6 +224,7 @@
       created.view_format = packet.srv_format;
       *victim = created;
       activate_display(data, created);
+      data.display_used[victim - data.displays.data()] = GetTickCount64();
       return display_status::ready;
     }
   }

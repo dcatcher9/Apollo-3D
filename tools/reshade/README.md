@@ -901,7 +901,12 @@ reshade_game3d_native_provider_runtime_test.exe <ReShade64.dll> <frozenShaders> 
 
 It exercises real GPU depth production, capture, sampling and matrix preparation, including
 padded/nonzero-offset rectangles, failed evaluation (the newest completed copy held within its
-age bound, then mono with the native scale held) and recovery. The optional metadata-only
+age bound, then mono with the native scale held) and recovery. Two larger render sizes retire the
+first display, released off the present thread while Presents go on, and a runtime reset waits for
+that release. Then (10-31) a larger render size and back: the smaller display is reused and the
+larger one is released off the present thread once unused for 2 s (`MEASURE native-provider
+display-idle released_ms=`; without the idle release it stayed allocated and the case failed), and
+two render sizes alternating faster than that keep both displays for 4.5 s. The optional metadata-only
 interposer enables the SL FG 2x case: retained real depth, generated presentations, a hitch of the
 source age and more before a real Present and one between it and its generated Present (the
 generated Present holds that frame's own copy and every Present keeps full stereo strength,
@@ -1679,7 +1684,7 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 
 ##### depth_display
 
-- [`depth_display.inl`](depth_display.inl): provider display binding, allocation and fenced retirement. Docs: [depth_display](../../docs/reshade-sbs.md#depth_display).
+- [`depth_display.inl`](depth_display.inl): provider display binding, allocation and fenced retirement (also of a display unused for 2 s). Docs: [depth_display](../../docs/reshade-sbs.md#depth_display).
 - [`depth_display_copy.inl`](depth_display_copy.inl): the exact-position display-copy block in provider `begin()`. Docs: [depth_display](../../docs/reshade-sbs.md#depth_display).
 
 #### API depth provider

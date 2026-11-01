@@ -582,8 +582,12 @@ switches entries rather than reallocating; a replaced entry is retired by a fenc
 later Present, with no `wait_idle`, and once that fence completed it is released on a pool thread
 (a texture's last Release and ReShade's view release can wait on video memory: 17 and 81 ms on the
 present thread in ACS 10-27b, whose dynamic resolution retired a display at most render-size
-changes). A runtime's teardown waits for its releases, so none outlives its runtime or device. A
-release of 8 ms or more logs `Sunshine Game 3D: depth display release took X ms off the present
+changes). An entry that is neither the active display nor the effects' binding for 2 s is
+retired the same way (10-31), so VRAM returns about 2 s after a resolution drop or a provider flip;
+a shape that comes back sooner (dynamic resolution between two render sizes, an FG toggle and back)
+still reuses its entry. Until 10-31 the inactive entry stayed until a third shape evicted it, so
+after 4K then 1080p both displays stayed allocated. A runtime's teardown waits for its releases,
+so none outlives its runtime or device. A release of 8 ms or more logs `Sunshine Game 3D: depth display release took X ms off the present
 thread (n textures, m MiB)`. Capture storage goes the same way (10-27): what the idle sweep
 (`depth_capture::poll`, on the present thread), a Present's observation, a queue's retirement or a
 record call on a game thread drops last (predicted copy-out storage released unused, idle storage

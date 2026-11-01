@@ -890,6 +890,78 @@ namespace {
       std::puts("PASS native SL display release: a display retired by dynamic resolution is released off the present thread while Presents continue, and a runtime reset waits for that release");
     }
 
+    // Idle display storage (deferred item 5, 10-31). A display unused for 2 s
+    // (depth_display.inl, display_idle_ms) is released, so VRAM returns after
+    // a resolution drop: until 10-31 the larger display stayed allocated
+    // beside the smaller one until a third shape evicted it. A shape that
+    // comes back sooner reuses its entry, so dynamic resolution alternating
+    // between two render sizes never reallocates.
+    void run_display_idle_release() {
+      const auto display = reinterpret_cast<bool (*)(api::effect_runtime *, std::uint64_t *)>(
+        GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineStreamlineTestDisplay"));
+      require(display != nullptr, "The test add-on exports no active display texture");
+      const auto active_texture = [&] {
+        std::uint64_t texture{};
+        require(display(observed.runtime, &texture) && texture, "The test add-on names no active display texture");
+        return texture;
+      };
+      // A sentinel whose release never waits for a gate (the texture's last
+      // Release may run on the present thread at teardown).
+      const auto watch = [&](std::uint64_t texture) {
+        auto *sentinel = new release_sentinel;  // Never freed, as above.
+        SetEvent(sentinel->gate);
+        checked(reinterpret_cast<ID3D12Resource *>(texture)->SetPrivateDataInterface(release_sentinel_guid, sentinel),
+          "Attach a release sentinel to a display texture");
+        sentinel->Release();
+        return sentinel;
+      };
+      const auto show = [&](auto *target, const char *label) {
+        selected = target;
+        active_area = {0, 0, target->width, target->height};
+        settle(label);
+      };
+      auto *small = first.get();
+      show(small, "SL-display-idle-small");
+      const auto small_texture = active_texture();
+      resized_targets.push_back(target_uav(first->width + 64, first->height + 32, 0));
+      auto *large = resized_targets.back().get();
+      show(large, "SL-display-idle-large");
+      const auto large_texture = active_texture();
+      require(large_texture != small_texture, "A larger render size did not get a display of its own");
+      auto *large_released = watch(large_texture);
+      // Up, then down: the smaller display is reused at once, and the larger
+      // one is released off the present thread once unused for the idle
+      // period, while Presents go on.
+      const auto dropped = GetTickCount64();
+      show(small, "SL-display-idle-dropped");
+      require(active_texture() == small_texture, "Returning to the earlier render size reallocated its display");
+      while (!large_released->released && GetTickCount64() - dropped < 8000) present_frame();
+      const auto released_ms = GetTickCount64() - dropped;
+      std::printf("MEASURE native-provider display-idle released_ms=%llu\n", static_cast<unsigned long long>(released_ms));
+      require(large_released->released, "A display unused since a resolution drop was never released (its VRAM stayed allocated)");
+      require(large_released->thread != large_released->present_thread, "An idle display was released on the present thread");
+      require(released_ms >= 1900, "A display was released before it was unused for the idle period");
+      require(active_texture() == small_texture, "The active display changed while an idle one was released");
+      // Dynamic resolution between two render sizes, each shown for less
+      // than the idle period: both displays stay (no allocation per change).
+      show(large, "SL-display-oscillation-large");
+      const auto oscillating_large = active_texture();
+      auto *small_kept = watch(small_texture);
+      auto *large_kept = watch(oscillating_large);
+      unsigned changes = 0;
+      for (const auto until = GetTickCount64() + 4500; GetTickCount64() < until; ++changes) {
+        show(changes % 2 ? large : small, "SL-display-oscillation");
+        require(active_texture() == (changes % 2 ? oscillating_large : small_texture),
+          "Dynamic resolution between two render sizes reallocated a display");
+        for (const auto next = GetTickCount64() + 300; GetTickCount64() < next;) present_frame();
+      }
+      require(!small_kept->released && !large_kept->released,
+        "Dynamic resolution between two render sizes released a display it kept using");
+      std::printf("MEASURE native-provider display-oscillation changes=%u\n", changes);
+      show(small, "SL-display-idle-done");
+      std::puts("PASS native SL display idle release: a display unused for 2 s after a resolution drop is released off the present thread; render sizes alternating faster keep both displays");
+    }
+
     // The public tag 23 UI hook with one Resource type, then the offscreen UI
     // layer, over the FG cases' real frames.
     void run_ui_hook(std::uint32_t resource_type) {
@@ -4011,6 +4083,7 @@ int main(int argc, char **argv) {
     else {
       fixture.run_streamline();
       fixture.run_display_release();
+      fixture.run_display_idle_release();
       if (sdk) fixture.run_fg(sdk);
     }
     fixture.finish();
