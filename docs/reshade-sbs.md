@@ -4910,9 +4910,18 @@ source, their completed snapshots), never another viewport's copy, and nothing i
 Without a confirmed scope (FG off, unknown, or an ambiguous or unavailable read, which excludes FG
 input), or with no single active view of its viewport (it has none, or its FG and ordinary views are
 both active), the tie stays. One active view needs no tie-break and is selected as before, whichever
-viewport FG names. FG Off ties the views again at once (the FG scope's view passes to the
+viewport FG names. Each view is its viewport's newest call of its source: a call that began after
+the other viewport's evaluation took a later sequence (one sequence serves every viewport and
+thread; DLSS-G's evaluation on the present thread, a deferred FG tag copy at its Present) still
+advances its view unless a newer call of its own viewport began since (until 11-01 it changed
+nothing, so the bound view kept its previous frame, whose copy was shown, and the call's own copy
+never showed: the R5 review's R5-17). FG Off ties the views again at once (the FG scope's view passes to the
 viewport's ordinary source, above), so the display holds its FG copy within the source age only when
-the newest nomination is that viewport's (`FG_successor_pending`), and drops it otherwise. An FG
+the newest nomination is that viewport's (`FG_successor_pending`), and drops it otherwise; where the
+viewport's ordinary view is newer than its FG view (an SR evaluation with FG route none keeps both),
+that view stays and the FG view goes (until 11-01 the FG view replaced it, also past the source
+age, and the other viewport could then be the one active view, its copy shown for this viewport's
+image: the R5 review's R5-2). An FG
 viewport switch selects the new viewport's lineage alone and drops the old viewport's held copy
 (`source_changed`, or `FG_scope_changed` under a required scope) until the new viewport's first
 readable copy; an options store that knows both viewports' modes reads ambiguous until the old

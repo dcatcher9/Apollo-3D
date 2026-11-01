@@ -2146,15 +2146,21 @@ namespace sunshine_streamline::depth_capture {
     // shows nothing fresh while the display retains a copy, decide_display
     // (D) for it. F, G: viewport 0's FG copies; A: its SR copy; D: its SR
     // copy on the game's queue, readable from its list's Reset (no copy-out,
-    // so readable and reclaimable at once); B, C: viewport 1's SR copies;
-    // live or silent: the Present's FG scope. SWEEP: the Present's idle
-    // sweep or another viewport's record before the next Present recycles
-    // every slot the pool may reclaim (reclaimable, the rule both use); it
-    // names the copies it took. The pool keeps every head a Present can
-    // take and its stand-ins (since 11-01; until then only the namespace's
-    // newest nomination's, so a bound viewport's newest copy or its FG
-    // lineage's SR stand-in went and the Present held: the R5 review's
-    // R5-1).
+    // so readable and reclaimable at once) or, in the late-begin rows, its
+    // next SR copy; B, C: viewport 1's SR copies; live or silent: the
+    // Present's FG scope. SWEEP: the Present's idle sweep or another
+    // viewport's record before the next Present recycles every slot the
+    // pool may reclaim (reclaimable, the rule both use); it names the copies
+    // it took. The pool keeps every head a Present can take and its
+    // stand-ins (since 11-01; until then only the namespace's newest
+    // nomination's, so a bound viewport's newest copy or its FG lineage's SR
+    // stand-in went and the Present held: the R5 review's R5-1). Each view
+    // follows its own viewport's newest call, also when another viewport's
+    // evaluation began a newer one first (since 11-01; until then that call
+    // left the bound view at its previous frame, whose copy was consumed, so
+    // the Present held: R5-17). At FG Off a newer SR view of the viewport
+    // stays its view (since 11-01; until then the stale FG view replaced it
+    // and the other viewport became the one active view: R5-2).
     void view_tie_rows() {
       using query = frame_generation_query_status;
       enum class shape {
@@ -2175,7 +2181,10 @@ namespace sunshine_streamline::depth_capture {
         fg_silent_no_count,  // fg_silent with Dynamic mode's 0 generated frames.
         one_view_no_count,  // F alone, a live scope with Dynamic mode's 0 generated frames.
         bound_kept,  // A shown (silent scope on viewport 0); D, then C the newest; a sweep.
-        fg_on_lineage_kept  // FG On on viewport 0 (silent): D, G in flight, B the newest; a sweep.
+        fg_on_lineage_kept,  // FG On on viewport 0 (silent): D, G in flight, B the newest; a sweep.
+        fg_off_newer_sr,  // F past the source age, A newer (FG route none), B the newest; FG Off.
+        fg_live_late_begin,  // F shown; C begins before G, viewport 0's next FG copy.
+        silent_late_begin  // A shown (silent scope on viewport 0); C begins before D, viewport 0's next SR copy.
       };
 
       struct row {
@@ -2204,9 +2213,13 @@ namespace sunshine_streamline::depth_capture {
         {"A live Dynamic scope without a declared generated count breaks no tie: it then finds the other viewport's newer nomination", shape::fg_live_no_count, "P1 live - unavailable fg_scope_mismatch"},
         {"A silent Dynamic scope without a declared generated count breaks no tie", shape::fg_silent_no_count, "P1 silent - ambiguous ambiguous_views"},
         {"One active view: a Dynamic scope without a declared generated count still owns its viewport", shape::one_view_no_count, "P1 live F ready current_capture"},
-        // The R5 review (11-01): the pool.
+        // The R5 review (11-01): the pool, a late begin and FG Off beside a
+        // newer SR view.
         {"The pool keeps the bound viewport's newest copy, readable from its Reset, beside the other viewport's newer nomination: it shows", shape::bound_kept, "P1 silent A ready current_capture; SWEEP -; P2 silent D ready current_capture"},
         {"The pool keeps the bound FG head's SR stand-in at FG On beside the other viewport's newer nomination: it stands in", shape::fg_on_lineage_kept, "SWEEP -; P1 silent D ready lineage_snapshot"},
+        {"FG Off with a newer SR view of the viewport: it stays the viewport's view, so the views tie, never the other viewport's copy", shape::fg_off_newer_sr, "OFF views=2; P1 - ambiguous ambiguous_views"},
+        {"A live scope's next FG copy whose evaluation began after the other viewport's newer one: it shows", shape::fg_live_late_begin, "P1 live F ready current_capture; P2 live G ready current_capture"},
+        {"A silent scope's next SR copy whose evaluation began after the other viewport's newer one: it shows", shape::silent_late_begin, "P1 silent A ready current_capture; P2 silent D ready current_capture"},
       };
       constexpr std::uint64_t epoch = 13, device = 41;
       for (const auto &r : rows) {
@@ -2313,7 +2326,7 @@ namespace sunshine_streamline::depth_capture {
           for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views) {
             views += view.sequence != 0;
           }
-          trace += "; OFF views=" + std::to_string(views);
+          trace += std::string(trace.empty() ? "" : "; ") + "OFF views=" + std::to_string(views);
         };
         // The idle sweep or another viewport's record before the next
         // Present: each slot the pool may reclaim is recycled.
@@ -2357,6 +2370,7 @@ namespace sunshine_streamline::depth_capture {
         const auto sr1 = [&](std::uint64_t sequence) -> slot & {
           return copy(make(index++, provider_kind::streamline, epoch, sequence, 0, 1));
         };
+        auto &streamline_views = evaluations[provider_index(provider_kind::streamline)].views;
         switch (r.kind) {
           case shape::no_fg:
             a = &sr0(10);
@@ -2470,6 +2484,44 @@ namespace sunshine_streamline::depth_capture {
             g->finished = false;
             b = &sr1(12);
             sweep();
+            pick(fg_read(query::observed, true, 0));
+            break;
+          case shape::fg_off_newer_sr: {
+            // Viewport 0's FG view past the source age (DLSS-G nominated
+            // nothing since), its SR view newer beside it (an evaluate with
+            // FG route none keeps the FG view), viewport 1 the newest.
+            f = &fg_copy(10, true);
+            a = &sr0(11, UINT64_MAX);
+            b = &sr1(12);
+            const auto old = GetTickCount64() - source_age - 1;
+            f->metadata.tick = old;
+            for (auto &view : streamline_views) {
+              if (view.source_id == fg_source) {
+                view.tick = old;
+              }
+            }
+            // Two Presents since: none presents the FG view's frame.
+            fixture::presents_since(2);
+            off();
+            pick(fg_read(query::observed, false, 0));
+            break;
+          }
+          case shape::fg_live_late_begin:
+            f = &fg_copy(10, true);
+            b = &sr1(11);
+            pick(fg_read(query::observed, true, 0));
+            // Viewport 1's next evaluation takes the later sequence but
+            // begins first (another thread); viewport 0's FG copy follows.
+            c = &sr1(13);
+            g = &fg_copy(12, true);
+            pick(fg_read(query::observed, true, 0));
+            break;
+          case shape::silent_late_begin:
+            a = &sr0(10);
+            b = &sr1(11);
+            pick(fg_read(query::observed, true, 0));
+            c = &sr1(13);
+            d = &sr0(12);
             pick(fg_read(query::observed, true, 0));
             break;
         }

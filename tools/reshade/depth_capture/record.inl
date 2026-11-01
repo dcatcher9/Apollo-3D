@@ -187,11 +187,23 @@ namespace sunshine_streamline::depth_capture {
     // until this viewport's next evaluation: its copy showed at FG Off's
     // next Present. An inactive one (a viewport that stopped evaluating, such
     // as the session timelines' earlier viewports) makes nothing ambiguous.
+    // A newer ordinary view of the viewport (an SR evaluation that kept the
+    // FG view, FG route none) is already the viewport's call: it stays, and
+    // the role's view goes. Until 11-01 the role's view replaced it, also
+    // past the source age, so the other viewport could be the one active
+    // view and its copy showed for this viewport's image (the R5 review's
+    // R5-2).
+    const auto newer_ordinary = [&](const evaluation_head &role) {
+      return std::any_of(current.views.begin(), current.views.end(), [&](const evaluation_head &view) {
+        return view.epoch == epoch && view.viewport == viewport && !view.source_id && view.sequence > role.sequence;
+      });
+    };
     const evaluation_head *head = nullptr;
     if (fg_role && current.epoch == epoch)
       for (const auto &view : current.views)
         if (view.epoch == epoch && view.source_id == source_id &&
-            (other_viewport_active || (current.source_id == source_id && view.sequence == current.sequence))) head = &view;
+            (other_viewport_active || (current.source_id == source_id && view.sequence == current.sequence)) &&
+            !newer_ordinary(view)) head = &view;
     for (auto &view : current.views) {
       if (&view == head) {
         // Its call (sequence, tick, present) without the FG scope's facts.
@@ -223,11 +235,27 @@ namespace sunshine_streamline::depth_capture {
       if (source_id == fg_key) source_id = 0;
       if (!source_id) superseded_source_id = fg_key;
     }
-    if (sequence <= current.sequence) return;
-    current.sequence = sequence;
-    current.source_id = source_id;
-    current.pending_nomination = {};
-    attempt_status[provider_index(provider)] = status::unavailable;
+    // A call older than the namespace's newest (another viewport's evaluation
+    // took a later sequence and began first: one sequence serves every
+    // viewport and thread) still advances its own viewport's view, as if
+    // they had begun in order, unless a newer call of its viewport began
+    // since, which superseded or keeps that view. Selection matches the
+    // view's sequence exactly where its viewport breaks a tie (owner ruling
+    // R5), so until 11-01, when such a call changed nothing, the view kept
+    // its previous frame, whose copy was already shown: the Present held it
+    // and the call's own copy never showed (the R5 review's R5-17). The
+    // namespace's newest nomination, its nomination in progress and its
+    // attempt status move only with a newer call.
+    if (sequence <= current.sequence) {
+      if (std::any_of(current.views.begin(), current.views.end(), [&](const evaluation_head &value) {
+            return value.epoch == epoch && value.viewport == viewport && value.sequence >= sequence;
+          })) return;
+    } else {
+      current.sequence = sequence;
+      current.source_id = source_id;
+      current.pending_nomination = {};
+      attempt_status[provider_index(provider)] = status::unavailable;
+    }
     // An explicit adapter role change (SR -> FG) replaces one logical source
     // for this same viewport. Other viewports remain independently ambiguous;
     // this changes neither captured GPU lifetimes nor provider ownership.
@@ -247,6 +275,8 @@ namespace sunshine_streamline::depth_capture {
       value.sequence = sequence; value.tick = now; value.present = ordinal; return;
     }
     auto oldest = std::min_element(current.views.begin(), current.views.end(), [](const auto &a, const auto &b) { return a.sequence < b.sequence; });
+    // An older call never displaces a newer view.
+    if (oldest->sequence >= sequence) return;
     *oldest = {epoch, sequence, now, source_id, viewport};
     oldest->present = ordinal;
   }

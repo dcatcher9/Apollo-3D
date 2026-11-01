@@ -3215,8 +3215,11 @@ serial is 30 there); each Present establishes any selected copy, as
   without a count broke the tie; since the R5 review, 11-01: the pool keeps the bound viewport's
   newest copy, readable from its list's Reset, and at FG On its FG head's SR stand-in beside the
   other viewport's newer nomination (each row's SWEEP recycles what the pool may reclaim; until
-  then both went and the Present held)), the pool's storage check before its retention (a copy
-  whose fence completes between the two reads stays; until 11-01 it was recycled), the source a head refused before its capture existed names to
+  then both went and the Present held), a call that began after the other viewport's newer
+  evaluation advances its view, live or silent (until then the Present held the shown copy), and
+  FG Off keeps a newer SR view of the viewport beside its stale FG view (until then the other
+  viewport's copy showed)), the pool's storage check before its retention (a copy whose fence
+  completes between the two reads stays; until 11-01 it was recycled), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of
   `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at
