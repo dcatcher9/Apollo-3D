@@ -249,6 +249,23 @@ namespace sunshine_streamline::frame_generation {
       const bool every_frame = !deferral.previous_known || deferral.previous != deferral.at_tag;
       return !(evaluating && every_frame) && queue_executed;
     }
+    // Whether a Present is the deferral's frame's (present_deferred).
+    // executions: the game's command list executions counted at the
+    // deferral's newest tag call (at_tag), and at this Present on any queue
+    // (now) and on the presenting queue (on_queue). Without frame generation
+    // the frame's Present is the first after a game list executed following
+    // the tag call: a count above the tag call's. The Present reads its counts
+    // before it takes the deferrals' lock, so a tag call that read after
+    // them can already stand in the table with a larger count: that Present
+    // is an earlier frame's. Until 11-01 any other count reached it (!=), so
+    // the next frame's copy could be made at the previous frame's Present
+    // (F67). With frame generation, presented().
+    bool reached(bool generating, std::uint64_t scope_epoch, std::uint32_t scope_viewport, const marks &deferral,
+        std::uint64_t at_tag, std::uint64_t now_executions, std::uint64_t on_queue, std::uint64_t now,
+        std::uint64_t ordinal) const {
+      if (!generating) return now_executions > at_tag;
+      return presented(scope_epoch, scope_viewport, deferral, on_queue > at_tag, now, ordinal);
+    }
     // Whether the source age ends a deferral (its newest tag call at tick) at
     // the Present ordinal: only at a Present that cannot be its frame's own.
     // That Present may come after the earlier frames' generated Presents

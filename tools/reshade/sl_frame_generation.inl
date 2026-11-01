@@ -364,8 +364,8 @@ namespace sunshine_streamline {
       // evaluated a frame following the tag, while DLSS-G evaluates every
       // frame in this scope; else the first after a game list executed on
       // this presenting queue since the tag (deferral_evaluations).
-      const bool reached = !generating ? entry.executions != executions :
-        fg_evaluation.presented(entry.epoch, entry.viewport, entry.evaluations, queue_executions > entry.executions, now, ordinal);
+      const bool reached = fg_evaluation.reached(generating, entry.epoch, entry.viewport, entry.evaluations, entry.executions,
+        executions, queue_executions, now, ordinal);
       if (!past && !reached) {
         waited += generating;
         continue;

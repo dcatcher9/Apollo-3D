@@ -705,6 +705,37 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P5 deferral age by the frame's own Present: %zu rows\n", std::size(rows));
     }
 
+    // P5: without frame generation a deferral's frame's Present is the first
+    // after a game list executed following its newest tag call
+    // (deferral_evaluations::reached: a count above the tag call's). The
+    // Present reads its counts before the deferrals' lock, so a tag call
+    // that read after it stands in the table with a larger count: an earlier
+    // frame's Present (lane L-fg, F67, 11-01; until then any other count
+    // reached it, so the next frame's copy was made at the previous frame's
+    // Present).
+    void deferral_reached_rows() {
+      namespace fg = sunshine_streamline::frame_generation;
+      struct row {
+        const char *pins;
+        std::uint64_t at_tag, now_executions;
+        bool reached;
+      };
+      const row rows[] {
+        {"No game list executed since the tag call: an earlier frame's Present", 5, 5, false},
+        {"A game list executed since: the frame's Present", 5, 6, true},
+        {"The tag call read its count after this Present read its own: an earlier frame's Present", 6, 5, false},
+      };
+      for (const auto &r : rows) {
+        const fg::deferral_evaluations value;
+        if (value.reached(false, 7, 0, {}, r.at_tag, r.now_executions, r.now_executions, 1000, 3) != r.reached) {
+          char text[512];
+          std::snprintf(text, sizeof(text), "P5 deferral without frame generation, %s: reached %d", r.pins, !r.reached);
+          fail(text);
+        }
+      }
+      std::printf("PASS P5 deferral's Present without frame generation: %zu rows\n", std::size(rows));
+    }
+
     // P6: select_provider at one Present. Each row builds the queue's owner
     // (its previous, delivered frame), the newest capture of each provider and
     // the FG policy, then names the pick. Correction 2 of the refactor plan: a
@@ -3778,6 +3809,7 @@ int main() {
   dlssg_tag_precedence_steps();
   deferral_present_steps();
   deferral_age_rows();
+  deferral_reached_rows();
   head_completes_between_looks();
   lineage_after_refused_completed();
   select_provider_rows();

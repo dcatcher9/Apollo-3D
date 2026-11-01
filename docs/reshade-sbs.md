@@ -4455,12 +4455,20 @@ from its declaration):
   Any other tag without a command list has no point to copy at (`boundary_without_commands`, S2),
   at its call and at a later evaluate.
 
-A frame's Present depends on whether the viewport's frame generation is on (its observed
-`slDLSSGSetOptions` mode; without the viewport's metadata it counts as on):
+A frame's Present depends on whether the viewport's frame generation is on (its committed
+`slDLSSGSetOptions` options in this Present's FG snapshot, `present_frame_generation`; a viewport
+with no known options counts as off, as every viewport does since 11-01, PD5; until then a lost
+metadata read counted as on), decided in one place (`deferral_evaluations::reached`):
 - Off: the game's Present reaches ReShade's directly, so it is the first Present after a game list
   executed following the tag call (any queue: `depth_capture::game_executions`; ReShade's own
-  immediate lists and DXGI's internal Present list do not count). A Present with none since is an
-  earlier frame's.
+  immediate lists and DXGI's internal Present list do not count): a count above the tag call's. A
+  Present with none since is an earlier frame's, and so is one whose count the tag call's exceeds:
+  the Present reads its counts before it takes the deferrals' lock, so a tag call that read after
+  it can already stand in the table. Until 11-01 any other count reached it, so the next frame's
+  copy could be made at the previous frame's Present (lane L-fg, F67; seam rows `P5 deferral's
+  Present without frame generation`). Under real DLSS-G whose options were never observed, the
+  copy is therefore made at the first Present after any game execution, which can be an earlier
+  frame's paced or generated Present (F69).
 - On: DLSS-G presents earlier frames (paced real frames and generated ones) on its own queue while
   the game submits the next frame's work, so a game execution proves nothing. DLSS-G evaluates a
   frame inside that frame's Present, after the frame's tags: while it evaluates every frame of the
