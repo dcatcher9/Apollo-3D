@@ -2191,8 +2191,13 @@ c28965dca8d7c76c's frame 38 failed or passed by when DLSS-G's compute copy compl
 published before the one the last real Present showed, which would be older depth after newer:
 until 10-28 an earlier frame's copy, complete only after its own Present and never shown, counted,
 so where a late signal then conflicted the shown copy's read the add-on's mono Present failed as a
-gap, the extra shard's seeds 722b4878c6c27f14 at frame 90 and 7bd2fe012beab724 at frame 179), and
-any other loss there is a gap. The first CPU, second or late signal of a fence makes the copies read through it
+gap, the extra shard's seeds 722b4878c6c27f14 at frame 90 and 7bd2fe012beab724 at frame 179; nor a
+copy without a known capture id, one the add-on published at no call the fixture saw, of a frame
+before the shown copy's own, since ids follow the frames' order too: until 11-01 any copy without an
+id counted, so where the shown copy's read was conflicted and the frame's own copy was in flight the
+add-on's mono Present failed as a gap in loaded runs, soak seeds 2bda274f7f2ca5de at frame 63 and
+afcf3faa4ef87af5 at frame 12, `O1-second-signal-unknown-copy-of-earlier-frame` and
+`O1-late-signal-unknown-copy-of-earlier-frame` in every run), and any other loss there is a gap. The first CPU, second or late signal of a fence makes the copies read through it
 unholdable from then on (`judge::late_signal`), as O1 stops holding such a read: each copy names
 its own fence (`supply::completion::relied`), the fixture's token of that fence object, new at
 each FG toggle (until the 10-27 review every copy of a frame took the frame's fences, keyed by a
@@ -2887,6 +2892,13 @@ Present's UI used the old mode and its depth the new one, `fg_modes:disagree` at
 sources under FG without generated Presents, `fg-on-ui-window-ends-at-next-evaluation-hitch` (PD7,
 11-01: its real Present offered no UI input and the UI's count held the previous frame's decision
 there as a generated Present, `ui_frame:held` at frame 24, every run; depth's window fixed it),
+and two for O1's mono
+Present beside an earlier frame's copy whose capture id the fixture never learned:
+`O1-second-signal-unknown-copy-of-earlier-frame` (soak seed 2bda274f7f2ca5de's shape: the first
+DLSS-G compute copy after FG On, then a second signaller) and
+`O1-late-signal-unknown-copy-of-earlier-frame` (seed afcf3faa4ef87af5's frames 0 to 12: the FG
+frame's SR copy, then a late signal after FG Off; before 11-01 the judge counted such a copy as
+holdable, a gap at frames 27 and 12, every run),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes

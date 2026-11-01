@@ -718,7 +718,7 @@ namespace game3d_continuity {
             value.newer_capture = handover_.capture;
             pending_.push_back(value);
           }
-          handover_ = {record.depth_capture, api};
+          handover_ = {record.depth_capture, api, frame_of(record.depth_capture)};
         }
         // The newest source of the shown rung's kind; a tick ahead of the
         // record's (another read of the clock) is age 0. So is a real
@@ -1060,9 +1060,30 @@ namespace game3d_continuity {
     // copy, complete only after its own Present, was never shown, the
     // add-on's mono Present failed as a gap (the extra shard's seeds
     // 722b4878c6c27f14 at frame 90 and 7bd2fe012beab724 at frame 179).
+    // Nor a copy without a known capture id (the add-on published none the
+    // fixture saw at its call) of a frame before the shown copy's: ids
+    // follow the frames' order as well. Until 11-01 any copy without an id
+    // counted, so where the shown copy's read was conflicted and the
+    // frame's own copy was still in flight, the add-on's mono Present failed
+    // as a gap beside such a copy of an earlier frame (soak seeds
+    // 2bda274f7f2ca5de at frame 63, the first DLSS-G compute copy after FG
+    // On, and afcf3faa4ef87af5 at frame 12, the FG frame's SR copy, both in
+    // loaded runs only).
     bool holdable(std::uint64_t now) const {
-      const auto newest = readable_after(0, api_sources, handover_.capture).second;
+      const auto newest = readable_after(0, api_sources, handover_.capture, handover_.frame).second;
       return newest && now + tick_slack_ms < newest + sunshine_freshness::source_age_ms;
+    }
+
+    // The frame of the copy with this capture id, 0 when no copy names it.
+    std::uint64_t frame_of(std::uint64_t capture) const {
+      for (const auto &copy : copies_) {
+        for (const auto value : copy.capture) {
+          if (value && (value & ~copy_fg_input) == capture) {
+            return copy.frame;
+          }
+        }
+      }
+      return 0;
     }
 
     // The newest copy of sources certainly readable at this Present (as
@@ -1117,7 +1138,8 @@ namespace game3d_continuity {
     // Present after tick, and the newest one's stamp.
     // floor: a capture id; a copy whose known capture ids are all below it
     // is not counted (0: none).
-    std::pair<unsigned, std::uint64_t> readable_after(std::uint64_t tick, std::uint8_t sources, std::uint64_t floor = 0) const {
+    std::pair<unsigned, std::uint64_t> readable_after(std::uint64_t tick, std::uint8_t sources, std::uint64_t floor = 0,
+        std::uint64_t floor_frame = 0) const {
       unsigned frames {};
       std::uint64_t last {}, newest {};
       for (const auto &copy : copies_) {
@@ -1129,7 +1151,9 @@ namespace game3d_continuity {
           for (const auto value : copy.capture) {
             id = std::max(id, value & ~copy_fg_input);
           }
-          if (id && id < floor) {
+          // Without a known id, its frame decides (floor_frame: the floor
+          // copy's frame, 0 unknown).
+          if (id ? id < floor : copy.frame < floor_frame) {
             continue;
           }
         }
@@ -1160,10 +1184,12 @@ namespace game3d_continuity {
     } shown_copy_;
     std::array<std::uint64_t, 3> real_presents_ {};
     // The copy the last real Present that showed API depth showed, and its
-    // API (the no-step-back rule, of either API since 10-31).
+    // API (the no-step-back rule, of either API since 10-31), with the
+    // frame of the copy that capture id names (frame_of; 0 unknown).
     struct shown_api {
       std::uint64_t capture {};
       sunshine_game3d::source_api api {sunshine_game3d::source_api::none};
+      std::uint64_t frame {};
     } handover_;
     std::uint64_t last_legal_ {}, last_present_ {}, newest_api_ {}, newest_generic_ {}, newest_readable_ {}, newest_limited_ {};
     unsigned presents_ {}, legal_presents_ {}, shown_ {}, shown_generic_ {}, unrecorded_ {}, stalls_ {};

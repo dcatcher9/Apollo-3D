@@ -18,7 +18,9 @@
 // Present never shows a copy recorded before the one the last real Present
 // showed (a handover to the other API, and since 10-31 the same API's other
 // source too), and a copy deferred to its frame's Present counts by the
-// capture id the fixture learns after that Present.
+// capture id the fixture learns after that Present. A copy whose id the
+// fixture never learned counts by its frame: one of a frame before the
+// shown copy's is no holdable copy (11-01).
 #include "test_game3d_continuity.h"
 
 #include <cstdint>
@@ -573,6 +575,53 @@ namespace {
     }
   }
 
+  // A copy whose capture id the fixture never learned (supply::capture 0:
+  // the add-on published none it saw at the call) follows the frames'
+  // order as ids do: one of a frame before the shown copy's was published
+  // before it, so after the shown copy's conflict it is no holdable copy
+  // and the mono Present is O1's. One of the shown copy's own frame still
+  // is. Until 11-01 any copy without an id counted (soak seeds
+  // 2bda274f7f2ca5de at frame 63 and afcf3faa4ef87af5 at frame 12, in
+  // loaded runs, failed as a gap).
+  void holdable_unknown_id_by_frame() {
+    for (const bool own_frame : {false, true}) {
+      const int fence_a = 0;
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      continuity::supply first;
+      first.add_elsewhere(continuity::sr_evaluate, now);
+      first.completions.clear();
+      first.completes(continuity::sr_evaluate, done, nullptr, own_frame ? 11 : 0);
+      first.unordered = true;
+      judge.present(mono(present++, now), first, "test");
+      now += 16;
+      continuity::supply second;
+      second.add_elsewhere(continuity::sr_evaluate, now);
+      second.completions.clear();
+      second.completes(continuity::sr_evaluate, done, &fence_a, 13);
+      if (own_frame) {
+        second.add_elsewhere(continuity::dlssg_input, now);
+        second.completes(continuity::dlssg_input, done, nullptr, 0);
+      }
+      second.immediate = continuity::sr_evaluate;
+      auto record = shown(present++, now, source_slot::scene_depth, now);
+      record.depth_capture = 13;
+      judge.present(record, second, "test");
+      judge.late_signal(&fence_a);
+      judge.take();
+      now += 16;
+      continuity::supply third;
+      third.add_elsewhere(continuity::sr_evaluate, now);
+      third.unordered = true;
+      judge.present(mono(present++, now), third, "test");
+      const auto violations = judge.take();
+      const bool gap = violations.size() == 1 && violations[0].kind == continuity::violation_kind::gap;
+      require(own_frame ? gap : violations.empty(),
+        own_frame ? "a copy without a capture id of the shown copy's own frame did not make the mono Present after the conflict a gap"
+                  : "a copy without a capture id of a frame before the shown copy's made the mono Present after the conflict a gap");
+    }
+  }
+
   // The freshness rule by capture id (10-28): a Present that holds the
   // previous frame's copy beside its own frame's readable copy, one frame
   // (16 ms) late, passed the tick bound (two frame intervals and the slack);
@@ -878,6 +927,7 @@ int main() {
   generated_drop_after_late_signal();
   late_signal_conflicts_only_its_copies();
   holdable_never_older_than_shown();
+  holdable_unknown_id_by_frame();
   unordered_copy_completed_after_decision();
   stale_rule_ages_a_frames_own_copy_from_its_capture();
   immediate_copy_counts_at_its_own_present();
@@ -896,7 +946,8 @@ int main() {
             "came; a hold past the source age is stale; copies age from when they were made; a no-source frame holds "
             "under strict_holds; a generated Present after its FG frame's real Present presents that frame; a "
             "Present one copy behind a later frame's readable copy of its kind is stale_shown by capture id, a copy of its own frame is no newer, also a deferred copy's "
-            "learned one; a real Present never shows a copy recorded before the last real Present's, of either API; "
+            "learned one; a real Present never shows a copy recorded before the last real Present's, of either API, "
+            "and a copy without a known capture id of a frame before the shown copy's is no holdable copy; "
             "after FG Off a held FG copy is judged by its lineage, "
             "also against the SR copies the FG hold kept off-screen; the stale rule ages a hold from its newest copy's "
             "made tick");

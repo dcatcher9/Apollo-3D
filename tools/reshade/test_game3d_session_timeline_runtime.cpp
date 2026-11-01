@@ -1007,6 +1007,22 @@ namespace {
     // evaluation ended, decides, and the T1 grace reuses it as a real
     // frame without its own decision.
     {"fg-on-ui-window-ends-at-next-evaluation-hitch", "20*sr=local; fg=on,sr=local,dlssg=direct; 3*sr=local,dlssg=direct,ui=listed; sr=local,dlssg=direct,ui=bare,hitch=before_sources; 5*sr=local,dlssg=direct,ui=listed"},
+    // A conflict of the shown copy's read (O1) while the frame's own copy
+    // is in flight, beside an earlier frame's copy whose capture id the
+    // fixture never learned (the add-on published none it saw at the call)
+    // and that is younger than the source age: the add-on drops the
+    // conflicted copy and that Present is mono, as O1 has it, since the
+    // earlier copy was published before the shown one (it never steps
+    // back). Until 11-01 the judge counted any copy without an id as
+    // holdable, so that mono Present was a gap (every run): the first
+    // DLSS-G compute copy after FG On, read through no fence (its fence
+    // not yet settled), then a second signaller of that fence (soak seed
+    // 2bda274f7f2ca5de at frame 63, in loaded runs only), and the FG frame's
+    // SR copy before FG Off, then a late signal (seed afcf3faa4ef87af5's
+    // frames 0 to 12, at frame 12 in loaded runs only). The reads are held
+    // on the GPU past their Presents, so each run makes the late read.
+    {"O1-second-signal-unknown-copy-of-earlier-frame", "20*sr=local; fg=on,tag=present_list,sr=local; tag=present_list,sr=local; 4*tag=present_list,sr=local,dlssg=compute; tag=now_bare,sr=local,dlssg=compute,dlssg_gpu=after_present; tag=now_bare,sr=local,dlssg=compute,dlssg_gpu=after_present,order=second; 10*tag=now_bare,sr=local,dlssg=compute", false, 1},
+    {"O1-late-signal-unknown-copy-of-earlier-frame", "tag=present_list,sr=tag,ui=bare; tag=present_list,sr=tag; 6*tag=present_list,sr=other_queue; tag=present_list,sr=other_queue,ui=listed; fg=on,tag=present_list,sr=other_queue,dlssg=compute_unobserved,state=proven,generated=1,ui=listed; fg=off,sr=other_queue,state=proven,ui=listed,sr_gpu=after_present; sr=other_queue,state=proven,ui=listed,order=late,sr_gpu=after_present; sr=other_queue,state=proven,ui=listed,order=late,sr_gpu=after_present; 10*sr=other_queue,state=proven,ui=listed", false, 1},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
