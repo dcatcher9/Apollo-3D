@@ -2593,7 +2593,13 @@ namespace {
     // barriers, a depth copy, Close and ExecuteCommandLists, the native
     // entry points the capture owner observes on game threads. The add-on's
     // counters (SunshineDepthTestCaptureLockStats) are reset when the threads
-    // run and read after seconds; MEASURE lines report them.
+    // run and read after seconds; MEASURE lines report them. The counter's
+    // own invariants are checked at rest, on any machine (11-01, F91: no
+    // test read the numbers the owner's split decision reads): the
+    // recorders' acquisitions count in the game role and the Presents' in
+    // the present role, every role's histogram holds its waits, each wait has
+    // one holder site, and with Diagnostics every present-thread hold is
+    // timed.
     void run_contention(HMODULE sdk, unsigned threads, unsigned seconds) {
       using namespace sunshine_streamline;
       using stats_t = BOOL (*)(depth_capture::lock_stats::values *, BOOL);
@@ -2706,6 +2712,37 @@ namespace {
       render_tracked_depth = {};
       require(!failed.load(), "A recorder thread failed");
       report_capture_lock("contention", values, elapsed, presents, threads, recorded);
+      // At rest: the recorders are joined; two equal reads 5 ms apart show no
+      // count of another thread in flight.
+      namespace lock_stats = depth_capture::lock_stats;
+      lock_stats::values rest, again;
+      for (unsigned attempt = 0; attempt != 20; ++attempt) {
+        stats(&rest, FALSE);
+        Sleep(5);
+        stats(&again, FALSE);
+        if (!std::memcmp(&rest, &again, sizeof(rest))) break;
+      }
+      const auto consistent = [](const lock_stats::role_values &role) {
+        std::uint64_t all = 0, long_ones = 0;
+        for (std::size_t i = 0; i != lock_stats::buckets; ++i) {
+          all += role.histogram[i];
+          if (i >= lock_stats::bucket_of(lock_stats::long_wait_ns)) long_ones += role.histogram[i];
+        }
+        return role.waits <= role.locks && all == role.waits && long_ones == role.long_waits;
+      };
+      std::uint64_t attributed = 0;
+      for (const auto &holder : rest.holders) attributed += holder.waits;
+      require(rest.game.locks > 0, "The recorder threads' acquisitions of the capture lock were not counted in the game role");
+      require(rest.present.locks >= presents, "The Presents' acquisitions of the capture lock were not counted in the present role");
+      require(consistent(rest.game) && consistent(rest.present) && consistent(rest.present_hold),
+        "A capture lock role's histogram does not hold its waits");
+      require(attributed == rest.game.waits + rest.present.waits, "A capture lock wait was not attributed to one holder site");
+      require(rest.present_hold.locks == (diagnostics_off() ? 0 : rest.present.locks),
+        "The present thread's holds were not timed exactly while Diagnostics was on");
+      std::printf("MEASURE capture lock contention invariants: game_locks=%llu present_locks=%llu waits=%llu attributed=%llu "
+        "present_holds=%llu" "\n", static_cast<unsigned long long>(rest.game.locks), static_cast<unsigned long long>(rest.present.locks),
+        static_cast<unsigned long long>(rest.game.waits + rest.present.waits), static_cast<unsigned long long>(attributed),
+        static_cast<unsigned long long>(rest.present_hold.locks));
     }
 
     // Public SDK crops, real/generated pairs, dynamic resolution and FG off.

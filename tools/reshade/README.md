@@ -930,7 +930,12 @@ contention mode appends `--recorder-threads N` (1 to 16) after the interposer: i
 regressions, the main thread presents FG frames (SL camera, FG tags, DLSS-G's evaluation) for 60 s
 while N threads each record four lists per Present on the presenting queue (Reset, depth barriers, a
 depth copy, Close, ExecuteCommandLists), and `MEASURE capture lock contention` lines report the
-counters of that window (no verdict; it measures, for the owner's capture-lock split ruling Q5).
+counters of that window (no timing verdict; it measures, for the owner's capture-lock split ruling
+Q5). Then, at rest (11-01, F91), it checks the counter's own invariants, which hold on any machine:
+the recorders' acquisitions count in the game role and at least one per Present in the present
+role, every role's histogram holds its waits (those of 1 ms or more from the 1000 us bucket on),
+each wait has one holder site, and with Diagnostics every present-thread hold is timed (none
+without); `MEASURE capture lock contention invariants` prints the counts it checked.
 
 It exercises real GPU depth production, capture, sampling and matrix preparation, including
 padded/nonzero-offset rectangles, failed evaluation (the newest completed copy held within its
