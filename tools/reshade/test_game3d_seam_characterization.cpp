@@ -100,6 +100,7 @@ namespace sunshine_streamline::depth_capture {
       owner.last_epoch = value.metadata.epoch;
       owner.last_sequence = value.metadata.sequence;
       owner.last_source_tick = recent ? GetTickCount64() : GetTickCount64() - source_age - 1;
+      owner.shown_capture = value.id;
     }
 
     // The picked capture's label, or - when nothing readable was picked.
@@ -1581,9 +1582,10 @@ namespace sunshine_streamline::depth_capture {
           }
         }
         if (r.change == v::retired) {
-          // FG Off retires the FG source, its copies with it; FG On follows,
-          // which restores the role (frame_generation_restored).
-          retire_source(provider_kind::streamline, epoch, fg_source);
+          // FG Off retires the FG source, its copies with it (those after
+          // the shown copy as the ordinary source until FG On); FG On
+          // follows, which restores the role (frame_generation_restored).
+          retire_source(provider_kind::streamline, epoch, fg_source, 0, true);
           frame_generation_restored(epoch, 0);
         }
         if (r.change == v::ambiguous) {
@@ -1752,25 +1754,30 @@ namespace sunshine_streamline::depth_capture {
         const char *trace;
       };
 
+      // Since 10-31 FG Off floors the lineage's owner, on the FG role or
+      // already on the ordinary source, at the copy its display showed
+      // (shown_capture; until then the FG role's owner alone, at its last
+      // selected copy), and keeps the FG copies published after it as the
+      // ordinary source until FG On (deferred list items 9 (C) and 11).
       const row rows[] {
         {"A silent frame's SR copy after F, executed after its Present, stands in at the Present after FG Off", shape::unsubmitted_sr, "P1 F ready current_capture; P2 - recorded no_completed_snapshot; OFF floor=F; P3 S ready completed_snapshot; P4 H ready current_capture"},
         {"A late Off: the frame's SR copy after F shows at its own Present", shape::late_off, "P1 F ready current_capture; OFF floor=F; P2 S ready current_capture"},
-        {"SR readable at its own Present took the queue before FG Off", shape::sr_same_queue, "P1 F ready current_capture; P2 S ready current_capture; OFF floor=0; P3 - recorded completed_already_consumed; P4 H ready current_capture"},
+        {"SR readable at its own Present took the queue before FG Off", shape::sr_same_queue, "P1 F ready current_capture; P2 S ready current_capture; OFF floor=S; P3 - recorded completed_before_gap; P4 H ready current_capture"},
         {"An SR copy published before F stays historical", shape::sr_before_fg, "P1 F ready current_capture; OFF floor=F; P2 - recorded completed_before_gap; P3 H ready current_capture"},
         {"An SR copy published after F of a frame called before it stays consumed", shape::sr_called_before_fg, "P1 F ready current_capture; P2 - submitted no_completed_snapshot; OFF floor=F; P3 - recorded completed_already_consumed; P4 H ready current_capture"},
         {"The same S never stands in for FG On's pending input either", shape::sr_called_before_fg_then_on, "P1 F ready current_capture; P2 - submitted no_completed_snapshot; OFF floor=F; P3 - recorded no_completed_snapshot"},
         {"No SR copy before FG Off: the FG-Off frame's own SR copy shows once readable", shape::no_sr_before_off, "P1 F ready current_capture; OFF floor=F; P2 - recorded no_completed_snapshot; P3 H ready current_capture"},
         {"FG Off then On within the source age: S stands in for FG On's pending input", shape::off_then_on, "P1 F ready current_capture; P2 - recorded no_completed_snapshot; OFF floor=F; P3 S ready lineage_snapshot"},
-        {"An SR owner whose newest nomination was DLSS-G's: S stands in, no gap", shape::sr_owner_fg_head, "P1 C ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=0; P3 S ready completed_snapshot; P4 - recorded completed_already_consumed; P5 H ready current_capture"},
-        {"The same with the viewport's SR view kept beside the FG one", shape::sr_owner_fg_head_sr_view_kept, "P1 C ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=0; P3 S ready completed_snapshot; P4 - recorded completed_already_consumed; P5 H ready current_capture"},
+        {"An SR owner whose newest nomination was DLSS-G's: S stands in, no gap", shape::sr_owner_fg_head, "P1 C ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=C; P3 S ready completed_snapshot; P4 - recorded completed_already_consumed; P5 H ready current_capture"},
+        {"The same with the viewport's SR view kept beside the FG one", shape::sr_owner_fg_head_sr_view_kept, "P1 C ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=C; P3 S ready completed_snapshot; P4 - recorded completed_already_consumed; P5 H ready current_capture"},
         {"Another viewport's view past the source age makes nothing ambiguous: DLSS-G's head passes to SR, S stands in", shape::other_viewport, "P1 F ready current_capture; P2 - recorded no_completed_snapshot; OFF floor=F views=2; P3 S ready completed_snapshot; P4 H ready current_capture"},
-        {"Another viewport's view active at FG Off: DLSS-G's head goes without an SR head, ambiguous and revoking as before", shape::other_viewport_active, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=0 views=1; P3 - unavailable no_current_nomination [gap]; P4 - ambiguous ambiguous_views [gap]; P5 - ambiguous ambiguous_views [gap]"},
+        {"Another viewport's view active at FG Off: DLSS-G's head goes without an SR head, ambiguous and revoking as before", shape::other_viewport_active, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=F views=1; P3 - unavailable no_current_nomination [gap]; P4 - ambiguous ambiguous_views [gap]; P5 - ambiguous ambiguous_views [gap]"},
         {"A repeated effect of F's presentation selects nothing new after FG Off", shape::same_present, "P1 F ready current_capture; OFF floor=F; P1 - submitted completed_not_older; P2 S ready current_capture"},
         {"An FG copy of a frame before the Off, recorded after it, never shows once SR was shown", shape::fg_after_off_then_on, "P1 F ready current_capture; OFF floor=F; P2 S ready current_capture; P3 - recorded completed_already_consumed"},
         {"The same FG copy beside a newer readable SR copy never shown: FG On shows the newer frame (until 10-28 G, completed_snapshot)", shape::fg_after_off_sr_unshown_then_on, "P1 F ready current_capture; OFF floor=F; P2 S ready lineage_snapshot"},
         {"The same FG copy alone: the lineage's own finished frame within the source age shows at FG On", shape::fg_after_off_alone_then_on, "P1 F ready current_capture; OFF floor=F; P2 G ready completed_snapshot"},
         {"An FG copy recorded while FG stays off is the viewport's ordinary source: it shows after FG Off, one view (until 10-28 the FG view beside SR, ambiguous)", shape::fg_after_off_rekeyed, "P1 F ready current_capture; OFF floor=F; P2 G ready current_capture; P3 H ready current_capture"},
-        {"FG Off between F's selection and its copy: F is still consumed, so an SR copy of an earlier frame published after it stays refused (until 10-28 it showed: older after newer)", shape::off_before_complete, "P1 C ready current_capture; P2 F ready current_capture; OFF floor=F; P3 - unavailable no_current_nomination"},
+        {"FG Off between F's selection and its copy: F is still consumed, so an SR copy of an earlier frame published after it stays refused (until 10-28 it showed: older after newer)", shape::off_before_complete, "P1 C ready current_capture; P2 F ready current_capture; OFF floor=C; P3 - submitted completed_already_consumed"},
         {"An NGX copy published before F stays historical", shape::ngx_before_fg, "P1 F ready current_capture; OFF floor=F; P2 - submitted completed_before_gap"},
         {"An NGX copy after S takes the queue; FG On's stand-in never steps back to S", shape::ngx_after_fg_then_on, "P1 F ready current_capture; P2 - recorded no_completed_snapshot; OFF floor=F; P3 N ready current_capture; P4 - recorded no_completed_snapshot"},
         {"An NGX feature's release still revokes every copy before it", shape::ngx_release, "P1 N ready current_capture; OFF floor=serial; P2 - stale inactive_views"},
@@ -1868,9 +1875,10 @@ namespace sunshine_streamline::depth_capture {
         // FG Off: the options call after the evaluations before it (its
         // observation serial at or above their sequences, 30 at most).
         const auto off = [&](provider_kind provider, std::uint64_t retired_epoch, std::uint64_t source) {
-          retire_source(provider, retired_epoch, source, 30);
+          retire_source(provider, retired_epoch, source, 30, true);
           const auto floor = owner.admission_after;
-          const auto text = floor == 0 ? std::string("0") : f && floor == f->id ? std::string("F") : floor == serial.load() ? std::string("serial") : std::to_string(floor);
+          const auto text = floor == 0 ? std::string("0") : f && floor == f->id ? std::string("F") : s && floor == s->id ? std::string("S") :
+            c && floor == c->id ? std::string("C") : floor == serial.load() ? std::string("serial") : std::to_string(floor);
           trace += "; OFF floor=" + text;
           if (r.kind == shape::other_viewport || r.kind == shape::other_viewport_active) {
             unsigned views {};
@@ -1925,8 +1933,10 @@ namespace sunshine_streamline::depth_capture {
             s = &sr(20, true);
             fence.completed = 4;
             pick();
-            // DLSS-G's FG nomination of the next frame, its copy in flight.
+            // DLSS-G's FG nomination of the next frame, its copy (of the
+            // game's depth, the SR input's storage) in flight.
             f = &make(index++, provider_kind::streamline, epoch, 30, fg_source, 0, r.kind == shape::sr_owner_fg_head ? 0 : UINT64_MAX);
+            f->metadata.source = storage;
             f->finished = false;
             off(provider_kind::streamline, epoch, fg_source);
             fence.completed = 5;

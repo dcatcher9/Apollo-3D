@@ -184,6 +184,11 @@ namespace sunshine_streamline::depth_capture {
       bool chosen{};
       // Native place (continued): this producer queue's copy-out command ring.
       std::array<copy_out_list, copy_out_lists> copy_out;
+      // Consumer ownership (continued): the copy this queue's display last
+      // copied (complete_frame), which FG Off floors the viewport's display
+      // lineage at (retire_source). present_capture is the last selected
+      // copy, which a Present may not show (a pending or refused pick).
+      std::uint64_t shown_capture{};
     };
   }
 
@@ -329,6 +334,10 @@ namespace sunshine_streamline::depth_capture {
       // diagnostic budget while live.
       std::uint64_t reservation{}, reservation_tick{}, reserved_bytes{};
       bool reserved_live{}; // The reservation is for a live snapshot (its budget).
+      // Selection (continued): a copy of an FG scope that a confirmed FG Off
+      // kept as its viewport's ordinary source (retire_source); FG On drops
+      // it (frame_generation_restored). Beside reserved_live, in its padding.
+      bool retired_fg_copy{};
       // Storage (continued): age of a cached allocation after capture retirement.
       // When a colour/mask slot's capture retired and it kept only its cached
       // live allocation (collect_diagnostics). poll() releases old idle storage.

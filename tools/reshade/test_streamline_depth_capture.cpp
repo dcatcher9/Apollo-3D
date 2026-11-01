@@ -795,16 +795,19 @@ namespace sunshine_streamline::depth_capture {
         fg.metadata.projection.supplied = true;
         establish_provider(established, fg, 21);
         established.last_epoch = fg_epoch; established.last_sequence = 3;
+        established.shown_capture = fg.id;  // complete_frame of the shown FG copy.
         begin_evaluation(fg_epoch, 4, 0, provider_kind::streamline, fg_id);
         auto &after_shown = make(3, provider_kind::ngx, 30, 2, 400);
         if (pick(22, fg_policy).value) return false;
-        // A successful FG Off retires that exact source: its copies never
-        // return. It retires only the FG role (10-28): the owner's floor is
-        // its last selected copy, so an NGX copy published after the shown FG
-        // copy takes the queue as at any handover (until 10-28 FG Off revoked
-        // it too), while one published before it stays historical, as does
-        // the viewport's SR copy of an earlier frame.
-        retire_source(provider_kind::streamline, fg_epoch, fg_id);
+        // A successful FG Off retires that exact source: its copy the
+        // display showed, and any before it, never return. It retires only
+        // the FG role (10-28): the owner's floor is the copy it showed
+        // (since 10-31; until then its last selected copy), so an NGX copy
+        // published after the shown FG copy takes the queue as at any
+        // handover (until 10-28 FG Off revoked it too), while one published
+        // before it stays historical, as does the viewport's SR copy of an
+        // earlier frame.
+        retire_source(provider_kind::streamline, fg_epoch, fg_id, 0, true);
         if (established.provider_established || !fg.invalid || pick(23, fg_policy).value ||
             pick(23).value != &after_shown) return false;
         after_shown.success = false;

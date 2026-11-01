@@ -297,9 +297,12 @@ namespace sunshine_streamline::depth_capture {
   // options call's; 0 none). FG Off (a Streamline FG source) retires only
   // the FG role of its viewport's display lineage, and that role stays
   // retired until frame_generation_restored: meanwhile an input of the role
-  // is the viewport's ordinary source.
+  // is the viewport's ordinary source. confirmed_off: the call observed FG
+  // off (a successful mode 0 call): the FG scope's copies published after
+  // the copy the lineage's display showed are kept as the viewport's
+  // ordinary source until FG On; a failed or unknown call revokes them all.
   void retire_source(sunshine_scene_depth::provider_kind provider, std::uint64_t epoch, std::uint64_t source_id,
-    std::uint64_t serial = 0);
+    std::uint64_t serial = 0, bool confirmed_off = false);
   // FG On for the viewport in epoch: its FG role is live again.
   void frame_generation_restored(std::uint64_t epoch, std::uint32_t viewport);
   // Whether an FG input of the viewport admitted at serial (its tag call's

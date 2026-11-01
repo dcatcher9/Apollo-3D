@@ -31,6 +31,9 @@ namespace sunshine_streamline {
       // Only the sampling entry judges (and counts) the result.
       const bool sdk_ok = sample && sdk_accepted(result);
       std::uint64_t retired_epoch{}, turned_on{}, turned_on_epoch{};
+      // The retiring call observed FG off (a successful mode 0 call), not
+      // a failed or unknown one (retire_source's confirmed_off).
+      bool confirmed_off{};
       if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, sdk_ok);
       bool changed = false;
       // A game may set its FG options once: a busy writer must not leave the
@@ -58,7 +61,7 @@ namespace sunshine_streamline {
                 known, known && copy.mode != 0, valid && copy.mode >= 2};
               if (state.enabled) state.enabled_tick = enabled_since ? enabled_since : now;
               if (state.enabled && !enabled_since) { turned_on = now; turned_on_epoch = update->epoch; }
-              if (!known || copy.mode == 0) retired_epoch = update->epoch;
+              if (!known || copy.mode == 0) { retired_epoch = update->epoch; confirmed_off = known; }
             }
           }
         }
@@ -80,7 +83,7 @@ namespace sunshine_streamline {
       // SDK call was in flight. A concurrent new On may lose one capture;
       // a fresh tag restores it without resurrecting pre-loss pixels.
       if (retired_epoch) depth_capture::retire_source(sunshine_scene_depth::provider_kind::streamline,
-        retired_epoch, sunshine_scene_depth::fg_source_id(id), serial);
+        retired_epoch, sunshine_scene_depth::fg_source_id(id), serial, confirmed_off);
       // Only an actual FG-mode/knowledge transition revokes UI scope. Games
       // can call unsupported Off options after every successful HUDless tag;
       // repeated failure is not a new failure of those independent input tags.

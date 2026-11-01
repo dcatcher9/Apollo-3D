@@ -288,7 +288,7 @@ namespace sunshine_streamline::depth_capture {
     { std::lock_guard lock(mutex);
       for (auto &owner : capture_queues.queues) if (owner) {
         owner->provider_established = false;
-        owner->last_epoch = owner->last_sequence = owner->present_capture = 0;
+        owner->last_epoch = owner->last_sequence = owner->present_capture = owner->shown_capture = 0;
       } }
     native_observer::shutdown();
     invalidate_all();

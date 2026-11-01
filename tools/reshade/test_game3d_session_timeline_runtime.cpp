@@ -858,6 +858,22 @@ namespace {
     // only since it judges the same API too (seed c40a42f921da5ba0, frames
     // 138 to 162, the deferred list's item 11).
     {"fg-off-sr-successor-older-than-held", "20*sr=other_queue; 3*tag=present_bare,ui=listed; fg=on,tag=present_bare,sr=other_queue,dlssg=direct,state=recorded_other,ui=listed; tag=present_bare,sr=other_queue,dlssg=direct,state=recorded_other,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,state=proven,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; fg=off,tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; 2*sr=other_queue,state=unprovable,ui=listed,order=late; sr=other_queue,state=unprovable,order=late; fg=off,sr=other_queue,state=unprovable,order=late; tag=now_list,sr=other_queue,state=unprovable,order=late,sr_gpu=after_present; tag=evaluate_bare,sr=other_queue,state=unprovable,ui=listed,order=late; tag=evaluate_bare,sr=other_queue,state=proven,ui=listed,order=late; 3*tag=evaluate_bare,state=proven,ui=listed; 2*ui=listed"},
+    // FG Off right after a frame whose only FG input is DLSS-G's compute
+    // copy, in flight at its own Present (the first after FG On renewed the
+    // game's order fence, or dlssg_gpu=after_present), so that Present held
+    // the frame before's copy. FG Off keeps the scope's copies published
+    // after the shown copy as the lineage's ordinary copies, so the compute
+    // copy, readable from the next Present, replaces the held one. Until
+    // 10-31 FG Off invalidated it: the display held the older copy beside
+    // it (stale_shown at frames 31 to 33, and 29 to 32 with dynamic
+    // resolution, every run; seeds 40e5fd9a22d273bc at frames 107 to 109 and
+    // 64863a396a5d6dd5 at frames 139 to 142), or, after a late Off with the
+    // display on the silent scope's SR copy, the queue lost its association
+    // and the Present went mono (dropped_hold at frame 27, every run; seed
+    // 117a6b99131447b1 at frame 57, in about one run of three).
+    {"fg-off-late-pending-dlssg-copy", "20*sr=local; 3*tag=present_bare,sr=local,generated=2; drs=change,tag=present_bare,sr=local,generated=2; tag=present_bare,sr=local,generated=2; tag=present_bare,sr=local,generated=2,at=inside; fg=on,tag=present_bare,sr=local,generated=2,at=inside; drs=change,tag=present_bare,sr=local,generated=2,at=inside; tag=present_bare,sr=local,generated=1,at=inside; tag=present_bare,sr=local,state=unprovable,generated=3,at=inside; tag=present_bare,sr=local,dlssg=compute,state=unprovable,generated=3,at=inside,dlssg_gpu=after_present; fg=off_late,tag=present_bare,sr=local,dlssg=compute,state=unprovable; 2*tag=present_bare,sr=local,state=unprovable; tag=present_bare,sr=local,state=proven; fg=off,tag=present_bare,sr=local,state=unprovable; tag=present_bare,sr=local,state=unprovable; tag=present_bare,state=unprovable; drs=change,tag=present_bare,state=proven"},
+    {"fg-off-drs-pending-dlssg-copy", "20*sr=local; fg=on,tag=present_list,sr=tag; 4*tag=present_list,sr=tag; 3*tag=present_list; untag=before_global,dlssg=compute,dlssg_gpu=after_present; fg=off,drs=change; 3*defaults; fg=off,sr=local; 6*tag=now_list,sr=local"},
+    {"fg-off-late-pending-dlssg-copy-silent-scope", "20*tag=evaluate_list; fg=off,tag=evaluate_list; tag=evaluate_list; 2*tag=evaluate_list,untag=after_frame; fg=on,tag=evaluate_list,untag=after_frame,sr=other_queue,dlssg=direct_unobserved,generated=1,at=inside; drs=change,tag=evaluate_list,untag=after_frame,sr=other_queue,dlssg=direct_unobserved,generated=1,at=inside; tag=evaluate_list,untag=after_frame,dlssg=compute,generated=1,at=inside,dlssg_gpu=after_present; fg=off_late,tag=evaluate_list,dlssg=compute; tag=evaluate_list; tag=evaluate_list,ui=untagged; tag=evaluate_bare,ui=untagged; ui=untagged; 2*untag=after_frame,ui=untagged; untag=before_global,ui=untagged"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose

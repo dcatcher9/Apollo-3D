@@ -66,30 +66,34 @@ namespace sunshine_streamline::depth_capture {
     }
   }
 
-  void retire_source(provider_kind provider, std::uint64_t epoch, std::uint64_t source_id, std::uint64_t retiring_serial) {
+  void retire_source(provider_kind provider, std::uint64_t epoch, std::uint64_t source_id, std::uint64_t retiring_serial,
+      bool confirmed_off) {
     if (!valid_provider(provider) || !epoch || !source_id) return;
     std::lock_guard lock(mutex);
     const auto matches = [&](const input &value) {
       return value.provider == provider && value.epoch == epoch && value.source_id == source_id;
     };
-    // The retired source's copies, recorded or still recording, never show
-    // again: an FG Off/On transition cannot resurrect a copy of the FG scope
-    // before it.
-    for (auto &value : capture_pool.slots) if (value.id && !value.preservation_only && matches(value.metadata)) {
-      invalidate(value, capture_failure::source_retired);
-    }
     // FG Off (slDLSSGSetOptions mode=0, or an options call that failed)
     // retires only the FG role of its viewport's display lineage: the
     // viewport's SR/RR copies of the same epoch are the lineage's successor
     // (depth_hold.h, lineage_successor), and nothing else of it is
-    // revoked. Its owner keeps its last selected copy (present_capture) as
-    // the admission floor, the handover floor of establish_provider, so no
-    // copy published before the one it showed returns, and keeps its
+    // revoked. The lineage's owner (the queue whose display shows it,
+    // established on the FG role or already on the viewport's ordinary
+    // source: a Present selects a refused FG frame's SR head before the
+    // Off, seed c40a42f921da5ba0 at frame 148) is floored at the copy its
+    // display last copied (shown_capture), so no copy published before the
+    // one it showed returns. Until 10-31 the floor was the owner's last
+    // selected copy, matched only on the FG role: an owner the Present
+    // before had moved to the ordinary source took no floor (frame 149
+    // showed frame 144's SR copy after frame 146's FG copy), and a pending
+    // FG copy never shown (DLSS-G's compute copy in flight at its own
+    // Present) became the floor. The FG role's owner also keeps its
     // consumed frame (last_epoch, last_sequence: the viewport's FG and SR
     // inputs share one sequence per epoch), so no copy of an earlier frame
     // returns; present and present_capture stay, so a repeated effect of the
-    // same presentation selects nothing new. The queue's association ends
-    // as before (C8 holds the FG copy within the source age, Generic may
+    // same presentation selects nothing new, and present_capture stays the
+    // handover floor of establish_provider. Its association ends as before
+    // (C8 holds the display's copy within the source age, Generic may
     // follow). Until 10-28 the watermark moved to serial here, which revoked
     // the viewport's SR copies recorded since the shown FG copy, the
     // lineage's legal successor: a Present before its next SR copy was
@@ -101,6 +105,23 @@ namespace sunshine_streamline::depth_capture {
     std::uint32_t viewport {};
     const bool fg_role = provider == provider_kind::streamline &&
       sunshine_scene_depth::fg_depth_viewport(source_id, viewport);
+    const auto lineage_owner = [&](const queue_state &owner) {
+      return fg_role && owner.provider_established && owner.provider == provider && owner.nominated_epoch == epoch &&
+        owner.viewport == viewport && (owner.source_id == source_id || !owner.source_id);
+    };
+    std::uint64_t shown {};
+    for (const auto &owner : capture_queues.queues)
+      if (owner && lineage_owner(*owner)) shown = std::max(shown, owner->shown_capture);
+    auto &current = evaluations[provider_index(provider)];
+    const auto now = GetTickCount64();
+    // Another viewport's view in this epoch is active (or presenting): the
+    // viewport's picks stay ambiguous, so neither its FG copies nor its FG
+    // nomination pass to its ordinary source (below).
+    const bool other_viewport_active = fg_role &&
+      std::any_of(current.views.begin(), current.views.end(), [&](const evaluation_head &view) {
+        return view.sequence && view.epoch == epoch && view.viewport != viewport &&
+          (sunshine_freshness::fresh_lt(view.tick, now, sunshine_freshness::source_age_ms) || view_presenting(view, provider));
+      });
     // The role stays retired until FG On (frame_generation_restored): the
     // inputs admitted before this call (serial), and any while FG stays off,
     // are the viewport's ordinary source (frame_generation_role_retired,
@@ -115,18 +136,42 @@ namespace sunshine_streamline::depth_capture {
       }
       *mark = {epoch, std::max(kept, retiring_serial), viewport, true};
     }
+    // The retired source's copies, recorded or still recording. At a
+    // confirmed FG Off those published after the copy the lineage's display
+    // showed are the frames' own depth of the display lineage, the
+    // viewport's ordinary source, as an input of the role admitted after the
+    // Off is (retire_frame_generation_role), so the newest readable one
+    // replaces the held copy (C8), until FG On restores the role
+    // (frame_generation_restored drops them: an FG Off/On transition never
+    // resurrects the FG scope before it). The others, and every copy of a
+    // failed or unknown options call's scope or of any other retired source,
+    // never show again. Until 10-31 every copy was invalidated, so DLSS-G's
+    // compute copy in flight at its own Present never showed after the Off
+    // and the display held the older copy beside it (seed 40e5fd9a22d273bc
+    // at frames 107 to 109, 64863a396a5d6dd5 at frames 139 to 142), or the
+    // queue lost its association at a late Off (117a6b99131447b1 at frame
+    // 57).
+    for (auto &value : capture_pool.slots) if (value.id && !value.preservation_only && matches(value.metadata)) {
+      if (fg_role && confirmed_off && !other_viewport_active && value.id > shown) {
+        retire_frame_generation_role(value.metadata);
+        value.retired_fg_copy = true;
+      } else {
+        invalidate(value, capture_failure::source_retired);
+      }
+    }
+    for (auto &owner : capture_queues.queues) if (owner && lineage_owner(*owner) && owner->source_id != source_id)
+      owner->admission_after = std::max(owner->admission_after, owner->shown_capture);
     for (auto &owner : capture_queues.queues) if (owner && owner->provider_established && owner->provider == provider &&
         owner->nominated_epoch == epoch && owner->source_id == source_id) {
       owner->provider_established = false;
       if (fg_role) {
         owner->source_id = owner->last_source_tick = owner->nominated_epoch = 0;
-        owner->admission_after = std::max(owner->admission_after, owner->present_capture);
+        owner->admission_after = std::max(owner->admission_after, owner->shown_capture);
         continue;
       }
       owner->source_id = owner->last_epoch = owner->last_sequence = owner->last_source_tick = owner->nominated_epoch = owner->present_capture = 0;
       owner->admission_after = std::max(owner->admission_after, serial.load(std::memory_order_relaxed));
     }
-    auto &current = evaluations[provider_index(provider)];
     // The FG role's newest nomination, the namespace's newest, passes to the
     // viewport's ordinary source (Streamline SR/RR: source 0) as a head
     // without a capture: the next Present before the viewport's next SR
@@ -141,12 +186,7 @@ namespace sunshine_streamline::depth_capture {
     // before. An inactive one (a viewport that stopped evaluating, such as
     // the session timelines' earlier viewports) makes nothing ambiguous.
     const evaluation_head *head = nullptr;
-    const auto now = GetTickCount64();
-    if (fg_role && current.epoch == epoch && current.source_id == source_id &&
-        std::none_of(current.views.begin(), current.views.end(), [&](const evaluation_head &view) {
-          return view.sequence && view.epoch == epoch && view.viewport != viewport &&
-            (sunshine_freshness::fresh_lt(view.tick, now, sunshine_freshness::source_age_ms) || view_presenting(view, provider));
-        }))
+    if (fg_role && current.epoch == epoch && current.source_id == source_id && !other_viewport_active)
       for (const auto &view : current.views)
         if (view.epoch == epoch && view.source_id == source_id && view.sequence == current.sequence) head = &view;
     for (auto &view : current.views) {

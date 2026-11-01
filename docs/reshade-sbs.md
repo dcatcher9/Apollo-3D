@@ -4594,10 +4594,26 @@ line reports a required scope turning `silent` and, later, `live` again, at most
 scope without its own line. Generated presentations count as FG (`fg` on output lines) while a
 silent scope's viewport supplies the depth. An observed FG Off (`slDLSSGSetOptions` mode 0, or an
 options call that failed) retires only the FG role of that viewport's display lineage
-(`retire_source`): the scope's copies are invalidated, recorded or still recording, so no FG Off/On
-transition resurrects one, and the queue's API association ends, but nothing else of the lineage is
-revoked. The owner's admission floor becomes its last selected copy, the handover floor of
-`establish_provider` (so no copy published before the one it showed returns), and it keeps its
+(`retire_source`). At an Off the call observed (a successful mode 0 call), the scope's copies
+published after the copy the lineage's display last showed (the queue owner's `shown_capture`, set
+where its consumer copied a frame, `complete_frame`) are the frames' own depth of the display
+lineage, re-keyed as the viewport's ordinary source as an input admitted after the Off is, so the
+newest readable one replaces the held copy (C8), until FG On restores the role
+(`frame_generation_restored` drops them); not while another viewport's view in that epoch is active,
+which keeps the viewport's picks ambiguous (below). The scope's other copies, and every copy at a
+failed or unknown options call, recorded or still recording, are invalidated, so no FG Off/On
+transition resurrects one. The
+queue's API association ends, but nothing else of the lineage is revoked. The lineage's owner,
+established on the FG role or already on the viewport's ordinary source (a Present before the Off
+selects a refused FG frame's SR head as the source, ready or not), is floored at that shown copy
+(so no copy published before the one it showed returns). Until 10-31 every scope copy was
+invalidated, so DLSS-G's compute copy in flight at its own Present never showed after the Off and
+the display held the older copy beside it (the session timelines' seeds 40e5fd9a22d273bc and
+64863a396a5d6dd5), or the queue lost its association and the Present was mono (117a6b99131447b1);
+and the floor was the owner's last selected copy, matched only on the FG role, so a pending FG copy
+never shown became the floor and an owner already on the ordinary source took none (seed
+c40a42f921da5ba0 at frame 149 showed frame 144's SR copy after frame 146's FG copy). The FG role's
+owner keeps its last selected copy as the handover floor of `establish_provider`, and it keeps its
 consumed frame (the viewport's FG and SR inputs share one sequence per epoch, so no copy of an
 earlier frame returns; a copy the Present selected before the Off and its consumer copied after it,
 FG Off landing on the game's thread while DLSS-G presents on its own, still becomes the consumed

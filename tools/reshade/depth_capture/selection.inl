@@ -896,5 +896,6 @@ namespace sunshine_streamline::depth_capture {
     owner->last_epoch = value.metadata.epoch;
     owner->last_sequence = value.metadata.sequence;
     owner->last_source_tick = value.metadata.tick;
+    owner->shown_capture = value.capture_id;
   }
 }

@@ -254,6 +254,12 @@ namespace sunshine_streamline::depth_capture {
     if (!requested.load() || !epoch) return;
     std::lock_guard lock(mutex);
     if (auto *mark = fg_retirement_of(epoch, viewport)) mark->active = false;
+    // The FG scope's copies the Off kept as the viewport's ordinary source
+    // (retire_source) never show again: an FG Off/On transition never
+    // resurrects the scope before it.
+    for (auto &value : capture_pool.slots)
+      if (value.id && value.retired_fg_copy && value.metadata.epoch == epoch && value.metadata.viewport == viewport)
+        invalidate(value, capture_failure::source_retired);
   }
 
   bool frame_generation_retired(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t serial) {

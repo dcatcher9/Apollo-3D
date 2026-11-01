@@ -454,7 +454,7 @@ namespace sunshine_streamline::depth_capture {
       for (auto &owner : capture_queues.queues) if (owner) {
         owner->provider_established = false;
         owner->source_id = owner->last_epoch = owner->last_sequence = owner->last_source_tick = owner->nominated_epoch = owner->present_capture = 0;
-        owner->admission_after = 0;
+        owner->admission_after = owner->shown_capture = 0;
       }
     }
     requested = enabled;

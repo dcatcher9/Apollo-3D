@@ -2455,9 +2455,14 @@ copy over a readable SR copy at all (it spares the placement calibration a switc
 losses until Step 4) awaits the owner.
 
 FG Off retires only the FG role of the viewport's display lineage (10-28; [Streamline depth
-selection](../../docs/reshade-sbs.md#streamline-depth-selection) owns the rule): the FG copies are
-invalidated and the queue's association ends as before (C8's hold above, Generic after it), but the
-owner's admission floor is its last selected copy (the handover floor) instead of the newest
+selection](../../docs/reshade-sbs.md#streamline-depth-selection) owns the rule): at an Off the call
+observed, the FG copies published after the copy the lineage's display last showed
+(`queue_state::shown_capture`) become the viewport's ordinary source until FG On
+(`slot::retired_fg_copy`, dropped by `frame_generation_restored`) and the others are invalidated
+(since 10-31; until then all were, as at a failed options call still), the
+queue's association ends as before (C8's hold above, Generic after it), but the lineage's owner (on
+the FG role or already on the ordinary source) is floored at that shown copy (until 10-31 the FG
+role's owner at its last selected copy, which a pending FG copy could be) instead of the newest
 capture, it keeps its consumed frame and its presentation tuple, and an FG nomination that was the
 namespace's newest passes to the viewport's ordinary source as a missing frame of the lineage,
 unless another viewport's view in that epoch is active. So the SR copies recorded since the shown
@@ -2704,7 +2709,14 @@ in the extra shard's seed d0dd7845ac141ad2 at frame 113), and one for FG Off aft
 frame's SR copy that the FG hold kept off-screen, `fg-off-sr-successor-older-than-held` (seed
 c40a42f921da5ba0's frames 138 to 162: before 10-31 FG Off showed that SR copy, two frames older than
 the held FG copy, and held it about 125 ms; stale_shown at frame 31 under the judge's same-API
-no-step-back rule, three of three runs, 10-31),
+no-step-back rule, three of three runs, 10-31), and three for FG Off right after a frame whose
+DLSS-G compute copy was in flight at its own Present: `fg-off-late-pending-dlssg-copy` (seed
+40e5fd9a22d273bc's frames 96 to 114), `fg-off-drs-pending-dlssg-copy` (seed 64863a396a5d6dd5's
+shape, FG Off with a dynamic resolution change) and `fg-off-late-pending-dlssg-copy-silent-scope`
+(seed 117a6b99131447b1's frames 50 to 64, the copy held on the GPU past its Present): before 10-31
+FG Off invalidated that copy, so the display held the older copy beside it (stale_shown at frames 31
+and 29, three of three and one of one runs) or, with the display on the silent scope's SR copy, the
+queue lost its association (dropped_hold at frame 27, three of three runs),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
