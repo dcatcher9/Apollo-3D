@@ -1352,7 +1352,8 @@ generated while the frame its API depth acquisition presents (the presenting flo
 evaluated frame's Present ordinal while that frame's window is open, `frame_presenting`) is the
 frame depth presented at the last Present that offered a Streamline UI tag
 (`ui_evidence::generated_in_window`, published per Present as `present_fg::depth_frame`). So UI and
-depth take one decision: the next frame's first evaluation ends the window for both, and the
+depth take one decision: the next frame's first evaluation (a silent FG scope's refused FG tag call
+included, since 11-01) ends the window for both, and the
 Present's grant bounds it. Until 11-01 the UI counted its own window of the reported generated
 count from that Present, so where the next frame's evaluation began inside it (DLSS-G presenting
 earlier frames inside the next frame's recording, Assassin's Creed Shadows' pattern; multi-frame
@@ -3788,7 +3789,11 @@ generated Present DLSS-G skipped showed that frame's copy, past the source age, 
 DLSS-G's evaluation that tries its own copy whatever its outcome since 10-31, as a live scope's
 nomination always did from its begin: a silent scope's refused attempt began none, so with FG 4x
 declared the Present after a hitch held an earlier frame's copy past the source age as its own, and
-whether the scope was still live there followed the clock, soak seed 4547e4874aef62bb; a tag
+whether the scope was still live there followed the clock, soak seed 4547e4874aef62bb; so does a
+silent scope's refused FG tag boundary since 11-01, which withdraws nothing: it ended none, so a
+generated Present inside that frame's recording after the refusal still presented the earlier frame
+and the UI held that frame's decision there, soak seed f0b594e3ad951a96 at frame 99, session row
+`fg-silent-refused-tag-ends-window`; a tag
 call whose copy is deferred to its frame's Present, R2, begins none, so DLSS-G's generated Present of
 the earlier frame inside the next frame's recording after that call shows the earlier frame's own
 depth however old, never one flat Present: owner ruling Q2, 10-30): its views
@@ -4651,7 +4656,8 @@ each time. Until 10-26 (the continuity invariant's known gap C4) a frame without
 missed nothing, nor did a frame whose tag left it to a DLSS-G evaluation that never came, so after
 a single FG copy the scope kept the viewport's SR/RR depth out for a second while the display could
 hold that copy only for the source age.
-A silent FG scope owns nothing: its refused boundaries withdraw nothing, the same viewport's
+A silent FG scope owns nothing: its refused boundaries withdraw nothing (each still ends an earlier
+frame's presenting window, `frame_presenting` above), the same viewport's
 ordinary SR/RR evaluation nominates again (replacing any FG observation of that viewport), the
 provider selects as without FG for that Present (`require_FG=0 FG_silent=1` in readiness lines),
 and a direct NGX evaluation copies its depth again. FG still keeps its viewport while it can

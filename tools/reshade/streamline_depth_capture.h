@@ -354,7 +354,9 @@ namespace sunshine_streamline::depth_capture {
   // runs before present() counts its Present, reads that Present's own.
   std::uint64_t next_present_ordinal();
   // An evaluation call that begins no view (a live FG scope's SR/RR
-  // evaluation, which the probe leaves to the scope): a later frame's call,
+  // evaluation, which the probe leaves to the scope; DLSS-G's refused
+  // attempt; since 11-01 a silent FG scope's refused FG tag boundary, which
+  // withdraws nothing): a later frame's call,
   // which ends an earlier frame's presenting window as begin_evaluation
   // does (frame_presenting), so a Present after it cannot take that frame's
   // copy, past the source age, for its own. Since 10-31 one that begins no

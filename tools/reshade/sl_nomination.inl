@@ -333,7 +333,8 @@ namespace sunshine_streamline {
       const auto superseded = snapshot.frame_generation_input ? 0 :
         snapshot.tag_boundary || fg_silent || fg_disabled ? fg_source : UINT64_MAX;
       // A silent FG scope has no FG observation to withdraw: its refused
-      // boundaries leave the ordinary source of the viewport in place. A
+      // boundaries leave the ordinary source of the viewport in place, and
+      // only end an earlier frame's presenting window (below). A
       // withdrawn attempt is the namespace's newest nomination without a copy,
       // a missing frame of its display lineage that revokes no finished copy
       // (depth_capture::select_capture). A refused FG boundary also leaves its
@@ -341,7 +342,19 @@ namespace sunshine_streamline {
       // scope silent.
       const bool withdraws = !(snapshot.frame_generation_input && fg_silent);
       const auto withdraw_invalid_attempt = [&] {
-        if (!withdraws) return;
+        // A silent scope's refused FG boundary is still its frame's call: it
+        // ends an earlier frame's presenting window (frame_presenting), as a
+        // live scope's withdrawal does from its begin and DLSS-G's refused
+        // attempt does (10-31). Until 11-01 it ended none, so a generated
+        // Present inside that frame's recording after it still presented the
+        // earlier frame by depth's window: the UI held that frame's decision
+        // there as a generated Present of it (PD7; soak seed
+        // f0b594e3ad951a96 at frame 99), and depth could hold that frame's
+        // copy there past the source age as its own (own_frame).
+        if (!withdraws) {
+          depth_capture::evaluation_called(snapshot.epoch);
+          return;
+        }
         depth_capture::begin_evaluation(snapshot.epoch, snapshot.sequence, snapshot.viewport,
           sunshine_scene_depth::provider_kind::streamline, snapshot.frame_generation_input ? fg_source : 0,
           superseded);

@@ -2905,7 +2905,11 @@ DLSS-G compute copy after FG On, then a second signaller) and
 frame's SR copy, then a late signal after FG Off; before 11-01 the judge counted such a copy as
 holdable, a gap at frames 27 and 12, every run), and one for Generic's own copy after a hitch
 between a frame's calls and its Present, `generic-own-copy-hitch-after-sources` (before 11-01 the
-judge aged it from the frame's stamp, stale at frame 20, every run),
+judge aged it from the frame's stamp, stale at frame 20, every run), and one for a silent FG
+scope's refused FG tag call, `fg-silent-refused-tag-ends-window` (soak seed f0b594e3ad951a96's
+frames 91 to 99: before 11-01 that refusal ended no presenting window, so the generated Present
+inside the frame's recording after it held the earlier frame's UI decision, `ui_frame:held` at
+frame 28, 3 of 3 runs),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -2937,8 +2941,8 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 86 regression timelines, 6870
-frames and about 19100 Presents, with the seeds' hitches and late FG Offs) in about 340 s
+`reshade_session_timelines` runs the fixed set (24 seeds and 87 regression timelines, 6903
+frames and about 19150 Presents, with the seeds' hitches and late FG Offs) in about 340 s
 (lane run f2-P0-int1-followups-c5-sessions, 11-01; 61 rows and about 285 s in the full check's
 registered run of 10-28), registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own

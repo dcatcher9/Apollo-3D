@@ -1031,6 +1031,18 @@ namespace {
     // in the soak's process only, where Generic was ready at the first
     // Present; alone it was not, and the first Present was mono).
     {"generic-own-copy-hitch-after-sources", "20*defaults; hitch=after_sources; 10*defaults"},
+    // A silent FG scope's refused FG tag call ends an earlier frame's
+    // presenting window (depth_capture::evaluation_called, 11-01): soak seed
+    // f0b594e3ad951a96's frames 91 to 99 and four more like 99. FG turned on
+    // without an FG copy (the scope silent, each FG tag call refused at the
+    // call: boundary_without_commands, then missing_state), a generated
+    // Present inside each frame's recording, UI tags at frames 20 and 25 to
+    // 27, untagged from frame 28. Frame 28's generated Present comes after
+    // its refused tag call, so it presents frame 28 (the oracle's
+    // evaluation_began). Until 11-01 that refusal ended no window, so depth
+    // still presented frame 27 there and the UI held frame 27's decision as
+    // a generated Present of it (ui_frame:held at frame 28, 3 of 3 runs).
+    {"fg-silent-refused-tag-ends-window", "20*sr=other_queue,state=proven; tag=present_bare,untag=after_global,sr=other_queue,state=proven,ui=listed; tag=present_bare,untag=after_global,sr=other_queue,state=proven; fg=on,untag=after_global,sr=other_queue,state=proven,generated=1,at=inside,sr_gpu=after_present; 2*tag=now_bare,untag=after_frame,sr=other_queue,generated=1,at=inside; 2*tag=evaluate_list,untag=after_frame,sr=other_queue,generated=1,at=inside,ui=listed; tag=evaluate_list,untag=after_frame,sr=other_queue,generated=1,at=inside,ui=listed,sr_gpu=after_present; 5*tag=evaluate_list,untag=after_frame,sr=local,generated=1,at=inside,ui=untagged"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
