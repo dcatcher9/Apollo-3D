@@ -1551,7 +1551,8 @@ uncovered on about every Present, which unproves every state; why is not traced,
 DIRECT lists of one device: an [open gap](../../docs/reshade-sbs.md#selecting-scene-depth)). The other cases
 cover complementary rotation becoming concurrent rendering (with A current on every Present, its
 peers B and C, drawn on every Present too, must hold their own end-of-frame copies on fewer than
-half of those Presents, A on all of them: until 11-01 every member was copied on every Present),
+three quarters of those Presents, A on all of them: until 11-01 every member was copied on every
+Present),
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,
 and a stable captured crop despite unrelated viewport activity. The layout case also requires
