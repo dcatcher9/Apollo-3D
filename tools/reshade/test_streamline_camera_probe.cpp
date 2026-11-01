@@ -4032,6 +4032,37 @@ namespace {
       "F68: a consumer without an FG snapshot of its Present read an earlier Present's fallback snapshot");
   }
 
+  // A restart (initialize after device recreation, which clears the FG
+  // options store and starts a new epoch) resets the process's FG view
+  // (lane L-fg, F26, 11-01). Until then the view kept its UI projection
+  // through every later unavailable read, so FG On confirmed before the
+  // restart stayed the UI's mode for the rest of the process in a game that
+  // sets its options only when it enables FG.
+  void test_fg_view_restart() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(91);
+    fg_options on; on.generated_frames = 3;
+    constexpr std::uint64_t chain = 0x6000;
+    require(set_options(view, on) == 0, "FG On options failed");
+    take_present_fg(chain);
+    const auto before = present_frame_generation(chain);
+    end_present_fg();
+    require(before.ui.known && before.ui.enabled && before.depth.require_frame_generation, "FG On did not reach the FG view");
+    initialize(nullptr);
+    take_present_fg(chain);
+    const auto after = present_frame_generation(chain);
+    end_present_fg();
+    require(after.read == frame_generation_query_status::unavailable && !after.ui.known &&
+        !after.depth.require_frame_generation && !after.depth.exclude_unconfirmed_fg,
+      "F26: the FG view kept a mode from before a restart");
+  }
+
   // DLSS-G's evaluation supply (lane P, PD10 and round 1's C1, 11-01). A
   // refused FG tag boundary reads it once for both of its decisions: whether
   // a command-less boundary withdraws nothing, and whether its frame is missed
@@ -4439,6 +4470,8 @@ int main(int argc, char **argv) {
     std::puts("PASS one FG options store read per Present snapshot, applied to the FG view in store order");
     test_present_fg_fallback_one_shot();
     std::puts("PASS a consumer without an FG snapshot of its Present reads its own for that call only");
+    test_fg_view_restart();
+    std::puts("PASS a restart resets the process's FG view");
     test_evaluation_supply_read();
     std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
     test_camera_read_retry();

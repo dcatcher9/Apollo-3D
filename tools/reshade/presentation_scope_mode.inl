@@ -91,9 +91,9 @@
 
     // The process's one FG view (presentation_scope::fg_view), updated once
     // per Present on its present thread (take_present_fg) under fg_view_lock,
-    // taken only there and held across that Present's one store read, so the
-    // lock order is fg_view_lock, then fg_mode_lock (shared); and this
-    // thread's Present's snapshot.
+    // held there across that Present's one store read, so the lock order is
+    // fg_view_lock, then fg_mode_lock (shared), and reset at a restart
+    // (release_camera_records); and this thread's Present's snapshot.
     SRWLOCK fg_view_lock = SRWLOCK_INIT;
     presentation_scope::fg_view fg_state;
     thread_local presentation_scope::present_fg present_snapshot;

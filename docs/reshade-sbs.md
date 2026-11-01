@@ -6372,7 +6372,12 @@ before the first one FG is not required; an ambiguous read, or an unavailable
 one while FG is required, revokes FG input while independent ordinary depth
 stays eligible) and UI (the last observed mode, kept through an ambiguous or
 unavailable read so generated frames' current color stays out of UI detection,
-cleared while the observer is inactive). So under an ambiguous read depth
+cleared while the observer is inactive). A restart (the add-on's re-registration
+after device recreation, which clears the options store) resets the whole view, so
+the next Present reads FG as a new process does; until 11-01 the UI projection
+kept an FG On from before it for the rest of the process where the game set no
+options again (lane L-fg, F26: Present alpha refused as `FG_active`, the
+unprotected-HUD warning suppressed; probe row `test_fg_view_restart`). So under an ambiguous read depth
 excludes FG input while the UI keeps the last confirmed mode: their one
 documented difference (owner ruling Q1, 11-01). An options call during a Present
 is the next Present's for both. Until 11-01 the provider runtime and each

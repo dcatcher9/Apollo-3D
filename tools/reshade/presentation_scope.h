@@ -299,7 +299,8 @@ namespace sunshine_streamline::presentation_scope {
   //   request into confirmed Off.
   // - ui: the last observed mode, kept through an ambiguous or unavailable
   //   read (the UI's safe side: it keeps generated frames' current color out
-  //   of UI detection), cleared while the observer is inactive.
+  //   of UI detection), cleared while the observer is inactive. A restart
+  //   (the probe's release_camera_records) resets the whole view.
   // So under an ambiguous read depth excludes FG input while the UI keeps the
   // last confirmed mode: their one documented difference (owner ruling Q1,
   // 11-01). Until 11-01 the provider runtime and each exporter runtime kept a

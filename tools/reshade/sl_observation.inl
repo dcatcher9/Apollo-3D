@@ -27,6 +27,15 @@ namespace sunshine_streamline {
       // clear; retired source leases are released outside mutation ownership.
       while (!metadata.clear()) SwitchToThread();
       clear_fg_modes();
+      // A restart ends the scope of the process's FG view as well: the next
+      // Present reads FG as a new process does. Until 11-01 the view kept
+      // its UI projection, so FG On confirmed before a device recreation
+      // stayed the UI's mode for the rest of the process when the game did
+      // not set its options again (F26: Present alpha refused as FG_active,
+      // the overlay's unprotected-HUD warning suppressed).
+      AcquireSRWLockExclusive(&fg_view_lock);
+      fg_state = {};
+      ReleaseSRWLockExclusive(&fg_view_lock);
       drop_deferred();
     }
 
