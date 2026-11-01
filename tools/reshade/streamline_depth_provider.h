@@ -83,6 +83,10 @@ namespace sunshine_streamline::provider {
   bool current(reshade::api::effect_runtime *runtime, sunshine_depth::frame_depth &out);
   bool latest_center(reshade::api::effect_runtime *runtime, center_sample &out);
   bool selected(reshade::api::effect_runtime *runtime);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  // The FG decision of the runtime's last depth frame (streamline_depth_provider.cpp).
+  unsigned test_frame_generation_decision(reshade::api::effect_runtime *runtime);
+#endif
   // Focus/technique/export invalidation cannot carry approximate held depth
   // across a new viewing interval. The owned texture and numeric history remain.
   void invalidate_reused_depth(reshade::api::effect_runtime *runtime);

@@ -67,6 +67,10 @@ namespace sunshine_streamline {
     }
 
     metadata_owner::read_pin read_metadata() {
+#if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
+      for (auto count = metadata_read_failures.load(std::memory_order_acquire); count;)
+        if (metadata_read_failures.compare_exchange_weak(count, count - 1, std::memory_order_acq_rel)) return {};
+#endif
       auto pin = metadata.read();
       if (pin && (pin->epoch != epoch.load(std::memory_order_acquire) ||
           pin->observation != observation_generation.load(std::memory_order_acquire))) pin.reset();

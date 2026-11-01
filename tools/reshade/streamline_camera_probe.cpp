@@ -148,6 +148,13 @@ namespace sunshine_streamline {
     };
     using metadata_owner = observation::snapshot_owner<metadata_state, 8>;
     metadata_owner metadata;
+#if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
+    // Test seam: the next count metadata reads (read_metadata) fail, as a
+    // read fails that lost the race with the writers on every attempt
+    // (observer_snapshot.h), which no fixture produces by itself
+    // (testing::fail_metadata_reads, SunshineStreamlineTestFailMetadataReads).
+    std::atomic<unsigned> metadata_read_failures{};
+#endif
     struct token_state {
       token_record tokens[frame_count]{};
       std::uint64_t observation{};
@@ -531,6 +538,11 @@ namespace sunshine_streamline {
       if (depth_copied) *depth_copied = deferrals.depth_copied.load(std::memory_order_relaxed);
       if (cancelled) *cancelled = deferrals.cancelled.load(std::memory_order_relaxed);
     }
+    // The next count metadata reads fail (metadata_read_failures); 0 ends a
+    // run of failures. The session timelines' reads=lost_at_present.
+    extern "C" __declspec(dllexport) void SunshineStreamlineTestFailMetadataReads(unsigned count) {
+      metadata_read_failures.store(count, std::memory_order_release);
+    }
 #endif
     // Defined in sl_frame_generation.inl.
     void report_deferrals();
@@ -707,6 +719,10 @@ namespace sunshine_streamline {
       return bool(held_token_readers[index]);
     }
     void unpin_tokens() { for (auto &pin : held_token_readers) pin.reset(); }
+    void fail_metadata_reads(unsigned count) { metadata_read_failures.store(count, std::memory_order_release); }
+    void hold_evaluation_supply() { AcquireSRWLockExclusive(&evaluation_supply_lock); }
+    void release_evaluation_supply() { ReleaseSRWLockExclusive(&evaluation_supply_lock); }
+    presentation_scope::fg_route route_of(std::uint32_t viewport) { return frame_generation_route(viewport); }
     void age_frame_generation(std::uint64_t ms) {
       auto update = metadata.try_write();
       while (!update) { SwitchToThread(); update = metadata.try_write(); }

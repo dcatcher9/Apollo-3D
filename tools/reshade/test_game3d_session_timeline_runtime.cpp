@@ -134,6 +134,8 @@ namespace {
       hitch,
       dlssg_gpu,
       sr_gpu,
+      fg_at,
+      reads,
       dimension_count
     };
 
@@ -285,6 +287,29 @@ namespace {
       after_present
     };
 
+    // Where the frame's FG options event (fg=on or off) reaches the add-on:
+    // before its calls, or inside its real Present, after the UI read the FG
+    // mode of that Present and before depth reads it (depth_read: the
+    // add-on's SunshineGame3DTestOptionsAtDepthFrame, a game whose options
+    // call lands on another thread during a Present). Seeds never draw it;
+    // rows name it, and a timeline that does is judged per Present for the
+    // FG mode the UI and depth used (fg_modes:disagree).
+    enum class fg_at_form {
+      frame,
+      depth_read
+    };
+
+    // Whether the add-on's metadata reads fail during the Presents made
+    // while the frame is current (after its calls: inside its recording, its
+    // real Present and the generated Presents after it), as a read fails
+    // that lost the race with the writers on every attempt (the add-on's
+    // SunshineStreamlineTestFailMetadataReads). Seeds never draw it; rows
+    // name it.
+    enum class reads_form {
+      kept,
+      lost_at_present
+    };
+
     template<class E>
     E of(const generator::row &value, dimension d) {
       return E(value[d]);
@@ -336,6 +361,8 @@ namespace {
           {"hitch", {"none", "brief", "before_sources", "after_sources", "between", "after_present", "before_dlssg"}},
           {"dlssg_gpu", {"prompt", "after_present"}},
           {"sr_gpu", {"prompt", "after_present"}},
+          {"fg_at", {"frame", "depth_read"}},
+          {"reads", {"kept", "lost_at_present"}},
         },
         legal,
       };
@@ -1150,6 +1177,12 @@ namespace {
     // The add-on's totals of depth copies deferred to their frame's Present,
     // of those copied and of the deferrals an untag cancelled.
     void (*deferral_totals)(std::uint64_t *, std::uint64_t *, std::uint64_t *) {};
+    // The add-on's lost metadata reads (reads=lost_at_present), its call at
+    // the next depth frame (fg_at=depth_read) and the FG mode its last
+    // Present used for UI and for depth.
+    void (*fail_metadata_reads)(unsigned) {};
+    void (*options_at_depth_frame)(void (*)(void *), void *) {};
+    BOOL (*present_frame_generation)(api::effect_runtime *, unsigned *, unsigned *) {};
     decltype(&NVSDK_NGX_D3D12_CreateFeature) ngx_create {};
     decltype(&NVSDK_NGX_D3D12_EvaluateFeature) ngx_evaluate {};
     const matrix::sl_version version {2, 7, 30};
@@ -1406,6 +1439,10 @@ namespace {
       require(newest_copy_fn, "Test add-on lacks its newest-copy report");
       deferral_totals = reinterpret_cast<decltype(deferral_totals)>(GetProcAddress(addon, "SunshineStreamlineTestDeferrals"));
       require(deferral_totals, "Test add-on lacks its deferral totals");
+      fail_metadata_reads = reinterpret_cast<decltype(fail_metadata_reads)>(GetProcAddress(addon, "SunshineStreamlineTestFailMetadataReads"));
+      options_at_depth_frame = reinterpret_cast<decltype(options_at_depth_frame)>(GetProcAddress(addon, "SunshineGame3DTestOptionsAtDepthFrame"));
+      present_frame_generation = reinterpret_cast<decltype(present_frame_generation)>(GetProcAddress(addon, "SunshineGame3DTestPresentFrameGeneration"));
+      require(fail_metadata_reads && options_at_depth_frame && present_frame_generation, "Test add-on lacks its FG mode seams");
       // The export stop at a focus loss would end FG reuse: select the hidden
       // game window in the test observer without moving focus.
       set_foreground(window);
@@ -1929,13 +1966,16 @@ namespace {
         }
       } scope;
 
+      lose_reads(true);
       if (inside) {
         checked(swapchain->Present(0, 0), "Generated Present inside the recording");
       } else {
         render_tracked_depth = {};
         present_frame();
       }
+      lose_reads(false);
       ++result.generated;
+      judge_present_modes(inside ? "a generated Present inside its recording" : "a generated Present after it");
       poll("generated");
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;
@@ -2538,12 +2578,71 @@ namespace {
     // The generated count the FG options declared last.
     std::uint32_t declared_generated {1};
 
+    // The frame's FG options event made inside its real Present
+    // (fg_at=depth_read): armed once the frame's calls are made, made by the
+    // add-on's call at that Present's depth frame.
+    struct options_at_present {
+      bool armed {}, made {}, on {};
+      std::uint32_t generated {};
+    } pending_options;
+
+    static void make_pending_options(void *context) {
+      auto &self = *static_cast<timeline_fixture *>(context);
+      self.pending_options.made = true;
+      self.set_frame_generation(self.pending_options.on, self.pending_options.generated);
+    }
+
+    // The add-on's metadata reads fail while on is set during a frame with
+    // reads=lost_at_present (its Presents after its calls).
+    void lose_reads(bool on) {
+      using namespace frame_events;
+      if (of<reads_form>((*frames)[frame], events::reads) == reads_form::lost_at_present) {
+        fail_metadata_reads(on ? ~0u : 0u);
+      }
+    }
+
+    // Once the frame's calls are made, right before its real Present.
+    void before_real_present() {
+      if (pending_options.armed) {
+        options_at_depth_frame(&timeline_fixture::make_pending_options, this);
+      }
+      lose_reads(true);
+    }
+
+    // The FG mode each Present used for UI and for depth (the add-on's
+    // SunshineGame3DTestPresentFrameGeneration). In a timeline with an FG
+    // options event inside a Present (fg_at=depth_read) both must be the
+    // same on every Present where depth does not revoke FG input: the UI's
+    // FG mode (known and enabled) and depth's (its policy requires FG).
+    bool judge_modes {};
+
+    void judge_present_modes(const char *which) {
+      if (!judge_modes) {
+        return;
+      }
+      unsigned ui {}, depth {};
+      require(present_frame_generation(observed.runtime, &ui, &depth), "The add-on did not report a Present's FG modes");
+      if (trace) {
+        std::printf("TRACE frame=%u fg_modes %s ui=%u depth=%u\n", frame, which, ui, depth);
+      }
+      const bool ui_fg = (ui & 3u) == 3u, depth_fg = (depth & 2u) != 0;
+      if (!(depth & 4u) && ui_fg != depth_fg) {
+        fail("fg_modes:disagree", frame_text(frame) + ": " + which + " used FG " + (ui_fg ? "on" : "off") + " for UI and " + (depth_fg ? "on" : "off") + " for depth", frame, std::string("ui_") + (ui_fg ? "on" : "off"));
+      }
+    }
+
     void run_frame() {
       using namespace frame_events;
       const auto &value = (*frames)[frame];
       const auto event = of<fg_event>(value, events::fg);
       const auto generated = std::uint32_t(value[events::generated]);
-      if (event == fg_event::on || event == fg_event::off) {
+      const bool options_at_present = (event == fg_event::on || event == fg_event::off) &&
+        of<fg_at_form>(value, events::fg_at) == fg_at_form::depth_read;
+      pending_options = {options_at_present, false, event == fg_event::on, generated};
+      if (options_at_present) {
+        // Made inside the frame's real Present (before_real_present); its
+        // fences are renewed after it.
+      } else if (event == fg_event::on || event == fg_event::off) {
         set_frame_generation(event == fg_event::on, generated);
         // The game creates its frame-generation objects anew, these fences
         // among them.
@@ -2564,6 +2663,7 @@ namespace {
       refusal_serial = last_refusal().serial;
       render_tracked_depth = [this] {
         frame_body();
+        before_real_present();
       };
       after_present = [this] {
         open_dlssg_gate();
@@ -2571,8 +2671,15 @@ namespace {
       };
       deferred_copy_before = 0;
       present_frame();
+      lose_reads(false);
       render_tracked_depth = {};
       after_present = {};
+      if (pending_options.armed) {
+        require(pending_options.made, "The frame's FG options event was not made inside its real Present");
+        pending_options = {};
+        renew_order();
+      }
+      judge_present_modes("its Present");
       poll("present");
       // The frame's tag copy deferred to this Present, published by it.
       if (deferred_copy_before) {
@@ -2682,6 +2789,10 @@ namespace {
       fg_copy_capture = 0;
       fg_enabled_at = 0;
       present_frames.clear();
+      judge_modes = std::any_of(value.frames.begin(), value.frames.end(), [](const generator::row &row) {
+        return frame_events::of<frame_events::fg_at_form>(row, frame_events::fg_at) == frame_events::fg_at_form::depth_read;
+      });
+      pending_options = {};
       where = label;
       continuity_log.judge = {};
       // The timelines mark each frame whose events may end its source's

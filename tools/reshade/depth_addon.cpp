@@ -1124,6 +1124,10 @@ void sunshine_depth::set_native_driver(effect_runtime *runtime, bool enabled)
 }
 bool sunshine_depth::begin_native_frame(effect_runtime *runtime, command_list *commands)
 {
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+	if (const auto call = options_at_depth_frame.exchange(nullptr, std::memory_order_acq_rel))
+		call(options_at_depth_frame_context.load(std::memory_order_acquire));
+#endif
 	auto *data = runtime->get_private_data<generic_depth_data>();
 	if (!data || !data->native_driver) return false;
 	begin_depth_frame(runtime, commands);

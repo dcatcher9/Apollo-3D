@@ -17,6 +17,8 @@
 #include "depth_refusal.h"
 #include "depth_selection_snapshot_test.h"
 #include "game3d_test_depth_events.h"
+#include "game3d_controls.h"
+#include "streamline_depth_provider.h"
 
 static void require_snapshot(bool value, const char *message)
 {
@@ -797,6 +799,27 @@ extern "C" __declspec(dllexport) BOOL SunshineGame3DTestFrameRecord(effect_runti
 	const auto *record = sunshine_game3d::frame_record_store::writable(runtime);
 	if (record == nullptr) return FALSE;
 	*output = *record;
+	return TRUE;
+}
+
+// Runs call(context) once at the next native depth frame's entry, after the
+// UI read the FG mode of that Present and before depth reads it
+// (begin_native_frame): a game's FG options call landing inside a Present.
+extern "C" __declspec(dllexport) void SunshineGame3DTestOptionsAtDepthFrame(void (*call)(void *), void *context)
+{
+	options_at_depth_frame_context.store(context, std::memory_order_release);
+	options_at_depth_frame.store(call, std::memory_order_release);
+}
+
+// The FG mode the runtime's last Present used for UI (its published source
+// alpha decision: bit 0 known, bit 1 enabled) and for depth (the provider's
+// decision, sunshine_streamline::provider::test_frame_generation_decision).
+extern "C" __declspec(dllexport) BOOL SunshineGame3DTestPresentFrameGeneration(effect_runtime *runtime, unsigned *ui, unsigned *depth)
+{
+	if (!s_registered || runtime == nullptr || ui == nullptr || depth == nullptr) return FALSE;
+	const auto fg = sunshine_game3d::query_source_alpha_ui(runtime).fg;
+	*ui = (fg.known ? 1u : 0u) | (fg.enabled ? 2u : 0u);
+	*depth = sunshine_streamline::provider::test_frame_generation_decision(runtime);
 	return TRUE;
 }
 

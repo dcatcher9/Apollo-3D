@@ -242,6 +242,15 @@ namespace sunshine_streamline {
     void unlock_tokens();
     bool pin_tokens(unsigned index);
     void unpin_tokens();
+    // The next count metadata reads fail, as a read that lost the race with
+    // the writers on every attempt does (observer_snapshot.h); 0 ends it.
+    void fail_metadata_reads(unsigned count);
+    // Holds the DLSS-G evaluation supply lock exclusively until released, on
+    // the calling thread; a hook that reads the supply must run on another.
+    void hold_evaluation_supply();
+    void release_evaluation_supply();
+    // The SL route of the viewport's evaluations (frame_generation_route).
+    presentation_scope::fg_route route_of(std::uint32_t viewport);
     // Moves every enabled FG scope's enabled tick ms into the past.
     void age_frame_generation(std::uint64_t ms);
     // One explicitly armed fixture observation of the real pre-SDK policy.

@@ -2199,6 +2199,22 @@ contract the oracle describes. With FG on the game's FG options declare
 each frame's generated count as `numFramesToGenerate` (and DLSS-G's `MultiFrameCount`), repeated
 when it changes, as the add-on reads it (always 1 until the 10-27 review).
 
+Two event kinds of 11-01 (lane P, PD series) make the FG mode's reads testable; seeds never draw
+them (they come after every drawn kind, at 0), so every seed keeps its frames, and rows name them.
+`fg_at=depth_read` makes the frame's FG options event (`fg=on` or `off`) inside its real Present,
+after the UI read that Present's FG mode and before depth reads it (the test add-on's
+`SunshineGame3DTestOptionsAtDepthFrame`, called at `sunshine_depth::begin_native_frame`'s entry):
+a game whose options call lands on another thread during a Present. A timeline with such a frame
+is judged on every Present for the FG mode the UI and depth used (the test add-on's
+`SunshineGame3DTestPresentFrameGeneration`: the published UI decision's mode and the provider's
+FG decision): `fg_modes:disagree` where depth does not revoke FG input and they differ.
+`reads=lost_at_present` fails every metadata read of the add-on during the Presents made while
+the frame is current, after its calls (`SunshineStreamlineTestFailMetadataReads`), as a read fails
+that lost the race with the camera and tag writers on every attempt (`observer_snapshot.h`), which
+no fixture produces by itself. The probe tests reach the same seam as
+`testing::fail_metadata_reads`, the SL route as `testing::route_of`, and hold DLSS-G's evaluation
+supply lock with `testing::hold_evaluation_supply`.
+
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's
 own supply log. Each frame function names, at the call that supplies it, what the frame supplies as

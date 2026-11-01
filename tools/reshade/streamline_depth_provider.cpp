@@ -71,6 +71,10 @@ namespace sunshine_streamline::provider {
       std::uint64_t pending_id{}, pending_texture{}, next_sample{};
       bool owns_pass{}, open{}, have_latest{};
       frame_generation_policy source_policy;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      // The last begin's FG decision (test_frame_generation_decision).
+      unsigned test_fg_decision{};
+#endif
       // The required FG scope was silent at the last Present. Its turns are
       // counted; the line comes at most every 5 s, naming the newest state.
       bool fg_scope_silent{};
@@ -468,6 +472,11 @@ namespace sunshine_streamline::provider {
     }
     evidence.fg = fg_source;
     evidence.fg_query = fg_status;
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    data->test_fg_decision = (fg_status == frame_generation_query_status::observed ? 1u : 0u) |
+      (policy.require_frame_generation ? 2u : 0u) | (policy.exclude_unconfirmed_fg ? 4u : 0u) |
+      (selection.generated_presents << 8);
+#endif
     evidence.selection = selection;
     evidence.fg_silent = fg_silent;
     if (selection.exclude_unconfirmed_fg && data->source_metadata.frame_generation_input) {
@@ -803,6 +812,13 @@ namespace sunshine_streamline::provider {
   // or calibration state, and is absent from the production add-on.
   extern "C" __declspec(dllexport) bool SunshineStreamlineTestCenter(api::effect_runtime *runtime, center_sample *out) {
     return out && latest_center(runtime, *out);
+  }
+  // The FG decision of the runtime's last depth frame (provider begin): bit 0
+  // the FG read observed the mode, bit 1 the policy requires FG, bit 2 it
+  // excludes unconfirmed FG input, bits 8 and up the generated Presents.
+  unsigned test_frame_generation_decision(api::effect_runtime *runtime) {
+    const auto *data = runtime->get_private_data<state>();
+    return data ? data->test_fg_decision : 0u;
   }
   // The active display texture (its native resource), read only.
   extern "C" __declspec(dllexport) bool SunshineStreamlineTestDisplay(api::effect_runtime *runtime, std::uint64_t *texture) {
