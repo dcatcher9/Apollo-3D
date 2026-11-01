@@ -494,7 +494,8 @@ namespace sunshine_streamline {
       // (normalize_depth_frame): its history revision, its recent camera's
       // depth direction and its steady depth coefficients. No frame
       // correlation, jitter or reset pulse is claimed. Busy or lost metadata
-      // refuses, as a tag boundary does.
+      // refuses, as a tag boundary does; a read that lost the race with the
+      // writers is retried briefly first (read_metadata).
       else if (const auto viewport = capture_evaluation(fg.viewport, 1000, frame_identity{},
                  reinterpret_cast<void *>(value.command), ticket, serial, loss, nullptr, nullptr, false);
                viewport.status == evidence_status::busy || viewport.status == evidence_status::inactive ||

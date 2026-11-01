@@ -265,7 +265,7 @@ namespace sunshine_streamline {
     // Defined in sl_observation.inl.
     std::uint64_t observation_ticket();
     bool current(std::uint64_t ticket);
-    metadata_owner::read_pin read_metadata();
+    metadata_owner::read_pin read_metadata(bool briefly = false);
     metadata_owner::transaction write_metadata(std::uint64_t ticket, bool briefly = false);
     void metadata_write_lost(const metadata_owner::transaction &update, const char *site,
         std::uint32_t line, loss_diagnostics::context details = loss_context);

@@ -4543,7 +4543,13 @@ compute list, readable three evaluations later, those Presents were mono. The
 depth carries the viewport's own camera evidence as an unframed FG tag does: its history revision,
 the recent camera's depth direction where `DLSSG.DepthInverted` is absent, and the camera's steady
 depth coefficients when both directions agree; `DLSSG.CameraNear`/`CameraFar` are not used, and no
-jitter or frame correlation is claimed. Busy or lost metadata refuses it (`scope_changed`).
+jitter or frame correlation is claimed. Busy or lost metadata refuses it (`scope_changed`). A read of
+that camera evidence which lost the race with the camera, tag and token writers (the published
+metadata changed under it on every attempt) is retried a bounded number of times first, like a
+contended metadata write (`read_metadata(true)`, 48 pauses then 16 yields), and so is the read of an
+SL evaluation's snapshot and of a depth tag boundary (`capture_evaluation`, `capture_depth_tag`):
+until 11-01 such a read refused DLSS-G's copy, made an SL evaluation's snapshot busy, or dropped
+the whole tag boundary (probe row `test_camera_read_retry`).
 The same evaluation's `DLSSG.HUDLess`, `DLSSG.Backbuffer`, `DLSSG.UI` and `DLSSG.UIAlpha` (each with
 its own subrectangle, read the same way) are offered to the live UI request of that viewport as one
 batch (`tag_scope=2`, `boundary::frame_generation_evaluation`), under the same observed-state rule.

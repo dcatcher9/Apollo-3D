@@ -3996,6 +3996,57 @@ namespace {
     require(failed.empty(), failed.c_str());
   }
 
+  // A call's camera read that lost the race with the writers (lane P,
+  // 11-01; the PD design's seen-not-fixed race). read_metadata fails only
+  // when the published camera and tag metadata changed under it on every
+  // attempt (observer_snapshot.h), which a burst of camera, tag and token calls
+  // on other threads can do (testing::fail_metadata_reads). Until 11-01 such
+  // a read made an SL evaluation's snapshot busy (capture_evaluation, which
+  // DLSS-G's camera evidence also reads: scope_changed, no copy) and dropped a
+  // whole depth tag boundary (capture_depth_tag). The call's read is now
+  // retried a bounded number of times; one that keeps losing still refuses.
+  void test_camera_read_retry() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "Camera read hook install failed");
+    std::string failed;
+    const auto check = [&](bool passed, const char *what) { if (!passed) failed += std::string(failed.empty() ? "" : "; ") + what; };
+    auto view = viewport(3), standalone = viewport(0);
+    auto constants = modern_camera();
+    opaque_token token;
+    const std::uint32_t number = 7;
+    mint(token, &number);
+    int native{}, native_standalone{}, commands{};
+    auto resource = modern_resource(&native);
+    auto tag = depth_tag_for(resource);
+    const base_structure *inputs[] {&view.base};
+    call_v2_constants(constants, token.ref(), view);
+    call_v2_framed_tag(token.ref(), view, &tag, 1, nullptr);
+    evaluation_snapshot snapshot;
+    testing::fail_metadata_reads(1);
+    call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
+    testing::fail_metadata_reads(0);
+    check(nominated_snapshot(view.value, snapshot) && snapshot.status != evidence_status::busy &&
+        snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native),
+      "An SL evaluation whose camera read lost the race once read no camera evidence (busy)");
+    auto standalone_resource = modern_resource(&native_standalone);
+    standalone_resource.base = {}; standalone_resource.width = standalone_resource.height = 0; standalone_resource.state = 0x60;
+    auto depth = depth_tag_for(standalone_resource); depth.lifecycle = 0; depth.area = {0, 0, 2228, 1253};
+    testing::fail_metadata_reads(1);
+    call_v2_tag(standalone, &depth, 1, &commands);
+    testing::fail_metadata_reads(0);
+    check(nominated_snapshot(standalone.value, snapshot) && snapshot.tag_boundary &&
+        snapshot.tags[0].value.native_resource == reinterpret_cast<std::uintptr_t>(&native_standalone),
+      "A depth tag boundary whose camera read lost the race once was dropped");
+    // Bounded: a read that keeps losing refuses as before.
+    testing::fail_metadata_reads(1000);
+    call_v2_evaluate(0, token.ref(), inputs, 1, nullptr);
+    testing::fail_metadata_reads(0);
+    check(nominated_snapshot(view.value, snapshot) && snapshot.status == evidence_status::busy,
+      "An SL evaluation whose camera read kept losing was not refused as busy");
+    require(failed.empty(), failed.c_str());
+  }
+
   void test_version_identity() {
     using versioning::abi;
     auto make = [](unsigned major, unsigned minor, unsigned patch, const wchar_t *file, const wchar_t *product) {
@@ -4298,6 +4349,8 @@ int main(int argc, char **argv) {
     std::puts("PASS one FG snapshot per Present from one FG view: options during a Present are the next one's, Q1's two projections, equal modes for a runtime created during ambiguity");
     test_evaluation_supply_read();
     std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
+    test_camera_read_retry();
+    std::puts("PASS a call's camera read that lost the race with the writers is retried briefly: no busy SL evaluation, no dropped tag boundary; one that keeps losing still refuses");
     test_until_evaluate_lifetime();
     std::puts("PASS UntilEvaluate global/frame/local pre-call admission, post-return expiry and unchanged extent rejection");
     std::puts("PASS default-on lightweight source nomination, no selected-depth dependency, lifetime ABA, freshness, loss and viewport gates");

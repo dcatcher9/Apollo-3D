@@ -2218,6 +2218,8 @@ supply lock with `testing::hold_evaluation_supply`; `testing::supply_evaluation`
 `testing::evaluation_supplied` make DLSS-G's supply and read it as a refused FG tag boundary does
 (probe row `test_evaluation_supply_read`: the one read under a held lock, PD10, and FG On revoking
 the previous FG period's supply, round 1's C1).
+Probe row `test_camera_read_retry` loses one camera read of an SL evaluation and of a depth tag
+boundary (`read_metadata(true)` retries it) and keeps losing one to show the bounded refusal.
 
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's

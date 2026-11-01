@@ -67,12 +67,30 @@ namespace sunshine_streamline {
         observation_generation.load(std::memory_order_acquire) == ticket;
     }
 
-    metadata_owner::read_pin read_metadata() {
+    // briefly: retry a read that lost the race with the writers (the
+    // publication changed under it on every attempt, observer_snapshot.h) a
+    // bounded number of times, like write_metadata, for a call's own camera
+    // evidence, which the game never repeats for its frame (capture_evaluation,
+    // capture_depth_tag). Until 11-01 such a read refused DLSS-G's camera
+    // evidence (scope_changed, no copy), made an SL evaluation's snapshot busy
+    // and dropped a whole depth tag boundary under a burst of camera, tag and
+    // token calls on other threads. A publication of an earlier epoch or
+    // observation reads as none at once.
+    metadata_owner::read_pin read_metadata(bool briefly) {
+      const auto read = [] {
 #if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
-      for (auto count = metadata_read_failures.load(std::memory_order_acquire); count;)
-        if (metadata_read_failures.compare_exchange_weak(count, count - 1, std::memory_order_acq_rel)) return {};
+        for (auto count = metadata_read_failures.load(std::memory_order_acquire); count;)
+          if (metadata_read_failures.compare_exchange_weak(count, count - 1, std::memory_order_acq_rel))
+            return metadata_owner::read_pin{};
 #endif
-      auto pin = metadata.read();
+        return metadata.read();
+      };
+      auto pin = read();
+      for (unsigned attempt = 0; briefly && !pin && metadata.has_publication() && attempt < 64; ++attempt) {
+        if (attempt < 48) YieldProcessor();
+        else SwitchToThread();
+        pin = read();
+      }
       if (pin && (pin->epoch != epoch.load(std::memory_order_acquire) ||
           pin->observation != observation_generation.load(std::memory_order_acquire))) pin.reset();
       return pin;
@@ -327,7 +345,7 @@ namespace sunshine_streamline {
       // Read before the metadata, like loss: a later lost constants call
       // belongs to the next evaluation.
       const auto history_revision = history_loss.load(std::memory_order_acquire);
-      auto pin = selected_state ? metadata_owner::read_pin{} : read_metadata();
+      auto pin = selected_state ? metadata_owner::read_pin{} : read_metadata(true);
       if (!selected_state && pin) selected_state = &*pin;
       if (!selected_state && metadata.has_publication()) { out.status = evidence_status::busy; return out; }
       // The first evaluation may provide local raw depth before any constants
@@ -676,7 +694,7 @@ namespace sunshine_streamline {
       if (!out.valid_viewport || !source_requested.load(std::memory_order_acquire) ||
           (!out.tags[0].present && !out.tags[1].present && !out.tags[2].present)) return snapshot;
       frame_identity identity = out.frame;
-      auto pin = read_metadata();
+      auto pin = read_metadata(true);
       if (!pin && metadata.has_publication()) return snapshot;
       // The viewport's FG role: its committed options (the FG options store).
       const auto fg = read_fg_mode(out.viewport);
