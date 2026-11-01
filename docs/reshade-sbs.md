@@ -6443,7 +6443,15 @@ after the store's lock is released. Its fan-out stays at that adapter call site,
 order: `frame_generation_enabled`, `frame_generation_restored`, `revoke_evaluation_supply`
 (FG On: DLSS-G's evaluation supply from before it supplies nothing of the new FG period, below),
 `retire_source`, `ui_mask::invalidate_scope` or `invalidate_all`, then the
-`Sunshine Streamline frame generation:` line.
+`Sunshine Streamline frame generation:` line. The store commit and the fan-out up to the UI
+invalidation run under one more lock, `fg_transition_lock`, taken only there after the SDK
+call returned, so two options calls' fan-outs follow their commits' order. Until 11-01 nothing
+ordered them: an Off whose `retire_source` took the capture lock after a newer On's
+`frame_generation_restored` (an engine calling the options from two threads at a toggle) left
+the FG role retired while the store said On, and as every later On repeats the mode, nothing
+restored it until the next FG Off-to-On toggle: no live scope, no presenting window, DLSS-G's
+and the deferred tag copy both made (lane L-fg, F81; probe row `test_fg_transition_order`,
+through the probe-only `testing::set_fg_transition_seam`).
 
 ### Depth output
 

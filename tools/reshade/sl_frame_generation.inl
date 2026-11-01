@@ -37,9 +37,14 @@ namespace sunshine_streamline {
       if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, sdk_ok);
       bool changed = false;
       // The FG options store (presentation_scope_mode.inl), whose only writer
-      // this is: the write cannot be lost to the camera and tag writers, so a
-      // game that sets its options once is never left with an unknown mode.
-      if (sample && current(ticket)) {
+      // of options this is: the write cannot be lost to the camera and tag
+      // writers, so a game that sets its options once is never left with an
+      // unknown mode. The commit and its transition entries below run under
+      // fg_transition_lock, so two options calls' transitions follow their
+      // commits' order.
+      const bool transition = sample && current(ticket);
+      if (transition) {
+        AcquireSRWLockExclusive(&fg_transition_lock);
         AcquireSRWLockExclusive(&fg_mode_lock);
         if (current(ticket)) {
           const auto source_epoch = epoch.load(std::memory_order_acquire);
@@ -69,12 +74,21 @@ namespace sunshine_streamline {
         }
         ReleaseSRWLockExclusive(&fg_mode_lock);
         if (!current(ticket)) retired_epoch = turned_on = 0;
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+        if (fg_transition_seam) fg_transition_seam();
+#endif
       }
       // The one FG options-transition entry (docs/reshade-sbs.md, Presentation
-      // scope). After update.reset(), in this order: frame_generation_enabled,
+      // scope). After the store write (fg_mode_lock released), still under
+      // fg_transition_lock, in this order: frame_generation_enabled,
       // frame_generation_restored, revoke_evaluation_supply, retire_source,
-      // ui_mask::invalidate_scope or invalidate_all, then the "Sunshine
-      // Streamline frame generation:" line.
+      // ui_mask::invalidate_scope or invalidate_all; then, after the lock,
+      // the "Sunshine Streamline frame generation:" line. Until 11-01 the
+      // entries ran after the store's lock with nothing ordering them: an Off
+      // whose retire_source got the capture lock after a newer On's
+      // frame_generation_restored left the FG role retired while the store
+      // said On, and every later On repeats the mode, so nothing restored it
+      // until the next FG Off-to-On toggle (F81).
       // FG's first Present moves Present to DLSS-G's queue after this frame's
       // copies on the game's queue were submitted: those are copied out for
       // the source age from here (U-C1b, depth_capture::frame_generation_enabled).
@@ -84,8 +98,8 @@ namespace sunshine_streamline {
       if (turned_on) depth_capture::frame_generation_restored(turned_on_epoch, id);
       if (turned_on) revoke_evaluation_supply(turned_on_epoch, id, turned_on);
       // Revoke the exact FG scope, including tags recorded while the failed
-      // SDK call was in flight. A concurrent new On may lose one capture;
-      // a fresh tag restores it without resurrecting pre-loss pixels.
+      // SDK call was in flight. A concurrent newer On commits and restores
+      // after this (fg_transition_lock).
       if (retired_epoch) depth_capture::retire_source(sunshine_scene_depth::provider_kind::streamline,
         retired_epoch, sunshine_scene_depth::fg_source_id(id), serial, confirmed_off);
       // Only an actual FG-mode/knowledge transition revokes UI scope. Games
@@ -95,6 +109,7 @@ namespace sunshine_streamline {
         if (valid_viewport) sunshine_game3d::ui_mask::invalidate_scope(epoch, id);
         else sunshine_game3d::ui_mask::invalidate_all();
       }
+      if (transition) ReleaseSRWLockExclusive(&fg_transition_lock);
       if (changed) {
         char text[256]{};
         std::snprintf(text, sizeof(text), "Sunshine Streamline frame generation: viewport=%u mode=%u generated_frames=%u supported=%u success=%u sdk_result=%d",

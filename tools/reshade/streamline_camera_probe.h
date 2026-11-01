@@ -283,6 +283,9 @@ namespace sunshine_streamline {
     // Runs seam after each copy of the FG options store (read_fg_modes),
     // outside its lock, on the reading thread; an empty one ends it.
     void set_fg_store_read_seam(std::function<void()> seam);
+    // Runs seam in an options call after its store commit, before its FG
+    // transition entries (frame_generation_restored, retire_source, ...).
+    void set_fg_transition_seam(std::function<void()> seam);
     // One explicitly armed fixture observation of the real pre-SDK policy.
     void arm_entry_policy();
     bool entry_policy(bool &selected, bool &admissible);

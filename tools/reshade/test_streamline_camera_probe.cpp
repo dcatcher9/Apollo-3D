@@ -13,6 +13,7 @@
 #include "game3d_ui_mask.h"
 #include "test_minhook_ledger.h"
 #include "test_sl_fixture_sdk.h"
+#include "test_streamline_depth_capture_fixture.h"
 #include <reshade.hpp>
 
 #include <algorithm>
@@ -4108,6 +4109,49 @@ namespace {
     require(failed.empty(), failed.c_str());
   }
 
+  // Two options calls' FG transitions follow their store commits (lane
+  // L-fg, F81, 11-01). An Off committed, then, before its own transition
+  // entries ran, an On on another thread committed and restored the FG role
+  // (frame_generation_restored found no retirement yet); the Off's
+  // retire_source then retired the role while the store said On, and only
+  // the next FG Off-to-On toggle restored it: every later On call repeats
+  // the mode, so none restores. The FG scope was then never live for the
+  // whole FG-on period (no presenting window, generated Presents mono after
+  // a hitch, DLSS-G's own copy and the deferred tag copy both made).
+  void test_fg_transition_order() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(111);
+    fg_options on; on.generated_frames = 1;
+    fg_options off; off.mode = 0; off.generated_frames = 0;
+    // The capture owner keeps FG retirements while it is requested.
+    depth_capture::fixture::reset_owner();
+    require(set_options(view, on) == 0, "FG On options failed");
+    std::atomic<bool> fired{}, other_done{};
+    std::thread other;
+    testing::set_fg_transition_seam([&] {
+      if (fired.exchange(true)) return;
+      other = std::thread([&] { set_options(view, on); other_done = true; });
+      // With ordered transitions the other call waits for this one's.
+      for (unsigned i = 0; i != 100 && !other_done.load(); ++i) Sleep(2);
+    });
+    set_options(view, off);
+    other.join();
+    testing::set_fg_transition_seam({});
+    frame_generation_snapshot fg;
+    const bool on_now = query_frame_generation(view.value, fg) && fg.enabled;
+    const bool retired = on_now && depth_capture::frame_generation_retired(fg.epoch, view.value, 0);
+    depth_capture::fixture::reset_owner();
+    depth_capture::requested = false;
+    require(on_now && !retired,
+      "F81: an FG Off's retirement landed after a newer On's restore and left the FG role retired while FG is on");
+  }
+
   // DLSS-G's evaluation supply (lane P, PD10 and round 1's C1, 11-01). A
   // refused FG tag boundary reads it once for both of its decisions: whether
   // a command-less boundary withdraws nothing, and whether its frame is missed
@@ -4519,6 +4563,8 @@ int main(int argc, char **argv) {
     std::puts("PASS a restart resets the process's FG view");
     test_any_viewport_read_beside_off();
     std::puts("PASS another viewport's FG Off binds no FG scope: the enabled viewport breaks the tie; two enabled stay ambiguous");
+    test_fg_transition_order();
+    std::puts("PASS two options calls' FG transitions follow their store commits");
     test_evaluation_supply_read();
     std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
     test_camera_read_retry();

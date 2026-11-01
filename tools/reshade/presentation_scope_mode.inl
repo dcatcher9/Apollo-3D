@@ -28,12 +28,20 @@
     };
     using fg_mode_table = std::array<fg_mode_slot, slot_count>;
     SRWLOCK fg_mode_lock = SRWLOCK_INIT;
+    // One options call's store commit and its FG transition entries at a time
+    // (hook_fg_options), so the entries follow the commits' order. Taken only
+    // there, after the SDK call returned and with no other lock held; under
+    // it the call takes fg_mode_lock, then the entries' own locks (the
+    // capture mutex, evaluation_supply_lock, the UI mask's), none of which is
+    // held where an options call can begin.
+    SRWLOCK fg_transition_lock = SRWLOCK_INIT;
     fg_mode_table fg_modes{};
     // A copy of the store.
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-    // Test seam (testing::set_fg_store_read_seam): runs after each copy of
-    // the store, outside fg_mode_lock.
-    std::function<void()> fg_store_read_seam;
+    // Test seams: after each copy of the store, outside fg_mode_lock
+    // (testing::set_fg_store_read_seam); after an options call's store
+    // commit, before its transition entries (testing::set_fg_transition_seam).
+    std::function<void()> fg_store_read_seam, fg_transition_seam;
 #endif
     fg_mode_table read_fg_modes() {
       AcquireSRWLockShared(&fg_mode_lock);
