@@ -1439,6 +1439,14 @@ private-data destruction flag on each member reports it), the lower-resolution i
 recovers, and a new native A/B set must then promote within the same 12 s with no Present
 without depth and keep its own current depth on every Present for 4 s (no flapping).
 `--set-repromotion-kept` is the same with the first set kept allocated and never drawn again.
+Both read each first-set member's end-of-frame capture id on the member's own Present before the
+drop (the test add-on's `SunshineDepthTestCaptureTicket`; a capture slot must hold it), and then
+require the capture owner to reclaim every one of those slots within four Presents of the drop
+(`SunshineStreamlineTestCaptureReadsCopyOut` no longer finds the id), whether the game destroyed
+the set or kept it: before 11-01 a source that stopped working kept its last capture ticket, and
+with it the slot's copy and the game's buffer, until the device was released. In the destroyed
+variant D3D12 must also destroy each member within 54 Presents of the Present on which the
+incumbent recovered (the member views' 50-depth-frame retirement wait plus four).
 
 `reshade_depth_alternating_runtime_test` uses those same four arguments and, like the
 probe-round fixture, renders through native Game 3D with no FX and no environment settings

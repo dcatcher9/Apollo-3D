@@ -50,6 +50,21 @@ namespace {
     std::array<std::unique_ptr<target_t>,3> abandoned_set;
     // --set-repromotion: set as D3D12 destroys each first-set member.
     std::array<std::atomic<bool>,3> first_set_destroyed{};
+    // The capture owner's view of the first set (test add-on queries): the
+    // id of the end-of-frame capture a source holds for its depth frame, and
+    // whether a capture slot still holds a capture id (the query answers only
+    // while one does).
+    BOOL (*capture_ticket)(api::effect_runtime *,std::uint64_t,std::uint64_t *)=nullptr;
+    BOOL (*capture_held)(std::uint64_t,BOOL *)=nullptr;
+    // From the Present that dropped the first set (tick() counts): each
+    // member's last capture copy and the Present on which its slot was
+    // reclaimed, and the Present on which D3D12 destroyed the member.
+    struct release_watch {
+      bool active=false;
+      unsigned presents=0;
+      std::array<std::uint64_t,3> copy{};
+      std::array<unsigned,3> copy_reclaimed{},destroyed{};
+    } released_set;
     std::ofstream trace;
 
     bool current(const target_t &target) const {
@@ -100,6 +115,15 @@ namespace {
         << frame.depth.frame_index << ',' << frame.depth.ready << ',' << frame.parameters.camera_ready << ','
         << frame.parameters.depth_scale << ',' << frame.parameters.strength_blend << '\n';
       require(trace.good(), "Cannot record challenger-promotion trajectory");
+      if (released_set.active) {
+        auto &watch=released_set;
+        ++watch.presents;
+        for (unsigned m=0;m<3;++m) {
+          BOOL copy_out=FALSE;
+          if (!watch.copy_reclaimed[m] && !capture_held(watch.copy[m],&copy_out)) watch.copy_reclaimed[m]=watch.presents;
+          if (!watch.destroyed[m] && first_set_destroyed[m]) watch.destroyed[m]=watch.presents;
+        }
+      }
       if (missing)
         require(frame.depth.source_resource.handle != reinterpret_cast<std::uint64_t>(missing->texture.p),
                 "A candidate without a legal current capture displaced useful scene depth");
@@ -224,6 +248,25 @@ namespace {
     // working one).
     void check_set_repromotion(bool keep_first_set) {
       check_set_challenger();
+      // Each member's end-of-frame capture copy, read on its own Present: a
+      // capture slot that holds the member's depth frame (positive control).
+      const auto module=GetModuleHandleW(L"SunshineSBSTest.addon64");
+      capture_ticket=reinterpret_cast<decltype(capture_ticket)>(GetProcAddress(module,"SunshineDepthTestCaptureTicket"));
+      capture_held=reinterpret_cast<decltype(capture_held)>(GetProcAddress(module,"SunshineStreamlineTestCaptureReadsCopyOut"));
+      require(capture_ticket && capture_held,"The set release check needs the test add-on's capture queries");
+      auto &watch=released_set;
+      for (unsigned i=0;i<30 && std::count(watch.copy.begin(),watch.copy.end(),std::uint64_t{0});++i) {
+        tick("native-set-copies");
+        for (unsigned m=0;m<3;++m) {
+          std::uint64_t id=0;BOOL copy_out=FALSE;
+          if (set_rendered!=native_set[m].get() || !current(*set_rendered) || frame.depth.reused_depth) continue;
+          require(capture_ticket(observed.runtime,reinterpret_cast<std::uint64_t>(set_rendered->texture.p),&id),
+                  "The capture ticket query failed");
+          if (id && capture_held(id,&copy_out)) watch.copy[m]=id;
+        }
+      }
+      require(!std::count(watch.copy.begin(),watch.copy.end(),std::uint64_t{0}),
+              "A promoted set member showed its own current depth without a held end-of-frame capture copy");
       auto &destroyed=first_set_destroyed;
       if (keep_first_set) abandoned_set=std::move(native_set);
       else for (unsigned i=0;i<3;++i) {
@@ -234,8 +277,27 @@ namespace {
       }
       const auto released=GetTickCount64();
       for (auto &member:native_set) member.reset();
+      watch.active=true; // Present 1 is the first without the set.
       await_current(keep_first_set ? "set-abandoned-scaled-recovery" : "set-destroyed-scaled-recovery",*scene,12000);
+      const unsigned recovered=watch.presents;
       stable("scaled-reconfirmed-after-set",*scene,1200);
+      {
+        // The capture owner reclaims each member's last capture copy whether
+        // the game destroys the member or keeps it allocated: the copy's
+        // ticket goes on the first depth frame its source did not work on
+        // (Present 1), the copy and the backup copy read from it complete
+        // with that Present's GPU work, which the fixture waits for, and the
+        // next Present's capture poll reclaims the slot.
+        constexpr unsigned copy_release_presents=4;
+        while (std::count(watch.copy_reclaimed.begin(),watch.copy_reclaimed.end(),0u) && watch.presents<400)
+          tick("set-copies-release");
+        std::printf("MEASURE set-copies-release presents=%u,%u,%u limit=%u\n",watch.copy_reclaimed[0],watch.copy_reclaimed[1],
+          watch.copy_reclaimed[2],copy_release_presents);
+        for (const auto reclaimed:watch.copy_reclaimed)
+          require(reclaimed && reclaimed<=copy_release_presents,
+                  "The capture owner kept a dropped set member's end-of-frame capture copy (its ticket held the slot)");
+        std::printf("PASS every dropped set member's capture copy is reclaimed within %u Presents\n",copy_release_presents);
+      }
       if (!keep_first_set) {
         // The member views of a set that left the routed capture set retire
         // within 50 depth frames; nothing else may keep the game's buffers.
@@ -247,8 +309,19 @@ namespace {
           int(destroyed[0].load()),int(destroyed[1].load()),int(destroyed[2].load()));
         require(destroyed[0] && destroyed[1] && destroyed[2],
           "The add-on kept a depth-stencil the game released alive (its last end-of-frame capture held it)");
+        // In Presents: the set leaves the routed capture set at the latest
+        // when the incumbent recovered (its anchor then moves on), and its
+        // member views retire 50 depth frames later (one per Present here),
+        // which drops the add-on's last reference.
+        constexpr unsigned retire_presents=50,slack_presents=4;
+        std::printf("MEASURE set-destroyed-release presents=%u,%u,%u recovered=%u limit=%u\n",watch.destroyed[0],watch.destroyed[1],
+          watch.destroyed[2],recovered,recovered+retire_presents+slack_presents);
+        for (const auto present:watch.destroyed)
+          require(present && present<=recovered+retire_presents+slack_presents,
+                  "A destroyed set member outlived its capture views' retirement after the incumbent recovered");
         std::puts("PASS every member of a destroyed native set is released to D3D12 after the game drops it");
       }
+      watch.active=false;
       set_size=2; set_present=0;
       for (unsigned i=0;i<set_size;++i) native_set[i]=target(width,height,1,9);
       std::printf("DIAGNOSTIC second-set originals incumbent=%llu A=%llu B=%llu\n",

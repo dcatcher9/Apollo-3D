@@ -1017,3 +1017,21 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestQueueChoice(effect_runtim
 	auto *queue = runtime->get_command_queue();
 	return queue != nullptr && sunshine_streamline::depth_capture::choice(queue->get_native(), *output) ? TRUE : FALSE;
 }
+
+// The capture id of the end-of-frame capture a native depth-stencil holds for
+// the depth frame of its last work (its capture ticket; 0: none). A fixture
+// then asks the capture owner whether a slot still holds that capture
+// (SunshineStreamlineTestCaptureReadsCopyOut answers only while one does):
+// the probe-round fixture's release of a dropped set's copies. Read-only.
+extern "C" __declspec(dllexport) BOOL SunshineDepthTestCaptureTicket(effect_runtime *runtime, uint64_t native_resource, uint64_t *capture)
+{
+	if (!s_registered || runtime == nullptr || native_resource == 0 || capture == nullptr) return FALSE;
+	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
+	if (device_data == nullptr) return FALSE;
+	const std::shared_lock<std::shared_mutex> lock(s_mutex);
+	const auto found = device_data->depth_stencil_resources.find(resource { native_resource });
+	*capture = 0;
+	if (found != device_data->depth_stencil_resources.end() && found->second.last_frame_stats.capture_ticket)
+		*capture = found->second.last_frame_stats.capture_ticket.id;
+	return TRUE;
+}
