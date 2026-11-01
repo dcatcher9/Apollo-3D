@@ -542,10 +542,17 @@ namespace sunshine_streamline::provider {
     // (decide_display's lineage).
     // So does a live scope's ordinary stand-in for its pending input
     // (lineage_snapshot): it never replaces the scope's own held copy.
+    // The retained copy's age is judged on one clock read per Present: the FG
+    // hold, the queue's retention, the display decision and the cache's
+    // reuse. Until 11-01 each read its own clock, so a copy judged inside the
+    // source age by the FG hold (which shuts out the readable ordinary
+    // candidate) could be judged expired by the cache a tick later, and that
+    // Present was mono (F84, F53).
+    const auto decision_tick = GetTickCount64();
     const char *fg_hold = nullptr;
     if ((fg_silent || (selection.require_frame_generation && acquisition.source_selected)) &&
         !(acquisition.source_selected && data->frame.metadata.frame_generation_input) &&
-        depth_capture::frame_generation_holds(data->cache.reference(), policy, GetTickCount64()))
+        depth_capture::frame_generation_holds(data->cache.reference(), policy, decision_tick))
       fg_hold = "FG_copy_held";
     const bool available = acquisition.source_selected && !fg_hold;
     evidence.capture = capture_info;
@@ -569,7 +576,7 @@ namespace sunshine_streamline::provider {
     // source age (frame_generation_retained), so it is held as any source's
     // missing frame is.
     const bool associated = policy.require_frame_generation || depth_capture::provider_active(runtime->get_command_queue()->get_native()) ||
-      depth_capture::frame_generation_retained(data->cache.reference(), policy, GetTickCount64());
+      depth_capture::frame_generation_retained(data->cache.reference(), policy, decision_tick);
     std::uint32_t frame_width{}, frame_height{};
     runtime->get_screenshot_width_and_height(&frame_width, &frame_height);
     const auto handoff_tick = GetTickCount64();
@@ -659,12 +666,11 @@ namespace sunshine_streamline::provider {
     depth_capture::consumer_diagnostic consumer;
     sunshine_depth::frame_depth captured;
     bool copied = false;
-    const auto reuse_tick = GetTickCount64();
     const auto &cached = data->cache.depth();
-    const auto prior_depth_age = cached.ready && reuse_tick >= cached.provided.tick ?
-      reuse_tick - cached.provided.tick : UINT64_MAX;
+    const auto prior_depth_age = cached.ready && decision_tick >= cached.provided.tick ?
+      decision_tick - cached.provided.tick : UINT64_MAX;
     auto update = fg_hold ? sunshine_game3d::depth_output::display_decision{sunshine_game3d::depth_output::display_action::hold, fg_hold} :
-      sunshine_game3d::depth_output::decide_display(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
+      sunshine_game3d::depth_output::decide_display(acquisition, data->frame, data->cache.reference(), selection, decision_tick);
     evidence.action = update.action;
     evidence.source_reason = update.reason;
     if (available) display = display_status::waiting_capture;
@@ -674,7 +680,7 @@ namespace sunshine_streamline::provider {
       // observation loss refuses the consumer's recording, for one): its
       // frame is a failed newer frame, so the retained copy is held as for a
       // pending one (decide_failed_copy).
-      update = sunshine_game3d::depth_output::decide_failed_copy(acquisition, data->frame, data->cache.reference(), selection, reuse_tick);
+      update = sunshine_game3d::depth_output::decide_failed_copy(acquisition, data->frame, data->cache.reference(), selection, decision_tick);
       evidence.action = update.action;
       evidence.source_reason = update.reason;
     }
@@ -701,7 +707,7 @@ namespace sunshine_streamline::provider {
         if (context.immediate_commands) context.queue = queue->get_native();
       }
       context.texture = data->display_texture.handle; context.view = data->display_view.handle;
-      context.now = GetTickCount64();
+      context.now = decision_tick;
       sunshine_depth::frame_depth reused;
       if (data->cache.reuse(update, context, present, reused)) {
         data->output = std::move(reused);
@@ -728,7 +734,7 @@ namespace sunshine_streamline::provider {
     evidence.copied = copied;
     evidence.display = display;
     evidence.consumer = consumer;
-    if (!evidence.tick) evidence.tick = reuse_tick;
+    if (!evidence.tick) evidence.tick = decision_tick;
     trace_readiness(runtime, *data, evidence, data->output.ready, readiness_reason);
     const auto &stats_source = data->output.provided;
     // FG stays active while a silent scope's viewport supplies ordinary depth.
@@ -743,7 +749,7 @@ namespace sunshine_streamline::provider {
       data->presentations.reset();
       data->presentation_source = identity;
     }
-    data->presentations.observe(present, reuse_tick, !data->output.ready ? sunshine_depth_stats::presentation_kind::unavailable :
+    data->presentations.observe(present, decision_tick, !data->output.ready ? sunshine_depth_stats::presentation_kind::unavailable :
       data->output.reused_depth ? sunshine_depth_stats::presentation_kind::reused : sunshine_depth_stats::presentation_kind::fresh);
     // Fresh and deliberately reused depth share the existing stable descriptor.
     bind_api(runtime, *data, data->display_view, data->output.ready);

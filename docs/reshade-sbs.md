@@ -4683,7 +4683,11 @@ and a direct NGX evaluation copies its depth again. FG still keeps its viewport 
 supply (`depth_capture::frame_generation_holds`): while the display holds that scope's own newest
 copy, made since FG On and younger than the source age, a silent scope's ordinary candidate, fresh
 or pending, does not replace it (readiness lines show `source_action=hold
-source_reason=FG_copy_held`), and SR/RR depth takes over only once that copy expires. A frame
+source_reason=FG_copy_held`), and SR/RR depth takes over only once that copy expires. That age is
+judged on one clock read per Present, shared by this hold, the queue's retention, the display
+decision and the display cache's reuse (until 11-01 the cache read the clock again, so a copy held
+at the age's last millisecond could expire there a tick later: a mono Present at the end of the
+hold although the ordinary candidate was readable). A frame
 without an FG copy is thus held as any missing frame of a source is: a game whose FG copies keep
 arriving with an occasional frame without one keeps FG depth and its placement throughout, and
 the SR/RR evaluations nominated meanwhile are ready when the copy expires. Enabled FG still holds

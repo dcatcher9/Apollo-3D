@@ -195,6 +195,9 @@ namespace sunshine_game3d::depth_output {
     return out;
   }
 
+  // now: the clock the Present's display decision read (the provider reads
+  // it once per Present for the FG hold, the queue's retention,
+  // decide_display and this reuse), never a later read.
   struct display_cache_context {
     std::uint32_t color_width{}, color_height{};
     bool immediate_commands{};

@@ -495,6 +495,35 @@ namespace {
     require(!cache.reuse(hold(), local, 75, out) && equal(cache.reason(), "retained_depth_expired"),
       "The cache reused a copy past the source age for a hold not marked own_frame");
   }
+
+  // The FG hold and the cache's reuse judge the retained copy's age on the
+  // Present's one clock read (F84, F53, 11-01). At the source age's last
+  // millisecond frame_generation_holds keeps the scope's FG copy, which shuts
+  // out the readable ordinary candidate, and the cache reuses that copy on
+  // the same clock. Until 11-01 the provider read the clock again for the
+  // cache: one tick later the copy was expired there (the second check
+  // below), so a silent scope's hold ended in a mono Present although the
+  // ordinary candidate had been readable. The cache's own age rule stands.
+  void frame_generation_hold_one_clock() {
+    display_depth_cache cache;
+    const auto value = fresh();
+    arm(cache, value);
+    depth_capture::selection_policy policy;
+    policy.require_frame_generation = true; policy.epoch = value.provided.epoch;
+    policy.viewport = value.provided.viewport; policy.enabled_tick = 1;
+    const auto edge = value.provided.tick + sunshine_freshness::source_age_ms - 1;
+    require(depth_capture::frame_generation_holds(cache.reference(), policy, edge),
+      "The FG hold dropped the scope's copy at the source age's last millisecond");
+    sunshine_game3d::depth_output::display_decision held;
+    held.action = sunshine_game3d::depth_output::display_action::hold; held.reason = "FG_copy_held";
+    auto local = context(); local.now = edge; frame_depth out;
+    require(cache.reuse(held, local, 72, out) && out.reused_depth,
+      "The cache expired the FG copy the FG hold kept on the same clock");
+    same_image(out, value);
+    local.now = edge + 1;
+    require(!cache.reuse(held, local, 73, out) && equal(cache.reason(), "retained_depth_expired"),
+      "The cache reused an FG copy past the source age on a later clock");
+  }
 }
 
 int main() {
@@ -505,6 +534,7 @@ int main() {
     source_actions_and_commit();
     dynamic_resolution_sequence();
     frame_generation_hold();
+    frame_generation_hold_one_clock();
     std::puts("display depth cache tests passed");
     return 0;
   } catch (const std::exception &error) {
