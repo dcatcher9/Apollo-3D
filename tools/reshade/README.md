@@ -2824,9 +2824,10 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 61 regression timelines, about
-5900 frames and 16100 Presents, with the seeds' hitches and late FG Offs) in about 285 s (the full
-check's registered run, 10-28), registered like
+`reshade_session_timelines` runs the fixed set (24 seeds and 79 regression timelines, 6628
+frames and about 18250 Presents, with the seeds' hitches and late FG Offs) in about 340 s
+(lane run f2-P0-int1-followups-c5-sessions, 11-01; 61 rows and about 285 s in the full check's
+registered run of 10-28), registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own
 watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first). Locally:
 
