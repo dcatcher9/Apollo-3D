@@ -21,9 +21,13 @@
 // source too), and a copy deferred to its frame's Present counts by the
 // capture id the fixture learns after that Present. A copy whose id the
 // fixture never learned counts by its frame: one of a frame before the
-// shown copy's is no holdable copy (11-01).
+// shown copy's is no holdable copy (11-01). Since 11-01 a generated Present
+// never shows a copy of an earlier frame than the last real Present showed,
+// an untag ends a hold but never the copy its frame's own Present reads, and
+// excused frames of a source keep it current for the new-source warm-up.
 #include "test_game3d_continuity.h"
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -947,9 +951,155 @@ namespace {
       require(value.stale ? stale : violations.empty(), value.message);
     }
   }
+
+  // F9 (11-01 final review): a generated Present presents the last real
+  // Present's frame or a later one, so it never shows a copy of an earlier
+  // frame than the one that Present showed. Frame 4's SR copy (capture 14),
+  // read through fence_a and shown by its real Present; a late signal of
+  // fence_a conflicts that read (O1), and a generated Present then shows
+  // frame 3's copy (capture 12): no readable copy is newer, so only the
+  // no-step-back rule sees it. Where frame 4 also made its tag copy at the
+  // call (capture 13), a generated Present that shows it shows the same
+  // frame with a lower id, no step back. Until 11-01 the rule judged real
+  // Presents only.
+  void generated_present_never_steps_back() {
+    struct trial {
+      std::uint64_t shown;
+      bool tag_copy, stale;
+      const char *message;
+    };
+    const trial trials[] {
+      {12, false, true, "a generated Present that showed the previous frame's copy after the shown copy's late signal was not stale_shown"},
+      {13, true, false, "a generated Present that showed another copy of the real Present's own frame was stale_shown"},
+      {14, true, false, "a generated Present that held the real Present's copy was stale_shown"},
+    };
+    for (const auto &value : trials) {
+      const int fence_a = 0;
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      std::array<std::uint64_t, 5> made {};
+      for (std::uint64_t i = 0; i != 3; ++i, now += 16) {
+        continuity::supply frame;
+        frame.add(continuity::sr_evaluate, now);
+        frame.immediate = continuity::sr_evaluate;
+        frame.capture[0] = 10 + i;
+        made[i + 1] = now;
+        auto record = shown(present++, now, source_slot::scene_depth, now);
+        record.depth_capture = 10 + i;
+        judge.present(record, frame, "test");
+      }
+      continuity::supply frame;
+      if (value.tag_copy) {
+        frame.add(continuity::tag_copy, now);
+        frame.immediate = continuity::tag_copy;
+        frame.capture[1] = 13;
+      }
+      frame.add_elsewhere(continuity::sr_evaluate, now);
+      frame.completions.clear();
+      frame.completes(continuity::sr_evaluate, done, &fence_a, 14);
+      frame.late_after = true;
+      made[4] = now;
+      auto record = shown(present++, now, source_slot::scene_depth, now);
+      record.depth_capture = 14;
+      judge.present(record, frame, "test");
+      judge.late_signal(&fence_a);
+      judge.take();
+      now += 4;
+      const auto copy_tick = value.shown == 12 ? made[3] : made[4];
+      auto generated = shown(present++, now, source_slot::scene_depth, copy_tick);
+      generated.depth_capture = value.shown;
+      judge.present(generated, {}, "test", true, true);
+      const auto violations = judge.take();
+      const bool stale = violations.size() == 1 && violations[0].kind == continuity::violation_kind::stale_shown &&
+                         violations[0].shown_capture == value.shown && violations[0].newer_capture == 14;
+      require(value.stale ? stale : violations.empty(), value.message);
+    }
+  }
+
+  // F7 (11-01 final review): an untag after the frame's tag (R7) may end a
+  // hold, never the copy the frame's own Present reads (supply::immediate):
+  // with such a copy a mono Present is a gap, untag or not; a frame whose
+  // own Present reads none of its legal copies (one in flight on another
+  // queue) may drop the hold its untag ends. Until 11-01 drop_permitted
+  // excused both, so a mono Present of the C5 untag rows' frames passed.
+  void untag_ends_a_hold_never_the_frames_own_copy() {
+    struct trial {
+      bool reads_own, gap;
+      const char *message;
+    };
+    const trial trials[] {
+      {true, true, "a mono Present of a frame whose untag followed its tag was excused beside the frame's own readable copy"},
+      {false, false, "a frame whose untag may end its source dropped a hold its own Present could not replace and was a violation"},
+    };
+    for (const auto &value : trials) {
+      continuity::judge judge;
+      judge.strict_holds = true;
+      std::uint64_t now = 1000, present = 1;
+      for (int i = 0; i != 4; ++i, now += 16) {
+        continuity::supply frame;
+        frame.add(continuity::sr_evaluate, now);
+        frame.immediate = continuity::sr_evaluate;
+        judge.present(shown(present++, now, source_slot::scene_depth, now), frame, "test");
+      }
+      judge.take();
+      continuity::supply untagged;
+      if (value.reads_own) {
+        untagged.add(continuity::tag_copy, now);
+        untagged.immediate = continuity::tag_copy;
+      } else {
+        untagged.add_elsewhere(continuity::sr_evaluate, now, [] { return false; });
+      }
+      untagged.drop_permitted = true;
+      judge.present(mono(present++, now), untagged, "test");
+      const auto violations = judge.take();
+      require(value.gap ? violations.size() == 1 && violations[0].kind == continuity::violation_kind::gap : violations.empty(),
+        value.message);
+    }
+  }
+
+  // F7's second half: a legal frame whose mono Present the judge excuses
+  // (its own Present reads none of its copies, and its untag may end the
+  // hold) is still its source's, so it keeps that source current for the
+  // new-source rule: frames that then read their own copy have one source
+  // age to show depth, not a new source's establish_ms. Until 11-01 the
+  // excuse returned before the judge noted the legal frame, so a source
+  // age of excused frames gave the next frames a new source's warm-up.
+  void excused_legal_frames_keep_their_source() {
+    continuity::judge judge;
+    judge.strict_holds = true;
+    std::uint64_t now = 1000, present = 1;
+    for (int i = 0; i != 4; ++i, now += 16) {
+      continuity::supply frame;
+      frame.add(continuity::sr_evaluate, now);
+      frame.immediate = continuity::sr_evaluate;
+      judge.present(shown(present++, now, source_slot::scene_depth, now), frame, "test");
+    }
+    // 320 ms of frames whose copy is in flight on another queue, untagged
+    // after the tag: excused.
+    for (int i = 0; i != 20; ++i, now += 16) {
+      continuity::supply frame;
+      frame.add_elsewhere(continuity::sr_evaluate, now, [] { return false; });
+      frame.drop_permitted = true;
+      judge.present(mono(present++, now), frame, "test");
+    }
+    require(judge.take().empty(), "a frame whose own Present reads none of its copies and whose untag may end the hold was a violation");
+    // 400 ms of frames whose own Present reads its copy, all mono.
+    for (int i = 0; i != 25; ++i, now += 16) {
+      continuity::supply frame;
+      frame.add(continuity::sr_evaluate, now);
+      frame.immediate = continuity::sr_evaluate;
+      judge.present(mono(present++, now), frame, "test");
+    }
+    const auto violations = judge.take();
+    require(violations.size() == 1 && violations[0].kind == continuity::violation_kind::unestablished,
+      "mono Presents of frames reading their own copy right after excused frames of the same source were given a new source's warm-up");
+  }
 }
 
 int main() {
+  untag_ends_a_hold_never_the_frames_own_copy();
+  excused_legal_frames_keep_their_source();
+  generated_present_never_steps_back();
   single_present_lag_by_capture();
   handover_never_steps_back();
   deferred_copy_counts_by_its_learned_capture();
@@ -983,6 +1133,8 @@ int main() {
             "and a copy without a known capture id of a frame before the shown copy's is no holdable copy; "
             "after FG Off a held FG copy is judged by its lineage, "
             "also against the SR copies the FG hold kept off-screen; the stale rule ages a hold from its newest copy's "
-            "made tick");
+            "made tick; a generated Present never shows a copy of an earlier frame than the last real Present's; an "
+            "untag ends a hold, never the copy its frame's own Present reads, and excused frames keep their source "
+            "current");
   return EXIT_SUCCESS;
 }

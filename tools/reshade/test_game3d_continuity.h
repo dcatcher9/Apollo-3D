@@ -50,21 +50,32 @@
 // sources (FG Off's SR successor, FG On's FG input) steps back to older
 // depth (until 10-31 only a handover to the other API was judged, so FG Off
 // showing an SR copy published before the held FG copy passed: the
-// deferred list's item 11, seed c40a42f921da5ba0 at frame 149). A copy
+// deferred list's item 11, seed c40a42f921da5ba0 at frame 149). A
+// generated Present presents that real Present's frame or a later one, so
+// its API copy is of no earlier frame than that one's (until 11-01 a
+// generated Present was not judged by this rule). A copy
 // deferred to its frame's Present (R2) names its capture id once that
 // Present published it (judge::learned_capture).
 //
-// A judge reads two things per Present: the frame record the test add-on
-// exports (SunshineGame3DTestFrameRecord, docs/reshade-sbs.md, Frame
-// record) and the fixture's own supply log, what the frame it presents
-// supplied as the fixture knows it (never what the add-on reports). A
-// generated Present supplies nothing of its own.
+// A judge reads per Present the frame record the test add-on exports
+// (SunshineGame3DTestFrameRecord, docs/reshade-sbs.md, Frame record) and
+// the fixture's own supply log, what the frame it presents supplied as the
+// fixture knows it (never what the add-on reports), and for a Generic
+// Present one more report of the add-on's: whether it showed the copy it
+// made at that Present of the frame it presents (generic_own, the test
+// add-on's SunshineDepthTestGenericHold: a current capture ready and no
+// hold), which, like the record, says what the add-on showed, never what
+// the frame supplied. The record names no Generic copy's tick, so a
+// Generic hold is aged from the newest Generic source; the hold's own age
+// bound is the alternating fixture's ("Depth was held beyond the source
+// age"). A generated Present supplies nothing of its own.
 //
 // Warm-up: the judge is armed by a Present that shows depth. A Present that
 // shows none disarms it when its frame had nothing it could show (no legal
 // source its own Present reads and nothing holdable within the source age,
 // the mono the invariant permits), when its frame's events may end its
-// source (supply::drop_permitted), or when it is a violation; a generated
+// source and its own Present reads none of its legal sources
+// (supply::drop_permitted), or when it is a violation; a generated
 // Present neither arms nor disarms it. While disarmed, a frame's legal
 // sources have one source age to show depth, counted from the first such
 // Present, and establish_ms only during a warm-up: the session's start, a
@@ -227,7 +238,9 @@ namespace game3d_continuity {
     // The frame's events may end its source's hold (an untag no tag call of
     // the frame follows, R7, or the retiring of its viewport): a mono Present
     // there is no dropped hold (the session timelines; until 11-01 any untag,
-    // one before the frame's own tag call too).
+    // one before the frame's own tag call too). It ends a hold only: a legal
+    // copy the frame's own Present reads (immediate) is shown there as at
+    // any frame (until 11-01 it excused that Present's mono too).
     bool drop_permitted {};
     // Its Present comes after FG Off (its FG options turned FG off, at the
     // frame's start or after its evaluations): an FG copy it shows is held
@@ -708,21 +721,39 @@ namespace game3d_continuity {
             pending_.push_back(value);
           }
         }
-        // A real Present steps forward: its API copy was recorded no
-        // earlier than the copy the last real Present that showed API depth
-        // showed, of either API or source (owner ruling 10-30 Q3: FG Off's
-        // SR successor and FG On's FG input never step back either; until
-        // 10-31 only a handover to the other API was judged).
-        if (!generated && !generic && record.depth_capture) {
-          const auto api = record[owner].key.api;
-          if (handover_.capture && record.depth_capture < handover_.capture) {
-            violation value {violation_kind::stale_shown, where, record.present, now, frame, 0, owner, row.state, row.reason};
-            value.shown_tick = record.depth_tick_ms;
-            value.shown_capture = record.depth_capture;
-            value.newer_capture = handover_.capture;
-            pending_.push_back(value);
+        // No step back: a real Present's API copy was recorded no earlier
+        // than the copy the last real Present that showed API depth showed,
+        // of either API or source (owner ruling 10-30 Q3: FG Off's SR
+        // successor and FG On's FG input never step back either; until 10-31
+        // only a handover to the other API was judged), and it becomes the
+        // reference. A generated Present presents that real Present's frame
+        // or a later one (owner ruling 10-30 Q3, deferred item 13), so its
+        // API copy is of no earlier frame than the reference's (frame_of,
+        // the reference's looked up again, as a copy deferred to its frame's
+        // Present is named only after it, learned_capture; by capture id
+        // where either frame is unknown: another source's copy of the same
+        // frame may carry a lower id, as readable_newer has it), and it
+        // leaves the reference as it is. Until 11-01 generated Presents were
+        // not judged: one that showed the previous frame's copy after a late
+        // signal conflicted the shown copy's read (O1) passed, as no
+        // readable copy was newer and its age ran from the presented frame's
+        // supply.
+        if (!generic && record.depth_capture) {
+          if (handover_.capture) {
+            const auto shown_frame = generated ? frame_of(record.depth_capture) : 0;
+            const auto reference_frame = generated ? frame_of(handover_.capture) : 0;
+            const bool back = shown_frame && reference_frame ? shown_frame < reference_frame : record.depth_capture < handover_.capture;
+            if (back) {
+              violation value {violation_kind::stale_shown, where, record.present, now, frame, 0, owner, row.state, row.reason};
+              value.shown_tick = record.depth_tick_ms;
+              value.shown_capture = record.depth_capture;
+              value.newer_capture = handover_.capture;
+              pending_.push_back(value);
+            }
           }
-          handover_ = {record.depth_capture, api, frame_of(record.depth_capture)};
+          if (!generated) {
+            handover_ = {record.depth_capture, frame_of(record.depth_capture)};
+          }
         }
         // The newest source of the shown rung's kind; a tick ahead of the
         // record's (another read of the clock) is age 0. So is a real
@@ -815,13 +846,29 @@ namespace game3d_continuity {
       // legal sources (an unordered frame, a copy deferred to the Present
       // after it, R2, or a pipelined source) and that has nothing it could
       // hold younger than the source age (holdable, by each copy's made
-      // time) supplies that Present nothing: it may go mono, as may a frame
-      // whose events end its source (supply::drop_permitted). Until the
+      // time) supplies that Present nothing: it may go mono, as may such a
+      // frame whose events end its source (supply::drop_permitted: they end
+      // a hold, never the copy the frame's own Present reads). Until the
       // 10-27 review only unordered frames had this rule, and a legal frame
       // whose copy only a later Present reads was a gap after a hitch, where
-      // only an over-age hold could show depth. A frame whose sources meet a
-      // known limitation keeps its loss: its row records it there (known).
-      if (frame.drop_permitted || (!reads_own && !could_hold && !frame.limited)) {
+      // only an over-age hold could show depth. Until 11-01 the drop excused
+      // a frame whose own Present reads its legal copy too, so a mono
+      // Present of a frame whose untag followed its tag passed (the C5 untag
+      // rows and C4-cancelled-fg-tags could not fail). A frame whose sources
+      // meet a known limitation keeps its loss: its row records it there
+      // (known). An excused legal frame is still its source's: it keeps that
+      // source current for the new-source rule below, and begins a new one
+      // as a judged Present would (until 11-01 it did neither, so after a
+      // source age of excused frames the next legal frame had a new
+      // source's establish_ms of mono).
+      if (!reads_own && (frame.drop_permitted || (!could_hold && !frame.limited))) {
+        if (frame.legal) {
+          if (!last_legal_ || now - last_legal_ >= sunshine_freshness::source_age_ms) {
+            warming_ = true;
+            since_ = {};
+          }
+          last_legal_ = now;
+        }
         armed_ = false;
         return;
       }
@@ -1195,12 +1242,11 @@ namespace game3d_continuity {
       std::uint8_t sources {};
     } shown_copy_;
     std::array<std::uint64_t, 3> real_presents_ {};
-    // The copy the last real Present that showed API depth showed, and its
-    // API (the no-step-back rule, of either API since 10-31), with the
-    // frame of the copy that capture id names (frame_of; 0 unknown).
+    // The copy the last real Present that showed API depth showed (the
+    // no-step-back rule, of either API since 10-31), and the frame of the
+    // copy that capture id names at that Present (frame_of; 0 unknown).
     struct shown_api {
       std::uint64_t capture {};
-      sunshine_game3d::source_api api {sunshine_game3d::source_api::none};
       std::uint64_t frame {};
     } handover_;
     std::uint64_t last_legal_ {}, last_present_ {}, newest_api_ {}, newest_generic_ {}, newest_readable_ {}, newest_limited_ {};

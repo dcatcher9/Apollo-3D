@@ -2212,7 +2212,12 @@ ids follow publication order across providers and sources): neither a handover t
 FG On's FG input; owner ruling 10-30 Q3, since 10-31) steps back to older depth. Until 10-31 only
 the other API was judged, so FG Off showing frame 144's SR copy after frame 146's FG copy and
 holding it for about 125 ms passed (seed c40a42f921da5ba0, frame 149, the deferred list's item
-11). `reshade_game3d_continuity` pins these on synthetic records.
+11). A generated Present presents that real Present's frame or a later one, so its API copy is of
+no earlier frame than that Present's copy (judged by the copies' frames, by capture id where a
+frame is unknown, since another source's copy of the same frame may carry a lower id; until 11-01
+generated Presents were not judged, so one that showed the previous frame's copy after a late
+signal conflicted the shown copy's read, O1, passed). `reshade_game3d_continuity` pins these on
+synthetic records.
 
 `unordered_read` (Step 4, U-C1): a read of a copy still in flight must be ordered after its
 producer by the game's own fences. Each fixture logs every `ExecuteCommandLists`, `Signal` and
@@ -2395,11 +2400,14 @@ Generic's binding ready; H in mono shows none. The judge is armed by a Present t
 Present that shows none disarms it when its frame's own Present reads none of its legal sources and
 nothing it could hold is younger than the source age (an unordered frame, a copy deferred to the
 next Present, a pipelined source; frames whose sources meet a known limitation keep their loss for
-its row), when its frame's events may end its source (an untag no tag call of the frame follows,
-R7, or a run's isolation: `supply::drop_permitted`; until 11-01 an untag before the frame's own tag
-call too, which names the depth again, so a mono Present passed while the frame's deferred tag copy
-was holdable), when its frame had no legal source and nothing is holdable, or when it is
-a violation; a generated Present neither arms nor disarms it. In the session timelines
+its row), when its frame's own Present reads none of its legal sources and its events may end its
+source (an untag no tag call of the frame follows, R7, or a run's isolation:
+`supply::drop_permitted`, which ends a hold, never the copy the frame's own Present reads; until
+11-01 an untag before the frame's own tag call too, which names the depth again, so a mono Present
+passed while the frame's deferred tag copy was holdable, and a frame whose own Present reads its
+legal copy too, so the `C5-*-untag-then-evaluate` rows and `C4-cancelled-fg-tags` could not fail),
+when its frame had no legal source and nothing is holdable, or when it is a violation; a generated
+Present neither arms nor disarms it. In the session timelines
 (`judge::strict_holds`) a frame with no legal source must hold the last depth while it is younger
 than the source age (a mono Present there is a `dropped_hold`); the native provider fixture's frame
 scripts end sources without marking them and keep the older rule. Until the 10-27 review any frame
@@ -2416,7 +2424,9 @@ frame disarmed the judge, which excused a mono Present after a hitch between a f
 and its Present, `hitch-after-sources`, and until the 10-27 review one before its first call still
 did, `hitch-between-*`; nor for a generated Present after its frame's real Present; a silence of
 `association_ms` is one for every frame, as the API association ends there) or a new source (a
-source-age gap in legal sources). Frames whose legal sources all meet a known limitation and frames
+source-age gap in legal sources; a legal frame whose mono Present the judge excuses keeps its source
+current, while until 11-01 a source age of such frames gave the next legal frame a new source's
+warm-up). Frames whose legal sources all meet a known limitation and frames
 with a source that meets none are timed apart, so a loss a known gap excuses never extends the time
 the others have. A generated Present after a real one that showed a fresh copy of a frame whose
 legal sources the presenting queue reads must hold it while that copy is certainly younger than the
