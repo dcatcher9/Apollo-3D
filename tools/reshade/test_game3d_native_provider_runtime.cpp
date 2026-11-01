@@ -58,6 +58,10 @@ namespace {
   // that Present's present event; one entry per depth Present.
   struct record_history_t {
     BOOL (*query)(api::effect_runtime *, sunshine_game3d::frame_record *){};
+    // Generic's hold as the Present left it (SunshineDepthTestGenericHold):
+    // whether a Generic Present showed the copy it made (judge::present's
+    // generic_own).
+    BOOL (*generic_hold)(api::effect_runtime *, sunshine_game3d::test::generic_hold *){};
     std::vector<sunshine_game3d::frame_record> records;
   } record_history;
   // The continuity invariant (test_game3d_continuity.h): the supply of the
@@ -100,7 +104,10 @@ namespace {
     if (record_history.query && record_history.query(runtime, &value) && value.present &&
         (record_history.records.empty() || record_history.records.back().present != value.present)) {
       record_history.records.push_back(value);
-      continuity_log.judge.present(value, frame, continuity_log.where, continuity_log.generated, continuity_log.between);
+      sunshine_game3d::test::generic_hold hold{};
+      const bool generic_own = !continuity_log.generated && value.depth_owner == sunshine_game3d::source_slot::generic &&
+        record_history.generic_hold && record_history.generic_hold(runtime, &hold) && hold.capture_ready && !hold.held;
+      continuity_log.judge.present(value, frame, continuity_log.where, continuity_log.generated, continuity_log.between, generic_own);
       const bool ordered = value.depth_read_order == sunshine_game3d::read_order::ordered;
       script_order.present(script_presenting, value.present, ordered, value.depth_read_queue, value.depth_read_ticket);
     } else continuity_log.judge.unrecorded();
@@ -752,6 +759,9 @@ namespace {
       record_history.query = reinterpret_cast<decltype(record_history.query)>(
         GetProcAddress(module, "SunshineGame3DTestFrameRecord"));
       require(record_history.query, "Test add-on lacks the frame record");
+      record_history.generic_hold = reinterpret_cast<decltype(record_history.generic_hold)>(
+        GetProcAddress(module, "SunshineDepthTestGenericHold"));
+      require(record_history.generic_hold, "Test add-on lacks Generic's hold");
       script_last_execute = reinterpret_cast<decltype(script_last_execute)>(GetProcAddress(module, "SunshineQueueOrderTestLastExecute"));
       require(script_last_execute, "Test add-on lacks the queue-order position of an Execute");
       script_presenting = queue.p;

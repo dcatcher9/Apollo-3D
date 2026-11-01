@@ -562,8 +562,12 @@ namespace game3d_continuity {
 
     // One Present: its frame record and the supply of the frame it presents
     // (empty for a generated Present, which presents the frame the previous
-    // real Present presented), in the script or phase where.
-    void present(const sunshine_game3d::frame_record &record, const supply &frame, const char *where, bool generated = false, bool between = false) {
+    // real Present presented), in the script or phase where. generic_own:
+    // a Generic Present shows the copy the add-on made at it, of the frame
+    // it presents (its end-of-frame copy: a current copy ready, no hold, as
+    // the test add-on's SunshineDepthTestGenericHold reports it).
+    void present(const sunshine_game3d::frame_record &record, const supply &frame, const char *where, bool generated = false, bool between = false,
+        bool generic_own = false) {
       using sunshine_game3d::source_slot;
       ++presents_;
       const auto now = record.tick_ms;
@@ -730,11 +734,19 @@ namespace game3d_continuity {
         // own fresh copy stale (the 10-27 full check's C8-fg-off-color-only,
         // frame 39: age 672 ms after a 683 ms Present gap). So is the copy a
         // frame's real Present showed, at a generated Present of that frame
-        // after it (own_generated: frame_presenting). An older copy shown
-        // there, or any copy of a frame with no API source, keeps the age
-        // since the newest source.
+        // after it (own_generated: frame_presenting). So is Generic's copy
+        // made at the real Present that shows it (generic_own: its
+        // end-of-frame copy of the frame it presents, which drew its Generic
+        // source). Until 11-01 that copy aged from the frame's stamp, so after
+        // a hitch between the frame's calls and its Present the frame's own
+        // Generic depth was stale (soak seed 543ed82ea2b4170f at frame 0, in
+        // the soak's process only, where Generic was ready at the first
+        // Present). An older copy shown there, a Generic hold, or any API
+        // copy of a frame with no API source, keeps the age since the newest
+        // source.
         const auto newest = generic ? newest_generic_ : newest_api_;
-        const bool own_frame = !generated && !generic && frame.tick && record.depth_tick_ms >= frame.tick;
+        const bool own_frame = !generated && frame.tick &&
+          (generic ? generic_own && ((frame.legal | frame.permitted) & generic_sources) : record.depth_tick_ms >= frame.tick);
         const bool own_generated_copy = own_generated && !generic && record.depth_tick_ms &&
           ((shown_copy_.tick && record.depth_tick_ms == shown_copy_.tick) || (presented_.tick && record.depth_tick_ms >= presented_.tick));
         std::uint64_t age = now;

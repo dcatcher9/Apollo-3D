@@ -8,7 +8,8 @@
 // from another queue that completed after the add-on's decision neither
 // excuses nor demands a mono Present there. A real Present's copy captured
 // inside the frame it presents is no older than that frame for the stale
-// rule, however long the frame took. A frame's own copy recorded at its
+// rule, however long the frame took, and so is Generic's copy made at the
+// Present that shows it (since 11-01). A frame's own copy recorded at its
 // call is readable at its own Present: the freshness rule counts it there,
 // and a stall inside such a frame is no warm-up. Where each copy's capture id
 // is known, a Present that shows a copy older than a readable copy of the
@@ -622,6 +623,37 @@ namespace {
     }
   }
 
+  // Generic's copy shown at the Present that made it (its end-of-frame
+  // copy: judge::present's generic_own) is the presented frame's own depth,
+  // however long the frame took, as an API copy captured inside its frame
+  // is: a hitch of the source age between the frame's calls and its Present
+  // leaves it fresh. A Generic hold of an earlier capture keeps the age
+  // since the newest Generic source. Until 11-01 the own copy aged from the
+  // frame's stamp (soak seed 543ed82ea2b4170f at frame 0, in the soak's
+  // process).
+  void generic_own_copy_is_its_frames_depth() {
+    for (const bool own : {true, false}) {
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      for (int i = 0; i != 3; ++i) {
+        continuity::supply frame;
+        frame.allow(continuity::generic_boundary, now);
+        judge.present(shown(present++, now, source_slot::generic, 0), frame, "test", false, false, true);
+        now += 16;
+      }
+      judge.take();
+      continuity::supply frame;
+      frame.allow(continuity::generic_boundary, now);
+      now += 406;
+      judge.present(shown(present++, now, source_slot::generic, 0), frame, "test", false, false, own);
+      const auto violations = judge.take();
+      const bool stale = violations.size() == 1 && violations[0].kind == continuity::violation_kind::stale;
+      require(own ? violations.empty() : stale,
+        own ? "Generic's own copy of a frame with a hitch before its Present was stale"
+            : "a Generic hold after a hitch of the source age was not stale");
+    }
+  }
+
   // The freshness rule by capture id (10-28): a Present that holds the
   // previous frame's copy beside its own frame's readable copy, one frame
   // (16 ms) late, passed the tick bound (two frame intervals and the slack);
@@ -930,6 +962,7 @@ int main() {
   holdable_unknown_id_by_frame();
   unordered_copy_completed_after_decision();
   stale_rule_ages_a_frames_own_copy_from_its_capture();
+  generic_own_copy_is_its_frames_depth();
   immediate_copy_counts_at_its_own_present();
   stall_inside_a_frame_that_reads_its_own_source();
   hold_past_the_source_age_after_a_hitch();
@@ -942,7 +975,7 @@ int main() {
   std::puts("PASS continuity judge: a late signal conflicts only the copies read through its fence; a generated "
             "Present's dropped hold is R1's only where the real Present showed such a copy; a copy that completed "
             "after the add-on's decision is no holdable copy there; a frame's own copy is no older than its frame "
-            "for the stale rule; a frame's own copy at its call is readable at its Present after a stall wherever it "
+            "for the stale rule, also Generic's own end-of-frame copy; a frame's own copy at its call is readable at its Present after a stall wherever it "
             "came; a hold past the source age is stale; copies age from when they were made; a no-source frame holds "
             "under strict_holds; a generated Present after its FG frame's real Present presents that frame; a "
             "Present one copy behind a later frame's readable copy of its kind is stale_shown by capture id, a copy of its own frame is no newer, also a deferred copy's "

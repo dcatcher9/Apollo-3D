@@ -1023,6 +1023,14 @@ namespace {
     // on the GPU past their Presents, so each run makes the late read.
     {"O1-second-signal-unknown-copy-of-earlier-frame", "20*sr=local; fg=on,tag=present_list,sr=local; tag=present_list,sr=local; 4*tag=present_list,sr=local,dlssg=compute; tag=now_bare,sr=local,dlssg=compute,dlssg_gpu=after_present; tag=now_bare,sr=local,dlssg=compute,dlssg_gpu=after_present,order=second; 10*tag=now_bare,sr=local,dlssg=compute", false, 1},
     {"O1-late-signal-unknown-copy-of-earlier-frame", "tag=present_list,sr=tag,ui=bare; tag=present_list,sr=tag; 6*tag=present_list,sr=other_queue; tag=present_list,sr=other_queue,ui=listed; fg=on,tag=present_list,sr=other_queue,dlssg=compute_unobserved,state=proven,generated=1,ui=listed; fg=off,sr=other_queue,state=proven,ui=listed,sr_gpu=after_present; sr=other_queue,state=proven,ui=listed,order=late,sr_gpu=after_present; sr=other_queue,state=proven,ui=listed,order=late,sr_gpu=after_present; 10*sr=other_queue,state=proven,ui=listed", false, 1},
+    // Generic's copy shown at the Present that made it (its end-of-frame
+    // copy) is the presented frame's own depth, however long the frame took:
+    // a hitch of the source age between the frame's calls and its Present.
+    // Until 11-01 the judge aged it from the frame's stamp, so that Present
+    // was stale (frame 20, every run; soak seed 543ed82ea2b4170f at frame 0,
+    // in the soak's process only, where Generic was ready at the first
+    // Present; alone it was not, and the first Present was mono).
+    {"generic-own-copy-hitch-after-sources", "20*defaults; hitch=after_sources; 10*defaults"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose

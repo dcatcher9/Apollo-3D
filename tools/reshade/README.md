@@ -2351,7 +2351,12 @@ Present's API copy captured inside the frame it presents, its capture tick no ea
 frame's stamp, is that frame's own depth and age 0 however long the frame took: until 10-27 its age
 ran from the frame's first call, so the 10-27 full check's `C8-fg-off-color-only` failed at frame 39
 with age 672 ms after a 683 ms hitch inside that frame, before its SR evaluation, and
-`hitch-before-sources` pins it; a real Present that holds an older frame's copy is also stale once
+`hitch-before-sources` pins it; so is Generic's copy made at the real Present that shows it, its
+end-of-frame copy of that frame (the test add-on's `SunshineDepthTestGenericHold`: a current copy
+ready, no hold): until 11-01 it aged from the frame's stamp, so after a hitch between the frame's
+calls and its Present that Present was stale (soak seed 543ed82ea2b4170f at frame 0 in the soak's
+process, where Generic was ready at the first Present; `generic-own-copy-hitch-after-sources`,
+stale at frame 20 in every run); a real Present that holds an older frame's copy is also stale once
 that copy itself is the source age old, whatever newer supply its frame made: until the 10-27 review
 the frame after a hitch could hold the copy before it, 418 ms old, while its own copy was deferred
 to the next Present, `hitch-after-sources-then-deferred-tag`) or `stale_shown` (the freshness rule
@@ -2898,7 +2903,9 @@ Present beside an earlier frame's copy whose capture id the fixture never learne
 DLSS-G compute copy after FG On, then a second signaller) and
 `O1-late-signal-unknown-copy-of-earlier-frame` (seed afcf3faa4ef87af5's frames 0 to 12: the FG
 frame's SR copy, then a late signal after FG Off; before 11-01 the judge counted such a copy as
-holdable, a gap at frames 27 and 12, every run),
+holdable, a gap at frames 27 and 12, every run), and one for Generic's own copy after a hitch
+between a frame's calls and its Present, `generic-own-copy-hitch-after-sources` (before 11-01 the
+judge aged it from the frame's stamp, stale at frame 20, every run),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
