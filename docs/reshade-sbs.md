@@ -4102,8 +4102,12 @@ counts on the depth status line, and so does one whose first acquisition there h
 prevent, in every FG path. A copy recorded for
 the reader's queue and submitted after Present moved takes an idle slot's cached storage of its
 shape, format, view and device at its submission (`COMMON` rest on a compute queue), never an
-allocation on the game's submission thread; with none it keeps the Reset rule (`unstored`, at most
-the copies in flight across one FG toggle). Storage taken only for that prediction and left unused
+allocation on the game's submission thread. Where no idle slot holds such storage, a copy FG Off
+kept as its viewport's ordinary source gives its storage up first (the oldest that no GPU work and
+no reader holds any more): it stands in only until newer depth, which the live copy is, so it is
+invalidated (until 11-01 the kept copies held their storage while a live SR copy on the game's
+queue went without, `taken=0 unstored=2` in seed dda773a575be6561 at frame 91). With neither it
+keeps the Reset rule (`unstored`, at most the copies in flight across one FG toggle). Storage taken only for that prediction and left unused
 (the list ran on the reader's queue after all) is released by the idle sweep (`released`). A copy
 not copied out (every ring list in flight, a failed list call, an unstored copy) keeps the Reset
 rule, and so does a copy whose copy-out storage could not be allocated (`failed`; until 10-27 the

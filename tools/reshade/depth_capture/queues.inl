@@ -290,7 +290,14 @@ namespace sunshine_streamline::depth_capture {
     // slot's cached storage of its snapshot's shape, format, view and device
     // (rest COMMON on a COMPUTE queue), so the game's submission thread never
     // allocates under the capture lock. The idle slot allocates again at its
-    // next record, without the lock. False when no idle slot holds such
+    // next record, without the lock. Where no idle slot holds such storage,
+    // a copy FG Off kept as its viewport's ordinary source (retire_source,
+    // retired_fg_copy) gives its storage up first, the oldest one that no GPU
+    // work and no reader holds any more (snapshot_storage_retired): it stands
+    // in only until newer depth, which a live copy submitted since is, so it
+    // is invalidated and never shows again. Until 11-01 the kept copies held
+    // their storage while a live copy went without (seed dda773a575be6561 at
+    // frame 91: copy_out taken=0, unstored=2). False when neither holds such
     // storage: the copy keeps the Reset rule, as before.
     bool take_idle_storage(slot &value, bool compute) {
       const auto &own = *value.texture;
@@ -309,6 +316,22 @@ namespace sunshine_streamline::depth_capture {
             value.published = std::move(*storage);
             return true;
           }
+      }
+      slot *kept = nullptr;
+      std::shared_ptr<texture_reference> *given = nullptr;
+      for (auto &entry : capture_pool.slots) {
+        if (!entry.id || !entry.retired_fg_copy || &entry == &value || (kept && entry.id > kept->id) ||
+            reserved_by_other(entry, 0) || !snapshot_storage_retired(entry)) continue;
+        for (auto *storage : {&entry.published, &entry.texture})
+          if (fits(*storage)) {
+            kept = &entry; given = storage;
+            break;
+          }
+      }
+      if (kept) {
+        invalidate(*kept, capture_failure::source_retired);
+        value.published = std::move(*given);
+        return true;
       }
       return false;
     }

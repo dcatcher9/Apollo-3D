@@ -3112,6 +3112,84 @@ namespace {
     std::puts("PASS local snapshot reuse with fresh IDs/exact pixels; exported pixels stay immutable after host ack; "
       "dump copies never evict idle live storage, which is released after 2 s idle");
   }
+  // A confirmed FG Off keeps the FG copies published after the shown copy as
+  // the viewport's ordinary source (retire_source, retired_fg_copy). Such a
+  // kept copy gives its storage up before a live copy goes without copy-out
+  // storage: a copy of the viewport recorded while the render queue reads,
+  // submitted once Present moved to another queue, is copied out at its
+  // submission into the kept copy's storage of its shape when no idle slot
+  // holds any (U-C1b), and so is readable there before its recording's
+  // Reset. The kept copy, completed and read by nothing, is the completed
+  // fallback beneath that pending copy, so the idle sweep keeps it. Until
+  // 11-01 it kept its storage and the live copy went without (seed
+  // dda773a575be6561 at frame 91: copy_out taken=0, unstored=2). Last before
+  // device_release: it leaves an epoch of Streamline copies behind.
+  void copy_out_takes_retired_fg_storage(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    // A shape no other case caches storage for.
+    texture_case fg_depth(gpu, DXGI_FORMAT_R32_FLOAT, 4, D3D12_RESOURCE_FLAG_NONE, true, 1, 1, 44, 28);
+    texture_case sr_depth(gpu, DXGI_FORMAT_R32_FLOAT, 4, D3D12_RESOURCE_FLAG_NONE, true, 1, 1, 44, 28);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    constexpr std::uint64_t epoch = 86;
+    const auto fg_id = sunshine_scene_depth::fg_source_id(0);
+    capture::record_diagnostic diagnostic;
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    const auto present = [&](ID3D12CommandQueue *queue, std::uint64_t index) {
+      capture::acquire(native(queue), index, packet, &acquired);
+      packet = {};
+    };
+    const auto counts = [] { return capture::proven_counts(); };
+    const auto record = [&](texture_case &image, std::uint64_t source_id, std::uint64_t sequence) {
+      auto value = image.input;
+      value.provider = sunshine_scene_depth::provider_kind::streamline;
+      value.epoch = epoch; value.source_id = source_id; value.viewport = 0; value.sequence = sequence;
+      value.frame_generation_input = source_id == fg_id;
+      value.valid_until = sunshine_scene_depth::lifetime::until_evaluation; value.force_snapshot = false;
+      value.source_present_generation = capture::source_present_generation(value.source);
+      value.proof = sunshine_scene_depth::state_proof::sdk_contract; value.tick = GetTickCount64();
+      const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), value, UINT64_MAX, &diagnostic);
+      require(ticket && diagnostic.result == capture::status::recorded, "retired FG storage: a copy was refused");
+      capture::finish(ticket, true);
+      return ticket;
+    };
+    // The render queue presents and reads its own copies, past the source
+    // age of any copy read elsewhere: no copy takes copy-out storage.
+    present(gpu.queue.Get(), 13100);
+    Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
+    // DLSS-G's copy of viewport 0, executed, completed and Reset; then a
+    // confirmed FG Off keeps it as the viewport's ordinary source.
+    const auto fg = record(fg_depth, fg_id, 1);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    capture::retire_source(sunshine_scene_depth::provider_kind::streamline, epoch, fg_id, 0, true);
+    // The viewport's next SR copy, recorded while the render queue reads.
+    const auto live = record(sr_depth, 0, 2);
+    require(!capture::testing::holds_copy_out_storage(live), "retired FG storage: the live copy took copy-out storage at its record");
+    const auto made = counts().copied_out, taken = counts().copy_out_taken, unstored = counts().copy_out_unstored;
+    // Present moves to another queue; the copy is submitted on the render queue.
+    present(gpu.foreign_queue.Get(), 13101);
+    gpu.submit(); gpu.wait(); // Executed, completed, never Reset.
+    require(counts().copy_out_unstored == unstored && counts().copy_out_taken == taken + 1 && counts().copied_out == made + 1,
+      "retired FG storage: a live copy went without copy-out storage while a copy FG Off kept held storage of its shape");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 13102, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == live,
+      "retired FG storage: the live copy was unreadable on the new presenting queue before its recording's Reset");
+    require(fg != live, "retired FG storage: the kept copy and the live copy share an id");
+    packet = {};
+    gpu.reset();
+    // The viewport's source 0 cannot be retired (retire_source takes no
+    // source 0): its association with the foreign queue ends once it made
+    // no evaluation for the association window, so device_release finds the
+    // queue unowned, as after the cases before.
+    capture::frame_generation_restored(epoch, 0);
+    Sleep(DWORD(sunshine_freshness::association_ms + 20));
+    require(!capture::provider_active(native(gpu.foreign_queue.Get())),
+      "retired FG storage: the foreign queue stayed associated past the association window");
+    capture::poll();
+    gpu.check_debug_errors();
+    std::puts("PASS a copy FG Off kept gives its storage up for a live copy's copy-out, which is readable on the new "
+      "presenting queue before its recording's Reset");
+  }
   void replay_and_cancel(fixture &gpu) {
     // Dump copies never evict live caches: age out those of earlier cases so
     // this case fills the whole pool.
@@ -3559,6 +3637,7 @@ int main(int argc, char **argv) {
       }
     auxiliary_consumer_replay_and_discard(gpu);
     replay_and_cancel(gpu);
+    copy_out_takes_retired_fg_storage(gpu);
     // Last: it releases the fixture device's capture state.
     device_release(gpu);
     std::puts("PASS diagnostic texture capture functional GPU regression (no performance measurement)");

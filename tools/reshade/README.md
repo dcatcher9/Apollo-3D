@@ -2323,7 +2323,9 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
   copy whose copy-out storage cannot be allocated is still recorded, with the Reset rule
   (`copy_out={... failed=}`). A copy recorded for the reader's queue and
   submitted after Present moved takes an idle slot's cached storage of its shape at its submission,
-  with no allocation there; with none it keeps the Reset rule (`copy_out={... unstored=}`), as a
+  with no allocation there, else a copy FG Off kept as its viewport's ordinary source gives its
+  storage up (since 11-01; `copy_out_takes_retired_fg_storage`); with neither it keeps the Reset
+  rule (`copy_out={... unstored=}`), as a
   copy on a game list never executed with a copy does while the newest `DIRECT`-list copy ran on the
   reader's queue and no copy of its source was read elsewhere within the source age: the session
   timelines judge such a first copy on an entry of the game's ring (no copy on the game's queue or
@@ -2336,7 +2338,8 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
   source age after FG options turn on, the reader's own queue copies out too, since FG's first
   Present moves Present after that frame's copies were submitted there (until 10-27 those kept the
   Reset rule, so that first FG Present was flat). The
-  capture test pins each case (`copy_out_replay`, `copy_out_reader_moves`, the compute-list
+  capture test pins each case (`copy_out_replay`, `copy_out_reader_moves`,
+  `copy_out_takes_retired_fg_storage`, the compute-list
   cases); with U-C1b reverted they fail, and the fixed timelines' seed `6e5b9c154ddc34d8` shows its
   frame 10 (its first SR copy on the game's queue) mono instead of fresh, which the judge's warm-up
   excuses. No row remains: every copy elsewhere is copied out, so the fixtures' freshness supply
