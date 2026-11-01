@@ -459,6 +459,20 @@ namespace {
   // (README, Session-level tests); random seeds meet these shapes only by
   // chance, and a change of the event language changes every seed. So does
   // each hold the session tests' review found unjudged by a mutation.
+  // A row's per-Present trace is compared exactly (T1), so a row states when
+  // the GPU runs the SR work it records on the game's own queue:
+  // sr_gpu=after_present, in flight at its own Present (as the rows' shapes
+  // have it), unless the CPU waits for that work before the Present
+  // (order=cpu or cpu_wait, a hitch after its calls, or DLSS-G's compute
+  // evaluation of the frame, which waits for the presenting queue). With the
+  // default (prompt) its completion races the add-on's read at that Present:
+  // the read order (completed or ordered) and, where no fence orders the
+  // read (after an FG toggle, a second or CPU signal), whether that Present
+  // shows the copy or holds the one before change from run to run (10-31:
+  // the T1 flakes of C8-fg-off-*, O1-late-signal-presenting-copy-held,
+  // fg-off-late-* and hitch-after-sources; 3 to 10 distinct traces in 10
+  // runs of each alone). DLSS-G's compute copies are read from the next
+  // Present on (U-C1), so their timing changes no trace.
   struct regression {
     const char *fix, *events;
     // A loss a known gap records fails it too: with its fix reverted, the
@@ -519,14 +533,14 @@ namespace {
     // input on the game's own queue, never readable within the source age
     // here (known gap C1 once the hold ages out), and FG on again within
     // the hold, whose silent scope selects as without FG.
-    {"C8-fg-off-sr-other-queue", "20*sr=local; fg=on,tag=present_list; fg=off,sr=other_queue; 4*sr=other_queue; fg=on,sr=other_queue; 15*sr=other_queue"},
+    {"C8-fg-off-sr-other-queue", "20*sr=local; fg=on,tag=present_list; fg=off,sr=other_queue,sr_gpu=after_present; 4*sr=other_queue,sr_gpu=after_present; fg=on,sr=other_queue,sr_gpu=after_present; 15*sr=other_queue,sr_gpu=after_present"},
     // FG Off releases the queue's API association, yet the FG copy is held
     // within the source age (known gap C8 until then: color-only Presents
     // after FG Off dropped it and Generic's decoy view took the queue, so
     // the SR copy on the game's own queue that followed within that age
     // found nothing to hold): one FG tag copy, FG off with frames that
     // supply nothing, then the viewport's SR input on the game's queue.
-    {"C8-fg-off-color-only", "20*sr=local; fg=on,tag=present_list; fg=off; 10*defaults; 15*sr=other_queue"},
+    {"C8-fg-off-color-only", "20*sr=local; fg=on,tag=present_list; fg=off; 10*defaults; 15*sr=other_queue,sr_gpu=after_present"},
     // An OnlyValidNow tag outside FG scope copied at its call (S1), whose
     // frame's SR evaluation of the tag refuses it for its lifetime (S3),
     // keeps that copy (known gap C5 until then, the API contract matrix's
@@ -596,7 +610,7 @@ namespace {
     // the Present conflicts only the SR read, so the generated Present keeps
     // holding the FG copy. Until the 10-27 review the fixture tagged any
     // dropped hold there R1-late-signaller (excused at any age).
-    {"O1-late-signal-presenting-copy-held", "20*sr=other_queue; fg=on,tag=now_list,sr=other_queue,generated=1; 5*tag=now_list,sr=other_queue,generated=1; tag=now_list,sr=other_queue,order=late,generated=1; 10*tag=now_list,sr=other_queue,generated=1", true},
+    {"O1-late-signal-presenting-copy-held", "20*sr=other_queue,sr_gpu=after_present; fg=on,tag=now_list,sr=other_queue,sr_gpu=after_present,generated=1; 5*tag=now_list,sr=other_queue,sr_gpu=after_present,generated=1; tag=now_list,sr=other_queue,sr_gpu=after_present,order=late,generated=1; 10*tag=now_list,sr=other_queue,sr_gpu=after_present,generated=1", true},
     {"fg-on-holds-sr-copy", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,generated=1,at=inside; 5*tag=now_list,generated=1; fg=off,sr=local; 10*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*sr=local,generated=1"},
     // A hitch of the source age and more inside a frame, before its SR
     // evaluation (on the presenting queue's list, then on the game's own
@@ -612,7 +626,7 @@ namespace {
     // 10-27 that Present was mono (inactive_views), and the judge excused it
     // as a stall's warm-up (it also hit the fixed set's
     // C5-global-untag-then-evaluate once under load, at frame 25).
-    {"hitch-after-sources", "20*sr=local; sr=local,hitch=after_sources; 10*sr=local; 5*sr=other_queue; sr=other_queue,hitch=after_sources; 10*sr=other_queue"},
+    {"hitch-after-sources", "20*sr=local; sr=local,hitch=after_sources; 10*sr=local; 5*sr=other_queue,sr_gpu=after_present; sr=other_queue,hitch=after_sources; 10*sr=other_queue,sr_gpu=after_present"},
     // FG On in a GPU-bound game: DLSS-G's first compute copy is still in
     // flight at its own Present (dlssg_gpu=after_present), and its order
     // fence is new, so that Present cannot read it. The frame's own SR copy
@@ -733,8 +747,8 @@ namespace {
     // second signaller in place of the CPU's failed one run of eight with a
     // stale_shown at frame 22, before the Off (one Present behind a copy
     // that completed right before it; not reproduced in three replays).
-    {"fg-off-late-sr-after-fg-copy", "20*sr=other_queue; fg=on,tag=now_list,sr=other_queue; 5*tag=now_list,sr=other_queue; sr=other_queue; fg=off_late,sr=other_queue,sr_gpu=after_present,order=second; sr=other_queue,sr_gpu=after_present; 10*sr=other_queue", true},
-    {"fg-off-late-dlssg-head-sr-owner", "20*sr=other_queue; fg=on,sr=other_queue; sr=other_queue,order=cpu; 2*sr=other_queue; fg=off_late,sr=other_queue,sr_gpu=after_present,dlssg=direct; sr=other_queue,sr_gpu=after_present; 10*sr=other_queue", true},
+    {"fg-off-late-sr-after-fg-copy", "20*sr=other_queue,sr_gpu=after_present; fg=on,tag=now_list,sr=other_queue,sr_gpu=after_present; 5*tag=now_list,sr=other_queue,sr_gpu=after_present; sr=other_queue,sr_gpu=after_present; fg=off_late,sr=other_queue,sr_gpu=after_present,order=second; sr=other_queue,sr_gpu=after_present; 10*sr=other_queue,sr_gpu=after_present", true},
+    {"fg-off-late-dlssg-head-sr-owner", "20*sr=other_queue,sr_gpu=after_present; fg=on,sr=other_queue,sr_gpu=after_present; sr=other_queue,order=cpu; 2*sr=other_queue,sr_gpu=after_present; fg=off_late,sr=other_queue,sr_gpu=after_present,dlssg=direct; sr=other_queue,sr_gpu=after_present; 10*sr=other_queue,sr_gpu=after_present", true},
     // The judge's stale rule ages a Present that holds a copy from the
     // newest offered API copy's made tick, not its frame's stamp: a frame
     // with a brief hitch before its calls made its SR copy that much later
