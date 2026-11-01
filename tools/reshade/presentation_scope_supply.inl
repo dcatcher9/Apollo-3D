@@ -20,8 +20,27 @@
         evaluation_supply = {scope_epoch, tick, viewport};
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
     }
+    // FG On (hook_fg_options, enabled_tick) begins a new FG period of the
+    // viewport: DLSS-G's copies from before it supply nothing of that period,
+    // as no copy from before it keeps the scope live (frame_generation_scope_live
+    // counts only copies from the enabled tick on). An evaluation of the new
+    // period, which comes after the On, stays. Until 11-01 a supply of the
+    // previous period kept miss_frame_generation from counting the new
+    // period's missed frames for up to fg_silent_ms after FG On (round 1's C1).
+    void revoke_evaluation_supply(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
+      AcquireSRWLockExclusive(&evaluation_supply_lock);
+      if (evaluation_supply.epoch == scope_epoch && evaluation_supply.viewport == viewport && evaluation_supply.tick < enabled_tick)
+        evaluation_supply = {};
+      ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
+    // Whether DLSS-G's own evaluation supplies the scope's copies: its newest
+    // copy is of this scope and within fg_silent_ms. A refused FG tag boundary
+    // reads it once, for both of its decisions (nominate_depth_source): whether
+    // it withdraws nothing, and whether its frame is missed. Until 11-01 the
+    // first read was a try-lock and the second blocked, so a held lock withdrew
+    // the FG nomination of a frame the second read then found supplied (PD10).
     bool evaluation_supplies(std::uint64_t scope_epoch, std::uint32_t viewport) {
-      if (!TryAcquireSRWLockShared(&evaluation_supply_lock)) return false; // Busy: withdraw as before.
+      AcquireSRWLockShared(&evaluation_supply_lock);
       const auto supply = evaluation_supply;
       ReleaseSRWLockShared(&evaluation_supply_lock);
       const auto now = GetTickCount64();
@@ -52,12 +71,7 @@
     // copies (remember_evaluation_supply), that evaluation, not the tag,
     // decides the frame.
     void miss_frame_generation(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t sequence) {
-      AcquireSRWLockShared(&evaluation_supply_lock);
-      const auto supply = evaluation_supply;
-      ReleaseSRWLockShared(&evaluation_supply_lock);
-      if (supply.tick && supply.epoch == scope_epoch && supply.viewport == viewport &&
-          sunshine_freshness::ahead_tolerant_le(supply.tick, GetTickCount64(), sunshine_freshness::fg_silent_ms)) return;
-      depth_capture::frame_generation_missed(scope_epoch, viewport, sequence);
+      if (!evaluation_supplies(scope_epoch, viewport)) depth_capture::frame_generation_missed(scope_epoch, viewport, sequence);
     }
     // A precedence per UI kind (ui_mask::capture_slot,
     // ui_mask::tag_precedence), not keyed to the frame as depth's is, since a
@@ -203,9 +217,15 @@
       deferral_pending.store(0, std::memory_order_release);
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
     }
-    // The three default-argument missed-frame sites keep their two calls
+    // The two default-argument missed-frame sites keep their two calls
     // and separate lock holds in the same order.
     void frame_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence) {
       remember_tag_copy(epoch, viewport, false);
       miss_frame_generation(epoch, viewport, sequence);
+    }
+    // A refused FG tag boundary that read DLSS-G's supply itself
+    // (evaluation_supplies, PD10): the same answer decides its withdrawal.
+    void frame_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence, bool evaluation_supplied) {
+      remember_tag_copy(epoch, viewport, false);
+      if (!evaluation_supplied) depth_capture::frame_generation_missed(epoch, viewport, sequence);
     }

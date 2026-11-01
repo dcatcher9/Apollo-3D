@@ -722,6 +722,10 @@ namespace sunshine_streamline {
     void fail_metadata_reads(unsigned count) { metadata_read_failures.store(count, std::memory_order_release); }
     void hold_evaluation_supply() { AcquireSRWLockExclusive(&evaluation_supply_lock); }
     void release_evaluation_supply() { ReleaseSRWLockExclusive(&evaluation_supply_lock); }
+    void supply_evaluation(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t tick) {
+      remember_evaluation_supply(scope_epoch, viewport, tick);
+    }
+    bool evaluation_supplied(std::uint64_t scope_epoch, std::uint32_t viewport) { return evaluation_supplies(scope_epoch, viewport); }
     presentation_scope::fg_route route_of(std::uint32_t viewport) { return frame_generation_route(viewport); }
     void age_frame_generation(std::uint64_t ms) {
       AcquireSRWLockExclusive(&fg_mode_lock);

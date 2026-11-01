@@ -3944,6 +3944,58 @@ namespace {
     end_present_fg();
   }
 
+  // DLSS-G's evaluation supply (lane P, PD10 and round 1's C1, 11-01). A
+  // refused FG tag boundary reads it once for both of its decisions: whether
+  // a command-less boundary withdraws nothing, and whether its frame is missed
+  // (nominate_depth_source). Until 11-01 the first read was a try-lock, so a
+  // supply lock held by another thread (DLSS-G's evaluation remembering its
+  // copy, a deferral, a UI tag) withdrew the FG nomination while the second,
+  // blocking read found the supply and left the frame unmissed. And a supply
+  // from before an FG Off and On supplied the new FG period for up to
+  // fg_silent_ms (soak seed 4547e4874aef62bb's frames 20-22 against 79).
+  void test_evaluation_supply_read() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(61);
+    fg_options on; on.generated_frames = 1;
+    fg_options off; off.mode = 0; off.generated_frames = 0;
+    require(set_options(view, on) == 0, "FG On options failed");
+    frame_generation_snapshot fg;
+    require(query_frame_generation(view.value, fg) && fg.enabled, "FG On was not committed");
+    // FG has been on for 500 ms; DLSS-G copied this scope 100 ms ago.
+    testing::age_frame_generation(500);
+    std::string failed;
+    const auto check = [&](bool passed, const char *what) { if (!passed) failed += std::string(failed.empty() ? "" : "; ") + what; };
+    testing::supply_evaluation(fg.epoch, view.value, GetTickCount64() - 100);
+    check(testing::evaluation_supplied(fg.epoch, view.value), "A fresh supply of the FG period did not supply its scope");
+    {
+      testing::hold_evaluation_supply();
+      std::atomic<bool> started{};
+      bool read{};
+      std::thread boundary([&] {
+        started.store(true, std::memory_order_release);
+        read = testing::evaluation_supplied(fg.epoch, view.value);
+      });
+      while (!started.load(std::memory_order_acquire)) SwitchToThread();
+      Sleep(20);
+      testing::release_evaluation_supply();
+      boundary.join();
+      check(read, "PD10: an FG tag boundary read DLSS-G's fresh supply as absent while another thread held its lock");
+    }
+    require(set_options(view, off) == 0, "FG Off options failed");
+    require(set_options(view, on) == 0, "FG On options failed");
+    check(!testing::evaluation_supplied(fg.epoch, view.value),
+      "C1: DLSS-G's supply from before an FG Off and On supplied the new FG period");
+    testing::supply_evaluation(fg.epoch, view.value, GetTickCount64());
+    check(testing::evaluation_supplied(fg.epoch, view.value), "DLSS-G's supply of the new FG period did not supply it");
+    require(failed.empty(), failed.c_str());
+  }
+
   void test_version_identity() {
     using versioning::abi;
     auto make = [](unsigned major, unsigned minor, unsigned patch, const wchar_t *file, const wchar_t *product) {
@@ -4244,6 +4296,8 @@ int main(int argc, char **argv) {
     std::puts("PASS the FG mode survives lost metadata reads, a held metadata writer and a fifth viewport's camera");
     test_present_fg_snapshot();
     std::puts("PASS one FG snapshot per Present from one FG view: options during a Present are the next one's, Q1's two projections, equal modes for a runtime created during ambiguity");
+    test_evaluation_supply_read();
+    std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
     test_until_evaluate_lifetime();
     std::puts("PASS UntilEvaluate global/frame/local pre-call admission, post-return expiry and unchanged extent rejection");
     std::puts("PASS default-on lightweight source nomination, no selected-depth dependency, lifetime ABA, freshness, loss and viewport gates");

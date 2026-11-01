@@ -261,6 +261,11 @@ namespace sunshine_streamline {
     // the calling thread; a hook that reads the supply must run on another.
     void hold_evaluation_supply();
     void release_evaluation_supply();
+    // DLSS-G's evaluation supply: a copy of the scope at tick
+    // (remember_evaluation_supply), and the one read of it a refused FG tag
+    // boundary makes (evaluation_supplies).
+    void supply_evaluation(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t tick);
+    bool evaluation_supplied(std::uint64_t scope_epoch, std::uint32_t viewport);
     // The SL route of the viewport's evaluations (frame_generation_route).
     presentation_scope::fg_route route_of(std::uint32_t viewport);
     // Moves every enabled FG scope's enabled tick ms into the past.

@@ -72,14 +72,17 @@ namespace sunshine_streamline {
       }
       // The one FG options-transition entry (docs/reshade-sbs.md, Presentation
       // scope). After update.reset(), in this order: frame_generation_enabled,
-      // frame_generation_restored, retire_source, ui_mask::invalidate_scope or
-      // invalidate_all, then the "Sunshine Streamline frame generation:" line.
+      // frame_generation_restored, revoke_evaluation_supply, retire_source,
+      // ui_mask::invalidate_scope or invalidate_all, then the "Sunshine
+      // Streamline frame generation:" line.
       // FG's first Present moves Present to DLSS-G's queue after this frame's
       // copies on the game's queue were submitted: those are copied out for
       // the source age from here (U-C1b, depth_capture::frame_generation_enabled).
       if (turned_on) depth_capture::frame_generation_enabled(turned_on);
-      // FG On ends the viewport's FG role retirement (retire_source).
+      // FG On ends the viewport's FG role retirement (retire_source), and
+      // DLSS-G's supply from before it supplies nothing of the new period.
       if (turned_on) depth_capture::frame_generation_restored(turned_on_epoch, id);
+      if (turned_on) revoke_evaluation_supply(turned_on_epoch, id, turned_on);
       // Revoke the exact FG scope, including tags recorded while the failed
       // SDK call was in flight. A concurrent new On may lose one capture;
       // a fresh tag restores it without resurrecting pre-loss pixels.

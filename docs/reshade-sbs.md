@@ -4457,6 +4457,14 @@ boundary with no copy point of a live scope whose copies DLSS-G's own evaluation
 it withdraws nothing,
 since that evaluation, not the tag, is where the frame's depth is copied, and a withdrawal would
 leave every Present between the tag and the evaluation without a current FG nomination.
+The boundary reads DLSS-G's supply (its newest copy of this scope within `fg_silent_ms`) once, and
+that one answer decides both its withdrawal and whether its frame is missed (since 11-01, PD10;
+before, the withdrawal's read was a try-lock that a held lock answered "not supplied" while the
+missed-frame read blocked and found the supply, so the FG nomination was withdrawn for a frame that
+was not missed). A supply from before the viewport's FG On supplies nothing of the new FG period:
+FG On revokes it (`revoke_evaluation_supply`), as a scope is live only by copies from its enabled
+tick on (since 11-01, round 1's C1; before, a supply of the previous FG period kept the new
+period's missed frames uncounted for up to `fg_silent_ms`, probe row `test_evaluation_supply_read`).
 
 DLSS-G's own NGX evaluation (feature 11, created by Streamline's DLSS-G plugin through the NGX
 exports the add-on already hooks; no new hook and no patch of the DLSS-G module) supplies the FG
@@ -6213,8 +6221,9 @@ FG target.
 The FG options transition has one entry, in `hook_fg_options`
 ([`sl_frame_generation.inl`](../tools/reshade/sl_frame_generation.inl)), right
 after the store's lock is released. Its fan-out stays at that adapter call site, in this
-order: `frame_generation_enabled`, `frame_generation_restored`, `retire_source`,
-`ui_mask::invalidate_scope` or `invalidate_all`, then the
+order: `frame_generation_enabled`, `frame_generation_restored`, `revoke_evaluation_supply`
+(FG On: DLSS-G's evaluation supply from before it supplies nothing of the new FG period, below),
+`retire_source`, `ui_mask::invalidate_scope` or `invalidate_all`, then the
 `Sunshine Streamline frame generation:` line.
 
 ### Depth output

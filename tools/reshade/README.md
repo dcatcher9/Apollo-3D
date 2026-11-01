@@ -2214,7 +2214,10 @@ the frame is current, after its calls (`SunshineStreamlineTestFailMetadataReads`
 that lost the race with the camera and tag writers on every attempt (`observer_snapshot.h`), which
 no fixture produces by itself. The probe tests reach the same seam as
 `testing::fail_metadata_reads`, the SL route as `testing::route_of`, and hold DLSS-G's evaluation
-supply lock with `testing::hold_evaluation_supply`.
+supply lock with `testing::hold_evaluation_supply`; `testing::supply_evaluation` and
+`testing::evaluation_supplied` make DLSS-G's supply and read it as a refused FG tag boundary does
+(probe row `test_evaluation_supply_read`: the one read under a held lock, PD10, and FG On revoking
+the previous FG period's supply, round 1's C1).
 
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's

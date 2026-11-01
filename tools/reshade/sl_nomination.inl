@@ -453,12 +453,13 @@ namespace sunshine_streamline {
       // copies (observe_frame_generation_inputs): withdrawing would leave
       // every Present between the tag and that evaluation without a current
       // FG nomination. That evaluation, not the tag, then decides the frame
-      // (miss_frame_generation changes nothing).
+      // (its frame is not missed). One read of the supply decides both
+      // (evaluation_supplies, PD10).
+      const bool evaluation_supplied = fg_boundary && evaluation_supplies(snapshot.epoch, snapshot.viewport);
       const bool supplied = fg_boundary && !attempted && withdraws &&
-        !std::strcmp(candidate_rejection(snapshot), "boundary_without_commands") &&
-        evaluation_supplies(snapshot.epoch, snapshot.viewport);
+        !std::strcmp(candidate_rejection(snapshot), "boundary_without_commands") && evaluation_supplied;
       if (fg_boundary) {
-        frame_missed(snapshot.epoch, snapshot.viewport, snapshot.sequence);
+        frame_missed(snapshot.epoch, snapshot.viewport, snapshot.sequence, evaluation_supplied);
         char reason[96]{};
         if (attempted) std::snprintf(reason, sizeof(reason), "capture_%s/%s",
           depth_capture::name(diagnostic.result), depth_capture::name(diagnostic.stage));
