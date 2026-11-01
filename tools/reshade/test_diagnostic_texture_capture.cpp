@@ -899,10 +899,15 @@ namespace {
     const auto counts = [] { return capture::proven_counts(); };
     const auto before = counts();
     const auto made = before.copied_out;
-    // FG off: the render queue presents and reads its own copies.
+    // FG off: the render queue presents and reads its own copies. A copy
+    // submitted on the reader's queue takes its submission's Present
+    // (PD9: the stamp follows the reader through real submissions).
     present(gpu.queue.Get(), 12100);
-    nominate(1);
-    gpu.submit(); gpu.wait(); gpu.reset();
+    const auto first = nominate(1);
+    gpu.submit();
+    require(capture::testing::submitted_present(first) == capture::next_present_ordinal(),
+      "reader moves: a copy submitted on the reader's queue was not stamped with its submission's Present (PD9)");
+    gpu.wait(); gpu.reset();
     require(counts().copied_out == made, "reader moves: the reader's own copy was copied out");
     // FG on: Present moves to DLSS-G's queue. The first render-queue copy
     // recorded after that is copied out at its first submission and read
@@ -914,6 +919,13 @@ namespace {
     gpu.submit(); gpu.wait(); // Executed, completed, never Reset.
     require(counts().copied_out == made + 1,
       "reader moves: the first render-queue copy was not copied out once Present moved to another queue (U-C1b)");
+    // PD9 (11-01): the render queue acquired depth before but is no longer
+    // the reader, so its submission does not stamp the copy: it keeps its
+    // call's stamp, which the FG frame's generated window counts from (a
+    // sticky flag of that earlier acquisition stamped it, and generated
+    // Presents after a freeze of the source age were mono).
+    require(!capture::testing::submitted_present(ticket),
+      "reader moves: a render-queue copy after Present moved to another queue was stamped with its submission's Present (PD9)");
     require(capture::acquire(native(gpu.foreign_queue.Get()), 12102, packet, &acquired) && packet.pixel_ready &&
         packet.capture_id == ticket && packet.producer_queue == native(gpu.queue.Get()),
       "reader moves: the completed copy was unreadable on the new presenting queue before its recording's Reset");

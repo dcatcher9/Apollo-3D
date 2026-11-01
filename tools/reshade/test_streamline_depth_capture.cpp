@@ -54,6 +54,12 @@ namespace sunshine_streamline::depth_capture {
         if (capture && value.id == capture && value.published) return reinterpret_cast<std::uint64_t>(value.published->resource.p);
       return 0;
     }
+    std::uint64_t submitted_present(std::uint64_t capture) {
+      std::lock_guard lock(mutex);
+      for (const auto &value : capture_pool.slots)
+        if (capture && value.id == capture) return value.submitted_present;
+      return 0;
+    }
     // Whether a nomination in progress is this evaluation's: its epoch,
     // sequence, source and viewport (record.inl's same_nomination of its
     // nomination_of).

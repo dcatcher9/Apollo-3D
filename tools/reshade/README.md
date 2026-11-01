@@ -2471,7 +2471,10 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
   Reset rule, so that first FG Present was flat). The
   capture test pins each case (`copy_out_replay`, `copy_out_reader_moves`,
   `copy_out_takes_retired_fg_storage`, the compute-list
-  cases); with U-C1b reverted they fail, and the fixed timelines' seed `6e5b9c154ddc34d8` shows its
+  cases; `copy_out_reader_moves` also checks each copy's submission stamp through real
+  submissions, since 11-01: a copy submitted on the reader's queue takes its submission's Present,
+  and a render-queue copy after Present moved to DLSS-G's queue keeps its call's stamp, PD9, F61);
+  with U-C1b reverted they fail, and the fixed timelines' seed `6e5b9c154ddc34d8` shows its
   frame 10 (its first SR copy on the game's queue) mono instead of fresh, which the judge's warm-up
   excuses. No row remains: every copy elsewhere is copied out, so the fixtures' freshness supply
   names each one's completion, and the timelines' DLSS-G compute frames and the SR inputs a live FG
