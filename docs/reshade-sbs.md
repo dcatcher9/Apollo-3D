@@ -582,14 +582,17 @@ copies into the other entry rather than reallocating; a replaced entry is retire
 later Present, with no `wait_idle`, and once that fence completed it is released on a pool thread
 (a texture's last Release and ReShade's view release can wait on video memory: 17 and 81 ms on the
 present thread in ACS 10-27b, whose dynamic resolution retired a display at most render-size
-changes). A replaced entry is never the active display, and the effects' binding is the active
+changes). A replaced entry is never the active display, and the provider's binding is the active
 entry's view or none (the provider binds the active view after every copy that made an entry
 active), so
 retiring one changes no binding; an unbind for a retired bound view, which could never run, was
-removed with its test record on 11-01. An entry that is neither the active display nor the effects' binding for 2 s is
-retired the same way (10-31), so VRAM returns about 2 s after a resolution drop or a provider flip;
-a shape that comes back sooner (dynamic resolution between two render sizes, an FG toggle and back)
-still reuses its entry. Until 10-31 the inactive entry stayed until a third shape evicted it, so
+removed with its test record on 11-01. An entry the provider has not bound for 2 s is retired the
+same way (10-31), so VRAM returns about 2 s after a resolution drop or a provider flip, and the
+active display too once its API source is gone: the provider binds nothing once it stops owning
+the pass, and Generic rebinds DEPTH at that Present (until 11-01 the active display stayed
+allocated for the rest of the session after a handover to Generic; the native provider fixture's
+`SL-display-gone-*`). A shape that comes back sooner (dynamic resolution between two render
+sizes, an FG toggle and back, an API source that resumes) still reuses its entry. Until 10-31 the inactive entry stayed until a third shape evicted it, so
 after 4K then 1080p both displays stayed allocated. A runtime's teardown waits for its releases,
 so none outlives its runtime or device. A release of 8 ms or more logs `Sunshine Game 3D: depth display release took X ms off the present
 thread (n textures, m MiB)`. Capture storage goes the same way (10-27): what the idle sweep

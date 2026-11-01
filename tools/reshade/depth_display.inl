@@ -12,7 +12,6 @@
         const sunshine_game3d::slow_step step("API depth binding");
         runtime->update_texture_bindings("DEPTH", view, view);
         data.bound_view = view;
-        data.effects_view = view;
       }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
       depth_events::readiness(runtime, depth_events::site_id::provider_bind_ready, ready);
@@ -36,8 +35,7 @@
       data.retired_displays.clear();
       if (data.retire_fence.handle) device->destroy_fence(data.retire_fence);
       data.retire_fence = {};
-      data.display_view = {}; data.display_texture = {};
-      data.display_width = data.display_height = data.display_format = data.display_view_format = 0;
+      data.display_view = {}; data.display_texture = {}; data.display_view_format = 0;
     }
 
     // pooled: on a pool thread, which logs its own slow release (on the
@@ -111,22 +109,29 @@
       entry = {};
     }
 
-    // An inactive display unused this long is retired, so its storage does not
-    // outlive a resolution drop or a provider flip (until 10-31 it stayed until
-    // a third shape evicted it: after 4K then 1080p both stayed allocated). A
-    // shape that returns sooner reuses its entry: dynamic resolution
-    // alternating between two render sizes, or an FG toggle and back.
+    // A display unused this long is retired, so its storage does not outlive
+    // a resolution drop or a provider flip (until 10-31 it stayed until a
+    // third shape evicted it: after 4K then 1080p both stayed allocated), nor
+    // its API source (until 11-01 the active display stayed for the rest of
+    // the session once Generic took DEPTH over). A shape that returns sooner
+    // reuses its entry: dynamic resolution alternating between two render
+    // sizes, an FG toggle and back, or an API source that resumes.
     constexpr std::uint64_t display_idle_ms = 2000;
 
-    // The active display and the effects' binding are in use at this Present;
-    // any other entry unused for display_idle_ms is retired as an evicted one
-    // is (fenced on a later Present, released off the present thread). The
-    // effects' binding is never retired here, so no binding changes.
+    // The provider's binding (bound_view) is in use at this Present: the
+    // active display while the provider owns the pass. Any other entry,
+    // the active one too once the provider stopped binding it (its API
+    // source gone: Generic rebound DEPTH), unused for display_idle_ms is
+    // retired as an evicted one is (fenced on a later Present, released off
+    // the present thread). No binding changes here.
     void expire_idle_displays(state &data, std::uint64_t present, std::uint64_t now) {
       for (auto &entry : data.displays) {
         if (!entry.texture.handle) continue;
-        if (entry.texture == data.display_texture || entry.view == data.effects_view) entry.used = now;
-        else if (now - entry.used >= display_idle_ms) retire_display(data, entry, present);
+        if (entry.view == data.bound_view) entry.used = now;
+        else if (now - entry.used >= display_idle_ms) {
+          if (entry.texture == data.display_texture) { data.display_texture = {}; data.display_view = {}; data.display_view_format = 0; }
+          retire_display(data, entry, present);
+        }
       }
     }
 
@@ -165,9 +170,7 @@
     }
 
     void activate_display(state &data, const state::display_entry &entry) {
-      data.display_texture = entry.texture; data.display_view = entry.view;
-      data.display_width = entry.width; data.display_height = entry.height; data.display_format = entry.format;
-      data.display_view_format = entry.view_format;
+      data.display_texture = entry.texture; data.display_view = entry.view; data.display_view_format = entry.view_format;
     }
 
     // The entry a fresh copy of packet's shape and format is made into
@@ -203,12 +206,12 @@
         if (entry.texture != data.display_texture) victim = &entry;
       }
       // Retiring the inactive entry changes no binding: the victim is never
-      // the active entry, and the effects' view (effects_view) is none or the
-      // active entry's, since display_view changes only when a copy
-      // succeeded (activate_display) and at teardown, and begin() binds
-      // display_view (bind_api) before it returns. (Until 11-01 an unbind for
-      // an evicted bound view and a clear of an evicted active entry stood
-      // here; neither could run.)
+      // the active entry, and the provider's binding (bound_view) is none or
+      // the active entry's view, since display_view changes only when a copy
+      // succeeded (activate_display), at an idle release and at teardown, and
+      // begin() binds display_view (bind_api) before it returns. (Until 11-01
+      // an unbind for an evicted bound view and a clear of an evicted active
+      // entry stood here; neither could run.)
       if (victim->texture.handle) retire_display(data, *victim, present);
       api::resource_desc desc(packet.width, packet.height, 1, 1, static_cast<api::format>(packet.format), 1,
         api::memory_heap::default_, api::resource_usage::shader_resource | api::resource_usage::copy_dest);

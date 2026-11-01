@@ -950,7 +950,10 @@ two render sizes alternating faster than that keep both displays for 4.5 s. With
 (11-01), a display copy the test add-on refuses (`SunshineStreamlineTestRefuseNextDisplayCopy`, as a
 consumer refusal records nothing) at a new render size, once for the other retained display's size
 and once for a size that allocates, holds the retained copy on the shown display
-(`SL-display-failed-copy-*`; until 11-01 that Present was mono). The optional metadata-only
+(`SL-display-failed-copy-*`; until 11-01 that Present was mono), and once the SR source stops, the
+provider's last display is released off the present thread after its association lapses and it
+stays unbound for the idle period (`MEASURE native-provider display-gone released_ms=`, about 3 s;
+until 11-01 it stayed allocated for the session). The optional metadata-only
 interposer enables the SL FG 2x case: retained real depth, generated presentations, a hitch of the
 source age and more before a real Present and one between it and its generated Present (the
 generated Present holds that frame's own copy and every Present keeps full stereo strength,

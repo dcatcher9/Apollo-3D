@@ -1085,6 +1085,47 @@ namespace {
       std::puts("PASS native SL display failed copy: a failed copy at a new render size, into the other retained display or a new one, holds the retained copy on the shown display");
     }
 
+    // The provider's last display once its API source is gone (F25, 11-01):
+    // after the association lapses the provider binds nothing (Generic takes
+    // DEPTH), and its display is released once unbound for the idle period,
+    // off the present thread. Until 11-01 the active display counted as in
+    // use for the rest of the session.
+    void run_display_source_gone() {
+      const auto display = reinterpret_cast<bool (*)(api::effect_runtime *, std::uint64_t *)>(
+        GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineStreamlineTestDisplay"));
+      require(display != nullptr, "The test add-on exports no active display texture");
+      selected = first.get();
+      active_area = {0, 0, selected->width, selected->height};
+      settle("SL-display-gone-seed");
+      std::uint64_t texture{};
+      require(display(observed.runtime, &texture) && texture, "The test add-on names no active display texture");
+      auto *sentinel = new release_sentinel;  // Never freed, as in run_display_idle_release.
+      SetEvent(sentinel->gate);
+      checked(reinterpret_cast<ID3D12Resource *>(texture)->SetPrivateDataInterface(release_sentinel_guid, sentinel),
+        "Attach a release sentinel to the active display texture");
+      sentinel->Release();
+      // No frame: the SR source stops, and its association lapses.
+      render_tracked_depth = {};
+      const auto stopped = GetTickCount64();
+      while (!sentinel->released && GetTickCount64() - stopped < 8000) present_frame();
+      const auto released_ms = GetTickCount64() - stopped;
+      std::printf("MEASURE native-provider display-gone released_ms=%llu\n", static_cast<unsigned long long>(released_ms));
+      require(sentinel->released, "The provider's last display stayed allocated after its API source was gone");
+      require(sentinel->thread != sentinel->present_thread, "The provider's last display was released on the present thread");
+      require(released_ms >= sunshine_freshness::association_ms + 1900,
+        "The provider's display was released before it was unbound for the idle period");
+      // The source resumes: until the provider shows depth again its SR
+      // depth is permitted, not owed (a new display is allocated).
+      render_tracked_depth = [&] { draw_frame(); permitted_supply(game3d_continuity::generic_boundary | game3d_continuity::sr_evaluate); };
+      for (const auto until = GetTickCount64() + 15000; GetTickCount64() < until;) {
+        present_frame();
+        if (const auto s = inspect(); active(s) && !s.source.reused_depth) break;
+      }
+      render_tracked_depth = [&] { evaluated_frame(); };
+      settle("SL-display-gone-recovered");
+      std::puts("PASS native SL display source gone: the provider's last display is released off the present thread once Generic owns DEPTH for the idle period, and a resuming source shows depth again");
+    }
+
     // The public tag 23 UI hook with one Resource type, then the offscreen UI
     // layer, over the FG cases' real frames.
     void run_ui_hook(std::uint32_t resource_type) {
@@ -4386,7 +4427,10 @@ int main(int argc, char **argv) {
       fixture.run_display_release();
       fixture.run_display_idle_release();
       // The FG runs are near their watchdog: these cases run without FG only.
-      if (!sdk) fixture.run_display_failed_copy();
+      if (!sdk) {
+        fixture.run_display_failed_copy();
+        fixture.run_display_source_gone();
+      }
       if (sdk) fixture.run_fg(sdk);
     }
     fixture.finish();

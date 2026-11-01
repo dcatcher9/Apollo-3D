@@ -85,9 +85,13 @@ namespace sunshine_streamline::provider {
       std::uint32_t fg_mode{};
       fg_switch_line fg_switch;
       api::resource display_texture{};
+      // bound_view: the view this provider last passed to
+      // update_texture_bindings while it owns the pass; cleared when it stops
+      // owning it, since Generic then rebinds DEPTH at once (depth_addon.cpp,
+      // bind_generic on the provider's first Present without the pass).
       api::resource_view display_view{}, bound_view{};
       sunshine_depth::ready_uniform_cache<api::effect_uniform_variable> depth_ready;
-      std::uint32_t display_width{}, display_height{}, display_format{}, display_view_format{};
+      std::uint32_t display_view_format{};
       // Display storage per shape/format (NGX and Streamline usually differ),
       // so a provider flip reuses the other entry instead of reallocating
       // (until that entry is unused for 2 s: used, below).
@@ -96,14 +100,12 @@ namespace sunshine_streamline::provider {
         api::resource texture{};
         api::resource_view view{};
         std::uint32_t width{}, height{}, format{}, view_format{};
-        // The tick of the last Present at which it was the active display or
-        // the effects' binding (collect_displays retires an entry unused for
+        // Its creation, else the last Present at which it was the provider's
+        // binding (collect_displays retires an entry unused for
         // display_idle_ms).
         std::uint64_t used{};
       };
       std::array<display_entry, 2> displays{};
-      // The view last passed to update_texture_bindings by this provider.
-      api::resource_view effects_view{};
       // Replaced display storage, released on a pool thread once the runtime
       // queue passed a fence signaled on a later Present (never a CPU wait on
       // this path). bytes: its texture's size.
@@ -326,7 +328,6 @@ namespace sunshine_streamline::provider {
       data->source_metadata = {};
       data->fg_scope_silent = false;
       data->bound_view = {};
-      data->effects_view = {};
       data->associated_tick = 0;
       data->associated_width = data->associated_height = 0;
       data->handoff_hold = false;
