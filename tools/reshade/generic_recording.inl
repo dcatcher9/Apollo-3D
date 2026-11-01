@@ -141,10 +141,8 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 	else if (depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 && depth_stencil_desc->depth_load_op == render_pass_load_op::discard &&
 		cmd_list->get_device()->get_api() == device_api::d3d12)
 	{
-		// A D3D12 depth DISCARD leaves the sampled plane undefined: it erases what
-		// was there as a clear does (the hold's cleared gate), but has no value,
-		// so it adds no clear convention and does not restart the capture crop.
-		// Vulkan's DONT_CARE is left to the draw-statistics picker as before.
+		// A D3D12 depth DISCARD (observe_depth_discard). Vulkan's DONT_CARE is
+		// left to the draw-statistics picker as before.
 		device *const device = cmd_list->get_device();
 		const auto view = device->get_resource_view_desc(depth_stencil_desc->view);
 		if (view.texture.first_level == 0 && view.texture.first_layer == 0)
@@ -156,7 +154,7 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 				lock.lock();
 			auto &stats = state.stats_per_used_depth_stencil[depth_stencil];
 			stats.limit_tracking(tracking_demand(device));
-			stats.depth_erased = true;
+			stats.observe_depth_discard(state.position());
 		}
 	}
 	// ReShade runs this event before the native BeginRenderPass, so the clear
@@ -195,9 +193,11 @@ static depth_stencil_frame_stats &record_scene_write(state_tracking &state, reso
 	return stats;
 }
 
-// full: the transfer replaces the whole sampled plane (no source or
-// destination box, no destination offset).
-static void record_copied_depth(command_list *cmd_list, resource source, resource dest, uint32_t subresource, bool full)
+// full: the transfer replaces the whole sampled plane (no destination box or
+// offset, and no source box or, from a tracked depth-stencil, one spanning
+// its whole plane: whole_plane_box).
+static void record_copied_depth(command_list *cmd_list, resource source, resource dest, uint32_t subresource, bool full,
+	const subresource_box *source_box = nullptr)
 {
 	if (dest == 0 || subresource != 0) return; // The shader samples the first depth plane/level/layer.
 	auto *device_data = cmd_list->get_device()->get_private_data<generic_depth_device_data>();
@@ -206,6 +206,11 @@ static void record_copied_depth(command_list *cmd_list, resource source, resourc
 	const std::shared_lock<std::shared_mutex> lock(s_mutex);
 	const auto found = device_data->depth_stencil_resources.find(dest);
 	if (found == device_data->depth_stencil_resources.end()) return; // Skip color and our sampling backups.
+	if (full && source_box)
+	{
+		const auto from = device_data->depth_stencil_resources.find(source);
+		full = from != device_data->depth_stencil_resources.end() && whole_plane_box(source_box, from->second.desc);
+	}
 	// A transfer is activity, not proof of a full raster viewport. In particular,
 	// ReShade can report a null destination box for a partial origin copy.
 	// Its source and position let on_present tell a copy of another candidate
@@ -223,10 +228,12 @@ static void record_copied_depth(command_list *cmd_list, resource source, resourc
 // is left out of the frame, as if untouched: its allocation, its evidence and
 // its activity grace stay as its last own work left them, so a member of an
 // alternating set that receives a copy between its turns stays active. The
-// one exception is a whole copy of depth the
-// source drew and then cleared away (a full clear after the copy): only the
-// destination still holds that pass, so it stays a candidate and takes the
-// source's clear convention for its depth direction. A copy from anything
+// one exception is a whole copy of depth the source drew and then overwrote
+// (last_overwrite: a clear of its sampled plane, with or without rectangles,
+// or a render pass that clears or DISCARDs it, after the copy): only the
+// destination may still hold that pass, so it stays a candidate, judged by its
+// content, and takes the source's clear convention for its depth direction. A
+// source overwritten only by drawing is not seen as such. A copy from anything
 // else (a buffer, an MSAA or mipped depth, another size or format, or a source
 // on another queue whose order is unknown and so not a lost pass) keeps
 // today's activity, as does a destination that also drew. Generic content
@@ -249,7 +256,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void resolve_transfer_lineage(state_tracking &stat
 		const auto found = state.stats_per_used_depth_stencil.find(stats.transfer_source);
 		const depth_stencil_frame_stats *producer = found == state.stats_per_used_depth_stencil.end() ? nullptr : &found->second;
 		if (stats.transfer_full && producer && producer->first_draw && producer->first_draw < stats.transfer_position &&
-			producer->last_full_clear > stats.transfer_position)
+			producer->last_overwrite > stats.transfer_position)
 		{
 			stats.clear_zero |= producer->clear_zero;
 			stats.clear_one |= producer->clear_one;
@@ -289,7 +296,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_texture_region(command_list *cmd_list
 	const subresource_box *source_box, resource dest, uint32_t subresource, const subresource_box *dest_box, filter_mode)
 {
 	if (empty_copy_box(source_box) || empty_copy_box(dest_box)) return false;
-	record_copied_depth(cmd_list, source, dest, subresource, source_subresource == 0 && !source_box && !dest_box);
+	record_copied_depth(cmd_list, source, dest, subresource, source_subresource == 0 && !dest_box, source_box);
 	return false;
 }
 SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_buffer_to_texture(command_list *cmd_list, resource, uint64_t, uint32_t, uint32_t,

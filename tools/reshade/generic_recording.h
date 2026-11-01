@@ -21,6 +21,16 @@
 #error "Include depth_addon_test_access.h, which defines the linkage of this state"
 #endif
 
+// A copy's source box spans the whole sampled plane (mip 0, layer 0) of a
+// texture described by desc; no box is the whole subresource. On D3D11 and
+// D3D12 a depth-stencil copies only whole subresources, so such a box is the
+// one legal box there, and the copy replaces the plane as a box-less one does.
+SUNSHINE_DEPTH_ADDON_SHARED bool whole_plane_box(const subresource_box *box, const resource_desc &desc)
+{
+	return box == nullptr || (box->left == 0 && box->top == 0 && box->front == 0 &&
+		box->right >= desc.texture.width && box->bottom >= desc.texture.height && box->back >= 1);
+}
+
 struct depth_stencil_frame_stats
 {
 	draw_stats total;
@@ -49,7 +59,10 @@ struct depth_stencil_frame_stats
 	// Execution-order positions of this frame's work (state_tracking::position,
 	// rebased when a recording merges into the one it executes in); zero: none.
 	// They are positions, not counters, so they are kept while counters are off.
-	uint64_t first_draw = 0, last_full_clear = 0;
+	// last_overwrite: the last clear of the sampled plane's depth (with or
+	// without rectangles, a render pass's CLEAR included) or D3D12 render pass
+	// that DISCARDs it; what was there may be gone (resolve_transfer_lineage).
+	uint64_t first_draw = 0, last_overwrite = 0;
 	// The last transfer into this resource: its source (any resource) and
 	// position, and whether it replaced the whole sampled plane.
 	resource transfer_source = {};
@@ -75,20 +88,29 @@ struct depth_stencil_frame_stats
 			total.last_viewport = view;
 	}
 	void observe_full_clear() { viewport_restart_pending = true; }
-	// A depth clear of the sampled plane without rectangles. Only on D3D10, D3D11
-	// and D3D12 (ClearDepthStencilView, and a D3D12 render pass's CLEAR) does it
+	// A depth clear of the sampled plane, with or without rectangles, overwrites
+	// it (last_overwrite). Only without rectangles, and only on D3D10, D3D11
+	// and D3D12 (ClearDepthStencilView, and a D3D12 render pass's CLEAR), does it
 	// cover the whole view and so erase the extent drawn so far. D3D9's Clear
 	// covers the current viewport and scissor, glClear the scissor and a Vulkan
 	// render pass's CLEAR its render area, none of which ReShade reports: there
 	// the crop keeps the largest viewport drawn in the frame.
 	void observe_depth_clear(device_api api, uint32_t rect_count, bool sampled_plane, uint64_t position = 0)
 	{
-		if (rect_count == 0 && sampled_plane &&
-			(api == device_api::d3d10 || api == device_api::d3d11 || api == device_api::d3d12))
-		{
+		if (!sampled_plane)
+			return;
+		last_overwrite = position;
+		if (rect_count == 0 && (api == device_api::d3d10 || api == device_api::d3d11 || api == device_api::d3d12))
 			observe_full_clear();
-			last_full_clear = position;
-		}
+	}
+	// A D3D12 render pass that DISCARDs the sampled plane's depth leaves it
+	// undefined: it erases what was there as a clear does (the hold's cleared
+	// gate, the lineage), but has no value, so it adds no clear convention and
+	// does not restart the capture crop.
+	void observe_depth_discard(uint64_t position)
+	{
+		depth_erased = true;
+		last_overwrite = position;
 	}
 	// Raster or mesh work at this position.
 	void observe_draw(uint64_t position)
@@ -103,7 +125,7 @@ struct depth_stencil_frame_stats
 	void merge_positions(const depth_stencil_frame_stats &later, uint64_t offset)
 	{
 		if (later.first_draw && !first_draw) first_draw = later.first_draw + offset;
-		if (later.last_full_clear) last_full_clear = later.last_full_clear + offset;
+		if (later.last_overwrite) last_overwrite = later.last_overwrite + offset;
 		if (later.transfer_position)
 			observe_transfer(later.transfer_source, later.transfer_position + offset, later.transfer_full);
 		transfer_alias |= later.transfer_alias;

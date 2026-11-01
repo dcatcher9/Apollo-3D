@@ -10,6 +10,8 @@ namespace {
   struct rotation_fixture:raw_runtime_fixture {
     enum class cadence { single,abc,aabb,offturn,offturn_history,missing,concurrent,interrupted,moving,auxiliary,copy_history,copy_end,copy_rescue,
       gap_double,gap_ui,gap_overlay,gap_long,gap_cleared,paused };
+    enum class rescue { clear,rect,pass_clear,discard,boxed };
+    rescue rescue_route=rescue::clear;
     using action_t=BOOL (*)(api::effect_runtime *);
     native_game3d_observer game3d{*this};
     // What the native render of the latest Present consumed.
@@ -172,6 +174,20 @@ namespace {
       const auto dsv=target.heap->GetCPUDescriptorHandleForHeapStart();
       commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,target.clear_depth,0,0,nullptr);
     }
+    // copy_depth by CopyTextureRegion with an explicit source box spanning the
+    // whole subresource (legal for depth-stencil, which copies only whole
+    // subresources).
+    void copy_depth_box(target_t &from,target_t &to){
+      transition(commands.p,from.texture.p,D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+      transition(commands.p,to.texture.p,D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_COPY_DEST);
+      D3D12_TEXTURE_COPY_LOCATION source{},dest{};
+      source.pResource=from.texture.p;source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      dest.pResource=to.texture.p;dest.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      const D3D12_BOX box{0,0,0,UINT(from.width),UINT(from.height),1};
+      commands->CopyTextureRegion(&dest,0,0,0,&source,&box);
+      transition(commands.p,to.texture.p,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_DEPTH_WRITE);
+      transition(commands.p,from.texture.p,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    }
     // A game that copies its scene depth into another depth-stencil allocation
     // of the same geometry, allocated before the scene (the lower lifetime
     // identity). copy_history: a history copy at the start of the frame, before
@@ -180,6 +196,11 @@ namespace {
     // copy_end: the same copy after the scene draw. copy_rescue: the scene is
     // copied out, then its own allocation is cleared and reused for a small
     // first-person pass, so only the destination holds this frame's scene.
+    // rescue_route: how the scene's allocation is overwritten after the copy,
+    // by each route ReShade reports (ClearDepthStencilView without or with one
+    // full-view rectangle, a render pass whose depth access is CLEAR, or one
+    // that DISCARDs it), or the copy is a CopyTextureRegion with a
+    // full-extent source box (boxed; then a plain clear).
     // Every frame draws a new center depth, so a copy one frame old shows in
     // the raw center of the captured backup (pixels()).
     // A colour-only UI pass (no depth-stencil) and a HUD pass into its own
@@ -237,13 +258,29 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         copy_depth(*scene,*decoy);draw(*scene);
       }else if(mode==cadence::copy_end){draw(*scene);copy_depth(*scene,*decoy);}
       else{
-        draw(*scene);copy_depth(*scene,*decoy);
+        draw(*scene);
+        if(rescue_route==rescue::boxed)copy_depth_box(*scene,*decoy);else copy_depth(*scene,*decoy);
         const auto dsv=scene->heap->GetCPUDescriptorHandleForHeapStart();
+        if(rescue_route==rescue::pass_clear)erase_scene(1);
+        else if(rescue_route==rescue::discard)erase_scene(2);
+        else if(rescue_route==rescue::rect){
+          const D3D12_RECT all{0,0,LONG(width),LONG(height)};
+          commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,scene->clear_depth,0,1,&all);
+        }else clear_depth(*scene);
         commands->OMSetRenderTargets(0,nullptr,FALSE,&dsv);
-        clear_depth(*scene);
         commands->SetGraphicsRootSignature(root.p);commands->SetPipelineState(depth32_pipeline.p);
         commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         const D3D12_VIEWPORT viewport{0,0,float(width),float(height),0,1};
+        if(rescue_route==rescue::discard){
+          // A DISCARD leaves the depth undefined: the pass's full-view reset
+          // draw (a flat .5) replaces it, so only the destination holds the
+          // scene whatever the driver kept.
+          const D3D12_RECT all{0,0,LONG(width),LONG(height)};
+          commands->RSSetViewports(1,&viewport);commands->RSSetScissorRects(1,&all);
+          struct {float w,h;unsigned pattern;} reset{float(width),float(height),19};
+          commands->SetGraphicsRoot32BitConstants(0,3,&reset,0);
+          commands->DrawInstanced(3,1,0,0);
+        }
         const D3D12_RECT scissor{LONG(width*3/4),LONG(height*3/4),LONG(width),LONG(height)};
         commands->RSSetViewports(1,&viewport);commands->RSSetScissorRects(1,&scissor);
         struct {float w,h;unsigned pattern;} constants{float(width),float(height),19};
@@ -664,6 +701,16 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       require(stereo_observed[drawn-1]>0,"Copy case never produced actual stereo pixels");
       std::printf("PASS %s: the copy's real source is current depth on every Present\n",label);
     }
+    // copy_rescue by each route in turn (rescue_route): whatever overwrote the
+    // scene's own allocation after the copy, and a full-extent boxed copy,
+    // the destination is the captured current depth on every Present.
+    static const char *rescue_label(rescue route){
+      return route==rescue::rect ? "copy-of-rect-cleared-pass" : route==rescue::pass_clear ? "copy-of-render-pass-cleared-pass" :
+        route==rescue::discard ? "copy-of-discarded-pass" : route==rescue::boxed ? "boxed-copy-of-cleared-pass" : "copy-of-cleared-pass";
+    }
+    void check_rescues(std::initializer_list<rescue> routes){
+      for(const auto route:routes){rescue_route=route;stereo_observed={};check_copies(cadence::copy_rescue,rescue_label(route));}
+    }
     // The scene draws every other Present (gap_double, gap_ui, gap_overlay) or
     // one Present in 40 (gap_long). In between: a frame presented twice, a
     // colour-only UI pass, or a HUD pass into its own depth-stencil every
@@ -834,14 +881,21 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       create_pipeline();normal=false;
       if(test_case=="--crowded-rotating-startup")
         for(unsigned i=0;i<12;++i)unrelated.push_back(target(width,height,1,19));
-      const bool copies=test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue";
+      // --copy-rescue runs every route in turn; --copy-rescue-<route> one alone,
+      // drawn from the game's first frame.
+      const bool rescues=test_case.rfind("--copy-rescue",0)==0;
+      const bool copies=test_case=="--copy-history" || test_case=="--copy-end" || rescues;
       if(copies){decoy=target(width,height,1,15);scene=target(width,height,1,14);}
       else{scene=target(width,height,1,14);decoy=target(width,height,1,15);}
       // The cut case's first new scene has half the size (another allocation shape).
       third=test_case=="--gap-cut" ? target(width/2,height/2,1,18) : target(width,height,1,18);
       if(test_case=="--copy-history")set_mode(cadence::copy_history);
       if(test_case=="--copy-end")set_mode(cadence::copy_end);
-      if(test_case=="--copy-rescue")set_mode(cadence::copy_rescue);
+      if(rescues)set_mode(cadence::copy_rescue);
+      if(test_case=="--copy-rescue-rect")rescue_route=rescue::rect;
+      if(test_case=="--copy-rescue-pass-clear")rescue_route=rescue::pass_clear;
+      if(test_case=="--copy-rescue-discard")rescue_route=rescue::discard;
+      if(test_case=="--copy-rescue-boxed")rescue_route=rescue::boxed;
       if(test_case.rfind("--gap-",0)==0){
         gap_pipelines();
         if(test_case=="--gap-overlay")overlay=target(width,height,1,19);
@@ -880,7 +934,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         else if(test_case=="--layout")check_layout();
         else if(test_case=="--copy-history")check_copies(cadence::copy_history,"copy-history-before-draw");
         else if(test_case=="--copy-end")check_copies(cadence::copy_end,"copy-after-draw");
-        else if(test_case=="--copy-rescue")check_copies(cadence::copy_rescue,"copy-of-cleared-pass");
+        else if(test_case=="--copy-rescue")check_rescues({rescue::clear,rescue::rect,rescue::pass_clear,rescue::discard,rescue::boxed});
+        else if(rescues)check_rescues({rescue_route});
         else if(test_case=="--gap-none")check_gap(cadence::interrupted,"gap-no-depth-work");
         else if(test_case=="--gap-double")check_gap(cadence::gap_double,"gap-double-present");
         else if(test_case=="--gap-ui")check_gap(cadence::gap_ui,"gap-color-only-ui");
@@ -949,12 +1004,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain]\n",stderr);return 2;}
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--copy-rescue-rect|--copy-rescue-pass-clear|--copy-rescue-discard|--copy-rescue-boxed|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
     require(test_case.empty() || test_case=="--overlap" || test_case=="--interrupted-startup" || test_case=="--moving-startup" || test_case=="--rotating-startup" || test_case=="--crowded-rotating-startup" || test_case=="--flat-startup" || test_case=="--layout" ||
-      test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue" || test_case=="--gap-none" || test_case=="--gap-double" ||
+      test_case=="--copy-history" || test_case=="--copy-end" || test_case=="--copy-rescue" || test_case=="--copy-rescue-rect" ||
+      test_case=="--copy-rescue-pass-clear" || test_case=="--copy-rescue-discard" || test_case=="--copy-rescue-boxed" ||
+      test_case=="--gap-none" || test_case=="--gap-double" ||
       test_case=="--gap-ui" || test_case=="--gap-overlay" || test_case=="--gap-long" || test_case=="--gap-cleared" || test_case=="--gap-cut" ||
       test_case=="--second-swapchain","Unknown isolated rotation case");
     select_native_boot();

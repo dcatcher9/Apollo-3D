@@ -6252,9 +6252,13 @@ source drew in the frame (a history copy, older depth), or the source still hold
 newer depth at the end of the frame (a duplicate, or a partial copy). The destination is then
 left as its last own work left it (or, if the game also cleared it, treated as cleared), so it
 is neither captured as current depth nor selected; the source is. The one exception is a whole
-copy of a pass the source drew and then cleared away (a full clear after the copy): only the
-destination still holds that depth, so it stays a candidate and takes the source's clear
-convention for its depth direction. A copy from anything else (a buffer, an MSAA, mipped or
+copy (of the whole subresource, also by a box that spans it) of a pass the source drew and then
+overwrote after the copy: a clear of its sampled plane, with or without rectangles, a render pass
+whose depth access is CLEAR, or a D3D12 render pass that DISCARDs it. Only the destination may
+still hold that pass, so it stays a candidate, judged by its content like any other, and takes
+the source's clear convention for its depth direction. A source that overwrites the pass only by
+drawing (a full-view reset draw that always passes the depth test) is not seen as overwritten:
+the copy then counts as a duplicate. A copy from anything else (a buffer, an MSAA, mipped or
 array depth, another size or format, or a source whose work is on another queue) keeps its
 activity. No relationship to the swapchain buffer index is assumed.
 
@@ -6525,12 +6529,17 @@ accepted consequences:
   own submissions, after its depth clear and before its draws, is taken for a cleared screen and
   is mono (fail-safe; whether any game presents that way has not been measured).
 - **Copies of scene depth.** A copy of another same-geometry candidate is never current depth of
-  its destination, except a whole copy of a pass the source then cleared away (see
+  its destination, except a whole copy of a pass the source then overwrote by a clear (with or
+  without rectangles) or a render pass that clears or DISCARDs it (see
   [Selecting scene depth](#selecting-scene-depth)). A game whose only copy of the scene depth is
-  partial, or is made on another queue than the one that drew it, then has none Generic can
-  show while the source holds something else at Present: that frame fails safe (the previous
-  Present's depth held within the source age, then mono). A copy from a buffer, an MSAA or mipped
-  depth, or another size or format keeps its activity and is judged by its content like any buffer.
+  partial, is made on another queue than the one that drew it, or whose source overwrites the
+  copied pass only by drawing (a full-view reset draw that always passes the depth test), then has
+  no copy Generic can show. What the source holds at Present is judged by its content like any
+  buffer: when it does not qualify (a cleared view with a small first-person pass), that frame
+  fails safe (the previous Present's depth held within the source age, then mono); when its later
+  pass qualifies as scene depth (another camera's full view), that pass's depth is shown. A copy
+  from a buffer, an MSAA or mipped depth, or another size or format keeps its activity and is
+  judged by its content like any buffer.
 
 ## Activation and recovery
 

@@ -252,7 +252,8 @@ static void check_capture_extent()
 // A copy of another same-geometry candidate is not depth of its own: a history
 // copy made before the source drew holds older depth, and a copy the source
 // still holds is a duplicate. Only a whole copy of a pass the source then
-// cleared away keeps the destination (docs/reshade-sbs.md, Selecting scene depth).
+// overwrote (a clear, with or without rectangles, or a DISCARD) keeps the
+// destination (docs/reshade-sbs.md, Selecting scene depth).
 static void check_transfer_lineage()
 {
 	const resource scene { 0x1000 }, history { 0x2000 }, msaa { 0x3000 }, small { 0x4000 }, buffer { 0x5000 };
@@ -265,7 +266,15 @@ static void check_transfer_lineage()
 		device.depth_stencil_resources.emplace(value, info);
 	};
 	track(scene, 1920, 1080, 1); track(history, 1920, 1080, 1); track(msaa, 1920, 1080, 4); track(small, 960, 540, 1);
-	enum class op { draw, clear, copy, partial };
+	// rect_clear: a depth clear limited to one (full-view) rectangle; discard: a
+	// D3D12 render pass that DISCARDs the depth; boxed: a copy with a source box
+	// spanning the source's whole plane (whole_plane_box decides it is full).
+	enum class op { draw, clear, rect_clear, discard, copy, boxed, partial };
+	const subresource_box whole { 0, 0, 0, 1920, 1080, 1 }, part { 0, 0, 0, 1920, 540, 1 }, offset { 1, 0, 0, 1920, 1080, 1 };
+	const auto &scene_desc = device.depth_stencil_resources.at(scene).desc;
+	require_snapshot(whole_plane_box(nullptr, scene_desc) && whole_plane_box(&whole, scene_desc) &&
+		!whole_plane_box(&part, scene_desc) && !whole_plane_box(&offset, scene_desc),
+		"A copy box spanning the source's whole plane was not a full copy, or a partial box was");
 	struct step
 	{
 		op kind;
@@ -284,10 +293,14 @@ static void check_transfer_lineage()
 				auto &stats = list.stats_per_used_depth_stencil[s.target];
 				if (s.kind == op::draw) { stats.total.observed_work = true; ++stats.total.drawcalls; stats.observe_draw(list.position()); }
 				else if (s.kind == op::clear) { stats.clear_zero = true; stats.observe_depth_clear(device_api::d3d12, 0, true, list.position()); }
+				else if (s.kind == op::rect_clear) { stats.clear_zero = true; stats.observe_depth_clear(device_api::d3d12, 1, true, list.position()); }
+				else if (s.kind == op::discard) stats.observe_depth_discard(list.position());
 				else
 				{
 					stats.total.observed_work = true; ++stats.total.scene_writes;
-					stats.observe_transfer(s.source, list.position(), s.kind == op::copy);
+					const bool full = s.kind == op::copy ||
+						(s.kind == op::boxed && whole_plane_box(&whole, device.depth_stencil_resources.at(s.source).desc));
+					stats.observe_transfer(s.source, list.position(), full);
 				}
 			}
 			queue.merge(list);
@@ -308,6 +321,26 @@ static void check_transfer_lineage()
 	const auto &kept = frame.at(history);
 	require_snapshot(active(frame, history) && !kept.transfer_alias && kept.clear_zero,
 		"A whole copy of a pass its source cleared away lost its activity or the source's clear convention");
+	// Every overwrite of the source after the copy counts: a clear limited to
+	// rectangles too (it restarts no capture crop, but the pass may be gone).
+	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::copy, history, scene}}, {{op::rect_clear, scene}, {op::draw, scene}}});
+	require_snapshot(active(frame, history) && !frame.at(history).transfer_alias && frame.at(history).clear_zero,
+		"A whole copy of a pass its source cleared by a rectangle lost its activity or the source's clear convention");
+	// A render pass that DISCARDs the source's depth after the copy (then a reset
+	// draw) overwrites the pass as a clear does; it has no clear value of its
+	// own, so the destination takes the source's earlier clear convention.
+	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::copy, history, scene}}, {{op::discard, scene}, {op::draw, scene}}});
+	require_snapshot(active(frame, history) && !frame.at(history).transfer_alias && frame.at(history).clear_zero &&
+		frame.at(scene).depth_erased, "A whole copy of a pass its source discarded lost its activity or the source's clear convention");
+	// A copy with a box spanning the source's whole plane is a whole copy.
+	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::boxed, history, scene}}, {{op::clear, scene}, {op::draw, scene}}});
+	require_snapshot(active(frame, history) && !frame.at(history).transfer_alias,
+		"A boxed whole copy of a pass its source cleared away lost its activity");
+	// A history copy before the source's first draw stays older depth, however
+	// the source is overwritten later in the frame.
+	frame = run({{{op::boxed, history, scene}, {op::discard, scene}, {op::draw, scene}, {op::rect_clear, scene}, {op::draw, scene}}});
+	require_snapshot(!frame.count(history) && active(frame, scene),
+		"A history copy made before its source drew stayed current depth after a later overwrite");
 	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::partial, history, scene}, {op::clear, scene}, {op::draw, scene}}});
 	require_snapshot(!active(frame, history), "A partial copy of a pass was preferred over a source that drew");
 	frame = run({{{op::copy, history, scene}}});

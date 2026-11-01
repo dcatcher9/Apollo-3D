@@ -1416,12 +1416,18 @@ not an uncontended frame-time benchmark. Execution is opt-in and serial, outside
 The same fixture accepts one optional isolated case after its four normal arguments:
 `--overlap`, `--interrupted-startup`, `--moving-startup`, `--rotating-startup`,
 `--crowded-rotating-startup`, `--flat-startup`, `--layout`, `--copy-history`, `--copy-end`,
-`--copy-rescue`, `--gap-none`, `--gap-double`, `--gap-ui`, `--gap-overlay`, `--gap-long`,
+`--copy-rescue`, `--copy-rescue-rect`, `--copy-rescue-pass-clear`, `--copy-rescue-discard`,
+`--copy-rescue-boxed`, `--gap-none`, `--gap-double`, `--gap-ui`, `--gap-overlay`, `--gap-long`,
 `--gap-cleared`, `--gap-cut` or `--second-swapchain`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
 before the scene: a history copy at the start of the frame (the destination cleared on its first
-frames), a copy after the scene draw, and a copy of a pass the scene's allocation then clears for a
-small first-person draw. The scene, or in the last case the destination, must be the current
-depth on every Present, with this frame's raw center and full stereo. The gap cases draw the scene
+frames), a copy after the scene draw, and a copy of a pass the scene's allocation then overwrites
+for a small first-person draw. The scene, or in the last case the destination, must be the current
+depth on every Present, with this frame's raw center and full stereo. `--copy-rescue` overwrites
+the scene's allocation after the copy by each route in turn: `ClearDepthStencilView` without and
+with one full-view rectangle, a render pass whose depth access is CLEAR, and one that DISCARDs it
+followed by a full-view flat reset draw; its last route copies by `CopyTextureRegion` with a source
+box spanning the whole subresource, then clears. `--copy-rescue-<route>` runs one route alone
+from the game's first frame (the [lineage rule](../../docs/reshade-sbs.md#selecting-scene-depth)). The gap cases draw the scene
 every other Present (one in 40 for `--gap-long`) with nothing, a repeated colour, a colour-only UI
 pass or a HUD into its own depth-stencil in between: every in-between Present must hold its real
 frame's depth at full stereo, and with one real frame in 40 the hold must end at the source age
