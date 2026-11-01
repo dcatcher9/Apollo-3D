@@ -2350,8 +2350,9 @@ where DLSS-G presented no generated Present), and `--trace` prints `TRACE frame=
 each Present that offered or held.
 `reads=lost_at_present` fails every metadata read of the add-on during the Presents made while
 the frame is current, after its calls (`SunshineStreamlineTestFailMetadataReads`), as a read fails
-that lost the race with the camera and tag writers on every attempt (`observer_snapshot.h`), which
-no fixture produces by itself. The probe tests reach the same seam as
+that failed on every attempt (`observer_snapshot.h`: the publication changed under it, or the
+slot's pin count changed between its load and its pin, through other readers or a writer's base
+pin), which no fixture produces by itself. The probe tests reach the same seam as
 `testing::fail_metadata_reads`, the SL route as `testing::route_of`, and hold DLSS-G's evaluation
 supply lock with `testing::hold_evaluation_supply`; `testing::supply_evaluation` and
 `testing::evaluation_supplied` make DLSS-G's supply and read it as a refused FG tag boundary does

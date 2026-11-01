@@ -14,9 +14,12 @@
 //   render (one Present; Auto, or manual On through detection):
 //     1. bits: the offered candidate bits (ui_detection::candidate), and the
 //        candidate_signatures of the offered kinds; identity: the provider's
-//        present_identity {hold_previous} (Present counting: a Present that
-//        offers nothing within the reported generated count of the last one
-//        that offered a UI tag, ui_evidence::generated_without_input);
+//        present_identity {hold_previous}: a generated Present by depth's
+//        window (ui_evidence::generated_in_window: a Present that offers no
+//        input while it still presents the frame the last Present that
+//        offered a UI tag presented, by present_fg::depth_frame; the
+//        reported generated count when that Present's presenting floor was
+//        0) or by snapshot identity (ui_evidence::same_snapshot_inputs);
 //     2. accepted = session.accepted(bits, signatures) (manual On: every
 //        offered candidate, without the ledger);
 //     3. t = state.arbitrate(identity, observation, bits);
@@ -244,11 +247,13 @@ namespace sunshine_game3d::ui_temporal {
     return delta;
   }
 
-  // T1 identity of one Present (M6), by Present counting: whether it offers
-  // nothing within the reported generated count of the last Present that
-  // offered a UI tag (ui_evidence::generated_without_input, hold_previous). A
-  // HUD-less pairing names no real frame: an offered image makes the Present
-  // real.
+  // T1 identity of one Present (M6): whether it is generated (hold_previous),
+  // by depth's window (ui_evidence::generated_in_window: no input offered
+  // while it still presents the frame of the last Present that offered a UI
+  // tag; the reported generated count only where that Present's presenting
+  // floor was 0) or by snapshot identity (ui_evidence::same_snapshot_inputs).
+  // A HUD-less pairing names no real frame: an offered image makes the
+  // Present real. (Until 11-01 this named Present counting alone, F29.)
   struct present_identity {
     bool generated{};
   };
@@ -305,10 +310,12 @@ namespace sunshine_game3d::ui_temporal {
     // decision (detected_mask) while that was made in the same identity
     // scope (hold_scope_changed: an observation revision alone keeps it);
     // otherwise it has no mask and the chain ends. No multiplier constant and
-    // no time bound: Present counting (ui_evidence::generated_without_input)
-    // classifies only Presents that offer nothing, so a count reported too
-    // high holds only those, and one too low leaves the later ones to the
-    // grace below. A real
+    // no time bound: depth's window (ui_evidence::generated_in_window, with
+    // the reported count only where that window was 0) classifies only
+    // Presents that offer nothing, so a count reported too high holds only
+    // those, and one too low leaves the later ones to the grace below; a
+    // Present that re-offers exactly the last detecting Present's snapshots
+    // under FG is held by snapshot identity (same_snapshot_inputs). A real
     // Present always detects; its detection pushes per_frame_hold_reset when
     // no real decision exists in this chain (the first detection, an
     // identity scope change, an inactive frame or a Present without a mask

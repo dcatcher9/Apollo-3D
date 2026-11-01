@@ -264,8 +264,9 @@ namespace sunshine_streamline {
     void unlock_tokens();
     bool pin_tokens(unsigned index);
     void unpin_tokens();
-    // The next count metadata reads fail, as a read that lost the race with
-    // the writers on every attempt does (observer_snapshot.h); 0 ends it.
+    // The next count metadata reads fail, as a read does that failed on
+    // every attempt (observer_snapshot.h: the publication changed under it,
+    // or other readers or a writer changed the slot's pin count); 0 ends it.
     void fail_metadata_reads(unsigned count);
     // Holds the DLSS-G evaluation supply lock exclusively until released, on
     // the calling thread; a hook that reads the supply must run on another.

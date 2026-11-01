@@ -151,8 +151,9 @@ namespace sunshine_streamline {
     metadata_owner metadata;
 #if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
     // Test seam: the next count metadata reads (read_metadata) fail, as a
-    // read fails that lost the race with the writers on every attempt
-    // (observer_snapshot.h), which no fixture produces by itself
+    // read fails on every attempt (observer_snapshot.h: the publication
+    // changed under it, or other readers or a writer changed the slot's pin
+    // count between its load and its pin), which no fixture produces by itself
     // (testing::fail_metadata_reads, SunshineStreamlineTestFailMetadataReads).
     std::atomic<unsigned> metadata_read_failures{};
 #endif

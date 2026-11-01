@@ -76,8 +76,10 @@ namespace sunshine_streamline {
         observation_generation.load(std::memory_order_acquire) == ticket;
     }
 
-    // briefly: retry a read that lost the race with the writers (the
-    // publication changed under it on every attempt, observer_snapshot.h) a
+    // briefly: retry a read that failed on every attempt
+    // (observer_snapshot.h: the publication changed under it, or the slot's
+    // reader count changed between its load and its pin, because another
+    // reader pinned or unpinned the slot or a writer pinned its base) a
     // bounded number of times, like write_metadata, for a call's own camera
     // evidence, which the game never repeats for its frame (capture_evaluation,
     // capture_depth_tag). Until 11-01 such a read refused DLSS-G's camera

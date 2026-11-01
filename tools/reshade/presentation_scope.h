@@ -12,7 +12,11 @@
 
 // presentation_scope (docs/reshade-sbs.md, Presentation scope): the FG value
 // types, the one FG state machine (fg_view) and each Present's FG snapshot
-// (present_fg), and their pure predicates, each under its own name. The FG
+// (present_fg), and their predicates, each under its own name. Most are
+// pure; select_frame_generation_scope, frame_generation_retained and
+// sunshine_ngx::frame_generation_owns_depth read the capture owner under its
+// mutex (frame_generation_scope_live, frame_generation_retired), so none of
+// them may be called with that mutex held. The FG
 // mode itself is the probe's FG options store (presentation_scope_mode.inl),
 // whose reads always get the last committed options: no FG read is busy since
 // 11-01, and the busy rules each reader had for one are deleted. The SL

@@ -4355,9 +4355,10 @@ namespace {
 
   // A call's camera read that lost the race with the writers (lane P,
   // 11-01; the PD design's seen-not-fixed race). read_metadata fails only
-  // when the published camera and tag metadata changed under it on every
-  // attempt (observer_snapshot.h), which a burst of camera, tag and token calls
-  // on other threads can do (testing::fail_metadata_reads). Until 11-01 such
+  // when every attempt failed: the published camera and tag metadata changed
+  // under it, or the slot's pin count changed between its load and its pin
+  // (other readers, a writer's base pin; observer_snapshot.h), which a burst
+  // of calls on other threads can do (testing::fail_metadata_reads). Until 11-01 such
   // a read made an SL evaluation's snapshot busy (capture_evaluation, which
   // DLSS-G's camera evidence also reads: scope_changed, no copy) and dropped a
   // whole depth tag boundary (capture_depth_tag). The call's read is now

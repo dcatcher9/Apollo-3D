@@ -1382,9 +1382,10 @@ count from that Present, so where the next frame's evaluation began inside it (D
 earlier frames inside the next frame's recording, Assassin's Creed Shadows' pattern; multi-frame
 generation) the next frame's Presents held the earlier frame's decision (HUD edges with parallax
 for a moment; session row `fg-on-ui-window-ends-at-next-evaluation-hitch` and five fixed-set seeds, judged by
-`ui_frame:held` where depth presented a frame at the Present that offered the tag). Where the Present that offered the tag had no depth window (no API depth), Present
+`ui_frame:held` where depth presented a frame at the Present that offered the tag). Where the Present that offered the tag had no depth window (presenting floor 0 at that Present: no API depth, or an API scope without an open window, such as a silent FG scope without FG stamps), Present
 counting decides as before: a Present that offers no input within the reported generated count
-(one while it is unknown) of that Present is generated (`ui_mask::generated_without_input`). The
+(one while it is unknown) of that Present is generated (`ui_evidence::generated_without_input`, the
+fallback of `ui_evidence::generated_in_window`). The
 capture owner, however, offers each kind's
 newest ready snapshot on every Present while it is recent (250 ms), and the offscreen UI layer its
 newest copy, so a generated Present normally re-offers its real frame's inputs instead of offering
@@ -4641,8 +4642,10 @@ depth carries the viewport's own camera evidence as an unframed FG tag does: its
 the recent camera's depth direction where `DLSSG.DepthInverted` is absent, and the camera's steady
 depth coefficients when both directions agree; `DLSSG.CameraNear`/`CameraFar` are not used, and no
 jitter or frame correlation is claimed. Busy or lost metadata refuses it (`scope_changed`). A read of
-that camera evidence which lost the race with the camera, tag and token writers (the published
-metadata changed under it on every attempt) is retried a bounded number of times first, like a
+that camera evidence which failed on every attempt (the published metadata changed under it, or
+the slot's pin count changed between its load and its pin: another reader, the present thread or a
+hook, pinned or unpinned the slot, or a writer pinned its base) is retried a bounded number of
+times first, like a
 contended metadata write (`read_metadata(true)`, 48 pauses then 16 yields), and so is the read of an
 SL evaluation's snapshot and of a depth tag boundary (`capture_evaluation`, `capture_depth_tag`):
 until 11-01 such a read refused DLSS-G's copy, made an SL evaluation's snapshot busy, or dropped
@@ -4865,9 +4868,13 @@ until SR was readable (110-235 ms). A failed or ambiguous FG-options observation
 and its retained display pixels, but does not confirm that FG is Off. Selection excludes those
 unconfirmed FG inputs and permits independently validated ordinary SL or NGX depth, with the
 selected capture's own encoding and camera. No FG read is busy since 11-01: every read gets the
-last committed options (the FG options store, [Presentation scope](#presentation-scope)), so a
-confirmed policy or this revoked-scope fallback policy changes only at an observed options change
-and cannot restore the old FG scope. A subsequent successful enabled
+last committed options (the FG options store, [Presentation scope](#presentation-scope)). A
+confirmed policy changes at an observed options change, and is also revoked by an ambiguous read,
+or by an unavailable one while FG is required, which the FG target or its loss revision changing
+(`retain_fg_target`), an observation restart or a dropped viewport mode cause without any options
+call; this revoked-scope fallback policy changes only at an observed options change or a restart
+(F26); neither can
+restore the old FG scope (until 11-01 this said both changed only at an options call, F24). A subsequent successful enabled
 observation restores mandatory FG selection. Older captures from the
 previous ownership interval cannot be resurrected. While a live FG scope owns a viewport, ordinary
 evaluation adapters do not also nominate that same viewport; FG's first attempt supersedes only
@@ -6378,9 +6385,14 @@ changes; without that metadata the raw fallback cannot establish physical equiva
 
 ### Presentation scope
 
-`presentation_scope.h` owns the FG value declarations and their pure
+`presentation_scope.h` owns the FG value declarations and their
 predicates, including DLSS-G's frame inputs, the one FG state machine
-(`fg_view`) and a Present's FG snapshot (`present_fg`). The SL route and
+(`fg_view`) and a Present's FG snapshot (`present_fg`). Most predicates are
+pure; three read the capture owner under its mutex (`select_frame_generation_scope`
+and NGX's `frame_generation_owns_depth` through `frame_generation_scope_live`,
+`frame_generation_retained` through `frame_generation_retired`), so none of the
+three may be called with that mutex held (until 11-01 the header called them all
+pure, F49). The SL route and
 nested-capture adapter bodies and the deferred-frame observations stay at their
 original sites, because they read live Streamline state.
 
