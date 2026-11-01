@@ -4701,8 +4701,12 @@ Off lands between it and the next SR evaluation. The `completed_before_gap` loss
 Assassin's Creed Shadows' logs of 10-24 to 10-27 came from its refused SR nominations instead,
 missing frames since 10-28 (below). The finished FG copy is
 held across FG Off within its source age, as any source's missing frame is: the queue stays the
-API's while the display holds an FG copy younger than the source age
-(`depth_capture::frame_generation_retained`), so color-only Presents hold it, and the same
+API's while the display holds an FG copy, or any Streamline copy of the viewport whose FG role FG
+Off retired (until FG On; the copy of its ordinary source a silent scope let the display show),
+younger than the source age (`depth_capture::frame_generation_retained`; until 11-01 an FG copy
+only, so with the display on the silent scope's SR copy and DLSS-G's kept copy still unreadable,
+FG Off's released association made those Presents mono, `source_handoff`), so color-only Presents
+hold it, and the same
 viewport's ordinary SR/RR source of the copy's epoch, which follows it, takes the viewport only at
 its first readable frame; while that source is pending (as an SR copy on another queue is until its
 recording retired) the FG copy is held (readiness lines show `source_action=hold

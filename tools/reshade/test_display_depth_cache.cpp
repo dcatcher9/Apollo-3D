@@ -433,7 +433,9 @@ namespace {
     // the scope's newest copy within the source age (frame_generation_retained,
     // continuity gap C8 until 10-26): an FG copy younger than the source age
     // keeps the queue under any policy but a revoked (unconfirmed) one. An
-    // expired copy, an ordinary or NGX copy and an empty display keep nothing.
+    // expired copy, an NGX copy, an empty display and an ordinary copy of a
+    // viewport whose FG role no FG Off retired keep nothing (the capture
+    // owner's fg_off_retained_lineage_regression covers a retired one).
     const auto keeps = [&](const sunshine_game3d::depth_output::retained_depth &retained, const depth_capture::selection_policy &p,
         std::uint64_t now) { return depth_capture::frame_generation_retained(retained, p, now); };
     require(keeps(held, {}, 1000) && keeps(held, {}, 1000 + sunshine_freshness::source_age_ms - 1),

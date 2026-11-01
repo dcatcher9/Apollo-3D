@@ -412,6 +412,8 @@ if(BUILD_TESTING)
   target_compile_features(reshade_display_depth_cache_tests PRIVATE cxx_std_17)
   target_compile_definitions(reshade_display_depth_cache_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_include_directories(reshade_display_depth_cache_tests SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
+  # frame_generation_retained reads the capture owner's FG retirement.
+  target_link_libraries(reshade_display_depth_cache_tests PRIVATE sunshine_game3d_core_archive)
   if(MINGW)
     target_link_options(reshade_display_depth_cache_tests PRIVATE -static)
   endif()

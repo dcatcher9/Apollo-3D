@@ -4045,6 +4045,9 @@ int main(int argc, char **argv) {
     require(depth_capture::testing::live_source_admission_regression(),
       "a pipelined live source was locked out by an expired, absent or replaced owner, or a delivering owner alternated or lost selection to a pixel-less capture");
     std::puts("PASS live pipelined sources use their own completed snapshots after owner expiry, reset or source change; delivering owners are kept through rejected attempts and stay revocable");
+    require(depth_capture::testing::fg_off_retained_lineage_regression(),
+      "FG Off released the queue while the display held its retired FG role's viewport's ordinary copy, or kept it for an expired, other or revoked copy, or after FG On");
+    std::puts("PASS FG Off keeps the queue associated while the display holds any copy of the retired FG role's viewport within the source age");
     require(depth_capture::testing::crop_region_regression(), "native depth crop admitted an unsupported copy or rejected a valid extent");
     require(depth_capture::testing::record_diagnostic_regression(), "record diagnostics changed admission or were overwritten by another attempt");
     require(depth_capture::testing::snapshot_basis_regression(), "Snapshot state-basis provenance changed admission");

@@ -1151,6 +1151,62 @@ namespace sunshine_streamline::depth_capture {
           capture_pool.slots[pixel_slot_limit - 1].id != overflow) return false;
       return true;
     }
+    // FG Off with the display on its viewport's ordinary copy (deferred fixes
+    // round 2, C3's residual): a silent scope let the display show the
+    // viewport's SR copy, a pending pick of DLSS-G's copy in flight
+    // established the queue on the FG role, and a confirmed Off ends that
+    // association while the FG copies it keeps are still unreadable. The
+    // display's copy of the retired role's viewport, younger than the source
+    // age, keeps the queue the API's as an FG copy does
+    // (frame_generation_retained), so the Presents until a kept copy is
+    // readable hold it instead of going mono (source_handoff). Not once it
+    // expired, not for another viewport's or another API's copy, not under a
+    // revoked scope, and not once FG On restored the role. Until 11-01 only an
+    // FG copy kept the queue.
+    bool fg_off_retained_lineage_regression() {
+      struct cleanup {
+        std::array<slot, slot_limit> saved_slots{capture_pool.slots};
+        std::array<evaluation_namespace, provider_count> saved_evaluations{evaluations};
+        bool saved_requested{requested.load()};
+        std::uint64_t saved_serial{serial.load()};
+        ~cleanup() {
+          capture_pool.slots = saved_slots; evaluations = saved_evaluations;
+          requested = saved_requested; serial = saved_serial;
+        }
+      } restore;
+      fixture::clear_captures(); requested = true;
+      const auto empty_queue = std::find_if(capture_queues.queues.begin(), capture_queues.queues.end(), [](const auto &entry) { return !entry; });
+      if (empty_queue == capture_queues.queues.end()) return false;
+      *empty_queue = std::make_unique<queue_state>();
+      struct release_queue { std::unique_ptr<queue_state> &entry; ~release_queue() { entry.reset(); } } queue_cleanup{*empty_queue};
+      auto &owner = **empty_queue;
+      constexpr std::uint64_t native = 91, fg_epoch = 91;
+      constexpr auto fg_id = sunshine_scene_depth::fg_source_id(0);
+      // The silent scope's SR copy, shown, then DLSS-G's copy in flight.
+      auto &sr = fixture::make_capture(0, native, provider_kind::streamline, fg_epoch, 10, 0);
+      auto &fg = fixture::make_capture(1, native, provider_kind::streamline, fg_epoch, 11, fg_id);
+      fg.metadata.frame_generation_input = true; fg.finished = fg.success = false;
+      establish_provider(owner, fg, 50);
+      owner.shown_capture = sr.id;
+      retained_depth display;
+      display.capture_id = sr.id; display.metadata = sr.metadata;
+      const auto now = display.metadata.tick;
+      // While FG is on, an ordinary copy keeps nothing of its own: the
+      // scope's policy holds the queue.
+      if (!owner.provider_established || frame_generation_retained(display, {}, now)) return false;
+      retire_source(provider_kind::streamline, fg_epoch, fg_id, 0, true);
+      if (owner.provider_established || fg.invalid || !fg.retired_fg_copy) return false;
+      if (!frame_generation_retained(display, {}, now) ||
+          !frame_generation_retained(display, {}, now + sunshine_freshness::source_age_ms - 1)) return false;
+      auto other_viewport = display; other_viewport.metadata.viewport = 1;
+      auto ngx_copy = display; ngx_copy.metadata.provider = provider_kind::ngx;
+      selection_policy revoked; revoked.exclude_unconfirmed_fg = true;
+      if (frame_generation_retained(display, {}, now + sunshine_freshness::source_age_ms) ||
+          frame_generation_retained(other_viewport, {}, now) || frame_generation_retained(ngx_copy, {}, now) ||
+          frame_generation_retained(display, revoked, now) || frame_generation_retained({}, {}, now)) return false;
+      frame_generation_restored(fg_epoch, 0);
+      return !frame_generation_retained(display, {}, now);
+    }
     bool live_source_admission_regression() {
       // A pipelined game's newest nomination is still in flight at every
       // Present, so its pixels come only from the source's own newest

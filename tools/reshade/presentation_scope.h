@@ -365,17 +365,27 @@ namespace sunshine_streamline::depth_capture {
 
   // FG Off retires the FG source, which releases its queue's API association
   // (retire_source), while the display may still hold that scope's newest
-  // copy. Within the source age it is held as any source's missing frame is:
-  // while the display holds an FG copy younger than the source age and FG is
-  // not revoked (an unconfirmed scope refuses its copies), the queue stays
-  // the API's, so decide_display holds the copy until it expires, a readable
-  // frame of another source replaces it or a source outside its lineage
-  // drops it. Only then may the queue hand over to Generic. The successor's
-  // copies recorded since the shown FG copy stay admissible at FG Off
-  // (retire_source retires only the FG role), so the first of them readable
-  // replaces the held copy at once.
+  // copy, or the copy of the viewport's ordinary source a silent scope let
+  // it show. Within the source age it is held as any source's missing frame
+  // is: while the display holds an FG copy, or any Streamline copy of a
+  // viewport whose FG role FG Off retired (frame_generation_retired, until
+  // FG On), younger than the source age and FG is not revoked (an
+  // unconfirmed scope refuses its copies), the queue stays the API's, so
+  // decide_display holds the copy until it expires, a readable frame of
+  // another source replaces it or a source outside its lineage drops it.
+  // Only then may the queue hand over to Generic. The successor's copies
+  // recorded since the shown copy stay admissible at FG Off (retire_source
+  // retires only the FG role), so the first of them readable replaces the
+  // held copy at once. Until 11-01 only an FG copy kept the queue: with the
+  // display on the silent scope's SR copy and the FG role's owner
+  // established by a pending pick, FG Off released the queue while the FG
+  // copies it kept were still unreadable (DLSS-G's compute copy in flight
+  // past the next Present), and those Presents went mono (source_handoff).
   inline bool frame_generation_retained(const sunshine_game3d::depth_output::retained_depth &previous, selection_policy policy, std::uint64_t now) {
-    return !policy.exclude_unconfirmed_fg && sunshine_game3d::depth_output::frame_generation_copy(previous, now);
+    const auto &before = previous.metadata;
+    return !policy.exclude_unconfirmed_fg && (sunshine_game3d::depth_output::frame_generation_copy(previous, now) ||
+      (previous.capture_id && before.provider == sunshine_scene_depth::provider_kind::streamline &&
+       sunshine_freshness::within_source_age(before.tick, now) && frame_generation_retired(before.epoch, before.viewport, 0)));
   }
 }
 

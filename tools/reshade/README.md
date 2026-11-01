@@ -2466,8 +2466,9 @@ chose holding: across FG Off the FG copy is held within the source age, as any s
 frame is. Two rules make it so. FG Off retires the FG source, which released the queue's API
 association at once, so a color-only Present after it dropped the copy (`source_not_associated`);
 the queue now stays the API's while the display holds an FG copy younger than the source age and FG
-is not revoked (`depth_capture::frame_generation_retained`), and only then may it hand over to
-Generic. And the viewport's ordinary source that follows an FG copy (the same viewport's SR/RR
+is not revoked (`depth_capture::frame_generation_retained`; since 11-01 also any Streamline copy of
+the viewport whose FG role FG Off retired, as the silent scope's SR copy the display showed before
+the Off), and only then may it hand over to Generic. And the viewport's ordinary source that follows an FG copy (the same viewport's SR/RR
 source of the copy's epoch, once FG is off or its scope silent) is no changed source until its first
 readable frame: `decide_display` holds the FG copy meanwhile (`FG_successor_pending`, or
 `retained_after_failed_copy` after a failed copy of that source; the display lineage,
@@ -2495,8 +2496,9 @@ within the copy's source age found nothing to hold; `C8-fg-off-color-only` then 
 (it needs Generic ready before the SR copies, so a much faster run may not reach that loss). Soaks
 over seeds 24 to 311 also no longer fail where FG Off dropped a copy that C5's frames would have held
 (`8796b81ac6f85eb1`, `df5b8bef81f93ab5`, `9b04fb316a7df676`, `b71fd435cfcf4171`: `source_handoff`
-at FG Off). The seam characterization pins the successor rule (twelve rows), and the display cache
-test `frame_generation_retained`. The fixed set's seed `30618337c4062c47` meets the unrowed pattern
+at FG Off). The seam characterization pins the successor rule (twelve rows), the display cache
+test `frame_generation_retained`, and the capture owner's `fg_off_retained_lineage_regression` (run
+by the Streamline probe test) its retired-role case. The fixed set's seed `30618337c4062c47` meets the unrowed pattern
 C6's note names (frame 56 or 57) whenever its frames 36 to 54 take less than the source age: the FG
 copy that `frame_generation_holds` keeps over the viewport's readable SR copies then expires only as
 DLSS-G's compute copy supersedes them. That depends on the run's pace alone (both builds take the same

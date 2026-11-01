@@ -739,7 +739,7 @@ namespace sunshine_streamline::depth_capture {
   namespace testing { bool diagnostic_snapshot_regression(); }
   namespace testing { bool initial_recording_regression(); bool zero_cookie_submission_regression(); bool unsupported_com_boundary_regression(); bool source_cookie_reentry_regression(); bool recording_recovery_regression(); bool recording_state_loss_regression(); }
   namespace testing { bool submission_completion_regression(); bool provider_admission_regression(); bool crop_region_regression(); bool record_diagnostic_regression(); }
-  namespace testing { bool live_source_admission_regression(); }
+  namespace testing { bool live_source_admission_regression(); bool fg_off_retained_lineage_regression(); }
   // The state-basis provenance of an auxiliary snapshot copy.
   namespace testing { bool snapshot_basis_regression(); }
   // An executed recording's sorted aliasing marks answer aliased_after
