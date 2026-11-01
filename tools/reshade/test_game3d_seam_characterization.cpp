@@ -2580,8 +2580,10 @@ namespace sunshine_streamline::depth_capture {
           fail(text);
         }
       }
-      // producer_submitted stamps a copy's submission on a presenting queue
-      // (one that acquired), and leaves one on another queue to its call.
+      // producer_submitted stamps a copy's submission on the presenting
+      // queue (the reader, whose acquisition is the newest), and leaves one
+      // on another queue to its call.
+      const auto saved_reader = reader;
       {
         reset();
         int stand_in {};
@@ -2589,6 +2591,8 @@ namespace sunshine_streamline::depth_capture {
         place = std::make_unique<queue_state>();
         place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&stand_in);
         place->chosen = true;
+        place->cookie = 0x51;
+        reader = place->cookie;
         const auto presenting = reinterpret_cast<std::uint64_t>(place->queue.p);
         auto &copy = make(0, provider_kind::streamline, epoch, 2, 0);
         copy.producer_submitted = false;
@@ -2608,6 +2612,35 @@ namespace sunshine_streamline::depth_capture {
           fail("P2 producer_submitted: a presenting queue's submission was not stamped, or another queue's was");
         }
       }
+      // PD9 (11-01): a queue that acquired depth earlier but is no longer the
+      // reader (FG moved Present to DLSS-G's queue after FG was off earlier in
+      // the session) is not the presenting queue: its copy keeps its call's
+      // stamp, which the FG frame's generated window counts from. Until then
+      // its sticky chosen flag stamped the copy with its submission's
+      // Present, which frame_presenting gives no generated window.
+      {
+        reset();
+        int stand_in {};
+        auto &place = capture_queues.queues[0];
+        place = std::make_unique<queue_state>();
+        place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&stand_in);
+        place->chosen = true;
+        place->cookie = 0x51;
+        reader = 0x52;
+        const auto former = reinterpret_cast<std::uint64_t>(place->queue.p);
+        auto &copy = make(0, provider_kind::streamline, epoch, 2, 0);
+        copy.producer_submitted = false;
+        copy.present = present_ordinal();
+        fixture::presents_since(1);
+        producer_submitted(copy, former, 7, true);
+        const bool unstamped = !copy.submitted_present && presented_by(copy) == copy.present;
+        place->queue.p = nullptr;
+        place.reset();
+        if (!unstamped) {
+          fail("PD9 producer_submitted: a queue that acquired earlier but is no longer the reader stamped its copy with its submission's Present");
+        }
+      }
+      reader = saved_reader;
       // PD8 (11-01): the grant is the Present's (present(), from its FG
       // snapshot), so an acquisition of another runtime whose policy has no
       // FG, between the FG frame's Presents, leaves the FG frame's window.
@@ -2638,7 +2671,7 @@ namespace sunshine_streamline::depth_capture {
           fail("PD8 grant: an acquisition without FG ended an MFG 4x frame's window, or the window outlasted its four Presents");
         }
       }
-      std::printf("PASS F2/P2 hitch between a frame's evaluation and its Presents: %zu rows\n", std::size(rows) + 2);
+      std::printf("PASS F2/P2 hitch between a frame's evaluation and its Presents: %zu rows\n", std::size(rows) + 3);
     }
 
     struct display_case {

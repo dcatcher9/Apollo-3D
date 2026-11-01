@@ -3764,10 +3764,15 @@ evaluation and its later Presents made them mono (`inactive_views`, `retained_de
 the first Present after the pause without depth restarted the stereo fade (the session timelines'
 `fg-on-hitch-*`, `fg-on-dlssg-in-flight-hitch-after-sources` and
 `fg-on-live-compute-hitch-after-sources`). A copy's frame is the Present ordinal of its producer
-list's submission on a presenting queue (one that acquired depth) where that submission was seen,
-else of its call: a game that records frame N+1 on one thread before its submission thread presents
-frame N stamped N+1's copy with frame N's Present, so after a hitch on its submission thread its own
-Present never counted it current (until the 10-27 review). The count runs from the frame's real
+list's submission on the presenting queue (the reader, the queue whose acquisition is the newest)
+where that submission was seen, else of its call: a game that records frame N+1 on one thread before
+its submission thread presents frame N stamped N+1's copy with frame N's Present, so after a hitch on
+its submission thread its own Present never counted it current (until the 10-27 review). Until 11-01
+any queue that had ever acquired depth counted as presenting, so after FG moved Present to DLSS-G's
+queue a render queue that presented with FG off earlier in the session stamped its later copies with
+their submission's Present, which gives no generated window: after a freeze of the source age the
+frame's generated Presents were mono, only in a session where FG had been off before (PD9, seam row
+`PD9 producer_submitted`). The count runs from the frame's real
 Present (<a id="fg-frame-anchor"></a>its anchor): DLSS-G presents an earlier frame's generated
 Presents on its own thread while the game records the next frame (Assassin's Creed Shadows inside
 its SR evaluation), at most the declared count of them after that frame's first stamp, so the first

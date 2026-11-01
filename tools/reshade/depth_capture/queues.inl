@@ -48,20 +48,27 @@ namespace sunshine_streamline::depth_capture {
         return; // Never relabel the original producer's fence as another queue.
       }
       value.retirement_unknown |= !signaled;
-      // Submitted on a presenting queue (one that acquired depth): the
-      // Present that shows this copy is decided by this submission's place
-      // in that queue's order, not by when the CPU recorded it. A game that
-      // records frame N+1 (its evaluation) before its submission thread
-      // presents frame N stamped N+1's copy with Present N's ordinal, so its
-      // own Present after a hitch never counted it as current (the 10-27
-      // review's P2). The call stamp stays for a copy whose submission on
-      // a presenting queue was not seen (presented_by).
-      // Cross-section read: producer submission uses this native place's
-      // diagnostic chosen flag as evidence that it has presented; reader differs.
+      // Submitted on the presenting queue (the reader, whose acquisition is
+      // the newest: the queue that reads depth now, as copy-out and
+      // readability take it): the Present that shows this copy is decided by
+      // this submission's place in that queue's order, not by when the CPU
+      // recorded it. A game that records frame N+1 (its evaluation) before
+      // its submission thread presents frame N stamped N+1's copy with
+      // Present N's ordinal, so its own Present after a hitch never counted
+      // it as current (the 10-27 review's P2). The call stamp stays for a
+      // copy whose submission on the presenting queue was not seen
+      // (presented_by). Until 11-01 any queue that ever acquired depth
+      // counted (its diagnostic chosen flag, which stays set), so after FG
+      // moved Present to DLSS-G's queue a render queue that presented with FG
+      // off earlier stamped its later copies with their submission's Present
+      // instead of their call's: frame_presenting gives such a stamp no
+      // generated window, so after a freeze of the source age the frame's
+      // generated Presents were mono, only where FG had been off earlier in
+      // the session (PD9).
       // It is also the newest FG frame's anchor when the copy is that
       // frame's (anchor_frame_generation): its real Present comes after.
       if (!value.producer_submitted && !value.submitted_present)
-        if (const auto *presenting = known_queue(native); presenting && presenting->chosen) {
+        if (const auto *presenting = known_queue(native); presenting && reader && presenting->cookie == reader) {
           value.submitted_present = present_ordinal();
           anchor_frame_generation(value.present, value.submitted_present);
         }

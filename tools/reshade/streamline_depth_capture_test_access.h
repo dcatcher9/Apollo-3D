@@ -178,8 +178,9 @@ namespace sunshine_streamline::depth_capture {
       std::uint32_t viewport{};
       // Diagnostic choice: this place's recorded acquisition, not reader.
       // The newest acquisition's choice (depth_choice), when chosen. Whether
-      // depth is read elsewhere is the newest acquisition's (the capture's
-      // reader, read_elsewhere), not this flag, which stays once set.
+      // depth is read elsewhere, and whether a submission is stamped with its
+      // Present (producer_submitted), is the newest acquisition's (the
+      // capture's reader), not this flag, which stays once set.
       depth_choice choice;
       bool chosen{};
       // Native place (continued): this producer queue's copy-out command ring.
@@ -631,6 +632,8 @@ namespace sunshine_streamline::depth_capture {
     extern pool_state capture_pool;
     extern queue_places capture_queues;
     extern observation_state capture_observation;
+    // The newest acquisition's queue cookie (acquire, read_on).
+    extern std::uint64_t reader;
     std::uint64_t present_ordinal();
     bool frame_presenting(std::uint64_t ordinal);
     void stamp_frame_generation(std::uint64_t ordinal);

@@ -3031,7 +3031,8 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   only frames later (the held FG copy, `frame_generation_holds`, and the shared watermark), which
   Presents present a stamped frame (`frame_presenting`: its first, and with FG the declared count
   after it for a frame that made a frame-generation call, until the next evaluation; a copy's
-  submission on a presenting queue as its frame, `presented_by`; since 10-31 the count runs from the
+  submission on the presenting queue, the reader (since 11-01, PD9; before, any queue that ever
+  acquired), as its frame, `presented_by`; since 10-31 the count runs from the
   frame's anchor, the first Present after its submission or DLSS-G's evaluation of it, within the
   declared count of its first stamp, and its own evaluations up to the anchor end nothing), the frame's own SR stand-in for
   its DLSS-G copy in flight at those Presents after a hitch, never at a later one nor an earlier
