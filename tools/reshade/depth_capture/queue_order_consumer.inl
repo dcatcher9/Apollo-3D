@@ -75,6 +75,9 @@ namespace sunshine_streamline::depth_capture {
       return true;
     }
     disabled_logged = false;
+    // A pending second-signaller report first, one per Present (each queue
+    // once, at most 8 per process: native_observer::queue_order_signaller_line).
+    if (native_observer::queue_order_signaller_line(out, size)) return true;
     // At most one model snapshot a second, from the present thread (each
     // Present until 10-27, waiting for the order lock if a game thread held
     // it); one the lock is busy for is taken at a later Present.

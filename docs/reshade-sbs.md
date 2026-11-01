@@ -5436,6 +5436,21 @@ late_conflict= contention= own_signals=`, or once `Sunshine 3D queue order: disa
 report's "Queue order" check passes with the hooks installed and no late conflict, and warns when
 no Signal/Wait hook is installed with more than one queue, or on a late conflict.
 
+Who signals a fence besides its first signaller (10-31; ACS 10-27b poisoned 53 of 106 fences
+`second` with `ordered=0`, and no line said by whom): the first time a queue's Signal poisons a
+fence as its second signaller, the signalling thread records
+`Sunshine 3D queue order: second signaller fence=<record> value=<v> first={queue=<cookie>
+type=<direct|compute|copy|other|unknown>} second={queue=<cookie> type=<...> callers=<a<b<...>}
+report=<k>/8`, which the status step logs at the next Present (before its status line). Queue
+cookies are each queue's stable identity (the same in every line); a type is read once per queue
+record at its first logged Signal (`unknown`: that queue's record is gone). `callers=` lists the
+modules on the signalling thread's stack, from the one that called the hooked Signal outwards,
+consecutive frames of one module merged (at most 8): ReShade's or Streamline's proxy, then the
+game, a Streamline plug-in or the add-on itself. Each queue is reported once (later fences it
+poisons, CPU Signals and the first signaller's own Signals add no line) and at most 8 queues per
+process; the stack walk runs only for a queue not yet reported. It changes no decision: the poison,
+its refusals and the status line's counts are as before.
+
 ### Depth jitter registration
 
 Valid Streamline or NGX TAA jitter travels with the immutable real-depth capture, independently

@@ -7,8 +7,10 @@
 // the model decides; the reader's read-back proves what the GPU ordered. The
 // negative cells must refuse: a CPU signal, a second signaller and a shared
 // fence each leave the reader unordered, and a wait satisfied by a signal
-// before the producer orders nothing after it. Exit 77 without the debug
-// layer (Windows Graphics Tools).
+// before the producer orders nothing after it. The second signaller (a
+// compute queue) is reported once on the queue order status step, naming
+// both queues' types and its calling modules (deferred item 5, 10-31). Exit
+// 77 without the debug layer (Windows Graphics Tools).
 #include "streamline_depth_capture.h"
 #include "streamline_native_observer.h"
 
@@ -52,8 +54,8 @@ namespace {
   struct gpu {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12InfoQueue> messages;
-    // producer renders, reader waits and reads back, third signals as a
-    // second signaller.
+    // producer renders, reader waits and reads back, third (a compute
+    // queue) signals as a second signaller.
     ComPtr<ID3D12CommandQueue> producer, reader, third;
     ComPtr<ID3D12CommandAllocator> producer_allocator, reader_allocator;
     ComPtr<ID3D12GraphicsCommandList> producer_list, reader_list;
@@ -72,7 +74,9 @@ namespace {
       desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
       check(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&producer)), "producer queue");
       check(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&reader)), "reader queue");
-      check(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&third)), "third queue");
+      D3D12_COMMAND_QUEUE_DESC compute {};
+      compute.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+      check(device->CreateCommandQueue(&compute, IID_PPV_ARGS(&third)), "third queue");
       check(device->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(&producer_allocator)), "producer allocator");
       check(device->CreateCommandAllocator(desc.Type, IID_PPV_ARGS(&reader_allocator)), "reader allocator");
       check(device->CreateCommandList(0, desc.Type, producer_allocator.Get(), nullptr, IID_PPV_ARGS(&producer_list)), "producer list");
@@ -199,6 +203,19 @@ namespace {
     }
   };
 
+  // The second-signaller lines the queue order status step gives now (a
+  // few calls: each gives at most one line).
+  std::vector<std::string> signaller_lines() {
+    std::vector<std::string> out;
+    for (unsigned i = 0; i != 4; ++i) {
+      char line[1024] {};
+      if (capture::queue_order_line(GetTickCount64(), line, sizeof(line)) && std::strstr(line, "second signaller")) {
+        out.emplace_back(line);
+      }
+    }
+    return out;
+  }
+
   void cells(gpu &g) {
     const auto reader = native(g.reader.Get());
     const auto ordered = [&](const observer::position &at) {
@@ -257,7 +274,17 @@ namespace {
       g.read(false);
     }
     // Negative, second signaller: another queue signals the waited value.
+    // Reported once, naming both queues and the second one's calling modules
+    // (from this executable, which called the hooked Signal); the same
+    // queue's second poisoning below is not reported. The reports before it
+    // are the fixture's own: read() signals the idle fence from the reader
+    // and then the producer (two direct queues); none names the compute
+    // queue, which has not signalled yet (CPU signals: the observer test).
     {
+      for (const auto &line : signaller_lines()) {
+        std::printf("MEASURE queue-order second signaller before the cell: %s\n", line.c_str());
+        require(line.find("type=compute") == std::string::npos, "second-signaller: a report named the compute queue before it signalled: " + line);
+      }
       auto fence = g.settled_fence();
       const auto at = g.render(++value);
       check(g.producer->Signal(fence.Get(), 2), "producer signal");
@@ -266,6 +293,23 @@ namespace {
       const auto verdict = ordered(at);
       require(!verdict.ordered && verdict.why == refusal::poisoned, "second-signaller: a fence with a second signaller ordered the reader");
       g.read(false);
+      char exe[MAX_PATH] {};
+      GetModuleFileNameA(nullptr, exe, MAX_PATH);
+      const char *name = exe;
+      for (const char *at_char = exe; *at_char; ++at_char) {
+        if (*at_char == '\\' || *at_char == '/') {
+          name = at_char + 1;
+        }
+      }
+      const auto lines = signaller_lines();
+      const auto first = lines.empty() ? std::string() : lines.front();
+      std::printf("MEASURE queue-order second signaller line: %s\n", first.c_str());
+      require(lines.size() == 1 && first.find(" first={queue=") != std::string::npos && first.find(" type=direct} second={queue=") != std::string::npos &&
+                first.find(std::string(" type=compute callers=") + name) != std::string::npos,
+              "second-signaller: the poisoning was not reported once naming the direct first signaller, the compute second signaller and its caller: " + first);
+      auto again = g.settled_fence();
+      check(g.third->Signal(again.Get(), 2), "the same second signaller on another fence");
+      require(signaller_lines().empty(), "second-signaller: the same queue was reported twice");
     }
     // Negative, shared fence: another process or adapter may signal it.
     {

@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <algorithm>
 #include <memory>
 #include <new>
@@ -91,6 +92,11 @@ namespace sunshine_streamline::native_observer {
         // The queue's Execute, Signal and Wait vtable slots at first sight
         // (coverage); written under order_lock before id is published.
         std::array<void **, 3> slots{};
+        // The queue's stable cookie (written with slots) and its
+        // D3D12_COMMAND_LIST_TYPE + 1, read at its first logged Signal (0:
+        // not yet): the second-signaller diagnostic names both.
+        std::uint64_t cookie{};
+        std::atomic<std::uint8_t> type{};
       };
       std::array<ticket_slot, queue_limit> tickets;
       SRWLOCK lock = SRWLOCK_INIT;
@@ -104,6 +110,17 @@ namespace sunshine_streamline::native_observer {
       thread_local position last_execute{};
       struct queue_memory { std::uint64_t cookie, id; };
       struct fence_bytes { std::uint64_t id, signaller, why; };
+      // The second-signaller diagnostic (queue_order_signaller_line): a queue
+      // whose Signal poisoned a fence as its second signaller is reported
+      // once (by its cookie), at most report_limit queues per process; the
+      // reports are formatted on the signalling thread and handed to the
+      // present thread's status step one at a time.
+      constexpr unsigned report_limit = 8;
+      constexpr std::size_t report_size = 512;
+      std::array<std::uint64_t, report_limit> reported{};
+      std::array<std::array<char, report_size>, report_limit> reports{};
+      unsigned report_count{}, report_read{};
+      SRWLOCK report_lock = SRWLOCK_INIT;
     }
 
     struct restore_error {
@@ -208,7 +225,7 @@ namespace sunshine_streamline::native_observer {
     bool own_signal(ID3D12Fence *fence);
     void order_enter(invocation &call, ID3D12CommandQueue *queue, bool blocking);
     bool order_quiet(const invocation &call);
-    void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value);
+    void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value, void *caller);
     void order_wait(const invocation &call, ID3D12Fence *fence, UINT64 value, bool quiet);
     void order_cpu_signal(ID3D12Fence *fence);
 
@@ -478,8 +495,10 @@ namespace sunshine_streamline::native_observer {
     bool own_signal(ID3D12Fence *fence);
     std::uint64_t fence_id(ID3D12Fence *fence, std::uint64_t queue, bool *lost = nullptr);
     template<class Operation> void order_update(ID3D12Fence *fence, std::uint64_t id, Operation operation);
-    bool log_signal(const invocation &call, ID3D12Fence *fence, UINT64 value, bool retry);
-    void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value);
+    struct second_signal;
+    bool log_signal(const invocation &call, ID3D12Fence *fence, UINT64 value, bool retry, second_signal &poisoned);
+    void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value, void *caller);
+    void report_second_signaller(ID3D12CommandQueue *queue, const second_signal &poisoned, UINT64 value, void *caller);
     void order_wait(const invocation &call, ID3D12Fence *fence, UINT64 value, bool quiet);
     void order_cpu_signal(ID3D12Fence *fence);
     bool holds(const target &slot, unsigned kind);
@@ -659,10 +678,11 @@ namespace sunshine_streamline::native_observer {
     }
     refused_counts = {};
     order::model.reset();
-    for (auto &slot : order::tickets) { slot.id = 0; slot.entered = 0; slot.slots = {}; }
+    for (auto &slot : order::tickets) { slot.id = 0; slot.entered = 0; slot.slots = {}; slot.cookie = 0; slot.type = 0; }
     order::requested = true; order::reset_pending = false;
     order::resets = order::ordered_count = order::cpu_unhooked = order::contention = order::own_signals = 0;
     order::conflicted_seen = 0;
+    order::reported = {}; order::report_count = order::report_read = 0;
     for (auto &value : order::refused) value = 0;
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = slot_reads = 0;
     barrier_overflow = submission_overflow = discovery_contention = 0;

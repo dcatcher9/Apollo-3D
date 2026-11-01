@@ -1644,7 +1644,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 - [`depth_capture_types.h`](depth_capture_types.h): capture input, packet, selection policy, acquisition authority and retained-depth value types, shared by output and hold owners without the capture API. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`depth_capture/observation.inl`](depth_capture/observation.inl): part of `streamline_depth_capture.cpp` (end of the shell): command-list and recording identity, per-recording source states and barriers, the Reset/Close/render-pass lifecycle, the executed-list state proof, ReShade's list and runtime-list events, Present observation, and the depth-texture lifecycle. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`depth_capture/queues.inl`](depth_capture/queues.inl): part of `streamline_depth_capture.cpp` (end of the shell): queue places and their reclaiming, producer and consumer submissions and their fences, whether another queue may read a copy and which queue reads depth, copy-out on the producer queue, the submission hook, retired queues and each queue's newest game execution. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
-- [`depth_capture/queue_order_consumer.inl`](depth_capture/queue_order_consumer.inl): part of `streamline_depth_capture.cpp` (end of the shell): the capture owner's only reader of Step 4 queue-order verdicts (whether another queue may read a copy before its producer fence completed, the producer positions, reliance on an ordered read, the late-conflict query and the queue order line); removed with its call sites when Step 4 is deleted. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
+- [`depth_capture/queue_order_consumer.inl`](depth_capture/queue_order_consumer.inl): part of `streamline_depth_capture.cpp` (end of the shell): the capture owner's only reader of Step 4 queue-order verdicts (whether another queue may read a copy before its producer fence completed, the producer positions, reliance on an ordered read, the late-conflict query and the queue order line, which logs a pending second-signaller report first); removed with its call sites when Step 4 is deleted. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
 - [`depth_capture/pool.inl`](depth_capture/pool.inl): part of `streamline_depth_capture.cpp` (end of the shell): snapshot and source retention, allocation and storage registry, reservation budgets, pooled releases, idle sweeps and device teardown. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`depth_capture/record.inl`](depth_capture/record.inl): part of `streamline_depth_capture.cpp` (end of the shell): provider evaluations and nominations, retained-source retirement, recording depth and auxiliary snapshots, preserved copies and capture results. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`depth_capture/report.inl`](depth_capture/report.inl): part of `streamline_depth_capture.cpp` (end of the shell): capture diagnostics and report text. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
@@ -1660,7 +1660,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 #### Native observer
 
 - [`streamline_native_observer.cpp`](streamline_native_observer.cpp), [`streamline_native_observer.h`](streamline_native_observer.h): the D3D12 method-table hooks for resource states, submissions and queue order, and recording cookies. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
-- [`native_queue_order.inl`](native_queue_order.inl): part of `streamline_native_observer.cpp` (end of the shell): Step 4 signal/wait detours, queue and fence identities, coverage and queue-order evidence. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
+- [`native_queue_order.inl`](native_queue_order.inl): part of `streamline_native_observer.cpp` (end of the shell): Step 4 signal/wait detours, queue and fence identities, coverage and queue-order evidence, and the second-signaller diagnostic (each queue whose Signal poisons a fence as its second signaller reported once, at most 8, with both queues' types and its calling modules). Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
 - [`queue_order.h`](queue_order.h): the pure queue-order model (Step 4). Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
 - [`native_vtable_slot.h`](native_vtable_slot.h): the shared vtable-slot patch critical section. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
 - [`observer_snapshot.h`](observer_snapshot.h): bounded, pinned publication of the observers' private metadata. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
@@ -3084,8 +3084,13 @@ serial is 30 there); each Present establishes any selected copy, as
   read is still in flight when the model decides: a reader that waits after the producer's signal,
   and one whose wait was submitted before that signal, are ordered and read back exactly what the
   render wrote; a wait satisfied by a signal before the producer, a CPU signal, a second signaller
-  and a `D3D12_FENCE_FLAG_SHARED` fence each refuse. The debug layer stays clean (a refused cell's
-  reader reads nothing, as its read would race the render). It skips (77) without the debug layer.
+  and a `D3D12_FENCE_FLAG_SHARED` fence each refuse. The second signaller (a compute queue) is
+  reported once on the queue order status step, naming the direct first signaller, the compute
+  second signaller and this executable as the module that called its Signal, and the same queue's
+  later poisoning of another fence adds no line (10-31; it failed without the diagnostic). The
+  reports before that cell are the fixture's own second signaller, its idle fence (signalled by
+  the reader and then the producer, two direct queues), and never name the compute queue. The debug layer stays clean (a refused cell's reader reads nothing, as its read
+  would race the render). It skips (77) without the debug layer.
 - `reshade_streamline_native_observer` ([`test_streamline_native_observer.cpp`](test_streamline_native_observer.cpp))
   also runs the order family's hooks on COM-shaped fixtures: the method table; Signal and Wait
   discovered by `observe_queue`; a fence recorded only once its CPU Signal slot is installed and
@@ -3101,6 +3106,10 @@ serial is 30 there); each Present establishes any selected copy, as
   Signals and Waits on a fence whose CPU Signal slot was rejected read no slot address (each read
   two and repeated the discovery lookup); a CPU Signal slot a third party replaced after a proven
   edge refuses the next verdict as `uncovered` before any poll (it stayed ordered until the poll).
+  Its second-signaller cells (10-31): a compute queue's Signal on a fence a direct queue signals
+  first is reported once with both cookies and types and the test executable as the caller's
+  module; that queue's later poisoning, a CPU Signal and the first signaller's own Signals report
+  nothing; of nine queues that each poison a fence, eight are reported (`report=1/8` to `8/8`).
 - [`test_proven_state.cpp`](test_proven_state.cpp) (`reshade_proven_state`) pins the per-resource
   last-proven state of [`proven_state.h`](proven_state.h), which admits the Generic end-of-frame
   copy: a creation state holds on every queue until a list uses the texture and not once enhanced

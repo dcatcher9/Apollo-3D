@@ -3,6 +3,7 @@
 #include "queue_order.h"
 
 #include <Windows.h>
+#include <cstddef>
 #include <cstdint>
 
 struct D3D12_RESOURCE_BARRIER;
@@ -146,6 +147,13 @@ namespace sunshine_streamline::native_observer {
     std::uint64_t refused[static_cast<unsigned>(sunshine_queue_order::refusal::count)]{};
   };
   queue_order_status queue_order_counts();
+  // The second-signaller diagnostic (docs/reshade-sbs.md, Queue order): the
+  // next pending report of a queue whose Signal poisoned a fence as its
+  // second signaller ("Sunshine 3D queue order: second signaller ...": both
+  // queues' cookies and types, the second one's calling modules). Each queue
+  // is reported once, at most 8 per process; false when none is pending or
+  // the report lock is held (never waits).
+  bool queue_order_signaller_line(char *out, std::size_t size);
   // The add-on's own Signal of a fence of its own that no game queue waits
   // on (design finding 8): suppressed, so the order hooks never log it as
   // the game's and it never waits on the order lock. Every such add-on

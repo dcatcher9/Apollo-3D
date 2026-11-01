@@ -9,14 +9,17 @@ namespace sunshine_streamline::native_observer {
     // call that is logged may wait on the order lock for its queue's record:
     // the add-on's own (suppressed) calls and ReShade's Signals of its own
     // fences (own_signal) take TryAcquire, as Execute does.
+    // caller: the return address into whoever called the hooked slot, where
+    // the second-signaller diagnostic starts its list of calling modules.
     template<unsigned Index> HRESULT STDMETHODCALLTYPE signal_detour(ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value) {
       const DWORD incoming = GetLastError();
+      void *const caller = __builtin_return_address(0);
       auto &slot = targets[static_cast<unsigned>(method::signal)][Index];
       invocation call(method::signal, slot.status.load(std::memory_order_acquire));
       restore_error outgoing{incoming};
       const bool logged = call.eligible && !(fence && order_on() && own_signal(fence));
       order_enter(call, queue, logged);
-      if (logged && !call.inherited && fence && order_on()) order_signal(queue, call, fence, value);
+      if (logged && !call.inherited && fence && order_on()) order_signal(queue, call, fence, value, caller);
       SetLastError(incoming);
       const HRESULT result = reinterpret_cast<queue_fence_fn>(slot.original.load(std::memory_order_acquire))(queue, fence, value);
       outgoing.value = GetLastError();
@@ -105,6 +108,8 @@ namespace sunshine_streamline::native_observer {
       slot.id.store(0, std::memory_order_release);
       slot.entered.store(0, std::memory_order_relaxed);
       slot.slots = slots;
+      slot.cookie = memory.cookie;
+      slot.type.store(0, std::memory_order_relaxed);
       slot.id.store(memory.id, std::memory_order_release);
       ReleaseSRWLockExclusive(&order::lock);
       auto *object = reinterpret_cast<ID3D12Object *>(queue);
@@ -246,10 +251,16 @@ namespace sunshine_streamline::native_observer {
       ReleaseSRWLockExclusive(&order::lock);
     }
 
+    // A Signal that poisoned its fence as the fence's second signaller: the
+    // fence's record id and its first signaller's queue cookie.
+    struct second_signal {
+      std::uint64_t fence{}, first{};
+    };
+
     // Logs one queue Signal. False only with retry, when the call's queue
     // record was dropped (evicted, or a reset) since it took its ticket. A
     // signalling queue without a record poisons a fence already known.
-    bool log_signal(const invocation &call, ID3D12Fence *fence, UINT64 value, bool retry) {
+    bool log_signal(const invocation &call, ID3D12Fence *fence, UINT64 value, bool retry, second_signal &poisoned) {
       bool lost = false;
       auto id = call.ticket ? fence_id(fence, call.order_queue, &lost) : read_fence(fence).id;
       if (lost && retry) return false;
@@ -260,21 +271,130 @@ namespace sunshine_streamline::native_observer {
       order_update(fence, id, [&] {
         const bool recorded = call.ticket && !lost && order::model.known_queue(call.order_queue);
         if (call.ticket && !recorded && retry) { dropped = true; return; }
+        const auto before = order::model.memory(id);
         order::model.signal(recorded ? call.order_queue : 0, id, value, recorded ? call.ticket : 0, completed, GetTickCount64());
+        if (before.why == sunshine_queue_order::poison::none &&
+            order::model.memory(id).why == sunshine_queue_order::poison::second_signaller)
+          poisoned = {id, before.signaller};
       });
       return !dropped;
     }
 
-    void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value) {
+    void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value, void *caller) {
       const restore_error incoming{GetLastError()};
+      // The queue's type, once per record, for the second-signaller
+      // diagnostic (a getter; no lock).
+      if (auto *slot = ticket_of(call.order_queue); slot && !slot->type.load(std::memory_order_relaxed)) {
+        D3D12_COMMAND_QUEUE_DESC desc{};
+        queue->lpVtbl->GetDesc(queue, &desc);
+        slot->type.store(static_cast<std::uint8_t>(desc.Type + 1), std::memory_order_relaxed);
+      }
       // The native call is not forwarded yet: a record dropped since the call
       // took its ticket is re-sighted with a fresh ticket, so a signal never
       // goes unlogged against a live fence record (a pending wait would
       // resolve to a later signal of its queue, after work this one precedes).
-      if (log_signal(call, fence, value, true)) return;
-      call.order_queue = call.ticket = 0;
-      order_enter(call, queue, true);
-      log_signal(call, fence, value, false);
+      second_signal poisoned;
+      if (!log_signal(call, fence, value, true, poisoned)) {
+        call.order_queue = call.ticket = 0;
+        order_enter(call, queue, true);
+        log_signal(call, fence, value, false, poisoned);
+      }
+      if (poisoned.fence) report_second_signaller(queue, poisoned, value, caller);
+    }
+
+    const char *queue_type_name(std::uint8_t type) {
+      switch (type) {
+        case D3D12_COMMAND_LIST_TYPE_DIRECT + 1: return "direct";
+        case D3D12_COMMAND_LIST_TYPE_COMPUTE + 1: return "compute";
+        case D3D12_COMMAND_LIST_TYPE_COPY + 1: return "copy";
+        case 0: return "unknown";
+        default: return "other";
+      }
+    }
+
+    // The modules of the calling stack, from the frame that called the hooked
+    // slot (caller) outwards, consecutive frames of one module merged:
+    // "a<b<c" (a called the slot, c is the outermost listed). A stack the
+    // walk does not reach caller on starts after this module's own frames.
+    void calling_modules(void *caller, char *out, std::size_t size) {
+      void *frames[48]{};
+      const auto count = RtlCaptureStackBackTrace(0, 48, frames, nullptr);
+      const auto module_of = [](void *address) {
+        HMODULE module{};
+        return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCWSTR>(address), &module) ? module : nullptr;
+      };
+      unsigned first = 0;
+      while (first < count && frames[first] != caller) ++first;
+      if (first == count) {
+        const auto own = module_of(reinterpret_cast<void *>(&calling_modules));
+        first = 0;
+        while (first < count && module_of(frames[first]) == own) ++first;
+      }
+      std::size_t used = 0;
+      out[0] = 0;
+      HMODULE previous{};
+      for (unsigned i = first, listed = 0; i < count && listed < 8 && used + 1 < size; ++i) {
+        const auto module = module_of(frames[i]);
+        if (listed && module == previous) continue;
+        previous = module;
+        char path[MAX_PATH]{};
+        const char *name = "?";
+        if (module && GetModuleFileNameA(module, path, MAX_PATH)) {
+          name = path;
+          for (const char *at = path; *at; ++at)
+            if (*at == '\\' || *at == '/') name = at + 1;
+        }
+        const int wrote = std::snprintf(out + used, size - used, "%s%s", listed ? "<" : "", name);
+        if (wrote < 0) break;
+        used = std::min(size - 1, used + static_cast<std::size_t>(wrote));
+        ++listed;
+      }
+    }
+
+    // One report per queue that poisons a fence as its second signaller
+    // (its cookie), at most order::report_limit queues: both queues and the
+    // second one's calling modules (who signals the fence besides its first
+    // signaller: the game, Streamline or DLSS-G, ReShade or the add-on).
+    // Called after the order lock was released; costs a stack walk only for a
+    // queue not reported yet, and each fence is poisoned once.
+    void report_second_signaller(ID3D12CommandQueue *queue, const second_signal &poisoned, UINT64 value, void *caller) {
+      order::queue_memory memory{};
+      if (!private_bytes(queue, order_queue_guid, &memory, sizeof(memory)) || !memory.cookie) return;
+      const auto known = [&] {
+        return std::find(order::reported.begin(), order::reported.begin() + order::report_count, memory.cookie) !=
+          order::reported.begin() + order::report_count;
+      };
+      AcquireSRWLockShared(&order::report_lock);
+      const bool seen = known(), full = order::report_count == order::report_limit;
+      ReleaseSRWLockShared(&order::report_lock);
+      if (seen || full) return;
+      std::uint8_t first_type = 0, second_type = 0;
+      AcquireSRWLockShared(&order::lock);
+      for (const auto &slot : order::tickets) {
+        if (!slot.id.load(std::memory_order_acquire)) continue;
+        if (slot.cookie == poisoned.first) first_type = slot.type.load(std::memory_order_relaxed);
+        if (slot.cookie == memory.cookie) second_type = slot.type.load(std::memory_order_relaxed);
+      }
+      ReleaseSRWLockShared(&order::lock);
+      char callers[256];
+      calling_modules(caller, callers, sizeof(callers));
+      std::array<char, order::report_size> text{};
+      AcquireSRWLockExclusive(&order::report_lock);
+      if (known() || order::report_count == order::report_limit) {
+        ReleaseSRWLockExclusive(&order::report_lock);
+        return;
+      }
+      std::snprintf(text.data(), text.size(),
+        "Sunshine 3D queue order: second signaller fence=%llu value=%llu first={queue=%llu type=%s} "
+        "second={queue=%llu type=%s callers=%s} report=%u/%u",
+        static_cast<unsigned long long>(poisoned.fence), static_cast<unsigned long long>(value),
+        static_cast<unsigned long long>(poisoned.first), queue_type_name(first_type),
+        static_cast<unsigned long long>(memory.cookie), queue_type_name(second_type), callers,
+        order::report_count + 1, order::report_limit);
+      order::reported[order::report_count] = memory.cookie;
+      order::reports[order::report_count++] = text;
+      ReleaseSRWLockExclusive(&order::report_lock);
     }
 
     void order_wait(const invocation &call, ID3D12Fence *fence, UINT64 value, bool quiet) {
@@ -479,6 +599,14 @@ namespace sunshine_streamline::native_observer {
     out.own_signals = order::own_signals.load(std::memory_order_relaxed);
     for (unsigned i = 0; i != order::refused.size(); ++i) out.refused[i] = order::refused[i].load(std::memory_order_relaxed);
     return out;
+  }
+
+  bool queue_order_signaller_line(char *out, std::size_t size) {
+    if (!size || !TryAcquireSRWLockExclusive(&order::report_lock)) return false;
+    const bool pending = order::report_read < order::report_count;
+    if (pending) std::snprintf(out, size, "%s", order::reports[order::report_read++].data());
+    ReleaseSRWLockExclusive(&order::report_lock);
+    return pending;
   }
 
   HRESULT signal_own(ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value) {

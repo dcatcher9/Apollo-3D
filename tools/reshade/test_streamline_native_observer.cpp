@@ -13,6 +13,7 @@
 #include <cstring>
 #include <functional>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -98,6 +99,9 @@ namespace {
   constexpr auto queue_signal_slot = offsetof(ID3D12CommandQueueVtbl, Signal) / sizeof(void *);
   constexpr auto queue_wait_slot = offsetof(ID3D12CommandQueueVtbl, Wait) / sizeof(void *);
   constexpr auto fence_signal_slot = offsetof(ID3D12FenceVtbl, Signal) / sizeof(void *);
+  // GetDesc (18): the second-signaller diagnostic reads each signalling
+  // queue's type.
+  constexpr auto queue_desc_slot = offsetof(ID3D12CommandQueueVtbl, GetDesc) / sizeof(void *);
   using queue_fence_fn = HRESULT (STDMETHODCALLTYPE *)(void *, void *, UINT64);
   using fence_signal_fn = HRESULT (STDMETHODCALLTYPE *)(void *, UINT64);
   struct order_object {
@@ -108,6 +112,7 @@ namespace {
     D3D12_FENCE_FLAGS flags{};
     unsigned references{1};
     std::vector<std::pair<GUID, std::vector<unsigned char>>> data;
+    D3D12_COMMAND_LIST_TYPE type{D3D12_COMMAND_LIST_TYPE_DIRECT};
   };
   HRESULT queue_signal_result = S_OK, queue_wait_result = S_OK, cpu_signal_result = S_OK;
   std::atomic<bool> order_block{}, order_entered{}, order_release{};
@@ -179,6 +184,11 @@ namespace {
     return queue_signal_result;
   }
   NOINLINE HRESULT STDMETHODCALLTYPE order_queue_wait(void *, void *, UINT64) { ++order_waits; return queue_wait_result; }
+  NOINLINE D3D12_COMMAND_QUEUE_DESC *STDMETHODCALLTYPE order_get_desc(void *native, D3D12_COMMAND_QUEUE_DESC *out) {
+    *out = {};
+    out->Type = static_cast<order_object *>(native)->type;
+    return out;
+  }
   NOINLINE HRESULT STDMETHODCALLTYPE order_cpu_signal(void *fence, UINT64 value) {
     ++order_cpu_signals;
     if (SUCCEEDED(cpu_signal_result)) static_cast<order_object *>(fence)->value = value;
@@ -499,7 +509,7 @@ namespace {
     require(method_count == 6 && methods[3].slot == 14 && methods[4].slot == 15 && methods[5].slot == 10 &&
         std::strcmp(methods[3].method, "Signal") == 0 && std::strcmp(methods[4].method, "Wait") == 0 &&
         std::strcmp(methods[5].interface_name, "ID3D12Fence") == 0, "the hooked method table changed");
-    static std::array<void *, queue_wait_slot + 1> queue_table{}, unordered_table{};
+    static std::array<void *, queue_desc_slot + 1> queue_table{}, unordered_table{};
     static std::array<void *, 12> fence_table{};
     static std::array<void *, 3> device_table{};
     for (auto *table : {queue_table.data(), unordered_table.data(), fence_table.data(), device_table.data()}) {
@@ -514,6 +524,7 @@ namespace {
       table[execute_slot] = reinterpret_cast<void *>(order_execute);
       table[queue_signal_slot] = reinterpret_cast<void *>(order_queue_signal);
       table[queue_wait_slot] = reinterpret_cast<void *>(order_queue_wait);
+      table[queue_desc_slot] = reinterpret_cast<void *>(order_get_desc);
     }
     fence_table[8] = reinterpret_cast<void *>(order_completed);
     fence_table[fence_signal_slot] = reinterpret_cast<void *>(order_cpu_signal);
@@ -649,7 +660,7 @@ namespace {
 
   // The order host's review cells (10-27), on vtables of their own.
   struct order_tables {
-    std::array<void *, queue_wait_slot + 1> queue{};
+    std::array<void *, queue_desc_slot + 1> queue{};
     std::array<void *, 12> fence{};
     std::array<void *, 3> device{};
     order_tables() {
@@ -664,6 +675,7 @@ namespace {
       queue[execute_slot] = reinterpret_cast<void *>(order_execute);
       queue[queue_signal_slot] = reinterpret_cast<void *>(order_queue_signal);
       queue[queue_wait_slot] = reinterpret_cast<void *>(order_queue_wait);
+      queue[queue_desc_slot] = reinterpret_cast<void *>(order_get_desc);
       fence[8] = reinterpret_cast<void *>(order_completed);
       fence[fence_signal_slot] = reinterpret_cast<void *>(order_cpu_signal);
       fence[11] = reinterpret_cast<void *>(order_flags);
@@ -895,6 +907,75 @@ namespace {
     require(!verdict.ordered && verdict.why == sunshine_queue_order::refusal::uncovered,
       "a verdict rested on a CPU Signal slot replaced since the last poll");
     std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call; no add-on Signal waits on the order lock; ReShade's Signals of its own fences in the add-on's flush and after it are not logged and never wait, nor do a verdict, a rely or a conflict check on a busy lock; a slot replaced since the last poll refuses the next verdict");
+  }
+
+  // The second-signaller diagnostic (deferred item 5, 10-31): a queue whose
+  // Signal poisons a fence as its second signaller is reported once (ACS
+  // 10-27b: 53 of 106 fences poisoned second, ordered=0, and no log line said
+  // who signals them). The report names both queues (cookie and type) and the
+  // second one's calling modules, from the caller of the hooked slot; the
+  // first signaller's own Signals, the same queue poisoning another fence and
+  // a CPU Signal report nothing, and at most 8 queues are reported.
+  std::uint64_t order_cookie(const order_object &queue) {
+    std::uint64_t memory[2]{};
+    require(queue.data.size() == 1 && queue.data[0].second.size() == sizeof(memory), "a queue has no order record");
+    std::memcpy(memory, queue.data[0].second.data(), sizeof(memory));
+    return memory[0];
+  }
+  void order_signaller_cases() {
+    observer::set_queue_order(true);
+    static order_tables tables;
+    const auto signal = [](order_object &queue, order_object &on, UINT64 value) {
+      return reinterpret_cast<queue_fence_fn>(queue.vtable[queue_signal_slot])(&queue, &on, value);
+    };
+    const auto cpu_signal = [](order_object &on, UINT64 value) {
+      return reinterpret_cast<fence_signal_fn>(on.vtable[fence_signal_slot])(&on, value);
+    };
+    const auto second = [] {
+      return observer::queue_order_counts().model.poisoned[static_cast<unsigned>(sunshine_queue_order::poison::second_signaller)];
+    };
+    char line[512]{};
+    while (observer::queue_order_signaller_line(line, sizeof(line))) {}  // The earlier cases' own.
+    order_object device{tables.device.data(), object_kind::device};
+    order_object game{tables.queue.data(), object_kind::queue, &device}, async{tables.queue.data(), object_kind::queue, &device};
+    async.type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    std::vector<order_object> fences(12, order_object{tables.fence.data(), object_kind::unknown, &device});
+    observer::observe_queue(reinterpret_cast<std::uintptr_t>(&game));
+    require(observer::install_pending(), "the signaller queue's order slots were not installed");
+    require(signal(game, fences[0], 1) == S_OK && observer::install_pending(), "the signaller fence's CPU Signal slot was not installed");
+    require(signal(game, fences[0], 2) == S_OK && signal(game, fences[0], 3) == S_OK &&
+        !observer::queue_order_signaller_line(line, sizeof(line)), "a fence's first signaller was reported");
+    const auto poisoned = second();
+    require(signal(async, fences[0], 4) == S_OK && second() == poisoned + 1, "a second signaller did not poison the fence");
+    require(observer::queue_order_signaller_line(line, sizeof(line)), "a second signaller's poisoning was not reported");
+    char text[256]{}, exe[MAX_PATH]{};
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    const char *name = exe;
+    for (const char *at = exe; *at; ++at)
+      if (*at == '\\' || *at == '/') name = at + 1;
+    std::snprintf(text, sizeof(text), "first={queue=%llu type=direct} second={queue=%llu type=compute callers=%s",
+      static_cast<unsigned long long>(order_cookie(game)), static_cast<unsigned long long>(order_cookie(async)), name);
+    require(std::strstr(line, "Sunshine 3D queue order: second signaller fence=") == line && std::strstr(line, " value=4 ") &&
+        std::strstr(line, text) && std::strstr(line, " report=1/8"),
+      (std::string("the second-signaller report does not name both queues and the caller's module: ") + line).c_str());
+    require(!observer::queue_order_signaller_line(line, sizeof(line)), "one poisoning was reported twice");
+    // The same queue poisoning another fence, and CPU Signals: no report.
+    require(signal(game, fences[1], 1) == S_OK && signal(async, fences[1], 2) == S_OK && second() == poisoned + 2,
+      "the second fence was not poisoned");
+    require(signal(game, fences[2], 1) == S_OK && cpu_signal(fences[2], 2) == S_OK && signal(game, fences[2], 3) == S_OK,
+      "a CPU Signal failed");
+    require(!observer::queue_order_signaller_line(line, sizeof(line)), "a queue already reported, or a CPU Signal, was reported");
+    // At most 8 queues: 7 more are reported, the ninth is not.
+    std::vector<order_object> others(8, order_object{tables.queue.data(), object_kind::queue, &device});
+    for (unsigned i = 0; i != others.size(); ++i)
+      require(signal(game, fences[3 + i], 1) == S_OK && signal(others[i], fences[3 + i], 2) == S_OK, "a further second signal failed");
+    require(second() == poisoned + 2 + others.size(), "the further second signallers did not poison their fences");
+    unsigned reports = 0;
+    for (; observer::queue_order_signaller_line(line, sizeof(line)); ++reports)
+      require(std::strstr(line, (" report=" + std::to_string(reports + 2) + "/8").c_str()), "a report's number is wrong");
+    require(reports == 7, ("the reports were not limited to 8 queues: " + std::to_string(reports) + " more").c_str());
+    std::puts("PASS queue order second signaller: each queue that poisons a fence as its second signaller is reported once, "
+      "naming both queues and its calling modules; CPU Signals and repeat poisonings are not; at most 8 queues");
   }
 }
 int main() {
@@ -1246,6 +1327,7 @@ int main() {
 #endif
     order_cases();
     order_review_cases();
+    order_signaller_cases();
     observer::shutdown();
     require(MH_DisableHook(MH_ALL_HOOKS) == MH_OK, "fixture hook disable failed");
     require(MH_Uninitialize() == MH_OK, "fixture MinHook teardown failed"); minhook = false;
