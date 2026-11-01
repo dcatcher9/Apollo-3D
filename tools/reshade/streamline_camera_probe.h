@@ -175,8 +175,8 @@ namespace sunshine_streamline {
   // keeps the result for that Present's thread; end_present_fg drops it at
   // the Present's end. present_frame_generation returns the snapshot taken
   // for the swapchain's Present on this thread; a consumer that finds none
-  // takes its own (fail-safe, counted by present_fg_fallbacks), so it never
-  // reads another Present's.
+  // takes its own for that call only (fail-safe, each counted by
+  // present_fg_fallbacks), so it never reads another Present's.
   void take_present_fg(std::uint64_t swapchain);
   void end_present_fg();
   const presentation_scope::present_fg &present_frame_generation(std::uint64_t swapchain);

@@ -272,11 +272,17 @@ namespace sunshine_streamline {
   }
 
   const presentation_scope::present_fg &present_frame_generation(std::uint64_t swapchain) {
-    if (!swapchain || present_snapshot.swapchain != swapchain) {
-      fg_snapshot_fallbacks.fetch_add(1, std::memory_order_relaxed);
-      present_snapshot = take_fg(swapchain);
-    }
-    return present_snapshot;
+    if (swapchain && present_snapshot.swapchain == swapchain) return present_snapshot;
+    // A consumer with no snapshot taken for its swapchain's Present on this
+    // thread reads its own, for this call only: it is not kept for a later
+    // one. Until 11-01 it became the thread's snapshot, so where depth's
+    // present events frame no Present (depth not registered: a launch that
+    // asks for a restart, a legacy add-on) every later Present of that
+    // swapchain on the thread read the first one, and the fallback counter
+    // rose once (F68).
+    fg_snapshot_fallbacks.fetch_add(1, std::memory_order_relaxed);
+    fallback_snapshot = take_fg(swapchain);
+    return fallback_snapshot;
   }
 
   std::uint64_t present_fg_fallbacks() { return fg_snapshot_fallbacks.load(std::memory_order_relaxed); }

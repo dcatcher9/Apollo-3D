@@ -4006,6 +4006,32 @@ namespace {
     require(failed.empty(), failed.c_str());
   }
 
+  // A consumer with no FG snapshot of its Present reads its own for that
+  // call only (lane L-fg, F68, 11-01). Until then the read became the
+  // thread's snapshot, so where depth's present events frame no Present
+  // (depth not registered) every later Present of the swapchain on that
+  // thread read the first one: FG turned on later stayed unknown to the UI,
+  // and present_fg_fallbacks rose once.
+  void test_present_fg_fallback_one_shot() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(81);
+    fg_options on; on.generated_frames = 2;
+    constexpr std::uint64_t unframed = 0x5000;
+    const auto counted = present_fg_fallbacks();
+    const auto first = present_frame_generation(unframed);
+    require(set_options(view, on) == 0, "FG On options failed");
+    const auto second = present_frame_generation(unframed);
+    require(!first.ui.known && second.ui.known && second.ui.enabled && second.depth.require_frame_generation &&
+        present_fg_fallbacks() == counted + 2,
+      "F68: a consumer without an FG snapshot of its Present read an earlier Present's fallback snapshot");
+  }
+
   // DLSS-G's evaluation supply (lane P, PD10 and round 1's C1, 11-01). A
   // refused FG tag boundary reads it once for both of its decisions: whether
   // a command-less boundary withdraws nothing, and whether its frame is missed
@@ -4411,6 +4437,8 @@ int main(int argc, char **argv) {
     std::puts("PASS one FG snapshot per Present from one FG view: options during a Present are the next one's, Q1's two projections, equal modes for a runtime created during ambiguity");
     test_present_fg_one_store_read();
     std::puts("PASS one FG options store read per Present snapshot, applied to the FG view in store order");
+    test_present_fg_fallback_one_shot();
+    std::puts("PASS a consumer without an FG snapshot of its Present reads its own for that call only");
     test_evaluation_supply_read();
     std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
     test_camera_read_retry();
