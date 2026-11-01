@@ -484,6 +484,7 @@ namespace {
     const char *regression {};  // The fix a regression timeline keeps.
     bool lossless {};  // regression::lossless.
     unsigned late_reads {};  // regression::late_reads.
+    unsigned ui_holds {};  // regression::ui_holds.
   };
 
   // Each Assassin's Creed Shadows fix has a regression timeline: an event
@@ -526,6 +527,11 @@ namespace {
     // 10-28 such a timeline made it only in some runs, and a run without it
     // judged nothing of its scenario, the 10-28 review's J1).
     unsigned late_reads {};
+    // The UI generated-Present holds it must judge at least (ui_frame: a
+    // generated Present that presents the frame of the last UI tag's Present
+    // and holds its decision), so a row written for that judgement cannot
+    // pass without exercising it.
+    unsigned ui_holds {};
   };
 
   constexpr regression regressions[] {
@@ -1053,6 +1059,16 @@ namespace {
     // window. Until 11-01 nothing ended it there, so frame 27's Present held
     // frame 26's copy, 421 ms old, as its own: stale at frame 27, 2 of 2 runs.
     {"fg-on-refused-deferred-copy-ends-window-hitch", "20*sr=local; fg=on,tag=present_bare,generated=3; 5*tag=present_bare,generated=3; tag=present_bare; tag=present_bare,state=unprovable,hitch=after_sources,generated=3; 5*tag=present_bare,generated=3"},
+    // The UI's generated-Present hold where it is due (ui_frame:dropped, 11-01
+    // final review F13): FG 3x with DLSS-G's copy and UI tags in every frame,
+    // three generated Presents after each real one, then three inside each
+    // next frame's recording before its SR evaluation: each presents the
+    // frame of the last UI tag's Present, so it holds that Present's UI
+    // decision. Until 11-01 only a hold of the wrong frame was judged, so an
+    // add-on that dropped these holds (a depth window that ended early, or a
+    // UI that compared the wrong window: HUD parallax or mask flicker on every
+    // generated frame) passed; it must judge at least 20 holds.
+    {"fg-on-ui-generated-hold-kept", "20*sr=local; fg=on,sr=local,dlssg=direct,generated=3; 10*sr=local,dlssg=direct,generated=3,ui=listed; 10*sr=local,dlssg=direct,generated=3,at=inside,ui=listed; 3*sr=local,dlssg=direct,generated=3,ui=listed", false, 0, 20},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -1236,6 +1252,9 @@ namespace {
     // Of those, the reads a signal first submitted after them unordered
     // (R1-late-signaller's).
     unsigned late_reads {};
+    // Generated Presents of the last UI tag's frame that held its UI
+    // decision (judge_ui_frame).
+    unsigned ui_holds {};
     std::uint64_t elapsed_ms {};
   };
 
@@ -2056,8 +2075,9 @@ namespace {
       lose_reads(false);
       ++result.generated;
       judge_present_modes(inside ? "a generated Present inside its recording" : "a generated Present after it");
+      generated_since_real += continuity_log.between;
       judge_ui_frame(inside ? "a generated Present inside its recording" : "a generated Present after it",
-        continuity_log.between && inside ? frame - 1 : frame);
+        continuity_log.between && inside ? frame - 1 : frame, continuity_log.between ? generated_since_real : 1);
       poll("generated");
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;
@@ -2735,12 +2755,35 @@ namespace {
     // where depth presented a frame at that Present (its acquisition's
     // presenting floor): without that window the UI still counts
     // (ui_evidence::generated_in_window), a limit of no frame identity, not
-    // of this decision.
+    // of this decision. Both ways (11-01 final review F13): a hold on another
+    // frame is ui_frame:held, and a generated Present that presents that
+    // same frame and offers no input of its own must hold it (a UI row held,
+    // generated_present or same_snapshot_inputs), else ui_frame:dropped.
+    // Its record tells a missing hold from a withdrawn one: the add-on's
+    // hold turns each UI row it found absent (filtered, nothing offered)
+    // into held, and a qualification that withdrew what a Present offered or
+    // held (its scope changed, or its last observation is older than the
+    // source age) refuses those rows as qualification_unavailable, which
+    // ui_qualification owns. So a Present with an absent UI row and no row
+    // ready, held, or withdrawn that way made no hold. Depth's window, and so
+    // the hold, ends after the declared generated count of Presents that
+    // present the frame after its real Present (the Present's grant,
+    // frame_presenting): a further one (a frame whose generated Presents
+    // came after its real Present and again inside the next frame's
+    // recording) is not judged so. Until 11-01 only the first way was
+    // judged, so a depth window that ended early, or a UI that compared the
+    // wrong window, dropped every such hold unseen.
     unsigned ui_input_frame {UINT_MAX};
     bool ui_input_window {};
     std::uint64_t ui_judged_present {UINT64_MAX};
+    // The generated Presents that presented the last real Present's frame
+    // since that Present (between).
+    std::uint32_t generated_since_real {};
 
-    void judge_ui_frame(const char *which, unsigned shown_frame) {
+    // generated: 0 for a real Present, else the generated Present's place
+    // among those of its frame (generated_since_real; 1 where it presents
+    // the frame being recorded).
+    void judge_ui_frame(const char *which, unsigned shown_frame, std::uint32_t generated) {
       if (record_history.records.empty()) {
         return;
       }
@@ -2751,15 +2794,23 @@ namespace {
       ui_judged_present = r.present;
       using sunshine_game3d::source_slot;
       using sunshine_game3d::source_state;
-      bool offered {}, held {};
+      bool offered {}, held {}, input {}, kept {}, absent {};
+      const auto reason_is = [&](source_slot slot, const char *reason) {
+        return r[slot].reason && !std::strcmp(r[slot].reason, reason);
+      };
       for (const auto slot : {source_slot::ui_alpha, source_slot::ui_color, source_slot::backbuffer}) {
         offered = offered || r[slot].state == source_state::ready;
       }
       for (const auto slot : {source_slot::ui_alpha, source_slot::ui_color, source_slot::backbuffer, source_slot::hudless, source_slot::ui_layer}) {
-        held = held || (r[slot].state == source_state::held && r[slot].reason && !std::strcmp(r[slot].reason, "generated_present"));
+        held = held || (r[slot].state == source_state::held && reason_is(slot, "generated_present"));
+        kept = kept || (r[slot].state == source_state::held && (reason_is(slot, "generated_present") || reason_is(slot, "same_snapshot_inputs")));
+        input = input || r[slot].state == source_state::ready || (r[slot].state == source_state::refused && reason_is(slot, "qualification_unavailable"));
+        absent = absent || r[slot].state == source_state::absent;
       }
-      if (trace && (offered || held)) {
-        std::printf("TRACE frame=%u ui_frame %s present=%llu shown=%u input=%d window=%u offered=%u held=%u\n", frame, which, static_cast<unsigned long long>(r.present), shown_frame, ui_input_frame == UINT_MAX ? -1 : int(ui_input_frame), unsigned(ui_input_window), unsigned(offered), unsigned(held));
+      const bool same_frame = generated && generated <= declared_generated && ui_input_window && shown_frame == ui_input_frame;
+      result.ui_holds += same_frame && kept;
+      if (trace && (offered || held || same_frame)) {
+        std::printf("TRACE frame=%u ui_frame %s present=%llu shown=%u input=%d window=%u offered=%u held=%u kept=%u absent=%u own_input=%u\n", frame, which, static_cast<unsigned long long>(r.present), shown_frame, ui_input_frame == UINT_MAX ? -1 : int(ui_input_frame), unsigned(ui_input_window), unsigned(offered), unsigned(held), unsigned(kept), unsigned(absent), unsigned(input));
       }
       if (offered) {
         sunshine_streamline::depth_capture::depth_choice choice {};
@@ -2767,6 +2818,8 @@ namespace {
         ui_input_window = queue_choice(observed.runtime, &choice) && choice.decision.presenting_floor;
       } else if (held && ui_input_window && shown_frame != ui_input_frame) {
         fail("ui_frame:held", frame_text(frame) + ": " + which + " held frame " + std::to_string(ui_input_frame) + "'s UI decision as a generated Present of it, and it presents frame " + std::to_string(shown_frame), frame, "generated_present");
+      } else if (same_frame && absent && !input && !kept) {
+        fail("ui_frame:dropped", frame_text(frame) + ": " + which + " presents frame " + std::to_string(shown_frame) + ", whose Present offered the last UI tag, offered no UI input of its own and did not hold that Present's UI decision", frame, "generated_present");
       }
     }
 
@@ -2819,7 +2872,8 @@ namespace {
         renew_order();
       }
       judge_present_modes("its Present");
-      judge_ui_frame("its Present", frame);
+      generated_since_real = 0;
+      judge_ui_frame("its Present", frame, 0);
       poll("present");
       // The frame's tag copy deferred to this Present, published by it.
       if (deferred_copy_before) {
@@ -2947,6 +3001,11 @@ namespace {
       continuity_log.where = where.c_str();
       declared_generated = 1;
       presented_supply = {};
+      // A new viewport: the UI holds no earlier run's decision (its input
+      // Present is the scope's, ui_evidence), so neither does the UI judge.
+      ui_input_frame = UINT_MAX;
+      ui_input_window = false;
+      generated_since_real = 0;
       // A new viewport: no read of this run names an earlier run's copy, and
       // its order fences are new, so a run's fence events are its own.
       script_order.clear();
@@ -3231,6 +3290,7 @@ int main(int argc, char **argv) {
       kept.regression = value.fix;
       kept.lossless = value.lossless;
       kept.late_reads = value.late_reads;
+      kept.ui_holds = value.ui_holds;
       if (!parse_events(value.events, kept.frames, error)) {
         std::fprintf(stderr, "FAIL session timelines: the regression of %s: %s\n", value.fix, error.c_str());
         return 2;
@@ -3340,6 +3400,9 @@ int main(int argc, char **argv) {
       }
       if (result.late_reads < value.late_reads) {
         result.failures.push_back({"regression:no_late_read", 0, std::string("the regression of ") + value.regression + " made " + std::to_string(result.late_reads) + " late reads of the " + std::to_string(value.late_reads) + " its scenario needs", "regression:no_late_read"});
+      }
+      if (result.ui_holds < value.ui_holds) {
+        result.failures.push_back({"regression:no_ui_hold", 0, std::string("the regression of ") + value.regression + " judged " + std::to_string(result.ui_holds) + " UI generated-Present holds of the " + std::to_string(value.ui_holds) + " its scenario needs", "regression:no_ui_hold"});
       }
       for (std::size_t r = 0; r != rows.size(); ++r) {
         rows[r].exercised += result.rows[r].exercised;

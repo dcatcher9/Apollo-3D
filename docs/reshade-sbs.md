@@ -1382,7 +1382,9 @@ count from that Present, so where the next frame's evaluation began inside it (D
 earlier frames inside the next frame's recording, Assassin's Creed Shadows' pattern; multi-frame
 generation) the next frame's Presents held the earlier frame's decision (HUD edges with parallax
 for a moment; session row `fg-on-ui-window-ends-at-next-evaluation-hitch` and five fixed-set seeds, judged by
-`ui_frame:held` where depth presented a frame at the Present that offered the tag). Where the Present that offered the tag had no depth window (presenting floor 0 at that Present: no API depth, or an API scope without an open window, such as a silent FG scope without FG stamps), Present
+`ui_frame:held` where depth presented a frame at the Present that offered the tag, and since 11-01 the
+other way by `ui_frame:dropped`: a generated Present of that frame within its generated count that
+offers no input must hold, session row `fg-on-ui-generated-hold-kept`). Where the Present that offered the tag had no depth window (presenting floor 0 at that Present: no API depth, or an API scope without an open window, such as a silent FG scope without FG stamps), Present
 counting decides as before: a Present that offers no input within the reported generated count
 (one while it is unknown) of that Present is generated (`ui_evidence::generated_without_input`, the
 fallback of `ui_evidence::generated_in_window`). The

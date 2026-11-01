@@ -2349,7 +2349,17 @@ frame's recording before the add-on began an evaluation of that frame, the last 
 frame; one after that evaluation began, the frame being recorded. It is judged where depth
 presented a frame at that Present that offered the tag (its acquisition's presenting floor, read
 through `SunshineDepthTestQueueChoice`): without that window the UI still counts Presents, a limit
-of having no frame identity there. Before the add-on read depth's window for it, five fixed-set
+of having no frame identity there. The other way too (`ui_frame:dropped`, the 11-01 final
+review's F13): a generated Present that presents that frame, within the declared generated count
+of Presents after its real Present (depth's window and the hold end there), and offers no UI input
+of its own must hold its decision (a UI row `held`, `generated_present` or
+`same_snapshot_inputs`). Its record tells a missing hold from a withdrawn one: the hold turns each
+UI row the add-on found `absent` into `held`, and a qualification that withdrew what a Present
+offered or held (its scope changed, or its last observation is older than the source age) refuses
+those rows as `qualification_unavailable`, which `ui_qualification` owns; so a Present with an
+`absent` UI row and no row ready, held or withdrawn made no hold. Until 11-01 only the first way
+was judged, so an add-on whose depth window ended early, or whose UI compared the wrong window,
+dropped every such hold (HUD parallax or mask flicker on each generated frame) unseen. Before the add-on read depth's window for it, five fixed-set
 seeds failed there (a real Present of the next frame held as the earlier frame's generated one
 where DLSS-G presented no generated Present), and `--trace` prints `TRACE frame=<n> ui_frame` at
 each Present that offered or held.
@@ -3017,6 +3027,12 @@ a hitch of the source age, the earlier frame having presented none of its declar
 Presents, `fg-on-refused-deferred-copy-ends-window-hitch` (lane L-fg, F2: before 11-01 the refusal
 ended no presenting window, so that Present held the earlier frame's copy, 421 ms old, as its own,
 stale at frame 27, 2 of 2 runs),
+and one for the UI's hold at the generated Presents of the frame that
+offered its tag, `fg-on-ui-generated-hold-kept` (the 11-01 final review's F13: FG 3x with DLSS-G's
+copy and UI tags every frame, generated Presents after each real one, then inside each next frame's
+recording before its evaluation; with the add-on's UI made to ignore depth's window it fails
+`ui_frame:dropped` and its own `regression:no_ui_hold`, at least 20 judged holds, while before
+11-01 the timelines passed it),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -3048,10 +3064,10 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 88 regression timelines, 6936
-frames and about 19500 Presents, with the seeds' hitches and late FG Offs) in about 340 s
-(lane run f2-P0-int1-followups-c5-sessions, 11-01; 61 rows and about 285 s in the full check's
-registered run of 10-28), registered like
+`reshade_session_timelines` runs the fixed set (24 seeds and 89 regression timelines, 6980
+frames and about 19600 Presents, with the seeds' hitches and late FG Offs) in about 340 s
+(lane run f2-P0-int1-followups-c5-sessions, 11-01, with 87 rows; 61 rows and about 285 s in the
+full check's registered run of 10-28), registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about 1.4 times a full run (its own
 watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first; the bound was about
 twice a full run when the set took about 235 s, and each regression row adds about 2 s). Locally:
