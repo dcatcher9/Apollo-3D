@@ -23,10 +23,6 @@ namespace sunshine_streamline::depth_capture {
       return a.epoch == b.epoch && a.sequence == b.sequence && a.source_id == b.source_id && a.viewport == b.viewport;
     }
 
-    bool matching_evaluation(const evaluation_head &head, const input &value) {
-      return same_nomination(head, nomination_of(value));
-    }
-
     // Ends provider's nomination in progress when it is still this one.
     void end_nomination(provider_kind provider, const evaluation_head &nomination) {
       std::lock_guard lock(mutex);

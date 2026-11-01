@@ -54,6 +54,13 @@ namespace sunshine_streamline::depth_capture {
         if (capture && value.id == capture && value.published) return reinterpret_cast<std::uint64_t>(value.published->resource.p);
       return 0;
     }
+    // Whether a nomination in progress is this evaluation's: its epoch,
+    // sequence, source and viewport (record.inl's same_nomination of its
+    // nomination_of).
+    bool matching_evaluation(const evaluation_head &head, const input &value) {
+      return head.epoch == value.epoch && head.sequence == value.sequence && head.source_id == value.source_id &&
+        head.viewport == value.viewport;
+    }
     bool diagnostic_snapshot_regression() {
       // Same admission helper as production; completion alone must not publish
       // a texture while its recorded copy can still legally replay.

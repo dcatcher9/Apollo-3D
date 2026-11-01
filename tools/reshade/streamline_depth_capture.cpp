@@ -280,7 +280,6 @@ namespace sunshine_streamline::depth_capture {
     // Recording functions (depth_capture/record.inl).
     evaluation_head nomination_of(const input &value);
     bool same_nomination(const evaluation_head &a, const evaluation_head &b);
-    bool matching_evaluation(const evaluation_head &head, const input &value);
     void end_nomination(provider_kind provider, const evaluation_head &nomination);
     void end_nomination(const input &value);
     std::uint64_t record_nomination(const input &value, std::uint64_t normalized_source,
