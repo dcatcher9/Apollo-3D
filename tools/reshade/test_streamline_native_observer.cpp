@@ -131,7 +131,14 @@ namespace {
   }
   NOINLINE ULONG STDMETHODCALLTYPE order_add_ref(void *native) { return ++static_cast<order_object *>(native)->references; }
   NOINLINE ULONG STDMETHODCALLTYPE order_unref(void *native) { return --static_cast<order_object *>(native)->references; }
+  // Runs once, inside the next GetPrivateData of a fence's order record
+  // (three 64-bit words) on order_get_data_target: a Signal's read of its
+  // fence's record, between its ticket and its log.
+  void *order_get_data_target{};
+  std::function<void()> order_on_get_data;
   NOINLINE HRESULT STDMETHODCALLTYPE order_get_data(void *native, REFGUID guid, UINT *size, void *output) {
+    if (native == order_get_data_target && *size == 3 * sizeof(std::uint64_t) && order_on_get_data)
+      std::exchange(order_on_get_data, {})();
     for (const auto &[key, bytes] : static_cast<order_object *>(native)->data)
       if (IsEqualGUID(key, guid)) {
         if (*size < bytes.size()) { *size = UINT(bytes.size()); return DXGI_ERROR_MORE_DATA; }
@@ -161,14 +168,16 @@ namespace {
     ++device->references;
     return S_OK;
   }
-  // Runs once, inside the next GetCompletedValue (another thread's work
-  // between a hooked call's steps).
+  // Runs once, inside the next GetCompletedValue, after it read the value:
+  // another thread's work while the reading thread is preempted right after
+  // its read.
   std::function<void()> order_on_completed;
   // A slow GPU: queue Signals do not complete.
   bool order_defer_signals{};
   NOINLINE UINT64 STDMETHODCALLTYPE order_completed(void *native) {
+    const auto value = static_cast<order_object *>(native)->value;
     if (auto hook = std::exchange(order_on_completed, {})) hook();
-    return static_cast<order_object *>(native)->value;
+    return value;
   }
   NOINLINE D3D12_FENCE_FLAGS STDMETHODCALLTYPE order_flags(void *native) { return static_cast<order_object *>(native)->flags; }
   NOINLINE void STDMETHODCALLTYPE order_execute(void *, UINT, void *const *) {
@@ -717,14 +726,61 @@ namespace {
     order_defer_signals = true;
     require(signal(producer, fence, 3) == S_OK, "a slow signal failed");
     std::vector<order_object> others(32, order_object{tables.queue.data(), object_kind::queue, &device});
-    order_on_completed = [&] { for (auto &other : others) execute(other); };
-    require(signal(producer, fence, 4) == S_OK && !order_on_completed, "the evicting sightings did not run inside the Signal");
+    order_get_data_target = &fence;
+    order_on_get_data = [&] { for (auto &other : others) execute(other); };
+    require(signal(producer, fence, 4) == S_OK && !order_on_get_data, "the evicting sightings did not run inside the Signal");
+    order_get_data_target = nullptr;
     require(wait(reader, fence, 4) == S_OK, "the reader's wait failed");
     const auto copy = execute(producer);
     require(copy && copy.quiet && signal(producer, fence, 5) == S_OK, "the re-sighted producer took no position");
     require(!ordered(reader, copy).ordered,
       "a Signal dropped with its evicted queue record let the reader's wait resolve to a signal after the copy-out");
     require(wait(reader, fence, 5) == S_OK && ordered(reader, copy).ordered, "a wait for the signal after the copy-out did not order it");
+
+    // A completed value read before another thread's call settled the fence
+    // (11-01, F55): the fence is sighted at 100 and its first post-sight
+    // Signal(103) logged while a pre-sight signal (101) is in flight. A
+    // racing Wait (then a racing Signal) reads 101 and is preempted right
+    // after its read (the GetCompletedValue hook) while another thread's
+    // Signal (then Wait) reads 103 and settles the fence. Read before the
+    // order lock, the racing call checked 101 after the settle, found no
+    // logged signal of it and poisoned the fence as unobserved for good;
+    // read in its exclusive hold, the other call waits for that hold
+    // (bounded here: the hook waits at most 300 ms for it) and each value is
+    // applied in the order it was read. The fence still proves an edge.
+    for (const bool racing_wait : {true, false}) {
+      order_object raced{tables.fence.data(), object_kind::unknown, &device};
+      raced.value = 100;
+      require(signal(producer, raced, 103) == S_OK, "the raced fence was not sighted");
+      raced.value = 101;  // The pre-sight signal completes.
+      const auto unobserved = [] {
+        return observer::queue_order_counts().model.poisoned[static_cast<unsigned>(sunshine_queue_order::poison::unobserved_signal)];
+      };
+      const auto poisoned_before = unobserved();
+      std::atomic<bool> settled{};
+      std::thread settler;
+      order_on_completed = [&] {
+        settler = std::thread([&] {
+          raced.value = 103;  // The first post-sight signal completes.
+          if (racing_wait) signal(producer, raced, 104);
+          else wait(reader, raced, 103);
+          settled.store(true, std::memory_order_release);
+        });
+        for (const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+             !settled.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < until;)
+          std::this_thread::yield();
+      };
+      const auto racing = racing_wait ? wait(reader, raced, 103) : signal(producer, raced, 105);
+      if (settler.joinable()) settler.join();
+      require(racing == S_OK && !order_on_completed, "the racing call read no completed value");
+      require(unobserved() == poisoned_before,
+        racing_wait ? "a Wait's completed value read before another thread's Signal settled the fence poisoned it as unobserved"
+                    : "a Signal's completed value read before another thread's Wait settled the fence poisoned it as unobserved");
+      const auto after_race = execute(producer);
+      require(after_race && signal(producer, raced, 106) == S_OK, "the raced fence's next signal failed");
+      raced.value = 106;
+      require(wait(reader, raced, 106) == S_OK && ordered(reader, after_race).ordered, "the raced fence no longer proves an edge");
+    }
     order_defer_signals = false;
 
     // A fence's private data is written under the order lock: a CPU Signal
@@ -906,7 +962,7 @@ namespace {
     const auto verdict = ordered(reader, relied);
     require(!verdict.ordered && verdict.why == sunshine_queue_order::refusal::uncovered,
       "a verdict rested on a CPU Signal slot replaced since the last poll");
-    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call; no add-on Signal waits on the order lock; ReShade's Signals of its own fences in the add-on's flush and after it are not logged and never wait, nor do a verdict, a rely or a conflict check on a busy lock; a slot replaced since the last poll refuses the next verdict");
+    std::puts("PASS queue order review: a Signal whose queue record was evicted after its ticket is logged on the re-sighted record; a completed value read before another thread's call settled the fence never poisons it; fence private data is written under the order lock; a rejected CPU Signal slot is not discovered again per call; no add-on Signal waits on the order lock; ReShade's Signals of its own fences in the add-on's flush and after it are not logged and never wait, nor do a verdict, a rely or a conflict check on a busy lock; a slot replaced since the last poll refuses the next verdict");
   }
 
   // The second-signaller diagnostic (deferred item 5, 10-31): a queue whose

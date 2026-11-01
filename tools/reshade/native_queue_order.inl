@@ -239,18 +239,6 @@ namespace sunshine_streamline::native_observer {
       return memory.id;
     }
 
-    template<class Operation> void order_update(ID3D12Fence *fence, std::uint64_t id, Operation operation) {
-      AcquireSRWLockExclusive(&order::lock);
-      apply_order_reset();
-      if (order::model.known_fence(id)) {
-        const auto before = order::model.memory(id);
-        operation();
-        const auto after = order::model.memory(id);
-        if (after.signaller != before.signaller || after.why != before.why) write_fence(fence, after);
-      }
-      ReleaseSRWLockExclusive(&order::lock);
-    }
-
     // A Signal that poisoned its fence as the fence's second signaller: the
     // fence's record id and its first signaller's queue cookie.
     struct second_signal {
@@ -260,23 +248,36 @@ namespace sunshine_streamline::native_observer {
     // Logs one queue Signal. False only with retry, when the call's queue
     // record was dropped (evicted, or a reset) since it took its ticket. A
     // signalling queue without a record poisons a fence already known.
+    // The fence's completed value is read in the exclusive hold that applies
+    // it (a leaf runtime call, as write_fence's), as order_wait's is: in lock
+    // order the values a fence is read at only rise, so a value read before
+    // another thread's hold settled the fence is never checked after it.
+    // Until 11-01 the read came before the lock, and such a value, set by a
+    // pre-sight signal no ring holds, poisoned the fence as unobserved for
+    // good (F55).
     bool log_signal(const invocation &call, ID3D12Fence *fence, UINT64 value, bool retry, second_signal &poisoned) {
       bool lost = false;
       auto id = call.ticket ? fence_id(fence, call.order_queue, &lost) : read_fence(fence).id;
       if (lost && retry) return false;
       if (lost) id = read_fence(fence).id;
       if (!id) return true;
-      const auto completed = fence->lpVtbl->GetCompletedValue(fence);
       bool dropped = false;
-      order_update(fence, id, [&] {
+      AcquireSRWLockExclusive(&order::lock);
+      apply_order_reset();
+      if (order::model.known_fence(id)) {
         const bool recorded = call.ticket && !lost && order::model.known_queue(call.order_queue);
-        if (call.ticket && !recorded && retry) { dropped = true; return; }
-        const auto before = order::model.memory(id);
-        order::model.signal(recorded ? call.order_queue : 0, id, value, recorded ? call.ticket : 0, completed, GetTickCount64());
-        if (before.why == sunshine_queue_order::poison::none &&
-            order::model.memory(id).why == sunshine_queue_order::poison::second_signaller)
-          poisoned = {id, before.signaller};
-      });
+        if (call.ticket && !recorded && retry) dropped = true;
+        else {
+          const auto completed = fence->lpVtbl->GetCompletedValue(fence);
+          const auto before = order::model.memory(id);
+          order::model.signal(recorded ? call.order_queue : 0, id, value, recorded ? call.ticket : 0, completed, GetTickCount64());
+          const auto after = order::model.memory(id);
+          if (after.signaller != before.signaller || after.why != before.why) write_fence(fence, after);
+          if (before.why == sunshine_queue_order::poison::none && after.why == sunshine_queue_order::poison::second_signaller)
+            poisoned = {id, before.signaller};
+        }
+      }
+      ReleaseSRWLockExclusive(&order::lock);
       return !dropped;
     }
 
@@ -400,12 +401,13 @@ namespace sunshine_streamline::native_observer {
     void order_wait(const invocation &call, ID3D12Fence *fence, UINT64 value, bool quiet) {
       const restore_error incoming{GetLastError()};
       const auto id = fence_id(fence, call.order_queue);
-      const auto completed = fence->lpVtbl->GetCompletedValue(fence);
       AcquireSRWLockExclusive(&order::lock);
       apply_order_reset();
-      // An unknown fence still logs the wait (refused as untracked).
+      // An unknown fence still logs the wait (refused as untracked). A known
+      // one's completed value is read in this hold (log_signal, F55).
       const bool known = id && order::model.known_fence(id);
       const auto before = known ? order::model.memory(id) : sunshine_queue_order::fence_memory{};
+      const auto completed = known ? fence->lpVtbl->GetCompletedValue(fence) : 0;
       order::model.wait(call.order_queue, id, value, call.ticket, quiet, completed, GetTickCount64());
       if (known) {
         const auto after = order::model.memory(id);

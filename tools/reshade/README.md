@@ -3293,7 +3293,10 @@ serial is 30 there); each Present establishes any selected copy, as
   stays poisoned after its records were dropped; a third party's Signal slot resetting the order
   model only; and `QueueFenceOrder=0`. Its review cells (10-27): a Signal whose queue record a full
   table evicted between its ticket and its log is logged on the re-sighted record (dropped, the
-  reader's pending wait resolved to the next signal, after a copy-out it precedes); a CPU Signal
+  reader's pending wait resolved to the next signal, after a copy-out it precedes); a Wait, and a
+  Signal, that read the fence's completed value (a pre-sight signal's) and are preempted while
+  another thread's call settles the fence never poison it as unobserved, and the fence still proves
+  an edge (11-01, F55: the value was read before the order lock and checked after the settle); a CPU Signal
   poisoning a fence on another thread while a queue Signal writes its first signaller keeps its
   poison in the private data and through a model reset (the write ran after the lock was released);
   Signals and Waits on a fence whose CPU Signal slot was rejected read no slot address (each read

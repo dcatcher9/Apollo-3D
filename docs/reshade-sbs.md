@@ -5520,7 +5520,11 @@ data, written under the order lock so that an older write never replaces it, so 
 an eviction never forgets it) once it is shared, cross-adapter or
 non-monitored, of another device, signalled by the CPU (hooked, whatever the result), by a second
 queue or by a queue without a record, signalled a decreasing value or `UINT64_MAX`, or read at a
-completed value no logged signal set. A fence is recorded only once its CPU Signal slot is hooked.
+completed value no logged signal set. Each completed value is read in the exclusive hold of the
+order lock that applies it, so in lock order the values a fence is read at only rise: until 11-01 a
+Signal or Wait read it before the lock, and a value a pre-sight signal set, read before another
+thread's call settled the fence and checked after it, poisoned the fence as unobserved for good
+(F55). A fence is recorded only once its CPU Signal slot is hooked.
 Its completed value at first sight is its baseline: a wait at or below it is refused. Its first
 post-sight signal above every value seen settles it once read complete, which proves every
 pre-sight signal of that queue executed; a wait logged before that is refused. Every verdict is
@@ -5564,8 +5568,8 @@ because the add-on's barriers on a game resource would run without exclusive acc
 that may no longer hold, and they wait for a redesign that decides at the execute point and copies
 without changing state.
 
-**Cost.** A Signal or Wait reads two private-data values and the fence's completed value and takes
-one exclusive lock for an O(1) append (on a fence whose CPU Signal slot is pending, rejected or
+**Cost.** A Signal or Wait reads two private-data values and takes one exclusive lock, in which it
+reads the fence's completed value, for an O(1) append (on a fence whose CPU Signal slot is pending, rejected or
 refused, one private-data read and a lookup in the slot table, never a new discovery); an `ExecuteCommandLists` reads one private-data value and
 increments one atomic; queries walk the logged waits at most once per queue. The model is bounded:
 32 queues, 256 fences (least recently used dropped), 64 waits per queue, 32 signals and 8 pending
