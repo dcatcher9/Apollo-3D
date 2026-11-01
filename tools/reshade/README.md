@@ -3212,7 +3212,11 @@ serial is 30 there); each Present establishes any selected copy, as
   its FG copy within the source age only or drops it; an FG viewport switch drops the old
   viewport's held copy until the new one's is readable; until 11-01 every such row was ambiguous,
   and at FG Off the other viewport's newer copy showed; until late on 11-01 the Dynamic scope
-  without a count broke the tie), the source a head refused before its capture existed names to
+  without a count broke the tie; since the R5 review, 11-01: the pool keeps the bound viewport's
+  newest copy, readable from its list's Reset, and at FG On its FG head's SR stand-in beside the
+  other viewport's newer nomination (each row's SWEEP recycles what the pool may reclaim; until
+  then both went and the Present held)), the pool's storage check before its retention (a copy
+  whose fence completes between the two reads stays; until 11-01 it was recycled), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of
   `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at

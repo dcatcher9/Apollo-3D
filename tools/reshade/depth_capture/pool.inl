@@ -4,24 +4,46 @@
 
 namespace sunshine_streamline::depth_capture {
   SUNSHINE_CAPTURE_INTERNAL {
+    // Requires mutex. Whether provider's nomination (epoch, sequence,
+    // source_id) is one a Present can take as its head
+    // (select_latest_capture): the namespace's newest, or the newest of an
+    // active view (view_active), which a confirmed FG scope's viewport makes
+    // the head where it breaks a tie of active views (owner ruling R5). The
+    // pool keeps each such head and its stand-ins (logical_source_retention,
+    // release_idle_slots). Until 11-01 it kept only the namespace's newest
+    // nomination's: where the tie was broken on another viewport, that
+    // viewport's newest copy and its FG lineage's SR stand-in were
+    // reclaimable once readable (on another queue without copy-out storage,
+    // at once), so another viewport's record or the idle sweep could
+    // recycle them before the Present, which then held an older copy or went
+    // mono (the R5 review's R5-1).
+    bool selectable_head(provider_kind provider, std::uint64_t epoch, std::uint64_t sequence, std::uint64_t source_id,
+        std::uint64_t now) {
+      if (!valid_provider(provider)) return false;
+      const auto &current = evaluations[provider_index(provider)];
+      if (epoch == current.epoch && sequence == current.sequence && source_id == current.source_id) return true;
+      for (const auto &view : current.views)
+        if (view.epoch == epoch && view.sequence == sequence && view.source_id == source_id &&
+            view_active(current, view, provider, now)) return true;
+      return false;
+    }
+
     // Current source authority allows unfinished nominations and has no texture/fence requirement.
     bool current_source_nomination(const slot &value) {
       if (!value.id || !value.source_nominated || value.preservation_only || value.invalid ||
           value.nomination_invalid || (value.finished && !value.success) || !valid_provider(value.metadata.provider))
         return false;
-      const auto &head = evaluations[provider_index(value.metadata.provider)];
-      return value.metadata.epoch == head.epoch && value.metadata.sequence == head.sequence &&
-        value.metadata.source_id == head.source_id;
+      const auto &metadata = value.metadata;
+      return selectable_head(metadata.provider, metadata.epoch, metadata.sequence, metadata.source_id, GetTickCount64());
     }
 
     // Logical retention keeps metadata-only authority separately from completed fallback pixels.
     source_retention logical_source_retention(slot &value) {
       if (value.nomination_only) {
         // Metadata-only nominations carry source authority but no GPU storage.
-        const auto &head = evaluations[provider_index(value.metadata.provider)];
+        const auto &metadata = value.metadata;
         const bool current = !value.invalid && (!value.finished || value.success) &&
-          value.metadata.epoch == head.epoch && value.metadata.sequence == head.sequence &&
-          value.metadata.source_id == head.source_id;
+          selectable_head(metadata.provider, metadata.epoch, metadata.sequence, metadata.source_id, GetTickCount64());
         return current ? source_retention::current_nomination : source_retention::none;
       }
       if (!value.source_nominated || value.preservation_only || value.invalid || value.nomination_invalid ||
@@ -30,36 +52,47 @@ namespace sunshine_streamline::depth_capture {
       // A different provider (or Generic preservation) shares this pool and
       // must not erase the current head while its namespace still names it.
       if (current_source_nomination(value)) return source_retention::current_nomination;
-      // The provider's newest nomination: its capture, valid or not (a
-      // failed or refused one is a missing frame, select_capture), else the
-      // view that names it when it was refused before its capture existed.
       const auto provider = value.metadata.provider;
-      const auto &head = evaluations[provider_index(provider)];
-      const slot *latest = nullptr;
-      for (const auto &candidate : capture_pool.slots)
-        if (candidate.id && !candidate.preservation_only && candidate.metadata.provider == provider &&
-            candidate.metadata.epoch == head.epoch && candidate.metadata.sequence == head.sequence &&
-            candidate.metadata.source_id == head.source_id && (!latest || candidate.id > latest->id)) latest = &candidate;
-      const evaluation_head *view = nullptr;
-      if (!latest && head.epoch && head.sequence)
-        for (const auto &candidate : head.views)
-          if (candidate.epoch == head.epoch && candidate.sequence == head.sequence && candidate.source_id == head.source_id)
-            view = &candidate;
-      if (!latest && !view) return source_retention::none;
+      const auto &current = evaluations[provider_index(provider)];
+      const auto now = GetTickCount64();
       // Preserve exactly the existing eligible completed fallback too, beneath
       // a pending successor, a nomination in progress or a missing frame
       // alike, and beneath an FG input the SR/RR snapshot of its lineage that
-      // stands in for it (lineage_snapshot). Their age, reset/revision,
-      // source and GPU-completion requirements remain in completed_snapshot
-      // and lineage_fallback; retaining storage grants no extra admission.
+      // stands in for it (lineage_snapshot), of each head a Present can take
+      // (selectable_head). Their age, reset/revision, source and
+      // GPU-completion requirements remain in completed_snapshot and
+      // lineage_fallback; retaining storage grants no extra admission.
       // Until 10-28 that SR snapshot was kept by neither rule: on another
       // queue it becomes readable and reclaimable at once, so the Present's
       // idle sweep (poll) or another record could recycle it before the next
       // Present, which then held an older copy or went mono.
-      const auto identity = latest ? latest->metadata : head_identity(*view, provider);
-      const auto now = GetTickCount64();
-      return completed_snapshot(identity, now) == &value || lineage_fallback(identity, now) == &value ?
-        source_retention::completed_fallback : source_retention::none;
+      const auto stands_in = [&](std::uint64_t epoch, std::uint64_t sequence, std::uint64_t source_id) {
+        // The head's capture, valid or not (a failed or refused one is a
+        // missing frame, select_capture), else the view that names it when
+        // it was refused before its capture existed.
+        const slot *latest = nullptr;
+        for (const auto &candidate : capture_pool.slots)
+          if (candidate.id && !candidate.preservation_only && candidate.metadata.provider == provider &&
+              candidate.metadata.epoch == epoch && candidate.metadata.sequence == sequence &&
+              candidate.metadata.source_id == source_id && (!latest || candidate.id > latest->id)) latest = &candidate;
+        const evaluation_head *view = nullptr;
+        if (!latest && epoch && sequence)
+          for (const auto &candidate : current.views)
+            if (candidate.epoch == epoch && candidate.sequence == sequence && candidate.source_id == source_id)
+              view = &candidate;
+        if (!latest && !view) return false;
+        const auto identity = latest ? latest->metadata : head_identity(*view, provider);
+        // Both stand-ins are copies of the head's viewport: another
+        // viewport's copy needs neither scan.
+        if (identity.viewport != value.metadata.viewport) return false;
+        return completed_snapshot(identity, now) == &value || lineage_fallback(identity, now) == &value;
+      };
+      if (stands_in(current.epoch, current.sequence, current.source_id)) return source_retention::completed_fallback;
+      for (const auto &view : current.views)
+        if ((view.sequence != current.sequence || view.source_id != current.source_id) &&
+            view_active(current, view, provider, now) && stands_in(view.epoch, view.sequence, view.source_id))
+          return source_retention::completed_fallback;
+      return source_retention::none;
     }
 
     bool snapshot_storage_retired(const slot &value) {
@@ -87,7 +120,13 @@ namespace sunshine_streamline::depth_capture {
       // Logical source lifetime and GPU storage lifetime are independent. A
       // retired allocation can still carry authority; withdrawing authority
       // never discharges an unfinished recording, CPU lease or queue fence.
-      return logical_source_retention(value) == source_retention::none && snapshot_storage_retired(value);
+      // Storage first: a copy still recording or in flight (most of the
+      // pool's copies at a Present's idle sweep) needs no retention scan, and
+      // retention reads each fence no earlier than the storage check did, so
+      // a copy whose fence completes between the two reads stays as the
+      // stand-in it just became. Until 11-01 retention came first, for every
+      // copy (the final review's F66).
+      return snapshot_storage_retired(value) && logical_source_retention(value) == source_retention::none;
     }
 
     // Leaves the count last: a waiter may then release the device.
@@ -460,13 +499,14 @@ namespace sunshine_streamline::depth_capture {
     // the slot is next reused (after a hitch many slots can be idle). Released
     // storage moves to discard, for release after the lock.
     void release_idle_slots(std::vector<std::shared_ptr<texture_reference>> &discard) {
-      // An API namespace's newest nomination stays: selection reports its
-      // failure or pending state.
-      const auto head = [](const slot &value) {
+      // Each nomination a Present can take as its head stays (selectable_head:
+      // an API namespace's newest, and each active view's newest): selection
+      // reports its failure or pending state.
+      const auto now = GetTickCount64();
+      const auto head = [now](const slot &value) {
         const auto &metadata = value.metadata;
-        if (value.preservation_only || !metadata.epoch || !valid_provider(metadata.provider)) return false;
-        const auto &current = evaluations[provider_index(metadata.provider)];
-        return metadata.epoch == current.epoch && metadata.sequence == current.sequence && metadata.source_id == current.source_id;
+        if (value.preservation_only || !metadata.epoch) return false;
+        return selectable_head(metadata.provider, metadata.epoch, metadata.sequence, metadata.source_id, now);
       };
       std::uint64_t idle = 0;
       for (auto &value : capture_pool.slots) {

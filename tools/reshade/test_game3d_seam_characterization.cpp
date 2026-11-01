@@ -2144,8 +2144,17 @@ namespace sunshine_streamline::depth_capture {
     // acquire()'s bookkeeping at each Present (the gap watermark, the
     // establishment and delivery of a ready copy) and, at a Present that
     // shows nothing fresh while the display retains a copy, decide_display
-    // (D) for it. F, G: viewport 0's FG copies; A: its SR copy; B, C:
-    // viewport 1's SR copies; live or silent: the Present's FG scope.
+    // (D) for it. F, G: viewport 0's FG copies; A: its SR copy; D: its SR
+    // copy on the game's queue, readable from its list's Reset (no copy-out,
+    // so readable and reclaimable at once); B, C: viewport 1's SR copies;
+    // live or silent: the Present's FG scope. SWEEP: the Present's idle
+    // sweep or another viewport's record before the next Present recycles
+    // every slot the pool may reclaim (reclaimable, the rule both use); it
+    // names the copies it took. The pool keeps every head a Present can
+    // take and its stand-ins (since 11-01; until then only the namespace's
+    // newest nomination's, so a bound viewport's newest copy or its FG
+    // lineage's SR stand-in went and the Present held: the R5 review's
+    // R5-1).
     void view_tie_rows() {
       using query = frame_generation_query_status;
       enum class shape {
@@ -2164,7 +2173,9 @@ namespace sunshine_streamline::depth_capture {
         fg_switch,  // F shown; FG Off on viewport 0 and FG on viewport 1 (silent); A; C in flight, then C.
         fg_live_no_count,  // fg_live with Dynamic mode's 0 generated frames.
         fg_silent_no_count,  // fg_silent with Dynamic mode's 0 generated frames.
-        one_view_no_count  // F alone, a live scope with Dynamic mode's 0 generated frames.
+        one_view_no_count,  // F alone, a live scope with Dynamic mode's 0 generated frames.
+        bound_kept,  // A shown (silent scope on viewport 0); D, then C the newest; a sweep.
+        fg_on_lineage_kept  // FG On on viewport 0 (silent): D, G in flight, B the newest; a sweep.
       };
 
       struct row {
@@ -2193,18 +2204,30 @@ namespace sunshine_streamline::depth_capture {
         {"A live Dynamic scope without a declared generated count breaks no tie: it then finds the other viewport's newer nomination", shape::fg_live_no_count, "P1 live - unavailable fg_scope_mismatch"},
         {"A silent Dynamic scope without a declared generated count breaks no tie", shape::fg_silent_no_count, "P1 silent - ambiguous ambiguous_views"},
         {"One active view: a Dynamic scope without a declared generated count still owns its viewport", shape::one_view_no_count, "P1 live F ready current_capture"},
+        // The R5 review (11-01): the pool.
+        {"The pool keeps the bound viewport's newest copy, readable from its Reset, beside the other viewport's newer nomination: it shows", shape::bound_kept, "P1 silent A ready current_capture; SWEEP -; P2 silent D ready current_capture"},
+        {"The pool keeps the bound FG head's SR stand-in at FG On beside the other viewport's newer nomination: it stands in", shape::fg_on_lineage_kept, "SWEEP -; P1 silent D ready lineage_snapshot"},
       };
       constexpr std::uint64_t epoch = 13, device = 41;
       for (const auto &r : rows) {
         reset();
-        // The owner in the owner table, where retire_source finds it.
+        // The owner in the owner table, where retire_source finds it, and
+        // the game's queue (place 1), whose copies are complete (fence 5).
         capture_queues.queues[0] = std::make_unique<queue_state>();
-        fixture::completion_fence owner_queue;
+        fixture::completion_fence owner_queue, game_queue;
         capture_queues.queues[0]->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&owner_queue);
+        capture_queues.queues[1] = std::make_unique<queue_state>();
+        capture_queues.queues[1]->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&game_queue);
+        capture_queues.queues[1]->fence.p = &game_queue;
+        capture_queues.queues[1]->device_identity = device;
+        game_queue.completed = 5;
         struct release_place {
           ~release_place() {
             capture_queues.queues[0]->queue.p = nullptr;
             capture_queues.queues[0].reset();
+            capture_queues.queues[1]->queue.p = nullptr;
+            capture_queues.queues[1]->fence.p = nullptr;
+            capture_queues.queues[1].reset();
           }
         } release;
         auto &owner = *capture_queues.queues[0];
@@ -2213,7 +2236,7 @@ namespace sunshine_streamline::depth_capture {
         storage->device_identity = device;
         storage->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         storage->desc.Format = DXGI_FORMAT_R32_TYPELESS;
-        slot *f = nullptr, *g = nullptr, *a = nullptr, *b = nullptr, *c = nullptr;
+        slot *f = nullptr, *g = nullptr, *a = nullptr, *b = nullptr, *c = nullptr, *d = nullptr;
         unsigned index = 0;
         std::uint64_t present = 1;
         std::string trace;
@@ -2233,14 +2256,17 @@ namespace sunshine_streamline::depth_capture {
           presentation_scope::fg_view view;
           return provider::select_frame_generation_scope(view.update(status, value));
         };
-        const auto who = [&](const capture_pick &chosen) {
-          char out = '-';
-          for (const auto &[value, label] : {std::pair {f, 'F'}, std::pair {g, 'G'}, std::pair {a, 'A'}, std::pair {b, 'B'}, std::pair {c, 'C'}}) {
-            if (chosen.value && chosen.value == value) {
+        const auto label_of = [&](const slot *chosen) {
+          char out = '?';
+          for (const auto &[value, label] : {std::pair {f, 'F'}, std::pair {g, 'G'}, std::pair {a, 'A'}, std::pair {b, 'B'}, std::pair {c, 'C'}, std::pair {d, 'D'}}) {
+            if (chosen == value) {
               out = label;
             }
           }
-          return chosen.value && out == '-' ? '?' : out;
+          return out;
+        };
+        const auto who = [&](const capture_pick &chosen) {
+          return chosen.value ? label_of(chosen.value) : '-';
         };
         const auto display = [&](const display_decision &update) {
           return std::string(update.action == display_action::hold ? "hold " : "invalidate ") + update.reason;
@@ -2288,6 +2314,26 @@ namespace sunshine_streamline::depth_capture {
             views += view.sequence != 0;
           }
           trace += "; OFF views=" + std::to_string(views);
+        };
+        // The idle sweep or another viewport's record before the next
+        // Present: each slot the pool may reclaim is recycled.
+        const auto sweep = [&] {
+          std::string taken;
+          for (auto &value : capture_pool.slots) {
+            if (value.id && reclaimable(value)) {
+              taken += label_of(&value);
+              value = {};
+            }
+          }
+          trace += std::string(trace.empty() ? "" : "; ") + "SWEEP " + (taken.empty() ? std::string("-") : taken);
+        };
+        // A copy on the game's queue without copy-out storage: readable on
+        // the owner's queue from its list's Reset (the fixture's recording 0)
+        // with its producer fence complete, so also reclaimable then.
+        const auto on_game_queue = [&](slot &value) -> slot & {
+          value.queue = reinterpret_cast<std::uint64_t>(&game_queue);
+          value.producer_fence = 5;
+          return value;
         };
         // A nominated copy of the game's depth, on this queue.
         const auto copy = [&](slot &value) -> slot & {
@@ -2404,12 +2450,88 @@ namespace sunshine_streamline::depth_capture {
             c->finished = true;
             pick(fg_read(query::observed, true, 1));
             break;
+          case shape::bound_kept:
+            a = &sr0(10);
+            b = &sr1(11);
+            pick(fg_read(query::observed, true, 0));
+            // Viewport 0's next copy, readable from its Reset; viewport 1's
+            // next evaluation, the newest; then a record or the sweep.
+            d = &on_game_queue(sr0(12));
+            c = &sr1(13);
+            sweep();
+            pick(fg_read(query::observed, true, 0));
+            break;
+          case shape::fg_on_lineage_kept:
+            // Viewport 0's SR copy readable from its Reset, then its first
+            // FG evaluation (FG On, no accepted FG copy yet: silent) in
+            // flight, then viewport 1's newer evaluation.
+            d = &on_game_queue(sr0(10));
+            g = &fg_copy(11, false);
+            g->finished = false;
+            b = &sr1(12);
+            sweep();
+            pick(fg_read(query::observed, true, 0));
+            break;
         }
         if (trace != r.trace) {
           fail(std::string("P6 two active views, ") + r.pins + ":\n    got      " + trace + "\n    expected " + r.trace);
         }
       }
       std::printf("PASS P6 two active views and the FG scope's tie-break: %zu rows\n", std::size(rows));
+    }
+
+    // P6: the pool checks a copy's storage before its retention
+    // (reclaimable, since 11-01). A copy on another queue without copy-out
+    // storage, its list reset, whose producer fence completes between the two
+    // reads is then the newest readable completed copy beneath its pending
+    // head, the stand-in the next Present takes: it stays. Until 11-01
+    // retention read the fence first (not complete: nothing to keep) and the
+    // storage check then found the copy retired, so the idle sweep or a
+    // record recycled it (the final review's F66). A copy complete at both
+    // reads stays either way.
+    void storage_before_retention() {
+      constexpr std::uint64_t epoch = 13, device = 41;
+      for (const bool between : {false, true}) {
+        reset();
+        fixture::completion_fence fence;
+        fence.completed = between ? 4 : 5;
+        if (between) {
+          fence.completed_later = 5;
+          fence.later_after = 1;  // Complete from the second read on.
+        }
+        auto &place = capture_queues.queues[0];
+        place = std::make_unique<queue_state>();
+        place->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&fence);
+        place->fence.p = &fence;
+        place->device_identity = device;
+        struct release_place {
+          std::unique_ptr<queue_state> &entry;
+          ~release_place() { entry->queue.p = nullptr; entry->fence.p = nullptr; entry.reset(); }
+        } release{place};
+        auto storage = std::make_shared<source_reference>();
+        storage->device_identity = device;
+        storage->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        storage->desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        // The frame's SR copy on the game's queue (sequence 10), then its
+        // successor (sequence 20), the namespace's newest nomination, still
+        // recording.
+        auto &copy = make(0, provider_kind::streamline, epoch, 10, 0);
+        copy.texture = std::make_shared<texture_reference>();
+        copy.source_nominated = true;
+        copy.metadata.source = storage;
+        copy.queue = reinterpret_cast<std::uint64_t>(&fence);
+        copy.producer_fence = 5;
+        auto &head = make(1, provider_kind::streamline, epoch, 20, 0);
+        head.texture = std::make_shared<texture_reference>();
+        head.source_nominated = true;
+        head.metadata.source = storage;
+        head.finished = false;
+        pin_clock(GetTickCount64());
+        if (reclaimable(copy)) {
+          fail(std::string("P6 storage before retention, the copy ") + (between ? "completing between the reads" : "complete at both reads") + " is recycled");
+        }
+      }
+      std::printf("PASS P6 the pool's storage check before its retention: 2 rows\n");
     }
 
     // P6: a pending head's own copy, on another queue, that completes between
@@ -3566,6 +3688,7 @@ int main() {
   missing_frame_rows();
   fg_off_role_rows();
   view_tie_rows();
+  storage_before_retention();
   named_head_rows();
   frame_presenting_rows();
   frame_presenting_anchor_rows();

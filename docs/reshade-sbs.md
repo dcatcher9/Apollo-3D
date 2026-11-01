@@ -5092,7 +5092,17 @@ for a missing frame), and beneath a Streamline FG input the newest completed SR/
 display lineage that any queue can read (`lineage_fallback`, the copy `lineage_snapshot` stands in
 with; until 10-28 no rule kept it: an SR copy on another queue becomes readable and reclaimable at
 once, so the Present's idle sweep or another record could recycle it before the next Present, which
-then held an older copy or went mono). Supersession, failure or invalidation releases the current record's authority hold;
+then held an older copy or went mono). The pool keeps these for every head a Present can take
+(`selectable_head`): the provider's newest nomination, and the newest nomination of each active
+view, which a confirmed FG scope's viewport makes the head where it breaks a tie of active views
+(owner ruling R5, below); a head's stand-ins are copies of its viewport only. Until 11-01 only the
+namespace's newest nomination was kept, so with the tie broken on the other viewport its newest
+copy, readable from its list's Reset on another queue, or its FG lineage's SR stand-in at FG On
+could be recycled by the other viewport's record or the idle sweep before the Present, which then
+held or went mono (the R5 review's R5-1). A record's storage is checked before its retention
+(`reclaimable`, since 11-01): a copy still in flight needs no retention scan, and a copy whose fence
+completes between the two reads stays as the stand-in it just became (until then retention read
+the fence first, for every copy: the final review's F66). Supersession, failure or invalidation releases the current record's authority hold;
 completed-fallback eligibility and all GPU retirement requirements still apply before storage can
 be reused. This uses the existing bounded pool and does not extend capture freshness or authorize
 reading expired depth. Once per Present, every other reusable record drops its game resource,

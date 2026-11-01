@@ -69,18 +69,24 @@ namespace sunshine_streamline::depth_capture {
           (!value.consumer_queue || value.consumer_queue == consumer)) value.consumer_queue = consumer;
     }
 
+    // Requires mutex. An active view of provider's namespace current: of its
+    // epoch, its newest evaluation younger than the source age or the frame
+    // the Present being decided presents (frame_presenting), by its call or
+    // by its newest copy's submission (view_presenting). Selection counts
+    // these views (select_latest_capture); the pool keeps their heads
+    // (selectable_head).
+    bool view_active(const evaluation_namespace &current, const evaluation_head &value, provider_kind provider,
+        std::uint64_t now) {
+      return value.epoch == current.epoch && value.sequence &&
+        (sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms) || view_presenting(value, provider));
+    }
+
     capture_pick select_latest_capture(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, provider_kind provider, std::uint64_t now, selection_policy policy) {
       capture_pick out;
       out.provider = provider;
       const auto &current = evaluations[provider_index(provider)];
-      // Active: its newest evaluation is younger than the source age, or is
-      // the frame this Present presents (frame_presenting), by its call or by
-      // its newest copy's submission (presented_by).
-      const auto active = [&](const evaluation_head &value) {
-        return value.epoch == current.epoch && value.sequence &&
-          (sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms) || view_presenting(value, provider));
-      };
+      const auto active = [&](const evaluation_head &value) { return view_active(current, value, provider, now); };
       unsigned active_views = 0;
       for (const auto &value : current.views) active_views += active(value);
       // Two or more active views tie (S19). A confirmed FG scope's viewport
