@@ -1152,6 +1152,14 @@ namespace {
     // hitch that frame's own copy shown there was judged stale, soak seeds
     // d12563f8dc22b059 and 2dbc7936fb23f7fa).
     bool evaluation_began {};
+    // A frame whose tag copy is deferred to its Present (R2) as a legal
+    // source: the add-on's newest published copy right before that Present
+    // (newest_copy, never 0 here: 1 stands for none). The copy that Present
+    // publishes is the frame's tag copy, whose capture id the judge learns
+    // after it (judge::learned_capture); until 10-31 such a copy had none
+    // (supply::capture 0), so only the tick bound judged a Present holding an
+    // older copy beside it. 0: no such copy.
+    std::uint64_t deferred_copy_before {};
     // The oracle's FG scope at the frame's copy decisions, before a late FG
     // Off (fg=off_late) after them: judge_decisions reads a preempting FG
     // rule in that scope (until 10-28 it read the scope after the Off, so
@@ -2299,6 +2307,8 @@ namespace {
         continuity_log.pending.completes(value.sources, value.probe, value.relied, value.capture,
           value.sources == continuity::sr_evaluate && fg_held);
       }
+      deferred_copy_before = deferred_tag && !cancel_expected && (supply.legal & continuity::tag_copy) &&
+        !supply.capture[1] ? std::max<std::uint64_t>(newest_copy(), 1) : 0;
     }
 
     void dlssg_evaluation(frame_events::dlssg_form form) {
@@ -2435,10 +2445,18 @@ namespace {
         open_dlssg_gate();
         open_sr_gate();
       };
+      deferred_copy_before = 0;
       present_frame();
       render_tracked_depth = {};
       after_present = {};
       poll("present");
+      // The frame's tag copy deferred to this Present, published by it.
+      if (deferred_copy_before) {
+        if (const auto after = newest_copy(); after && after != deferred_copy_before) {
+          supply.capture[1] = after;
+          continuity_log.judge.learned_capture(continuity::tag_copy, after);
+        }
+      }
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;
         // The scope's FG copy is lost to a late signal only where the add-on

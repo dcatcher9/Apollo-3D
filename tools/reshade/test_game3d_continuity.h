@@ -43,10 +43,16 @@
 // while FG was on (supply::fg_held): FG Off retires only the FG role, so
 // the lineage's newest readable copy replaces the held one (10-28; until
 // then an FG hold beside a readable newer SR copy passed). A real Present
-// that shows a copy of the other
-// API than the last real Present that showed depth shows a copy recorded
-// after that one (capture ids follow publication order across providers):
-// an ownership handover never steps back to older depth.
+// that shows API depth shows a copy recorded no earlier than the one the
+// last real Present that showed API depth showed (capture ids follow
+// publication order across providers and sources): neither an ownership
+// handover to the other API nor a switch between a viewport's FG and SR
+// sources (FG Off's SR successor, FG On's FG input) steps back to older
+// depth (until 10-31 only a handover to the other API was judged, so FG Off
+// showing an SR copy published before the held FG copy passed: the
+// deferred list's item 11, seed c40a42f921da5ba0 at frame 149). A copy
+// deferred to its frame's Present (R2) names its capture id once that
+// Present published it (judge::learned_capture).
 //
 // A judge reads two things per Present: the frame record the test add-on
 // exports (SunshineGame3DTestFrameRecord, docs/reshade-sbs.md, Frame
@@ -696,11 +702,14 @@ namespace game3d_continuity {
             pending_.push_back(value);
           }
         }
-        // A handover to the other API steps forward: its copy was recorded
-        // after the copy the last real Present showed.
+        // A real Present steps forward: its API copy was recorded no
+        // earlier than the copy the last real Present that showed API depth
+        // showed, of either API or source (owner ruling 10-30 Q3: FG Off's
+        // SR successor and FG On's FG input never step back either; until
+        // 10-31 only a handover to the other API was judged).
         if (!generated && !generic && record.depth_capture) {
           const auto api = record[owner].key.api;
-          if (handover_.capture && handover_.api != api && record.depth_capture < handover_.capture) {
+          if (handover_.capture && record.depth_capture < handover_.capture) {
             violation value {violation_kind::stale_shown, where, record.present, now, frame, 0, owner, row.state, row.reason};
             value.shown_tick = record.depth_tick_ms;
             value.shown_capture = record.depth_capture;
@@ -861,6 +870,25 @@ namespace game3d_continuity {
     void late_signal(const void *fence) {
       for (auto &copy : copies_) {
         copy.conflicted = copy.conflicted || (fence && copy.relied == fence);
+      }
+    }
+
+    // A copy deferred to its frame's Present (R2) has no capture id at its
+    // call (supply::capture 0): once that Present published it, the fixture
+    // names it here, for the last real Present's frame's copies of sources
+    // whose id is still unknown, so the exact freshness rule (readable_newer)
+    // sees it at later Presents (until 10-31 such a copy was judged only by
+    // the tick bound).
+    void learned_capture(std::uint8_t sources, std::uint64_t capture) {
+      for (auto &copy : copies_) {
+        if (copy.frame != frames_) {
+          continue;
+        }
+        for (unsigned i = 0; i != copy.capture.size(); ++i) {
+          if ((sources & copy.sources & (1u << i)) && !copy.capture[i]) {
+            copy.capture[i] = capture;
+          }
+        }
       }
     }
 
@@ -1120,7 +1148,7 @@ namespace game3d_continuity {
     } shown_copy_;
     std::array<std::uint64_t, 3> real_presents_ {};
     // The copy the last real Present that showed API depth showed, and its
-    // API (the handover rule).
+    // API (the no-step-back rule, of either API since 10-31).
     struct shown_api {
       std::uint64_t capture {};
       sunshine_game3d::source_api api {sunshine_game3d::source_api::none};

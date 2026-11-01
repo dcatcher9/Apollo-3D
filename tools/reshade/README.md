@@ -2004,8 +2004,10 @@ the id of the copy each depth call published (the test add-on's `SunshineStreaml
 read before and after the call; `supply::capture`, also a completion's). A Present is then
 `stale_shown`, with no bound, when a copy among the same readable set, of the shown copy's own kind
 (an FG scope's input, or ordinary depth: FG keeps its viewport while it can supply), has a larger
-capture id than the shown copy; a copy whose id is unknown (a tag copy deferred to its frame's
-Present) keeps the tick bound. After FG Off (`supply::fg_off`, set by the session timelines) a shown
+capture id than the shown copy. A tag copy deferred to its frame's Present (R2) has no id at its
+call: the session timelines read the newest published copy right before and after that Present and
+name it then (`judge::learned_capture`, since 10-31; until then it kept the tick bound, which a
+one-frame lag passes). A copy whose id stays unknown keeps the tick bound. After FG Off (`supply::fg_off`, set by the session timelines) a shown
 FG copy is held as its display lineage's, so it is judged against the lineage's readable copies of
 either kind, also the SR copies a silent scope's FG hold kept off-screen while FG was on
 (`supply::fg_held`, readable only after FG Off): until 10-28 an FG copy held beside a readable newer
@@ -2029,10 +2031,14 @@ younger than the source age and its slack, is the hold's (`supply::owned`, `supp
 without it the lineage judge failed its `silent-scope` and `dlssg-evaluation` scripts (the
 contract runner's `reshade_native_provider_continuity`, `fg4k` and `fg720_legacy`, 10-28). Until 10-28 a Present one copy behind passed every timeline: a
 Present during a nomination in progress, the SR stand-in of an FG input recycled by the pool, a
-missing frame's stand-in shown a Present late. A real Present that shows a copy of the other API
-than the last real Present that showed API depth must show a copy recorded after that one (capture
-ids follow publication order across providers): a handover never steps back to older depth (the
-10-28 review's P2). `reshade_game3d_continuity` pins both on synthetic records.
+missing frame's stand-in shown a Present late. A real Present that shows API depth must show a
+copy recorded no earlier than the one the last real Present that showed API depth showed (capture
+ids follow publication order across providers and sources): neither a handover to the other API
+(the 10-28 review's P2) nor a switch between a viewport's FG and SR sources (FG Off's SR successor,
+FG On's FG input; owner ruling 10-30 Q3, since 10-31) steps back to older depth. Until 10-31 only
+the other API was judged, so FG Off showing frame 144's SR copy after frame 146's FG copy and
+holding it for about 125 ms passed (seed c40a42f921da5ba0, frame 149, the deferred list's item
+11). `reshade_game3d_continuity` pins these on synthetic records.
 
 `unordered_read` (Step 4, U-C1): a read of a copy still in flight must be ordered after its
 producer by the game's own fences. Each fixture logs every `ExecuteCommandLists`, `Signal` and
