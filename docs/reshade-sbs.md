@@ -6884,6 +6884,16 @@ accepted consequences:
   submitted between two Presents (of any swapchain), so a frame-generation Present that lands between one frame's
   own submissions, after its depth clear and before its draws, is taken for a cleared screen and
   is mono (fail-safe; whether any game presents that way has not been measured).
+- **A second swapchain that always presents first.** Presents of every swapchain of the game advance
+  one depth frame for the device, and the first Present after the frame's depth work takes that
+  work (on_present merges every queue's work into whichever swapchain presents first). A game
+  window whose Present always follows another of the game's swapchains' Presents, after the
+  scene's depth work (a pop-out or companion window, or a helper swapchain presented before the
+  main window every frame), therefore never has a current copy of its own and so nothing to hold:
+  Generic leaves it mono (fail-safe), and its status waits for a qualified current depth capture.
+  When the other window presents between the depth work and the game window's Present only on some
+  Presents (the alternating fixture's `--second-swapchain-between`), only those Presents are mono.
+  Giving the depth frame to the exported window's runtime instead would need its own design.
 - **A scene recreated in new buffers.** When the game drops every qualified depth buffer at once
   and draws its scene in new ones (a level load, or a settings or resolution change that
   reallocates them), the view is mono for about 0.3 s until one new buffer qualifies (reviewed
