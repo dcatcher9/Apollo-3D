@@ -2240,9 +2240,10 @@ eight) from streams of their own, after the fence events, so every seed keeps it
 there or DLSS-G's present thread between the call and the next SR evaluation does: the frame's FG
 role is retired before any Present shows its FG copies, which the add-on keeps as the viewport's
 ordinary source (since 11-01 they supply that Present as permitted, aged where they were made; until
-then nothing), its Present comes with FG off, and the order fences are renewed after its Present. Seeds never draw it (its weight is 0, so
-each seed keeps its frames): a frame's FG tag copy deferred to its Present after a late Off has no
-contract the oracle describes. With FG on the game's FG options declare
+then nothing), its Present comes with FG off, and the order fences are renewed after its Present. Its
+drawing weight is 0, so each seed keeps its frames; since 10-28 seeds draw it all the same, as half
+of their Offs while FG is on, from a stream of their own (`--seeds` below; until then no seed drew
+it). With FG on the game's FG options declare
 each frame's generated count as `numFramesToGenerate` (and DLSS-G's `MultiFrameCount`), repeated
 when it changes, as the add-on reads it (always 1 until the 10-27 review).
 

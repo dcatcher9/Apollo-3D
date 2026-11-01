@@ -605,9 +605,11 @@ allocated outside it, then re-validated and published under it; a reservation is
 preference, each byte budget (live snapshots or Dump 3D copies) counts the outstanding
 reservations of its own kind, and a lost race releases the new objects after the lock. The flip's
 present-thread steps each log their own hitch line: `native depth frame`, `depth display
-retirement`, `depth present observation`, `depth list coverage report`, `frame generation query`,
-`depth readiness trace`, `API depth binding`, `generic capture switch`, `generic challenger
-release`, `generic depth rebinding`, `depth capture acquisition` and `depth display preparation`.
+retirement`, `depth present observation`, `depth list coverage report`, `depth readiness trace`,
+`API depth binding`, `generic capture switch`, `generic challenger release`, `generic depth
+rebinding`, `depth capture acquisition` and `depth display preparation` (the `frame generation
+query` step went with the provider's own FG query on 11-01: every consumer reads the Present's one
+FG snapshot, `take_present_fg`, which reads the FG options store).
 Inside them `depth display retire signal` names a retirement's Signal and `depth present
 observation lock` the capture lock's wait alone (each logs its own line, the step around it too);
 inside `depth input observation`, the capture poll's `depth capture hook installation`, `depth
