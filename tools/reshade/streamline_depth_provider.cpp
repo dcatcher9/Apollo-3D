@@ -742,11 +742,7 @@ namespace sunshine_streamline::provider {
     if (!evidence.tick) evidence.tick = decision_tick;
     trace_readiness(runtime, *data, evidence, data->output.ready, readiness_reason);
     const auto &stats_source = data->output.provided;
-    // FG stays active while a silent scope's viewport supplies ordinary depth.
-    data->output.frame_generation_active = policy.require_frame_generation && policy.epoch &&
-      stats_source.provider == sunshine_scene_depth::provider_kind::streamline &&
-      (stats_source.frame_generation_input || fg_silent) &&
-      policy.epoch == stats_source.epoch && policy.viewport == stats_source.viewport;
+    data->output.frame_generation_active = sunshine_game3d::depth_output::frame_generation_active(policy, fg_silent, stats_source);
     const std::array<std::uint64_t, 5> identity{static_cast<std::uint64_t>(stats_source.provider),
       stats_source.epoch, stats_source.source_id, stats_source.viewport,
       data->output.frame_generation_active ? present_fg.generated_frames : 0u};

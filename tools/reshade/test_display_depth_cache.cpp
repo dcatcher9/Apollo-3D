@@ -524,6 +524,35 @@ namespace {
     require(!cache.reuse(held, local, 73, out) && equal(cache.reason(), "retained_depth_expired"),
       "The cache reused an FG copy past the source age on a later clock");
   }
+
+  // Which Presents count as frame generation's (fg on output and present-gap
+  // lines, F99, 11-01): a confirmed live scope's own FG input, and every
+  // Present of a silent scope, whatever supplies its depth. Until 11-01 a
+  // silent scope counted only its own Streamline viewport, so a direct NGX
+  // evaluation's depth there (the UE pattern: NGX SR, Streamline FG) logged
+  // its FG Presents as non-FG.
+  void frame_generation_active_output() {
+    using sunshine_game3d::depth_output::frame_generation_active;
+    depth_capture::selection_policy policy;
+    policy.require_frame_generation = true; policy.epoch = 11; policy.viewport = 3;
+    sunshine_scene_depth::frame input;
+    input.provider = sunshine_scene_depth::provider_kind::streamline; input.epoch = 11; input.viewport = 3;
+    input.frame_generation_input = true;
+    auto ordinary = input; ordinary.frame_generation_input = false;
+    auto ngx = ordinary; ngx.provider = sunshine_scene_depth::provider_kind::ngx; ngx.epoch = 5;
+    auto other_view = ordinary; other_view.viewport = 4;
+    require(frame_generation_active(policy, false, input), "A live scope's own FG input did not count as FG");
+    require(!frame_generation_active(policy, false, ordinary) && !frame_generation_active(policy, false, ngx),
+      "A live scope counted another source's depth as its FG input's");
+    require(frame_generation_active(policy, true, input) && frame_generation_active(policy, true, ordinary),
+      "A silent scope's own viewport did not count as FG");
+    require(frame_generation_active(policy, true, ngx), "A silent scope's Present with NGX depth did not count as FG");
+    require(frame_generation_active(policy, true, other_view) && frame_generation_active(policy, true, {}),
+      "A silent scope's Present with another view's depth or none did not count as FG");
+    auto unnamed = policy; unnamed.epoch = 0;
+    require(!frame_generation_active({}, false, input) && !frame_generation_active({}, true, input) &&
+      !frame_generation_active(unnamed, true, input), "A Present without a confirmed FG scope counted as FG");
+  }
 }
 
 int main() {
@@ -535,6 +564,7 @@ int main() {
     dynamic_resolution_sequence();
     frame_generation_hold();
     frame_generation_hold_one_clock();
+    frame_generation_active_output();
     std::puts("display depth cache tests passed");
     return 0;
   } catch (const std::exception &error) {

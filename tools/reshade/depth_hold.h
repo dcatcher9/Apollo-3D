@@ -195,6 +195,24 @@ namespace sunshine_game3d::depth_output {
     return out;
   }
 
+  // Whether a Present's output counts as frame generation's (its fg on output
+  // lines and the present-gap line, and its generated count in the
+  // presentation window's identity), shown: the output's metadata (the fresh
+  // or held copy's, else the source the provider holds the queue for). A
+  // confirmed scope counts while it shows its own FG input; a silent one at
+  // every Present, whatever supplies the depth (its viewport's ordinary
+  // source, another view or a direct NGX evaluation): DLSS-G still generates,
+  // and the provider still grants the generated Presents
+  // (present_fg::generated_presents). Until 11-01 a silent scope counted only
+  // its own Streamline viewport's copies, so NGX depth there logged its FG
+  // Presents as non-FG (F99).
+  inline bool frame_generation_active(const selection_policy &policy, bool silent,
+      const sunshine_scene_depth::frame &shown) {
+    return policy.require_frame_generation && policy.epoch &&
+      (silent || (shown.provider == sunshine_scene_depth::provider_kind::streamline && shown.frame_generation_input &&
+        policy.epoch == shown.epoch && policy.viewport == shown.viewport));
+  }
+
   // now: the clock the Present's display decision read (the provider reads
   // it once per Present for the FG hold, the queue's retention,
   // decide_display and this reuse), never a later read.

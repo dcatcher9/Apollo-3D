@@ -4723,8 +4723,11 @@ before the FG copy is past the source age once the FG copy is. A
 `Sunshine Streamline frame generation depth scope`
 line reports a required scope turning `silent` and, later, `live` again, at most every 5 s
 (`changes=` counts the turns so far; the line names the newest state); FG Off ends a silent
-scope without its own line. Generated presentations count as FG (`fg` on output lines) while a
-silent scope's viewport supplies the depth. An observed FG Off (`slDLSSGSetOptions` mode 0, or an
+scope without its own line. Presentations count as FG (`fg` on output and present-gap lines,
+`depth_output::frame_generation_active`) while a live scope shows its own FG input and at every
+Present of a silent scope, whatever supplies its depth (its viewport's SR/RR source, another view
+or a direct NGX evaluation; until 11-01 only its own viewport, so NGX depth in a silent scope
+logged FG Presents as non-FG). An observed FG Off (`slDLSSGSetOptions` mode 0, or an
 options call that failed) retires only the FG role of that viewport's display lineage
 (`retire_source`). At an Off the call observed (a successful mode 0 call), the scope's copies
 published after the copy the lineage's display last showed (the queue owner's `shown_capture`, set
