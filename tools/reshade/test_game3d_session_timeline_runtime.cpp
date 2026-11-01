@@ -474,10 +474,11 @@ namespace {
   // hitch-after-sources, 3 to 10 distinct traces in 10 runs of each alone,
   // and of this round's fg-off-sr-successor-older-than-held and
   // fg-on-deferred-tag-hitch-after-sources-held, 4 and 5 in 5;
-  // with the form stated, one, but for one run of C8-fg-off-color-only whose
-  // first SR frame's selection reason the clock decided: frame 19's SR copy
-  // reached the source age there, 13 frames (about 205-250 ms) after its
-  // Present). Rows that keep the default are judged by
+  // with the form stated, one, but for one run each of C8-fg-off-color-only
+  // and fg-off-sr-successor-older-than-held whose selection reason at one
+  // Present the clock decided: an older SR copy reached the source age
+  // there, in C8-fg-off-color-only frame 19's, 13 frames (about 205-250 ms)
+  // after its Present). Rows that keep the default are judged by
   // their verdicts, which accept either outcome. DLSS-G's compute copies
   // are read from the next Present on (U-C1), so their timing changes no
   // trace.
