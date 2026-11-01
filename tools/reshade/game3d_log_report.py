@@ -208,12 +208,14 @@ DLSSG_REFUSAL = {
     'tag_copied': 'the Streamline FG tag copied that frame first',
 }
 # Queue order (Step 4, docs/reshade-sbs.md): the queue Signal/Wait and fence Signal hooks, the fences they track and
-# poison, the verdicts given and refused, the reads that relied on them (proofs) and late conflicts (a fence a relied
-# read named was poisoned within the source age). Cumulative over the runtime.
+# poison, the verdicts given and refused, the reads that relied on them (proofs) and the relied reads conflicted: late
+# conflicts (a fence a relied read named was poisoned within the source age, the residual R1) and, since 11-01, those
+# a model reset (reset_conflicts) or an eviction (evicted_reads) conflicted, which earlier add-ons counted as late
+# conflicts. Cumulative over the runtime.
 QUEUE_ORDER = re.compile(r'Sunshine 3D queue order: hooks=\{signal=(\d+) wait=(\d+) fence_signal=(\d+) pending=(\d+)\} '
                          r'queues=(\d+) fences=(\d+) settled=(\d+) signals=(\d+) waits=(\d+) cpu_signals=(\d+) '
                          r'poisoned=\{([^}]*)\} refused=\{([^}]*)\} ordered=(\d+) proofs=\{([^}]*)\} '
-                         r'.*?late_conflict=(\d+)')
+                         r'.*?late_conflict=(\d+)(?: reset_conflicts=(\d+) evicted_reads=(\d+))?')
 QUEUE_ORDER_OFF = re.compile(r'Sunshine 3D queue order: disabled \(QueueFenceOrder=0\)')
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
                     r'.*?gpu_frames=(\d+)'
@@ -1080,7 +1082,9 @@ def parse(lines) -> Session:
                              'pending': int(g[3]), 'queues': int(g[4]), 'fences': int(g[5]), 'settled': int(g[6]),
                              'signals': int(g[7]), 'waits': int(g[8]), 'cpu_signals': int(g[9]),
                              'poisoned': counter_fields(g[10]), 'refused': counter_fields(g[11]), 'ordered': int(g[12]),
-                             'proofs': counter_fields(g[13]), 'late_conflict': int(g[14])}
+                             'proofs': counter_fields(g[13]), 'late_conflict': int(g[14]),
+                             'reset_conflicts': int(g[15] or 0), 'evicted_reads': int(g[16] or 0),
+                             'causes_counted': g[15] is not None}
         elif QUEUE_ORDER_OFF.search(text):
             s.queue_order_off = True
         if found := HITCH.search(text):
@@ -1706,9 +1710,11 @@ def dlssg_checks(s: Session, add) -> None:
 
 
 def queue_order_checks(s: Session, add) -> None:
-    """'Queue order' (Step 4): PASS with its hooks installed and no late conflict; WARN when no Signal/Wait hook is
-    installed although the game uses more than one queue (cross-queue proofs unavailable) or a fence a relied read
-    named was poisoned afterwards (late_conflict); INFO when QueueFenceOrder=0. No line means no check."""
+    """'Queue order' (Step 4): PASS with its hooks installed and no conflicted relied read; WARN when no Signal/Wait
+    hook is installed although the game uses more than one queue (cross-queue proofs unavailable), or a relied read was
+    conflicted: a fence it named was poisoned afterwards (late_conflict, the residual R1), or, named apart since 11-01,
+    a model reset or an eviction conflicted it (reset_conflicts, evicted_reads: the fail-closed bookkeeping, no poison);
+    an earlier add-on counted those as late conflicts too. INFO when QueueFenceOrder=0. No line means no check."""
     if s.queue_order_off and not s.queue_order:
         add(Check('INFO', 'Queue order', 'disabled (QueueFenceOrder=0): cross-queue reads wait for completion'))
         return
@@ -1724,9 +1730,17 @@ def queue_order_checks(s: Session, add) -> None:
               + (f"; refused {', '.join(f'{k} {v}' for k, v in sorted(refused.items(), key=lambda kv: -kv[1]))}"
                  if refused else ''))
     hooked = q['signal_hooks'] and q['wait_hooks']
+    conflicts = []
     if q['late_conflict']:
-        add(Check('WARN', 'Queue order', f"{q['late_conflict']} late conflicts: a fence a read relied on was poisoned "
-                  f'within the source age (residual R1); ' + detail))
+        conflicts.append(f"{q['late_conflict']} late conflicts: " + (
+            'a fence a read relied on was poisoned within the source age (residual R1)' if q['causes_counted'] else
+            'a fence a read relied on was poisoned within the source age (residual R1), or a model reset or an eviction '
+            'conflicted the read (this add-on counts every cause as a late conflict)'))
+    if q['reset_conflicts'] or q['evicted_reads']:
+        conflicts.append(f"relied reads conflicted without a poison (fail-closed bookkeeping, their held copies "
+                         f"dropped): {q['reset_conflicts']} at a model reset, {q['evicted_reads']} evicted")
+    if conflicts:
+        add(Check('WARN', 'Queue order', '; '.join(conflicts) + '; ' + detail))
     elif not hooked and q['queues'] > 1:
         add(Check('WARN', 'Queue order', 'no queue Signal/Wait hook installed with more than one queue: cross-queue '
                   'proofs unavailable; ' + detail))

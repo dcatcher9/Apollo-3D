@@ -87,7 +87,7 @@ namespace sunshine_streamline::depth_capture {
     if (s.busy) return false;
     const auto inflight = order_inflight_reads.load(std::memory_order_relaxed);
     std::uint64_t total = s.model.signals + s.model.waits + s.model.cpu_signals + s.ordered + s.resets + inflight +
-      s.model.late_conflict + s.signal_hooks + s.wait_hooks + s.fence_signal_hooks + s.pending + s.contention;
+      s.model.late_conflict + s.model.reset_conflicts + s.model.evicted_reads + s.signal_hooks + s.wait_hooks + s.fence_signal_hooks + s.pending + s.contention;
     for (const auto value : s.refused) total += value;
     for (const auto value : s.model.poisoned) total += value;
     if (total == logged_total || (logged_at && now - logged_at < 10000)) return false;
@@ -101,8 +101,8 @@ namespace sunshine_streamline::depth_capture {
       "signals=%llu waits=%llu cpu_signals=%llu poisoned={shared=%llu foreign=%llu cpu=%llu second=%llu monotonic=%llu "
       "unobserved=%llu removed=%llu unrecorded=%llu} refused={disabled=%llu pending_hooks=%llu uncovered=%llu untracked=%llu "
       "overlap=%llu unresolved=%llu baseline=%llu unsettled=%llu poisoned=%llu evicted=%llu cross_device=%llu} ordered=%llu "
-      "proofs={inflight=%llu} evicted_waits=%llu resets=%llu cpu_unhooked=%llu late_conflict=%llu contention=%llu "
-      "own_signals=%llu",
+      "proofs={inflight=%llu} evicted_waits=%llu resets=%llu cpu_unhooked=%llu late_conflict=%llu reset_conflicts=%llu "
+      "evicted_reads=%llu contention=%llu own_signals=%llu",
       s.signal_hooks, s.wait_hooks, s.fence_signal_hooks, s.pending, static_cast<unsigned long long>(s.model.queues),
       static_cast<unsigned long long>(s.model.fences), static_cast<unsigned long long>(s.model.settled),
       static_cast<unsigned long long>(s.model.signals), static_cast<unsigned long long>(s.model.waits),
@@ -113,7 +113,8 @@ namespace sunshine_streamline::depth_capture {
       r(refusal::poisoned), r(refusal::evicted), r(refusal::cross_device), static_cast<unsigned long long>(s.ordered),
       static_cast<unsigned long long>(inflight), static_cast<unsigned long long>(s.model.evicted_waits),
       static_cast<unsigned long long>(s.resets), static_cast<unsigned long long>(s.cpu_unhooked),
-      static_cast<unsigned long long>(s.model.late_conflict), static_cast<unsigned long long>(s.contention),
+      static_cast<unsigned long long>(s.model.late_conflict), static_cast<unsigned long long>(s.model.reset_conflicts),
+      static_cast<unsigned long long>(s.model.evicted_reads), static_cast<unsigned long long>(s.contention),
       static_cast<unsigned long long>(s.own_signals));
     return true;
   }

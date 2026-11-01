@@ -2180,7 +2180,8 @@ wait relied on) unorders, is `late` (`judge_reads`), the residual the owner acce
 which no observation at the decision can exclude. The session timelines count it as the known gap
 `R1-late-signaller`'s, the native provider fixture as `late=`. The add-on's side of O1: the model
 counts each relied read whose fence such a signal poisons within the source age as `late_conflict`
-and marks the read's capture conflicted, and the provider no longer holds that capture's
+(a read conflicted by a model reset or an eviction counts as `reset_conflicts` or `evicted_reads`
+instead, since 11-01) and marks the read's capture conflicted, and the provider no longer holds that capture's
 presentation copy from the next Present (`read_conflicted`; reason `late_conflict`): mono rather
 than pixels the producer may not have written. `sr-other-queue-in-flight-late-signaller` waits
 on a handoff fence only the game queue signals, then after its last Present the CPU signals that

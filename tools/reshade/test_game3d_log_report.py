@@ -982,20 +982,35 @@ class ReadinessReport(unittest.TestCase):
         self.assertNotIn('NGX depth', owned)
 
     def test_queue_order_names_hooks_poison_and_late_conflicts(self):
-        def order(hooks='signal=1 wait=1 fence_signal=1 pending=0', queues=3, late=0, poisoned='cpu=0 second=1'):
+        def order(hooks='signal=1 wait=1 fence_signal=1 pending=0', queues=3, late=0, poisoned='cpu=0 second=1',
+                  causes=' reset_conflicts=0 evicted_reads=0'):
             return line('10:00:07', f'[Sunshine 3D] Sunshine 3D queue order: hooks={{{hooks}}} queues={queues} fences=4 '
                                     'settled=3 signals=900 waits=600 cpu_signals=0 '
                                     f'poisoned={{shared=0 foreign=0 {poisoned} monotonic=0 unobserved=0 removed=0 '
                                     'unrecorded=0} refused={disabled=0 pending_hooks=2 uncovered=0 untracked=0 overlap=1 '
                                     'unresolved=0 baseline=0 unsettled=0 poisoned=0 evicted=0 cross_device=0} ordered=280 '
-                                    f'proofs={{inflight=270}} evicted_waits=0 resets=1 cpu_unhooked=1 late_conflict={late}')
+                                    f'proofs={{inflight=270}} evicted_waits=0 resets=1 cpu_unhooked=1 late_conflict={late}'
+                                    f'{causes} contention=0 own_signals=4')
         clean = run(BASE + [order()])
         self.assertEqual(clean['Queue order'].status, 'PASS')
         self.assertIn('280 ordered verdicts, proofs inflight 270; poisoned second 1; refused pending_hooks 2, overlap 1',
                       clean['Queue order'].detail)
         late = run(BASE + [order(late=2)])
         self.assertEqual(late['Queue order'].status, 'WARN')
-        self.assertIn('2 late conflicts', late['Queue order'].detail)
+        self.assertIn('2 late conflicts: a fence a read relied on was poisoned within the source age (residual R1); ',
+                      late['Queue order'].detail)
+        self.assertNotIn('without a poison', late['Queue order'].detail)
+        # A reset's and an eviction's conflicts are named apart, never as R1 (11-01, F57).
+        lapsed = run(BASE + [order(causes=' reset_conflicts=3 evicted_reads=1')])
+        self.assertEqual(lapsed['Queue order'].status, 'WARN')
+        self.assertIn('relied reads conflicted without a poison (fail-closed bookkeeping, their held copies dropped): '
+                      '3 at a model reset, 1 evicted', lapsed['Queue order'].detail)
+        self.assertNotIn('R1', lapsed['Queue order'].detail)
+        # An add-on before 11-01 counted every cause as a late conflict.
+        older = run(BASE + [order(late=2, causes='')])
+        self.assertEqual(older['Queue order'].status, 'WARN')
+        self.assertIn('2 late conflicts: a fence a read relied on was poisoned within the source age (residual R1), or a '
+                      'model reset or an eviction conflicted the read', older['Queue order'].detail)
         unhooked = run(BASE + [order(hooks='signal=0 wait=0 fence_signal=0 pending=0')])
         self.assertEqual(unhooked['Queue order'].status, 'WARN')
         self.assertIn('cross-queue proofs unavailable', unhooked['Queue order'].detail)

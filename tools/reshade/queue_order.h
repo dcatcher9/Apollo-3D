@@ -108,8 +108,15 @@ namespace sunshine_queue_order {
     std::uint64_t id{}, signaller{};
     poison why{};
   };
+  // late_conflict: relied reads a poison of one of their fences conflicted
+  // within the source age (the R1 residual). reset_conflicts and
+  // evicted_reads: those conflicted because their protection lapsed, at a
+  // model reset, or when a fence record they rested on was evicted or
+  // forgotten or the read itself was evicted while live (fail-closed; until
+  // 11-01 all three counted as late_conflict, F57).
   struct counts {
     std::uint64_t queues{}, fences{}, settled{}, signals{}, waits{}, cpu_signals{}, late_conflict{}, evicted_waits{};
+    std::uint64_t reset_conflicts{}, evicted_reads{};
     std::array<std::uint64_t, static_cast<unsigned>(poison::count)> poisoned{};
   };
 
@@ -162,7 +169,7 @@ namespace sunshine_queue_order {
         slot = 0;
         for (unsigned i = 1; i != Fences; ++i)
           if (fences_[i].last_use < fences_[slot].last_use) slot = i;
-        conflict_reads(fences_[slot].id, now);
+        conflict_reads(fences_[slot].id, now, &counts::evicted_reads);
       }
       auto &f = fences_[slot];
       f = {};
@@ -318,7 +325,7 @@ namespace sunshine_queue_order {
     // relied read is conflicted before its fences are forgotten.
     void reset(std::uint64_t now = 0) {
       for (auto &read : reads_)
-        if (read.expires > now) conflict(read);
+        if (read.expires > now) conflict(read, &counts::reset_conflicts);
       for (auto &q : queues_) q = {};
       for (auto &f : fences_) f = {};
       reads_ = {};
@@ -385,24 +392,26 @@ namespace sunshine_queue_order {
     // A read that relied on an ordered verdict: a poison of one of its
     // fences within the source age counts as late_conflict, and marks the
     // read's tag (the capture it read, 0 none) conflicted. A fence poisoned
-    // or forgotten since the verdict (a signal between the verdict and this
-    // call, under another lock hold) conflicts it at once, as does evicting
-    // a read that is still live. Returns whether the read still stands: one
-    // conflicted here must not be made (the caller has not copied yet).
+    // (late_conflict) or forgotten (evicted_reads) since the verdict (a
+    // signal, a reset or an eviction between the verdict and this call,
+    // under another lock hold) conflicts it at once, as does evicting a read
+    // that is still live (evicted_reads). Returns whether the read still
+    // stands: one conflicted here must not be made (the caller has not
+    // copied yet).
     bool rely(const verdict &value, std::uint64_t now, std::uint64_t tag = 0) {
       if (!value.ordered) return false;
       live_read read{value.fences, now + live_read_ms, tag, value.unbounded};
       for (const auto id : value.fences) {
         const auto *f = id ? fence_of(id) : nullptr;
         if (id && (!f || f->why != poison::none)) {
-          conflict(read);
+          conflict(read, f ? &counts::late_conflict : &counts::evicted_reads);
           return false;
         }
       }
       auto *oldest = &reads_[0];
       for (auto &entry : reads_)
         if (entry.expires < oldest->expires) oldest = &entry;
-      if (oldest->expires > now) conflict(*oldest);
+      if (oldest->expires > now) conflict(*oldest, &counts::evicted_reads);
       *oldest = read;
       return true;
     }
@@ -479,17 +488,18 @@ namespace sunshine_queue_order {
       if (f.why != poison::none) return;
       f.why = why;
       ++counts_.poisoned[static_cast<unsigned>(why)];
-      conflict_reads(f.id, now);
+      conflict_reads(f.id, now, &counts::late_conflict);
     }
-    // A live read that relied on fence (0: none) or on every fence.
-    void conflict_reads(std::uint64_t fence, std::uint64_t now) {
+    // A live read that relied on fence (0: none) or on every fence, counted
+    // in cause (a counts member).
+    void conflict_reads(std::uint64_t fence, std::uint64_t now, std::uint64_t counts::*cause) {
       for (auto &read : reads_)
         if (read.expires > now &&
             (read.unbounded || (fence && std::find(read.fences.begin(), read.fences.end(), fence) != read.fences.end())))
-          conflict(read);
+          conflict(read, cause);
     }
-    void conflict(live_read &read) {
-      ++counts_.late_conflict;
+    void conflict(live_read &read, std::uint64_t counts::*cause) {
+      ++(counts_.*cause);
       read.expires = 0;
       if (read.tag) conflicted_[conflicted_next_++ % LiveReads] = read.tag;
     }

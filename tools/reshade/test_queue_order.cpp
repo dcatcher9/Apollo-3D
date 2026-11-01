@@ -427,7 +427,10 @@ namespace {
       require(h.m.conflicted(55), "a poison did not conflict an unbounded read");
     }
     // A model reset (a coverage change) conflicts every live relied read,
-    // and an expired one not.
+    // and an expired one not. Each conflict is counted by its cause: only a
+    // poison is a late conflict (the R1 residual); a reset, an evicted fence
+    // record or an evicted live read count apart (11-01, F57: each counted
+    // as a late conflict, which the readiness report calls R1).
     {
       host h;
       settle(h);
@@ -439,6 +442,22 @@ namespace {
       h.m.rely(v, h.now - model::live_read_ms - 1, 56);
       h.m.reset(h.now);
       require(h.m.conflicted(52) && !h.m.conflicted(56), "a model reset left a live relied read unconflicted");
+      require(h.m.snapshot().late_conflict == 0, "a model reset counted a late conflict");
+      require(h.m.snapshot().reset_conflicts == 1 && h.m.snapshot().evicted_reads == 0, "a model reset's conflict was not counted as one");
+    }
+    // A reset between the verdict and rely forgets the verdict's fence: the
+    // read is conflicted at rely, counted as evicted, not late.
+    {
+      host h;
+      settle(h);
+      const auto p = h.execute(0);
+      h.signal(0, 0, 2);
+      h.wait(1, 0, 2);
+      const auto v = h.ordered(1, p);
+      h.m.reset(h.now);
+      require(!h.m.rely(v, h.now, 59) && h.m.conflicted(59), "a read relied on a fence a reset forgot");
+      require(h.m.snapshot().late_conflict == 0, "a forgotten fence counted a late conflict");
+      require(h.m.snapshot().evicted_reads == 1 && h.m.snapshot().reset_conflicts == 0, "a forgotten fence's conflict was not counted as evicted");
     }
     // An evicted fence record conflicts the live reads that relied on it:
     // its later signals are never logged against it.
@@ -451,6 +470,8 @@ namespace {
       h.m.rely(h.ordered(1, p), h.now, 53);
       for (unsigned i = 0; i != 256; ++i) h.m.add_fence(h.device, 0, {}, qo::poison::none, h.now);
       require(!h.m.known_fence(h.fence_ids[0]) && h.m.conflicted(53), "an evicted fence record left its relied read unconflicted");
+      require(h.m.snapshot().late_conflict == 0, "an evicted fence record counted a late conflict");
+      require(h.m.snapshot().evicted_reads == 1, "an evicted fence record's conflict was not counted as evicted");
     }
     // A fence poisoned between the verdict and rely (another lock hold)
     // conflicts the read at once.
@@ -466,6 +487,7 @@ namespace {
       // so it is never made (consume_owned refuses it).
       require(!h.m.rely(v, h.now, 54), "rely let a read stand on a fence poisoned since its verdict");
       require(h.m.conflicted(54), "a read relied on a fence poisoned since its verdict");
+      require(h.m.snapshot().late_conflict == 1, "a fence poisoned since its verdict did not count a late conflict");
       const auto w = h.ordered(1, p);
       require(!w.ordered, "a poisoned fence still ordered a read");
     }
@@ -489,6 +511,8 @@ namespace {
       const auto v = h.ordered(1, p);
       for (std::uint64_t tag = 100; tag != 165; ++tag) h.m.rely(v, h.now, tag);
       require(h.m.conflicted(100) && !h.m.conflicted(101), "a live relied read was evicted unconflicted");
+      require(h.m.snapshot().late_conflict == 0, "an evicted live read counted a late conflict");
+      require(h.m.snapshot().evicted_reads == 1, "an evicted live read's conflict was not counted as evicted");
     }
     // Keyed by id, not by pointer: a forgotten device's records are gone.
     {

@@ -5547,6 +5547,11 @@ every fence), and fails closed wherever its protection would lapse: a fence pois
 between the verdict and the read, a model reset, an evicted fence record and a live read evicted
 by newer ones each conflict it at once (10-27); one conflicted between the verdict and the read is
 not copied at all (the consumer gets `capture_not_ready`), rather than shown for that Present. The
+status line counts each conflict by its cause: `late_conflict` only a poison (the residual),
+`reset_conflicts` the live reads a model reset conflicted, `evicted_reads` a read whose fence
+record was evicted or forgotten, or that newer reads evicted while live (11-01, F57: until then all
+of them counted as `late_conflict`, which the readiness report calls the residual R1); each marks
+the capture conflicted alike (the frame record's reason stays `late_conflict`). The
 edge rests on the same
 ordering the game relies on to present its own colour. The session tests carry the residual as
 the known gap `R1-late-signaller` ([README](../tools/reshade/README.md), Session-level tests).
@@ -5582,9 +5587,10 @@ The status line, at most every 10 s while its counts change:
 `Sunshine 3D queue order: hooks={signal= wait= fence_signal= pending=} queues= fences= settled=
 signals= waits= cpu_signals= poisoned={shared= foreign= cpu= second= monotonic= unobserved= removed=
 unrecorded=} refused={...} ordered= proofs={inflight=} evicted_waits= resets= cpu_unhooked=
-late_conflict= contention= own_signals=`, or once `Sunshine 3D queue order: disabled (QueueFenceOrder=0)`. The readiness
-report's "Queue order" check passes with the hooks installed and no late conflict, and warns when
-no Signal/Wait hook is installed with more than one queue, or on a late conflict.
+late_conflict= reset_conflicts= evicted_reads= contention= own_signals=`, or once `Sunshine 3D queue order: disabled (QueueFenceOrder=0)`. The readiness
+report's "Queue order" check passes with the hooks installed and no conflicted read, and warns when
+no Signal/Wait hook is installed with more than one queue, or on a conflicted read: a late conflict
+as the residual R1, a reset or evicted read as dropped by the fail-closed bookkeeping (no poison).
 
 Who signals a fence besides its first signaller (10-31; ACS 10-27b poisoned 53 of 106 fences
 `second` with `ordered=0`, and no line said by whom): the first time a queue's Signal poisons a
