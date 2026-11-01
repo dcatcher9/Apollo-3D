@@ -2679,6 +2679,8 @@ namespace {
       fg_silent_scope_without_api_source();
       fg_linear_rr();
       fg_other_queue();
+      // Not at 4K, whose FG run is the nearest to the fixture's watchdog.
+      if (width < 3840) fg_runtime_reset();
     }
 
     // The capture lock under game-thread recording (--recorder-threads N, the
@@ -4053,6 +4055,59 @@ namespace {
           render_tracked_depth = [this] { evaluated_frame(); };
           settle("SL-recovered-after-linear-RR");
           std::puts("PASS native linear RR provider: public tag49 and feature1001, no camera matrix, actual capture/acquire/calibration and reciprocal moments excluding zero/negative/NaN/Inf; no FX");
+        }});
+    }
+
+    // The add-on's FG switch line across a runtime reset (F100, 11-01). A
+    // runtime created while the game's FG options stand (a swapchain resize
+    // or recreation) starts from their mode, so its first Present is no
+    // switch; until 11-01 it logged mode=0->1 with FG on. A runtime torn down
+    // inside a switch's line writes that line, ended=runtime_reset; until
+    // 11-01 the line was dropped, and the new runtime, which started at mode
+    // 0, logged none for that FG Off.
+    void fg_runtime_reset() {
+      const auto reset_runtime = [&] {
+        for (auto &backbuffer : backbuffers) backbuffer.reset();
+        checked(swapchain->ResizeBuffers(2, width, height, source_format, 0), "Reset the runtime with ResizeBuffers");
+        for (unsigned i = 0; i != 2; ++i) checked(swapchain->GetBuffer(i, IID_PPV_ARGS(backbuffers[i].put())), "Get the reset backbuffer");
+      };
+      const auto on_lines = [&] { return reshade_log_count({"Sunshine depth FG switch: viewport=", " mode=0->1 "}); };
+      run_script({"fg-runtime-reset", 30000,
+        [&] {
+          active_area = {0, 0, selected->width, selected->height};
+          render_tracked_depth = [this] { real_fg_frame(); };
+          configure_fg(true);
+          settle_route("FG-reset-seed", true);
+          // Any switch line of the seed is written within a second.
+          for (const auto until = GetTickCount64() + 1200; GetTickCount64() < until;) present_frame();
+        },
+        [&] {
+          const auto before = on_lines();
+          // The reset runtime shows FG depth again from a later copy: until
+          // then the frame's FG copy is permitted, not owed.
+          render_tracked_depth = [this] {
+            real_fg_frame(); withdraw_supply(); permitted_supply(game3d_continuity::tag_copy);
+          };
+          reset_runtime();
+          for (const auto until = GetTickCount64() + 2000; GetTickCount64() < until;) present_frame();
+          require(on_lines() == before, "A runtime reset with FG on logged an FG switch the game never made");
+          // FG Off, then a reset inside its line: the old runtime writes it.
+          render_tracked_depth = {};
+          configure_fg(false);
+          present_frame(); present_frame();
+          reset_runtime();
+          require(reshade_log_contains({"Sunshine depth FG switch: viewport=", " mode=1->0 ", " ended=runtime_reset"}),
+            "A runtime reset dropped the FG Off's switch line");
+        },
+        [&] {
+          render_tracked_depth = [&] { draw_frame(); permitted_supply(game3d_continuity::generic_boundary | game3d_continuity::sr_evaluate); };
+          for (const auto until = GetTickCount64() + 15000; GetTickCount64() < until;) {
+            present_frame();
+            if (const auto s = inspect(); active(s) && !s.source.reused_depth) break;
+          }
+          render_tracked_depth = [this] { evaluated_frame(); };
+          settle("SL-recovered-after-FG-reset");
+          std::puts("PASS native FG switch line across a runtime reset: no switch logged for a runtime created with FG on, and an FG Off's line ended by the reset is written");
         }});
     }
 

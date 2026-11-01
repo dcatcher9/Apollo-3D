@@ -84,13 +84,15 @@ namespace sunshine_streamline::provider {
   // Presents that held a retained copy, the oldest at max_held_age_ms; mono:
   // Presents without depth; first_reason and selection: the first Present
   // without a fresh copy. Status lines come at most once a second, so a hold
-  // of one or two Presents at a switch shows only here.
+  // of one or two Presents at a switch shows only here. runtime_reset: the
+  // runtime's teardown (a swapchain resize or recreation) ended the line
+  // first (ended=runtime_reset, with the Presents counted until then).
   struct fg_switch_line {
     std::uint32_t viewport{}, from{}, to{};
     std::uint64_t tick{}, presents{}, fresh_ms{UINT64_MAX}, held{}, max_held_age{}, mono{};
     const char *first_reason{"none"};
     depth_capture::selection_reason selection{depth_capture::selection_reason::not_attempted};
-    bool active{}, reasoned{};
+    bool active{}, reasoned{}, runtime_reset{};
   };
   void format_fg_switch(char *text, std::size_t size, const fg_switch_line &line);
   // "Sunshine API depth": no API source is associated with the queue; with

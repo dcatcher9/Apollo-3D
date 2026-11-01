@@ -2,18 +2,30 @@
 // Provider status gathering, log rendering and diagnostics.
 // Same TU as streamline_depth_provider.cpp; namespace-scope state and types stay there.
   namespace {
+    void emit_fg_switch(fg_switch_line &line) {
+      char text[512]{};
+      format_fg_switch(text, sizeof(text), line);
+      sunshine_log::message(reshade::log::level::info, text);
+      line.active = false;
+    }
+
+    // A runtime's teardown writes its active FG switch line, marked
+    // ended=runtime_reset (until 11-01 it was dropped, so an FG toggle the
+    // game applied with a swapchain recreation lost its line, F100).
+    void end_fg_switch(state &data) {
+      if (!data.fg_switch.active) return;
+      data.fg_switch.runtime_reset = true;
+      emit_fg_switch(data.fg_switch);
+    }
+
     // One "Sunshine depth FG switch" line per FG mode change (fg_switch_line),
     // from every Present's readiness evidence. ready: the Present shows depth
-    // (fresh when copied, else a held copy). Diagnostic only.
+    // (fresh when copied, else a held copy). Diagnostic only. A runtime starts
+    // from the FG mode the game's options stand at (initialize).
     void track_fg_switch(state &data, const readiness_evidence &e, bool ready, const char *why) {
       auto &line = data.fg_switch;
       const auto now = e.tick ? e.tick : GetTickCount64();
-      const auto emit = [&] {
-        char text[512]{};
-        format_fg_switch(text, sizeof(text), line);
-        sunshine_log::message(reshade::log::level::info, text);
-        line.active = false;
-      };
+      const auto emit = [&] { emit_fg_switch(line); };
       if (e.fg_query == frame_generation_query_status::observed && e.fg.known && e.fg.mode != data.fg_mode) {
         if (line.active) emit();
         line = {};
@@ -276,10 +288,11 @@
     if (line.fresh_ms != UINT64_MAX) std::snprintf(fresh, sizeof(fresh), "%llu", static_cast<unsigned long long>(line.fresh_ms));
     std::snprintf(text, size,
       "Sunshine depth FG switch: viewport=%u mode=%u->%u presents=%llu first_fresh_ms=%s held=%llu max_held_age_ms=%llu "
-      "mono=%llu first_reason=%s selection=%s",
+      "mono=%llu first_reason=%s selection=%s%s",
       line.viewport, line.from, line.to, static_cast<unsigned long long>(line.presents), fresh,
       static_cast<unsigned long long>(line.held), static_cast<unsigned long long>(line.max_held_age),
-      static_cast<unsigned long long>(line.mono), line.first_reason, depth_capture::name(line.selection));
+      static_cast<unsigned long long>(line.mono), line.first_reason, depth_capture::name(line.selection),
+      line.runtime_reset ? " ended=runtime_reset" : "");
   }
 
   void format_unassociated(char *text, std::size_t size, depth_capture::status status,
