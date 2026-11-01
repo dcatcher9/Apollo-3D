@@ -290,6 +290,8 @@ namespace sunshine_streamline::depth_capture {
     // (frame_presenting must never take a frame older than the last Present
     // for the current one).
     scope.presents.fetch_add(1, std::memory_order_acq_rel);
+    // Its thread is the present role of the capture lock's waits.
+    lock_counters.present_thread.store(GetCurrentThreadId(), std::memory_order_relaxed);
     if (!requested.load() || !native) return;
     std::lock_guard lock(mutex);
     // The Presents DLSS-G adds per real frame, from this Present's FG

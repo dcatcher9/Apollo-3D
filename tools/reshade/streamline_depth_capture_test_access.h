@@ -11,6 +11,7 @@
 // linkage in an inline namespace, so that the regressions can run in their own
 // translation unit; lookup inside the capture file is unchanged.
 #include "streamline_depth_capture.h"
+#include "capture_lock_stats.h"
 #include "capture_state_policy.h"
 #include "freshness.h"
 #include "native_command_storage.h"
@@ -627,7 +628,7 @@ namespace sunshine_streamline::depth_capture {
     extern std::atomic<status> reason;
     extern std::array<std::atomic<status>, provider_count> attempt_status;
     extern std::atomic<bool> requested;
-    extern std::mutex mutex;
+    extern capture_mutex mutex;
     extern scope_state scope;
     extern pool_state capture_pool;
     extern queue_places capture_queues;
@@ -658,7 +659,7 @@ namespace sunshine_streamline::depth_capture {
     std::unique_ptr<queue_state> *free_place();
     extern bool places_reclaimed;
     queue_state *known_queue(std::uint64_t native);
-    void ensure_queue(std::unique_lock<std::mutex> &lock, std::uint64_t native);
+    void ensure_queue(std::unique_lock<capture_mutex> &lock, std::uint64_t native);
     // Requires mutex. The retired slots' storage moves to discard (released
     // after the lock, on a pool thread).
     void collect_retired(std::vector<std::shared_ptr<texture_reference>> &discard);

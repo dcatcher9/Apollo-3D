@@ -911,6 +911,16 @@ zero installed FX techniques:
 reshade_game3d_native_provider_runtime_test.exe <ReShade64.dll> <frozenShaders> <SunshineSBSTest.addon64> <fresh-output-directory> 3840 2160 <frame_generation_interposer.dll>
 ```
 
+Every run ends with `MEASURE capture lock run` lines: the capture lock's counters over the whole run
+(per role, the present thread's holds and the holder sites, [Capture lock
+waits](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)); the fixture records,
+submits and presents on one thread, so its game role stays near zero by construction. The
+contention mode appends `--recorder-threads N` (1 to 16) after the interposer: instead of the
+regressions, the main thread presents FG frames (SL camera, FG tags, DLSS-G's evaluation) for 60 s
+while N threads each record four lists per Present on the presenting queue (Reset, depth barriers, a
+depth copy, Close, ExecuteCommandLists), and `MEASURE capture lock contention` lines report the
+counters of that window (no verdict; it measures, for the owner's capture-lock split ruling Q5).
+
 It exercises real GPU depth production, capture, sampling and matrix preparation, including
 padded/nonzero-offset rectangles, failed evaluation (the newest completed copy held within its
 age bound, then mono with the native scale held) and recovery. Two larger render sizes retire the
@@ -1652,6 +1662,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 - [`streamline_depth_capture.cpp`](streamline_depth_capture.cpp): the capture owner's shell: every global in its original order, the part declarations, the public API that is not yet in a part. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`streamline_depth_capture.h`](streamline_depth_capture.h): the capture owner's public API (inputs, packets, nomination, record, consume, reports). Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`streamline_depth_capture_test_access.h`](streamline_depth_capture_test_access.h): the capture owner's internal types and templates, the linkage switch, and the test views' declarations of its internals. Docs: [Test builds](#test-builds).
+- [`capture_lock_stats.h`](capture_lock_stats.h), [`depth_capture/lock_stats.inl`](depth_capture/lock_stats.inl) (part of `streamline_depth_capture.cpp`, included first among the parts at its end): the capture owner's mutex (`capture_mutex`, a counted `std::mutex`), its per-role wait counters and holder sites, the bounded `Sunshine depth capture lock:` line (`capture_lock_report`, from the provider's `depth list coverage report` step) and the test add-on's `SunshineDepthTestCaptureLockStats` (11-01, lane P; the PD design's section 8). Docs: [Capture lock waits](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost).
 - [`capture_state_policy.h`](capture_state_policy.h): how an injected copy chooses its source's pre-copy state. Docs: [API contract matrix](#api-contract-matrix).
 - [`proven_state.h`](proven_state.h): the per-resource last-proven state the capture owner feeds from executed recordings. Docs: [API contract matrix](#api-contract-matrix).
 - [`api_contract.h`](api_contract.h): how an API's declaration of an input becomes the capture input's contract (state proof, lifetime, extent, format). Docs: [API contract matrix](#api-contract-matrix).

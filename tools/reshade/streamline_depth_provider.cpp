@@ -5,6 +5,8 @@
 #include "depth_hold.h"
 #include "game3d_frame_record.h"
 #include "streamline_depth_capture.h"
+#include "capture_lock_stats.h"
+#include "game3d_diagnostics.h"
 #include "streamline_native_observer.h"
 #include "depth_content_sampler.h"
 #include "depth_ready_uniform_cache.h"
@@ -431,6 +433,12 @@ namespace sunshine_streamline::provider {
       char bound[384];
       if (depth_capture::capacity_report(bound, sizeof(bound)))
         sunshine_log::message(reshade::log::level::warning, bound);
+      // Game threads' waits on the capture lock (capture_lock_stats.h): at most
+      // every 10 s, for a window with a wait of a millisecond or more, or
+      // every window with Diagnostics.
+      char waits[640];
+      if (depth_capture::capture_lock_report(GetTickCount64(), sunshine_game3d::diagnostics::enabled(), waits, sizeof(waits)))
+        sunshine_log::message(reshade::log::level::info, waits);
     }
     // The FG mode of this Present (its FG snapshot, taken at its start): the
     // depth projection of the process's one FG view, the same read the UI

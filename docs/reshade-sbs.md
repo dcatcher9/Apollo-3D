@@ -613,6 +613,30 @@ observation lock` the capture lock's wait alone (each logs its own line, the ste
 inside `depth input observation`, the capture poll's `depth capture hook installation`, `depth
 capture poll lock` and `depth capture idle sweep`.
 
+**Capture lock waits** (since 11-01, the counter that decides perf item 3, the capture-lock
+split). The capture owner's one mutex is a counted wrapper (`capture_mutex`,
+[`capture_lock_stats.h`](../tools/reshade/capture_lock_stats.h)): an uncontended acquisition costs a
+`try_lock` and a relaxed count, a contended one is timed with `QueryPerformanceCounter`, and nothing
+changes which thread gets the lock or when. An acquisition on the thread of the newest Present
+(`present()`) is the present role, every other the game role (recording, submission, the
+Streamline and NGX hooks, pool jobs). Per role it counts acquisitions, contended waits, their sum,
+their largest, the waits of a millisecond or more and a histogram (bucket bounds 10, 25, 50, 100,
+250, 500, 1000, 2000, 4000, 8000 and 16000 us); the present thread's holds are timed too, and each
+wait names the site that held the lock when it began (the holder's lock call, as an offset in the
+add-on module; 16 sites). The bounded line `Sunshine depth capture lock: window_ms= game_locks=
+game_waits= game_wait_ms= game_wait_pct= game_p50_us= game_p99_us= game_max_ms= game_waits_1ms=
+present_locks= present_waits= present_wait_ms= present_p99_us= present_max_ms= present_hold_p99_us=
+present_hold_max_ms= holders=<g|p>+0x<offset>:<waits>/<ms>,...` comes at most every 10 s, for a window
+in which a game thread waited a millisecond or more, or every window with Diagnostics on; the
+percentiles are over every acquisition of the role (an uncontended one waits 0), as bucket bounds.
+The split is justified (owner ruling Q5, 11-01) when over a 60 s steady window of a live game, or
+the native provider fixture's contention mode reproducing it (`--recorder-threads N`), game threads
+wait a millisecond or more at least once per second, or their p99 wait is 0.25 ms or more, or their
+summed wait is 1% or more of wall time, or the present thread's p99 wait is 0.5 ms or more, and the
+dominant holder sites are present-thread sections that perf items 1 and 2 do not remove. Below a
+p99 of 0.05 ms and a largest wait of 0.5 ms it stays parked; in between, the named holder is
+shortened first.
+
 ### Frame record
 
 One typed record per Present ([`game3d_frame_record.h`](../tools/reshade/game3d_frame_record.h))

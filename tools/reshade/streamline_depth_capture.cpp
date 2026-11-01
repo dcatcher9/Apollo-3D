@@ -9,6 +9,7 @@
 #include "game3d_slow_step.h"
 #include "addon_lifetime.h"
 #include "streamline_depth_capture_test_access.h"
+#include "capture_lock_stats.h"
 #include "depth_capture/rules.h"
 #include "../../src/game3d_debug_formats.h"
 #include <d3d12.h>
@@ -40,7 +41,8 @@ namespace sunshine_streamline::depth_capture {
     std::atomic<status> reason{status::inactive};
     std::array<std::atomic<status>, provider_count> attempt_status{status::unavailable, status::unavailable};
     std::atomic<bool> requested{};
-    std::mutex mutex;
+    // The capture owner's one lock, counted (capture_lock_stats.h).
+    capture_mutex mutex;
     // Every D3D12 Present the add-on saw (present()), counted before that
     // Present's own selection. An evaluation's view and its snapshot are
     // stamped with present_ordinal() at their call: the ordinal of the
@@ -251,7 +253,7 @@ namespace sunshine_streamline::depth_capture {
     void apply_executed(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values);
     queue_state *known_queue(std::uint64_t native);
     queue_state *queue(std::uint64_t native);
-    void ensure_queue(std::unique_lock<std::mutex> &lock, std::uint64_t native);
+    void ensure_queue(std::unique_lock<capture_mutex> &lock, std::uint64_t native);
     bool submitted_success(const slot &value, std::uint64_t native);
     queue_progress producer_progress(const slot &value);
     bool producer_recording_retired(const slot &value);
@@ -543,6 +545,7 @@ namespace sunshine_streamline::depth_capture {
 
 }
 
+#include "depth_capture/lock_stats.inl"
 #include "depth_capture/consume.inl"
 #include "depth_capture/scope.inl"
 #include "depth_capture/selection.inl"

@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Included inside depth_capture at the original test-block position.
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  // The capture lock's counters (capture_lock_stats.h), cumulative; reset
+  // clears them after the copy (the native provider fixture's contention mode).
+  extern "C" __declspec(dllexport) BOOL SunshineDepthTestCaptureLockStats(lock_stats::values *out, BOOL reset) {
+    if (out) *out = capture_lock_values();
+    if (reset) reset_capture_lock_values();
+    return TRUE;
+  }
   namespace {
     // One Present of an earlier frame landing inside the next nominated copy's
     // call, between its input's read and the copy (record_impl).

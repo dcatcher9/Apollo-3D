@@ -20,7 +20,7 @@ namespace sunshine_streamline::depth_capture {
       return nullptr;
     }
     // The caller owns mutex. Keep the one lookup and unlock/observe/relock order.
-    void ensure_queue(std::unique_lock<std::mutex> &lock, std::uint64_t native) {
+    void ensure_queue(std::unique_lock<capture_mutex> &lock, std::uint64_t native) {
       if (!known_queue(native)) {
         lock.unlock();
         observe_queue(native);

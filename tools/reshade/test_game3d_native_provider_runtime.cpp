@@ -13,9 +13,12 @@
 #include "test_queue_order_script.h"
 #include "test_sl_fixture_sdk.h"
 #include "test_fixture_files.h"
+#include "capture_lock_stats.h"
 #include "../../src/game3d_debug_protocol.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -255,6 +258,50 @@ namespace {
       values = {}; value = 0; at = 0;
     }
   };
+
+  // MEASURE lines of the capture lock's counters over a window of
+  // elapsed_ms (run_contention, or a whole run): per role the acquisitions,
+  // the contended ones, the summed and largest wait, the waits of a
+  // millisecond or more (and per second), and the median and 99th
+  // percentile wait over every acquisition and over the contended ones (an
+  // uncontended acquisition waits 0; bucket upper bounds in microseconds);
+  // the present thread's holds; and the holder sites waiters found, as
+  // offsets in the test add-on (map them with its symbols).
+  void report_capture_lock(const char *label, const sunshine_streamline::depth_capture::lock_stats::values &values,
+      std::uint64_t elapsed_ms, unsigned presents, unsigned threads, std::uint64_t lists) {
+    namespace stats = sunshine_streamline::depth_capture::lock_stats;
+    const double seconds = elapsed_ms ? double(elapsed_ms) / 1000. : 1.;
+    const auto contended = [](const stats::role_values &value) { auto only = value; only.locks = only.waits; return only; };
+    const auto role = [&](const char *name, const stats::role_values &value) {
+      std::printf("MEASURE capture lock %s %s: locks=%llu waits=%llu wait_ms=%.3f wait_pct=%.4f max_ms=%.3f waits_1ms=%llu "
+        "waits_1ms_per_s=%.3f p50_us=%llu p99_us=%llu contended_p50_us=%llu contended_p99_us=%llu" "\n", label, name,
+        static_cast<unsigned long long>(value.locks), static_cast<unsigned long long>(value.waits),
+        double(value.wait_ns) / 1e6, double(value.wait_ns) / 1e7 / seconds, double(value.max_ns) / 1e6,
+        static_cast<unsigned long long>(value.long_waits), double(value.long_waits) / seconds,
+        static_cast<unsigned long long>(stats::quantile_us(value, .5)), static_cast<unsigned long long>(stats::quantile_us(value, .99)),
+        static_cast<unsigned long long>(stats::quantile_us(contended(value), .5)),
+        static_cast<unsigned long long>(stats::quantile_us(contended(value), .99)));
+    };
+    std::printf("MEASURE capture lock %s: window_ms=%llu presents=%u presents_per_s=%.1f recorder_threads=%u recorder_lists=%llu" "\n",
+      label, static_cast<unsigned long long>(elapsed_ms), presents, double(presents) / seconds, threads,
+      static_cast<unsigned long long>(lists));
+    role("game", values.game);
+    role("present", values.present);
+    std::printf("MEASURE capture lock %s present_hold: holds=%llu hold_ms=%.3f p50_us=%llu p99_us=%llu max_ms=%.3f" "\n", label,
+      static_cast<unsigned long long>(values.present_hold.locks), double(values.present_hold.wait_ns) / 1e6,
+      static_cast<unsigned long long>(stats::quantile_us(values.present_hold, .5)),
+      static_cast<unsigned long long>(stats::quantile_us(values.present_hold, .99)), double(values.present_hold.max_ns) / 1e6);
+    auto holders = values.holders;
+    std::sort(holders.begin(), holders.end(), [](const auto &a, const auto &b) { return a.wait_ns > b.wait_ns; });
+    for (const auto &holder : holders) {
+      if (!holder.waits) continue;
+      const auto address = stats::site_address(holder.site);
+      std::printf("MEASURE capture lock %s holder %s rva=0x%llx waits=%llu wait_ms=%.3f" "\n", label,
+        stats::site_present(holder.site) ? "present" : "game",
+        static_cast<unsigned long long>(address && address >= values.module_base ? address - values.module_base : 0),
+        static_cast<unsigned long long>(holder.waits), double(holder.wait_ns) / 1e6);
+    }
+  }
 
   struct native_provider_fixture : direct_fixture {
     // Isolation retires a viewport by setting constants on as many scratch
@@ -2517,6 +2564,119 @@ namespace {
       fg_other_queue();
     }
 
+    // The capture lock under game-thread recording (--recorder-threads N, the
+    // PD design's section 8; not a verdict). The fixture's other runs record,
+    // submit and present on one thread, so the capture lock is never
+    // contended there by construction. Here the main thread presents FG
+    // frames (real_fg_frame: SL camera, FG tags, DLSS-G's evaluation) while
+    // threads threads each record lists_per_frame lists per Present on the
+    // presenting queue, as a game's render threads do: Reset, depth
+    // barriers, a depth copy, Close and ExecuteCommandLists, the native
+    // entry points the capture owner observes on game threads. The add-on's
+    // counters (SunshineDepthTestCaptureLockStats) are reset when the threads
+    // run and read after seconds; MEASURE lines report them.
+    void run_contention(HMODULE sdk, unsigned threads, unsigned seconds) {
+      using namespace sunshine_streamline;
+      using stats_t = BOOL (*)(depth_capture::lock_stats::values *, BOOL);
+      const auto stats = reinterpret_cast<stats_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),
+        "SunshineDepthTestCaptureLockStats"));
+      require(stats, "The test add-on does not export its capture lock counters");
+      const auto getter = bind_streamline(sdk);
+      require(getter && sl.new_token && sl.constants && sl.global_tag && sl.evaluate, "FG metadata fixture lacks public SL exports");
+      void *function{};
+      require(getter(1000, "slDLSSGSetOptions", function) == 0 && function, "Public SDK did not expose FG options");
+      sl.set_options = reinterpret_cast<set_options_t>(function);
+      for (unsigned frame = 0; frame < 4; ++frame) step();
+      configure_fg(true);
+      render_tracked_depth = [this] { real_fg_frame(); };
+      settle("contention-FG");
+      constexpr unsigned lists_per_frame = 4;
+      std::mutex pace_mutex;
+      std::condition_variable pace;
+      std::uint64_t frames{};
+      bool stop{};
+      std::atomic<std::uint64_t> lists{};
+      std::atomic<unsigned> failed{};
+      const auto recorder = [&](unsigned index) {
+        try {
+          com_ptr<ID3D12CommandAllocator> allocator;
+          com_ptr<ID3D12GraphicsCommandList> list;
+          com_ptr<ID3D12Fence> fence;
+          checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(allocator.put())), "Create a recorder's allocator");
+          checked(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, nullptr, IID_PPV_ARGS(list.put())), "Create a recorder's list");
+          checked(list->Close(), "Close a recorder's initial list");
+          checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.put())), "Create a recorder's fence");
+          D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+          D3D12_RESOURCE_DESC desc{};
+          desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+          desc.Width = 1280; desc.Height = 720; desc.DepthOrArraySize = 1; desc.MipLevels = 1;
+          desc.Format = DXGI_FORMAT_D32_FLOAT; desc.SampleDesc.Count = 1;
+          desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+          const D3D12_CLEAR_VALUE clear{DXGI_FORMAT_D32_FLOAT, {1.f}};
+          com_ptr<ID3D12Resource> depth, copy;
+          checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear,
+            IID_PPV_ARGS(depth.put())), "Create a recorder's depth");
+          checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, &clear,
+            IID_PPV_ARGS(copy.put())), "Create a recorder's copy");
+          std::uint64_t value{}, seen{};
+          for (;;) {
+            {
+              std::unique_lock lock(pace_mutex);
+              pace.wait(lock, [&] { return stop || frames != seen; });
+              if (stop) break;
+              seen = frames;
+            }
+            for (unsigned n = 0; n != lists_per_frame; ++n) {
+              checked(fence->SetEventOnCompletion(value, nullptr), "Wait for a recorder's list");
+              checked(allocator->Reset(), "Reset a recorder's allocator");
+              checked(list->Reset(allocator.p, nullptr), "Reset a recorder's list");
+              transition(list.p, depth.p, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ);
+              transition(list.p, depth.p, D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_COPY_SOURCE);
+              list->CopyResource(copy.p, depth.p);
+              transition(list.p, depth.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+              checked(list->Close(), "Close a recorder's list");
+              ID3D12CommandList *submitted[]{list.p};
+              queue->ExecuteCommandLists(1, submitted);
+              checked(queue->Signal(fence.p, ++value), "Signal a recorder's list");
+              lists.fetch_add(1, std::memory_order_relaxed);
+            }
+          }
+          checked(fence->SetEventOnCompletion(value, nullptr), "Wait for a recorder's last list");
+        } catch (const std::exception &error) {
+          std::fprintf(stderr, "recorder %u: %s" "\n", index, error.what());
+          failed.fetch_add(1, std::memory_order_relaxed);
+        }
+      };
+      std::vector<std::thread> workers;
+      for (unsigned i = 0; i != threads; ++i) workers.emplace_back(recorder, i);
+      // The recorders' first lists create their recordings first.
+      for (unsigned frame = 0; frame < 8; ++frame) {
+        present_frame();
+        { std::lock_guard lock(pace_mutex); ++frames; }
+        pace.notify_all();
+      }
+      stats(nullptr, TRUE);
+      const auto lists_before = lists.load(std::memory_order_relaxed);
+      const auto start = GetTickCount64();
+      unsigned presents{};
+      while (GetTickCount64() - start < std::uint64_t(seconds) * 1000) {
+        present_frame();
+        ++presents;
+        { std::lock_guard lock(pace_mutex); ++frames; }
+        pace.notify_all();
+      }
+      depth_capture::lock_stats::values values;
+      stats(&values, FALSE);
+      const auto elapsed = GetTickCount64() - start;
+      const auto recorded = lists.load(std::memory_order_relaxed) - lists_before;
+      { std::lock_guard lock(pace_mutex); stop = true; }
+      pace.notify_all();
+      for (auto &worker : workers) worker.join();
+      render_tracked_depth = {};
+      require(!failed.load(), "A recorder thread failed");
+      report_capture_lock("contention", values, elapsed, presents, threads, recorded);
+    }
+
     // Public SDK crops, real/generated pairs, dynamic resolution and FG off.
     void fg_crop_pairs_and_off() {
       run_script({"sdk-crops", 45000,
@@ -4045,11 +4205,24 @@ namespace {
 #ifndef SUNSHINE_NATIVE_PROVIDER_FIXTURE_ONLY
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (argc != 5 && argc != 7 && argc != 8) {
-    std::fputs("usage: test_game3d_native_provider_runtime official.dll frozenShaders test.addon64 freshOutput [width height [frame_generation_interposer.dll]]\n", stderr);
+  // --recorder-threads N (after the interposer): the capture lock under N
+  // recording threads for 60 s (run_contention), instead of the regressions.
+  const bool contention = argc == 10 && std::string(argv[8]) == "--recorder-threads";
+  if (argc != 5 && argc != 7 && argc != 8 && !contention) {
+    std::fputs("usage: test_game3d_native_provider_runtime official.dll frozenShaders test.addon64 freshOutput [width height [frame_generation_interposer.dll [--recorder-threads N]]]\n", stderr);
     return 2;
   }
-  std::thread([] { Sleep(150000); std::fputs("FAIL native provider runtime watchdog\n", stderr); TerminateProcess(GetCurrentProcess(),124); }).detach();
+  constexpr unsigned contention_seconds = 60;
+  const unsigned recorder_threads = contention ? unsigned(std::stoul(argv[9])) : 0;
+  if (contention && (recorder_threads < 1 || recorder_threads > 16)) {
+    std::fputs("--recorder-threads takes 1 to 16\n", stderr);
+    return 2;
+  }
+  const auto run_start = GetTickCount64();
+  std::thread([contention] {
+    Sleep(150000 + (contention ? contention_seconds * 1000 : 0));
+    std::fputs("FAIL native provider runtime watchdog\n", stderr); TerminateProcess(GetCurrentProcess(),124);
+  }).detach();
   try {
     require(_putenv_s("SUNSHINE_DEPTH3D_EFFECT", "SunshineGame3D") == 0 &&
       _putenv_s("SUNSHINE_GAME3D_AUTOMATIC", "1") == 0 &&
@@ -4063,7 +4236,7 @@ int main(int argc, char **argv) {
     const auto directory = fs::absolute(argv[4]);
     require(!fs::exists(directory), "Native provider fixture requires a fresh isolated output directory");
     HMODULE sdk{};
-    if (argc == 8) {
+    if (argc >= 8) {
       const auto original = fs::absolute(argv[7]);
       require(fs::is_regular_file(original), "Requested FG metadata fixture DLL is missing");
       fs::create_directories(directory);
@@ -4079,7 +4252,10 @@ int main(int argc, char **argv) {
     fixture.load_native(directory);
     // The fixture's per-Present trace (record_present), written at its end.
     game3d_present_trace::out.open(directory / "trace.txt", "native");
-    if (public_ui) fixture.run_automatic_ui_tags(sdk);
+    if (contention) {
+      require(sdk, "The contention mode needs the FG metadata SDK");
+      fixture.run_contention(sdk, recorder_threads, contention_seconds);
+    } else if (public_ui) fixture.run_automatic_ui_tags(sdk);
     else {
       fixture.run_streamline();
       fixture.run_display_release();
@@ -4088,6 +4264,15 @@ int main(int argc, char **argv) {
     }
     fixture.finish();
     game3d_present_trace::out.close();
+    // The whole run's capture lock counters (the fixture records, submits
+    // and presents on one thread outside the contention mode).
+    using stats_t = BOOL (*)(sunshine_streamline::depth_capture::lock_stats::values *, BOOL);
+    if (const auto stats = reinterpret_cast<stats_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),
+          "SunshineDepthTestCaptureLockStats")); stats && !contention) {
+      sunshine_streamline::depth_capture::lock_stats::values values;
+      stats(&values, FALSE);
+      report_capture_lock("run", values, GetTickCount64() - run_start, 0, 0, 0);
+    }
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what()); return 1;
