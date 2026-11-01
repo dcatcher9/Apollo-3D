@@ -315,7 +315,13 @@ namespace sunshine_streamline {
         const auto fg_key = sunshine_scene_depth::fg_source_id(entry.viewport);
         for (std::size_t i = 0; i != entry.depth.count && !copied; ++i) {
           auto value = entry.depth.candidates[i];
-          value.sequence = sequence; value.present_queue = queue;
+          // The copy is made here, at its frame's Present: its tick, from
+          // which the source age of every later hold of it counts, is this
+          // Present's. Until 11-01 it kept its tag call's, so a hitch or a
+          // preempted game thread between the frame's calls and its Present
+          // aged the held copy by that delay, and a later Present that could
+          // only hold it went mono early.
+          value.sequence = sequence; value.tick = now; value.present_queue = queue;
           value.own_frame = true; value.at_tag_call = false; value.pixels_required = true;
           if (retired) { value.frame_generation_input = false; value.source_id = 0; }
           const auto captured = depth_capture::nominate(immediate, value, &diagnostic);

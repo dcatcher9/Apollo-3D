@@ -874,6 +874,17 @@ namespace {
     {"fg-off-late-pending-dlssg-copy", "20*sr=local; 3*tag=present_bare,sr=local,generated=2; drs=change,tag=present_bare,sr=local,generated=2; tag=present_bare,sr=local,generated=2; tag=present_bare,sr=local,generated=2,at=inside; fg=on,tag=present_bare,sr=local,generated=2,at=inside; drs=change,tag=present_bare,sr=local,generated=2,at=inside; tag=present_bare,sr=local,generated=1,at=inside; tag=present_bare,sr=local,state=unprovable,generated=3,at=inside; tag=present_bare,sr=local,dlssg=compute,state=unprovable,generated=3,at=inside,dlssg_gpu=after_present; fg=off_late,tag=present_bare,sr=local,dlssg=compute,state=unprovable; 2*tag=present_bare,sr=local,state=unprovable; tag=present_bare,sr=local,state=proven; fg=off,tag=present_bare,sr=local,state=unprovable; tag=present_bare,sr=local,state=unprovable; tag=present_bare,state=unprovable; drs=change,tag=present_bare,state=proven"},
     {"fg-off-drs-pending-dlssg-copy", "20*sr=local; fg=on,tag=present_list,sr=tag; 4*tag=present_list,sr=tag; 3*tag=present_list; untag=before_global,dlssg=compute,dlssg_gpu=after_present; fg=off,drs=change; 3*defaults; fg=off,sr=local; 6*tag=now_list,sr=local"},
     {"fg-off-late-pending-dlssg-copy-silent-scope", "20*tag=evaluate_list; fg=off,tag=evaluate_list; tag=evaluate_list; 2*tag=evaluate_list,untag=after_frame; fg=on,tag=evaluate_list,untag=after_frame,sr=other_queue,dlssg=direct_unobserved,generated=1,at=inside; drs=change,tag=evaluate_list,untag=after_frame,sr=other_queue,dlssg=direct_unobserved,generated=1,at=inside; tag=evaluate_list,untag=after_frame,dlssg=compute,generated=1,at=inside,dlssg_gpu=after_present; fg=off_late,tag=evaluate_list,dlssg=compute; tag=evaluate_list; tag=evaluate_list,ui=untagged; tag=evaluate_bare,ui=untagged; ui=untagged; 2*untag=after_frame,ui=untagged; untag=before_global,ui=untagged"},
+    // A frame's FG tag copy deferred to its Present (R2), with a hitch of
+    // the source age between the frame's calls and that Present (a game
+    // thread preempted between them, for less), then refused frames through
+    // FG Off until the next SR copy, as in fg-off-sr-successor-older-than-held
+    // (seed c40a42f921da5ba0's frames 138 to 162; its refused frames without
+    // their untags, which would let them drop the hold): the display holds
+    // that copy, aged from the Present that made it, as the judge ages it.
+    // Until 11-01 the add-on aged it from its tag call, so the first refused
+    // frame after the hitch was mono (dropped_hold at frame 29, every run;
+    // with the seed's untags the judge excused the same mono Presents).
+    {"fg-on-deferred-tag-hitch-after-sources-held", "20*sr=other_queue; 3*tag=present_bare,ui=listed; fg=on,tag=present_bare,sr=other_queue,dlssg=direct,state=recorded_other,ui=listed; tag=present_bare,sr=other_queue,dlssg=direct,state=recorded_other,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=proven,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=proven,ui=listed,hitch=after_sources; tag=present_bare,sr=other_queue,state=unprovable,ui=listed; tag=present_bare,sr=other_queue,state=unprovable,ui=listed,order=second; fg=off,tag=present_bare,sr=other_queue,state=unprovable,ui=listed,order=second; sr=other_queue,state=unprovable,ui=listed,order=second; 2*sr=other_queue,state=unprovable,ui=listed,order=late; sr=other_queue,state=unprovable,order=late; fg=off,sr=other_queue,state=unprovable,order=late; tag=now_list,sr=other_queue,state=unprovable,order=late,sr_gpu=after_present; tag=evaluate_bare,sr=other_queue,state=unprovable,ui=listed,order=late; tag=evaluate_bare,sr=other_queue,state=proven,ui=listed,order=late; 3*tag=evaluate_bare,state=proven,ui=listed; 2*ui=listed"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -2176,6 +2187,9 @@ namespace {
       // that Present, after any hitch here: its made tick is now (until
       // 10-28 its tag call's, so after a hitch the frame's own copy, held at
       // a later generated Present, was judged as old as the hitch, stale).
+      // The add-on stamps it there too (present_deferred; until 11-01 at its
+      // tag call, so it dropped the held copy that much before the judge's
+      // source age: fg-on-deferred-tag-hitch-after-sources-held).
       if (deferred_tag && !cancel_expected) {
         for (unsigned i = 0; i != supply.made.size(); ++i) {
           if ((continuity::tag_copy & (1u << i)) && supply.made[i]) {

@@ -4310,8 +4310,13 @@ from its declaration):
   depth-stencil texture from its creation), that state must agree, as an observation would, or the
   copy is refused (`conflicting_state`); an agreeing enhanced layout is left and restored with
   enhanced barriers. A refusal changes nothing: the
-  earlier capture holds within the source age, then mono. An accepted depth copy becomes the
-  viewport's FG source as a tag-call copy would (it keeps the FG scope live, and while it is the
+  earlier capture holds within the source age, then mono. <a id="deferred-copy-tick"></a>The copy's
+  tick, from which the source age of every later hold of it counts, is `present_deferred`'s read at
+  that Present, where the copy is made, as the session timelines' judge stamps it. Until 11-01 it
+  kept its tag call's, so a hitch or a game thread preempted between the frame's calls and its
+  Present aged the held copy by that delay, and a later Present that could only hold it went mono
+  early (the session timelines' `fg-on-deferred-tag-hitch-after-sources-held`). An accepted depth
+  copy becomes the viewport's FG source as a tag-call copy would (it keeps the FG scope live, and while it is the
   scope's newest tag copy, younger than the source age, DLSS-G's own evaluation of the next frame
   stands aside for that frame's own deferred copy, still waiting for its Present, `tag_copied`; a
   frame without an FG tag of its own is DLSS-G's), and an accepted UI copy is offered

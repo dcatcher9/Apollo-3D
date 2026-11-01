@@ -2717,7 +2717,11 @@ shape, FG Off with a dynamic resolution change) and `fg-off-late-pending-dlssg-c
 (seed 117a6b99131447b1's frames 50 to 64, the copy held on the GPU past its Present): before 10-31
 FG Off invalidated that copy, so the display held the older copy beside it (stale_shown at frames 31
 and 29, three of three and one of one runs) or, with the display on the silent scope's SR copy, the
-queue lost its association (dropped_hold at frame 27, three of three runs),
+queue lost its association (dropped_hold at frame 27, three of three runs), and one for a frame's
+FG tag copy deferred to its Present with a hitch of the source age between its calls and that
+Present, then refused frames, `fg-on-deferred-tag-hitch-after-sources-held` (seed
+c40a42f921da5ba0's frames 138 to 162 again: before 11-01 the add-on aged that copy from its tag
+call, the judge from its Present, dropped_hold at frame 29, every run),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
