@@ -6,9 +6,33 @@
 #include "../../src/reshade_bridge_protocol.h"
 #include "test_game3d_present_trace.h"
 #include <d3dcompiler.h>
+#include <atomic>
 #include <memory>
 
 namespace {
+  // Held in a game resource's private data (SetPrivateDataInterface): D3D12
+  // releases it when the resource object is destroyed, which sets the flag.
+  struct destruction_sentinel final : IUnknown {
+    std::shared_ptr<std::atomic<bool>> destroyed;
+    std::atomic<ULONG> references {1};
+    explicit destruction_sentinel(std::shared_ptr<std::atomic<bool>> flag) : destroyed(std::move(flag)) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **out) override {
+      if (!out) return E_POINTER;
+      *out = id == __uuidof(IUnknown) ? static_cast<IUnknown *>(this) : nullptr;
+      if (!*out) return E_NOINTERFACE;
+      AddRef();
+      return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+    ULONG STDMETHODCALLTYPE Release() override {
+      const ULONG left = --references;
+      if (left == 0) { destroyed->store(true); delete this; }
+      return left;
+    }
+  };
+  // The fixture's own private-data key for the sentinel.
+  constexpr GUID destruction_sentinel_guid {0x5b1f2a64, 0x3c0e, 0x4d8a, {0x9a, 0x51, 0x2e, 0x47, 0x81, 0x0c, 0x6f, 0x93}};
+
   struct native_selection_fixture_t : fixture_t {
     struct target_t {
       com_ptr<ID3D12Resource> texture;
@@ -261,17 +285,21 @@ float ps(float4 position : SV_Position) : SV_Depth {
         }
       });
       require(bound.p && bound->GetDesc().Width == width && bound->GetDesc().Height == height, "Production DEPTH binding is missing or wrong-sized");
-      // Only the add-on's copy may be bound (its end-of-frame backup, or the
-      // stable copy a rotating set binds): the game's live depth-stencil holds
-      // the same gradient at Present, so only identity tells them apart.
+      // Only the add-on's end-of-frame backup may be bound: the game's live
+      // depth-stencil holds the same gradient at Present, so only identity
+      // tells them apart. This fixture's scene is one source at a time (no
+      // rotation), so it never binds the stable copy a rotating set binds
+      // ("Sunshine depth effects binding"): a scene the game recreated is no
+      // rotation member of its released predecessor.
       // WKPDID_D3DDebugObjectNameW, which ID3D12Object::SetName writes.
       static constexpr GUID debug_object_name_w {0x4cca5fd8, 0x921f, 0x42c8, {0x85, 0x66, 0x70, 0xca, 0xf2, 0xa9, 0xb7, 0x41}};
       wchar_t bound_name[64] {};
       UINT bound_name_size = sizeof(bound_name) - sizeof(wchar_t);
-      require(bound.p != scene->texture.p && (!decoy || bound.p != decoy->texture.p) &&
-        SUCCEEDED(bound->GetPrivateData(debug_object_name_w, &bound_name_size, bound_name)) &&
-        (std::wcscmp(bound_name, L"Sunshine depth presentation texture") == 0 || std::wcscmp(bound_name, L"Sunshine depth effects binding") == 0),
-        "Production DEPTH binding is not the add-on's end-of-frame copy");
+      const bool named_binding = SUCCEEDED(bound->GetPrivateData(debug_object_name_w, &bound_name_size, bound_name));
+      std::printf("MEASURE production %s binding=%ls\n", phase, named_binding ? bound_name : L"(unnamed)");
+      require(bound.p != scene->texture.p && (!decoy || bound.p != decoy->texture.p) && named_binding &&
+        std::wcscmp(bound_name, L"Sunshine depth presentation texture") == 0,
+        "Production DEPTH binding is not the add-on's end-of-frame copy of the single selected source");
       const auto raw_bytes = read(bound.p, D3D12_RESOURCE_STATE_COPY_DEST);
       require(raw_bytes.size() == size_t(width) * height * sizeof(float), "Production bound depth is not raw R32");
       const auto depth = read(exported.p);
@@ -385,6 +413,14 @@ float ps(float4 position : SV_Position) : SV_Depth {
       // source age the view may still hold the old lifetime's last frame with
       // that lifetime's own calibration; the new lifetime never inherits it:
       // past that age it is uncalibrated until three fresh captures rebuild it.
+      // The game releases the old allocation here: a sentinel in its private
+      // data learns when the object is really destroyed.
+      const auto released = std::make_shared<std::atomic<bool>>(false);
+      {
+        auto *sentinel = new destruction_sentinel(released);
+        checked(scene->texture->SetPrivateDataInterface(destruction_sentinel_guid, sentinel), "Attach the released scene's sentinel");
+        sentinel->Release();
+      }
       const auto fresh_started = std::chrono::steady_clock::now();
       scene = create_target(false, true, 8, 6);
       do step(); while (std::chrono::steady_clock::now() - fresh_started < std::chrono::milliseconds(300));
@@ -395,6 +431,15 @@ float ps(float4 position : SV_Position) : SV_Depth {
         "Recreated source calibrated before three separately scheduled captures could complete");
       const auto normal = verify_scene("normal-Z recreated source");
       require(image_difference(normal, reversed) < .003f, "Equivalent normal/reversed game depth yields different calibrated geometry");
+      // The add-on references a source only while it may copy it: once the
+      // released allocation stopped working and its views retired, the game's
+      // release destroys it (it is no idle member of the new scene's set).
+      const auto release_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      unsigned release_frames = 0;
+      while (!released->load() && std::chrono::steady_clock::now() < release_deadline) { step(); ++release_frames; }
+      std::printf("MEASURE production released scene destroyed=%u after frames=%u\n", unsigned(released->load()), release_frames);
+      require(released->load(), "The add-on kept the game's released depth-stencil alive");
+      verify_scene("normal-Z recreated source after the release");
 
       // Change only the active copy rectangle in the SAME allocation. This must
       // invalidate historical calibration even when the resource pointer lives.

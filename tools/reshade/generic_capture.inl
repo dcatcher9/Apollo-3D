@@ -357,6 +357,19 @@ static bool hold_shown_capture(effect_runtime *runtime, const generic_depth_data
 	return runtime->get_device()->get_resource_from_view(resource_view{record.view}).handle == record.sampled;
 }
 
+// Whether the game released a depth-stencil the add-on still references for its
+// backup (track_depth_stencil_for_backup): that reference, which keeps a
+// source alive while it may be copied, is then the last one, so ReShade never
+// reports the destruction and the source stays in the device's map although
+// it can never work again.
+static bool released_by_game(device *device, generic_depth_device_data &device_data, resource source)
+{
+	if (device->get_api() > device_api::d3d12 || device_data.find_depth_stencil_backup(source) == nullptr) return false;
+	auto *const object = reinterpret_cast<IUnknown *>(source.handle);
+	object->AddRef();
+	return object->Release() == 1;
+}
+
 // The capture budget's view of the snapshot at depth frame `frame`: geometry,
 // content qualification, and whether the source worked within the selector's
 // activity grace (its last frame with work; a frame that only cleared it does
@@ -596,8 +609,19 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	data.capture_wait_detail = nullptr;
 	data.hold_only = false;
 	retire_member_views(runtime, data, device_data);
-	const auto observations = capture_observations(data, device_data.frame_index, snapshot);
+	auto observations = capture_observations(data, device_data.frame_index, snapshot);
 	const uint64_t anchor = selected_info ? selected_info->identity : 0;
+	// A set member the game released (released_by_game) and that stopped
+	// working leaves the routing: kept, it would hold a slot of a scene the
+	// game recreated with the same geometry for ever, make that single source
+	// a rotation, and keep its allocation alive. Its view then retires, which
+	// drops the last reference and destroys it. The anchor stays until the
+	// selector moves on, so a recreated scene can still take over as its peer.
+	observations.erase(std::remove_if(observations.begin(), observations.end(), [&](const auto &o) {
+		if (!o.idle || o.id == anchor) return false;
+		const auto source = std::find_if(snapshot.begin(), snapshot.end(), [&](const auto &entry) { return entry.second.identity == o.id; });
+		return source != snapshot.end() && released_by_game(runtime->get_device(), device_data, source->first);
+	}), observations.end());
 	const auto group = data.capture_budget.update(anchor, observations, !automatic);
 	data.anchor_depth_stencil = selected;
 	data.anchor_identity = anchor;

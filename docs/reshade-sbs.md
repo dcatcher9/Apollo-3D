@@ -6252,6 +6252,16 @@ turn when there is room. Without the order, the idle members of a set the game s
 (same geometry, older lifetimes) filled the four slots of every new set of that geometry, so a
 new A/B set was judged one member at a time, missed every other Present and never replaced the
 incumbent (deferred item 6, until 11-01).
+The add-on references a source it captures for as long as it may copy it (its backup's reference,
+taken so the source outlives an in-flight copy). A source the game released therefore stays alive
+through that reference alone, and ReShade never reports its destruction. Such a member, once idle,
+leaves every set but the one it anchors (`released_by_game`, the add-on's reference being the last
+one): its capture view then retires after the usual delay, which drops that reference, and the
+game's release destroys it. Until 11-01 a scene the game recreated with the same geometry (a
+settings change or a reload) kept its released predecessor as an idle member for as long as the
+set lived: the single source counted as a rotation (bound through the stable copy, one more copy
+per Present while effects read depth) and the old allocation and its backup were never freed
+(deferred item 3, J10).
 The existing slow quality policy chooses a preferred anchor. Current selection uses that anchor's
 usable copy when qualified, otherwise another qualified retained source's current copy. Multiple
 depth resources rendering in the same present is not itself a rejection. Ambiguous provenance of

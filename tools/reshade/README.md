@@ -1686,7 +1686,7 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 - [`generic_recording.h`](generic_recording.h): the per-command-list recording tracker (`state_tracking`, `depth_stencil_frame_stats`, `resource_hash`); included by `generic_depth_state.h` at its types' position. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
 - [`depth_addon_test_access.h`](depth_addon_test_access.h): the linkage switch of that state (internal in shipping, inline in the test add-on) and the test add-on's declarations of `depth_addon.cpp` internals. Docs: [Test builds](#test-builds).
 - [`capture_inputs.h`](capture_inputs.h): every ReShade-to-capture lifecycle forward of Generic depth (device release, command-list events, queue observe/retire, depth-stencil creation and destruction, depth clears, the Present boundary) as inline forwarders in `capture_inputs::`, called from `depth_addon.cpp`'s and `generic_recording.inl`'s handlers; included only by `depth_addon.cpp`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
-- [`generic_capture.inl`](generic_capture.inl): part of `depth_addon.cpp` (included after the candidate-selection declarations, where its definitions stood): the FrameActivityTrace text and Present/access trace types, member views, capture records and their validation, the hold gates (`judge_hold_gate`) and hold (`hold_shown_capture`), Present coverage, the end-of-frame copies and `select_captured_depth`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`generic_capture.inl`](generic_capture.inl): part of `depth_addon.cpp` (included after the candidate-selection declarations, where its definitions stood): the FrameActivityTrace text and Present/access trace types, member views, capture records and their validation, the hold gates (`judge_hold_gate`) and hold (`hold_shown_capture`), the released-source check (`released_by_game`), Present coverage, the end-of-frame copies and `select_captured_depth`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
 - [`generic_trace.inl`](generic_trace.inl): one statement of `select_captured_depth` (included at its place inside that function): the opt-in FrameActivityTrace route record of the capture set. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
 - [`generic_recording.inl`](generic_recording.inl): part of `depth_addon.cpp` (end of the shell): the ReShade draw, binding, clear, render-pass, transfer and execute events that fill the tracker, and `resolve_transfer_lineage`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
 - [`generic_probe.inl`](generic_probe.inl): part of `depth_addon.cpp` (end of the shell, before `generic_selection.inl`): the challenger probe: `release_challenger`, `prepare_probe_target`'s choice and preservation of the probe target, the raw-sample selection key and `complete_raw_sample`, and `sample_probe_target`. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
@@ -3156,6 +3156,12 @@ and also reloads the effect while it keeps drawing the same depth: the rebuilt `
 read ready, stay ready on a color-only Present within the source age (Generic's hold of the last
 frame), read unready after color-only Presents beyond it, then calibrate again, which checks that
 the shared change-only readiness cache republishes into a reloaded effect.
+In every phase `GameDepth` must be bound to the add-on's end-of-frame backup ("Sunshine depth
+presentation texture", printed as `MEASURE production <phase> binding=`), never the stable copy a
+rotating set binds: the fixture's scene is one source at a time. When it recreates the scene with
+the same geometry, the released allocation carries a sentinel in its private data, and it must be
+destroyed within 10 s: the add-on keeps no reference to a source the game released once it stopped
+working ([capture sets](../../docs/reshade-sbs.md#selecting-scene-depth)).
 The [owning validation section](../../docs/reshade-sbs.md#validation-and-remaining-device-check)
 describes the geometry, color, source-precision, AA and acquisition assertions. CTest includes
 the pure calibration policy alongside the existing selector and publisher lifecycle tests.
