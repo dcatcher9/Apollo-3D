@@ -2417,7 +2417,9 @@ readable frame: `decide_display` holds the FG copy meanwhile (`FG_successor_pend
 `retained_after_failed_copy` after a failed copy of that source; the display lineage,
 `sunshine_game3d::depth_output::detail::lineage_successor`, since 10-27 one rule for both directions), and that source's storage and encoding, which
 compare frames of one source, do not end the hold. A readable frame of any source replaces the copy,
-and another viewport's, epoch's or provider's source still drops it. A silent scope selects as
+and another viewport's, epoch's or provider's source still drops it. A copy of the lineage published
+before the held copy never replaces it (`retained_newer_copy`, owner ruling 10-30 Q3, since 10-31;
+the regression timeline `fg-off-sr-successor-older-than-held`). A silent scope selects as
 without FG, so FG turned on again within the hold keeps the copy until the scope supplies, while
 `frame_generation_holds` alone keeps a copy made since FG On over a readable SR copy. The provider
 fixture's `fg-off` script now holds the finished copy at a color-only Present after FG Off and is
@@ -2698,7 +2700,11 @@ its fence, so the pending head itself was its newest completed copy (`completed_
 add-on's FG switch line named it), and it is now decided again as the current capture; the seam
 characterization pins that race with a fence that completes between the reads; it also pins the
 lineage stand-in for an FG head whose own completed copy is refused, which the lineage judge found
-in the extra shard's seed d0dd7845ac141ad2 at frame 113),
+in the extra shard's seed d0dd7845ac141ad2 at frame 113), and one for FG Off after a silent FG
+frame's SR copy that the FG hold kept off-screen, `fg-off-sr-successor-older-than-held` (seed
+c40a42f921da5ba0's frames 138 to 162: before 10-31 FG Off showed that SR copy, two frames older than
+the held FG copy, and held it about 125 ms; stale_shown at frame 31 under the judge's same-API
+no-step-back rule, three of three runs, 10-31),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes

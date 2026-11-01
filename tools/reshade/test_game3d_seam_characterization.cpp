@@ -2913,6 +2913,34 @@ namespace sunshine_streamline::depth_capture {
          },
          action::copy_fresh,
          "fresh_copy_candidate"},
+        // Never older depth after newer (owner ruling 10-30 Q3, since 10-31):
+        // a readable copy of the retained copy's lineage published before it
+        // (FG Off's SR copy kept off-screen by the FG hold, seed
+        // c40a42f921da5ba0 at frame 149) does not replace it, nor does an
+        // older copy of the retained source; its storage ends nothing.
+        {"After an FG copy, a readable SR successor published before it holds it", [](display_case &d) {
+           fg_successor(d);
+           d.current.source_selected = d.candidate.pixel_ready = true;
+           d.current.capture_id = d.candidate.capture_id = 499;
+           ++d.candidate.format;
+         },
+         action::hold,
+         "retained_newer_copy"},
+        {"A readable copy of the retained source published before it holds it", [](display_case &d) {
+           d.current.source_selected = d.candidate.pixel_ready = true;
+           d.current.sequence = d.candidate.metadata.sequence = 29;
+           d.current.capture_id = d.candidate.capture_id = 499;
+         },
+         action::hold,
+         "retained_newer_copy"},
+        {"A readable copy published before the retained one past the source age", [](display_case &d) {
+           fg_successor(d);
+           d.current.source_selected = d.candidate.pixel_ready = true;
+           d.current.capture_id = d.candidate.capture_id = 499;
+           d.now = d.previous.metadata.tick + sunshine_freshness::source_age_ms;
+         },
+         action::invalidate,
+         "retained_depth_expired"},
         {"After an FG copy, the SR successor's own storage and encoding do not end the hold", [](display_case &d) {
            fg_successor(d);
            d.current.source_selected = true;

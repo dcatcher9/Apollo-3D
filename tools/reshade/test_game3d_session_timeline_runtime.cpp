@@ -848,6 +848,16 @@ namespace {
     {"fg-on-generated-in-evaluate-hitch-before-real-3x", "20*sr=local; fg=on,tag=now_list,sr=local,generated=2,at=evaluate; 10*tag=now_list,sr=local,generated=2,at=evaluate; tag=now_list,sr=local,generated=2,at=evaluate,hitch=after_sources; sr=local,generated=2,at=inside; 10*sr=local"},
     {"fg-on-generated-in-evaluate-hitch-before-real-4x", "20*sr=local; fg=on,tag=now_list,sr=local,generated=3,at=evaluate; 10*tag=now_list,sr=local,generated=3,at=evaluate; tag=now_list,sr=local,generated=3,at=evaluate,hitch=after_sources; sr=local,generated=3,at=inside; 10*sr=local"},
     {"fg-on-generated-before-own-evaluation-hitch-before-real-4x", "20*sr=local; fg=on,tag=now_list,sr=local,generated=3,at=inside; 10*tag=now_list,sr=local,generated=3,at=inside; tag=now_list,sr=local,generated=3,at=inside,hitch=after_sources; sr=local,generated=3,at=inside; 10*sr=local"},
+    // FG Off after a silent FG frame's SR copy on the game's queue, kept
+    // off-screen by the FG hold, then two frames refused (no observed
+    // state): the display holds the last FG tag copy (deferred to its
+    // Present) and the lineage's SR successor replaces it only with a copy
+    // published after it. Until 10-31 FG Off at frame 31 showed that SR
+    // copy, two frames older than the held FG copy, and held it until the
+    // next SR copy (about 125 ms), every run; the judge saw the step back
+    // only since it judges the same API too (seed c40a42f921da5ba0, frames
+    // 138 to 162, the deferred list's item 11).
+    {"fg-off-sr-successor-older-than-held", "20*sr=other_queue; 3*tag=present_bare,ui=listed; fg=on,tag=present_bare,sr=other_queue,dlssg=direct,state=recorded_other,ui=listed; tag=present_bare,sr=other_queue,dlssg=direct,state=recorded_other,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,state=proven,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; fg=off,tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; 2*sr=other_queue,state=unprovable,ui=listed,order=late; sr=other_queue,state=unprovable,order=late; fg=off,sr=other_queue,state=unprovable,order=late; tag=now_list,sr=other_queue,state=unprovable,order=late,sr_gpu=after_present; tag=evaluate_bare,sr=other_queue,state=unprovable,ui=listed,order=late; tag=evaluate_bare,sr=other_queue,state=proven,ui=listed,order=late; 3*tag=evaluate_bare,state=proven,ui=listed; 2*ui=listed"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose

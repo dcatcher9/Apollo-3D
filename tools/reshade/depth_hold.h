@@ -82,7 +82,19 @@ namespace sunshine_game3d::depth_output {
         out.reason = "FG_scope_unconfirmed";
         return out;
       }
-      if (current.source_selected && readable) {
+      // Never older depth after newer (owner ruling 10-30 Q3, C8): a
+      // candidate of the retained copy's display lineage (its viewport's
+      // Streamline FG input or ordinary source of its epoch) published before
+      // the retained copy (capture ids follow publication order) does not
+      // replace it. The retained copy is held under the rules below until a
+      // copy published after it is readable, or it expires. Until 10-31 FG
+      // Off showed such a copy whenever selection picked it: seed
+      // c40a42f921da5ba0 at frame 149 showed frame 144's SR copy after frame
+      // 146's FG copy and held it for about 125 ms.
+      const bool older = current.source_selected && current.capture_id && previous.capture_id &&
+        current.capture_id < previous.capture_id && current.provider == previous.metadata.provider &&
+        streamline_lineage(previous.metadata, current.epoch, current.viewport);
+      if (current.source_selected && readable && !older) {
         out.action = display_action::copy_fresh;
         out.reason = "fresh_copy_candidate";
         return out;
@@ -104,16 +116,19 @@ namespace sunshine_game3d::depth_output {
       // its first readable frame (copied above), and until then the copy is
       // held as any source's missing frame is. Storage and encoding compare
       // frames of one source only.
-      const bool other_source = !same_source(previous, current);
+      // An older candidate of the lineage (above) is no newer identity: it
+      // contradicts nothing, and its storage and encoding, never shown, end
+      // nothing.
+      const bool other_source = !older && !same_source(previous, current);
       if (other_source && !lineage_successor(previous, current)) {
         out.reason = "source_changed";
         return out;
       }
-      if (!other_source && current.source_selected && !same_storage(previous, candidate)) {
+      if (!other_source && !older && current.source_selected && !same_storage(previous, candidate)) {
         out.reason = "depth_format_changed";
         return out;
       }
-      if (!other_source && current.source_selected && before.projection.encoding != candidate.metadata.projection.encoding) {
+      if (!other_source && !older && current.source_selected && before.projection.encoding != candidate.metadata.projection.encoding) {
         out.reason = "depth_encoding_changed";
         return out;
       }
@@ -129,7 +144,8 @@ namespace sunshine_game3d::depth_output {
         return out;
       }
       out.action = display_action::hold;
-      out.reason = !other_source ? "retained_copy" : before.frame_generation_input ? "FG_successor_pending" : "FG_copy_pending";
+      out.reason = older ? "retained_newer_copy" : !other_source ? "retained_copy" :
+        before.frame_generation_input ? "FG_successor_pending" : "FG_copy_pending";
       return out;
     }
   }
@@ -150,7 +166,9 @@ namespace sunshine_game3d::depth_output {
   // only once its recording retired, and an ordinary copy for the FG input
   // after FG On or in a silent scope (FG_copy_pending), as for DLSS-G's
   // compute copy, readable only frames later. A required FG scope accepts
-  // only its own lineage's copy. hold still requires the cache owner's local
+  // only its own lineage's copy. A selected copy of the retained copy's lineage
+  // published before it never replaces it (retained_newer_copy): no older
+  // depth after newer. hold still requires the cache owner's local
   // storage, color extent, immediate-command and consumer-queue checks. Only a
   // successful fresh copy may replace retained_depth; holds never refresh it.
   inline display_decision decide_display(const acquisition_decision &current, const packet &candidate,

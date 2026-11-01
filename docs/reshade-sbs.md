@@ -4692,6 +4692,14 @@ kind: `depth_format_changed`) or encoding (`depth_encoding_changed`), when the e
 changes, or at the age bound below. A selected snapshot of a new render size of the same source
 (dynamic resolution) does not end it: the held copy keeps its own allocation and active rectangle,
 which consumers map to the screen like any crop, until the new size's first copy replaces it.
+No older depth follows newer (owner ruling 10-30 Q3): a selected copy of the retained copy's display
+lineage (its viewport's Streamline FG input or ordinary SR/RR source of its epoch) published before
+the retained copy (capture ids follow publication order) never replaces it, readable or not; the
+retained copy is held (`source_reason=retained_newer_copy`) until a copy published after it is
+readable or it expires, and that older copy's storage and encoding end nothing. Until 10-31 FG Off
+could show the lineage's SR copy that the FG hold had kept off-screen, two frames older than the
+held FG copy, and hold it for about 125 ms (the session timelines' seed c40a42f921da5ba0 at frame
+149).
 A readable snapshot whose copy into the display texture fails is such a failed successor. The
 consumer records that copy only once every check passed, so a failure leaves the display texture
 as the last successful copy left it, and the same rules hold that copy (readiness lines show
