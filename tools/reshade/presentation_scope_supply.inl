@@ -69,9 +69,10 @@
     // the viewport's ordinary SR/RR depth may supply it. sequence is the
     // frame's tag call. While DLSS-G's own evaluation supplies the scope's
     // copies (remember_evaluation_supply), that evaluation, not the tag,
-    // decides the frame.
-    void miss_frame_generation(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t sequence) {
-      if (!evaluation_supplies(scope_epoch, viewport)) depth_capture::frame_generation_missed(scope_epoch, viewport, sequence);
+    // decides the frame. supplied: the caller's one read of
+    // evaluation_supplies(scope_epoch, viewport).
+    void miss_frame_generation(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t sequence, bool supplied) {
+      if (!supplied) depth_capture::frame_generation_missed(scope_epoch, viewport, sequence);
     }
     // A precedence per UI kind (ui_mask::capture_slot,
     // ui_mask::tag_precedence), not keyed to the frame as depth's is, since a
@@ -217,15 +218,13 @@
       deferral_pending.store(0, std::memory_order_release);
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
     }
-    // The two default-argument missed-frame sites keep their two calls
-    // and separate lock holds in the same order.
-    void frame_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence) {
+    // A frame whose FG tag copy is gone (refused, cancelled or lapsed): no tag
+    // copy keeps precedence over DLSS-G's input (remember_tag_copy), and
+    // miss_frame_generation decides it with the caller's read of DLSS-G's
+    // supply (a refused FG tag boundary's read decides its withdrawal as
+    // well, PD10). Until 11-01 a second overload read the supply after the
+    // precedence and repeated the decision (F43).
+    void frame_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence, bool supplied) {
       remember_tag_copy(epoch, viewport, false);
-      miss_frame_generation(epoch, viewport, sequence);
-    }
-    // A refused FG tag boundary that read DLSS-G's supply itself
-    // (evaluation_supplies, PD10): the same answer decides its withdrawal.
-    void frame_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence, bool evaluation_supplied) {
-      remember_tag_copy(epoch, viewport, false);
-      if (!evaluation_supplied) depth_capture::frame_generation_missed(epoch, viewport, sequence);
+      miss_frame_generation(epoch, viewport, sequence, supplied);
     }

@@ -153,7 +153,7 @@ namespace sunshine_streamline {
     // the frame's newest tag call.
     void hand_over(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned kinds, std::uint64_t sequence) {
       if (kinds & 1u) {
-        frame_missed(scope_epoch, viewport, sequence);
+        frame_missed(scope_epoch, viewport, sequence, evaluation_supplies(scope_epoch, viewport));
       }
       for (unsigned slot = 0; slot != 4; ++slot)
         if (kinds & (2u << slot)) remember_ui_tag_copy(scope_epoch, viewport, slot, false);
@@ -431,7 +431,7 @@ namespace sunshine_streamline {
         if (!copied) depth_capture::evaluation_called(entry.epoch);
         if (!retired) {
           remember_tag_copy(entry.epoch, entry.viewport, copied, entry.serial, entry.frame);
-          if (!copied) miss_frame_generation(entry.epoch, entry.viewport, entry.serial);
+          if (!copied) miss_frame_generation(entry.epoch, entry.viewport, entry.serial, evaluation_supplies(entry.epoch, entry.viewport));
         }
         if (copied) {
           recorded = true;

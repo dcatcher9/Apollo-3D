@@ -368,7 +368,7 @@ namespace sunshine_streamline {
       if (const auto rejected = source_rejection(snapshot)) {
         if (fg_boundary) {
           report_fg_refusal(snapshot, rejected, withdraws, route == fg_route::owned);
-          frame_missed(snapshot.epoch, snapshot.viewport, snapshot.sequence);
+          frame_missed(snapshot.epoch, snapshot.viewport, snapshot.sequence, evaluation_supplies(snapshot.epoch, snapshot.viewport));
         }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
         remember_refusal(snapshot, sunshine_depth_refusal::gate::source, rejected);
@@ -452,7 +452,8 @@ namespace sunshine_streamline {
           snapshot.sequence, snapshot.frame);
         if (fg_boundary && diagnostic.result == depth_capture::status::recorded)
           count_tag_call_copy(candidates.data(), count, diagnostic);
-        else if (fg_boundary) miss_frame_generation(snapshot.epoch, snapshot.viewport, snapshot.sequence);
+        else if (fg_boundary)
+          miss_frame_generation(snapshot.epoch, snapshot.viewport, snapshot.sequence, evaluation_supplies(snapshot.epoch, snapshot.viewport));
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
         // A metadata-only nomination keeps the source; its copy was refused.
         if (diagnostic.result != depth_capture::status::recorded)
