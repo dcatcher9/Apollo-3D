@@ -228,7 +228,11 @@ namespace sunshine_streamline::provider {
     void track_render_size(state &data, bool copied, bool held, bool selected);
     void activate_display(state &data, const state::display_entry &entry);
     display_status prepare_display(api::effect_runtime *runtime, state &data, const depth_capture::packet &packet,
-        std::uint64_t present);
+        std::uint64_t present, state::display_entry *&target);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // The next display copy is refused (SunshineStreamlineTestRefuseNextDisplayCopy).
+    std::atomic<bool> refuse_next_display_copy{};
+#endif
   }
 #ifdef SUNSHINE_SBS_TEST
   // Exercise the exact value-only publication used by the renderer and dump
@@ -837,6 +841,12 @@ namespace sunshine_streamline::provider {
     if (!data || !texture) return false;
     *texture = data->display_texture.handle;
     return true;
+  }
+  // arm: refuse the provider's next display copy, which then records nothing,
+  // as a consumer refusal does (the native provider fixture's failed copy at
+  // a new render size). Returns whether a refusal was still pending.
+  extern "C" __declspec(dllexport) bool SunshineStreamlineTestRefuseNextDisplayCopy(bool arm) {
+    return refuse_next_display_copy.exchange(arm, std::memory_order_acq_rel);
   }
 #endif
   bool selected(api::effect_runtime *runtime) {

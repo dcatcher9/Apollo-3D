@@ -946,7 +946,11 @@ first display, released off the present thread while Presents go on, and a runti
 that release. Then (10-31) a larger render size and back: the smaller display is reused and the
 larger one is released off the present thread once unused for 2 s (`MEASURE native-provider
 display-idle released_ms=`; without the idle release it stayed allocated and the case failed), and
-two render sizes alternating faster than that keep both displays for 4.5 s. The optional metadata-only
+two render sizes alternating faster than that keep both displays for 4.5 s. Without the interposer
+(11-01), a display copy the test add-on refuses (`SunshineStreamlineTestRefuseNextDisplayCopy`, as a
+consumer refusal records nothing) at a new render size, once for the other retained display's size
+and once for a size that allocates, holds the retained copy on the shown display
+(`SL-display-failed-copy-*`; until 11-01 that Present was mono). The optional metadata-only
 interposer enables the SL FG 2x case: retained real depth, generated presentations, a hitch of the
 source age and more before a real Present and one between it and its generated Present (the
 generated Present holds that frame's own copy and every Present keeps full stereo strength,

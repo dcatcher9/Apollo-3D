@@ -578,12 +578,13 @@ a game that runs SR and FG through Streamline fell back to Generic for a Present
 capture was pending. An explicit release with no other evaluation falls back at once. The log line ends `holding API
 ownership (mono) for a provider handoff, at most 250 ms`, and the readiness reason is
 `source_handoff`. Display storage keeps one entry per shape and format (at most two), so a flip
-switches entries rather than reallocating; a replaced entry is retired by a fence signalled on a
+copies into the other entry rather than reallocating; a replaced entry is retired by a fence signalled on a
 later Present, with no `wait_idle`, and once that fence completed it is released on a pool thread
 (a texture's last Release and ReShade's view release can wait on video memory: 17 and 81 ms on the
 present thread in ACS 10-27b, whose dynamic resolution retired a display at most render-size
 changes). A replaced entry is never the active display, and the effects' binding is the active
-entry's view or none (the provider binds the active view after every allocation or switch), so
+entry's view or none (the provider binds the active view after every copy that made an entry
+active), so
 retiring one changes no binding; an unbind for a retired bound view, which could never run, was
 removed with its test record on 11-01. An entry that is neither the active display nor the effects' binding for 2 s is
 retired the same way (10-31), so VRAM returns about 2 s after a resolution drop or a provider flip;
@@ -4865,7 +4866,11 @@ presenting queue. Until 10-26 every failed copy dropped the retained copy, so th
 queue a game created while depth was live (the native observer installs its hook for it, an
 observation loss: `loss=global_observation_loss`), as a DLSS-G swapchain's queue the first time
 frame generation presents, made one Present mono while a copy younger than the source age was
-retained (the session tests' continuity gap C3).
+retained (the session tests' continuity gap C3). A copy of a new render size or format goes into
+the other retained display entry or a new one, which becomes the shown display only once the copy
+succeeded, so a failure there holds the retained copy on the shown display too (until 11-01 the
+display switched to the new entry and dropped the retained copy before the copy was tried, so a
+failure at a render-size step was mono; the native provider fixture's `SL-display-failed-copy-*`).
 Explicit source interruptions advance the queue's admission watermark, preventing
 pre-interruption captures from returning: a newest nomination whose views are ambiguous (two
 viewports evaluating) or inactive, one past the source age that the Present does not present

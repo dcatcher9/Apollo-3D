@@ -1028,6 +1028,63 @@ namespace {
       std::puts("PASS native SL display idle release: a display unused for 2 s after a resolution drop is released off the present thread; render sizes alternating faster keep both displays");
     }
 
+    // A failed display copy at a new render size holds the retained copy
+    // (F64, 11-01). The copy is made into the other retained display or a
+    // new one, which becomes the active display only once the copy
+    // succeeded, so a failed copy leaves the shown display and the retained
+    // copy as they were (decide_failed_copy, retained_after_failed_copy).
+    // Until 11-01 the active display switched and the cache was dropped
+    // before the copy, so a consumer failure at a render-size step (a busy
+    // queue-order lock, an observation loss) was a mono Present. The test
+    // add-on refuses one copy, which then records nothing, as a consumer
+    // refusal does: at the size the other retained display has (the
+    // oscillation above kept it), then at a size that allocates.
+    void run_display_failed_copy() {
+      const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
+      const auto display = reinterpret_cast<bool (*)(api::effect_runtime *, std::uint64_t *)>(
+        GetProcAddress(module, "SunshineStreamlineTestDisplay"));
+      const auto refuse = reinterpret_cast<bool (*)(bool)>(GetProcAddress(module, "SunshineStreamlineTestRefuseNextDisplayCopy"));
+      require(display && refuse, "The test add-on exports no display test hooks");
+      const auto active_texture = [&] {
+        std::uint64_t texture{};
+        require(display(observed.runtime, &texture) && texture, "The test add-on names no active display texture");
+        return texture;
+      };
+      const auto show = [&](uav_target *target, const char *label) {
+        selected = target;
+        active_area = {0, 0, target->width, target->height};
+        return settle(label);
+      };
+      const auto failed_copy = [&](uav_target *target, const char *label, const char *recovered) {
+        using sunshine_game3d::source_slot;
+        const auto before = inspect();
+        const auto shown = active_texture();
+        require(!refuse(true), "A refused display copy was pending before its case");
+        selected = target;
+        active_area = {0, 0, target->width, target->height};
+        // The frame's SR copy is refused by the test add-on: permitted, not owed.
+        render_tracked_depth = [&] { draw_frame(); permitted_supply(game3d_continuity::generic_boundary | game3d_continuity::sr_evaluate); };
+        present_frame();
+        render_tracked_depth = [&] { evaluated_frame(); };
+        require(!refuse(false), "The provider attempted no display copy of the new render size");
+        const auto s = inspect();
+        log_status(label, s);
+        require(s.ready() && s.source.ready && s.source.reused_depth && s.source.current.capture == before.source.current.capture,
+          "A failed display copy at a new render size did not hold the retained copy (the Present was mono)");
+        require(active_texture() == shown, "A failed display copy changed the active display");
+        require_record(label, source_slot::scene_depth, source_slot::scene_depth, sunshine_game3d::source_state::held, "retained_copy");
+        show(target, recovered);
+        require(active_texture() != shown, "The render size's first successful copy did not change the active display");
+      };
+      auto *small = first.get(), *large = resized_targets.back().get();
+      show(small, "SL-display-failed-copy-seed");
+      failed_copy(large, "SL-display-failed-copy-switch", "SL-display-failed-copy-switch-recovered");
+      resized_targets.push_back(target_uav(first->width + 128, first->height + 96, 0));
+      failed_copy(resized_targets.back().get(), "SL-display-failed-copy-new", "SL-display-failed-copy-new-recovered");
+      show(small, "SL-display-failed-copy-done");
+      std::puts("PASS native SL display failed copy: a failed copy at a new render size, into the other retained display or a new one, holds the retained copy on the shown display");
+    }
+
     // The public tag 23 UI hook with one Resource type, then the offscreen UI
     // layer, over the FG cases' real frames.
     void run_ui_hook(std::uint32_t resource_type) {
@@ -4328,6 +4385,8 @@ int main(int argc, char **argv) {
       fixture.run_streamline();
       fixture.run_display_release();
       fixture.run_display_idle_release();
+      // The FG runs are near their watchdog: these cases run without FG only.
+      if (!sdk) fixture.run_display_failed_copy();
       if (sdk) fixture.run_fg(sdk);
     }
     fixture.finish();

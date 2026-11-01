@@ -170,27 +170,32 @@
       data.display_view_format = entry.view_format;
     }
 
+    // The entry a fresh copy of packet's shape and format is made into
+    // (target): the active display, the other retained entry or a new one.
+    // It becomes the active display only once that copy succeeded
+    // (activate_display, depth_display_copy.inl), so a failed copy leaves
+    // the active display, which holds the retained copy, and the display
+    // cache as they were, and decide_failed_copy holds that copy (until
+    // 11-01 a new render size or format switched the active display and
+    // dropped the cache before the copy: a failed copy there was a mono
+    // Present, F64). A successful copy's commit replaces the retained copy.
     display_status prepare_display(api::effect_runtime *runtime, state &data, const depth_capture::packet &packet,
-        std::uint64_t present) {
-      const auto matches = [&](const state::display_entry &entry) {
-        return entry.texture.handle && entry.width == packet.width && entry.height == packet.height && entry.format == packet.format &&
-          entry.view_format == packet.srv_format;
-      };
-      if (data.display_texture.handle && data.display_width == packet.width && data.display_height == packet.height &&
-          data.display_format == packet.format && data.display_view_format == packet.srv_format) return display_status::ready;
+        std::uint64_t present, state::display_entry *&target) {
+      target = nullptr;
       // A new shape or format allocates here, on the present thread, and
       // retires the inactive entry (released off it, collect_displays).
       // Dynamic resolution makes that frequent, not rare (ACS 10-27b: 316
       // render-size changes in one session). Ordinary rotation at one shape
       // never allocates a texture or changes descriptors. A provider flip
-      // (NGX and Streamline usually differ in shape or format) switches to the
-      // other retained entry; the cache never reuses the other entry's pixels.
-      for (auto &entry : data.displays) if (matches(entry)) {
-        activate_display(data, entry);
-        entry.used = GetTickCount64();
-        data.cache.invalidate("display_switched");
-        return display_status::ready;
-      }
+      // (NGX and Streamline usually differ in shape or format) copies into
+      // the other retained entry; the cache never reuses that entry's
+      // earlier pixels.
+      for (auto &entry : data.displays)
+        if (entry.texture.handle && entry.width == packet.width && entry.height == packet.height &&
+            entry.format == packet.format && entry.view_format == packet.srv_format) {
+          target = &entry;
+          return display_status::ready;
+        }
       // An empty entry, else the inactive one. The active entry is retained.
       auto *victim = &data.displays[0];
       for (auto &entry : data.displays) {
@@ -199,13 +204,12 @@
       }
       // Retiring the inactive entry changes no binding: the victim is never
       // the active entry, and the effects' view (effects_view) is none or the
-      // active entry's, since display_view changes only here (and at
-      // teardown) and begin() follows every prepare_display with
-      // bind_api(display_view) before it returns. (Until 11-01 an unbind for
+      // active entry's, since display_view changes only when a copy
+      // succeeded (activate_display) and at teardown, and begin() binds
+      // display_view (bind_api) before it returns. (Until 11-01 an unbind for
       // an evicted bound view and a clear of an evicted active entry stood
       // here; neither could run.)
       if (victim->texture.handle) retire_display(data, *victim, present);
-      data.cache.invalidate("display_recreated");
       api::resource_desc desc(packet.width, packet.height, 1, 1, static_cast<api::format>(packet.format), 1,
         api::memory_heap::default_, api::resource_usage::shader_resource | api::resource_usage::copy_dest);
       state::display_entry created;
@@ -220,9 +224,11 @@
       }
       created.width = packet.width; created.height = packet.height; created.format = packet.format;
       created.view_format = packet.srv_format;
+      // A new entry counts as used from its creation (expire_idle_displays),
+      // also while a failed copy left it inactive.
+      created.used = GetTickCount64();
       *victim = created;
-      activate_display(data, created);
-      victim->used = GetTickCount64();
+      target = victim;
       return display_status::ready;
     }
   }
