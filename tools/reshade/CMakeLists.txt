@@ -17,7 +17,52 @@ execute_process(COMMAND git diff --quiet WORKING_DIRECTORY "${CMAKE_CURRENT_SOUR
 if(NOT SUNSHINE_GAME3D_DIRTY EQUAL 0)
   string(APPEND SUNSHINE_GAME3D_BUILD_REVISION "-dirty")
 endif()
-add_compile_definitions(SUNSHINE_GAME3D_SHADER_SHA256="${SUNSHINE_GAME3D_SHADER_SHA256}"
+# Dump 3D's build.revision is the HEAD of the last configure, so the configure
+# re-runs whenever this worktree's HEAD moves (a commit, checkout or pull): it
+# depends on the worktree's HEAD file and its branch's loose ref, which change
+# with nothing else. A packed branch has no loose ref until its next commit
+# creates one, so then it depends on that ref's directory and packed-refs
+# instead (other branches' updates there re-run only the configure). Only
+# game3d_debug_dump.cpp prints the revision, so a new one recompiles that file
+# in each view and relinks; nothing else changes (until 11-01 every file had
+# the definition, so any configure rebuilt them all, while a commit alone left
+# the revision old).
+execute_process(COMMAND git rev-parse --path-format=absolute --git-path HEAD
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" OUTPUT_VARIABLE sunshine_git_files
+  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git symbolic-ref -q HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  OUTPUT_VARIABLE sunshine_git_branch OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(sunshine_git_branch)
+  execute_process(COMMAND git rev-parse --path-format=absolute --git-path "${sunshine_git_branch}" --git-path packed-refs
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" OUTPUT_VARIABLE sunshine_git_refs
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  string(REPLACE "\n" ";" sunshine_git_refs "${sunshine_git_refs}")
+  list(LENGTH sunshine_git_refs sunshine_git_ref_count)
+  if(sunshine_git_ref_count EQUAL 2)
+    list(GET sunshine_git_refs 0 sunshine_git_ref)
+    list(GET sunshine_git_refs 1 sunshine_git_packed_refs)
+    if(EXISTS "${sunshine_git_ref}")
+      list(APPEND sunshine_git_files "${sunshine_git_ref}")
+    else()
+      get_filename_component(sunshine_git_ref_directory "${sunshine_git_ref}" DIRECTORY)
+      while(sunshine_git_ref_directory AND NOT EXISTS "${sunshine_git_ref_directory}")
+        get_filename_component(sunshine_git_ref_parent "${sunshine_git_ref_directory}" DIRECTORY)
+        if(sunshine_git_ref_parent STREQUAL sunshine_git_ref_directory)
+          break()
+        endif()
+        set(sunshine_git_ref_directory "${sunshine_git_ref_parent}")
+      endwhile()
+      list(APPEND sunshine_git_files "${sunshine_git_ref_directory}" "${sunshine_git_packed_refs}")
+    endif()
+  endif()
+endif()
+foreach(sunshine_git_file IN LISTS sunshine_git_files)
+  if(EXISTS "${sunshine_git_file}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${sunshine_git_file}")
+  endif()
+endforeach()
+add_compile_definitions(SUNSHINE_GAME3D_SHADER_SHA256="${SUNSHINE_GAME3D_SHADER_SHA256}")
+set_property(SOURCE game3d_debug_dump.cpp APPEND PROPERTY COMPILE_DEFINITIONS
   SUNSHINE_GAME3D_BUILD_REVISION="${SUNSHINE_GAME3D_BUILD_REVISION}")
 add_library(sunshine_game3d_diagnostics STATIC game3d_diagnostic_metadata.cpp)
 target_compile_features(sunshine_game3d_diagnostics PUBLIC cxx_std_17)
