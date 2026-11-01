@@ -2199,8 +2199,14 @@ accepted candidates a label names (`accepted`, a list of those artifact kinds; t
 and the resulting mask (empty, partial HUD, or flat) with that label:
 
 ```powershell
-.\ui_detection_replay.exe ..\..\tools\reshade\game3d_native.hlsl E:\ApolloDev\sbs_dump\ui_detection_cases.json
+.\ui_detection_replay.exe ..\..\tools\reshade\game3d_native.hlsl E:\ApolloDev\refactor_lane_fixtures\ui_detection_cases.json
 ```
+
+The case file's `dump_root` names the folder of the packages it labels (by default the case
+file's own folder). The labelled packages and their case file lived in `E:\ApolloDev\sbs_dump`
+until 10-29, when that folder was emptied; the copy above names the 42 packages recovered from it,
+in `E:\ApolloDev\refactor_lane_fixtures\sbs_dump`, and the cases of the 7 that were already gone
+skip (`dump missing`).
 
 It also pushes the exact 80-byte `b0` from `replay.parameter_hex`, as every renderer compute pass
 receives it, and binds the raw depth artifact at `t1` and the presented color at `t6` (`t0` stays

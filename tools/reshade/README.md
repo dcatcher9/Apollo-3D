@@ -789,10 +789,12 @@ owns their contracts. The first is the single-frame replay of the labelled dumps
 `cmake-build-relwithdebinfo/reshade-addon`:
 
 ```powershell
-.\ui_detection_replay.exe ..\..\tools\reshade\game3d_native.hlsl E:\ApolloDev\sbs_dump\ui_detection_cases.json
+.\ui_detection_replay.exe ..\..\tools\reshade\game3d_native.hlsl E:\ApolloDev\refactor_lane_fixtures\ui_detection_cases.json
 ```
 
-It ends with
+That case file labels the Dump 3D packages in `E:\ApolloDev\refactor_lane_fixtures\sbs_dump` (its
+`dump_root`); the originals in `E:\ApolloDev\sbs_dump` are gone since 10-29 ([the replay's
+cases](../../docs/reshade-sbs.md#setup)). It ends with
 `PASS|FAIL UI detection replay: N passed, X xfailed, Y xpassed, F failed, S skipped`. A known-wrong
 cell is XFAIL while it keeps today's recorded outcome, and XPASS once it meets its target.
 `--strict` also fails on an XPASS, so that its xfail gets removed.
