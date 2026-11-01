@@ -107,9 +107,10 @@ namespace {
   // The fixed set the registered test runs, and each timeline's length.
   constexpr unsigned fixed_timelines = 24, min_frames = 60, max_frames = 200;
   // The fixed set's time bound, its watchdog 10 s later, below ctest's 480 s,
-  // about twice a full run (184 to 187 s on 10-27, when the bound was 225 s
-  // and ctest's 240 s, so a loaded machine's run could reach either; 235 s
-  // since the 10-27 review's timelines and the seeds' hitches), and
+  // about 1.4 times a full run (about 340 s on 11-01 with 87 rows; it was
+  // about twice a full run at 235 s, after the 10-27 review's timelines and
+  // the seeds' hitches, and 184 to 187 s on 10-27, when the bound was 225 s
+  // and ctest's 240 s, so a loaded machine's run could reach either), and
   // how long its first failure is shrunk once every timeline ran: a failing
   // run holds the GPU about a minute longer than a passing one and prints
   // its reproducer in time. --shrink-runs outside the fixed set shrinks for

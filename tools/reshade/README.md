@@ -3052,8 +3052,9 @@ keep the default, are judged by their verdicts, which accept either outcome.
 frames and about 19500 Presents, with the seeds' hitches and late FG Offs) in about 340 s
 (lane run f2-P0-int1-followups-c5-sessions, 11-01; 61 rows and about 285 s in the full check's
 registered run of 10-28), registered like
-`reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own
-watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first). Locally:
+`reshade_native_provider_continuity` but with a 480 s timeout, about 1.4 times a full run (its own
+watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first; the bound was about
+twice a full run when the set took about 235 s, and each regression row adds about 2 s). Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
       --seeds N [--from M]] [--shard i/N] [--shrink-runs N] [--trace]
