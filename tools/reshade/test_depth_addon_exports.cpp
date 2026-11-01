@@ -507,6 +507,23 @@ static void check_hold_gates()
 		cleared.back().frames.back() = w::clear;
 		require_snapshot(judge(cleared, members, period - 1) == hold_gate::cleared,
 			"A rotation member clearing on its turn without drawing held the previous member's depth");
+		// A scene starting on the first member's next turn, in a buffer that
+		// drew on its previous turn, exactly one cadence before (beyond the
+		// grace: A/B/C/D): the member did not draw, so the buffer took its
+		// turn, not a free slot. The same beside an unqualified last member,
+		// whose own turn (a free slot) still holds (above).
+		if (period > grace)
+		{
+			auto taken = rotation;
+			for (auto &turns : taken) turns.frames.push_back(w::none);
+			taken.push_back({ 1920, 1080, 1, std::vector<work>(3 * period + 1, w::none) });
+			taken.back().frames[2 * period] = w::draw;
+			taken.back().frames.back() = w::draw;
+			require_snapshot(judge(taken, members, period) == hold_gate::cut,
+				"A scene starting on a rotation member's turn in a buffer that drew exactly one cadence before held the rotation's depth");
+			require_snapshot(judge(taken, qualified, period - 1) == hold_gate::cut,
+				"A scene starting on a member's turn beside an unqualified member, in a buffer that drew one cadence before, held the depth");
+		}
 	}
 	// on_present's bookkeeping: the last earlier frame with work.
 	constexpr uint64_t none = std::numeric_limits<uint64_t>::max();

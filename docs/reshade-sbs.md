@@ -6309,7 +6309,9 @@ refuse the hold, judged from the work of each Present that advances the depth fr
   multisampled where the device resolves depth) drew although it had no work within the
   selector's activity grace (the three depth-active Presents before, as long as a candidate counts
   as active) and does not draw at the set's own cadence (its idle interval is not the interval
-  between the last two working Presents of a set member whose next turn is not yet overdue). A
+  between the last two working Presents of a set member whose next turn is still to come; on a
+  Present that is a set member's turn and that member did not work, the buffer took that turn,
+  so nothing draws at the set's cadence then). A
   scene pass starts now in another buffer, at another size or at the same size before it
   qualifies (a cutscene, photo mode or a 3D menu): the held depth would be another camera's. A
   source that keeps drawing (a HUD with its own depth-stencil, an every-Present lower-resolution
@@ -6547,8 +6549,11 @@ accepted consequences:
   including an unqualified buffer of the same size; the first turn of a new rotation member is one
   too, its later turns hold). Neither gate sees a screen change on which the game simply stops
   drawing its scene without clearing depth or drawing into another buffer, or starts the new scene
-  in a buffer that last drew within those three Presents or exactly one set cadence before (four
-  Presents before, beside an A/B/C/D set): those Presents show the last scene's depth for at most
+  in a buffer that last drew within those three Presents, or on the turn of a rotation member not
+  yet in the set in a buffer that last drew exactly one set cadence before (four Presents before,
+  beside an A/B/C set whose fourth member has not qualified; that buffer then draws exactly as the
+  fourth member would, until 11-01 also on a set member's turn): those Presents show the last
+  scene's depth for at most
   250 ms after it was current,
   exactly as with the API providers, then mono. Both gates judge a Present by the work
   submitted since the previous one, so a frame-generation Present that lands between one frame's

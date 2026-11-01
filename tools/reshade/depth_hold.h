@@ -316,9 +316,13 @@ enum class hold_gate { open, cleared, cut };
 // members show, on its turn, before it qualifies into the set (A/B/C/D, whose
 // turns come four depth frames apart). It draws at that cadence when its idle
 // interval equals the interval between the last two worked depth frames of a
-// set member whose next turn is not yet overdue: a stopped set lends none,
-// and a single long gap (a member resuming its scene) matches nothing else by
-// chance. No knob of its own.
+// set member whose next turn is still to come: a stopped set lends none, and
+// a single long gap (a member resuming its scene) matches nothing else by
+// chance. Such a member's turn is a slot no set member owns, so a set member
+// whose turn this frame is (one interval after its last work) and that did not
+// work lends no cadence to anyone: a buffer drawing in its place took its
+// turn, not a free slot, and is a cut even when it last drew exactly one
+// cadence before. No knob of its own.
 template<class Snapshot, class MatchesShape>
 inline hold_gate judge_hold_gate(const Snapshot &snapshot,
 	const sunshine_depth_capture::capture_set &captures, uint64_t held, uint64_t frame,
@@ -331,17 +335,22 @@ inline hold_gate judge_hold_gate(const Snapshot &snapshot,
 			if (captures.records[i].identity == id) return true;
 		return false;
 	};
-	// The set's cadence (above): at most one interval per member and the held source.
+	// The set's cadence (above): at most one interval per member and the held
+	// source, from the members whose next turn is still to come; `skipped`: a
+	// member whose turn this frame is did not work.
 	std::array<uint64_t, sunshine_depth_capture::maximum_sources + 1> cadence {};
 	unsigned cadences = 0;
-	bool erased = false, worked = false;
+	bool erased = false, worked = false, skipped = false;
 	for (const auto &[value, info] : snapshot)
 	{
 		if (!in_set(info.identity)) continue;
 		const auto &stats = info.last_frame_stats;
-		if (info.prior_work_frame != none && stats.total.has_work() && info.last_used_in_frame <= frame &&
-			frame - info.last_used_in_frame <= info.last_used_in_frame - info.prior_work_frame && cadences != cadence.size())
-			cadence[cadences++] = info.last_used_in_frame - info.prior_work_frame;
+		if (info.prior_work_frame != none && stats.total.has_work() && info.last_used_in_frame <= frame)
+		{
+			const auto interval = info.last_used_in_frame - info.prior_work_frame, since = frame - info.last_used_in_frame;
+			if (since < interval && cadences != cadence.size()) cadence[cadences++] = interval;
+			else if (since == interval) skipped = true;
+		}
 		if (info.last_used_in_frame != frame) continue;
 		erased = erased || stats.depth_erased;
 		worked = worked || stats.total.has_work();
@@ -352,7 +361,7 @@ inline hold_gate judge_hold_gate(const Snapshot &snapshot,
 		if (info.last_used_in_frame != frame || in_set(info.identity) || !info.last_frame_stats.total.drew() ||
 			!(info.desc.texture.samples <= 1 || resolve_depth) || !candidate_matches_shape(info, color_width, color_height)) continue;
 		const auto idle = info.prior_work_frame == none ? none : frame - info.prior_work_frame;
-		if (idle > grace && std::find(cadence.begin(), cadence.begin() + cadences, idle) == cadence.begin() + cadences)
+		if (idle > grace && (skipped || std::find(cadence.begin(), cadence.begin() + cadences, idle) == cadence.begin() + cadences))
 			return hold_gate::cut;
 	}
 	return hold_gate::open;
