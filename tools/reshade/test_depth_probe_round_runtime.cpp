@@ -4,8 +4,32 @@
 // readiness or camera.
 #include "test_raw_runtime_fixture.h"
 #include "test_game3d_native_observation.h"
+#include <atomic>
 
 namespace {
+  // Set once D3D12 destroys the resource it is attached to as private data
+  // (the resource then releases its private data), the way ReShade itself
+  // learns of a destroyed resource. Released on whichever thread drops the
+  // resource's last reference.
+  struct destruction_flag final : IUnknown {
+    std::atomic<bool> &destroyed;
+    std::atomic<ULONG> references{1};
+    explicit destruction_flag(std::atomic<bool> &flag) : destroyed(flag) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
+      if (!out) return E_POINTER;
+      if (riid == __uuidof(IUnknown)) { *out = static_cast<IUnknown *>(this); AddRef(); return S_OK; }
+      *out = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+    ULONG STDMETHODCALLTYPE Release() override {
+      const ULONG left = --references;
+      if (!left) { destroyed.store(true); delete this; }
+      return left;
+    }
+  };
+  // {7C2E4D61-3B8A-4F0E-9A51-6D2C8B9E1F47}
+  constexpr GUID destruction_flag_guid = {0x7c2e4d61, 0x3b8a, 0x4f0e, {0x9a, 0x51, 0x6d, 0x2c, 0x8b, 0x9e, 0x1f, 0x47}};
+
   struct probe_round_fixture : raw_runtime_fixture {
     native_game3d_observer game3d{*this};
     // What the native render of the latest Present consumed.
@@ -18,10 +42,14 @@ namespace {
     unsigned lower_present=0;
     target_t *lower_rendered=nullptr;
     // --set-challenger: native members drawn one per Present beside the
-    // every-Present incumbent.
+    // every-Present incumbent (the first set_size of them).
     std::array<std::unique_ptr<target_t>,3> native_set;
-    unsigned set_present=0;
+    unsigned set_size=3, set_present=0;
     target_t *set_rendered=nullptr;
+    // --set-repromotion-kept: the first set, still allocated, never drawn again.
+    std::array<std::unique_ptr<target_t>,3> abandoned_set;
+    // --set-repromotion: set as D3D12 destroys each first-set member.
+    std::array<std::atomic<bool>,3> first_set_destroyed{};
     std::ofstream trace;
 
     bool current(const target_t &target) const {
@@ -37,7 +65,7 @@ namespace {
     void render_depth() {
       if (native_set[0]) {
         draw(*scene);
-        set_rendered=native_set[set_present++%3].get();
+        set_rendered=native_set[set_present++%set_size].get();
         draw(*set_rendered);
         return;
       }
@@ -184,6 +212,68 @@ namespace {
       verify_pattern("native-set-promoted",*native_set[0],{native_set[1].get(),native_set[2].get()});
       std::puts("PASS a native A/B/C set judged as one capture set promotes over every-Present lower-resolution depth with no Present without depth");
     }
+    // A better source that appears a second time. The promoted A/B/C set goes
+    // away, the every-Present lower-resolution incumbent recovers, and a new
+    // native A/B set then challenges it: it must promote within the budget a
+    // set gets from a fresh start, with no Present without depth on the way,
+    // and then keep its own current depth on every Present (no flapping back
+    // to the incumbent it replaced). The first set is either destroyed, and
+    // then the add-on must let D3D12 destroy it (hold no reference to a
+    // buffer the game released), or kept allocated and never drawn again
+    // (`keep_first_set`: an abandoned set never shares a capture set with a
+    // working one).
+    void check_set_repromotion(bool keep_first_set) {
+      check_set_challenger();
+      auto &destroyed=first_set_destroyed;
+      if (keep_first_set) abandoned_set=std::move(native_set);
+      else for (unsigned i=0;i<3;++i) {
+        auto *flag=new destruction_flag(destroyed[i]);
+        require(SUCCEEDED(native_set[i]->texture->SetPrivateDataInterface(destruction_flag_guid,flag)),
+          "Cannot watch the first set's destruction");
+        flag->Release();
+      }
+      const auto released=GetTickCount64();
+      for (auto &member:native_set) member.reset();
+      await_current(keep_first_set ? "set-abandoned-scaled-recovery" : "set-destroyed-scaled-recovery",*scene,12000);
+      stable("scaled-reconfirmed-after-set",*scene,1200);
+      if (!keep_first_set) {
+        // The member views of a set that left the routed capture set retire
+        // within 50 depth frames; nothing else may keep the game's buffers.
+        constexpr unsigned release_limit_ms=4000;
+        while (!(destroyed[0] && destroyed[1] && destroyed[2]) && GetTickCount64()-released<release_limit_ms)
+          tick("set-destroyed-release");
+        std::printf("MEASURE set-destroyed-release release_ms=%llu limit_ms=%u destroyed=%d%d%d\n",
+          static_cast<unsigned long long>(GetTickCount64()-released),release_limit_ms,
+          int(destroyed[0].load()),int(destroyed[1].load()),int(destroyed[2].load()));
+        require(destroyed[0] && destroyed[1] && destroyed[2],
+          "The add-on kept a depth-stencil the game released alive (its last end-of-frame capture held it)");
+        std::puts("PASS every member of a destroyed native set is released to D3D12 after the game drops it");
+      }
+      set_size=2; set_present=0;
+      for (unsigned i=0;i<set_size;++i) native_set[i]=target(width,height,1,9);
+      std::printf("DIAGNOSTIC second-set originals incumbent=%llu A=%llu B=%llu\n",
+        static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(scene->texture.p)),
+        static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(native_set[0]->texture.p)),
+        static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(native_set[1]->texture.p)));
+      const auto began=GetTickCount64(); unsigned consecutive=0;
+      do {
+        tick("second-set-challenger");
+        require(frame.depth.ready, "A Present had no depth while a second native A/B set challenged the recovered incumbent");
+        consecutive=current(*set_rendered) && !frame.depth.reused_depth && full() ? consecutive+1 : 0;
+      } while (consecutive<30 && GetTickCount64()-began<12000);
+      std::printf("MEASURE second-set-challenger promotion_ms=%llu consecutive=%u\n",
+        static_cast<unsigned long long>(GetTickCount64()-began), consecutive);
+      require(consecutive>=30, "A second native set covering every Present did not promote over the recovered lower-resolution incumbent");
+      std::puts("PASS a native A/B set appearing after an A/B/C set came and went promotes over the recovered every-Present incumbent with no Present without depth");
+      const auto steady_until=GetTickCount64()+4000;
+      do {
+        tick("second-set-steady");
+        require(current(*set_rendered) && !frame.depth.reused_depth && full(),
+          "The re-promoted native set lost its own current depth on a Present (flapped back to the incumbent)");
+      } while (GetTickCount64()<steady_until);
+      verify_pattern("second-set-promoted",*native_set[0],{native_set[1].get()});
+      std::puts("PASS the re-promoted native A/B set keeps its own current depth on every Present for 4 s (no flapping)");
+    }
     void check_native_priority() {
       // All unrelated lower-resolution resources are older than the useful
       // native source. No source has been manually selected or prequalified.
@@ -210,7 +300,7 @@ namespace {
       verify_pattern("fullres-flat-keeps-useful-scaled",*scene);
       std::puts("PASS full-resolution flat depth cannot displace the qualified lower-resolution current source");
     }
-    void run(bool native_priority=false,bool set_challenger=false) {
+    void run(bool native_priority=false,bool set_challenger=false,bool set_repromotion=false,bool keep_first_set=false) {
       create_pipeline(); normal=false;
       scene=target(width/2,height/2,1,1);
       render_tracked_depth=[&]{render_depth();};
@@ -238,6 +328,11 @@ namespace {
       }
       if (set_challenger) {
         check_set_challenger();
+        render_tracked_depth={};
+        return;
+      }
+      if (set_repromotion) {
+        check_set_repromotion(keep_first_set);
         render_tracked_depth={};
         return;
       }
@@ -278,8 +373,11 @@ namespace {
 
 int main(int argc,char **argv) {
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && (argc!=6 || (std::strcmp(argv[5],"--native-priority")!=0 && std::strcmp(argv[5],"--set-challenger")!=0))){
-    std::fputs("usage: depth_probe_round_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--native-priority|--set-challenger]\n",stderr);return 2;
+  const char *mode=argc==6 ? argv[5] : "";
+  if(argc!=5 && (argc!=6 || (std::strcmp(mode,"--native-priority")!=0 && std::strcmp(mode,"--set-challenger")!=0 &&
+                              std::strcmp(mode,"--set-repromotion")!=0 && std::strcmp(mode,"--set-repromotion-kept")!=0))){
+    std::fputs("usage: depth_probe_round_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> "
+               "[--native-priority|--set-challenger|--set-repromotion|--set-repromotion-kept]\n",stderr);return 2;
   }
   std::thread([]{Sleep(150000);std::fputs("FAIL probe-round watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try {
@@ -288,6 +386,8 @@ int main(int argc,char **argv) {
     require(!fs::exists(fs::absolute(argv[4])),"Fresh probe-round output required");
     probe_round_fixture f; f.runtime_directory=fs::absolute(argv[4]);
     f.initialize(fs::absolute(argv[1]),fs::absolute(argv[2]),f.runtime_directory,2,0,fs::absolute(argv[3]));
-    f.run(argc==6 && std::strcmp(argv[5],"--native-priority")==0,argc==6 && std::strcmp(argv[5],"--set-challenger")==0); return 0;
+    const bool kept=std::strcmp(mode,"--set-repromotion-kept")==0;
+    f.run(std::strcmp(mode,"--native-priority")==0,std::strcmp(mode,"--set-challenger")==0,
+          kept || std::strcmp(mode,"--set-repromotion")==0,kept); return 0;
   } catch(const std::exception &e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }

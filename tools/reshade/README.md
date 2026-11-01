@@ -1400,6 +1400,12 @@ and no Present may be without depth on the way: the set takes over on the promot
 turn (a comparison won on another member's turn waits for it), and a member without its own
 current copy yet holds the previous Present's depth; judged one member at a time they never
 promote.
+`--set-repromotion` runs `--set-challenger`, then destroys the promoted set: D3D12 must destroy
+all three members within 4 s of the fixture releasing them (the add-on holds none of them; a
+private-data destruction flag on each member reports it), the lower-resolution incumbent
+recovers, and a new native A/B set must then promote within the same 12 s with no Present
+without depth and keep its own current depth on every Present for 4 s (no flapping).
+`--set-repromotion-kept` is the same with the first set kept allocated and never drawn again.
 
 `reshade_depth_alternating_runtime_test` uses those same four arguments and, like the
 probe-round fixture, renders through native Game 3D with no FX and no environment settings

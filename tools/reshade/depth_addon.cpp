@@ -712,6 +712,17 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 			info.observe_frame(frame_stats, device_data->frame_index);
 		}
 	}
+	// An end-of-frame capture ticket belongs to its depth frame: only that
+	// frame's copy can be current (capture_record, publish_preserved_depth).
+	// A source that did not work on this frame drops its ticket now, as a
+	// working one does in observe_frame. Kept, the ticket would hold its
+	// capture snapshot, and through it the game's depth-stencil, so a buffer
+	// the game stops using or destroys would stay alive and selectable.
+	// Released after the lock.
+	std::vector<sunshine_streamline::depth_capture::preservation_ticket> passed_tickets;
+	for (auto &[depth_stencil, info] : device_data->depth_stencil_resources)
+		if (info.last_used_in_frame != device_data->frame_index && info.last_frame_stats.capture_ticket)
+			passed_tickets.push_back(std::exchange(info.last_frame_stats.capture_ticket, {}));
 
 	// Destroy resources that were enqueued for delayed destruction and have reached the targeted number of passed frames.
 	// Erase them under the lock and destroy them after it: game-thread depth clears wait for this exclusive section.

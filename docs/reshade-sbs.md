@@ -4008,6 +4008,10 @@ While these counts change, the line repeats at most every 10 s.
 
 Generic capture statistics retain a strong snapshot ticket with its allocation identity. Publishing
 it requires the current, active, unambiguous presentation record and a matching live ticket.
+A ticket lasts one depth frame: on the next one a source's new statistics replace it, and a
+source that did not work drops it, so a depth-stencil the game stops using or destroys keeps no
+snapshot, and the snapshot keeps no reference to it (until 11-01 the last ticket of such a buffer
+kept it alive and selectable until the device was released).
 An end-of-frame snapshot can be consumed later in the same still-open recording, where command
 order is explicit. Preserved
 presentations use the game's existing rendering/presentation ordering contract, as Generic Depth
