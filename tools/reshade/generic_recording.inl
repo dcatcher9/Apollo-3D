@@ -362,12 +362,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_resolve_texture_region(command_list *cmd_l
 	record_copied_depth(cmd_list, source, dest, subresource, source_subresource == 0 && !source_box && !dest_x && !dest_y && !dest_z);
 	return false;
 }
-// Its only work was the StreamlineCameraProbe content ledger's; it stays
-// registered so the registered event set is unchanged.
-static void on_content_barrier(command_list *, uint32_t, const resource *, const resource_usage *, const resource_usage *)
-{
-}
-
 static void on_reset(command_list *cmd_list)
 {
 	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::reset);

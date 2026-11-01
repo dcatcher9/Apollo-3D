@@ -625,7 +625,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_copy_buffer_to_texture(command_list *cmd_l
 	resource dest, uint32_t subresource, const subresource_box *dest_box);
 SUNSHINE_DEPTH_ADDON_INTERNAL bool on_resolve_texture_region(command_list *cmd_list, resource source, uint32_t source_subresource,
 	const subresource_box *source_box, resource dest, uint32_t subresource, uint32_t dest_x, uint32_t dest_y, uint32_t dest_z, format);
-static void on_content_barrier(command_list *, uint32_t, const resource *, const resource_usage *, const resource_usage *);
 static void on_reset(command_list *cmd_list);
 static void on_close(command_list *cmd_list);
 static void on_execute_primary(command_queue *queue, command_list *cmd_list);
@@ -1204,7 +1203,6 @@ static void register_depth_events()
 	reshade::register_event<reshade::addon_event::copy_texture_region>(sunshine_addon_lifetime::guarded<on_copy_texture_region>);
 	reshade::register_event<reshade::addon_event::copy_buffer_to_texture>(sunshine_addon_lifetime::guarded<on_copy_buffer_to_texture>);
 	reshade::register_event<reshade::addon_event::resolve_texture_region>(sunshine_addon_lifetime::guarded<on_resolve_texture_region>);
-	reshade::register_event<reshade::addon_event::barrier>(sunshine_addon_lifetime::guarded<on_content_barrier>);
 	reshade::register_event<reshade::addon_event::end_render_pass>(sunshine_addon_lifetime::guarded<on_end_render_pass>);
 	reshade::register_event<reshade::addon_event::close_command_list>(sunshine_addon_lifetime::guarded<on_close>);
 	reshade::register_event<reshade::addon_event::bind_viewports>(sunshine_addon_lifetime::guarded<on_bind_viewport>);
@@ -1249,7 +1247,6 @@ static void unregister_depth_events()
 	reshade::unregister_event<reshade::addon_event::copy_texture_region>(sunshine_addon_lifetime::guarded<on_copy_texture_region>);
 	reshade::unregister_event<reshade::addon_event::copy_buffer_to_texture>(sunshine_addon_lifetime::guarded<on_copy_buffer_to_texture>);
 	reshade::unregister_event<reshade::addon_event::resolve_texture_region>(sunshine_addon_lifetime::guarded<on_resolve_texture_region>);
-	reshade::unregister_event<reshade::addon_event::barrier>(sunshine_addon_lifetime::guarded<on_content_barrier>);
 	reshade::unregister_event<reshade::addon_event::end_render_pass>(sunshine_addon_lifetime::guarded<on_end_render_pass>);
 	reshade::unregister_event<reshade::addon_event::close_command_list>(sunshine_addon_lifetime::guarded<on_close>);
 	reshade::unregister_event<reshade::addon_event::bind_viewports>(sunshine_addon_lifetime::guarded<on_bind_viewport>);
