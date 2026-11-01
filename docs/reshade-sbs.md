@@ -4280,7 +4280,14 @@ The consumed `DLSSGOptions` mode/count prefix is read for any structure version 
 chained structure is still refused. Off, On,
 Auto and Dynamic modes are recognized; Auto/Dynamic describe an enabled policy, not proof that
 a particular presentation was generated. The requested count is diagnostic metadata, not an
-observed fixed frame-generation multiplier.
+observed fixed frame-generation multiplier. On or Auto with `numFramesToGenerate` 0 is refused as
+unsupported options; Dynamic with 0 is enabled FG whose count is unknown, so its viewport's depth
+keeps FG routing. `sl_dlss_g.h` (2.11.1 through 2.14.1, one text) gives the count as the "Number
+of frames to generate inbetween fully rendered frames" for every mode and adds for Dynamic only
+`dynamicTargetFrameRate` ("Target frame rate for dynamic frame generation when enabled") and
+`DLSSGState::bIsDynamicMFGSupported`. It does not say whether Dynamic with a count of 0 picks its
+own count or generates nothing, so such a scope binds no viewport in a tie of two active views
+([Streamline depth selection](#streamline-depth-selection)).
 The observer intercepts both newly returned and previously cached FG options function pointers.
 Resolving the public function or loading middleware does not enable FG; a successful game options
 call is still required. Global `OnlyValidNow` tags may pair with the latest successful constants
@@ -4858,7 +4865,12 @@ copy of the newest nomination's viewport within the source age (another viewport
 `source_changed`), and the Present is then mono. The viewport a confirmed FG scope is bound to
 breaks that tie (the API contract's owner ruling R5, since 11-01; `select_latest_capture`): a
 required scope's, or a silent one's, which selects as without FG and keeps its epoch and viewport
-for this (`selection_policy::silent_epoch`, `silent_viewport`). When exactly one active view is that
+for this (`selection_policy::tie_epoch`, `tie_viewport`, which the FG view sets for enabled FG
+with a declared generated count). Dynamic mode with `numFramesToGenerate` 0 names no tie
+viewport: the SDK header does not say whether it then generates frames (above), so it is no
+confirmed binding and the tie stays (fail safe; with one active view such a scope still owns its
+viewport). Until late on 11-01 its viewport broke the tie (the contract matrix's pending row
+`S19-dynamic-zero-frames`). When exactly one active view is that
 viewport's, the Present selects as if it were the one active view: that viewport's newest nomination
 is the head, and only its display lineage is picked or stands in (its FG input, its ordinary
 source, their completed snapshots), never another viewport's copy, and nothing is interrupted.

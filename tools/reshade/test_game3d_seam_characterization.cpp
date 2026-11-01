@@ -288,7 +288,9 @@ namespace sunshine_streamline::depth_capture {
           fg = &value;
         }
         const auto now = GetTickCount64();
-        const selection_policy policy {true, epoch, 0, false, r.just_enabled ? now : now - sunshine_freshness::fg_silent_ms - 1};
+        // As the FG view projects enabled FG with a declared generated count:
+        // its viewport is the one that breaks a tie (tie_epoch, tie_viewport).
+        const selection_policy policy {true, epoch, 0, false, r.just_enabled ? now : now - sunshine_freshness::fg_silent_ms - 1, epoch, 0};
         // provider::begin's selection for this Present.
         const auto scope = provider::select_frame_generation_scope(policy);
         const bool live = !scope.silent;
@@ -2130,8 +2132,10 @@ namespace sunshine_streamline::depth_capture {
     // exactly one active view is that viewport's: the Present selects that
     // viewport's display lineage alone, its stand-ins included, never
     // another viewport's copy. Without a confirmed scope (FG off, an
-    // ambiguous read) or without a single active view of its viewport the
-    // tie stays, and one active view needs no tie-break. FG Off ties the
+    // ambiguous read, or Dynamic mode without a declared generated count,
+    // whose generation sl_dlss_g.h leaves open: lane F, 11-01) or without a
+    // single active view of its viewport the tie stays, and one active view
+    // needs no tie-break. FG Off ties the
     // views again at once (retire_source passes the FG view to the
     // viewport's ordinary source whatever the namespace's newest
     // nomination), and an FG viewport switch never shows the old viewport's
@@ -2157,7 +2161,10 @@ namespace sunshine_streamline::depth_capture {
         one_view,  // B alone, a silent scope on viewport 0.
         fg_off,  // F shown; C, the newest; FG Off; then viewport 0's next SR copy A.
         fg_off_fg_newest,  // F shown; C; G in flight, the newest; FG Off.
-        fg_switch  // F shown; FG Off on viewport 0 and FG on viewport 1 (silent); A; C in flight, then C.
+        fg_switch,  // F shown; FG Off on viewport 0 and FG on viewport 1 (silent); A; C in flight, then C.
+        fg_live_no_count,  // fg_live with Dynamic mode's 0 generated frames.
+        fg_silent_no_count,  // fg_silent with Dynamic mode's 0 generated frames.
+        one_view_no_count  // F alone, a live scope with Dynamic mode's 0 generated frames.
       };
 
       struct row {
@@ -2180,6 +2187,12 @@ namespace sunshine_streamline::depth_capture {
         {"FG Off: the views tie at once, the other viewport's newer copy never shows and the display drops F", shape::fg_off, "P1 live F ready current_capture; OFF views=2; P2 - ambiguous ambiguous_views D invalidate source_changed; P3 - ambiguous ambiguous_views"},
         {"FG Off with the FG nomination the newest: the views tie at once, the display holds F within the source age only", shape::fg_off_fg_newest, "P1 live F ready current_capture; OFF views=2; P2 - ambiguous ambiguous_views D hold FG_successor_pending D@age invalidate retained_depth_expired"},
         {"An FG viewport switch: the new viewport's copy shows once readable, the old viewport's never as the new one's", shape::fg_switch, "P1 live F ready current_capture; OFF views=2; P2 silent - recorded no_completed_snapshot D invalidate source_changed; P3 silent C ready current_capture"},
+        // Lane F (11-01): sl_dlss_g.h does not say whether Dynamic mode with
+        // numFramesToGenerate 0 generates frames, so it binds no viewport;
+        // until then its viewport broke the tie (live F, silent A).
+        {"A live Dynamic scope without a declared generated count breaks no tie: it then finds the other viewport's newer nomination", shape::fg_live_no_count, "P1 live - unavailable fg_scope_mismatch"},
+        {"A silent Dynamic scope without a declared generated count breaks no tie", shape::fg_silent_no_count, "P1 silent - ambiguous ambiguous_views"},
+        {"One active view: a Dynamic scope without a declared generated count still owns its viewport", shape::one_view_no_count, "P1 live F ready current_capture"},
       };
       constexpr std::uint64_t epoch = 13, device = 41;
       for (const auto &r : rows) {
@@ -2209,13 +2222,13 @@ namespace sunshine_streamline::depth_capture {
         // projection and provider::begin's scope selection. FG turned on
         // before every copy (enabled tick 1): an accepted FG copy makes the
         // scope live, however many clock steps the row's setup took.
-        const auto fg_read = [&](query status, bool enabled, std::uint32_t viewport) {
+        const auto fg_read = [&](query status, bool enabled, std::uint32_t viewport, std::uint32_t frames = 1) {
           frame_generation_snapshot value;
           value.known = status == query::observed;
           value.enabled = enabled;
           value.epoch = epoch;
           value.viewport = viewport;
-          value.generated_frames = enabled ? 1 : 0;
+          value.generated_frames = enabled ? frames : 0;
           value.enabled_tick = enabled ? 1 : 0;
           presentation_scope::fg_view view;
           return provider::select_frame_generation_scope(view.update(status, value));
@@ -2305,9 +2318,19 @@ namespace sunshine_streamline::depth_capture {
             pick(fg_read(query::observed, false, 0));
             break;
           case shape::fg_live:
+          case shape::fg_live_no_count:
             f = &fg_copy(10, true);
             b = &sr1(11);
-            pick(fg_read(query::observed, true, 0));
+            pick(fg_read(query::observed, true, 0, r.kind == shape::fg_live ? 1 : 0));
+            break;
+          case shape::fg_silent_no_count:
+            a = &sr0(10);
+            b = &sr1(11);
+            pick(fg_read(query::observed, true, 0, 0));
+            break;
+          case shape::one_view_no_count:
+            f = &fg_copy(10, true);
+            pick(fg_read(query::observed, true, 0, 0));
             break;
           case shape::fg_live_fg_newest:
             b = &sr1(9);

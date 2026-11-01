@@ -1970,10 +1970,12 @@ options name (the case's or the other active one's). The options go through the 
 the FG read (`query_frame_generation`), the FG view's depth projection and
 `provider::select_frame_generation_scope` make the policy, and `select_provider` picks from both
 viewports' SR copies with either viewport's evaluation the newest. Each viewport must meet the
-oracle for its own case, never the other's copy: 116 meet; the 4 cells of Dynamic mode with
-`numFramesToGenerate` 0 (options accepted) are the pending owner question
-`S19-dynamic-zero-frames` (the probe accepts Dynamic with any count, so FG binds its viewport,
-where the oracle reads a count of 0 as no frame generation). A runtime case still runs one
+oracle for its own case, never the other's copy: all 120 meet. Dynamic mode with
+`numFramesToGenerate` 0 is no frame generation scope to the oracle (S20) and binds no viewport in
+the add-on: `sl_dlss_g.h` does not say whether Dynamic then generates frames, so both take the
+fail-safe reading and both viewports refuse (the FG view names no tie viewport without a declared
+count). Until late on 11-01 the probe's enabled Dynamic scope broke the tie there, the 4 cells of
+the pending owner question `S19-dynamic-zero-frames`. A runtime case still runs one
 viewport: a second one would need its own per-frame SDK calls, resources and refusal attribution
 in the native provider fixture. Until 11-01 the add-on did not implement R5's tie-break (also
 mono), the hook table's pending row `S19-two-active`; before that round the evidence names
@@ -3162,11 +3164,13 @@ serial is 30 there); each Present establishes any selected copy, as
   executed after its Present), two active views and the FG scope's tie-break (owner ruling R5,
   11-01: a live or a silent scope's viewport picks its own display lineage alone, its stand-in
   included, never the other viewport's copy; no FG, an ambiguous read, a scope on a viewport
-  without an active view and two active views of its viewport keep the tie; one active view needs
-  none; FG Off ties the views again at once, whatever the newest nomination, and the display holds
+  without an active view, two active views of its viewport and a live or silent Dynamic scope
+  without a declared generated count keep the tie (with one active view that scope still owns its
+  viewport); one active view needs none; FG Off ties the views again at once, whatever the newest nomination, and the display holds
   its FG copy within the source age only or drops it; an FG viewport switch drops the old
   viewport's held copy until the new one's is readable; until 11-01 every such row was ambiguous,
-  and at FG Off the other viewport's newer copy showed), the source a head refused before its capture existed names to
+  and at FG Off the other viewport's newer copy showed; until late on 11-01 the Dynamic scope
+  without a count broke the tie), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of
   `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at

@@ -79,7 +79,7 @@ namespace game3d_contract {
     inline constexpr rule S18 {"S18", "33 to 73 tags in one call, or 33 or more evaluate inputs, with depth among them: CAPTURE; other slots are not wiped", "SLA:143-173: numTags is a uint32_t with no stated limit; SLA:250-262: nor is numInputs"};
     inline constexpr rule S19 {"S19", "Two SR viewports active together: with frame generation in scope (S20) the viewport bound to it CAPTUREs and any other REFUSE ambiguous_view; without it both REFUSE ambiguous_view (R5)", "SLT:614-621 ViewportHandle (any number); owner ruling R5"};
     inline constexpr rule S19b {"S19b", "Viewports rotating, one active at a time: CAPTURE", "SLT:614-621 ViewportHandle"};
-    inline constexpr rule S20 {"S20", "Frame generation is in scope for On, Auto or Dynamic where that release's header declares the mode, with 1 frame or more (above 1 only where the header documents multi frame generation) and options that did not fail. A lifecycle 1 or 2 tag call outside that scope: EITHER REFUSE fg_scope or the CAPTURE it would be in scope, else REFUSE fg_scope; SR is unaffected", "sl_dlss_g.h:34-40 DLSSGMode and 75-79 numFramesToGenerate ('Cannot exceed DLSSGState::numFramesToGenerateMax', for every mode), as each release declares them (survey tables; 'Must be 1' before 2.7.2); SLT:402, 404: the lifecycle, not frame generation, bounds a copy at the call"};
+    inline constexpr rule S20 {"S20", "Frame generation is in scope for On, Auto or Dynamic where that release's header declares the mode, with 1 frame or more (above 1 only where the header documents multi frame generation; 0 is no scope for Dynamic too) and options that did not fail. A lifecycle 1 or 2 tag call outside that scope: EITHER REFUSE fg_scope or the CAPTURE it would be in scope, else REFUSE fg_scope; SR is unaffected", "sl_dlss_g.h:34-40 DLSSGMode and 75-79 numFramesToGenerate ('Number of frames to generate inbetween fully rendered frames. Cannot exceed DLSSGState::numFramesToGenerateMax', for every mode), as each release declares them (survey tables; 'Must be 1' before 2.7.2); for Dynamic, 118-120 dynamicTargetFrameRate ('Target frame rate for dynamic frame generation when enabled') and 179-181 bIsDynamicMFGSupported do not say whether a count of 0 generates frames: fail safe, no scope (frame_generation_scope); SLT:402, 404: the lifecycle, not frame generation, bounds a copy at the call"};
     inline constexpr rule S21 {"S21", "Result 39 (eWarnOutOfVRAM): treated as success", "sl_result.h:74: eWarnOutOfVRAM is the only warning"};
     inline constexpr rule S21b {"S21b", "eError* on the tag or evaluate: that copy is discarded, HOLD, then mono (global across viewports, R6)", "sl_result.h:33-73; owner ruling R6"};
     inline constexpr rule S22 {"S22", "COMPUTE evaluate list with a compute-legal state: CAPTURE", "SLA:253: the command buffer must be created on a device where the feature is supported (no list type is required)"};
@@ -670,7 +670,16 @@ namespace game3d_contract {
     // Frame generation is in scope for a mode that release's header declares
     // other than eOff, with a frame count it allows (above 1 only where it
     // documents multi frame generation), and options that did not fail (S20).
-    // An undeclared mode or count leaves no scope.
+    // An undeclared mode or count leaves no scope. A count of 0 leaves none
+    // for every mode, Dynamic included. sl_dlss_g.h:75 gives the count, with
+    // no mode named, as the "Number of frames to generate inbetween fully
+    // rendered frames"; for Dynamic the header adds only a target frame rate
+    // (118-120) and a support flag (179-181). It does not say whether
+    // Dynamic with a count of 0 picks its own count or generates nothing
+    // (2.11.1 through 2.14.1, one text). Without confirmed generation the
+    // fail-safe reading is no scope: two active viewports both refuse (S19),
+    // never one showing the other's depth, and a lifecycle 1 or 2 tag call
+    // may refuse or capture (S20).
     constexpr bool frame_generation_scope(const sl_case &value) {
       if (value.fg == fg_mode::off || !value.frames_generated || value.options_result == sl_result::error) {
         return false;
@@ -1507,6 +1516,8 @@ namespace game3d_contract {
     static_assert(captures(expect(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true)), rules::S19, nps));
     static_assert(refuses(expect(with(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true), &sl_case::fg, fg_mode::off)), rules::S19, refusal::ambiguous_view));
     static_assert(refuses(expect(with(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true), &sl_case::options_result, sl_result::error)), rules::S19, refusal::ambiguous_view));
+    static_assert(captures(expect(with(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true), &sl_case::fg, fg_mode::dynamic)), rules::S19, nps));
+    static_assert(refuses(expect(with(with(with(with(tag(present, evaluate), &sl_case::views, viewports::two_active), &sl_case::fg_bound_view, true), &sl_case::fg, fg_mode::dynamic), &sl_case::frames_generated, 0u)), rules::S19, refusal::ambiguous_view));
     static_assert(captures(expect(with(tag(present, evaluate), &sl_case::views, viewports::five_rotating)), rules::S19b, nps));
     static_assert(undecided(expect(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::undeclared)), rules::S20));
     static_assert(undecided(expect(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::off)), rules::S20) && expect(with(tag(present, copy_point::tag_call), &sl_case::fg, fg_mode::off)).deferred);

@@ -133,20 +133,15 @@ namespace game3d_contract::known_gaps {
   // Two SR viewports active together (S19, owner ruling R5), judged at the
   // capture owner's selection (test_game3d_api_contract_cpu.cpp, family
   // sl_views, judged with judge_each). Each viewport meets the oracle for
-  // its own case; the add-on meets every cell but one owner question.
+  // its own case; the add-on meets every cell.
   namespace views {
-    // DLSS-G's Dynamic mode asking for no generated frame: the probe accepts
-    // Dynamic with any count (hook_fg_options), so FG is in scope and its
-    // viewport breaks the tie, where the oracle reads a count of 0 as no
-    // frame generation (frame_generation_scope, S20), so both refuse.
-    constexpr bool dynamic_without_frames(const sl_case &value) {
-      return value.views == viewports::two_active && value.fg == fg_mode::dynamic && !value.frames_generated &&
-             value.options_result != sl_result::error;
+    constexpr bool no_cell(const sl_case &) {
+      return false;
     }
   }  // namespace views
 
   inline constexpr row<sl_case> view_rows[] {
-    {"S19-dynamic-zero-frames", &rules::S19, kind::pending, &views::dynamic_without_frames, "Owner question (11-01): does DLSSGMode eDynamic with numFramesToGenerate 0 put frame generation in scope? The probe accepts Dynamic with any count (hook_fg_options), so its viewport breaks a tie of two active viewports (R5) and its copy shows; the oracle's frame_generation_scope reads a count of 0 as no frame generation for every mode, so both viewports refuse. The same difference was invisible at S20, whose tag-call cells permit both outcomes. Until R5's tie-break (11-01) both viewports were mono there (S19-two-active, removed)."},
+    {"none", &rules::S19, kind::pending, &views::no_cell, "No two-viewport gap remains: lane F (11-01) closed S19-dynamic-zero-frames. DLSSGMode eDynamic with numFramesToGenerate 0 (options accepted) is enabled FG to the probe, and its viewport broke a tie of two active viewports (R5), where the oracle reads a count of 0 as no frame generation (S20), so both viewports refuse. sl_dlss_g.h (2.11.1 to 2.14.1) does not say whether Dynamic then generates frames, so the add-on now takes the fail-safe reading: an FG scope without a declared generated count names no tie viewport (fg_view::update) and the tie stays. This row matches no cell."},
   };
 
   // A Streamline frame judged at its Present by the runtime layer

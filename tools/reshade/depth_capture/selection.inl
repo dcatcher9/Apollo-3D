@@ -84,26 +84,27 @@ namespace sunshine_streamline::depth_capture {
       unsigned active_views = 0;
       for (const auto &value : current.views) active_views += active(value);
       // Two or more active views tie (S19). A confirmed FG scope's viewport
-      // breaks the tie (owner ruling R5): a required scope's, or a silent
-      // scope's (select_frame_generation_scope keeps it as silent_epoch and
-      // silent_viewport). When exactly one active view is that viewport's,
-      // the Present selects as if it were the one active view: its newest
-      // nomination is the head, whose identity every look below matches
-      // (the slots of that nomination, its stand-ins: completed_snapshot and
-      // lineage_snapshot of its viewport), so no other viewport's copy is
-      // picked. Without such a scope (FG off, unknown, ambiguous or
-      // unavailable: exclude_unconfirmed_fg), or with no single active view
-      // of its viewport, the tie stays (ambiguous). One active view needs no
-      // tie-break and is selected as before, whichever viewport FG names.
-      // Until 11-01 the tie always stayed: two active SR viewports were mono,
-      // also with FG bound to one of them.
-      const auto tie_epoch = policy.require_frame_generation ? policy.epoch : policy.silent_epoch;
-      const auto tie_viewport = policy.require_frame_generation ? policy.viewport : policy.silent_viewport;
+      // breaks the tie (owner ruling R5): the policy's tie_epoch and
+      // tie_viewport, a required scope's or a silent one's
+      // (select_frame_generation_scope keeps them). When exactly one active
+      // view is that viewport's, the Present selects as if it were the one
+      // active view: its newest nomination is the head, whose identity every
+      // look below matches (the slots of that nomination, its stand-ins:
+      // completed_snapshot and lineage_snapshot of its viewport), so no
+      // other viewport's copy is picked. Without such a scope (FG off,
+      // unknown, ambiguous or unavailable: exclude_unconfirmed_fg; or enabled
+      // FG without a declared generated count, Dynamic mode with
+      // numFramesToGenerate 0: fg_view::update names no tie viewport), or
+      // with no single active view of its viewport, the tie stays
+      // (ambiguous). One active view needs no tie-break and is selected as
+      // before, whichever viewport FG names. Until 11-01 the tie always
+      // stayed: two active SR viewports were mono, also with FG bound to one
+      // of them.
       const evaluation_head *bound = nullptr;
-      if (active_views > 1 && provider == provider_kind::streamline && tie_epoch && tie_epoch == current.epoch) {
+      if (active_views > 1 && provider == provider_kind::streamline && policy.tie_epoch && policy.tie_epoch == current.epoch) {
         unsigned bound_views = 0;
         for (const auto &value : current.views)
-          if (value.viewport == tie_viewport && active(value)) { bound = &value; ++bound_views; }
+          if (value.viewport == policy.tie_viewport && active(value)) { bound = &value; ++bound_views; }
         if (bound_views == 1) active_views = 1;
         else bound = nullptr;
       }

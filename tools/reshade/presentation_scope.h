@@ -314,6 +314,16 @@ namespace sunshine_streamline::presentation_scope {
       if (status == frame_generation_query_status::observed) {
         depth_ = value.enabled ? depth_capture::selection_policy{true, value.epoch, value.viewport, false, value.enabled_tick} :
           depth_capture::selection_policy{};
+        // Its viewport breaks a tie of active Streamline views (owner ruling
+        // R5) only with a declared generated count. hook_fg_options accepts
+        // Dynamic mode with numFramesToGenerate 0 as enabled FG, whose count
+        // Dynamic may pick (dynamicTargetFrameRate), but sl_dlss_g.h does not
+        // say that it then generates any frame: no confirmed binding, so the
+        // tie stays (fail safe, S19). Its own routing is unchanged.
+        if (value.enabled && value.generated_frames) {
+          depth_.tie_epoch = value.epoch;
+          depth_.tie_viewport = value.viewport;
+        }
         generated_frames_ = value.enabled ? value.generated_frames : 0;
       } else if (status == frame_generation_query_status::ambiguous || depth_.require_frame_generation) {
         depth_ = {};
@@ -377,9 +387,9 @@ namespace sunshine_streamline::provider {
   // may supply depth once FG's own newest copy can no longer be held
   // (depth_capture::frame_generation_holds), and the next accepted FG copy
   // takes ownership back. Its viewport still breaks a tie of active
-  // Streamline views (owner ruling R5): the selection keeps the scope's epoch
-  // and viewport as silent_epoch and silent_viewport, which
-  // select_latest_capture reads as a required scope's own.
+  // Streamline views (owner ruling R5): the selection keeps the scope's
+  // tie_epoch and tie_viewport (fg_view::update), which select_latest_capture
+  // reads as a required scope's.
   // Any other policy selects as it is.
   struct frame_generation_selection {
     depth_capture::selection_policy selection;
@@ -390,8 +400,8 @@ namespace sunshine_streamline::provider {
       !depth_capture::frame_generation_scope_live(policy.epoch, policy.viewport, policy.enabled_tick);
     if (!silent) return {policy, false};
     depth_capture::selection_policy selection;
-    selection.silent_epoch = policy.epoch;
-    selection.silent_viewport = policy.viewport;
+    selection.tie_epoch = policy.tie_epoch;
+    selection.tie_viewport = policy.tie_viewport;
     return {selection, true};
   }
 }
