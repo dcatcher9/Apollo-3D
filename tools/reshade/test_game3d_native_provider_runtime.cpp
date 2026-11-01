@@ -2648,6 +2648,18 @@ namespace {
         }
       };
       std::vector<std::thread> workers;
+      // The recorders stop and are joined however this run ends.
+      struct join_workers {
+        std::vector<std::thread> &workers;
+        std::mutex &pace_mutex;
+        std::condition_variable &pace;
+        bool &stop;
+        ~join_workers() {
+          { std::lock_guard lock(pace_mutex); stop = true; }
+          pace.notify_all();
+          for (auto &worker : workers) if (worker.joinable()) worker.join();
+        }
+      } joined{workers, pace_mutex, pace, stop};
       for (unsigned i = 0; i != threads; ++i) workers.emplace_back(recorder, i);
       // The recorders' first lists create their recordings first.
       for (unsigned frame = 0; frame < 8; ++frame) {

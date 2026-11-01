@@ -17,7 +17,10 @@ namespace {
   using provider_status_t = BOOL (*)(api::effect_runtime *, sunshine_streamline::provider::source_status *);
   using tracked_t = BOOL (*)(api::effect_runtime *, std::uint64_t, BOOL *);
   using action_t = BOOL (*)(api::effect_runtime *);
-  std::uint64_t game_native_command{};
+  // The native list of the calling thread's newest Reset (observe_reset):
+  // per thread, so another thread's recordings (the native provider
+  // fixture's --recorder-threads) never replace the fixture thread's list.
+  thread_local std::uint64_t game_native_command{};
   constexpr GUID streamline_v1_state_guid{0x694b3e1c,0x0e33,0x416f,{0xba,0x83,0xfe,0x24,0x8d,0xa1,0xe8,0x5d}};
   constexpr std::uint32_t chi_shader_read=(1u<<5)|(1u<<6), chi_present=1u<<18;
   void observe_reset(api::command_list *commands) { game_native_command = commands->get_native(); }
