@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace sunshine_depth_capture {
@@ -114,6 +115,23 @@ namespace sunshine_depth_capture {
     if (contains(candidate)) return true;
     const auto set = budget{}.update(candidate, observations, false);
     return std::any_of(set.members.begin(), set.members.begin() + set.count, contains);
+  }
+  // The same for two lists, `ids` and `more_ids`, from one set build (none
+  // when the candidate itself is in both): Present coverage asks it for the
+  // sources that worked and those that drew.
+  inline std::pair<bool, bool> prospective_set_contains(std::uint64_t candidate, const std::vector<source_observation> &observations,
+      const std::vector<std::uint64_t> &ids, const std::vector<std::uint64_t> &more_ids) {
+    const auto among = [](const std::vector<std::uint64_t> &list, std::uint64_t id) {
+      return std::find(list.begin(), list.end(), id) != list.end();
+    };
+    std::pair<bool, bool> found {among(ids, candidate), among(more_ids, candidate)};
+    if (found.first && found.second) return found;
+    const auto set = budget{}.update(candidate, observations, false);
+    for (unsigned i = 0; i != set.count; ++i) {
+      found.first = found.first || among(ids, set.members[i]);
+      found.second = found.second || among(more_ids, set.members[i]);
+    }
+    return found;
   }
 
   // Immutable result of capture ownership for one native present. All handles

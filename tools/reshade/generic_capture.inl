@@ -421,9 +421,8 @@ static void observe_present_coverage(generic_depth_data &data, uint64_t frame, c
 	}
 	const auto observations = capture_observations(data, frame, snapshot);
 	data.selection.observe_present(frame, data.anchor_identity, data.capture_ready, anchor, [&](uint64_t id) {
-		return sunshine_depth::selection_policy::set_presence {
-			sunshine_depth_capture::prospective_set_contains(id, observations, active),
-			sunshine_depth_capture::prospective_set_contains(id, observations, drew)};
+		const auto [set_active, set_drew] = sunshine_depth_capture::prospective_set_contains(id, observations, active, drew);
+		return sunshine_depth::selection_policy::set_presence {set_active, set_drew};
 	});
 }
 

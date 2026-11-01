@@ -174,6 +174,19 @@ namespace {
       "Idle members of an abandoned set kept a new A/B set from being judged as one capture set");
     const std::vector<source_observation> full {idle(1), source(10), source(11), source(12), source(13)};
     require(!prospective_set_contains(10, full, {1}), "An idle source took a slot a working source needed");
+    // Present coverage asks about two lists at once (worked, drew) from one set
+    // build: each answer is the one-list answer for that list.
+    const std::vector<std::vector<source_observation>> all {pair, triple, unqualified, second, full};
+    const std::vector<std::vector<std::uint64_t>> lists {{}, {1}, {2}, {3}, {9}, {4}, {1, 2, 3}, {10}, {11}, {1, 11}, {13}};
+    for (const auto &observations : all)
+      for (std::uint64_t id : {1u, 2u, 3u, 4u, 9u, 10u, 11u, 13u})
+        for (const auto &first : lists)
+          for (const auto &more : lists) {
+            const auto both = prospective_set_contains(id, observations, first, more);
+            require(both.first == prospective_set_contains(id, observations, first) &&
+              both.second == prospective_set_contains(id, observations, more),
+              "One prospective set answered two id lists differently from one list at a time");
+          }
   }
 }
 int main() {
