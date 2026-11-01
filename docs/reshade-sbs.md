@@ -6517,7 +6517,13 @@ of it again, Generic makes no copy of it for that frame (`ends_undefined`,
 mono, as for any missing frame (below), and the probe samples nothing from it. No copy point
 exists before the discard: a copy is illegal inside a D3D12 render pass, and ReShade raises its
 end event before the native `EndRenderPass`, still inside the pass. A suspending pass ends nothing;
-the pass that resumes it is judged at its own end. The discard also overwrites the plane for the
+the pass that resumes it is judged at its own end. Likewise a resuming pass begins nothing: a
+suspending/resuming pair declares the same accesses and its boundary renders as ending and
+beginning `PRESERVE` (the D3D12 render pass specification's suspend/resume rule), so only the first
+pass of the chain applies its depth `CLEAR` or `DISCARD`; a resuming pass's is not observed. Until
+11-01 it was, after the draws of the recording the pass was suspended in, as an erase of that
+depth (the crop, the cleared gate and the lineage; the alternating fixture's `--resume-pass`
+case). The discard also overwrites the plane for the
 transfer lineage and the cleared gate, as a `DISCARD` at a pass's start does. Until 11-01 the
 ending access was not read, and the copy of such a frame read undefined depth. Vulkan's
 `DONT_CARE` store is not judged, as its load is not (the draw-statistics picker).

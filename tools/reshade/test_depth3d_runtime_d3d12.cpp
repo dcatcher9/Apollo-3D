@@ -348,10 +348,16 @@ namespace {
       checked(commands->Reset(allocator.p, nullptr), "Reset fixture command list");
     }
 
+    // A closed list to execute before commands in the same call, once (a
+    // render pass it suspends resumes in commands, which D3D12 requires to
+    // run in one ExecuteCommandLists call).
+    ID3D12CommandList *execute_first = nullptr;
+
     void submit(bool present = false) {
       checked(commands->Close(), "Close fixture command list");
-      ID3D12CommandList *lists[] {commands.p};
-      queue->ExecuteCommandLists(1, lists);
+      ID3D12CommandList *lists[] {execute_first ? execute_first : commands.p, commands.p};
+      queue->ExecuteCommandLists(execute_first ? 2 : 1, lists);
+      execute_first = nullptr;
       if (present) {
         if (before_present) before_present();
         checked(swapchain->Present(0, 0), "Actual natural D3D12 game Present");

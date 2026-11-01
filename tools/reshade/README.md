@@ -912,8 +912,8 @@ reshade_game3d_native_provider_runtime_test.exe <ReShade64.dll> <frozenShaders> 
 ```
 
 Every run ends with `MEASURE capture lock run` lines: the capture lock's counters over the whole run
-and its Presents (`presents=`, every Present the effect runtimes saw, and `presents_per_s=`; both 0
-until the 11-01 leftovers) (per role, the present thread's holds and the holder sites, [Capture lock
+and its Presents (`presents=`, every Present the effect runtimes saw, and `presents_per_s=`; both
+were 0 until 11-01), per role, with the present thread's holds and the holder sites ([Capture lock
 waits](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)); the fixture records,
 submits and presents on one thread, so its game role stays near zero by construction. The
 contention mode appends `--recorder-threads N` (1 to 16) after the interposer: instead of the
@@ -1475,7 +1475,8 @@ The same fixture accepts one optional isolated case after its four normal argume
 `--crowded-rotating-startup`, `--flat-startup`, `--layout`, `--copy-history`, `--copy-end`,
 `--copy-rescue`, `--copy-rescue-rect`, `--copy-rescue-pass-clear`, `--copy-rescue-discard`,
 `--copy-rescue-boxed`, `--gap-none`, `--gap-double`, `--gap-ui`, `--gap-overlay`, `--gap-long`,
-`--gap-cleared`, `--gap-cut`, `--second-swapchain`, `--second-swapchain-between` or `--end-discard`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
+`--gap-cleared`, `--gap-cut`, `--second-swapchain`, `--second-swapchain-between`, `--end-discard` or
+`--resume-pass`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
 before the scene: a history copy at the start of the frame (the destination cleared on its first
 frames), a copy after the scene draw, and a copy of a pass the scene's allocation then overwrites
 for a small first-person draw. The scene, or in the last case the destination, must be the current
@@ -1513,7 +1514,13 @@ ending access), with a new center depth each frame; on every other Present a sec
 PRESERVEs the depth draws it again. A Present whose depth the pass left DISCARDed must never show
 that frame's depth as current: it holds the previous Present's depth at full stereo (a missing
 frame); the other Presents must be full stereo on their own current depth
-([end-of-frame copy](../../docs/reshade-sbs.md#selecting-scene-depth)). The other cases
+([end-of-frame copy](../../docs/reshade-sbs.md#selecting-scene-depth)). `--resume-pass` (11-01)
+splits the scene's pass across two command lists executed in one `ExecuteCommandLists` call: the
+scene drawn in a pass that CLEARs its depth, PRESERVEs it and suspends, the last thing in its own
+list, and the frame's list beginning with the pass that resumes it (the same accesses) and draws
+nothing, with a new center depth each frame. The resuming pass's CLEAR applies nothing, so every
+Present must be full stereo on its own current depth with this frame's raw center, which the GPU
+copy shows (a runtime that applied the resuming CLEAR would fail there). The other cases
 cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,

@@ -9,7 +9,7 @@
 namespace {
   struct rotation_fixture:raw_runtime_fixture {
     enum class cadence { single,abc,aabb,offturn,offturn_history,missing,concurrent,interrupted,moving,auxiliary,copy_history,copy_end,copy_rescue,
-      gap_double,gap_ui,gap_overlay,gap_long,gap_cleared,paused,end_discard };
+      gap_double,gap_ui,gap_overlay,gap_long,gap_cleared,paused,end_discard,resume_pass };
     enum class rescue { clear,rect,pass_clear,discard,boxed };
     rescue rescue_route=rescue::clear;
     using action_t=BOOL (*)(api::effect_runtime *);
@@ -32,6 +32,8 @@ namespace {
     // This Present's scene depth pass ended with a DISCARD and nothing wrote
     // the depth again before the Present (end_discard).
     bool end_discarded=false;
+    // The list whose last pass suspends the scene's pass (resume_pass).
+    com_ptr<ID3D12CommandAllocator> suspend_allocator;com_ptr<ID3D12GraphicsCommandList> suspend_list;
     // A second hidden window of the game, presenting colour only after every
     // Present of the game's window (check_second_swapchain): its own swapchain
     // and so its own effect runtime.
@@ -303,11 +305,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       ++copied_frames;
     }
     // The scene's depth pass as one D3D12 render pass: its depth CLEARed at the
-    // start, the scene drawn inside, and its depth ending access `end`.
-    void scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE end){
+    // start, the scene drawn inside (unless !draws), and its depth ending
+    // access `end`; recorded into `into` (else the frame's list) with `flags`.
+    void scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE end,ID3D12GraphicsCommandList *into=nullptr,
+        D3D12_RENDER_PASS_FLAGS flags=D3D12_RENDER_PASS_FLAG_NONE,bool draws=true){
       auto &target=*scene;
+      auto *const list=into ? into : commands.p;
       com_ptr<ID3D12GraphicsCommandList4> list4;
-      checked(commands->QueryInterface(IID_PPV_ARGS(list4.put())),"The game's list lacks render passes");
+      checked(list->QueryInterface(IID_PPV_ARGS(list4.put())),"The game's list lacks render passes");
       D3D12_RENDER_PASS_DEPTH_STENCIL_DESC pass{};
       pass.cpuDescriptor=target.heap->GetCPUDescriptorHandleForHeapStart();
       pass.DepthBeginningAccess.Type=D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
@@ -316,15 +321,17 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       pass.DepthEndingAccess.Type=end;
       pass.StencilBeginningAccess.Type=D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
       pass.StencilEndingAccess.Type=D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
-      list4->BeginRenderPass(0,nullptr,&pass,D3D12_RENDER_PASS_FLAG_NONE);
-      commands->SetGraphicsRootSignature(root.p);commands->SetPipelineState(depth32_pipeline.p);
-      commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-      const D3D12_VIEWPORT viewport{0,0,float(target.width),float(target.height),0,1};
-      const D3D12_RECT scissor{0,0,LONG(target.width),LONG(target.height)};
-      commands->RSSetViewports(1,&viewport);commands->RSSetScissorRects(1,&scissor);
-      struct {float w,h;unsigned pattern;} constants{viewport.Width,viewport.Height,target.pattern};
-      commands->SetGraphicsRoot32BitConstants(0,3,&constants,0);
-      for(unsigned i=0;i<target.draws;++i)commands->DrawInstanced(3,1,0,0);
+      list4->BeginRenderPass(0,nullptr,&pass,flags);
+      if(draws){
+        list->SetGraphicsRootSignature(root.p);list->SetPipelineState(depth32_pipeline.p);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const D3D12_VIEWPORT viewport{0,0,float(target.width),float(target.height),0,1};
+        const D3D12_RECT scissor{0,0,LONG(target.width),LONG(target.height)};
+        list->RSSetViewports(1,&viewport);list->RSSetScissorRects(1,&scissor);
+        struct {float w,h;unsigned pattern;} constants{viewport.Width,viewport.Height,target.pattern};
+        list->SetGraphicsRoot32BitConstants(0,3,&constants,0);
+        for(unsigned i=0;i<target.draws;++i)list->DrawInstanced(3,1,0,0);
+      }
       list4->EndRenderPass();
     }
     // end_discard: the scene's pass DISCARDs its depth at the end every
@@ -340,11 +347,32 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       end_discarded=phase_present%2;
       if(!end_discarded)scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE);
     }
+    // resume_pass: the scene's pass split across two command lists executed
+    // in one ExecuteCommandLists call, as a renderer records one pass on
+    // several threads: the scene drawn in a pass that CLEARs its depth,
+    // PRESERVEs it and suspends, the last thing in its own list, and the
+    // frame's list beginning with the pass that resumes it (the same accesses,
+    // as the pair requires) and draws nothing. A new center depth every frame.
+    void draw_resume_pass(){
+      if(!suspend_list.p){
+        checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(suspend_allocator.put())),"Create the suspending list's allocator");
+        checked(game->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,suspend_allocator.p,nullptr,IID_PPV_ARGS(suspend_list.put())),"Create the suspending list");
+      }else{
+        checked(suspend_allocator->Reset(),"Reset the suspending list's allocator");
+        checked(suspend_list->Reset(suspend_allocator.p,nullptr),"Reset the suspending list");
+      }
+      scene->pattern=100+8*(phase_present%16);
+      scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE,suspend_list.p,D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS);
+      checked(suspend_list->Close(),"Close the suspending list");
+      execute_first=suspend_list.p;
+      scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE,commands.p,D3D12_RENDER_PASS_FLAG_RESUMING_PASS,false);
+    }
     void draw_depth(){
       drawn=0;raster_mask=0;end_discarded=false;
       if(mode==cadence::single)drawn=single_role;
       else if(mode==cadence::abc || mode==cadence::offturn || mode==cadence::offturn_history)drawn=phase_present%3+1;
-      else if(mode==cadence::copy_history || mode==cadence::copy_end || mode==cadence::end_discard)drawn=1;
+      else if(mode==cadence::copy_history || mode==cadence::copy_end || mode==cadence::end_discard ||
+        mode==cadence::resume_pass)drawn=1;
       else if(mode==cadence::copy_rescue)drawn=2; // The destination holds this frame's scene.
       else if(mode==cadence::aabb)drawn=(phase_present/2)%2+1;
       else if(mode==cadence::concurrent || mode==cadence::moving || mode==cadence::auxiliary)drawn=1;
@@ -383,6 +411,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         raster_mask=1;draw_copy_case();return;
       }
       if(mode==cadence::end_discard){draw_end_discard();return;}
+      if(mode==cadence::resume_pass){draw_resume_pass();return;}
       const auto draw_unrelated=[&]{
         for(unsigned i=0;i<unrelated.size();++i)
           draw(*unrelated[(i+phase_present)%unrelated.size()]);
@@ -857,6 +886,22 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       }
       std::printf("PASS end-discard: %u Presents whose depth a later pass wrote again full stereo on their own current depth, %u whose pass DISCARDed it held the previous Present's depth\n",stored,discarded);
     }
+    // resume_pass (draw_resume_pass): the pass that resumes the scene's pass
+    // applies no beginning access, so its CLEAR erases nothing the
+    // suspending pass drew: every Present is full stereo on its own current
+    // depth, this frame's raw center (pixels(): the GPU's depth, so a runtime
+    // that applied the resuming CLEAR fails there).
+    void check_resume_pass(){
+      set_mode(cadence::resume_pass);
+      const auto started=GetTickCount64();unsigned consecutive=0;
+      while(consecutive<20 && GetTickCount64()-started<15000){tick("resume-pass");if(full())++consecutive;else consecutive=0;}
+      require(consecutive>=20,"A scene drawn in a suspended render pass never reached full stereo");
+      for(unsigned i=0;i<120;++i){
+        tick("resume-pass");
+        require(full(),"A Present whose scene a suspended render pass drew lost its current depth at the pass that resumed it");
+      }
+      std::printf("PASS resume-pass: 120 Presents whose scene a suspending render pass drew, resumed by a pass whose CLEAR applies nothing, full stereo on their own current depth\n");
+    }
     // A new full-view scene starts in another allocation (a cutscene, photo
     // mode or 3D menu) and the old one is left untouched: first a half-size
     // one (C), then one of the same size that was never qualified (B). From
@@ -994,6 +1039,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       if(test_case=="--copy-rescue-discard")rescue_route=rescue::discard;
       if(test_case=="--copy-rescue-boxed")rescue_route=rescue::boxed;
       if(test_case=="--end-discard")set_mode(cadence::end_discard);
+      if(test_case=="--resume-pass")set_mode(cadence::resume_pass);
       if(test_case.rfind("--gap-",0)==0){
         gap_pipelines();
         if(test_case=="--gap-overlay")overlay=target(width,height,1,19);
@@ -1044,6 +1090,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         else if(test_case=="--second-swapchain")check_second_swapchain();
         else if(test_case=="--second-swapchain-between")check_second_swapchain(true);
         else if(test_case=="--end-discard")check_end_discard();
+        else if(test_case=="--resume-pass")check_resume_pass();
         else throw std::runtime_error("Unknown isolated rotation case");
         finish();return;
       }
@@ -1104,7 +1151,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--copy-rescue-rect|--copy-rescue-pass-clear|--copy-rescue-discard|--copy-rescue-boxed|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain|--second-swapchain-between|--end-discard]\n",stderr);return 2;}
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--copy-rescue-rect|--copy-rescue-pass-clear|--copy-rescue-discard|--copy-rescue-boxed|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain|--second-swapchain-between|--end-discard|--resume-pass]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
@@ -1113,7 +1160,8 @@ int main(int argc,char **argv){
       test_case=="--copy-rescue-pass-clear" || test_case=="--copy-rescue-discard" || test_case=="--copy-rescue-boxed" ||
       test_case=="--gap-none" || test_case=="--gap-double" ||
       test_case=="--gap-ui" || test_case=="--gap-overlay" || test_case=="--gap-long" || test_case=="--gap-cleared" || test_case=="--gap-cut" ||
-      test_case=="--second-swapchain" || test_case=="--second-swapchain-between" || test_case=="--end-discard","Unknown isolated rotation case");
+      test_case=="--second-swapchain" || test_case=="--second-swapchain-between" || test_case=="--end-discard" ||
+      test_case=="--resume-pass","Unknown isolated rotation case");
     select_native_boot();
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");
     rotation_fixture f;f.runtime_directory=fs::absolute(argv[4]);

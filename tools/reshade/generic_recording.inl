@@ -136,9 +136,15 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 }
 static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint32_t, const render_pass_render_target_desc *, const render_pass_depth_stencil_desc *depth_stencil_desc, render_pass_flags flags)
 {
-	if (depth_stencil_desc != nullptr && depth_stencil_desc->depth_load_op == render_pass_load_op::clear)
+	// A resuming pass continues the pass a suspending one left in an earlier
+	// recording: the pair declares the same accesses, and its boundary renders
+	// as ending and beginning PRESERVE, so only the first pass of the chain
+	// applies the beginning access. Until 11-01 a resuming pass's depth CLEAR
+	// or DISCARD was observed again, after the draws of the recording before.
+	const bool begins = depth_stencil_desc != nullptr && (flags & render_pass_flags::resume) == render_pass_flags::none;
+	if (begins && depth_stencil_desc->depth_load_op == render_pass_load_op::clear)
 		on_clear_depth_stencil(cmd_list, depth_stencil_desc->view, &depth_stencil_desc->clear_depth, nullptr, 0, nullptr);
-	else if (depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 && depth_stencil_desc->depth_load_op == render_pass_load_op::discard &&
+	else if (begins && depth_stencil_desc->view != 0 && depth_stencil_desc->depth_load_op == render_pass_load_op::discard &&
 		cmd_list->get_device()->get_api() == device_api::d3d12)
 	{
 		// A D3D12 depth DISCARD (observe_depth_discard). Vulkan's DONT_CARE is
