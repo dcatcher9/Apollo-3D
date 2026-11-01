@@ -625,12 +625,17 @@ Streamline and NGX hooks, pool jobs). Per role it counts acquisitions, contended
 their largest, the waits of a millisecond or more and a histogram (bucket bounds 10, 25, 50, 100,
 250, 500, 1000, 2000, 4000, 8000 and 16000 us); the present thread's holds are timed too, and each
 wait names the site that held the lock when it began (the holder's lock call, as an offset in the
-add-on module; 16 sites). The bounded line `Sunshine depth capture lock: window_ms= game_locks=
+add-on module): the first 63 sites are named, the waits on any later site count as `other` (until
+11-01 the 16th site took them under its own name, F56). The bounded line `Sunshine depth capture lock: window_ms= game_locks=
 game_waits= game_wait_ms= game_wait_pct= game_p50_us= game_p99_us= game_max_ms= game_waits_1ms=
 present_locks= present_waits= present_wait_ms= present_p99_us= present_max_ms= present_hold_p99_us=
-present_hold_max_ms= holders=<g|p>+0x<offset>:<waits>/<ms>,...` comes at most every 10 s, for a window
-in which a game thread waited a millisecond or more, or every window with Diagnostics on; the
+present_hold_max_ms= holders=<g|p>+0x<offset>|other:<waits>/<ms>,...` comes at most every 10 s, for a
+window in which a game thread waited a millisecond or more, or every window with Diagnostics on; the
 percentiles are over every acquisition of the role (an uncontended one waits 0), as bucket bounds.
+Each window's counts and maxima are its own: the first call takes the baseline and prints nothing,
+and its maxima start there (until 11-01 the first window's maxima covered every wait since the
+add-on loaded, F59); the fixtures' counter reset takes a new baseline (until 11-01 the next window's
+counts wrapped below zero, F71).
 The split is justified (owner ruling Q5, 11-01) when over a 60 s steady window of a live game, or
 the native provider fixture's contention mode reproducing it (`--recorder-threads N`), game threads
 wait a millisecond or more at least once per second, or their p99 wait is 0.25 ms or more, or their

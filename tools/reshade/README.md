@@ -1691,7 +1691,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 - [`streamline_depth_capture.cpp`](streamline_depth_capture.cpp): the capture owner's shell: every global in its original order, the part declarations, the public API that is not yet in a part. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`streamline_depth_capture.h`](streamline_depth_capture.h): the capture owner's public API (inputs, packets, nomination, record, consume, reports). Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`streamline_depth_capture_test_access.h`](streamline_depth_capture_test_access.h): the capture owner's internal types and templates, the linkage switch, and the test views' declarations of its internals. Docs: [Test builds](#test-builds).
-- [`capture_lock_stats.h`](capture_lock_stats.h), [`depth_capture/lock_stats.inl`](depth_capture/lock_stats.inl) (part of `streamline_depth_capture.cpp`, included first among the parts at its end): the capture owner's mutex (`capture_mutex`, a counted `std::mutex`), its per-role wait counters and holder sites, the bounded `Sunshine depth capture lock:` line (`capture_lock_report`, from the provider's `depth list coverage report` step) and the test add-on's `SunshineDepthTestCaptureLockStats` (11-01, lane P; the PD design's section 8). Docs: [Capture lock waits](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost).
+- [`capture_lock_stats.h`](capture_lock_stats.h), [`depth_capture/lock_stats.inl`](depth_capture/lock_stats.inl) (part of `streamline_depth_capture.cpp`, included first among the parts at its end): the capture owner's mutex (`capture_mutex`, a counted `std::mutex`), its per-role wait counters and holder sites, the bounded `Sunshine depth capture lock:` line (`capture_lock_report`, from the provider's `depth list coverage report` step) and the test add-on's `SunshineDepthTestCaptureLockStats` (11-01, lane P; the PD design's section 8); CPU rows in [`test_capture_lock.cpp`](test_capture_lock.cpp). Docs: [Capture lock waits](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost).
 - [`capture_state_policy.h`](capture_state_policy.h): how an injected copy chooses its source's pre-copy state. Docs: [API contract matrix](#api-contract-matrix).
 - [`proven_state.h`](proven_state.h): the per-resource last-proven state the capture owner feeds from executed recordings. Docs: [API contract matrix](#api-contract-matrix).
 - [`api_contract.h`](api_contract.h): how an API's declaration of an input becomes the capture input's contract (state proof, lifetime, extent, format). Docs: [API contract matrix](#api-contract-matrix).
@@ -3310,6 +3310,21 @@ serial is 30 there); each Present establishes any selected copy, as
   direct queue take its record's slot is reported with both queues' own types (11-01, F72: the
   direct queue was named `compute`, its type then read at the first logged Signal without the
   lock); of nine queues that each poison a fence, eight are reported (`report=1/8` to `8/8`).
+- [`test_capture_lock.cpp`](test_capture_lock.cpp) (`reshade_capture_lock`, 11-01) runs the
+  capture lock's wait counter on CPU threads with a `capture_mutex` of its own and a clock of its
+  own; its numbers decide the owner's capture-lock split ([Capture lock
+  waits](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)), and no test read them
+  before (F91). Each row checks a rule that holds on any machine: the present thread's and other
+  threads' acquisitions count in their own role, each wait once with its holder's site and role,
+  and every role's histogram holds its waits (the waits of a millisecond or more are its buckets
+  from 1000 us); `bucket_of`'s edges and `quantile_us` over every acquisition; without Diagnostics a
+  window prints only for a game thread's wait of a millisecond or more. Its regressions (each failed
+  before, run alone): a wait before the first report call is no part of the first window's maximum
+  (F59); a counter reset takes a new window baseline (F71: the next window's `present_locks`
+  wrapped to 18446744073709551568); the holder sites past the named slots count as `other` (F56:
+  the 16th site took them under its own name). Deleting the present thread's naming, timing no
+  contended wait, shifting `bucket_of` or gating the line on the present thread's waits each fails
+  a row. `reshade_capture_lock_tests <row>` runs one row in a fresh process.
 - [`test_proven_state.cpp`](test_proven_state.cpp) (`reshade_proven_state`) pins the per-resource
   last-proven state of [`proven_state.h`](proven_state.h), which admits the Generic end-of-frame
   copy: a creation state holds on every queue until a list uses the texture and not once enhanced

@@ -12,6 +12,20 @@ namespace sunshine_streamline::depth_capture {
       std::atomic<unsigned long> present_thread{};
     };
     lock_counter_state lock_counters;
+    // capture_lock_report's window, beside the counters it is taken from:
+    // the counters at the window's start (before), its start, and its
+    // earliest end (next; 0: no baseline yet, also after a reset). busy:
+    // one caller at a time (try: a Present never waits; a reset waits). Until
+    // 11-01 the baseline was the report function's own statics, which a
+    // reset of the counters left in place, and the next window's counts
+    // wrapped below zero (F71).
+    struct lock_report_window {
+      std::atomic<bool> busy{};
+      std::atomic<std::uint64_t> next{};
+      std::uint64_t start{};
+      lock_stats::values before{};
+    };
+    lock_report_window report_window;
 
     std::uint64_t lock_clock() {
       LARGE_INTEGER value{};
@@ -39,18 +53,22 @@ namespace sunshine_streamline::depth_capture {
       role.histogram[lock_stats::bucket_of(ns)].fetch_add(1, std::memory_order_relaxed);
     }
     // A wait of ns on a lock that site held when the wait began (0: it was
-    // released in between, counted under the unknown site).
+    // released in between, counted under the unknown site). A site without a
+    // slot of its own counts in the last slot, other (holder_slots).
     void count_lock_holder(std::uint64_t site, std::uint64_t ns) {
       if (!site) site = lock_stats::site(0, false);
-      for (auto &slot : lock_counters.holders) {
-        auto seen = slot.site.load(std::memory_order_acquire);
-        if (!seen && slot.site.compare_exchange_strong(seen, site, std::memory_order_acq_rel)) seen = site;
-        if (seen == site || &slot == &lock_counters.holders.back()) {
-          slot.waits.fetch_add(1, std::memory_order_relaxed);
-          slot.wait_ns.fetch_add(ns, std::memory_order_relaxed);
-          return;
+      auto &slots = lock_counters.holders;
+      auto *slot = &slots.back();
+      for (std::size_t i = 0; i + 1 != slots.size(); ++i) {
+        auto seen = slots[i].site.load(std::memory_order_acquire);
+        if (!seen && slots[i].site.compare_exchange_strong(seen, site, std::memory_order_acq_rel)) seen = site;
+        if (seen == site) {
+          slot = &slots[i];
+          break;
         }
       }
+      slot->waits.fetch_add(1, std::memory_order_relaxed);
+      slot->wait_ns.fetch_add(ns, std::memory_order_relaxed);
     }
     lock_stats::role_values lock_role_values(const lock_stats::role_counters &role) {
       lock_stats::role_values out;
@@ -137,6 +155,8 @@ namespace sunshine_streamline::depth_capture {
   }
 
   void reset_capture_lock_values() {
+    // Fixtures only: waits for a report in progress.
+    while (report_window.busy.exchange(true, std::memory_order_acquire)) SwitchToThread();
     reset_lock_role(lock_counters.game);
     reset_lock_role(lock_counters.present);
     reset_lock_role(lock_counters.present_hold);
@@ -145,37 +165,41 @@ namespace sunshine_streamline::depth_capture {
       slot.waits.store(0, std::memory_order_relaxed);
       slot.wait_ns.store(0, std::memory_order_relaxed);
     }
+    report_window.next.store(0, std::memory_order_relaxed);
+    report_window.busy.store(false, std::memory_order_release);
   }
 
   bool capture_lock_report(std::uint64_t now_ms, bool always, char *out, std::size_t size) {
-    static std::atomic<std::uint64_t> next_window{};
-    // The previous window's end, kept by the one caller that claims a window.
-    static lock_stats::values before;
-    static std::uint64_t window_start{};
-    auto next = next_window.load(std::memory_order_relaxed);
-    if (!next) {
-      if (next_window.compare_exchange_strong(next, now_ms + 10000, std::memory_order_relaxed)) {
-        before = capture_lock_values();
-        window_start = now_ms;
-      }
-      return false;
-    }
-    if (now_ms < next || !next_window.compare_exchange_strong(next, now_ms + 10000, std::memory_order_relaxed)) return false;
+    auto &window = report_window;
+    if (const auto next = window.next.load(std::memory_order_relaxed); next && now_ms < next) return false;
+    // One caller takes a window (another runtime's Present skips it).
+    if (window.busy.exchange(true, std::memory_order_acquire)) return false;
+    struct release_window {
+      lock_report_window &window;
+      ~release_window() { window.busy.store(false, std::memory_order_release); }
+    } release{window};
+    const auto next = window.next.load(std::memory_order_relaxed);
+    if (next && now_ms < next) return false;
     const auto now = capture_lock_values();
-    const auto game = lock_window(now.game, before.game, lock_counters.game.window_max_ns);
-    const auto present = lock_window(now.present, before.present, lock_counters.present.window_max_ns);
-    const auto hold = lock_window(now.present_hold, before.present_hold, lock_counters.present_hold.window_max_ns);
+    // The window maxima are exchanged at every window, the baseline's too:
+    // the first window's are its own, not the largest since the process
+    // began (until 11-01, F59).
+    const auto game = lock_window(now.game, window.before.game, lock_counters.game.window_max_ns);
+    const auto present = lock_window(now.present, window.before.present, lock_counters.present.window_max_ns);
+    const auto hold = lock_window(now.present_hold, window.before.present_hold, lock_counters.present_hold.window_max_ns);
+    // A slot's site is claimed once (until a reset, which takes a new
+    // baseline), so each slot's window is its own difference.
     std::array<lock_stats::holder_values, lock_stats::holder_slots> holders{};
     for (std::size_t i = 0; i != holders.size(); ++i) {
       holders[i] = now.holders[i];
-      if (before.holders[i].site == now.holders[i].site) {
-        holders[i].waits -= before.holders[i].waits;
-        holders[i].wait_ns -= before.holders[i].wait_ns;
-      }
+      holders[i].waits -= window.before.holders[i].waits;
+      holders[i].wait_ns -= window.before.holders[i].wait_ns;
     }
-    const auto window_ms = now_ms > window_start ? now_ms - window_start : 1;
-    before = now;
-    window_start = now_ms;
+    const auto window_ms = now_ms > window.start ? now_ms - window.start : 1;
+    window.before = now;
+    window.start = now_ms;
+    window.next.store(now_ms + 10000, std::memory_order_relaxed);
+    if (!next) return false;  // The baseline.
     if (!always && !game.long_waits) return false;
     if (!out || !size) return false;
     std::sort(holders.begin(), holders.end(), [](const auto &a, const auto &b) { return a.wait_ns > b.wait_ns; });
@@ -183,8 +207,12 @@ namespace sunshine_streamline::depth_capture {
     for (std::size_t i = 0, used = 0; i != 4 && holders[i].waits; ++i) {
       const auto address = lock_stats::site_address(holders[i].site);
       const auto offset = address && address >= now.module_base ? address - now.module_base : 0;
-      const int written = std::snprintf(sites + used, sizeof(sites) - used, "%s%c+0x%llx:%llu/%.3f", i ? "," : "",
-        lock_stats::site_present(holders[i].site) ? 'p' : 'g', static_cast<unsigned long long>(offset),
+      char site[32];
+      if (holders[i].site)
+        std::snprintf(site, sizeof(site), "%c+0x%llx", lock_stats::site_present(holders[i].site) ? 'p' : 'g',
+          static_cast<unsigned long long>(offset));
+      else std::snprintf(site, sizeof(site), "other");
+      const int written = std::snprintf(sites + used, sizeof(sites) - used, "%s%s:%llu/%.3f", i ? "," : "", site,
         static_cast<unsigned long long>(holders[i].waits), double(holders[i].wait_ns) / 1e6);
       if (written < 0 || used + std::size_t(written) >= sizeof(sites)) break;
       used += std::size_t(written);

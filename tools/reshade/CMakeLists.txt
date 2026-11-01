@@ -429,6 +429,16 @@ if(BUILD_TESTING)
   add_test(NAME reshade_streamline_native_observer COMMAND reshade_streamline_native_observer_tests)
   set_tests_properties(reshade_streamline_native_observer PROPERTIES TIMEOUT 20)
 
+  # The capture lock's wait counter on CPU threads (README, Characterization tests).
+  add_executable(reshade_capture_lock_tests test_capture_lock.cpp)
+  target_compile_definitions(reshade_capture_lock_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(reshade_capture_lock_tests PRIVATE sunshine_game3d_core_probe_test_archive)
+  if(MINGW)
+    target_link_options(reshade_capture_lock_tests PRIVATE -static)
+  endif()
+  add_test(NAME reshade_capture_lock COMMAND reshade_capture_lock_tests)
+  set_tests_properties(reshade_capture_lock PROPERTIES TIMEOUT 30)
+
   add_executable(reshade_streamline_v1_resource_state_tests test_streamline_v1_resource_state.cpp)
   target_compile_features(reshade_streamline_v1_resource_state_tests PRIVATE cxx_std_17)
   target_compile_definitions(reshade_streamline_v1_resource_state_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

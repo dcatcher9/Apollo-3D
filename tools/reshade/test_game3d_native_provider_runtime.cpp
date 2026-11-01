@@ -276,7 +276,8 @@ namespace {
   // percentile wait over every acquisition and over the contended ones (an
   // uncontended acquisition waits 0; bucket upper bounds in microseconds);
   // the present thread's holds; and the holder sites waiters found, as
-  // offsets in the test add-on (map them with its symbols).
+  // offsets in the test add-on (map them with its symbols), the waits on
+  // sites past the named ones as holder other.
   void report_capture_lock(const char *label, const sunshine_streamline::depth_capture::lock_stats::values &values,
       std::uint64_t elapsed_ms, unsigned presents, unsigned threads, std::uint64_t lists) {
     namespace stats = sunshine_streamline::depth_capture::lock_stats;
@@ -305,6 +306,11 @@ namespace {
     std::sort(holders.begin(), holders.end(), [](const auto &a, const auto &b) { return a.wait_ns > b.wait_ns; });
     for (const auto &holder : holders) {
       if (!holder.waits) continue;
+      if (!holder.site) {
+        std::printf("MEASURE capture lock %s holder other waits=%llu wait_ms=%.3f" "\n", label,
+          static_cast<unsigned long long>(holder.waits), double(holder.wait_ns) / 1e6);
+        continue;
+      }
       const auto address = stats::site_address(holder.site);
       std::printf("MEASURE capture lock %s holder %s rva=0x%llx waits=%llu wait_ms=%.3f" "\n", label,
         stats::site_present(holder.site) ? "present" : "game",

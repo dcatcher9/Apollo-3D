@@ -23,8 +23,12 @@ namespace sunshine_streamline::depth_capture {
     inline constexpr std::array<std::uint32_t, 11> bounds_us{10, 25, 50, 100, 250, 500, 1000, 2000, 4000, 8000, 16000};
     inline constexpr std::size_t buckets = bounds_us.size() + 1;
     // The holder sites a waiter found holding the lock (the holder's lock()
-    // return address); the last slot also takes every site once all are used.
-    inline constexpr std::size_t holder_slots = 16;
+    // return address): the first holder_slots - 1 sites each claim a slot;
+    // the last slot names no site (site 0, printed as other) and takes the
+    // waits on every later one. About 60 lock calls take the capture lock,
+    // some on both thread roles. Until 11-01 the 16th site also claimed the
+    // last slot, and every later site's waits were printed under it (F56).
+    inline constexpr std::size_t holder_slots = 64;
     // A wait of this length counts toward waits of a millisecond or more.
     inline constexpr std::uint64_t long_wait_ns = 1000000;
     constexpr std::size_t bucket_of(std::uint64_t ns) {
@@ -53,6 +57,7 @@ namespace sunshine_streamline::depth_capture {
     };
     // A plain copy of the counters (capture_lock_values): cumulative since
     // the process began or the last reset; max_ns is the largest since then.
+    // A holder whose site is 0 is the other slot (holder_slots).
     struct role_values {
       std::uint64_t locks{}, waits{}, wait_ns{}, long_waits{}, max_ns{};
       std::array<std::uint64_t, buckets> histogram{};
@@ -104,11 +109,14 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t held_at_{};
   };
 
-  // The counters (cumulative), and a reset (fixtures only).
+  // The counters (cumulative), and a reset (fixtures only), which also makes
+  // the next capture_lock_report call take a new window baseline.
   lock_stats::values capture_lock_values();
   void reset_capture_lock_values();
   // The bounded "Sunshine depth capture lock:" line: at most every 10 s,
   // only for a window in which a game thread waited a millisecond or more,
-  // or every window when always is set (Diagnostics).
+  // or every window when always is set (Diagnostics). The first call (and
+  // the first after a reset) takes the window's baseline and prints
+  // nothing; each window's maxima are its own.
   bool capture_lock_report(std::uint64_t now_ms, bool always, char *out, std::size_t size);
 }
