@@ -7,8 +7,12 @@
 #include <cstdint>
 
 namespace sunshine_streamline::loss_diagnostics {
+  // 1 and 2 were commands_busy and resource_table_full, raised by the command
+  // and resource tables that structure refactor rounds D2 and D3 removed; the
+  // other values keep their numbers. game3d_log_report.py still reads both
+  // names in older add-ons' logs.
   enum class reason {
-    records_busy, commands_busy, resource_table_full, invalid_input,
+    records_busy, invalid_input = 3,
     sdk_failure, token_replaced, lifecycle, test_injected, tokens_busy,
     metadata_storage_busy
   };
@@ -18,8 +22,6 @@ namespace sunshine_streamline::loss_diagnostics {
       SUNSHINE_LOSS_NAME(records_busy);
       SUNSHINE_LOSS_NAME(tokens_busy);
       SUNSHINE_LOSS_NAME(metadata_storage_busy);
-      SUNSHINE_LOSS_NAME(commands_busy);
-      SUNSHINE_LOSS_NAME(resource_table_full);
       SUNSHINE_LOSS_NAME(invalid_input);
       SUNSHINE_LOSS_NAME(sdk_failure);
       SUNSHINE_LOSS_NAME(token_replaced);

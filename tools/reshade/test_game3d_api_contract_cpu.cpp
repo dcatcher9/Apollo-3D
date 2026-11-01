@@ -763,8 +763,13 @@ namespace {
     // The source gate returns these evidence statuses' names; the rest
     // admit the call.
     using sunshine_streamline::evidence_status;
-    for (auto status = unsigned(evidence_status::inactive); status <= unsigned(evidence_status::tracked_content_evaluation); ++status) {
-      const auto value = evidence_status(status);
+    // Every enumerator (their numbers have gaps: streamline_camera_probe.h).
+    for (const auto value : {evidence_status::inactive, evidence_status::busy, evidence_status::missing_evaluation,
+           evidence_status::evaluation_failed, evidence_status::observation_lost, evidence_status::untracked_frame,
+           evidence_status::missing_constants, evidence_status::rejected_constants, evidence_status::invalid_camera,
+           evidence_status::camera_reset, evidence_status::missing_depth, evidence_status::stale,
+           evidence_status::ambiguous_viewport, evidence_status::source_associated_evaluation}) {
+      require(std::strcmp(sunshine_streamline::name(value), "unknown") != 0, "an evidence status has no name");
       const bool admitted = value == evidence_status::source_associated_evaluation || value == evidence_status::missing_constants || value == evidence_status::rejected_constants || value == evidence_status::invalid_camera || value == evidence_status::camera_reset || value == evidence_status::untracked_frame;
       require(admitted || refusal::classify(sunshine_streamline::name(value)) != refusal::reason_class::unclassified, "an evidence status the source gate names has no refusal class");
     }

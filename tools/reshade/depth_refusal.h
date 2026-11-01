@@ -104,14 +104,8 @@ namespace sunshine_depth_refusal {
     {"observation-lost", reason_class::internal},
     {"untracked-frame", reason_class::internal},
     {"missing-depth", reason_class::absent},
-    {"unsupported-depth-tag", reason_class::malformed},
-    {"selected-depth-not-ready", reason_class::internal},
-    {"selected-source-mismatch", reason_class::internal},
-    {"selected-extent-mismatch", reason_class::internal},
     {"stale-evaluation", reason_class::internal},  // The frame's camera is older than its tag.
     {"ambiguous-viewport", reason_class::ambiguous_view},  // S19.
-    {"command-associated-evaluation-content-unverified", reason_class::internal},
-    {"tracked-content-evaluation-coverage-incomplete", reason_class::internal},
     // Tag gate literals (streamline_camera_data.h tag_refusal and the gates after it).
     {"absent", reason_class::absent},
     {"unsupported_unreadable", reason_class::malformed},

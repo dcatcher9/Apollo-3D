@@ -639,15 +639,9 @@ namespace sunshine_streamline {
       case evidence_status::invalid_camera: return "invalid-camera";
       case evidence_status::camera_reset: return "camera-reset";
       case evidence_status::missing_depth: return "missing-depth";
-      case evidence_status::unsupported_depth: return "unsupported-depth-tag";
-      case evidence_status::depth_not_ready: return "selected-depth-not-ready";
-      case evidence_status::source_mismatch: return "selected-source-mismatch";
-      case evidence_status::extent_mismatch: return "selected-extent-mismatch";
       case evidence_status::stale: return "stale-evaluation";
       case evidence_status::ambiguous_viewport: return "ambiguous-viewport";
       case evidence_status::source_associated_evaluation: return "source-associated-evaluation-reshade-frame-unverified";
-      case evidence_status::command_associated_evaluation: return "command-associated-evaluation-content-unverified";
-      case evidence_status::tracked_content_evaluation: return "tracked-content-evaluation-coverage-incomplete";
     }
     return "unknown";
   }

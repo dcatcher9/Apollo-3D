@@ -2799,9 +2799,9 @@ def exporter_sources():
 
 
 def enum_names(text, enum):
-    """The enumerators of `enum class <enum> { ... }`, in order."""
+    """The enumerators of `enum class <enum> { ... }`, in order (an explicit `= value` left out)."""
     body = re.search(rf'enum class {enum} \{{([^}}]*)\}}', text).group(1)
-    return tuple(name.strip() for name in body.split(',') if name.strip())
+    return tuple(name.split('=')[0].strip() for name in body.split(',') if name.strip())
 
 
 class SchemaMirrors(unittest.TestCase):
@@ -2847,7 +2847,10 @@ class SchemaMirrors(unittest.TestCase):
         text = source('observation_loss_journal.h')
         names = enum_names(text, 'reason')
         classified = report.LOSS_CAPACITY + report.LOSS_ROUTINE + report.LOSS_FAULT
-        self.assertEqual(sorted(classified), sorted(names))
+        # Every cause the add-on raises, plus the legacy causes older add-ons raised (capacity, never live again).
+        self.assertEqual(sorted(classified), sorted(names + report.LOSS_LEGACY))
+        self.assertFalse(set(report.LOSS_LEGACY) & set(names))
+        self.assertTrue(set(report.LOSS_LEGACY) <= set(report.LOSS_CAPACITY))
         self.assertEqual(len(set(classified)), len(classified))
         self.assertEqual(sorted(re.findall(r'SUNSHINE_LOSS_NAME\((\w+)\);', text)), sorted(names))
 

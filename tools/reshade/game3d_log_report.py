@@ -293,7 +293,9 @@ CAPTURE_OK = frozenset(('inactive', 'unavailable', 'recorded', 'submitted', 'rea
 # add-on's bounded tables was full, which a burst of game work explains, so it warns by rate: all of them more than
 # once per two minutes, or one more than LOSS_BURST times within LOSS_BURST_S. Routine: the game ended a resource's
 # lifecycle or reused an address for a new token. Faults (input the SDK contract refuses, an SDK failure, a test
-# injection) and unknown causes warn at any count.
+# injection) and unknown causes warn at any count. LOSS_LEGACY: capacity causes only add-ons built before the 10-31
+# structure refactor raise (it removed their tables); the report still reads them in those add-ons' logs.
+LOSS_LEGACY = ('commands_busy', 'resource_table_full')
 LOSS_CAPACITY = ('tokens_busy', 'records_busy', 'commands_busy', 'resource_table_full', 'metadata_storage_busy')
 LOSS_ROUTINE = ('lifecycle', 'token_replaced')
 LOSS_FAULT = ('invalid_input', 'sdk_failure', 'test_injected')

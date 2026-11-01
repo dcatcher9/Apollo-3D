@@ -121,12 +121,15 @@ namespace sunshine_streamline {
     // An untag at an evaluate: the tag call it ended.
     ended_depth_tag ended;
   };
+  // 11-14, 18 and 19 were unsupported_depth, depth_not_ready, source_mismatch,
+  // extent_mismatch, command_associated_evaluation and
+  // tracked_content_evaluation, which nothing has set since structure refactor
+  // rounds D2 and D3; the other values keep their numbers.
   enum class evidence_status {
     inactive, busy, missing_evaluation, evaluation_failed, observation_lost,
     untracked_frame, missing_constants, rejected_constants, invalid_camera,
-    camera_reset, missing_depth, unsupported_depth, depth_not_ready,
-    source_mismatch, extent_mismatch, stale, ambiguous_viewport,
-    source_associated_evaluation, command_associated_evaluation, tracked_content_evaluation
+    camera_reset, missing_depth, stale = 15, ambiguous_viewport,
+    source_associated_evaluation
   };
   struct evaluation_snapshot {
     evidence_status status{evidence_status::missing_evaluation};

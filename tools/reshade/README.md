@@ -593,7 +593,9 @@ Since 10-23 these checks judge each event by its origin rather than warning at a
   settle time after an export start, FG switch or reset is INFO, as before.
 - `Observation losses` (sampled on `Sunshine depth observation evidence` lines): a capacity loss
   (`tokens_busy`, `records_busy`, `commands_busy`, `resource_table_full`, `metadata_storage_busy`: a
-  full bounded table, which a burst of game work explains) warns only by rate: all of them more than
+  full bounded table, which a burst of game work explains; `commands_busy` and
+  `resource_table_full` appear only in logs of add-ons from before the 10-31 structure refactor)
+  warns only by rate: all of them more than
   once per 2 minutes of the session (counted as at least 2 minutes), or one cause more than 3 times
   within 60 s. `lifecycle` and `token_replaced` are the game's own and never warn. `invalid_input`,
   `sdk_failure`, `test_injected` and a cause the report does not know warn at any count. The depth a
