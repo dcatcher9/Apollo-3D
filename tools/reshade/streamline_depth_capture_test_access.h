@@ -571,12 +571,15 @@ namespace sunshine_streamline::depth_capture {
       slot *value{};
       const slot *latest{};
       const evaluation_head *pending_nomination{};
-      // The namespace's newest nomination (its epoch, sequence and source)
-      // as its view names it, with that view's viewport, tick and present:
-      // set only when that view is the namespace's one active view
-      // (select_latest_capture). Policy picks carry none.
+      // The head's nomination (its epoch, sequence and source) as its view
+      // names it, with that view's viewport, tick and present: the
+      // namespace's newest nomination, or, where a confirmed FG scope's
+      // viewport broke a tie of active views (owner ruling R5), that
+      // viewport's newest (select_latest_capture). Set only when that view
+      // is the one active view or the bound one. Policy picks carry none.
       const evaluation_head *head{};
-      // The pick's provider namespace and its newest nomination's view,
+      // The pick's provider namespace and its head's view (the namespace's
+      // newest nomination's, or the bound viewport's as for head),
       // whatever its views' activity: the source an acquisition names when
       // no capture or nomination in progress does (classify_acquisition), so
       // the display never holds another viewport's or feature generation's

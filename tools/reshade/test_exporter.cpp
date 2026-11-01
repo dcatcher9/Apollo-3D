@@ -368,9 +368,12 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     // provider's row comes from its own mapping (provider::describe_acquisition
     // and describe_display) of what the fixture states the runtime did: the
     // acquisition as the capture owner reports it (the copied frame when it
-    // selected one), the scope's selection for a live or silent FG scope (as
-    // select_frame_generation_scope returns it, which the seam
-    // characterization pins), association, handoff, and a display whose fresh
+    // selected one), the scope's selection for a live or silent FG scope (a
+    // silent one as select_frame_generation_scope returns it but for its
+    // tie_epoch and tie_viewport, which only select_latest_capture reads:
+    // describe_acquisition reads the scope's silent and
+    // exclude_unconfirmed_fg; the seam characterization pins the scope
+    // selection), association, handoff, and a display whose fresh
     // copy or hold of held succeeds. It decides nothing (P0b).
     static sunshine_game3d::api_depth_decision provider_decision(
         const sunshine_streamline::depth_capture::acquisition_decision &proof,

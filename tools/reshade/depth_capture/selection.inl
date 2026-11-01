@@ -119,7 +119,7 @@ namespace sunshine_streamline::depth_capture {
       const auto epoch = bound ? bound->epoch : current.epoch;
       const auto sequence = bound ? bound->sequence : current.sequence;
       const auto source_id = bound ? bound->source_id : current.source_id;
-      // The newest nomination's view, active or not (capture_pick::named).
+      // The head's view, active or not (capture_pick::named).
       for (const auto &value : current.views)
         if (epoch && sequence && value.epoch == epoch && value.sequence == sequence &&
             value.source_id == source_id) out.named = &value;
@@ -135,12 +135,17 @@ namespace sunshine_streamline::depth_capture {
         out.selection = active_views ? selection_reason::ambiguous_views : selection_reason::inactive_views;
         return out;
       }
-      // The newest nomination's view, when it is that one active view: its
-      // viewport names the head's display lineage (select_capture).
+      // The head's view, when it is the one active view or the bound one:
+      // its viewport names the head's display lineage (select_capture).
       for (const auto &value : current.views)
         if (epoch && sequence && value.epoch == epoch && value.sequence == sequence &&
             value.source_id == source_id && active(value))
           out.head = &value;
+      // The namespace has one nomination in progress, its newest's
+      // (mark_pending): a bound viewport's nomination in progress after
+      // another viewport's evaluation began has none, and reads as a missing
+      // frame (select_capture: the same stand-in or hold, with no watermark
+      // moved).
       const auto &pending = current.pending_nomination;
       if (pending.sequence && pending.epoch == epoch && pending.sequence == sequence &&
           pending.source_id == source_id &&
@@ -174,8 +179,13 @@ namespace sunshine_streamline::depth_capture {
         if (!out.value || value.id > out.value->id) { out.value = &value; out.progress = progress; }
       }
       if (!out.value) {
-        // The provider's last attempt is the namespace's newest nomination's;
-        // a bound viewport's older nomination has no attempt status left.
+        // The provider's last attempt (attempt_status): a newer evaluation's
+        // begin resets it, and the record of the namespace's newest
+        // nomination usually wrote it, but a record of an older evaluation
+        // that finishes later on another thread may have. A bound viewport's
+        // older nomination reports none (unavailable). Diagnostic only: every
+        // value it holds is a missing frame alike (select_capture,
+        // interrupts_admission).
         const bool newest = sequence == current.sequence && source_id == current.source_id;
         out.result = out.pending_nomination ? status::recorded :
           newest ? attempt_status[provider_index(provider)].load() : status::unavailable;

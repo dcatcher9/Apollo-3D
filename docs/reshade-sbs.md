@@ -4915,7 +4915,18 @@ the other viewport's evaluation took a later sequence (one sequence serves every
 thread; DLSS-G's evaluation on the present thread, a deferred FG tag copy at its Present) still
 advances its view unless a newer call of its own viewport began since (until 11-01 it changed
 nothing, so the bound view kept its previous frame, whose copy was shown, and the call's own copy
-never showed: the R5 review's R5-17). FG Off ties the views again at once (the FG scope's view passes to the
+never showed: the R5 review's R5-17). The namespace keeps one nomination in progress and one attempt
+status, its newest nomination's: a bound viewport's nomination in progress after the other
+viewport's evaluation began reads as a missing frame (the same stand-in or hold, no watermark
+moved; a readable nested NGX copy may take that Present, as for any missing frame), and a bound
+head that is not the namespace's newest reports no attempt status (unavailable; the status is
+diagnostic, and a late record of an older evaluation on another thread may still write the newest
+head's). The tie-break needs the bound viewport's view among the namespace's four views: a view
+whose viewport stopped evaluating is replaced first, but with five or more active Streamline views
+the bound one may go, and the Present stays mono (fail safe, as before 11-01). It also takes the
+FG viewport for the presented camera, as DLSS-G does: that viewport's depth is mapped to the whole
+image of every Present that selects it, so split screen with FG options left on, or a second
+swapchain presenting the other viewport, is out of scope. FG Off ties the views again at once (the FG scope's view passes to the
 viewport's ordinary source, above), so the display holds its FG copy within the source age only when
 the newest nomination is that viewport's (`FG_successor_pending`), and drops it otherwise; where the
 viewport's ordinary view is newer than its FG view (an SR evaluation with FG route none keeps both),

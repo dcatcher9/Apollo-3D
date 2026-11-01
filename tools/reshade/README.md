@@ -2008,7 +2008,10 @@ options name (the case's or the other active one's). The options go through the 
 the FG read (`query_frame_generation`), the FG view's depth projection and
 `provider::select_frame_generation_scope` make the policy, and `select_provider` picks from both
 viewports' SR copies with either viewport's evaluation the newest. Each viewport must meet the
-oracle for its own case, never the other's copy: all 120 meet. Dynamic mode with
+oracle for its own case, never the other's copy: all 120 meet. The capture owner holds no FG copy
+before the pick, so every FG cell judges a silent scope (its tie viewport, `tie_epoch` and
+`tie_viewport`); a live (required) scope's tie-break is pinned by the seam characterization's P6
+two-view rows, on viewport 0 and on viewport 1. Dynamic mode with
 `numFramesToGenerate` 0 is no frame generation scope to the oracle (S20) and binds no viewport in
 the add-on: `sl_dlss_g.h` does not say whether Dynamic then generates frames, so both take the
 fail-safe reading and both viewports refuse (the FG view names no tie viewport without a declared
@@ -3210,16 +3213,21 @@ serial is 30 there); each Present establishes any selected copy, as
   without a declared generated count keep the tie (with one active view that scope still owns its
   viewport); one active view needs none; FG Off ties the views again at once, whatever the newest nomination, and the display holds
   its FG copy within the source age only or drops it; an FG viewport switch drops the old
-  viewport's held copy until the new one's is readable; until 11-01 every such row was ambiguous,
-  and at FG Off the other viewport's newer copy showed; until late on 11-01 the Dynamic scope
-  without a count broke the tie; since the R5 review, 11-01: the pool keeps the bound viewport's
-  newest copy, readable from its list's Reset, and at FG On its FG head's SR stand-in beside the
-  other viewport's newer nomination (each row's SWEEP recycles what the pool may reclaim; until
-  then both went and the Present held), a call that began after the other viewport's newer
-  evaluation advances its view, live or silent (until then the Present held the shown copy), and
-  FG Off keeps a newer SR view of the viewport beside its stale FG view (until then the other
-  viewport's copy showed)), the pool's storage check before its retention (a copy whose fence
-  completes between the two reads stays; until 11-01 it was recycled), the source a head refused before its capture existed names to
+  viewport's held copy until the new one's is readable; until 11-01 the rows where a scope breaks
+  the tie read `ambiguous_views`, or `fg_scope_mismatch` under the required scope whose
+  viewport's nomination was not the newest, at FG Off the other viewport's newer copy showed, or
+  with the FG nomination the newest the Present read `no_current_nomination`, and the viewport
+  switch stayed ambiguous; until late on 11-01 the Dynamic scope without a count broke the tie;
+  since the R5 review, 11-01: the pool keeps the bound viewport's newest copy, readable from its
+  list's Reset, and at FG On its FG head's SR stand-in beside the other viewport's newer nomination
+  (each row's SWEEP recycles what the pool may reclaim; until then both went and the Present
+  held), a call that began after the other viewport's newer evaluation advances its view, live or
+  silent (until then the Present held the shown copy), FG Off keeps a newer SR view of the
+  viewport beside its stale FG view (until then the other viewport's copy showed), a bound head
+  refused before its capture existed and older than the other viewport's recorded one reports
+  `unavailable` (with an earlier copy of its viewport standing in), and a live scope on viewport 1
+  breaks the tie as on viewport 0), the pool's storage check before its retention (a copy whose
+  fence completes between the two reads stays; until 11-01 it was recycled), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of
   `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at
