@@ -1235,8 +1235,11 @@ namespace {
     // A required copy of the frame's last decision, recorded on another
     // queue: the freshness rule's supply, readable once its copy-out
     // completed (every such copy is copied out since U-C1b). Called once its
-    // list executed (completion: its ring's). A permitted copy may or may not
-    // have been made, so it neither counts nor moves the source's stamp.
+    // list executed (completion: its ring's). Its made stamp is its deciding
+    // call's (offer, before the call, as for every source; until 11-01 a
+    // second stamp here at the list's submission was dead: offer had always
+    // stamped the decision). A permitted copy may or may not have been made,
+    // so it neither counts nor has a completion here.
     // readable: the contract lets the add-on read it at the frame's own
     // Present (execute_elsewhere). Otherwise it stays legal: the frame's
     // Present holds earlier depth (continuity::supply::unordered), and later
@@ -1251,11 +1254,6 @@ namespace {
         return;
       }
       supply.elsewhere |= source;
-      for (unsigned i = 0; i != supply.made.size(); ++i) {
-        if ((source & (1u << i)) && !supply.made[i]) {
-          supply.made[i] = GetTickCount64();
-        }
-      }
       readable_here = readable_here || readable;
       if (readable) {
         supply.immediate |= source;

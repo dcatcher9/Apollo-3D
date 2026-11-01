@@ -2158,10 +2158,11 @@ while it records a later frame. A refused later tag of a frame (the untag script
 withdraws only the observation: the copy the frame's own tag made before it stays supplied, and
 stands in as a missing frame's (until 10-28 the script withdrew it from the supply log and required
 no fresh depth there). Each source's copy is
-stamped when it was made (`supply::made`, its deciding call after any hitch before it, or its
-recording's submission for a copy from another queue), and holds and the freshness rule age copies
-by it, not by the frame's first call (until the 10-27 review a copy made after a hitch inside its
-frame looked as old as the hitch, and a dropped hold of it passed).
+stamped when it was made (`supply::made`: its deciding call after any hitch before it, a copy
+recorded on another queue included, and for a tag copy deferred to its frame's Present, R2, that
+Present after any hitch before it), and holds and the freshness rule age copies by it, not by the
+frame's first call (until the 10-27 review a copy made after a hitch inside its frame looked as old
+as the hitch, and a dropped hold of it passed).
 
 A Present shows depth when the rung that decided it has pixels: D1 or D2 ready or held, or
 Generic's binding ready; H in mono shows none. The judge is armed by a Present that shows depth. A
