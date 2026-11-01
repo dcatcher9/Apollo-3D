@@ -521,17 +521,28 @@ namespace sunshine_depth {
       }
 
       // Initial selection and recovery from invalid/stale/destroyed sources
-      // remain immediate once another source has confirmed useful content.
-      // Among confirmed sources the completeness class ranks first, as for a
-      // challenger; within it a source whose set left a Present without depth
-      // that another confirmed source drew, since its comparison start, ranks
-      // after one that did not, so recovery does not pick a source drawn only
-      // on some Presents over one drawn on all of them.
+      // remain immediate once another source has confirmed useful content,
+      // ranked by better() (the content score). Present coverage can only set
+      // a confirmed source aside: one whose set left a Present without depth
+      // that another confirmed source drew, since its comparison start
+      // (gapped), is passed over while an unmarked confirmed source of the
+      // same or a higher class is active, so recovery does not pick a source
+      // drawn only on some Presents over one drawn on all of them. The class
+      // decides nothing else here: a .02 completeness difference across a
+      // class boundary never outweighs resolution. One filter and one total
+      // order, so the pick does not depend on the candidates' lifetime order.
       pending_ = {};
+      double covered_class = -1;  // Highest class of an active, confirmed, unmarked source.
+      for (const auto &item : candidates_)
+        if (active(item.second, frame) && good(item.second, frame) && !gapped(item.second))
+          covered_class = std::max(covered_class, completeness_class(item.second, false));
       const candidate_state *best = nullptr;
       for (const auto &item : candidates_) {
         const auto &candidate = item.second;
-        if (active(candidate, frame) && (!best || recovery_better(candidate, *best, frame)))
+        if (!active(candidate, frame) ||
+            (good(candidate, frame) && gapped(candidate) && completeness_class(candidate, false) <= covered_class))
+          continue;
+        if (!best || better(candidate, *best, frame))
           best = &candidate;
       }
       if (best && good(*best, frame))
@@ -646,17 +657,6 @@ namespace sunshine_depth {
       const auto &e = candidate.evidence;
       const auto since = e.positive_count ? e.positive_frames[e.positive_count - 1] : 0;
       return candidate.coverage.gap > since;
-    }
-
-    bool recovery_better(const candidate_state &a, const candidate_state &b, std::uint64_t frame) const {
-      if (good(a, frame) && good(b, frame)) {
-        const auto ac = completeness_class(a, false), bc = completeness_class(b, false);
-        if (ac != bc)
-          return ac > bc;
-        if (gapped(a) != gapped(b))
-          return !gapped(a);
-      }
-      return better(a, b, frame);
     }
 
     bool better(const candidate_state &a, const candidate_state &b, std::uint64_t frame) const {

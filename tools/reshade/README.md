@@ -1274,6 +1274,13 @@ through the official runtime, without injecting `DEPTH`:
   .\cmake-build-reshade\scene-depth-dx12 1280 720
 ```
 
+`--coverage-only` runs the scene-completeness phases (foreground-only, sky and lower-resolution
+full scenes), then a recovery across a completeness-class boundary: a quarter-resolution scene
+about .83 complete anchors, native depth of the same camera about .66 complete (one class lower,
+ahead on the content score) cannot challenge it, and after both pause for 12 Presents of a menu
+that draws only flat depth, recovery must bind the native source and keep it
+([recovery rule](../../docs/reshade-sbs.md#selecting-scene-depth)).
+
 `--reload-only` checks coverage over presents through native-resource recreation with the
 production add-on. A lower-resolution scene target draws every present while recreated native
 depth draws every second, then every third present: the every-present source must stay bound

@@ -6366,13 +6366,21 @@ still in flight) has no backup to adopt, so that takeover Present is mono.
 
 Initial selection, and recovery when the selected source stops being usable (inactive for more
 than three depth-active Presents, three bad samples, or a crop change that erases its evidence),
-choose immediately among confirmed sources without paired comparisons. They rank by completeness
-class first, as a challenger does, then by Present coverage, then by the content score. The
-coverage record for this ranking does not depend on an incumbent: on each depth-active Present,
-an active candidate whose set had no current-copy work while a confirmed source's set drew is
-marked, and a candidate marked since its oldest retained positive capture ranks after one that
-is not. A source drawn on only some Presents therefore does not take over from one drawn on
-every Present when, for example, both pause for a menu that draws other depth and resume.
+choose immediately among confirmed sources without paired comparisons, by the content score
+(completeness, histogram breadth and resolution). Present coverage can only set a source aside,
+never lift one. Its record does not depend on an incumbent: on each depth-active Present, an
+active candidate whose set had no current-copy work while a confirmed source's set drew is
+marked. A source marked since its oldest retained positive capture is passed over while an
+unmarked confirmed source of the same or a higher completeness class is active. A source drawn
+on only some Presents therefore does not take over from one drawn on every Present when, for
+example, both pause for a menu that draws other depth and resume. A marked source of a higher
+class than every unmarked one keeps its place in the score order, so materially fuller depth
+drawn on only some Presents still outranks less complete depth drawn on every Present. The class
+decides nothing else here: without marks, native depth one class below a lower-resolution source
+(.79 against .81 complete, across a class boundary) but ahead on the score is chosen, as an
+initial pick always chose it, so a difference within sampling noise never halves the depth
+resolution. The pick does not depend on the candidates' lifetime order. After it, the challenger
+rules above apply as to any anchor.
 
 At startup, or while the preferred source has less than full output-resolution coverage,
 general discovery gives active output-matching candidates earlier sampling opportunities.

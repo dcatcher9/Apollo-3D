@@ -1337,8 +1337,9 @@ namespace {
     pause.run(1200);
     require(pause.current == 1 && pause.flat == 0, "recovery picked depth drawn on only some Presents, leaving resumed Presents flat");
 
-    // (13) Completeness class still ranks first in recovery: materially fuller
-    // depth drawn every other Present beats less complete every-Present depth.
+    // (13) Materially fuller depth drawn every other Present still beats less
+    // complete every-Present depth in recovery: Present coverage passes over a
+    // source with gaps only for an unmarked one of the same or a higher class.
     auto partial = useful;
     partial.completeness = .5f;
     present_run fuller;
@@ -1348,7 +1349,48 @@ namespace {
     require(fuller.current == 2, "fuller depth must win before the pause");
     fuller.run(412);
     require(fuller.current == 2, "recovery put Present coverage above the completeness class");
-    std::puts("PASS recovery: every-Present depth wins within a completeness class; the class still ranks first");
+
+    // (14) Without coverage gaps the completeness class decides nothing in
+    // recovery: native depth .79 complete (class 4) and half-resolution depth
+    // .81 complete (class 5), both drawn on every Present, are ranked by the
+    // content score as an initial pick always was, so a .02 difference within
+    // sampling noise never halves the depth resolution. Whichever source
+    // anchors first (lifetime order), recovery after a pause picks native.
+    auto native_quality = useful, half_quality = useful;
+    native_quality.completeness = .79f;
+    half_quality.completeness = .81f;
+    for (const bool native_first : {true, false}) {
+      const std::uint64_t native_id = native_first ? 1 : 2, half_id = native_first ? 2 : 1;
+      present_run boundary;
+      boundary.sources = {{native_id, 1280, 720, native_quality, 1, 0, 0, 0, 399}, {half_id, 640, 360, half_quality, 1, 0, 0, 0, 399},
+                          {native_id, 1280, 720, native_quality, 1, 0, 0, 410}, {half_id, 640, 360, half_quality, 1, 0, 0, 410}};
+      boundary.run(400);
+      boundary.run(1200);
+      require(boundary.current == native_id, "recovery without coverage gaps let the completeness class override the content score");
+    }
+
+    // (15) One order for every lifetime assignment. Native depth drawn on
+    // every other Present (.81, class 5, gapped) is passed over: an unmarked
+    // source of its class (half resolution, .81, class 5) drew on every
+    // Present. The score then ranks the rest: native every-Present depth (.79)
+    // ahead of the half-resolution source. A pairwise rule that let the class
+    // decide only between differing marks would cycle here (gapped native over
+    // the lower class, which beats half resolution on the score, which beats
+    // the gapped source on coverage) and pick by lifetime order.
+    const std::array<std::array<std::uint64_t, 3>, 6> orders {{{1, 2, 3}, {1, 3, 2}, {2, 1, 3}, {2, 3, 1}, {3, 1, 2}, {3, 2, 1}}};
+    for (const auto &ids : orders) {
+      const std::uint64_t gapped_native = ids[0], native_id = ids[1], half_id = ids[2];
+      present_run three;
+      three.sources = {{gapped_native, 1280, 720, half_quality, 2, 0, 0, 0, 399}, {native_id, 1280, 720, native_quality, 1, 0, 0, 0, 399},
+                       {half_id, 640, 360, half_quality, 1, 0, 0, 0, 399},
+                       {gapped_native, 1280, 720, half_quality, 2, 0, 0, 410}, {native_id, 1280, 720, native_quality, 1, 0, 0, 410},
+                       {half_id, 640, 360, half_quality, 1, 0, 0, 410}};
+      three.run(400);
+      three.run(411);
+      require(three.current == native_id, "recovery depended on lifetime order or ranked a source with coverage gaps over its class");
+    }
+    std::puts("PASS recovery: every-Present depth wins within a completeness class; fuller depth with gaps still wins across classes; "
+              "without coverage gaps the content score ranks, in one order");
   }
 }  // namespace
 

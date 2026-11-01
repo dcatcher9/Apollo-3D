@@ -109,7 +109,9 @@ float ps(float4 position : SV_Position) : SV_Depth {
   // Their allocations, workloads and depth convention deliberately match.
   if (pattern == 4 && (uv.x < 0.35 || uv.x > 0.65 || uv.y < 0.1 || uv.y > 0.9)) return 0;
   if (pattern == 5 && uv.y < 0.35) return 0;
-  if (pattern == 4 || pattern == 5) return 0.01 + 0.02 * uv.x + 0.015 * uv.y;
+  // Less sky: one completeness class above pattern 5.
+  if (pattern == 20 && uv.y < 0.25) return 0;
+  if (pattern == 4 || pattern == 5 || pattern == 20) return 0.01 + 0.02 * uv.x + 0.015 * uv.y;
   if (pattern == 1) return 0.01 + 0.02 * uv.x + 0.015 * uv.y;
   if (pattern == 3) return 0.04 + 0.008 * uv.x + 0.004 * uv.y;
   // Same camera convention and coverage, but more populated distance ranges.
@@ -302,7 +304,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
         if (pattern == 9) raw = .01f + .02f * (1 - u) + .015f * v;
         // Patterns 7/8 use normal-Z with Depth_Map=0; the same projection of
         // their complementary raw depth supplies an independent pixel oracle.
-        if ((pattern == 4 && (u < .35f || u > .65f || v < .1f || v > .9f)) || (pattern == 5 && v < .35f)) raw = 0;
+        if ((pattern == 4 && (u < .35f || u > .65f || v < .1f || v > .9f)) || (pattern == 5 && v < .35f) || (pattern == 20 && v < .25f)) raw = 0;
         const float expected = 1.f / (1.f + 319.f * raw);
         if (std::abs(depth - expected) > .002f) return false;
         low = std::min(low, depth); high = std::max(high, depth);
@@ -372,6 +374,42 @@ float ps(float4 position : SV_Position) : SV_Depth {
         require(selected.Width == scene->width && selected.Height == scene->height, "Sky made native foreground depth replace the fuller scaled scene");
       }
       require(varied_linear_depth(5), "Scaled sky scene lost its shader-visible background depth");
+    }
+
+    // Recovery ranks confirmed sources by the content score; the completeness
+    // class decides only between Present coverage marks (docs/reshade-sbs.md,
+    // Selecting scene depth). A quarter-resolution scene with little sky
+    // (pattern 20, about .83 complete: class 5) is the anchor. Native depth of
+    // the same camera with more sky (pattern 5, about .66: class 4) is ahead on
+    // the score (resolution) but one class lower, so it cannot challenge the
+    // anchor. Both pause for a menu that draws only flat depth, then resume,
+    // drawn on every Present: recovery must pick the native source, as it did
+    // before Present coverage entered recovery, not the higher class.
+    void check_recovery_class_boundary() {
+      scene = target(width / 4, height / 4, 1, 20);
+      decoy = target(width, height, 1, 0);
+      shadow.reset();
+      wait_for_scene("quarter-resolution scene, completeness class 5", scene->width, scene->height, 20);
+      decoy = target(width, height, 1, 5);
+      const auto qualify_until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+      while (std::chrono::steady_clock::now() < qualify_until) {
+        step();
+        const auto selected = selected_description();
+        require(selected.Width == scene->width && selected.Height == scene->height,
+          "Native depth one completeness class lower challenged the quarter-resolution anchor");
+      }
+      auto menu = target(width, height, 1, 0);
+      const auto tracked = render_tracked_depth;
+      render_tracked_depth = [&] { draw(*menu); };
+      for (unsigned present = 0; present != 12; ++present) step();
+      render_tracked_depth = tracked;
+      wait_for_scene("recovery after a pause picks native depth ahead on the score across a class boundary", width, height, 5);
+      const auto stable_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (std::chrono::steady_clock::now() < stable_until) {
+        step();
+        require(selected_description().Width == width, "The quarter-resolution scene reclaimed the recovered native source");
+      }
+      std::puts("PASS recovery across a completeness class boundary: the content score ranks sources without Present-coverage gaps");
     }
 
     void check_histogram_breadth() {
@@ -566,7 +604,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       wait_for_scene("half-resolution DLSS-like input", scene->width, scene->height);
       if (!only.empty()) {
         if (only == "--viewport-only") check_multiple_viewports();
-        else if (only == "--coverage-only") check_scene_completeness();
+        else if (only == "--coverage-only") { check_scene_completeness(); check_recovery_class_boundary(); }
         else if (only == "--reload-only") check_reload_interleaved();
         else check_histogram_breadth();
         render_tracked_depth = {};
