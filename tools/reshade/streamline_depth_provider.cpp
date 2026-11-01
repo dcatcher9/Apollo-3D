@@ -90,12 +90,16 @@ namespace sunshine_streamline::provider {
       std::uint32_t display_width{}, display_height{}, display_format{}, display_view_format{};
       // Display storage per shape/format (NGX and Streamline usually differ),
       // so a provider flip reuses the other entry instead of reallocating
-      // (until that entry is unused for 2 s: display_used, below).
+      // (until that entry is unused for 2 s: used, below).
       // The active entry is mirrored in display_texture/display_view above.
       struct display_entry {
         api::resource texture{};
         api::resource_view view{};
         std::uint32_t width{}, height{}, format{}, view_format{};
+        // The tick of the last Present at which it was the active display or
+        // the effects' binding (collect_displays retires an entry unused for
+        // display_idle_ms).
+        std::uint64_t used{};
       };
       std::array<display_entry, 2> displays{};
       // The view last passed to update_texture_bindings by this provider.
@@ -140,10 +144,6 @@ namespace sunshine_streamline::provider {
       std::uint64_t next_trace_episode{}, trace_loss_tick{}, suppressed_trace_episodes{};
       observation_loss_episode trace_observation_loss;
       render_size_state render_size;
-      // Per displays entry: the tick of the last Present at which it was the
-      // active display or the effects' binding (collect_displays retires an
-      // entry unused for display_idle_ms).
-      std::array<std::uint64_t, 2> display_used{};
     };
 }
 #if defined(__MINGW32__)

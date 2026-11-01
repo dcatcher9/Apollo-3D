@@ -123,11 +123,10 @@
     // is (fenced on a later Present, released off the present thread). The
     // effects' binding is never retired here, so no binding changes.
     void expire_idle_displays(state &data, std::uint64_t present, std::uint64_t now) {
-      for (std::size_t i = 0; i != data.displays.size(); ++i) {
-        auto &entry = data.displays[i];
+      for (auto &entry : data.displays) {
         if (!entry.texture.handle) continue;
-        if (entry.texture == data.display_texture || entry.view == data.effects_view) data.display_used[i] = now;
-        else if (now - data.display_used[i] >= display_idle_ms) retire_display(data, entry, present);
+        if (entry.texture == data.display_texture || entry.view == data.effects_view) entry.used = now;
+        else if (now - entry.used >= display_idle_ms) retire_display(data, entry, present);
       }
     }
 
@@ -186,9 +185,9 @@
       // never allocates a texture or changes descriptors. A provider flip
       // (NGX and Streamline usually differ in shape or format) switches to the
       // other retained entry; the cache never reuses the other entry's pixels.
-      for (const auto &entry : data.displays) if (matches(entry)) {
+      for (auto &entry : data.displays) if (matches(entry)) {
         activate_display(data, entry);
-        data.display_used[&entry - data.displays.data()] = GetTickCount64();
+        entry.used = GetTickCount64();
         data.cache.invalidate("display_switched");
         return display_status::ready;
       }
@@ -223,7 +222,7 @@
       created.view_format = packet.srv_format;
       *victim = created;
       activate_display(data, created);
-      data.display_used[victim - data.displays.data()] = GetTickCount64();
+      victim->used = GetTickCount64();
       return display_status::ready;
     }
   }
