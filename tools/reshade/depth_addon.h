@@ -21,7 +21,6 @@ namespace sunshine_depth {
   bool initialize(HMODULE addon_module);
   void shutdown();
   bool active();
-  const char *status_message();
 
   // Native presentation owns the same capture lease without requiring an FX
   // technique. Enabled native rendering suppresses duplicate effects callbacks.
@@ -92,10 +91,6 @@ namespace sunshine_depth {
   // Exporter-owned opt-in basis. Call each begin_effects; disabled releases only
   // this raw-scene request, preserving legacy selector/calibration sampling.
   void set_raw_scene_request(reshade::api::effect_runtime *runtime, std::uint64_t basis_epoch, bool enabled);
-  // Value copy of a completed, submission-bound selected-source readback. No
-  // camera projection or final-color registration proof is implied. Repeated
-  // reads retain the same sample ID; the policy rejects duplicate observations.
-  bool get_latest_raw_sample(reshade::api::effect_runtime *runtime, sunshine_raw_scene::sample &output);
   // Completed immutable CPU evidence, independent of current rendering. Each
   // sample keeps its own source/basis/layout/runtime and authenticated readback.
   std::size_t get_raw_samples(reshade::api::effect_runtime *runtime,

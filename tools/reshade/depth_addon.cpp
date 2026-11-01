@@ -1459,11 +1459,6 @@ bool sunshine_depth::active()
 	return s_registered;
 }
 
-const char *sunshine_depth::status_message()
-{
-	return s_status_message;
-}
-
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
 // The test add-on's exports (test_depth_addon_exports.cpp) use these with
 // both the recorded and the snapshot resource rows.

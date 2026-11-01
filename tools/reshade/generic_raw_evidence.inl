@@ -68,21 +68,6 @@ std::size_t sunshine_depth::get_raw_samples(effect_runtime *runtime,
 	return count;
 }
 
-bool sunshine_depth::get_latest_raw_sample(effect_runtime *runtime, sunshine_raw_scene::sample &output)
-{
-	output = {};
-	if (!s_registered || runtime == nullptr) return false;
-	const auto *data = runtime->get_private_data<generic_depth_data>();
-	if (!data || !data->native_access_open || !data->capture_ready) return false;
-	std::array<sunshine_raw_scene::sample, sunshine_raw_scene::maximum_sources> samples;
-	const auto count = get_raw_samples(runtime, samples);
-	for (std::size_t i = 0; i != count; ++i)
-		if (samples[i].metadata.source.lifetime == data->selected_identity &&
-			samples[i].metadata.source.native == data->selected_depth_stencil.handle)
-		{ output = samples[i]; return true; }
-	return false;
-}
-
 bool sunshine_depth::get_raw_source_roster(effect_runtime *runtime, raw_source_roster &output)
 {
 	output = {};
