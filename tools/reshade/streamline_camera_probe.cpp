@@ -433,7 +433,7 @@ namespace sunshine_streamline {
     // read keeps an existing publication's FG ownership.
     // disabled (optional): the viewport's FG options were observed off in
     // this epoch (a known mode 0 under the current options revision).
-    enum class fg_route { none, owned, silent };
+    using fg_route = presentation_scope::fg_route;
     // Defined in sl_nomination.inl.
     fg_route frame_generation_route(std::uint32_t viewport, bool *disabled = nullptr);
     bool source_path_selected(const evaluation_snapshot &snapshot);

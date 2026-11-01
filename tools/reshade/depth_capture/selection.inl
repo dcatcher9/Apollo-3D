@@ -302,7 +302,7 @@ namespace sunshine_streamline::depth_capture {
     // snapshots completed: FG On's first frames, or DLSS-G's compute copy
     // still in flight at its own Present in a GPU-bound game. The viewport's
     // ordinary SR/RR source of the same epoch is one display lineage with it
-    // (depth_cache_update.h, lineage_successor), and its newest snapshot that
+    // (depth_hold.h, lineage_successor), and its newest snapshot that
     // this queue can read now and has not consumed (the queue's watermark,
     // shared by the viewport's sources) stands in, within the source age: at
     // FG On that is the frame's own SR copy. Until 10-27 only the display's
@@ -841,7 +841,7 @@ namespace sunshine_streamline::depth_capture {
     // pending, repeated and missing frames do not (interrupts_admission).
     if (interrupts_admission(*owner, chosen)) owner->admission_after = serial.load(std::memory_order_relaxed);
     // The display may hold the newest evaluated frame's own copy at this
-    // Present, whatever its age (depth_cache_update.h, own_frame).
+    // Present, whatever its age (depth_hold.h, own_frame).
     decision.presenting_floor = frame_presenting(scope.newest_evaluation_present) ? scope.newest_evaluation_present : 0;
     // A head refused before its capture existed names its sequence too, so a
     // missing frame's stand-in reads as sequence < newest_sequence.

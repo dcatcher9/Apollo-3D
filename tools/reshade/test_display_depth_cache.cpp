@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "depth_hold.h"
-#include "depth_cache_update.h"
 #include "provided_raw_scene.h"
 
 #include <array>

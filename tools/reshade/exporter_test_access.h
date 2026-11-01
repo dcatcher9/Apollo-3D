@@ -16,6 +16,7 @@
 #include "provided_raw_scene.h"
 #include "automatic_scene_transition.h"
 #include "game3d_controls.h"
+#include "presentation_scope.h"
 #include "game3d_display_scale.h"
 #include "game3d_renderer.h"
 #include "game3d_depth_input.h"

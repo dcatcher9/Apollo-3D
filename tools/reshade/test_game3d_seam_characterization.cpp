@@ -19,7 +19,7 @@
 #ifndef SUNSHINE_STREAMLINE_PROBE_TEST
   #error "Built only into the Streamline probe tests' view of the production sources"
 #endif
-#include "depth_cache_update.h"
+#include "depth_hold.h"
 #include "freshness.h"
 #include "game3d_ui_input_provider.h"
 #include "game3d_ui_mask.h"

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_controls_model.h"
+#include "presentation_scope.h"
 
 #include <cstdio>
 #include <functional>

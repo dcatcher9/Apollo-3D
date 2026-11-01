@@ -9,7 +9,7 @@
 // a class outside the contract. Only the TEST add-on records refusals, for
 // SunshineDepthTestLastRefusal; the production add-on records and exports
 // nothing, and no decision reads a class.
-#include "frame_generation_inputs.h"
+#include "presentation_scope.h"
 #include "streamline_depth_capture.h"
 
 #include <cstdint>
@@ -197,7 +197,7 @@ namespace sunshine_depth_refusal {
     return reason_class::unclassified;
   }
 
-  // DLSS-G's DLSSG.Depth outcome (frame_generation_inputs.h); a capture
+  // DLSS-G's DLSSG.Depth outcome (presentation_scope.h); a capture
   // refusal is classified by its stage.
   constexpr reason_class classify(sunshine_streamline::frame_generation::depth_outcome outcome, sunshine_streamline::depth_capture::record_stage stage) {
     using sunshine_streamline::frame_generation::depth_outcome;

@@ -5,9 +5,22 @@
 #include "game3d_ui_mask.h"
 #include "scene_depth_source.h"
 #include "streamline_depth_capture.h"
+#include "game3d_controls.h"
 
 #include <array>
 #include <cstdint>
+
+// presentation_scope (docs/reshade-sbs.md, Presentation scope): the FG policy
+// and value types and their pure predicates, each under its own name. Their
+// instances stay with their consumers (the provider's source_policy, the
+// exporter runtime's source_alpha_policy). The busy variants stay distinct and
+// are not unified: the provider's busy read before any confirmation requires
+// FG (selection_policy{true}); the SL route keeps an existing publication
+// owned; nested capture does not treat busy metadata as ownership; NGX copies;
+// the UI policy keeps its last known mode until an observed change or an
+// inactive observer; present_deferred treats missing metadata as generating.
+// The SL adapter bodies that read live state stay in sl_nomination.inl and
+// sl_frame_generation.inl.
 
 // DLSS-G's own inputs of one real frame, read from its NGX evaluation
 // (feature 11, NVSDK_NGX_Feature_FrameGeneration) by ngx_depth_source.cpp and
@@ -255,5 +268,146 @@ namespace sunshine_streamline::frame_generation {
         count != deferral.at_tag && present && present == ordinal;
       return !evaluated_since;
     }
+  };
+}
+
+namespace sunshine_streamline {
+  struct frame_generation_snapshot {
+    std::uint64_t epoch{}, sequence{}, tick{}, loss_revision{};
+    std::uint32_t viewport{}, mode{}, generated_frames{};
+    bool known{}, enabled{}, automatic{};
+    // Enabled: the tick of the options call that turned FG on in this epoch,
+    // kept while later calls leave it on (depth_capture::frame_generation_scope_live).
+    std::uint64_t enabled_tick{};
+  };
+  // Successful, version-checked game options only. Enabled means requested by
+  // the game; it does not identify any particular real/generated presentation.
+  enum class frame_generation_query_status { unavailable, busy, ambiguous, observed };
+}
+
+namespace sunshine_streamline::presentation_scope {
+  enum class fg_route { none, owned, silent };
+}
+
+namespace sunshine_streamline::provider {
+  // Busy queries retain a confirmed source choice, not stale pixel readiness.
+  // Observation loss revokes FG scope while independent ordinary depth remains
+  // eligible. This does not turn a failed Off request into confirmed Off.
+  struct frame_generation_policy {
+    depth_capture::selection_policy update(frame_generation_query_status status,
+        const frame_generation_snapshot &value) {
+      if (status == frame_generation_query_status::observed) {
+        selected_ = value.enabled ? depth_capture::selection_policy{true, value.epoch, value.viewport, false, value.enabled_tick} :
+          depth_capture::selection_policy{};
+        generated_frames_ = value.enabled ? value.generated_frames : 0;
+        confirmed_ = true;
+      } else if (status == frame_generation_query_status::busy) {
+        return confirmed_ || selected_.exclude_unconfirmed_fg ? selected_ : depth_capture::selection_policy{true};
+      } else if (status == frame_generation_query_status::ambiguous || selected_.require_frame_generation) {
+        selected_ = {};
+        selected_.exclude_unconfirmed_fg = true;
+        generated_frames_ = 0;
+        confirmed_ = false;
+      }
+      return selected_;
+    }
+    std::uint32_t generated_frames() const { return generated_frames_; }
+  private:
+    depth_capture::selection_policy selected_;
+    std::uint32_t generated_frames_{};
+    bool confirmed_{};
+  };
+  // Enabled FG owns its viewport's depth only while its scope is live
+  // (depth_capture::frame_generation_scope_live). A silent scope selects as
+  // without FG for this acquisition, so that viewport's ordinary SR/RR depth
+  // may supply depth once FG's own newest copy can no longer be held
+  // (depth_capture::frame_generation_holds), and the next accepted FG copy
+  // takes ownership back.
+  // Any other policy selects as it is.
+  struct frame_generation_selection {
+    depth_capture::selection_policy selection;
+    bool silent{};
+  };
+  inline frame_generation_selection select_frame_generation_scope(const depth_capture::selection_policy &policy) {
+    const bool silent = policy.require_frame_generation &&
+      !depth_capture::frame_generation_scope_live(policy.epoch, policy.viewport, policy.enabled_tick);
+    return {silent ? depth_capture::selection_policy{} : policy, silent};
+  }
+}
+
+namespace sunshine_game3d::depth_output {
+  // A retained Streamline FG copy younger than the source age: what
+  // frame_generation_holds and frame_generation_retained keep.
+  inline bool frame_generation_copy(const retained_depth &previous, std::uint64_t now) {
+    const auto &before = previous.metadata;
+    return previous.capture_id && before.frame_generation_input &&
+      before.provider == sunshine_scene_depth::provider_kind::streamline &&
+      sunshine_freshness::within_source_age(before.tick, now);
+  }
+}
+
+namespace sunshine_streamline::depth_capture {
+  // FG keeps its viewport while it can supply. An enabled FG scope that is
+  // silent at this Present (its newest frame had no FG copy) lets the same
+  // viewport's ordinary SR/RR depth stand in only once its own newest copy
+  // can no longer be held: while the display holds a copy of that scope made
+  // since FG On (policy.enabled_tick), younger than the source age, that copy
+  // is held over a fresh or pending ordinary candidate. A frame without an FG
+  // copy is then held as any missing frame of a source is, instead of
+  // switching the viewport's source (which restarts the placement
+  // calibration) to SR and back. policy: the confirmed FG policy, not the
+  // silent scope's selection.
+  inline bool frame_generation_holds(const sunshine_game3d::depth_output::retained_depth &previous, selection_policy policy, std::uint64_t now) {
+    const auto &before = previous.metadata;
+    return policy.require_frame_generation && policy.epoch && sunshine_game3d::depth_output::frame_generation_copy(previous, now) &&
+      before.epoch == policy.epoch && before.viewport == policy.viewport && before.tick >= policy.enabled_tick;
+  }
+
+  // FG Off retires the FG source, which releases its queue's API association
+  // (retire_source), while the display may still hold that scope's newest
+  // copy. Within the source age it is held as any source's missing frame is:
+  // while the display holds an FG copy younger than the source age and FG is
+  // not revoked (an unconfirmed scope refuses its copies), the queue stays
+  // the API's, so decide_display holds the copy until it expires, a readable
+  // frame of another source replaces it or a source outside its lineage
+  // drops it. Only then may the queue hand over to Generic. The successor's
+  // copies recorded since the shown FG copy stay admissible at FG Off
+  // (retire_source retires only the FG role), so the first of them readable
+  // replaces the held copy at once.
+  inline bool frame_generation_retained(const sunshine_game3d::depth_output::retained_depth &previous, selection_policy policy, std::uint64_t now) {
+    return !policy.exclude_unconfirmed_fg && sunshine_game3d::depth_output::frame_generation_copy(previous, now);
+  }
+}
+
+namespace sunshine_ngx {
+  // Whether confirmed Streamline FG owns depth, so that an NGX evaluation
+  // records no copy: FG options observed enabled (the probe's
+  // frame_generation_snapshot: enabled, epoch, viewport, enabled_tick) whose
+  // scope is live (depth_capture::frame_generation_scope_live). Selection
+  // never considers NGX while FG is required, and FG Off raises the admission
+  // watermark past every snapshot taken meanwhile, so a copy would have no
+  // consumer. FG Off, a busy or ambiguous FG read, which observes no options
+  // (nested NGX's rule, owns_nested_depth_capture), and a silent scope, which
+  // owns nothing, copy.
+  inline bool frame_generation_owns_depth(bool enabled, std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
+    return enabled && sunshine_streamline::depth_capture::frame_generation_scope_live(epoch, viewport, enabled_tick);
+  }
+}
+
+namespace sunshine_game3d {
+  struct source_alpha_ui_policy {
+    source_alpha_ui_decision update(bool requested, frame_generation_mode observed, bool observer_active) {
+      // Contention or ambiguous/lost observations cannot turn a known FG mode
+      // off. Only an observed mode change or genuine observer/runtime shutdown
+      // clears it.
+      if (!observer_active) mode = {};
+      else if (observed.known) mode = observed;
+      source_alpha_ui_decision result;
+      result.requested = requested;
+      result.fg = mode;
+      return result;
+    }
+  private:
+    frame_generation_mode mode;
   };
 }

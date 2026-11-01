@@ -81,7 +81,7 @@ namespace sunshine_streamline::depth_capture {
     // FG Off (slDLSSGSetOptions mode=0, or an options call that failed)
     // retires only the FG role of its viewport's display lineage: the
     // viewport's SR/RR copies of the same epoch are the lineage's successor
-    // (depth_cache_update.h, lineage_successor), and nothing else of it is
+    // (depth_hold.h, lineage_successor), and nothing else of it is
     // revoked. Its owner keeps its last selected copy (present_capture) as
     // the admission floor, the handover floor of establish_provider, so no
     // copy published before the one it showed returns, and keeps its

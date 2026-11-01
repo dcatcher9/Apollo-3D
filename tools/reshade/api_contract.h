@@ -219,7 +219,7 @@ namespace sunshine_api_contract {
     // observed on the evaluation's own recording proves it, for the
     // evaluation.
     inline constexpr contract observed_input{UINT32_MAX, state_proof::observed_nonzero, lifetime::until_evaluation};
-    // DLSS-G's own inputs (frame_generation_inputs.h): no API states their
+    // DLSS-G's own inputs (presentation_scope.h): no API states their
     // state at this call (observed_input).
     inline constexpr const contract &frame_generation_input = observed_input;
     // A Depth input by its evaluation's feature: Super Resolution's SDK

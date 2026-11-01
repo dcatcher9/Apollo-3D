@@ -5,7 +5,7 @@ extern "C" {
   BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID);
   __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade);
 }
-#include "depth_cache_update.h"
+#include "depth_hold.h"
 #include "streamline_depth_provider.h"
 #include "game3d_frame_record.h"
 

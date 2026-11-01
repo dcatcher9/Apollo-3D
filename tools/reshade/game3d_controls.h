@@ -153,21 +153,6 @@ namespace sunshine_game3d {
     if (!value.rendered) return previous;
     return value.coverage.enabled || value.coverage.state == alpha_auto_state::automatic_off ? 0 : previous;
   }
-  struct source_alpha_ui_policy {
-    source_alpha_ui_decision update(bool requested, frame_generation_mode observed, bool observer_active) {
-      // Contention or ambiguous/lost observations cannot turn a known FG mode
-      // off. Only an observed mode change or genuine observer/runtime shutdown
-      // clears it.
-      if (!observer_active) mode = {};
-      else if (observed.known) mode = observed;
-      source_alpha_ui_decision result;
-      result.requested = requested;
-      result.fg = mode;
-      return result;
-    }
-  private:
-    frame_generation_mode mode;
-  };
 
   // The same frozen presentation decision consumed by rendering and Dump 3D.
   source_alpha_ui_decision query_source_alpha_ui(reshade::api::effect_runtime *runtime);

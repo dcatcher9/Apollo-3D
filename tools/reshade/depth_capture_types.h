@@ -37,7 +37,7 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t present_queue{};
     // A nomination whose copy is refused is no nomination: no metadata-only
     // ticket is published, so the source's latest observation is unchanged.
-    // DLSS-G's own evaluation (frame_generation_inputs.h) supplies FG depth
+    // DLSS-G's own evaluation (presentation_scope.h) supplies FG depth
     // only through recorded copies; a refusal must change nothing.
     bool pixels_required{};
   };
@@ -93,5 +93,21 @@ namespace sunshine_streamline::depth_capture {
     // presents that frame (frame_presenting), else 0: a retained copy of
     // that frame or a later one is its own depth here (decide_display).
     std::uint64_t presenting_floor{};
+  };
+}
+
+namespace sunshine_game3d::depth_output {
+  // Description of the last successful private display copy. It retains no
+  // game-resource lease, capture-pool allocation, or independently aged copy.
+  // format is the copy's storage family, view_format the view it is read
+  // through (packet::format and packet::srv_format).
+  struct retained_depth {
+    sunshine_scene_depth::frame metadata;
+    std::uint64_t capture_id{}, real_present{};
+    std::uint32_t width{}, height{}, format{}, view_format{};
+    sunshine_scene_depth::extent area;
+    // The present ordinal of the frame the copy is (packet::present),
+    // compared with acquisition_decision::presenting_floor.
+    std::uint64_t present_stamp{};
   };
 }

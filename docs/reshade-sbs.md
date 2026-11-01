@@ -6023,6 +6023,23 @@ identical FP32 behavior near the far plane. A screen-plane reference cannot comp
 change of camera encoding. Validated camera metadata supports continuity across known projection
 changes; without that metadata the raw fallback cannot establish physical equivalence.
 
+### Presentation scope
+
+`presentation_scope.h` owns the existing FG policy and value declarations and
+their pure predicates, including DLSS-G's frame inputs. Policy layouts and
+consumer instances stay unchanged: the provider keeps `source_policy`, and each
+exporter runtime keeps `source_alpha_policy`. The SL route and nested-capture
+adapter bodies and the deferred-frame observations stay at their original sites,
+because they read live Streamline state; the header merges no state and no live
+read.
+
+The busy and unknown FG reads keep six distinct rules, side by side and never
+unified: the provider's busy read before any confirmed mode requires FG
+(`selection_policy{true}`); the SL route keeps an existing publication owned;
+nested capture does not treat busy metadata as ownership; NGX copies; the UI
+policy keeps its last known mode until an observed change or an inactive
+observer; and `present_deferred` treats missing metadata as still generating.
+
 ### Depth output
 
 #### depth_output
@@ -6049,12 +6066,12 @@ call sites. The record retains no resource ownership or independent lifetime.
 
 #### depth_hold
 
-`depth_hold.h` owns the pure API display decision and private display-copy value,
+`depth_hold.h` owns the pure API display decision and the private display copy,
 plus Generic's pure hold gate and value/age check. API lineage and storage validity
 remain distinct from Generic content serial, anchor and resource-map validity;
 the latter's resource-map and view checks stay in `generic_capture.inl`.
-`depth_cache_update.h` retains the Streamline FG scope predicates until the
-presentation-scope move. Capture types come from `depth_capture_types.h`.
+Capture and retained-depth value declarations come from `depth_capture_types.h`;
+the Streamline FG scope predicates are in `presentation_scope.h`.
 
 #### depth_display
 

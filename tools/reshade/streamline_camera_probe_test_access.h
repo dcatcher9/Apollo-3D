@@ -14,7 +14,7 @@
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
 #define SUNSHINE_PROBE_INTERNAL inline namespace probe_test_access
 #include "depth_refusal.h"
-#include "frame_generation_inputs.h"
+#include "presentation_scope.h"
 #include <cstdint>
 
 namespace sunshine_streamline {

@@ -3,7 +3,6 @@
 #include "streamline_depth_provider_log.h"
 #include "streamline_camera_probe.h"
 #include "depth_hold.h"
-#include "depth_cache_update.h"
 #include "game3d_frame_record.h"
 #include "streamline_depth_capture.h"
 #include "streamline_native_observer.h"

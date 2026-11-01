@@ -6,6 +6,7 @@
 // The capture API header remains a transitive dependency through depth_addon.h
 // and streamline_camera_probe.h; this move does not widen the include cut.
 #include "depth_capture_types.h"
+#include "presentation_scope.h"
 #include "depth_addon.h"
 #include "depth_capture_policy.h"
 #include "freshness.h"
@@ -19,19 +20,6 @@ namespace sunshine_game3d::depth_output {
   using sunshine_streamline::depth_capture::selection_policy;
   enum class display_action { copy_fresh, hold, invalidate };
 
-  // Description of the last successful private display copy. It retains no
-  // game-resource lease, capture-pool allocation, or independently aged copy.
-  // format is the copy's storage family, view_format the view it is read
-  // through (packet::format and packet::srv_format).
-  struct retained_depth {
-    sunshine_scene_depth::frame metadata;
-    std::uint64_t capture_id{}, real_present{};
-    std::uint32_t width{}, height{}, format{}, view_format{};
-    sunshine_scene_depth::extent area;
-    // The present ordinal of the frame the copy is (packet::present),
-    // compared with acquisition_decision::presenting_floor.
-    std::uint64_t present_stamp{};
-  };
   struct display_decision {
     display_action action{display_action::invalidate};
     const char *reason{"no_retained_depth"};
@@ -83,15 +71,6 @@ namespace sunshine_game3d::depth_output {
       return streamline_lineage(before, current.epoch, current.viewport) && current.provider == before.provider &&
         fg != before.frame_generation_input;
     }
-  }
-
-  // A retained Streamline FG copy younger than the source age: what
-  // frame_generation_holds and frame_generation_retained keep.
-  inline bool frame_generation_copy(const retained_depth &previous, std::uint64_t now) {
-    const auto &before = previous.metadata;
-    return previous.capture_id && before.frame_generation_input &&
-      before.provider == sunshine_scene_depth::provider_kind::streamline &&
-      sunshine_freshness::within_source_age(before.tick, now);
   }
 
   namespace detail {

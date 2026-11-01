@@ -1596,7 +1596,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 
 #### Presentation scope
 
-- [`frame_generation_inputs.h`](frame_generation_inputs.h): DLSS-G's own inputs of one real frame, read from its NGX evaluation and supplied to the viewport's Streamline FG scope. Docs: [Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection).
+- [`presentation_scope.h`](presentation_scope.h): FG policy/value declarations and existing pure predicates, including DLSS-G frame inputs; consumer state and live adapter reads remain at their call sites. Docs: [Presentation scope](../../docs/reshade-sbs.md#presentation-scope).
 
 #### Depth capture
 
@@ -1610,7 +1610,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 - [`depth_view_format.h`](depth_view_format.h): the one rule for how an API depth input is stored and read. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`native_command_storage.h`](native_command_storage.h), [`native_resource_identity.h`](native_resource_identity.h): recording identity per command list and object identity cookies shared by the API adapters and ReShade preservation. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`game3d_capture_diagnostic.h`](game3d_capture_diagnostic.h): a bounded copy of one native record attempt for diagnostics. Docs: [Dump 3D diagnostics](../../docs/reshade-sbs.md#dump-3d-diagnostics).
-- [`depth_capture_types.h`](depth_capture_types.h): capture input, packet, selection policy and acquisition authority types, shared by output and hold owners without the capture API. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`depth_capture_types.h`](depth_capture_types.h): capture input, packet, selection policy, acquisition authority and retained-depth value types, shared by output and hold owners without the capture API. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`depth_capture/observation.inl`](depth_capture/observation.inl): part of `streamline_depth_capture.cpp` (end of the shell): command-list and recording identity, per-recording source states and barriers, the Reset/Close/render-pass lifecycle, the executed-list state proof, ReShade's list and runtime-list events, Present observation, and the depth-texture lifecycle. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`depth_capture/queues.inl`](depth_capture/queues.inl): part of `streamline_depth_capture.cpp` (end of the shell): queue places and their reclaiming, producer and consumer submissions and their fences, whether another queue may read a copy and which queue reads depth, copy-out on the producer queue, the submission hook, retired queues and each queue's newest game execution. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`depth_capture/queue_order_consumer.inl`](depth_capture/queue_order_consumer.inl): part of `streamline_depth_capture.cpp` (end of the shell): the capture owner's only reader of Step 4 queue-order verdicts (whether another queue may read a copy before its producer fence completed, the producer positions, reliance on an ordered read, the late-conflict query and the queue order line); removed with its call sites when Step 4 is deleted. Docs: [Queue order](../../docs/reshade-sbs.md#queue-order).
@@ -1658,7 +1658,6 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 - [`provider_report_present.inl`](provider_report_present.inl): the exact-position per-Present status publication. Docs: [depth_display](../../docs/reshade-sbs.md#depth_display).
 - [`streamline_depth_provider_log.h`](streamline_depth_provider_log.h): the provider's status lines, rendered from gathered values. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 - [`scene_depth_source.h`](scene_depth_source.h): the small value snapshot a provider adapter emits after validating its own evidence. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
-- [`depth_cache_update.h`](depth_cache_update.h): retained Streamline frame-generation scope predicates. Docs: [depth_hold](../../docs/reshade-sbs.md#depth_hold).
 - [`depth_ready_uniform_cache.h`](depth_ready_uniform_cache.h): the per-runtime readiness uniform both API and Generic depth publish through. Docs: [Native renderer ownership](../../docs/reshade-sbs.md#native-renderer-ownership).
 
 #### Generic depth

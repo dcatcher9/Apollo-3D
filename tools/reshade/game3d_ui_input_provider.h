@@ -2,6 +2,7 @@
 #pragma once
 
 #include "game3d_controls.h"
+#include "presentation_scope.h"
 #include "game3d_renderer.h"
 #include "game3d_ui_qualification.h"
 #include <optional>

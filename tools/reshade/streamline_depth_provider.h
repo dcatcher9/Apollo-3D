@@ -6,7 +6,7 @@
 #include "depth_moments.h"
 #include "game3d_depth_input.h"
 #include "streamline_depth_capture.h"
-#include "depth_cache_update.h"
+#include "depth_hold.h"
 #include "freshness.h"
 #include <array>
 
@@ -15,49 +15,6 @@ namespace sunshine_depth { struct sample_result; }
 // One ReShade-facing consumer for API-authoritative depth. API depth reaches it
 // only through native snapshots, which feed the binding and calibration readback.
 namespace sunshine_streamline::provider {
-  // Busy queries retain a confirmed source choice, not stale pixel readiness.
-  // Observation loss revokes FG scope while independent ordinary depth remains
-  // eligible. This does not turn a failed Off request into confirmed Off.
-  struct frame_generation_policy {
-    depth_capture::selection_policy update(frame_generation_query_status status,
-        const frame_generation_snapshot &value) {
-      if (status == frame_generation_query_status::observed) {
-        selected_ = value.enabled ? depth_capture::selection_policy{true, value.epoch, value.viewport, false, value.enabled_tick} :
-          depth_capture::selection_policy{};
-        generated_frames_ = value.enabled ? value.generated_frames : 0;
-        confirmed_ = true;
-      } else if (status == frame_generation_query_status::busy) {
-        return confirmed_ || selected_.exclude_unconfirmed_fg ? selected_ : depth_capture::selection_policy{true};
-      } else if (status == frame_generation_query_status::ambiguous || selected_.require_frame_generation) {
-        selected_ = {};
-        selected_.exclude_unconfirmed_fg = true;
-        generated_frames_ = 0;
-        confirmed_ = false;
-      }
-      return selected_;
-    }
-    std::uint32_t generated_frames() const { return generated_frames_; }
-  private:
-    depth_capture::selection_policy selected_;
-    std::uint32_t generated_frames_{};
-    bool confirmed_{};
-  };
-  // Enabled FG owns its viewport's depth only while its scope is live
-  // (depth_capture::frame_generation_scope_live). A silent scope selects as
-  // without FG for this acquisition, so that viewport's ordinary SR/RR depth
-  // may supply depth once FG's own newest copy can no longer be held
-  // (depth_capture::frame_generation_holds), and the next accepted FG copy
-  // takes ownership back.
-  // Any other policy selects as it is.
-  struct frame_generation_selection {
-    depth_capture::selection_policy selection;
-    bool silent{};
-  };
-  inline frame_generation_selection select_frame_generation_scope(const depth_capture::selection_policy &policy) {
-    const bool silent = policy.require_frame_generation &&
-      !depth_capture::frame_generation_scope_live(policy.epoch, policy.viewport, policy.enabled_tick);
-    return {silent ? depth_capture::selection_policy{} : policy, silent};
-  }
   // provider::begin's frame record row (game3d_frame_record.h), in two steps.
   // The acquisition: the FG policy and the scope's selection, the queue's
   // association, the handoff hold and the capture owner's diagnostic. A

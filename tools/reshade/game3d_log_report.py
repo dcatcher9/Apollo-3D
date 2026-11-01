@@ -199,7 +199,7 @@ NGX = re.compile(r'Sunshine NGX depth: .*?evaluations=(\d+) nominations=(\d+) co
 # Cumulative over the runtime, like the rest of the line.
 DLSSG = re.compile(r'Sunshine NGX depth: .*?fg_feature=(\d+) dlssg_depth=\{copied=(\d+) inner_frames=(\d+) '
                    r'refused=([^}]*)\} dlssg_ui=\{offered=(\d+) captured=(\d+) refused=([^}]*)\}')
-# What the most common DLSSG.Depth refusals mean (ngx_depth_source.cpp, frame_generation_inputs.h).
+# What the most common DLSSG.Depth refusals mean (ngx_depth_source.cpp, presentation_scope.h).
 DLSSG_REFUSAL = {
     'missing_state': "DLSS-G's command list observed no state for its depth, so no copy is made (fail-safe)",
     'observer_coverage': "ReShade does not cover DLSS-G's command list",

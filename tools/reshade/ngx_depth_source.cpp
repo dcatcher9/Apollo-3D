@@ -69,7 +69,7 @@ namespace sunshine_ngx {
     };
     std::array<feature_count, 4> missing_by_feature;
     std::atomic<std::uint64_t> missing_other_feature{};
-    // DLSS-G's own inputs (frame_generation_inputs.h): inner frames of multi
+    // DLSS-G's own inputs (presentation_scope.h): inner frames of multi
     // frame generation skipped, DLSSG.Depth outcomes (capture refusals by the
     // capture owner's stage), and the UI inputs offered, captured and refused
     // (by outcome, ui_mask begin stage or native record stage).
@@ -412,9 +412,6 @@ namespace sunshine_ngx {
   void shutdown() { active_epoch.store(0, std::memory_order_release); }
   bool enabled() { return !sunshine_addon_lifetime::stopping() && active_epoch.load(std::memory_order_acquire) != 0; }
   std::uint64_t epoch() { return sunshine_addon_lifetime::stopping() ? 0 : active_epoch.load(std::memory_order_acquire); }
-  bool frame_generation_owns_depth(bool enabled, std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
-    return enabled && sunshine_streamline::depth_capture::frame_generation_scope_live(epoch, viewport, enabled_tick);
-  }
   namespace {
     // device_default: the feature's documented depth input is device depth when
     // DLSS.Use.HW.Depth is absent. That holds for Super Resolution/DLAA only;
@@ -553,7 +550,7 @@ namespace sunshine_ngx {
       selected = recover_feature(owner, handle, api, parameters, attempt.epoch, selected_slot);
     // DLSS-G is a known feature with no SR Depth input to miss. Its own
     // inputs (DLSSG.Depth, Backbuffer, HUDLess, UI, UIAlpha) supply its
-    // Streamline FG scope, once per real frame (frame_generation_inputs.h).
+    // Streamline FG scope, once per real frame (presentation_scope.h).
     if (selected.handle && selected.parameters.epoch == attempt.epoch &&
         selected.parameters.feature == frame_generation_feature) {
       ++fg_feature;

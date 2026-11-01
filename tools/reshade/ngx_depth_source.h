@@ -2,7 +2,7 @@
 #pragma once
 #include "scene_depth_source.h"
 #include "game3d_diagnostic_metadata.h"
-#include "frame_generation_inputs.h"
+#include "presentation_scope.h"
 #include <Windows.h>
 #include <cstdint>
 
@@ -50,7 +50,7 @@ namespace sunshine_ngx {
     // rebuilding only session/sequence loses the producing command list.
     sunshine_game3d::diagnostic::stamp diagnostic_observation {};
     // DLSS-G's (feature 11) own inputs of this real frame, supplied to the
-    // Streamline FG scope (frame_generation_inputs.h); finished with the call.
+    // Streamline FG scope (presentation_scope.h); finished with the call.
     sunshine_streamline::frame_generation::attempt frame_generation;
   };
   // A depth-owned call may observe armed dump parameters without nominating
@@ -59,16 +59,6 @@ namespace sunshine_ngx {
   evaluation before_evaluate(HMODULE owner, const parameter_api &api, std::uint64_t command,
     const void *handle, const void *parameters, bool capture_depth = true, bool observe_diagnostics = true);
   void after_evaluate(const evaluation &value, bool successful);
-  // Whether confirmed Streamline FG owns depth, so that an NGX evaluation
-  // records no copy: FG options observed enabled (the probe's
-  // frame_generation_snapshot: enabled, epoch, viewport, enabled_tick) whose
-  // scope is live (depth_capture::frame_generation_scope_live). Selection
-  // never considers NGX while FG is required, and FG Off raises the admission
-  // watermark past every snapshot taken meanwhile, so a copy would have no
-  // consumer. FG Off, a busy or ambiguous FG read, which observes no options
-  // (nested NGX's rule, owns_nested_depth_capture), and a silent scope, which
-  // owns nothing, copy.
-  bool frame_generation_owns_depth(bool enabled, std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick);
 
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
   namespace testing {

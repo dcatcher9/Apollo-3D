@@ -13,7 +13,7 @@
 #include "native_command_storage.h"
 #include "native_resource_identity.h"
 #include "depth_view_format.h"
-#include "depth_cache_update.h" // Selection regressions apply the provider's display policy.
+#include "depth_hold.h" // Selection regressions apply the provider's display policy.
 #include "../../src/game3d_debug_formats.h"
 #include <d3d12.h>
 #include <algorithm>

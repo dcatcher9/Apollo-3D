@@ -7,7 +7,7 @@
 #include "streamline_camera_data.h"
 #include "scene_feedback.h"
 #include "streamline_depth_capture.h"
-#include "frame_generation_inputs.h"
+#include "presentation_scope.h"
 #include "freshness.h"
 #include "observation_loss_journal.h"
 
@@ -158,21 +158,10 @@ namespace sunshine_streamline {
   };
   const char *name(evidence_status value);
 
-  struct frame_generation_snapshot {
-    std::uint64_t epoch{}, sequence{}, tick{}, loss_revision{};
-    std::uint32_t viewport{}, mode{}, generated_frames{};
-    bool known{}, enabled{}, automatic{};
-    // Enabled: the tick of the options call that turned FG on in this epoch,
-    // kept while later calls leave it on (depth_capture::frame_generation_scope_live).
-    std::uint64_t enabled_tick{};
-  };
-  // Successful, version-checked game options only. Enabled means requested by
-  // the game; it does not identify any particular real/generated presentation.
-  enum class frame_generation_query_status { unavailable, busy, ambiguous, observed };
   bool query_frame_generation(std::uint32_t viewport, frame_generation_snapshot &output,
     frame_generation_query_status *status = nullptr);
 
-  // DLSS-G's own NGX evaluation of one real frame (frame_generation_inputs.h).
+  // DLSS-G's own NGX evaluation of one real frame (presentation_scope.h).
   // Its inputs belong to the one viewport whose FG options were observed
   // enabled in the current epoch, under one fresh observation sequence ordered
   // with every Streamline call. DLSSG.Depth becomes that viewport's FG source
