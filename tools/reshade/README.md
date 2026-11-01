@@ -2747,11 +2747,13 @@ whether that Present shows the copy or holds the one before change between runs:
 `C8-fg-off-sr-other-queue`, `C8-fg-off-color-only`, `O1-late-signal-presenting-copy-held`,
 `fg-off-late-sr-after-fg-copy`, `fg-off-late-dlssg-head-sr-owner` and `hitch-after-sources` left
 it to the machine (3 to 10 distinct traces in 10 runs of each alone, and an occasional T1 mismatch
-in the full checks; with the form stated, one trace in 10 runs of each, 11-01, but for one run of
+in the full checks), and so did this round's `fg-off-sr-successor-older-than-held` and
+`fg-on-deferred-tag-hitch-after-sources-held` (4 and 5 distinct traces in 5 runs of each alone).
+With the form stated each gives one trace in 10 runs alone (11-01), but for one run of
 `C8-fg-off-color-only` whose first SR frame's selection reason, `ch=`, the clock decided: frame
 19's SR copy reached the source age there, 13 frames (about 205-250 ms) after its Present; the
 display is the same; of 71 earlier traces of the row in full checks only one showed it, run beside
-a game's GPU load). DLSS-G's compute
+a game's GPU load. DLSS-G's compute
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
