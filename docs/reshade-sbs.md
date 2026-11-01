@@ -1357,8 +1357,8 @@ Present's grant bounds it. Until 11-01 the UI counted its own window of the repo
 count from that Present, so where the next frame's evaluation began inside it (DLSS-G presenting
 earlier frames inside the next frame's recording, Assassin's Creed Shadows' pattern; multi-frame
 generation) the next frame's Presents held the earlier frame's decision (HUD edges with parallax
-for a moment; session row `fg-on-ui-window-ends-at-next-evaluation-hitch` and seven fixed-set seeds, judged by
-`ui_frame:held`). Where the Present that offered the tag had no depth window (no API depth), Present
+for a moment; session row `fg-on-ui-window-ends-at-next-evaluation-hitch` and five fixed-set seeds, judged by
+`ui_frame:held` where depth presented a frame at the Present that offered the tag). Where the Present that offered the tag had no depth window (no API depth), Present
 counting decides as before: a Present that offers no input within the reported generated count
 (one while it is unknown) of that Present is generated (`ui_mask::generated_without_input`). The
 capture owner, however, offers each kind's

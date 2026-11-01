@@ -2225,10 +2225,13 @@ a Present whose frame record holds a UI row as `held,generated_present` must pre
 last Present that offered a Streamline UI tag (a tag row `ready`) presented, as the oracle gives
 Presents to frames: a real Present its frame; a generated Present after it, or inside the next
 frame's recording before the add-on began an evaluation of that frame, the last real Present's
-frame; one after that evaluation began, the frame being recorded. Before the add-on read depth's
-window for it, seven fixed-set seeds failed there (a real Present of the next frame held as the
-earlier frame's generated one where DLSS-G presented no generated Present), and
-`--trace` prints `TRACE frame=<n> ui_frame` at each Present that offered or held.
+frame; one after that evaluation began, the frame being recorded. It is judged where depth
+presented a frame at that Present that offered the tag (its acquisition's presenting floor, read
+through `SunshineDepthTestQueueChoice`): without that window the UI still counts Presents, a limit
+of having no frame identity there. Before the add-on read depth's window for it, five fixed-set
+seeds failed there (a real Present of the next frame held as the earlier frame's generated one
+where DLSS-G presented no generated Present), and `--trace` prints `TRACE frame=<n> ui_frame` at
+each Present that offered or held.
 `reads=lost_at_present` fails every metadata read of the add-on during the Presents made while
 the frame is current, after its calls (`SunshineStreamlineTestFailMetadataReads`), as a read fails
 that lost the race with the camera and tag writers on every attempt (`observer_snapshot.h`), which

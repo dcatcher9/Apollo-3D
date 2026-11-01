@@ -1212,6 +1212,9 @@ namespace {
     void (*fail_metadata_reads)(unsigned) {};
     void (*options_at_depth_frame)(void (*)(void *), void *) {};
     BOOL (*present_frame_generation)(api::effect_runtime *, unsigned *, unsigned *, std::uint64_t *) {};
+    // The presenting queue's newest depth choice, whose acquisition names
+    // the frame depth presents (presenting_floor, the UI's depth window).
+    BOOL (*queue_choice)(api::effect_runtime *, sunshine_streamline::depth_capture::depth_choice *) {};
     decltype(&NVSDK_NGX_D3D12_CreateFeature) ngx_create {};
     decltype(&NVSDK_NGX_D3D12_EvaluateFeature) ngx_evaluate {};
     const matrix::sl_version version {2, 7, 30};
@@ -1472,6 +1475,8 @@ namespace {
       options_at_depth_frame = reinterpret_cast<decltype(options_at_depth_frame)>(GetProcAddress(addon, "SunshineGame3DTestOptionsAtDepthFrame"));
       present_frame_generation = reinterpret_cast<decltype(present_frame_generation)>(GetProcAddress(addon, "SunshineGame3DTestPresentFrameGeneration"));
       require(fail_metadata_reads && options_at_depth_frame && present_frame_generation, "Test add-on lacks its FG mode seams");
+      queue_choice = reinterpret_cast<decltype(queue_choice)>(GetProcAddress(addon, "SunshineDepthTestQueueChoice"));
+      require(queue_choice, "Test add-on lacks its queue choice report");
       // The export stop at a focus loss would end FG reuse: select the hidden
       // game window in the test observer without moving focus.
       set_foreground(window);
@@ -2680,8 +2685,13 @@ namespace {
     // that evaluation began, the frame being recorded (as depth's window
     // ends at the next evaluation, frame_presenting). Until 11-01 the UI
     // counted its own window of the declared generated count, so the next
-    // frame's Presents inside it held the earlier frame's decision.
+    // frame's Presents inside it held the earlier frame's decision. Judged
+    // where depth presented a frame at that Present (its acquisition's
+    // presenting floor): without that window the UI still counts
+    // (ui_evidence::generated_in_window), a limit of no frame identity, not
+    // of this decision.
     unsigned ui_input_frame {UINT_MAX};
+    bool ui_input_window {};
     std::uint64_t ui_judged_present {UINT64_MAX};
 
     void judge_ui_frame(const char *which, unsigned shown_frame) {
@@ -2703,11 +2713,13 @@ namespace {
         held = held || (r[slot].state == source_state::held && r[slot].reason && !std::strcmp(r[slot].reason, "generated_present"));
       }
       if (trace && (offered || held)) {
-        std::printf("TRACE frame=%u ui_frame %s present=%llu shown=%u input=%d offered=%u held=%u\n", frame, which, static_cast<unsigned long long>(r.present), shown_frame, ui_input_frame == UINT_MAX ? -1 : int(ui_input_frame), unsigned(offered), unsigned(held));
+        std::printf("TRACE frame=%u ui_frame %s present=%llu shown=%u input=%d window=%u offered=%u held=%u\n", frame, which, static_cast<unsigned long long>(r.present), shown_frame, ui_input_frame == UINT_MAX ? -1 : int(ui_input_frame), unsigned(ui_input_window), unsigned(offered), unsigned(held));
       }
       if (offered) {
+        sunshine_streamline::depth_capture::depth_choice choice {};
         ui_input_frame = shown_frame;
-      } else if (held && shown_frame != ui_input_frame) {
+        ui_input_window = queue_choice(observed.runtime, &choice) && choice.decision.presenting_floor;
+      } else if (held && ui_input_window && shown_frame != ui_input_frame) {
         fail("ui_frame:held", frame_text(frame) + ": " + which + " held frame " + std::to_string(ui_input_frame) + "'s UI decision as a generated Present of it, and it presents frame " + std::to_string(shown_frame), frame, "generated_present");
       }
     }
