@@ -178,18 +178,20 @@ namespace sunshine_streamline::depth_capture {
       };
 
       const timeline timelines[] {
-        {"Before any observation a busy read requires an FG scope it cannot name (fg_scope_missing) and is not kept",
-         {{query::unavailable, none, '-', 0, 0, 0, 0}, {query::busy, none, 'R', 0, 0, 0, 0}, {query::unavailable, none, '-', 0, 0, 0, 0}}},
-        {"FG On names its scope; busy reads keep it",
-         {{query::observed, on_vp0, 'R', 5, 100, 0, 1}, {query::busy, none, 'R', 5, 100, 0, 1}, {query::busy, none, 'R', 5, 100, 0, 1}}},
-        {"FG Off is confirmed: busy and unavailable reads require nothing",
-         {{query::observed, on_vp0, 'R', 5, 100, 0, 1}, {query::observed, off_vp0, '-', 0, 0, 0, 0}, {query::busy, none, '-', 0, 0, 0, 0}, {query::unavailable, none, '-', 0, 0, 0, 0}}},
+        // No read is busy since the FG options store (11-01): the rows that
+        // fed the retired busy status are rewritten without it.
+        {"Before any observation an unavailable read requires nothing (an unknown mode is no FG)",
+         {{query::unavailable, none, '-', 0, 0, 0, 0}, {query::unavailable, none, '-', 0, 0, 0, 0}}},
+        {"FG On names its scope; repeated observations keep it",
+         {{query::observed, on_vp0, 'R', 5, 100, 0, 1}, {query::observed, on_vp0, 'R', 5, 100, 0, 1}}},
+        {"FG Off is confirmed: unavailable reads require nothing",
+         {{query::observed, on_vp0, 'R', 5, 100, 0, 1}, {query::observed, off_vp0, '-', 0, 0, 0, 0}, {query::unavailable, none, '-', 0, 0, 0, 0}}},
         {"An unavailable read after FG On revokes FG input until the next observed On",
-         {{query::observed, on_vp0, 'R', 5, 100, 0, 1}, {query::unavailable, none, 'X', 0, 0, 0, 0}, {query::busy, none, 'X', 0, 0, 0, 0}, {query::unavailable, none, 'X', 0, 0, 0, 0}, {query::observed, on_vp0, 'R', 5, 100, 0, 1}}},
+         {{query::observed, on_vp0, 'R', 5, 100, 0, 1}, {query::unavailable, none, 'X', 0, 0, 0, 0}, {query::unavailable, none, 'X', 0, 0, 0, 0}, {query::observed, on_vp0, 'R', 5, 100, 0, 1}}},
         {"An ambiguous read (two enabled viewports, a failed Off, lost options) revokes FG input; a confirmed Off lifts it",
-         {{query::observed, on_vp0, 'R', 5, 100, 0, 1}, {query::ambiguous, none, 'X', 0, 0, 0, 0}, {query::busy, none, 'X', 0, 0, 0, 0}, {query::observed, off_vp0, '-', 0, 0, 0, 0}}},
-        {"An ambiguous first read excludes FG input through busy and unavailable reads",
-         {{query::ambiguous, none, 'X', 0, 0, 0, 0}, {query::busy, none, 'X', 0, 0, 0, 0}, {query::unavailable, none, 'X', 0, 0, 0, 0}}},
+         {{query::observed, on_vp0, 'R', 5, 100, 0, 1}, {query::ambiguous, none, 'X', 0, 0, 0, 0}, {query::unavailable, none, 'X', 0, 0, 0, 0}, {query::observed, off_vp0, '-', 0, 0, 0, 0}}},
+        {"An ambiguous first read excludes FG input through unavailable reads",
+         {{query::ambiguous, none, 'X', 0, 0, 0, 0}, {query::unavailable, none, 'X', 0, 0, 0, 0}}},
         {"The scope follows the newest observed On: another viewport, multi frame generation, a new epoch, a dynamic count",
          {{query::observed, on_vp0, 'R', 5, 100, 0, 1}, {query::observed, on_vp1_mfg, 'R', 5, 200, 1, 3}, {query::observed, on_new_epoch_dynamic, 'R', 6, 300, 0, 0}}},
       };
@@ -308,8 +310,8 @@ namespace sunshine_streamline::depth_capture {
 
     // P5: NGX's copy rule under frame generation
     // (sunshine_ngx::frame_generation_owns_depth). Confirmed FG options whose
-    // scope is live suppress an NGX evaluation's copy; FG Off, a busy or
-    // ambiguous read (which observes no options) and a silent scope copy.
+    // scope is live suppress an NGX evaluation's copy; FG Off, an ambiguous
+    // read (which observes no options) and a silent scope copy.
     void ngx_frame_generation_rows() {
       enum class fg_copy {
         none,
@@ -320,7 +322,7 @@ namespace sunshine_streamline::depth_capture {
 
       struct row {
         const char *pins;
-        bool enabled;  // The FG options query observed FG on (false: Off, busy or ambiguous).
+        bool enabled;  // The FG options query observed FG on (false: Off or ambiguous).
         bool just_enabled;  // FG options turned FG on less than a second ago.
         fg_copy copy;
         bool suppressed;
@@ -332,7 +334,7 @@ namespace sunshine_streamline::depth_capture {
         {"A silent scope owns nothing: NGX copies", true, false, fg_copy::none, false},
         {"Another viewport's accepted FG copy leaves this scope silent", true, false, fg_copy::other_viewport, false},
         {"Another epoch's accepted FG copy leaves this scope silent", true, false, fg_copy::other_epoch, false},
-        {"FG Off, a busy or an ambiguous read copies, even beside a live FG copy", false, false, fg_copy::accepted, false},
+        {"FG Off or an ambiguous read copies, even beside a live FG copy", false, false, fg_copy::accepted, false},
         {"FG Off copies just after FG was on", false, true, fg_copy::none, false},
       };
       constexpr std::uint64_t epoch = 7;
@@ -755,7 +757,7 @@ namespace sunshine_streamline::depth_capture {
         {"Required FG refuses the viewport's ordinary SL depth", o::none, false, c::ready, c::ready, false, p::required, '-', status::unavailable, r::fg_scope_mismatch},
         {"Required FG never falls back to NGX", o::none, false, c::none, c::ready, true, p::required, '-', status::stale, r::inactive_views},
         {"Required FG with its input pending holds", o::none, false, c::pending, c::ready, true, p::required, '-', status::recorded, r::no_completed_snapshot},
-        {"Required FG before its scope is known (a busy first read) is missing", o::none, false, c::ready, c::ready, true, p::unknown_epoch, '-', status::unavailable, r::fg_scope_missing},
+        {"Required FG before its scope is known (no policy names it since 11-01; fail-safe) is missing", o::none, false, c::ready, c::ready, true, p::unknown_epoch, '-', status::unavailable, r::fg_scope_missing},
         {"Required FG of another viewport refuses this viewport's FG input", o::none, false, c::ready, c::ready, true, p::other_viewport, '-', status::unavailable, r::fg_scope_mismatch},
         {"Excluded FG refuses the FG input and lets NGX supply", o::none, false, c::ready, c::ready, true, p::excluded, 'N', status::ready, r::current_capture},
         {"Excluded FG without another source is missing", o::none, false, c::ready, c::none, true, p::excluded, '-', status::stale, r::fg_scope_missing},

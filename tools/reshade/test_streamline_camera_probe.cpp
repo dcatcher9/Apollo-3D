@@ -3365,16 +3365,10 @@ namespace {
       provider::frame_generation_policy policy;
       require(!policy.update(frame_generation_query_status::unavailable, {}).require_frame_generation,
         "Unobserved unavailable FG blocked ordinary depth routing");
-      require(policy.update(frame_generation_query_status::busy, {}).require_frame_generation,
-        "A first busy FG query was treated as confirmed Off");
       auto selected = policy.update(frame_generation_query_status::observed, fg);
       require(selected.require_frame_generation && selected.epoch == fg.epoch && selected.viewport == fg.viewport &&
           !selected.exclude_unconfirmed_fg && policy.generated_frames() == fg.generated_frames,
         "Confirmed FG did not select its exact scope");
-      selected = policy.update(frame_generation_query_status::busy, {});
-      require(selected.require_frame_generation && selected.epoch == fg.epoch && selected.viewport == fg.viewport &&
-          !selected.exclude_unconfirmed_fg && policy.generated_frames() == fg.generated_frames,
-        "Busy FG query discarded confirmed scope or admitted ordinary depth");
 
       frame_generation_snapshot contended_snapshot;
       frame_generation_query_status contended_status{};
@@ -3406,9 +3400,6 @@ namespace {
       selected = policy.update(frame_generation_query_status::ambiguous, {});
       require(!selected.require_frame_generation && selected.exclude_unconfirmed_fg && !selected.epoch && !policy.generated_frames(),
         "Ambiguous FG retained a mandatory missing scope or authorized unconfirmed FG depth");
-      selected = policy.update(frame_generation_query_status::busy, {});
-      require(!selected.require_frame_generation && selected.exclude_unconfirmed_fg && !selected.epoch,
-        "Busy query resurrected revoked FG scope or blocked independent ordinary depth");
       selected = policy.update(frame_generation_query_status::observed, fg);
       require(selected.require_frame_generation && selected.epoch == fg.epoch && selected.viewport == fg.viewport &&
           !selected.exclude_unconfirmed_fg && policy.generated_frames() == fg.generated_frames,
@@ -3419,8 +3410,8 @@ namespace {
       auto off = fg; off.enabled = false;
       selected = policy.update(frame_generation_query_status::observed, off);
       require(!selected.require_frame_generation && !selected.exclude_unconfirmed_fg && !selected.epoch &&
-          !policy.update(frame_generation_query_status::busy, {}).require_frame_generation && !policy.generated_frames(),
-        "Confirmed Off did not restore ordinary routing through a busy query");
+          !policy.update(frame_generation_query_status::unavailable, {}).require_frame_generation && !policy.generated_frames(),
+        "Confirmed Off did not restore ordinary routing through an unavailable query");
       policy = {};
       require(!policy.update(frame_generation_query_status::unavailable, {}).require_frame_generation,
         "Runtime policy reset retained an old FG requirement");
@@ -3578,9 +3569,9 @@ namespace {
     require(!fallback_policy.require_frame_generation && fallback_policy.exclude_unconfirmed_fg &&
         !fallback_policy.epoch && !dynamic_policy.generated_frames(),
       "Failed FG Off left a mandatory missing scope or authorized old FG reuse");
-    fallback_policy = dynamic_policy.update(frame_generation_query_status::busy, {});
+    fallback_policy = dynamic_policy.update(frame_generation_query_status::unavailable, {});
     require(!fallback_policy.require_frame_generation && fallback_policy.exclude_unconfirmed_fg && !fallback_policy.epoch,
-      "Busy query revived the failed-Off scope or blocked fresh independent fallback");
+      "An unavailable query revived the failed-Off scope or blocked fresh independent fallback");
     options.mode = 1; options.generated_frames = 1;
     require(set_options(view, options) == 0 && query_frame_generation(UINT32_MAX, fg) && fg.enabled,
       "A successful FG On did not recover after the failed Off");
@@ -3816,13 +3807,23 @@ namespace {
     const auto constants = modern_camera();
     // A camera publication exists, so a lost read is a busy one.
     call_v2_constants(constants, token.ref(), view);
-    fg_options on; on.generated_frames = 3;
-    require(set_options(view, on) == 0, "FG On options failed");
     // Every check runs, so a run names each FG read a lost metadata read changes.
     std::string failed;
     const auto check = [&](bool passed, const char *what) { if (!passed) failed += std::string(failed.empty() ? "" : "; ") + what; };
     frame_generation_snapshot fg;
     frame_generation_query_status status{};
+    // PD1: before any options call a lost read left the provider requiring FG
+    // it could not name (a mono Present where Generic would supply).
+    {
+      provider::frame_generation_policy policy;
+      testing::fail_metadata_reads(1);
+      query_frame_generation(UINT32_MAX, fg, &status);
+      testing::fail_metadata_reads(0);
+      check(status == frame_generation_query_status::unavailable && !policy.update(status, fg).require_frame_generation,
+        "A lost metadata read before any FG options required FG");
+    }
+    fg_options on; on.generated_frames = 3;
+    require(set_options(view, on) == 0, "FG On options failed");
     testing::fail_metadata_reads(1);
     const bool queried = query_frame_generation(UINT32_MAX, fg, &status);
     testing::fail_metadata_reads(0);

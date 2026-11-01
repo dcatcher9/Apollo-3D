@@ -15,9 +15,9 @@
 // instances stay with their consumers (the provider's source_policy, the
 // exporter runtime's source_alpha_policy). The FG mode itself is the probe's
 // FG options store (presentation_scope_mode.inl), whose reads always get the
-// last committed options: no FG read is busy since 11-01, so the busy rules
-// each reader had for one are gone. The SL adapter bodies that read live state
-// stay in sl_nomination.inl and sl_frame_generation.inl.
+// last committed options: no FG read is busy since 11-01, and the busy rules
+// each reader had for one are deleted. The SL adapter bodies that read live
+// state stay in sl_nomination.inl and sl_frame_generation.inl.
 
 // DLSS-G's own inputs of one real frame, read from its NGX evaluation
 // (feature 11, NVSDK_NGX_Feature_FrameGeneration) by ngx_depth_source.cpp and
@@ -279,6 +279,9 @@ namespace sunshine_streamline {
   };
   // Successful, version-checked game options only. Enabled means requested by
   // the game; it does not identify any particular real/generated presentation.
+  // busy is retired: no read produces it since the FG options store (11-01),
+  // and it keeps its value so that the provider log's fg_query= numbers do
+  // not shift.
   enum class frame_generation_query_status { unavailable, busy, ambiguous, observed };
 }
 
@@ -287,9 +290,14 @@ namespace sunshine_streamline::presentation_scope {
 }
 
 namespace sunshine_streamline::provider {
-  // Busy queries retain a confirmed source choice, not stale pixel readiness.
-  // Observation loss revokes FG scope while independent ordinary depth remains
-  // eligible. This does not turn a failed Off request into confirmed Off.
+  // An observed mode names the source choice; until the first one FG is not
+  // required (the owner's 11-01 ruling: an unknown mode is no FG, Generic
+  // allowed). Observation loss revokes FG scope while independent ordinary
+  // depth remains eligible. This does not turn a failed Off request into
+  // confirmed Off. Until 11-01 a busy read (one that lost the metadata
+  // writers' race) before any observed mode required FG it could not name
+  // (selection_policy{true}: a mono Present where Generic would supply); no
+  // read is busy since the FG options store.
   struct frame_generation_policy {
     depth_capture::selection_policy update(frame_generation_query_status status,
         const frame_generation_snapshot &value) {
@@ -297,14 +305,10 @@ namespace sunshine_streamline::provider {
         selected_ = value.enabled ? depth_capture::selection_policy{true, value.epoch, value.viewport, false, value.enabled_tick} :
           depth_capture::selection_policy{};
         generated_frames_ = value.enabled ? value.generated_frames : 0;
-        confirmed_ = true;
-      } else if (status == frame_generation_query_status::busy) {
-        return confirmed_ || selected_.exclude_unconfirmed_fg ? selected_ : depth_capture::selection_policy{true};
       } else if (status == frame_generation_query_status::ambiguous || selected_.require_frame_generation) {
         selected_ = {};
         selected_.exclude_unconfirmed_fg = true;
         generated_frames_ = 0;
-        confirmed_ = false;
       }
       return selected_;
     }
@@ -312,7 +316,6 @@ namespace sunshine_streamline::provider {
   private:
     depth_capture::selection_policy selected_;
     std::uint32_t generated_frames_{};
-    bool confirmed_{};
   };
   // Enabled FG owns its viewport's depth only while its scope is live
   // (depth_capture::frame_generation_scope_live). A silent scope selects as
@@ -404,8 +407,8 @@ namespace sunshine_ngx {
 namespace sunshine_game3d {
   struct source_alpha_ui_policy {
     source_alpha_ui_decision update(bool requested, frame_generation_mode observed, bool observer_active) {
-      // Contention or ambiguous/lost observations cannot turn a known FG mode
-      // off. Only an observed mode change or genuine observer/runtime shutdown
+      // An ambiguous or lost observation cannot turn a known FG mode off.
+      // Only an observed mode change or genuine observer/runtime shutdown
       // clears it.
       if (!observer_active) mode = {};
       else if (observed.known) mode = observed;

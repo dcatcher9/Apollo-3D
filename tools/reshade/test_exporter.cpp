@@ -354,9 +354,9 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       require(decide(fg, fresh, fallback, excluded).action == action::copy_fresh &&
           decide({}, fresh, fallback, excluded).action == action::copy_fresh,
         "Revoked SL FG scope blocked an independently valid fresh NGX linear-depth copy");
-      const auto busy_fallback = source_policy.update(frame_generation_query_status::busy, {});
-      require(decide(fg, fresh, fallback, busy_fallback).action == action::copy_fresh,
-        "Busy query disabled independently valid fallback after FG revocation");
+      const auto later_fallback = source_policy.update(frame_generation_query_status::unavailable, {});
+      require(decide(fg, fresh, fallback, later_fallback).action == action::copy_fresh,
+        "An unavailable query disabled independently valid fallback after FG revocation");
       fallback.pixel_ready = false;
       require(decide(fg, fresh, fallback, excluded).action == action::invalidate &&
           decide(previous, fresh, fallback).action == action::invalidate,
@@ -540,9 +540,9 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         reason::fg_scope_missing, depth_capture::status::unavailable, fg_retained.metadata), 9, 1610);
       require(record.depth_owner == source_slot::fg_depth && row_is(fg, source_state::held, "retained_copy") &&
           fg.first_ready_ms == 1600, "The frame record did not name a generated Present's FG hold");
-      // A busy query keeps the confirmed scope.
-      const auto busy = source_policy.update(frame_generation_query_status::busy, {});
-      require(busy.require_frame_generation && busy.epoch == fg_policy.epoch, "Frame record fixture lost a busy FG scope");
+      // A repeated observation keeps the confirmed scope.
+      const auto busy = source_policy.update(frame_generation_query_status::observed, on);
+      require(busy.require_frame_generation && busy.epoch == fg_policy.epoch, "Frame record fixture lost a repeated FG scope");
       // Silent: the selection runs without FG, and SR depth supplies the viewport.
       const auto sr_fresh = sunshine_game3d::depth_output::decide_display(selected, candidate, {}, {}, 2700);
       sunshine_game3d::record_api_depth(record, provider_decision(selected, busy, true, true, false, sr_fresh, false,

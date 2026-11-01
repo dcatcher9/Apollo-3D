@@ -6155,7 +6155,10 @@ query, the current observation, an available FG target. A restart clears it
 (`release_camera_records`), and a fifth viewport replaces the one whose options
 were set longest ago. So no FG read is busy any more (`busy` stays in
 `frame_generation_query_status` and the provider log's `fg_query=` numbers,
-retired), and no options write is lost. Until 11-01 the mode lived in the camera
+retired), and no options write is lost. The busy rules are deleted with it: the
+provider's policy requires FG only from an observed enabled mode, so before the
+first one an unknown mode is no FG and Generic may supply (the owner's 11-01
+ruling). Until 11-01 the mode lived in the camera
 records: a read that lost the writers' race (the observer snapshot's eight
 attempts) was busy, with six rules for it (the provider's busy read before any
 confirmed mode required FG; the SL route took an existing publication as owned,
