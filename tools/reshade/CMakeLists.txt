@@ -12,7 +12,8 @@ execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SO
 if(NOT SUNSHINE_GAME3D_BUILD_REVISION)
   set(SUNSHINE_GAME3D_BUILD_REVISION "unknown")
 endif()
-execute_process(COMMAND git diff --quiet WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+# Staged and unstaged edits of tracked files both count (against HEAD).
+execute_process(COMMAND git diff --quiet HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   RESULT_VARIABLE SUNSHINE_GAME3D_DIRTY ERROR_QUIET)
 if(NOT SUNSHINE_GAME3D_DIRTY EQUAL 0)
   string(APPEND SUNSHINE_GAME3D_BUILD_REVISION "-dirty")
@@ -56,11 +57,16 @@ if(sunshine_git_branch)
     endif()
   endif()
 endif()
+set(sunshine_git_watched FALSE)
 foreach(sunshine_git_file IN LISTS sunshine_git_files)
   if(EXISTS "${sunshine_git_file}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${sunshine_git_file}")
+    set(sunshine_git_watched TRUE)
   endif()
 endforeach()
+if(NOT sunshine_git_watched)
+  message(STATUS "Game 3D build.revision: no git HEAD file found; the revision changes only at the next configure")
+endif()
 add_compile_definitions(SUNSHINE_GAME3D_SHADER_SHA256="${SUNSHINE_GAME3D_SHADER_SHA256}")
 set_property(SOURCE game3d_debug_dump.cpp APPEND PROPERTY COMPILE_DEFINITIONS
   SUNSHINE_GAME3D_BUILD_REVISION="${SUNSHINE_GAME3D_BUILD_REVISION}")

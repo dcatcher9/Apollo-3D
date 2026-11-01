@@ -3110,9 +3110,10 @@ FP16 HDR and R32 depth without preview normalization. Descriptors identify dimen
 format and packed row size. Render metadata includes the applied constants, strength, depth
 rectangle, jitter, camera conversion, screen-plane state and capture/export identities.
 Its `build` entry names the add-on's source revision (the git HEAD of the build's last configure,
-`-dirty` when tracked files differed then), the embedded shader's SHA-256 and the compile date and
-time. The add-on's configure depends on that HEAD, so the first build after a commit, checkout or
-pull re-runs it and names the new revision (until 11-01 an incremental build kept the older one).
+`-dirty` when tracked files, staged or not, differed from that HEAD then), the embedded shader's
+SHA-256 and the compile date and time. The add-on's configure depends on that HEAD, so the first
+build after a commit, checkout or pull re-runs it and names the new revision (until 11-01 an
+incremental build kept the older one).
 The package embeds the exact HLSL used by the renderer, the complete 80-byte constant buffer
 (including padding), its ABI/layout, compiler flags/defines, and pass/sampler bindings. Depth
 is saved as unfiltered R32 samples from the full consumed allocation at mip 0/layer 0, before

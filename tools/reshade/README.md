@@ -110,10 +110,12 @@ supports an existing MSVC x64 development environment (`-G Ninja`, or an x64 Vis
 generator); that compiler has not been exercised in the local validation.
 The default build stages the shipping files in `cmake-build-reshade/package`; test DLLs
 and obsolete files left in an existing build directory are not part of that package.
-Dump 3D's `build.revision` is the git HEAD of the last configure (with `-dirty` when tracked files
-differed then). The configure depends on the worktree's HEAD file and its branch ref, so the next
-build after a commit, checkout or pull re-runs it and names the new revision; only
-`game3d_debug_dump.cpp`, the one file that prints it, recompiles for that.
+Dump 3D's `build.revision` is the git HEAD of the last configure (with `-dirty` when tracked files,
+staged or not, differed from that HEAD then). The configure depends on the worktree's HEAD file and
+its branch ref, so the next build after a commit, checkout or pull re-runs it and names the new
+revision; only `game3d_debug_dump.cpp`, the one file that prints it, recompiles for that. A
+configure that finds no HEAD file to depend on says so in a status line; its revision then changes
+only at the next configure.
 
 ## Install and enable
 
