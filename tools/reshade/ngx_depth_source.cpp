@@ -644,14 +644,36 @@ namespace sunshine_ngx {
     sunshine_api_contract::apply(sunshine_api_contract::ngx::evaluation_input_of(feature), value);
 #ifndef SUNSHINE_UPSCALER_TRACE_TEST
     using namespace sunshine_streamline;
+    // Confirmed Streamline FG owns depth (frame_generation_owns_depth): the
+    // evaluation begins (the live handoff's evidence) and copies nothing, so
+    // none of its depth, subrect or jitter parameters is read. Until 11-01 it
+    // read them and began a nomination first, which took the capture lock
+    // three times on the game's render thread every real frame with FG on
+    // (F98); its Reset pulse and sequence above are still committed. An
+    // owned evaluation with incomplete parameters counts as fg_owned, not
+    // missing_parameters.
+    if (frame_generation_snapshot fg; query_frame_generation(UINT32_MAX, fg) &&
+        frame_generation_owns_depth(fg.enabled, fg.epoch, fg.viewport, fg.enabled_tick)) {
+      depth_capture::begin_evaluation(value.epoch, value.sequence, value.viewport, value.provider, value.source_id);
+      attempt.capture_suppressed_by_depth_owner = true;
+      ++fg_owned;
+      return attempt;
+    }
     // Its nomination is in progress from this begin until its copy is
     // recorded or refused, whichever path returns, so a Present on another
-    // thread while the getters, the FG owner query and
-    // retain_source below run does not read the attempt as refused: the
-    // snapshot completed before it stands in, as it does once a refused
-    // attempt is a missing frame (depth_capture::select_capture).
+    // thread while the getters and retain_source below run does not read
+    // the attempt as refused: the snapshot completed before it stands in, as
+    // it does once a refused attempt is a missing frame
+    // (depth_capture::select_capture).
     depth_capture::evaluation_nomination nominating;
     nominating.begin(value.epoch, value.sequence, value.viewport, value.provider, value.source_id);
+#else
+    // The call-trace tests decide whether a live FG scope owns depth.
+    if (backend.frame_generation_owns_depth && backend.frame_generation_owns_depth()) {
+      attempt.capture_suppressed_by_depth_owner = true;
+      ++fg_owned;
+      return attempt;
+    }
 #endif
     void *resource{};
     auto &area = value.resource.area;
@@ -678,23 +700,6 @@ namespace sunshine_ngx {
       if (have_x && have_y && std::isfinite(jitter_x) && std::isfinite(jitter_y))
         value.jitter = {jitter_x, jitter_y, area.width, area.height, true};
     }
-#ifndef SUNSHINE_UPSCALER_TRACE_TEST
-    // Confirmed Streamline FG owns depth (frame_generation_owns_depth). The
-    // evaluation above stays live for the handoff hold.
-    if (frame_generation_snapshot fg; query_frame_generation(UINT32_MAX, fg) &&
-        frame_generation_owns_depth(fg.enabled, fg.epoch, fg.viewport, fg.enabled_tick)) {
-      attempt.capture_suppressed_by_depth_owner = true;
-      ++fg_owned;
-      return attempt;
-    }
-#else
-    // The call-trace tests decide whether a live FG scope owns depth.
-    if (backend.frame_generation_owns_depth && backend.frame_generation_owns_depth()) {
-      attempt.capture_suppressed_by_depth_owner = true;
-      ++fg_owned;
-      return attempt;
-    }
-#endif
     sunshine_streamline::depth_capture::record_diagnostic diagnostic;
     bool retaining = false;
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST

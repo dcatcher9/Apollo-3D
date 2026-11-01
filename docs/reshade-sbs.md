@@ -5833,10 +5833,16 @@ Nested NGX capture is suppressed only when an enclosing SL or NGX evaluation has
 a valid native copy, or when SL has confirmed enabled FG authority for that viewport and that FG
 scope is live (above). A direct (not nested) NGX evaluation applies the same FG rule: while SL
 reports FG enabled on its one viewport with a live scope it begins its evaluation (live handoff
-evidence) but records no depth copy, since selection never considers NGX while FG is required; a
+evidence) but records no depth copy, since selection never considers NGX while FG is required; an
 ambiguous FG read, or a silent
 FG scope, copies as before. The `Sunshine NGX depth` line counts
-these evaluations as `fg_owned`. Before the final review a UE title with NVIDIA's DLSS plugin and
+these evaluations as `fg_owned`, also one with incomplete parameters: the decision comes right after
+the Reset pulse and the evaluation's sequence are committed, before its depth, subrect and jitter
+parameters are read or a nomination begins (one capture-lock round trip for the scope's liveness and
+one for the evaluation's begin on the game's render thread; until 11-01 three, plus those getters,
+every real frame with FG on: lane L-fg, F98). At FG Off the frame's FG copies, kept as lineage
+copies, and the next NGX evaluation's copy supply depth; an Off between an NGX evaluation and its
+frame's Present costs that frame's NGX copy, inside the accepted switch allowance. Before the final review a UE title with NVIDIA's DLSS plugin and
 the Streamline DLSS-G plugin copied its full depth plane on every real frame with FG on, for no
 consumer. DLSS-G itself (NGX feature 11, `NVSDK_NGX_Feature_FrameGeneration` in the pinned
 `nvsdk_ngx_defs.h`) is a known FG feature with no Super Resolution `Depth` input: its evaluations

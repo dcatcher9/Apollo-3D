@@ -492,11 +492,19 @@ namespace sunshine_ngx {
   // records no copy: FG options observed enabled (the probe's
   // frame_generation_snapshot: enabled, epoch, viewport, enabled_tick) whose
   // scope is live (depth_capture::frame_generation_scope_live). Selection
-  // never considers NGX while FG is required, and FG Off raises the admission
-  // watermark past every snapshot taken meanwhile, so a copy would have no
-  // consumer. FG Off, an ambiguous FG read, which observes no options (nested
-  // NGX's rule, owns_nested_depth_capture), and a silent scope, which owns
-  // nothing, copy.
+  // never considers NGX while FG is required (select_provider's
+  // require_frame_generation branch), so the copy would be wasted while the
+  // scope is live. At FG Off, which retires only the FG role (retire_source,
+  // since 10-28: the lineage owner is floored at its shown copy, and the
+  // frame's FG copies are kept as lineage copies), those copies and the next
+  // NGX evaluation's supply depth; an NGX copy made meanwhile would have been
+  // admissible, so an Off between an NGX evaluation and its frame's Present
+  // costs that one frame's copy, inside the accepted switch allowance. (Until
+  // 11-01 this said FG Off raised the admission watermark past every
+  // snapshot, so a copy would have no consumer: true only until 10-28, F97.)
+  // FG Off, an ambiguous FG read, which observes no options (nested NGX's
+  // rule, owns_nested_depth_capture), and a silent scope, which owns nothing,
+  // copy.
   inline bool frame_generation_owns_depth(bool enabled, std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
     return enabled && sunshine_streamline::depth_capture::frame_generation_scope_live(epoch, viewport, enabled_tick);
   }
