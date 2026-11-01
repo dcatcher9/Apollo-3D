@@ -376,7 +376,10 @@ namespace sunshine_streamline::provider {
   // without FG for this acquisition, so that viewport's ordinary SR/RR depth
   // may supply depth once FG's own newest copy can no longer be held
   // (depth_capture::frame_generation_holds), and the next accepted FG copy
-  // takes ownership back.
+  // takes ownership back. Its viewport still breaks a tie of active
+  // Streamline views (owner ruling R5): the selection keeps the scope's epoch
+  // and viewport as silent_epoch and silent_viewport, which
+  // select_latest_capture reads as a required scope's own.
   // Any other policy selects as it is.
   struct frame_generation_selection {
     depth_capture::selection_policy selection;
@@ -385,7 +388,11 @@ namespace sunshine_streamline::provider {
   inline frame_generation_selection select_frame_generation_scope(const depth_capture::selection_policy &policy) {
     const bool silent = policy.require_frame_generation &&
       !depth_capture::frame_generation_scope_live(policy.epoch, policy.viewport, policy.enabled_tick);
-    return {silent ? depth_capture::selection_policy{} : policy, silent};
+    if (!silent) return {policy, false};
+    depth_capture::selection_policy selection;
+    selection.silent_epoch = policy.epoch;
+    selection.silent_viewport = policy.viewport;
+    return {selection, true};
   }
 }
 

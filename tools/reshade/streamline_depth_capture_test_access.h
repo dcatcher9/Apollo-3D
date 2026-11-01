@@ -702,7 +702,7 @@ namespace sunshine_streamline::depth_capture {
       std::uint64_t now);
     input head_identity(const evaluation_head &head, provider_kind provider);
     capture_pick select_capture(const queue_state &owner, std::uint64_t native,
-      std::uint64_t present, provider_kind provider, std::uint64_t now);
+      std::uint64_t present, provider_kind provider, std::uint64_t now, selection_policy policy);
     bool interrupts_admission(const queue_state &owner, const capture_pick &chosen);
     capture_pick select_provider(const queue_state &owner, std::uint64_t native,
       std::uint64_t present, std::uint64_t now, selection_policy policy);

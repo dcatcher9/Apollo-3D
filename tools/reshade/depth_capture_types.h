@@ -73,6 +73,12 @@ namespace sunshine_streamline::depth_capture {
     bool exclude_unconfirmed_fg{};
     // Required FG: when its options turned it on (frame_generation_scope_live).
     std::uint64_t enabled_tick{};
+    // A silent FG scope's epoch and viewport (select_frame_generation_scope):
+    // it selects as without FG, and its viewport still breaks a tie of
+    // active Streamline views, as a required scope's does (owner ruling R5,
+    // select_latest_capture). Zero silent_epoch: none.
+    std::uint64_t silent_epoch{};
+    std::uint32_t silent_viewport{};
   };
   // Acquisition authority, frozen under the capture lock. Diagnostics may be
   // omitted or reformatted without changing these source/continuity decisions.

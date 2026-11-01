@@ -70,29 +70,59 @@ namespace sunshine_streamline::depth_capture {
     }
 
     capture_pick select_latest_capture(const queue_state &owner, std::uint64_t native,
-        std::uint64_t present, provider_kind provider, std::uint64_t now) {
+        std::uint64_t present, provider_kind provider, std::uint64_t now, selection_policy policy) {
       capture_pick out;
       out.provider = provider;
       const auto &current = evaluations[provider_index(provider)];
+      // Active: its newest evaluation is younger than the source age, or is
+      // the frame this Present presents (frame_presenting), by its call or by
+      // its newest copy's submission (presented_by).
+      const auto active = [&](const evaluation_head &value) {
+        return value.epoch == current.epoch && value.sequence &&
+          (sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms) || view_presenting(value, provider));
+      };
+      unsigned active_views = 0;
+      for (const auto &value : current.views) active_views += active(value);
+      // Two or more active views tie (S19). A confirmed FG scope's viewport
+      // breaks the tie (owner ruling R5): a required scope's, or a silent
+      // scope's (select_frame_generation_scope keeps it as silent_epoch and
+      // silent_viewport). When exactly one active view is that viewport's,
+      // the Present selects as if it were the one active view: its newest
+      // nomination is the head, whose identity every look below matches
+      // (the slots of that nomination, its stand-ins: completed_snapshot and
+      // lineage_snapshot of its viewport), so no other viewport's copy is
+      // picked. Without such a scope (FG off, unknown, ambiguous or
+      // unavailable: exclude_unconfirmed_fg), or with no single active view
+      // of its viewport, the tie stays (ambiguous). One active view needs no
+      // tie-break and is selected as before, whichever viewport FG names.
+      // Until 11-01 the tie always stayed: two active SR viewports were mono,
+      // also with FG bound to one of them.
+      const auto tie_epoch = policy.require_frame_generation ? policy.epoch : policy.silent_epoch;
+      const auto tie_viewport = policy.require_frame_generation ? policy.viewport : policy.silent_viewport;
+      const evaluation_head *bound = nullptr;
+      if (active_views > 1 && provider == provider_kind::streamline && tie_epoch && tie_epoch == current.epoch) {
+        unsigned bound_views = 0;
+        for (const auto &value : current.views)
+          if (value.viewport == tie_viewport && active(value)) { bound = &value; ++bound_views; }
+        if (bound_views == 1) active_views = 1;
+        else bound = nullptr;
+      }
+      // The head's identity: the namespace's newest nomination, or the bound
+      // viewport's newest where it broke the tie.
+      const auto epoch = bound ? bound->epoch : current.epoch;
+      const auto sequence = bound ? bound->sequence : current.sequence;
+      const auto source_id = bound ? bound->source_id : current.source_id;
       // The newest nomination's view, active or not (capture_pick::named).
       for (const auto &value : current.views)
-        if (current.epoch && current.sequence && value.epoch == current.epoch && value.sequence == current.sequence &&
-            value.source_id == current.source_id) out.named = &value;
+        if (epoch && sequence && value.epoch == epoch && value.sequence == sequence &&
+            value.source_id == source_id) out.named = &value;
       const auto is_latest = [&](const slot &value) {
-        return value.id && !value.preservation_only && value.metadata.provider == provider && value.metadata.epoch == current.epoch &&
-          value.metadata.sequence == current.sequence && value.metadata.source_id == current.source_id;
+        return value.id && !value.preservation_only && value.metadata.provider == provider && value.metadata.epoch == epoch &&
+          value.metadata.sequence == sequence && value.metadata.source_id == source_id;
       };
       for (const auto &value : capture_pool.slots) if (is_latest(value) && (!out.latest || value.id > out.latest->id)) out.latest = &value;
       out.selection = out.latest ? selection_reason::no_admissible_capture : selection_reason::no_current_nomination;
       if (out.latest && out.latest->queue != native) out.progress = producer_progress(*out.latest);
-      // Active: its newest evaluation is younger than the source age, or is
-      // the frame this Present presents (frame_presenting), by its call or by
-      // its newest copy's submission (presented_by).
-      unsigned active_views = 0;
-      for (const auto &value : current.views)
-        if (value.epoch == current.epoch && value.sequence &&
-            (sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms) || view_presenting(value, provider)))
-          ++active_views;
       if (active_views != 1) {
         out.result = active_views ? status::ambiguous : status::stale;
         out.selection = active_views ? selection_reason::ambiguous_views : selection_reason::inactive_views;
@@ -101,13 +131,12 @@ namespace sunshine_streamline::depth_capture {
       // The newest nomination's view, when it is that one active view: its
       // viewport names the head's display lineage (select_capture).
       for (const auto &value : current.views)
-        if (current.epoch && current.sequence && value.epoch == current.epoch && value.sequence == current.sequence &&
-            value.source_id == current.source_id &&
-            (sunshine_freshness::fresh_lt(value.tick, now, sunshine_freshness::source_age_ms) || view_presenting(value, provider)))
+        if (epoch && sequence && value.epoch == epoch && value.sequence == sequence &&
+            value.source_id == source_id && active(value))
           out.head = &value;
       const auto &pending = current.pending_nomination;
-      if (pending.sequence && pending.epoch == current.epoch && pending.sequence == current.sequence &&
-          pending.source_id == current.source_id &&
+      if (pending.sequence && pending.epoch == epoch && pending.sequence == sequence &&
+          pending.source_id == source_id &&
           (sunshine_freshness::fresh_lt(pending.tick, now, sunshine_freshness::source_age_ms) || frame_presenting(pending.present)) &&
           owner.provider_established && owner.provider == provider && owner.source_id == pending.source_id &&
           owner.viewport == pending.viewport && owner.last_epoch == pending.epoch && pending.sequence > owner.last_sequence)
@@ -138,7 +167,11 @@ namespace sunshine_streamline::depth_capture {
         if (!out.value || value.id > out.value->id) { out.value = &value; out.progress = progress; }
       }
       if (!out.value) {
-        out.result = out.pending_nomination ? status::recorded : attempt_status[provider_index(provider)].load();
+        // The provider's last attempt is the namespace's newest nomination's;
+        // a bound viewport's older nomination has no attempt status left.
+        const bool newest = sequence == current.sequence && source_id == current.source_id;
+        out.result = out.pending_nomination ? status::recorded :
+          newest ? attempt_status[provider_index(provider)].load() : status::unavailable;
         if (out.latest) {
           if (out.latest->invalid || (out.latest->finished && !out.latest->success)) out.result = status::failed;
           else if (out.latest->producer_submitted) {
@@ -379,8 +412,8 @@ namespace sunshine_streamline::depth_capture {
     }
 
     capture_pick select_capture(const queue_state &owner, std::uint64_t native,
-        std::uint64_t present, provider_kind provider, std::uint64_t now) {
-      auto chosen = select_latest_capture(owner, native, present, provider, now);
+        std::uint64_t present, provider_kind provider, std::uint64_t now, selection_policy policy) {
+      auto chosen = select_latest_capture(owner, native, present, provider, now, policy);
       const auto *latest = chosen.latest;
       // This live check is source age or this frame being presented; unlike
       // select_provider's live, it does not interpret status::stale or a pending nomination.
@@ -437,7 +470,7 @@ namespace sunshine_streamline::depth_capture {
       // game's queue completed during that Present's selection (the 10-28
       // review's J2, once in a few fixed-set runs).
       if (pending && completed && completed == latest) {
-        auto again = select_latest_capture(owner, native, present, provider, now);
+        auto again = select_latest_capture(owner, native, present, provider, now, policy);
         if (again.value == completed && again.result == status::ready) return again;
       }
       if (!completed) {
@@ -526,7 +559,7 @@ namespace sunshine_streamline::depth_capture {
         return head && sunshine_scene_depth::is_fg_source(head->source_id, head->viewport);
       };
       const auto select_sl = [&] {
-        auto chosen = select_capture(owner, native, present, provider_kind::streamline, now);
+        auto chosen = select_capture(owner, native, present, provider_kind::streamline, now, policy);
         const auto *source = chosen.value ? chosen.value : chosen.latest;
         // Without a capture, a nomination in progress or a head refused before
         // its slot existed names the source: an FG input's is excluded as one.
@@ -567,9 +600,9 @@ namespace sunshine_streamline::depth_capture {
       }
       // Repeated effects in one presentation keep one immutable provider tuple.
       if (owner.provider_established && owner.present == present && owner.present_capture)
-        return owner.provider == provider_kind::streamline ? select_sl() : select_capture(owner, native, present, owner.provider, now);
+        return owner.provider == provider_kind::streamline ? select_sl() : select_capture(owner, native, present, owner.provider, now, policy);
       auto sl = select_sl();
-      auto ngx = select_capture(owner, native, present, provider_kind::ngx, now);
+      auto ngx = select_capture(owner, native, present, provider_kind::ngx, now, policy);
       // Ownership never moves to depth older than the owner's last selected
       // copy (present_capture). Capture ids follow publication order across
       // both providers, while GPU readability need not: the other provider's
@@ -829,7 +862,8 @@ namespace sunshine_streamline::depth_capture {
         const auto &current = evaluations[provider_index(provider)];
         for (const auto &view : current.views) if (view.epoch == current.epoch && view.sequence) {
           diagnostic->newest_view_tick_ms = std::max(diagnostic->newest_view_tick_ms, view.tick);
-          // As select_latest_capture counts them (frame_presenting too).
+          // As select_latest_capture counts them (frame_presenting too),
+          // before a confirmed FG scope's viewport breaks their tie.
           if (sunshine_freshness::fresh_lt(view.tick, selection_tick, sunshine_freshness::source_age_ms) ||
               view_presenting(view, provider))
             ++diagnostic->active_view_count;

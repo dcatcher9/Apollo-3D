@@ -111,8 +111,9 @@ namespace sunshine_streamline::depth_capture {
     auto &current = evaluations[provider_index(provider)];
     const auto now = GetTickCount64();
     // Another viewport's view in this epoch is active (or presenting): the
-    // viewport's picks stay ambiguous, so neither its FG copies nor its FG
-    // nomination pass to its ordinary source (below).
+    // viewport's picks are ambiguous once FG is off (no FG scope breaks the
+    // views' tie, select_latest_capture), so its FG copies do not pass to its
+    // ordinary source (below).
     const bool other_viewport_active = fg_role &&
       std::any_of(current.views.begin(), current.views.end(), [&](const evaluation_head &view) {
         return view.sequence && view.epoch == epoch && view.viewport != viewport &&
@@ -176,15 +177,21 @@ namespace sunshine_streamline::depth_capture {
     // (interrupts_admission). Until 10-28 the namespace kept a head no view
     // named (its FG nomination had replaced the viewport's SR view), so that
     // Present read inactive or ambiguous views and moved acquire's gap
-    // watermark, which revoked the same SR copies. Not while another
-    // viewport's view in this epoch is active (select_latest_capture): a
-    // source-0 view beside it keeps the picks ambiguous, so the view goes as
-    // before. An inactive one (a viewport that stopped evaluating, such as
-    // the session timelines' earlier viewports) makes nothing ambiguous.
+    // watermark, which revoked the same SR copies. While another viewport's
+    // view in this epoch is active the role's view passes to the ordinary
+    // source as well, whether or not its nomination is the namespace's
+    // newest: the viewport keeps its call as a view, so FG Off leaves two
+    // active views, ambiguous at once, where the FG scope's viewport had
+    // broken their tie (owner ruling R5, select_latest_capture). Until 11-01
+    // the view went there, and the other viewport was the one active view
+    // until this viewport's next evaluation: its copy showed at FG Off's
+    // next Present. An inactive one (a viewport that stopped evaluating, such
+    // as the session timelines' earlier viewports) makes nothing ambiguous.
     const evaluation_head *head = nullptr;
-    if (fg_role && current.epoch == epoch && current.source_id == source_id && !other_viewport_active)
+    if (fg_role && current.epoch == epoch)
       for (const auto &view : current.views)
-        if (view.epoch == epoch && view.source_id == source_id && view.sequence == current.sequence) head = &view;
+        if (view.epoch == epoch && view.source_id == source_id &&
+            (other_viewport_active || (current.source_id == source_id && view.sequence == current.sequence))) head = &view;
     for (auto &view : current.views) {
       if (&view == head) {
         // Its call (sequence, tick, present) without the FG scope's facts.

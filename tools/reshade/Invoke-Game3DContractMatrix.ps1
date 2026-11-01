@@ -131,7 +131,7 @@ try {
   $skipped = [Collections.Generic.List[string]]::new()
   $families = [ordered]@{}
   # The runtime layer's Streamline families share sl_runtime_rows.
-  $gapTables = @{ 'L1 sl' = (Read-GapRows 'sl_rows'); 'L1 ngx' = (Read-GapRows 'ngx_rows'); 'L3' = (Read-GapRows 'sl_runtime_rows');
+  $gapTables = @{ 'L1 sl' = (Read-GapRows 'sl_rows'); 'L1 sl_views' = (Read-GapRows 'view_rows'); 'L1 ngx' = (Read-GapRows 'ngx_rows'); 'L3' = (Read-GapRows 'sl_runtime_rows');
     'L3 ngx' = (Read-GapRows 'ngx_runtime_rows'); 'L3 generic' = (Read-GapRows 'generic_runtime_rows'); 'L3 ui' = (Read-GapRows 'ui_runtime_rows') }
 
   # A layer's case lines: counted per family, each verdict accounted for, and

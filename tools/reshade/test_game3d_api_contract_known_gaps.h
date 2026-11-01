@@ -124,17 +124,29 @@ namespace game3d_contract::known_gaps {
       return legal(value) && (expected.kind == outcome_kind::capture || expected.kind == outcome_kind::continuous) && !either(expected);
     }
 
-    // Two SR viewports active together (S19). No hook or runtime cell runs
-    // them: views runs one and five_rotating.
-    constexpr bool two_active(const sl_case &value) {
-      return value.views == viewports::two_active;
-    }
-
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
     {"none", &rules::S1, kind::pending, &streamline::no_cell, "No Streamline hook gap remains: Stage 3 batch B closed S4, S15, S16 and S16d (and with earlier fixes every other row). This row matches no cell."},
-    {"S19-two-active", &rules::S19, kind::pending, &streamline::two_active, "Two SR viewports active together (11-01, round 2): each viewport's copy point still copies its depth, and the capture owner's selection refuses, not a gate (no refusal is recorded): while both views are within the source age no Present uses either (ambiguous_views, which moves the admission watermark), so the display holds its last copy of the newest nomination's viewport within the source age, or drops another viewport's (source_changed), then mono. With FG in scope the viewport bound to it does not break the tie (R5): mono as well. Fail-safe, never another viewport's depth; owner work: R5's tie-break and skipping the unused copies. No cell runs two active viewports, so this row matches none."},
+  };
+
+  // Two SR viewports active together (S19, owner ruling R5), judged at the
+  // capture owner's selection (test_game3d_api_contract_cpu.cpp, family
+  // sl_views, judged with judge_each). Each viewport meets the oracle for
+  // its own case; the add-on meets every cell but one owner question.
+  namespace views {
+    // DLSS-G's Dynamic mode asking for no generated frame: the probe accepts
+    // Dynamic with any count (hook_fg_options), so FG is in scope and its
+    // viewport breaks the tie, where the oracle reads a count of 0 as no
+    // frame generation (frame_generation_scope, S20), so both refuse.
+    constexpr bool dynamic_without_frames(const sl_case &value) {
+      return value.views == viewports::two_active && value.fg == fg_mode::dynamic && !value.frames_generated &&
+             value.options_result != sl_result::error;
+    }
+  }  // namespace views
+
+  inline constexpr row<sl_case> view_rows[] {
+    {"S19-dynamic-zero-frames", &rules::S19, kind::pending, &views::dynamic_without_frames, "Owner question (11-01): does DLSSGMode eDynamic with numFramesToGenerate 0 put frame generation in scope? The probe accepts Dynamic with any count (hook_fg_options), so its viewport breaks a tie of two active viewports (R5) and its copy shows; the oracle's frame_generation_scope reads a count of 0 as no frame generation for every mode, so both viewports refuse. The same difference was invisible at S20, whose tag-call cells permit both outcomes. Until R5's tie-break (11-01) both viewports were mono there (S19-two-active, removed)."},
   };
 
   // A Streamline frame judged at its Present by the runtime layer

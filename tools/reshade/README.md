@@ -1960,14 +1960,25 @@ name stands for either (11-01). A failed tag call or evaluate invalidates that c
 (`capture_failure::evaluation_failed`) and the Present holds within the source age, then is mono:
 S21b's HOLD, which the runtime families' `tag_result=error` and `evaluate_result=error` cells judge.
 Two SR viewports active together each still copy at their copy points; the capture owner's
-selection refuses both while both views are within the source age (`ambiguous_views`), so the
-display holds its last copy of the newest nomination's viewport within the source age, or drops
-another viewport's, then is mono. No hook or runtime cell runs two active viewports (the hook
-layer's `views` runs one and five rotating; a runtime case has one viewport), so the copies made and
-R5's FG tie-break, which the add-on does not implement (also mono), are the hook table's pending
-row `S19-two-active`. Until then the evidence names `evaluation-failed` and `ambiguous-viewport`,
-which nothing had set since structure rounds D6 and D3, stood in for both in
-`reshade_contract_matrix_cpu`'s refusal pairing.
+selection refuses both while both views are within the source age (`ambiguous_views`), unless a
+confirmed FG scope's viewport breaks the tie (owner ruling R5, since 11-01): then that viewport's
+display lineage alone is selected ([Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection)).
+`reshade_contract_matrix_cpu` judges this at the capture owner's selection in its family
+`sl_views` (`view_cells`; JSON lines `L1 sl_views`, gap table `view_rows`): 120 cells at the newest
+surveyed release over FG mode, generated frames, the options call's result and the viewport the
+options name (the case's or the other active one's). The options go through the probe's own hooks,
+the FG read (`query_frame_generation`), the FG view's depth projection and
+`provider::select_frame_generation_scope` make the policy, and `select_provider` picks from both
+viewports' SR copies with either viewport's evaluation the newest. Each viewport must meet the
+oracle for its own case, never the other's copy: 116 meet; the 4 cells of Dynamic mode with
+`numFramesToGenerate` 0 (options accepted) are the pending owner question
+`S19-dynamic-zero-frames` (the probe accepts Dynamic with any count, so FG binds its viewport,
+where the oracle reads a count of 0 as no frame generation). A runtime case still runs one
+viewport: a second one would need its own per-frame SDK calls, resources and refusal attribution
+in the native provider fixture. Until 11-01 the add-on did not implement R5's tie-break (also
+mono), the hook table's pending row `S19-two-active`; before that round the evidence names
+`evaluation-failed` and `ambiguous-viewport`, which nothing had set since structure rounds D6 and
+D3, stood in for both in `reshade_contract_matrix_cpu`'s refusal pairing.
 
 Family `ngx` drives Super Resolution, Ray Reconstruction and an unknown feature through `Depth`
 and the DLSS keys, and DLSS-G's own evaluation through `DLSSG.*` on a viewport whose FG the 2.7.30
@@ -3138,8 +3149,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   SR owner whose newest nomination was DLSS-G's and at FG On again, while a copy
   published before the shown one, a copy of an earlier frame, an FG copy recorded after the Off once
   SR was shown, an NGX copy before the shown one and an SR copy before an NGX copy that took the queue
-  stay refused; another viewport's active view keeps the old view removal, one past the source age
-  does not; an NGX feature's release still revokes; an FG copy recorded after the Off while the
+  stay refused; with another viewport's view active the FG view passes to the ordinary source too,
+  so the views tie at once (since 11-01; until then it went, and no nomination was current), one past
+  the source age makes nothing ambiguous; an NGX feature's release still revokes; an FG copy recorded after the Off while the
 role stays retired is the viewport's ordinary source, a copy selected before an Off and copied
 after it is still the consumed frame (`complete_frame`; until 10-28 an SR copy of an earlier frame
 published after it showed next), and an FG copy an Off race left of an older frame
@@ -3147,7 +3159,14 @@ than a readable, never shown SR copy loses to it at FG On, while alone it shows 
 across `completed_snapshot` and `lineage_snapshot` for a copy of the retired role, 10-28; the Off's
 serial is 30 there); each Present establishes any selected copy, as
   `acquire` does, so an FG owner meets a later SR copy at FG Off only after a late Off or a list
-  executed after its Present), the source a head refused before its capture existed names to
+  executed after its Present), two active views and the FG scope's tie-break (owner ruling R5,
+  11-01: a live or a silent scope's viewport picks its own display lineage alone, its stand-in
+  included, never the other viewport's copy; no FG, an ambiguous read, a scope on a viewport
+  without an active view and two active views of its viewport keep the tie; one active view needs
+  none; FG Off ties the views again at once, whatever the newest nomination, and the display holds
+  its FG copy within the source age only or drops it; an FG viewport switch drops the old
+  viewport's held copy until the new one's is readable; until 11-01 every such row was ambiguous,
+  and at FG Off the other viewport's newer copy showed), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of
   `decide_display`. Its freshness table
   pins each age limit one millisecond either side against an explicit clock: the source age at

@@ -298,7 +298,7 @@ namespace sunshine_streamline::depth_capture {
         const queue_progress &progress);
     void bind_pixel_consumer(slot &value, std::uint64_t consumer, status pixels);
     capture_pick select_latest_capture(const queue_state &owner, std::uint64_t native,
-        std::uint64_t present, provider_kind provider, std::uint64_t now);
+        std::uint64_t present, provider_kind provider, std::uint64_t now, selection_policy policy);
     bool pending_frame(const capture_pick &chosen, const queue_state &owner);
     acquisition_decision classify_acquisition(const capture_pick &chosen, const queue_state &owner,
         selection_policy policy);
@@ -315,7 +315,7 @@ namespace sunshine_streamline::depth_capture {
     const slot *lineage_fallback(const input &fg, std::uint64_t now);
     input head_identity(const evaluation_head &head, provider_kind provider);
     capture_pick select_capture(const queue_state &owner, std::uint64_t native,
-        std::uint64_t present, provider_kind provider, std::uint64_t now);
+        std::uint64_t present, provider_kind provider, std::uint64_t now, selection_policy policy);
     bool interrupts_admission(const queue_state &owner, const capture_pick &chosen);
     capture_pick select_provider(const queue_state &owner, std::uint64_t native,
         std::uint64_t present, std::uint64_t now, selection_policy policy = {});

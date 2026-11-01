@@ -693,7 +693,7 @@ namespace sunshine_streamline::depth_capture {
       if (select(4).value != &preferred) return false;
       // Simultaneous distinct view/source identities remain ambiguous.
       begin_evaluation(3, 2, 1, provider_kind::ngx, 124);
-      const auto ambiguous = select_capture(owner, native, 4, provider_kind::ngx, GetTickCount64());
+      const auto ambiguous = select_capture(owner, native, 4, provider_kind::ngx, GetTickCount64(), {});
       if (ambiguous.value || ambiguous.result != status::ambiguous ||
           ambiguous.selection != selection_reason::ambiguous_views) return false;
       {
@@ -1000,14 +1000,14 @@ namespace sunshine_streamline::depth_capture {
       constexpr std::uint64_t fg_source = 1ull << 63;
       make(0, provider_kind::streamline, 8, 1, 0);
       auto &fg = make(1, provider_kind::streamline, 8, 2, fg_source);
-      if (select_capture(role_owner, native, 7, provider_kind::streamline, GetTickCount64()).result != status::ambiguous) return false;
+      if (select_capture(role_owner, native, 7, provider_kind::streamline, GetTickCount64(), {}).result != status::ambiguous) return false;
       fg.metadata.sequence = 3;
       begin_evaluation(8, 3, 0, provider_kind::streamline, fg_source, 0);
-      if (select_capture(role_owner, native, 7, provider_kind::streamline, GetTickCount64()).value != &fg) return false;
+      if (select_capture(role_owner, native, 7, provider_kind::streamline, GetTickCount64(), {}).value != &fg) return false;
       begin_evaluation(8, 4, 1, provider_kind::streamline, 0);
       fg.metadata.sequence = 5;
       begin_evaluation(8, 5, 0, provider_kind::streamline, fg_source, 0);
-      if (select_capture(role_owner, native, 7, provider_kind::streamline, GetTickCount64()).result != status::ambiguous) return false;
+      if (select_capture(role_owner, native, 7, provider_kind::streamline, GetTickCount64(), {}).result != status::ambiguous) return false;
 
       // A Present can observe an SDK nomination after its watermark advances
       // but before native validation/allocation has produced a capture slot.
@@ -1029,7 +1029,7 @@ namespace sunshine_streamline::depth_capture {
         return candidate;
       };
       const auto pending_pick = [&](std::uint64_t now = GetTickCount64()) {
-        return select_capture(pending_owner, native, 11, provider_kind::streamline, now);
+        return select_capture(pending_owner, native, 11, provider_kind::streamline, now, {});
       };
       auto candidate = prepare_pending();
       if (!begin_nomination(candidate, UINT64_MAX)) return false;

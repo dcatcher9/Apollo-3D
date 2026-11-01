@@ -263,7 +263,10 @@ namespace sunshine_streamline::depth_capture {
         {"An accepted copy of a frame newer than the missed one keeps the scope live", false, fg_copy::copied_after_miss, true, true, 'F', status::ready, selection_reason::current_capture},
         {"A failed FG evaluation is no accepted copy; its attempt still replaced the SR view", false, fg_copy::failed, true, false, '-', status::failed, selection_reason::no_admissible_capture},
         {"A metadata-only FG nomination is no accepted copy", false, fg_copy::metadata_only, true, false, '-', status::unavailable, selection_reason::no_admissible_capture},
-        {"Another viewport's accepted FG copy leaves this scope silent and makes Streamline ambiguous", false, fg_copy::other_viewport, true, false, '-', status::ambiguous, selection_reason::ambiguous_views},
+        // Owner ruling R5 (11-01): the silent scope's viewport breaks the
+        // two active views' tie (view_tie_rows); until 11-01 the Present
+        // read ambiguous views.
+        {"Another viewport's accepted FG copy leaves this scope silent; this scope's viewport breaks the two views' tie: its SR depth", false, fg_copy::other_viewport, true, false, 'S', status::ready, selection_reason::current_capture},
       };
       constexpr std::uint64_t epoch = 7;
       for (const auto &r : rows) {
@@ -1774,7 +1777,10 @@ namespace sunshine_streamline::depth_capture {
         {"An SR owner whose newest nomination was DLSS-G's: S stands in, no gap", shape::sr_owner_fg_head, "P1 C ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=C; P3 S ready completed_snapshot; P4 - recorded completed_already_consumed; P5 H ready current_capture"},
         {"The same with the viewport's SR view kept beside the FG one", shape::sr_owner_fg_head_sr_view_kept, "P1 C ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=C; P3 S ready completed_snapshot; P4 - recorded completed_already_consumed; P5 H ready current_capture"},
         {"Another viewport's view past the source age makes nothing ambiguous: DLSS-G's head passes to SR, S stands in", shape::other_viewport, "P1 F ready current_capture; P2 - recorded no_completed_snapshot; OFF floor=F views=2; P3 S ready completed_snapshot; P4 H ready current_capture"},
-        {"Another viewport's view active at FG Off: DLSS-G's head goes without an SR head, ambiguous and revoking as before", shape::other_viewport_active, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=F views=1; P3 - unavailable no_current_nomination [gap]; P4 - ambiguous ambiguous_views [gap]; P5 - ambiguous ambiguous_views [gap]"},
+        // Since 11-01 (owner ruling R5, view_tie_rows) its FG view passes to
+        // the viewport's SR source too, so the views tie at once; until then
+        // it went, and the Present after FG Off named no nomination.
+        {"Another viewport's view active at FG Off: DLSS-G's head passes to the viewport's SR source too, two views, ambiguous at once and revoking", shape::other_viewport_active, "P1 F ready current_capture; P2 S submitted no_completed_snapshot; OFF floor=F views=2; P3 - ambiguous ambiguous_views [gap]; P4 - ambiguous ambiguous_views [gap]; P5 - ambiguous ambiguous_views [gap]"},
         {"A repeated effect of F's presentation selects nothing new after FG Off", shape::same_present, "P1 F ready current_capture; OFF floor=F; P1 - submitted completed_not_older; P2 S ready current_capture"},
         {"An FG copy of a frame before the Off, recorded after it, never shows once SR was shown", shape::fg_after_off_then_on, "P1 F ready current_capture; OFF floor=F; P2 S ready current_capture; P3 - recorded completed_already_consumed"},
         {"The same FG copy beside a newer readable SR copy never shown: FG On shows the newer frame (until 10-28 G, completed_snapshot)", shape::fg_after_off_sr_unshown_then_on, "P1 F ready current_capture; OFF floor=F; P2 S ready lineage_snapshot"},
@@ -2113,6 +2119,274 @@ namespace sunshine_streamline::depth_capture {
         }
       }
       std::printf("PASS P6 FG Off retires only the FG role: %zu rows\n", std::size(rows));
+    }
+
+    // P6: two or more active Streamline views tie (S19): no view is the
+    // Present's source (ambiguous_views, which moves the admission
+    // watermark), and the display holds only a copy of the viewport the
+    // newest nomination names, within the source age. A confirmed FG scope's
+    // viewport breaks the tie (owner ruling R5, 11-01), the required scope's
+    // or a silent one's (select_frame_generation_scope keeps it), when
+    // exactly one active view is that viewport's: the Present selects that
+    // viewport's display lineage alone, its stand-ins included, never
+    // another viewport's copy. Without a confirmed scope (FG off, an
+    // ambiguous read) or without a single active view of its viewport the
+    // tie stays, and one active view needs no tie-break. FG Off ties the
+    // views again at once (retire_source passes the FG view to the
+    // viewport's ordinary source whatever the namespace's newest
+    // nomination), and an FG viewport switch never shows the old viewport's
+    // copy as the new one's. Until 11-01 the tie always stayed, and at FG
+    // Off the other viewport could be the one active view. Each row runs
+    // acquire()'s bookkeeping at each Present (the gap watermark, the
+    // establishment and delivery of a ready copy) and, at a Present that
+    // shows nothing fresh while the display retains a copy, decide_display
+    // (D) for it. F, G: viewport 0's FG copies; A: its SR copy; B, C:
+    // viewport 1's SR copies; live or silent: the Present's FG scope.
+    void view_tie_rows() {
+      using query = frame_generation_query_status;
+      enum class shape {
+        no_fg,  // A and B, FG observed off.
+        fg_live,  // F (live scope on viewport 0) and B, B the newest nomination.
+        fg_live_fg_newest,  // B, then F the newest.
+        fg_live_pending,  // F, B, then G in flight, the newest of viewport 0.
+        fg_silent,  // A and B, a silent scope on viewport 0.
+        fg_bound_other,  // A and B, a silent scope on viewport 1.
+        fg_ambiguous,  // A and B, an ambiguous FG read.
+        fg_bound_inactive,  // A and B, a scope on viewport 2, which has no view.
+        fg_bound_two_views,  // F and A both active on viewport 0, and B.
+        one_view,  // B alone, a silent scope on viewport 0.
+        fg_off,  // F shown; C, the newest; FG Off; then viewport 0's next SR copy A.
+        fg_off_fg_newest,  // F shown; C; G in flight, the newest; FG Off.
+        fg_switch  // F shown; FG Off on viewport 0 and FG on viewport 1 (silent); A; C in flight, then C.
+      };
+
+      struct row {
+        const char *pins;
+        shape kind;
+        const char *trace;
+      };
+
+      const row rows[] {
+        {"Two active viewports without FG are ambiguous", shape::no_fg, "P1 - ambiguous ambiguous_views"},
+        {"A live FG scope's viewport breaks the tie: its FG copy shows, never the other viewport's newer copy", shape::fg_live, "P1 live F ready current_capture"},
+        {"The same with the FG nomination the newest", shape::fg_live_fg_newest, "P1 live F ready current_capture"},
+        {"A live scope's newest FG copy in flight: its own completed copy stands in, never the other viewport's", shape::fg_live_pending, "P1 live F ready completed_snapshot"},
+        {"A silent FG scope's viewport breaks the tie: its SR copy shows", shape::fg_silent, "P1 silent A ready current_capture"},
+        {"FG bound to the other viewport: that viewport's copy shows, never this one's", shape::fg_bound_other, "P1 silent B ready current_capture"},
+        {"An ambiguous FG read breaks no tie", shape::fg_ambiguous, "P1 - ambiguous ambiguous_views"},
+        {"A scope on a viewport without an active view breaks no tie", shape::fg_bound_inactive, "P1 silent - ambiguous ambiguous_views"},
+        {"Two active views of the scope's viewport break no tie: the required scope then finds the other viewport's newer nomination", shape::fg_bound_two_views, "P1 live - unavailable fg_scope_mismatch"},
+        {"One active view needs no tie-break, whichever viewport FG names", shape::one_view, "P1 silent B ready current_capture"},
+        {"FG Off: the views tie at once, the other viewport's newer copy never shows and the display drops F", shape::fg_off, "P1 live F ready current_capture; OFF views=2; P2 - ambiguous ambiguous_views D invalidate source_changed; P3 - ambiguous ambiguous_views"},
+        {"FG Off with the FG nomination the newest: the views tie at once, the display holds F within the source age only", shape::fg_off_fg_newest, "P1 live F ready current_capture; OFF views=2; P2 - ambiguous ambiguous_views D hold FG_successor_pending D@age invalidate retained_depth_expired"},
+        {"An FG viewport switch: the new viewport's copy shows once readable, the old viewport's never as the new one's", shape::fg_switch, "P1 live F ready current_capture; OFF views=2; P2 silent - recorded no_completed_snapshot D invalidate source_changed; P3 silent C ready current_capture"},
+      };
+      constexpr std::uint64_t epoch = 13, device = 41;
+      for (const auto &r : rows) {
+        reset();
+        // The owner in the owner table, where retire_source finds it.
+        capture_queues.queues[0] = std::make_unique<queue_state>();
+        fixture::completion_fence owner_queue;
+        capture_queues.queues[0]->queue.p = reinterpret_cast<ID3D12CommandQueue *>(&owner_queue);
+        struct release_place {
+          ~release_place() {
+            capture_queues.queues[0]->queue.p = nullptr;
+            capture_queues.queues[0].reset();
+          }
+        } release;
+        auto &owner = *capture_queues.queues[0];
+        owner.device_identity = device;
+        auto storage = std::make_shared<source_reference>();
+        storage->device_identity = device;
+        storage->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        storage->desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        slot *f = nullptr, *g = nullptr, *a = nullptr, *b = nullptr, *c = nullptr;
+        unsigned index = 0;
+        std::uint64_t present = 1;
+        std::string trace;
+        retained_depth retained;
+        // The FG mode each Present reads, through the FG view's depth
+        // projection and provider::begin's scope selection. FG turned on
+        // before every copy (enabled tick 1): an accepted FG copy makes the
+        // scope live, however many clock steps the row's setup took.
+        const auto fg_read = [&](query status, bool enabled, std::uint32_t viewport) {
+          frame_generation_snapshot value;
+          value.known = status == query::observed;
+          value.enabled = enabled;
+          value.epoch = epoch;
+          value.viewport = viewport;
+          value.generated_frames = enabled ? 1 : 0;
+          value.enabled_tick = enabled ? 1 : 0;
+          presentation_scope::fg_view view;
+          return provider::select_frame_generation_scope(view.update(status, value));
+        };
+        const auto who = [&](const capture_pick &chosen) {
+          char out = '-';
+          for (const auto &[value, label] : {std::pair {f, 'F'}, std::pair {g, 'G'}, std::pair {a, 'A'}, std::pair {b, 'B'}, std::pair {c, 'C'}}) {
+            if (chosen.value && chosen.value == value) {
+              out = label;
+            }
+          }
+          return chosen.value && out == '-' ? '?' : out;
+        };
+        const auto display = [&](const display_decision &update) {
+          return std::string(update.action == display_action::hold ? "hold " : "invalidate ") + update.reason;
+        };
+        const auto pick = [&](const provider::frame_generation_selection &scope, bool age = false) {
+          const auto now = GetTickCount64();
+          const auto chosen = select_provider(owner, native, present, now, scope.selection);
+          const char *fg = scope.silent ? " silent" : scope.selection.require_frame_generation ? " live" : "";
+          trace += std::string(trace.empty() ? "" : "; ") + "P" + std::to_string(present) + fg + " " + who(chosen) + " " + name(chosen.result) + " " + name(chosen.selection);
+          const auto decision = classify_acquisition(chosen, owner, scope.selection);
+          if (interrupts_admission(owner, chosen)) {
+            owner.admission_after = serial.load();
+            trace += " [gap]";
+          }
+          if (chosen.value) {
+            establish_provider(owner, *chosen.value, present);
+          }
+          if (chosen.value && chosen.result == status::ready) {
+            deliver(owner, *chosen.value);
+            retained = {};
+            retained.metadata = chosen.value->metadata;
+            retained.capture_id = chosen.value->id;
+            retained.width = 1920;
+            retained.height = 1080;
+            retained.format = 39;
+            retained.view_format = 41;
+            retained.area = {0, 0, 1920, 1080};
+          } else if (retained.capture_id) {
+            const auto update = decide_display(decision, packet {}, retained, scope.selection, now);
+            trace += " D " + display(update);
+            if (age && update.action == display_action::hold) {
+              trace += " D@age " + display(decide_display(decision, packet {}, retained, scope.selection, now + source_age));
+            }
+            if (update.action != display_action::hold) {
+              retained = {};
+            }
+          }
+          fixture::presents_since(1);
+          ++present;
+        };
+        const auto off = [&] {
+          retire_source(provider_kind::streamline, epoch, fg_source, 30, true);
+          unsigned views {};
+          for (const auto &view : evaluations[provider_index(provider_kind::streamline)].views) {
+            views += view.sequence != 0;
+          }
+          trace += "; OFF views=" + std::to_string(views);
+        };
+        // A nominated copy of the game's depth, on this queue.
+        const auto copy = [&](slot &value) -> slot & {
+          value.metadata.source = storage;
+          value.texture = std::make_shared<texture_reference>();
+          value.source_nominated = true;
+          return value;
+        };
+        // Viewport 0's FG copy, accepted (a live scope), and its SR copy;
+        // viewport 1's SR copy.
+        const auto fg_copy = [&](std::uint64_t sequence, bool accepted) -> slot & {
+          auto &value = copy(make(index++, provider_kind::streamline, epoch, sequence, fg_source, 0, 0));
+          if (accepted) {
+            finish(value.id, true);
+          }
+          return value;
+        };
+        const auto sr0 = [&](std::uint64_t sequence, std::uint64_t superseded = fg_source) -> slot & {
+          return copy(make(index++, provider_kind::streamline, epoch, sequence, 0, 0, superseded));
+        };
+        const auto sr1 = [&](std::uint64_t sequence) -> slot & {
+          return copy(make(index++, provider_kind::streamline, epoch, sequence, 0, 1));
+        };
+        switch (r.kind) {
+          case shape::no_fg:
+            a = &sr0(10);
+            b = &sr1(11);
+            pick(fg_read(query::observed, false, 0));
+            break;
+          case shape::fg_live:
+            f = &fg_copy(10, true);
+            b = &sr1(11);
+            pick(fg_read(query::observed, true, 0));
+            break;
+          case shape::fg_live_fg_newest:
+            b = &sr1(9);
+            f = &fg_copy(10, true);
+            pick(fg_read(query::observed, true, 0));
+            break;
+          case shape::fg_live_pending:
+            f = &fg_copy(10, true);
+            b = &sr1(11);
+            g = &fg_copy(12, false);
+            g->finished = false;
+            pick(fg_read(query::observed, true, 0));
+            break;
+          case shape::fg_silent:
+          case shape::fg_bound_other:
+          case shape::fg_ambiguous:
+          case shape::fg_bound_inactive:
+            a = &sr0(10);
+            b = &sr1(11);
+            pick(r.kind == shape::fg_ambiguous ? fg_read(query::ambiguous, false, 0) :
+                 fg_read(query::observed, true, r.kind == shape::fg_silent ? 0 : r.kind == shape::fg_bound_other ? 1 : 2));
+            break;
+          case shape::fg_bound_two_views:
+            f = &fg_copy(10, true);
+            a = &sr0(11, UINT64_MAX);
+            b = &sr1(12);
+            pick(fg_read(query::observed, true, 0));
+            break;
+          case shape::one_view:
+            b = &sr1(11);
+            pick(fg_read(query::observed, true, 0));
+            break;
+          case shape::fg_off:
+            b = &sr1(9);
+            f = &fg_copy(10, true);
+            pick(fg_read(query::observed, true, 0));
+            // Viewport 1's next copy, the newest; then FG Off on viewport 0.
+            c = &sr1(11);
+            off();
+            pick(fg_read(query::observed, false, 0));
+            // Viewport 0's next SR evaluation, FG off.
+            a = &sr0(12);
+            pick(fg_read(query::observed, false, 0));
+            break;
+          case shape::fg_off_fg_newest:
+            b = &sr1(9);
+            f = &fg_copy(10, true);
+            pick(fg_read(query::observed, true, 0));
+            // Viewport 1's next copy; DLSS-G's next FG copy in flight, the
+            // newest; then FG Off on viewport 0.
+            c = &sr1(11);
+            g = &fg_copy(12, false);
+            g->finished = false;
+            off();
+            pick(fg_read(query::observed, false, 0), true);
+            break;
+          case shape::fg_switch:
+            b = &sr1(9);
+            f = &fg_copy(10, true);
+            pick(fg_read(query::observed, true, 0));
+            // FG moves to viewport 1: Off on viewport 0, On on viewport 1
+            // (silent: no FG copy of it yet). Viewport 0 keeps evaluating;
+            // viewport 1's next copy is in flight, then readable, and its
+            // copy from before the switch is past the source age.
+            off();
+            a = &sr0(11);
+            c = &sr1(12);
+            c->finished = false;
+            b->metadata.tick = GetTickCount64() - source_age - 1;
+            pick(fg_read(query::observed, true, 1));
+            c->finished = true;
+            pick(fg_read(query::observed, true, 1));
+            break;
+        }
+        if (trace != r.trace) {
+          fail(std::string("P6 two active views, ") + r.pins + ":\n    got      " + trace + "\n    expected " + r.trace);
+        }
+      }
+      std::printf("PASS P6 two active views and the FG scope's tie-break: %zu rows\n", std::size(rows));
     }
 
     // P6: a pending head's own copy, on another queue, that completes between
@@ -3268,6 +3542,7 @@ int main() {
   lineage_stand_in_rows();
   missing_frame_rows();
   fg_off_role_rows();
+  view_tie_rows();
   named_head_rows();
   frame_presenting_rows();
   frame_presenting_anchor_rows();

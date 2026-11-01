@@ -62,6 +62,10 @@
 // received and its gates gave, with the SDK result its finish_capture saw).
 // Where SUNSHINE_CONTRACT_MATRIX_L1_CELLS names a file, it is replaced by one
 // line per judged Streamline case of what the tap gave (tap_line).
+//
+// Two SR viewports active together (S19) are decided by the capture owner's
+// selection, not at a copy point; the family sl_views judges them there
+// (view_cells), with the case's FG options through the same hooks.
 #include "capture_state_policy.h"
 #include "depth_refusal.h"
 #include "depth_view_format.h"
@@ -74,6 +78,7 @@
 #include "test_game3d_api_contract_jsonl.h"
 #include "test_game3d_api_contract_tally.h"
 #include "test_sl_fixture_sdk.h"
+#include "test_streamline_depth_capture_fixture.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -1782,6 +1787,175 @@ namespace {
     }
   }  // namespace sl_cells
 
+  // Two SR viewports active together (S19, owner ruling R5). Each one's copy
+  // point copies as one viewport's does (the hook family's cells); the
+  // capture owner decides between them when it selects, which needs no
+  // device. The case's FG options go through the probe's own hooks to the
+  // viewport FG is bound to (the case's, or the other active one's); the FG
+  // read (query_frame_generation), the FG view's depth projection and
+  // provider::begin's scope selection make the selection policy, as at a
+  // Present; and select_provider picks from both viewports' SR copies, both
+  // active, once with each viewport's evaluation the newest. Each viewport
+  // meets the oracle for its own case (the case viewport with the cell's
+  // fg_bound_view, the other with the opposite): it captures where its copy
+  // is the pick in both orders, and refuses where neither order picks it.
+  // Every cell runs at the newest surveyed release, whose header declares
+  // Off, On, Auto and Dynamic and multi frame generation; the hook family
+  // varies releases.
+  namespace view_cells {
+    enum dimension : unsigned {
+      fg,
+      frames,
+      options_result,
+      fg_view
+    };
+
+    generator::family family() {
+      return {
+        "sl_views",
+        {
+          {"fg", {"off", "on", "automatic", "dynamic", "undeclared"}},
+          {"frames", {"1", "0", "3", "5"}},
+          {"options_result", {"ok", "warn_out_of_vram", "error"}},
+          {"fg_view", {"case", "other"}},
+        },
+        [](const generator::row &) {
+          return true;
+        },
+      };
+    }
+
+    // The case viewport's case (bound: FG names it), or the other viewport's.
+    matrix::sl_case to_case(const generator::row &value, bool bound) {
+      matrix::sl_case out;
+      out.views = matrix::viewports::two_active;
+      out.fg = matrix::fg_mode(value[fg]);
+      out.frames_generated = matrix::frames_generated[value[frames]];
+      out.options_result = matrix::sl_result(value[options_result]);
+      out.fg_bound_view = bound;
+      return out;
+    }
+
+    constexpr std::uint32_t case_view = 7, other_view = 8;
+    constexpr unsigned row_count = std::size(gaps::view_rows);
+
+    struct judgement {
+      matrix::sl_case value;
+      matrix::outcome expected, other_expected;
+      matrix::result actual, other;
+      // The pick with the other viewport's evaluation the newest, then with
+      // the case viewport's: C the case viewport's copy, O the other's, -
+      // none.
+      char picks[2] {};
+      bool satisfied {};
+      gaps::verdict verdict {};
+      bool matched[row_count] {};
+    };
+
+    // The selection policy of a Present after the case's FG options call,
+    // and the epoch its scope names (1 when no read observed one).
+    sunshine_streamline::provider::frame_generation_selection fg_scope(const matrix::sl_case &value, std::uint64_t &epoch) {
+      namespace fx = sl_fixture;
+      fx::tag_result = fx::evaluate_result = fx::options_result = 0;
+      require(sl_cells::install(matrix::newest_surveyed), "the probe did not hook the newest surveyed release");
+      // No FG copy in the capture owner: the scope is silent, as at the
+      // hook family's evaluate copy points.
+      capture::fixture::reset_owner();
+      if (value.fg != matrix::fg_mode::off) {
+        const auto &newest = matrix::newest_known();
+        void *function {};
+        require(fx::call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "the probe offered no DLSS-G options entry");
+        fx::options_result = sl_cells::sdk_result(value.options_result);
+        fx::fg_options options;
+        options.base.version = newest.dlssg_options;
+        options.mode = std::uint32_t(value.fg);
+        options.generated_frames = value.frames_generated;
+        const auto view = fx::viewport(value.fg_bound_view ? case_view : other_view, newest.viewport_handle);
+        require(reinterpret_cast<fx::options_function>(function)(view, options) == fx::options_result, "the probe changed the FG options call's result");
+      }
+      sunshine_streamline::frame_generation_snapshot read;
+      auto status = sunshine_streamline::frame_generation_query_status::unavailable;
+      sunshine_streamline::query_frame_generation(UINT32_MAX, read, &status);
+      epoch = status == sunshine_streamline::frame_generation_query_status::observed ? read.epoch : 1;
+      sunshine_streamline::presentation_scope::fg_view view;
+      return sunshine_streamline::provider::select_frame_generation_scope(view.update(status, read));
+    }
+
+    // select_provider's pick from both viewports' SR copies in epoch, both
+    // active, with the case viewport's evaluation the newest or the other's.
+    char pick(const sunshine_streamline::provider::frame_generation_selection &scope, std::uint64_t epoch, bool case_newest) {
+      using capture::slot;
+      constexpr std::uint64_t device = 41, native = 77;
+      capture::fixture::reset_owner();
+      auto storage = std::make_shared<capture::source_reference>();
+      storage->device_identity = device;
+      storage->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      storage->desc.Format = DXGI_FORMAT_R32_TYPELESS;
+      const auto copy = [&](unsigned index, std::uint64_t sequence, std::uint32_t viewport) -> slot & {
+        auto &value = capture::fixture::make_capture(index, native, sunshine_scene_depth::provider_kind::streamline, epoch, sequence, 0, viewport);
+        value.metadata.source = storage;
+        value.texture = std::make_shared<capture::texture_reference>();
+        value.source_nominated = true;
+        return value;
+      };
+      const slot *mine = nullptr, *other = nullptr;
+      if (case_newest) {
+        other = &copy(0, 1, other_view);
+        mine = &copy(1, 2, case_view);
+      } else {
+        mine = &copy(0, 1, case_view);
+        other = &copy(1, 2, other_view);
+      }
+      capture::queue_state owner;
+      owner.device_identity = device;
+      const auto chosen = capture::select_provider(owner, native, 1, GetTickCount64(), scope.selection);
+      const auto *picked = chosen.result == capture::status::ready ? chosen.value : nullptr;
+      return !picked ? '-' : picked == mine ? 'C' :
+             picked == other                ? 'O' :
+                                              '?';
+    }
+
+    judgement judge(const generator::row &assignment) {
+      judgement out;
+      const bool bound = assignment[fg_view] == 0;
+      out.value = to_case(assignment, bound);
+      out.expected = matrix::expect(out.value);
+      out.other_expected = matrix::expect(to_case(assignment, !bound));
+      require(out.expected.by != nullptr && out.other_expected.by != nullptr, "the oracle named no rule for a two-viewport cell");
+      std::uint64_t epoch {};
+      const auto scope = fg_scope(out.value, epoch);
+      out.picks[0] = pick(scope, epoch, false);
+      out.picks[1] = pick(scope, epoch, true);
+      const bool consistent = out.picks[0] == out.picks[1];
+      const auto outcome = [&](char viewport) {
+        matrix::result value;
+        value.kind = consistent && out.picks[0] == viewport ? matrix::outcome_kind::capture : matrix::outcome_kind::refuse;
+        value.why = value.kind == matrix::outcome_kind::refuse ? matrix::refusal::ambiguous_view : matrix::refusal::none;
+        return value;
+      };
+      out.actual = outcome('C');
+      out.other = outcome('O');
+      const auto meets = [](const matrix::outcome &expected, const matrix::result &actual) {
+        if (actual.kind == matrix::outcome_kind::capture) {
+          return matrix::permits(expected, matrix::outcome_kind::capture) || matrix::permits(expected, matrix::outcome_kind::continuous);
+        }
+        return matrix::permits(expected, matrix::outcome_kind::refuse) || matrix::permits(expected, matrix::outcome_kind::hold);
+      };
+      out.satisfied = consistent && out.picks[0] != '?' && meets(out.expected, out.actual) && meets(out.other_expected, out.other);
+      out.verdict = gaps::judge_each(gaps::view_rows, out.value, out.satisfied, {out.actual, consistent}, out.matched);
+      return out;
+    }
+
+    void describe(const char *what, const generator::family &owner, const generator::row &assignment, const judgement &value) {
+      std::string rows;
+      const char *ids[row_count] {};
+      for (unsigned i = 0; i != row_count; ++i) {
+        ids[i] = gaps::view_rows[i].id;
+      }
+      std::fprintf(stderr, "%s: case sl_views %s %s: expected %s (%s), the other viewport %s (%s); picks %c %c; rows %s; %s\n", what, generator::id_text(generator::case_id(owner, assignment)).c_str(), generator::describe(owner, assignment).c_str(), name(value.expected.kind), value.expected.by->id, name(value.other_expected.kind), value.other_expected.by->id, value.picks[0], value.picks[1], row_names(value.matched, ids, row_count, rows), name(value.verdict));
+    }
+  }  // namespace view_cells
+
   // The NGX hook family: the evaluation adapter's dimensions, all combined.
   namespace ngx_cells {
     enum dimension : unsigned {
@@ -2049,6 +2223,7 @@ namespace {
   struct hook_counts {
     sl_cells::census census;
     each_tally<sl_cells::row_count> streamline;
+    each_tally<view_cells::row_count> views;
     each_tally<ngx_cells::row_count> ngx;
     unsigned ngx_frame_generation {};
   };
@@ -2083,6 +2258,24 @@ namespace {
       if (const auto *what = counts.streamline.add(value.verdict, value.matched, value.satisfied)) {
         sl_cells::describe(what, sl, streamline[i], value);
       }
+    }
+    // The two-viewport family: every cell, in a run that is not a shard or
+    // in shard 0. The capture owner's state it uses is restored afterwards.
+    if (!options.partial() || (options.shards != 1 && options.shard == 0)) {
+      const bool requested = capture::requested.load();
+      const auto views = view_cells::family();
+      for (const auto &assignment : generator::product(views, {view_cells::fg, view_cells::frames, view_cells::options_result, view_cells::fg_view}, generator::defaults(views))) {
+        const auto value = view_cells::judge(assignment);
+        if (lines.is_open()) {
+          lines << game3d_contract::jsonl::line("L1", views, assignment, nullptr, true, value.expected, value.actual, value.verdict, gaps::view_rows, value.matched).dump() << '\n';
+        }
+        if (const auto *what = counts.views.add(value.verdict, value.matched, value.satisfied)) {
+          view_cells::describe(what, views, assignment, value);
+        }
+      }
+      capture::fixture::reset_owner();
+      capture::requested = requested;
+      counts.views.finish(gaps::view_rows, "Two active viewports", true);
     }
     sl_cells::uninstall();
     const auto ngx = ngx_cells::family();
@@ -2216,6 +2409,10 @@ int main(int argc, char **argv) try {
   const auto &census = hooks.census;
   std::printf("PASS API contract matrix L1%s: %u Streamline hook cells: the %u-row copy-point product (%u constructible, %u legal), %u seed rows, %u owner-question rows, %u one-factor rows and %u pairwise rows covering all %zu legal value pairs; ", options.partial() ? " shard" : "", hooks.streamline.cells, census.product, census.constructible, census.legal_product, census.seeded, census.questions, census.one_factor, census.pairwise, census.pairs);
   hooks.streamline.print(gaps::sl_rows);
+  if (hooks.views.cells) {
+    std::printf(". %u two-active-viewport cells (S19) at the capture owner's selection: ", hooks.views.cells);
+    hooks.views.print(gaps::view_rows);
+  }
   std::printf(". %u NGX evaluation cells (%u of DLSS-G's own evaluation): ", hooks.ngx.cells, hooks.ngx_frame_generation);
   hooks.ngx.print(gaps::ngx_rows);
   std::printf("\n");

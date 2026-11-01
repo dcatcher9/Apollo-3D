@@ -4707,7 +4707,7 @@ where its consumer copied a frame, `complete_frame`) are the frames' own depth o
 lineage, re-keyed as the viewport's ordinary source as an input admitted after the Off is, so the
 newest readable one replaces the held copy (C8), until FG On restores the role
 (`frame_generation_restored` drops them); not while another viewport's view in that epoch is active,
-which keeps the viewport's picks ambiguous (below). The scope's other copies, and every copy at a
+whose picks tie with this viewport's once FG is off (below). The scope's other copies, and every copy at a
 failed or unknown options call, recorded or still recording, are invalidated, so no FG Off/On
 transition resurrects one. The
 queue's API association ends, but nothing else of the lineage is revoked. The lineage's owner,
@@ -4737,9 +4737,12 @@ whose own completed copy is refused (published before a gap, consumed, of anothe
 readable here takes its lineage's stand-in as one with none does: until 10-28 the Present held the
 display's older copy beside the lineage's readable SR copy (the session timelines' seed
 d0dd7845ac141ad2, at an FG renewal after the scope's held copy was dropped).
-While another viewport's view in that epoch is active, that FG nomination goes as before: an
-ordinary view beside it would keep the picks ambiguous (a view that stopped evaluating, past the
-source age, makes nothing ambiguous). An NGX copy published after the shown
+While another viewport's view in that epoch is active, the scope's view passes to the viewport's
+ordinary source as well, whether or not its nomination is the namespace's newest: the viewport keeps
+its call as a view, so FG Off leaves two active views that tie at once (below; no FG scope breaks
+their tie any more). Until 11-01 the view went there, and the other viewport was the one active view
+until this viewport's next evaluation, so the other viewport's copy showed at FG Off's next Present
+(a view that stopped evaluating, past the source age, makes nothing ambiguous). An NGX copy published after the shown
 FG copy takes the queue as at any handover, which makes the SR copies before it historical. The FG
 role stays retired until FG On (`frame_generation_restored`, the options call that turns FG on
 again): an FG input admitted before the retiring options call (its tag call's or DLSS-G
@@ -4806,7 +4809,8 @@ and cannot restore the old FG scope. A subsequent successful enabled
 observation restores mandatory FG selection. Older captures from the
 previous ownership interval cannot be resurrected. While a live FG scope owns a viewport, ordinary
 evaluation adapters do not also nominate that same viewport; FG's first attempt supersedes only
-its old ordinary evaluation observation. Other viewports remain independently ambiguous. No cross-API
+its old ordinary evaluation observation. Other viewports still nominate their own copies, and a
+confirmed FG scope's viewport breaks their tie (below). No cross-API
 projection borrowing is needed.
 
 When a presentation has no newly readable depth (a generated FG frame, a pending, failed or
@@ -4849,12 +4853,31 @@ also a head refused before its capture existed whose source is the FG input, and
 `fg_scope_mismatch`), a released NGX feature (`retire_source`; FG Off retires only the FG role,
 above) and an expired association
 (`expire_association`). Two SR viewports evaluating together are such an interruption at every
-Present while both views are within the source age, whatever FG binds: neither is shown, the
-display holds its last copy of the newest nomination's viewport within the source age (another
-viewport's copy it drops, `source_changed`), and the Present is then mono. The API contract's owner
-ruling R5 lets the viewport bound to frame generation break that tie; the add-on does not implement
-it, so such a game is mono there as well (the contract matrix's pending row `S19-two-active`,
-11-01). So does ownership moving to the other provider: every copy recorded before
+Present while both views are within the source age: neither is shown, the display holds its last
+copy of the newest nomination's viewport within the source age (another viewport's copy it drops,
+`source_changed`), and the Present is then mono. The viewport a confirmed FG scope is bound to
+breaks that tie (the API contract's owner ruling R5, since 11-01; `select_latest_capture`): a
+required scope's, or a silent one's, which selects as without FG and keeps its epoch and viewport
+for this (`selection_policy::silent_epoch`, `silent_viewport`). When exactly one active view is that
+viewport's, the Present selects as if it were the one active view: that viewport's newest nomination
+is the head, and only its display lineage is picked or stands in (its FG input, its ordinary
+source, their completed snapshots), never another viewport's copy, and nothing is interrupted.
+Without a confirmed scope (FG off, unknown, or an ambiguous or unavailable read, which excludes FG
+input), or with no single active view of its viewport (it has none, or its FG and ordinary views are
+both active), the tie stays. One active view needs no tie-break and is selected as before, whichever
+viewport FG names. FG Off ties the views again at once (the FG scope's view passes to the
+viewport's ordinary source, above), so the display holds its FG copy within the source age only when
+the newest nomination is that viewport's (`FG_successor_pending`), and drops it otherwise. An FG
+viewport switch selects the new viewport's lineage alone and drops the old viewport's held copy
+(`source_changed`, or `FG_scope_changed` under a required scope) until the new viewport's first
+readable copy; an options store that knows both viewports' modes reads ambiguous until the old
+viewport's camera record goes, and the views tie meanwhile. The other viewport keeps copying its
+depth every frame although no Present can show it while the tie is broken (a limit: skipping it
+would need the FG viewport's activity at the copy point, and the copy is the depth to show if the FG
+viewport stops evaluating while the scope is silent). Until 11-01 two active SR viewports were mono
+also with FG bound to one of them (the contract matrix's pending row `S19-two-active`), and at FG Off
+the other viewport could be the one active view until this viewport's next evaluation, its copy
+shown at the next Present. So does ownership moving to the other provider: every copy recorded before
 the new owner's chosen copy, and the previous owner's last selected copy, is historical
 (`establish_provider`), because the consumed watermark restarts there and cannot compare the two
 providers' sequences, so the previous provider's copy already shown, or one older than the new
@@ -5219,7 +5242,8 @@ frame's untag (a null `slSetTagForFrame` or `slSetTag`) ended that tag after its
 evaluation then reads no depth tag (`missing-depth`), and judges the call the untag ended in its
 place. Until 10-26 it began one, so outside frame generation such a frame's Present was mono (the
 API contract matrix's `S1-evaluate` row, and its untag form, which the session timelines found). Native capture still declines
-unknown depth encodings, unknown resource states or layouts and ambiguous viewports. One rule
+unknown depth encodings, unknown resource states or layouts and ambiguous viewports (two active
+viewports whose tie no confirmed FG scope's viewport breaks, R5). One rule
 ([`depth_view_format.h`](../tools/reshade/depth_view_format.h)), shared by the capture, the
 content sampler and the V1.1.1 adapter, stores a depth input in its typeless family and names the
 view the snapshot is read through: the allocation's own R32_FLOAT, R16_FLOAT or R16_UNORM; the
