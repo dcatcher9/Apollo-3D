@@ -15,8 +15,8 @@
     // present_deferred took the viewport as generating, DLSS-G's inputs found
     // no FG scope, the SL UI tags took FG as off); an options call that lost
     // its write to a camera writer bumped fg_loss_revision, which left the
-    // mode ambiguous for every reader until the game's next options call; and
-    // a fifth viewport's camera evicted the FG viewport's record.
+    // mode ambiguous for every reader until the game's next options call. A
+    // viewport keeps its mode as long as its camera record (drop_fg_mode).
     // fg_mode_lock is a leaf: nothing else is taken while it is held.
     struct fg_mode_slot {
       frame_generation_snapshot state;
@@ -48,7 +48,7 @@
     }
     // Requires fg_mode_lock exclusive. The viewport's slot of observation; a
     // new viewport takes a free slot, one of an earlier observation, or the
-    // slot whose options were set longest ago.
+    // slot whose options were set longest ago (more than four FG viewports).
     fg_mode_slot &fg_mode_slot_of(std::uint32_t viewport, std::uint64_t observation) {
       for (auto &slot : fg_modes)
         if (slot.used && slot.observation == observation && slot.state.viewport == viewport) return slot;
@@ -62,6 +62,16 @@
       chosen->observation = observation;
       chosen->state.viewport = viewport;
       return *chosen;
+    }
+    // A viewport whose camera record a newer viewport's replaced (slot(): the
+    // game renders it no longer) loses its FG mode with it, as when the mode
+    // lived in the record: until 11-01, and again since the same day's fix,
+    // a retired viewport's mode never keeps the any-viewport query ambiguous
+    // beside the game's new FG viewport.
+    void drop_fg_mode(std::uint32_t viewport) {
+      AcquireSRWLockExclusive(&fg_mode_lock);
+      for (auto &slot : fg_modes) if (slot.used && slot.state.viewport == viewport) slot = {};
+      ReleaseSRWLockExclusive(&fg_mode_lock);
     }
     // Lifecycle (release_camera_records): a restart reads every mode as unavailable.
     void clear_fg_modes() {

@@ -104,6 +104,8 @@ namespace sunshine_streamline {
         if (!record.used) { chosen = &record; break; }
         if (record.changed < chosen->changed) chosen = &record;
       }
+      // The replaced viewport's FG mode goes with its record (drop_fg_mode).
+      if (chosen->used) drop_fg_mode(chosen->viewport);
       *chosen = {};
       chosen->used = true;
       chosen->viewport = viewport;

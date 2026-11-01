@@ -3854,12 +3854,22 @@ namespace {
       "An options call under a held metadata writer lost its write, which left the FG mode ambiguous");
     // The game repeats its options, which commits them in any case.
     require(set_options(view, on2) == 0, "FG On options failed");
+    // Four other viewports' cameras replace the FG viewport's camera record:
+    // the game renders it no longer, and its FG mode goes with the record, as
+    // before the store (a guard). A new FG viewport's mode is then the only
+    // one: with the retired viewport's mode kept, the any-viewport query was
+    // ambiguous and depth revoked FG input (the store's first form, 11-01,
+    // where every session timeline after the first with FG read ambiguous).
     for (std::uint32_t i = 0; i != frame_generation::viewport_slots; ++i) {
       auto other = viewport(40 + i);
       call_v2_constants(constants, token.ref(), other);
     }
-    check(query_frame_generation(view.value, fg) && fg.enabled && fg.generated_frames == 2,
-      "Camera calls of four other viewports evicted the FG viewport's mode");
+    check(!query_frame_generation(view.value, fg), "A viewport whose camera record four other viewports replaced kept its FG mode");
+    auto next_view = viewport(45);
+    require(set_options(next_view, on) == 0, "FG On options failed");
+    check(query_frame_generation(UINT32_MAX, fg, &status) && status == frame_generation_query_status::observed &&
+        fg.viewport == next_view.value,
+      "A retired viewport's FG mode left the new FG viewport's mode ambiguous");
     fg_options off; off.mode = 0; off.generated_frames = 0;
     require(set_options(off_view, off) == 0, "FG Off options failed");
     testing::fail_metadata_reads(1);

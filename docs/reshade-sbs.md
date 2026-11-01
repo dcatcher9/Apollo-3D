@@ -6182,8 +6182,15 @@ and direct NGX, DLSS-G's inputs and the SL UI tags; the SL route;
 role) gets the last committed options. The validity rules are unchanged: known,
 the current epoch and options loss revision, one viewport for an any-viewport
 query, the current observation, an available FG target. A restart clears it
-(`release_camera_records`), and a fifth viewport replaces the one whose options
-were set longest ago. So no FG read is busy any more (`busy` stays in
+(`release_camera_records`), and a viewport keeps its mode as long as its camera
+record, as before the store: when a newer viewport's camera, tag or evaluation
+replaces that record (the probe keeps four), the game renders the viewport no
+longer and its mode goes too (`drop_fg_mode`), so a retired viewport's mode never
+keeps the any-viewport query ambiguous beside the game's new FG viewport (the
+session fixtures retire each timeline's viewport so; the store's first form kept
+it, and every timeline after the first with FG read ambiguous, revoking FG input;
+fixed the same day, probe row `test_frame_generation_mode_store`). So no FG read
+is busy any more (`busy` stays in
 `frame_generation_query_status` and the provider log's `fg_query=` numbers,
 retired), and no options write is lost. The busy rules are deleted with it: the
 provider's policy requires FG only from an observed enabled mode, so before the
@@ -6199,8 +6206,7 @@ so an MFG frame's deferred copy lapsed at its own Present after a hitch, row
 `fg-on-lost-metadata-read-hitch`) and two more (DLSS-G's inputs found no FG
 scope; the SL UI tags took FG as off); an options call that lost its write to a
 camera writer bumped `fg_loss_revision`, which left the mode ambiguous for every
-reader (FG input revoked) until the game's next options call; and a fifth
-viewport's camera evicted the FG viewport's record (probe row
+reader (FG input revoked) until the game's next options call (probe row
 `test_frame_generation_mode_store`). `fg_loss_revision` now changes only with the
 FG target.
 
