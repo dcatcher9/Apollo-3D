@@ -360,6 +360,13 @@ namespace sunshine_streamline::presentation_scope {
     std::uint32_t generated_presents() const {
       return depth.require_frame_generation ? (generated_frames ? generated_frames : 1u) : 0u;
     }
+    // The frame this Present presents by depth's window (PD7): its API depth
+    // acquisition's presenting floor (the newest evaluated frame's present
+    // ordinal while this Present still presents that frame,
+    // frame_presenting), else 0, as the provider published it after its
+    // acquisition (present_depth_frame). The UI holds a generated Present's
+    // decision by it.
+    std::uint64_t depth_frame{};
   };
 }
 

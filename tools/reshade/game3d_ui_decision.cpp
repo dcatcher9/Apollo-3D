@@ -139,8 +139,9 @@ namespace sunshine_game3d {
   }
 
   bool ui_decision::generated_hold(bool capturing, bool available, uint64_t frame_sequence, uint64_t input_present,
-      bool fg_active, uint32_t generated_frames) {
-    return capturing && !available && ui_evidence::generated_without_input(frame_sequence, input_present, fg_active, generated_frames);
+      bool fg_active, uint32_t generated_frames, uint64_t depth_frame, uint64_t input_frame) {
+    return capturing && !available &&
+      ui_evidence::generated_in_window(frame_sequence, input_present, fg_active, generated_frames, depth_frame, input_frame);
   }
   bool ui_decision::snapshot_hold(bool capturing, bool available, bool hold_previous,
       const ui_evidence::snapshot_inputs &offered_inputs, const ui_evidence::snapshot_inputs &detected_before,

@@ -517,6 +517,9 @@ namespace sunshine_streamline::provider {
       const sunshine_game3d::slow_step step("depth capture acquisition");
       depth_capture::acquire(runtime->get_command_queue()->get_native(), present, data->frame, acquisition, &capture_info, selection);
     }
+    // Which frame this Present presents (depth's window), for the UI's hold
+    // of a generated Present (PD7): the same decision for both.
+    present_depth_frame(runtime->get_native(), acquisition.presenting_floor);
     // O1 (fail-safe): a copy read in flight on a fence that a signal first
     // submitted after that read has since poisoned (late_conflict) may hold
     // pixels its producer had not written yet; it is not held any further,

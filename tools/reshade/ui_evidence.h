@@ -74,6 +74,29 @@ namespace sunshine_game3d::ui_evidence {
     !generated_without_input(14, 10, true, 3) && generated_without_input(11, 10, true, 0) &&
     !generated_without_input(12, 10, true, 0) && !generated_without_input(11, 10, false, 3) &&
     !generated_without_input(11, 0, true, 3) && !generated_without_input(10, 10, true, 3));
+  // T1 by depth's window (PD7, 11-01). Where depth named the frame the last
+  // Present that offered a UI tag presented (input_frame: the presenting
+  // frame of that Present's API depth acquisition, present_fg::depth_frame),
+  // a later Present without input of its own is that frame's generated
+  // Present exactly while depth still presents that frame there (frame ==
+  // input_frame): depth's window, which the next frame's first evaluation
+  // ends and the Present's grant bounds, so UI and depth take one decision.
+  // Until 11-01 the UI counted its own window of the generated count from
+  // that Present, so where the next frame's evaluation began inside it
+  // (DLSS-G presenting earlier frames inside the next frame's recording;
+  // multi-frame generation) the next frame's Presents held the earlier
+  // frame's decision, or the reverse after a freeze. Without a depth window
+  // at the input (no API depth, input_frame 0) the count decides
+  // (generated_without_input).
+  constexpr bool generated_in_window(std::uint64_t present, std::uint64_t input_present, bool fg_active,
+      std::uint32_t generated_frames, std::uint64_t frame, std::uint64_t input_frame) {
+    if (!input_frame) return generated_without_input(present, input_present, fg_active, generated_frames);
+    return fg_active && input_present && present > input_present && frame == input_frame;
+  }
+  static_assert(generated_in_window(11, 10, true, 1, 7, 7) && generated_in_window(15, 10, true, 1, 7, 7) &&
+    !generated_in_window(11, 10, true, 3, 8, 7) && !generated_in_window(11, 10, true, 3, 0, 7) &&
+    !generated_in_window(11, 10, false, 3, 7, 7) && !generated_in_window(10, 10, true, 3, 7, 7) &&
+    generated_in_window(13, 10, true, 3, 8, 0) && !generated_in_window(14, 10, true, 3, 8, 0));
   // T1 by snapshot identity. The capture owner offers each kind's newest ready
   // snapshot on every Present while it is recent, and the layer its newest
   // copy, so under frame generation a generated Present re-offers the real

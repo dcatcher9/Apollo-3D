@@ -1346,10 +1346,22 @@ storage can be reused. Unsubmitted, failed or replay-invalidated captures remain
 
 **Temporal hold (T1).** A Present without its own fresh decision uses the last real decision,
 and a real frame without a decision of its own reuses the previous real frame's decision once;
-after that there is no mask. There is no multiplier constant and no time bound. Present counting
-tells real from generated Presents: under FG, a Present that offers no input within the reported
-generated count (one while it is unknown) of the last Present that offered a Streamline UI tag is
-generated (`ui_mask::generated_without_input`). The capture owner, however, offers each kind's
+after that there is no mask. There is no multiplier constant and no time bound. Depth's window
+tells real from generated Presents (since 11-01, PD7): under FG, a Present that offers no input is
+generated while the frame its API depth acquisition presents (the presenting floor, the newest
+evaluated frame's Present ordinal while that frame's window is open, `frame_presenting`) is the
+frame depth presented at the last Present that offered a Streamline UI tag
+(`ui_evidence::generated_in_window`, published per Present as `present_fg::depth_frame`). So UI and
+depth take one decision: the next frame's first evaluation ends the window for both, and the
+Present's grant bounds it. Until 11-01 the UI counted its own window of the reported generated
+count from that Present, so where the next frame's evaluation began inside it (DLSS-G presenting
+earlier frames inside the next frame's recording, Assassin's Creed Shadows' pattern; multi-frame
+generation) the next frame's Presents held the earlier frame's decision (HUD edges with parallax
+for a moment; session row `fg-on-ui-window-ends-at-next-evaluation-hitch` and seven fixed-set seeds, judged by
+`ui_frame:held`). Where the Present that offered the tag had no depth window (no API depth), Present
+counting decides as before: a Present that offers no input within the reported generated count
+(one while it is unknown) of that Present is generated (`ui_mask::generated_without_input`). The
+capture owner, however, offers each kind's
 newest ready snapshot on every Present while it is recent (250 ms), and the offscreen UI layer its
 newest copy, so a generated Present normally re-offers its real frame's inputs instead of offering
 nothing: Expedition 33's Backbuffer, The Witcher 3's UIAlpha and Stellar Blade's layer and tags at

@@ -996,6 +996,17 @@ namespace {
     // mode.
     {"fg-on-between-ui-and-depth-reads", "20*sr=local; fg=on,fg_at=depth_read,sr=local; 20*sr=local"},
     {"fg-off-between-ui-and-depth-reads", "20*sr=local; fg=on,sr=local; 10*sr=local; fg=off,fg_at=depth_read,sr=local; 10*sr=local"},
+    // The UI's generated-Present hold ends where depth's window does, at the
+    // next frame's evaluation (PD7, lane P 11-01). FG on, no generated
+    // Presents (DLSS-G skipped them), UI tags every frame; frame 24 freezes
+    // before its sources, so its own Present offers no UI input (the last
+    // snapshot aged past 250 ms, its own deferred one is not made yet).
+    // Until then the UI counted one Present from frame 23's and held frame
+    // 23's decision on frame 24's real Present as its generated Present
+    // (ui_frame:held at frame 24); now depth's window, which frame 24's
+    // evaluation ended, decides, and the T1 grace reuses it as a real
+    // frame without its own decision.
+    {"fg-on-ui-window-ends-at-next-evaluation-hitch", "20*sr=local; fg=on,sr=local,dlssg=direct; 3*sr=local,dlssg=direct,ui=listed; sr=local,dlssg=direct,ui=bare,hitch=before_sources; 5*sr=local,dlssg=direct,ui=listed"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -1994,6 +2005,8 @@ namespace {
       lose_reads(false);
       ++result.generated;
       judge_present_modes(inside ? "a generated Present inside its recording" : "a generated Present after it");
+      judge_ui_frame(inside ? "a generated Present inside its recording" : "a generated Present after it",
+        continuity_log.between && inside ? frame - 1 : frame);
       poll("generated");
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;
@@ -2657,6 +2670,48 @@ namespace {
       }
     }
 
+    // PD7 (11-01): the UI holds the decision of the last Present that
+    // offered it a Streamline UI tag on a later Present without input of
+    // its own (a UI row held, generated_present) only where that later
+    // Present presents the same frame as the oracle gives Presents to
+    // frames: a real Present its frame; a generated Present after it, or
+    // inside the next frame's recording before the add-on began an
+    // evaluation of that frame, the last real Present's frame; one after
+    // that evaluation began, the frame being recorded (as depth's window
+    // ends at the next evaluation, frame_presenting). Until 11-01 the UI
+    // counted its own window of the declared generated count, so the next
+    // frame's Presents inside it held the earlier frame's decision.
+    unsigned ui_input_frame {UINT_MAX};
+    std::uint64_t ui_judged_present {UINT64_MAX};
+
+    void judge_ui_frame(const char *which, unsigned shown_frame) {
+      if (record_history.records.empty()) {
+        return;
+      }
+      const auto &r = record_history.records.back();
+      if (r.present == ui_judged_present) {
+        return;
+      }
+      ui_judged_present = r.present;
+      using sunshine_game3d::source_slot;
+      using sunshine_game3d::source_state;
+      bool offered {}, held {};
+      for (const auto slot : {source_slot::ui_alpha, source_slot::ui_color, source_slot::backbuffer}) {
+        offered = offered || r[slot].state == source_state::ready;
+      }
+      for (const auto slot : {source_slot::ui_alpha, source_slot::ui_color, source_slot::backbuffer, source_slot::hudless, source_slot::ui_layer}) {
+        held = held || (r[slot].state == source_state::held && r[slot].reason && !std::strcmp(r[slot].reason, "generated_present"));
+      }
+      if (trace && (offered || held)) {
+        std::printf("TRACE frame=%u ui_frame %s present=%llu shown=%u input=%d offered=%u held=%u\n", frame, which, static_cast<unsigned long long>(r.present), shown_frame, ui_input_frame == UINT_MAX ? -1 : int(ui_input_frame), unsigned(offered), unsigned(held));
+      }
+      if (offered) {
+        ui_input_frame = shown_frame;
+      } else if (held && shown_frame != ui_input_frame) {
+        fail("ui_frame:held", frame_text(frame) + ": " + which + " held frame " + std::to_string(ui_input_frame) + "'s UI decision as a generated Present of it, and it presents frame " + std::to_string(shown_frame), frame, "generated_present");
+      }
+    }
+
     void run_frame() {
       using namespace frame_events;
       const auto &value = (*frames)[frame];
@@ -2706,6 +2761,7 @@ namespace {
         renew_order();
       }
       judge_present_modes("its Present");
+      judge_ui_frame("its Present", frame);
       poll("present");
       // The frame's tag copy deferred to this Present, published by it.
       if (deferred_copy_before) {

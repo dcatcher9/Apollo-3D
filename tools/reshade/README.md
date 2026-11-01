@@ -2220,6 +2220,15 @@ a game whose options call lands on another thread during a Present. A timeline w
 is judged on every Present for the FG mode the UI and depth used (the test add-on's
 `SunshineGame3DTestPresentFrameGeneration`: the published UI decision's mode and the provider's
 FG decision): `fg_modes:disagree` where depth does not revoke FG input and they differ.
+Every timeline is also judged for the UI's generated-Present hold (`ui_frame:held`, PD7, 11-01):
+a Present whose frame record holds a UI row as `held,generated_present` must present the frame the
+last Present that offered a Streamline UI tag (a tag row `ready`) presented, as the oracle gives
+Presents to frames: a real Present its frame; a generated Present after it, or inside the next
+frame's recording before the add-on began an evaluation of that frame, the last real Present's
+frame; one after that evaluation began, the frame being recorded. Before the add-on read depth's
+window for it, seven fixed-set seeds failed there (a real Present of the next frame held as the
+earlier frame's generated one where DLSS-G presented no generated Present), and
+`--trace` prints `TRACE frame=<n> ui_frame` at each Present that offered or held.
 `reads=lost_at_present` fails every metadata read of the add-on during the Presents made while
 the frame is current, after its calls (`SunshineStreamlineTestFailMetadataReads`), as a read fails
 that lost the race with the camera and tag writers on every attempt (`observer_snapshot.h`), which
@@ -2841,7 +2850,10 @@ next frame, continuity gap at frame 26, every run; the FG options store fixed it
 FG options call inside a frame's real Present, between the UI's and depth's FG reads,
 `fg-on-between-ui-and-depth-reads` and `fg-off-between-ui-and-depth-reads` (PD11, 11-01: that
 Present's UI used the old mode and its depth the new one, `fg_modes:disagree` at frames 20 and
-31, every run; one FG snapshot per Present fixed it),
+31, every run; one FG snapshot per Present fixed it), and one for a frame frozen before its
+sources under FG without generated Presents, `fg-on-ui-window-ends-at-next-evaluation-hitch` (PD7,
+11-01: its real Present offered no UI input and the UI's count held the previous frame's decision
+there as a generated Present, `ui_frame:held` at frame 24, every run; depth's window fixed it),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -2873,7 +2885,7 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 82 regression timelines, 6748
+`reshade_session_timelines` runs the fixed set (24 seeds and 83 regression timelines, 6778
 frames and about 18700 Presents, with the seeds' hitches and late FG Offs) in about 340 s
 (lane run f2-P0-int1-followups-c5-sessions, 11-01; 61 rows and about 285 s in the full check's
 registered run of 10-28), registered like

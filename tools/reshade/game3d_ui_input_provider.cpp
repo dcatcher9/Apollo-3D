@@ -59,10 +59,10 @@ namespace sunshine_game3d::ui_input {
       std::uint64_t native_device{}, device_identity{};
       // HUD-less pairing outcomes since the last gate log.
       std::array<std::uint32_t, hudless_outcome_count> hudless_outcomes{};
-      // T1 Present counting without a HUD-less pairing: the frame_sequence of
-      // the last render that offered a Streamline UI tag, in this epoch and
-      // viewport (ui_evidence::generated_without_input).
-      std::uint64_t input_present{}, input_epoch{};
+      // T1 without a HUD-less pairing: the frame_sequence of the last render
+      // that offered a Streamline UI tag, in this epoch and viewport, and the
+      // frame depth presented there (ui_evidence::generated_in_window).
+      std::uint64_t input_present{}, input_frame{}, input_epoch{};
       std::uint32_t input_viewport{};
       // The HUD-less snapshot offered last (ui_evidence::pair_hudless_offer): a
       // later offer of the same one pairs with its own Present's color under
@@ -263,7 +263,7 @@ namespace sunshine_game3d::ui_input {
     result.detection.current_color = false;
     ui_qualification::scope base;
     ui_qualification::status before;
-    std::uint64_t instance{}, frame_sequence{}, input_present{};
+    std::uint64_t instance{}, frame_sequence{}, input_present{}, input_frame{};
     offered_snapshot hudless_before;
     ui_evidence::snapshot_inputs detected_before{}, offered_inputs{};
     {
@@ -273,7 +273,10 @@ namespace sunshine_game3d::ui_input {
         const auto &entry = found->second;
         base = entry.base; before = entry.selection.snapshot();
         instance = entry.instance; frame_sequence = ++found->second.frame_sequence;
-        if (entry.input_epoch == base.epoch && entry.input_viewport == base.viewport) input_present = entry.input_present;
+        if (entry.input_epoch == base.epoch && entry.input_viewport == base.viewport) {
+          input_present = entry.input_present;
+          input_frame = entry.input_frame;
+        }
         if (entry.detected_epoch == base.epoch && entry.detected_viewport == base.viewport) detected_before = entry.detected_inputs;
         hudless_before = entry.hudless_offered;
       }
@@ -516,10 +519,14 @@ namespace sunshine_game3d::ui_input {
         result.status.retained_alpha_ready = true; available = true;
       }
     }
-    // T1 by Present counting: a render that offers nothing, within the
-    // reported generated count of the last one that offered a Streamline UI
-    // tag, is a generated Present and shows that real frame's decision
-    // (ui_evidence::generated_without_input); the count bounds it.
+    // T1: a render that offers nothing, while depth still presents the frame
+    // it presented at the last render that offered a Streamline UI tag, is
+    // a generated Present and shows that real frame's decision; without a
+    // depth window there, the reported generated count bounds it
+    // (ui_evidence::generated_in_window). This render's frame is the
+    // provider's acquisition's, made earlier in this render
+    // (present_fg::depth_frame).
+    const auto depth_frame = sunshine_streamline::present_frame_generation(runtime->get_native()).depth_frame;
     const bool tag_offered = result.detection.masks[0].handle || result.detection.masks[1].handle ||
       result.detection.masks[2].handle;
     // T1 (ui_detection::per_frame_reoffer): the render before offered this
@@ -528,9 +535,11 @@ namespace sunshine_game3d::ui_input {
     // matter: an accepted, valid one decides the frame itself, and one that is
     // unaccepted or invalid cannot.
     result.detection.hudless_reoffer = hudless_reoffered_now;
-    if (ui_decision::generated_hold(capturing, available, frame_sequence, input_present, fg_active, status.fg.generated_frames)) {
+    if (ui_decision::generated_hold(capturing, available, frame_sequence, input_present, fg_active, status.fg.generated_frames,
+          depth_frame, input_frame)) {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
-        {"association", "present_count_after_last_ui_tag"}, {"presents_since_ui_tag", frame_sequence - input_present}});
+        {"association", input_frame ? "depth_window_of_last_ui_tag" : "present_count_after_last_ui_tag"},
+        {"presents_since_ui_tag", frame_sequence - input_present}});
       result.status.retained_alpha_ready = true;
       result.detection.hold_previous = true;
       available = true;
@@ -642,6 +651,7 @@ namespace sunshine_game3d::ui_input {
         }
         if (tag_offered && !same_inputs) {
           entry.input_present = frame_sequence; entry.input_epoch = base.epoch; entry.input_viewport = base.viewport;
+          entry.input_frame = depth_frame;
         }
         const bool matches = entry.instance == instance && !entry.suspended && entry.base == base &&
           entry.selection.snapshot().choice_revision == before.choice_revision;

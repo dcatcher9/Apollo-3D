@@ -272,6 +272,10 @@ namespace sunshine_streamline {
 
   std::uint64_t present_fg_fallbacks() { return fg_snapshot_fallbacks.load(std::memory_order_relaxed); }
 
+  void present_depth_frame(std::uint64_t swapchain, std::uint64_t frame) {
+    if (swapchain && present_snapshot.swapchain == swapchain) present_snapshot.depth_frame = frame;
+  }
+
   bool present_deferred(std::uint64_t swapchain, std::uint64_t queue, std::uint64_t immediate) {
     if (!deferral_pending.load(std::memory_order_acquire) || !queue || !immediate) return false;
     namespace mask = sunshine_game3d::ui_mask;

@@ -175,6 +175,10 @@ namespace sunshine_streamline {
   void end_present_fg();
   const presentation_scope::present_fg &present_frame_generation(std::uint64_t swapchain);
   std::uint64_t present_fg_fallbacks();
+  // The provider's depth acquisition of the swapchain's Present on this
+  // thread names the frame it presents (present_fg::depth_frame); ignored
+  // for a snapshot of another swapchain.
+  void present_depth_frame(std::uint64_t swapchain, std::uint64_t frame);
 
   // DLSS-G's own NGX evaluation of one real frame (presentation_scope.h).
   // Its inputs belong to the one viewport whose FG options were observed

@@ -58,8 +58,10 @@ namespace sunshine_game3d {
     bool measure_scene(uint64_t now, bool proven_image);
     void update_alpha_auto(bool eligible, const alpha_auto_source *automatic, bool detection_active, bool &source_alpha_ui);
 
+    // depth_frame, input_frame: the frame depth presents at this Present and
+    // at the last one that offered a UI tag (ui_evidence::generated_in_window).
     static bool generated_hold(bool capturing, bool available, uint64_t frame_sequence, uint64_t input_present,
-      bool fg_active, uint32_t generated_frames);
+      bool fg_active, uint32_t generated_frames, uint64_t depth_frame, uint64_t input_frame);
     static bool snapshot_hold(bool capturing, bool available, bool hold_previous,
       const ui_evidence::snapshot_inputs &offered_inputs, const ui_evidence::snapshot_inputs &detected_before,
       bool fg_active, bool own_input);
