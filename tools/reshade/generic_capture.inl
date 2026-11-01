@@ -616,6 +616,28 @@ static void preserve_depth_at_effects(effect_runtime *runtime, command_list *cmd
 	observe_preserved_layout(found->second, stats);
 }
 
+// A capture member select_captured_depth does not copy this Present still has
+// the crop it drew observed, as its copy would have observed it
+// (observe_preserved_layout): a crop change advances its layout on this
+// Present, not at its next copy, so its evidence, set membership and raw
+// roster entry follow the change when they would have with a copy.
+static void observe_uncopied_member(generic_depth_device_data &device_data, resource source, uint64_t identity, uint64_t capture_after)
+{
+	const std::unique_lock<std::shared_mutex> lock(s_mutex);
+	const auto found = device_data.depth_stencil_resources.find(source);
+	if (found == device_data.depth_stencil_resources.end() || found->second.identity != identity ||
+		device_data.native_depth_present_index != device_data.native_present_index || !device_data.frame_index ||
+		(capture_after && device_data.frame_index <= capture_after)) return;
+	auto &info = found->second;
+	const auto &stats = info.last_frame_stats;
+	if (info.last_used_in_frame != device_data.frame_index || !stats.total.has_work() || stats.copied_during_frame ||
+		stats.copy_provenance_ambiguous) return;
+	depth_stencil_frame_stats drawn;
+	drawn.copied_during_frame = true;
+	drawn.copied_viewport = stats.total.last_viewport;
+	observe_preserved_layout(info, drawn);
+}
+
 static generic_depth_data::member_view *select_captured_depth(effect_runtime *runtime, command_list *cmd_list, generic_depth_data &data,
 	generic_depth_device_data &device_data, const depth_selection_snapshot &snapshot, bool automatic,
 	resource &selected, const depth_selection_resource *&selected_info)
@@ -680,8 +702,9 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	// (choose_current below then picks a peer, or the shown capture is held)
 	// or when the peer's raw sample may be taken this Present
 	// (sample_probe_target); the probe's visit to a peer copies it there
-	// (prepare_probe_target). Otherwise no peer is copied: on D3D12 each copy
-	// is a snapshot and a publish copy of the whole plane.
+	// (prepare_probe_target). Otherwise no peer is copied (on D3D12 each copy
+	// is a snapshot and a publish copy of the whole plane); its crop is still
+	// observed (observe_uncopied_member).
 	bool anchor_shown = false;
 	for (const auto &member : data.member_views)
 		if (!member.retire_after && member.view != 0 && member.identity == anchor)
@@ -701,6 +724,8 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 		const auto *raw = raw_member(data, member.identity); // None yet: a new member's first sample is due.
 		if (!anchor_shown || (raw_sampling && (!raw || now >= raw->next_tick)))
 			preserve_depth_at_effects(runtime, cmd_list, device_data, member.source, member.identity, member.capture_after);
+		else
+			observe_uncopied_member(device_data, member.source, member.identity, member.capture_after);
 	}
 	sunshine_depth::raw_source_roster next_roster;
 	next_roster.routing_epoch = group.epoch;

@@ -6534,11 +6534,13 @@ The existing slow quality policy chooses a preferred anchor. Current selection u
 usable copy when qualified, otherwise another qualified retained source's current copy. Each
 Present copies the anchor's member first; another member is copied only when the anchor shows no
 current qualified copy of its own that Present, when that member's raw sample may be taken (its
-250 ms deadline due and the sampler idle), or when the probe samples it (a sample that falls due
-during the Present's effects waits for the next Present). Until 11-01 every working member was
-copied on every Present (on D3D12 a snapshot and a publish copy of the whole plane apiece) although
-nothing read the copies of members not shown or sampled, and the selected member's copy was tried
-a second time, so a refused one counted twice in `end_of_frame_refused`. Multiple
+250 ms deadline due and the sampler idle), or when the probe samples it (a sample that falls due during
+the Present's effects waits for the next Present). A member not copied still has the crop it drew
+observed, as its copy would have, so a crop change advances its layout on that Present. Until 11-01
+every working member was copied on every Present (on D3D12 a snapshot and a publish copy of the
+whole plane apiece) although nothing read the copies of members not shown or sampled, and the
+selected member's copy was tried a second time, so a refused one counted twice in
+`end_of_frame_refused`. Multiple
 depth resources rendering in the same present is not itself a rejection. Ambiguous provenance of
 the actual copy, wrong runtime/present, missing copy, or a newly assigned backup without its own
 capture still rejects that record. A copy into a tracked depth-stencil allocation is activity
