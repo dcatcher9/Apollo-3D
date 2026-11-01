@@ -94,7 +94,10 @@ namespace {
     if (!script_last_execute || !script_last_execute(&order_queue, &order_ticket, &quiet)) order_queue = order_ticket = 0;
     script_order.execute(queue, order_queue, order_ticket);
   }
+  // Every Present the effect runtimes saw (the whole run's capture lock line).
+  unsigned run_presents{};
   void record_present(api::effect_runtime *runtime) {
+    ++run_presents;
     game3d_continuity::supply frame;
     if (!continuity_log.generated) {
       frame = continuity_log.pending; continuity_log.pending = {};
@@ -4293,7 +4296,7 @@ int main(int argc, char **argv) {
           "SunshineDepthTestCaptureLockStats")); stats && !contention) {
       sunshine_streamline::depth_capture::lock_stats::values values;
       stats(&values, FALSE);
-      report_capture_lock("run", values, GetTickCount64() - run_start, 0, 0, 0);
+      report_capture_lock("run", values, GetTickCount64() - run_start, run_presents, 0, 0);
     }
     return 0;
   } catch (const std::exception &error) {

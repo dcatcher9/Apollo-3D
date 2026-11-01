@@ -912,7 +912,8 @@ reshade_game3d_native_provider_runtime_test.exe <ReShade64.dll> <frozenShaders> 
 ```
 
 Every run ends with `MEASURE capture lock run` lines: the capture lock's counters over the whole run
-(per role, the present thread's holds and the holder sites, [Capture lock
+and its Presents (`presents=`, every Present the effect runtimes saw, and `presents_per_s=`; both 0
+until the 11-01 leftovers) (per role, the present thread's holds and the holder sites, [Capture lock
 waits](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)); the fixture records,
 submits and presents on one thread, so its game role stays near zero by construction. The
 contention mode appends `--recorder-threads N` (1 to 16) after the interposer: instead of the
