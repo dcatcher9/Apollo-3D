@@ -3337,6 +3337,15 @@ checks the production FX compiler output/ABI across backend, color and size vari
 unsupported-input rejections. Its performance-macro variant is a compile check; only the official
 runtime fixture exercises real specialization. The validator is a supplied development tool,
 not a dependency of the shipping shader or installer.
+`test_game3d_presentation_compile.ps1 -ValidatorPath <validate_shaders.exe> -ShaderDirectory <dir>
+-ControlShaderDirectory <dir> -OutputDirectory <fresh-dir>` checks an externally supplied
+`SunshineGame3D.fx` against a control copy (its export contract, pass graph, controls and identical
+bytecode under obsolete definitions). Like the installers ([Setup](../../docs/reshade-sbs.md#setup)),
+it loads Windows PowerShell's own `Microsoft.PowerShell.Utility` from `$PSHOME` first, so a 5.1
+started from a PowerShell 7 window still finds `Get-FileHash` (11-01).
+[`Invoke-Game3DContractMatrix.ps1`](Invoke-Game3DContractMatrix.ps1) calls none of 5.1's own
+Utility functions (`Get-FileHash`, `New-TemporaryFile`, `New-Guid`, `Format-Hex`,
+`Import-PowerShellDataFile`) and runs there as it is.
 
 `reshade_native_present_d3d12_test` takes the same arguments as the legacy presentation fixture
 below. It uses a controlled paint effect with the independent effect's filename, technique and

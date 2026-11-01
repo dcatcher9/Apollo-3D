@@ -8,6 +8,10 @@ param(
     [Parameter(Mandatory)][string] $OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
+# PowerShell 7's inherited PSModulePath must not hide 5.1's Get-FileHash (install.ps1).
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')
+}
 $validator = (Get-Item -LiteralPath $ValidatorPath).FullName
 $effect = (Get-Item -LiteralPath (Join-Path $ShaderDirectory 'SunshineGame3D.fx')).FullName
 $controlEffect = (Get-Item -LiteralPath (Join-Path $ControlShaderDirectory 'SunshineGame3D.fx')).FullName
