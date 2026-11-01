@@ -6,7 +6,10 @@
 // hooks on game threads) serializes on one mutex. Whether game threads wait on
 // it for long enough to split it (perf item 3) is decided by these counts:
 // lock() first tries the native mutex, so an uncontended acquisition costs
-// one try_lock and a relaxed count; only a contended one is timed. No
+// one try_lock and a relaxed count (on the present thread also a relaxed
+// flag read); only a contended one is timed, and, while Diagnostics is on,
+// the present thread's holds (two counter reads each; until 11-01 always,
+// F39). No
 // constructor or destructor beyond std::mutex's (its counters are atomics
 // with constant initializers), so the object is initialized and destroyed
 // where the plain mutex was.
@@ -104,8 +107,9 @@ namespace sunshine_streamline::depth_capture {
     // The holder's site (lock_stats::site), for a waiter's attribution; 0
     // once released.
     std::atomic<std::uint64_t> holder_{};
-    // The performance counter at a present-thread acquisition (its hold is
-    // timed at unlock), else 0. Written and read by the holder only.
+    // The performance counter at a present-thread acquisition while
+    // Diagnostics is on (its hold is timed at unlock), else 0. Written and
+    // read by the holder only.
     std::uint64_t held_at_{};
   };
 
@@ -117,6 +121,8 @@ namespace sunshine_streamline::depth_capture {
   // only for a window in which a game thread waited a millisecond or more,
   // or every window when always is set (Diagnostics). The first call (and
   // the first after a reset) takes the window's baseline and prints
-  // nothing; each window's maxima are its own.
+  // nothing; each window's maxima are its own. always also times the
+  // present thread's holds from this call on (present_hold_*, printed for a
+  // window that timed some).
   bool capture_lock_report(std::uint64_t now_ms, bool always, char *out, std::size_t size);
 }

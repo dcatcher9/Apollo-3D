@@ -218,6 +218,45 @@ namespace {
     std::puts("PASS capture lock holders: the sites past the named slots count as other, printed so");
   }
 
+  // F39: the present thread's holds are timed only while the report's
+  // always (Diagnostics) is on, and the line names them only for a window
+  // that timed some; off, an acquisition costs a try_lock and a relaxed
+  // count. Until 11-01 every present-thread hold read the clock twice.
+  void hold_timing() {
+    capture::present(0, 0);
+    capture::reset_capture_lock_values();
+    report(false);  // The baseline; holds untimed from here.
+    lock_times(4);
+    auto values = capture::capture_lock_values();
+    require(values.present.locks == 4 && values.present_hold.locks == 0, "a present-thread hold was timed without Diagnostics");
+    auto line = report(true);  // A Diagnostics window: holds timed from here.
+    require(!line.empty() && line.find(" present_hold_") == std::string::npos,
+      "a window without timed holds printed hold fields: " + line);
+    lock_times(4);
+    values = capture::capture_lock_values();
+    require(values.present_hold.locks == 4 && sum(values.present_hold) == 4, "a present-thread hold was not timed with Diagnostics");
+    line = report(true);
+    require(line.find(" present_hold_p99_us=") != std::string::npos && line.find(" present_hold_max_ms=") != std::string::npos,
+      "a window of timed holds printed no hold fields: " + line);
+    // What timing costs an uncontended present-thread acquisition here (no
+    // verdict: a machine's clock source decides it).
+    const auto per_pair = [] {
+      constexpr unsigned pairs = 200000;
+      LARGE_INTEGER start{}, end{}, frequency{};
+      QueryPerformanceFrequency(&frequency);
+      QueryPerformanceCounter(&start);
+      lock_times(pairs);
+      QueryPerformanceCounter(&end);
+      return double(end.QuadPart - start.QuadPart) * 1e9 / double(frequency.QuadPart) / pairs;
+    };
+    const auto timed = per_pair();
+    report(false);
+    const auto untimed = per_pair();
+    std::printf("MEASURE capture lock present-thread lock+unlock ns: holds timed %.1f, untimed %.1f\n", timed, untimed);
+    std::puts("PASS capture lock holds: the present thread's holds are timed only with Diagnostics, and printed only for a window "
+      "that timed some");
+  }
+
   // F91: bucket_of's edges, and quantile_us over every acquisition (an
   // uncontended one waits 0) as its bucket's upper bound, the open bucket
   // as the largest wait.
@@ -267,7 +306,8 @@ namespace {
 
   const std::vector<std::pair<const char *, void (*)()>> rows{
     {"first_window", first_window}, {"reset_baseline", reset_baseline}, {"roles_and_waits", roles_and_waits},
-    {"holder_overflow", holder_overflow}, {"buckets_and_quantiles", buckets_and_quantiles}, {"gate", gate}};
+    {"holder_overflow", holder_overflow}, {"hold_timing", hold_timing}, {"buckets_and_quantiles", buckets_and_quantiles},
+    {"gate", gate}};
 }
 
 int main(int argc, char **argv) {

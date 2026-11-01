@@ -10,6 +10,9 @@ namespace sunshine_streamline::depth_capture {
       // The newest Present's thread (present()): its acquisitions are the
       // present role, every other thread's the game role.
       std::atomic<unsigned long> present_thread{};
+      // Whether the present thread's holds are timed: the last report's
+      // always (Diagnostics).
+      std::atomic<bool> time_holds{};
     };
     lock_counter_state lock_counters;
     // capture_lock_report's window, beside the counters it is taken from:
@@ -114,7 +117,7 @@ namespace sunshine_streamline::depth_capture {
       count_lock_holder(holder, ns);
     }
     holder_.store(lock_stats::site(address, present), std::memory_order_relaxed);
-    held_at_ = present ? lock_clock() : 0;
+    held_at_ = present && lock_counters.time_holds.load(std::memory_order_relaxed) ? lock_clock() : 0;
   }
 
   __attribute__((noinline)) bool capture_mutex::try_lock() {
@@ -123,7 +126,7 @@ namespace sunshine_streamline::depth_capture {
     if (!native_.try_lock()) return false;
     (present ? lock_counters.present : lock_counters.game).locks.fetch_add(1, std::memory_order_relaxed);
     holder_.store(lock_stats::site(address, present), std::memory_order_relaxed);
-    held_at_ = present ? lock_clock() : 0;
+    held_at_ = present && lock_counters.time_holds.load(std::memory_order_relaxed) ? lock_clock() : 0;
     return true;
   }
 
@@ -170,6 +173,9 @@ namespace sunshine_streamline::depth_capture {
   }
 
   bool capture_lock_report(std::uint64_t now_ms, bool always, char *out, std::size_t size) {
+    // Diagnostics times the present thread's holds (a store only on a change).
+    if (lock_counters.time_holds.load(std::memory_order_relaxed) != always)
+      lock_counters.time_holds.store(always, std::memory_order_relaxed);
     auto &window = report_window;
     if (const auto next = window.next.load(std::memory_order_relaxed); next && now_ms < next) return false;
     // One caller takes a window (another runtime's Present skips it).
@@ -217,11 +223,16 @@ namespace sunshine_streamline::depth_capture {
       if (written < 0 || used + std::size_t(written) >= sizeof(sites)) break;
       used += std::size_t(written);
     }
+    // The present thread's holds, for a window that timed some.
+    char holds[80]{};
+    if (hold.locks)
+      std::snprintf(holds, sizeof(holds), " present_hold_p99_us=%llu present_hold_max_ms=%.3f",
+        static_cast<unsigned long long>(lock_stats::quantile_us(hold, .99)), double(hold.max_ns) / 1e6);
     std::snprintf(out, size,
       "Sunshine depth capture lock: window_ms=%llu game_locks=%llu game_waits=%llu game_wait_ms=%.3f "
       "game_wait_pct=%.3f game_p50_us=%llu game_p99_us=%llu game_max_ms=%.3f game_waits_1ms=%llu "
-      "present_locks=%llu present_waits=%llu present_wait_ms=%.3f present_p99_us=%llu present_max_ms=%.3f "
-      "present_hold_p99_us=%llu present_hold_max_ms=%.3f holders=%s",
+      "present_locks=%llu present_waits=%llu present_wait_ms=%.3f present_p99_us=%llu present_max_ms=%.3f"
+      "%s holders=%s",
       static_cast<unsigned long long>(window_ms), static_cast<unsigned long long>(game.locks),
       static_cast<unsigned long long>(game.waits), double(game.wait_ns) / 1e6,
       double(game.wait_ns) / 1e4 / double(window_ms),
@@ -229,8 +240,7 @@ namespace sunshine_streamline::depth_capture {
       static_cast<unsigned long long>(lock_stats::quantile_us(game, .99)), double(game.max_ns) / 1e6,
       static_cast<unsigned long long>(game.long_waits), static_cast<unsigned long long>(present.locks),
       static_cast<unsigned long long>(present.waits), double(present.wait_ns) / 1e6,
-      static_cast<unsigned long long>(lock_stats::quantile_us(present, .99)), double(present.max_ns) / 1e6,
-      static_cast<unsigned long long>(lock_stats::quantile_us(hold, .99)), double(hold.max_ns) / 1e6,
+      static_cast<unsigned long long>(lock_stats::quantile_us(present, .99)), double(present.max_ns) / 1e6, holds,
       sites[0] ? sites : "none");
     return true;
   }

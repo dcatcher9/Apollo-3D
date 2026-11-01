@@ -618,18 +618,20 @@ capture poll lock` and `depth capture idle sweep`.
 **Capture lock waits** (since 11-01, the counter that decides perf item 3, the capture-lock
 split). The capture owner's one mutex is a counted wrapper (`capture_mutex`,
 [`capture_lock_stats.h`](../tools/reshade/capture_lock_stats.h)): an uncontended acquisition costs a
-`try_lock` and a relaxed count, a contended one is timed with `QueryPerformanceCounter`, and nothing
-changes which thread gets the lock or when. An acquisition on the thread of the newest Present
+`try_lock` and a relaxed count (on the present thread also a relaxed flag read), a contended one is
+timed with `QueryPerformanceCounter`, and nothing changes which thread gets the lock or when. An acquisition on the thread of the newest Present
 (`present()`) is the present role, every other the game role (recording, submission, the
 Streamline and NGX hooks, pool jobs). Per role it counts acquisitions, contended waits, their sum,
 their largest, the waits of a millisecond or more and a histogram (bucket bounds 10, 25, 50, 100,
-250, 500, 1000, 2000, 4000, 8000 and 16000 us); the present thread's holds are timed too, and each
+250, 500, 1000, 2000, 4000, 8000 and 16000 us); while Diagnostics is on the present thread's holds
+are timed too (two counter reads per hold; until 11-01 every hold was, Diagnostics or not, F39), and
+the line's `present_hold_p99_us= present_hold_max_ms=` come only from a window that timed holds; each
 wait names the site that held the lock when it began (the holder's lock call, as an offset in the
 add-on module): the first 63 sites are named, the waits on any later site count as `other` (until
 11-01 the 16th site took them under its own name, F56). The bounded line `Sunshine depth capture lock: window_ms= game_locks=
 game_waits= game_wait_ms= game_wait_pct= game_p50_us= game_p99_us= game_max_ms= game_waits_1ms=
-present_locks= present_waits= present_wait_ms= present_p99_us= present_max_ms= present_hold_p99_us=
-present_hold_max_ms= holders=<g|p>+0x<offset>|other:<waits>/<ms>,...` comes at most every 10 s, for a
+present_locks= present_waits= present_wait_ms= present_p99_us= present_max_ms= [present_hold_p99_us=
+present_hold_max_ms=] holders=<g|p>+0x<offset>|other:<waits>/<ms>,...` comes at most every 10 s, for a
 window in which a game thread waited a millisecond or more, or every window with Diagnostics on; the
 percentiles are over every acquisition of the role (an uncontended one waits 0), as bucket bounds.
 Each window's counts and maxima are its own: the first call takes the baseline and prints nothing,

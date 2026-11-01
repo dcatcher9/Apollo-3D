@@ -3319,7 +3319,9 @@ serial is 30 there); each Present establishes any selected copy, as
   and every role's histogram holds its waits (the waits of a millisecond or more are its buckets
   from 1000 us); `bucket_of`'s edges and `quantile_us` over every acquisition; without Diagnostics a
   window prints only for a game thread's wait of a millisecond or more. Its regressions (each failed
-  before, run alone): a wait before the first report call is no part of the first window's maximum
+  before, run alone): the present thread's holds are timed only with Diagnostics and printed only for
+  a window that timed some (F39: every present-thread hold read the clock twice, Diagnostics or
+  not); a wait before the first report call is no part of the first window's maximum
   (F59); a counter reset takes a new window baseline (F71: the next window's `present_locks`
   wrapped to 18446744073709551568); the holder sites past the named slots count as `other` (F56:
   the 16th site took them under its own name). Deleting the present thread's naming, timing no
