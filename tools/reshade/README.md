@@ -1431,7 +1431,7 @@ The same fixture accepts one optional isolated case after its four normal argume
 `--crowded-rotating-startup`, `--flat-startup`, `--layout`, `--copy-history`, `--copy-end`,
 `--copy-rescue`, `--copy-rescue-rect`, `--copy-rescue-pass-clear`, `--copy-rescue-discard`,
 `--copy-rescue-boxed`, `--gap-none`, `--gap-double`, `--gap-ui`, `--gap-overlay`, `--gap-long`,
-`--gap-cleared`, `--gap-cut` or `--second-swapchain`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
+`--gap-cleared`, `--gap-cut`, `--second-swapchain` or `--second-swapchain-between`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
 before the scene: a history copy at the start of the frame (the destination cleared on its first
 frames), a copy after the scene draw, and a copy of a pass the scene's allocation then overwrites
 for a small first-person draw. The scene, or in the last case the destination, must be the current
@@ -1457,7 +1457,12 @@ game's queue, so its own effect runtime) that presents colour only after every P
 game's window, whose scene draws every other Present: the game's window must hold its in-between
 Presents at full stereo while the second runtime, rendering natively on each of its Presents,
 never shows or holds Generic depth; the hold is per runtime, so this case passes with and without
-the gates (the snapshot CTest checks both gates' rules on synthetic snapshots). The other cases
+the gates (the snapshot CTest checks both gates' rules on synthetic snapshots).
+`--second-swapchain-between` erases the scene's depth without drawing every other Present
+(`--gap-cleared`'s routes), and on those Presents the second window presents between that work and
+the game window's Present, so the game window's Present carries no depth work of its own: it must
+still be mono, never hold its last real frame (the gates judge each depth frame on each runtime's
+first Present that sees it), while the second runtime shows and holds nothing. The other cases
 cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,

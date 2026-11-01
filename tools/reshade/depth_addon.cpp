@@ -870,12 +870,15 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	data.stable_current = false; // Set again below by this Present's stable copy.
 	auto *member_binding = select_captured_depth(runtime, cmd_list, data, *device_data, current_depth_stencil_resources,
 		automatic, selected_depth_stencil, selected_depth_stencil_info);
-	// Judged on the Present that advanced the depth frame, from its own work. A
-	// later Present without depth work can hold only what that one showed.
-	data.hold_verdict = device_data->native_depth_present_index == native_present_index ?
+	// Judged once per depth frame, from its work, on this runtime's first Present
+	// that sees it: the Present that advanced it, or this runtime's next one when
+	// another swapchain's Present took that frame's work. A later Present without
+	// new depth work can hold only what that one showed.
+	data.hold_verdict = data.hold_judged_frame != device_data->frame_index ?
 		judge_hold_gate(current_depth_stencil_resources, data.captures, data.shown.record.identity, device_data->frame_index,
 			frame_width, frame_height, device->check_capability(device_caps::resolve_depth_stencil),
 			data.selection.active_grace_frames()) : hold_gate::open;
+	data.hold_judged_frame = device_data->frame_index;
 	const uint64_t selected_id = selected_depth_stencil_info ? selected_depth_stencil_info->identity : 0;
 	if (member_binding)
 	{

@@ -6307,8 +6307,11 @@ on which only other depth is drawn (a HUD with its own depth-stencil, or the fra
 every-other-Present source skips), and a missing frame: a Present on which the anchor's capture
 set drew but whose end-of-frame copy was refused or failed holds within the source age, as the
 providers' missing frame does (its colour is then one frame ahead of the held depth). Two gates
-refuse the hold, judged from the work of each Present that advances the depth frame
-(`judge_hold_gate`), so such a Present is mono from the first:
+refuse the hold (`judge_hold_gate`), judged once per depth frame from its work on each effect
+runtime's first Present that sees that frame: the Present that advanced it, or, when another
+swapchain's Present took the frame's work (a second window presenting between the game's depth
+work and its own Present), this runtime's next Present (until 11-01 that Present judged nothing
+and held). Such a Present is mono from the first:
 
 - *Cleared:* the anchor's capture set, or the held source, was cleared (`ClearDepthStencilView` of
   the sampled plane, with or without rectangles, or a D3D12 render pass's depth `CLEAR`) or had its
@@ -6340,7 +6343,7 @@ calibration, raw samples and the strength ramp do not advance; `Sunshine_DepthRe
 and the `Sunshine 3D depth:` line counts held Presents (`ready_copies held=`). A held Present is
 not a current copy: Present coverage and sampling see only current copies. The hold belongs to the
 effect runtime that showed the capture: the runtime of another swapchain (a second window of the
-game) never holds it.
+game) never holds it, and its Presents never spare this runtime's hold from the gates.
 Binding, sampling and the public current depth accessor use the same capture record and currentness
 checks. The view/backup cache is bounded and retains retiring resources until their existing
 retirement period ends; ordinary rotation reuses views rather than allocating or waiting for the
@@ -6565,8 +6568,8 @@ accepted consequences:
   fourth member would, until 11-01 also on a set member's turn): those Presents show the last
   scene's depth for at most
   250 ms after it was current,
-  exactly as with the API providers, then mono. Both gates judge a Present by the work
-  submitted since the previous one, so a frame-generation Present that lands between one frame's
+  exactly as with the API providers, then mono. Both gates judge a depth frame by the work
+  submitted between two Presents (of any swapchain), so a frame-generation Present that lands between one frame's
   own submissions, after its depth clear and before its draws, is taken for a cleared screen and
   is mono (fail-safe; whether any game presents that way has not been measured).
 - **Copies of scene depth.** A copy of another same-geometry candidate is never current depth of

@@ -37,6 +37,10 @@ namespace {
     api::effect_runtime *main_runtime=nullptr,*second_runtime=nullptr;
     BOOL (*second_last)(api::effect_runtime *,sunshine_game3d::test::last_render *)=nullptr;
     std::uint64_t second_sequence=0;unsigned second_renders=0;
+    // second_between: on each Present that erases the scene's depth, the
+    // second window presents between that depth work and the game window's
+    // Present, so its Present takes the depth frame (presented_between).
+    bool second_between=false,presented_between=false;
     std::unique_ptr<target_t> overlay; // A HUD pass with its own full-size depth every Present (gap_overlay).
     com_ptr<ID3D12PipelineState> color_pipeline;com_ptr<ID3D12Resource> ui_color;com_ptr<ID3D12DescriptorHeap> ui_rtv;
     std::uint64_t rendered_sequence=0;
@@ -306,6 +310,11 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       if(mode==cadence::gap_ui && !drawn)ui_color_pass();
       erased=(mode==cadence::gap_cleared || mode==cadence::paused) && !drawn;
       if(erased)erase_scene(erase_count++%3);
+      if(erased && second_between && second_chain.p){
+        // Submit the game's work so far, present the second window, then go
+        // on recording the game window's frame.
+        submit();present_second();begin_commands();presented_between=true;
+      }
       if(mode==cadence::moving){
         if(!movement_started)movement_started=GetTickCount64();
         // Looking repeatedly between coherent near/middle/far center patches
@@ -483,7 +492,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         <<marker<<','<<eye_difference<<','<<(drawn?center(member(drawn).pattern):0.f)<<','
         <<captured.x<<','<<captured.y<<','<<captured.active_width<<','<<captured.active_height<<','<<raster_mask<<','<<held<<'\n';
       require(trace.good(),"Cannot record actual-frame rotation trajectory");
-      if(second_chain.p)present_second();
+      if(second_chain.p && !presented_between)present_second();
+      presented_between=false;
     }
     void warm(const char *phase,bool basis=true,const std::function<void(std::uint64_t)> &guard={}){
       const auto started=GetTickCount64();unsigned consecutive=0;
@@ -829,7 +839,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     // holds its real frame's depth on the Presents between (tick()); the
     // second window's runtime, which never showed that capture, never shows
     // or holds it: the hold belongs to the runtime that showed it.
-    void check_second_swapchain(){
+    // between (--second-swapchain-between): the game's window erases its
+    // scene's depth without drawing every other Present (gap_cleared), and on
+    // those Presents the second window presents between that work and the
+    // game window's Present, so the game window's Present carries no depth
+    // work of its own. It still shows a screen without its scene: mono, never
+    // its last real frame held (tick()); the second window still shows and
+    // holds nothing.
+    void check_second_swapchain(bool between=false){
       main_runtime=observed.runtime;
       second_last=reinterpret_cast<decltype(second_last)>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineGame3DTestLastRender"));
       require(main_runtime && second_last,"The second-window case needs the test add-on's last-render query");
@@ -853,20 +870,26 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       for(unsigned i=0;i<2;++i)checked(second_chain->GetBuffer(i,IID_PPV_ARGS(second_buffers[i].put())),"Get the second window's backbuffer");
       present_second();
       require(second_runtime && second_runtime!=main_runtime,"The second swapchain has no effect runtime of its own");
-      set_mode(cadence::interrupted);
+      second_between=between;
+      set_mode(between ? cadence::gap_cleared : cadence::interrupted);
+      const char *label=between ? "second-window-between" : "second-window";
       const auto started=GetTickCount64();unsigned consecutive=0;
-      while((consecutive<20 || !second_renders) && GetTickCount64()-started<30000){tick("second-window");if(drawn){if(full())++consecutive;else consecutive=0;}}
+      while((consecutive<20 || !second_renders) && GetTickCount64()-started<30000){tick(label);if(drawn){if(full())++consecutive;else consecutive=0;}}
       require(consecutive>=20,"Real frames beside a second window never reached full stereo");
       require(second_renders>0,"The second window's runtime never rendered natively");
-      const auto renders=second_renders;unsigned real=0,between=0;
+      const auto renders=second_renders;unsigned real=0,others=0;
       for(unsigned i=0;i<120;++i){
-        tick("second-window");
+        tick(label);
         if(drawn){require(full(),"A real frame beside a second window lost full stereo");++real;}
-        else{require(held && ready() && blend()==1.f,"An in-between Present beside a second window was not held at full stereo");++between;}
+        else if(between){require(erased && !held && !capture_ready && !ready() && blend()==0.f,
+          "A Present that erased the scene's depth before a second window's Present was not mono");++others;}
+        else{require(held && ready() && blend()==1.f,"An in-between Present beside a second window was not held at full stereo");++others;}
       }
       require(second_renders-renders==120,"The second window's runtime did not render on each of its Presents");
-      std::printf("PASS second window: %u real frames full stereo, %u in-between Presents held; %u colour-only Presents of the second window's own runtime showed and held no depth\n",
-        real,between,second_renders);
+      std::printf(between ?
+        "PASS second window between: %u real frames full stereo, %u Presents that erased the scene's depth before the second window presented mono; %u colour-only Presents of the second window's own runtime showed and held no depth\n" :
+        "PASS second window: %u real frames full stereo, %u in-between Presents held; %u colour-only Presents of the second window's own runtime showed and held no depth\n",
+        real,others,second_renders);
     }
     void finish(){
       render_tracked_depth={};
@@ -944,6 +967,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         else if(test_case=="--gap-cleared")check_gap_cleared();
         else if(test_case=="--gap-cut")check_gap_cut();
         else if(test_case=="--second-swapchain")check_second_swapchain();
+        else if(test_case=="--second-swapchain-between")check_second_swapchain(true);
         else throw std::runtime_error("Unknown isolated rotation case");
         finish();return;
       }
@@ -1004,7 +1028,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--copy-rescue-rect|--copy-rescue-pass-clear|--copy-rescue-discard|--copy-rescue-boxed|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain]\n",stderr);return 2;}
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--copy-rescue-rect|--copy-rescue-pass-clear|--copy-rescue-discard|--copy-rescue-boxed|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain|--second-swapchain-between]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
@@ -1013,7 +1037,7 @@ int main(int argc,char **argv){
       test_case=="--copy-rescue-pass-clear" || test_case=="--copy-rescue-discard" || test_case=="--copy-rescue-boxed" ||
       test_case=="--gap-none" || test_case=="--gap-double" ||
       test_case=="--gap-ui" || test_case=="--gap-overlay" || test_case=="--gap-long" || test_case=="--gap-cleared" || test_case=="--gap-cut" ||
-      test_case=="--second-swapchain","Unknown isolated rotation case");
+      test_case=="--second-swapchain" || test_case=="--second-swapchain-between","Unknown isolated rotation case");
     select_native_boot();
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");
     rotation_fixture f;f.runtime_directory=fs::absolute(argv[4]);

@@ -289,6 +289,9 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	uint64_t trace_access_present = std::numeric_limits<uint64_t>::max();
 	uint64_t trace_snapshot_frame = 0, trace_snapshot_present = 0;
 	sunshine_diagnostics::family_gap_observer trace_gaps;
+	// The depth frame this runtime last judged the hold gate on (hold_verdict;
+	// zero: none).
+	uint64_t hold_judged_frame = 0;
 };
 
 struct depth_stencil_backup
