@@ -3847,7 +3847,9 @@ Presents on its own thread while the game records the next frame (Assassin's Cre
 its SR evaluation), at most the declared count of them after that frame's first stamp, so the first
 Present after the frame's newest submission seen on a presenting queue (a copy's producer list), or
 after DLSS-G's evaluation of a frame whose FG tag copy was recorded at its call (it stands aside for
-that copy), anchors its window: the frame's stamps run from its first to that anchor, its generated
+that copy; since PD9 the only anchor where the copy's list does not run on the reading queue, which
+no session row reaches: probe row `test_dlssg_anchor_for_recorded_tag_copy`, which fails without
+that call or its `recorded` answer, lane L-fg, F88, 11-01), anchors its window: the frame's stamps run from its first to that anchor, its generated
 Presents count from there, its own evaluations up to the anchor end nothing, and an evaluation after
 it, the next frame's, ends the window. A submission or evaluation more than the declared count of
 Presents after the frame's first stamp is a later frame's and anchors nothing, so no window grows

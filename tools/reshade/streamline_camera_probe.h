@@ -286,6 +286,10 @@ namespace sunshine_streamline {
     // Runs seam in an options call after its store commit, before its FG
     // transition entries (frame_generation_restored, retire_source, ...).
     void set_fg_transition_seam(std::function<void()> seam);
+    // An FG tag copy of the scope recorded now at the tag call sequence
+    // (remember_tag_copy), which DLSS-G's evaluation of that frame stands
+    // aside for.
+    void remember_fg_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t sequence);
     // Defers candidate, a depth copy of the viewport's frame, to its frame's
     // Present (present_deferred), as a tag call that could not copy it does.
     void defer_depth(std::uint32_t viewport, const depth_capture::input &candidate);

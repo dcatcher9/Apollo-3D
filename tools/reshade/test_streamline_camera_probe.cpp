@@ -4254,6 +4254,53 @@ namespace {
     require(failed.empty(), failed.c_str());
   }
 
+  // DLSS-G's evaluation that stands aside for its frame's FG tag copy
+  // recorded at the tag call anchors that frame's presenting window at the
+  // next Present (92b98375's anchor (b): frame_generation_evaluated through
+  // tags_supply_frame's recorded answer), with no submission of the copy on
+  // the reading queue to anchor it (anchor (a), which PD9 limits to the
+  // reading queue: FG moved Present to DLSS-G's queue). No session row
+  // reaches that case: the fixture presents on the queue that runs the
+  // tag's list, where anchor (a) fires as well (lane L-fg, F88, 11-01). The
+  // earlier frame's generated Presents came after this frame's first stamp.
+  void test_dlssg_anchor_for_recorded_tag_copy() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(141);
+    opaque_token token; std::uint32_t numeric = 7; mint(token, &numeric);
+    call_v2_constants(modern_camera(), token.ref(), view);
+    fg_options on; on.generated_frames = 3;
+    require(set_options(view, on) == 0, "FG On options failed");
+    frame_generation_snapshot fg;
+    require(query_frame_generation(view.value, fg) && fg.enabled, "FG On was not committed");
+    depth_capture::fixture::reset_owner();
+    depth_capture::capture_queues.queues[0] = std::make_unique<depth_capture::queue_state>();
+    // The frame's first FG stamp, then two of the earlier frame's generated
+    // Presents.
+    depth_capture::scope.frame_generation_present = depth_capture::present_ordinal();
+    depth_capture::scope.frame_generation_anchor = 0;
+    depth_capture::scope.presenting_generated = 3;
+    depth_capture::fixture::presents_since(2);
+    testing::remember_fg_tag_copy(fg.epoch, view.value, UINT64_MAX / 2);
+    int native{}, commands{};
+    frame_generation::inputs inputs;
+    inputs.command = reinterpret_cast<std::uint64_t>(&commands);
+    inputs.depth.state = frame_generation::parameter::present;
+    inputs.depth.native = reinterpret_cast<std::uint64_t>(&native);
+    const auto attempt = observe_frame_generation_inputs(inputs);
+    finish_frame_generation_inputs(attempt, true);
+    const bool anchored = depth_capture::scope.frame_generation_anchor == depth_capture::present_ordinal();
+    depth_capture::fixture::reset_owner();
+    depth_capture::requested = false;
+    require(attempt.depth == frame_generation::depth_outcome::tag_copied && anchored,
+      "F88: DLSS-G's evaluation that stood aside for its frame's recorded FG tag copy did not anchor the frame's presenting window");
+  }
+
   // DLSS-G's evaluation supply (lane P, PD10 and round 1's C1, 11-01). A
   // refused FG tag boundary reads it once for both of its decisions: whether
   // a command-less boundary withdraws nothing, and whether its frame is missed
@@ -4671,6 +4718,8 @@ int main(int argc, char **argv) {
     std::puts("PASS FG Off retires the FG role once; a repeated Off retires nothing new");
     test_refused_frame_calls_end_window();
     std::puts("PASS a refused deferred FG copy and DLSS-G's evaluation without a copy attempt end an earlier frame's presenting window");
+    test_dlssg_anchor_for_recorded_tag_copy();
+    std::puts("PASS DLSS-G's evaluation standing aside for its frame's recorded FG tag copy anchors that frame's presenting window");
     test_evaluation_supply_read();
     std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
     test_camera_read_retry();

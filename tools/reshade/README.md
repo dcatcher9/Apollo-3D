@@ -2359,6 +2359,14 @@ supply lock with `testing::hold_evaluation_supply`; `testing::supply_evaluation`
 the previous FG period's supply, round 1's C1).
 Probe row `test_camera_read_retry` loses one camera read of an SL evaluation and of a depth tag
 boundary (`read_metadata(true)` retries it) and keeps losing one to show the bounded refusal.
+Probe-only hooks of 11-01 (lane L-fg) reach the FG paths no session row reaches:
+`testing::set_fg_store_read_seam` and `testing::set_fg_transition_seam` run a callback after an
+FG options store read or an options call's commit (rows `test_present_fg_one_store_read`,
+`test_fg_transition_order`), `testing::defer_depth` defers a depth candidate to its frame's Present
+(row `test_refused_frame_calls_end_window`), and `testing::remember_fg_tag_copy` records an FG tag
+copy that DLSS-G's evaluation stands aside for (row `test_dlssg_anchor_for_recorded_tag_copy`);
+rows that need FG retirements or the presenting window set the capture owner requested through its
+fixture (`depth_capture::fixture::reset_owner`).
 
 The judge reads each Present's [frame record](../../docs/reshade-sbs.md#frame-record)
 (`SunshineGame3DTestFrameRecord`, copied in ReShade's `reshade_present` event) and the fixture's

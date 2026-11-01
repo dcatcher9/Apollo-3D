@@ -734,6 +734,9 @@ namespace sunshine_streamline {
     }
     void set_fg_store_read_seam(std::function<void()> seam) { fg_store_read_seam = std::move(seam); }
     void set_fg_transition_seam(std::function<void()> seam) { fg_transition_seam = std::move(seam); }
+    void remember_fg_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t sequence) {
+      remember_tag_copy(scope_epoch, viewport, true, sequence);
+    }
     void defer_depth(std::uint32_t viewport, const depth_capture::input &candidate) {
       AcquireSRWLockExclusive(&evaluation_supply_lock);
       for (auto &entry : deferred_frames) if (!entry.used) {
