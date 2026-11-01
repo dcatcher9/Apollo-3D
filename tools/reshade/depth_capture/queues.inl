@@ -122,18 +122,23 @@ namespace sunshine_streamline::depth_capture {
       if (progress.completed >= value.producer_fence) return true;
       return ordered_after_producer(value, consumer, relied);
     }
+    // Requires mutex. The place of the newest acquisition's queue (reader)
+    // while it is live (not retiring), else null: the one test reader_live,
+    // reader_queue and read_elsewhere are made of (until 11-01 each wrote it
+    // out, F62).
+    const queue_state *reader_place() {
+      if (!reader) return nullptr;
+      for (const auto &entry : capture_queues.queues)
+        if (entry && entry->cookie == reader && !entry->retiring) return entry.get();
+      return nullptr;
+    }
     // Requires mutex. Whether the newest acquisition's queue (reader) is a
     // live place.
-    bool reader_live() {
-      return reader && std::any_of(capture_queues.queues.begin(), capture_queues.queues.end(), [](const auto &entry) {
-        return entry && entry->cookie == reader && !entry->retiring;
-      });
-    }
+    bool reader_live() { return reader_place() != nullptr; }
     // Requires mutex. The native queue of the newest acquisition (reader).
     std::uint64_t reader_queue() {
-      for (const auto &entry : capture_queues.queues)
-        if (entry && reader && entry->cookie == reader && !entry->retiring) return reinterpret_cast<std::uint64_t>(entry->queue.p);
-      return 0;
+      const auto *place = reader_place();
+      return place ? reinterpret_cast<std::uint64_t>(place->queue.p) : 0;
     }
     void consumer_submitted(slot &value, std::uint64_t native, std::uint64_t fence, bool signaled) {
       if (value.consumer_queue && value.consumer_queue != native) invalidate(value, capture_failure::consumer_queue_changed);
@@ -250,11 +255,7 @@ namespace sunshine_streamline::depth_capture {
     // acquisition (reader) was another live queue's. Not whether owner ever
     // acquired: a render queue that presented with FG off reads elsewhere
     // once FG presents on DLSS-G's queue, and no longer once FG is off again.
-    bool read_elsewhere(const queue_state &owner) {
-      return reader && reader != owner.cookie && std::any_of(capture_queues.queues.begin(), capture_queues.queues.end(), [&](const auto &entry) {
-        return entry && entry->cookie == reader && !entry->retiring;
-      });
-    }
+    bool read_elsewhere(const queue_state &owner) { return reader != owner.cookie && reader_live(); }
     // U-C1b: FG options turned on within the source age, so Present may move
     // to DLSS-G's queue at FG's first Present, after the frame's copies on
     // the queue that reads depth now were submitted (until 10-27 those kept
