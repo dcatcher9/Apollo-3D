@@ -976,29 +976,41 @@ namespace sunshine_streamline {
     return true;
   }
 
+  namespace {
+    // query_frame_generation over one copy of the FG options store: store, a
+    // copy the caller read (take_fg's one read per Present), or null to read
+    // the store here.
+    bool read_frame_generation(const fg_mode_table *store, std::uint32_t viewport, frame_generation_snapshot &output,
+        frame_generation_query_status *status) {
+      output = {};
+      if (status) *status = frame_generation_query_status::unavailable;
+      const auto ticket = observation_ticket();
+      if (!ticket || !fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return false;
+      // The FG options store: every read gets the last committed options.
+      fg_mode_table read;
+      if (!store) { read = read_fg_modes(); store = &read; }
+      const auto &modes = *store;
+      bool found = false, ambiguous = false;
+      const auto options_loss = fg_loss_revision.load(std::memory_order_acquire);
+      const auto source_epoch = epoch.load(std::memory_order_acquire);
+      for (const auto &slot : modes) {
+        const auto &state = slot.state;
+        if (!slot.used || slot.observation != ticket || !state.sequence || (viewport != UINT32_MAX && state.viewport != viewport)) continue;
+        if (!state.known || state.epoch != source_epoch || state.loss_revision != options_loss) { ambiguous = true; continue; }
+        if (found) { ambiguous = true; continue; }
+        output = state; found = true;
+      }
+      if (!found || ambiguous || !current(ticket) || options_loss != fg_loss_revision.load(std::memory_order_acquire)) {
+        if (status && ambiguous) *status = frame_generation_query_status::ambiguous;
+        output = {}; return false;
+      }
+      if (status) *status = frame_generation_query_status::observed;
+      return true;
+    }
+  }
+
   bool query_frame_generation(std::uint32_t viewport, frame_generation_snapshot &output,
       frame_generation_query_status *status) {
-    output = {};
-    if (status) *status = frame_generation_query_status::unavailable;
-    const auto ticket = observation_ticket();
-    if (!ticket || !fg_available.load(std::memory_order_acquire) || !current_fg_target.load(std::memory_order_acquire)) return false;
-    // The FG options store: every read gets the last committed options.
-    const auto modes = read_fg_modes();
-    bool found = false, ambiguous = false;
-    const auto options_loss = fg_loss_revision.load(std::memory_order_acquire);
-    const auto source_epoch = epoch.load(std::memory_order_acquire);
-    for (const auto &slot : modes) {
-      const auto &state = slot.state;
-      if (!slot.used || slot.observation != ticket || !state.sequence || (viewport != UINT32_MAX && state.viewport != viewport)) continue;
-      if (!state.known || state.epoch != source_epoch || state.loss_revision != options_loss) { ambiguous = true; continue; }
-      if (found) { ambiguous = true; continue; }
-      output = state; found = true;
-    }
-    if (!found || ambiguous || !current(ticket) || options_loss != fg_loss_revision.load(std::memory_order_acquire)) {
-      if (status && ambiguous) *status = frame_generation_query_status::ambiguous;
-      output = {}; return false;
-    }
-    if (status) *status = frame_generation_query_status::observed;
-    return true;
+    return read_frame_generation(nullptr, viewport, output, status);
   }
 }

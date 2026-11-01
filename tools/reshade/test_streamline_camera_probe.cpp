@@ -3944,6 +3944,68 @@ namespace {
     end_present_fg();
   }
 
+  // One read of the FG options store per Present snapshot, applied to the
+  // process's one FG view in store order (lane L-fg, F1 and F70, 11-01).
+  // Until then take_fg read the store twice outside fg_view_lock: an options
+  // call between the two reads gave present_deferred's per-viewport modes
+  // another mode than depth's and the UI's in one Present (F1), and a present
+  // thread could apply its older read to the view after another present
+  // thread's newer one, which the next ambiguous read then kept (F70).
+  void test_present_fg_one_store_read() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(71);
+    fg_options on; on.generated_frames = 3;
+    fg_options off; off.mode = 0; off.generated_frames = 0;
+    constexpr std::uint64_t first_chain = 0x3000, second_chain = 0x4000;
+    std::string failed;
+    const auto check = [&](bool passed, const char *what) { if (!passed) failed += std::string(failed.empty() ? "" : "; ") + what; };
+    // F1: an options call right after the snapshot's store read.
+    require(set_options(view, on) == 0, "FG On options failed");
+    std::atomic<bool> fired{};
+    testing::set_fg_store_read_seam([&] { if (!fired.exchange(true)) set_options(view, off); });
+    take_present_fg(first_chain);
+    testing::set_fg_store_read_seam({});
+    const auto split = present_frame_generation(first_chain);
+    end_present_fg();
+    check(fired.load() && split.depth.require_frame_generation && split.mode(view.value).known && split.mode(view.value).enabled,
+      "F1: an options call during a Present's FG snapshot gave present_deferred another mode than depth and the UI");
+    // F70: another present thread reads the store after the Off below and
+    // updates the view while this thread is between its read and its update.
+    require(set_options(view, on) == 0, "FG On options failed");
+    take_present_fg(first_chain); end_present_fg();
+    fired = false;
+    std::atomic<bool> other_done{};
+    std::thread other;
+    testing::set_fg_store_read_seam([&] {
+      if (fired.exchange(true)) return;
+      set_options(view, off);
+      other = std::thread([&] { take_present_fg(second_chain); end_present_fg(); other_done = true; });
+      // With the view applied in store order the other thread waits for this
+      // one's update; give it time to finish first otherwise.
+      for (unsigned i = 0; i != 100 && !other_done.load(); ++i) Sleep(2);
+    });
+    take_present_fg(first_chain); end_present_fg();
+    other.join();
+    testing::set_fg_store_read_seam({});
+    // The next read is ambiguous (a failed options call), so the UI keeps the
+    // mode of the read applied last: the newer one, FG Off.
+    result_v2 = -7;
+    set_options(view, off);
+    result_v2 = 0;
+    take_present_fg(first_chain);
+    const auto kept = present_frame_generation(first_chain);
+    end_present_fg();
+    check(kept.read == frame_generation_query_status::ambiguous && kept.ui.known && !kept.ui.enabled,
+      "F70: a present thread's older FG read was applied to the FG view after another thread's newer one");
+    require(failed.empty(), failed.c_str());
+  }
+
   // DLSS-G's evaluation supply (lane P, PD10 and round 1's C1, 11-01). A
   // refused FG tag boundary reads it once for both of its decisions: whether
   // a command-less boundary withdraws nothing, and whether its frame is missed
@@ -4347,6 +4409,8 @@ int main(int argc, char **argv) {
     std::puts("PASS the FG mode survives lost metadata reads, a held metadata writer and a fifth viewport's camera");
     test_present_fg_snapshot();
     std::puts("PASS one FG snapshot per Present from one FG view: options during a Present are the next one's, Q1's two projections, equal modes for a runtime created during ambiguity");
+    test_present_fg_one_store_read();
+    std::puts("PASS one FG options store read per Present snapshot, applied to the FG view in store order");
     test_evaluation_supply_read();
     std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
     test_camera_read_retry();

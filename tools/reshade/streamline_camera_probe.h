@@ -10,6 +10,9 @@
 #include "presentation_scope.h"
 #include "freshness.h"
 #include "observation_loss_journal.h"
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+#include <functional>
+#endif
 
 namespace sunshine_streamline {
   // Source adapters share these hooks and can nominate/copy current depth.
@@ -277,6 +280,9 @@ namespace sunshine_streamline {
     presentation_scope::fg_route route_of(std::uint32_t viewport);
     // Moves every enabled FG scope's enabled tick ms into the past.
     void age_frame_generation(std::uint64_t ms);
+    // Runs seam after each copy of the FG options store (read_fg_modes),
+    // outside its lock, on the reading thread; an empty one ends it.
+    void set_fg_store_read_seam(std::function<void()> seam);
     // One explicitly armed fixture observation of the real pre-SDK policy.
     void arm_entry_policy();
     bool entry_policy(bool &selected, bool &admissible);

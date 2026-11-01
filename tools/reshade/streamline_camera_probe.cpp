@@ -24,6 +24,9 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+#include <functional>
+#endif
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -729,6 +732,7 @@ namespace sunshine_streamline {
       }
       ReleaseSRWLockExclusive(&fg_mode_lock);
     }
+    void set_fg_store_read_seam(std::function<void()> seam) { fg_store_read_seam = std::move(seam); }
     void arm_entry_policy() { entry_policy_armed = true; entry_policy_observed = false; }
     bool entry_policy(bool &selected, bool &admissible) {
       selected = entry_path_selected; admissible = entry_source_admitted;
@@ -791,6 +795,7 @@ namespace sunshine_streamline {
       // fixture case begins as a new process does.
       fg_state = {};
       present_snapshot = {};
+      fg_store_read_seam = nullptr;
       original_feature_function_v2 = nullptr;
       hooks_installed = minhook_initialized = false;
       v1_private_state_ready.store(false, std::memory_order_release);

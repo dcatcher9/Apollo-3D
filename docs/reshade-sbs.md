@@ -6347,9 +6347,16 @@ nested-capture adapter bodies and the deferred-frame observations stay at their
 original sites, because they read live Streamline state.
 
 One FG snapshot per Present (11-01, lane P, PD6 and PD11): depth's present
-event takes it first, for every API (`take_present_fg`): one any-viewport read
-of the FG options store, each viewport's committed options, and the process's
-one `fg_view` updated once under its own leaf lock (present threads only). That
+event takes it first, for every API (`take_present_fg`): one read of the FG
+options store gives its any-viewport read and each viewport's committed options,
+and the process's one `fg_view` is updated once from it. The store read and the
+update share one hold of the view's lock (present threads only; taken before the
+store's own lock), so present threads update the view in store order. Until
+11-01 (lane L-fg, F1 and F70) the store was read twice outside that lock: an
+options call between the two reads gave `present_deferred` another mode than
+depth and the UI, and an older read could be applied after another present
+thread's newer one, which the next ambiguous read kept (probe row
+`test_present_fg_one_store_read`). That
 Present's consumers on its thread read it (`present_frame_generation`):
 `present_deferred` (each viewport's generating and generated counts), the UI
 (`ui_input::observe`) and the provider (`begin`); depth's `finish_present` drops
@@ -6378,7 +6385,8 @@ runtime's known one, its depth policy unconfirmed (probe row
 The FG mode has its own store, `presentation_scope_mode.inl` (11-01, lane P,
 PD1-PD5): each viewport's newest committed FG options, kept apart from the
 per-call camera and tag metadata, which every camera, tag and token call
-republishes. `hook_fg_options` is its only writer, under a leaf lock; every
+republishes. `hook_fg_options` is the only writer of options, under a leaf lock
+(a replaced camera record and a restart only erase slots); every
 reader (`query_frame_generation` and through it the provider, the UI, nested
 and direct NGX, DLSS-G's inputs and the SL UI tags; the SL route;
 `present_deferred`; the camera store's FG frame; the depth tag boundary's FG

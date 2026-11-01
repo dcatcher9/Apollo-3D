@@ -6,8 +6,9 @@
     // The FG mode (docs/reshade-sbs.md, Presentation scope): each viewport's
     // newest committed FG options, kept apart from the per-call camera and
     // tag metadata (metadata_state), which every camera, tag and token call
-    // republishes. The options hook (hook_fg_options) is its only writer and
-    // cannot lose its write; a reader always gets the last committed options.
+    // republishes. The options hook (hook_fg_options) is the only writer of
+    // options and cannot lose its write (drop_fg_mode and clear_fg_modes only
+    // erase slots); a reader always gets the last committed options.
     // Until 11-01 the mode lived in the camera records: a read that lost the
     // writers' race was "busy", and each reader had its own rule for it (the
     // provider required FG before any confirmation, the SL route took the
@@ -29,10 +30,18 @@
     SRWLOCK fg_mode_lock = SRWLOCK_INIT;
     fg_mode_table fg_modes{};
     // A copy of the store.
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+    // Test seam (testing::set_fg_store_read_seam): runs after each copy of
+    // the store, outside fg_mode_lock.
+    std::function<void()> fg_store_read_seam;
+#endif
     fg_mode_table read_fg_modes() {
       AcquireSRWLockShared(&fg_mode_lock);
       const auto out = fg_modes;
       ReleaseSRWLockShared(&fg_mode_lock);
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+      if (fg_store_read_seam) fg_store_read_seam();
+#endif
       return out;
     }
     // The viewport's committed options in the current observation, or none
@@ -82,7 +91,9 @@
 
     // The process's one FG view (presentation_scope::fg_view), updated once
     // per Present on its present thread (take_present_fg) under fg_view_lock,
-    // a leaf taken only there; and this thread's Present's snapshot.
+    // taken only there and held across that Present's one store read, so the
+    // lock order is fg_view_lock, then fg_mode_lock (shared); and this
+    // thread's Present's snapshot.
     SRWLOCK fg_view_lock = SRWLOCK_INIT;
     presentation_scope::fg_view fg_state;
     thread_local presentation_scope::present_fg present_snapshot;

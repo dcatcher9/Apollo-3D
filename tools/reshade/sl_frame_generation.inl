@@ -239,13 +239,22 @@ namespace sunshine_streamline {
     presentation_scope::present_fg take_fg(std::uint64_t swapchain) {
       presentation_scope::present_fg out;
       out.swapchain = swapchain;
-      query_frame_generation(UINT32_MAX, out.fg, &out.read);
+      // One read of the FG options store gives the any-viewport read (so
+      // depth and the UI) and each viewport's committed options
+      // (present_deferred), and it is taken under fg_view_lock, so the
+      // process's one view applies reads in store order: of two present
+      // threads, the one that read later updates the view later. Until 11-01
+      // the store was read twice, outside the lock: an options call between
+      // the two reads gave present_deferred another mode than depth and the
+      // UI, and a present thread could apply its older read after another
+      // thread's newer one, which an ambiguous or unavailable next read kept.
+      AcquireSRWLockExclusive(&fg_view_lock);
+      const auto modes = read_fg_modes();
+      read_frame_generation(&modes, UINT32_MAX, out.fg, &out.read);
       out.observer_active = source_enabled();
       const auto observation = observation_generation.load(std::memory_order_acquire);
-      const auto modes = read_fg_modes();
       for (std::size_t i = 0; i != modes.size(); ++i)
         if (modes[i].used && modes[i].observation == observation) out.modes[i] = modes[i].state;
-      AcquireSRWLockExclusive(&fg_view_lock);
       out.depth = fg_state.update(out.read, out.fg, out.observer_active);
       out.generated_frames = fg_state.generated_frames();
       out.ui = fg_state.ui();
