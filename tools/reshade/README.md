@@ -2774,7 +2774,12 @@ queue lost its association (dropped_hold at frame 27, three of three runs), and 
 FG tag copy deferred to its Present with a hitch of the source age between its calls and that
 Present, then refused frames, `fg-on-deferred-tag-hitch-after-sources-held` (seed
 c40a42f921da5ba0's frames 138 to 162 again: before 11-01 the add-on aged that copy from its tag
-call, the judge from its Present, dropped_hold at frame 29, every run),
+call, the judge from its Present, dropped_hold at frame 29, every run), and one for a late FG Off
+whose frame's DLSS-G copy the add-on keeps and shows at that frame's Present after a hitch since its
+evaluation, `fg-off-late-kept-dlssg-copy-hitch-after-sources` (fixed-set seed 5d48a3d414f1de10's
+frames 0 to 40 with that hitch: before 11-01 the fixture stripped every FG copy of a late-Off frame
+but its deferred tag copy from the supply, an unsupplied fresh copy at frame 33, every run; without
+the hitch the seed failed stale at frame 39 about 1 run in 3),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -2821,9 +2826,11 @@ watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first). 
 `name=value,...`, `N*` repeating one); `--seeds N --from M` soaks N further seeds (with the
 regressions and witnesses). Since 10-28 seeds draw a late FG Off (`fg=off_late`) for half of
 their Offs while FG is on, from a stream of their own (until then no seed drew it, which hid the
-stale FG copy held after a late Off, the 10-28 review's P1 and J3): the late Off frame's FG tag copy
-deferred to its Present is permitted there as the lineage's ordinary depth and the next readable SR
-copy required, and a refusal is judged in the FG scope of the frame's decisions, before the Off.
+stale FG copy held after a late Off, the 10-28 review's P1 and J3): the late Off frame's FG copies
+the add-on keeps (its FG tag's, made at the call or deferred to its Present, and DLSS-G's, made at its
+evaluation; until 11-01 only the deferred tag copy) are permitted there as the lineage's ordinary
+depth, each aged from where it was made, and the next readable SR copy required, and a refusal is
+judged in the FG scope of the frame's decisions, before the Off.
 Soaks over the 350 seeds after the fixed
 set (`--from 24`) found the shapes of C4, C6 and C7 beyond their witnesses; seeds 279 to 373 then
 passed with no failure (in the event language before Presents inside an SR evaluation, which

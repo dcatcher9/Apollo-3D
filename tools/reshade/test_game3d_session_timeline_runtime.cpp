@@ -908,6 +908,18 @@ namespace {
     // frame after the hitch was mono (dropped_hold at frame 29, every run;
     // with the seed's untags the judge excused the same mono Presents).
     {"fg-on-deferred-tag-hitch-after-sources-held", "20*sr=other_queue,sr_gpu=after_present; 3*tag=present_bare,ui=listed; fg=on,tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=proven,ui=listed,hitch=after_sources; tag=present_bare,sr=other_queue,state=unprovable,ui=listed; tag=present_bare,sr=other_queue,state=unprovable,ui=listed,order=second; fg=off,tag=present_bare,sr=other_queue,state=unprovable,ui=listed,order=second; sr=other_queue,state=unprovable,ui=listed,order=second; 2*sr=other_queue,state=unprovable,ui=listed,order=late; sr=other_queue,state=unprovable,order=late; fg=off,sr=other_queue,state=unprovable,order=late; tag=now_list,sr=other_queue,state=unprovable,order=late,sr_gpu=after_present; tag=evaluate_bare,sr=other_queue,state=unprovable,ui=listed,order=late; tag=evaluate_bare,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed,order=late; 3*tag=evaluate_bare,state=proven,ui=listed; 2*ui=listed"},
+    // A late FG Off whose frame's DLSS-G copy, made at its evaluation, is
+    // kept as the viewport's ordinary source and shown at that frame's
+    // Present after a hitch since the evaluation (fixed-set seed
+    // 5d48a3d414f1de10's frames 0 to 40, with hitch=after_sources on its
+    // fg=off_late frame 33). The fixture supplies that copy as permitted,
+    // aged from its evaluation as the add-on ages it. Until 11-01 it
+    // stripped every FG copy of a late-Off frame but its deferred tag copy,
+    // so the shown copy failed as unsupplied (oracle:unsupplied_fresh at
+    // frame 33, every run), and without the hitch the add-on's hold of it
+    // was aged from the frame before (the seed, stale at frame 39 about 1
+    // run in 3).
+    {"fg-off-late-kept-dlssg-copy-hitch-after-sources", "sr=other_queue,state=recorded_other,order=cpu; tag=evaluate_bare,state=recorded_other; tag=evaluate_bare,state=recorded_other; tag=evaluate_bare,state=recorded_other; tag=evaluate_bare,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; sr=local,state=recorded_other; untag=before_global,sr=local,state=recorded_other; fg=on,untag=before_global,sr=other_queue,state=recorded_other; untag=before_global,dlssg=direct_unobserved,state=proven; untag=before_global,dlssg=direct,state=proven; untag=before_global,dlssg=direct,state=proven; untag=before_global,dlssg=direct,state=recorded_other; untag=before_global,dlssg=direct; untag=before_global,dlssg=direct; untag=before_global,dlssg=direct; untag=before_global,dlssg=direct,generated=2; untag=before_global,dlssg=direct,state=unprovable,generated=2; untag=before_global,generated=2; untag=after_frame,generated=2; untag=after_frame,generated=2; untag=before_global,generated=2; untag=before_global,generated=2; untag=before_global,dlssg=direct,generated=2; untag=before_global,dlssg=direct,generated=2; tag=now_bare,untag=before_global,dlssg=direct,generated=2; tag=now_bare,untag=before_global,dlssg=direct,generated=2; tag=now_bare,untag=before_global,dlssg=direct,generated=2; fg=off_late,tag=now_bare,entry=global,untag=before_global,sr=tag,dlssg=direct,hitch=after_sources; tag=now_bare,entry=global,untag=before_global,sr=tag; drs=change,tag=now_bare,entry=global,untag=before_global,sr=tag; tag=now_bare,entry=global,untag=before_global,sr=tag,ui=untagged; tag=now_bare,entry=global,untag=before_global,sr=tag,ui=untagged,hitch=brief; tag=now_bare,entry=global,sr=tag,ui=untagged; tag=now_bare,entry=global,sr=tag,ui=untagged; tag=now_bare,entry=global,sr=tag,ui=untagged"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -2281,36 +2293,43 @@ namespace {
         dlssg_evaluated = now;
         ++dlssg_frames;
       }
-      // A late FG Off retired the frame's FG copies (its FG tag's and
-      // DLSS-G's) before any Present showed them: they supply nothing. Its
-      // FG tag copy deferred to its Present (R2), made after the Off, is the
-      // frame's own depth of the display lineage, the viewport's ordinary
-      // source (depth_capture::frame_generation_retired): permitted at that
-      // Present, never required, and the lineage's SR successor is required
-      // at its first readable frame as any (until 10-28 the add-on made it
-      // the FG view again beside the SR view, which held it stale; the
-      // fixture called it a source with no contract).
-      const bool late_deferred_tag = late_off && deferred_tag && !cancel_expected &&
-        ((supply.legal | supply.limited | supply.permitted) & continuity::tag_copy);
+      // A late FG Off retired the frame's FG role before any Present showed
+      // its FG copies. The add-on keeps them, published after the copy the
+      // lineage's display showed, as the frame's own depth of the display
+      // lineage, the viewport's ordinary source (retire_source at a confirmed
+      // Off, owner ruling 10-30 Q3; depth_capture::frame_generation_retired):
+      // its FG tag's copy, made at the call or deferred to its Present (R2)
+      // and made there after the Off, and DLSS-G's copy, made at its
+      // evaluation. They supply that Present as permitted, never required,
+      // each aged from where it was made (supply::made, where the add-on
+      // stamps it), and the lineage's SR successor is required at its first
+      // readable frame as any. A tag copy the frame's untag cancels (R7) is
+      // never made. Until 11-01 only the deferred tag copy supplied it (until
+      // 10-28 the add-on made that copy the FG view again beside the SR
+      // view, which held it stale; the fixture called it a source with no
+      // contract), while the add-on has kept DLSS-G's copy since 11-01's
+      // deferred fixes: the judge aged the add-on's hold of it from the frame
+      // before (fixed-set seed 5d48a3d414f1de10 failed stale at frame 39, age
+      // 296 ms, about 1 run in 3), and showed after a hitch since its
+      // evaluation it failed as unsupplied
+      // (fg-off-late-kept-dlssg-copy-hitch-after-sources).
       if (late_off) {
         constexpr auto fg_copies = std::uint8_t(continuity::tag_copy | continuity::dlssg_input);
+        const auto kept = std::uint8_t((supply.legal | supply.limited | supply.permitted) & fg_copies &
+          ~(cancel_expected ? continuity::tag_copy : 0));
         for (auto *mask : {&supply.legal, &supply.limited, &supply.permitted, &supply.elsewhere, &supply.immediate}) {
           *mask = std::uint8_t(*mask & ~fg_copies);
         }
         for (const unsigned i : {1u, 2u}) {
-          supply.made[i] = supply.capture[i] = 0;
+          if (!(kept & (1u << i))) {
+            supply.made[i] = 0;
+          }
+          supply.capture[i] = 0;
         }
         supply.completions.erase(std::remove_if(supply.completions.begin(), supply.completions.end(), [](const auto &value) {
           return (value.sources & fg_copies) != 0;
         }), supply.completions.end());
-        if (late_deferred_tag) {
-          supply.permitted |= continuity::tag_copy;
-          for (unsigned i = 0; i != supply.made.size(); ++i) {
-            if (continuity::tag_copy & (1u << i)) {
-              supply.made[i] = GetTickCount64();
-            }
-          }
-        }
+        supply.permitted |= kept;
       }
       const auto owned_sr = owned || held_off || compute_scope ? std::uint8_t(supply.legal & continuity::sr_evaluate) : std::uint8_t {};
       // A frame whose Present can read none of its legal sources: its copies
