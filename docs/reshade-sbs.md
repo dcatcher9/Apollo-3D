@@ -593,7 +593,15 @@ the pass, and Generic rebinds DEPTH at that Present (until 11-01 the active disp
 allocated for the rest of the session after a handover to Generic; the native provider fixture's
 `SL-display-gone-*`). A shape that comes back sooner (dynamic resolution between two render
 sizes, an FG toggle and back, an API source that resumes) still reuses its entry. Until 10-31 the inactive entry stayed until a third shape evicted it, so
-after 4K then 1080p both displays stayed allocated. A runtime's teardown waits for its releases,
+after 4K then 1080p both displays stayed allocated. A known limit, parked by the owner (10-29: the
+stutter leftovers return if a log shows them again): the displays are sized to the depth's
+allocation, so a shape that neither retained entry has (a third allocation size, or one that
+returns after the idle period) still creates its texture and view on the present thread (the
+`depth display preparation` slow step logs one of 8 ms or more), and every change of the shown
+entry, a reuse too, rebinds DEPTH (`API depth binding`), which ReShade 6.8 waits on the queue for.
+The grow-only display per format of the 10-27 stutter plan, which would remove both, is not built:
+the 10-31 idle release (deferred item 5 (ii)) returns VRAM and does not remove these steps.
+A runtime's teardown waits for its releases,
 so none outlives its runtime or device. A release of 8 ms or more logs `Sunshine Game 3D: depth display release took X ms off the present
 thread (n textures, m MiB)`. Capture storage goes the same way (10-27): what the idle sweep
 (`depth_capture::poll`, on the present thread), a Present's observation, a queue's retirement or a
