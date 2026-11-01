@@ -6561,7 +6561,9 @@ accepted consequences:
   before and does not draw at the anchor's set's own cadence (a cutscene, photo mode or 3D menu,
   including an unqualified buffer of the same size; the first turn of a new rotation member is one
   too, its later turns hold). Neither gate sees a screen change on which the game simply stops
-  drawing its scene without clearing depth or drawing into another buffer, or starts the new scene
+  drawing its scene without clearing depth or drawing into another buffer (also when it clears
+  only the buffer the anchor's depth is copied or resolved from: the anchor is then the
+  destination of that copy, which the screen leaves untouched), or starts the new scene
   in a buffer that last drew within those three Presents, or on the turn of a rotation member not
   yet in the set in a buffer that last drew exactly one set cadence before (four Presents before,
   beside an A/B/C set whose fourth member has not qualified; that buffer then draws exactly as the

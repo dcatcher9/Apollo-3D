@@ -156,11 +156,16 @@ namespace {
     }
     // A screen without the scene (a pause, inventory or loading screen, a
     // video) that keeps erasing the scene's depth and draws none: by
-    // ClearDepthStencilView, a render pass whose depth access is CLEAR, or one
-    // that DISCARDs it, in turn.
+    // ClearDepthStencilView, a render pass whose depth access is CLEAR, one
+    // that DISCARDs it, or ClearDepthStencilView limited to one rectangle that
+    // spans the whole view or to one over its top-left quarter, in turn.
     void erase_scene(unsigned route){
       auto &target=*scene;const auto dsv=target.heap->GetCPUDescriptorHandleForHeapStart();
       if(route==0){commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,target.clear_depth,0,0,nullptr);return;}
+      if(route>=3){
+        const D3D12_RECT rect{0,0,LONG(route==3 ? target.width : target.width/2),LONG(route==3 ? target.height : target.height/2)};
+        commands->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,target.clear_depth,0,1,&rect);return;
+      }
       com_ptr<ID3D12GraphicsCommandList4> list4;
       checked(commands->QueryInterface(IID_PPV_ARGS(list4.put())),"The game's list lacks render passes");
       D3D12_RENDER_PASS_DEPTH_STENCIL_DESC pass{};
@@ -309,7 +314,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       if(mode==cadence::gap_overlay)overlay_pass();
       if(mode==cadence::gap_ui && !drawn)ui_color_pass();
       erased=(mode==cadence::gap_cleared || mode==cadence::paused) && !drawn;
-      if(erased)erase_scene(erase_count++%3);
+      if(erased)erase_scene(erase_count++%5);
       if(erased && second_between && second_chain.p){
         // Submit the game's work so far, present the second window, then go
         // on recording the game window's frame.
@@ -760,7 +765,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     }
     // The game erases the scene's depth without drawing every other Present
     // (gap_cleared), by ClearDepthStencilView, a render pass whose depth
-    // access is CLEAR or one that DISCARDs it in turn, then on every Present
+    // access is CLEAR, one that DISCARDs it, or a clear limited to one
+    // full-view or quarter-view rectangle in turn, then on every Present
     // (paused): a screen without its scene, so each such Present holds nothing
     // and is mono from the first (tick()). The real frames stay full stereo,
     // and after the pause the scene recovers.

@@ -1446,7 +1446,8 @@ pass or a HUD into its own depth-stencil in between: every in-between Present mu
 frame's depth at full stereo, and with one real frame in 40 the hold must end at the source age
 and stereo fade in again. `--gap-cleared` erases the scene's depth without drawing every other
 Present, then on every Present for at least 400 ms (a pause screen), by `ClearDepthStencilView`, a
-render pass whose depth access is CLEAR and one that DISCARDs it in turn: each such Present must be
+render pass whose depth access is CLEAR, one that DISCARDs it, and `ClearDepthStencilView` limited
+to one full-view rectangle and to one over the view's top-left quarter in turn: each such Present must be
 mono from the first, never held ([hold gates](../../docs/reshade-sbs.md#selecting-scene-depth)),
 the real frames full stereo, and the scene must recover after the pause. `--gap-cut` leaves the
 established scene untouched and starts a full-view scene in another allocation, first one of half
