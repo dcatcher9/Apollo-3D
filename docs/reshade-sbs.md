@@ -3724,7 +3724,10 @@ declares (`numFramesToGenerate`, from the confirmed FG policy, also for a silent
 is on with no count), until the next frame's first evaluation begins (`frame_presenting`; a live
 FG scope's SR/RR evaluation, which begins no view, ends it as well since 10-28,
 `depth_capture::evaluation_called`: a hitch frame without an FG call after a frame whose
-generated Present DLSS-G skipped showed that frame's copy, past the source age, as current): its views
+generated Present DLSS-G skipped showed that frame's copy, past the source age, as current; a tag
+call whose copy is deferred to its frame's Present, R2, begins none, so DLSS-G's generated Present of
+the earlier frame inside the next frame's recording after that call shows the earlier frame's own
+depth however old, never one flat Present: owner ruling Q2, 10-30): its views
 are active, its copies current, the stand-in of its own SR snapshot for its DLSS-G copy in flight
 admitted (`lineage_snapshot`, below) and the display's hold of its own copy kept (`own_frame`:
 `retained_depth::present_stamp` at or after the acquisition's `presenting_floor`) whatever their

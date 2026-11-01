@@ -797,6 +797,24 @@ namespace {
     // (25 runs) it did not reproduce; the seam characterization pins it.
     {"fg-off-own-tag-copy-after-dlssg-refusal", "20*sr=other_queue; fg=on,tag=now_list,dlssg=direct,generated=2; 2*tag=now_list,dlssg=direct,generated=2; 2*dlssg=direct,generated=2; sr=other_queue,dlssg=direct,generated=2,order=wait_first; fg=on,sr=other_queue,dlssg=direct,generated=2,order=wait_first; sr=other_queue,dlssg=direct,generated=2,order=wait_first,hitch=brief; sr=other_queue,dlssg=direct,generated=2,order=wait_first; untag=after_global,sr=other_queue,dlssg=direct_unobserved,generated=2,order=wait_first; fg=off,tag=now_list,untag=after_global,sr=other_queue,order=wait_first; tag=now_list,untag=before_global,sr=other_queue,order=wait_first; 10*sr=other_queue"},
     {"fg-on-owned-sr-missing-generated-hitch", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 5*tag=now_list,sr=local; sr=local,hitch=after_sources; 10*sr=local"},
+    // FG On, a hitch of the source age and more after a frame's real
+    // Present (after_present) or before the next frame's first call
+    // (between), then the next frame's FG tag call, whose copy is deferred to
+    // that frame's Present (R2), and DLSS-G's generated Present of the
+    // earlier frame inside the next frame's recording (at=inside). The
+    // deferred tag call begins no evaluation, so that generated Present
+    // still presents the earlier frame and shows its own copy, however old
+    // (frame_presenting; owner ruling Q2, 10-30: no 2D flash there). Until
+    // 10-31 the judge counted the tag call's decision as the next frame's
+    // first evaluation and judged that copy stale, every run. Forms: seed
+    // d12563f8dc22b059's frames 78 and 79 (the earlier frame's tag copied at
+    // its SR evaluation of it, the hitch after its Present), the bare tag
+    // with the hitch between frames, and seed 2dbc7936fb23f7fa's frames 86
+    // to 93 (a frame tag with a global untag after it, R7's EITHER; the
+    // earlier frame's SR copy on the game's queue).
+    {"fg-on-deferred-tag-generated-inside-after-hitch", "20*sr=local; fg=on,tag=evaluate_list,entry=global,sr=tag,dlssg=direct,generated=1,at=inside; 5*tag=evaluate_list,entry=global,sr=tag,dlssg=direct,generated=1,at=inside; tag=evaluate_list,entry=global,sr=tag,dlssg=direct,generated=1,at=inside,hitch=after_present; 10*tag=present_list,entry=global,sr=tag,dlssg=direct,generated=1,at=inside"},
+    {"fg-on-deferred-tag-generated-inside-after-hitch-between", "20*sr=local; fg=on,tag=present_bare,dlssg=direct,generated=1,at=inside; 5*tag=present_bare,dlssg=direct,generated=1,at=inside; tag=present_bare,dlssg=direct,generated=1,at=inside,hitch=between; 10*tag=present_bare,dlssg=direct,generated=1,at=inside"},
+    {"fg-on-deferred-tag-generated-inside-after-hitch-untag", "20*sr=local; fg=on,sr=local,dlssg=direct,generated=2; 2*tag=evaluate_list,untag=after_global,sr=local,dlssg=direct,generated=2; tag=evaluate_list,untag=after_global,dlssg=direct,generated=2,ui=bare; tag=evaluate_list,untag=after_global,generated=2,at=inside,ui=bare; tag=present_bare,untag=after_global,sr=other_queue,generated=2,at=inside,ui=bare; tag=present_bare,untag=after_global,sr=other_queue,generated=2,at=inside,ui=bare,hitch=between; tag=present_bare,untag=before_global,generated=2,at=inside,ui=untagged; 10*tag=present_bare,ui=untagged"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -1087,6 +1105,20 @@ namespace {
     // (frame_generation::deferral_evaluations): DLSS-G evaluated a frame
     // since the previous frame whose tag copy was deferred, or none was.
     bool deferred_tag {}, awaits_dlssg {};
+    // Whether an add-on evaluation began in the frame being recorded, set
+    // where the fixture makes the call that begins it: an SR evaluation, a
+    // DLSS-G evaluation, or a tag call the oracle copies or refuses at the
+    // call. Not a tag call whose copy the oracle defers to the frame's
+    // Present (R2) or holds for the frame's own untag (R7): the add-on
+    // nominates nothing there, so the previous frame's window stays open
+    // (depth_capture::frame_presenting). Not when a decision is pushed
+    // either: decide() and the tag call's decisions come before their calls.
+    // A generated Present inside the recording before it presents the last
+    // real Present's frame (generated_present, between; owner ruling Q2,
+    // 10-30: until then a deferred tag call's decision counted, so after a
+    // hitch that frame's own copy shown there was judged stale, soak seeds
+    // d12563f8dc22b059 and 2dbc7936fb23f7fa).
+    bool evaluation_began {};
     // The oracle's FG scope at the frame's copy decisions, before a late FG
     // Off (fg=off_late) after them: judge_decisions reads a preempting FG
     // rule in that scope (until 10-28 it read the scope after the Off, so
@@ -1743,10 +1775,11 @@ namespace {
     void generated_present(bool inside) {
       continuity_log.generated = true;
       // It presents the last real Present's frame as that Present did after
-      // that Present (between), or inside this frame's recording before its
-      // first depth call (no decision yet: the add-on's next evaluation has
-      // not begun, so it still presents that frame, frame_presenting).
-      continuity_log.between = !inside || decisions.empty();
+      // that Present (between), or inside this frame's recording before the
+      // add-on began an evaluation of this frame (evaluation_began: a tag
+      // call it defers to this frame's Present begins none, so it still
+      // presents that frame, frame_presenting).
+      continuity_log.between = !inside || !evaluation_began;
 
       struct end_generated {
         ~end_generated() {
@@ -1841,7 +1874,7 @@ namespace {
         return reinterpret_cast<void *>(game_native_command);
       };
       evidence_seen = false;
-      deferred_tag = awaits_dlssg = readable_here = false;
+      deferred_tag = awaits_dlssg = readable_here = evaluation_began = false;
       // A hitch between frames: after the previous frame's Presents, before
       // this frame's first call and its stamp.
       const auto hitch = of<hitch_form>(value, events::hitch);
@@ -1894,6 +1927,10 @@ namespace {
         decisions.push_back(call);
         cancel_expected = call.legal && cancels_deferral(tag_call, call.expected);
         deferred_tag = call.legal && permits_capture(call.expected) && call.expected.deferred;
+        // The call begins an evaluation where the oracle copies or refuses it
+        // at the call, not where it defers its copy to the frame's Present
+        // (R2) or holds it for the frame's untag (R7).
+        const bool begins_evaluation = !(deferred_tag || cancel_expected);
         if (deferred_tag) {
           awaits_dlssg = !deferred_known || deferred_dlssg_frames != dlssg_frames;
           deferred_known = true;
@@ -1935,6 +1972,7 @@ namespace {
         const abi_v2::resource_tag depth_tag {{nullptr, tag_guid, 1}, &resource, 0, std::uint32_t(tag_call.life), active_area};
         const auto deferred_before = deferral_total(0);
         const auto copy_before = newest_copy();
+        evaluation_began = evaluation_began || begins_evaluation;
         returned(frame_entry ? sl.frame_tag(*token, view, &depth_tag, 1, tag_commands) : sl.global_tag(view, &depth_tag, 1, tag_commands), "the depth tag call");
         note_copy(continuity::tag_copy, copy_before);
         cancel_expected = cancel_expected && deferral_total(0) != deferred_before;
@@ -1988,6 +2026,7 @@ namespace {
           present_before_next_copy();
         }
         const auto copy_before = newest_copy();
+        evaluation_began = true;
         returned(sl.evaluate(0, *token, inputs, sr_choice == sr_form::local ? 2 : 1, command()), "slEvaluateFeature");
         note_copy(continuity::sr_evaluate, copy_before);
         if (generated_in_evaluate) {
@@ -2009,6 +2048,7 @@ namespace {
         const base_structure *inputs[] {&view.base, &input.base};
         decide("sr_other_queue", local_case(declared, false, 0), continuity::sr_evaluate, {"evaluate"});
         const auto copy_before = newest_copy();
+        evaluation_began = true;
         returned(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)), "slEvaluateFeature on the game's queue");
         note_copy(continuity::sr_evaluate, copy_before);
         poll("evaluate");
@@ -2267,6 +2307,7 @@ namespace {
         value.depth = recorded(observed, read);
         decide("dlssg_compute", value, continuity::dlssg_input, {"dlssg"}, true);
         const auto copy_before = newest_copy();
+        evaluation_began = true;
         require(ngx_evaluate(compute, feature, &dlssg_inputs, nullptr) == ngx_fixture::success, "DLSS-G's compute evaluation changed the SDK result");
         note_copy(continuity::dlssg_input, copy_before);
         poll("dlssg");
@@ -2300,6 +2341,7 @@ namespace {
       decide("dlssg_direct", value, continuity::dlssg_input, {"dlssg"}, true);
       immediate(continuity::dlssg_input);
       const auto copy_before = newest_copy();
+      evaluation_began = true;
       require(ngx_evaluate(list, feature, &dlssg_inputs, nullptr) == ngx_fixture::success, "DLSS-G's evaluation changed the SDK result");
       note_copy(continuity::dlssg_input, copy_before);
       poll("dlssg");

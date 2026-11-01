@@ -2188,8 +2188,11 @@ legal sources the presenting queue reads must hold it while that copy is certain
 source age (from its made time when it is that frame's own, else from the real Present two before:
 a copy deferred to the next Present was made after it; less 40 ms), unless a copy recorded on
 another queue may have become readable meanwhile. A generated Present that presents its frame as
-the real Present did (after it, or inside the next frame's recording before that frame's first
-depth call: `between`) shows that frame's own copy, or the one its real Present showed, at age 0, and
+the real Present did (after it, or inside the next frame's recording before an add-on evaluation of
+that frame began: `between`; a tag call whose copy is deferred to that frame's Present, R2, or held
+for its untag, R7, begins none, owner ruling Q2 of 10-30; until 10-31 any tag call counted, so after
+a hitch the earlier frame's own copy shown there was stale, soak seeds d12563f8dc22b059 and
+2dbc7936fb23f7fa) shows that frame's own copy, or the one its real Present showed, at age 0, and
 when that frame supplied an FG copy its live scope accepts (`supply::fg_frame`, so the add-on counts
 its generated Presents, `frame_presenting`), dropping the frame's own fresh copy there is a dropped
 hold whatever the clock (until the 10-27 review only within the source age of the clock, so the
@@ -2659,7 +2662,13 @@ fixed set's seed c28965dca8d7c76c passed three mono Presents at its frame 64), a
 hitch after frames whose generated Present DLSS-G skipped, `fg-on-deferred-tag-missing-generated-hitch`
 and `fg-on-owned-sr-missing-generated-hitch` (the hitch frame's Present showed the earlier frame's
 copy, 422 ms old, as current: stale at frame 26, 10-28, temporary build; the second makes no FG
-call, so one flat Present is its contract under "Leave it")), and two for a late FG Off whose frame's
+call, so one flat Present is its contract under "Leave it")), three for DLSS-G's generated Present
+of a frame inside the next frame's recording after that frame's FG tag call, whose copy is deferred
+to its Present (R2), and a hitch of the source age: `fg-on-deferred-tag-generated-inside-after-hitch`
+(seed d12563f8dc22b059's shape) and its forms `-between` and `-untag` (seed 2dbc7936fb23f7fa's
+shape, a global untag after the tag): the earlier frame's own copy shown there is its depth (owner
+ruling Q2, 10-30; with the judge's former `between` each failed stale at frame 26 or 27, two of two
+runs, 10-31), and two for a late FG Off whose frame's
 FG depth is a tag copy deferred to its Present (the 10-28 review's P1): `fg-off-late-deferred-tag-copy`
 (its shrunk form) and `fg-off-late-deferred-tag-copy-sr-after` (with the FG role's re-keying
 reverted the copy becomes the FG view again beside the SR view: an unsupplied fresh FG copy and
