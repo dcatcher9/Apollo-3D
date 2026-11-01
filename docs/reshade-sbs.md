@@ -5553,6 +5553,28 @@ poisons, CPU Signals and the first signaller's own Signals add no line) and at m
 process; the stack walk runs only for a queue not yet reported. It changes no decision: the poison,
 its refusals and the status line's counts are as before.
 
+What a `second` poison costs, and why it stays (11-01, round 2). It removes proofs only, never
+depth: a fence poisoned `second` stops ordering any wait on it, so a read whose only proof rests on
+it keeps the completion rule (U-C1 above): selection shows the newest copy whose producer fence
+completed, or the display holds its retained copy within the source age, at most a frame behind
+while copies keep completing, never mono by itself. The one visible cost is O1: a read that
+relied on the fence within the source age before the second signal is conflicted (`late_conflict`)
+and its copy no longer held, once per fence, since the poison is sticky. Two relaxations would
+keep a proof sound, because each keeps the fence's logged signals in GPU order, so a wait still
+resolves to the first logged signal reaching it: (a) another queue's Signal whose call reads the
+fence complete at every logged value (the CPU saw the first queue's signals execute, as when a
+fence pool hands a fence to another queue), and (b) another queue's Signal after a logged, resolved
+Wait of its own on that fence for the newest logged signal (a GPU hand-off). Neither is adopted.
+(b) alone only moves the poison to the first queue's next Signal where that queue keeps signalling
+without waiting (the session timelines' `order=second`, and the third queue's late signal of
+`order=late`), and a read made in between, legal under (b), is then conflicted (O1) where the
+poison at the second signal had refused it and kept the completion rule. (a) decides by whether
+the GPU finished before the CPU logged the next Signal, so the same game sequence would poison or
+not by timing, and the timelines' order forms would stop being deterministic rows. Which pattern
+games use is what the second-signaller line records (both queues' types and the signalling
+modules); the owner decides from a live session whether (a) and (b) are worth adding, together
+with Step 4's own fate.
+
 ### Depth jitter registration
 
 Valid Streamline or NGX TAA jitter travels with the immutable real-depth capture, independently
