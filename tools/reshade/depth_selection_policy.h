@@ -410,9 +410,10 @@ namespace sunshine_depth {
     // deadline. Reading this never adds wins or changes round-robin order.
     std::uint64_t pending_challenger_id() const { return pending_.challenger; }
     // The challenger whose comparison the last choose() found won: it takes
-    // over on that Present, or waits for its next rendered Present (below).
-    // The wait ends by the takeover, or within the activity grace once it
-    // stops rendering, since an inactive challenger drops the comparison.
+    // over on that Present, or waits for its next rendered Present or for a
+    // capture (below). The wait ends by the takeover, or within the activity
+    // grace once it stops rendering, since an inactive challenger drops the
+    // comparison.
     std::uint64_t won_challenger_id() const {
       return pending_.wins >= std::max(options_.comparison_samples_required, 1u) ? pending_.challenger : 0;
     }
@@ -427,7 +428,20 @@ namespace sunshine_depth {
     // hold the old anchor's depth, so the Present would be mono: the incumbent
     // keeps it (current or held) and the won comparison waits for the
     // challenger's next rendered Present.
+    // `capture_ready(id)`: whether a backup is already tracked for the
+    // challenger (its probe visit's, or a capture slot's). The new anchor's
+    // capture slot adopts it, so the takeover Present's own copy counts. A
+    // comparison won after its visit ended on the deadline (the incumbent's
+    // later sample paired the challenger's last one) has none: a new slot
+    // counts copies only from the next Present, so the takeover Present would
+    // be mono. The incumbent keeps every Present until the challenger's next
+    // visit allocates one (prepare_probe_target gives a won challenger the
+    // next visit).
     selection_result choose(std::uint64_t frame, std::uint64_t current_id = 0, bool depth_present = true) {
+      return choose(frame, current_id, depth_present, [](std::uint64_t) { return true; });
+    }
+    template <class CaptureReady>
+    selection_result choose(std::uint64_t frame, std::uint64_t current_id, bool depth_present, CaptureReady &&capture_ready) {
       const auto current = candidates_.find(current_id);
       const bool current_active = current != candidates_.end() && active(current->second, frame);
       const bool current_good = current_active && good(current->second, frame);
@@ -507,6 +521,8 @@ namespace sunshine_depth {
           if (pending_.wins >= std::max(options_.comparison_samples_required, 1u) &&
               !(depth_present && challenger->info.last_seen_frame == frame))
             return {current_id, "waiting for the challenger's next rendered Present"};
+          if (pending_.wins >= std::max(options_.comparison_samples_required, 1u) && !capture_ready(challenger->info.id))
+            return {current_id, "waiting for the won challenger's capture"};
           if (pending_.wins >= std::max(options_.comparison_samples_required, 1u))
             return {challenger->info.id, challenger_priority == 4 ? "sustained fuller nonendpoint depth support" :
                                         challenger_priority == 3 ? "sustained comparable depth on more Presents" :

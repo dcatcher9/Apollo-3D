@@ -6375,8 +6375,12 @@ deadline and whatever readback completes (also the challenger's own, which in an
 its next turn), and the new anchor's capture set adopts the visit's backup on the takeover
 Present, where a new allocation would count copies only from the next Present. The wait ends by
 the takeover, or once the challenger has not rendered for longer than the activity grace, which
-drops the comparison. A comparison won only after its visit ended on the deadline (by a readback
-still in flight) has no backup to adopt, so that takeover Present is mono.
+drops the comparison. A comparison can also be won after its visit ended on the deadline (the
+incumbent's later readback pairs the challenger's last sample). It has no backup to adopt, and a
+new capture slot counts copies only from the next Present, so the incumbent keeps every Present
+until the won challenger's next probe visit (it gets the next one) has allocated a backup; it then
+takes over on its next rendered Present with its own copy (until 11-01 that takeover Present was
+mono).
 
 Initial selection, and recovery when the selected source stops being usable (inactive for more
 than three depth-active Presents, three bad samples, or a crop change that erases its evidence),

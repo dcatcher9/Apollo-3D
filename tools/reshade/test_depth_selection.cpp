@@ -940,6 +940,15 @@ namespace {
     }
     policy.observe(candidate(2, 15, 1, 1280, 720));
     require(policy.choose(15, 1, false).id == 1, "a won comparison took over on a Present that did not advance the depth frame");
+    // Its visit ended on the deadline before the last paired win (the
+    // incumbent's later sample paired the challenger's last one): no backup
+    // is tracked for the challenger, so a new capture slot would count copies
+    // only from the next Present and this takeover Present would be mono. The
+    // incumbent keeps it and the comparison stays won for the next visit.
+    const auto no_capture = policy.choose(15, 1, true, [](std::uint64_t) { return false; });
+    require(no_capture.id == 1 && std::string(no_capture.reason) == "waiting for the won challenger's capture" &&
+            policy.won_challenger_id() == 2 && policy.pending_challenger_id() == 2,
+            "a won challenger without a tracked backup took over (a mono takeover Present)");
     require(policy.choose(15, 1).id == 2 && policy.won_challenger_id() == 2,
             "three distinct paired wins must eventually promote a better same-size source, still won on its takeover Present");
     require(policy.choose(15, 2).id == 2 && policy.pending_challenger_id() == 0 && policy.won_challenger_id() == 0,

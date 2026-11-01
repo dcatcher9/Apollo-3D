@@ -82,7 +82,12 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 		release_challenger(runtime, data);
 	if (data.probe_target_id == 0)
 	{
-		data.probe_target_id = data.discovery_hint.take(device_data.frame_index);
+		// A comparison won without a visit (it ended on its deadline before the
+		// last paired win) gets the next one: its takeover waits for a tracked
+		// backup (selection_policy::choose), which this visit allocates.
+		data.probe_target_id = data.selection.won_challenger_id();
+		if (!data.probe_target_id)
+			data.probe_target_id = data.discovery_hint.take(device_data.frame_index);
 		if (data.probe_target_id && !data.selection.evidence(data.probe_target_id))
 			data.probe_target_id = 0; // A recent hint cannot restore a destroyed or filtered candidate.
 		// Refresh the current source between round-robin challenger visits so a
