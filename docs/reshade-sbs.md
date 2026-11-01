@@ -6579,11 +6579,13 @@ a real captured-crop change advances the layout and invalidates the correspondin
 
 The end-of-frame copy reads the source as the frame left it. A D3D12 render pass whose depth
 ending access is `DISCARD` leaves the sampled plane's depth undefined when it ends (a driver may
-really discard it). When such a pass was the last thing in the frame to touch the source's depth,
-with no later clear without rectangles (a render pass's `CLEAR` included) or whole copy writing all
-of it again, Generic makes no copy of it for that frame (`ends_undefined`,
-`preserve_d3d12_at_effects`): the Present holds the last good depth within the source age, or is
-mono, as for any missing frame (below), and the probe samples nothing from it. No copy point
+really discard it). When such a pass's ending `DISCARD` comes after the frame's last clear of the
+sampled plane without rectangles (a render pass's `CLEAR` included) and its last whole copy into
+it, Generic makes no copy for that frame, whatever was drawn after it (draws, clears limited to
+rectangles, partial copies and a later pass that loads `PRESERVE` or `DISCARD` leave the pixels
+they do not cover undefined; `ends_undefined`, `preserve_d3d12_at_effects`): the Present holds the
+last good depth within the source age, or is mono, as for any missing frame (below), and the probe
+samples nothing from it. No copy point
 exists before the discard: a copy is illegal inside a D3D12 render pass, and ReShade raises its
 end event before the native `EndRenderPass`, still inside the pass. A suspending pass ends nothing;
 the pass that resumes it is judged at its own end. Likewise a resuming pass begins nothing: a
