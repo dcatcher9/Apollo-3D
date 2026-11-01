@@ -2176,8 +2176,10 @@ which made the full check's two failures of that day depend on timing: `hitch=` 
 right after the frame's stamp, before its calls, `after_sources` (as long) after them, before its
 Present (the fixture's bookkeeping after it, such as whether a live FG scope still holds its copy,
 reads the clock after the hitch, as the add-on decides then), `between` (as long) before the
-frame's first call and its stamp, or `after_present` (as long) after its real Present, before its
-generated Presents; `dlssg_gpu=after_present` holds DLSS-G's compute work on the GPU until
+frame's first call and its stamp, `after_present` (as long) after its real Present, before its
+generated Presents, or `before_dlssg` (as long; 11-01) right before DLSS-G's evaluation of the
+frame, after its other calls, a stall before a game's Present call, inside which DLSS-G evaluates
+(seeds never draw it); `dlssg_gpu=after_present` holds DLSS-G's compute work on the GPU until
 the frame's Present returned (its queue waits on a gate fence the CPU signals then, a GPU-bound
 game's copy in flight at its own Present; the gate is no order fence, so no read relies on it, and
 a GPU signal after the Present would deadlock against the presenting queue's wait before it);
@@ -2189,8 +2191,9 @@ eight) from streams of their own, after the fence events, so every seed keeps it
 (until the 10-27 review no seed drew them; the SR work's stream came on 10-28). `fg=off_late`
 (10-28) turns FG off after the frame's evaluations, before its Present, as a game's options call
 there or DLSS-G's present thread between the call and the next SR evaluation does: the frame's FG
-copies are retired before any Present shows them (they supply nothing), its Present comes with FG
-off, and the order fences are renewed after its Present. Seeds never draw it (its weight is 0, so
+role is retired before any Present shows its FG copies, which the add-on keeps as the viewport's
+ordinary source (since 11-01 they supply that Present as permitted, aged where they were made; until
+then nothing), its Present comes with FG off, and the order fences are renewed after its Present. Seeds never draw it (its weight is 0, so
 each seed keeps its frames): a frame's FG tag copy deferred to its Present after a late Off has no
 contract the oracle describes. With FG on the game's FG options declare
 each frame's generated count as `numFramesToGenerate` (and DLSS-G's `MultiFrameCount`), repeated
@@ -2792,7 +2795,12 @@ refused frames after the hitch, `fg-on-deferred-tag-hitch-after-sources-held-unt
 deferred copy as without it, one after the tag, or in a frame without a tag, may end its hold; until
 11-01 every untag form excused
 a mono Present there, and with the add-on aging that copy from its tag call again, a temporary
-mutation, both forms passed mono from frame 29; now the before form fails there),
+mutation, both forms passed mono from frame 29; now the before form fails there), and two guard
+rows for a hitch right before DLSS-G's own evaluation of a frame whose FG depth is a tag copy
+deferred to its Present, `fg-on-deferred-tag-hitch-before-dlssg-refused` and `-4x` (DLSS-G no
+longer stands aside for that tag copy, past the source age, and its own copy is refused: the
+frame's Present shows its deferred copy and its generated Presents hold it; they passed when added,
+11-01),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
