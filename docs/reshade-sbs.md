@@ -6312,8 +6312,12 @@ still hold that pass, so it stays a candidate, judged by its content like any ot
 the source's clear convention for its depth direction. A source that overwrites the pass only by
 drawing (a full-view reset draw that always passes the depth test) is not seen as overwritten:
 the copy then counts as a duplicate. A copy from anything else (a buffer, an MSAA, mipped or
-array depth, another size or format, or a source whose work is on another queue) keeps its
-activity. No relationship to the swapchain buffer index is assumed.
+array depth, another size or format, or a texture that is not a depth-stencil) keeps its
+activity. The exception is judged within the copying queue's own recording: a candidate whose
+work in the frame ran on another queue has no position there to order the copy against, so its
+copy is never taken for a lost pass and is not current depth of its destination, as for a history
+copy (fail-safe; see [Copies of scene depth](#scene-depth-selection-limits)). No relationship to
+the swapchain buffer index is assumed.
 
 Capture layout follows the actual captured crop: the largest viewport drawn into the source since
 its last full depth clear in the frame, in execution order across command lists. On D3D10, D3D11
@@ -6576,7 +6580,13 @@ accepted consequences:
   some Presents while a comparable source draws every Present, the every-Present source reclaims
   after three fresh paired comparisons (about 0.4 s); until then each skipped Present holds the
   selected source's last frame (one frame behind its colour), so none is flat. A source not
-  calibrated before then calibrates first (about 1 s of mono, the camera's own three samples). The
+  calibrated before then calibrates first: about 1 s of mono, while the scene gain takes its four
+  full-image samples at least 250 ms apart. The paired comparisons that promoted it cannot seed
+  that calibration (reviewed 11-01): they sample a challenger at selector points only, without the
+  full-image moments the gain uses (only a routed member's sample collects them), and a member's
+  calibration admits only samples captured after it was bound. Seeding would add a full-image
+  reduction to every challenger sample and calibrate from frames before the source was shown, for
+  a gain only after a Generic source switch, so it stays as for an FG switch's warm-up. The
   three-interval guard stays (decided under the hold rule): the skipped Presents are held
   meanwhile, so none is flat, and switching sooner would let a single hitch switch sources and
   recalibrate.

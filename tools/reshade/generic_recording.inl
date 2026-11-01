@@ -235,8 +235,13 @@ static void record_copied_depth(command_list *cmd_list, resource source, resourc
 // content, and takes the source's clear convention for its depth direction. A
 // source overwritten only by drawing is not seen as such. A copy from anything
 // else (a buffer, an MSAA or mipped depth, another size or format, or a source
-// on another queue whose order is unknown and so not a lost pass) keeps
-// today's activity, as does a destination that also drew. Generic content
+// that is not a tracked depth-stencil) keeps today's activity, as does a
+// destination that also drew. A same-geometry candidate whose work this frame
+// ran on another queue has none in this queue's recording, no position to
+// order the copy against, so the copy is treated as above: never a lost pass,
+// never current depth of its destination (fail-safe; a pass that queue drew
+// and then cleared is not kept; check_transfer_lineage's no-work case).
+// Generic content
 // selection only (D3D11 and D3D12); the other APIs' draw-statistics picker
 // keeps ReShade's accounting.
 SUNSHINE_DEPTH_ADDON_INTERNAL void resolve_transfer_lineage(state_tracking &state, const generic_depth_device_data &device_data)
