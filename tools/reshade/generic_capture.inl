@@ -373,9 +373,18 @@ static bool released_by_game(device *device, generic_depth_device_data &device_d
 // The capture budget's view of the snapshot at depth frame `frame`: geometry,
 // content qualification, and whether the source worked within the selector's
 // activity grace (its last frame with work; a frame that only cleared it does
-// not count, as for a candidate's activity).
+// not count, as for a candidate's activity). With `routing`, it leaves out the
+// idle sources other than `anchor` that the game released
+// (released_by_game): select_captured_depth routes without them, while
+// Present coverage observes every source.
+struct released_sources
+{
+	device *api_device;
+	generic_depth_device_data &device_data;
+	uint64_t anchor;
+};
 static std::vector<sunshine_depth_capture::source_observation> capture_observations(const generic_depth_data &data,
-	uint64_t frame, const depth_selection_snapshot &snapshot)
+	uint64_t frame, const depth_selection_snapshot &snapshot, const released_sources *routing = nullptr)
 {
 	constexpr auto none = std::numeric_limits<uint64_t>::max();
 	std::vector<sunshine_depth_capture::source_observation> observations;
@@ -383,14 +392,15 @@ static std::vector<sunshine_depth_capture::source_observation> capture_observati
 	for (const auto &[value, info] : snapshot)
 	{
 		if (!content_supported(info.desc) || info.last_used_in_frame == none) continue;
+		const uint64_t worked = info.last_frame_stats.total.has_work() ? info.last_used_in_frame : info.prior_work_frame;
+		const bool idle = worked == none || worked > frame || frame - worked > data.selection.active_grace_frames();
+		if (routing && idle && info.identity != routing->anchor && released_by_game(routing->api_device, routing->device_data, value)) continue;
 		const auto region = effective_capture_region(info);
 		const auto *e = data.selection.evidence(info.identity);
-		const uint64_t worked = info.last_frame_stats.total.has_work() ? info.last_used_in_frame : info.prior_work_frame;
 		observations.push_back({info.identity, info.layout_epoch, info.last_used_in_frame,
 			{info.desc.texture.width, info.desc.texture.height, static_cast<uint32_t>(info.desc.texture.format),
 			 region.x, region.y, region.width, region.height},
-			e && e->confirmed_good && e->quality.kind == sunshine_depth::content_kind::useful,
-			worked == none || worked > frame || frame - worked > data.selection.active_grace_frames()});
+			e && e->confirmed_good && e->quality.kind == sunshine_depth::content_kind::useful, idle});
 	}
 	return observations;
 }
@@ -612,7 +622,6 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	data.capture_wait_detail = nullptr;
 	data.hold_only = false;
 	retire_member_views(runtime, data, device_data);
-	auto observations = capture_observations(data, device_data.frame_index, snapshot);
 	const uint64_t anchor = selected_info ? selected_info->identity : 0;
 	// A set member the game released (released_by_game) and that stopped
 	// working leaves the routing: kept, it would hold a slot of a scene the
@@ -620,11 +629,8 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	// a rotation, and keep its allocation alive. Its view then retires, which
 	// drops the last reference and destroys it. The anchor stays until the
 	// selector moves on, so a recreated scene can still take over as its peer.
-	observations.erase(std::remove_if(observations.begin(), observations.end(), [&](const auto &o) {
-		if (!o.idle || o.id == anchor) return false;
-		const auto source = std::find_if(snapshot.begin(), snapshot.end(), [&](const auto &entry) { return entry.second.identity == o.id; });
-		return source != snapshot.end() && released_by_game(runtime->get_device(), device_data, source->first);
-	}), observations.end());
+	const released_sources routing {runtime->get_device(), device_data, anchor};
+	const auto observations = capture_observations(data, device_data.frame_index, snapshot, &routing);
 	const auto group = data.capture_budget.update(anchor, observations, !automatic);
 	data.anchor_depth_stencil = selected;
 	data.anchor_identity = anchor;
