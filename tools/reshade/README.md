@@ -1593,7 +1593,7 @@ adapter, which has no test-access header, keeps its one recorder under the same 
 query, `SunshineDepthTestLastRefusal`, is one of the depth add-on's exports. The DEPTH binding
 events follow the same split: each `update_texture_bindings("DEPTH", ...)` call and readiness
 write of the API provider, Generic Depth and the exporter, the API provider's runtime-reload reset of
-its binding cache and its display evictions, and each event handler that reaches one (its phase),
+its binding cache, and each event handler that reaches one (its phase),
 call a recorder of [`game3d_test_depth_events.h`](game3d_test_depth_events.h) under
 `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, and a fixture reads them after each Present through
 `SunshineDepthTestBindingEvents`, another of the depth add-on's exports.

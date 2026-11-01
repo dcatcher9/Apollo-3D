@@ -45,12 +45,9 @@ namespace sunshine_game3d::test::depth_events {
     // the provider's binding and readiness caches (it calls neither), which
     // depth_addon.cpp on_reload_effect_runtime makes only with Game 3D off.
     provider_runtime_reload = 9,
-    // streamline_depth_provider.cpp prepare_display(): the retirement of an
-    // evicted display entry (a new shape or format with both entries in
-    // use), recorded before its unbinding check; the value is whether the
-    // effects still named the evicted view (its null binding, site 1, then
-    // follows).
-    provider_display_evict = 10,
+    // 10 was provider_display_evict, prepare_display()'s record of an
+    // evicted display and whether the effects named it (never: 15 of 15 in
+    // round 0); it went on 11-01 with the unbind it guarded. Not reused.
   };
 
   // view or ready of a record that has none.
@@ -65,11 +62,11 @@ namespace sunshine_game3d::test::depth_events {
     std::uint64_t present;
     handler phase;
     site_id site;
-    // A binding: 1 a view, 0 null. A display eviction: 1 if the effects named
-    // the evicted view, else 0. A readiness write or a reset: not_applicable.
+    // A binding: 1 a view, 0 null. A readiness write or a reset:
+    // not_applicable.
     std::uint8_t view;
-    // A readiness write: the value, 1 or 0. A binding, an eviction or a
-    // reset: not_applicable.
+    // A readiness write: the value, 1 or 0. A binding or a reset:
+    // not_applicable.
     std::uint8_t ready;
     std::uint8_t reserved[4];
   };
@@ -126,12 +123,6 @@ namespace sunshine_game3d::test::depth_events {
   // A readiness write, about to be made.
   inline void readiness(const void *runtime, site_id site, bool ready) {
     detail::record(runtime, site, not_applicable, ready ? 1 : 0);
-  }
-
-  // A display entry about to be retired by an eviction; named: whether the
-  // effects still name its view.
-  inline void eviction(const void *runtime, site_id site, bool named) {
-    detail::record(runtime, site, named ? 1 : 0, not_applicable);
   }
 
   // A reset of a binding or readiness cache that writes neither, about to be

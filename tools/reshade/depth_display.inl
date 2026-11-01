@@ -198,15 +198,14 @@
         if (!entry.texture.handle) { victim = &entry; break; }
         if (entry.texture != data.display_texture) victim = &entry;
       }
-      if (victim->texture.handle) {
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-        depth_events::eviction(runtime, depth_events::site_id::provider_display_evict, victim->view == data.effects_view);
-#endif
-        // Effects can still name this view only if it was the last binding.
-        if (victim->view == data.effects_view) bind_api(runtime, data, {}, false);
-        if (victim->texture == data.display_texture) { data.display_texture = {}; data.display_view = {}; }
-        retire_display(data, *victim, present);
-      }
+      // Retiring the inactive entry changes no binding: the victim is never
+      // the active entry, and the effects' view (effects_view) is none or the
+      // active entry's, since display_view changes only here (and at
+      // teardown) and begin() follows every prepare_display with
+      // bind_api(display_view) before it returns. (Until 11-01 an unbind for
+      // an evicted bound view and a clear of an evicted active entry stood
+      // here; neither could run.)
+      if (victim->texture.handle) retire_display(data, *victim, present);
       data.cache.invalidate("display_recreated");
       api::resource_desc desc(packet.width, packet.height, 1, 1, static_cast<api::format>(packet.format), 1,
         api::memory_heap::default_, api::resource_usage::shader_resource | api::resource_usage::copy_dest);

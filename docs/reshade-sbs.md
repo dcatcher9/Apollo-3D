@@ -582,7 +582,10 @@ switches entries rather than reallocating; a replaced entry is retired by a fenc
 later Present, with no `wait_idle`, and once that fence completed it is released on a pool thread
 (a texture's last Release and ReShade's view release can wait on video memory: 17 and 81 ms on the
 present thread in ACS 10-27b, whose dynamic resolution retired a display at most render-size
-changes). An entry that is neither the active display nor the effects' binding for 2 s is
+changes). A replaced entry is never the active display, and the effects' binding is the active
+entry's view or none (the provider binds the active view after every allocation or switch), so
+retiring one changes no binding; an unbind for a retired bound view, which could never run, was
+removed with its test record on 11-01. An entry that is neither the active display nor the effects' binding for 2 s is
 retired the same way (10-31), so VRAM returns about 2 s after a resolution drop or a provider flip;
 a shape that comes back sooner (dynamic resolution between two render sizes, an FG toggle and back)
 still reuses its entry. Until 10-31 the inactive entry stayed until a third shape evicted it, so

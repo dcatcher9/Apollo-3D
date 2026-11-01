@@ -124,9 +124,8 @@ namespace {
     // separated, oldest first. runtime: its rank; present: the newest
     // event's Present ordinal minus its own (0: the newest Present's);
     // phase and site: game3d_test_depth_events.h's ids; value: b1 or b0 for
-    // a binding (a view or null) or a display eviction (provider_display_evict:
-    // whether the effects named the evicted view), r1 or r0 for a readiness
-    // write, x for a reset that writes neither (provider_runtime_reload). t8skip=n
+    // a binding (a view or null; also site 10's display eviction record in
+    // traces before 11-01), r1 or r0 for a readiness write, x for a reset that writes neither (provider_runtime_reload). t8skip=n
     // (only when n is not 0): events missing from the list. A trace's first
     // line lists only its newest Present's events: the older ones came with
     // Presents before the trace's first line, whose number is timing (a
