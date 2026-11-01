@@ -1543,7 +1543,9 @@ the quarter drawn after it narrowed the crop, and with that observation dropped
 altogether (4b3f9cee) the case was mono, since the CLEAR was the frame's only proof of the
 depth's state after the suspending list (the fixture's second list counts as uncovered, which
 unproves every state). The other cases
-cover complementary rotation becoming concurrent rendering,
+cover complementary rotation becoming concurrent rendering (with A current on every Present, its
+peers B and C, drawn on every Present too, must hold their own end-of-frame copies on fewer than
+half of those Presents, A on all of them: until 11-01 every member was copied on every Present),
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,
 and a stable captured crop despite unrelated viewport activity. The layout case also requires

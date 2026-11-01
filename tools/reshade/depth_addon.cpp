@@ -994,8 +994,9 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			assert(depth_stencil_backup != nullptr && depth_stencil_backup->backup_texture != 0);
 			const resource backup_texture = depth_stencil_backup->backup_texture;
 
-			preserve_depth_at_effects(runtime, cmd_list, *device_data, selected_depth_stencil, selected_id,
-				member_binding ? member_binding->capture_after : 0);
+			// A capture member's copy was made by select_captured_depth.
+			if (!member_binding)
+				preserve_depth_at_effects(runtime, cmd_list, *device_data, selected_depth_stencil, selected_id);
 
 			cmd_list->barrier(backup_texture, resource_usage::copy_dest, resource_usage::shader_resource);
 		}

@@ -140,6 +140,15 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 		return;
 	if (target == data.selected_depth_stencil)
 		return; // Already prepared by the original selected-depth path.
+	// select_captured_depth copies a capture member only when it may be shown
+	// or its raw sample is due; the probe's sample of a member needs this
+	// Present's copy too (preserve_depth_at_effects makes it once per frame).
+	for (const auto &member : data.member_views)
+		if (member.identity == info.identity && member.view != 0 && !member.retire_after)
+		{
+			preserve_depth_at_effects(runtime, cmd_list, device_data, target, info.identity, member.capture_after);
+			break;
+		}
 
 	if (data.challenger_depth_stencil == 0)
 	{

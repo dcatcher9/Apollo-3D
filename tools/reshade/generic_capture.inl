@@ -674,10 +674,33 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 			*slot = {source->first, source->second.identity, 0, view, already_tracked ? 0 : device_data.frame_index};
 		}
 	// End-of-frame capture cannot depend on already having a selected current
-	// copy.
+	// copy: the anchor's member is copied first. A peer's copy is read only
+	// when the anchor shows no current qualified copy of its own this Present
+	// (choose_current below then picks a peer, or the shown capture is held)
+	// or when the peer's raw sample may be taken this Present
+	// (sample_probe_target); the probe's visit to a peer copies it there
+	// (prepare_probe_target). Otherwise no peer is copied: on D3D12 each copy
+	// is a snapshot and a publish copy of the whole plane.
+	bool anchor_shown = false;
 	for (const auto &member : data.member_views)
-		if (!member.retire_after && member.view != 0)
+		if (!member.retire_after && member.view != 0 && member.identity == anchor)
+		{
 			preserve_depth_at_effects(runtime, cmd_list, device_data, member.source, member.identity, member.capture_after);
+			const auto observed = std::find_if(observations.begin(), observations.end(), [anchor](const auto &o) { return o.id == anchor; });
+			anchor_shown = (!automatic || (observed != observations.end() && observed->qualified)) &&
+				capture_record(runtime, data, device_data, member.source, member.identity, member.view, true, member.capture_after)
+					.record.renderable(device_data.native_present_index, device_data.frame_index, data.runtime_epoch);
+			break;
+		}
+	const bool raw_sampling = anchor_shown && data.raw_scene_requested && !sunshine_depth::busy();
+	const uint64_t now = raw_sampling ? GetTickCount64() : 0;
+	for (const auto &member : data.member_views)
+	{
+		if (member.retire_after || member.view == 0 || member.identity == anchor) continue;
+		const auto *raw = raw_member(data, member.identity); // None yet: a new member's first sample is due.
+		if (!anchor_shown || (raw_sampling && (!raw || now >= raw->next_tick)))
+			preserve_depth_at_effects(runtime, cmd_list, device_data, member.source, member.identity, member.capture_after);
+	}
 	sunshine_depth::raw_source_roster next_roster;
 	next_roster.routing_epoch = group.epoch;
 	next_roster.basis_epoch = data.raw_basis_epoch;

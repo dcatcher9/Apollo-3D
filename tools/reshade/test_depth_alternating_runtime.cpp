@@ -49,6 +49,11 @@ namespace {
     std::unique_ptr<target_t> overlay; // A HUD pass with its own full-size depth every Present (gap_overlay).
     com_ptr<ID3D12PipelineState> color_pipeline;com_ptr<ID3D12Resource> ui_color;com_ptr<ID3D12DescriptorHeap> ui_rtv;
     std::uint64_t rendered_sequence=0;
+    // check_overlap's concurrent phase: on each Present that shows A's own
+    // current depth, which members hold an end-of-frame copy of their own
+    // (the test add-on's capture ticket query).
+    BOOL (*capture_ticket)(api::effect_runtime *,std::uint64_t,std::uint64_t *)=nullptr;
+    std::array<unsigned,3> copied_members{};unsigned anchor_presents=0;
     bool ready() const {return latest.rendered && latest.parameters.depth_ready && latest.parameters.camera_ready;}
     float gain() const {return latest.parameters.depth_scale;}
     float zero() const {return latest.parameters.convergence[1];}
@@ -559,6 +564,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         crops[drawn-1]={captured.x,captured.y,captured.active_width,captured.active_height};
       }
       pixels();
+      if(capture_ticket && capture_ready && !held && current(1)){
+        for(unsigned role=1;role<=3;++role){
+          std::uint64_t id=0;
+          require(capture_ticket(observed.runtime,reinterpret_cast<std::uint64_t>(member(role).texture.p),&id),"The capture ticket query failed");
+          if(id)++copied_members[role-1];
+        }
+        ++anchor_presents;
+      }
       if(capture_ready && !held)shown={captured.source_resource.handle,captured.source_id,captured.frame_index,step_before,step_after,
         center(member(drawn).pattern),blend(),true};
       else if(held && !shown.known)
@@ -625,11 +638,26 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       set_mode(cadence::concurrent);
       // Persistent overlap must not lock an already-qualified family into mono.
       // The expected winner A was specified before any concurrent result is read.
-      warm("concurrent-anchor-recovery");stable("concurrent-anchor",60);
+      warm("concurrent-anchor-recovery");
+      // A shows its own current copy on every Present, so its peers B and C,
+      // drawn on every Present too, are copied only when the add-on may read
+      // them: a raw sample due (every 250 ms each) or the probe's sample.
+      // Until 11-01 each was copied on every Present (on D3D12 a snapshot and
+      // a publish copy of the whole plane apiece), A's depth unchanged.
+      capture_ticket=reinterpret_cast<decltype(capture_ticket)>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineDepthTestCaptureTicket"));
+      require(capture_ticket,"The overlap case needs the test add-on's capture ticket query");
+      copied_members={};anchor_presents=0;
+      stable("concurrent-anchor",60);
+      const auto counted=anchor_presents;const auto copies=copied_members;
+      capture_ticket=nullptr;
+      std::printf("MEASURE concurrent-anchor presents=%u copied A=%u B=%u C=%u\n",counted,copies[0],copies[1],copies[2]);
+      require(counted==60 && copies[0]==counted,"A Present that showed A's current depth had no end-of-frame copy of A");
+      require(copies[1]*2<counted && copies[2]*2<counted,
+        "A peer drawn beside the shown anchor was copied on most Presents although nothing read its copy");
       set_mode(cadence::abc);warm("concurrent-back-to-ABC");stable("concurrent-back-to-ABC",30);
       missing_then_recover();
       require(stereo_observed[0]>0,"Concurrent preferred source never produced actual stereo pixels");
-      std::puts("PASS overlap: qualified A/ABC, persistent concurrent raster with current A, return to ABC, current mono on real gaps");
+      std::puts("PASS overlap: qualified A/ABC, persistent concurrent raster with current A (peers copied only when read), return to ABC, current mono on real gaps");
     }
     void check_interrupted_startup(){
       const auto started=GetTickCount64();unsigned valid=0,missing=0,consecutive_valid=0;
