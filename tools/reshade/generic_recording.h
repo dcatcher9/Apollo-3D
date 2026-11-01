@@ -101,16 +101,22 @@ struct depth_stencil_frame_stats
 			return;
 		last_overwrite = position;
 		if (rect_count == 0 && (api == device_api::d3d10 || api == device_api::d3d11 || api == device_api::d3d12))
+		{
 			observe_full_clear();
+			last_rewrite = position;
+		}
 	}
 	// A D3D12 render pass that DISCARDs the sampled plane's depth leaves it
 	// undefined: it erases what was there as a clear does (the hold's cleared
 	// gate, the lineage), but has no value, so it adds no clear convention and
-	// does not restart the capture crop.
-	void observe_depth_discard(uint64_t position)
+	// does not restart the capture crop. at_end: the pass's ending access
+	// (on_end_render_pass), after which the frame's depth stays undefined
+	// (ends_undefined).
+	void observe_depth_discard(uint64_t position, bool at_end = false)
 	{
 		depth_erased = true;
 		last_overwrite = position;
+		if (at_end) last_end_discard = position;
 	}
 	// Raster or mesh work at this position.
 	void observe_draw(uint64_t position)
@@ -120,6 +126,7 @@ struct depth_stencil_frame_stats
 	void observe_transfer(resource source, uint64_t position, bool full)
 	{
 		transfer_source = source; transfer_position = position; transfer_full = full;
+		if (full) last_rewrite = position;
 	}
 	// Positions of a recording that executes after everything already merged.
 	void merge_positions(const depth_stencil_frame_stats &later, uint64_t offset)
@@ -129,7 +136,17 @@ struct depth_stencil_frame_stats
 		if (later.transfer_position)
 			observe_transfer(later.transfer_source, later.transfer_position + offset, later.transfer_full);
 		transfer_alias |= later.transfer_alias;
+		if (later.last_end_discard) last_end_discard = later.last_end_discard + offset;
+		if (later.last_rewrite) last_rewrite = later.last_rewrite + offset;
 	}
+	// The frame left the sampled plane's depth undefined: its last D3D12 render
+	// pass that DISCARDed it at the end (its ending access) came after its last
+	// clear without rectangles (a render pass's CLEAR included) and its last
+	// whole copy into it. Its end-of-frame copy would read undefined depth, on a
+	// driver that really discards (preserve_d3d12_at_effects makes none). Kept
+	// last in the struct, positions as above.
+	uint64_t last_end_discard = 0, last_rewrite = 0;
+	bool ends_undefined() const { return last_end_discard > last_rewrite; }
 };
 
 struct resource_hash

@@ -251,6 +251,42 @@ static void check_capture_extent()
 	}
 }
 
+// A D3D12 render pass that DISCARDs the sampled plane's depth at its end
+// leaves the frame's depth undefined until a later clear without rectangles
+// or a whole copy writes all of it, also across merged recordings: the
+// end-of-frame copy then makes none (docs/reshade-sbs.md, Selecting scene
+// depth).
+static void check_end_discard()
+{
+	const resource target { 1 };
+	using step_t = void (*)(depth_stencil_frame_stats &, uint64_t);
+	static constexpr step_t discard_end = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_discard(p, true); };
+	static constexpr step_t discard_start = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_discard(p); };
+	static constexpr step_t clear = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_clear(device_api::d3d12, 0, true, p); };
+	static constexpr step_t rect_clear = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_clear(device_api::d3d12, 1, true, p); };
+	static constexpr step_t whole_copy = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_transfer({ 2 }, p, true); };
+	static constexpr step_t part_copy = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_transfer({ 2 }, p, false); };
+	static constexpr step_t draw = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_draw(p); };
+	// Two recordings of one frame; the later executes after the earlier.
+	const auto undefined = [&](std::initializer_list<step_t> earlier, std::initializer_list<step_t> later) {
+		state_tracking queue(true), list(false);
+		for (const auto step : earlier) step(queue.stats_per_used_depth_stencil[target], queue.position());
+		for (const auto step : later) step(list.stats_per_used_depth_stencil[target], list.position());
+		queue.merge(list);
+		return queue.stats_per_used_depth_stencil[target].ends_undefined();
+	};
+	require_snapshot(undefined({ clear, draw, discard_end }, {}), "A pass that DISCARDed the depth at its end left defined depth");
+	require_snapshot(undefined({ clear, draw }, { discard_end }), "A later recording's DISCARD at a pass end was lost in the merge");
+	require_snapshot(undefined({ discard_end }, { draw }) && undefined({ discard_end }, { rect_clear, draw }) &&
+		undefined({ discard_end, part_copy }, {}) && undefined({ discard_end }, { discard_start, draw }),
+		"Drawing, a rectangle clear, a partial copy or a DISCARD at a pass start wrote the discarded depth again");
+	require_snapshot(!undefined({ clear, draw }, {}) && !undefined({ discard_start, draw }, {}),
+		"Depth no pass DISCARDed at its end was taken for undefined");
+	require_snapshot(!undefined({ discard_end }, { clear, draw }) && !undefined({ discard_end, clear, draw }, {}) &&
+		!undefined({ discard_end }, { whole_copy }) && !undefined({ discard_end, whole_copy }, {}),
+		"A clear without rectangles or a whole copy after a DISCARD did not write the depth again");
+}
+
 // A copy of another same-geometry candidate is not depth of its own: a history
 // copy made before the source drew holds older depth, and a copy the source
 // still holds is a duplicate. Only a whole copy of a pass the source then
@@ -554,6 +590,7 @@ static void check_depth_snapshot_contract()
 {
 	check_candidate_shape_table();
 	check_capture_extent();
+	check_end_discard();
 	check_transfer_lineage();
 	check_hold_gates();
 

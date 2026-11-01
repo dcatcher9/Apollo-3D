@@ -6447,17 +6447,17 @@ left as its last own work left it (or, if the game also cleared it, treated as c
 is neither captured as current depth nor selected; the source is. The one exception is a whole
 copy (of the whole subresource, also by a box that spans it) of a pass the source drew and then
 overwrote after the copy: a clear of its sampled plane, with or without rectangles, a render pass
-whose depth access is CLEAR, or a D3D12 render pass that DISCARDs it. Only the destination may
-still hold that pass, so it stays a candidate, judged by its content like any other, and takes
-the source's clear convention for its depth direction. A source that overwrites the pass only by
-drawing (a full-view reset draw that always passes the depth test) is not seen as overwritten:
-the copy then counts as a duplicate. A copy from anything else (a buffer, an MSAA, mipped or
-array depth, another size or format, or a texture that is not a depth-stencil) keeps its
-activity. The exception is judged within the copying queue's own recording: a candidate whose
-work in the frame ran on another queue has no position there to order the copy against, so its
-copy is never taken for a lost pass and is not current depth of its destination, as for a history
-copy (fail-safe; see [Copies of scene depth](#scene-depth-selection-limits)). No relationship to
-the swapchain buffer index is assumed.
+whose depth access is CLEAR, or a D3D12 render pass that DISCARDs it (at its start or its end).
+Only the destination may still hold that pass, so it stays a candidate, judged by its content like
+any other, and takes the source's clear convention for its depth direction. A source that
+overwrites the pass only by drawing (a full-view reset draw that always passes the depth test) is
+not seen as overwritten: the copy then counts as a duplicate. A copy from anything else (a buffer,
+an MSAA, mipped or array depth, another size or format, or a texture that is not a depth-stencil)
+keeps its activity. The exception is judged within the copying queue's own recording: a candidate
+whose work in the frame ran on another queue has no position there to order the copy against, so
+its copy is never taken for a lost pass and is not current depth of its destination, as for a
+history copy (fail-safe; see [Copies of scene depth](#scene-depth-selection-limits)). No
+relationship to the swapchain buffer index is assumed.
 
 Capture layout follows the actual captured crop: the largest viewport drawn into the source since
 its last full depth clear in the frame, in execution order across command lists. On D3D10, D3D11
@@ -6471,6 +6471,20 @@ none of them, so on those APIs no clear restarts the crop: it stays the largest 
 the frame.
 Aggregate activity and off-turn writes cannot change that identity without a new usable capture;
 a real captured-crop change advances the layout and invalidates the corresponding numeric basis.
+
+The end-of-frame copy reads the source as the frame left it. A D3D12 render pass whose depth
+ending access is `DISCARD` leaves the sampled plane's depth undefined when it ends (a driver may
+really discard it). When such a pass was the last thing in the frame to touch the source's depth,
+with no later clear without rectangles (a render pass's `CLEAR` included) or whole copy writing all
+of it again, Generic makes no copy of it for that frame (`ends_undefined`,
+`preserve_d3d12_at_effects`): the Present holds the last good depth within the source age, or is
+mono, as for any missing frame (below), and the probe samples nothing from it. No copy point
+exists before the discard: a copy is illegal inside a D3D12 render pass, and ReShade raises its
+end event before the native `EndRenderPass`, still inside the pass. A suspending pass ends nothing;
+the pass that resumes it is judged at its own end. The discard also overwrites the plane for the
+transfer lineage and the cleared gate, as a `DISCARD` at a pass's start does. Until 11-01 the
+ending access was not read, and the copy of such a frame read undefined depth. Vulkan's
+`DONT_CARE` store is not judged, as its load is not (the draw-statistics picker).
 
 A Present on which no current copy can be shown holds the last good depth, as the API providers
 do: it shows the capture the runtime showed on its previous Present again, as reused depth, for
@@ -6489,9 +6503,9 @@ and held). Such a Present is mono from the first:
 
 - *Cleared:* the anchor's capture set, or the held source, was cleared (`ClearDepthStencilView` of
   the sampled plane, with or without rectangles, or a D3D12 render pass's depth `CLEAR`) or had its
-  depth discarded (a D3D12 render pass's `DISCARD`), and none of it drew or received depth of its
-  own. The game is showing a screen without its scene: a pause, inventory or loading screen, or a
-  video, that keeps clearing depth.
+  depth discarded (a D3D12 render pass's `DISCARD`, at its start or its end), and none of it drew
+  or received depth of its own. The game is showing a screen without its scene: a pause,
+  inventory or loading screen, or a video, that keeps clearing depth.
 - *Cut:* a depth-stencil outside that set that passes the candidate shape test (single-sample, or
   multisampled where the device resolves depth) drew although it had no work within the
   selector's activity grace (the three depth-active Presents before, as long as a candidate counts
@@ -6766,6 +6780,14 @@ accepted consequences:
   pass qualifies as scene depth (another camera's full view), that pass's depth is shown. A copy
   from a buffer, an MSAA or mipped depth, or another size or format keeps its activity and is
   judged by its content like any buffer.
+- **Depth a render pass discards at its end.** A D3D12 game whose scene pass ends with its depth
+  `DISCARD`ed on every frame (its later work never reads that depth) has no Generic depth: no
+  frame leaves defined depth to copy, so the view is mono (see
+  [Selecting scene depth](#selecting-scene-depth)). There is no earlier copy point: a copy inside
+  the pass is illegal, and ReShade's end event runs inside it. A copy the game itself made before
+  the discard can still be shown (the copy exception above); otherwise only an API provider can
+  supply such a game. Before 11-01 such frames were copied as they were, which on a driver that
+  really discards is undefined depth.
 
 ## Activation and recovery
 

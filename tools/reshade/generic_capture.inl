@@ -478,7 +478,11 @@ static void preserve_d3d12_at_effects(effect_runtime *runtime, command_list *com
 		if (found == device_data.depth_stencil_resources.end() || found->second.identity != identity || !view || !view->references ||
 			device_data.native_depth_present_index != present || !frame || (capture_after && frame <= capture_after)) return;
 		auto &info = found->second;
-		if (info.last_used_in_frame != frame || !info.last_frame_stats.total.has_work() || info.last_frame_stats.copy_provenance_ambiguous) return;
+		// A frame whose last render pass over the source DISCARDed its depth at
+		// the end leaves it undefined (ends_undefined): no copy, so the earlier
+		// capture holds within the source age (a missing frame) or none shows.
+		if (info.last_used_in_frame != frame || !info.last_frame_stats.total.has_work() || info.last_frame_stats.copy_provenance_ambiguous ||
+			info.last_frame_stats.ends_undefined()) return;
 		capture = !info.last_frame_stats.copied_during_frame &&
 			!info.last_frame_stats.preservation_reservation && (info.desc.usage & resource_usage::copy_source) != 0;
 		if (capture) {

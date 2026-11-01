@@ -134,7 +134,7 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 
 	return false;
 }
-static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint32_t, const render_pass_render_target_desc *, const render_pass_depth_stencil_desc *depth_stencil_desc, render_pass_flags)
+static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint32_t, const render_pass_render_target_desc *, const render_pass_depth_stencil_desc *depth_stencil_desc, render_pass_flags flags)
 {
 	if (depth_stencil_desc != nullptr && depth_stencil_desc->depth_load_op == render_pass_load_op::clear)
 		on_clear_depth_stencil(cmd_list, depth_stencil_desc->view, &depth_stencil_desc->clear_depth, nullptr, 0, nullptr);
@@ -162,7 +162,23 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 	// here on, before the synthesized binding below.
 	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_begin);
 
-	// If render pass has depth store operation set to 'discard', any copy performed after the render pass will likely contain broken data, so can only hope that the depth buffer can be copied before that ...
+	// A D3D12 pass whose depth ending access is DISCARD leaves the sampled
+	// plane's depth undefined when it ends (on_end_render_pass). No copy can
+	// be made before that: a copy is illegal inside a render pass, and
+	// ReShade raises the end event before the native EndRenderPass, still
+	// inside the pass. A suspending pass ends nothing; the pass that resumes
+	// it carries the same ending access and is judged at its own end.
+	auto &state = *cmd_list->get_private_data<state_tracking>();
+	state.render_pass_depth = {};
+	if (depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 &&
+		depth_stencil_desc->depth_store_op == render_pass_store_op::discard &&
+		(flags & render_pass_flags::suspend) == render_pass_flags::none && cmd_list->get_device()->get_api() == device_api::d3d12)
+	{
+		device *const device = cmd_list->get_device();
+		const auto view = device->get_resource_view_desc(depth_stencil_desc->view);
+		if (view.texture.first_level == 0 && view.texture.first_layer == 0)
+			state.render_pass_depth = device->get_resource_from_view(depth_stencil_desc->view);
+	}
 
 	on_bind_depth_stencil_impl(cmd_list, depth_stencil_desc != nullptr ? depth_stencil_desc->view : resource_view {}, false);
 	return false;
@@ -172,6 +188,16 @@ static bool on_end_render_pass(command_list *cmd_list)
 {
 	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_end);
 	auto &state = *cmd_list->get_private_data<state_tracking>();
+	// The pass's depth ending access DISCARDs it now (render_pass_depth).
+	if (state.render_pass_depth != 0)
+	{
+		std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
+		if (state.is_queue)
+			lock.lock();
+		auto &stats = state.stats_per_used_depth_stencil[state.render_pass_depth];
+		stats.limit_tracking(tracking_demand(cmd_list->get_device()));
+		stats.observe_depth_discard(state.position(), true);
+	}
 	state.render_pass_depth = {};
 	return false;
 }

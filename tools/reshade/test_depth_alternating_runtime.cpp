@@ -9,7 +9,7 @@
 namespace {
   struct rotation_fixture:raw_runtime_fixture {
     enum class cadence { single,abc,aabb,offturn,offturn_history,missing,concurrent,interrupted,moving,auxiliary,copy_history,copy_end,copy_rescue,
-      gap_double,gap_ui,gap_overlay,gap_long,gap_cleared,paused };
+      gap_double,gap_ui,gap_overlay,gap_long,gap_cleared,paused,end_discard };
     enum class rescue { clear,rect,pass_clear,discard,boxed };
     rescue rescue_route=rescue::clear;
     using action_t=BOOL (*)(api::effect_runtime *);
@@ -29,6 +29,9 @@ namespace {
     // This Present erased the scene's depth and drew no depth (gap_cleared, paused).
     bool erased=false;
     unsigned erase_count=0;
+    // This Present's scene depth pass ended with a DISCARD and nothing wrote
+    // the depth again before the Present (end_discard).
+    bool end_discarded=false;
     // A second hidden window of the game, presenting colour only after every
     // Present of the game's window (check_second_swapchain): its own swapchain
     // and so its own effect runtime.
@@ -299,11 +302,49 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       }
       ++copied_frames;
     }
+    // The scene's depth pass as one D3D12 render pass: its depth CLEARed at the
+    // start, the scene drawn inside, and its depth ending access `end`.
+    void scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE end){
+      auto &target=*scene;
+      com_ptr<ID3D12GraphicsCommandList4> list4;
+      checked(commands->QueryInterface(IID_PPV_ARGS(list4.put())),"The game's list lacks render passes");
+      D3D12_RENDER_PASS_DEPTH_STENCIL_DESC pass{};
+      pass.cpuDescriptor=target.heap->GetCPUDescriptorHandleForHeapStart();
+      pass.DepthBeginningAccess.Type=D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
+      pass.DepthBeginningAccess.Clear.ClearValue.Format=target.format;
+      pass.DepthBeginningAccess.Clear.ClearValue.DepthStencil.Depth=target.clear_depth;
+      pass.DepthEndingAccess.Type=end;
+      pass.StencilBeginningAccess.Type=D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
+      pass.StencilEndingAccess.Type=D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
+      list4->BeginRenderPass(0,nullptr,&pass,D3D12_RENDER_PASS_FLAG_NONE);
+      commands->SetGraphicsRootSignature(root.p);commands->SetPipelineState(depth32_pipeline.p);
+      commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      const D3D12_VIEWPORT viewport{0,0,float(target.width),float(target.height),0,1};
+      const D3D12_RECT scissor{0,0,LONG(target.width),LONG(target.height)};
+      commands->RSSetViewports(1,&viewport);commands->RSSetScissorRects(1,&scissor);
+      struct {float w,h;unsigned pattern;} constants{viewport.Width,viewport.Height,target.pattern};
+      commands->SetGraphicsRoot32BitConstants(0,3,&constants,0);
+      for(unsigned i=0;i<target.draws;++i)commands->DrawInstanced(3,1,0,0);
+      list4->EndRenderPass();
+    }
+    // end_discard: the scene's pass DISCARDs its depth at the end every
+    // Present, as a game does whose later work never reads that depth. Every
+    // other Present that pass is the frame's last access to the scene's depth,
+    // which is then undefined when the frame ends; on the Presents between, a
+    // second pass (its CLEAR, the scene drawn again, PRESERVE) writes it again.
+    // A new center depth every frame, so a copy one frame old shows in the raw
+    // center (pixels()).
+    void draw_end_discard(){
+      scene->pattern=100+8*(phase_present%16);
+      scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_DISCARD);
+      end_discarded=phase_present%2;
+      if(!end_discarded)scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE);
+    }
     void draw_depth(){
-      drawn=0;raster_mask=0;
+      drawn=0;raster_mask=0;end_discarded=false;
       if(mode==cadence::single)drawn=single_role;
       else if(mode==cadence::abc || mode==cadence::offturn || mode==cadence::offturn_history)drawn=phase_present%3+1;
-      else if(mode==cadence::copy_history || mode==cadence::copy_end)drawn=1;
+      else if(mode==cadence::copy_history || mode==cadence::copy_end || mode==cadence::end_discard)drawn=1;
       else if(mode==cadence::copy_rescue)drawn=2; // The destination holds this frame's scene.
       else if(mode==cadence::aabb)drawn=(phase_present/2)%2+1;
       else if(mode==cadence::concurrent || mode==cadence::moving || mode==cadence::auxiliary)drawn=1;
@@ -341,6 +382,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       if(mode==cadence::copy_history || mode==cadence::copy_end || mode==cadence::copy_rescue){
         raster_mask=1;draw_copy_case();return;
       }
+      if(mode==cadence::end_discard){draw_end_discard();return;}
       const auto draw_unrelated=[&]{
         for(unsigned i=0;i<unrelated.size();++i)
           draw(*unrelated[(i+phase_present)%unrelated.size()]);
@@ -463,6 +505,10 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         require(step_before-shown.after<250,"Depth was held beyond the source age");
         require(blend()==shown.blend,"A held Present advanced or reset the strength ramp");
       }
+      // A frame whose last access to the scene's depth DISCARDed it leaves
+      // undefined depth: never shown as that Present's current depth.
+      if(end_discarded)require(!capture_ready || held,
+        "A Present whose scene depth its render pass DISCARDed showed that frame's undefined depth as current");
       if(held)++held_presents;
       else{
         require(!capture_ready || (drawn && current(drawn)),"Wrong/old physical depth admitted for this rendered present");
@@ -789,6 +835,28 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       set_mode(cadence::single,1);warm("after-pause");stable("after-pause",20);
       std::printf("PASS pause: %u Presents that keep erasing the scene's depth mono from the first, then the scene recovers\n",mono);
     }
+    // end_discard (draw_end_discard): on every other Present the scene's
+    // depth ends the frame DISCARDed by its pass's ending access. Such a
+    // Present never shows that frame's depth as current (tick()); it holds the
+    // previous Present's depth within the source age, at full stereo (a
+    // missing frame). The Presents whose depth a later pass wrote again show
+    // their own current depth at full stereo.
+    void check_end_discard(){
+      set_mode(cadence::end_discard);
+      const auto started=GetTickCount64();unsigned consecutive=0;
+      while(consecutive<20 && GetTickCount64()-started<15000){
+        tick("end-discard");
+        if(!end_discarded){if(full())++consecutive;else consecutive=0;}
+      }
+      require(consecutive>=20,"Presents whose depth a pass wrote again after a DISCARD never reached full stereo");
+      unsigned stored=0,discarded=0;
+      for(unsigned i=0;i<120;++i){
+        tick("end-discard");
+        if(!end_discarded){require(full(),"A Present whose depth a pass wrote again after a DISCARD lost its current depth");++stored;}
+        else{require(held && ready() && blend()==1.f,"A Present whose scene depth its pass DISCARDed was not held at full stereo");++discarded;}
+      }
+      std::printf("PASS end-discard: %u Presents whose depth a later pass wrote again full stereo on their own current depth, %u whose pass DISCARDed it held the previous Present's depth\n",stored,discarded);
+    }
     // A new full-view scene starts in another allocation (a cutscene, photo
     // mode or 3D menu) and the old one is left untouched: first a half-size
     // one (C), then one of the same size that was never qualified (B). From
@@ -925,6 +993,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       if(test_case=="--copy-rescue-pass-clear")rescue_route=rescue::pass_clear;
       if(test_case=="--copy-rescue-discard")rescue_route=rescue::discard;
       if(test_case=="--copy-rescue-boxed")rescue_route=rescue::boxed;
+      if(test_case=="--end-discard")set_mode(cadence::end_discard);
       if(test_case.rfind("--gap-",0)==0){
         gap_pipelines();
         if(test_case=="--gap-overlay")overlay=target(width,height,1,19);
@@ -974,6 +1043,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         else if(test_case=="--gap-cut")check_gap_cut();
         else if(test_case=="--second-swapchain")check_second_swapchain();
         else if(test_case=="--second-swapchain-between")check_second_swapchain(true);
+        else if(test_case=="--end-discard")check_end_discard();
         else throw std::runtime_error("Unknown isolated rotation case");
         finish();return;
       }
@@ -1034,7 +1104,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--copy-rescue-rect|--copy-rescue-pass-clear|--copy-rescue-discard|--copy-rescue-boxed|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain|--second-swapchain-between]\n",stderr);return 2;}
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--copy-rescue-rect|--copy-rescue-pass-clear|--copy-rescue-discard|--copy-rescue-boxed|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain|--second-swapchain-between|--end-discard]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
@@ -1043,7 +1113,7 @@ int main(int argc,char **argv){
       test_case=="--copy-rescue-pass-clear" || test_case=="--copy-rescue-discard" || test_case=="--copy-rescue-boxed" ||
       test_case=="--gap-none" || test_case=="--gap-double" ||
       test_case=="--gap-ui" || test_case=="--gap-overlay" || test_case=="--gap-long" || test_case=="--gap-cleared" || test_case=="--gap-cut" ||
-      test_case=="--second-swapchain" || test_case=="--second-swapchain-between","Unknown isolated rotation case");
+      test_case=="--second-swapchain" || test_case=="--second-swapchain-between" || test_case=="--end-discard","Unknown isolated rotation case");
     select_native_boot();
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");
     rotation_fixture f;f.runtime_directory=fs::absolute(argv[4]);

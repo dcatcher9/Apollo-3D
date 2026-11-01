@@ -1472,7 +1472,7 @@ The same fixture accepts one optional isolated case after its four normal argume
 `--crowded-rotating-startup`, `--flat-startup`, `--layout`, `--copy-history`, `--copy-end`,
 `--copy-rescue`, `--copy-rescue-rect`, `--copy-rescue-pass-clear`, `--copy-rescue-discard`,
 `--copy-rescue-boxed`, `--gap-none`, `--gap-double`, `--gap-ui`, `--gap-overlay`, `--gap-long`,
-`--gap-cleared`, `--gap-cut`, `--second-swapchain` or `--second-swapchain-between`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
+`--gap-cleared`, `--gap-cut`, `--second-swapchain`, `--second-swapchain-between` or `--end-discard`. Each case needs a fresh output directory. The copy cases allocate a same-geometry copy destination
 before the scene: a history copy at the start of the frame (the destination cleared on its first
 frames), a copy after the scene draw, and a copy of a pass the scene's allocation then overwrites
 for a small first-person draw. The scene, or in the last case the destination, must be the current
@@ -1504,7 +1504,13 @@ the gates (the snapshot CTest checks both gates' rules on synthetic snapshots).
 (`--gap-cleared`'s routes), and on those Presents the second window presents between that work and
 the game window's Present, so the game window's Present carries no depth work of its own: it must
 still be mono, never hold its last real frame (the gates judge each depth frame on each runtime's
-first Present that sees it), while the second runtime shows and holds nothing. The other cases
+first Present that sees it), while the second runtime shows and holds nothing. `--end-discard`
+draws the scene inside a D3D12 render pass that CLEARs its depth and DISCARDs it at the end (its
+ending access), with a new center depth each frame; on every other Present a second such pass that
+PRESERVEs the depth draws it again. A Present whose depth the pass left DISCARDed must never show
+that frame's depth as current: it holds the previous Present's depth at full stereo (a missing
+frame); the other Presents must be full stereo on their own current depth
+([end-of-frame copy](../../docs/reshade-sbs.md#selecting-scene-depth)). The other cases
 cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,
