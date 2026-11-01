@@ -26,22 +26,65 @@ namespace sunshine_streamline::depth_capture {
     // Requires mutex. Whether a stamp is the frame the Present being decided
     // presents: no other Present came since its call (above), or, for a
     // frame that made a frame-generation call (its DLSS-G call is what adds
-    // Presents for it), one of the `generated` Presents after its first, as
+    // Presents for it), one of the `generated` Presents after its real one, as
     // long as no later evaluation began. With FG on DLSS-G presents a frame's generated
     // Presents and its real one in either order, so a hitch between a
     // frame's evaluation and its last Present made every Present after its
     // first mono (inactive_views, retained_depth_expired; the 10-27 review's
     // F1 and F2, open items 1 and 2), and the first Present after the pause
-    // without depth restarted the stereo fade. At most generated + 1
-    // Presents count, ended early by the next frame's first evaluation, so a
-    // game that keeps presenting without evaluating reaches the source age
-    // at its (generated + 2)-th Present as before.
+    // without depth restarted the stereo fade.
+    // The frame's stamps run from its first frame-generation stamp
+    // (frame_generation_present) to its anchor, the first Present after its
+    // last submission seen (frame_generation_anchor), and its window from
+    // its first stamp to `generated` Presents after the later of the two.
+    // DLSS-G presents earlier frames on its own thread while the game records
+    // this one (Assassin's Creed Shadows inside its SR evaluation), so up to
+    // `generated` Presents of the earlier frame come after this frame's stamp
+    // and before its real Present. Until 10-31 the window counted from the
+    // stamp, so those Presents used it up: after a hitch before its real
+    // Present, its own generated Presents went mono (MFG 4x: three, a 2D flash
+    // right after the freeze; soak seed d40ba4d5b7c456ee at frame 126), and
+    // an evaluation of the frame after them (its SR evaluation) ended its
+    // window as a later frame's would. An evaluation that began after the
+    // anchor is the next frame's and ends the window, so a game that keeps
+    // presenting without evaluating reaches the source age at the
+    // (generated + 2)-th Present after its anchor, as before.
     bool frame_presenting(std::uint64_t ordinal) {
       if (!ordinal) return false;
       const auto n = scope.presents.load(std::memory_order_acquire);
       if (ordinal >= n) return true;
-      const std::uint64_t generated = ordinal == scope.frame_generation_present ? scope.presenting_generated : 0;
-      return generated && ordinal >= scope.newest_evaluation_present && n - ordinal <= generated;
+      const auto first = scope.frame_generation_present, generated = std::uint64_t(scope.presenting_generated);
+      const auto last = std::max(first, scope.frame_generation_anchor);
+      return generated && first && ordinal >= first && ordinal <= last &&
+        scope.newest_evaluation_present <= last && n <= last + generated;
+    }
+
+    // Requires mutex. A frame-generation stamp at ordinal (an FG input's
+    // evaluation began, or its copy was published): the newest FG frame's
+    // own while it is no later than that frame's stamps and anchor (its FG
+    // inputs that DLSS-G's evaluation copies at its Present), else the first
+    // stamp of the next FG frame, which has no anchor yet.
+    void stamp_frame_generation(std::uint64_t ordinal) {
+      if (ordinal <= std::max(scope.frame_generation_present, scope.frame_generation_anchor)) return;
+      scope.frame_generation_present = ordinal;
+      scope.frame_generation_anchor = 0;
+    }
+
+    // Requires mutex. ordinal: the first Present after a submission of the
+    // frame stamped at call (a copy's producer list on a presenting queue,
+    // slot::submitted_present), or after DLSS-G's evaluation of the newest
+    // FG frame (frame_generation_evaluated). The frame's real Present comes
+    // at or after it: it anchors that frame's window (frame_presenting) when
+    // call is one of its stamps and at most `generated` Presents (the earlier
+    // frame's that DLSS-G may still present) came since its first. A later
+    // frame's submission or evaluation is further away, so it never extends
+    // an earlier frame's window, nor reopens a window a later evaluation
+    // ended.
+    void anchor_frame_generation(std::uint64_t call, std::uint64_t ordinal) {
+      const auto first = scope.frame_generation_present;
+      if (!first || call < first || call > std::max(first, scope.frame_generation_anchor) ||
+          ordinal > first + scope.presenting_generated) return;
+      scope.frame_generation_anchor = std::max(scope.frame_generation_anchor, ordinal);
     }
 
     // The present ordinal of the frame a copy is: its submission's on a
@@ -228,6 +271,12 @@ namespace sunshine_streamline::depth_capture {
     if (!requested.load() || !epoch) return;
     std::lock_guard lock(mutex);
     scope.newest_evaluation_present = std::max(scope.newest_evaluation_present, present_ordinal());
+  }
+
+  void frame_generation_evaluated(std::uint64_t epoch) {
+    if (!requested.load() || !epoch) return;
+    std::lock_guard lock(mutex);
+    anchor_frame_generation(scope.frame_generation_present, present_ordinal());
   }
 
   void present(std::uint64_t native) {

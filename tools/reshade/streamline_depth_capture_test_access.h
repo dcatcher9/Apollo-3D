@@ -518,9 +518,10 @@ namespace sunshine_streamline::depth_capture {
       // generated Present between an evaluation and its frame's Present leaves
       // the wall-clock rule alone.
       // Require mutex. The newest present_ordinal() an evaluation began with
-      // (begin_evaluation_locked), the newest one a frame-generation input's
-      // evaluation began with or its copy was stamped with, and the Presents
-      // DLSS-G adds per real frame that the selection being decided grants
+      // (begin_evaluation_locked), the first one of the newest frame whose
+      // frame-generation input's evaluation began or whose copy was stamped
+      // (stamp_frame_generation; its anchor: frame_generation_anchor), and
+      // the Presents DLSS-G adds per real frame that the selection being decided grants
       // (select_provider, selection_policy::generated_presents).
       std::uint64_t newest_evaluation_present{}, frame_generation_present{};
       std::uint32_t presenting_generated{};
@@ -542,6 +543,12 @@ namespace sunshine_streamline::depth_capture {
       // Protected by mutex: the viewports whose FG role FG Off retired, per
       // epoch (retire_source; the oldest gives way).
       std::array<fg_retirement, 4> fg_retirements{};
+      // Requires mutex. The first Present after the newest FG frame's newest
+      // submission seen (anchor_frame_generation; 0 none since its first
+      // stamp, frame_generation_present): its real Present comes at or
+      // after it, and its window counts its generated Presents from there
+      // (frame_presenting).
+      std::uint64_t frame_generation_anchor{};
     };
     static_assert(std::is_trivially_destructible_v<scope_state>);
     struct queue_progress {
@@ -617,6 +624,8 @@ namespace sunshine_streamline::depth_capture {
     extern observation_state capture_observation;
     std::uint64_t present_ordinal();
     bool frame_presenting(std::uint64_t ordinal);
+    void stamp_frame_generation(std::uint64_t ordinal);
+    void anchor_frame_generation(std::uint64_t call, std::uint64_t ordinal);
     std::uint64_t presented_by(const slot &value);
     bool view_presenting(const evaluation_head &view, provider_kind provider);
     unsigned provider_index(provider_kind value);
@@ -712,10 +721,10 @@ namespace sunshine_streamline::depth_capture {
     // API evaluation bookkeeping: no evaluations.
     inline void reset_evaluations() { evaluations = {}; }
     // Presentation scope: no FG role retirement, no evaluation or frame
-    // generation Present, and no generated Presents.
+    // generation Present or anchor, and no generated Presents.
     inline void reset_scope() {
       scope.fg_retirements = {};
-      scope.newest_evaluation_present = scope.frame_generation_present = 0;
+      scope.newest_evaluation_present = scope.frame_generation_present = scope.frame_generation_anchor = 0;
       scope.presenting_generated = 0;
     }
     // Record admission: every provider's last attempt unavailable.

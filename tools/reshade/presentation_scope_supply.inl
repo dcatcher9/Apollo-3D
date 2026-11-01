@@ -150,8 +150,10 @@
     // Whether DLSSG.Depth of the frame DLSS-G evaluates stands aside for that
     // frame's own FG tag copy (tag_copy): recorded for it, or deferred to its
     // Present and waiting there (the viewport's deferral's newest tag call).
-    // evaluated: the frame (evaluated_frame).
-    bool tags_supply_frame(std::uint64_t scope_epoch, std::uint32_t viewport, const frame_generation::frame_mark &evaluated) {
+    // evaluated: the frame (evaluated_frame). recorded (optional): whether
+    // that copy was recorded for it, not waiting.
+    bool tags_supply_frame(std::uint64_t scope_epoch, std::uint32_t viewport, const frame_generation::frame_mark &evaluated,
+        bool *recorded = nullptr) {
       const bool deferrals = deferral_pending.load(std::memory_order_acquire) != 0;
       const auto now = GetTickCount64();
       AcquireSRWLockShared(&evaluation_supply_lock);
@@ -164,6 +166,7 @@
             waiting = true;
           }
       const bool supply = tag_copy.tags_supply(scope_epoch, viewport, evaluated, waiting ? &pending : nullptr, now);
+      if (recorded) *recorded = supply && tag_copy.tags_supply(scope_epoch, viewport, evaluated, nullptr, now);
       ReleaseSRWLockShared(&evaluation_supply_lock);
       return supply;
     }

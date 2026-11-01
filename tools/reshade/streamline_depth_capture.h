@@ -354,8 +354,15 @@ namespace sunshine_streamline::depth_capture {
   // evaluation, which the probe leaves to the scope): a later frame's call,
   // which ends an earlier frame's presenting window as begin_evaluation
   // does (frame_presenting), so a Present after it cannot take that frame's
-  // copy, past the source age, for its own.
+  // copy, past the source age, for its own. Since 10-31 one that begins no
+  // later than the newest FG frame's anchor (below) is that frame's own.
   void evaluation_called(std::uint64_t epoch);
+  // DLSS-G's evaluation of a frame whose FG tag copy was recorded at its
+  // call (it stands aside for it): the frame's Presents begin at the next
+  // one, which anchors that frame's presenting window (frame_presenting:
+  // its generated Presents counted from its real one, after the earlier
+  // frame's that DLSS-G presented since its stamp, at most that many).
+  void frame_generation_evaluated(std::uint64_t epoch);
   // A retained source's allocation width and height (false without one).
   bool source_extent(const source_ref &source, std::uint32_t &width, std::uint32_t &height);
   // BEGIN actual native Present: expires future uses of this device's old tags,

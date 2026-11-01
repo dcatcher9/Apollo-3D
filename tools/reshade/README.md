@@ -2673,7 +2673,13 @@ runs, 10-31), one for DLSS-G's refused evaluation in a silent scope after a hitc
 before 10-31 the attempt began no evaluation, so the hitch frame's real Present held an earlier
 frame's copy, 453 ms old, as its own: stale at frame 27, two of two runs; soak seed
 4547e4874aef62bb's frame 80 failed so only under CPU load, when DLSS-G's copies of a second before
-no longer kept the scope live), and two for a late FG Off whose frame's
+no longer kept the scope live), four for a frame whose earlier frame's generated Presents DLSS-G
+presents inside its recording after its first stamp, then a hitch of the source age before its real
+Present (its window anchored at its real Present, [docs](../../docs/reshade-sbs.md#fg-frame-anchor)):
+`fg-on-generated-in-evaluate-hitch-before-real-2x`, `-3x` and `-4x` (inside its SR evaluation, soak
+seed d40ba4d5b7c456ee's shape) and `fg-on-generated-before-own-evaluation-hitch-before-real-4x`
+(after its FG tag copy and before its SR evaluation; before 10-31 each lost the frame's own generated
+Presents after the freeze, a dropped hold at frame 32, two of two runs), and two for a late FG Off whose frame's
 FG depth is a tag copy deferred to its Present (the 10-28 review's P1): `fg-off-late-deferred-tag-copy`
 (its shrunk form) and `fg-off-late-deferred-tag-copy-sr-after` (with the FG role's re-keying
 reverted the copy becomes the FG view again beside the SR view: an unsupplied fresh FG copy and
@@ -2862,7 +2868,9 @@ a known gap. Each table names the behaviour of every row and the refactor phase 
   only frames later (the held FG copy, `frame_generation_holds`, and the shared watermark), which
   Presents present a stamped frame (`frame_presenting`: its first, and with FG the declared count
   after it for a frame that made a frame-generation call, until the next evaluation; a copy's
-  submission on a presenting queue as its frame, `presented_by`), the frame's own SR stand-in for
+  submission on a presenting queue as its frame, `presented_by`; since 10-31 the count runs from the
+  frame's anchor, the first Present after its submission or DLSS-G's evaluation of it, within the
+  declared count of its first stamp, and its own evaluations up to the anchor end nothing), the frame's own SR stand-in for
   its DLSS-G copy in flight at those Presents after a hitch, never at a later one nor an earlier
   frame's, a missing frame's stand-in (each kind of failed or refused head, SR and FG, against
   every per-copy check and every identity interruption, which still revoke: after each one, and

@@ -197,7 +197,7 @@ namespace sunshine_streamline::depth_capture {
       scope.newest_evaluation_present = std::max(scope.newest_evaluation_present, ordinal);
       if (provider == provider_kind::streamline &&
           sunshine_scene_depth::is_fg_source(source_id, viewport))
-        scope.frame_generation_present = std::max(scope.frame_generation_present, ordinal);
+        stamp_frame_generation(ordinal);
     }
     for (auto &value : current.views) if (value.epoch == epoch && value.viewport == viewport && value.source_id == source_id) {
       // A new call does not end a run of rejected ones; only its result can.
@@ -719,7 +719,7 @@ namespace sunshine_streamline::depth_capture {
       if (found->predicted_storage) capture_queues.copy_out_counters.predicted.fetch_add(1, std::memory_order_relaxed);
       found->id = ++serial; found->command = cookie; found->producer_recording = owner.life();
       found->present = present_ordinal();
-      if (found->metadata.frame_generation_input) scope.frame_generation_present = std::max(scope.frame_generation_present, found->present);
+      if (found->metadata.frame_generation_input) stamp_frame_generation(found->present);
       found->basis = basis; found->compute_list = on_compute;
       compute_copies_recorded |= on_compute;
       if (proof) {

@@ -831,6 +831,23 @@ namespace {
     // they were younger than fg_silent_ms, and a live scope's refused
     // attempt begins its nomination.
     {"fg-on-silent-dlssg-refusal-hitch-between", "20*sr=local; fg=on,tag=present_bare,generated=3; 4*tag=present_bare; tag=present_bare,dlssg=compute_unobserved; tag=present_bare,untag=after_global,dlssg=compute_unobserved; tag=present_bare,untag=after_global,dlssg=compute_unobserved,hitch=between; 10*tag=present_bare,untag=after_global,sr=local,dlssg=compute_unobserved"},
+    // MFG with the earlier frame's generated Presents inside this frame's
+    // recording after its first stamp (DLSS-G's present thread: Assassin's
+    // Creed Shadows), inside its SR evaluation (at=evaluate) at 2x, 3x and
+    // 4x, or after its FG tag copy and before its SR evaluation (at=inside),
+    // then a hitch of the source age before its real Present, and its own
+    // generated Presents inside the next frame's recording before any call.
+    // Its presenting window is anchored at its real Present, the first after
+    // its copy's submission (frame_presenting), so those Presents hold its
+    // own copy and its SR evaluation after the earlier Presents does not end
+    // its window. Until 10-31 the window counted from its stamp, the earlier
+    // frame's Presents used it up, and its own generated Presents after the
+    // freeze were mono (dropped_hold at frame 32, every run; soak seed
+    // d40ba4d5b7c456ee at frame 126).
+    {"fg-on-generated-in-evaluate-hitch-before-real-2x", "20*sr=local; fg=on,tag=now_list,sr=local,generated=1,at=evaluate; 10*tag=now_list,sr=local,generated=1,at=evaluate; tag=now_list,sr=local,generated=1,at=evaluate,hitch=after_sources; sr=local,generated=1,at=inside; 10*sr=local"},
+    {"fg-on-generated-in-evaluate-hitch-before-real-3x", "20*sr=local; fg=on,tag=now_list,sr=local,generated=2,at=evaluate; 10*tag=now_list,sr=local,generated=2,at=evaluate; tag=now_list,sr=local,generated=2,at=evaluate,hitch=after_sources; sr=local,generated=2,at=inside; 10*sr=local"},
+    {"fg-on-generated-in-evaluate-hitch-before-real-4x", "20*sr=local; fg=on,tag=now_list,sr=local,generated=3,at=evaluate; 10*tag=now_list,sr=local,generated=3,at=evaluate; tag=now_list,sr=local,generated=3,at=evaluate,hitch=after_sources; sr=local,generated=3,at=inside; 10*sr=local"},
+    {"fg-on-generated-before-own-evaluation-hitch-before-real-4x", "20*sr=local; fg=on,tag=now_list,sr=local,generated=3,at=inside; 10*tag=now_list,sr=local,generated=3,at=inside; tag=now_list,sr=local,generated=3,at=inside,hitch=after_sources; sr=local,generated=3,at=inside; 10*sr=local"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose

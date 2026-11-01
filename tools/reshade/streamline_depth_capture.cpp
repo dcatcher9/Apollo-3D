@@ -50,6 +50,8 @@ namespace sunshine_streamline::depth_capture {
     // Present ordinals and frame-generation scope (depth_capture/scope.inl).
     std::uint64_t present_ordinal();
     bool frame_presenting(std::uint64_t ordinal);
+    void stamp_frame_generation(std::uint64_t ordinal);
+    void anchor_frame_generation(std::uint64_t call, std::uint64_t ordinal);
     std::uint64_t presented_by(const slot &value);
     fg_retirement *fg_retirement_of(std::uint64_t epoch, std::uint32_t viewport);
     bool frame_generation_role_retired(provider_kind provider, std::uint64_t epoch, std::uint32_t viewport);

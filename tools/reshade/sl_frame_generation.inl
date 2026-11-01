@@ -426,7 +426,15 @@ namespace sunshine_streamline {
       // The frame's own FG tag copied it first, or its copy waits for the
       // frame's Present: no second copy (a later frame without an FG tag of
       // its own is DLSS-G's).
-      else if (tags_supply_frame(fg.epoch, fg.viewport, evaluated_frame(fg.viewport))) out.depth = depth_outcome::tag_copied;
+      else if (bool recorded{}; tags_supply_frame(fg.epoch, fg.viewport, evaluated_frame(fg.viewport), &recorded)) {
+        out.depth = depth_outcome::tag_copied;
+        // Recorded at the frame's tag call: DLSS-G evaluates the frame inside
+        // its Present, so its Presents begin at the next one, which anchors
+        // its presenting window (frame_presenting) also where its copy's
+        // submission on a presenting queue is not seen. A copy that waits for
+        // the frame's Present is stamped there itself.
+        if (recorded) depth_capture::frame_generation_evaluated(fg.epoch);
+      }
       // The viewport's own camera evidence, exactly as for an unframed FG tag
       // (normalize_depth_frame): its history revision, its recent camera's
       // depth direction and its steady depth coefficients. No frame

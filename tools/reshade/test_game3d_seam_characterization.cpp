@@ -2371,6 +2371,95 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS F1 frame_presenting: %zu rows\n", std::size(rows));
     }
 
+    // F1, anchored (deferred item 9 B, 10-31; soak seed d40ba4d5b7c456ee at
+    // frame 126): DLSS-G presents an earlier frame's generated Presents while
+    // the game records this one (inside its SR evaluation: Assassin's Creed
+    // Shadows), so up to the generated count of Presents come between a
+    // frame's stamp and its real Present. The first Present after the frame's
+    // submission on a presenting queue, or after DLSS-G's evaluation of a
+    // frame whose tag copy was recorded, anchors its window: its generated
+    // Presents count from there, its own evaluations up to the anchor end
+    // nothing, and a later frame's evaluation after it does. Until 10-31 the
+    // window counted from the stamp, so after a hitch before the real Present
+    // the frame's own generated Presents were mono.
+    void frame_presenting_anchor_rows() {
+      enum class anchor {
+        none,
+        submission,  // Its copy's producer list on a presenting queue.
+        dlssg,  // DLSS-G's evaluation standing aside for its recorded tag copy.
+        earlier_copy,  // A submission of a copy recorded before its stamp.
+        anchored_stamp,  // A submission, then an FG stamp at the anchor.
+        later_stamp  // A submission, then an FG stamp after its real Present.
+      };
+      struct row {
+        const char *pins;
+        unsigned generated;
+        unsigned earlier;  // The earlier frame's Presents after its stamp.
+        anchor kind;
+        bool own_evaluation;  // Its evaluation after them (its SR evaluation).
+        unsigned after;  // Presents after its real one, the decided one included.
+        bool later_evaluation;  // The next frame's evaluation before the decided Present.
+        bool expected;
+      };
+
+      const row rows[] {
+        {"MFG 4x, three earlier generated Presents after its stamp, no submission seen: its first generated Present", 3, 3, anchor::none, false, 1, false, false},
+        {"The same with its copy's submission seen after them: its first generated Present", 3, 3, anchor::submission, false, 1, false, true},
+        {"The same: its third generated Present", 3, 3, anchor::submission, false, 3, false, true},
+        {"The same: a fourth Present after its real one", 3, 3, anchor::submission, false, 4, false, false},
+        {"Anchored by DLSS-G's evaluation of its recorded tag copy: its third generated Present", 3, 3, anchor::dlssg, false, 3, false, true},
+        {"MFG 3x, two earlier generated Presents, anchored: its second generated Present", 2, 2, anchor::submission, false, 2, false, true},
+        {"MFG 2x, one earlier generated Present, anchored: its generated Present", 1, 1, anchor::submission, false, 1, false, true},
+        {"MFG 2x anchored: a second Present after its real one", 1, 1, anchor::submission, false, 2, false, false},
+        {"Its own evaluation after the earlier Presents, before its submission: its third generated Present", 3, 3, anchor::submission, true, 3, false, true},
+        {"The same without the submission seen: that evaluation ends its window", 3, 3, anchor::none, true, 1, false, false},
+        {"Anchored, the next frame's evaluation after its real Present ends its window", 3, 3, anchor::submission, false, 1, true, false},
+        {"MFG 2x, two Presents after its stamp: a submission beyond its generated count anchors nothing", 1, 2, anchor::submission, false, 1, false, false},
+        {"A submission of a copy recorded before its stamp anchors nothing", 3, 3, anchor::earlier_copy, false, 1, false, false},
+        {"An FG stamp at its anchor (DLSS-G's inputs copied at its Present) is its own: its third generated Present", 3, 3, anchor::anchored_stamp, false, 3, false, true},
+        {"An FG stamp after its real Present begins the next FG frame", 3, 3, anchor::later_stamp, false, 2, false, false},
+      };
+      for (const auto &r : rows) {
+        reset();
+        scope.presenting_generated = r.generated;
+        const auto stamp = present_ordinal();
+        scope.newest_evaluation_present = stamp;
+        stamp_frame_generation(stamp);
+        fixture::presents_since(r.earlier);
+        if (r.own_evaluation) {
+          scope.newest_evaluation_present = present_ordinal();
+        }
+        // The first Present after the frame's submission: its real one.
+        const auto at = present_ordinal();
+        if (r.kind == anchor::dlssg) {
+          frame_generation_evaluated(9);
+        } else if (r.kind == anchor::earlier_copy) {
+          anchor_frame_generation(stamp - 1, at);
+        } else if (r.kind != anchor::none) {
+          anchor_frame_generation(stamp, at);
+        }
+        if (r.kind == anchor::anchored_stamp) {
+          stamp_frame_generation(at);
+        }
+        fixture::presents_since(1);
+        if (r.kind == anchor::later_stamp) {
+          stamp_frame_generation(present_ordinal());
+        }
+        if (r.later_evaluation) {
+          scope.newest_evaluation_present = present_ordinal();
+        }
+        fixture::presents_since(r.after);
+        const bool got = frame_presenting(stamp);
+        // The copy's own stamp, its submission's (presented_by), decides alike.
+        const bool copy = r.kind == anchor::submission || r.kind == anchor::anchored_stamp ? frame_presenting(at) : got;
+        if (got != r.expected || copy != got) {
+          fail(std::string("F1 anchored frame_presenting, ") + r.pins + ": got " + (got ? "presenting" : "not presenting") +
+               (copy != got ? " (its submission's stamp differs)" : ""));
+        }
+      }
+      std::printf("PASS F1 anchored frame_presenting: %zu rows\n", std::size(rows));
+    }
+
     // F2 and P2 (the 10-27 review): a hitch between a frame's evaluation and
     // a later Present of that frame. The FG input in flight (DLSS-G's copy)
     // and the frame's own SR snapshot, both past the source age by the
@@ -3077,6 +3166,7 @@ int main() {
   fg_off_role_rows();
   named_head_rows();
   frame_presenting_rows();
+  frame_presenting_anchor_rows();
   hitch_presenting_rows();
   decide_display_rows();
   ui_admission_rows();

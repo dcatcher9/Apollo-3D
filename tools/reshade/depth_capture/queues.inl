@@ -58,9 +58,13 @@ namespace sunshine_streamline::depth_capture {
       // a presenting queue was not seen (presented_by).
       // Cross-section read: producer submission uses this native place's
       // diagnostic chosen flag as evidence that it has presented; reader differs.
+      // It is also the newest FG frame's anchor when the copy is that
+      // frame's (anchor_frame_generation): its real Present comes after.
       if (!value.producer_submitted && !value.submitted_present)
-        if (const auto *presenting = known_queue(native); presenting && presenting->chosen)
+        if (const auto *presenting = known_queue(native); presenting && presenting->chosen) {
           value.submitted_present = present_ordinal();
+          anchor_frame_generation(value.present, value.submitted_present);
+        }
       value.producer_submitted = true;
       value.queue = native;
       value.producer_fence = signaled ? fence : 0;

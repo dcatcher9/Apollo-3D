@@ -3743,9 +3743,25 @@ the first Present after the pause without depth restarted the stereo fade (the s
 list's submission on a presenting queue (one that acquired depth) where that submission was seen,
 else of its call: a game that records frame N+1 on one thread before its submission thread presents
 frame N stamped N+1's copy with frame N's Present, so after a hitch on its submission thread its own
-Present never counted it current (until the 10-27 review). Any other Present ends it: a game that
-keeps presenting without evaluating reaches the source age at its (count + 2)-th Present, and the
-source age bounds every hold over later Presents. A frame's copies are never current before their
+Present never counted it current (until the 10-27 review). The count runs from the frame's real
+Present (<a id="fg-frame-anchor"></a>its anchor): DLSS-G presents an earlier frame's generated
+Presents on its own thread while the game records the next frame (Assassin's Creed Shadows inside
+its SR evaluation), at most the declared count of them after that frame's first stamp, so the first
+Present after the frame's newest submission seen on a presenting queue (a copy's producer list), or
+after DLSS-G's evaluation of a frame whose FG tag copy was recorded at its call (it stands aside for
+that copy), anchors its window: the frame's stamps run from its first to that anchor, its generated
+Presents count from there, its own evaluations up to the anchor end nothing, and an evaluation after
+it, the next frame's, ends the window. A submission or evaluation more than the declared count of
+Presents after the frame's first stamp is a later frame's and anchors nothing, so no window grows
+into a later frame's Presents or opens again. Until 10-31 the count ran from the stamp: those
+earlier Presents used the window up, and after a hitch of the source age before its real Present
+the frame's own generated Presents were mono, a 2D flash right after the freeze (three at MFG 4x;
+soak seed d40ba4d5b7c456ee at frame 126; the session timelines'
+`fg-on-generated-in-evaluate-hitch-before-real-2x`, `-3x`, `-4x` and
+`fg-on-generated-before-own-evaluation-hitch-before-real-4x`). Any other Present ends it: a game
+that keeps presenting without evaluating reaches the source age at its (count + 2)-th Present
+after its anchor, and the source age bounds every hold over later Presents. A frame's copies are
+never current before their
 producer finished or where the order model refused a read: currency only lifts the age bound. One
 limitation: when DLSS-G presents on its own thread and the next frame's first evaluation begins
 before this frame's last Present, that Present keeps the age bound (never older than before). Whether
