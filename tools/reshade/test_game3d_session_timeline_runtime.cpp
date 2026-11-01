@@ -815,6 +815,22 @@ namespace {
     {"fg-on-deferred-tag-generated-inside-after-hitch", "20*sr=local; fg=on,tag=evaluate_list,entry=global,sr=tag,dlssg=direct,generated=1,at=inside; 5*tag=evaluate_list,entry=global,sr=tag,dlssg=direct,generated=1,at=inside; tag=evaluate_list,entry=global,sr=tag,dlssg=direct,generated=1,at=inside,hitch=after_present; 10*tag=present_list,entry=global,sr=tag,dlssg=direct,generated=1,at=inside"},
     {"fg-on-deferred-tag-generated-inside-after-hitch-between", "20*sr=local; fg=on,tag=present_bare,dlssg=direct,generated=1,at=inside; 5*tag=present_bare,dlssg=direct,generated=1,at=inside; tag=present_bare,dlssg=direct,generated=1,at=inside,hitch=between; 10*tag=present_bare,dlssg=direct,generated=1,at=inside"},
     {"fg-on-deferred-tag-generated-inside-after-hitch-untag", "20*sr=local; fg=on,sr=local,dlssg=direct,generated=2; 2*tag=evaluate_list,untag=after_global,sr=local,dlssg=direct,generated=2; tag=evaluate_list,untag=after_global,dlssg=direct,generated=2,ui=bare; tag=evaluate_list,untag=after_global,generated=2,at=inside,ui=bare; tag=present_bare,untag=after_global,sr=other_queue,generated=2,at=inside,ui=bare; tag=present_bare,untag=after_global,sr=other_queue,generated=2,at=inside,ui=bare,hitch=between; tag=present_bare,untag=before_global,generated=2,at=inside,ui=untagged; 10*tag=present_bare,ui=untagged"},
+    // FG 4x declared and DLSS-G presenting no generated frame, each frame's
+    // FG depth a tag copy deferred to its Present (R2), then two frames whose
+    // global untag ends that copy, so the scope falls silent, and DLSS-G's
+    // own compute copy of each refused (no observed state), the second after
+    // a hitch of the source age between frames. Its real Present does not
+    // present the frame before the untags: DLSS-G's evaluation of each later
+    // frame ends that frame's window (frame_presenting) whatever its outcome,
+    // so the hitch frame holds nothing past the source age. Until 10-31 a
+    // silent scope's refused DLSS-G attempt began no evaluation, so that
+    // Present showed the earlier frame's copy, 453 ms old, as its own (stale
+    // at frame 27, every run). Soak seed 4547e4874aef62bb's frames 73 to 81
+    // failed so only under CPU load: its DLSS-G copies about a second
+    // earlier kept the scope live at the untag (miss_frame_generation) while
+    // they were younger than fg_silent_ms, and a live scope's refused
+    // attempt begins its nomination.
+    {"fg-on-silent-dlssg-refusal-hitch-between", "20*sr=local; fg=on,tag=present_bare,generated=3; 4*tag=present_bare; tag=present_bare,dlssg=compute_unobserved; tag=present_bare,untag=after_global,dlssg=compute_unobserved; tag=present_bare,untag=after_global,dlssg=compute_unobserved,hitch=between; 10*tag=present_bare,untag=after_global,sr=local,dlssg=compute_unobserved"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose

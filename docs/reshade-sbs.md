@@ -3724,7 +3724,11 @@ declares (`numFramesToGenerate`, from the confirmed FG policy, also for a silent
 is on with no count), until the next frame's first evaluation begins (`frame_presenting`; a live
 FG scope's SR/RR evaluation, which begins no view, ends it as well since 10-28,
 `depth_capture::evaluation_called`: a hitch frame without an FG call after a frame whose
-generated Present DLSS-G skipped showed that frame's copy, past the source age, as current; a tag
+generated Present DLSS-G skipped showed that frame's copy, past the source age, as current; so does
+DLSS-G's evaluation that tries its own copy whatever its outcome since 10-31, as a live scope's
+nomination always did from its begin: a silent scope's refused attempt began none, so with FG 4x
+declared the Present after a hitch held an earlier frame's copy past the source age as its own, and
+whether the scope was still live there followed the clock, soak seed 4547e4874aef62bb; a tag
 call whose copy is deferred to its frame's Present, R2, begins none, so DLSS-G's generated Present of
 the earlier frame inside the next frame's recording after that call shows the earlier frame's own
 depth however old, never one flat Present: owner ruling Q2, 10-30): its views

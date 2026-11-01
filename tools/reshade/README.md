@@ -2668,7 +2668,12 @@ to its Present (R2), and a hitch of the source age: `fg-on-deferred-tag-generate
 (seed d12563f8dc22b059's shape) and its forms `-between` and `-untag` (seed 2dbc7936fb23f7fa's
 shape, a global untag after the tag): the earlier frame's own copy shown there is its depth (owner
 ruling Q2, 10-30; with the judge's former `between` each failed stale at frame 26 or 27, two of two
-runs, 10-31), and two for a late FG Off whose frame's
+runs, 10-31), one for DLSS-G's refused evaluation in a silent scope after a hitch,
+`fg-on-silent-dlssg-refusal-hitch-between` (FG 4x declared, untags ending the deferred tag copies;
+before 10-31 the attempt began no evaluation, so the hitch frame's real Present held an earlier
+frame's copy, 453 ms old, as its own: stale at frame 27, two of two runs; soak seed
+4547e4874aef62bb's frame 80 failed so only under CPU load, when DLSS-G's copies of a second before
+no longer kept the scope live), and two for a late FG Off whose frame's
 FG depth is a tag copy deferred to its Present (the 10-28 review's P1): `fg-off-late-deferred-tag-copy`
 (its shrunk form) and `fg-off-late-deferred-tag-copy-sr-after` (with the FG role's re-keying
 reverted the copy becomes the FG view again beside the SR view: an unsupplied fresh FG copy and

@@ -438,6 +438,15 @@ namespace sunshine_streamline {
                viewport.epoch != fg.epoch)
         out.depth = depth_outcome::scope_changed;
       else {
+        // An evaluation that tries its own copy is its frame's call whatever
+        // its outcome: it ends an earlier frame's presenting window
+        // (frame_presenting), as a live scope's nomination does from its
+        // begin. Until 10-31 a silent scope's refused attempt began none, so
+        // with FG 4x declared the Present after a hitch held an earlier
+        // frame's copy past the source age as its own, and whether the scope
+        // was still live there followed the clock (soak seed
+        // 4547e4874aef62bb, frame 80, stale under CPU load only).
+        depth_capture::evaluation_called(fg.epoch);
         depth_capture::observe_command(value.command);
         depth_capture::input input;
         input.provider = sunshine_scene_depth::provider_kind::streamline;
