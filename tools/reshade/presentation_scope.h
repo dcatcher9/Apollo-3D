@@ -439,7 +439,8 @@ namespace sunshine_streamline::provider {
 
 namespace sunshine_game3d::depth_output {
   // A retained Streamline FG copy younger than the source age: what
-  // frame_generation_holds and frame_generation_retained keep.
+  // frame_generation_holds keeps (frame_generation_retained keeps it too,
+  // beside a retired FG role's other Streamline copies).
   inline bool frame_generation_copy(const retained_depth &previous, std::uint64_t now) {
     const auto &before = previous.metadata;
     return previous.capture_id && before.frame_generation_input &&
@@ -485,9 +486,9 @@ namespace sunshine_streamline::depth_capture {
   // past the next Present), and those Presents went mono (source_handoff).
   inline bool frame_generation_retained(const sunshine_game3d::depth_output::retained_depth &previous, selection_policy policy, std::uint64_t now) {
     const auto &before = previous.metadata;
-    return !policy.exclude_unconfirmed_fg && (sunshine_game3d::depth_output::frame_generation_copy(previous, now) ||
-      (previous.capture_id && before.provider == sunshine_scene_depth::provider_kind::streamline &&
-       sunshine_freshness::within_source_age(before.tick, now) && frame_generation_retired(before.epoch, before.viewport, 0)));
+    return !policy.exclude_unconfirmed_fg && previous.capture_id &&
+      before.provider == sunshine_scene_depth::provider_kind::streamline && sunshine_freshness::within_source_age(before.tick, now) &&
+      (before.frame_generation_input || frame_generation_retired(before.epoch, before.viewport, 0));
   }
 }
 
