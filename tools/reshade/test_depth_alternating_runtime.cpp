@@ -305,10 +305,11 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       ++copied_frames;
     }
     // The scene's depth pass as one D3D12 render pass: its depth CLEARed at the
-    // start, the scene drawn inside (unless !draws), and its depth ending
-    // access `end`; recorded into `into` (else the frame's list) with `flags`.
+    // start, the scene drawn inside over the top-left 1/divisor of each side
+    // (none for 0), and its depth ending access `end`; recorded into `into`
+    // (else the frame's list) with `flags`.
     void scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE end,ID3D12GraphicsCommandList *into=nullptr,
-        D3D12_RENDER_PASS_FLAGS flags=D3D12_RENDER_PASS_FLAG_NONE,bool draws=true){
+        D3D12_RENDER_PASS_FLAGS flags=D3D12_RENDER_PASS_FLAG_NONE,unsigned divisor=1){
       auto &target=*scene;
       auto *const list=into ? into : commands.p;
       com_ptr<ID3D12GraphicsCommandList4> list4;
@@ -322,10 +323,10 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       pass.StencilBeginningAccess.Type=D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
       pass.StencilEndingAccess.Type=D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
       list4->BeginRenderPass(0,nullptr,&pass,flags);
-      if(draws){
+      if(divisor){
         list->SetGraphicsRootSignature(root.p);list->SetPipelineState(depth32_pipeline.p);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        const D3D12_VIEWPORT viewport{0,0,float(target.width),float(target.height),0,1};
+        const D3D12_VIEWPORT viewport{0,0,float(target.width/divisor),float(target.height/divisor),0,1};
         const D3D12_RECT scissor{0,0,LONG(target.width),LONG(target.height)};
         list->RSSetViewports(1,&viewport);list->RSSetScissorRects(1,&scissor);
         struct {float w,h;unsigned pattern;} constants{viewport.Width,viewport.Height,target.pattern};
@@ -352,7 +353,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     // several threads: the scene drawn in a pass that CLEARs its depth,
     // PRESERVEs it and suspends, the last thing in its own list, and the
     // frame's list beginning with the pass that resumes it (the same accesses,
-    // as the pair requires) and draws nothing. A new center depth every frame.
+    // as the pair requires) and draws the top-left quarter again (a later
+    // part of the same pass). A new center depth every frame.
     void draw_resume_pass(){
       if(!suspend_list.p){
         checked(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(suspend_allocator.put())),"Create the suspending list's allocator");
@@ -365,7 +367,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE,suspend_list.p,D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS);
       checked(suspend_list->Close(),"Close the suspending list");
       execute_first=suspend_list.p;
-      scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE,commands.p,D3D12_RENDER_PASS_FLAG_RESUMING_PASS,false);
+      scene_pass(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE,commands.p,D3D12_RENDER_PASS_FLAG_RESUMING_PASS,2);
     }
     void draw_depth(){
       drawn=0;raster_mask=0;end_discarded=false;
@@ -890,7 +892,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     // applies no beginning access, so its CLEAR erases nothing the
     // suspending pass drew: every Present is full stereo on its own current
     // depth, this frame's raw center (pixels(): the GPU's depth, so a runtime
-    // that applied the resuming CLEAR fails there).
+    // that applied the resuming CLEAR fails there), captured over the whole
+    // scene (the quarter drawn after the resume does not restart the crop).
     void check_resume_pass(){
       set_mode(cadence::resume_pass);
       const auto started=GetTickCount64();unsigned consecutive=0;
@@ -899,6 +902,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       for(unsigned i=0;i<120;++i){
         tick("resume-pass");
         require(full(),"A Present whose scene a suspended render pass drew lost its current depth at the pass that resumed it");
+        require(captured.x==0 && captured.y==0 && captured.active_width==scene->width && captured.active_height==scene->height,
+          "The CLEAR of the pass that resumed the scene's pass restarted the capture crop at the quarter drawn after it");
       }
       std::printf("PASS resume-pass: 120 Presents whose scene a suspending render pass drew, resumed by a pass whose CLEAR applies nothing, full stereo on their own current depth\n");
     }

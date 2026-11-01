@@ -1517,10 +1517,15 @@ frame); the other Presents must be full stereo on their own current depth
 ([end-of-frame copy](../../docs/reshade-sbs.md#selecting-scene-depth)). `--resume-pass` (11-01)
 splits the scene's pass across two command lists executed in one `ExecuteCommandLists` call: the
 scene drawn in a pass that CLEARs its depth, PRESERVEs it and suspends, the last thing in its own
-list, and the frame's list beginning with the pass that resumes it (the same accesses) and draws
-nothing, with a new center depth each frame. The resuming pass's CLEAR applies nothing, so every
-Present must be full stereo on its own current depth with this frame's raw center, which the GPU
-copy shows (a runtime that applied the resuming CLEAR would fail there). The other cases
+list, and the frame's list beginning with the pass that resumes it (the same accesses) and drawing
+the top-left quarter again, with a new center depth each frame. The resuming pass's CLEAR applies
+nothing, so every Present must be full stereo on its own current depth with this frame's raw
+center, which the GPU copy shows (a runtime that applied the resuming CLEAR would fail there),
+captured over the whole scene: before 11-01 the add-on took the resuming CLEAR for an erase, and
+the quarter drawn after it narrowed the crop, and with that observation dropped
+altogether (4b3f9cee) the case was mono, since the CLEAR was the frame's only proof of the
+depth's state after the suspending list (the fixture's second list counts as uncovered, which
+unproves every state). The other cases
 cover complementary rotation becoming concurrent rendering,
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,

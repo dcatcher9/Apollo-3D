@@ -139,13 +139,26 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 	// A resuming pass continues the pass a suspending one left in an earlier
 	// recording: the pair declares the same accesses, and its boundary renders
 	// as ending and beginning PRESERVE, so only the first pass of the chain
-	// applies the beginning access. Until 11-01 a resuming pass's depth CLEAR
-	// or DISCARD was observed again, after the draws of the recording before.
-	const bool begins = depth_stencil_desc != nullptr && (flags & render_pass_flags::resume) == render_pass_flags::none;
-	if (begins && depth_stencil_desc->depth_load_op == render_pass_load_op::clear)
+	// applies the beginning access, and a resuming pass's depth CLEAR or
+	// DISCARD erases nothing. Its CLEAR still declares the DEPTH_WRITE state
+	// the pass writes the depth in, so it proves that state as a clear does
+	// (on_clear_depth_stencil). Until 11-01 a resuming pass's CLEAR or DISCARD
+	// was observed as an erase after the draws of the recording before (the
+	// capture crop restarted at its next draw, the cleared gate, the lineage);
+	// 4b3f9cee dropped its state proof with it.
+	const bool resuming = (flags & render_pass_flags::resume) != render_pass_flags::none;
+	if (resuming && depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 &&
+		depth_stencil_desc->depth_load_op == render_pass_load_op::clear && cmd_list->get_device()->get_api() == device_api::d3d12)
+	{
+		device *const device = cmd_list->get_device();
+		const auto view = device->get_resource_view_desc(depth_stencil_desc->view);
+		if (view.texture.first_level == 0 && view.texture.first_layer == 0)
+			capture_inputs::observe_depth_clear(cmd_list, device->get_resource_from_view(depth_stencil_desc->view));
+	}
+	else if (!resuming && depth_stencil_desc != nullptr && depth_stencil_desc->depth_load_op == render_pass_load_op::clear)
 		on_clear_depth_stencil(cmd_list, depth_stencil_desc->view, &depth_stencil_desc->clear_depth, nullptr, 0, nullptr);
-	else if (begins && depth_stencil_desc->view != 0 && depth_stencil_desc->depth_load_op == render_pass_load_op::discard &&
-		cmd_list->get_device()->get_api() == device_api::d3d12)
+	else if (!resuming && depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 &&
+		depth_stencil_desc->depth_load_op == render_pass_load_op::discard && cmd_list->get_device()->get_api() == device_api::d3d12)
 	{
 		// A D3D12 depth DISCARD (observe_depth_discard). Vulkan's DONT_CARE is
 		// left to the draw-statistics picker as before.

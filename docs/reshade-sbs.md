@@ -6520,10 +6520,13 @@ end event before the native `EndRenderPass`, still inside the pass. A suspending
 the pass that resumes it is judged at its own end. Likewise a resuming pass begins nothing: a
 suspending/resuming pair declares the same accesses and its boundary renders as ending and
 beginning `PRESERVE` (the D3D12 render pass specification's suspend/resume rule), so only the first
-pass of the chain applies its depth `CLEAR` or `DISCARD`; a resuming pass's is not observed. Until
-11-01 it was, after the draws of the recording the pass was suspended in, as an erase of that
-depth (the crop, the cleared gate and the lineage; the alternating fixture's `--resume-pass`
-case). The discard also overwrites the plane for the
+pass of the chain applies its depth `CLEAR` or `DISCARD`; a resuming pass's erases nothing. Its
+`CLEAR` still declares the `DEPTH_WRITE` state the pass writes the depth in, so it proves that
+state for the end-of-frame copy as a clear does. Until 11-01 a resuming pass's `CLEAR` or `DISCARD`
+was observed as an erase after the draws of the recording the pass was suspended in: the capture
+crop restarted at the next draw (a later quarter-view part of the pass narrowed the scene's crop to
+it), and the cleared gate and the lineage saw an overwrite (the alternating fixture's
+`--resume-pass` case). The discard also overwrites the plane for the
 transfer lineage and the cleared gate, as a `DISCARD` at a pass's start does. Until 11-01 the
 ending access was not read, and the copy of such a frame read undefined depth. Vulkan's
 `DONT_CARE` store is not judged, as its load is not (the draw-statistics picker).
