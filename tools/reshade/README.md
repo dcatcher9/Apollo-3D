@@ -1546,8 +1546,9 @@ center, which the GPU copy shows (a runtime that applied the resuming CLEAR woul
 captured over the whole scene: before 11-01 the add-on took the resuming CLEAR for an erase, and
 the quarter drawn after it narrowed the crop, and with that observation dropped
 altogether (4b3f9cee) the case was mono, since the CLEAR was the frame's only proof of the
-depth's state after the suspending list (the fixture's second list counts as uncovered, which
-unproves every state). The other cases
+depth's state after the suspending list (the proven-state table counts one of the two lists as
+uncovered on about every Present, which unproves every state; why is not traced, as both are
+DIRECT lists of one device: an [open gap](../../docs/reshade-sbs.md#selecting-scene-depth)). The other cases
 cover complementary rotation becoming concurrent rendering (with A current on every Present, its
 peers B and C, drawn on every Present too, must hold their own end-of-frame copies on fewer than
 half of those Presents, A on all of them: until 11-01 every member was copied on every Present),

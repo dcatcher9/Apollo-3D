@@ -6602,6 +6602,19 @@ transfer lineage and the cleared gate, as a `DISCARD` at a pass's start does. Un
 ending access was not read, and the copy of such a frame read undefined depth. Vulkan's
 `DONT_CARE` store is not judged, as its load is not (the draw-statistics picker).
 
+Open gap (11-01, cause not traced): in the alternating fixture's `--resume-pass` case the
+proven-state table counts one of the two lists of the frame's one `ExecuteCommandLists` call as
+`uncovered` on about every Present (in each run of the case, before and after the fix), and an
+uncovered list unproves every state. Both are DIRECT lists of the same device, hooked at creation,
+so their method-table verdict (`states_covered`) should match; whether a per-list method table,
+`states_covered`'s limit of 16 new checks a second or the enhanced-barrier probe
+(`native_observer::states_ready`) gives the second verdict is not known. The case passes because the
+resuming pass's `CLEAR` proves `DEPTH_WRITE` after the uncovered list; a game that records the
+passes before its end of frame in several lists of one type, with no such proof after the last one,
+would have its end-of-frame copies refused (`end_of_frame_refused` with `last=missing_state`): held
+within the source age, then mono (fail-safe). Tracing it needs a run that logs each list's first
+method-table word and `states_ready`'s result at the first uncovered verdict.
+
 A Present on which no current copy can be shown holds the last good depth, as the API providers
 do: it shows the capture the runtime showed on its previous Present again, as reused depth, for
 at most the source age (250 ms, [`freshness.h`](../tools/reshade/freshness.h)) after the Present on
