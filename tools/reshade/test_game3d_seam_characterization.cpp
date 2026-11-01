@@ -659,6 +659,15 @@ namespace sunshine_streamline::depth_capture {
         bool expired, presented;
       };
       constexpr auto age = sunshine_freshness::source_age_ms;
+      // Dynamic mode with numFramesToGenerate 0 (lane L-fg, F4, 11-01): its
+      // count reads as 1 generated Present, as the grant and the UI read it;
+      // until then the deferral clock and DLSS-G's evaluation window took it
+      // as none, so a hitch lapsed the frame's deferred copy at an earlier
+      // frame's generated Present.
+      sunshine_streamline::frame_generation_snapshot dynamic;
+      dynamic.known = dynamic.enabled = dynamic.automatic = true;
+      dynamic.mode = 3;
+      const auto dynamic_frames = dynamic.generated_presents();
       const row rows[] {
         {"Within the source age a deferral never expires", age - 1, 0, -1, 5, false, false, false},
         {"Its frame's Present after a hitch of the source age, no Present since its tag call", age + 150, 0, -1, 0, true, false, true},
@@ -669,6 +678,8 @@ namespace sunshine_streamline::depth_capture {
         {"Without frame generation a Present since its tag call was its frame's", age + 150, 0, -1, 1, true, true, true},
         {"DLSS-G evaluated its frame after the tag call, no Present since: the Present is that frame's", age + 150, 0, 2, 2, false, false, true},
         {"a Present came after that evaluation: past", age + 150, 0, 1, 2, false, true, false},
+        {"Dynamic mode without a declared count: after an earlier frame's generated Present", age + 150, dynamic_frames, -1, 1, false, false, false},
+        {"Dynamic mode without a declared count: two Presents since, one of them its frame's", age + 150, dynamic_frames, -1, 2, false, true, false},
       };
       for (const auto &r : rows) {
         fg::deferral_evaluations value;

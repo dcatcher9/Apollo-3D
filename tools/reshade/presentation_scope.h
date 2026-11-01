@@ -276,6 +276,15 @@ namespace sunshine_streamline {
     // Enabled: the tick of the options call that turned FG on in this epoch,
     // kept while later calls leave it on (depth_capture::frame_generation_scope_live).
     std::uint64_t enabled_tick{};
+    // The Presents DLSS-G adds per real frame under these options: their
+    // generated count, 1 while enabled without one (Dynamic mode with
+    // numFramesToGenerate 0, whose count DLSS-G may pick), 0 without FG.
+    // Every reader of a viewport's count takes it so: the deferral clock
+    // (present_deferred) and DLSS-G's evaluation window
+    // (deferral_evaluations), as the Present's grant (present_fg) and the UI
+    // (ui_evidence) do. Until 11-01 the deferral clock and the evaluation
+    // window took Dynamic's 0 as no generated Present (F4).
+    std::uint32_t generated_presents() const { return enabled ? (generated_frames ? generated_frames : 1u) : 0u; }
   };
   // Successful, version-checked game options only. Enabled means requested by
   // the game; it does not identify any particular real/generated presentation.

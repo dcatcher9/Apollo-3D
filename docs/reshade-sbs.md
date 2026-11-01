@@ -4309,7 +4309,13 @@ of frames to generate inbetween fully rendered frames" for every mode and adds f
 `dynamicTargetFrameRate` ("Target frame rate for dynamic frame generation when enabled") and
 `DLSSGState::bIsDynamicMFGSupported`. It does not say whether Dynamic with a count of 0 picks its
 own count or generates nothing, so such a scope binds no viewport in a tie of two active views
-([Streamline depth selection](#streamline-depth-selection)).
+([Streamline depth selection](#streamline-depth-selection)). Every reader of its count takes it as
+1 generated Present per real frame (`frame_generation_snapshot::generated_presents`): the Present's
+grant, the UI's count, the deferral clock and DLSS-G's evaluation window (until 11-01 the last two
+took it as none, so after a hitch of the source age a frame's deferred copy lapsed at an earlier
+frame's generated Present: lane L-fg, F4, seam rows `P5 deferral age` with Dynamic mode). A true
+Dynamic multiplier above 1 can still lapse a deferral after such a hitch; DLSS-G's own copy of the
+frame then supplies it.
 The observer intercepts both newly returned and previously cached FG options function pointers.
 Resolving the public function or loading middleware does not enable FG; a successful game options
 call is still required. Global `OnlyValidNow` tags may pair with the latest successful constants
@@ -4492,7 +4498,7 @@ frame's Present would pair one frame's depth with the previous frame's camera. A
 frame's tag call of the viewport replaces it, or the source age passed at a Present that cannot be
 its frame's own (`deferral_evaluations::expired`): one with more Presents since the frame's newest
 tag call than the earlier frames' generated ones DLSS-G may still present before it (the FG
-options' generated count, none with FG off), and not the first after DLSS-G evaluated a frame
+options' generated count, 1 while FG is on with no count, none with FG off), and not the first after DLSS-G evaluated a frame
 following that call. The tag call and DLSS-G's evaluation are stamped with the ordinal of the
 Present that presents the frame being recorded (`depth_capture::next_present_ordinal`). Until 10-28
 the source age alone lapsed it, also at its frame's own Present after a hitch of that age between

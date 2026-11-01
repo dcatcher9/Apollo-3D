@@ -350,7 +350,7 @@ namespace sunshine_streamline {
       // frame's copy lapsed after a hitch at a Present still its own.
       const auto mode = current.mode(entry.viewport);
       const bool generating = mode.known && mode.enabled;
-      const std::uint32_t generated = generating ? mode.generated_frames : 0;
+      const std::uint32_t generated = generating ? mode.generated_presents() : 0;
       if (!past && pin) for (const auto &record : pin->records) if (record.used && record.viewport == entry.viewport) {
         past = record.camera_serial > entry.serial && !same_frame(record.camera_frame, entry.frame);
         break;
@@ -514,7 +514,7 @@ namespace sunshine_streamline {
     const auto tick = GetTickCount64();
     // This frame's Present comes next (present_deferred).
     AcquireSRWLockExclusive(&evaluation_supply_lock);
-    fg_evaluation.evaluated(fg.epoch, fg.viewport, tick, depth_capture::next_present_ordinal(), fg.generated_frames);
+    fg_evaluation.evaluated(fg.epoch, fg.viewport, tick, depth_capture::next_present_ordinal(), fg.generated_presents());
     ReleaseSRWLockExclusive(&evaluation_supply_lock);
     const auto source_id = sunshine_scene_depth::fg_source_id(fg.viewport);
     if (out.depth == depth_outcome::not_offered) {
