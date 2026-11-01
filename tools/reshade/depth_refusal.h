@@ -21,12 +21,15 @@
 
 namespace sunshine_depth_refusal {
   // The oracle's REFUSE classes in its own order, then reasons outside them:
-  // hold is the oracle's HOLD, not a refusal (an untag, S9; an SDK failure,
-  // S21b; an open render pass, S23); absent means the call named no depth
+  // hold is the oracle's HOLD, not a refusal (an untag, S9; an open render
+  // pass, S23); absent means the call named no depth
   // input, or the game marked the frame as not rendering game frames;
   // internal is the add-on's own observation, frame tracking, identity or
   // capacity, never a contract decision; unclassified is a reason this file
-  // does not know, which needs a row.
+  // does not know, which needs a row. Two contract decisions name no reason
+  // here: an SDK failure (S21b) invalidates its copy unread
+  // (capture_failure::evaluation_failed), and two active viewports (S19) are
+  // refused by the capture owner's selection (ambiguous_views), not a gate.
   enum class reason_class : std::uint32_t {
     none,
     state_unprovable,
@@ -100,12 +103,10 @@ namespace sunshine_depth_refusal {
     {"inactive", reason_class::internal},
     {"snapshot-busy", reason_class::internal},
     {"missing-evaluation", reason_class::internal},
-    {"evaluation-failed", reason_class::hold},  // S21b.
     {"observation-lost", reason_class::internal},
     {"untracked-frame", reason_class::internal},
     {"missing-depth", reason_class::absent},
     {"stale-evaluation", reason_class::internal},  // The frame's camera is older than its tag.
-    {"ambiguous-viewport", reason_class::ambiguous_view},  // S19.
     // Tag gate literals (streamline_camera_data.h tag_refusal and the gates after it).
     {"absent", reason_class::absent},
     {"unsupported_unreadable", reason_class::malformed},

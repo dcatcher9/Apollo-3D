@@ -743,11 +743,9 @@ namespace {
     using matrix::resource_form;
     using matrix::resource_shape;
     using matrix::sl_case;
-    using matrix::sl_result;
     using matrix::struct_form;
     using matrix::subresource_barrier;
     using matrix::tag_commands;
-    using matrix::viewports;
     using depth_outcome = sunshine_streamline::frame_generation::depth_outcome;
     refusal_counts counts;
     for (const auto &entry : refusal::named_reasons) {
@@ -765,10 +763,10 @@ namespace {
     using sunshine_streamline::evidence_status;
     // Every enumerator (their numbers have gaps: streamline_camera_probe.h).
     for (const auto value : {evidence_status::inactive, evidence_status::busy, evidence_status::missing_evaluation,
-           evidence_status::evaluation_failed, evidence_status::observation_lost, evidence_status::untracked_frame,
+           evidence_status::observation_lost, evidence_status::untracked_frame,
            evidence_status::missing_constants, evidence_status::rejected_constants, evidence_status::invalid_camera,
            evidence_status::camera_reset, evidence_status::missing_depth, evidence_status::stale,
-           evidence_status::ambiguous_viewport, evidence_status::source_associated_evaluation}) {
+           evidence_status::source_associated_evaluation}) {
       require(std::strcmp(sunshine_streamline::name(value), "unknown") != 0, "an evidence status has no name");
       const bool admitted = value == evidence_status::source_associated_evaluation || value == evidence_status::missing_constants || value == evidence_status::rejected_constants || value == evidence_status::invalid_camera || value == evidence_status::camera_reset || value == evidence_status::untracked_frame;
       require(admitted || refusal::classify(sunshine_streamline::name(value)) != refusal::reason_class::unclassified, "an evidence status the source gate names has no refusal class");
@@ -809,8 +807,6 @@ namespace {
       {"invalid-extent", expect(outside)},
       {"not-valid-until-present", expect(tag(now, evaluate))},
       {"missing-resource", expect(with(at_evaluate, &sl_case::resource, resource_form::null_native))},
-      {"evaluation-failed", expect(with(at_evaluate, &sl_case::evaluate_result, sl_result::error))},
-      {"ambiguous-viewport", expect(with(at_evaluate, &sl_case::views, viewports::two_active))},
       {"no_retained_source", expect(msaa)},
       {"missing_parameters", expect(with(ngx_case {}, &ngx_case::hw_depth, ngx_hw_depth::other))},
       {"missing_parameters", expect(with(ngx_case {}, &ngx_case::subrect, ngx_subrect::outside))},

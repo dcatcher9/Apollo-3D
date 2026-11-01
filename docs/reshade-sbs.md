@@ -4840,7 +4840,13 @@ viewports evaluating) or inactive, one past the source age that the Present does
 also a head refused before its capture existed whose source is the FG input, and
 `fg_scope_mismatch`), a released NGX feature (`retire_source`; FG Off retires only the FG role,
 above) and an expired association
-(`expire_association`). So does ownership moving to the other provider: every copy recorded before
+(`expire_association`). Two SR viewports evaluating together are such an interruption at every
+Present while both views are within the source age, whatever FG binds: neither is shown, the
+display holds its last copy of the newest nomination's viewport within the source age (another
+viewport's copy it drops, `source_changed`), and the Present is then mono. The API contract's owner
+ruling R5 lets the viewport bound to frame generation break that tie; the add-on does not implement
+it, so such a game is mono there as well (the contract matrix's pending row `S19-two-active`,
+11-01). So does ownership moving to the other provider: every copy recorded before
 the new owner's chosen copy, and the previous owner's last selected copy, is historical
 (`establish_provider`), because the consumed watermark restarts there and cannot compare the two
 providers' sequences, so the previous provider's copy already shown, or one older than the new

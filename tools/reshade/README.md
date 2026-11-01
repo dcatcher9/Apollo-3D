@@ -1942,6 +1942,20 @@ with the copy point that decides; a gap at a copy point the frame reaches before
 also shows its refusal class there. Only `sl27` can show a row stale: the others sample their
 release's cells.
 
+An SDK failure (S21b) and two active viewports (S19) are decided outside the gates, so no refusal
+name stands for either (11-01). A failed tag call or evaluate invalidates that call's copy unread
+(`capture_failure::evaluation_failed`) and the Present holds within the source age, then is mono:
+S21b's HOLD, which the runtime families' `tag_result=error` and `evaluate_result=error` cells judge.
+Two SR viewports active together each still copy at their copy points; the capture owner's
+selection refuses both while both views are within the source age (`ambiguous_views`), so the
+display holds its last copy of the newest nomination's viewport within the source age, or drops
+another viewport's, then is mono. No hook or runtime cell runs two active viewports (the hook
+layer's `views` runs one and five rotating; a runtime case has one viewport), so the copies made and
+R5's FG tie-break, which the add-on does not implement (also mono), are the hook table's pending
+row `S19-two-active`. Until then the evidence names `evaluation-failed` and `ambiguous-viewport`,
+which nothing had set since structure rounds D6 and D3, stood in for both in
+`reshade_contract_matrix_cpu`'s refusal pairing.
+
 Family `ngx` drives Super Resolution, Ray Reconstruction and an unknown feature through `Depth`
 and the DLSS keys, and DLSS-G's own evaluation through `DLSSG.*` on a viewport whose FG the 2.7.30
 interposer's options enabled, over feature, `DLSS.Use.HW.Depth`, how the depth is set, subrect,

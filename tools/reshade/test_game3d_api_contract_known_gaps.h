@@ -124,10 +124,17 @@ namespace game3d_contract::known_gaps {
       return legal(value) && (expected.kind == outcome_kind::capture || expected.kind == outcome_kind::continuous) && !either(expected);
     }
 
+    // Two SR viewports active together (S19). No hook or runtime cell runs
+    // them: views runs one and five_rotating.
+    constexpr bool two_active(const sl_case &value) {
+      return value.views == viewports::two_active;
+    }
+
   }  // namespace streamline
 
   inline constexpr row<sl_case> sl_rows[] {
     {"none", &rules::S1, kind::pending, &streamline::no_cell, "No Streamline hook gap remains: Stage 3 batch B closed S4, S15, S16 and S16d (and with earlier fixes every other row). This row matches no cell."},
+    {"S19-two-active", &rules::S19, kind::pending, &streamline::two_active, "Two SR viewports active together (11-01, round 2): each viewport's copy point still copies its depth, and the capture owner's selection refuses, not a gate (no refusal is recorded): while both views are within the source age no Present uses either (ambiguous_views, which moves the admission watermark), so the display holds its last copy of the newest nomination's viewport within the source age, or drops another viewport's (source_changed), then mono. With FG in scope the viewport bound to it does not break the tie (R5): mono as well. Fail-safe, never another viewport's depth; owner work: R5's tie-break and skipping the unused copies. No cell runs two active viewports, so this row matches none."},
   };
 
   // A Streamline frame judged at its Present by the runtime layer

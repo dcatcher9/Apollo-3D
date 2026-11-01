@@ -124,12 +124,15 @@ namespace sunshine_streamline {
   // 11-14, 18 and 19 were unsupported_depth, depth_not_ready, source_mismatch,
   // extent_mismatch, command_associated_evaluation and
   // tracked_content_evaluation, which nothing has set since structure refactor
-  // rounds D2 and D3; the other values keep their numbers.
+  // rounds D2 and D3; 3 and 16 were evaluation_failed (none since D6: a failed
+  // evaluate invalidates its copy, capture_failure::evaluation_failed) and
+  // ambiguous_viewport (none since D3: two active viewports are the capture
+  // owner's ambiguous_views). The other values keep their numbers.
   enum class evidence_status {
-    inactive, busy, missing_evaluation, evaluation_failed, observation_lost,
+    inactive, busy, missing_evaluation, observation_lost = 4,
     untracked_frame, missing_constants, rejected_constants, invalid_camera,
-    camera_reset, missing_depth, stale = 15, ambiguous_viewport,
-    source_associated_evaluation
+    camera_reset, missing_depth, stale = 15,
+    source_associated_evaluation = 17
   };
   struct evaluation_snapshot {
     evidence_status status{evidence_status::missing_evaluation};

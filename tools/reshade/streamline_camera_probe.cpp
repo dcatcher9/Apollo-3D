@@ -643,7 +643,6 @@ namespace sunshine_streamline {
       case evidence_status::inactive: return "inactive";
       case evidence_status::busy: return "snapshot-busy";
       case evidence_status::missing_evaluation: return "missing-evaluation";
-      case evidence_status::evaluation_failed: return "evaluation-failed";
       case evidence_status::observation_lost: return "observation-lost";
       case evidence_status::untracked_frame: return "untracked-frame";
       case evidence_status::missing_constants: return "missing-frame-constants";
@@ -652,7 +651,6 @@ namespace sunshine_streamline {
       case evidence_status::camera_reset: return "camera-reset";
       case evidence_status::missing_depth: return "missing-depth";
       case evidence_status::stale: return "stale-evaluation";
-      case evidence_status::ambiguous_viewport: return "ambiguous-viewport";
       case evidence_status::source_associated_evaluation: return "source-associated-evaluation-reshade-frame-unverified";
     }
     return "unknown";
