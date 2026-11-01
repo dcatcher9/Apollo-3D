@@ -1065,20 +1065,30 @@ namespace game3d_continuity {
 
     // The newest copy of sources certainly readable at this Present (as
     // readable_after counts them) of the same kind as the shown copy
-    // (copy_fg_input) and with a capture id above it, with its kind flag;
-    // 0 when there is none, or when the shown copy is not one the judge knows
-    // (its kind unknown).
+    // (copy_fg_input), of a later frame and with a capture id above it, with
+    // its kind flag; 0 when there is none, or when the shown copy is not one
+    // the judge knows (its kind unknown).
     // lineage: of either kind (an FG copy held after FG Off), whether or not
     // the judge knows the shown copy.
+    // A copy of the shown copy's own frame (another source's, such as the
+    // frame's SR copy beside its tag copy, or one made later in that frame)
+    // is that frame's depth too, so it is no newer depth: the add-on's
+    // consumed frame stands (11-01: seed dda773a575be6561 at frame 92, where
+    // frame 91's SR copy on the game's queue had no copy-out storage and
+    // became readable only after its Present, and the display held that
+    // frame's tag copy).
     std::uint64_t readable_newer(std::uint64_t shown, std::uint8_t sources, bool lineage = false) const {
       if (!shown) {
         return 0;
       }
-      std::uint64_t kind = UINT64_MAX;
+      std::uint64_t kind = UINT64_MAX, frame {};
+      bool known {};
       for (const auto &copy : copies_) {
         for (const auto value : copy.capture) {
           if (value && (value & ~copy_fg_input) == shown) {
             kind = value & copy_fg_input;
+            frame = copy.frame;
+            known = true;
           }
         }
       }
@@ -1087,7 +1097,7 @@ namespace game3d_continuity {
       }
       std::uint64_t newest {};
       for (const auto &copy : copies_) {
-        if (!readable_now(copy)) {
+        if (!readable_now(copy) || (known && copy.frame <= frame)) {
           continue;
         }
         for (unsigned i = 0; i != copy.capture.size(); ++i) {

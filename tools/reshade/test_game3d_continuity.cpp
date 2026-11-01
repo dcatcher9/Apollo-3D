@@ -12,7 +12,9 @@
 // call is readable at its own Present: the freshness rule counts it there,
 // and a stall inside such a frame is no warm-up. Where each copy's capture id
 // is known, a Present that shows a copy older than a readable copy of the
-// same kind is stale_shown with no bound (a single Present's lag), a real
+// same kind of a later frame is stale_shown with no bound (a single
+// Present's lag; since 11-01 a copy of the shown copy's own frame is no
+// newer depth), a real
 // Present never shows a copy recorded before the one the last real Present
 // showed (a handover to the other API, and since 10-31 the same API's other
 // source too), and a copy deferred to its frame's Present counts by the
@@ -728,6 +730,67 @@ namespace {
     }
   }
 
+  // A copy of the shown copy's own frame is that frame's depth too: the
+  // frame's SR copy on another queue, readable only after its Present beside
+  // the frame's tag copy that Present showed, is no newer depth, so a later
+  // Present without a newer frame may hold the tag copy (the add-on's
+  // consumed frame). Until 11-01 the judge took any higher capture id for
+  // newer depth (seed dda773a575be6561 at frame 92, stale_shown alone, every
+  // run). A later frame's copy readable beside that hold still makes it
+  // stale_shown.
+  void same_frame_copy_is_no_newer() {
+    for (const bool later_frame : {false, true}) {
+      continuity::judge judge;
+      std::uint64_t now = 1000, present = 1;
+      for (std::uint64_t i = 0; i != 3; ++i, now += 16) {
+        continuity::supply frame;
+        frame.add(continuity::sr_evaluate, now);
+        frame.immediate = continuity::sr_evaluate;
+        frame.capture[0] = 10 + i;
+        auto record = shown(present++, now, source_slot::scene_depth, now);
+        record.depth_capture = 10 + i;
+        judge.present(record, frame, "test");
+      }
+      // The frame's tag copy at its call, which its Present shows, and its
+      // SR copy on another queue, complete at the look after that Present.
+      bool complete = false;
+      continuity::supply both;
+      both.add(continuity::tag_copy | continuity::sr_evaluate, now);
+      both.immediate = continuity::tag_copy;
+      both.elsewhere = continuity::sr_evaluate;
+      both.capture[1] = 20;
+      both.completions.push_back({continuity::sr_evaluate, [&complete] { return complete; }, nullptr, false, 22, false});
+      auto tag = shown(present++, now, source_slot::scene_depth, now);
+      tag.depth_capture = 20;
+      complete = true;
+      judge.present(tag, both, "test");
+      require(judge.take().empty(), "a Present that showed its frame's tag copy, its SR copy in flight, was not clean");
+      // Two Presents hold the tag copy: one with no source, one with a later
+      // frame's own copy (later_frame) or none again.
+      for (unsigned i = 0; i != 2; ++i) {
+        now += 16;
+        continuity::supply next;
+        if (later_frame && i == 1) {
+          next.add(continuity::sr_evaluate, now);
+          next.immediate = continuity::sr_evaluate;
+          next.capture[0] = 24;
+        } else {
+          next.allow(continuity::generic_boundary, now);
+        }
+        auto held = shown(present++, now, source_slot::scene_depth, now - 16 * (i + 1));
+        held.depth_capture = 20;
+        held[source_slot::scene_depth].state = source_state::held;
+        judge.present(held, next, "test");
+      }
+      const auto violations = judge.take();
+      const bool stale = violations.size() == 1 && violations[0].kind == continuity::violation_kind::stale_shown &&
+                         violations[0].shown_capture == 20 && violations[0].newer_capture == 24;
+      require(later_frame ? stale : violations.empty(),
+        later_frame ? "a Present holding a frame's tag copy beside a later frame's readable copy was not stale_shown"
+                    : "a Present holding a frame's tag copy beside the same frame's SR copy, readable after its Present, was stale_shown");
+    }
+  }
+
   // The stale rule ages a Present that holds an API copy from the newest
   // offered API copy's made tick, not its frame's stamp: after a brief hitch
   // before a frame's calls its copy is that much younger than the frame
@@ -809,6 +872,7 @@ int main() {
   single_present_lag_by_capture();
   handover_never_steps_back();
   deferred_copy_counts_by_its_learned_capture();
+  same_frame_copy_is_no_newer();
   fg_hold_after_fg_off_judged_by_lineage();
   stale_rule_ages_from_the_newest_copy();
   generated_drop_after_late_signal();
@@ -831,7 +895,7 @@ int main() {
             "for the stale rule; a frame's own copy at its call is readable at its Present after a stall wherever it "
             "came; a hold past the source age is stale; copies age from when they were made; a no-source frame holds "
             "under strict_holds; a generated Present after its FG frame's real Present presents that frame; a "
-            "Present one copy behind a readable copy of its kind is stale_shown by capture id, also a deferred copy's "
+            "Present one copy behind a later frame's readable copy of its kind is stale_shown by capture id, a copy of its own frame is no newer, also a deferred copy's "
             "learned one; a real Present never shows a copy recorded before the last real Present's, of either API; "
             "after FG Off a held FG copy is judged by its lineage, "
             "also against the SR copies the FG hold kept off-screen; the stale rule ages a hold from its newest copy's "

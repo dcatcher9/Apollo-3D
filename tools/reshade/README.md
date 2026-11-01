@@ -2003,8 +2003,13 @@ frame record names the shown copy's capture id (`depth_capture`), and the sessio
 the id of the copy each depth call published (the test add-on's `SunshineStreamlineTestNewestCopy`,
 read before and after the call; `supply::capture`, also a completion's). A Present is then
 `stale_shown`, with no bound, when a copy among the same readable set, of the shown copy's own kind
-(an FG scope's input, or ordinary depth: FG keeps its viewport while it can supply), has a larger
-capture id than the shown copy. A tag copy deferred to its frame's Present (R2) has no id at its
+(an FG scope's input, or ordinary depth: FG keeps its viewport while it can supply), of a later
+frame, has a larger capture id than the shown copy. A copy of the shown copy's own frame (another
+source's, such as the frame's SR copy beside its tag copy, or one made later in that frame) is that
+frame's depth too, so it is no newer (11-01: seed `dda773a575be6561` alone held frame 91's tag
+copy at frame 92 while frame 91's SR copy on the game's queue, without copy-out storage, became
+readable after its Present; the judge called that stale_shown in every run). A tag copy deferred
+to its frame's Present (R2) has no id at its
 call: the session timelines read the newest published copy right before and after that Present and
 name it then (`judge::learned_capture`, since 10-31; until then it kept the tick bound, which a
 one-frame lag passes). A copy whose id stays unknown keeps the tick bound. After FG Off (`supply::fg_off`, set by the session timelines) a shown
