@@ -10,14 +10,14 @@
 #include <array>
 #include <cstdint>
 
-// presentation_scope (docs/reshade-sbs.md, Presentation scope): the FG policy
-// and value types and their pure predicates, each under its own name. Their
-// instances stay with their consumers (the provider's source_policy, the
-// exporter runtime's source_alpha_policy). The FG mode itself is the probe's
-// FG options store (presentation_scope_mode.inl), whose reads always get the
-// last committed options: no FG read is busy since 11-01, and the busy rules
-// each reader had for one are deleted. The SL adapter bodies that read live
-// state stay in sl_nomination.inl and sl_frame_generation.inl.
+// presentation_scope (docs/reshade-sbs.md, Presentation scope): the FG value
+// types, the one FG state machine (fg_view) and each Present's FG snapshot
+// (present_fg), and their pure predicates, each under its own name. The FG
+// mode itself is the probe's FG options store (presentation_scope_mode.inl),
+// whose reads always get the last committed options: no FG read is busy since
+// 11-01, and the busy rules each reader had for one are deleted. The SL
+// adapter bodies that read live state stay in sl_nomination.inl and
+// sl_frame_generation.inl.
 
 // DLSS-G's own inputs of one real frame, read from its NGX evaluation
 // (feature 11, NVSDK_NGX_Feature_FrameGeneration) by ngx_depth_source.cpp and
@@ -287,36 +287,77 @@ namespace sunshine_streamline {
 
 namespace sunshine_streamline::presentation_scope {
   enum class fg_route { none, owned, silent };
+
+  // The one FG state machine (docs/reshade-sbs.md, Presentation scope). Each
+  // Present's FG read updates the process's one view once (take_present_fg),
+  // and depth and UI read their two projections of that state:
+  // - depth: an observed mode names the source choice; until the first one FG
+  //   is not required (the owner's 11-01 ruling: an unknown mode is no FG,
+  //   Generic allowed). An ambiguous read, or an unavailable one while FG is
+  //   required, revokes FG scope while independent ordinary depth remains
+  //   eligible (exclude_unconfirmed_fg); this never turns a failed Off
+  //   request into confirmed Off.
+  // - ui: the last observed mode, kept through an ambiguous or unavailable
+  //   read (the UI's safe side: it keeps generated frames' current color out
+  //   of UI detection), cleared while the observer is inactive.
+  // So under an ambiguous read depth excludes FG input while the UI keeps the
+  // last confirmed mode: their one documented difference (owner ruling Q1,
+  // 11-01). Until 11-01 the provider runtime and each exporter runtime kept a
+  // policy of their own, updated from two reads at two points of the Present
+  // (PD6, PD11): an options call between them gave the UI one mode and depth
+  // the other for that Present, and a runtime created during an ambiguous
+  // period started with an unknown UI mode beside an older runtime's known one.
+  struct fg_view {
+    // Returns the depth projection after the read.
+    depth_capture::selection_policy update(frame_generation_query_status status,
+        const frame_generation_snapshot &value, bool observer_active = true) {
+      if (status == frame_generation_query_status::observed) {
+        depth_ = value.enabled ? depth_capture::selection_policy{true, value.epoch, value.viewport, false, value.enabled_tick} :
+          depth_capture::selection_policy{};
+        generated_frames_ = value.enabled ? value.generated_frames : 0;
+      } else if (status == frame_generation_query_status::ambiguous || depth_.require_frame_generation) {
+        depth_ = {};
+        depth_.exclude_unconfirmed_fg = true;
+        generated_frames_ = 0;
+      }
+      if (!observer_active) ui_ = {};
+      else if (status == frame_generation_query_status::observed && value.known)
+        ui_ = {value.known, value.enabled, value.automatic, value.generated_frames, value.viewport, value.epoch, value.sequence};
+      return depth_;
+    }
+    depth_capture::selection_policy depth() const { return depth_; }
+    std::uint32_t generated_frames() const { return generated_frames_; }
+    sunshine_game3d::frame_generation_mode ui() const { return ui_; }
+  private:
+    depth_capture::selection_policy depth_;
+    std::uint32_t generated_frames_{};
+    sunshine_game3d::frame_generation_mode ui_;
+  };
+
+  // One Present's FG snapshot (take_present_fg): taken once, first thing in
+  // the Present (depth's present event), and read by every consumer of that
+  // Present on its thread: present_deferred, the UI and the provider.
+  struct present_fg {
+    // The native swapchain it was taken for (0: none taken).
+    std::uint64_t swapchain{};
+    // The any-viewport read (query_frame_generation) and the view after it.
+    frame_generation_query_status read{frame_generation_query_status::unavailable};
+    frame_generation_snapshot fg;
+    depth_capture::selection_policy depth;
+    std::uint32_t generated_frames{};
+    sunshine_game3d::frame_generation_mode ui;
+    bool observer_active{};
+    // Each viewport's committed FG options at the take (viewport_slots of
+    // them; an unused entry has sequence 0).
+    std::array<frame_generation_snapshot, frame_generation::viewport_slots> modes{};
+    frame_generation_snapshot mode(std::uint32_t viewport) const {
+      for (const auto &value : modes) if (value.sequence && value.viewport == viewport) return value;
+      return {};
+    }
+  };
 }
 
 namespace sunshine_streamline::provider {
-  // An observed mode names the source choice; until the first one FG is not
-  // required (the owner's 11-01 ruling: an unknown mode is no FG, Generic
-  // allowed). Observation loss revokes FG scope while independent ordinary
-  // depth remains eligible. This does not turn a failed Off request into
-  // confirmed Off. Until 11-01 a busy read (one that lost the metadata
-  // writers' race) before any observed mode required FG it could not name
-  // (selection_policy{true}: a mono Present where Generic would supply); no
-  // read is busy since the FG options store.
-  struct frame_generation_policy {
-    depth_capture::selection_policy update(frame_generation_query_status status,
-        const frame_generation_snapshot &value) {
-      if (status == frame_generation_query_status::observed) {
-        selected_ = value.enabled ? depth_capture::selection_policy{true, value.epoch, value.viewport, false, value.enabled_tick} :
-          depth_capture::selection_policy{};
-        generated_frames_ = value.enabled ? value.generated_frames : 0;
-      } else if (status == frame_generation_query_status::ambiguous || selected_.require_frame_generation) {
-        selected_ = {};
-        selected_.exclude_unconfirmed_fg = true;
-        generated_frames_ = 0;
-      }
-      return selected_;
-    }
-    std::uint32_t generated_frames() const { return generated_frames_; }
-  private:
-    depth_capture::selection_policy selected_;
-    std::uint32_t generated_frames_{};
-  };
   // Enabled FG owns its viewport's depth only while its scope is live
   // (depth_capture::frame_generation_scope_live). A silent scope selects as
   // without FG for this acquisition, so that viewport's ordinary SR/RR depth
@@ -404,20 +445,3 @@ namespace sunshine_ngx {
   }
 }
 
-namespace sunshine_game3d {
-  struct source_alpha_ui_policy {
-    source_alpha_ui_decision update(bool requested, frame_generation_mode observed, bool observer_active) {
-      // An ambiguous or lost observation cannot turn a known FG mode off.
-      // Only an observed mode change or genuine observer/runtime shutdown
-      // clears it.
-      if (!observer_active) mode = {};
-      else if (observed.known) mode = observed;
-      source_alpha_ui_decision result;
-      result.requested = requested;
-      result.fg = mode;
-      return result;
-    }
-  private:
-    frame_generation_mode mode;
-  };
-}

@@ -58,7 +58,7 @@ namespace sunshine_streamline {
   // frame_generation::deferral_evaluations); drops those whose frame ended.
   // True when it recorded a copy: the caller submits immediate before the
   // Present.
-  bool present_deferred(std::uint64_t queue, std::uint64_t immediate);
+  bool present_deferred(std::uint64_t swapchain, std::uint64_t queue, std::uint64_t immediate);
 
   enum class frame_identity_kind { unavailable, v1_numeric, v2_observed_token, v2_constants_call };
   struct frame_identity {
@@ -163,6 +163,18 @@ namespace sunshine_streamline {
 
   bool query_frame_generation(std::uint32_t viewport, frame_generation_snapshot &output,
     frame_generation_query_status *status = nullptr);
+  // One FG snapshot per Present (docs/reshade-sbs.md, Presentation scope):
+  // take_present_fg reads the FG mode once, first thing in a Present (depth's
+  // present event, for every API), updates the process's one fg_view and
+  // keeps the result for that Present's thread; end_present_fg drops it at
+  // the Present's end. present_frame_generation returns the snapshot taken
+  // for the swapchain's Present on this thread; a consumer that finds none
+  // takes its own (fail-safe, counted by present_fg_fallbacks), so it never
+  // reads another Present's.
+  void take_present_fg(std::uint64_t swapchain);
+  void end_present_fg();
+  const presentation_scope::present_fg &present_frame_generation(std::uint64_t swapchain);
+  std::uint64_t present_fg_fallbacks();
 
   // DLSS-G's own NGX evaluation of one real frame (presentation_scope.h).
   // Its inputs belong to the one viewport whose FG options were observed

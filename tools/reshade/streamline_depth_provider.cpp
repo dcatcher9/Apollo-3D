@@ -70,7 +70,6 @@ namespace sunshine_streamline::provider {
       sunshine_depth_statistics::tile_layout pending_grid;
       std::uint64_t pending_id{}, pending_texture{}, next_sample{};
       bool owns_pass{}, open{}, have_latest{};
-      frame_generation_policy source_policy;
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
       // The last begin's FG decision (test_frame_generation_decision).
       unsigned test_fg_decision{};
@@ -319,7 +318,6 @@ namespace sunshine_streamline::provider {
       data->frame = {}; data->output = {};
       data->last_valid = {};
       data->source_metadata = {};
-      data->source_policy = {};
       data->fg_scope_silent = false;
       data->bound_view = {};
       data->effects_view = {};
@@ -399,7 +397,6 @@ namespace sunshine_streamline::provider {
     data->open = data->owns_pass = data->handoff_hold = false;
     data->frame = {}; data->output = {};
     if (!allowed || runtime->get_device()->get_api() != api::device_api::d3d12) {
-      data->source_policy = {};
       data->fg_scope_silent = false;
       data->cache.invalidate(!allowed ? "provider_disallowed" : "unsupported_API");
       data->presentations.reset();
@@ -435,13 +432,13 @@ namespace sunshine_streamline::provider {
       if (depth_capture::capacity_report(bound, sizeof(bound)))
         sunshine_log::message(reshade::log::level::warning, bound);
     }
-    frame_generation_snapshot fg_source;
-    frame_generation_query_status fg_status;
-    {
-      const sunshine_game3d::slow_step step("frame generation query");
-      query_frame_generation(UINT32_MAX, fg_source, &fg_status);
-    }
-    const auto policy = data->source_policy.update(fg_status, fg_source);
+    // The FG mode of this Present (its FG snapshot, taken at its start): the
+    // depth projection of the process's one FG view, the same read the UI
+    // used for this Present.
+    const auto &present_fg = present_frame_generation(runtime->get_native());
+    const auto &fg_source = present_fg.fg;
+    const auto fg_status = present_fg.read;
+    const auto policy = present_fg.depth;
     // A silent FG scope selects as without FG (select_frame_generation_scope).
     // The policy's own confirmed FG scope is left unchanged, and it still
     // holds the queue in mono when no API source is available (associated).
@@ -452,7 +449,7 @@ namespace sunshine_streamline::provider {
     // frame that made a frame-generation call); 1 while FG is on with no
     // count, 0 without FG.
     auto selection = scope.selection;
-    selection.generated_presents = policy.require_frame_generation ? std::max(1u, data->source_policy.generated_frames()) : 0u;
+    selection.generated_presents = policy.require_frame_generation ? std::max(1u, present_fg.generated_frames) : 0u;
     // Logged when a required scope turns silent, and when it is live again
     // (FG Off ends a silent scope without a line of its own). A scope turns
     // at each frame FG supplies or misses, so the line comes at most every
@@ -733,7 +730,7 @@ namespace sunshine_streamline::provider {
       policy.epoch == stats_source.epoch && policy.viewport == stats_source.viewport;
     const std::array<std::uint64_t, 5> identity{static_cast<std::uint64_t>(stats_source.provider),
       stats_source.epoch, stats_source.source_id, stats_source.viewport,
-      data->output.frame_generation_active ? data->source_policy.generated_frames() : 0u};
+      data->output.frame_generation_active ? present_fg.generated_frames : 0u};
     if (identity != data->presentation_source) {
       data->presentations.reset();
       data->presentation_source = identity;

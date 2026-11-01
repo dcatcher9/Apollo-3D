@@ -219,7 +219,7 @@ namespace sunshine_game3d {
     // false: the API path did not run (refusal says why); Generic decides.
     bool allowed {};
     const char *refusal {"not_recorded"};
-    // The FG scope (provider::frame_generation_policy): required, required
+    // The FG scope (the FG view's depth projection, presentation_scope::fg_view): required, required
     // but silent (frame_generation_scope_live), or revoked as unconfirmed.
     bool fg_required {}, fg_silent {}, fg_excluded {};
     std::uint64_t fg_epoch {};

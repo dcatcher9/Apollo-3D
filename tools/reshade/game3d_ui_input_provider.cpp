@@ -164,16 +164,14 @@ namespace sunshine_game3d::ui_input {
       };
     }
   }
-  presentation observe() {
-    sunshine_streamline::frame_generation_snapshot fg;
-    presentation result;
-    if (sunshine_streamline::query_frame_generation(UINT32_MAX, fg))
-      result.mode = {fg.known, fg.enabled, fg.automatic, fg.generated_frames, fg.viewport, fg.epoch, fg.sequence};
-    result.observer_active = sunshine_streamline::source_enabled();
-    return result;
+  presentation observe(std::uint64_t swapchain) {
+    const auto &current = sunshine_streamline::present_frame_generation(swapchain);
+    return {current.ui, current.observer_active};
   }
-  source_alpha_ui_decision resolve(source_alpha_ui_policy &policy, const render_settings &settings, const presentation &observed) {
-    auto result = policy.update(settings.ui_protection != source_alpha_mode::off, observed.mode, observed.observer_active);
+  source_alpha_ui_decision resolve(const render_settings &settings, const presentation &observed) {
+    source_alpha_ui_decision result;
+    result.requested = settings.ui_protection != source_alpha_mode::off;
+    result.fg = observed.mode;
     result.mode = settings.ui_protection;
     return result;
   }

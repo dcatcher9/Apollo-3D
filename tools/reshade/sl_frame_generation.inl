@@ -232,7 +232,44 @@ namespace sunshine_streamline {
     }
   }
 
-  bool present_deferred(std::uint64_t queue, std::uint64_t immediate) {
+  namespace {
+    presentation_scope::present_fg take_fg(std::uint64_t swapchain) {
+      presentation_scope::present_fg out;
+      out.swapchain = swapchain;
+      query_frame_generation(UINT32_MAX, out.fg, &out.read);
+      out.observer_active = source_enabled();
+      const auto observation = observation_generation.load(std::memory_order_acquire);
+      const auto modes = read_fg_modes();
+      for (std::size_t i = 0; i != modes.size(); ++i)
+        if (modes[i].used && modes[i].observation == observation) out.modes[i] = modes[i].state;
+      AcquireSRWLockExclusive(&fg_view_lock);
+      out.depth = fg_state.update(out.read, out.fg, out.observer_active);
+      out.generated_frames = fg_state.generated_frames();
+      out.ui = fg_state.ui();
+      ReleaseSRWLockExclusive(&fg_view_lock);
+      return out;
+    }
+  }
+
+  void take_present_fg(std::uint64_t swapchain) {
+    present_snapshot = take_fg(swapchain);
+  }
+
+  void end_present_fg() {
+    present_snapshot = {};
+  }
+
+  const presentation_scope::present_fg &present_frame_generation(std::uint64_t swapchain) {
+    if (!swapchain || present_snapshot.swapchain != swapchain) {
+      fg_snapshot_fallbacks.fetch_add(1, std::memory_order_relaxed);
+      present_snapshot = take_fg(swapchain);
+    }
+    return present_snapshot;
+  }
+
+  std::uint64_t present_fg_fallbacks() { return fg_snapshot_fallbacks.load(std::memory_order_relaxed); }
+
+  bool present_deferred(std::uint64_t swapchain, std::uint64_t queue, std::uint64_t immediate) {
     if (!deferral_pending.load(std::memory_order_acquire) || !queue || !immediate) return false;
     namespace mask = sunshine_game3d::ui_mask;
     const DWORD incoming = GetLastError();
@@ -249,9 +286,9 @@ namespace sunshine_streamline {
     struct ended_frame { std::uint64_t epoch{}, serial{}; std::uint32_t viewport{}; unsigned kinds{}; };
     std::array<ended_frame, slot_count> ended;
     unsigned ended_count = 0;
-    // The viewports' committed FG options (the FG options store), and the
-    // camera metadata only for whether a later frame began.
-    const auto modes = read_fg_modes();
+    // The viewports' FG options as this Present read them (its FG snapshot),
+    // and the camera metadata only for whether a later frame began.
+    const auto &current = present_frame_generation(swapchain);
     auto pin = read_metadata();
     AcquireSRWLockExclusive(&evaluation_supply_lock);
     for (auto &entry : deferred_frames) {
@@ -266,13 +303,9 @@ namespace sunshine_streamline {
       // Until 11-01 a lost metadata read counted as generating with none
       // (PD5): an FG-off viewport's copy waited for the FG rule, and an MFG
       // frame's copy lapsed after a hitch at a Present still its own.
-      bool generating = false;
-      std::uint32_t generated = 0;
-      for (const auto &slot : modes) if (slot.used && slot.observation == ticket && slot.state.viewport == entry.viewport) {
-        generating = slot.state.known && slot.state.enabled;
-        generated = generating ? slot.state.generated_frames : 0;
-        break;
-      }
+      const auto mode = current.mode(entry.viewport);
+      const bool generating = mode.known && mode.enabled;
+      const std::uint32_t generated = generating ? mode.generated_frames : 0;
       if (!past && pin) for (const auto &record : pin->records) if (record.used && record.viewport == entry.viewport) {
         past = record.camera_serial > entry.serial && !same_frame(record.camera_frame, entry.frame);
         break;

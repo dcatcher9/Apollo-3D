@@ -122,9 +122,10 @@ namespace sunshine_streamline::depth_capture {
       return value.exclude_unconfirmed_fg ? 'X' : '-';
     }
 
-    // P5: provider::frame_generation_policy turns each Present's FG options
-    // query into the selection policy. Each timeline is a sequence of query
-    // results and the policy each one returns.
+    // P5: the FG view (presentation_scope::fg_view) turns each Present's FG
+    // options read into the selection policy, its depth projection. Each
+    // timeline is a sequence of query results and the policy each one
+    // returns.
     void frame_generation_policy_timelines() {
       using query = frame_generation_query_status;
 
@@ -197,7 +198,7 @@ namespace sunshine_streamline::depth_capture {
       };
       unsigned rows = 0;
       for (const auto &line : timelines) {
-        provider::frame_generation_policy policy;
+        presentation_scope::fg_view policy;
         unsigned index = 0;
         for (const auto &s : line.steps) {
           ++rows;

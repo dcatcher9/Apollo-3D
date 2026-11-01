@@ -3362,7 +3362,7 @@ namespace {
     require(query_frame_generation(UINT32_MAX, fg) && fg.viewport == view.value && fg.enabled && fg.generated_frames == 1,
       "first FG On was missed");
     {
-      provider::frame_generation_policy policy;
+      presentation_scope::fg_view policy;
       require(!policy.update(frame_generation_query_status::unavailable, {}).require_frame_generation,
         "Unobserved unavailable FG blocked ordinary depth routing");
       auto selected = policy.update(frame_generation_query_status::observed, fg);
@@ -3544,7 +3544,7 @@ namespace {
     options.mode = 3; options.generated_frames = 0; set_options(view, options);
     require(query_frame_generation(view.value, fg) && fg.enabled && fg.automatic && fg.generated_frames == 0,
       "Dynamic FG incorrectly required a fixed generated-frame count");
-    provider::frame_generation_policy dynamic_policy;
+    presentation_scope::fg_view dynamic_policy;
     require(dynamic_policy.update(frame_generation_query_status::observed, fg).require_frame_generation &&
         dynamic_policy.generated_frames() == 0,
       "Dynamic FG with an unknown count selected ordinary depth routing");
@@ -3815,7 +3815,7 @@ namespace {
     // PD1: before any options call a lost read left the provider requiring FG
     // it could not name (a mono Present where Generic would supply).
     {
-      provider::frame_generation_policy policy;
+      presentation_scope::fg_view policy;
       testing::fail_metadata_reads(1);
       query_frame_generation(UINT32_MAX, fg, &status);
       testing::fail_metadata_reads(0);
@@ -3867,6 +3867,71 @@ namespace {
     testing::fail_metadata_reads(0);
     check(off_route == presentation_scope::fg_route::none, "A lost metadata read made an FG Off viewport's route FG's");
     require(failed.empty(), failed.c_str());
+  }
+
+  // One FG snapshot per Present and one process-wide FG view (lane P, PD6,
+  // PD11, 11-01). Every consumer of a Present reads the snapshot taken at its
+  // start, so an options call during the Present is the next Present's for
+  // UI and depth alike; under an ambiguous read depth excludes FG input while
+  // the UI keeps the last confirmed mode (owner ruling Q1); and a runtime
+  // whose first Present comes during that ambiguity reads the same modes as
+  // an older one (until 11-01 each exporter runtime's UI policy began
+  // unknown, test_game3d_controls pinned it: "A new runtime inherited the old
+  // runtime's mode").
+  void test_present_fg_snapshot() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(51);
+    fg_options on; on.generated_frames = 3;
+    fg_options off; off.mode = 0; off.generated_frames = 0;
+    require(set_options(view, on) == 0, "FG On options failed");
+    constexpr std::uint64_t older = 0x1000, newer = 0x2000;
+    take_present_fg(older);
+    const auto first = present_frame_generation(older);
+    end_present_fg();
+    require(first.swapchain == older && first.read == frame_generation_query_status::observed &&
+        first.depth.require_frame_generation && first.generated_frames == 3 && first.ui.known && first.ui.enabled &&
+        first.mode(view.value).enabled && first.mode(view.value).generated_frames == 3,
+      "A Present's FG snapshot did not carry the committed FG On to depth, UI and the viewport's mode");
+    take_present_fg(older);
+    require(set_options(view, off) == 0, "FG Off options failed");
+    const auto during = present_frame_generation(older);
+    end_present_fg();
+    require(during.depth.require_frame_generation && during.ui.enabled && during.mode(view.value).enabled,
+      "An options call during a Present changed that Present's FG snapshot");
+    take_present_fg(older);
+    const auto after = present_frame_generation(older);
+    end_present_fg();
+    require(!after.depth.require_frame_generation && !after.depth.exclude_unconfirmed_fg && after.ui.known && !after.ui.enabled,
+      "The next Present did not read the FG Off committed during the one before");
+    require(set_options(view, on) == 0, "FG On options failed");
+    take_present_fg(older); end_present_fg();
+    result_v2 = -7;
+    set_options(view, off);
+    result_v2 = 0;
+    take_present_fg(older);
+    const auto ambiguous = present_frame_generation(older);
+    end_present_fg();
+    require(ambiguous.read == frame_generation_query_status::ambiguous && !ambiguous.depth.require_frame_generation &&
+        ambiguous.depth.exclude_unconfirmed_fg && ambiguous.ui.known && ambiguous.ui.enabled,
+      "An ambiguous read did not revoke depth's FG input while the UI kept its confirmed FG mode");
+    take_present_fg(newer);
+    const auto created = present_frame_generation(newer);
+    end_present_fg();
+    require(created.ui.known == ambiguous.ui.known && created.ui.enabled == ambiguous.ui.enabled &&
+        created.ui.epoch == ambiguous.ui.epoch && created.ui.sequence == ambiguous.ui.sequence &&
+        created.depth.require_frame_generation == ambiguous.depth.require_frame_generation &&
+        created.depth.exclude_unconfirmed_fg == ambiguous.depth.exclude_unconfirmed_fg,
+      "A runtime whose first Present came during an ambiguous FG read read other FG modes than an older runtime");
+    const auto &fallback = present_frame_generation(older);
+    require(fallback.swapchain == older && fallback.ui.enabled && fallback.depth.exclude_unconfirmed_fg,
+      "A consumer with no FG snapshot of its Present did not read its own");
+    end_present_fg();
   }
 
   void test_version_identity() {
@@ -4167,6 +4232,8 @@ int main(int argc, char **argv) {
     std::puts("PASS pre-cached FG target detour, single forwarding, zero-base resource compatibility, bounded global camera-call pairing and lifecycle gates");
     test_frame_generation_mode_store();
     std::puts("PASS the FG mode survives lost metadata reads, a held metadata writer and a fifth viewport's camera");
+    test_present_fg_snapshot();
+    std::puts("PASS one FG snapshot per Present from one FG view: options during a Present are the next one's, Q1's two projections, equal modes for a runtime created during ambiguity");
     test_until_evaluate_lifetime();
     std::puts("PASS UntilEvaluate global/frame/local pre-call admission, post-return expiry and unchanged extent rejection");
     std::puts("PASS default-on lightweight source nomination, no selected-depth dependency, lifetime ABA, freshness, loss and viewport gates");

@@ -987,6 +987,15 @@ namespace {
     // (three Presents after its tag call) and lapsed unmade. The FG mode now
     // comes from the FG options store, which no read loses.
     {"fg-on-lost-metadata-read-hitch", "20*sr=local; fg=on,tag=present_bare,generated=3,at=inside; 5*tag=present_bare,generated=3,at=inside; tag=present_bare,generated=3,at=inside,hitch=after_sources,reads=lost_at_present; 10*tag=present_bare,generated=3,at=inside"},
+    // FG turned on, and later off, by an options call inside a frame's real
+    // Present, after the UI read that Present's FG mode and before depth
+    // read it (PD11, lane P 11-01): until one FG snapshot per Present that
+    // Present's UI used the old mode and its depth the new one
+    // (fg_modes:disagree at frame 20, and at frame 31); now both use the
+    // snapshot taken at the Present's start, and the next Present the new
+    // mode.
+    {"fg-on-between-ui-and-depth-reads", "20*sr=local; fg=on,fg_at=depth_read,sr=local; 20*sr=local"},
+    {"fg-off-between-ui-and-depth-reads", "20*sr=local; fg=on,sr=local; 10*sr=local; fg=off,fg_at=depth_read,sr=local; 10*sr=local"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -1191,7 +1200,7 @@ namespace {
     // Present used for UI and for depth.
     void (*fail_metadata_reads)(unsigned) {};
     void (*options_at_depth_frame)(void (*)(void *), void *) {};
-    BOOL (*present_frame_generation)(api::effect_runtime *, unsigned *, unsigned *) {};
+    BOOL (*present_frame_generation)(api::effect_runtime *, unsigned *, unsigned *, std::uint64_t *) {};
     decltype(&NVSDK_NGX_D3D12_CreateFeature) ngx_create {};
     decltype(&NVSDK_NGX_D3D12_EvaluateFeature) ngx_evaluate {};
     const matrix::sl_version version {2, 7, 30};
@@ -2622,17 +2631,25 @@ namespace {
     // SunshineGame3DTestPresentFrameGeneration). In a timeline with an FG
     // options event inside a Present (fg_at=depth_read) both must be the
     // same on every Present where depth does not revoke FG input: the UI's
-    // FG mode (known and enabled) and depth's (its policy requires FG).
+    // FG mode (known and enabled) and depth's (its policy requires FG); and
+    // every consumer must find the FG snapshot its Present took (no
+    // fallback since the run began).
     bool judge_modes {};
+    std::uint64_t fallbacks_before {};
 
     void judge_present_modes(const char *which) {
       if (!judge_modes) {
         return;
       }
       unsigned ui {}, depth {};
-      require(present_frame_generation(observed.runtime, &ui, &depth), "The add-on did not report a Present's FG modes");
+      std::uint64_t fallbacks {};
+      require(present_frame_generation(observed.runtime, &ui, &depth, &fallbacks), "The add-on did not report a Present's FG modes");
       if (trace) {
-        std::printf("TRACE frame=%u fg_modes %s ui=%u depth=%u\n", frame, which, ui, depth);
+        std::printf("TRACE frame=%u fg_modes %s ui=%u depth=%u fallbacks=%llu\n", frame, which, ui, depth, static_cast<unsigned long long>(fallbacks - fallbacks_before));
+      }
+      if (fallbacks != fallbacks_before) {
+        fail("fg_snapshot:fallback", frame_text(frame) + ": " + which + " had a consumer that found no FG snapshot of its Present", frame, "fallback");
+        fallbacks_before = fallbacks;
       }
       const bool ui_fg = (ui & 3u) == 3u, depth_fg = (depth & 2u) != 0;
       if (!(depth & 4u) && ui_fg != depth_fg) {
@@ -2802,6 +2819,10 @@ namespace {
         return frame_events::of<frame_events::fg_at_form>(row, frame_events::fg_at) == frame_events::fg_at_form::depth_read;
       });
       pending_options = {};
+      if (judge_modes) {
+        unsigned ui {}, depth {};
+        require(present_frame_generation(observed.runtime, &ui, &depth, &fallbacks_before), "The add-on did not report its FG snapshot fallbacks");
+      }
       where = label;
       continuity_log.judge = {};
       // The timelines mark each frame whose events may end its source's

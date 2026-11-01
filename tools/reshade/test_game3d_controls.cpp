@@ -178,34 +178,51 @@ namespace {
   }
 
   void source_alpha_fg_mode_survives_observation_gaps() {
-    source_alpha_ui_policy policy;
-    check(policy.update(true, {}, true).effective(), "An unobserved FG mode disabled an explicit non-FG alpha preference");
-    frame_generation_mode fg {true, true, false, 1, 0, 7, 41};
-    const auto initial = policy.update(true, fg, true);
+    // The UI projection of the process's one FG view (fg_view::ui).
+    using sunshine_streamline::frame_generation_query_status;
+    sunshine_streamline::presentation_scope::fg_view view;
+    const auto decide = [&](bool requested) {
+      source_alpha_ui_decision result;
+      result.requested = requested;
+      result.fg = view.ui();
+      return result;
+    };
+    check(decide(true).effective(), "An unobserved FG mode disabled an explicit non-FG alpha preference");
+    sunshine_streamline::frame_generation_snapshot fg;
+    fg.known = fg.enabled = true; fg.generated_frames = 1; fg.epoch = 7; fg.sequence = 41;
+    view.update(frame_generation_query_status::observed, fg, true);
+    const auto initial = decide(true);
     check(initial.blocked_by_fg() && !initial.effective(), "Confirmed FG did not block presentation alpha");
     auto retained = initial;
     retained.retained_alpha_ready = true;
     check(retained.effective() && !retained.blocked_by_fg(), "Completed real alpha did not enable FG UI protection");
     retained.requested = false;
     check(!retained.effective(), "Retained alpha overrode the user's disabled preference");
-    // Busy, ambiguous and missing observations all carry no confirmed mode.
-    // None is an FG-off event, including while Generic depth is manually pinned.
-    for (unsigned missing = 0; missing < 3; ++missing) {
-      const auto held = policy.update(true, {}, true);
+    // Ambiguous and missing observations carry no confirmed mode. None is an
+    // FG-off event, including while Generic depth is manually pinned (no read
+    // is busy since 11-01).
+    for (const auto missing : {frame_generation_query_status::ambiguous, frame_generation_query_status::unavailable,
+           frame_generation_query_status::unavailable}) {
+      view.update(missing, {}, true);
+      const auto held = decide(true);
       check(held.blocked_by_fg() && !held.effective() && held.fg.epoch == 7 && held.fg.sequence == 41,
         "Observation loss reenables alpha or loses the confirmed mode's identity");
     }
-    const auto disabled = policy.update(false, {}, true);
+    const auto disabled = decide(false);
     check(!disabled.requested && !disabled.effective() && disabled.fg.enabled,
       "Disabling the UI preference lost the independent FG observation");
     fg.enabled = false; fg.sequence = 42;
-    check(policy.update(true, fg, true).effective(), "Explicit FG Off did not restore the saved preference");
+    view.update(frame_generation_query_status::observed, fg, true);
+    check(decide(true).effective(), "Explicit FG Off did not restore the saved preference");
     fg.enabled = true; fg.epoch = 8; fg.sequence = 1;
-    check(policy.update(true, fg, true).blocked_by_fg(), "New confirmed observer scope was not accepted");
-    const auto stopped = policy.update(true, {}, false);
+    view.update(frame_generation_query_status::observed, fg, true);
+    check(decide(true).blocked_by_fg(), "New confirmed observer scope was not accepted");
+    view.update(frame_generation_query_status::unavailable, {}, false);
+    const auto stopped = decide(true);
     check(!stopped.fg.known && stopped.effective(), "Observer shutdown retained a previous scope's FG mode");
-    source_alpha_ui_policy recreated;
-    check(!recreated.update(true, {}, true).fg.known, "A new runtime inherited the old runtime's mode");
+    // One view per process (11-01, PD6): a runtime created later reads the
+    // same mode as an older one (until then each runtime kept a policy that
+    // began unknown); the probe's present-snapshot row pins it.
     check(initial.fg.enabled && !initial.effective(), "Later mode changes mutated an already frozen presentation");
   }
 

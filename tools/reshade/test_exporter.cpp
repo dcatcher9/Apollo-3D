@@ -321,7 +321,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       require(decide({}, selected, candidate).action == action::invalidate,
         "A selected source without ready pixels authorized a fresh copy");
 
-      provider::frame_generation_policy source_policy;
+      presentation_scope::fg_view source_policy;
       frame_generation_snapshot fg_snapshot;
       fg_snapshot.known = fg_snapshot.enabled = true; fg_snapshot.epoch = metadata.epoch;
       fg_snapshot.viewport = metadata.viewport; fg_snapshot.generated_frames = 1;
@@ -508,10 +508,10 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
           row_is(hold, source_state::inactive, "provider_disallowed") && !scene.first_ready_ms,
         "The frame record did not name a disallowed API path");
 
-      // Frame generation through provider::frame_generation_policy: FG On owns
+      // Frame generation through the FG view's depth projection: FG On owns
       // its viewport's depth (D1), a generated Present holds its real frame, a
       // silent scope lets SR depth through, and an ambiguous query revokes FG.
-      provider::frame_generation_policy source_policy;
+      presentation_scope::fg_view source_policy;
       frame_generation_snapshot on;
       on.known = on.enabled = true; on.epoch = metadata.epoch; on.viewport = metadata.viewport; on.generated_frames = 1;
       const auto fg_policy = source_policy.update(frame_generation_query_status::observed, on);
@@ -1500,15 +1500,19 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 
     static void normalized_ui_input_preserves_source_authority() {
       using namespace sunshine_game3d;
-      source_alpha_ui_policy policy;
+      // The UI projection of the process's FG view (fg_view::ui).
+      sunshine_streamline::presentation_scope::fg_view view;
+      sunshine_streamline::frame_generation_snapshot fg_on;
+      fg_on.known = fg_on.enabled = true; fg_on.generated_frames = 1; fg_on.viewport = 11; fg_on.epoch = 7; fg_on.sequence = 41;
+      view.update(sunshine_streamline::frame_generation_query_status::observed, fg_on, true);
       render_settings settings;
       alpha_auto_policy session;
       const auto generic = session.decision();
       require(generic.state == alpha_auto_state::waiting_for_source && !generic.enabled,
         "Normalized UI fixture did not begin with an Auto session that detected nothing");
-      ui_input::presentation observed{{true, true, false, 1, 11, 7, 41}, true};
+      ui_input::presentation observed{view.ui(), true};
       ui_input::frame input;
-      input.status = ui_input::resolve(policy, settings, observed);
+      input.status = ui_input::resolve(settings, observed);
       input.observation.session = &session;
       input.observation.now_ms = 1001;
       ui_plane_parameters plane;
@@ -1535,7 +1539,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         "FG current-color filtering discarded an independent captured candidate");
       input.automatic_detection = false;
       input.detection = {};
-      const auto held = ui_input::resolve(policy, settings, {{}, true});
+      view.update(sunshine_streamline::frame_generation_query_status::unavailable, {}, true);
+      const auto held = ui_input::resolve(settings, {view.ui(), true});
       require(held.fg_active() && held.fg.epoch == 7 && !held.effective(),
         "Missing observer data cleared the provider's confirmed FG requirement");
 
@@ -1558,7 +1563,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         "Failed captured-mask materialization fell back to current color");
       input.view = {123};
       settings.ui_protection = source_alpha_mode::off;
-      input.status = ui_input::resolve(policy, settings, observed);
+      input.status = ui_input::resolve(settings, observed);
       input.status.retained_alpha_ready = true;
       require(!input.for_render(plane, scene).available(),
         "A retained dedicated mask bypassed Manual Off at the normalized boundary");
@@ -1566,7 +1571,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       settings.ui_protection = source_alpha_mode::automatic;
       observed.mode.enabled = false;
       ++observed.mode.sequence;
-      input.status = ui_input::resolve(policy, settings, observed);
+      input.status = ui_input::resolve(settings, observed);
       input.kind = ui_input_kind::current_color_alpha;
       input.view = {};
       input.observation.retained = false;
@@ -1645,7 +1650,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       publisher_t publisher;
       auto &proof = publisher.runtimes_[owner()];
       const sunshine_game3d::frame_generation_mode fg {true, true, false, 1, 0, 7, 41};
-      proof.frame.source_alpha = proof.source_alpha_policy.update(true, fg, true);
+      proof.frame.source_alpha.requested = true;
+      proof.frame.source_alpha.fg = fg;
       proof.frame.source_alpha.input_state = sunshine_game3d::source_alpha_input_state::state_conflict;
       proof.frame.depth_ready = true;
       proof.frame.diagnostics.frame_generation_active = false; // Ready Generic depth has no SL FG provenance.
@@ -1673,7 +1679,11 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         invalidated.input == sunshine_game3d::source_alpha_input::none &&
         !invalidated.dedicated_ui_active(sunshine_game3d::source_alpha_mode::automatic, true),
         "An effects reload retained the prior applied UI source");
-      const auto retained = publisher.runtimes_.at(owner()).source_alpha_policy.update(true, {}, true);
+      // The confirmed game FG mode is the process's FG view's, not the
+      // runtime's (fg_view::ui): an effects reload cannot clear it.
+      sunshine_game3d::source_alpha_ui_decision retained;
+      retained.requested = true;
+      retained.fg = fg;
       require(retained.blocked_by_fg() && retained.fg.sequence == 41 &&
         retained.input_state == sunshine_game3d::source_alpha_input_state::not_observed &&
         !retained.rendered && !retained.applied && retained.input == sunshine_game3d::source_alpha_input::none,

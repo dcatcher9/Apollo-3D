@@ -6134,13 +6134,40 @@ changes; without that metadata the raw fallback cannot establish physical equiva
 
 ### Presentation scope
 
-`presentation_scope.h` owns the existing FG policy and value declarations and
-their pure predicates, including DLSS-G's frame inputs. Policy layouts and
-consumer instances stay unchanged: the provider keeps `source_policy`, and each
-exporter runtime keeps `source_alpha_policy`. The SL route and nested-capture
-adapter bodies and the deferred-frame observations stay at their original sites,
-because they read live Streamline state; the header merges no state and no live
-read.
+`presentation_scope.h` owns the FG value declarations and their pure
+predicates, including DLSS-G's frame inputs, the one FG state machine
+(`fg_view`) and a Present's FG snapshot (`present_fg`). The SL route and
+nested-capture adapter bodies and the deferred-frame observations stay at their
+original sites, because they read live Streamline state.
+
+One FG snapshot per Present (11-01, lane P, PD6 and PD11): depth's present
+event takes it first, for every API (`take_present_fg`): one any-viewport read
+of the FG options store, each viewport's committed options, and the process's
+one `fg_view` updated once under its own leaf lock (present threads only). That
+Present's consumers on its thread read it (`present_frame_generation`):
+`present_deferred` (each viewport's generating and generated counts), the UI
+(`ui_input::observe`) and the provider (`begin`); depth's `finish_present` drops
+it. A consumer that finds no snapshot taken for its swapchain's Present takes its
+own and counts it (`present_fg_fallbacks`; the session timelines' rows with an
+options call during a Present require none). `fg_view` has two
+projections of one state: depth (an observed mode names the source choice;
+before the first one FG is not required; an ambiguous read, or an unavailable
+one while FG is required, revokes FG input while independent ordinary depth
+stays eligible) and UI (the last observed mode, kept through an ambiguous or
+unavailable read so generated frames' current color stays out of UI detection,
+cleared while the observer is inactive). So under an ambiguous read depth
+excludes FG input while the UI keeps the last confirmed mode: their one
+documented difference (owner ruling Q1, 11-01). An options call during a Present
+is the next Present's for both. Until 11-01 the provider runtime and each
+exporter runtime kept a policy of their own (`source_policy`,
+`source_alpha_policy`), updated from two reads at two points of the Present,
+between which the settings lock, the video-memory query and the renderer's
+configuration ran: an options call between them gave that Present's UI one
+mode and its depth the other (rows `fg-on-between-ui-and-depth-reads` and
+`fg-off-between-ui-and-depth-reads`: `fg_modes:disagree`), and a runtime created
+during an ambiguous period began with an unknown UI mode beside an older
+runtime's known one, its depth policy unconfirmed (probe row
+`test_present_fg_snapshot`).
 
 The FG mode has its own store, `presentation_scope_mode.inl` (11-01, lane P,
 PD1-PD5): each viewport's newest committed FG options, kept apart from the

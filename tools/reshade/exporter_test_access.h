@@ -273,7 +273,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 
   struct runtime_t {
     bool addon_native = false;
-    sunshine_game3d::source_alpha_ui_policy source_alpha_policy;
     float frame_strength = sunshine_game3d::default_strength;
     std::uint64_t swapchain = 0;
     std::uint64_t presentation_ordinal = 0;
@@ -538,7 +537,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       const bool diagnostic_owner = debug_dump_.awaiting_capture() &&
         owns_foreground(runtime, static_cast<HWND>(runtime->get_hwnd()));
       const auto settings = sunshine_game3d::query_render_settings(runtime);
-      const auto presentation = sunshine_game3d::ui_input::observe();
+      const auto presentation = sunshine_game3d::ui_input::observe(swapchain->get_native());
       sunshine_game3d::source_alpha_ui_decision source_alpha;
       sunshine_depth::set_native_driver(runtime, settings.enabled);
       LARGE_INTEGER present_qpc {};
@@ -548,7 +547,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         std::lock_guard<std::mutex> lock(mutex_);
         auto &proof = runtimes_[runtime];
         proof.addon_native = settings.enabled;
-        source_alpha = sunshine_game3d::ui_input::resolve(proof.source_alpha_policy, settings, presentation);
+        source_alpha = sunshine_game3d::ui_input::resolve(settings, presentation);
         const auto tick = GetTickCount64();
         gap = measure_present_gap(proof, present_qpc.QuadPart, tick);
         note_shown_present(proof, tick);
@@ -823,11 +822,9 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         auto &proof = runtimes_[runtime];
         auto renderer = std::move(proof.renderer);
         const auto swapchain = proof.swapchain;
-        const auto source_alpha_policy = proof.source_alpha_policy;
         proof = runtime_t{};
         proof.swapchain = swapchain;
         proof.renderer = std::move(renderer);
-        proof.source_alpha_policy = source_alpha_policy;
       }
       final_counters.session = clear_automatic_ui(runtime);
       if (ring_.generation_ && ring_.generation_->owner_runtime == runtime) {

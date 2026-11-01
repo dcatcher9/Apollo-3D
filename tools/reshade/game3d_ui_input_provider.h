@@ -15,9 +15,10 @@ namespace sunshine_game3d::ui_input {
     frame_generation_mode mode;
     bool observer_active{};
   };
-  presentation observe();
-  source_alpha_ui_decision resolve(source_alpha_ui_policy &policy, const render_settings &settings,
-    const presentation &observed);
+  // The FG mode of the swapchain's Present: the UI projection of its FG
+  // snapshot (sunshine_streamline::present_frame_generation).
+  presentation observe(std::uint64_t swapchain);
+  source_alpha_ui_decision resolve(const render_settings &settings, const presentation &observed);
   void invalidate(reshade::api::effect_runtime *runtime);
   // Disabling Game 3D invalidates captures but keeps the session's choice.
   // Runtime destruction uses invalidate, which also forgets that choice.

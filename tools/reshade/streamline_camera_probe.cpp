@@ -789,6 +789,10 @@ namespace sunshine_streamline {
       }
       fg_target_count = 0; current_fg_target = nullptr; fg_available = false;
       fg_loss_revision = 0;
+      // The process's FG view and this thread's Present snapshot: each
+      // fixture case begins as a new process does.
+      fg_state = {};
+      present_snapshot = {};
       original_feature_function_v2 = nullptr;
       hooks_installed = minhook_initialized = false;
       v1_private_state_ready.store(false, std::memory_order_release);

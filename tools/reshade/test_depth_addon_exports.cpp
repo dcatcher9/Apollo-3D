@@ -813,13 +813,17 @@ extern "C" __declspec(dllexport) void SunshineGame3DTestOptionsAtDepthFrame(void
 
 // The FG mode the runtime's last Present used for UI (its published source
 // alpha decision: bit 0 known, bit 1 enabled) and for depth (the provider's
-// decision, sunshine_streamline::provider::test_frame_generation_decision).
-extern "C" __declspec(dllexport) BOOL SunshineGame3DTestPresentFrameGeneration(effect_runtime *runtime, unsigned *ui, unsigned *depth)
+// decision, sunshine_streamline::provider::test_frame_generation_decision),
+// and the consumers so far that found no FG snapshot of their Present
+// (sunshine_streamline::present_fg_fallbacks).
+extern "C" __declspec(dllexport) BOOL SunshineGame3DTestPresentFrameGeneration(effect_runtime *runtime, unsigned *ui, unsigned *depth,
+	uint64_t *fallbacks)
 {
 	if (!s_registered || runtime == nullptr || ui == nullptr || depth == nullptr) return FALSE;
 	const auto fg = sunshine_game3d::query_source_alpha_ui(runtime).fg;
 	*ui = (fg.known ? 1u : 0u) | (fg.enabled ? 2u : 0u);
 	*depth = sunshine_streamline::provider::test_frame_generation_decision(runtime);
+	if (fallbacks) *fallbacks = sunshine_streamline::present_fg_fallbacks();
 	return TRUE;
 }
 

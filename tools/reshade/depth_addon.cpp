@@ -649,6 +649,10 @@ static void submit_deferred_copies(command_queue *queue, command_list *immediate
 
 static void on_present(command_queue *presenting_queue, swapchain *swapchain, const rect *, const rect *, uint32_t, const rect *)
 {
+	// This Present's one FG snapshot, read before anything of the Present
+	// reads the FG mode: present_deferred here, then the exporter's UI and
+	// the provider, whose present event runs after this one on this thread.
+	sunshine_streamline::take_present_fg(swapchain->get_native());
 	// The native tag's UntilPresent lifetime ends here. Already copied packets
 	// remain owned and usable by effects; tags supplied after this boundary keep
 	// their new authority, including concurrent next-frame tagging. First, the
@@ -658,7 +662,7 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 	{
 		const query_heap marker = presenting_queue->get_device()->get_private_data<generic_depth_device_data>()->deferred_copy_marker;
 		if (command_list *const immediate = presenting_queue->get_immediate_command_list();
-			immediate != nullptr && marker != 0 && sunshine_streamline::present_deferred(presenting_queue->get_native(), immediate->get_native()))
+			immediate != nullptr && marker != 0 && sunshine_streamline::present_deferred(swapchain->get_native(), presenting_queue->get_native(), immediate->get_native()))
 			submit_deferred_copies(presenting_queue, immediate, marker);
 		capture_inputs::present(presenting_queue);
 	}
@@ -1168,6 +1172,8 @@ static void finish_sampler_present(command_queue *queue, swapchain *swapchain)
 {
 	const sunshine_streamline::native_observer::suppression_scope add_on_work;
 	sunshine_depth::finish_present(queue, swapchain);
+	// The Present's FG snapshot ends with it.
+	sunshine_streamline::end_present_fg();
 }
 
 static void register_depth_events()

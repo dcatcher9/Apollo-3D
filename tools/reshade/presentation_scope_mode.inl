@@ -69,3 +69,13 @@
       fg_modes = {};
       ReleaseSRWLockExclusive(&fg_mode_lock);
     }
+
+    // The process's one FG view (presentation_scope::fg_view), updated once
+    // per Present on its present thread (take_present_fg) under fg_view_lock,
+    // a leaf taken only there; and this thread's Present's snapshot.
+    SRWLOCK fg_view_lock = SRWLOCK_INIT;
+    presentation_scope::fg_view fg_state;
+    thread_local presentation_scope::present_fg present_snapshot;
+    // Consumers that found no snapshot taken for their Present and took
+    // their own (present_frame_generation, present_fg_fallbacks).
+    std::atomic<std::uint64_t> fg_snapshot_fallbacks{};
