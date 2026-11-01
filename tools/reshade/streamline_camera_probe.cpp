@@ -138,7 +138,6 @@ namespace sunshine_streamline {
 
     // POD/atomic storage remains live in the pinned add-on after AddonUninit. In
     // particular there is no destructible C++ mutex or worker used by detours.
-    SRWLOCK presentations_lock = SRWLOCK_INIT;
     SRWLOCK poll_lock = SRWLOCK_INIT;
     struct metadata_state {
       viewport_record records[slot_count]{};
@@ -610,16 +609,13 @@ namespace sunshine_streamline {
     // Keep the existing hooks and only start a fresh observation epoch.
     while (!token_metadata.clear()) SwitchToThread();
     release_camera_records();
-    AcquireSRWLockExclusive(&presentations_lock);
     lose(loss_diagnostics::reason::lifecycle, __func__, 3382, {});
     ++history_loss; // Camera records were released: every viewport's history restarts.
     ++epoch;
-    ReleaseSRWLockExclusive(&presentations_lock);
     next_discovery = 0;
     source_requested.store(source_enabled, std::memory_order_release);
     if (hooks_installed) observing.store(source_enabled, std::memory_order_release);
     ReleaseSRWLockExclusive(&poll_lock);
-    message("Sunshine Streamline: diagnostic probe disabled; command/content tracking is off");
   }
   bool source_enabled() { return source_requested.load(std::memory_order_acquire); }
   std::uint64_t depth_observation_revision() { return loss_revision.load(std::memory_order_acquire); }
