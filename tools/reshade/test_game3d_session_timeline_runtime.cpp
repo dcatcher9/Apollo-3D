@@ -247,14 +247,19 @@ namespace {
     // after_sources, the same after its calls, before its Present; between,
     // the same before the frame's first call and its stamp (after the
     // previous frame's Presents); after_present, the same after its real
-    // Present, before its generated Presents after it.
+    // Present, before its generated Presents after it; before_dlssg, the
+    // same after the frame's other calls, right before DLSS-G's evaluation
+    // of it (a stall before a game's Present call, inside which DLSS-G
+    // evaluates the frame). Seeds never draw before_dlssg (hitch_weights
+    // leaves it out), so every seed keeps its frames; rows name it.
     enum class hitch_form {
       none,
       brief,
       before_sources,
       after_sources,
       between,
-      after_present
+      after_present,
+      before_dlssg
     };
 
     constexpr DWORD hitch_ms(hitch_form value) {
@@ -328,7 +333,7 @@ namespace {
           {"at", {"between", "inside", "evaluate"}},
           {"ui", {"none", "bare", "listed", "untagged"}},
           {"order", {"wait", "wait_first", "cpu_wait", "cpu", "second", "late"}},
-          {"hitch", {"none", "brief", "before_sources", "after_sources", "between", "after_present"}},
+          {"hitch", {"none", "brief", "before_sources", "after_sources", "between", "after_present", "before_dlssg"}},
           {"dlssg_gpu", {"prompt", "after_present"}},
           {"sr_gpu", {"prompt", "after_present"}},
         },
@@ -933,6 +938,19 @@ namespace {
     // before form now fails there (dropped_hold), the after form passes.
     {"fg-on-deferred-tag-hitch-after-sources-held-untag-before", "20*sr=other_queue,sr_gpu=after_present; 3*tag=present_bare,ui=listed; fg=on,tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=proven,ui=listed,hitch=after_sources; tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; fg=off,tag=present_bare,untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; untag=before_global,sr=other_queue,state=unprovable,ui=listed,order=second; 2*sr=other_queue,state=unprovable,ui=listed,order=late; sr=other_queue,state=unprovable,order=late; fg=off,sr=other_queue,state=unprovable,order=late; tag=now_list,sr=other_queue,state=unprovable,order=late,sr_gpu=after_present; tag=evaluate_bare,sr=other_queue,state=unprovable,ui=listed,order=late; tag=evaluate_bare,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed,order=late; 3*tag=evaluate_bare,state=proven,ui=listed; 2*ui=listed"},
     {"fg-on-deferred-tag-hitch-after-sources-held-untag-after", "20*sr=other_queue,sr_gpu=after_present; 3*tag=present_bare,ui=listed; fg=on,tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; tag=present_bare,sr=other_queue,sr_gpu=after_present,dlssg=direct,state=recorded_other,ui=listed; 2*tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed; tag=present_bare,untag=before_global,sr=other_queue,state=proven,ui=listed,hitch=after_sources; tag=present_bare,untag=after_global,sr=other_queue,state=unprovable,ui=listed; tag=present_bare,untag=after_global,sr=other_queue,state=unprovable,ui=listed,order=second; fg=off,tag=present_bare,untag=after_global,sr=other_queue,state=unprovable,ui=listed,order=second; untag=after_global,sr=other_queue,state=unprovable,ui=listed,order=second; 2*sr=other_queue,state=unprovable,ui=listed,order=late; sr=other_queue,state=unprovable,order=late; fg=off,sr=other_queue,state=unprovable,order=late; tag=now_list,sr=other_queue,state=unprovable,order=late,sr_gpu=after_present; tag=evaluate_bare,sr=other_queue,state=unprovable,ui=listed,order=late; tag=evaluate_bare,sr=other_queue,sr_gpu=after_present,state=proven,ui=listed,order=late; 3*tag=evaluate_bare,state=proven,ui=listed; 2*ui=listed"},
+    // A hitch of the source age right before DLSS-G's own evaluation of a
+    // frame whose FG depth is a tag copy deferred to its Present (a stall
+    // before the game's Present call, inside which DLSS-G evaluates):
+    // DLSS-G no longer stands aside for that tag copy (its tag call is past
+    // the source age), its own copy is refused (its input's state
+    // unobserved), and that refused attempt ends an earlier frame's
+    // presenting window (depth_capture::evaluation_called, 10-31), not this
+    // frame's own: its Present shows its deferred copy, made there, and its
+    // generated Presents hold it, 2x and 4x. A guard: round 1 left this
+    // shape unmodelled (hitch=after_sources comes after DLSS-G's
+    // evaluation).
+    {"fg-on-deferred-tag-hitch-before-dlssg-refused", "20*sr=local; fg=on,tag=present_bare,dlssg=direct,generated=1; 5*tag=present_bare,dlssg=direct,generated=1; tag=present_bare,dlssg=direct_unobserved,generated=1,hitch=before_dlssg; 10*tag=present_bare,dlssg=direct,generated=1"},
+    {"fg-on-deferred-tag-hitch-before-dlssg-refused-4x", "20*sr=local; fg=on,tag=present_bare,dlssg=direct,generated=3; 5*tag=present_bare,dlssg=direct,generated=3; tag=present_bare,dlssg=direct_unobserved,generated=3,hitch=before_dlssg; 10*tag=present_bare,dlssg=direct,generated=3"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -2210,6 +2228,11 @@ namespace {
         recorded_elsewhere(continuity::sr_evaluate, std::move(completion), readable);
         game_work_carried[n] = game_work_carried[n] || (supply.elsewhere & continuity::sr_evaluate);
         other_queue_copy = GetTickCount64();
+      }
+      // A hitch right before DLSS-G's evaluation of the frame, after its other
+      // calls (before_dlssg).
+      if (hitch == hitch_form::before_dlssg) {
+        Sleep(hitch_ms(hitch));
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
       // FG as the frame's evaluations saw it, then a late FG Off: the game's
