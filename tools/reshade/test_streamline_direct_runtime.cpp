@@ -555,17 +555,27 @@ RWTexture2D<float> depth : register(u0);
       consumed_depth("direct-consumed-depth");
       return consumed_source;
     }
-    // Verifies the consumed pixels of both rotating sources: a capture takes
-    // several Presents, so consecutive captures can land on one source.
-    void verify_both(const char *phase,bool packed,const std::function<void()> &each={}) {
-      unsigned verified=0;
-      for(unsigned i=0;verified!=3;++i) {
-        require(i<16,"The consumed depth of both rotating sources was never verified");
+    // Verifies the fresh consumed pixels and the unchanged original planes of
+    // both packed rotating sources, counted as packed_state_cases counts them:
+    // consumed coverage from the source of each capture verify_packed_depth
+    // validated (the render it consumed, matched to the Present that drew it),
+    // only for a fresh copy, and plane coverage from the source whose planes it
+    // read (preserved_source, the latest drawn one). A capture takes several
+    // Presents, so consecutive captures can land on one source.
+    void verify_both(const char *phase,const std::function<void()> &each={}) {
+      unsigned verified=0,preserved=0,captures=0,held=0;
+      for(unsigned i=0;verified!=3 || preserved!=3;++i) {
+        require(i<16,"Did not verify fresh consumed depth and unchanged original planes of both rotating sources");
         tick(phase);
         if(i&1) tick(phase); // A capture spans a fixed number of Presents: shift its parity.
-        verified|=packed ? verify_packed_depth() : verify_depth();
+        const unsigned source=verify_packed_depth();
+        ++captures;
+        if(consumed_fresh) verified|=source;
+        else ++held;
+        preserved|=preserved_source;
         if(each) each();
       }
+      std::printf("MEASURE %s verify_both captures=%u held=%u\n",phase,captures,held);
     }
     void matrix_change_cases() {
       // Change real camera metadata; never write camera scale/readiness uniforms.
@@ -956,7 +966,7 @@ RWTexture2D<float> depth : register(u0);
       // Read both spatial/depth patterns, changing center, original stencil and
       // the depth and projection a native render consumed while all pressure
       // objects remain live.
-      verify_both(phase,true);
+      verify_both(phase);
       std::printf("PASS %s retained=%u both_sources=1 consecutive_full=12 consumed_packed_pixels_and_projection=1\n",phase,retained);
     }
     void command_capacity_cases() {
@@ -1005,7 +1015,7 @@ RWTexture2D<float> depth : register(u0);
         check_projection();
       }
       require(seen==3 && submitted_before_finish>=12,"Pending evaluation did not exercise both real rotating sources after submission");
-      verify_both("pending-evaluation-pixel-check",true);
+      verify_both("pending-evaluation-pixel-check");
       std::printf("PASS submitted-before-success evaluations=%u both_sources=1 consecutive_full=12 consumed_packed_pixels_and_projection=1\n",
         submitted_before_finish);
 
@@ -1080,7 +1090,7 @@ RWTexture2D<float> depth : register(u0);
         check_provider_status(true);
       }
       require(seen==3,"Large native batch did not exercise both rotating depth sources");
-      verify_both(phase,true,[&]{check_provider_status(true);});
+      verify_both(phase,[&]{check_provider_status(true);});
       std::printf("PASS %s producer_index=%u producer_batches=%u idle_batches=%u barrier_batches=%u both_sources=1 consecutive_full=12 consumed_packed_pixels_and_projection=1\n",
         phase,batch_producer_index,submitted_large_batches,submitted_idle_batches,recorded_large_barriers);
     }

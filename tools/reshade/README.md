@@ -1096,7 +1096,9 @@ verified: the fresh (not held) depth a native render consumed, matched to the Pr
 it. A capture spans a variable number of Presents, so the source of another Present proves nothing.
 Packed V1 also counts, separately, the source whose unchanged original depth and stencil planes
 it read back (the latest drawn one, not necessarily the consumed one); both sources must be
-covered there too.
+covered there too. The command capacity, pending evaluation and large batch modes below count
+their pixel checks of both packed sources the same way (`verify_both`, which prints
+`MEASURE <phase> verify_both captures= held=`).
 `SUNSHINE_STREAMLINE_COMMAND_CAPACITY_TEST=1` is another exclusive mode. It retains
 160 real native-only command lists on the observed vtable, then destroys and recreates them
 while checking packed-depth rotation, shader output and recovery. These lists bypass ReShade's
