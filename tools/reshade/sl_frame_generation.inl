@@ -76,7 +76,7 @@ namespace sunshine_streamline {
       // SDK call was in flight. A concurrent new On may lose one capture;
       // a fresh tag restores it without resurrecting pre-loss pixels.
       if (retired_epoch) depth_capture::retire_source(sunshine_scene_depth::provider_kind::streamline,
-        retired_epoch, sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(id)), serial);
+        retired_epoch, sunshine_scene_depth::fg_source_id(id), serial);
       // Only an actual FG-mode/knowledge transition revokes UI scope. Games
       // can call unsupported Off options after every successful HUDless tag;
       // repeated failure is not a new failure of those independent input tags.
@@ -305,7 +305,7 @@ namespace sunshine_streamline {
         // P1; until then it became the FG view again beside the SR view).
         const bool retired = entry.depth.candidates[0].frame_generation_input &&
           depth_capture::frame_generation_retired(entry.epoch, entry.viewport, entry.serial);
-        const auto fg_key = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(entry.viewport));
+        const auto fg_key = sunshine_scene_depth::fg_source_id(entry.viewport);
         for (std::size_t i = 0; i != entry.depth.count && !copied; ++i) {
           auto value = entry.depth.candidates[i];
           value.sequence = sequence; value.present_queue = queue;
@@ -415,7 +415,7 @@ namespace sunshine_streamline {
     AcquireSRWLockExclusive(&evaluation_supply_lock);
     fg_evaluation.evaluated(fg.epoch, fg.viewport, tick, depth_capture::next_present_ordinal(), fg.generated_frames);
     ReleaseSRWLockExclusive(&evaluation_supply_lock);
-    const auto source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(fg.viewport));
+    const auto source_id = sunshine_scene_depth::fg_source_id(fg.viewport);
     if (out.depth == depth_outcome::not_offered) {
       if (!value.depth.area_valid) out.depth = depth_outcome::subrect;
       else if (!source_requested.load(std::memory_order_acquire) || !depth_capture::active()) out.depth = depth_outcome::inactive;

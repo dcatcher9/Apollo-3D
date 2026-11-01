@@ -176,7 +176,7 @@ namespace sunshine_streamline::depth_capture {
     auto &current = evaluations[provider_index(provider)];
     if (epoch != current.epoch) { current = {}; current.epoch = epoch; }
     if (frame_generation_role_retired(provider, epoch, viewport)) {
-      const auto fg_key = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
+      const auto fg_key = sunshine_scene_depth::fg_source_id(viewport);
       if (source_id == fg_key) source_id = 0;
       if (!source_id) superseded_source_id = fg_key;
     }
@@ -196,7 +196,7 @@ namespace sunshine_streamline::depth_capture {
     if (epoch) {
       scope.newest_evaluation_present = std::max(scope.newest_evaluation_present, ordinal);
       if (provider == provider_kind::streamline &&
-          source_id == sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport)))
+          sunshine_scene_depth::is_fg_source(source_id, viewport))
         scope.frame_generation_present = std::max(scope.frame_generation_present, ordinal);
     }
     for (auto &value : current.views) if (value.epoch == epoch && value.viewport == viewport && value.source_id == source_id) {

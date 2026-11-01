@@ -136,7 +136,7 @@ namespace sunshine_streamline::depth_capture {
     evaluation_head *live_frame_generation_scope(std::uint64_t epoch, std::uint32_t viewport,
         std::uint64_t enabled_tick) {
       const auto now = scope_now();
-      const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
+      const auto source = sunshine_scene_depth::fg_source_id(viewport);
       // A compute-list copy of this scope counts once readable (accept_compute_copy).
       if (compute_copies_recorded)
         for (const auto &value : capture_pool.slots)
@@ -201,7 +201,7 @@ namespace sunshine_streamline::depth_capture {
   void frame_generation_missed(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t sequence) {
     if (!requested.load() || !epoch || !sequence) return;
     std::lock_guard lock(mutex);
-    const auto source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(viewport));
+    const auto source = sunshine_scene_depth::fg_source_id(viewport);
     for (auto &view : evaluations[provider_index(provider_kind::streamline)].views)
       if (view.epoch == epoch && view.viewport == viewport && view.source_id == source)
         view.missed_sequence = std::max(view.missed_sequence, sequence);

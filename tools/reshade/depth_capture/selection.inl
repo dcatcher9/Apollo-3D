@@ -211,7 +211,7 @@ namespace sunshine_streamline::depth_capture {
       }
       else if (policy.require_frame_generation) {
         out.epoch = policy.epoch; out.viewport = policy.viewport;
-        out.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(policy.viewport));
+        out.source_id = sunshine_scene_depth::fg_source_id(policy.viewport);
       }
       return out;
     }
@@ -374,7 +374,7 @@ namespace sunshine_streamline::depth_capture {
       out.provider = provider; out.epoch = head.epoch; out.sequence = head.sequence;
       out.source_id = head.source_id; out.viewport = head.viewport; out.tick = head.tick;
       out.frame_generation_input = provider == provider_kind::streamline &&
-        head.source_id == sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(head.viewport));
+        sunshine_scene_depth::is_fg_source(head.source_id, head.viewport);
       return out;
     }
 
@@ -524,7 +524,7 @@ namespace sunshine_streamline::depth_capture {
         std::uint64_t present, std::uint64_t now, selection_policy policy) {
       scope.presenting_generated = policy.generated_presents;
       const auto fg_head = [](const evaluation_head *head) {
-        return head && head->source_id == sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(head->viewport));
+        return head && sunshine_scene_depth::is_fg_source(head->source_id, head->viewport);
       };
       const auto select_sl = [&] {
         auto chosen = select_capture(owner, native, present, provider_kind::streamline, now);
@@ -546,7 +546,7 @@ namespace sunshine_streamline::depth_capture {
         // FG owns the source choice before pixels are ready. Do not silently
         // substitute SR depth while its matching camera belongs to SL FG.
         auto fg = select_sl();
-        const auto fg_source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(policy.viewport));
+        const auto fg_source = sunshine_scene_depth::fg_source_id(policy.viewport);
         const auto matches = [&](const sunshine_scene_depth::frame &value) {
           return value.provider == provider_kind::streamline && value.frame_generation_input &&
             value.epoch == policy.epoch && value.viewport == policy.viewport &&
@@ -770,7 +770,7 @@ namespace sunshine_streamline::depth_capture {
     decision = {};
     if (policy.require_frame_generation) {
       decision.epoch = policy.epoch; decision.viewport = policy.viewport;
-      decision.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(policy.viewport));
+      decision.source_id = sunshine_scene_depth::fg_source_id(policy.viewport);
     }
     if (diagnostic) {
       *diagnostic = {}; diagnostic->requested_queue = native;

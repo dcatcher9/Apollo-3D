@@ -184,7 +184,7 @@ namespace sunshine_streamline {
         (!snapshot.tag_boundary || tag.scope == tag_scope::explicit_frame);
       value.frame_generation_input = snapshot.frame_generation_input;
       value.source_id = snapshot.frame_generation_input ?
-        sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(snapshot.viewport)) : 0;
+        sunshine_scene_depth::fg_source_id(snapshot.viewport) : 0;
       const bool valid = (snapshot.status == evidence_status::source_associated_evaluation ||
           snapshot.status == evidence_status::camera_reset) &&
         snapshot.projection.valid() && snapshot.camera.reset <= 1 && tag.present && tag.supported &&
@@ -338,7 +338,7 @@ namespace sunshine_streamline {
       // readable SR copies (the 10-28 review's P1). Not where FG is merely
       // unknown (busy or lost metadata), which keeps a live scope's views.
       const bool fg_silent = route == fg_route::silent;
-      const auto fg_source = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(snapshot.viewport));
+      const auto fg_source = sunshine_scene_depth::fg_source_id(snapshot.viewport);
       const auto superseded = snapshot.frame_generation_input ? 0 :
         snapshot.tag_boundary || fg_silent || fg_disabled ? fg_source : UINT64_MAX;
       // A silent FG scope has no FG observation to withdraw: its refused

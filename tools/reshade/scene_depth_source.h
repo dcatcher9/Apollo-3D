@@ -48,6 +48,13 @@ namespace sunshine_scene_depth {
   constexpr std::uint64_t encode_source_id(const source_key &key) {
     return key.role == source_role::fg_depth ? (std::uint64_t{1} << 63) | key.viewport : key.id;
   }
+  // Encoded FG source for a known viewport; these helpers do not decode it.
+  constexpr std::uint64_t fg_source_id(std::uint32_t viewport) {
+    return encode_source_id(fg_depth_key(viewport));
+  }
+  constexpr bool is_fg_source(std::uint64_t source_id, std::uint32_t viewport) {
+    return source_id == fg_source_id(viewport);
+  }
   // Whether source_id is a viewport's FG depth (encode_source_id of
   // fg_depth_key), and that viewport.
   constexpr bool fg_depth_viewport(std::uint64_t source_id, std::uint32_t &viewport) {

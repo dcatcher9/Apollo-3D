@@ -15,7 +15,7 @@ namespace sunshine_streamline {
       depth_capture::input input;
       input.epoch = source_epoch; input.sequence = out.serial; input.tick = out.tick;
       input.viewport = out.viewport; input.observation_revision = out.loss;
-      input.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(out.viewport));
+      input.source_id = sunshine_scene_depth::fg_source_id(out.viewport);
       input.frame_generation_input = fg_enabled;
       input.source_frame_generation = out.frame.generation;
       input.source_frame_token = tag.token;

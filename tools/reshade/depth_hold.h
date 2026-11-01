@@ -66,8 +66,7 @@ namespace sunshine_game3d::depth_output {
     // frame is, in either direction.
     inline bool lineage_successor(const retained_depth &previous, const acquisition_decision &current) {
       const auto &before = previous.metadata;
-      const bool fg = current.source_id ==
-        sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(current.viewport));
+      const bool fg = sunshine_scene_depth::is_fg_source(current.source_id, current.viewport);
       return streamline_lineage(before, current.epoch, current.viewport) && current.provider == before.provider &&
         fg != before.frame_generation_input;
     }
