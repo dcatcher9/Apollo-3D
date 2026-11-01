@@ -6768,6 +6768,22 @@ accepted consequences:
   submitted between two Presents (of any swapchain), so a frame-generation Present that lands between one frame's
   own submissions, after its depth clear and before its draws, is taken for a cleared screen and
   is mono (fail-safe; whether any game presents that way has not been measured).
+- **A scene recreated in new buffers.** When the game drops every qualified depth buffer at once
+  and draws its scene in new ones (a level load, or a settings or resolution change that
+  reallocates them), the view is mono for about 0.3 s until one new buffer qualifies (reviewed
+  11-01, round 2: 15 to 24 Presents at about 64 Hz in the probe-round fixture's rotating-lower
+  startup, where three new half-resolution buffers draw one per Present). In one traced run: the
+  first three Presents are cuts (a new buffer drew after no work within the activity grace) while
+  the dropped anchor is still within that grace; then the first new buffer becomes the anchor, its
+  capture view is newly assigned and so takes its first copy on its next turn, its first useful
+  sample follows at once, its second (confirmation needs two) comes on its first turn at least
+  125 ms later, and it shows on its next turn after that, with nothing held on the two Presents
+  between because nothing was shown since the cut. Nothing qualified is left to show meanwhile:
+  the old buffers are gone or idle, and their depth would be another scene's (the cut gate). Each
+  step is a general guard: the activity grace tolerates real gaps, the new-assignment floor keeps
+  a copy that describes an earlier assignment out, two samples 125 ms apart keep a single
+  transient frame from being confirmed, and a hold shows only depth that was shown. Shortening
+  the mono stretch would weaken one of them for every game, so it stays.
 - **Copies of scene depth.** A copy of another same-geometry candidate is never current depth of
   its destination, except a whole copy of a pass the source then overwrote by a clear (with or
   without rectangles) or a render pass that clears or DISCARDs it (see
