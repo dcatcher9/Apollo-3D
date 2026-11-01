@@ -459,20 +459,26 @@ namespace {
   // (README, Session-level tests); random seeds meet these shapes only by
   // chance, and a change of the event language changes every seed. So does
   // each hold the session tests' review found unjudged by a mutation.
-  // A row's per-Present trace is compared exactly (T1), so a row states when
-  // the GPU runs the SR work it records on the game's own queue:
-  // sr_gpu=after_present, in flight at its own Present (as the rows' shapes
-  // have it), unless the CPU waits for that work before the Present
-  // (order=cpu or cpu_wait, a hitch after its calls, or DLSS-G's compute
-  // evaluation of the frame, which waits for the presenting queue). With the
-  // default (prompt) its completion races the add-on's read at that Present:
-  // the read order (completed or ordered) and, where no fence orders the
-  // read (after an FG toggle, a second or CPU signal), whether that Present
-  // shows the copy or holds the one before change from run to run (10-31:
-  // the T1 flakes of C8-fg-off-*, O1-late-signal-presenting-copy-held,
-  // fg-off-late-* and hitch-after-sources; 3 to 10 distinct traces in 10
-  // runs of each alone). DLSS-G's compute copies are read from the next
-  // Present on (U-C1), so their timing changes no trace.
+  // A row whose per-Present trace T1 compares exactly states when the GPU
+  // runs the SR work it records on the game's own queue wherever a Present
+  // shows that work's copy or the one before it: sr_gpu=after_present, in
+  // flight at its own Present (as the rows' shapes have it), unless the CPU
+  // waits for that work before the Present (order=cpu or cpu_wait, a hitch
+  // after its calls, or DLSS-G's compute evaluation of the frame, which
+  // waits for the presenting queue). With the default (prompt) its
+  // completion races the add-on's read at that Present: the read order
+  // (completed or ordered) and, where no fence orders the read (after an FG
+  // toggle, a second or CPU signal), whether that Present shows the copy or
+  // holds the one before change from run to run (10-31: the T1 flakes of
+  // C8-fg-off-*, O1-late-signal-presenting-copy-held, fg-off-late-* and
+  // hitch-after-sources, 3 to 10 distinct traces in 10 runs of each alone;
+  // with the form stated, one, but for one run of C8-fg-off-color-only whose
+  // first SR frame's selection reason the clock decided: frame 19's SR copy
+  // reached the source age there, 13 frames (about 205-250 ms) after its
+  // Present). Rows that keep the default are judged by
+  // their verdicts, which accept either outcome. DLSS-G's compute copies
+  // are read from the next Present on (U-C1), so their timing changes no
+  // trace.
   struct regression {
     const char *fix, *events;
     // A loss a known gap records fails it too: with its fix reverted, the

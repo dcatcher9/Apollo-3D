@@ -2736,18 +2736,24 @@ run; a witness that loses none fails the set, as the matrix's gap seeds keep a r
 failing cell. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
-Each regression timeline's per-Present trace is compared exactly (T1), so a row states when the
-GPU runs the SR work it records on the game's own queue: `sr_gpu=after_present`, in flight at its
-own Present, unless the CPU waits for that work before the Present (`order=cpu` or `cpu_wait`, a
-hitch after its calls, or DLSS-G's compute evaluation of the frame). With the default (`prompt`)
+A regression timeline whose per-Present trace T1 compares exactly states when the GPU runs the SR
+work it records on the game's own queue wherever a Present shows that work's copy or the one
+before it: `sr_gpu=after_present`, in flight at its own Present, unless the CPU waits for that
+work before the Present (`order=cpu` or `cpu_wait`, a hitch after its calls, or DLSS-G's compute
+evaluation of the frame). With the default (`prompt`)
 its completion races the add-on's read at that Present, so the read order (`ro=completed` or
 `ordered`) and, where no fence orders the read (after an FG toggle, a second or CPU signal),
 whether that Present shows the copy or holds the one before change between runs: until 11-01
 `C8-fg-off-sr-other-queue`, `C8-fg-off-color-only`, `O1-late-signal-presenting-copy-held`,
 `fg-off-late-sr-after-fg-copy`, `fg-off-late-dlssg-head-sr-owner` and `hitch-after-sources` left
 it to the machine (3 to 10 distinct traces in 10 runs of each alone, and an occasional T1 mismatch
-in the full checks). DLSS-G's compute copies are read from the next Present on, so their timing
-changes no trace. Seeds keep the default: their verdicts accept either outcome.
+in the full checks; with the form stated, one trace in 10 runs of each, 11-01, but for one run of
+`C8-fg-off-color-only` whose first SR frame's selection reason, `ch=`, the clock decided: frame
+19's SR copy reached the source age there, 13 frames (about 205-250 ms) after its Present; the
+display is the same; of 71 earlier traces of the row in full checks only one showed it, run beside
+a game's GPU load). DLSS-G's compute
+copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
+keep the default, are judged by their verdicts, which accept either outcome.
 
 `reshade_session_timelines` runs the fixed set (24 seeds and 61 regression timelines, about
 5900 frames and 16100 Presents, with the seeds' hitches and late FG Offs) in about 285 s (the full
