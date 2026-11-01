@@ -4591,7 +4591,14 @@ on with no FG depth captured, which shut its working SR depth out for as long as
 game whose FG copies keep being accepted keeps FG ownership throughout. A switch between FG and SR
 depth restarts the placement controller's calibration of the other logical source (its projection
 domain includes the source id; the raw controller keeps a bounded history per source), as it did
-before. A single FG copy amid frames without one (Shadows, 10-24) still switches twice: it is
+before. That restart is the placement warm-up after an FG switch: the scene gain's initialization
+(Experimental raw-depth automation) needs four samples at least 250 ms apart, so the scene is
+flat for about 1 s (the 10-22 logs, the report's `FG-switch placement warm-up`). The owner accepted
+about 1 s after switches (10-28) and it stays (reviewed 10-31): the only levers are a shorter
+initialization span, which averages the nearest reference over less of the scene and so makes the
+gain noisier everywhere, or a gain carried from the other source, which is learned on another
+depth (format, crop, resolution or encoding may differ) and is right only where both sources share
+one projection, which nothing proves at the switch. A single FG copy amid frames without one (Shadows, 10-24) still switches twice: it is
 shown at its Present and held while younger than the source age, then SR/RR depth returns. Until
 10-25 the second frame without an FG copy switched to SR depth (and the next FG copy back), and a
 silent scope whose SR copy was not yet readable dropped the held FG copy as a changed source. The

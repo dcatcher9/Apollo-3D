@@ -7,7 +7,7 @@ Game 3D readiness: bf6.exe  21:21:59 to 21:26:51 (4m51s, ended without exiting (
          21:26:14.538-21:26:51.246 retained_depth_expired, unknown selection=no_current_nomination, until the log ended
 [WARN] Depth at FG switches: 1 FG switch, 1 with depth lost
          21:24:11.689 FG on: mono 0 ms over 1 Present no_retained_depth, Streamline selection=no_completed_snapshot, prior_age 94 ms; the game froze 207 ms
-[INFO] FG-switch placement warm-up: 1 FG switch left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+[INFO] FG-switch placement warm-up: 1 FG switch left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; about 1 s is by design)
          21:24:11.689 FG on: flat 21:24:11.757-21:24:12.764 (1.0 s with depth, projection waiting_for_depth)
 [WARN] Placement flat: 3.5% of publications showed the colour frame with depth, 0.7% faded stereo back in; flat or fading windows outside FG switches and resets
          21:22:11-21:22:16, projection waiting_for_depth 21:22:04-21:22:15 (5.7 s with depth)

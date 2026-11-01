@@ -1353,7 +1353,7 @@ def fg_switch_checks(s: Session, add, depth_from: float | None = None) -> None:
 
 
 def warm_up(s: Session, runs: list['Unplaced'], add) -> None:
-    """FG-switch placement warm-up, the next round's item: each flat run after an FG switch while depth was shown
+    """FG-switch placement warm-up, about 1 s by design (owner 10-28): each flat run after an FG switch while depth was shown
     (the placement calibration restarts at a switch between the FG and SR sources). The Placement flat check counts
     these runs as calibrations; this lists them per switch so they are never dropped."""
     switches = fg_mode_switches(s)
@@ -1368,8 +1368,8 @@ def warm_up(s: Session, runs: list['Unplaced'], add) -> None:
     if times:
         add(Check('INFO', FG_WARM_UP,
                   f'{len(times)} FG switch{"es" if len(times) != 1 else ""} left the scene flat while depth was shown '
-                  '(the placement calibration restarts at a switch between the FG and SR sources; the next round\'s '
-                  'item)', times[:8]))
+                  '(the placement calibration restarts at a switch between the FG and SR sources; about 1 s is by '
+                  'design)', times[:8]))
 
 
 def game_froze(s: Session, start: float, end: float) -> str:

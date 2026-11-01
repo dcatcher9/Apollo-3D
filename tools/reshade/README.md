@@ -719,8 +719,8 @@ at least one Present interval after the loss, by the next Present index the add-
 others, the export stop's own invalidation or a game losing its focus as it presented (E33 10-22b:
 10 and 2 ms before the pause), are INFO `Depth at FG switches, export stops`. INFO
 `FG-switch placement warm-up` lists, per switch, the flat runs after it while depth was shown (the
-placement calibration restarts at a switch between the FG and SR sources): the next round's item,
-which `Placement flat` counts as calibrations and never drops. Render-size changes
+placement calibration restarts at a switch between the FG and SR sources; about 1 s is by design,
+docs/reshade-sbs.md), which `Placement flat` counts as calibrations and never drops. Render-size changes
 of one depth source (dynamic resolution) keep depth since 10-23 and are no gap: INFO
 `Depth render size` sums the `Sunshine depth render size` lines (changes, Presents held across a
 pending size, the smallest and largest active extent). Before, each change was a
@@ -2528,7 +2528,7 @@ the NGX copy is no member of the FG input's lineage, so FG Off and On still drop
 source's first readable copy (31-234 ms per toggle in the 10-22 logs, unmeasured on today's build;
 copies of one retained source resource would prove one lineage, which awaits the owner's ruling);
 the placement calibration that restarts at each FG switch (about 1 s flat per toggle in the 10-22
-logs) is the next round's item, listed per switch by the readiness report; an API owner held while
+logs) is by design (owner 10-28, reviewed 10-31), listed per switch by the readiness report; an API owner held while
 every attempt is refused before its slot exists (Battlefield 6, 10-22) is queued with its log
 signature.
 

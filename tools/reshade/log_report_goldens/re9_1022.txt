@@ -4,7 +4,7 @@ Game 3D readiness: re9.exe  14:49:27 to 14:51:27 (2m00s, exited (the process end
 [WARN] Depth at FG switches: 2 FG switches, 2 with depth lost
          14:49:54.126 FG on: mono 16 ms over 3 Presents no_retained_depth, Streamline selection=no_completed_snapshot, prior_age 125 ms
          14:51:22.090 FG off: mono 62 ms over 5 Presents source_changed, Streamline selection=no_completed_snapshot, prior_age 63 ms
-[INFO] FG-switch placement warm-up: 2 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+[INFO] FG-switch placement warm-up: 2 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; about 1 s is by design)
          14:49:54.126 FG on: flat 14:49:54.224-14:49:55.812 (1.6 s with depth, projection waiting_for_depth_range)
          14:51:22.090 FG off: flat 14:51:22.094-14:51:23.078 (0.9 s with depth, projection waiting_for_depth)
 [WARN] Placement flat: 5.5% of publications showed the colour frame with depth, 0.8% faded stereo back in; flat or fading windows outside FG switches and resets

@@ -1435,7 +1435,7 @@ class ReadinessReport(unittest.TestCase):
         checks = run(BASE + unexplained[:3] + [fg] + unexplained[3:])
         self.assertEqual(checks['Placement calibration'].times,
                          ['10:00:18.000-10:00:19.000 after frame generation switch'])
-        # It is also listed with its switch as the FG-switch placement warm-up, the next round's item, so a
+        # It is also listed with its switch as the FG-switch placement warm-up (about 1 s by design), so a
         # calibration at an FG switch is never dropped.
         self.assertEqual(checks['FG-switch placement warm-up'].times,
                          ['10:00:18.000 FG on: flat 10:00:18.000-10:00:19.000 (1.0 s with depth, raw calibrating)'])

@@ -7,7 +7,7 @@ Game 3D readiness: SandFall-Win64-Shipping.exe  13:45:05 to 13:49:09 (4m04s, exi
          13:45:52.038 FG off: no depth loss logged
          13:47:09.062 FG on: no depth loss logged
          13:48:01.555 FG off: mono 31 ms over 3 Presents source_handoff, unknown selection=no_current_nomination, prior_age 125 ms
-[INFO] FG-switch placement warm-up: 2 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+[INFO] FG-switch placement warm-up: 2 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; about 1 s is by design)
          13:47:09.062 FG on: flat 13:47:09.040-13:47:10.267 (0.9 s with depth, raw depth_unavailable)
          13:48:01.555 FG off: flat 13:48:01.597-13:48:02.604 (1.0 s with depth, raw frame_mismatch)
 [PASS] Placement flat: 38.7% of publications showed the colour frame with depth, 1.4% faded stereo back in

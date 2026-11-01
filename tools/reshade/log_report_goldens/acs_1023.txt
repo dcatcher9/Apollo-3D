@@ -15,7 +15,7 @@ Game 3D readiness: ACShadows.exe  08:23:00 to 08:25:37 (2m36s, ended without exi
          08:24:33.069 FG on: mono 1406 ms over 93 Presents no_retained_depth, Streamline selection=inactive_views, prior_age 594 ms; mono 79 ms over 6 Presents depth_shape_changed, Streamline selection=layout_changed, prior_age 171 ms; mono 454 ms over 38 Presents source_changed, Streamline selection=layout_changed, prior_age 250 ms
 [INFO] Depth paused by the game: 1 depth loss in which the game ran no DLSS (no active depth view: a menu or loading screen) and resumed it with its own scene reset; those frames were flat
          08:23:52.599-08:23:53.816 (1219 ms) retained_depth_expired, Streamline selection=inactive_views (the game supplied no depth)
-[INFO] FG-switch placement warm-up: 1 FG switch left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+[INFO] FG-switch placement warm-up: 1 FG switch left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; about 1 s is by design)
          08:24:33.069 FG on: flat 08:24:33.461-08:24:36.861 (1.4 s with depth, raw depth_unavailable)
 [PASS] Placement flat: 10.5% of publications showed the colour frame with depth, 6.6% faded stereo back in
 [INFO] Placement calibration: 2 flat runs were calibrations with depth for at most 3 s

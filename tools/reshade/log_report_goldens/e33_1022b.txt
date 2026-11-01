@@ -15,7 +15,7 @@ Game 3D readiness: SandFall-Win64-Shipping.exe  14:35:02 to 14:37:04 (2m02s, exi
 [INFO] Depth paused by the game: 2 depth losses in which the game ran no DLSS (no active depth view: a menu or loading screen) and resumed it with its own scene reset; those frames were flat
          14:35:30.766-14:35:31.598 (828 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth)
          14:35:36.825-14:35:38.087 (1265 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth)
-[INFO] FG-switch placement warm-up: 4 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; the next round's item)
+[INFO] FG-switch placement warm-up: 4 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; about 1 s is by design)
          14:35:49.900 FG on: flat 14:35:50.153-14:35:51.156 (1.0 s with depth, projection waiting_for_depth)
          14:36:28.103 FG on: flat 14:36:27.212-14:36:29.318 (1.0 s with depth, projection waiting_for_depth)
          14:36:39.759 FG on: flat 14:36:39.944-14:36:41.064 (1.1 s with depth, projection waiting_for_depth)
