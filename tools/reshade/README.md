@@ -2011,7 +2011,12 @@ viewports' SR copies with either viewport's evaluation the newest. Each viewport
 oracle for its own case, never the other's copy: all 120 meet. The capture owner holds no FG copy
 before the pick, so every FG cell judges a silent scope (its tie viewport, `tie_epoch` and
 `tie_viewport`); a live (required) scope's tie-break is pinned by the seam characterization's P6
-two-view rows, on viewport 0 and on viewport 1. Dynamic mode with
+two-view rows, on viewport 0 and on viewport 1. A whole run requires all 120 cells (11-01). Each
+cell's JSON line also carries, under `evidence`, the other viewport's expected and observed outcome
+(which decide the verdict as well) and both picks with `select_provider`'s result and reason; a
+refusal's `why` is S19's `ambiguous_view` where the other viewport's copy or ambiguous views
+refused it, `fg_scope` where the FG scope's checks did, and `none` otherwise (until 11-01 every
+refusal read `ambiguous_view` and the line named only the case viewport). Dynamic mode with
 `numFramesToGenerate` 0 is no frame generation scope to the oracle (S20) and binds no viewport in
 the add-on: `sl_dlss_g.h` does not say whether Dynamic then generates frames, so both take the
 fail-safe reading and both viewports refuse (the FG view names no tie viewport without a declared
@@ -2067,7 +2072,10 @@ verdict, gap rows and evidence ([`test_game3d_api_contract_jsonl.h`](test_game3d
 line per contract test with its ctest result. The runner checks those cases against the known-gap
 table itself: a case may only meet the oracle, fail as a recorded gap or sit in a pending row, and
 each expected-failure row of a family that ran whole (and, at runtime, whose scope is whole) must be
-the only row of a failing case. `summary.json` names the commit the run started from and lists under
+the only row of a failing case. A passing `reshade_contract_matrix_cpu` (ctest runs it whole) must
+have written lines of every hook family a known-gap table names (`L1 sl`, `L1 sl_views`, `L1 ngx`),
+so a family that ran no case fails the run (11-01; until then only the families with lines were
+checked, and a family whose gap table holds no expected-failure row could vanish unseen). `summary.json` names the commit the run started from and lists under
 `uncommitted` the tracked files that differed from it (the console says how many), so results from
 a merge in progress or a local edit do not pass as evidence for that commit: run it after the commit.
 `-SkipGpu` leaves out the device and runtime layers; run them only with no game running. A contract

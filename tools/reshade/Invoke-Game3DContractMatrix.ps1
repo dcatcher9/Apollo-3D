@@ -202,6 +202,14 @@ try {
     } elseif ($status -ne 'skipped') {
       $problems.Add("$name wrote no case lines ($file)")
     }
+    # ctest runs the hook layer whole: a passing run writes lines of every
+    # hook family a known-gap table names, so a family that ran no case
+    # fails here rather than passing unseen.
+    if ($layer -eq 'L0+L1' -and $status -eq 'pass') {
+      foreach ($key in @($gapTables.Keys | Where-Object { $_ -like 'L1 *' } | Sort-Object)) {
+        if (-not $families.Contains($key)) { $problems.Add("$name wrote no case lines of family $key") }
+      }
+    }
   }
   # UTF-8 without a byte-order mark, which would corrupt the first JSON line.
   $utf8 = New-Object Text.UTF8Encoding $false

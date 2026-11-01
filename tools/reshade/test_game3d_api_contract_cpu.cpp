@@ -1838,15 +1838,37 @@ namespace {
 
     constexpr std::uint32_t case_view = 7, other_view = 8;
     constexpr unsigned row_count = std::size(gaps::view_rows);
+    // The family's size: every value of each dimension combined.
+    constexpr unsigned cell_count = (unsigned(matrix::fg_mode::undeclared) + 1) * std::size(matrix::frames_generated) *
+      (unsigned(matrix::sl_result::error) + 1) * 2;
+
+    void check_sizes(const generator::family &owner) {
+      require(owner.dimensions.size() == fg_view + 1, "the two-viewport family and its dimension enumeration differ");
+      const auto sized = [&](unsigned d, std::size_t count) {
+        require(owner.dimensions[d].values.size() == count, "a two-viewport dimension's names and values differ in number");
+      };
+      sized(fg, std::size_t(matrix::fg_mode::undeclared) + 1);
+      sized(frames, std::size(matrix::frames_generated));
+      sized(options_result, std::size_t(matrix::sl_result::error) + 1);
+      sized(fg_view, 2);
+    }
+
+    // One Present's selection: C the case viewport's copy, O the other's, -
+    // none ready, ? a copy of neither; with select_provider's result and
+    // reason.
+    struct pick_result {
+      char label {'?'};
+      capture::status result {capture::status::unavailable};
+      capture::selection_reason selection {capture::selection_reason::not_attempted};
+    };
 
     struct judgement {
       matrix::sl_case value;
       matrix::outcome expected, other_expected;
       matrix::result actual, other;
       // The pick with the other viewport's evaluation the newest, then with
-      // the case viewport's: C the case viewport's copy, O the other's, -
-      // none.
-      char picks[2] {};
+      // the case viewport's.
+      pick_result picks[2] {};
       bool satisfied {};
       gaps::verdict verdict {};
       bool matched[row_count] {};
@@ -1883,7 +1905,7 @@ namespace {
 
     // select_provider's pick from both viewports' SR copies in epoch, both
     // active, with the case viewport's evaluation the newest or the other's.
-    char pick(const sunshine_streamline::provider::frame_generation_selection &scope, std::uint64_t epoch, bool case_newest) {
+    pick_result pick(const sunshine_streamline::provider::frame_generation_selection &scope, std::uint64_t epoch, bool case_newest) {
       using capture::slot;
       constexpr std::uint64_t device = 41, native = 77;
       capture::fixture::reset_owner();
@@ -1910,9 +1932,30 @@ namespace {
       owner.device_identity = device;
       const auto chosen = capture::select_provider(owner, native, 1, GetTickCount64(), scope.selection);
       const auto *picked = chosen.result == capture::status::ready ? chosen.value : nullptr;
-      return !picked ? '-' : picked == mine ? 'C' :
-             picked == other                ? 'O' :
-                                              '?';
+      pick_result out;
+      out.label = !picked ? '-' : picked == mine ? 'C' :
+                  picked == other                ? 'O' :
+                                                   '?';
+      out.result = chosen.result;
+      out.selection = chosen.selection;
+      return out;
+    }
+
+    // The refusal class a refusing viewport's two picks show: the other
+    // viewport's copy or ambiguous views, S19's ambiguous_view; the FG
+    // scope's checks (fg_scope_missing, fg_scope_mismatch), fg_scope; any
+    // other selection none (the JSON line's evidence names each pick's
+    // result and reason).
+    matrix::refusal refusal_of(const pick_result (&picks)[2], char viewport) {
+      bool scope = false, ambiguous = false;
+      for (const auto &value : picks) {
+        if (value.selection == capture::selection_reason::fg_scope_missing || value.selection == capture::selection_reason::fg_scope_mismatch) {
+          scope = true;
+        } else if ((value.label != '-' && value.label != viewport) || value.selection == capture::selection_reason::ambiguous_views) {
+          ambiguous = true;
+        }
+      }
+      return scope ? matrix::refusal::fg_scope : ambiguous ? matrix::refusal::ambiguous_view : matrix::refusal::none;
     }
 
     judgement judge(const generator::row &assignment) {
@@ -1926,11 +1969,11 @@ namespace {
       const auto scope = fg_scope(out.value, epoch);
       out.picks[0] = pick(scope, epoch, false);
       out.picks[1] = pick(scope, epoch, true);
-      const bool consistent = out.picks[0] == out.picks[1];
+      const bool consistent = out.picks[0].label == out.picks[1].label;
       const auto outcome = [&](char viewport) {
         matrix::result value;
-        value.kind = consistent && out.picks[0] == viewport ? matrix::outcome_kind::capture : matrix::outcome_kind::refuse;
-        value.why = value.kind == matrix::outcome_kind::refuse ? matrix::refusal::ambiguous_view : matrix::refusal::none;
+        value.kind = consistent && out.picks[0].label == viewport ? matrix::outcome_kind::capture : matrix::outcome_kind::refuse;
+        value.why = value.kind == matrix::outcome_kind::refuse ? refusal_of(out.picks, viewport) : matrix::refusal::none;
         return value;
       };
       out.actual = outcome('C');
@@ -1941,7 +1984,7 @@ namespace {
         }
         return matrix::permits(expected, matrix::outcome_kind::refuse) || matrix::permits(expected, matrix::outcome_kind::hold);
       };
-      out.satisfied = consistent && out.picks[0] != '?' && meets(out.expected, out.actual) && meets(out.other_expected, out.other);
+      out.satisfied = consistent && out.picks[0].label != '?' && meets(out.expected, out.actual) && meets(out.other_expected, out.other);
       out.verdict = gaps::judge_each(gaps::view_rows, out.value, out.satisfied, {out.actual, consistent}, out.matched);
       return out;
     }
@@ -1952,7 +1995,23 @@ namespace {
       for (unsigned i = 0; i != row_count; ++i) {
         ids[i] = gaps::view_rows[i].id;
       }
-      std::fprintf(stderr, "%s: case sl_views %s %s: expected %s (%s), the other viewport %s (%s); picks %c %c; rows %s; %s\n", what, generator::id_text(generator::case_id(owner, assignment)).c_str(), generator::describe(owner, assignment).c_str(), name(value.expected.kind), value.expected.by->id, name(value.other_expected.kind), value.other_expected.by->id, value.picks[0], value.picks[1], row_names(value.matched, ids, row_count, rows), name(value.verdict));
+      std::fprintf(stderr, "%s: case sl_views %s %s: expected %s (%s), the other viewport %s (%s); picks %c %c (%s %s, %s %s); rows %s; %s\n", what, generator::id_text(generator::case_id(owner, assignment)).c_str(), generator::describe(owner, assignment).c_str(), name(value.expected.kind), value.expected.by->id, name(value.other_expected.kind), value.other_expected.by->id, value.picks[0].label, value.picks[1].label, capture::name(value.picks[0].result), capture::name(value.picks[0].selection), capture::name(value.picks[1].result), capture::name(value.picks[1].selection), row_names(value.matched, ids, row_count, rows), name(value.verdict));
+    }
+
+    // A cell's JSON-line evidence: the other viewport's expected and observed
+    // outcomes, which decide the verdict as the case viewport's do, and each
+    // pick (the other viewport's evaluation the newest, then the case
+    // viewport's) with select_provider's result and reason.
+    nlohmann::json evidence(const judgement &value) {
+      nlohmann::json picks = nlohmann::json::array();
+      for (const auto &pick : value.picks) {
+        picks.push_back({{"pick", std::string(1, pick.label)}, {"result", capture::name(pick.result)}, {"selection", capture::name(pick.selection)}});
+      }
+      return {
+        {"other_viewport", {{"rule", value.other_expected.by ? value.other_expected.by->id : ""}, {"expected", name(value.other_expected.kind)}, {"observed", name(value.other.kind)}, {"why", matrix::jsonl::name(value.other.why)}}},
+        {"picks", picks},
+        {"consistent", value.picks[0].label == value.picks[1].label},
+      };
     }
   }  // namespace view_cells
 
@@ -2264,10 +2323,13 @@ namespace {
     if (!options.partial() || (options.shards != 1 && options.shard == 0)) {
       const bool requested = capture::requested.load();
       const auto views = view_cells::family();
+      view_cells::check_sizes(views);
       for (const auto &assignment : generator::product(views, {view_cells::fg, view_cells::frames, view_cells::options_result, view_cells::fg_view}, generator::defaults(views))) {
         const auto value = view_cells::judge(assignment);
         if (lines.is_open()) {
-          lines << game3d_contract::jsonl::line("L1", views, assignment, nullptr, true, value.expected, value.actual, value.verdict, gaps::view_rows, value.matched).dump() << '\n';
+          auto line = game3d_contract::jsonl::line("L1", views, assignment, nullptr, true, value.expected, value.actual, value.verdict, gaps::view_rows, value.matched);
+          line["evidence"] = view_cells::evidence(value);
+          lines << line.dump() << '\n';
         }
         if (const auto *what = counts.views.add(value.verdict, value.matched, value.satisfied)) {
           view_cells::describe(what, views, assignment, value);
@@ -2275,6 +2337,10 @@ namespace {
       }
       capture::fixture::reset_owner();
       capture::requested = requested;
+      // Every cell ran: its gap table has no expected-failure row whose
+      // absence would show a family that ran none (the final review's
+      // R5-16).
+      require(counts.views.cells == view_cells::cell_count, "the two-viewport family did not run every cell");
       counts.views.finish(gaps::view_rows, "Two active viewports", true);
     }
     sl_cells::uninstall();
@@ -2409,7 +2475,8 @@ int main(int argc, char **argv) try {
   const auto &census = hooks.census;
   std::printf("PASS API contract matrix L1%s: %u Streamline hook cells: the %u-row copy-point product (%u constructible, %u legal), %u seed rows, %u owner-question rows, %u one-factor rows and %u pairwise rows covering all %zu legal value pairs; ", options.partial() ? " shard" : "", hooks.streamline.cells, census.product, census.constructible, census.legal_product, census.seeded, census.questions, census.one_factor, census.pairwise, census.pairs);
   hooks.streamline.print(gaps::sl_rows);
-  if (hooks.views.cells) {
+  // Shards other than 0 run no two-viewport cell.
+  if (!options.partial() || hooks.views.cells) {
     std::printf(". %u two-active-viewport cells (S19) at the capture owner's selection: ", hooks.views.cells);
     hooks.views.print(gaps::view_rows);
   }
