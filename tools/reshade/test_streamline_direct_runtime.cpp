@@ -718,6 +718,10 @@ RWTexture2D<float> depth : register(u0);
       const D3D12_RANGE no_write{0,0}; staging->Unmap(0,&no_write);
       return bytes;
     }
+    // Which rotating source's original depth and stencil planes the last
+    // verify_packed_depth read back unchanged: the latest drawn source, which
+    // need not be the one its capture consumed.
+    unsigned preserved_source{};
     unsigned verify_packed_depth() {
       check_projection();
       consumed_depth("packed-consumed-depth");
@@ -739,6 +743,7 @@ RWTexture2D<float> depth : register(u0);
         require(stencil[size_t(y)*selected->width+x]==static_cast<std::uint8_t>(selected->stencil_seed+band),
           "Native depth-plane capture changed the original stencil plane");
       }
+      preserved_source=selected==first.get() ? 1u : 2u;
       return verified;
     }
     // Constant-depth rows outside the center patch let the actual source image
@@ -851,14 +856,17 @@ RWTexture2D<float> depth : register(u0);
         const auto phase=input==private_case::common ? "packed-v1-COMMON" : "packed-v1-shader-read";
         settle(phase);
         // Coverage as in private_state_cases: the verified capture's own source.
-        unsigned verified=0;
-        for(unsigned i=0;i<4 || verified!=3;++i) {
-          require(i<16,"Packed V1 regression did not verify fresh consumed depth of both real format19 sources");
+        // The unchanged original planes are a separate check of another source
+        // (the latest drawn one), so both sources must be covered by each.
+        unsigned verified=0,preserved=0;
+        for(unsigned i=0;i<4 || verified!=3 || preserved!=3;++i) {
+          require(i<16,"Packed V1 regression did not verify fresh consumed depth and unchanged original planes of both real format19 sources");
           tick(phase);
           require(ticket && current() && ready(),"Packed V1 source rotation lost its current independent capture");
           if(i&1) tick(phase); // Shift the next capture's parity, so both sources are consumed.
           const unsigned source=verify_packed_depth();
           if(consumed_fresh) verified|=source;
+          preserved|=preserved_source;
         }
       }
       std::puts("PASS packed R32G8X24/D32S8 private-state rotation: submitted prior-CL state, exact consumed depth-plane pixels and projection, source depth/stencil preservation");
