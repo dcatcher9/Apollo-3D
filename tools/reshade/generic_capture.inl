@@ -357,21 +357,27 @@ static bool hold_shown_capture(effect_runtime *runtime, const generic_depth_data
 	return runtime->get_device()->get_resource_from_view(resource_view{record.view}).handle == record.sampled;
 }
 
-// The capture budget's view of the snapshot: geometry and content qualification.
+// The capture budget's view of the snapshot at depth frame `frame`: geometry,
+// content qualification, and whether the source worked within the selector's
+// activity grace (its last frame with work; a frame that only cleared it does
+// not count, as for a candidate's activity).
 static std::vector<sunshine_depth_capture::source_observation> capture_observations(const generic_depth_data &data,
-	const depth_selection_snapshot &snapshot)
+	uint64_t frame, const depth_selection_snapshot &snapshot)
 {
+	constexpr auto none = std::numeric_limits<uint64_t>::max();
 	std::vector<sunshine_depth_capture::source_observation> observations;
 	observations.reserve(snapshot.size());
 	for (const auto &[value, info] : snapshot)
 	{
-		if (!content_supported(info.desc) || info.last_used_in_frame == std::numeric_limits<uint64_t>::max()) continue;
+		if (!content_supported(info.desc) || info.last_used_in_frame == none) continue;
 		const auto region = effective_capture_region(info);
 		const auto *e = data.selection.evidence(info.identity);
+		const uint64_t worked = info.last_frame_stats.total.has_work() ? info.last_used_in_frame : info.prior_work_frame;
 		observations.push_back({info.identity, info.layout_epoch, info.last_used_in_frame,
 			{info.desc.texture.width, info.desc.texture.height, static_cast<uint32_t>(info.desc.texture.format),
 			 region.x, region.y, region.width, region.height},
-			e && e->confirmed_good && e->quality.kind == sunshine_depth::content_kind::useful});
+			e && e->confirmed_good && e->quality.kind == sunshine_depth::content_kind::useful,
+			worked == none || worked > frame || frame - worked > data.selection.active_grace_frames()});
 	}
 	return observations;
 }
@@ -400,7 +406,7 @@ static void observe_present_coverage(generic_depth_data &data, uint64_t frame, c
 		anchor.active = anchor.active || contains(active, data.captures.records[i].identity);
 		anchor.drew = anchor.drew || contains(drew, data.captures.records[i].identity);
 	}
-	const auto observations = capture_observations(data, snapshot);
+	const auto observations = capture_observations(data, frame, snapshot);
 	data.selection.observe_present(frame, data.anchor_identity, data.capture_ready, anchor, [&](uint64_t id) {
 		return sunshine_depth::selection_policy::set_presence {
 			sunshine_depth_capture::prospective_set_contains(id, observations, active),
@@ -590,7 +596,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	data.capture_wait_detail = nullptr;
 	data.hold_only = false;
 	retire_member_views(runtime, data, device_data);
-	const auto observations = capture_observations(data, snapshot);
+	const auto observations = capture_observations(data, device_data.frame_index, snapshot);
 	const uint64_t anchor = selected_info ? selected_info->identity : 0;
 	const auto group = data.capture_budget.update(anchor, observations, !automatic);
 	data.anchor_depth_stencil = selected;

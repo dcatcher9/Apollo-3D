@@ -19,10 +19,13 @@ namespace sunshine_depth_capture {
 
   // Slow source evidence controls only capture allocation/preferences. It does
   // not assert a current copy, a shared numeric basis, or exclusive rendering.
+  // `idle`: no work within the selector's activity grace (the source stopped
+  // being drawn, or the game abandoned it). It joins a set only in a slot no
+  // working source takes, and gives its slot to a working one.
   struct source_observation {
     std::uint64_t id{}, layout{}, last_used{};
     geometry shape;
-    bool qualified{};
+    bool qualified{}, idle{};
   };
   struct source_set {
     std::uint64_t epoch{};
@@ -60,7 +63,8 @@ namespace sunshine_depth_capture {
       if (!single_anchor) {
         // A temporarily inactive/flat member still owns the same capture slot
         // and numeric basis. Remove it only on authoritative tuple change or
-        // replacement by a newly qualified source when the budget is full.
+        // replacement by a newly qualified working source when the budget is
+        // full (an unqualified or idle member, the longest unused first).
         for (unsigned i = 0; i != sources_.count && next.count < maximum_sources; ++i) {
           const auto old = find(sources_.members[i]);
           if (old == live.end() || old->id == anchor || !(old->shape == primary->shape) ||
@@ -72,13 +76,19 @@ namespace sunshine_depth_capture {
           if (o.id && o.qualified && o.shape == primary->shape &&
               std::find(next.members.begin(), next.members.begin() + next.count, o.id) == next.members.begin() + next.count)
             candidates.push_back(&o);
-        std::sort(candidates.begin(), candidates.end(), [](const auto *a, const auto *b) { return a->id < b->id; });
+        // Working sources join first, idle ones only fill the slots left: by
+        // lifetime order alone, the idle members of an abandoned set of the
+        // same geometry would take the slots and keep a working peer out.
+        std::sort(candidates.begin(), candidates.end(), [](const auto *a, const auto *b) {
+          return a->idle != b->idle ? !a->idle : a->id < b->id;
+        });
         for (const auto *o : candidates) {
           if (next.count < maximum_sources) append(*o);
+          else if (o->idle) break;
           else {
             unsigned replace = maximum_sources;
             for (unsigned i = 1; i != next.count; ++i)
-              if (!kept[i].qualified && (replace == maximum_sources || kept[i].last_used < kept[replace].last_used)) replace = i;
+              if ((!kept[i].qualified || kept[i].idle) && (replace == maximum_sources || kept[i].last_used < kept[replace].last_used)) replace = i;
             if (replace == maximum_sources) break;
             next.members[replace] = o->id; kept[replace] = *o;
           }
@@ -94,9 +104,10 @@ namespace sunshine_depth_capture {
   };
 
   // Whether the capture set the budget would route if `candidate` became the
-  // anchor (itself and its same-geometry qualified peers) has a member among
-  // `ids`: alternating A/B or A/B/C allocations count together for Present
-  // coverage. Pure and allocation-bounded by the observations.
+  // anchor (itself and its same-geometry qualified peers, working ones first)
+  // has a member among `ids`: alternating A/B or A/B/C allocations count
+  // together for Present coverage. Pure and allocation-bounded by the
+  // observations.
   inline bool prospective_set_contains(std::uint64_t candidate, const std::vector<source_observation> &observations,
       const std::vector<std::uint64_t> &ids) {
     const auto contains = [&ids](std::uint64_t id) { return std::find(ids.begin(), ids.end(), id) != ids.end(); };

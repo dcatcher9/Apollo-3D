@@ -115,6 +115,39 @@ namespace {
     auto changed = slots.update(100, live, false);
     require(changed.epoch > first.epoch && changed.members[0] == 100, "New anchor outside budget did not replace generation");
   }
+  // An idle source (no work within the activity grace: a set the game stopped
+  // drawing or abandoned) joins a capture set only in a slot no working source
+  // takes, and a full set gives an idle member's slot to a working newly
+  // qualified source; a member that only pauses keeps its slot while nothing
+  // needs it.
+  void idle_sources_and_budget() {
+    const auto idle = [](std::uint64_t id) { auto o = source(id); o.idle = true; return o; };
+    budget fresh;
+    const std::vector<source_observation> crowded {idle(1), idle(2), idle(3), source(10), source(11)};
+    auto set = fresh.update(10, crowded, false);
+    require(set.count == 4 && set.members[0] == 10 && set.members[1] == 11 && set.members[2] == 1 && set.members[3] == 2,
+      "Idle same-geometry peers with older lifetimes filled a new capture set and kept its working peer out");
+    budget resume;
+    const std::vector<source_observation> resuming {source(10), idle(11), idle(12)};
+    set = resume.update(10, resuming, false);
+    require(set.count == 3 && set.members[1] == 11 && set.members[2] == 12,
+      "Idle peers lost the spare slots that let a resuming set's first turns be current");
+    budget slots;
+    std::vector<source_observation> live {source(1), source(2), source(3), source(4)};
+    const auto first = slots.update(1, live, false);
+    for (auto &item : live) if (item.id != 1) item.idle = true;
+    const auto paused = slots.update(1, live, false);
+    require(paused.members == first.members && paused.count == 4, "A pausing member lost its slot while no working source needed it");
+    live.push_back(source(5));
+    const auto replaced = slots.update(1, live, false);
+    require(replaced.count == 4 && replaced.members[0] == 1 &&
+      std::find(replaced.members.begin(), replaced.members.end(), 5) != replaced.members.end(),
+      "A working qualified source could not take an idle member's slot in a full capture set");
+    live.push_back(idle(6));
+    const auto later = slots.update(1, live, false);
+    require(std::find(later.members.begin(), later.members.begin() + later.count, 6) == later.members.begin() + later.count,
+      "An idle source took a capture slot");
+  }
   // Present coverage judges a candidate by the capture set it would route as
   // the anchor: alternating same-geometry qualified allocations count
   // together; another geometry or an unqualified allocation does not.
@@ -133,12 +166,20 @@ namespace {
       "An unqualified allocation joined another candidate's prospective set, or lost its own anchor's");
     require(!prospective_set_contains(1, pair, {}) && prospective_set_contains(4, pair, {4}),
       "A set without members among the ids drew, or a candidate outside the observations lost its own presence");
+    // A new A/B set beside three idle members of an abandoned A/B/C set of the
+    // same geometry (older lifetimes): judged as one set, not one member at a time.
+    auto idle = [](std::uint64_t id) { auto o = source(id); o.idle = true; return o; };
+    const std::vector<source_observation> second {idle(1), idle(2), idle(3), source(10), source(11)};
+    require(prospective_set_contains(10, second, {11}) && prospective_set_contains(11, second, {10}),
+      "Idle members of an abandoned set kept a new A/B set from being judged as one capture set");
+    const std::vector<source_observation> full {idle(1), source(10), source(11), source(12), source(13)};
+    require(!prospective_set_contains(10, full, {1}), "An idle source took a slot a working source needed");
   }
 }
 int main() {
   try {
     allocation_is_not_selection(); overlapping_copies_keep_anchor(); exact_currentness(); retained_lifetimes_and_budget();
-    prospective_sets();
-    std::puts("depth_capture_policy: 5 cases passed"); return 0;
+    idle_sources_and_budget(); prospective_sets();
+    std::puts("depth_capture_policy: 6 cases passed"); return 0;
   } catch (const std::exception &error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
 }

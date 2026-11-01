@@ -6243,6 +6243,15 @@ live eligible sources during inactivity.
 and pure current-copy selection. Independently useful sources with matching dimensions, format
 and capture region can retain capture slots; membership does not require mutually exclusive
 rendering. A live unchanged member can survive temporary inactivity or inconclusive content.
+Working sources join a set first: a source with no work within the selector's activity grace (the
+three depth-active Presents a candidate counts as active; a frame that only cleared it does not
+count) is idle and joins only in a slot no working source takes, and a full set gives the slot of
+an unqualified or idle member (the longest unused first) to a newly qualified working source. An
+idle peer of a pausing set therefore still gets its slot (and its capture view) before its next
+turn when there is room. Without the order, the idle members of a set the game stopped drawing
+(same geometry, older lifetimes) filled the four slots of every new set of that geometry, so a
+new A/B set was judged one member at a time, missed every other Present and never replaced the
+incumbent (deferred item 6, until 11-01).
 The existing slow quality policy chooses a preferred anchor. Current selection uses that anchor's
 usable copy when qualified, otherwise another qualified retained source's current copy. Multiple
 depth resources rendering in the same present is not itself a rejection. Ambiguous provenance of
@@ -6334,10 +6343,11 @@ artificial preference. A full-resolution buffer still has to pass the content ch
 Coverage over Presents ranks after the completeness class and before resolution and histogram
 breadth. After current-copy routing on each depth-active Present, selection records, relative to
 the routed anchor, what each other candidate's prospective capture set did: the candidate with
-the same-geometry qualified peers the capture budget would route with it, so alternating A/B or
-A/B/C allocations count together. A set misses a Present when it had no work that makes an
-end-of-frame copy current (raster or mesh work, or a copy that is depth of its own, above), so a
-set fed by a resolve from an MSAA scene every Present is not missing any; only raster and mesh
+the same-geometry qualified peers the capture budget would route with it (working ones first,
+above), so alternating A/B or A/B/C allocations count together. A set misses a
+Present when it had no work that makes an end-of-frame copy current (raster or mesh work, or a
+copy that is depth of its own, above), so a set fed by a resolve from an MSAA scene every Present
+is not missing any; only raster and mesh
 work cover a gap, so a copy never earns a coverage win. Clears do not count. A challenger whose
 set missed a Present on which the anchor showed current depth cannot win on resolution,
 histogram breadth or Presents it covers, because promoting it would leave that Present flat;
