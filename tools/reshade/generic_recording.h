@@ -68,9 +68,6 @@ struct depth_stencil_frame_stats
 	resource transfer_source = {};
 	uint64_t transfer_position = 0;
 	bool transfer_full = false;
-	// This frame's transfer activity was removed (resolve_transfer_lineage):
-	// it was a copy of a candidate that holds the same or newer depth.
-	bool transfer_alias = false;
 
 	void limit_tracking(depth_tracking_demand demand)
 	{
@@ -135,7 +132,6 @@ struct depth_stencil_frame_stats
 		if (later.last_overwrite) last_overwrite = later.last_overwrite + offset;
 		if (later.transfer_position)
 			observe_transfer(later.transfer_source, later.transfer_position + offset, later.transfer_full);
-		transfer_alias |= later.transfer_alias;
 		if (later.last_end_discard) last_end_discard = later.last_end_discard + offset;
 		if (later.last_rewrite) last_rewrite = later.last_rewrite + offset;
 	}

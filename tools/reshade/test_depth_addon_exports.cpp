@@ -351,28 +351,28 @@ static void check_transfer_lineage()
 	require_snapshot(!frame.count(history) && active(frame, scene),
 		"A history copy made before its source drew stayed current depth, or left its destination touched");
 	frame = run({{{op::clear, history}, {op::copy, history, scene}, {op::clear, scene}, {op::draw, scene}}});
-	require_snapshot(frame.count(history) && !active(frame, history) && frame.at(history).transfer_alias && frame.at(history).clear_zero,
+	require_snapshot(frame.count(history) && !active(frame, history) && frame.at(history).clear_zero,
 		"A history reset (clear, then copy) lost its clear or kept its copy as activity");
 	frame = run({{{op::clear, scene}, {op::draw, scene}}, {{op::copy, history, scene}}});
 	require_snapshot(!active(frame, history) && active(frame, scene), "A duplicate of depth its source still holds stayed current depth");
 	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::copy, history, scene}}, {{op::clear, scene}, {op::draw, scene}}});
 	const auto &kept = frame.at(history);
-	require_snapshot(active(frame, history) && !kept.transfer_alias && kept.clear_zero,
+	require_snapshot(active(frame, history) && kept.clear_zero,
 		"A whole copy of a pass its source cleared away lost its activity or the source's clear convention");
 	// Every overwrite of the source after the copy counts: a clear limited to
 	// rectangles too (it restarts no capture crop, but the pass may be gone).
 	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::copy, history, scene}}, {{op::rect_clear, scene}, {op::draw, scene}}});
-	require_snapshot(active(frame, history) && !frame.at(history).transfer_alias && frame.at(history).clear_zero,
+	require_snapshot(active(frame, history) && frame.at(history).clear_zero,
 		"A whole copy of a pass its source cleared by a rectangle lost its activity or the source's clear convention");
 	// A render pass that DISCARDs the source's depth after the copy (then a reset
 	// draw) overwrites the pass as a clear does; it has no clear value of its
 	// own, so the destination takes the source's earlier clear convention.
 	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::copy, history, scene}}, {{op::discard, scene}, {op::draw, scene}}});
-	require_snapshot(active(frame, history) && !frame.at(history).transfer_alias && frame.at(history).clear_zero &&
+	require_snapshot(active(frame, history) && frame.at(history).clear_zero &&
 		frame.at(scene).depth_erased, "A whole copy of a pass its source discarded lost its activity or the source's clear convention");
 	// A copy with a box spanning the source's whole plane is a whole copy.
 	frame = run({{{op::clear, scene}, {op::draw, scene}, {op::boxed, history, scene}}, {{op::clear, scene}, {op::draw, scene}}});
-	require_snapshot(active(frame, history) && !frame.at(history).transfer_alias,
+	require_snapshot(active(frame, history),
 		"A boxed whole copy of a pass its source cleared away lost its activity");
 	// A history copy before the source's first draw stays older depth, however
 	// the source is overwritten later in the frame.

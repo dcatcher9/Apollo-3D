@@ -314,7 +314,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void resolve_transfer_lineage(state_tracking &stat
 		}
 		stats.total.observed_work = false;
 		stats.total.scene_writes = 0;
-		stats.transfer_alias = true;
 		if (!stats.clear_zero && !stats.clear_one && !stats.clear_other && untouched_count != untouched.size())
 			untouched[untouched_count++] = dest;
 	}
