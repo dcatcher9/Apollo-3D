@@ -8,6 +8,13 @@ param(
     [switch] $AllowRunningGame
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 started from a PowerShell 7 window inherits PowerShell
+# 7's PSModulePath, whose Core-only Microsoft.PowerShell.Utility comes first and
+# hides 5.1's own Get-FileHash ("not recognized"). Load this edition's module
+# from $PSHOME; the environment and every other command stay as they are.
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')
+}
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 # Windows PowerShell 5.1 does not populate $PSScriptRoot while binding -File
 # parameter defaults. Resolve the co-located package only after binding.

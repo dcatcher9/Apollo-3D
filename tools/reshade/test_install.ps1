@@ -7,6 +7,11 @@ param(
     [Parameter(Mandatory)][string] $OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
+# The checks hash files themselves; as in install.ps1, PowerShell 7's inherited
+# PSModulePath must not hide 5.1's Get-FileHash.
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')
+}
 $installer = Join-Path $PSScriptRoot 'install.ps1'
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Use a fresh isolated output directory.' }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
@@ -454,3 +459,48 @@ foreach ($name in @('SunshineSBS.addon64','SunshineSBS-LICENSES.txt')) {
 Require ([IO.File]::ReadAllText((Join-Path $standaloneGame 'ReShade.ini')) -match '(?m)^Enabled=1\r?$') 'Packaged CLI did not enable native Game 3D.'
 Require ((Get-FileHash -LiteralPath $standaloneExecutable).Hash -eq $standaloneGameHash) 'Packaged CLI changed the game executable.'
 Write-Output 'PASS Windows PowerShell 5.1 -File uses co-located addon files when AddonDirectory is omitted.'
+
+# Windows PowerShell started from a PowerShell 7 window inherits PowerShell 7's
+# PSModulePath, whose Microsoft.PowerShell.Utility comes first. Its manifest
+# lists the Utility cmdlets, Get-FileHash among them (a cmdlet there), over a
+# nested Microsoft.PowerShell.Commands.Utility.dll that 5.1 resolves to its own
+# assembly. 5.1 loads it for the first Utility cmdlet a script uses; then
+# Get-FileHash, a function of 5.1's own module, is not recognized. A stand-in
+# of that manifest (5.1's cmdlet list plus Get-FileHash) reproduces it. Only the
+# child installer sees it.
+$leakedModules = Join-Path $OutputDirectory 'PowerShell 7 modules'
+$leakedUtility = Join-Path $leakedModules 'Microsoft.PowerShell.Utility'
+New-Item -ItemType Directory -Path $leakedUtility | Out-Null
+$leakedCmdlets = @((Get-Module Microsoft.PowerShell.Utility).ExportedCmdlets.Keys) + 'Get-FileHash' |
+    ForEach-Object { "'" + $_ + "'" }
+[IO.File]::WriteAllText((Join-Path $leakedUtility 'Microsoft.PowerShell.Utility.psd1'), ((
+    "@{",
+    "    GUID = '1da87e53-152b-403e-98dc-74d7b4d63d59'",
+    "    ModuleVersion = '7.0.0.0'",
+    "    CompatiblePSEditions = @('Core')",
+    "    PowerShellVersion = '3.0'",
+    "    NestedModules = @('Microsoft.PowerShell.Commands.Utility.dll')",
+    ("    CmdletsToExport = @(" + ($leakedCmdlets -join ', ') + ")"),
+    "    FunctionsToExport = @()",
+    "}") -join "`r`n"))
+$leakedGame = New-Fixture 'Windows PowerShell File with PowerShell 7 module path' "[GENERAL]`n" '' $false
+$leakedExecutable = Join-Path $leakedGame 'Test Game.exe'
+$leakedGameHash = (Get-FileHash -LiteralPath $leakedExecutable).Hash
+$previousModulePath = $env:PSModulePath
+$previousErrorAction = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    $env:PSModulePath = $leakedModules + ';' + $previousModulePath
+    $leakedOutput = & $windowsPowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $standaloneInstaller -GameExecutable $leakedExecutable -AllowRunningGame 2>&1
+    $leakedExit = $LASTEXITCODE
+} finally {
+    $env:PSModulePath = $previousModulePath
+    $ErrorActionPreference = $previousErrorAction
+}
+Require ($leakedExit -eq 0) ('Windows PowerShell -File setup under PowerShell 7''s module path failed: ' + ($leakedOutput -join [Environment]::NewLine))
+foreach ($name in @('SunshineSBS.addon64','SunshineSBS-LICENSES.txt')) {
+    Require ((Get-FileHash -LiteralPath (Join-Path $leakedGame $name)).Hash -eq
+        (Get-FileHash -LiteralPath (Join-Path $standalonePackage $name)).Hash) ('Setup under PowerShell 7''s module path did not install: ' + $name)
+}
+Require ((Get-FileHash -LiteralPath $leakedExecutable).Hash -eq $leakedGameHash) 'Setup under PowerShell 7''s module path changed the game executable.'
+Write-Output 'PASS Windows PowerShell 5.1 -File installs when PowerShell 7''s module path was inherited.'

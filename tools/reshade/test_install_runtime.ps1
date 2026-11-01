@@ -4,6 +4,10 @@ param(
     [string] $SetupArchive = (Join-Path $PSScriptRoot '..\..\cmake-build-relwithdebinfo\ReShade_Setup_6.8.0_Addon.exe')
 )
 $ErrorActionPreference = 'Stop'
+# PowerShell 7's inherited PSModulePath must not hide 5.1's Get-FileHash (install.ps1).
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')
+}
 $script:runtimeInstaller = Join-Path $PSScriptRoot 'install-runtime.ps1'
 $script:officialArchive = (Get-Item -LiteralPath $SetupArchive -ErrorAction Stop).FullName
 $script:pinnedHash = 'AFE4C8F13048306307983B8B3D41D5BF00A86820440B0E57DEA10950E1176445'

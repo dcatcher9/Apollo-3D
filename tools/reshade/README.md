@@ -167,6 +167,10 @@ Normal automatic UI detection requires neither a review file nor a panel approva
    .\cmake-build-reshade\install.ps1 -GameExecutable 'D:\Games\My Game\Game.exe'
    ```
 
+   A Windows PowerShell started from a PowerShell 7 window works too: the installer loads that
+   edition's own `Microsoft.PowerShell.Utility` from `$PSHOME`, so PowerShell 7's inherited module
+   path cannot hide `Get-FileHash` ([Setup](../../docs/reshade-sbs.md#setup)).
+
    The installer installs one DLL, backs up replaced files, keeps Generic Depth disabled,
    enables native Game 3D for a new setup, and removes the old separate depth/probe add-ons.
    Saved SunshineGame3D strength/depth-view values migrate into `[SUNSHINE_GAME3D]` in ReShade.ini;

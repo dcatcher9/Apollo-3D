@@ -755,6 +755,10 @@ Manual setup and presentation requirements:
    techniques are disabled. Original SuperDepth3D reference files/settings remain available.
    An explicit `-ShaderDirectory` installs a reference renderer and disables native Game 3D;
    this is for comparison testing, not ordinary setup.
+   `install.ps1` and `install-runtime.ps1` also run in a Windows PowerShell 5.1 started from a
+   PowerShell 7 window. Such a 5.1 inherits PowerShell 7's `PSModulePath`, whose
+   `Microsoft.PowerShell.Utility` would hide 5.1's `Get-FileHash` ("not recognized"), so both load
+   the running edition's own module from `$PSHOME` first; nothing else in the environment changes.
 3. Put the game in fullscreen or borderless fullscreen on Sunshine's virtual display at the normal resolution.
    Its client area must exactly cover that display, and ReShade and Sunshine must use the same GPU.
    Windows display scaling above 100% on that display makes a game that is not DPI aware see the
