@@ -895,20 +895,19 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 		state_tracking &state;
 		decltype(state.stats_per_used_depth_stencil) stats;
 		resource depth;
-		uint64_t lifetime;
 		viewport view;
 		~restore_state() {
 			const std::unique_lock<std::shared_mutex> lock(s_mutex);
 			state.stats_per_used_depth_stencil = std::move(stats);
-			state.current_depth_stencil = depth; state.current_depth_lifetime = lifetime;
+			state.current_depth_stencil = depth;
 			state.current_viewport = view;
 		}
 	};
 	std::unique_lock<std::shared_mutex> lock(s_mutex);
 	restore_state saved {state, std::move(state.stats_per_used_depth_stencil), state.current_depth_stencil,
-		state.current_depth_lifetime, state.current_viewport};
+		state.current_viewport};
 	state.stats_per_used_depth_stencil.clear();
-	state.current_depth_stencil = {native_resource}; state.current_depth_lifetime = 0;
+	state.current_depth_stencil = {native_resource};
 	state.current_viewport = {0, 0, 1280, 720, 0, 1};
 	lock.unlock();
 	const resource target {native_resource};

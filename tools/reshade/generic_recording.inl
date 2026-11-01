@@ -173,7 +173,6 @@ static bool on_end_render_pass(command_list *cmd_list)
 	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_end);
 	auto &state = *cmd_list->get_private_data<state_tracking>();
 	state.render_pass_depth = {};
-	state.render_pass_depth_uncertain = false;
 	return false;
 }
 // Call under the queue-state lock when needed. These writes establish activity,

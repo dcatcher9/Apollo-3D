@@ -147,9 +147,7 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	const uint64_t command_identity = s_next_command_identity.fetch_add(1, std::memory_order_relaxed);
 	viewport current_viewport = {};
 	resource current_depth_stencil = { 0 };
-	uint64_t current_depth_lifetime = 0;
 	resource render_pass_depth = {};
-	bool render_pass_depth_uncertain = false;
 	// Execution order of the depth work recorded here (draws, clears and
 	// transfers), for depth_stencil_frame_stats' positions.
 	uint64_t ordinal = 0;
@@ -165,9 +163,7 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	{
 		stats_per_used_depth_stencil.clear();
 		current_depth_stencil = { 0 };
-		current_depth_lifetime = 0;
 		render_pass_depth = {};
-		render_pass_depth_uncertain = false;
 		ordinal = 0;
 	}
 	void reset_on_present()
@@ -181,7 +177,6 @@ struct __declspec(uuid("806c3b54-baf6-46a7-a72a-28c629143d84")) state_tracking
 	{
 		// Executing a command list in a different command list inherits state
 		current_depth_stencil = source.current_depth_stencil;
-		current_depth_lifetime = source.current_depth_lifetime;
 
 		if (source.stats_per_used_depth_stencil.empty())
 			return;
