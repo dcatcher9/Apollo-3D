@@ -66,6 +66,10 @@ namespace sunshine_streamline {
         else if (!update.commit()) { ++fg_loss_revision; retired_epoch = turned_on = 0; }
       } else if (sample && current(ticket)) ++fg_loss_revision;
       update.reset(); // No mutation ownership across capture/COM reentry below.
+      // The one FG options-transition entry (docs/reshade-sbs.md, Presentation
+      // scope). After update.reset(), in this order: frame_generation_enabled,
+      // frame_generation_restored, retire_source, ui_mask::invalidate_scope or
+      // invalidate_all, then the "Sunshine Streamline frame generation:" line.
       // FG's first Present moves Present to DLSS-G's queue after this frame's
       // copies on the game's queue were submitted: those are copied out for
       // the source age from here (U-C1b, depth_capture::frame_generation_enabled).

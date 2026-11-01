@@ -6040,6 +6040,13 @@ nested capture does not treat busy metadata as ownership; NGX copies; the UI
 policy keeps its last known mode until an observed change or an inactive
 observer; and `present_deferred` treats missing metadata as still generating.
 
+The FG options transition has one entry, in `hook_fg_options`
+([`sl_frame_generation.inl`](../tools/reshade/sl_frame_generation.inl)), right
+after `update.reset()`. Its fan-out stays at that adapter call site, in this
+order: `frame_generation_enabled`, `frame_generation_restored`, `retire_source`,
+`ui_mask::invalidate_scope` or `invalidate_all`, then the
+`Sunshine Streamline frame generation:` line.
+
 ### Depth output
 
 #### depth_output
