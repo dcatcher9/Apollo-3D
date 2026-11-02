@@ -182,9 +182,19 @@ OCR (`1`) or current ineligible abstention (`2`). Neither path relabels an older
 armed Dump 3D root forces depth inference and remains a complete ordinary subtitle observation
 only in eligible context; it cannot override hard context disable. Exact unchanged DDup
 deliveries submit no root, whether the current color was inferred or reused an older analysis owner.
-The temporal pixel mask's four confirmations count genuine completed eligible inference
+The diagnostic RGB history's four confirmations count genuine completed eligible inference
 observations with distinct source frame and time, not display frames. Duplicate delivery, exact
 DDup reuse, whole-tuple reuse and single-flight busy drops do not add confirmation observations.
+Current support does not wait for count four. Positive count preserves duplicate admission; valid
+current pixels inside authenticated covers are supported immediately when current probability or
+native spatial contrast passes the [current-evidence rule](host-sbs.md#native-subtitle-contours-and-ui-plane).
+Before cover publication, OCR30 separately classifies local text lines from current orientation and
+qualified layout evidence. Its learned layout survives scene cuts, while current accepted covers
+and pixel evidence remain tied to each genuine observation. Blank classified results clear current
+protection immediately. Independent-entry learning uses source-time blank intervals, not a fixed
+count of rendered frames; the layout prior never grants support on its own. Domain/context changes
+and invalid clocks clear that prior. The canonical parameters and classifier wire layout are owned
+by the same subtitle section linked above.
 
 The production subtitle path applies no overlay exclusion to cut evidence or DAV2. Subtitle
 appearance and disappearance remain ordinary scene evidence; the locator consumes the
@@ -209,27 +219,38 @@ The detector-only PP-OCRv6/OCR8/UIP4 path consumes the authenticated durable Cut
 epoch. It has no private cut classifier or subtitle ownership transaction. A distinct infer
 observation joins the current OCR8 record, source/domain identity and geometry; every valid
 paired cover participates. A confirmed cut or input-domain change resets the independent UI
-controller and native pixel history. The current observation starts pixel confirmation again;
-four genuine eligible observations are required. Old support and an old UI target cannot cross
+controller and native pixel history. The current observation restarts diagnostic pixel confirmation
+but can supply immediate support from current probability or spatial contrast. Old support and an old UI target cannot cross
 the cut. The saturating maximum epoch remains the terminal unique-generation lifetime for an
 uninterrupted domain.
 
-Duplicate observations do not add confirmations or spend controller dwell time. DAV2 reuse
+The current authorized cover histogram supplies a clearance goal. First entry after a cut uses
+that goal immediately; continued presentation follows it in both directions under the source-time
+smoothing and slew policy owned by the [subtitle contract](host-sbs.md#adaptive-geometry-and-subtitle-plane).
+There is no instantaneous forward floor or separate release-budget candidate during continuation.
+A genuine newer valid-empty observation clears the invisible applied plane and probe state while
+retaining the accepted clock. Invalid clocks and gaps in authority hold or disarm timing, and
+duplicates/reuse hold the controller. The goal is not a maximum-scene or all-glyph clearance
+guarantee and does not change cut evidence. Pixel support follows the same canonical contract.
+
+Duplicate observations do not add confirmations or spend controller integration time. DAV2 reuse
 dispatches no subtitle observation and preserves the entire published tuple byte-for-byte.
 Current off-cover, empty or invalid authority clears positive pixel counts; raw pixel history has
 no pending owner, lease or historical rectangle cache. Ordinary cover count/order/split/merge changes
-do not reset still-covered pixel history by themselves. Recipe 23 compares current and prior
+do not reset still-covered pixel history by themselves. Recipe 25 compares current and prior
 authenticated OCR probability over each current raw/core. A strict unit-mass spatial-distribution
 change ratio above `1/8` sets a current probability cue. A qualifying same-pixel fixed RGB reference
 retains its anchor and advances despite that cue. When the reference is missing or mismatched inside
 a cued current raw/core, neighbor fallback is blocked and the pixel starts at one. Expanded covers
-authorize search without enlarging this local fallback veto; four genuine RGB confirmations still
-supply raw support. Each genuine nonzero cue independently rearms provisional protection of the
-current cover union; four consecutive cue-free observations hand over to confirmed-pixel Gaussians.
+authorize search without enlarging this local diagnostic fallback veto. Four genuine RGB
+confirmations supply diagnostic count four only; current binary support comes from current
+probability or spatial contrast, with positive count only for duplicate admission. Cues neither
+rearm nor prolong protection, and the
+retired presentation countdown remains canonical zero.
 This stateless witness uses the previous completed probability snapshot before overwrite, creates
 no new flags on duplicates/reuse/reset or invalid/incompatible history, and leaves the independent
 UI controller and durable CutBridge epoch unchanged. It creates no historical box ownership or cut.
-The exact ratio, sampling, countdown, header and limitations are owned by the
+The exact ratio, current support sampling, header and limitations are owned by the
 [canonical subtitle policy](host-sbs.md#adaptive-geometry-and-subtitle-plane).
 Missing or stale geometry clears granted UIP4 slots and copies
 Base while preserving the applied controller plane/goal with timing disarmed. Invalid Base
@@ -408,10 +429,11 @@ The committed conformance clips must prove at least these contracts:
   domain without a reset or camera reacquisition;
 - changing an ROI between Chromium-video and foreground-client authority clears detector lineage
   even when its rectangle and dimensions match;
-- all current admitted OCR8 covers participate in native pixel confirmation; repeating a record
-  cannot supply one of the four genuine observations;
-- a hard cut resets UI memory and pixel history, with provisional current-cover protection during fresh confirmation;
-- a cut or input reset landing on an already-visible subtitle starts its first pixel observation;
+- all current admitted OCR8 covers participate in native support search and diagnostic RGB
+  confirmation; repeating a record cannot supply one of the four genuine diagnostic observations;
+- a hard cut resets UI memory and pixel history; fresh current pixel evidence can grant immediate
+  support without provisional whole-cover protection;
+- a cut or input reset landing on an already-visible subtitle starts its first diagnostic pixel observation;
   cover membership changes alone do not clear otherwise compatible, still-covered history.
 
 Run the production evaluator and the scene-cut unit tests after changing the evidence shader,
@@ -449,18 +471,26 @@ Exercise each sequence for at least 20 seconds and finish with five seconds of a
     verify that each preserves ordinary full-frame continuity rather than creating an ROI transition.
     Repeat with desktop focus, a minimized window, a window on another monitor, and a spanning window;
     each must remain ordinary full-frame V2 without switching the capture output.
-17. Land a cut and an input-domain reset on visible static subtitles. Verify that support waits
-    for four genuine eligible pixel observations and cannot reuse pre-reset confirmation.
+17. Land a cut and an input-domain reset on visible static subtitles. Verify immediate support from
+    valid current pixel evidence, without a four-count wait or pre-reset support reuse. Verify that
+    valid current entry-budget evidence raises the UI plane to its forward floor immediately, while
+    backward movement follows the current release candidate with the 100 ms source-time response.
+    A genuine newer valid-empty observation must clear hidden controller state; repeated clocks
+    and reuse must hold rather than spend time or manufacture a reset.
 18. Introduce moving scene text inside admitted OCR covers and test static non-subtitle text too.
-    Moving RGB must not inherit mature counts; stable non-subtitle pixels inside valid covers
-    remain a declared false-positive boundary of this generic method.
+    Moving RGB must not inherit mature diagnostic counts; current false probabilities and textured
+    scenery inside false current covers remain declared false-positive boundaries of this method.
 19. Append and remove a second line, reorder or split OCR boxes, and repeat an observation.
     Still-covered qualifying same-pixel fixed RGB references retain history even with a probability cue;
-    newly admitted pixels start at1, and empty/invalid
-    current authority returns exact Base. Duplicate identities do not discover new cover pixels.
+    newly admitted diagnostic pixels start at1, and empty/invalid
+    current authority returns exact Base. Duplicate identities do not add diagnostic confirmations.
 20. Replace one real subtitle cue with another, including similarly colored glyphs and a genuine
     disappearance. Inspect native support, Gaussian coverage and the actual stereo glyph edges;
-    partial-color matches and static backgrounds must not be presented as full semantic accuracy.
+    current false probabilities and static backgrounds must not be presented as full semantic accuracy.
+    Verify that pixels lose support when both current probability and spatial-contrast tests fail,
+    and that a false cover alone cannot retain protection after disappearance. Check invalid and
+    out-of-crop cardinal neighbors, equality at both thresholds, low-contrast glyphs, and textured
+    scenery within false current covers.
 21. Exercise the current-core probability witness on same-size, expanded, shrunk and multiline
     changes, harmless detector noise and genuinely changed background/context. Verify strict
     `T > 1/8`, no cue when both probability masses are zero, a cue when exactly one is
@@ -470,8 +500,8 @@ Exercise each sequence for at least 20 seconds and finish with five seconds of a
     Verify retained expanded-margin history and later uncued fallback borrowing too; a cue
     does not impose four new observations on every retained reference. Invalid current/prior P, stale/incompatible SCT5 identity and duplicate observations
     cannot manufacture flags. The cue leaves pixel history outside cued current raw/cores and
-    independent UI state unchanged, but can rearm the shared current-cover provisional countdown.
-    Measure missed changes, false protection and RGB restart delays on genuine sources instead of fitting the fixed
+    independent UI state unchanged and cannot create a provisional cover mask.
+    Measure missed changes, false protection and current-evidence coverage on genuine sources instead of fitting the fixed
     experimental threshold to selected output frames.
 
 Repeat representative cases in SDR and HDR and across authenticated landscape, ultrawide, and
@@ -483,10 +513,16 @@ The live contract passes when exposure-only changes never reacquire the camera, 
 never pumps it, each qualified editorial cut creates exactly one authenticated epoch transition, a cut during
 persistent motion remains observable, ROI-domain transitions cannot compare incompatible history,
 pure ROI translation does not reacquire the camera, and diagnostics add no GPU queue stall.
-The subtitle portion requires four genuine eligible observations for native pixel confirmation,
-strict cut/domain resets, all admitted current OCR8 covers, independent source-time UI filtering,
-and exact Base whenever conditioning is unavailable. No cover geometry is synthesized from
+The subtitle portion requires immediate current-evidence support within all admitted current
+OCR8 covers, four genuine eligible observations only for diagnostic RGB confirmation, strict
+cut/domain resets, independent source-time UI filtering, and exact Base whenever conditioning is
+unavailable or current support is empty. No cover geometry is synthesized from
 historical ownership or controller state. Real cue changes, disappearance, edge quality and
 static-background ambiguity remain necessary quality evidence beyond contract tests.
 
-The current provisional OCR warmup is presentation state, independent of the four RGB confirmations. Every eligible strictly newer frame/time observation with a nonzero current probability-reset mask rearms protection of only current covers to four, even during an active countdown. Each genuine zero-mask observation decrements it; the fourth consecutive cue-free observation hands over to confirmed-pixel Gaussian support. Persistent or repeated cues can prolong provisional protection indefinitely; exact duplicates and full-tuple reuse hold it. Empty/invalid authority clears it, and cut/domain resets start a new window only with valid current nonempty evidence. Raw support still requires four confirmations. A genuine absent-caption frame with a current false OCR box can receive cue-held provisional protection, which must be measured separately from stale-history leakage.
+UIP4 word22 is canonical zero. There is no provisional whole-cover mask or cue-held grace. A genuine
+absent-caption frame with a false current OCR box receives support only where valid current
+RGB/probability, positive-count duplicate admission, and current probability or spatial contrast
+pass the same rule as a real subtitle pixel. The bounded spatial high-contrast-overlay assumption
+is not semantic qualification. Measure remaining false probabilities and textured-scenery protection
+separately from stale-history leakage; diagnostic count four grants no protection.

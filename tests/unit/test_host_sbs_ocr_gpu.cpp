@@ -6,8 +6,11 @@
 
 #ifdef _WIN32
 
+  #include "src/crypto.h"
   #include "src/depth_coordinate_v2.h"
   #include "src/host_sbs_resolution.h"
+  #include "src/host_sbs_shader_cache.h"
+  #include "src/platform/windows/sbs_debug_dump.h"
 
   #include <algorithm>
   #include <array>
@@ -15,13 +18,22 @@
   #include <cmath>
   #include <cstddef>
   #include <cstdint>
+  #include <cstdlib>
   #include <cstring>
   #include <d3d11.h>
   #include <d3dcompiler.h>
   #include <filesystem>
+  #include <fstream>
+  #include <iterator>
   #include <limits>
+  #include <map>
+  #include <mutex>
+  #include <numeric>
+  #include <nlohmann/json.hpp>
   #include <optional>
+  #include <stdexcept>
   #include <string>
+  #include <tuple>
   #include <vector>
   #include <wrl/client.h>
 
@@ -43,6 +55,8 @@ namespace {
   constexpr std::uint32_t ocr_cell_words = 1u;
   constexpr std::uint32_t ocr_cell_stat_words =
     ocr_grid_width * ocr_height * ocr_cell_words;
+  constexpr std::uint32_t ocr_record_prefix_words = v2::subtitle_ocr_final_box_offset +
+    v2::subtitle_ocr_final_box_capacity * v2::subtitle_ocr_box_word_count;
 
   constexpr std::uint32_t ceil_crop_height(
     const std::uint32_t width,
@@ -53,6 +67,25 @@ namespace {
       v2::subtitle_ocr_crop_aspect_width - 1u
     ) / v2::subtitle_ocr_crop_aspect_width;
     return std::min(height, static_cast<std::uint32_t>(crop));
+  }
+
+  struct configured_center_boundary_t {
+    std::uint32_t reference_width;
+    std::uint32_t detector_offset;
+  };
+
+  constexpr configured_center_boundary_t configured_center_boundary(const std::uint32_t native_width) {
+    constexpr auto numerator = static_cast<std::uint64_t>(v2::subtitle_ocr_line_center_tolerance_numerator);
+    constexpr auto denominator = static_cast<std::uint64_t>(v2::subtitle_ocr_line_center_tolerance_denominator);
+    static_assert(numerator > 0u && denominator > 0u);
+    const auto scaled_width = static_cast<std::uint64_t>(native_width) * denominator;
+    // The reference may be wider than the analysis crop. Choose its smallest
+    // valid width that puts the configured inclusive edge on an integer detector
+    // column; this keeps exact-boundary coverage meaningful at both 10% and 2%.
+    const auto quantum = scaled_width / std::gcd(scaled_width, ocr_width * numerator);
+    const auto reference_width = (native_width + quantum - 1u) / quantum * quantum;
+    return {static_cast<std::uint32_t>(reference_width),
+      static_cast<std::uint32_t>(ocr_width * reference_width * numerator / scaled_width)};
   }
 
   constexpr std::uint32_t subtitle_search_top(const std::uint32_t height) {
@@ -150,18 +183,24 @@ namespace {
     };
   }
 
-  // Inputs are the independently authored DB-expanded bounds used by each fixture below.
-  // The new ordinary line-end allowance is eight detector pixels on X only; this helper does
-  // not recalculate production's DB expansion or apply the ordinary allowance to ribbons.
+  // Inputs are independently authored DB-expanded bounds and current tight-core heights.
+  // Pin the intended search-only policy independently: four eight-pixel cells on X and ceil
+  // half the current tight height on Y. Do not recalculate DB unclip or apply this to ribbons.
   constexpr std::array<std::uint32_t, 4u> default_ordinary_cover(
     const std::uint32_t left,
     const std::uint32_t top,
     const std::uint32_t right,
-    const std::uint32_t bottom
+    const std::uint32_t bottom,
+    const std::uint32_t core_height = 8u
   ) {
-    constexpr std::uint32_t horizontal_guard = 8u;
-    return default_ocr_box(left > horizontal_guard ? left - horizontal_guard : 0u,
-      top, std::min(right + horizontal_guard, ocr_width), bottom);
+    constexpr std::uint32_t horizontal_guard = 32u;
+    const auto vertical_guard = (core_height + 1u) / 2u;
+    const auto mapped = default_ocr_box(left > horizontal_guard ? left - horizontal_guard : 0u,
+      top > vertical_guard ? top - vertical_guard : 0u,
+      std::min(right + horizontal_guard, ocr_width),
+      std::min(bottom + vertical_guard, ocr_height));
+    return {mapped[0u], std::clamp(mapped[1u], roi_top, roi_bottom),
+      mapped[2u], std::clamp(mapped[3u], roi_top, roi_bottom)};
   }
 
   struct rgba_t {
@@ -200,6 +239,7 @@ namespace {
     std::uint32_t line_reference_width;
     std::int32_t line_search_top_source;
     std::uint32_t reserved = 0u;
+    std::array<std::uint32_t, 4u> observation {};
   };
 
   struct depth_constants_t {
@@ -228,7 +268,7 @@ namespace {
 
   static_assert(sizeof(rgba_t) == 4u * sizeof(float));
   static_assert(sizeof(preprocess_constants_t) == 32u);
-  static_assert(sizeof(ocr_resolve_constants_t) == 80u);
+  static_assert(sizeof(ocr_resolve_constants_t) == 96u);
   static_assert(sizeof(depth_constants_t) == 64u);
   static_assert(sizeof(v2_constants_t) == 64u);
   static_assert(sizeof(subtitle_constants_t) == 80u);
@@ -242,27 +282,48 @@ namespace {
     ComPtr<ID3D11ComputeShader> &shader,
     std::string &error
   ) {
+    constexpr UINT compile_flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
+    using cache_key_t = std::tuple<std::filesystem::path, std::string, UINT,
+      std::string, std::uint32_t, crypto::sha256_t>;
+    static std::map<cache_key_t, ComPtr<ID3DBlob>> compiled_bytecode;
+    static std::mutex compiled_bytecode_mutex;
+    const auto normalized_path = std::filesystem::weakly_canonical(path).lexically_normal();
+    const auto sources = models::host_sbs_shader_cache::snapshot_sources(
+      SUNSHINE_SHADERS_DIR, models::host_sbs_shader_cache::parallax_v2_producer_specs);
+    const auto closure = models::host_sbs_shader_cache::source_closure_sha256(sources);
+    if (closure != models::host_sbs_shader_cache::parallax_v2_producer_source_closure_sha256) {
+      error = "OCR fixture sources changed outside their authenticated producer closure";
+      return false;
+    }
+    std::ifstream source(normalized_path, std::ios::binary);
+    if (!source) {
+      error = "Cannot read OCR fixture shader: " + normalized_path.string();
+      return false;
+    }
+    const std::string source_text((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
+    const cache_key_t key {normalized_path, entrypoint, compile_flags, closure, v2::contract_tag,
+      crypto::hash(source_text)};
     ComPtr<ID3DBlob> bytecode;
     ComPtr<ID3DBlob> diagnostics;
-    const auto status = D3DCompileFromFile(
-      path.c_str(),
-      nullptr,
-      D3D_COMPILE_STANDARD_FILE_INCLUDE,
-      entrypoint,
-      "cs_5_0",
-      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
-      0u,
-      &bytecode,
-      &diagnostics
-    );
-    if (FAILED(status)) {
-      error = diagnostics ?
-                std::string(
-                  static_cast<const char *>(diagnostics->GetBufferPointer()),
-                  diagnostics->GetBufferSize()
-                ) :
-                std::string("D3DCompileFromFile failed without diagnostics");
-      return false;
+    {
+      // Each process uses one frozen authenticated source closure. Reuse portable DXBC only;
+      // every fixture still creates its compute shader on its own D3D11 device.
+      const std::lock_guard lock(compiled_bytecode_mutex);
+      const auto cached = compiled_bytecode.find(key);
+      if (cached != compiled_bytecode.end()) {
+        bytecode = cached->second;
+      } else {
+        const auto status = D3DCompileFromFile(
+          normalized_path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+          entrypoint, "cs_5_0", compile_flags, 0u, &bytecode, &diagnostics);
+        if (FAILED(status)) {
+          error = diagnostics ?
+                    std::string(static_cast<const char *>(diagnostics->GetBufferPointer()), diagnostics->GetBufferSize()) :
+                    std::string("D3DCompileFromFile failed without diagnostics");
+          return false;
+        }
+        compiled_bytecode.emplace(key, bytecode);
+      }
     }
     if (FAILED(device->CreateComputeShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &shader))) {
       error = std::string("CreateComputeShader failed for ") + entrypoint;
@@ -394,11 +455,12 @@ namespace {
       std::string &error,
       const bool need_preprocess,
       const bool need_boxes,
-      const bool need_locator
+      const bool need_locator,
+      const D3D_DRIVER_TYPE driver_type = D3D_DRIVER_TYPE_WARP
     ) {
       constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
       D3D_FEATURE_LEVEL actual {};
-      if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0u, requested, static_cast<UINT>(std::size(requested)), D3D11_SDK_VERSION, &device_, &actual, &context_)) || actual < D3D_FEATURE_LEVEL_11_0) {
+      if (FAILED(D3D11CreateDevice(nullptr, driver_type, nullptr, 0u, requested, static_cast<UINT>(std::size(requested)), D3D11_SDK_VERSION, &device_, &actual, &context_)) || actual < D3D_FEATURE_LEVEL_11_0) {
         return false;
       }
 
@@ -522,7 +584,9 @@ namespace {
       std::array<std::uint32_t, 4u> tensor_content = {},
       const std::optional<std::int32_t> line_center_twice_source = std::nullopt,
       const std::optional<std::uint32_t> line_reference_width = std::nullopt,
-      const std::optional<std::int32_t> line_search_top_source = std::nullopt
+      const std::optional<std::int32_t> line_search_top_source = std::nullopt,
+      const std::optional<std::uint64_t> observation_timestamp_us = std::nullopt,
+      const bool input_domain_reset = false
     ) {
       if (!cells_ || !boxes_ || probability.size() != ocr_pixels) {
         return false;
@@ -538,6 +602,7 @@ namespace {
       if (tensor_content == std::array<std::uint32_t, 4u> {}) {
         tensor_content = {0u, 0u, field_w, field_h};
       }
+      const auto source_clock = observation_timestamp_us.value_or(frame * 33333u);
       const ocr_resolve_constants_t constants {
         static_cast<std::uint32_t>(frame),
         static_cast<std::uint32_t>(frame >> 32u),
@@ -556,6 +621,8 @@ namespace {
         line_reference_width.value_or(source_w),
         line_search_top_source.value_or(static_cast<std::int32_t>(subtitle_search_top(source_h))),
         0u,
+        {static_cast<std::uint32_t>(source_clock), static_cast<std::uint32_t>(source_clock >> 32u),
+          input_domain_reset ? 1u : 0u, 0u},
       };
       context_->UpdateSubresource(
         boxes_cb_.Get(),
@@ -575,10 +642,23 @@ namespace {
       context_->CSSetShader(boxes_.Get(), nullptr, 0u);
       context_->CSSetConstantBuffers(0u, 1u, boxes_cb_.GetAddressOf());
       context_->CSSetShaderResources(1u, 1u, cell_stats_srv_.GetAddressOf());
-      context_->CSSetUnorderedAccessViews(1u, 1u, record_uav_.GetAddressOf(), nullptr);
+      std::array<ID3D11UnorderedAccessView *, 2u> resolve_uavs {record_uav_.Get(), candidate_scratch_uav_.Get()};
+      context_->CSSetUnorderedAccessViews(1u, static_cast<UINT>(resolve_uavs.size()), resolve_uavs.data(), nullptr);
       context_->Dispatch(1u, 1u, 1u);
       unbind();
       return read_buffer(device_.Get(), context_.Get(), record_buffer_.Get(), record_);
+    }
+
+    // Opt-in diagnostic import only. The replay caller first validates the complete serialized
+    // record with the maintained dump reader; round-trip every uploaded word before dispatch.
+    bool seed_validated_record_for_replay(const std::vector<std::uint32_t> &prior) {
+      if (!record_buffer_ || prior.size() != v2::subtitle_ocr_record_word_count) {
+        return false;
+      }
+      unbind();
+      context_->UpdateSubresource(record_buffer_.Get(), 0u, nullptr, prior.data(), 0u, 0u);
+      return read_buffer(device_.Get(), context_.Get(), record_buffer_.Get(), record_) &&
+             record_ == prior;
     }
 
     bool run_boxes_in_screen(
@@ -609,6 +689,7 @@ namespace {
       if (!locator_resolve_ || !condition_) {
         return false;
       }
+      const auto source_clock = frame * 33333u;
       const subtitle_constants_t constants {
         {field_width, field_height, roi_top, roi_bottom},
         {source_width, source_height, enabled ? 1u : 0u, reset ? 1u : 0u},
@@ -619,14 +700,14 @@ namespace {
           static_cast<std::uint32_t>(generation >> 32u),
         },
         {0u, 0u, field_width, field_height},
-        {static_cast<std::uint32_t>(frame), static_cast<std::uint32_t>(frame >> 32u), 0u, 0u},
+        {static_cast<std::uint32_t>(source_clock), static_cast<std::uint32_t>(source_clock >> 32u), 0u, 0u},
       };
       // This current-publication fixture uses an authored microsecond cadence, shared by OCR and the
       // sealed Base publication. It exercises no artificial UI dwell or model inference.
-      coordinate_constants_.joint_observation_timestamp_low = static_cast<std::uint32_t>(frame);
-      coordinate_constants_.joint_observation_timestamp_high = static_cast<std::uint32_t>(frame >> 32u);
+      coordinate_constants_.joint_observation_timestamp_low = static_cast<std::uint32_t>(source_clock);
+      coordinate_constants_.joint_observation_timestamp_high = static_cast<std::uint32_t>(source_clock >> 32u);
       context_->UpdateSubresource(v2_cb_.Get(), 0u, nullptr, &coordinate_constants_, 0u, 0u);
-      upload_geometry_publication(frame);
+      upload_geometry_publication(source_clock);
       context_->UpdateSubresource(
         subtitle_cb_.Get(),
         0u,
@@ -723,6 +804,14 @@ namespace {
       return record_;
     }
 
+    bool adapter_description(DXGI_ADAPTER_DESC &description) const {
+      ComPtr<IDXGIDevice> dxgi_device;
+      ComPtr<IDXGIAdapter> adapter;
+      return SUCCEEDED(device_.As(&dxgi_device)) &&
+        SUCCEEDED(dxgi_device->GetAdapter(&adapter)) &&
+        SUCCEEDED(adapter->GetDesc(&description));
+    }
+
     const std::vector<std::uint32_t> &state() const {
       return state_;
     }
@@ -766,16 +855,18 @@ namespace {
         params[v2::subtitle_condition_param_target_word] == state_[v2::subtitle_plane_adaptive_offset + 3u];
       const float infinity = std::bit_cast<float>(v2::subtitle_contour_distance_empty_bits);
       std::vector<float> distance(static_cast<std::size_t>(field_width) * field_height, infinity);
-      // These OCR topology/current-publication tests author a squared-source-pixel distance to
-      // every exact current OCR8 cover's field-node centers. This is an analytic conditioner input, not
-      // the native five-center distance producer or a claim about glyph-mask quality.
+      // These OCR topology/current-publication tests author a nonnegative conditioner-budget
+      // fixture: zero inside exact current OCR8 tight cores, increasing quadratically outside.
+      // Search-cover padding grants no synthetic zero budget. This isolates publication and
+      // current pair authority; it executes neither native RGB/palette classification nor the
+      // production native-support budget producer and makes no glyph-mask quality claim.
       const double source_x_step = static_cast<double>(source_width) / field_width;
       const double source_y_step = static_cast<double>(source_height) / field_height;
       for (std::uint32_t y = 0u; y < field_height; ++y) {
         for (std::uint32_t x = 0u; x < field_width; ++x) {
           const auto index = static_cast<std::size_t>(y) * field_width + x;
           for (std::uint32_t slot = 0u; current_valid && slot < count; ++slot) {
-            const auto offset = v2::subtitle_ocr_final_box_offset + slot * v2::subtitle_ocr_box_word_count;
+            const auto offset = v2::subtitle_ocr_raw_box_offset + slot * v2::subtitle_ocr_box_word_count;
             const auto nearest_x = std::clamp(x, record_[offset], record_[offset + 2u] - 1u);
             const auto nearest_y = std::clamp(y, record_[offset + 1u], record_[offset + 3u] - 1u);
             const double dx = (static_cast<double>(x) - nearest_x) * source_x_step;
@@ -848,6 +939,12 @@ namespace {
           )) {
         return false;
       }
+
+      zeros.assign(static_cast<std::size_t>(v2::subtitle_ocr_local_candidate_capacity) *
+        v2::subtitle_ocr_local_candidate_word_count, 0u);
+      if (!create_structured_buffer(device_.Get(), zeros.data(), zeros.size() * sizeof(std::uint32_t),
+            4u * sizeof(std::uint32_t), D3D11_BIND_UNORDERED_ACCESS,
+            candidate_scratch_buffer_, nullptr, &candidate_scratch_uav_)) return false;
 
       const ocr_resolve_constants_t zero {};
       return create_constant_buffer(device_.Get(), &zero, sizeof(zero), boxes_cb_);
@@ -1071,6 +1168,8 @@ namespace {
     ComPtr<ID3D11Buffer> record_buffer_;
     ComPtr<ID3D11ShaderResourceView> record_srv_;
     ComPtr<ID3D11UnorderedAccessView> record_uav_;
+    ComPtr<ID3D11Buffer> candidate_scratch_buffer_;
+    ComPtr<ID3D11UnorderedAccessView> candidate_scratch_uav_;
     ComPtr<ID3D11Buffer> state_buffer_;
     ComPtr<ID3D11ShaderResourceView> state_srv_;
     ComPtr<ID3D11UnorderedAccessView> state_uav_;
@@ -1248,6 +1347,219 @@ namespace {
     }
   }
 
+  // Opt-in diagnostic: replay sealed detector bytes through the production box shaders.
+  // The caller supplies paths/constants; no machine-local corpus or image reconstruction is
+  // part of this test. It intentionally does not dispatch the fixture's analytic conditioner.
+  TEST(HostSbsOcrGpuTest, SavedProbabilityNativeRecordReplay) {
+    const auto *cases_environment = std::getenv("SUNSHINE_TEST_OCR_REPLAY_CASES");
+    const auto *output_environment = std::getenv("SUNSHINE_TEST_OCR_REPLAY_OUTPUT");
+    if (!cases_environment && !output_environment) {
+      GTEST_SKIP() << "Set SUNSHINE_TEST_OCR_REPLAY_CASES and SUNSHINE_TEST_OCR_REPLAY_OUTPUT for sealed-P diagnostics";
+    }
+    ASSERT_NE(cases_environment, nullptr);
+    ASSERT_NE(output_environment, nullptr);
+    const std::filesystem::path cases_path(cases_environment);
+    const std::filesystem::path output_root(output_environment);
+    ASSERT_FALSE(output_root.empty());
+    ASSERT_TRUE(!std::filesystem::exists(output_root) ||
+                (std::filesystem::is_directory(output_root) && std::filesystem::is_empty(output_root)))
+      << "Diagnostic output must be a new or empty directory";
+
+    const auto read_bytes = [](const std::filesystem::path &path) {
+      std::ifstream input(path, std::ios::binary | std::ios::ate);
+      if (!input || input.tellg() < 0) throw std::runtime_error("Cannot read diagnostic input: " + path.string());
+      std::vector<char> bytes(static_cast<std::size_t>(input.tellg()));
+      input.seekg(0);
+      if (!bytes.empty()) input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+      if (!input) throw std::runtime_error("Incomplete diagnostic input: " + path.string());
+      return bytes;
+    };
+    const auto sha256 = [](const void *data, const std::size_t size) {
+      const auto digest = crypto::hash(std::string_view(static_cast<const char *>(data), size));
+      constexpr char digits[] = "0123456789abcdef";
+      std::string hex;
+      hex.reserve(2u * digest.size());
+      for (const auto byte : digest) {
+        hex.push_back(digits[byte >> 4u]);
+        hex.push_back(digits[byte & 15u]);
+      }
+      return hex;
+    };
+    const auto write_bytes = [](const std::filesystem::path &path, const void *data, const std::size_t size) {
+      std::ofstream output(path, std::ios::binary);
+      output.write(static_cast<const char *>(data), static_cast<std::streamsize>(size));
+      if (!output) throw std::runtime_error("Cannot write diagnostic output: " + path.string());
+    };
+    const auto specification_bytes = read_bytes(cases_path);
+    const auto specification = nlohmann::json::parse(specification_bytes.begin(), specification_bytes.end());
+    ASSERT_EQ(specification.at("schema"), 1);
+    const auto &cases = specification.at("cases");
+    ASSERT_TRUE(cases.is_array());
+    ASSERT_GT(cases.size(), 0u);
+    ASSERT_LE(cases.size(), 8u);
+    const auto driver = specification.value("driver", std::string("warp"));
+    ASSERT_TRUE(driver == "warp" || driver == "hardware");
+    const auto shader_path = std::filesystem::path(SUNSHINE_SHADERS_DIR) / "host_sbs_ocr_boxes_cs.hlsl";
+    const auto shader_bytes = read_bytes(shader_path);
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false,
+      driver == "hardware" ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP)) << error;
+    DXGI_ADAPTER_DESC adapter {};
+    ASSERT_TRUE(fixture.adapter_description(adapter));
+    std::filesystem::create_directories(output_root);
+
+    for (std::size_t index = 0u; index < cases.size(); ++index) {
+      const auto &entry = cases[index];
+      SCOPED_TRACE(index);
+      const auto probability_path = cases_path.parent_path() / std::filesystem::path(entry.at("probability").get<std::string>());
+      const auto probability_bytes = read_bytes(probability_path);
+      ASSERT_EQ(probability_bytes.size(), static_cast<std::size_t>(ocr_pixels) * sizeof(float));
+      std::vector<float> probability(ocr_pixels);
+      std::memcpy(probability.data(), probability_bytes.data(), probability_bytes.size());
+      ASSERT_TRUE(std::all_of(probability.begin(), probability.end(), [](const float value) {
+        return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+      }));
+      const auto source = entry.at("source").get<std::array<std::uint32_t, 2u>>();
+      const auto crop = entry.at("crop").get<std::array<std::uint32_t, 2u>>();
+      const auto field = entry.at("field").get<std::array<std::uint32_t, 2u>>();
+      const auto roi = entry.at("roi").get<std::array<std::uint32_t, 2u>>();
+      const auto content = entry.at("content").get<std::array<std::uint32_t, 4u>>();
+      const auto reference = entry.at("line_reference").get<std::array<std::int32_t, 3u>>();
+      ASSERT_GT(reference[1u], 0);
+      const auto frame = entry.at("frame").get<std::uint64_t>();
+      const auto generation = entry.at("generation").get<std::uint64_t>();
+      const auto source_clock = entry.value("observation_timestamp_us", frame * 33333u);
+      const auto domain_reset = entry.value("input_domain_reset", false);
+      std::vector<char> prior_bytes;
+      nlohmann::json prior_import = nullptr;
+      if (entry.contains("prior_record")) {
+        // A sealed current/older observation can supply its real SCL1 state. Do not manufacture
+        // votes, replace a source clock, or accept a prefix/tail from a different analysis domain.
+        const auto prior_path = cases_path.parent_path() /
+          std::filesystem::path(entry.at("prior_record").get<std::string>());
+        prior_bytes = read_bytes(prior_path);
+        ASSERT_EQ(prior_bytes.size(), v2::subtitle_ocr_record_word_count * sizeof(std::uint32_t));
+        const auto prior_sha = sha256(prior_bytes.data(), prior_bytes.size());
+        ASSERT_EQ(prior_sha, entry.at("prior_record_sha256").get<std::string>());
+        std::vector<std::uint32_t> prior(v2::subtitle_ocr_record_word_count);
+        std::memcpy(prior.data(), prior_bytes.data(), prior_bytes.size());
+        const auto join = [&prior](const std::size_t offset) {
+          return prior.at(offset) | (static_cast<std::uint64_t>(prior.at(offset + 1u)) << 32u);
+        };
+        const auto prior_frame = join(5u);
+        const auto prior_clock = join(v2::subtitle_ocr_classifier_history_offset + 4u);
+        ASSERT_GT(prior_clock, 0u);
+        ASSERT_LE(prior_frame, frame);
+        ASSERT_LE(prior_clock, source_clock);
+        if (prior_frame == frame) {
+          ASSERT_EQ(prior_clock, source_clock);
+        }
+
+        const auto &prior_context = entry.at("prior_context");
+        const auto capture = prior_context.at("source_extent").get<std::array<std::uint32_t, 2u>>();
+        const auto rectangle = prior_context.at("analysis_rect").get<std::array<std::uint32_t, 4u>>();
+        const auto authority = prior_context.at("authority").get<std::string>();
+        ASSERT_TRUE(authority == "chromium-video" || authority == "foreground-client" ||
+                    authority == "full-source");
+        ASSERT_LT(rectangle[0u], rectangle[2u]);
+        ASSERT_LT(rectangle[1u], rectangle[3u]);
+        ASSERT_LE(rectangle[2u], capture[0u]);
+        ASSERT_LE(rectangle[3u], capture[1u]);
+        ASSERT_EQ(rectangle[2u] - rectangle[0u], source[0u]);
+        ASSERT_EQ(rectangle[3u] - rectangle[1u], source[1u]);
+        const auto expected_reference = models::subtitle_ocr_line_reference(
+          source[0u], source[1u], capture[0u], capture[1u], rectangle[0u], rectangle[1u],
+          authority == "chromium-video");
+        ASSERT_TRUE(expected_reference.has_value());
+        ASSERT_EQ(expected_reference->center_twice_source, reference[0u]);
+        ASSERT_EQ(expected_reference->width, static_cast<std::uint32_t>(reference[1u]));
+        ASSERT_EQ(expected_reference->search_top_source, reference[2u]);
+        platf::sbs_debug::frame prior_completed;
+        prior_completed.field_width = static_cast<int>(field[0u]);
+        prior_completed.field_height = static_cast<int>(field[1u]);
+        prior_completed.field_content = {content[0u], content[1u], content[2u], content[3u]};
+        prior_completed.matched_frame_id = prior_frame;
+        prior_completed.matched_observation_timestamp_us = prior_clock;
+        prior_completed.depth_input_region = {
+          .source_width = capture[0u],
+          .source_height = capture[1u],
+          .left = rectangle[0u],
+          .top = rectangle[1u],
+          .right = rectangle[2u],
+          .bottom = rectangle[3u],
+          .tensor_content = prior_completed.field_content,
+          .analysis_generation = generation,
+          .authority = authority == "chromium-video" ? models::depth_analysis_authority_e::chromium_video :
+            (authority == "foreground-client" ? models::depth_analysis_authority_e::foreground_client :
+              models::depth_analysis_authority_e::full_source),
+        };
+        ASSERT_TRUE(prior_completed.depth_input_region.valid());
+        std::vector<std::uint8_t> canonical_bytes(prior_bytes.size());
+        std::memcpy(canonical_bytes.data(), prior_bytes.data(), prior_bytes.size());
+        ASSERT_TRUE(platf::sbs_debug::detail::subtitle_ocr_record_is_canonical_for_frame(
+          canonical_bytes, prior_completed));
+        ASSERT_TRUE(fixture.seed_validated_record_for_replay(prior));
+        prior_import = {
+          {"path", prior_path.string()}, {"sha256", prior_sha},
+          {"canonical_validation", "maintained-subtitle_ocr_record_is_canonical_for_frame"},
+          {"gpu_upload_roundtrip_bit_exact", true},
+          {"matched_frame_id", prior_frame}, {"observation_timestamp_us", prior_clock},
+          {"context", prior_context},
+        };
+      }
+      ASSERT_TRUE(fixture.run_boxes(probability, frame, generation,
+        source[0u], source[1u], field[0u], field[1u], crop[0u], crop[1u],
+        roi[0u], roi[1u], content, reference[0u], static_cast<std::uint32_t>(reference[1u]), reference[2u],
+        source_clock, domain_reset));
+      const auto &record = fixture.record();
+      ASSERT_EQ(record.size(), v2::subtitle_ocr_record_word_count);
+      if (entry.contains("expected_final_count")) {
+        EXPECT_EQ(record[4u], entry.at("expected_final_count").get<std::uint32_t>());
+      }
+
+      const auto case_root = output_root / ("case_" + std::to_string(index));
+      ASSERT_TRUE(std::filesystem::create_directory(case_root));
+      write_bytes(case_root / "uploaded_probability.f32", probability.data(), probability_bytes.size());
+      if (!prior_bytes.empty()) {
+        write_bytes(case_root / "uploaded_prior_record.u32", prior_bytes.data(), prior_bytes.size());
+      }
+      write_bytes(case_root / "ocr_record.u32", record.data(), record.size() * sizeof(record[0u]));
+      nlohmann::json identity {
+        {"schema", 1}, {"kind", "native-D3D11-production-cells-and-resolve-sealed-P-diagnostic"},
+        {"driver", driver}, {"adapter", {{"vendor_id", adapter.VendorId}, {"device_id", adapter.DeviceId},
+          {"subsystem_id", adapter.SubSysId}, {"revision", adapter.Revision},
+          {"luid_low", adapter.AdapterLuid.LowPart}, {"luid_high", adapter.AdapterLuid.HighPart}}},
+        {"case", entry}, {"input_specification", cases_path.string()},
+        {"observation_timestamp_us", source_clock}, {"input_domain_reset", domain_reset},
+        {"input_specification_sha256", sha256(specification_bytes.data(), specification_bytes.size())},
+        {"probability_sha256", sha256(probability.data(), probability_bytes.size())},
+        {"record_sha256", sha256(record.data(), record.size() * sizeof(record[0u]))},
+        {"record_word_count", record.size()}, {"record_flags", record[2u]},
+        {"record_raw_count", record[3u]}, {"record_final_count", record[4u]},
+        {"depth_coordinate_v2_schema", v2::contract_schema}, {"depth_coordinate_v2_tag", v2::contract_tag},
+        {"depth_coordinate_v2_canonical_sha256", v2::contract_canonical_sha256},
+        {"producer_source_closure_sha256", models::host_sbs_shader_cache::parallax_v2_producer_source_closure_sha256},
+        {"ocr_shader_path", shader_path.string()}, {"ocr_shader_sha256", sha256(shader_bytes.data(), shader_bytes.size())},
+        {"shader_compile_flags", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3},
+        {"expected_record_bit_exact", nullptr}, {"renderer_or_conditioner_executed", false},
+        {"prior_record_input", prior_import},
+        {"expected_final_count", entry.value("expected_final_count", nlohmann::json(nullptr))},
+      };
+      if (entry.contains("expected_record")) {
+        const auto expected_path = cases_path.parent_path() / std::filesystem::path(entry.at("expected_record").get<std::string>());
+        const auto expected_bytes = read_bytes(expected_path);
+        ASSERT_EQ(expected_bytes.size(), record.size() * sizeof(record[0u]));
+        const bool equal = std::memcmp(expected_bytes.data(), record.data(), expected_bytes.size()) == 0;
+        identity["expected_record_sha256"] = sha256(expected_bytes.data(), expected_bytes.size());
+        identity["expected_record_bit_exact"] = equal;
+        EXPECT_TRUE(equal) << "Native OCR record differs from the sealed expected record";
+      }
+      const auto identity_text = identity.dump(2);
+      write_bytes(case_root / "identity.json", identity_text.data(), identity_text.size());
+    }
+  }
+
   TEST(HostSbsOcrGpuTest, ProbabilityMapProducesCenteredOneAndTwoLineOcr8Records) {
     ocr_warp_fixture_t fixture;
     std::string error;
@@ -1310,7 +1622,7 @@ namespace {
     );
   }
 
-  TEST(HostSbsOcrGpuTest, OrdinaryCoverAddsOneHorizontalCellAndKeepsVerticalDbBounds) {
+  TEST(HostSbsOcrGpuTest, OrdinaryCoverAddsFourHorizontalCellsAndHalfCoreHeightSearchOnly) {
     ocr_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
@@ -1320,7 +1632,7 @@ namespace {
     };
     const std::array<cover_case_t, 3u> cases {{
       {{240u, 100u, 720u, 108u}, {234u, 94u, 726u, 114u}},
-      // Stay inside center eligibility.
+      // Keep the left/right clipping inputs; reference placement is independent below.
       {{0u, 100u, 776u, 108u}, {0u, 94u, 782u, 114u}},
       {{192u, 100u, 960u, 108u}, {186u, 94u, 960u, 114u}},
     }};
@@ -1330,17 +1642,21 @@ namespace {
       const auto &db = test_case.db_cover;
       std::vector<float> probability(ocr_pixels, 0.0f);
       paint_rectangle(probability, core[0u], core[1u], core[2u], core[3u]);
-      ASSERT_TRUE(fixture.run_boxes(probability, 40u, 77u));
+      // Isolate cover geometry using a legal matched screen reference centered on
+      // each unchanged synthetic line, just as capture_native_pairs does below.
+      const auto analysis_left = source_width - core[0u] - core[2u];
+      ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u,
+        2u * source_width, analysis_left));
       ASSERT_EQ(fixture.record()[2u], 1u);
       ASSERT_EQ(fixture.record()[3u], 1u);
       ASSERT_EQ(fixture.record()[4u], 1u);
       EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
         default_ocr_box(core[0u], core[1u], core[2u], core[3u]));
       const auto cover = read_box(fixture.record(), v2::subtitle_ocr_final_box_offset);
-      EXPECT_EQ(cover, default_ordinary_cover(db[0u], db[1u], db[2u], db[3u]));
+      EXPECT_EQ(cover, default_ordinary_cover(db[0u], db[1u], db[2u], db[3u], core[3u] - core[1u]));
       const auto previous_db_cover = default_ocr_box(db[0u], db[1u], db[2u], db[3u]);
-      EXPECT_EQ(cover[1u], previous_db_cover[1u]);
-      EXPECT_EQ(cover[3u], previous_db_cover[3u]);
+      EXPECT_LT(cover[1u], previous_db_cover[1u]);
+      EXPECT_GT(cover[3u], previous_db_cover[3u]);
       if (db[0u] == 0u) {
         EXPECT_EQ(cover[0u], 0u);
       } else {
@@ -1362,17 +1678,17 @@ namespace {
     // On the 770-column field, 576 * 770 / 960 = 462 and 768 * 770 / 960 = 616 are exact. A float
     // multiply by the rounded-up reciprocal of 960 lifted both just above the integer, so ceil
     // returned one extra field column. The first case puts that edge on the core, the second on
-    // its expanded cover (DB pad 6 plus the eight-pixel guard).
+    // its expanded cover (DB pad 6 plus the 32-pixel search guard).
     struct edge_case_t {
       std::array<std::uint32_t, 4u> core;
       std::array<std::uint32_t, 4u> db_cover;
     };
     const std::array<edge_case_t, 2u> cases {{
       {{384u, 100u, 576u, 108u}, {378u, 94u, 582u, 114u}},
-      {{206u, 100u, 754u, 108u}, {200u, 94u, 760u, 114u}},
+      {{230u, 100u, 730u, 108u}, {224u, 94u, 736u, 114u}},
     }};
     static_assert(576u * field_width % ocr_width == 0u);
-    static_assert((760u + 8u) * field_width % ocr_width == 0u);
+    static_assert((736u + 32u) * field_width % ocr_width == 0u);
     for (const auto &test_case : cases) {
       SCOPED_TRACE(std::to_string(test_case.core[2u]));
       const auto &core = test_case.core;
@@ -1386,7 +1702,7 @@ namespace {
       EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
         default_ocr_box(core[0u], core[1u], core[2u], core[3u]));
       EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_final_box_offset),
-        default_ordinary_cover(db[0u], db[1u], db[2u], db[3u]));
+        default_ordinary_cover(db[0u], db[1u], db[2u], db[3u], core[3u] - core[1u]));
     }
   }
 
@@ -1488,7 +1804,7 @@ namespace {
     const auto core = read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset);
     const auto cover = read_box(fixture.record(), v2::subtitle_ocr_final_box_offset);
     EXPECT_EQ(core, (std::array<std::uint32_t, 4u> {530u, 742u, 1035u, 762u}));
-    EXPECT_EQ(cover, (std::array<std::uint32_t, 4u> {503u, 728u, 1062u, 777u}));
+    EXPECT_EQ(cover, (std::array<std::uint32_t, 4u> {465u, 718u, 1101u, 787u}));
     const auto contains_source_center = [&](const std::array<std::uint32_t, 4u> &box,
                                            const std::uint32_t x, const std::uint32_t y) {
       const auto scaled_x = (2ull * x + 1u) * native_field_w;
@@ -1509,6 +1825,68 @@ namespace {
       }
     }
     EXPECT_EQ(admitted_centers, 234u);
+  }
+
+
+  TEST(HostSbsOcrGpuTest, CurrentCaptionSearchIncludesDetectorMissingLeadingAndLowerStrokeWitnesses) {
+    // Actual live119 P component bounds, source2536x1427/crop1004+423 and content1540x866.
+    // Rectangles author only the retained horizontal component geometry. The missing stroke
+    // gets no synthetic P island, classifier relaxation, prior vote, or blanket-cover support.
+    // These three source coordinates are partial visible-stroke witnesses, not all-glyph GT.
+    constexpr std::uint32_t native_w = 2536u, native_h = 1427u;
+    constexpr std::uint32_t native_field_w = 1540u, native_field_h = 868u;
+    constexpr std::uint32_t content_h = 866u;
+    constexpr auto crop_h = ceil_crop_height(native_w, native_h);
+    constexpr auto crop_top = native_h - crop_h;
+    constexpr auto native_roi_top = subtitle_roi_edge(native_w, native_h, 0u,
+      content_h, v2::subtitle_ocr_safe_row_top);
+    constexpr auto native_roi_bottom = subtitle_roi_edge(native_w, native_h, 0u,
+      content_h, v2::subtitle_ocr_safe_row_bottom);
+    struct live_geometry_case_t {
+      std::array<std::uint32_t, 4u> detector_core;
+      std::array<std::uint32_t, 4u> expected_core;
+      std::array<std::uint32_t, 4u> expected_cover;
+      std::array<std::uint32_t, 2u> lower_witness;
+    };
+    constexpr std::array<live_geometry_case_t, 3u> cases {{
+      {{408u, 103u, 587u, 120u}, {654u, 774u, 942u, 802u}, {585u, 742u, 1011u, 834u}, {1428u, 1353u}},
+      {{379u, 109u, 596u, 122u}, {607u, 784u, 957u, 806u}, {542u, 758u, 1022u, 831u}, {1092u, 1361u}},
+      {{393u, 110u, 577u, 122u}, {630u, 785u, 926u, 806u}, {566u, 763u, 990u, 828u}, {1533u, 1360u}},
+    }};
+    const auto contains_source_center = [](const std::array<std::uint32_t, 4u> &box,
+                                           const std::uint32_t x, const std::uint32_t y) {
+      return (2ull * x + 1u) * native_field_w >= 2ull * box[0u] * native_w &&
+             (2ull * x + 1u) * native_field_w < 2ull * box[2u] * native_w &&
+             (2ull * y + 1u) * content_h >= 2ull * box[1u] * native_h &&
+             (2ull * y + 1u) * content_h < 2ull * box[3u] * native_h;
+    };
+    for (std::size_t index = 0u; index != cases.size(); ++index) {
+      SCOPED_TRACE(index);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      const auto &test_case = cases[index];
+      const auto &p = test_case.detector_core;
+      std::vector<float> probability(ocr_pixels, 0.0f);
+      paint_rectangle(probability, p[0u], p[1u], p[2u], p[3u]);
+      ASSERT_TRUE(fixture.run_boxes(probability, 7756u + index, 77u,
+        native_w, native_h, native_field_w, native_field_h, crop_top, crop_h,
+        native_roi_top, native_roi_bottom, {0u, 0u, native_field_w, content_h}));
+      ASSERT_EQ(fixture.record()[2u], 1u);
+      ASSERT_EQ(fixture.record()[3u], 1u);
+      ASSERT_EQ(fixture.record()[4u], 1u);
+      const auto core = read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset);
+      const auto cover = read_box(fixture.record(), v2::subtitle_ocr_final_box_offset);
+      EXPECT_EQ(core, test_case.expected_core);
+      EXPECT_EQ(cover, test_case.expected_cover);
+      EXPECT_EQ(fixture.record()[v2::subtitle_ocr_raw_box_offset + 5u], 0u);
+      EXPECT_FALSE(contains_source_center(core, test_case.lower_witness[0u], test_case.lower_witness[1u]));
+      EXPECT_TRUE(contains_source_center(cover, test_case.lower_witness[0u], test_case.lower_witness[1u]));
+      if (index == 0u) {
+        EXPECT_FALSE(contains_source_center(core, 966u, 1302u));
+        EXPECT_TRUE(contains_source_center(cover, 966u, 1302u));
+      }
+    }
   }
 
   struct ocr_candidate_patch_t {
@@ -1607,6 +1985,713 @@ namespace {
     return patches;
   }
 
+  std::array<std::uint32_t, 48u> classifier_history(const std::vector<std::uint32_t> &record) {
+    std::array<std::uint32_t, 48u> history {};
+    for (std::size_t word = 0u; word < history.size(); ++word)
+      history[word] = record.at(ocr_record_prefix_words + word);
+    return history;
+  }
+
+  bool observe_classifier(ocr_warp_fixture_t &fixture, const std::vector<float> &probability,
+                          const std::uint64_t frame, const std::uint64_t source_clock,
+                          const bool reset = false, const std::uint64_t generation = 77u) {
+    return fixture.run_boxes(probability, frame, generation, source_width, source_height,
+      field_width, field_height, source_crop_top, source_crop_height, roi_top, roi_bottom,
+      {}, std::nullopt, std::nullopt, std::nullopt, source_clock, reset);
+  }
+
+  void paint_tilted_line(std::vector<float> &probability, const std::uint32_t left,
+                         const std::uint32_t top, const std::uint32_t width,
+                         const std::uint32_t height, const std::uint32_t rise) {
+    for (std::uint32_t x = 0u; x < width; ++x) {
+      const auto y = top + x * rise / width;
+      paint_rectangle(probability, left + x, y, left + x + 1u, y + height);
+    }
+  }
+
+  void paint_envelope_line(std::vector<float> &probability, const std::uint32_t left,
+                            const std::int32_t top, const std::uint32_t width,
+                            const std::int32_t height, const std::int32_t top_rise,
+                            const std::int32_t bottom_rise) {
+    ASSERT_GT(width, 1u);
+    for (std::uint32_t x = 0u; x < width; ++x) {
+      const auto first = top + static_cast<std::int32_t>(x) * top_rise /
+        static_cast<std::int32_t>(width - 1u);
+      const auto last = top + height + static_cast<std::int32_t>(x) * bottom_rise /
+        static_cast<std::int32_t>(width - 1u);
+      ASSERT_GE(first, 0);
+      ASSERT_GT(last, first);
+      paint_rectangle(probability, left + x, static_cast<std::uint32_t>(first),
+        left + x + 1u, static_cast<std::uint32_t>(last));
+    }
+  }
+
+  bool learn_three_layout_entries(ocr_warp_fixture_t &fixture,
+                                   const std::vector<float> &strong) {
+    const std::vector<float> empty(ocr_pixels, 0.0f);
+    std::uint64_t frame = 1u;
+    std::uint64_t clock = 1'000'000u;
+    for (std::uint32_t episode = 0u; episode < 3u; ++episode) {
+      if (episode != 0u) {
+        if (!observe_classifier(fixture, empty, frame++, clock)) return false;
+        clock += 100'000u;
+      }
+      if (!observe_classifier(fixture, strong, frame++, clock) || fixture.record()[4u] == 0u)
+        return false;
+      clock += 100'000u;
+    }
+    return classifier_history(fixture.record())[3u] == 3u;
+  }
+
+  TEST(HostSbsOcrGpuTest, CurrentBracketedStackRecoversAsymmetricMiddleWithoutTeaching) {
+    // One edge varies with the current glyph shape while the other stays horizontal. These
+    // authored fields exercise both edge choices and both signs without a fitted CPU classifier.
+    for (const auto shape : {std::array<std::int32_t, 7u> {95, 8, 0, 95, 115, 125, 13},
+                             std::array<std::int32_t, 7u> {95, 0, -8, 95, 115, 125, 13},
+                             std::array<std::int32_t, 7u> {103, -8, 0, 95, 123, 135, 17}}) {
+      SCOPED_TRACE(shape[1u]);
+      SCOPED_TRACE(shape[2u]);
+      ocr_warp_fixture_t anchors_fixture, stack_fixture;
+      std::string error;
+      ASSERT_TRUE(anchors_fixture.initialize(error, false, true, false)) << error;
+      ASSERT_TRUE(stack_fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> anchors(ocr_pixels, 0.0f);
+      paint_rectangle(anchors, 300u, 70u, 660u, 85u);
+      const auto lower_top = static_cast<std::uint32_t>(shape[5u]);
+      paint_rectangle(anchors, 300u, lower_top, 660u, lower_top + 15u);
+      ASSERT_TRUE(observe_classifier(anchors_fixture, anchors, 1u, 1000000u));
+      ASSERT_EQ(anchors_fixture.record()[4u], 2u);
+      const auto upper_pair = read_native_pair(anchors_fixture.record(), 0u);
+      const auto lower_pair = read_native_pair(anchors_fixture.record(), 1u);
+      const auto anchors_history = classifier_history(anchors_fixture.record());
+      auto stack = anchors;
+      paint_envelope_line(stack, 390u, shape[0u], 180u, 20, shape[1u], shape[2u]);
+      ASSERT_TRUE(observe_classifier(stack_fixture, stack, 1u, 1000000u));
+      ASSERT_EQ(stack_fixture.record()[3u], 3u);
+      ASSERT_EQ(stack_fixture.record()[4u], 3u);
+      EXPECT_EQ(read_native_pair(stack_fixture.record(), 0u), upper_pair);
+      EXPECT_EQ(read_native_pair(stack_fixture.record(), 2u), lower_pair);
+      EXPECT_EQ(read_box(stack_fixture.record(), v2::subtitle_ocr_raw_box_offset +
+        v2::subtitle_ocr_box_word_count), default_ocr_box(390u,
+          static_cast<std::uint32_t>(shape[3u]), 570u, static_cast<std::uint32_t>(shape[4u])));
+      const auto pad = static_cast<std::uint32_t>(shape[6u]);
+      EXPECT_EQ(read_box(stack_fixture.record(), v2::subtitle_ocr_final_box_offset +
+        v2::subtitle_ocr_box_word_count), default_ordinary_cover(390u - pad,
+          static_cast<std::uint32_t>(shape[3u]) - pad, 570u + pad,
+          static_cast<std::uint32_t>(shape[4u]) + pad,
+          static_cast<std::uint32_t>(shape[4u] - shape[3u])));
+      // Both observations are cold and have identical strong anchors. The assisted member
+      // must not change any learned vote, trusted height/span, episode, or clock identity.
+      EXPECT_EQ(classifier_history(stack_fixture.record()), anchors_history);
+      std::vector<float> empty(ocr_pixels, 0.0f);
+      ASSERT_TRUE(observe_classifier(stack_fixture, empty, 2u, 1033333u));
+      EXPECT_EQ(stack_fixture.record()[4u], 0u);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, CurrentBracketedStackRequiresBothIndependentAnchorsAndOwnCenter) {
+    // The off-center word still overlaps the horizontal anchors on X. A centered union with
+    // those anchors must not lend the word its own missing center or opposite-side evidence.
+    for (const auto scenario : {0u, 1u, 2u, 3u}) {
+      SCOPED_TRACE(scenario);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> anchors(ocr_pixels, 0.0f);
+      if (scenario != 0u) {
+        // The last case keeps X overlap but moves only the upper anchor off center.
+        paint_rectangle(anchors, scenario == 3u ? 470u : 300u, 70u,
+          scenario == 3u ? 830u : 660u, 85u);
+      }
+      if (scenario != 1u) paint_rectangle(anchors, 300u, 125u, 660u, 140u);
+      ASSERT_TRUE(observe_classifier(fixture, anchors, 40u, 1000000u));
+      const auto count = fixture.record()[4u];
+      ASSERT_EQ(count, scenario == 2u ? 2u : 1u);
+      std::vector<ocr_native_pair_t> expected;
+      for (std::uint32_t slot = 0u; slot < count; ++slot)
+        expected.push_back(read_native_pair(fixture.record(), slot));
+      auto combined = anchors;
+      paint_envelope_line(combined, scenario == 2u ? 650u : 390u,
+        95, 180u, 20, 8, 0);
+      ASSERT_TRUE(observe_classifier(fixture, combined, 40u, 1000000u, true));
+      expect_retained_native_pairs(fixture.record(), expected);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, CurrentBracketedStackRejectsSteepAndCoherentlyTiltedMembers) {
+    for (const auto steep_one_edge : {false, true}) {
+      SCOPED_TRACE(steep_one_edge);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> anchors(ocr_pixels, 0.0f);
+      paint_rectangle(anchors, 300u, 70u, 660u, 85u);
+      paint_rectangle(anchors, 300u, 135u, 660u, 150u);
+      ASSERT_TRUE(observe_classifier(fixture, anchors, 40u, 1000000u));
+      ASSERT_EQ(fixture.record()[4u], 2u);
+      const std::vector<ocr_native_pair_t> expected {
+        read_native_pair(fixture.record(), 0u), read_native_pair(fixture.record(), 1u)};
+      auto combined = anchors;
+      if (steep_one_edge) {
+        // The bottom is flat, but the top rises by more than ten degrees. Its thirty-row
+        // height is still within twice either anchor, so angle is the independent veto.
+        paint_envelope_line(combined, 440u, 95, 80u, 30, 20, 0);
+      } else {
+        // Both boundaries follow the same moderate tilt; current stack evidence must not
+        // launder a coherent oblique line merely because it lies between horizontal text.
+        paint_envelope_line(combined, 420u, 95, 120u, 15, 8, 8);
+      }
+      ASSERT_TRUE(observe_classifier(fixture, combined, 40u, 1000000u, true));
+      expect_retained_native_pairs(fixture.record(), expected);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, CurrentBracketedStackCannotChainAmbiguousNeighbors) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> anchors(ocr_pixels, 0.0f);
+    paint_rectangle(anchors, 300u, 40u, 660u, 55u);
+    paint_rectangle(anchors, 300u, 125u, 660u, 140u);
+    ASSERT_TRUE(observe_classifier(fixture, anchors, 40u, 1000000u));
+    ASSERT_EQ(fixture.record()[4u], 2u);
+    const std::vector<ocr_native_pair_t> expected {
+      read_native_pair(fixture.record(), 0u), read_native_pair(fixture.record(), 1u)};
+    auto combined = anchors;
+    paint_envelope_line(combined, 390u, 65, 180u, 20, 8, 0);
+    paint_envelope_line(combined, 390u, 95, 180u, 20, 8, 0);
+    // Each member has one nearby strong anchor and one nearby ambiguous member. Neither
+    // has two independent strong anchors within a line height, so neither may bootstrap it.
+    ASSERT_TRUE(observe_classifier(fixture, combined, 40u, 1000000u, true));
+    expect_retained_native_pairs(fixture.record(), expected);
+  }
+
+  TEST(HostSbsOcrGpuTest, DistantRowBridgeDoesNotMergeIndependentCenteredLines) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> upper(ocr_pixels, 0.0f), lower(ocr_pixels, 0.0f);
+    paint_rectangle(upper, 300u, 80u, 660u, 90u);
+    paint_rectangle(lower, 300u, 110u, 660u, 120u);
+    ASSERT_TRUE(fixture.run_boxes(upper, 1u, 77u));
+    ASSERT_EQ(fixture.record()[4u], 1u);
+    const auto upper_pair = read_native_pair(fixture.record(), 0u);
+    ASSERT_TRUE(fixture.run_boxes(lower, 2u, 77u));
+    ASSERT_EQ(fixture.record()[4u], 1u);
+    const auto lower_pair = read_native_pair(fixture.record(), 0u);
+    std::vector<float> combined = upper;
+    paint_rectangle(combined, 300u, 110u, 660u, 120u);
+    // This distant vertical component fills the global inactive-row gap, without touching
+    // either centered text component. It must not change their cores or DB covers.
+    paint_rectangle(combined, 850u, 85u, 866u, 115u);
+    ASSERT_TRUE(fixture.run_boxes(combined, 40u, 77u));
+    expect_retained_native_pairs(fixture.record(), {upper_pair, lower_pair});
+  }
+
+  TEST(HostSbsOcrGpuTest, CurrentHorizontalDialogueRejectsSeparateTiltedSceneText) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> dialogue(ocr_pixels, 0.0f);
+    paint_rectangle(dialogue, 240u, 125u, 720u, 140u);
+    ASSERT_TRUE(fixture.run_boxes(dialogue, 1u, 77u));
+    ASSERT_EQ(fixture.record()[4u], 1u);
+    const auto expected = read_native_pair(fixture.record(), 0u);
+    auto combined = dialogue;
+    paint_tilted_line(combined, 400u, 55u, 160u, 8u, 40u);
+    ASSERT_TRUE(fixture.run_boxes(combined, 40u, 77u));
+    expect_retained_native_pairs(fixture.record(), {expected});
+  }
+
+  TEST(HostSbsOcrGpuTest, FirstStrongCueAndSingleCjkSquareEnterImmediately) {
+    for (const auto square : {false, true}) {
+      SCOPED_TRACE(square);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> probability(ocr_pixels, 0.0f);
+      const std::array<std::uint32_t, 4u> rectangle = square ?
+        std::array<std::uint32_t, 4u> {468u, 100u, 492u, 124u} :
+        std::array<std::uint32_t, 4u> {240u, 100u, 720u, 115u};
+      paint_rectangle(probability, rectangle[0u], rectangle[1u], rectangle[2u], rectangle[3u]);
+      ASSERT_TRUE(observe_classifier(fixture, probability, 1u, 1000000u));
+      ASSERT_EQ(fixture.record()[4u], 1u);
+      EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+        default_ocr_box(rectangle[0u], rectangle[1u], rectangle[2u], rectangle[3u]));
+      const auto history = classifier_history(fixture.record());
+      EXPECT_EQ(history[0u], 0x314C4353u);
+      EXPECT_EQ(history[1u], 1u);
+      EXPECT_EQ(history[3u], 1u);
+      EXPECT_EQ(history[23u], 1u);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, EmptyObservationClearsCurrentProtectionButRetainsLayoutPrior) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> cue(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+    paint_rectangle(cue, 240u, 100u, 720u, 115u);
+    ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1000000u));
+    const auto learned = classifier_history(fixture.record());
+    ASSERT_EQ(learned[3u], 1u);
+    ASSERT_TRUE(observe_classifier(fixture, empty, 2u, 1033333u));
+    ASSERT_EQ(fixture.record()[2u], 1u);
+    EXPECT_EQ(fixture.record()[4u], 0u);
+    for (std::size_t word = v2::subtitle_ocr_raw_box_offset; word < ocr_record_prefix_words; ++word)
+      EXPECT_EQ(fixture.record()[word], 0u);
+    const auto blank = classifier_history(fixture.record());
+    EXPECT_EQ(blank[3u], learned[3u]);
+    EXPECT_EQ(blank[24u], 1u);
+    EXPECT_EQ(blank[25u], 1033333u);
+    EXPECT_EQ(blank[26u], 0u);
+    for (std::size_t word = 32u; word < blank.size(); ++word)
+      EXPECT_EQ(blank[word], learned[word]);
+  }
+
+  TEST(HostSbsOcrGpuTest, LayoutLearnsIndependentEntriesRatherThanRepeatedStaticFrames) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> cue(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+    paint_rectangle(cue, 240u, 100u, 720u, 115u);
+    ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1000000u));
+    const auto first = classifier_history(fixture.record());
+    for (std::uint64_t frame = 2u; frame <= 20u; ++frame)
+      ASSERT_TRUE(observe_classifier(fixture, cue, frame, 1000000u + frame * 33333u));
+    const auto static_tail = classifier_history(fixture.record());
+    EXPECT_EQ(static_tail[3u], 1u);
+    for (std::size_t word = 32u; word < first.size(); ++word)
+      EXPECT_EQ(static_tail[word], first[word]);
+    ASSERT_TRUE(observe_classifier(fixture, empty, 21u, 2000000u));
+    ASSERT_TRUE(observe_classifier(fixture, cue, 22u, 2100000u));
+    EXPECT_EQ(classifier_history(fixture.record())[3u], 2u);
+    ASSERT_TRUE(observe_classifier(fixture, empty, 23u, 2200000u));
+    ASSERT_TRUE(observe_classifier(fixture, cue, 24u, 2300000u));
+    const auto third = classifier_history(fixture.record());
+    EXPECT_EQ(third[3u], 3u);
+    EXPECT_GE(*std::max_element(third.begin() + 32u, third.end()), 8u);
+  }
+
+  TEST(HostSbsOcrGpuTest, DuplicateFrameClockAndZeroClockCannotAccumulateLayoutEvidence) {
+    for (const auto pair : {std::array<std::uint64_t, 2u> {1u, 1000000u}, {2u, 1000000u}, {1u, 1100000u}, {3u, 0u}}) {
+      SCOPED_TRACE(pair[0u]);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> cue(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+      paint_rectangle(cue, 240u, 100u, 720u, 115u);
+      ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1000000u));
+      const auto before = classifier_history(fixture.record());
+      ASSERT_TRUE(observe_classifier(fixture, empty, pair[0u], pair[1u]));
+      const auto after = classifier_history(fixture.record());
+      EXPECT_LE(after[3u], before[3u]);
+      for (std::size_t word = 32u; word < before.size(); ++word) {
+        EXPECT_LE(after[word], before[word]);
+        if (pair[1u] == 1000000u) {
+          EXPECT_EQ(after[word], before[word]);
+        }
+      }
+      // An unaccepted blank cannot manufacture an independent entry when current text returns.
+      ASSERT_TRUE(observe_classifier(fixture, cue, 4u, 1300000u));
+      const auto reentered = classifier_history(fixture.record());
+      EXPECT_LE(reentered[3u], before[3u]);
+      for (std::size_t word = 32u; word < before.size(); ++word)
+        EXPECT_LE(reentered[word], before[word]);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, LearnedLayoutAssistsAmbiguousCurrentTextWithoutTeachingOrHoldingIt) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> strong(ocr_pixels, 0.0f), ambiguous(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+    paint_rectangle(strong, 240u, 100u, 720u, 115u);
+    paint_tilted_line(ambiguous, 400u, 100u, 160u, 10u, 10u);
+    // The authored four-degree envelope is deliberately between clearly horizontal and
+    // clearly oblique geometry. It has current P evidence, but no initial layout authority.
+    ASSERT_TRUE(observe_classifier(fixture, ambiguous, 1u, 1000000u));
+    EXPECT_EQ(fixture.record()[4u], 0u);
+    ASSERT_TRUE(observe_classifier(fixture, strong, 2u, 1100000u));
+    ASSERT_TRUE(observe_classifier(fixture, empty, 3u, 1200000u));
+    ASSERT_TRUE(observe_classifier(fixture, strong, 4u, 1300000u));
+    ASSERT_TRUE(observe_classifier(fixture, empty, 5u, 1400000u));
+    ASSERT_TRUE(observe_classifier(fixture, strong, 6u, 1500000u));
+    const auto trusted = classifier_history(fixture.record());
+    ASSERT_EQ(trusted[3u], 3u);
+    ASSERT_TRUE(observe_classifier(fixture, ambiguous, 7u, 1600000u));
+    EXPECT_EQ(fixture.record()[4u], 1u);
+    const auto assisted = classifier_history(fixture.record());
+    EXPECT_EQ(assisted[3u], trusted[3u]);
+    for (std::size_t word = 32u; word < trusted.size(); ++word)
+      EXPECT_EQ(assisted[word], trusted[word]);
+    ASSERT_TRUE(observe_classifier(fixture, empty, 8u, 1700000u));
+    EXPECT_EQ(fixture.record()[4u], 0u);
+    EXPECT_EQ(classifier_history(fixture.record())[3u], trusted[3u]);
+  }
+
+  TEST(HostSbsOcrGpuTest, QualifiedPriorCannotAuthorizeDivergentOrExcessiveObjectEnvelopes) {
+    // Both shapes fit a genuinely learned height/location. The first has opposed moderate
+    // edges; the second has one excessively tilted edge. Position alone must not admit either.
+    for (const auto shape : {std::array<std::int32_t, 5u> {90, 17, -30, 15, 122},
+                             std::array<std::int32_t, 5u> {90, 17, -40, 0, 107}}) {
+      SCOPED_TRACE(shape[2u]);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> strong(ocr_pixels, 0.0f), object(ocr_pixels, 0.0f);
+      paint_rectangle(strong, 240u, static_cast<std::uint32_t>(shape[4u] - 50),
+        720u, static_cast<std::uint32_t>(shape[4u]));
+      ASSERT_TRUE(learn_three_layout_entries(fixture, strong));
+      const auto trusted = classifier_history(fixture.record());
+      ASSERT_EQ(std::bit_cast<float>(trusted[27u]), 50.0f);
+      ASSERT_GE(*std::max_element(trusted.begin() + 32u, trusted.end()), 8u);
+      paint_envelope_line(object, 400u, shape[0u], 160u, shape[1u], shape[2u], shape[3u]);
+      ASSERT_TRUE(observe_classifier(fixture, object, 6u, 1'500'000u));
+      ASSERT_EQ(fixture.record()[2u], 1u);
+      EXPECT_EQ(fixture.record()[3u], 0u);
+      EXPECT_EQ(fixture.record()[4u], 0u);
+      for (std::size_t word = v2::subtitle_ocr_raw_box_offset; word < ocr_record_prefix_words; ++word)
+        EXPECT_EQ(fixture.record()[word], 0u);
+      const auto rejected = classifier_history(fixture.record());
+      EXPECT_EQ(rejected[3u], trusted[3u]);
+      for (std::size_t word = 27u; word < trusted.size(); ++word)
+        EXPECT_EQ(rejected[word], trusted[word]);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, QualifiedPriorPreservesAsymmetricFlatEnvelopeGlyphsWithoutTeaching) {
+    for (const auto shape : {std::array<std::int32_t, 5u> {95, 8, 0, 95, 115},
+                             std::array<std::int32_t, 5u> {95, 0, -8, 95, 115},
+                             std::array<std::int32_t, 5u> {103, -8, 0, 95, 123}}) {
+      SCOPED_TRACE(shape[1u]);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> strong(ocr_pixels, 0.0f), glyph(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+      paint_rectangle(strong, 240u, 100u, 720u, 115u);
+      ASSERT_TRUE(learn_three_layout_entries(fixture, strong));
+      const auto trusted = classifier_history(fixture.record());
+      // A real blank makes the next entry eligible to teach if it were independently strong.
+      // The glyph must be assisted instead, leaving the qualified location votes untouched.
+      ASSERT_TRUE(observe_classifier(fixture, empty, 6u, 1'500'000u));
+      paint_envelope_line(glyph, 390u, shape[0u], 180u, 20, shape[1u], shape[2u]);
+      ASSERT_TRUE(observe_classifier(fixture, glyph, 7u, 1'600'000u));
+      ASSERT_EQ(fixture.record()[4u], 1u);
+      EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+        default_ocr_box(390u, static_cast<std::uint32_t>(shape[3u]), 570u,
+          static_cast<std::uint32_t>(shape[4u])));
+      const auto assisted = classifier_history(fixture.record());
+      EXPECT_EQ(assisted[3u], trusted[3u]);
+      for (std::size_t word = 27u; word < trusted.size(); ++word)
+        EXPECT_EQ(assisted[word], trusted[word]);
+      ASSERT_TRUE(observe_classifier(fixture, empty, 8u, 1'700'000u));
+      EXPECT_EQ(fixture.record()[4u], 0u);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, QualifiedPriorKeepsUnknownNarrowGlyphsSeparateFromOrientationVeto) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> strong(ocr_pixels, 0.0f), narrow(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+    paint_rectangle(strong, 240u, 90u, 720u, 120u);
+    ASSERT_TRUE(learn_three_layout_entries(fixture, strong));
+    const auto trusted = classifier_history(fixture.record());
+    ASSERT_TRUE(observe_classifier(fixture, empty, 6u, 1'500'000u));
+    paint_rectangle(narrow, 478u, 90u, 482u, 120u);
+    ASSERT_TRUE(observe_classifier(fixture, narrow, 7u, 1'600'000u));
+    ASSERT_EQ(fixture.record()[4u], 1u);
+    EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+      default_ocr_box(478u, 90u, 482u, 120u));
+    const auto assisted = classifier_history(fixture.record());
+    EXPECT_EQ(assisted[3u], trusted[3u]);
+    for (std::size_t word = 27u; word < trusted.size(); ++word)
+      EXPECT_EQ(assisted[word], trusted[word]);
+  }
+
+  TEST(HostSbsOcrGpuTest, QualifiedPriorRequiresCurrentGroupToSpanReferenceCenter) {
+    // Every four-column piece is orientation-unknown, height/location compatible with a
+    // genuinely learned prior, and within the existing broad midpoint tolerance. Only the
+    // current group containing the center may use history without a current line witness.
+    // Detector spans are half-open: contact at the left is included; the right is excluded.
+    for (const auto scenario : {std::array<std::uint32_t, 3u> {430u, 434u, 0u},
+                               std::array<std::uint32_t, 3u> {526u, 530u, 0u},
+                               std::array<std::uint32_t, 3u> {478u, 482u, 1u},
+                               std::array<std::uint32_t, 3u> {480u, 484u, 1u},
+                               std::array<std::uint32_t, 3u> {476u, 480u, 0u}}) {
+      SCOPED_TRACE(scenario[0u]);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> strong(ocr_pixels, 0.0f), narrow(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+      paint_rectangle(strong, 240u, 90u, 720u, 120u);
+      ASSERT_TRUE(learn_three_layout_entries(fixture, strong));
+      const auto trusted = classifier_history(fixture.record());
+      ASSERT_GE(*std::max_element(trusted.begin() + 32u, trusted.end()), 8u);
+      paint_rectangle(narrow, scenario[0u], 90u, scenario[1u], 120u);
+      ASSERT_TRUE(observe_classifier(fixture, narrow, 6u, 1'500'000u));
+      ASSERT_EQ(fixture.record()[2u], 1u);
+      ASSERT_EQ(fixture.record()[4u], scenario[2u]);
+      if (scenario[2u] != 0u) {
+        EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+          default_ocr_box(scenario[0u], 90u, scenario[1u], 120u));
+      }
+      const auto observed = classifier_history(fixture.record());
+      EXPECT_EQ(observed[3u], trusted[3u]);
+      for (std::size_t word = 27u; word < trusted.size(); ++word)
+        EXPECT_EQ(observed[word], trusted[word]);
+      ASSERT_TRUE(observe_classifier(fixture, empty, 7u, 1'600'000u));
+      EXPECT_EQ(fixture.record()[4u], 0u);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, QualifiedPriorUsesSignedCurrentReferenceAndHalfOpenEdges) {
+    // References can be offset within or outside the current analysis crop. Learn within
+    // that same domain, then distinguish actual reference containment from midpoint slack.
+    for (const auto scenario : {std::array<std::int32_t, 6u> {960, 238, 242, 100, 380, 1},
+                               std::array<std::int32_t, 6u> {960, 270, 274, 100, 380, 0},
+                               std::array<std::int32_t, 6u> {960, 240, 244, 100, 380, 1},
+                               std::array<std::int32_t, 6u> {960, 236, 240, 100, 380, 0},
+                               std::array<std::int32_t, 6u> {0, 0, 4, 0, 12, 1},
+                               std::array<std::int32_t, 6u> {-4, 0, 4, 0, 12, 0}}) {
+      SCOPED_TRACE(scenario[0u]);
+      SCOPED_TRACE(scenario[1u]);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      const auto observe = [&](const std::vector<float> &probability,
+                               const std::uint64_t frame, const std::uint64_t clock) {
+        return fixture.run_boxes(probability, frame, 77u, source_width, source_height,
+          field_width, field_height, source_crop_top, source_crop_height, roi_top, roi_bottom,
+          {}, scenario[0u], source_width, std::nullopt, clock);
+      };
+      std::vector<float> strong(ocr_pixels, 0.0f), narrow(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+      paint_rectangle(strong, static_cast<std::uint32_t>(scenario[3u]), 90u,
+        static_cast<std::uint32_t>(scenario[4u]), 120u);
+      std::uint64_t frame = 1u;
+      std::uint64_t clock = 1'000'000u;
+      if (scenario[0u] < 0) {
+        // A reference left of the source is valid geometry, but no ordinary
+        // nonnegative tight group can contain it or establish a layout prior.
+        const auto expect_empty_history = [&] {
+          const auto history = classifier_history(fixture.record());
+          EXPECT_EQ(history[3u], 0u);
+          EXPECT_EQ(*std::max_element(history.begin() + 32u, history.end()), 0u);
+        };
+        for (std::uint32_t episode = 0u; episode < 3u; ++episode) {
+          if (episode != 0u) {
+            ASSERT_TRUE(observe(empty, frame++, clock));
+            clock += 100'000u;
+          }
+          ASSERT_TRUE(observe(strong, frame++, clock));
+          ASSERT_EQ(fixture.record()[2u], 1u);
+          ASSERT_EQ(fixture.record()[3u], 0u);
+          ASSERT_EQ(fixture.record()[4u], 0u);
+          expect_empty_history();
+          clock += 100'000u;
+        }
+        paint_rectangle(narrow, static_cast<std::uint32_t>(scenario[1u]), 90u,
+          static_cast<std::uint32_t>(scenario[2u]), 120u);
+        ASSERT_TRUE(observe(narrow, frame++, clock));
+        ASSERT_EQ(fixture.record()[2u], 1u);
+        ASSERT_EQ(fixture.record()[3u], 0u);
+        ASSERT_EQ(fixture.record()[4u], 0u);
+        expect_empty_history();
+        continue;
+      }
+      for (std::uint32_t episode = 0u; episode < 3u; ++episode) {
+        if (episode != 0u) {
+          ASSERT_TRUE(observe(empty, frame++, clock));
+          clock += 100'000u;
+        }
+        ASSERT_TRUE(observe(strong, frame++, clock));
+        ASSERT_EQ(fixture.record()[4u], 1u);
+        clock += 100'000u;
+      }
+      const auto trusted = classifier_history(fixture.record());
+      ASSERT_EQ(trusted[3u], 3u);
+      ASSERT_GE(*std::max_element(trusted.begin() + 32u, trusted.end()), 8u);
+      paint_rectangle(narrow, static_cast<std::uint32_t>(scenario[1u]), 90u,
+        static_cast<std::uint32_t>(scenario[2u]), 120u);
+      ASSERT_TRUE(observe(narrow, frame++, clock));
+      ASSERT_EQ(fixture.record()[2u], 1u);
+      ASSERT_EQ(fixture.record()[4u], static_cast<std::uint32_t>(scenario[5u]));
+      const auto observed = classifier_history(fixture.record());
+      EXPECT_EQ(observed[3u], trusted[3u]);
+      for (std::size_t word = 27u; word < trusted.size(); ++word)
+        EXPECT_EQ(observed[word], trusted[word]);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, SmallLearnedHeightCannotAdmitOffAxisFragmentOrDelayCenteredEntry) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> strong(ocr_pixels, 0.0f), fragment(ocr_pixels, 0.0f), centered(ocr_pixels, 0.0f);
+    paint_rectangle(strong, 240u, 112u, 720u, 118u);
+    ASSERT_TRUE(learn_three_layout_entries(fixture, strong));
+    const auto trusted = classifier_history(fixture.record());
+    ASSERT_EQ(std::bit_cast<float>(trusted[27u]), 6.0f);
+    // This three-row unknown fits the learned six-row height and baseline, but its current
+    // group is entirely left of the center. Rejection must clear it in this observation.
+    paint_rectangle(fragment, 428u, 115u, 432u, 118u);
+    ASSERT_TRUE(observe_classifier(fixture, fragment, 6u, 1'500'000u));
+    EXPECT_EQ(fixture.record()[4u], 0u);
+    paint_rectangle(centered, 478u, 115u, 482u, 118u);
+    ASSERT_TRUE(observe_classifier(fixture, centered, 7u, 1'533'333u));
+    ASSERT_EQ(fixture.record()[4u], 1u);
+    EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+      default_ocr_box(478u, 115u, 482u, 118u));
+    const auto observed = classifier_history(fixture.record());
+    EXPECT_EQ(observed[3u], trusted[3u]);
+    for (std::size_t word = 27u; word < trusted.size(); ++word)
+      EXPECT_EQ(observed[word], trusted[word]);
+  }
+
+  TEST(HostSbsOcrGpuTest, UnknownPieceOnCurrentHorizontalLineDoesNotNeedItsOwnCenterCrossing) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> cue(ocr_pixels, 0.0f);
+    paint_rectangle(cue, 300u, 90u, 600u, 120u);
+    // More than four inactive cells prevent an ordinary merge, while the fixed-height
+    // current line group still includes this unknown word. Equal height prevents the
+    // short-contained-punctuation exception from hiding a per-piece center regression.
+    paint_rectangle(cue, 640u, 90u, 644u, 120u);
+    ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1'000'000u));
+    ASSERT_EQ(fixture.record()[4u], 2u);
+    EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+      default_ocr_box(300u, 90u, 600u, 120u));
+    EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset + v2::subtitle_ocr_box_word_count),
+      default_ocr_box(640u, 90u, 644u, 120u));
+    // There is only one independent entry, below the prior-assistance threshold.
+    const auto history = classifier_history(fixture.record());
+    EXPECT_EQ(history[3u], 1u);
+    EXPECT_LT(*std::max_element(history.begin() + 32u, history.end()), 8u);
+  }
+
+  TEST(HostSbsOcrGpuTest, ExplicitDomainAndAnalysisGenerationChangesClearTheLayoutPrior) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> cue(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+    paint_rectangle(cue, 240u, 100u, 720u, 115u);
+    ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1000000u));
+    ASSERT_EQ(classifier_history(fixture.record())[3u], 1u);
+    ASSERT_TRUE(observe_classifier(fixture, empty, 2u, 1100000u, true));
+    auto cleared = classifier_history(fixture.record());
+    EXPECT_EQ(cleared[3u], 0u);
+    for (std::size_t word = 32u; word < cleared.size(); ++word) EXPECT_EQ(cleared[word], 0u);
+    ASSERT_TRUE(observe_classifier(fixture, cue, 3u, 1200000u));
+    ASSERT_EQ(classifier_history(fixture.record())[3u], 1u);
+    ASSERT_TRUE(observe_classifier(fixture, empty, 4u, 1300000u, false, 78u));
+    cleared = classifier_history(fixture.record());
+    EXPECT_EQ(cleared[3u], 0u);
+    EXPECT_EQ(cleared[8u], 78u);
+    for (std::size_t word = 32u; word < cleared.size(); ++word) EXPECT_EQ(cleared[word], 0u);
+  }
+
+  TEST(HostSbsOcrGpuTest, ChangingVideoToScreenLineReferenceClearsTheLayoutPrior) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> cue(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+    paint_rectangle(cue, 240u, 100u, 720u, 115u);
+    ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1000000u));
+    ASSERT_EQ(classifier_history(fixture.record())[3u], 1u);
+    // Same analysis pixels and generation, but a foreground-client fallback uses the full
+    // screen's center/lower quarter. A learned video-local location cannot cross that change.
+    ASSERT_TRUE(fixture.run_boxes(empty, 2u, 77u, source_width, source_height,
+      field_width, field_height, source_crop_top, source_crop_height, roi_top, roi_bottom,
+      {}, 3840, 3840u, 540, 1100000u));
+    const auto changed = classifier_history(fixture.record());
+    EXPECT_EQ(changed[3u], 0u);
+    EXPECT_EQ(changed[20u], 3840u);
+    EXPECT_EQ(changed[21u], 3840u);
+    EXPECT_EQ(changed[22u], 540u);
+    for (std::size_t word = 32u; word < changed.size(); ++word) EXPECT_EQ(changed[word], 0u);
+  }
+
+  TEST(HostSbsOcrGpuTest, LeadingAndTrailingShortPunctuationPreserveTheCurrentLine) {
+    for (const auto leading : {true, false}) {
+      SCOPED_TRACE(leading);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> cue(ocr_pixels, 0.0f);
+      paint_rectangle(cue, 300u, 85u, 660u, 100u);
+      paint_rectangle(cue, leading ? 280u : 672u, 94u, leading ? 283u : 675u, 97u);
+      ASSERT_TRUE(fixture.run_boxes(cue, 1u, 77u));
+      ASSERT_EQ(fixture.record()[4u], 1u);
+      EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+        default_ocr_box(leading ? 280u : 300u, 85u, leading ? 660u : 675u, 100u));
+      EXPECT_EQ(fixture.record()[v2::subtitle_ocr_raw_box_offset + 6u], 2u);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, SteepSceneMemberCannotBorrowThePunctuationAttachmentRule) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> dialogue(ocr_pixels, 0.0f);
+    paint_rectangle(dialogue, 300u, 100u, 660u, 115u);
+    ASSERT_TRUE(fixture.run_boxes(dialogue, 1u, 77u));
+    ASSERT_EQ(fixture.record()[4u], 1u);
+    const auto expected = read_native_pair(fixture.record(), 0u);
+    auto nearby_scene = dialogue;
+    // This fully observed steep piece is within the dialogue's vertical span and only twelve
+    // pixels beyond its right edge. Its geometry is scene-like, rather than unknown short
+    // punctuation; adjacency must neither attach it nor change the credible receiver.
+    paint_tilted_line(nearby_scene, 672u, 102u, 16u, 3u, 10u);
+    ASSERT_TRUE(fixture.run_boxes(nearby_scene, 40u, 77u));
+    expect_retained_native_pairs(fixture.record(), {expected});
+  }
+
+  TEST(HostSbsOcrGpuTest, AmbiguousSceneMemberNeedsItsOwnQualifiedPriorBeforeAttachment) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> dialogue(ocr_pixels, 0.0f);
+    paint_rectangle(dialogue, 300u, 90u, 600u, 110u);
+    // Center the unchanged receiver in a legal 5120-wide screen reference.
+    // Its 51.2-detector-pixel tolerance also contains an incorrectly merged
+    // receiver+scene union, so centering cannot hide the attachment regression.
+    ASSERT_TRUE(fixture.run_boxes_in_screen(dialogue, 1u, 77u, 5120u, 1660u));
+    ASSERT_EQ(fixture.record()[4u], 1u);
+    const auto expected = read_native_pair(fixture.record(), 0u);
+    auto nearby_scene = dialogue;
+    // A complete four-degree line is not unknown punctuation, even when contained in the
+    // current strong line's vertical span. One newly learned entry cannot qualify it.
+    paint_tilted_line(nearby_scene, 612u, 95u, 80u, 5u, 6u);
+    ASSERT_TRUE(fixture.run_boxes_in_screen(nearby_scene, 40u, 77u, 5120u, 1660u));
+    expect_retained_native_pairs(fixture.record(), {expected});
+  }
+
+  TEST(HostSbsOcrGpuTest, MoreThanOneHundredTwentyLocalCandidatesDoNotAbstainGlobally) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> crowded(ocr_pixels, 0.0f);
+    // Twenty columns times eight independent local rows, joined into one global row band by
+    // a remote strip. Even if that strip absorbs its closest column, 152 other local pieces
+    // exceed the retired 120-slot queue. A credible dialogue below must survive the pressure.
+    for (std::uint32_t row = 0u; row < 8u; ++row)
+      for (std::uint32_t column = 0u; column < 20u; ++column)
+        paint_rectangle(crowded, 8u + column * 48u, 35u + row * 10u,
+          16u + column * 48u, 40u + row * 10u);
+    paint_rectangle(crowded, 0u, 35u, 3u, 115u);
+    paint_rectangle(crowded, 240u, 130u, 720u, 145u);
+    ASSERT_TRUE(fixture.run_boxes(crowded, 1u, 77u));
+    EXPECT_EQ(fixture.record()[2u], 1u);
+    ASSERT_GT(fixture.record()[4u], 0u);
+    bool found_dialogue = false;
+    for (std::uint32_t slot = 0u; slot < fixture.record()[4u]; ++slot)
+      found_dialogue |= read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset +
+        slot * v2::subtitle_ocr_box_word_count) == default_ocr_box(240u, 130u, 720u, 145u);
+    EXPECT_TRUE(found_dialogue);
+  }
+
   TEST(HostSbsOcrGpuTest, LowerQuarterEligibilityDoesNotChangeTheNativeOcrCrop) {
     EXPECT_EQ(ceil_crop_height(1920u, 1080u), 320u);
     EXPECT_EQ(ceil_crop_height(3840u, 1080u), 640u);
@@ -1660,17 +2745,26 @@ namespace {
     EXPECT_EQ(fixture.record()[3u], 1u);
   }
 
-  TEST(HostSbsOcrGpuTest, LineCenterHasAnInclusiveOneTenthWidthTolerance) {
+  TEST(HostSbsOcrGpuTest, LineCenterHasAnInclusiveConfiguredWidthTolerance) {
     ocr_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
-    for (const auto left : {336u, 528u, 335u, 529u}) {
-      SCOPED_TRACE(std::to_string(left));
+    constexpr auto boundary = configured_center_boundary(source_width);
+    constexpr std::uint32_t patch_width = 256u;
+    constexpr auto centered_left = (ocr_width - patch_width) / 2u;
+    static_assert(boundary.reference_width <= v2::subtitle_contour_source_max_extent);
+    static_assert(boundary.detector_offset > 0u && boundary.detector_offset < centered_left);
+    const auto delta = static_cast<std::int32_t>(boundary.detector_offset);
+    for (const auto offset : {-delta, delta, -delta - 1, delta + 1}) {
+      SCOPED_TRACE(offset);
+      const auto left = static_cast<std::uint32_t>(static_cast<std::int32_t>(centered_left) + offset);
       std::vector<float> probability(ocr_pixels, 0.0f);
-      paint_rectangle(probability, left, 85u, left + 96u, 100u);
-      ASSERT_TRUE(fixture.run_boxes(probability, 40u, 77u));
+      paint_rectangle(probability, left, 85u, left + patch_width, 100u);
+      ASSERT_TRUE(fixture.run_boxes(probability, 40u, 77u, source_width, source_height,
+        field_width, field_height, source_crop_top, source_crop_height, roi_top, roi_bottom,
+        {}, static_cast<std::int32_t>(source_width), boundary.reference_width));
       EXPECT_EQ(fixture.record()[2u], 1u);
-      const auto expected_count = left == 336u || left == 528u ? 1u : 0u;
+      const auto expected_count = std::abs(offset) == delta ? 1u : 0u;
       EXPECT_EQ(fixture.record()[3u], expected_count);
       EXPECT_EQ(fixture.record()[4u], expected_count);
       if (expected_count == 0u) expect_retained_native_pairs(fixture.record(), {});
@@ -1696,22 +2790,31 @@ namespace {
     };
     constexpr auto crop_h = ceil_crop_height(video_w, video_h);
     constexpr auto crop_top = video_h - crop_h;
-    for (const auto left : {336u, 528u, 335u, 529u}) {
-      SCOPED_TRACE(std::to_string(left));
+    constexpr auto boundary = configured_center_boundary(video_w);
+    constexpr std::uint32_t patch_width = 256u;
+    constexpr auto centered_left = (ocr_width - patch_width) / 2u;
+    static_assert(boundary.reference_width <= v2::subtitle_contour_source_max_extent);
+    static_assert(boundary.detector_offset > 0u && boundary.detector_offset < centered_left);
+    const auto delta = static_cast<std::int32_t>(boundary.detector_offset);
+    for (const auto offset : {-delta, delta, -delta - 1, delta + 1}) {
+      SCOPED_TRACE(offset);
+      const auto left = static_cast<std::uint32_t>(static_cast<std::int32_t>(centered_left) + offset);
       std::vector<float> probability(ocr_pixels, 0.0f);
-      paint_rectangle(probability, left, 85u, left + 96u, 100u);
+      paint_rectangle(probability, left, 85u, left + patch_width, 100u);
       ASSERT_TRUE(fixture.run_boxes(probability, 40u, 77u, video_w, video_h,
         field_width, field_height, crop_top, crop_h,
-        geometry.roi_top, geometry.roi_bottom, content));
+        geometry.roi_top, geometry.roi_bottom, content,
+        static_cast<std::int32_t>(video_w), boundary.reference_width));
       EXPECT_EQ(fixture.record()[2u], 1u);
-      const auto expected_count = left == 336u || left == 528u ? 1u : 0u;
+      const auto expected_count = std::abs(offset) == delta ? 1u : 0u;
       EXPECT_EQ(fixture.record()[3u], expected_count);
       EXPECT_EQ(fixture.record()[4u], expected_count);
-      // In particular, right-edge tightL+tightR=1152 is exactly 1/10 of native video width
-      // from its center. Converting both sides independently to FP32 once rejected this case.
+      // Both inclusive configured edges are exact integer-rational equalities,
+      // even though video_w is not divisible by the detector width. The next
+      // detector column on either side is outside; do not replace this with FP32.
       if (expected_count == 0u) {
         for (std::size_t word = v2::subtitle_ocr_raw_box_offset;
-             word < fixture.record().size(); ++word)
+             word < ocr_record_prefix_words; ++word)
           EXPECT_EQ(fixture.record()[word], 0u);
       }
     }
@@ -1746,7 +2849,7 @@ namespace {
       EXPECT_EQ(fixture.record()[3u], 0u);
       EXPECT_EQ(fixture.record()[4u], 0u);
       for (std::size_t word = v2::subtitle_ocr_raw_box_offset;
-           word < fixture.record().size(); ++word)
+           word < ocr_record_prefix_words; ++word)
         EXPECT_EQ(fixture.record()[word], 0u);
     }
   }
@@ -1774,9 +2877,20 @@ namespace {
     const auto left_cover = read_box(fixture.record(), v2::subtitle_ocr_final_box_offset);
     const auto right_cover = read_box(fixture.record(), v2::subtitle_ocr_final_box_offset +
       v2::subtitle_ocr_box_word_count);
-    EXPECT_LT(left_cover[2u], right_cover[0u]);
-    EXPECT_LT(left_cover[2u], field_width / 2u);
-    EXPECT_GT(right_cover[0u], field_width / 2u);
+    const auto left_core = read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset);
+    const auto right_core = read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset +
+      v2::subtitle_ocr_box_word_count);
+    EXPECT_EQ(left_core, default_ocr_box(300u, 85u, 440u, 100u));
+    EXPECT_EQ(right_core, default_ocr_box(500u, 85u, 660u, 100u));
+    EXPECT_LT(left_core[2u], right_core[0u]);
+    EXPECT_LT(left_core[2u], field_width / 2u);
+    EXPECT_GT(right_core[0u], field_width / 2u);
+    // Separate producer pairs keep their own DB unclip and ordinary search guards. The
+    // four-cell search guards may overlap without merging the disjoint tight fragments.
+    EXPECT_EQ(left_cover, default_ordinary_cover(290u, 75u, 450u, 110u, 15u));
+    EXPECT_EQ(right_cover, default_ordinary_cover(490u, 75u, 670u, 110u, 15u));
+    EXPECT_NE(left_cover, right_cover);
+    EXPECT_GT(left_cover[2u], right_cover[0u]);
   }
 
   TEST(HostSbsOcrGpuTest, SameLineHorizontalGapHasAnInclusiveFourHeightLimit) {
@@ -1820,6 +2934,40 @@ namespace {
     expect_retained_native_pairs(fixture.record(), pairs);
   }
 
+  TEST(HostSbsOcrGpuTest, SeparatedStrongFragmentsRequireTheirGroupToBeCentered) {
+    // Relative geometry mirrors a pair of scene detections: both are individually
+    // off-center, share a horizontal band, and are close enough for the unchanged
+    // 4H line rule. Their union spans the reference but is about 2.92% off-center.
+    // A common translation centers the twin without changing its split support.
+    const std::vector<ocr_candidate_patch_t> off_center {
+      {{268u, 45u, 449u, 104u}},
+      {{548u, 45u, 748u, 92u}},
+    };
+    auto centered = off_center;
+    for (auto &patch : centered) {
+      patch.rectangle[0u] -= 28u;
+      patch.rectangle[2u] -= 28u;
+    }
+    ocr_warp_fixture_t expected_fixture;
+    std::string error;
+    ASSERT_TRUE(expected_fixture.initialize(error, false, true, false)) << error;
+    std::vector<ocr_native_pair_t> expected_pairs;
+    ASSERT_TRUE(capture_native_pairs(expected_fixture, centered, expected_pairs));
+    ASSERT_EQ(expected_pairs.size(), 2u);
+    for (const auto &pair : expected_pairs) EXPECT_EQ(pair[5u], 0u); // Ordinary, not a ribbon.
+    for (const auto exact_center : {false, true}) {
+      SCOPED_TRACE(exact_center);
+      ocr_warp_fixture_t fixture; // A fresh owner: neither case borrows learned layout.
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> probability(ocr_pixels, 0.0f);
+      paint_candidate_patches(probability, exact_center ? centered : off_center);
+      ASSERT_TRUE(fixture.run_boxes(probability, 40u, 77u));
+      expect_retained_native_pairs(fixture.record(), exact_center ? expected_pairs :
+        std::vector<ocr_native_pair_t> {});
+      EXPECT_EQ(classifier_history(fixture.record())[3u], exact_center ? 1u : 0u);
+    }
+  }
+
   TEST(HostSbsOcrGpuTest, DistantSameHeightColumnsCannotBorrowEachOthersCenter) {
     ocr_warp_fixture_t fixture;
     std::string error;
@@ -1860,7 +3008,7 @@ namespace {
     EXPECT_EQ(fixture.record()[3u], 0u);
     EXPECT_EQ(fixture.record()[4u], 0u);
     for (std::size_t word = v2::subtitle_ocr_raw_box_offset;
-         word < fixture.record().size(); ++word)
+         word < ocr_record_prefix_words; ++word)
       EXPECT_EQ(fixture.record()[word], 0u);
   }
 
@@ -1902,7 +3050,7 @@ namespace {
       EXPECT_EQ(fixture.record()[4u], gap == 525u ? 2u : 0u);
       if (gap == 526u) {
         for (std::size_t word = v2::subtitle_ocr_raw_box_offset;
-             word < fixture.record().size(); ++word)
+             word < ocr_record_prefix_words; ++word)
           EXPECT_EQ(fixture.record()[word], 0u);
       }
     }
@@ -1943,7 +3091,7 @@ namespace {
       EXPECT_EQ(fixture.record()[4u], gap == 60u ? 2u : 0u);
       if (gap == 61u) {
         for (std::size_t word = v2::subtitle_ocr_raw_box_offset;
-             word < fixture.record().size(); ++word)
+             word < ocr_record_prefix_words; ++word)
           EXPECT_EQ(fixture.record()[word], 0u);
       }
     }
@@ -2009,15 +3157,22 @@ namespace {
     ocr_warp_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
-    const auto patches = equal_area_ocr_patches(9u);
+    auto patches = equal_area_ocr_patches(9u);
+    // Recenter the complete nine-member line, preserving every core's dimensions,
+    // probability, discovery order and equal-area capacity tie.
+    for (auto &patch : patches) {
+      patch.rectangle[0u] += 80u;
+      patch.rectangle[2u] += 80u;
+    }
     std::vector<ocr_native_pair_t> pairs;
     ASSERT_TRUE(capture_native_pairs(fixture, patches, pairs));
     pairs.resize(8u);
     std::vector<float> probability(ocr_pixels, 0.0f);
     paint_candidate_patches(probability, patches);
     ASSERT_TRUE(fixture.run_boxes(probability, 40u, 77u));
-    // All nine cores span 0..800 (center 400 within 480+/-96). The earlier retained eight span
-    // only 0..704 (center 352 outside the tolerance), so selection cannot precede line filtering.
+    // All nine cores span 80..880 and center exactly at 480. The earlier retained
+    // eight span only 80..784, whose center432 is outside the configured 2% margin.
+    // Capacity selection before line filtering would therefore lose this line.
     expect_retained_native_pairs(fixture.record(), pairs);
   }
 
@@ -2174,7 +3329,8 @@ namespace {
     pairs.resize(8u);
     std::vector<float> probability(ocr_pixels, 0.0f);
     paint_candidate_patches(probability, patches);
-    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 3840u, 1216u));
+    // Match the reference to the complete nine-core union center400; capacity remains the test.
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 3840u, 1120u));
     expect_retained_native_pairs(fixture.record(), pairs);
   }
 
@@ -2190,7 +3346,8 @@ namespace {
     pairs.erase(pairs.begin() + 7u);
     std::vector<float> probability(ocr_pixels, 0.0f);
     paint_candidate_patches(probability, patches);
-    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 3840u, 1216u));
+    // Match the reference to the complete union center448; capacity remains the test.
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 3840u, 1024u));
     expect_retained_native_pairs(fixture.record(), pairs);
   }
 
@@ -2206,7 +3363,8 @@ namespace {
     pairs.erase(pairs.begin());
     std::vector<float> probability(ocr_pixels, 0.0f);
     paint_candidate_patches(probability, patches);
-    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 3840u, 1216u));
+    // Match the reference to the complete union center448; capacity remains the test.
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 3840u, 1024u));
     expect_retained_native_pairs(fixture.record(), pairs);
   }
 
@@ -2231,7 +3389,8 @@ namespace {
     const std::vector<ocr_native_pair_t> expected(pairs.begin() + 10u, pairs.begin() + 18u);
     std::vector<float> probability(ocr_pixels, 0.0f);
     paint_candidate_patches(probability, patches);
-    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 3840u, 1216u));
+    // Match the reference to the larger row center456; earlier row center448 remains eligible; capacity remains the test.
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 3840u, 1008u));
     expect_retained_native_pairs(fixture.record(), expected);
   }
 
@@ -2249,7 +3408,9 @@ namespace {
     std::vector<float> probability(ocr_pixels, 0.0f);
     for (const auto &island : islands)
       paint_rectangle(probability, island[0u], 120u, island[1u], 156u);
-    ASSERT_TRUE(fixture.run_boxes(probability, 40u, 77u));
+    // One legal screen reference keeps BOTH original groups eligible: ordinary
+    // center352 and ribbon center435.5 are within 51.2 pixels of reference393.5.
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 5120u, 1773u));
     ASSERT_EQ(fixture.record()[3u], 1u);
     const auto ribbon = read_native_pair(fixture.record(), 0u);
     ASSERT_EQ(ribbon[5u], v2::subtitle_ocr_box_flag_ribbon);
@@ -2260,7 +3421,7 @@ namespace {
     pairs.pop_back();
     pairs.push_back(ribbon);
     paint_candidate_patches(probability, patches);
-    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 3840u, 1216u));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 40u, 77u, 5120u, 1773u));
     expect_retained_native_pairs(fixture.record(), pairs);
   }
 
@@ -2278,7 +3439,7 @@ namespace {
       EXPECT_EQ(fixture.record()[2u], 0u);
       EXPECT_EQ(fixture.record()[3u], 0u);
       EXPECT_EQ(fixture.record()[4u], 0u);
-      for (std::size_t word = v2::subtitle_ocr_raw_box_offset; word < fixture.record().size(); ++word)
+      for (std::size_t word = v2::subtitle_ocr_raw_box_offset; word < ocr_record_prefix_words; ++word)
         EXPECT_EQ(fixture.record()[word], 0u);
     }
     probability[0u] = 0.0f;
@@ -2287,7 +3448,7 @@ namespace {
     EXPECT_EQ(fixture.record()[2u], 0u);
     EXPECT_EQ(fixture.record()[3u], 0u);
     EXPECT_EQ(fixture.record()[4u], 0u);
-    for (std::size_t word = v2::subtitle_ocr_raw_box_offset; word < fixture.record().size(); ++word)
+    for (std::size_t word = v2::subtitle_ocr_raw_box_offset; word < ocr_record_prefix_words; ++word)
       EXPECT_EQ(fixture.record()[word], 0u);
   }
 
@@ -2312,7 +3473,7 @@ namespace {
     );
     EXPECT_EQ(
       read_box(joined, v2::subtitle_ocr_final_box_offset),
-      default_ordinary_cover(280u, 74u, 681u, 108u)
+      default_ordinary_cover(280u, 74u, 681u, 108u, 14u)
     );
     EXPECT_EQ(joined[v2::subtitle_ocr_raw_box_offset + 6u], 2u);
     EXPECT_EQ(joined[v2::subtitle_ocr_raw_box_offset + 7u], 0u);
@@ -2335,7 +3496,7 @@ namespace {
     );
     EXPECT_EQ(
       read_box(remote_speck, v2::subtitle_ocr_final_box_offset),
-      default_ordinary_cover(309u, 74u, 646u, 111u)
+      default_ordinary_cover(309u, 74u, 646u, 111u, 15u)
     );
     EXPECT_EQ(remote_speck[v2::subtitle_ocr_raw_box_offset + 6u], 1u);
     EXPECT_EQ(remote_speck[v2::subtitle_ocr_raw_box_offset + 7u], 0u);
@@ -2366,7 +3527,7 @@ namespace {
     );
     EXPECT_EQ(
       read_box(punctuation, v2::subtitle_ocr_final_box_offset),
-      default_ordinary_cover(309u, 74u, 686u, 111u)
+      default_ordinary_cover(309u, 74u, 686u, 111u, 15u)
     );
     EXPECT_EQ(punctuation[v2::subtitle_ocr_raw_box_offset + 6u], 2u);
     EXPECT_EQ(punctuation[v2::subtitle_ocr_raw_box_offset + 7u], 1u);
@@ -2423,7 +3584,9 @@ namespace {
       paint_rectangle(probability, island[0u], 120u, island[1u], 156u);
     }
 
-    ASSERT_TRUE(fixture.run_boxes(probability, 30u, 77u));
+    // Keep the original asymmetric seven-island topology and exact edge data;
+    // a matched reference at its center435.5 isolates ribbon/bottom classification.
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 30u, 77u, 3840u, 1049u));
     const auto &record = fixture.record();
     ASSERT_EQ(record[2u], 1u);
     ASSERT_EQ(record[3u], 1u);
@@ -2461,7 +3624,7 @@ namespace {
     for (const auto &island : islands) {
       paint_rectangle(probability, island[0u], 120u, island[1u], 153u);
     }
-    ASSERT_TRUE(fixture.run_boxes(probability, 31u, 77u));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 31u, 77u, 3840u, 1049u));
     EXPECT_EQ(
       fixture.record()[v2::subtitle_ocr_raw_box_offset + 5u],
       v2::subtitle_ocr_box_flag_ribbon
@@ -2470,7 +3633,7 @@ namespace {
     for (const auto &island : islands) {
       paint_rectangle(probability, island[0u], 120u, island[1u], 152u);
     }
-    ASSERT_TRUE(fixture.run_boxes(probability, 32u, 77u));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 32u, 77u, 3840u, 1049u));
     EXPECT_EQ(fixture.record()[v2::subtitle_ocr_raw_box_offset + 5u], 0u);
 
     // The same segmented topology away from the bottom is a normal subtitle candidate. Position
@@ -2479,7 +3642,7 @@ namespace {
     for (const auto &island : islands) {
       paint_rectangle(probability, island[0u], 90u, island[1u], 100u);
     }
-    ASSERT_TRUE(fixture.run_boxes(probability, 33u, 77u));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 33u, 77u, 3840u, 1049u));
     EXPECT_EQ(fixture.record()[2u], 1u);
     EXPECT_EQ(fixture.record()[v2::subtitle_ocr_raw_box_offset + 5u], 0u);
     EXPECT_EQ(fixture.record()[v2::subtitle_ocr_final_box_offset + 5u], 0u);
@@ -2793,7 +3956,10 @@ namespace {
     // A tall off-center logo belongs to a different group, covered by the authorization tests.
     paint_rectangle(line_and_logo, 760u, 99u, 840u, 109u);
 
-    ASSERT_TRUE(fixture.run_boxes(line_and_logo, 10u, generation));
+    // Keep one legal matched reference throughout the complete lifecycle. Group
+    // center540 and later single-line center480 both lie within38.4 detector pixels
+    // of reference510; EMPTY/fault/restore must not borrow a reference-context reset.
+    ASSERT_TRUE(fixture.run_boxes_in_screen(line_and_logo, 10u, generation, 3840u, 900u));
     const auto &logo_record = fixture.record();
     ASSERT_EQ(logo_record[2u], 1u);
     ASSERT_EQ(logo_record[3u], 2u);
@@ -2810,11 +3976,12 @@ namespace {
         logo_record,
         v2::subtitle_ocr_final_box_offset + v2::subtitle_ocr_box_word_count
       ),
-      default_ordinary_cover(753u, 92u, 847u, 116u)
+      default_ordinary_cover(753u, 92u, 847u, 116u, 10u)
     );
 
-    // Every producer-admitted current pair participates immediately. There is no second shape
-    // filter or pending owner. These authored covers exercise conditioning, not real glyph recall.
+    // Every producer-admitted current pair participates immediately. The fixture authors zero
+    // budgets only in its tight cores; wider covers authorize search, not blanket protection.
+    // These authored budgets exercise conditioning/publication, not native RGB glyph recall.
     fixture.reset_locator();
     ASSERT_TRUE(fixture.dispatch_locator(10u, generation, true));
     ASSERT_EQ(fixture.state().size(), v2::subtitle_plane_state_word_count);
@@ -2822,11 +3989,12 @@ namespace {
     EXPECT_EQ(fixture.state()[v2::subtitle_plane_current_slot_mask_word], 3u);
     EXPECT_FALSE(fixture.output_is_exact_base());
     EXPECT_EQ(fixture.smoothing_enabled(), 1u);
-    EXPECT_EQ(fixture.weight_at(300u, 395u), 1.0f);
-    EXPECT_EQ(fixture.weight_at(650u, 395u), 1.0f);
-    EXPECT_LT(fixture.output_at(650u, 395u), 0.03f);
+    EXPECT_EQ(fixture.weight_at(300u, 390u), 1.0f);
+    EXPECT_EQ(fixture.weight_at(650u, 390u), 1.0f);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(650u, 390u)),
+      fixture.state()[v2::subtitle_plane_adaptive_offset + 3u]);
 
-    ASSERT_TRUE(fixture.run_boxes(line_and_logo, 11u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(line_and_logo, 11u, generation, 3840u, 900u));
     ASSERT_TRUE(fixture.dispatch_locator(11u, generation));
     EXPECT_EQ(fixture.state()[v2::subtitle_plane_flags_word], v2::subtitle_plane_current_valid_flag);
     EXPECT_EQ(fixture.state()[v2::subtitle_plane_current_slot_mask_word], 3u);
@@ -2839,13 +4007,14 @@ namespace {
       }),
       default_ordinary_cover(234u, 94u, 726u, 114u)
     );
-    EXPECT_LT(fixture.output_at(300u, 395u), 0.03f);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(300u, 390u)),
+      fixture.state()[v2::subtitle_plane_adaptive_offset + 3u]);
     EXPECT_EQ(fixture.smoothing_enabled(), 1u);
-    EXPECT_EQ(fixture.weight_at(300u, 395u), 1.0f);
-    EXPECT_GT(fixture.weight_at(180u, 395u), 0.0f);
-    EXPECT_LT(fixture.weight_at(180u, 395u), 1.0f);
-    // The literal Gaussian has fractional support immediately outside the authored rectangle;
-    // far away its tail underflows to exact M=0 and the proposal preserves Base bits.
+    EXPECT_EQ(fixture.weight_at(300u, 390u), 1.0f);
+    // This point's authored completion budget already exceeds its immutable Base/UI gap;
+    // authored core cells above remain exact M=1, while this outside-core background node
+    // needs no UI influence. The proposal preserves Base bits at the distant corner as well.
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.weight_at(180u, 395u)), 0u);
     EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.weight_at(0u, 0u)), 0u);
     EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(0u, 0u)),
       std::bit_cast<std::uint32_t>(0.03f));
@@ -2853,7 +4022,7 @@ namespace {
     // A fully empty probability map is an authoritative same-frame absence. It removes the
     // current cover union immediately and the conditioned field becomes bit-exact Base.
     std::vector<float> empty(ocr_pixels, 0.0f);
-    ASSERT_TRUE(fixture.run_boxes(empty, 12u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(empty, 12u, generation, 3840u, 900u));
     EXPECT_EQ(fixture.record()[2u], 1u);
     EXPECT_EQ(fixture.record()[3u], 0u);
     EXPECT_EQ(fixture.record()[4u], 0u);
@@ -2867,15 +4036,15 @@ namespace {
     // UIP1 grants no current authority, and no stale target can alter Base.
     std::vector<float> line_only(ocr_pixels, 0.0f);
     paint_rectangle(line_only, 240u, 100u, 720u, 108u);
-    ASSERT_TRUE(fixture.run_boxes(line_only, 13u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(line_only, 13u, generation, 3840u, 900u));
     ASSERT_TRUE(fixture.dispatch_locator(13u, generation));
-    ASSERT_TRUE(fixture.run_boxes(line_only, 14u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(line_only, 14u, generation, 3840u, 900u));
     ASSERT_TRUE(fixture.dispatch_locator(14u, generation));
     ASSERT_EQ(fixture.state()[v2::subtitle_plane_current_slot_mask_word], 1u);
 
     auto nonfinite = line_only;
     nonfinite[0u] = std::numeric_limits<float>::quiet_NaN();
-    ASSERT_TRUE(fixture.run_boxes(nonfinite, 15u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(nonfinite, 15u, generation, 3840u, 900u));
     EXPECT_EQ(fixture.record()[2u], 0u);
     EXPECT_EQ(fixture.record()[3u], 0u);
     EXPECT_EQ(fixture.record()[4u], 0u);
@@ -2886,12 +4055,12 @@ namespace {
     EXPECT_EQ(fixture.smoothing_enabled(), 0u);
 
     // A valid OCR8 record whose frame identity does not match b2 is equally non-authoritative.
-    ASSERT_TRUE(fixture.run_boxes(line_only, 16u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(line_only, 16u, generation, 3840u, 900u));
     ASSERT_TRUE(fixture.dispatch_locator(16u, generation));
-    ASSERT_TRUE(fixture.run_boxes(line_only, 17u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(line_only, 17u, generation, 3840u, 900u));
     ASSERT_TRUE(fixture.dispatch_locator(17u, generation));
     ASSERT_EQ(fixture.state()[v2::subtitle_plane_current_slot_mask_word], 1u);
-    ASSERT_TRUE(fixture.run_boxes(line_only, 18u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(line_only, 18u, generation, 3840u, 900u));
     ASSERT_TRUE(fixture.dispatch_locator(19u, generation));
     EXPECT_EQ(fixture.state()[0u], v2::subtitle_plane_state_schema);
     EXPECT_EQ(fixture.state()[1u], v2::subtitle_plane_state_tag);
@@ -2901,13 +4070,13 @@ namespace {
     EXPECT_EQ(fixture.smoothing_enabled(), 0u);
 
     // Analysis generation and explicit current-record admission are independent authority gates.
-    ASSERT_TRUE(fixture.run_boxes(line_only, 20u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(line_only, 20u, generation, 3840u, 900u));
     ASSERT_TRUE(fixture.dispatch_locator(20u, generation + 1u));
     EXPECT_EQ(fixture.state()[v2::subtitle_plane_flags_word], 0u);
     EXPECT_EQ(fixture.state()[v2::subtitle_plane_current_slot_mask_word], 0u);
     EXPECT_TRUE(fixture.output_is_exact_base());
     EXPECT_EQ(fixture.smoothing_enabled(), 0u);
-    ASSERT_TRUE(fixture.run_boxes(line_only, 21u, generation));
+    ASSERT_TRUE(fixture.run_boxes_in_screen(line_only, 21u, generation, 3840u, 900u));
     ASSERT_TRUE(fixture.dispatch_locator(21u, generation, false, false));
     EXPECT_EQ(fixture.state()[v2::subtitle_plane_flags_word], 0u);
     EXPECT_EQ(fixture.state()[v2::subtitle_plane_current_slot_mask_word], 0u);

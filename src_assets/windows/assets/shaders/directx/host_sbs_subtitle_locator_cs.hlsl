@@ -32,10 +32,10 @@ cbuffer SubtitleLocatorConstants : register(b2) {
 
 static const uint MAX_LINES = V2_SUBTITLE_PLANE_COVER_CAPACITY;
 static const uint ADAPTIVE = V2_SUBTITLE_PLANE_ADAPTIVE_OFFSET;
-static const uint ADAPTIVE_APPROACH = 1u;
-static const uint ADAPTIVE_RETREAT = 2u;
 static const uint ADAPTIVE_CAPPED = 4u;
 static const uint ADAPTIVE_CLOCK = 8u;
+// Survives abstention, unlike the current mask: clock rearm is not a new cue.
+static const uint ADAPTIVE_PRESENTED = V2_SUBTITLE_PLANE_ADAPTIVE_PRESENTED_FLAG;
 static const uint ADAPTIVE_HOST_MAX_SOURCE_WIDTH = 5120u;
 static const uint ADAPTIVE_COUNT_WORDS = 56u;
 groupshared uint PreviousState[V2_SUBTITLE_PLANE_STATE_WORD_COUNT];
@@ -119,26 +119,19 @@ bool AdaptiveTailValid(bool previous) {
     if (all_zero) return StateRead(previous, V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD) == 0u;
     uint flags = AdaptiveRead(previous, 1u);
     uint2 clock = uint2(AdaptiveRead(previous, 4u), AdaptiveRead(previous, 5u));
-    uint2 approach = uint2(AdaptiveRead(previous, 6u), AdaptiveRead(previous, 7u));
-    uint2 retreat = uint2(AdaptiveRead(previous, 8u), AdaptiveRead(previous, 9u));
     float applied = asfloat(AdaptiveRead(previous, 3u));
     float limit = asfloat(AdaptiveRead(previous, 12u));
     uint covered = AdaptiveRead(previous, 13u);
     uint content_area = (locator_content.z - locator_content.x) *
         (locator_content.w - locator_content.y);
-    return AdaptiveRead(previous, 0u) == 1u && (flags & ~15u) == 0u &&
-        (flags & (ADAPTIVE_APPROACH | ADAPTIVE_RETREAT)) !=
-            (ADAPTIVE_APPROACH | ADAPTIVE_RETREAT) &&
+    return AdaptiveRead(previous, 0u) == 1u && (flags & ~V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS) == 0u &&
+        AdaptiveRead(previous, 6u) == 0u && AdaptiveRead(previous, 7u) == 0u &&
+        AdaptiveRead(previous, 8u) == 0u && AdaptiveRead(previous, 9u) == 0u &&
+        AdaptiveRead(previous, 10u) == 0u && AdaptiveRead(previous, 11u) == 0u &&
         AdaptiveRead(previous, 2u) <= AdaptiveMaximumIndex() &&
-        AdaptiveRead(previous, 10u) <= AdaptiveMaximumIndex() &&
-        AdaptiveRead(previous, 11u) <= AdaptiveMaximumIndex() &&
         FiniteFloat(applied) && FiniteFloat(limit) && applied >= 0.0f &&
         limit == V2DisplayBudget() && applied <= limit &&
         (((flags & ADAPTIVE_CLOCK) != 0u) == any(clock != 0u)) &&
-        (((flags & ADAPTIVE_APPROACH) != 0u) == any(approach != 0u)) &&
-        (((flags & ADAPTIVE_RETREAT) != 0u) == any(retreat != 0u)) &&
-        ((flags & ADAPTIVE_APPROACH) == 0u || !V2ClockAfter(approach, clock)) &&
-        ((flags & ADAPTIVE_RETREAT) == 0u || !V2ClockAfter(retreat, clock)) &&
         covered <= content_area && AdaptiveRead(previous, 14u) <= covered &&
         (((flags & ADAPTIVE_CAPPED) != 0u) ==
           (AdaptiveRead(previous, 14u) * 5u > covered ||
@@ -327,10 +320,7 @@ bool StateHeaderValid(bool previous, bool exact_frame) {
         (flags == 0u && mask != 0u) || (reset_mask & ~mask) != 0u ||
         (reset_mask != 0u && (flags != V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG ||
          AdaptiveRead(previous, 0u) != 1u || AdaptiveRead(previous, 15u) != 0u)) ||
-        (warmup & ~(V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK | V2_SUBTITLE_PLANE_WARMUP_CUE_BIT)) != 0u ||
-        (warmup & V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK) > V2_SUBTITLE_PLANE_WARMUP_OBSERVATIONS ||
-        (warmup != 0u && (flags != V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG || mask == 0u ||
-         AdaptiveRead(previous, 0u) != 1u || AdaptiveRead(previous, 15u) != 0u))) return false;
+        warmup != 0u) return false;
     [unroll]
     for (uint word = V2_SUBTITLE_PLANE_RESERVED_OFFSET;
          word < V2_SUBTITLE_PLANE_HEADER_WORD_COUNT; ++word)
@@ -454,22 +444,15 @@ float AdaptiveCandidate(uint index, float limit) {
     return min((4.0f * (float)index) / (float)locator_source.x, limit);
 }
 
-bool AdaptiveBudgetPass(uint bad, uint covered, uint content, bool release) {
+bool AdaptiveBudgetPass(uint bad, uint covered, uint content) {
     if (covered == 0u) return true;
-    // Calibrated field sizes keep these integer products below 2^32. Equality passes entry;
-    // release deliberately requires both budgets to be strictly below their thresholds.
-    return release ? bad * 20u < covered * 3u && bad * 200u < content * 3u :
-        bad * 5u <= covered && bad * 50u <= content;
-}
-
-bool SourceTimeElapsed(uint2 now, uint2 start, uint minimum_us) {
-    if (V2ClockAfter(start, now)) return false;
-    uint2 elapsed = V2ClockSubtract(now, start);
-    return elapsed.y != 0u || elapsed.x >= minimum_us;
+    // Calibrated field sizes keep these integer products below 2^32. Equality passes.
+    return bad * 5u <= covered && bad * 50u <= content;
 }
 
 void AdaptiveDisarm(inout uint flags, inout uint tail[16]) {
-    flags &= ~(ADAPTIVE_APPROACH | ADAPTIVE_RETREAT);
+    // Former approach/retreat flags and dwell words cannot retain authority.
+    flags &= ~3u;
     tail[6u] = 0u;
     tail[7u] = 0u;
     tail[8u] = 0u;
@@ -522,6 +505,9 @@ void AdaptiveAdvance() {
     if (AdaptiveOcrValid == 0u) {
         // An abstention/malformed record supplies no probe, not an invented empty UI mask.
         AdaptiveDisarm(flags, tail);
+        flags &= ~ADAPTIVE_CLOCK;
+        tail[4u] = 0u;
+        tail[5u] = 0u;
         tail[1u] = flags;
         AdaptivePublish(tail);
         return;
@@ -531,19 +517,13 @@ void AdaptiveAdvance() {
     uint content_area = LocatorContentWidth() * (locator_content.w - locator_content.y);
     uint maximum_index = AdaptiveMaximumIndex();
     uint required = maximum_index;
-    uint release_index = maximum_index;
     bool required_found = false;
-    bool release_found = false;
     [loop]
     for (uint level = 0u; level <= maximum_index; ++level) {
         uint bad = AdaptiveCounts[2u + level];
-        if (!required_found && AdaptiveBudgetPass(bad, covered, content_area, false)) {
+        if (!required_found && AdaptiveBudgetPass(bad, covered, content_area)) {
             required = level;
             required_found = true;
-        }
-        if (!release_found && AdaptiveBudgetPass(bad, covered, content_area, true)) {
-            release_index = level;
-            release_found = true;
         }
     }
     flags = required_found ? flags & ~ADAPTIVE_CAPPED : flags | ADAPTIVE_CAPPED;
@@ -553,74 +533,59 @@ void AdaptiveAdvance() {
     uint2 now = locator_observation.xy;
     uint2 last = uint2(tail[4u], tail[5u]);
     bool have_clock = (flags & ADAPTIVE_CLOCK) != 0u;
+    if (AdaptiveCurrentCount == 0u) {
+        // Authoritative EMPTY removes protection now, even without a usable
+        // integration clock. Its hidden presentation cannot enter the next cue.
+        AdaptiveDisarm(flags, tail);
+        flags &= ~(ADAPTIVE_CAPPED | ADAPTIVE_PRESENTED | ADAPTIVE_CLOCK);
+        bool accept_empty_clock = any(now != 0u) && (!have_clock || V2ClockAfter(now, last));
+        tail[2u] = 0u;
+        tail[3u] = 0u;
+        tail[4u] = accept_empty_clock ? now.x : 0u;
+        tail[5u] = accept_empty_clock ? now.y : 0u;
+        tail[1u] = accept_empty_clock ? flags | ADAPTIVE_CLOCK : flags;
+        tail[13u] = 0u;
+        tail[14u] = 0u;
+        tail[15u] = 0u;
+        AdaptivePublish(tail);
+        return;
+    }
     if (AdaptiveCounts[1u] != 0u || all(now == 0u) ||
         (have_clock && !V2ClockAfter(now, last))) {
-        // No frame count/FPS clock is substituted. Keep the last accepted source time and plane.
+        // No frame count/FPS clock is substituted. Hold presentation and discard
+        // timing authority, so the next valid observation only rearms the clock.
         AdaptiveDisarm(flags, tail);
+        flags &= ~ADAPTIVE_CLOCK;
+        tail[4u] = 0u;
+        tail[5u] = 0u;
         tail[1u] = flags;
         AdaptivePublish(tail);
         return;
     }
 
-    uint goal = tail[2u];
-    if (required > goal) {
-        flags &= ~ADAPTIVE_RETREAT;
-        tail[8u] = 0u;
-        tail[9u] = 0u;
-        tail[11u] = 0u;
-        if ((flags & ADAPTIVE_APPROACH) == 0u) {
-            flags |= ADAPTIVE_APPROACH;
-            tail[6u] = now.x;
-            tail[7u] = now.y;
-            tail[10u] = required;
-        } else {
-            tail[10u] = min(tail[10u], required);
-        }
-        uint2 start = uint2(tail[6u], tail[7u]);
-        if (SourceTimeElapsed(now, start, 100000u)) {
-            goal = tail[10u];
-            AdaptiveDisarm(flags, tail);
-        }
-    } else {
-        flags &= ~ADAPTIVE_APPROACH;
-        tail[6u] = 0u;
-        tail[7u] = 0u;
-        tail[10u] = 0u;
-        if (release_found && release_index < goal &&
-            applied == AdaptiveCandidate(goal, limit)) {
-            if ((flags & ADAPTIVE_RETREAT) == 0u) {
-                flags |= ADAPTIVE_RETREAT;
-                tail[8u] = now.x;
-                tail[9u] = now.y;
-                tail[11u] = release_index;
-            } else {
-                tail[11u] = max(tail[11u], release_index);
-            }
-            uint2 start = uint2(tail[8u], tail[9u]);
-            if (SourceTimeElapsed(now, start, 1500000u)) {
-                goal = tail[11u];
-                AdaptiveDisarm(flags, tail);
-            }
-        } else {
-            flags &= ~ADAPTIVE_RETREAT;
-            tail[8u] = 0u;
-            tail[9u] = 0u;
-            tail[11u] = 0u;
-        }
-    }
-    float target = AdaptiveCandidate(goal, limit);
-    if (have_clock) {
+    // Current clearance is a diagnostic goal, not a presentation lower bound.
+    uint goal = required;
+    AdaptiveDisarm(flags, tail);
+    precise float current_goal = AdaptiveCandidate(required, limit);
+    if ((flags & ADAPTIVE_PRESENTED) == 0u) {
+        // No frame confirmation or temporal wait on first visible entry/reentry.
+        applied = current_goal;
+    } else if (have_clock) {
         uint2 elapsed = V2ClockSubtract(now, last);
-        // Game's live rate integration is capped to 250ms; this does not discard dwell evidence
-        // or expire a legitimate slower inference cadence. Both rates are one-eye source U/sec.
-        float seconds = elapsed.y != 0u ? 0.25f : min((float)elapsed.x * 1.0e-6f, 0.25f);
-        float step = seconds * (target > applied ? 0.03f : 0.005f);
-        applied = target > applied ? min(target, applied + step) : max(target, applied - step);
+        precise float cap = (float)V2_SUBTITLE_PLANE_MAX_TICK_GAP_MS * 0.001f;
+        precise float seconds = elapsed.y != 0u ? cap : min((float)elapsed.x * 1.0e-6f, cap);
+        precise float tau = (float)V2_SUBTITLE_PLANE_SMOOTHING_TIME_CONSTANT_MS * 0.001f;
+        precise float alpha = 1.0f - exp(-seconds / tau);
+        precise float delta = current_goal - applied;
+        precise float maximum_step = (float)V2_SUBTITLE_PLANE_SLEW_SOURCE_PIXELS_PER_SECOND *
+            seconds / (float)locator_source.x;
+        precise float update = applied + clamp(delta * alpha, -maximum_step, maximum_step);
+        applied = clamp(update, min(applied, current_goal), max(applied, current_goal));
     }
     tail[2u] = goal;
     tail[4u] = now.x;
     tail[5u] = now.y;
-    tail[1u] = flags | ADAPTIVE_CLOCK;
+    tail[1u] = flags | ADAPTIVE_CLOCK | ADAPTIVE_PRESENTED;
     tail[3u] = asuint(applied);
     AdaptivePublish(tail);
 }
@@ -907,46 +872,10 @@ void ResolveProbabilityReset(uint lane) {
 }
 
 void ResolveWarmup() {
-    uint count, kinds;
-    float target;
-    uint packed = 0u;
-    if (ConditionStateValid(count, kinds, target) && count != 0u) {
-        bool prior_domain = locator_source.w == 0u && StateHeaderValid(true, false) &&
-            PreviousState[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] ==
-                ConditionStateSnapshot[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD];
-        uint2 old_frame = uint2(PreviousState[V2_SUBTITLE_PLANE_FRAME_OFFSET],
-            PreviousState[V2_SUBTITLE_PLANE_FRAME_OFFSET + 1u]);
-        uint2 old_time = uint2(PreviousState[V2_SUBTITLE_PLANE_OBSERVATION_TIMESTAMP_OFFSET],
-            PreviousState[V2_SUBTITLE_PLANE_OBSERVATION_TIMESTAMP_OFFSET + 1u]);
-        bool duplicate = prior_domain && all(old_frame == locator_frame.xy) &&
-            all(old_time == locator_observation.xy);
-        bool newer = prior_domain && V2SubtitleHistoryClockLess(old_frame, locator_frame.xy) &&
-            V2SubtitleHistoryClockLess(old_time, locator_observation.xy);
-        uint previous = prior_domain ? PreviousState[V2_SUBTITLE_PLANE_WARMUP_WORD] : 0u;
-        if (duplicate) {
-            // Redispatch does not spend a confirmation or clear the last genuine cue latch.
-            // In particular, a duplicate after an empty observation cannot discover warmup.
-            packed = previous;
-        } else if (!prior_domain || newer) {
-            uint cue = ProbabilityResetMask != 0u ? V2_SUBTITLE_PLANE_WARMUP_CUE_BIT : 0u;
-            uint remaining = previous & V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK;
-            bool prior_active = prior_domain &&
-                PreviousState[V2_SUBTITLE_PLANE_FLAGS_WORD] == V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG &&
-                PreviousState[V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD] != 0u &&
-                PreviousState[ADAPTIVE] == 1u && PreviousState[ADAPTIVE + 15u] == 0u;
-            if (!prior_active || AdaptiveReset != 0u || cue != 0u) {
-                // Each genuine current cue rearms protection, including during an active window.
-                remaining = V2_SUBTITLE_PLANE_WARMUP_OBSERVATIONS;
-            } else if (remaining != 0u) {
-                // Handover follows four consecutive cue-free genuine observations.
-                --remaining;
-            }
-            packed = remaining | cue;
-        }
-        // Mixed, equal-only or regressing source clocks clear warmup rather than spending it.
-    }
-    LocatorState[V2_SUBTITLE_PLANE_WARMUP_WORD] = packed;
-    ConditionStateSnapshot[V2_SUBTITLE_PLANE_WARMUP_WORD] = packed;
+    // Current native text evidence owns protection on this observation. A cue or a
+    // retained rectangle cannot extend protection after that evidence disappears.
+    LocatorState[V2_SUBTITLE_PLANE_WARMUP_WORD] = 0u;
+    ConditionStateSnapshot[V2_SUBTITLE_PLANE_WARMUP_WORD] = 0u;
 }
 
 [numthreads(256, 1, 1)]
@@ -1027,36 +956,9 @@ bool ConditionContentValid() {
         all(locator_content == DepthAnalysisContentCells());
 }
 
-float CurrentCoverSquaredSourceDistance(uint2 position, uint count) {
-    precise float center_x = (float)position.x + 0.5f;
-    precise float center_y = (float)position.y + 0.5f;
-    precise float scale_x = (float)locator_source.x / (float)(locator_content.z - locator_content.x);
-    precise float scale_y = (float)locator_source.y / (float)(locator_content.w - locator_content.y);
-    precise float best = asfloat(V2_SUBTITLE_CONTOUR_DISTANCE_EMPTY_BITS);
-    [loop]
-    for (uint slot = 0u; slot < count; ++slot) {
-        uint offset = V2_OCR_FINAL_BOX_OFFSET + slot * V2_OCR_BOX_WORD_COUNT;
-        // The distance to the half-open rectangle has the same zero-distance boundary as its
-        // closure. Field-center differences are scaled to native source units before squaring.
-        precise float dx = max(max((float)OcrRecord[offset] - center_x,
-            center_x - (float)OcrRecord[offset + 2u]), 0.0f) * scale_x;
-        precise float dy = max(max((float)OcrRecord[offset + 1u] - center_y,
-            center_y - (float)OcrRecord[offset + 3u]), 0.0f) * scale_y;
-        precise float distance = dx * dx + dy * dy;
-        if (distance == 0.0f) return 0.0f;
-        best = min(best, distance);
-    }
-    return best;
-}
-
 bool EffectiveContourDistance(uint2 position, float raw, uint count, out float distance) {
     distance = raw;
-    bool warmup = (ConditionStateSnapshot[V2_SUBTITLE_PLANE_WARMUP_WORD] &
-        V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK) != 0u;
-    if ((!FiniteFloat(raw) && !(warmup && asuint(raw) == V2_SUBTITLE_CONTOUR_DISTANCE_EMPTY_BITS)) ||
-        raw < 0.0f || asuint(raw) == 0x80000000u) return false;
-    if (warmup) distance = min(raw, CurrentCoverSquaredSourceDistance(position, count));
-    return FiniteFloat(distance) && distance >= 0.0f;
+    return FiniteFloat(raw) && raw >= 0.0f && asuint(raw) != 0x80000000u;
 }
 
 float EvaluateConditionedBase(
@@ -1071,20 +973,41 @@ float EvaluateConditionedBase(
     if (!state_valid || !FiniteFloat(base) || abs(base) > v2_direct_container_limit) {
         return base;
     }
-    float q;
+    float budget;
     if (!EffectiveContourDistance(condition_position,
-        ContourDistance.Load(int3(condition_position, 0)), current_count, q)) return base;
-    precise float sigma = (float)min(locator_source.x, locator_source.y) /
-        V2_SUBTITLE_CONTOUR_GAUSSIAN_SIGMA_SHORT_SIDE_DIVISOR;
-    precise float denominator = 2.0f * sigma * sigma;
-    weight = exp(-q / denominator);
-    // Exact endpoints preserve both signed zero and already-safe Base bit patterns.
-    if (weight == 0.0f) return base;
-    if (weight == 1.0f) return condition_target;
-    precise float base_weight = 1.0f - weight;
-    precise float base_term = base_weight * base;
-    precise float ui_term = weight * condition_target;
-    precise float proposal = base_term + ui_term;
+        ContourDistance.Load(int3(condition_position, 0)), current_count, budget)) return base;
+    // Each supported footprint is exactly on the UI plane. Elsewhere retain immutable Base
+    // whenever it is inside the nearest pin's slope-feasible interval; no soft plateau or
+    // Gaussian tail can unnecessarily pull additional scenery toward the caption.
+    if (budget == 0.0f) {
+        weight = 1.0f;
+        return condition_target;
+    }
+    precise float difference = condition_target - base;
+    precise float gap_pixels = abs(difference) * (float)locator_source.x;
+    if (gap_pixels == 0.0f || budget >= gap_pixels) return base;
+    precise float remaining = budget / gap_pixels;
+    weight = 1.0f - remaining;
+    if (weight <= 0.0f) {
+        weight = 0.0f;
+        return base;
+    }
+    if (weight >= 1.0f) {
+        weight = 1.0f;
+        return condition_target;
+    }
+    precise float normalized_budget = budget / (float)locator_source.x;
+    precise float proposal = difference > 0.0f ?
+        condition_target - normalized_budget : condition_target + normalized_budget;
+    // Independent FP32 division/subtraction can round a near-gap proposal beyond Base.
+    // Preserve the closed Base/UI interval and copy endpoint bits, including signed zero.
+    if (difference > 0.0f) {
+        if (proposal <= base) return base;
+        if (proposal >= condition_target) return condition_target;
+    } else {
+        if (proposal >= base) return base;
+        if (proposal <= condition_target) return condition_target;
+    }
     return proposal;
 }
 
@@ -1110,42 +1033,45 @@ void condition_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : 
         ConditionGroupContentValid = ConditionContentValid() ? 1u : 0u;
         ConditionGroupValid = ConditionParamsValid(count, kinds, active, target) &&
             ContourIdentityValid(count, kinds) ? 1u : 0u;
-        uint2 first_content = ConditionGroupContentValid != 0u ?
-            DepthAnalysisClampCell(uint2(0u, 0u)) : uint2(0u, 0u);
-        float first_q;
-        bool first_distance_valid = false;
-        // Empty/invalid distance authority disables both the proposal and shared smoothing.
-        // This verdict is identical in every group, preserving one coherent full-field tuple.
-        if (ConditionGroupContentValid != 0u && ConditionGroupValid != 0u)
-            first_distance_valid = EffectiveContourDistance(first_content,
-                ContourDistance.Load(int3(first_content, 0)), count, first_q);
-        if (!first_distance_valid) {
-            ConditionGroupValid = 0u;
-        }
         ConditionGroupCount = count;
         ConditionGroupKinds = kinds;
         ConditionGroupTarget = target;
     }
     GroupMemoryBarrierWithGroupSync();
     if (all(dispatch_id.xy == 0u)) {
-        uint2 first_content = ConditionGroupContentValid != 0u ?
-            DepthAnalysisClampCell(uint2(0u, 0u)) : uint2(0u, 0u);
-        float first_q;
-        // Without truncation, any admitted seed yields finite q at every real content cell.
-        // M may underflow there, so M itself must not decide whether to run shared smoothing.
+        // A current support slab has finite horizontal budget across that content row.
+        // Scan the first content column only here; no individual group may mistake an
+        // unrelated empty top row for absence of every current glyph footprint.
         uint enabled = 0u;
-        if (ConditionGroupValid != 0u && ConditionGroupContentValid != 0u)
-            enabled = EffectiveContourDistance(first_content, ContourDistance.Load(int3(first_content, 0)),
-                ConditionGroupCount, first_q) ? 1u : 0u;
+        if (ConditionGroupValid != 0u && ConditionGroupContentValid != 0u) {
+            [loop]
+            for (uint row = locator_content.y; row < locator_content.w; ++row) {
+                uint2 probe = uint2(locator_content.x, row);
+                float row_budget;
+                if (EffectiveContourDistance(probe, ContourDistance.Load(int3(probe, 0)),
+                    ConditionGroupCount, row_budget)) {
+                    enabled = 1u;
+                    break;
+                }
+            }
+        }
         ConditionParamsOut[0u] = enabled;
     }
     if (dispatch_id.x >= target_w || dispatch_id.y >= target_h) return;
-    uint2 condition_position = ConditionGroupContentValid != 0u ?
+    // Clamp only an actual finite-budget proposal. Empty rows retain original Base bits,
+    // including padding; they must not inherit a neighboring content row or subtitle ramp.
+    uint2 condition_position = ConditionGroupContentValid != 0u && ConditionGroupValid != 0u ?
         DepthAnalysisClampCell(dispatch_id.xy) : dispatch_id.xy;
-    float base = BaseField.Load(int3(condition_position, 0));
+    bool local_valid = false;
+    if (ConditionGroupContentValid != 0u && ConditionGroupValid != 0u) {
+        float local_budget;
+        local_valid = EffectiveContourDistance(condition_position,
+            ContourDistance.Load(int3(condition_position, 0)), ConditionGroupCount, local_budget);
+    }
+    float base = BaseField.Load(int3(local_valid ? condition_position : dispatch_id.xy, 0));
     float weight;
     float conditioned = EvaluateConditionedBase(
-        condition_position, base, ConditionGroupValid != 0u, ConditionGroupCount,
+        condition_position, base, local_valid, ConditionGroupCount,
         ConditionGroupKinds, ConditionGroupTarget, weight);
     ConditionedField[dispatch_id.xy] = conditioned;
     GaussianWeightOut[dispatch_id.xy] = weight;

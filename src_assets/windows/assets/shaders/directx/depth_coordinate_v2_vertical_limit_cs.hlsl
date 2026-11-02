@@ -284,8 +284,8 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
     }
 }
 
-// The subtitle proposal is smoothed by the same core as Base. Disabled, empty, or malformed
-// control copies immutable Base bits instead; it never re-quantizes an already published Base.
+// Subtitle transitions are horizontal-only. This compatibility stage copies the current
+// proposal exactly; disabled/empty/malformed control copies immutable Base instead.
 StructuredBuffer<uint> GaussianSmoothingControl : register(t2);
 Texture2D<float> GaussianBase : register(t3);
 
@@ -303,22 +303,15 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_GroupThreadID)
 
 [numthreads(V2_LIMIT_GROUP_LINES, V2_LIMIT_LINE_CHUNKS, 1)]
 void subtitle_main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_GroupThreadID) {
-    // All lanes choose the same immutable control branch. Keep the branches structured:
-    // lane-varying exits from the copy path would invalidate the core's group barriers.
-    // Padding extends the nearest content cell.
-    if (GaussianSmoothingEnabled()) {
-        V2LimitMain(group_id, group_thread_id);
-    } else {
-        uint x = group_id.x * V2_LIMIT_GROUP_LINES + group_thread_id.x;
-        if (x < target_w) {
-            [loop]
-            for (uint y = group_thread_id.y; y < target_h; y += V2_LIMIT_LINE_CHUNKS) {
-                uint2 position = uint2(x, y);
-                uint2 source = DepthAnalysisContentValid() ? DepthAnalysisClampCell(position) : position;
-                float base = GaussianBase.Load(int3(source, 0));
-                VerticalMajorant[position] = base;
-                VerticalConditioned[position] = base;
-            }
+    bool enabled = GaussianSmoothingEnabled();
+    uint x = group_id.x * V2_LIMIT_GROUP_LINES + group_thread_id.x;
+    if (x < target_w) {
+        [loop]
+        for (uint y = group_thread_id.y; y < target_h; y += V2_LIMIT_LINE_CHUNKS) {
+            uint2 position = uint2(x, y);
+            float value = enabled ? OwnershipRefined.Load(int3(position, 0)) :
+                GaussianBase.Load(int3(position, 0));
+            VerticalConditioned[position] = value;
         }
     }
 }

@@ -936,31 +936,14 @@ namespace {
       );
     }
 
-    if (document->rect != cached.document_rect || video->rect != cached.element_rect) {
-      return false;
-    }
-
-    const auto document_in_client = probe::clip_if_within_tolerance(
+    return probe::windowed_cache_refresh_matches(
+      cached.element_rect,
+      cached.visible_rect,
       *client_rect,
-      document->rect,
-      coordinate_rounding_tolerance
-    );
-    const auto video_in_client = probe::clip_if_within_tolerance(
-      *client_rect,
-      video->rect,
-      coordinate_rounding_tolerance
-    );
-    const auto video_in_document = probe::clip_if_within_tolerance(
       document->rect,
       video->rect,
       coordinate_rounding_tolerance
     );
-    if (!document_in_client || !video_in_client || !video_in_document ||
-        probe::rect_area(video->rect) < probe::rect_area(*client_rect) / 20) {
-      return false;
-    }
-    const auto visible = probe::rect_intersection(*video_in_client, *video_in_document);
-    return visible && *visible == cached.visible_rect;
   }
 
   [[nodiscard]] std::string rect_string(const probe::rect_t &rect) {

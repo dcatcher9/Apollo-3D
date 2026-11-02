@@ -1,15 +1,18 @@
-// Five-center nearest-source-pixel Euclidean transform. The separable lower-envelope
-// algorithm uses FP32 distances at real field-node positions; native tests bound rounding error.
+// Minimum slope budget from current native support. Distances are native parallax pixels,
+// not squared Euclidean radii. Each of the five centers owns its complete bilinear field
+// footprint plus the bounded native completion margin. The weighted L1 distance to their
+// rectangular union defines the nearest feasible subtitle-plane interval at each field node.
 // Centers are EVERY current admitted native pixel plus its up/down/left/right offsets of 2.
-// Virtual centers outside the native crop are retained. No projected pins or L1 distances feed
-// this transform. Dispatch both entries through the receipt-gated grid16 slot; inactive groups
-// return uniformly. The resulting q is independent of sigma: the proposal writer may
-// evaluate exp(-q/(2*sigma*sigma)) and the user's literal UI/Base blend.
+// Virtual centers outside the native crop are retained. Only horizontal parallax is smoothed:
+// rows outside a center's sampling/completion footprint receive no influence from that center.
+// The horizontal cost derives from the content-local Q30 slope step. Dispatch both entries through the
+// receipt-gated grid16 slot; inactive groups return uniformly. Compatibility resource names
+// retain "Gaussian"/"SquaredDistance"; no Gaussian weight is evaluated by this recipe.
 //
 // horizontal_main: one 64-thread group per extended source row; writes R32_FLOAT
 //   scratch(field_width, crop_height+4).
 // vertical_main: one 64-thread group per field column; reads that distinct scratch and writes
-//   R32_FLOAT q(field_width, field_height). All padding/empty/invalid cells are positive infinity.
+//   R32_FLOAT budget(field_width, field_height). Padding/empty/invalid cells are positive infinity.
 // Unbind each UAV before using its SRV. No input aliases u0. Both inputs remain immutable.
 
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
@@ -37,12 +40,9 @@ groupshared uint GaussianPrefix[GAUSSIAN_MAX_EXTENDED_WIDTH];
 groupshared uint GaussianChunkLast[GAUSSIAN_LANES];
 groupshared uint GaussianChunkCarry[GAUSSIAN_LANES];
 
-// Both entry points combined declare 31,316 bytes of groupshared storage, below SM5's 32 KiB.
-// Only the vertical entry consumes this sorted parabola hull.
+// Both entry points stay below SM5's 32 KiB groupshared limit. The second entry reduces only
+// the bounded set of native rows touching this field node's sampling/completion footprint.
 groupshared float GaussianRowCost[GAUSSIAN_MAX_EXTENDED_HEIGHT];
-groupshared uint GaussianHullRow[GAUSSIAN_MAX_EXTENDED_HEIGHT];
-groupshared float GaussianHullStart[GAUSSIAN_MAX_EXTENDED_HEIGHT + 1u];
-groupshared uint GaussianHullCount;
 groupshared uint GaussianColumnValid;
 
 float GaussianInfinity() {
@@ -86,12 +86,12 @@ float GaussianSourceX(uint field_x) {
     return source;
 }
 
-float GaussianSourceExtendedY(uint field_y) {
-    precise float node = (float)(field_y - gaussian_content.y) + 0.5f;
-    precise float source = node * (float)gaussian_source.y /
-        (float)(gaussian_content.w - gaussian_content.y) - 0.5f;
-    precise float extended = source - (float)gaussian_source.z + (float)GAUSSIAN_CENTER_OFFSET;
-    return extended;
+float HorizontalBudgetPerSourcePixel() {
+    uint width = gaussian_content.z - gaussian_content.x;
+    uint step_q30 = max(1u, V2_LIMITER_HORIZONTAL_STEP_Q_NUMERATOR / width);
+    precise float step = (float)step_q30 / (float)V2_LIMITER_Q_SCALE;
+    precise float cost = step * (float)width;
+    return cost;
 }
 
 [numthreads(64, 1, 1)]
@@ -151,7 +151,7 @@ void horizontal_main(uint3 group_id : SV_GroupID, uint lane : SV_GroupIndex) {
             uint left = GaussianPrefix[floor_x];
             if (left != 0u) {
                 precise float dx = source_x - (float)((int)left - 1 - GAUSSIAN_CENTER_OFFSET);
-                best = dx * dx;
+                best = abs(dx);
             }
             if (GaussianPrefix[extended_w - 1u] > floor_x + 1u) {
                 uint lo = floor_x + 1u, hi = extended_w - 1u;
@@ -163,20 +163,21 @@ void horizontal_main(uint3 group_id : SV_GroupID, uint lane : SV_GroupIndex) {
                 }
                 uint right = GaussianPrefix[lo];
                 precise float dx = source_x - (float)((int)right - 1 - GAUSSIAN_CENTER_OFFSET);
-                precise float cost = dx * dx;
+                precise float cost = abs(dx);
                 // Equal computed costs retain the lower source x. No output argmin list is required.
                 if (cost < best) best = cost;
             }
         }
+        if (isfinite(best)) {
+            precise float pitch = (float)gaussian_source.x /
+                (float)(gaussian_content.z - gaussian_content.x);
+            precise float radius = pitch +
+                (float)V2_SUBTITLE_CONTOUR_DISTANCE_COMPLETION_SOURCE_PIXELS;
+            precise float remaining = max(best - radius, 0.0f);
+            best = remaining * HorizontalBudgetPerSourcePixel();
+        }
         SquaredDistanceOutput[uint2(x, row)] = best;
     }
-}
-
-float GaussianParabolaCost(uint row, float extended_y) {
-    precise float dy = extended_y - (float)row;
-    precise float squared = dy * dy;
-    precise float cost = GaussianRowCost[row] + squared;
-    return cost;
 }
 
 [numthreads(64, 1, 1)]
@@ -204,62 +205,44 @@ void vertical_main(uint3 group_id : SV_GroupID, uint lane : SV_GroupIndex) {
     }
     GroupMemoryBarrierWithGroupSync();
     if (lane == 0u) {
-        uint count = 0u;
         GaussianColumnValid = 1u;
-        precise float maximum_dx = (float)(gaussian_source.x + 4u);
-        precise float maximum_cost = maximum_dx * maximum_dx;
+        precise float maximum_cost = (float)(gaussian_source.x + 4u) *
+            HorizontalBudgetPerSourcePixel();
         [loop]
         for (uint row = 0u; row < rows; ++row) {
             float cost = GaussianRowCost[row];
-            if (cost == GaussianInfinity()) continue;
-            if (!isfinite(cost) || cost < 0.0f || cost > maximum_cost) {
+            if (asuint(cost) != V2_SUBTITLE_CONTOUR_DISTANCE_EMPTY_BITS &&
+                (!isfinite(cost) || cost < 0.0f || asuint(cost) == 0x80000000u || cost > maximum_cost))
                 GaussianColumnValid = 0u;
-                break;
-            }
-            float start = -GaussianInfinity();
-            [loop]
-            while (count != 0u) {
-                uint prior = GaussianHullRow[count - 1u];
-                // Difference-first form avoids subtracting two large y-squared intercepts.
-                precise float delta_cost = cost - GaussianRowCost[prior];
-                precise float delta_row = (float)(row - prior);
-                precise float midpoint = 0.5f * (float)(row + prior);
-                start = midpoint + delta_cost / (2.0f * delta_row);
-                if (start > GaussianHullStart[count - 1u]) break;
-                --count;
-            }
-            GaussianHullRow[count] = row;
-            GaussianHullStart[count] = count == 0u ? -GaussianInfinity() : start;
-            ++count;
         }
-        GaussianHullStart[count] = GaussianInfinity();
-        GaussianHullCount = count;
     }
     GroupMemoryBarrierWithGroupSync();
     [loop]
     for (uint y = lane; y < output_h; y += GAUSSIAN_LANES) {
         float best = GaussianInfinity();
-        if (GaussianColumnValid != 0u && GaussianHullCount != 0u &&
+        if (GaussianColumnValid != 0u &&
             y >= gaussian_content.y && y < gaussian_content.w) {
-            precise float extended_y = GaussianSourceExtendedY(y);
-            uint lo = 0u, hi = GaussianHullCount;
+            // Exact rational footprint membership avoids a discontinuous row decision at
+            // an implementation-dependent FP32 divide boundary. Values fit signed 32 bits
+            // for every admitted source/field shape. Clamp before nonnegative division.
+            int height = (int)(gaussian_content.w - gaussian_content.y);
+            int denominator = 2 * height;
+            int center_numerator = (2 * (int)(y - gaussian_content.y) + 1) * (int)gaussian_source.y - height +
+                denominator * (GAUSSIAN_CENTER_OFFSET - (int)gaussian_source.z);
+            int radius_numerator = 2 * (int)gaussian_source.y +
+                denominator * (int)V2_SUBTITLE_CONTOUR_DISTANCE_COMPLETION_SOURCE_PIXELS;
+            int first_numerator = center_numerator - radius_numerator;
+            int last_numerator = center_numerator + radius_numerator;
+            int maximum_numerator = ((int)rows - 1) * denominator;
+            int first = max(first_numerator, 0);
+            first = (first + denominator - 1) / denominator;
+            int last = min(last_numerator, maximum_numerator);
+            // A negative upper numerator or an entirely out-of-crop lower numerator
+            // denotes an empty row window, not a nearest-row extension.
+            last = last < 0 || first_numerator > maximum_numerator ? -1 : last / denominator;
             [loop]
-            while (lo < hi) {
-                uint mid = lo + (hi - lo) / 2u;
-                if (GaussianHullStart[mid] < extended_y) lo = mid + 1u;
-                else hi = mid;
-            }
-            uint selected = lo == 0u ? 0u : lo - 1u;
-            best = GaussianParabolaCost(GaussianHullRow[selected], extended_y);
-            // Recheck adjacent retained hull parabolas at the actual query coordinate to
-            // reduce sensitivity to a rounded breakpoint. Native tests bound FP32 error.
-            if (selected != 0u) {
-                float prior_cost = GaussianParabolaCost(GaussianHullRow[selected - 1u], extended_y);
-                if (prior_cost <= best) best = prior_cost;
-            }
-            if (selected + 1u < GaussianHullCount) {
-                float next_cost = GaussianParabolaCost(GaussianHullRow[selected + 1u], extended_y);
-                if (next_cost < best) best = next_cost;
+            for (int row = first; row <= last; ++row) {
+                best = min(best, GaussianRowCost[(uint)row]);
             }
         }
         SquaredDistanceOutput[uint2(column, y)] = best;

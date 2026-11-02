@@ -105,6 +105,59 @@ working data copied synchronously after the exact joined completion. They are re
 the raw transaction must prove current optional OCR execution before interpreting P/cells/RGB.
 They do not replace the completed subtitle snapshots or authorize rendering.
 
+`--subtitle-cohort-research` additionally runs the private cohort experiment on the estimator's
+actual device inputs. It requires both diagnostic options above and the explicit timeline.
+The separate `subtitle-cohort-research` sidecars contain private state, ownership, filtered
+support, unchanged dense completion, and their GPU inputs. Production rendering continues to use
+its ordinary subtitle tuple. `guarded_glyph_matte.u32` additionally records the private final
+subset guard; `glyph_matte.u32` retains the unchanged dense result, with separate guard shader
+provenance. The `published_next_*` files are the coherent previous tuple
+published **for the next observation**, not copies of the old inputs consumed by the current
+one. Command frame/time fields alone do not prove fresh GPU work: inspect the private state,
+SCT, transaction and indirect arguments to distinguish updates from reuse. This option is
+default off and its synchronous exports do not establish live speed or presentation quality.
+
+`--subtitle-inner-colour-research` runs the complete private inner-fill experiment on the same
+estimator device, including palette discovery, current colour/black-stroke witnesses, closed
+four-connected components and a fixed three-native-pixel margin on each axis. It consumes the
+production **baseline support**, not the cohort-filtered support. It requires the real estimator,
+both diagnostic options and the explicit timeline; cache/direct-geometry modes are rejected.
+`subtitle-inner-colour-research` contains `inner_body.u32`, `inner_matte.u32`, exact current inputs,
+CB/transaction/dispatch bytes and separate colour/component source closures. Private schema 2 also
+exports `numeric_validation_receipt.u32`, the helper source pin and command recording/replay counts.
+It uses one parallel numeric validation per call and reuses its recorded fixed commands. All palette
+decisions, mode dispatch and mask union run on the GPU. Reuse holds the accumulated masks through
+conditional zero dispatches; command clocks alone are not evidence of a fresh observation. This
+experiment is default off and does not change production drawing. Its synchronous diagnostic
+capture is not a live latency or performance benchmark.
+
+`--joined-completion-probe <plan.json>` selects a separate, default-off three-source experiment
+for current-color presentation while a real joined CUDA transaction is pending. It requires three
+immutable SDR PNGs, their pinned plan and an explicit observation timeline. It rejects ordinary
+diagnostic options, replay, caches, follow mode and HDR. A genuine empty warmup completes before
+the authored capture epoch; the plan keeps conversion IDs separate from estimator frame IDs.
+The private gate follows both interop unmaps and precedes the real completion event. Both busy
+draws require actual `CUDA_ERROR_NOT_READY` queries before and after their GPU readbacks.
+
+The probe records matched A, busy B, busy empty C, late B with current empty color, and matched C.
+Staging and owned CPU snapshot buffers are allocated before the epoch. GPU copies and Maps finish
+before the after-query; file output and hashing use those immutable CPU bytes after release.
+Inspect the invocation, completion, phase and raw artifact bindings together. Missing completion,
+an expired presentation owner, or a ready event before a required busy boundary is a failed or
+unavailable experiment. Preserved partial files do not establish a complete trajectory.
+This is bounded approximate presentation with an unknown current cut verdict. It creates no
+depth-reuse authorization or new OCR observation. Old-mask withdrawal cannot detect new glyphs,
+and unchanged background in an imprecise old mask can retain protection after text disappears.
+The live converter has not adopted this route; these captures do not qualify production latency.
+
+An explicit `current_source_snapshot` section in the private probe plan adds the V5 transport-only
+experiment. It preallocates and exports `current-display-source.rgba16f`, a source-only receipt and
+the literal current-source constant-buffer readback for all five phases. The source uses its own
+capture epoch, conversion serial and authored steady-clock timestamp; retained Base/SCT clocks stay
+unchanged. All new Maps also finish before the busy after-query, with hashes and files deferred
+until release. Missing or disabled sections keep the V4 GPU/render path. These pixels are not bound
+to the renderer and do not authorize current glyphs or authenticated subtitle absence.
+
 ### Adaptive infer/reuse A/B without a headset
 
 Use the maintained adaptive replay when a bug may depend on DAV2's private device decision. One
@@ -172,6 +225,11 @@ unrecognized historical options fail argument parsing.
 The current dump reader accepts the authenticated OCR8 record, 40-word UIP4 source/controller state and
 complete joined native contour tuple as live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
+The current coordinate contract is schema 120/OCR 32/contour recipe 27. UIP4 remains 40 words and
+OCR8 remains 256 words. The UI plane keeps its immediate current entry floor, uses a 100 ms
+source-time exponential response toward the current release candidate, and clears invisible
+controller history on a genuinely newer valid-empty observation. Duplicate clocks and whole-tuple
+reuse hold state. These rules do not by themselves qualify live timing, glyph recall or comfort.
 
 ## Reports and comparisons
 
@@ -218,16 +276,28 @@ reader accepts only the current UIP4/OCR8 dump schema; older experimental captur
 intentionally unsupported. An active schema-49 package authenticates the OCR8/UIP4/contour tuple for the
 atomic final field's publication frame, ordinary Base, conditioned final field, and the resolver's
 current-cover conflict histogram and source-time plane controller. It independently validates
-native support projection and the weighted distance collar into `shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
+current native glyph support, its projection and minimum slope-budget extension into `shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
 input. An
 active resolver authenticates all admitted current OCR8 paired covers without a second
 geometry selection. Per-pixel RGB history survives cover count/order/split/merge changes. An inactive package uses the one canonical `none` descriptor.
 
 The current OCR producer's centered-line eligibility and source-reference selection are defined in
 the [Host SBS owner contract](../../docs/host-sbs.md#native-subtitle-contours-and-ui-plane).
-Eligibility does not replace the existing confirmed-pixel Gaussian protection with a line rectangle.
-During cue-held warmup, current OCR covers also contribute to the Gaussian protection until four
-consecutive cue-free genuine observations; mature protection uses confirmed pixels.
+Eligibility bounds current search; it does not pin a rectangle. Ordinary search uses current
+line-center geometry to retain a wide guard only on the corrective side; ribbons retain their
+published search extent. Exact geometry belongs to the linked owner contract.
+Valid current RGB and all four finite unit-range bilinear probability contributors are required.
+Strong current probability plus contrast samples select up to eight current actual ink
+representatives from each paired tight core, merging dimmer antialiasing shades by normalized hue.
+Current palette-matching short strokes or locally witnessed dark outlines can
+then supply support, including model-missed matching strokes elsewhere inside that cover.
+Probability alone and unrelated RGB edges grant no support. The canonical rule binds integer
+palette pruning/matching, native contrast, the three-core-height tangent limit and fixed radius-six
+outline probes. Fixed-RGB history remains diagnostic, with positive count retained only for
+duplicate admission; it adds no four-observation wait or stable temporal text classification.
+There is no provisional whole-cover protection. This overlay-color/stroke hypothesis remains
+fallible on unrepresented colors, low-contrast strokes and matching scene texture; it is not
+semantic text identification. Current quality requires actual full-glyph, negative and live checks.
 
 Current schema-49 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 4 records the centered integer content rectangle in

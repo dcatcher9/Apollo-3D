@@ -171,6 +171,7 @@ namespace platf::dxgi {
       return {
         std::static_pointer_cast<const ddup_damage_history_t>(shared_from_this()),
         entries_.back().token,
+        update.single_desktop_present,
       };
     }
 

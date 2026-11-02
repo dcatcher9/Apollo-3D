@@ -458,6 +458,53 @@ TEST(VideoDomProbeLogic, CompleteFullscreenCensusCanStageAuthority) {
   EXPECT_FALSE(policy.publish_ok);
 }
 
+TEST(VideoDomProbeLogic, WindowedCacheRefreshKeepsStableVideoThroughDocumentLayoutChanges) {
+  constexpr probe::rect_t video {200, 150, 1480, 870};
+  EXPECT_TRUE(probe::windowed_cache_refresh_matches(video, video, browser, browser, video));
+  // A document header/footer can move while the same video retains its exact screen authority.
+  EXPECT_TRUE(probe::windowed_cache_refresh_matches(
+    video, video, browser, {0, 40, 1920, 1040}, video
+  ));
+  EXPECT_TRUE(probe::windowed_cache_refresh_matches(
+    video, video, browser, {20, 0, 1900, 1080}, video
+  ));
+}
+
+TEST(VideoDomProbeLogic, WindowedCacheRefreshRejectsVideoMotionOrCurrentContainmentLoss) {
+  constexpr probe::rect_t video {200, 150, 1480, 870};
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
+    video, video, browser, browser, {201, 150, 1481, 870}
+  ));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
+    video, video, browser, {0, 151, 1920, 1080}, video
+  ));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
+    video, video, browser, {0, 152, 1920, 1080}, video
+  ));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
+    video, video, browser, {-2, 0, 1920, 1080}, video
+  ));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
+    video, video, browser, {0, 0, 0, 1080}, video
+  ));
+  constexpr probe::rect_t tiny {200, 150, 210, 160};
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(tiny, tiny, browser, browser, tiny));
+}
+
+TEST(VideoDomProbeLogic, WindowedCacheRefreshPreservesExistingRoundingAndVisibleRectangleChecks) {
+  constexpr probe::rect_t edge_video {-1, 100, 1000, 800};
+  constexpr probe::rect_t visible {0, 100, 1000, 800};
+  EXPECT_TRUE(probe::windowed_cache_refresh_matches(
+    edge_video, visible, browser, browser, edge_video
+  ));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
+    edge_video, edge_video, browser, browser, edge_video
+  ));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
+    edge_video, visible, browser, browser, edge_video, 0
+  ));
+}
+
 TEST(VideoDomProbeLogic, FullscreenCacheRefreshAllowsDocumentAndOverscanChanges) {
   // Document geometry is intentionally absent from this policy. Only the retained video
   // identity, stable client authority, and continued full-client coverage are relevant.

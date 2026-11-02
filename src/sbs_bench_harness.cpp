@@ -56,6 +56,7 @@
   #include "host_sbs_gpu_trace.h"
   #include "host_sbs_observation_timeline.h"
   #include "host_sbs_shader_cache.h"
+  #include "host_sbs_subtitle_render.h"
   #include "host_sbs_v2_geometry.h"
   #include "logging.h"
   #include "offline_sbs_contract.h"
@@ -67,6 +68,13 @@
   #include "sbs_bench_depth_coordinate_v2.h"
   #include "video.h"
   #include "video_depth_estimator.h"
+  #include "sbs_bench_async_caption_probe_driver.h"
+  #include "sbs_bench_pre_unmap_feasibility.h"
+  #include "host_sbs_queued_render_guard.h"
+  #include "platform/windows/host_sbs_actual_converter_probe.h"
+  #include "host_sbs_current_source_snapshot_gpu.h"
+  #include "sbs_bench_current_cue_pipeline.h"
+#include "host_sbs_source_pattern_retirement_gpu.h"
 
   #ifndef SUNSHINE_SHADERS_DIR
     #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
@@ -2398,6 +2406,190 @@ namespace sbs_bench {
              SUCCEEDED(dev->CreateShaderResourceView(buffer.Get(), &view, &srv));
     }
 
+    // Schema-4 cache: Base/state and the optional glyph inputs are one durable publication.
+    // The descriptor is committed last and binds every payload, including Base and state.
+    bool read_cached_glyph_commit(const fs::path &directory,
+                                   const std::string &stem,
+                                   const scene_cache_metadata &metadata,
+                                   nlohmann::json &commit) {
+      try {
+        std::error_code ec;
+        const auto path = directory / (stem + ".tuple.json");
+        const auto bytes = fs::file_size(path, ec);
+        if (ec || bytes == 0u || bytes > 16384u) return false;
+        std::ifstream stream(path, std::ios::binary);
+        const std::string text {std::istreambuf_iterator<char>(stream), {}};
+        commit = offline_sbs::wire::parse_json_without_duplicate_keys(text);
+        namespace v2 = models::depth_coordinate_v2;
+        const auto width = commit.at("native_width").get<UINT>();
+        const auto height = commit.at("native_height").get<UINT>();
+        if (commit.at("schema") != 1u || commit.at("stem") != stem ||
+            !commit.at("subtitle_work_suppressed").is_boolean() ||
+            commit.at("coordinate_schema") != v2::contract_schema ||
+            commit.at("coordinate_tag") != v2::contract_tag ||
+            commit.at("source_width") != metadata.source_width ||
+            commit.at("source_height") != metadata.source_height ||
+            width == 0u || height == 0u ||
+            width > v2::subtitle_contour_source_max_extent ||
+            height > v2::subtitle_contour_source_max_extent) return false;
+        const std::array<std::pair<std::string_view, std::uint64_t>, 6u> payloads {{
+          {".depth.r32f", static_cast<std::uint64_t>(metadata.depth_width) * metadata.depth_height * 4u},
+          {".state.u32", sizeof(render_state_words_t)},
+          {".glyph.u32", static_cast<std::uint64_t>(width) * height * 4u},
+          {".source.rgba16f", static_cast<std::uint64_t>(width) * height * 8u},
+          {".sct.u32", v2::subtitle_contour_history_word_count * 4u},
+          {".scp.u32", v2::subtitle_condition_param_word_count * 4u},
+        }};
+        if (commit.at("payloads").size() != payloads.size()) return false;
+        for (const auto &[suffix, expected_size] : payloads) {
+          const auto name = stem + std::string(suffix);
+          const auto &record = commit.at("payloads").at(name);
+          const auto file = directory / name;
+          if (record.at("bytes") != expected_size ||
+              fs::file_size(file, ec) != expected_size || ec ||
+              record.at("sha256") != models::file_sha256_hex(file)) return false;
+        }
+        return true;
+      } catch (const std::exception &) {
+        return false;
+      }
+    }
+
+    bool cache_glyph_tuple_atomically(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                                       const models::estimate_result &result,
+                                       const fs::path &directory, const std::string &stem,
+                                       const scene_cache_metadata &metadata) {
+      ComPtr<ID3D11Resource> resource;
+      ComPtr<ID3D11Texture2D> matte;
+      if (!result.subtitle_glyph_matte ||
+          (result.subtitle_glyph_matte->GetResource(&resource), FAILED(resource.As(&matte)))) return false;
+      D3D11_TEXTURE2D_DESC desc {};
+      matte->GetDesc(&desc);
+      ComPtr<ID3D11Texture2D> texture_stage;
+      ComPtr<ID3D11Buffer> buffer_stage;
+      const auto texture = [&](ID3D11ShaderResourceView *view, DXGI_FORMAT format,
+                                 std::size_t pixel_bytes, const char *suffix) {
+        return publish_file_atomically(directory / (stem + suffix), [&](const fs::path &temporary) {
+          return dump_contour_texture(dev, ctx, view, format, pixel_bytes, temporary, texture_stage);
+        });
+      };
+      const auto buffer = [&](ID3D11ShaderResourceView *view, std::size_t words, const char *suffix) {
+        return publish_file_atomically(directory / (stem + suffix), [&](const fs::path &temporary) {
+          return dump_float_buffer(dev, ctx, view, words, temporary, buffer_stage);
+        });
+      };
+      namespace v2 = models::depth_coordinate_v2;
+      if (!texture(result.subtitle_glyph_matte.Get(), DXGI_FORMAT_R32_UINT, 4u, ".glyph.u32") ||
+          !texture(result.subtitle_contour_source.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, ".source.rgba16f") ||
+          !buffer(result.subtitle_contour_identity.Get(), v2::subtitle_contour_history_word_count, ".sct.u32") ||
+          !buffer(result.subtitle_condition_params.Get(), v2::subtitle_condition_param_word_count, ".scp.u32")) return false;
+      nlohmann::json payloads = nlohmann::json::object();
+      for (const auto *suffix : {".depth.r32f", ".state.u32", ".glyph.u32", ".source.rgba16f", ".sct.u32", ".scp.u32"}) {
+        const auto name = stem + suffix;
+        const auto path = directory / name;
+        const auto digest = models::file_sha256_hex(path);
+        if (digest.empty()) return false;
+        payloads[name] = {{"bytes", fs::file_size(path)}, {"sha256", digest}};
+      }
+      const nlohmann::json commit {
+        {"schema", 1u}, {"stem", stem},
+        {"coordinate_schema", v2::contract_schema}, {"coordinate_tag", v2::contract_tag},
+        {"source_width", metadata.source_width}, {"source_height", metadata.source_height},
+        {"native_width", desc.Width}, {"native_height", desc.Height}, {"payloads", payloads},
+        {"subtitle_work_suppressed", result.subtitle_work_suppressed},
+      };
+      if (!publish_json_atomically(directory / (stem + ".tuple.json"), commit)) return false;
+      nlohmann::json verified;
+      return read_cached_glyph_commit(directory, stem, metadata, verified);
+    }
+
+    bool restore_cached_glyph_tuple(ID3D11Device *dev, const fs::path &directory,
+                                     const std::string &stem, const scene_cache_metadata &metadata,
+                                     const render_state_words_t &state,
+                                     models::estimate_result &result) {
+      nlohmann::json commit;
+      if (!read_cached_glyph_commit(directory, stem, metadata, commit)) return false;
+      const auto width = commit.at("native_width").get<UINT>();
+      const auto height = commit.at("native_height").get<UINT>();
+      const auto texture = [&](DXGI_FORMAT format, UINT pixel_bytes, const char *suffix,
+                                 ComPtr<ID3D11ShaderResourceView> &view) {
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(width) * height * pixel_bytes);
+        if (!read_exact_file(directory / (stem + suffix), bytes.data(), bytes.size())) return false;
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = width; desc.Height = height; desc.MipLevels = 1u; desc.ArraySize = 1u;
+        desc.Format = format; desc.SampleDesc.Count = 1u;
+        desc.Usage = D3D11_USAGE_IMMUTABLE; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA initial {bytes.data(), width * pixel_bytes, 0u};
+        ComPtr<ID3D11Texture2D> value;
+        return SUCCEEDED(dev->CreateTexture2D(&desc, &initial, &value)) &&
+          SUCCEEDED(dev->CreateShaderResourceView(value.Get(), nullptr, &view));
+      };
+      const auto buffer = [&](UINT count, const char *suffix,
+                                ComPtr<ID3D11ShaderResourceView> &view,
+                                std::vector<std::uint32_t> &words) {
+        words.resize(count);
+        if (!read_exact_file(directory / (stem + suffix), words.data(), words.size() * 4u)) return false;
+        D3D11_BUFFER_DESC desc {};
+        desc.ByteWidth = count * 4u; desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; desc.StructureByteStride = 4u;
+        D3D11_SUBRESOURCE_DATA initial {words.data(), 0u, 0u};
+        ComPtr<ID3D11Buffer> value;
+        return SUCCEEDED(dev->CreateBuffer(&desc, &initial, &value)) &&
+          SUCCEEDED(dev->CreateShaderResourceView(value.Get(), nullptr, &view));
+      };
+      std::vector<std::uint32_t> identity, params;
+      namespace v2 = models::depth_coordinate_v2;
+      if (!texture(DXGI_FORMAT_R32_UINT, 4u, ".glyph.u32", result.subtitle_glyph_matte) ||
+          !texture(DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, ".source.rgba16f", result.subtitle_contour_source) ||
+          !buffer(v2::subtitle_contour_history_word_count, ".sct.u32", result.subtitle_contour_identity, identity) ||
+          !buffer(v2::subtitle_condition_param_word_count, ".scp.u32", result.subtitle_condition_params, params)) return false;
+      if (identity[0] != v2::subtitle_contour_schema || identity[1] != v2::subtitle_contour_history_tag ||
+          identity[22] != v2::subtitle_contour_recipe || params[0] != v2::subtitle_condition_param_schema ||
+          params[1] != v2::subtitle_condition_param_tag) return false;
+      result.subtitle_work_suppressed = commit.at("subtitle_work_suppressed").get<bool>();
+      const bool snapshot_valid = identity[23] == 1u;
+      if (identity[2] > 1u || identity[23] > 1u ||
+          std::any_of(identity.begin() + v2::subtitle_contour_history_reserved_offset,
+                      identity.end(), [](std::uint32_t word) { return word != 0u; }) ||
+          (snapshot_valid && (identity[8] != metadata.source_width || identity[9] != metadata.source_height ||
+            identity[10] > identity[9] || identity[11] > identity[9] - identity[10] ||
+            width != identity[8] || height != identity[11])) ||
+          (!snapshot_valid && (width != 1u || height != 1u))) return false;
+      if (!result.subtitle_work_suppressed) {
+        const auto count = params[v2::subtitle_condition_param_current_count_word];
+        const auto kinds = params[v2::subtitle_condition_param_current_kind_mask_word];
+        const auto active = params[v2::subtitle_condition_param_active_word];
+        const auto plane = std::bit_cast<float>(params[v2::subtitle_condition_param_target_word]);
+        if (active == v2::subtitle_condition_param_fully_active_value) {
+          if (!snapshot_valid || identity[2] != 1u ||
+              (identity[4] == 0u && identity[5] == 0u) ||
+              identity[6] != 0u || identity[7] != 0u ||
+              identity[12] != metadata.depth_width || identity[13] != metadata.depth_height ||
+              identity[16] >= identity[18] || identity[17] >= identity[19] ||
+              identity[18] > identity[12] || identity[19] > identity[13] ||
+              identity[3] != state[v2::confirmed_cut_count] ||
+              identity[20] != state[v2::gain_last_observation_low] ||
+              identity[21] != state[v2::gain_last_observation_high] ||
+              (identity[20] == 0u && identity[21] == 0u) ||
+              count == 0u || count > v2::subtitle_plane_cover_capacity ||
+              (kinds & ~((1u << count) - 1u)) != 0u ||
+              !std::isfinite(plane) || plane < 0.0f || plane > v2::direct_container_limit) return false;
+        } else if (active != 0u || count != 0u || kinds != 0u || params[5] != 0u) {
+          return false;
+        }
+      }
+      result.input_region.analysis_generation = static_cast<std::uint64_t>(identity[6]) |
+        (static_cast<std::uint64_t>(identity[7]) << 32u);
+      result.input_region.source_width = metadata.source_width;
+      result.input_region.source_height = metadata.source_height;
+      result.input_region.right = metadata.source_width;
+      result.input_region.bottom = metadata.source_height;
+      result.input_region.tensor_content = {0u, 0u, metadata.depth_width, metadata.depth_height};
+      result.field_content = {identity[16], identity[17], identity[18], identity[19]};
+      return true;
+    }
+
     struct scene_plan_entry {
       std::size_t start_sequence = 0;
       std::size_t end_sequence_exclusive = 0;
@@ -2492,11 +2684,13 @@ namespace sbs_bench {
         const std::string stem = scene_cache_frame_stem(sequence);
         const fs::path depth = directory / (stem + ".depth.r32f");
         const fs::path state = directory / (stem + ".state.u32");
+        nlohmann::json glyph_commit;
         if (!fs::is_regular_file(depth, ec) || ec ||
             fs::file_size(depth, ec) != depth_size || ec ||
             !fs::is_regular_file(state, ec) || ec ||
-            fs::file_size(state, ec) != sizeof(render_state_words_t) || ec) {
-          error = "scene cache is missing or has a wrong-sized pair for global sequence " +
+            fs::file_size(state, ec) != sizeof(render_state_words_t) || ec ||
+            !read_cached_glyph_commit(directory, stem, metadata, glyph_commit)) {
+          error = "scene cache is missing or has an invalid committed render tuple for global sequence " +
                   std::to_string(sequence);
           return false;
         }
@@ -3248,6 +3442,14 @@ namespace sbs_bench {
       // Borrow mutable working OCR resources only for an explicitly completed offline frame.
       // They diagnose detector/resolve admission and never supply rendering authority.
       bool ocr_working_diagnostics = false;
+      // Private same-device cohort state and masks, copied before the next input.
+      // This opt-in experiment never supplies the rendered subtitle mask.
+      bool subtitle_cohort_research = false;
+      bool subtitle_inner_colour_research = false;
+      // Private bounded real-PFM export. Copies existing completed operands; never renders a
+      // replacement mask or reconstructs a publication, contour CB, or final dispatch buffer.
+      bool pfm_joined_diagnostics = false;
+      std::string joined_completion_probe; // PRIVATE default-off three-source async experiment
       std::optional<std::vector<detail::subtitle_diagnostic_observation_range>>
         subtitle_plane_diagnostic_ranges;
       std::string follow_format;
@@ -3295,6 +3497,15 @@ namespace sbs_bench {
           o.subtitle_plane_diagnostic_render_selected = true;
         } else if (a == "--ocr-working-diagnostics") {
           o.ocr_working_diagnostics = true;
+        } else if (a == "--subtitle-cohort-research") {
+          o.subtitle_cohort_research = true;
+        } else if (a == "--subtitle-inner-colour-research") {
+          o.subtitle_inner_colour_research = true;
+        } else if (a == "--pfm-joined-diagnostics") {
+          o.pfm_joined_diagnostics = true;
+        } else if (a == "--joined-completion-probe") {
+          if (!o.joined_completion_probe.empty()) { BOOST_LOG(error) << "sbs-bench: private probe plan must appear once"; return false; }
+          o.joined_completion_probe = next("--joined-completion-probe");
         } else if (a == "--subtitle-plane-diagnostic-frames") {
           if (o.subtitle_plane_diagnostic_ranges) {
             BOOST_LOG(error) << "sbs-bench: diagnostic frame selection must appear once";
@@ -3386,7 +3597,8 @@ namespace sbs_bench {
       if (!o.capabilities.empty()) {
         if (!o.frames.empty() || !o.out.empty() || o.subtitle_plane_diagnostic_ranges ||
             o.subtitle_plane_diagnostic_render_selected ||
-            o.ocr_working_diagnostics) {
+            o.ocr_working_diagnostics || o.subtitle_cohort_research || o.subtitle_inner_colour_research ||
+            o.pfm_joined_diagnostics) {
           BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
           return false;
         }
@@ -3403,11 +3615,53 @@ namespace sbs_bench {
       const unsigned direct_geometry_input_count =
         (!o.direct_parallax_root.empty() ? 1u : 0u) +
         (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
+      if (o.pfm_joined_diagnostics &&
+          (o.observation_timeline.empty() || o.scene_cache.empty() || o.follow ||
+           o.bounded_adaptive_state || !o.render_cache.empty() || !o.scene_plan.empty() ||
+           direct_geometry_input_count != 0u || o.device_conditional_replay ||
+           o.device_conditional_replay_control || o.simulate_hdr ||
+           !o.joined_completion_probe.empty() || o.subtitle_plane_diagnostics ||
+           o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected ||
+           o.ocr_working_diagnostics || o.subtitle_cohort_research ||
+           o.subtitle_inner_colour_research || o.artifacts == artifact_mode_e::evaluation)) {
+        BOOST_LOG(error)
+          << "sbs-bench: private --pfm-joined-diagnostics requires real PFM, an explicit "
+             "timeline, a new scene cache, adaptive/conversion output, and no other "
+             "replay/follow/diagnostic protocol";
+        return false;
+      }
       if (o.ocr_working_diagnostics &&
           (!o.subtitle_plane_diagnostics || o.observation_timeline.empty())) {
         BOOST_LOG(error)
           << "sbs-bench: --ocr-working-diagnostics requires --subtitle-plane-diagnostics "
              "and an explicit --observation-timeline";
+        return false;
+      }
+      if (o.subtitle_cohort_research &&
+          (!o.subtitle_plane_diagnostics || !o.ocr_working_diagnostics ||
+           o.observation_timeline.empty())) {
+        BOOST_LOG(error)
+          << "sbs-bench: --subtitle-cohort-research requires --subtitle-plane-diagnostics, "
+             "--ocr-working-diagnostics and an explicit --observation-timeline";
+        return false;
+      }
+      if (!o.joined_completion_probe.empty() &&
+          (o.observation_timeline.empty() || o.follow || !o.scene_cache.empty() || !o.render_cache.empty() ||
+           !o.scene_plan.empty() || direct_geometry_input_count != 0u || o.device_conditional_replay ||
+           o.device_conditional_replay_control || o.simulate_hdr || o.artifacts != artifact_mode_e::evaluation ||
+           o.output_every != 1 || o.limit != 0 || o.subtitle_plane_diagnostics || o.ocr_working_diagnostics ||
+           o.subtitle_cohort_research || o.subtitle_inner_colour_research)) {
+        BOOST_LOG(error) << "sbs-bench: private --joined-completion-probe requires a real estimator, explicit timeline, exactly3 SDRPNG files, evaluation outputcadence1, and forbids replay/follow/caches/HDR/other diagnostic protocols";
+        return false;
+      }
+      if (o.subtitle_inner_colour_research &&
+          (!o.subtitle_plane_diagnostics || !o.ocr_working_diagnostics ||
+           o.observation_timeline.empty() || !o.scene_cache.empty() || !o.render_cache.empty() ||
+           direct_geometry_input_count != 0u)) {
+        BOOST_LOG(error)
+          << "sbs-bench: --subtitle-inner-colour-research requires the real estimator, "
+             "--subtitle-plane-diagnostics, --ocr-working-diagnostics and an explicit "
+             "--observation-timeline";
         return false;
       }
       if (o.subtitle_plane_diagnostic_ranges &&
@@ -3563,6 +3817,9 @@ namespace sbs_bench {
       return true;
     }
 
+    #include "sbs_bench_joined_completion_probe.inc"
+    #include "sbs_bench_independent_ocr_raw_probe.inc"
+
   }  // namespace
 
   int run(int argc, char **argv, offline_sbs::raw_frame_transport *transport) {
@@ -3612,13 +3869,18 @@ namespace sbs_bench {
             {"dtype", "float32-le"},
             {"layout", "row-major"},
             {"dxgi_format", "R32_FLOAT"},
-            {"semantics", "depth-coordinate-v2-signed-final-parallax-source-u"},
+            {"semantics", "depth-coordinate-v2-signed-base-parallax-source-u"},
           }},
           {"scene_cache_state", {
             {"schema", 2},
             {"word_count", render_state_words_t {}.size()},
             {"dtype", "uint32-le"},
             {"source", "depth_coordinate_v2.ParallaxState[0..2]"},
+          }},
+          {"scene_cache_subtitle_tuple", {
+            {"schema", 1u}, {"commit_file_pattern", "frame_%010d.tuple.json"},
+            {"payloads", {"Base", "ParallaxState", "NativeGlyphMatte", "CompletedDisplayBand", "SCT", "SCP"}},
+            {"atomic_hashed_commit", true},
           }},
           {"scene_plan", {
             {"schema", 2},
@@ -3664,6 +3926,20 @@ namespace sbs_bench {
       return 3;
     }
 
+    bool private_current_outline_hdr_probe=false;
+    bool private_fixed6_sdr_probe=false;
+    if (!o.joined_completion_probe.empty()) {
+      try {
+        std::ifstream f(o.joined_completion_probe,std::ios::binary);
+        const auto p=nlohmann::json::parse(f);
+        private_current_outline_hdr_probe=p.value("probe_kind",std::string{})=="actual-converter-current-outline-hdr-v1" &&
+          p.value("source_transfer",std::string{})=="scrgb_hdr" && !p.value("queue_enabled",true) &&
+          p.contains("selected_matte") && p.at("selected_matte").value("current_outline",false);
+        private_fixed6_sdr_probe=p.value("probe_kind",std::string{})=="actual-converter-current-outline-sequence6-sdr-v1" &&
+          p.value("source_transfer",std::string{})=="encoded-srgb" && !p.value("queue_enabled",true) &&
+          p.contains("selected_matte") && p.at("selected_matte").value("current_outline",false);
+      } catch (...) { private_current_outline_hdr_probe=false; private_fixed6_sdr_probe=false; }
+    }
     // Evaluation keeps its established WIC raster contract. Whole-clip adaptive/conversion modes
     // additionally accept strict linear-scRGB PFM frames. A clip is one format family throughout:
     // silently mixing SDR raster and HDR float interchange would corrupt both color semantics and
@@ -3701,13 +3977,13 @@ namespace sbs_bench {
           found_sdr_raster = true;
           frames.push_back(e.path());
         } else if (ext == ".pfm" &&
-                   o.artifacts != artifact_mode_e::evaluation) {
+                   (o.artifacts != artifact_mode_e::evaluation || private_current_outline_hdr_probe)) {
           found_hdr_pfm = true;
           frames.push_back(e.path());
         }
       }
     }
-    if (o.artifacts != artifact_mode_e::evaluation &&
+    if ((o.artifacts != artifact_mode_e::evaluation || private_current_outline_hdr_probe) &&
         ((found_sdr_raster && found_hdr_pfm) || found_mixed_sdr_formats)) {
       BOOST_LOG(error) << "sbs-bench: mixed source image formats are not a valid whole clip";
       return 4;
@@ -3739,6 +4015,15 @@ namespace sbs_bench {
                              "png/jpg" :
                              "png/jpg/PFM")
                        << " frames in " << o.frames;
+      return 4;
+    }
+    if (!o.joined_completion_probe.empty() && (frames.size() != (private_fixed6_sdr_probe?6u:3u) ||
+        (pfm_input ? !private_current_outline_hdr_probe : sdr_raster_format != "png"))) {
+      BOOST_LOG(error) << "sbs-bench: private joined probe requires exactly3 immutable SDRPNG or explicitly declared current-outline HDR PFM sources";
+      return 4;
+    }
+    if (o.pfm_joined_diagnostics && (!pfm_input || frames.empty() || frames.size() > 64u)) {
+      BOOST_LOG(error) << "sbs-bench: private PFM joined diagnostics requires 1..64 real PFM inputs";
       return 4;
     }
     if (o.subtitle_plane_diagnostic_ranges) {
@@ -3782,6 +4067,13 @@ namespace sbs_bench {
     if (ec) {
       BOOST_LOG(error) << "sbs-bench: cannot create output directory " << o.out;
       return 4;
+    }
+    if (o.pfm_joined_diagnostics) {
+      const auto directory = fs::path(o.out) / "pfm-joined";
+      if (fs::exists(directory, ec) || ec || !fs::create_directory(directory, ec) || ec) {
+        BOOST_LOG(error) << "sbs-bench: private PFM diagnostics requires a fresh pfm-joined directory";
+        return 4;
+      }
     }
     const auto normalized_path = [](const fs::path &path) {
       std::error_code path_ec;
@@ -3833,6 +4125,129 @@ namespace sbs_bench {
       sbs_perf::reset();
     }
     const auto model = video::host_sbs_v2_depth_model();
+    // PRIVATE opt-in connection to the ACTUAL converter, before another estimator/device is
+    // created by this harness. The ordinary frame loop and existing probe kinds are unchanged.
+    if (!o.joined_completion_probe.empty()) {
+      try {
+        std::ifstream f(o.joined_completion_probe,std::ios::binary);
+        if (!f) { BOOST_LOG(error) << "sbs-bench: converter probe plan unavailable"; return 7; }
+        const std::string bytes((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
+        const auto plan=nlohmann::json::parse(bytes);
+        if (plan.value("probe_kind",std::string{})=="actual-converter-current-outline-sequence6-sdr-v1") {
+          if(plan.at("schema")!=1 || plan.at("context_provider")!="synthetic-video-scheduling-only" ||
+             frames.size()!=6 || observation_timestamps.size()!=6 || plan.at("sources").size()!=6 ||
+             pfm_input || plan.at("queue_enabled").get<bool>() || !plan.contains("required_adapter") ||
+             plan.value("source_transfer",std::string{})!="encoded-srgb") {
+            BOOST_LOG(error)<<"sbs-bench: invalid fixed-six SDR converter protocol";return 7;
+          }
+          platf::dxgi::actual_converter_probe_v1::sequence6_request_t sequence;
+          auto &request=sequence.common;request.enabled=true;request.queued=false;request.hdr_input=false;
+          request.explicit_adapter=true;request.settings=sbs_cfg;request.output=o.out;
+          const auto &adapter=plan.at("required_adapter");
+          request.hdr_adapter_luid_low=adapter.at("luid_low").get<std::uint32_t>();
+          request.hdr_adapter_luid_high=adapter.at("luid_high").get<std::int32_t>();
+          request.hdr_adapter_vendor_id=adapter.at("vendor_id").get<std::uint32_t>();
+          request.hdr_adapter_device_id=adapter.at("device_id").get<std::uint32_t>();
+          const auto &source_binding=plan.at("source_plan");
+          const auto source_plan_path=source_binding.at("path").get<std::string>();
+          if(source_binding.at("sha256")!="63cd12dabcc38a9f538aa087907e2aa4534b5148efa1a02d29ca75b502bd072d" ||
+             models::file_sha256_hex(source_plan_path)!=source_binding.at("sha256").get<std::string>()) {
+            BOOST_LOG(error)<<"sbs-bench: fixed-six original source contract mismatch";return 7;
+          }
+          std::ifstream source_plan_file(source_plan_path);nlohmann::json source_plan;source_plan_file>>source_plan;
+          if(!source_plan_file || source_plan.at("frames").size()!=6u) {BOOST_LOG(error)<<"sbs-bench: fixed-six source contract unavailable";return 7;}
+          const auto &t=plan.at("selected_matte");models::subtitle_selected_matte_research_configuration_t cfg;
+          if(!t.at("current_outline").get<bool>() || plan.contains("temporal_source_bridge") ||
+             plan.value("require_actual_push_pull_background",false)) {
+            BOOST_LOG(error)<<"sbs-bench: fixed-six requires current outline without other probe actors";return 7;
+          }
+          cfg.current_outline=true;cfg.current_outline_shader_root=t.at("current_outline_shader_root").get<std::string>();
+          cfg.selector_shader_root=t.at("selector_shader_root").get<std::string>();
+          cfg.selector_source_closure_sha256=t.at("selector_source_closure_sha256").get<std::string>();
+          cfg.completed_shader_root=t.at("completed_shader_root").get<std::string>();
+          cfg.completed_source_closure_sha256=t.at("completed_source_closure_sha256").get<std::string>();
+          cfg.queued_shader_root=t.at("queued_shader_root").get<std::string>();
+          cfg.queued_source_closure_sha256=t.at("queued_source_closure_sha256").get<std::string>();
+          request.selected_matte=cfg;
+          for(std::size_t i=0;i<6;++i) {
+            const auto digest=models::file_sha256_hex(frames[i]);
+            if(digest.empty() || digest!=plan.at("sources").at(i).at("sha256").get<std::string>() ||
+               digest!=source_plan.at("frames").at(i).at("source").at("sha256").get<std::string>() ||
+               observation_timestamps[i]!=plan.at("sources").at(i).at("declared_timeline_us").get<std::uint64_t>() ||
+               observation_timestamps[i]!=source_plan.at("frames").at(i).at("time_us").get<std::uint64_t>()) {
+              BOOST_LOG(error)<<"sbs-bench: fixed-six immutable source/order/timeline mismatch";return 7;
+            }
+            rgba_image image;if(!load_png(frames[i],image)) {BOOST_LOG(error)<<"sbs-bench: fixed-six PNG decode failed";return 7;}
+            auto &f=sequence.frames[i];f.width=image.w;f.height=image.h;f.bgra=std::move(image.bgra);
+            f.source_file_sha256=digest;f.declared_timeline_us=observation_timestamps[i];
+          }
+          // This is an actual-converter functional sequence. Its clocks are created natively;
+          // source timeline values above remain declarations, never fabricated model clocks.
+          sbs_perf::set_enabled(false);std::string probe_error;
+          const int code=platf::dxgi::actual_converter_probe_v1::run_sequence6(sequence,probe_error);
+          if(code)BOOST_LOG(error)<<"sbs-bench: actual fixed-six converter probe: "<<probe_error;
+          return code;
+        }
+        if (plan.value("probe_kind",std::string{})=="actual-converter-rgb-v1" || plan.value("probe_kind",std::string{})=="actual-converter-pending-current-colour-v1" || plan.value("probe_kind",std::string{})=="actual-converter-current-outline-hdr-v1") {
+          if (plan.at("schema")!=1 || plan.at("context_provider")!="synthetic-video-scheduling-only" ||
+              frames.size()!=3 || observation_timestamps.size()!=3 || plan.at("sources").size()!=3) {
+            BOOST_LOG(error) << "sbs-bench: invalid actual-converter protocol"; return 7;
+          }
+          platf::dxgi::actual_converter_probe_v1::request_t request;
+          request.enabled=true;request.queued=plan.at("queue_enabled").get<bool>();
+          request.hdr_input=private_current_outline_hdr_probe;
+          if (request.hdr_input || plan.contains("required_adapter")) {
+            request.explicit_adapter=true;
+            const auto &adapter=plan.at("required_adapter");
+            request.hdr_adapter_luid_low=adapter.at("luid_low").get<std::uint32_t>();
+            request.hdr_adapter_luid_high=adapter.at("luid_high").get<std::int32_t>();
+            request.hdr_adapter_vendor_id=adapter.at("vendor_id").get<std::uint32_t>();
+            request.hdr_adapter_device_id=adapter.at("device_id").get<std::uint32_t>();
+          }
+          if ((pfm_input!=request.hdr_input) || (request.hdr_input&&request.queued)) { BOOST_LOG(error)<<"sbs-bench: unsupported private HDR probe declaration";return 7; }
+          request.settings=sbs_cfg;request.output=o.out;request.background_observer=plan.value("require_actual_push_pull_background",false);
+          const bool pending_colour=plan.value("probe_kind",std::string{})=="actual-converter-pending-current-colour-v1";
+          if(plan.contains("temporal_source_bridge")) {
+            const auto &t=plan.at("temporal_source_bridge");models::subtitle_temporal_source_research_configuration_t cfg;
+            cfg.temporal_shader_root=t.at("temporal_shader_root").get<std::string>();cfg.temporal_source_closure_sha256=t.at("temporal_source_closure_sha256").get<std::string>();
+            cfg.frame_shader_root=t.at("frame_shader_root").get<std::string>();cfg.frame_source_closure_sha256=t.at("frame_source_closure_sha256").get<std::string>();
+            cfg.recorded_execution=t.value("recorded_execution",true);request.temporal_source_bridge=cfg;
+          }
+          if(plan.contains("selected_matte")) {
+            const auto &t=plan.at("selected_matte");models::subtitle_selected_matte_research_configuration_t cfg;
+            cfg.current_outline=t.value("current_outline",false);
+            cfg.current_outline_shader_root=t.value("current_outline_shader_root",std::string{});
+            cfg.selector_shader_root=t.at("selector_shader_root").get<std::string>();cfg.selector_source_closure_sha256=t.at("selector_source_closure_sha256").get<std::string>();
+            cfg.completed_shader_root=t.at("completed_shader_root").get<std::string>();cfg.completed_source_closure_sha256=t.at("completed_source_closure_sha256").get<std::string>();
+            cfg.queued_shader_root=t.at("queued_shader_root").get<std::string>();cfg.queued_source_closure_sha256=t.at("queued_source_closure_sha256").get<std::string>();request.selected_matte=cfg;
+          }
+          if(request.background_observer&&(!request.hdr_input||request.queued||!request.selected_matte||!request.selected_matte->current_outline)){BOOST_LOG(error)<<"sbs-bench: BGobserver requires explicit completed HDR currentoutline";return 7;}
+          if(pending_colour){const auto &candidate=plan.at("pending_current_colour");request.pending_current_colour.enabled=candidate.at("enabled").get<bool>();request.pending_current_colour.shader_root=candidate.at("shader_root").get<std::string>();request.pending_current_colour.exact_source_closure=candidate.at("source_closure_sha256").get<std::string>();}
+
+          for (std::size_t i=0;i<3;++i) {
+            const auto digest=models::file_sha256_hex(frames[i]);
+            if (digest.empty() || digest!=plan.at("sources").at(i).at("sha256").get<std::string>()) { BOOST_LOG(error)<<"sbs-bench: converter immutable source mismatch";return 7; }
+            if (request.hdr_input) {
+              scrgb_image image;if (!load_pfm(frames[i],image)) { BOOST_LOG(error)<<"sbs-bench: converter immutable HDR PFM source decode failed";return 7; }
+              request.frames[i].width=image.w;request.frames[i].height=image.h;request.frames[i].rgba16=std::move(image.rgba16);
+            } else {
+              rgba_image image;if (!load_png(frames[i],image)) { BOOST_LOG(error)<<"sbs-bench: converter immutable PNG source mismatch";return 7; }
+              request.frames[i].width=image.w;request.frames[i].height=image.h;request.frames[i].bgra=std::move(image.bgra);
+            }
+            request.frames[i].source_file_sha256=digest;
+            request.frames[i].declared_timeline_us=observation_timestamps[i];
+          }
+          // This scheduling fixture is not a performance run. Actual source/model clocks are
+          // created by the converter; the CLI timeline is recorded as metadata only.
+          sbs_perf::set_enabled(false);
+          std::string probe_error;const int code=pending_colour?platf::dxgi::pending_current_colour_probe_v1::run(request,probe_error):platf::dxgi::actual_converter_probe_v1::run(request,probe_error);
+          if (code) BOOST_LOG(error) << "sbs-bench: actual converter probe: " << probe_error;
+          return code;
+        }
+      } catch(const std::exception &e) {
+        BOOST_LOG(error) << "sbs-bench: actual converter plan: " << e.what();return 7;
+      }
+    }
     const bool replay_mode = !o.render_cache.empty();
     // Direct replay supplies an authenticated, horizontally contractive final field plus an
     // independent canonical order. Native V2 sequence replay runs
@@ -4197,12 +4612,44 @@ namespace sbs_bench {
         sbs_cfg,
         model
       );
+      if (o.subtitle_cohort_research &&
+          !estimator->set_subtitle_cohort_research_enabled(true)) {
+        BOOST_LOG(error) << "sbs-bench: cannot enable private subtitle cohort research";
+        return 5;
+      }
+      if (o.subtitle_inner_colour_research &&
+          !estimator->set_subtitle_inner_colour_research_enabled(true)) {
+        BOOST_LOG(error) << "sbs-bench: cannot enable private subtitle inner-colour research";
+        return 5;
+      }
+      if (o.pfm_joined_diagnostics &&
+          !estimator->set_completed_ocr_conditioner_research_enabled(true)) {
+        BOOST_LOG(error) << "sbs-bench: cannot enable completed PFM operand copying";
+        return 5;
+      }
       if (estimator->has_terminal_failure()) {
         BOOST_LOG(error)
           << "sbs-bench: the production V2 estimator failed to initialize; refusing to "
              "emit output without authenticated cut-state and resolved-shape evidence";
         return 5;
       }
+    }
+
+    if (!o.joined_completion_probe.empty()) {
+      std::string raw_probe_plan;
+      if (read_file_snapshot(fs::path(o.joined_completion_probe), raw_probe_plan)) {
+        const auto raw_protocol = nlohmann::json::parse(raw_probe_plan, nullptr, false);
+        if (raw_protocol.is_object() && raw_protocol.value("probe_kind", std::string {}) == "independent-ocr-raw-v1") {
+          if (!estimator) return 5;
+          return run_independent_ocr_raw_probe(o, frames, observation_timestamps, dev.Get(), ctx.Get(),
+            *estimator, raw_probe_plan);
+        }
+      }
+    }
+    if (!o.joined_completion_probe.empty()) {
+      if (!estimator) return 5;
+      return run_joined_completion_probe(o, frames, observation_timestamps, dev.Get(), ctx.Get(),
+        *estimator, vs.Get(), ps.Get(), sampler.Get(), max_width);
     }
 
     // Per-run state built lazily on the first frame (once we know the input size).
@@ -4299,7 +4746,7 @@ namespace sbs_bench {
                         {models::near_identical_gpu_decision_word_count},
                         models::near_identical_gpu_decision_byte_count) ||
           !write_buffer(views->resolve_constants.Get(), "resolve_constants.u32", "uint32-le",
-                        {16u}, 16u * sizeof(std::uint32_t)) ||
+                        {24u}, 24u * sizeof(std::uint32_t)) ||
           !dump_contour_texture(dev.Get(), ctx.Get(), views->source_band.Get(),
                                 DXGI_FORMAT_R16G16B16A16_FLOAT, 8u,
                                 diagnostic_dir / "source_band.rgba16f", ocr_working_texture_stage) ||
@@ -4341,6 +4788,251 @@ namespace sbs_bench {
         {"metadata", "ocr-working/frame_" + output_id + "/metadata.json"}
       });
       captured_ocr_working_observations.push_back(global_sequence);
+      return true;
+    };
+    ComPtr<ID3D11Buffer> inner_research_buffer_stage;
+    ComPtr<ID3D11Texture2D> inner_research_texture_stage;
+    nlohmann::json inner_research_frames = nlohmann::json::array();
+    std::vector<std::uint64_t> captured_inner_research_observations;
+    const auto write_subtitle_inner_colour_research = [&](
+      const models::estimate_result &result, const std::string &output_id,
+      const std::uint64_t ordinal
+    ) {
+      if (!estimator || !result.completed_frame_valid || result.completed_frame_id != ordinal ||
+          !models::parallax_v2_result_is_authenticated(result)) return false;
+      const auto views = estimator->subtitle_inner_colour_working_views_for_evaluation(ordinal);
+      if (!views || !views->provenance || views->completed_frame_id != ordinal ||
+          views->command_frame_id != ordinal ||
+          views->command_observation_timestamp_us != observation_timestamps.at(ordinal - 1u) ||
+          views->input_region != result.input_region ||
+          views->field_width != static_cast<std::uint32_t>(result.field_width) ||
+          views->field_height != static_cast<std::uint32_t>(result.field_height) ||
+          views->field_content != result.field_content) return false;
+      const auto directory = fs::path(o.out) / "subtitle-inner-colour-research" / ("frame_" + output_id);
+      std::error_code error;
+      if (!fs::create_directories(directory, error) || error) return false;
+      nlohmann::json artifacts = nlohmann::json::object();
+      const auto describe = [&](const char *name, const char *dtype,
+                                const nlohmann::json &shape, const std::size_t bytes) {
+        const auto path = directory / name;
+        const auto digest = models::file_sha256_hex(path);
+        if (digest.empty() || fs::file_size(path) != bytes) return false;
+        artifacts[name] = {{"sha256", digest}, {"byte_count", bytes}, {"dtype", dtype},
+                           {"shape", shape}, {"layout", "row-major"}};
+        return true;
+      };
+      const auto write_buffer = [&](ID3D11Buffer *buffer, const char *name, const char *dtype) {
+        if (!buffer) return false;
+        D3D11_BUFFER_DESC desc {};
+        buffer->GetDesc(&desc);
+        if (desc.ByteWidth == 0u || desc.ByteWidth % 4u != 0u ||
+            !dump_ocr_working_buffer(dev.Get(), ctx.Get(), buffer, desc.ByteWidth,
+                                    directory / name, inner_research_buffer_stage) ||
+            !describe(name, dtype, {desc.ByteWidth / 4u}, desc.ByteWidth)) return false;
+        artifacts[name]["d3d11_structure_byte_stride"] = desc.StructureByteStride;
+        return true;
+      };
+      const auto write_view = [&](ID3D11ShaderResourceView *view, const char *name,
+                                  const char *buffer_dtype = "uint32-le") {
+        if (!view) return false;
+        ComPtr<ID3D11Resource> resource;
+        view->GetResource(&resource);
+        ComPtr<ID3D11Buffer> buffer;
+        if (SUCCEEDED(resource.As(&buffer))) return write_buffer(buffer.Get(), name, buffer_dtype);
+        ComPtr<ID3D11Texture2D> texture;
+        if (FAILED(resource.As(&texture))) return false;
+        D3D11_TEXTURE2D_DESC desc {};
+        texture->GetDesc(&desc);
+        const bool rgba16 = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+        if (!rgba16 && desc.Format != DXGI_FORMAT_R32_UINT) return false;
+        const UINT pixel_bytes = rgba16 ? 8u : 4u;
+        nlohmann::json shape = {desc.Height, desc.Width};
+        if (rgba16) shape.push_back(4u);
+        return dump_contour_texture(dev.Get(), ctx.Get(), view, desc.Format, pixel_bytes,
+                                    directory / name, inner_research_texture_stage) &&
+          describe(name, rgba16 ? "float16-le" : "uint32-le", shape,
+                   static_cast<std::size_t>(desc.Width) * desc.Height * pixel_bytes);
+      };
+      if (!write_view(views->body.Get(), "inner_body.u32") ||
+          !write_view(views->matte.Get(), "inner_matte.u32") ||
+          !write_view(views->validation_receipt.Get(), "numeric_validation_receipt.u32") ||
+          !write_view(views->current_source.Get(), "current_source.rgba16f") ||
+          !write_view(views->current_probability.Get(), "current_probability.f32", "float32-le") ||
+          !write_view(views->current_baseline_support.Get(), "current_baseline_support.u32") ||
+          !write_view(views->current_ocr.Get(), "current_ocr.u32") ||
+          !write_view(views->current_uip.Get(), "current_uip.u32") ||
+          !write_view(views->current_sct.Get(), "current_sct.u32") ||
+          !write_view(views->current_geometry.Get(), "current_geometry.u32") ||
+          !write_buffer(views->constants.Get(), "constants.u32", "uint32-le") ||
+          !write_buffer(views->transaction.Get(), "transaction.u32", "uint32-le") ||
+          !write_buffer(views->dispatch_arguments.Get(), "dispatch_arguments.u32", "uint32-le")) return false;
+      const auto &provenance = *views->provenance;
+      const nlohmann::json metadata = {
+        {"schema", 1u}, {"scope", "private-full-native-inner-colour-research"},
+        {"production_dump", false}, {"rendering_authority", false}, {"geometry_changed", false},
+        {"command_context_is_fresh_GPU_verdict", false},
+        {"observation_ordinal", ordinal}, {"source_file_id", output_id},
+        {"completed_frame_id", views->completed_frame_id}, {"command_frame_id", views->command_frame_id},
+        {"command_observation_timestamp_us", views->command_observation_timestamp_us},
+        {"analysis_region", {result.input_region.left, result.input_region.top,
+                              result.input_region.right, result.input_region.bottom}},
+        {"analysis_generation", result.input_region.analysis_generation},
+        {"field_width", result.field_width}, {"field_height", result.field_height},
+        {"content", {result.field_content.left, result.field_content.top,
+                     result.field_content.right, result.field_content.bottom}},
+        {"private_schema", provenance.private_schema},
+        {"source_closure_schema", provenance.source_closure_schema},
+        {"source_compile_flags", provenance.source_compile_flags},
+        {"source_macro_count", provenance.source_macro_count},
+        {"colour_source_closure_sha256", provenance.colour_source_closure_sha256},
+        {"components_source_closure_sha256", provenance.components_source_closure_sha256},
+        {"helper_source_sha256", provenance.helper_source_sha256},
+        {"recorded_execution_requested", views->recorded_execution_requested},
+        {"helper_execution_path", views->helper_execution_path},
+        {"helper_recordings", views->helper_recordings},
+        {"helper_replays", views->helper_replays},
+        {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256},
+        {"artifacts", artifacts}
+      };
+      std::ofstream stream(directory / "metadata.json");
+      stream << metadata.dump(2) << '\n';
+      stream.flush();
+      if (!stream.good()) return false;
+      inner_research_frames.push_back({{"observation_ordinal", ordinal}, {"source_file_id", output_id},
+        {"metadata", "subtitle-inner-colour-research/frame_" + output_id + "/metadata.json"}});
+      captured_inner_research_observations.push_back(ordinal);
+      return true;
+    };
+
+    ComPtr<ID3D11Buffer> cohort_research_buffer_stage;
+    ComPtr<ID3D11Texture2D> cohort_research_texture_stage;
+    nlohmann::json cohort_research_frames = nlohmann::json::array();
+    std::vector<std::uint64_t> captured_cohort_research_observations;
+    const auto write_subtitle_cohort_research = [&](
+      const models::estimate_result &result, const std::string &output_id,
+      const std::uint64_t ordinal
+    ) {
+      if (!estimator || !result.completed_frame_valid || result.completed_frame_id != ordinal ||
+          !models::parallax_v2_result_is_authenticated(result)) return false;
+      const auto views = estimator->subtitle_cohort_working_views_for_evaluation(ordinal);
+      if (!views || !views->provenance || views->completed_frame_id != ordinal ||
+          views->command_frame_id != ordinal ||
+          views->command_observation_timestamp_us != observation_timestamps.at(ordinal - 1u) ||
+          views->input_region != result.input_region ||
+          views->field_width != static_cast<std::uint32_t>(result.field_width) ||
+          views->field_height != static_cast<std::uint32_t>(result.field_height) ||
+          views->field_content != result.field_content) return false;
+      const auto directory = fs::path(o.out) / "subtitle-cohort-research" / ("frame_" + output_id);
+      std::error_code error;
+      if (!fs::create_directories(directory, error) || error) return false;
+      nlohmann::json artifacts = nlohmann::json::object();
+      const auto describe = [&](const std::string &name, const char *dtype,
+                                const nlohmann::json &shape, std::size_t bytes) {
+        const auto path = directory / name;
+        const auto digest = models::file_sha256_hex(path);
+        if (digest.empty() || fs::file_size(path) != bytes) return false;
+        artifacts[name] = {{"sha256", digest}, {"byte_count", bytes},
+                           {"dtype", dtype}, {"shape", shape}, {"layout", "row-major"}};
+        return true;
+      };
+      const auto write_buffer = [&](ID3D11Buffer *buffer, const char *name, const char *dtype) {
+        if (!buffer) return false;
+        D3D11_BUFFER_DESC desc {};
+        buffer->GetDesc(&desc);
+        if (desc.ByteWidth == 0u || desc.ByteWidth % sizeof(std::uint32_t) != 0u) return false;
+        if (!dump_ocr_working_buffer(dev.Get(), ctx.Get(), buffer, desc.ByteWidth,
+                                    directory / name, cohort_research_buffer_stage) ||
+            !describe(name, dtype, {desc.ByteWidth / sizeof(std::uint32_t)}, desc.ByteWidth)) return false;
+        artifacts[name]["d3d11_structure_byte_stride"] = desc.StructureByteStride;
+        return true;
+      };
+      const auto write_view = [&](ID3D11ShaderResourceView *view, const char *name,
+                                  const char *buffer_dtype = "uint32-le") {
+        if (!view) return false;
+        ComPtr<ID3D11Resource> resource;
+        view->GetResource(&resource);
+        ComPtr<ID3D11Buffer> buffer;
+        if (SUCCEEDED(resource.As(&buffer))) return write_buffer(buffer.Get(), name, buffer_dtype);
+        ComPtr<ID3D11Texture2D> texture;
+        if (FAILED(resource.As(&texture))) return false;
+        D3D11_TEXTURE2D_DESC desc {};
+        texture->GetDesc(&desc);
+        const char *dtype = nullptr;
+        UINT bytes_per_pixel = 0u;
+        nlohmann::json shape = {desc.Height, desc.Width};
+        if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+          dtype = "float16-le";
+          bytes_per_pixel = 8u;
+          shape.push_back(4u);
+        } else if (desc.Format == DXGI_FORMAT_R32_UINT) {
+          dtype = "uint32-le";
+          bytes_per_pixel = 4u;
+        } else if (desc.Format == DXGI_FORMAT_R32_FLOAT) {
+          dtype = "float32-le";
+          bytes_per_pixel = 4u;
+        } else return false;
+        return dump_contour_texture(dev.Get(), ctx.Get(), view, desc.Format, bytes_per_pixel,
+                                    directory / name, cohort_research_texture_stage) &&
+          describe(name, dtype, shape,
+                   static_cast<std::size_t>(desc.Width) * desc.Height * bytes_per_pixel);
+      };
+      if (!write_view(views->state.Get(), "state.u32") ||
+          !write_view(views->next_state.Get(), "next_state.u32") ||
+          !write_view(views->owner.Get(), "owner.u32") ||
+          !write_view(views->birth_rgb.Get(), "birth_rgb.u32") ||
+          !write_view(views->next_owner.Get(), "next_owner.u32") ||
+          !write_view(views->next_birth_rgb.Get(), "next_birth_rgb.u32") ||
+          !write_view(views->eligibility.Get(), "eligibility.u32") ||
+          !write_view(views->filtered_support.Get(), "filtered_support.u32") ||
+          !write_view(views->glyph_matte.Get(), "glyph_matte.u32") ||
+          !write_view(views->guarded_glyph_matte.Get(), "guarded_glyph_matte.u32") ||
+          !write_view(views->current_source.Get(), "current_source.rgba16f") ||
+          !write_view(views->current_probability.Get(), "current_probability.f32", "float32-le") ||
+          !write_view(views->current_ocr.Get(), "current_ocr.u32") ||
+          !write_view(views->current_uip.Get(), "current_uip.u32") ||
+          !write_view(views->current_sct.Get(), "current_sct.u32") ||
+          !write_view(views->current_baseline_support.Get(), "current_baseline_support.u32") ||
+          !write_view(views->current_geometry.Get(), "current_geometry.u32") ||
+          !write_view(views->previous_source.Get(), "published_next_source.rgba16f") ||
+          !write_view(views->previous_probability.Get(), "published_next_probability.f32", "float32-le") ||
+          !write_view(views->previous_sct.Get(), "published_next_sct.u32") ||
+          !write_view(views->previous_baseline_support.Get(), "published_next_baseline_support.u32") ||
+          !write_buffer(views->constants.Get(), "constants.u32", "uint32-le") ||
+          !write_buffer(views->transaction.Get(), "transaction.u32", "uint32-le") ||
+          !write_buffer(views->dispatch_arguments.Get(), "dispatch_arguments.u32", "uint32-le")) return false;
+      const auto &provenance = *views->provenance;
+      const nlohmann::json metadata = {
+        {"schema", 1u}, {"scope", "private-same-device-mutable-cohort-research"},
+        {"production_dump", false}, {"rendering_authority", false}, {"geometry_changed", false},
+        {"previous_tuple_role", "published-for-next-observation-not-consumed-old-inputs"},
+        {"command_context_is_fresh_GPU_verdict", false},
+        {"observation_ordinal", ordinal}, {"source_file_id", output_id},
+        {"completed_frame_id", views->completed_frame_id},
+        {"command_frame_id", views->command_frame_id},
+        {"command_observation_timestamp_us", views->command_observation_timestamp_us},
+        {"analysis_region", {result.input_region.left, result.input_region.top,
+                              result.input_region.right, result.input_region.bottom}},
+        {"analysis_generation", result.input_region.analysis_generation},
+        {"field_width", result.field_width}, {"field_height", result.field_height},
+        {"content", {result.field_content.left, result.field_content.top,
+                     result.field_content.right, result.field_content.bottom}},
+        {"private_schema", provenance.private_schema},
+        {"source_closure_schema", provenance.source_closure_schema},
+        {"source_compile_flags", provenance.source_compile_flags},
+        {"source_macro_count", provenance.source_macro_count},
+        {"prototype_source_closure_sha256", provenance.prototype_source_closure_sha256},
+        {"diagnostic_source_closure_sha256", provenance.diagnostic_source_closure_sha256},
+        {"matte_guard_source_closure_sha256", provenance.matte_guard_source_closure_sha256},
+        {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256},
+        {"artifact_digests", artifacts}
+      };
+      std::ofstream stream(directory / "metadata.json");
+      stream << metadata.dump(2) << '\n';
+      stream.flush();
+      if (!stream.good()) return false;
+      cohort_research_frames.push_back({{"observation_ordinal", ordinal}, {"source_file_id", output_id},
+        {"metadata", "subtitle-cohort-research/frame_" + output_id + "/metadata.json"}});
+      captured_cohort_research_observations.push_back(ordinal);
       return true;
     };
     // One native writer serves full legacy exports and selected pre-render snapshots.
@@ -4388,11 +5080,13 @@ namespace sbs_bench {
           !write_words(result.shadow_state.Get(), models::depth_coordinate_v2::state_float_count, "state.f32") ||
           !write_words(result.cut_state.Get(), 32u, "cut_state.f32") ||
           (exact_subtitle &&
-           (!write_words(result.ocr_box_record.Get(), 208u, "ocr_record.u32") ||
+           (!write_words(result.ocr_box_record.Get(), models::depth_coordinate_v2::subtitle_ocr_record_word_count, "ocr_record.u32") ||
             !write_words(result.subtitle_locator_state.Get(), models::depth_coordinate_v2::subtitle_plane_state_word_count, "locator_state.u32") ||
             !write_words(result.subtitle_contour_identity.Get(), models::depth_coordinate_v2::subtitle_contour_history_word_count, "contour_identity.u32") ||
             !write_words(result.subtitle_ocr_probability.Get(), 960u * 160u, "ocr_probability.f32") ||
             !write_contour(result.subtitle_contour_support.Get(), DXGI_FORMAT_R32_UINT, 4u, "contour_support.u32") ||
+            !write_contour(result.subtitle_glyph_matte.Get(), DXGI_FORMAT_R32_UINT, 4u, "glyph_matte.u32") ||
+            !write_words(result.subtitle_condition_params.Get(), models::depth_coordinate_v2::subtitle_condition_param_word_count, "condition_params.u32") ||
             !write_contour(result.subtitle_contour_field_pin.Get(), DXGI_FORMAT_R32_UINT, 4u, "contour_field_pin.u32") ||
             !write_contour(result.subtitle_contour_distance.Get(), DXGI_FORMAT_R32_FLOAT, 4u, "contour_distance.f32") ||
             !write_field(result.subtitle_gaussian_weight.Get(), "gaussian_weight.f32") ||
@@ -4515,6 +5209,212 @@ namespace sbs_bench {
           ++publication_receipt_stale;
         }
       }
+    };
+    nlohmann::json pfm_joined_frames = nlohmann::json::array();
+    const auto write_pfm_joined_diagnostics = [&](const models::estimate_result &result,
+      ID3D11ShaderResourceView *raw_source, const fs::path &source_path,
+      const std::string &source_sha256, const std::string &output_id,
+      const std::size_t sequence, const UINT width, const UINT height) {
+      namespace v2 = models::depth_coordinate_v2;
+      const auto directory = fs::path(o.out) / "pfm-joined" / ("frame_" + output_id);
+      std::error_code error;
+      if (!fs::create_directory(directory, error) || error) return false;
+      const auto &p = result.publication;
+      nlohmann::json metadata {
+        {"schema", 1u}, {"role", "private-real-pfm-completed-numeric-operands"},
+        {"production_dump", false}, {"live_capture", false}, {"source_alpha", "PFM loader constructs alpha=1"},
+        {"status", "UNAVAILABLE"}, {"unavailable_reasons", nlohmann::json::array()},
+        {"source_file", source_path.string()}, {"source_snapshot_sha256", source_sha256},
+        {"observation_ordinal", sequence}, {"completed_frame_id", result.completed_frame_id},
+        {"coordinate_contract_schema", v2::contract_schema}, {"coordinate_contract_tag", v2::contract_tag},
+        {"coordinate_contract_sha256", v2::contract_canonical_sha256},
+        {"producer_source_closure_sha256", v2::shader_source_closure_sha256},
+        {"source_width", width}, {"source_height", height},
+        {"field_width", result.field_width}, {"field_height", result.field_height},
+        {"content", {result.field_content.left, result.field_content.top,
+                     result.field_content.right, result.field_content.bottom}},
+        {"input_roi_ltrb", {result.input_region.left, result.input_region.top,
+                           result.input_region.right, result.input_region.bottom}},
+        {"publication", {{"estimator_generation", p.estimator_generation},
+          {"publication_sequence", p.publication_sequence}, {"analysis_generation", p.analysis_generation},
+          {"frame_id", p.frame_id}, {"observation_timestamp_us", p.observation_timestamp_us},
+          {"transaction_token", p.transaction_token}, {"domain_tag", p.domain_tag},
+          {"baseline_frame_id", p.baseline_frame_id}, {"width", p.width}, {"height", p.height},
+          {"subtitle_domain", p.subtitle_domain}, {"raw_coordinate_scale", p.raw_coordinate_scale},
+          {"joint_plane_mode", p.joint_plane_mode}, {"expected_work", p.expected_work},
+          {"submission_class", static_cast<std::uint32_t>(p.submission_class)},
+          {"flags", p.flags}, {"host_subtitle_outcome", static_cast<std::uint32_t>(p.host_subtitle_outcome)}}},
+        {"artifacts", nlohmann::json::object()},
+        {"scope", "Literal completed GPU bytes; no reconstructed/resealed state, constants or dispatch. Not a live-capture or subtitle-quality certificate."}
+      };
+      const auto unavailable = [&](const char *reason) { metadata["unavailable_reasons"].push_back(reason); };
+      const auto commit = [&]() {
+        if (!publish_json_atomically(directory / "metadata.json", metadata)) return false;
+        pfm_joined_frames.push_back({{"observation_ordinal", sequence}, {"status", metadata["status"]},
+          {"metadata", "pfm-joined/frame_" + output_id + "/metadata.json"},
+          {"sha256", models::file_sha256_hex(directory / "metadata.json")}});
+        return publish_json_atomically(fs::path(o.out) / "pfm_joined_diagnostics.json",
+          {{"schema", 1u}, {"status", "RUNNING"}, {"frames", pfm_joined_frames}});
+      };
+      if (!estimator || !result.completed_frame_valid || result.completed_frame_id != sequence ||
+          !models::parallax_v2_result_is_authenticated(result) || !models::subtitle_evidence_is_exact_frame(result) ||
+          p.frame_id != sequence || p.observation_timestamp_us != observation_timestamps.at(sequence - 1u) ||
+          !estimator->publication_is_current(p) || source_sha256.empty()) {
+        unavailable("current exact completed geometry/subtitle publication unavailable");
+        return commit();
+      }
+      const auto views = estimator->completed_ocr_conditioner_working_views_for_evaluation(p);
+      if (!views || views->publication != p || views->input_region != result.input_region ||
+          views->field_width != static_cast<UINT>(result.field_width) ||
+          views->field_height != static_cast<UINT>(result.field_height) || views->field_content != result.field_content ||
+          views->ocr_record.Get() != result.ocr_box_record.Get() || views->uip.Get() != result.subtitle_locator_state.Get() ||
+          views->sct.Get() != result.subtitle_contour_identity.Get() || views->source_band.Get() != result.subtitle_contour_source.Get() ||
+          views->probability_snapshot.Get() != result.subtitle_ocr_probability.Get()) {
+        unavailable("completed conditioner aliases missing or not the result's exact publication operands");
+        return commit();
+      }
+      ComPtr<ID3D11Texture2D> texture_stage;
+      ComPtr<ID3D11Buffer> buffer_stage;
+      const auto artifact = [&](const char *name, const nlohmann::json &layout) {
+        const auto path = directory / name;
+        const auto digest = models::file_sha256_hex(path);
+        if (digest.empty()) return false;
+        metadata["artifacts"][name] = layout;
+        metadata["artifacts"][name]["sha256"] = digest;
+        metadata["artifacts"][name]["bytes"] = fs::file_size(path);
+        return true;
+      };
+      const auto buffer = [&](ID3D11Buffer *value, UINT bytes, const char *name) {
+        if (!value) { unavailable(name); return true; }
+        D3D11_BUFFER_DESC desc {}; value->GetDesc(&desc);
+        if (desc.ByteWidth != bytes) { unavailable(name); return true; }
+        return publish_file_atomically(directory / name, [&](const fs::path &temporary) {
+          return dump_ocr_working_buffer(dev.Get(), ctx.Get(), value, bytes, temporary, buffer_stage);
+        }) && artifact(name, {{"word_count", bytes / 4u}, {"encoding", "opaque-u32-le"}});
+      };
+      const auto words = [&](ID3D11ShaderResourceView *value, UINT count, const char *name) {
+        ComPtr<ID3D11Resource> resource; ComPtr<ID3D11Buffer> typed;
+        if (!value || (value->GetResource(&resource), FAILED(resource.As(&typed)))) {
+          unavailable(name); return true;
+        }
+        return buffer(typed.Get(), count * 4u, name);
+      };
+      const auto texture = [&](ID3D11ShaderResourceView *value, DXGI_FORMAT format,
+                                  UINT bytes, const char *name, UINT expected_width, UINT expected_height) {
+        ComPtr<ID3D11Resource> resource; ComPtr<ID3D11Texture2D> typed;
+        if (!value || (value->GetResource(&resource), FAILED(resource.As(&typed)))) {
+          unavailable(name); return true;
+        }
+        D3D11_TEXTURE2D_DESC desc {}; typed->GetDesc(&desc);
+        if (desc.Format != format || desc.Width != expected_width || desc.Height != expected_height ||
+            desc.MipLevels != 1u || desc.ArraySize != 1u || desc.SampleDesc.Count != 1u) {
+          unavailable(name); return true;
+        }
+        return publish_file_atomically(directory / name, [&](const fs::path &temporary) {
+          return dump_contour_texture(dev.Get(), ctx.Get(), value, format, bytes, temporary, texture_stage);
+        }) && artifact(name, {{"width", desc.Width}, {"height", desc.Height}, {"dxgi_format", desc.Format},
+                             {"bytes_per_pixel", bytes}, {"layout", "top-down-row-major-tight"}});
+      };
+      const auto native_width = views->input_region.width();
+      const auto native_height = views->input_region.height();
+      // Copy the actual CB first. Native source-band crop is CB[2:4]; publication domain[4:6]
+      // is the different live-field ROI and must never be used as native source coordinates.
+      if (!buffer(views->constants.Get(), 96u, "actual_contour_cb.u32") ||
+          !buffer(views->transaction.Get(), 256u, "actual_transaction.u32") ||
+          !buffer(views->dispatch_arguments.Get(), 256u, "actual_final_dispatch.u32")) return false;
+      const auto read_words = [&](const char *name, auto &words) {
+        std::ifstream stream(directory / name, std::ios::binary);
+        stream.read(reinterpret_cast<char *>(words.data()), sizeof(words));
+        return stream.good() && stream.peek() == std::char_traits<char>::eof();
+      };
+      std::array<std::uint32_t, 24u> actual_cb {};
+      std::array<std::uint32_t, 64u> actual_final {};
+      const auto low = [](std::uint64_t value) { return static_cast<std::uint32_t>(value); };
+      const auto high = [](std::uint64_t value) { return static_cast<std::uint32_t>(value >> 32u); };
+      if (!read_words("actual_contour_cb.u32", actual_cb) ||
+          !read_words("actual_final_dispatch.u32", actual_final) ||
+          actual_cb[0u] != native_width || actual_cb[1u] != native_height ||
+          actual_cb[2u] >= native_height || actual_cb[3u] != native_height - actual_cb[2u] ||
+          actual_cb[4u] != p.width || actual_cb[5u] != p.height ||
+          actual_cb[6u] != p.subtitle_domain[4u] || actual_cb[7u] != p.subtitle_domain[5u] ||
+          actual_cb[12u] != low(p.frame_id) || actual_cb[13u] != high(p.frame_id) ||
+          actual_cb[14u] != low(p.analysis_generation) || actual_cb[15u] != high(p.analysis_generation) ||
+          actual_cb[16u] != low(p.observation_timestamp_us) || actual_cb[17u] != high(p.observation_timestamp_us) ||
+          actual_cb[18u] > 1u || actual_cb[19u] != 0u || actual_cb[20u] != 1u ||
+          actual_cb[21u] != v2::subtitle_contour_recipe || actual_cb[22u] != 0u || actual_cb[23u] != 0u) {
+        unavailable("actual contour CB/final buffer missing or current clock/geometry mismatch");
+        return commit();
+      }
+      const auto actual_auth = models::host_sbs_gpu_trace::authenticate_receipt(
+        actual_final, p.transaction_token, p.expected_work, p.submission_class);
+      if (!actual_auth.receipt_valid || actual_final[60u] != 1u || actual_final[61u] != 1u ||
+          actual_final[62u] != 1u || actual_final[63u] != 0u) {
+        unavailable("actual final dispatch receipt fault, stale token or inactive final publication");
+      }
+      const auto crop_top = actual_cb[2u];
+      const auto band_height = actual_cb[3u];
+      if (!texture(raw_source, DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "raw_source.rgba16f", width, height) ||
+          !texture(result.shadow_base_final_parallax.Get(), DXGI_FORMAT_R32_FLOAT, 4u, "base.r32f", p.width, p.height) ||
+          !words(result.shadow_state.Get(), v2::state_float_count, "state.u32") ||
+          !words(views->probability_snapshot.Get(), v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height, "probability.f32") ||
+          !words(views->ocr_record.Get(), v2::subtitle_ocr_record_word_count, "ocr.u32") ||
+          !words(views->uip.Get(), v2::subtitle_plane_state_word_count, "uip.u32") ||
+          !words(views->sct.Get(), v2::subtitle_contour_history_word_count, "sct.u32") ||
+          !words(result.subtitle_condition_params.Get(), v2::subtitle_condition_param_word_count, "scp.u32") ||
+          !texture(result.subtitle_contour_support.Get(), DXGI_FORMAT_R32_UINT, 4u, "support.u32", native_width, band_height) ||
+          !texture(result.subtitle_glyph_matte.Get(), DXGI_FORMAT_R32_UINT, 4u, "matte.u32", native_width, band_height) ||
+          !texture(views->source_band.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "display.rgba16f", native_width, band_height)) return false;
+      std::array<std::uint32_t, v2::subtitle_ocr_record_word_count> actual_ocr {};
+      std::array<std::uint32_t, v2::subtitle_plane_state_word_count> actual_uip {};
+      std::array<std::uint32_t, v2::subtitle_contour_history_word_count> actual_sct {};
+      if (!read_words("ocr.u32", actual_ocr) || !read_words("uip.u32", actual_uip) ||
+          !read_words("sct.u32", actual_sct)) {
+        unavailable("actual OCR/UIP/SCT bytes unavailable");
+      } else {
+        bool clocks_match = actual_ocr[0u] == v2::subtitle_ocr_record_schema &&
+          actual_ocr[1u] == v2::subtitle_ocr_record_tag && actual_ocr[2u] == 1u &&
+          actual_uip[0u] == v2::subtitle_plane_state_schema && actual_uip[1u] == v2::subtitle_plane_state_tag &&
+          actual_uip[2u] == 1u && actual_sct[0u] == v2::subtitle_contour_schema &&
+          actual_sct[1u] == v2::subtitle_contour_history_tag && actual_sct[2u] <= 1u &&
+          actual_sct[22u] == v2::subtitle_contour_recipe && actual_sct[23u] == 1u;
+        for (UINT i = 0u; i < 4u; ++i) {
+          clocks_match = clocks_match && actual_ocr[5u + i] == actual_cb[12u + i] &&
+            actual_uip[4u + i] == actual_cb[12u + i] && actual_sct[4u + i] == actual_cb[12u + i] &&
+            actual_sct[8u + i] == actual_cb[i] && actual_sct[12u + i] == actual_cb[4u + i] &&
+            actual_sct[16u + i] == actual_cb[8u + i] && actual_uip[12u + i] == actual_cb[4u + i] &&
+            actual_uip[16u + i] == actual_cb[8u + i] && actual_cb[8u + i] == p.subtitle_domain[6u + i];
+        }
+        clocks_match = clocks_match && actual_ocr[9u] == native_width && actual_ocr[10u] == native_height &&
+          actual_ocr[11u] == p.width && actual_ocr[12u] == p.height &&
+          actual_ocr[13u] == actual_cb[6u] && actual_ocr[14u] == actual_cb[7u] &&
+          actual_uip[8u] == actual_cb[16u] && actual_uip[9u] == actual_cb[17u] &&
+          actual_uip[10u] == native_width && actual_uip[11u] == native_height &&
+          actual_sct[20u] == actual_cb[16u] && actual_sct[21u] == actual_cb[17u];
+        if (!clocks_match) unavailable("actual OCR/UIP/SCT clock or geometry does not join the copied current CB");
+      }
+      metadata["native_width"] = native_width; metadata["native_height"] = native_height;
+      metadata["source_band_top"] = crop_top; metadata["source_band_height"] = band_height;
+      metadata["probability_shape"] = {v2::subtitle_ocr_output_height, v2::subtitle_ocr_output_width};
+      // Readbacks above finish the queued producer work. This is one existing nonblocking
+      // receipt poll, with no retry, Flush, extra GPU wait, or substitute completion.
+      observe_publications();
+      const auto receipt = device_conditional_publication;
+      if (publication_transport.failed || !receipt || receipt->expected != p || !receipt->geometry_valid ||
+          !receipt->subtitle_is_current() || !estimator->publication_is_current(p)) {
+        unavailable("exact final-publication GPU receipt missing, failed or not current");
+      } else {
+        metadata["receipt"] = {{"geometry_valid", receipt->geometry_valid},
+          {"depth_owner_valid", receipt->depth_owner_valid}, {"subtitle_current", receipt->subtitle_is_current()},
+          {"depth", static_cast<std::uint32_t>(receipt->depth)},
+          {"subtitle", static_cast<std::uint32_t>(receipt->subtitle)}};
+      }
+      metadata["conditioner_admission"] = "Literal CB/root/OCR/UIP/SCT clocks and source readiness must also pass the consumer's existing strict contract; no new authority is created by this exporter.";
+      const auto cache_commit = fs::path(o.scene_cache) / (scene_cache_frame_stem(sequence) + ".tuple.json");
+      const auto cache_digest = models::file_sha256_hex(cache_commit);
+      metadata["scene_cache_commit"] = {{"path", cache_commit.string()}, {"sha256", cache_digest}};
+      if (cache_digest.empty()) unavailable("same-frame scene cache commit unavailable");
+      if (metadata["unavailable_reasons"].empty()) metadata["status"] = "COPIED_CURRENT_COMPLETION_INPUTS";
+      return commit();
     };
     ComPtr<ID3D11Buffer> device_conditional_trace_stage;
     std::vector<std::uint32_t> device_conditional_trace_words;
@@ -4757,7 +5657,7 @@ namespace sbs_bench {
       std::string exact_source_sha256;
       std::uint64_t source_raster_bytes = 0;
       bool loaded = false;
-      const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode;
+      const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode || o.pfm_joined_diagnostics;
       if (transport) {
         const auto &header = raw_source->header;
         source_raster_bytes = raw_source->bytes();
@@ -4813,7 +5713,7 @@ namespace sbs_bench {
                      load_pfm(std::string_view(exact_source_snapshot), hdr_img) :
                      load_png(std::string_view(exact_source_snapshot), img);
         }
-        if (loaded && depth_coordinate_v2_gpu_mode) {
+        if (loaded && (depth_coordinate_v2_gpu_mode || o.pfm_joined_diagnostics)) {
           exact_source_sha256 = sha256_hex(exact_source_snapshot);
         }
       } else {
@@ -5126,7 +6026,7 @@ namespace sbs_bench {
               replay_cache_metadata.depth_width,
               replay_cache_metadata.depth_height,
               cached_depth_texture,
-              est.shadow_final_parallax,
+              est.shadow_base_final_parallax,
               /* require_unit_range */ false,
               nullptr,
               nullptr,
@@ -5192,6 +6092,15 @@ namespace sbs_bench {
                            << sequence;
           return 6;
         }
+        if (!restore_cached_glyph_tuple(dev.Get(), fs::path(o.render_cache), cache_stem,
+                                         replay_cache_metadata, render_words, est)) {
+          BOOST_LOG(error) << "sbs-bench: invalid cached glyph tuple for sequence " << sequence;
+          return 6;
+        }
+        // This alias is diagnostic only during cache replay. Rendering consumes Base and the
+        // separately restored tuple, never a fabricated conditioned field.
+        est.shadow_final_parallax = est.shadow_base_final_parallax;
+        est.color_space = input_color;
         est.raw_width = static_cast<int>(replay_cache_metadata.depth_width);
         est.raw_height = static_cast<int>(replay_cache_metadata.depth_height);
         est.field_width = static_cast<int>(replay_cache_metadata.depth_width);
@@ -5280,6 +6189,14 @@ namespace sbs_bench {
           input_color,
           capture_convex2x_diagnostics
         );
+        if (o.pfm_joined_diagnostics &&
+            (!est.completed_frame_valid || est.completed_frame_id != estimator_frame_id ||
+             estimator->has_terminal_failure() || !models::parallax_v2_result_is_authenticated(est)) &&
+            !write_pfm_joined_diagnostics(est, in_srv.Get(), current_frame, exact_source_sha256,
+              output_id, global_sequence, frame_width, frame_height)) {
+          BOOST_LOG(error) << "sbs-bench: cannot record unavailable PFM completion";
+          return 6;
+        }
         if ((whole_clip_mode || o.device_conditional_replay) &&
             (!est.completed_frame_valid ||
              est.completed_frame_id != estimator_frame_id)) {
@@ -5585,8 +6502,8 @@ namespace sbs_bench {
         if (!o.scene_cache.empty()) {
           ComPtr<ID3D11Resource> depth_resource;
           ComPtr<ID3D11Texture2D> depth_texture;
-          if (!est.shadow_final_parallax ||
-              (est.shadow_final_parallax->GetResource(&depth_resource),
+          if (!est.shadow_base_final_parallax ||
+              (est.shadow_base_final_parallax->GetResource(&depth_resource),
                FAILED(depth_resource.As(&depth_texture)))) {
             BOOST_LOG(error)
               << "sbs-bench: scene cache final parallax is not an R32 texture";
@@ -5655,8 +6572,8 @@ namespace sbs_bench {
           }
           const std::size_t sequence = fi + 1u;
           const std::string cache_stem = scene_cache_frame_stem(sequence);
-          // Schema-3 cache pair: the signed V2 final field plus its ParallaxState words,
-          // exactly what the replay child re-authenticates and binds to the warp.
+          // Schema-4 render tuple: immutable scene Base, state, native matte, source snapshot,
+          // SCT and SCP. The per-frame descriptor commits their hashes before count advances.
           render_state_words_t v2_state_words {};
           if (!read_v2_state_words(
                 dev.Get(),
@@ -5668,7 +6585,7 @@ namespace sbs_bench {
               !cache_depth_texture_atomically(
                 dev.Get(),
                 ctx.Get(),
-                est.shadow_final_parallax.Get(),
+                est.shadow_base_final_parallax.Get(),
                 fs::path(o.scene_cache) / (cache_stem + ".depth.r32f"),
                 scene_cache_depth_stage,
                 scene_cache_metadata_value.depth_width,
@@ -5678,8 +6595,12 @@ namespace sbs_bench {
               !cache_v2_state_atomically(
                 v2_state_words,
                 fs::path(o.scene_cache) / (cache_stem + ".state.u32")
+              ) ||
+              !cache_glyph_tuple_atomically(
+                dev.Get(), ctx.Get(), est, fs::path(o.scene_cache), cache_stem,
+                scene_cache_metadata_value
               )) {
-            BOOST_LOG(error) << "sbs-bench: cannot durably publish scene cache pair "
+            BOOST_LOG(error) << "sbs-bench: cannot durably publish scene cache render tuple "
                              << sequence;
             return 6;
           }
@@ -5696,7 +6617,7 @@ namespace sbs_bench {
               fi + 1u
             )) {
           BOOST_LOG(error)
-            << "sbs-bench: cannot acknowledge traced scene cache pair "
+            << "sbs-bench: cannot acknowledge traced scene cache render tuple "
             << (fi + 1u);
           return 6;
         }
@@ -5709,6 +6630,13 @@ namespace sbs_bench {
           return 6;
         }
         cut_state_records.push_back(std::move(state_record));
+      }
+
+      if (o.pfm_joined_diagnostics &&
+          !write_pfm_joined_diagnostics(est, in_srv.Get(), current_frame, exact_source_sha256,
+            output_id, global_sequence, frame_width, frame_height)) {
+        BOOST_LOG(error) << "sbs-bench: failed to persist private PFM joined diagnostic operands";
+        return 6;
       }
 
       if (o.artifacts == artifact_mode_e::adaptive) {
@@ -5752,6 +6680,25 @@ namespace sbs_bench {
         return 6;
       }
 
+      if (o.subtitle_cohort_research &&
+          (!o.subtitle_plane_diagnostic_ranges ||
+           detail::subtitle_diagnostic_observation_selected(
+             *o.subtitle_plane_diagnostic_ranges, global_sequence
+           )) && !write_subtitle_cohort_research(est, output_id, global_sequence)) {
+        BOOST_LOG(error) << "sbs-bench: private subtitle cohort diagnostic did not bind "
+                         << "the current completed observation " << global_sequence;
+        return 6;
+      }
+
+      if (o.subtitle_inner_colour_research &&
+          (!o.subtitle_plane_diagnostic_ranges || detail::subtitle_diagnostic_observation_selected(
+            *o.subtitle_plane_diagnostic_ranges, global_sequence
+          )) && !write_subtitle_inner_colour_research(est, output_id, global_sequence)) {
+        BOOST_LOG(error) << "sbs-bench: private subtitle inner-colour diagnostic did not bind "
+                         << "the current completed observation " << global_sequence;
+        return 6;
+      }
+
       if (o.subtitle_plane_diagnostic_ranges &&
           detail::subtitle_diagnostic_observation_selected(
             *o.subtitle_plane_diagnostic_ranges, global_sequence
@@ -5790,18 +6737,28 @@ namespace sbs_bench {
         ctx->Begin(warp_disjoint.Get());
         ctx->End(warp_start.Get());
       }
-      // V2-live analysis/conversion (and cache replay) bind the authenticated signed final
-      // field plus ParallaxState; direct replay binds its uploaded encoded field with the
+      // Live conversion and cache replay bind ordinary Base plus the joined glyph tuple.
+      // Direct replay binds its uploaded encoded field with the
       // estimator's cut-compat state.
       ID3D11ShaderResourceView *warp_depth =
         direct_parallax_mode ? direct_parallax_srv.Get() :
-                               est.shadow_final_parallax.Get();
+                               est.shadow_base_final_parallax.Get();
       ID3D11ShaderResourceView *warp_state =
         direct_parallax_mode ? est.cut_state.Get() : est.shadow_state.Get();
       ID3D11Buffer *cb = repro_cb.Get();
       if (direct_parallax_cb) {
         ctx->PSSetConstantBuffers(4, 1, direct_parallax_cb.GetAddressOf());
       }
+      const models::host_sbs_subtitle_render_constants_t subtitle_render {
+        .enabled = !direct_parallax_mode && !est.subtitle_work_suppressed ? 1u : 0u,
+        .color_mode = static_cast<std::uint32_t>(input_color),
+        .analysis_generation_low = static_cast<std::uint32_t>(est.input_region.analysis_generation),
+        .analysis_generation_high = static_cast<std::uint32_t>(est.input_region.analysis_generation >> 32u),
+        .source_left = 0u, .source_top = 0u,
+        .source_width = frame_width, .source_height = frame_height,
+      };
+      const auto subtitle_render_cb = const_buffer(dev.Get(), subtitle_render);
+      if (!subtitle_render_cb) return 6;
       const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {sbs_rtv.Get(), nullptr},
         .render_target_count = 1u,
@@ -5813,11 +6770,13 @@ namespace sbs_bench {
           in_srv.Get(),
           warp_depth,
           warp_state,
-          nullptr,
-          nullptr,
-          nullptr,
+          est.subtitle_glyph_matte.Get(),
+          est.subtitle_contour_source.Get(),
+          est.subtitle_condition_params.Get(),
+          est.subtitle_contour_identity.Get(),
         },
         .geometry_constants = cb,
+        .subtitle_constants = subtitle_render_cb.Get(),
       };
       if (!platf::dxgi::record_host_sbs_v2_draw(ctx.Get(), draw_command)) {
         BOOST_LOG(error) << "sbs-bench: production V2 draw operands are incomplete";
@@ -5880,44 +6839,19 @@ namespace sbs_bench {
       sbs_perf::tick();
 
       if (o.artifacts == artifact_mode_e::evaluation) {
-        ID3D11RenderTargetView *null_rtv[] = {nullptr};
-        ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr};
         // Offline-only mask pass, deliberately outside the production warp timestamp/CPU sample.
-        // Red marks finite-boundary extrapolation of the continuous full-capture inverse.
-        ctx->OMSetRenderTargets(1, warp_mask_rtv.GetAddressOf(), nullptr);
-        ctx->VSSetShader(vs.Get(), nullptr, 0);
-        ctx->PSSetShader(mask_ps.Get(), nullptr, 0);
-        ctx->RSSetViewports(1, &vp);
-        ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
-        ID3D11ShaderResourceView *mask_srvs[] = {
-          in_srv.Get(),
-          warp_depth,
-          warp_state,
-        };
-        ctx->PSSetShaderResources(0, 3, mask_srvs);
-        ctx->PSSetConstantBuffers(2, 1, &cb);
-        ctx->Draw(3, 0);
-        ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-        ctx->PSSetShaderResources(0, 3, null_srv);
+        // Red marks finite-boundary extrapolation of the actual selected Base/UI source U.
+        auto diagnostic_draw = draw_command;
+        diagnostic_draw.render_targets[0] = warp_mask_rtv.Get();
+        diagnostic_draw.pixel_shader = mask_ps.Get();
+        if (!platf::dxgi::record_host_sbs_v2_draw(ctx.Get(), diagnostic_draw)) return 6;
 
         // Offline-only exact inverse-warp mapping. This deliberately repeats the production
-        // Reproject path after timing has ended: metric labels receive the shader's actual sampled
+        // source selector after timing has ended: metric labels receive the shader's actual sampled
         // source coordinate instead of estimating correspondence again from the rendered colors.
-        ctx->OMSetRenderTargets(1, warp_mapping_rtv.GetAddressOf(), nullptr);
-        ctx->VSSetShader(vs.Get(), nullptr, 0);
-        ctx->PSSetShader(mapping_ps.Get(), nullptr, 0);
-        ctx->RSSetViewports(1, &vp);
-        ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
-        ID3D11ShaderResourceView *mapping_srvs[] = {
-          in_srv.Get(),
-          warp_depth,
-          warp_state,
-        };
-        ctx->PSSetShaderResources(0, 3, mapping_srvs);
-        ctx->PSSetConstantBuffers(2, 1, &cb);
-        ctx->Draw(3, 0);
-        ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-        ctx->PSSetShaderResources(0, 3, null_srv);
+        diagnostic_draw.render_targets[0] = warp_mapping_rtv.Get();
+        diagnostic_draw.pixel_shader = mapping_ps.Get();
+        if (!platf::dxgi::record_host_sbs_v2_draw(ctx.Get(), diagnostic_draw)) return 6;
 
         char mapping_name[64];
         snprintf(mapping_name, sizeof(mapping_name), "warp_map_%s.f32", output_id.c_str());
@@ -6414,6 +7348,15 @@ namespace sbs_bench {
     }
     const std::size_t completed_frame_count =
       o.follow ? processed_frame_count : frames.size();
+    if (o.pfm_joined_diagnostics) {
+      if (pfm_joined_frames.size() != completed_frame_count ||
+          !publish_json_atomically(fs::path(o.out) / "pfm_joined_diagnostics.json",
+            {{"schema", 1u}, {"status", "COMPLETE"}, {"frame_count", completed_frame_count},
+             {"observation_timeline_sha256", observation_timeline_sha256}, {"frames", pfm_joined_frames}})) {
+        BOOST_LOG(error) << "sbs-bench: private PFM joined export did not cover every input";
+        return 8;
+      }
+    }
     if (convex2x_runtime_provenance) {
       if (convex2x_diagnostic_frame_count != completed_frame_count ||
           !est.raw_model_provenance) {
@@ -6708,6 +7651,44 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: cannot write working OCR diagnostic manifest";
         return 6;
       }
+    }
+    if (o.subtitle_cohort_research) {
+      if (captured_cohort_research_observations != captured_ocr_working_observations ||
+          cohort_research_frames.size() != captured_cohort_research_observations.size()) {
+        BOOST_LOG(error) << "sbs-bench: private subtitle cohort diagnostics have incomplete selection";
+        return 6;
+      }
+      const nlohmann::json manifest = {
+        {"schema", 1u}, {"scope", "private-same-device-mutable-cohort-research"},
+        {"production_dump", false}, {"rendering_authority", false}, {"geometry_changed", false},
+        {"selection_basis", "one-based-observation-ordinal"},
+        {"processed_frame_count", completed_frame_count},
+        {"captured_observation_ids", captured_cohort_research_observations},
+        {"frames", cohort_research_frames}
+      };
+      std::ofstream stream(fs::path(o.out) / "subtitle_cohort_research.json");
+      stream << manifest.dump(2) << '\n';
+      stream.flush();
+      if (!stream.good()) return 6;
+    }
+    if (o.subtitle_inner_colour_research) {
+      if (captured_inner_research_observations != captured_ocr_working_observations ||
+          inner_research_frames.size() != captured_inner_research_observations.size()) {
+        BOOST_LOG(error) << "sbs-bench: private subtitle inner-colour diagnostics have incomplete selection";
+        return 6;
+      }
+      const nlohmann::json manifest = {
+        {"schema", 1u}, {"scope", "private-full-native-inner-colour-research"},
+        {"production_dump", false}, {"rendering_authority", false}, {"geometry_changed", false},
+        {"selection_basis", "one-based-observation-ordinal"},
+        {"processed_frame_count", completed_frame_count},
+        {"captured_observation_ids", captured_inner_research_observations},
+        {"frames", inner_research_frames}
+      };
+      std::ofstream stream(fs::path(o.out) / "subtitle_inner_colour_research.json");
+      stream << manifest.dump(2) << '\n';
+      stream.flush();
+      if (!stream.good()) return 6;
     }
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
     if (o.artifacts == artifact_mode_e::evaluation) {
@@ -7207,7 +8188,7 @@ namespace sbs_bench {
             .depth_provenance = replay_mode ?
               "scene-cache-contract-schema-" +
                 std::to_string(offline_sbs::scene_cache_contract_schema) +
-                ":signed-final-parallax-R32_FLOAT" :
+                ":signed-base-parallax-R32_FLOAT-plus-glyph-tuple" :
               std::string {"video_depth_estimator"},
             .pipeline_state_provenance = replay_mode ?
               "scene-cache-contract-schema-" +

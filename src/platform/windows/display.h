@@ -659,6 +659,18 @@ namespace platf::dxgi {
              !frame_info.ProtectedContentMaskedOut;
     }
 
+    /** One new desktop present, rather than a coalesced acquisition. This says nothing
+     * about decoder frames that were never presented. A successful copy and an uninterrupted
+     * capture chain are separate prerequisites before exporting this evidence.
+     */
+    [[nodiscard]] constexpr bool ddup_frame_has_one_desktop_present(
+      const DXGI_OUTDUPL_FRAME_INFO &frame_info
+    ) noexcept {
+      return frame_info.LastPresentTime.QuadPart > 0 &&
+             frame_info.AccumulatedFrames == 1u &&
+             !frame_info.ProtectedContentMaskedOut;
+    }
+
     /** Conservative answer for damage accumulated between two committed DDup surfaces. */
     enum class ddup_damage_intersection_e : std::uint8_t {
       unknown,
@@ -699,6 +711,9 @@ namespace platf::dxgi {
     struct ddup_damage_update_t {
       bool known = false;
       std::vector<RECT> rects;
+      // Explicit acquired-surface evidence; independent of dirty-rectangle availability.
+      // Kept last so existing authored damage-only aggregates remain unknown by default.
+      bool single_desktop_present = false;
     };
 
     /** Immutable identity of one desktop surface actually committed by CopyResource. */
@@ -707,7 +722,22 @@ namespace platf::dxgi {
     struct ddup_damage_snapshot_t {
       std::shared_ptr<const ddup_damage_history_t> history;
       std::uint64_t token = 0u;
+      bool single_desktop_present = false;
     };
+
+    /** The caller observed two adjacent committed surfaces and DDup reported exactly one
+     * intervening desktop present. Skipped captures, coalesced presents and unrelated histories
+     * are unknown. This is neither pixel equality nor subtitle/model observation authority.
+     */
+    [[nodiscard]] inline bool ddup_adjacent_desktop_present_observed(
+      const std::optional<ddup_damage_snapshot_t> &from,
+      const std::optional<ddup_damage_snapshot_t> &through
+    ) noexcept {
+      return from && through && from->history &&
+             from->history.get() == through->history.get() &&
+             from->token != 0u && from->token != UINT64_MAX &&
+             through->token == from->token + 1u && through->single_desktop_present;
+    }
 
     /** Validate and normalize DDup dirty/move metadata into capture-texture coordinates. */
     [[nodiscard]] ddup_damage_update_t make_ddup_damage_update(

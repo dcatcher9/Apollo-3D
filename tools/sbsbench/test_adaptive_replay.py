@@ -842,7 +842,9 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             words = list(struct.unpack(f"<{trace.stat().st_size // 4}I", trace.read_bytes()))
             applied = struct.unpack('<I', struct.pack('<f', .01))[0]
             limit = struct.unpack('<I', struct.pack('<f', .04))[0]
-            tail = [1, 9, 2, applied, 1, 0, 1, 0, 0, 0, 3, 0, limit, 1000, 1, 0]
+            # Current entry requirement2 and a filtered plane above it. The accepted
+            # controller clock remains1 while the held publication's root clock advances.
+            tail = [1, 8, 2, applied, 1, 0, 0, 0, 0, 0, 0, 0, limit, 1000, 1, 0]
             for slot in (0, 1):
                 base = replay.TRACE_HEADER_WORDS + slot * replay.TRACE_RECORD_WORDS
                 start = base + replay.TRACE_RECORD_PLANE_BEGIN + 24
@@ -856,6 +858,20 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 self.assertEqual(record["condition"], (policy.condition_param_schema,
                     policy.condition_param_tag, 1, 0, 2, applied))
             self.assertEqual([row["observation_timestamp_us"] for row in records], [1, 16668])
+            self.assertEqual([row["subtitle_plane"][28:30] for row in records], [(1, 0), (1, 0)])
+
+    def test_rejects_retired_ui_dwell_fields_even_when_reuse_holds_them_exactly(self):
+        adaptive = replay.TRACE_RECORD_PLANE_BEGIN + 24
+        for word, value in ((1, 9), (1, 10), (6, 1), (7, 1), (8, 1),
+                            (9, 1), (10, 1), (11, 1)):
+            with self.subTest(word=word, value=value), tempfile.TemporaryDirectory() as directory:
+                control, treatment = self.make_pair(Path(directory))
+                # Forge both publications identically: this must fail current UI semantics,
+                # rather than merely failing the complete-tuple reuse equality check.
+                for frame in (1, 2):
+                    self.mutate_trace_word(treatment, frame, adaptive + word, value)
+                with self.assertRaisesRegex(replay.EvidenceError, "adaptive UI"):
+                    replay._validate_contract_and_trace(control, treatment, 2)
 
     def test_rejects_changed_first_or_last_adaptive_tail_word_on_reuse(self):
         for tail_word in (24, 39):

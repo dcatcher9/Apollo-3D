@@ -1,0 +1,8 @@
+#pragma once
+
+// Test-only configure-time hashes; never runtime shader or mask authority.
+namespace subtitle_test_source_pins {
+  constexpr char current_black_enclosure[] = "@SUBTITLE_CBC_HELPER_SHA256@";
+  constexpr char current_outline_support[] = "@SUBTITLE_OUTLINE_HELPER_SHA256@";
+  constexpr char global_colour_validation[] = "@SUBTITLE_BASELINE_HELPER_SHA256@";
+}

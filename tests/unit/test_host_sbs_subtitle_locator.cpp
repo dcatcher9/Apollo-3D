@@ -17,6 +17,7 @@
   #include <cmath>
   #include <cstddef>
   #include <cstdint>
+  #include <cstdlib>
   #include <cstring>
   #include <d3d11.h>
   #include <limits>
@@ -92,8 +93,8 @@ namespace {
   constexpr float contour_distance_infinity = std::numeric_limits<float>::infinity();
 
   // Independent authored input to the proposal writer, not a CPU renderer or a claim about
-  // RGB classification. A field seed is placed at its source-coordinate node; the actual
-  // five-native-center distance producer has a separate exhaustive native test suite.
+  // RGB classification. Authored field pins supply the exact Q30 axis budget below; the actual
+  // five-native-rectangle producer has a separate exhaustive native test suite.
   std::vector<float> authored_mask_distances(
     const std::vector<std::uint32_t> &mask,
     const std::uint32_t width,
@@ -105,35 +106,18 @@ namespace {
     std::vector<float> distance(mask.size(), contour_distance_infinity);
     if (content[0u] >= content[2u] || content[1u] >= content[3u] ||
         content[2u] > width || content[3u] > height) return distance;
-    const double sx = static_cast<double>(source_width) / (content[2u] - content[0u]);
-    const double sy = static_cast<double>(source_height) / (content[3u] - content[1u]);
-    const auto transform = [](const std::vector<double> &input, const double scale_squared) {
-      const auto n = input.size();
-      std::vector<double> output(n, std::numeric_limits<double>::infinity()), starts(n + 1u);
-      std::vector<std::size_t> rows(n);
-      std::size_t count = 0u;
-      for (std::size_t row = 0u; row < n; ++row) {
-        if (!std::isfinite(input[row])) continue;
-        double start = -std::numeric_limits<double>::infinity();
-        while (count != 0u) {
-          const auto prior = rows[count - 1u];
-          start = 0.5 * static_cast<double>(row + prior) +
-            (input[row] - input[prior]) / (2.0 * scale_squared * static_cast<double>(row - prior));
-          if (start > starts[count - 1u]) break;
-          --count;
-        }
-        rows[count] = row;
-        starts[count] = count == 0u ? -std::numeric_limits<double>::infinity() : start;
-        ++count;
-      }
-      if (count == 0u) return output;
-      starts[count] = std::numeric_limits<double>::infinity();
-      std::size_t selected = 0u;
-      for (std::size_t query = 0u; query < n; ++query) {
-        while (selected + 1u < count && starts[selected + 1u] < static_cast<double>(query)) ++selected;
-        const auto delta = static_cast<double>(query) - rows[selected];
-        output[query] = input[rows[selected]] + scale_squared * delta * delta;
-      }
+    (void)source_height;
+    const auto content_width = content[2u] - content[0u];
+    const double sx = static_cast<double>(v2::limiter_horizontal_step_q_numerator / content_width) /
+      v2::limiter_q_scale * source_width;
+    const double sy = static_cast<double>(v2::limiter_vertical_step_q_numerator / content_width) /
+      v2::limiter_q_scale * source_width;
+    const auto transform = [](const std::vector<double> &input, const double step) {
+      auto output = input;
+      for (std::size_t x = 1u; x < output.size(); ++x)
+        output[x] = std::min(output[x], output[x - 1u] + step);
+      for (std::size_t x = output.size(); x-- > 1u;)
+        output[x - 1u] = std::min(output[x - 1u], output[x] + step);
       return output;
     };
     const auto cw = content[2u] - content[0u], ch = content[3u] - content[1u];
@@ -143,19 +127,56 @@ namespace {
       for (std::uint32_t x = 0u; x < cw; ++x) {
         if (mask[static_cast<std::size_t>(y + content[1u]) * width + x + content[0u]] != 0u) row[x] = 0.0;
       }
-      const auto result = transform(row, sx * sx);
+      const auto result = transform(row, sx);
       std::copy(result.begin(), result.end(), horizontal.begin() + static_cast<std::size_t>(y) * cw);
     }
     for (std::uint32_t x = 0u; x < cw; ++x) {
       std::vector<double> column(ch);
       for (std::uint32_t y = 0u; y < ch; ++y) column[y] = horizontal[static_cast<std::size_t>(y) * cw + x];
-      const auto result = transform(column, sy * sy);
+      const auto result = transform(column, sy);
       for (std::uint32_t y = 0u; y < ch; ++y) {
         distance[static_cast<std::size_t>(y + content[1u]) * width + x + content[0u]] = static_cast<float>(result[y]);
       }
     }
     return distance;
   }
+
+  std::pair<float, float> expected_minimum_extension(
+    const float base, const float target, float distance_pixels,
+    const std::uint32_t source_width
+  ) {
+    // SM5 float math/comparisons flush subnormal inputs to sign-preserved zero.
+    // Texture I/O preserves the authored bits, so this must precede the D==0 branch
+    // rather than replacing/removing the denorm sample from the adversarial sweep.
+    // https://learn.microsoft.com/en-us/windows/win32/direct3d11/floating-point-rules
+    const auto distance_bits = std::bit_cast<std::uint32_t>(distance_pixels);
+    if ((distance_bits & 0x7f800000u) == 0u && (distance_bits & 0x007fffffu) != 0u)
+      distance_pixels = std::bit_cast<float>(distance_bits & 0x80000000u);
+    if (distance_pixels == 0.0f) return {1.0f, target};
+    const volatile float difference = target - base;
+    const volatile float gap = std::abs(difference) * static_cast<float>(source_width);
+    if (!std::isfinite(distance_pixels) || gap == 0.0f || distance_pixels >= gap)
+      return {0.0f, base};
+    const volatile float ratio = distance_pixels / gap;
+    const volatile float weight = 1.0f - ratio;
+    if (weight <= 0.0f) return {0.0f, base};
+    if (weight >= 1.0f) return {1.0f, target};
+    const volatile float budget = distance_pixels / static_cast<float>(source_width);
+    const volatile float proposal = difference > 0.0f ? target - budget : target + budget;
+    return {weight, std::clamp(static_cast<float>(proposal),
+      std::min(base, target), std::max(base, target))};
+  }
+
+  // CPU reference for one accepted continuation; no OCR or Base classification replica.
+  double expected_ui_presentation_step(double initial, double target, double seconds) {
+    seconds = std::min(seconds, v2::subtitle_plane_max_tick_gap_ms * .001);
+    const double tau = v2::subtitle_plane_smoothing_time_constant_ms * .001;
+    const double max_step = v2::subtitle_plane_slew_source_pixels_per_second * seconds / 1920.0;
+    return initial + std::clamp((target - initial) * (1.0 - std::exp(-seconds / tau)),
+      -max_step, max_step);
+  }
+  constexpr float ui_retreat_arithmetic_tolerance =
+    128.0f * std::numeric_limits<float>::epsilon() * v2::direct_container_limit;
 
   struct depth_constants_t {
     std::uint32_t target_w;
@@ -389,7 +410,19 @@ namespace {
                       roi_bottom_override;
     }
 
-    bool initialize(std::string &error, const D3D_DRIVER_TYPE driver = D3D_DRIVER_TYPE_WARP) {
+    // Strict test-only override for the existing timing cases. Explicit-driver callers
+    // keep their declared driver, and hardware failure never falls back to WARP.
+    bool initialize(std::string &error) {
+      const auto *choice = std::getenv("SUNSHINE_TEST_SUBTITLE_LOCATOR_DRIVER");
+      if (choice == nullptr || std::strcmp(choice, "warp") == 0)
+        return initialize(error, D3D_DRIVER_TYPE_WARP);
+      if (std::strcmp(choice, "hardware") == 0)
+        return initialize(error, D3D_DRIVER_TYPE_HARDWARE);
+      error = "SUNSHINE_TEST_SUBTITLE_LOCATOR_DRIVER must be warp or hardware";
+      return false;
+    }
+
+    bool initialize(std::string &error, const D3D_DRIVER_TYPE driver) {
       constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
       D3D_FEATURE_LEVEL actual {};
       if (FAILED(D3D11CreateDevice(
@@ -411,7 +444,9 @@ namespace {
         if (FAILED(device_.As(&dxgi_device)) ||
             FAILED(dxgi_device->GetAdapter(&adapter)) ||
             FAILED(adapter->GetDesc(&description))) return false;
-        std::wcout << L"Native dump reproduction adapter: " << description.Description << L'\n';
+        std::wcout << L"Native subtitle locator HARDWARE adapter: " << description.Description
+                   << L"; LUID=" << description.AdapterLuid.LowPart << L"," << description.AdapterLuid.HighPart
+                   << L"; vendor=" << description.VendorId << L"; device=" << description.DeviceId << L'\n';
       }
 
       namespace shader_cache = models::host_sbs_shader_cache;
@@ -1332,280 +1367,112 @@ namespace {
   }
 
 
-  TEST(HostSbsSubtitleSlr13GpuTest, WarmupProtectsCurrentCoversForFourFreshObservationsThenHandsOverToPixels) {
+  TEST(HostSbsSubtitleSlr13GpuTest, CurrentNativeEvidenceStartsAndStopsWithoutWaitingForCoverChanges) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
     fixture.set_base(0.03f);
     const line_box_t line {180u, 360u, 590u, 370u};
     auto mask = std::vector<std::uint32_t>(fixture.base().size(), 0u);
-    ASSERT_TRUE(fixture.set_authored_contour_mask(mask));
-    for (std::uint64_t frame = 1u; frame <= v2::subtitle_plane_warmup_observations; ++frame) {
-      ASSERT_TRUE(fixture.observe_at(frame, {line}, frame));
-      EXPECT_EQ(fixture.state()[v2::subtitle_plane_warmup_word], v2::subtitle_plane_warmup_observations + 1u - frame);
-      EXPECT_EQ(fixture.gaussian_control(), 1u);
-      EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.gaussian_weights()[364u * field_width + 400u]),
-        std::bit_cast<std::uint32_t>(1.0f));
-      EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(400u, 364u)), fixture.condition_params()[5u]);
-      EXPECT_TRUE(std::all_of(fixture.contour_distances().begin(), fixture.contour_distances().end(),
-        [](float q) { return q == contour_distance_infinity; }))
-        << "temporary presentation must not manufacture native pixel-distance evidence";
-    }
-    // This fixture authors distance seeds, not RGB counts. The temporal classifier has its
-    // own GPU suite; here the fifth observation must use only the supplied confirmed pixels.
     mask[364u * field_width + 200u] = 1u;
     ASSERT_TRUE(fixture.set_authored_contour_mask(mask));
-    ASSERT_TRUE(fixture.observe_at(5u, {line}, 5u));
+    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
     EXPECT_EQ(fixture.state()[v2::subtitle_plane_warmup_word], 0u);
     EXPECT_EQ(fixture.gaussian_control(), 1u);
     EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(200u, 364u)), fixture.condition_params()[5u]);
     EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.gaussian_weights()[364u * field_width + 400u]), 0u);
-    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(400u, 364u)),
-      std::bit_cast<std::uint32_t>(fixture.base()[364u * field_width + 400u]));
-  }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, WarmupEveryGenuineCueRearmsAcrossDifferentCurrentCoresAndDuplicatesHold) {
-    subtitle_plane_fixture_t fixture;
-    std::string error;
-    ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.enable_probability_witness(1.f);
-    const line_box_t left {180u, 360u, 300u, 370u}, right {500u, 382u, 650u, 392u};
-    constexpr auto word = v2::subtitle_plane_warmup_word;
-    constexpr auto cue = v2::subtitle_plane_warmup_cue_bit;
-    ASSERT_TRUE(fixture.observe_at(1u, {left, right}, 100001u));
-    EXPECT_EQ(fixture.state()[word], 4u);
-    fixture.set_probability_quarters(1.f, 0.f, 1.f, 1.f);
-    ASSERT_TRUE(fixture.observe_at(2u, {left, right}, 200001u));
-    ASSERT_EQ(fixture.state()[v2::subtitle_plane_history_reset_mask_word], 1u);
-    EXPECT_EQ(fixture.state()[word], 4u | cue);
-    ASSERT_TRUE(fixture.observe_at(2u, {left, right}, 200001u));
-    EXPECT_EQ(fixture.state()[v2::subtitle_plane_history_reset_mask_word], 0u);
-    EXPECT_EQ(fixture.state()[word], 4u | cue) << "duplicate must retain the last genuine cue";
-    // Another current core changes while the preceding genuine any-cue latch remains high.
-    fixture.set_probability_quarters(1.f, 0.f, 0.f, 1.f);
-    ASSERT_TRUE(fixture.observe_at(3u, {left, right}, 300001u));
-    ASSERT_EQ(fixture.state()[v2::subtitle_plane_history_reset_mask_word], 2u);
-    EXPECT_EQ(fixture.state()[word], 4u | cue);
-    ASSERT_TRUE(fixture.observe_at(3u, {left, right}, 300001u));
-    EXPECT_EQ(fixture.state()[v2::subtitle_plane_history_reset_mask_word], 0u);
-    EXPECT_EQ(fixture.state()[word], 4u | cue);
-    const std::array changes {
-      std::array {0.f, 1.f, 0.f, 1.f},
-      std::array {0.f, 1.f, 1.f, 0.f},
-      std::array {1.f, 0.f, 1.f, 0.f}
-    };
-    for (std::size_t index = 0u; index < changes.size(); ++index) {
-      const auto &values = changes[index];
-      fixture.set_probability_quarters(values[0u], values[1u], values[2u], values[3u]);
-      const auto frame = 4u + index;
-      ASSERT_TRUE(fixture.observe_at(frame, {left, right}, frame * 100000u + 1u));
-      ASSERT_EQ(fixture.state()[v2::subtitle_plane_history_reset_mask_word], index == 1u ? 2u : 1u);
-      EXPECT_EQ(fixture.state()[word], 4u | cue) << "continuous genuine cues may prolong protection";
-    }
-    for (std::uint64_t frame = 7u; frame <= 10u; ++frame) {
-      ASSERT_TRUE(fixture.observe_at(frame, {left, right}, frame * 100000u + 1u));
-      ASSERT_EQ(fixture.state()[v2::subtitle_plane_history_reset_mask_word], 0u);
-      EXPECT_EQ(fixture.state()[word], 10u - frame);
-      if (frame == 7u) {
-        ASSERT_TRUE(fixture.observe_at(frame, {left, right}, frame * 100000u + 1u));
-        EXPECT_EQ(fixture.state()[word], 3u) << "a quiet duplicate cannot spend an observation";
-      }
-    }
-    fixture.set_probability_quarters(0.f, 1.f, 1.f, 0.f);
-    ASSERT_TRUE(fixture.observe_at(11u, {left, right}, 1100001u));
-    ASSERT_EQ(fixture.state()[v2::subtitle_plane_history_reset_mask_word], 1u);
-    EXPECT_EQ(fixture.state()[word], 4u | cue);
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, WarmupRequiresBothStrictlyNewerSourceClocks) {
-    const line_box_t line {180u, 360u, 590u, 370u};
-    for (const auto fault : {0u, 1u, 2u, 3u, 4u}) {
-      SCOPED_TRACE(fault);
-      subtitle_plane_fixture_t fixture;
-      std::string error;
-      ASSERT_TRUE(fixture.initialize(error)) << error;
-      ASSERT_TRUE(fixture.set_authored_contour_mask(std::vector<std::uint32_t>(fixture.base().size(), 0u)));
-      ASSERT_TRUE(fixture.observe_at(10u, {line}, 100001u));
-      ASSERT_EQ(fixture.state()[v2::subtitle_plane_warmup_word], 4u);
-      if (fault == 0u) ASSERT_TRUE(fixture.observe_at(10u, {line}, 100001u)); // Exact duplicate holds.
-      if (fault == 1u) ASSERT_TRUE(fixture.observe_at(11u, {line}, 100001u)); // Equal time.
-      if (fault == 2u) ASSERT_TRUE(fixture.observe_at(10u, {line}, 200001u)); // Equal frame.
-      if (fault == 3u) ASSERT_TRUE(fixture.observe_at(9u, {line}, 200001u)); // Older frame.
-      if (fault == 4u) ASSERT_TRUE(fixture.observe_at(11u, {line}, 100000u)); // Older time.
-      EXPECT_EQ(fixture.state()[v2::subtitle_plane_warmup_word], fault == 0u ? 4u : 0u);
-      EXPECT_EQ(fixture.gaussian_control(), fault == 0u ? 1u : 0u);
-      if (fault != 0u) EXPECT_TRUE(fixture.output_is_exact_base());
-    }
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, WarmupClearsOnEmptyOrInvalidAndRearmsOnlyEligibleCurrentEvidence) {
-    subtitle_plane_fixture_t fixture;
-    std::string error;
-    ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_base(0.03f);
-    ASSERT_TRUE(fixture.set_authored_contour_mask(std::vector<std::uint32_t>(fixture.base().size(), 0u)));
-    const line_box_t line {180u, 360u, 590u, 370u};
-    constexpr auto word = v2::subtitle_plane_warmup_word;
-    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
-    ASSERT_EQ(fixture.state()[word], 4u);
-    ASSERT_TRUE(fixture.observe_at(2u, {}, 2u));
-    EXPECT_EQ(fixture.state()[word], 0u);
-    EXPECT_TRUE(fixture.output_is_exact_base());
+    // A still-current OCR cover must not retain a protected rectangle after pixel evidence ends.
+    mask[364u * field_width + 200u] = 0u;
+    ASSERT_TRUE(fixture.set_authored_contour_mask(mask));
     ASSERT_TRUE(fixture.observe_at(2u, {line}, 2u));
-    EXPECT_EQ(fixture.state()[word], 0u) << "an exact duplicate after empty cannot acquire warmup";
+    EXPECT_EQ(fixture.state()[3u], 1u);
     EXPECT_EQ(fixture.gaussian_control(), 0u);
     EXPECT_TRUE(fixture.output_is_exact_base());
-    ASSERT_TRUE(fixture.observe_at(3u, {}, 3u));
-    ASSERT_TRUE(fixture.observe_at(4u, {line}, 4u));
-    EXPECT_EQ(fixture.state()[word], 4u);
-    ASSERT_TRUE(fixture.observe_at(5u, {line}, 5u, false, false));
-    EXPECT_EQ(fixture.state()[word], 0u);
-    EXPECT_TRUE(fixture.output_is_exact_base());
-    ASSERT_TRUE(fixture.observe_at(6u, {line}, 6u));
-    EXPECT_EQ(fixture.state()[word], 4u);
-    fixture.set_geometry_ready(false);
-    ASSERT_TRUE(fixture.observe_at(7u, {line}, 7u));
-    EXPECT_EQ(fixture.state()[word], 0u);
-    EXPECT_TRUE(fixture.output_is_exact_base());
-    fixture.set_geometry_ready(true);
-    ASSERT_TRUE(fixture.observe_at(8u, {line}, 8u));
-    EXPECT_EQ(fixture.state()[word], 4u);
-    fixture.set_cut(1u, true);
-    ASSERT_TRUE(fixture.observe_at(9u, {line}, 9u));
-    EXPECT_EQ(fixture.state()[word], 4u);
-    ASSERT_TRUE(fixture.observe_at(10u, {line}, 10u, true));
-    EXPECT_EQ(fixture.state()[word], 4u);
-    fixture.set_base(std::numeric_limits<float>::quiet_NaN());
-    ASSERT_TRUE(fixture.observe_at(11u, {line}, 11u));
-    EXPECT_EQ(fixture.state()[word], 0u);
-    EXPECT_EQ(fixture.condition_params()[4u], 0u);
-    fixture.set_base(0.03f);
-    ASSERT_TRUE(fixture.observe_at(12u, {line}, 12u));
-    EXPECT_EQ(fixture.state()[word], 4u);
+    EXPECT_TRUE(std::all_of(fixture.gaussian_weights().begin(), fixture.gaussian_weights().end(),
+      [](float value) { return std::bit_cast<std::uint32_t>(value) == 0u; }));
+
+    // Same-shape replacement uses the new native seed on its first observation.
+    mask[364u * field_width + 400u] = 1u;
+    ASSERT_TRUE(fixture.set_authored_contour_mask(mask));
+    ASSERT_TRUE(fixture.observe_at(3u, {line}, 3u));
+    EXPECT_EQ(fixture.gaussian_control(), 1u);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(400u, 364u)), fixture.condition_params()[5u]);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.gaussian_weights()[364u * field_width + 200u]), 0u);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, WarmupUsesMaximumGaussianUnionOfOnlyCurrentCoverRectangles) {
+  TEST(HostSbsSubtitleSlr13GpuTest, ProbabilityCuesNeverProtectCoversWithoutCurrentNativeSeeds) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
     fixture.set_base(0.03f);
+    fixture.enable_probability_witness(1.f);
     ASSERT_TRUE(fixture.set_authored_contour_mask(std::vector<std::uint32_t>(fixture.base().size(), 0u)));
-    const ocr_box_t left {line_box_t {200u, 360u, 210u, 370u}, line_box_t {180u, 350u, 300u, 392u}, 0u, 1u, 0u};
-    const ocr_box_t right {line_box_t {520u, 365u, 530u, 375u}, line_box_t {500u, 355u, 620u, 395u}, 0u, 1u, 0u};
-    ASSERT_TRUE(fixture.observe_at(1u, {left, right}, 1u));
-    const auto expected_weight = [](std::uint32_t x, std::uint32_t y, const std::vector<ocr_box_t> &boxes) {
-      double q = std::numeric_limits<double>::infinity();
-      for (const auto &box : boxes) {
-        const auto &r = box.cover;
-        const double dx = std::max({double(r.left) - (x + .5), (x + .5) - double(r.right), 0.0}) * 1920.0 / field_width;
-        const double dy = std::max({double(r.top) - (y + .5), (y + .5) - double(r.bottom), 0.0}) * 1080.0 / field_height;
-        q = std::min(q, dx * dx + dy * dy);
+    const line_box_t left {180u, 360u, 300u, 370u}, right {500u, 382u, 650u, 392u};
+    for (std::uint64_t frame = 1u; frame <= 8u; ++frame) {
+      fixture.set_probability_quarters(frame % 2u ? 1.f : 0.f, frame % 2u ? 0.f : 1.f, 1.f, 1.f);
+      ASSERT_TRUE(fixture.observe_at(frame, {left, right}, frame * 100000u + 1u));
+      if (frame > 1u) {
+        EXPECT_NE(fixture.state()[v2::subtitle_plane_history_reset_mask_word], 0u);
       }
-      const double sigma = 1080.0 / v2::subtitle_contour_gaussian_sigma_short_side_divisor;
-      return std::exp(-q / (2.0 * sigma * sigma));
-    };
-    for (const auto [x, y] : std::array<std::pair<std::uint32_t, std::uint32_t>, 7u> {
-           {{180u, 350u}, {299u, 391u}, {300u, 392u}, {320u, 394u}, {400u, 365u}, {499u, 354u}, {619u, 394u}}}) {
-      EXPECT_NEAR(fixture.gaussian_weights()[y * field_width + x], expected_weight(x, y, {left, right}),
-        v2::subtitle_contour_gaussian_weight_absolute_error_limit);
-    }
-    const auto union_weights = fixture.gaussian_weights();
-    ASSERT_TRUE(fixture.observe_at(2u, {right, left, left}, 2u));
-    EXPECT_EQ(fixture.gaussian_weights(), union_weights) << "reordering and overlap do not sum intensity";
-    ASSERT_TRUE(fixture.observe_at(3u, {right}, 3u));
-    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.gaussian_weights()[360u * field_width + 200u]), 0u)
-      << "the absent left current cover cannot retain temporary presentation authority";
-    EXPECT_TRUE(std::all_of(fixture.contour_distances().begin(), fixture.contour_distances().end(),
-      [](float q) { return q == contour_distance_infinity; }));
-  }
-
-  TEST(HostSbsSubtitleSlr13GpuTest, WarmupRectangleGaussianUsesFractionalSourceUnitsAndNearestContentPadding) {
-    const tensor_content_t content {0u, 89u, 770u, 345u};
-    subtitle_plane_fixture_t fixture(770u, 434u, 1500u, 500u,
-      std::numeric_limits<std::uint32_t>::max(), std::numeric_limits<std::uint32_t>::max(), content);
-    std::string error;
-    ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_base(0.03f);
-    ASSERT_TRUE(fixture.set_authored_contour_mask(std::vector<std::uint32_t>(fixture.base().size(), 0u)));
-    const auto bottom = subtitle_roi_edge(1500u, 500u, content, v2::subtitle_ocr_safe_row_bottom);
-    const line_box_t line {180u, bottom - 20u, 590u, bottom};
-    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
-    ASSERT_EQ(fixture.gaussian_control(), 1u); // Finite rectangle q suffices even when the far M underflows.
-    const auto x = line.left - 3u, y = line.top - 2u;
-    const double dx = 2.5 * 1500.0 / (content[2u] - content[0u]);
-    const double dy = 1.5 * 500.0 / (content[3u] - content[1u]);
-    const double sigma = 500.0 / v2::subtitle_contour_gaussian_sigma_short_side_divisor;
-    EXPECT_NEAR(fixture.gaussian_weights()[y * field_width + x],
-      std::exp(-(dx * dx + dy * dy) / (2.0 * sigma * sigma)),
-      v2::subtitle_contour_gaussian_weight_absolute_error_limit);
-    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.gaussian_weights()[(line.top + 1u) * field_width + line.left]),
-      std::bit_cast<std::uint32_t>(1.0f));
-    for (const auto pad_y : {0u, field_height - 1u}) {
-      const auto cy = std::clamp(pad_y, content[1u], content[3u] - 1u);
-      EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(300u, pad_y)),
-        std::bit_cast<std::uint32_t>(fixture.output_at(300u, cy)));
-      EXPECT_EQ(fixture.contour_distances()[pad_y * field_width + 300u], contour_distance_infinity);
+      EXPECT_EQ(fixture.state()[v2::subtitle_plane_warmup_word], 0u);
+      EXPECT_EQ(fixture.gaussian_control(), 0u);
+      EXPECT_TRUE(fixture.output_is_exact_base());
+      ASSERT_TRUE(fixture.observe_at(frame, {left, right}, frame * 100000u + 1u));
+      EXPECT_EQ(fixture.gaussian_control(), 0u);
+      EXPECT_TRUE(fixture.output_is_exact_base());
     }
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, WarmupCannotWaiveMalformedPackedStateOrNativeDistanceEvidence) {
+  TEST(HostSbsSubtitleSlr13GpuTest, RetiredWarmupWordsCannotReviveCurrentOrHistoricalProtection) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
     fixture.set_base(0.03f);
-    ASSERT_TRUE(fixture.set_authored_contour_mask(std::vector<std::uint32_t>(fixture.base().size(), 0u)));
     const line_box_t line {180u, 360u, 590u, 370u};
     ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
-    ASSERT_EQ(fixture.gaussian_control(), 1u);
     const auto identity = fixture.contour_identity();
-    const auto warm_output = fixture.output(), warm_weights = fixture.gaussian_weights();
-    for (const auto packed : {1u, 2u, 3u, 4u, 9u, 10u, 11u, 12u}) {
+    const auto output = fixture.output();
+    for (const auto packed : {1u, 2u, 3u, 4u, 5u, 8u, 9u, 10u, 11u, 12u, 16u, 0xffffffffu}) {
       SCOPED_TRACE(packed);
       ASSERT_TRUE(fixture.overwrite_state_word(v2::subtitle_plane_warmup_word, packed));
-      ASSERT_TRUE(fixture.condition_with_contour_identity_word(0u, identity[0u]));
-      EXPECT_EQ(fixture.gaussian_control(), 1u);
-      EXPECT_EQ(fixture.gaussian_weights(), warm_weights);
-      EXPECT_EQ(fixture.output(), warm_output);
-    }
-    for (const auto malformed : {5u, 6u, 7u, 13u, 14u, 15u, 16u, 0xffffffffu}) {
-      ASSERT_TRUE(fixture.overwrite_state_word(v2::subtitle_plane_warmup_word, malformed));
       ASSERT_TRUE(fixture.condition_with_contour_identity_word(0u, identity[0u]));
       EXPECT_EQ(fixture.gaussian_control(), 0u);
       EXPECT_TRUE(fixture.output_is_exact_base());
     }
-    ASSERT_TRUE(fixture.overwrite_state_word(v2::subtitle_plane_warmup_word, v2::subtitle_plane_warmup_observations));
-    for (const auto bad : {std::numeric_limits<float>::quiet_NaN(), -1.0f,
-           -std::numeric_limits<float>::infinity(), std::bit_cast<float>(0x80000000u)}) {
-      auto q = std::vector<float>(fixture.base().size(), contour_distance_infinity);
-      q[0u] = bad;
+    ASSERT_TRUE(fixture.overwrite_state_word(v2::subtitle_plane_warmup_word, 0u));
+    ASSERT_TRUE(fixture.condition_with_contour_identity_word(0u, identity[0u]));
+    EXPECT_EQ(fixture.output(), output);
+    ASSERT_EQ(fixture.gaussian_control(), 1u);
+    ASSERT_FALSE(fixture.output_is_exact_base());
+    for (const auto bad : {std::numeric_limits<float>::quiet_NaN(), -1.0f, -std::numeric_limits<float>::infinity(), std::bit_cast<float>(0x80000000u)}) {
+      SCOPED_TRACE(std::bit_cast<std::uint32_t>(bad));
+      // No valid row can enable the conditioner. These malformed runtime inputs are not
+      // valid saved producer packages; the maintained dump authenticator rejects them.
+      auto q = std::vector<float>(fixture.base().size(), bad);
       ASSERT_TRUE(fixture.condition_with_distance_field(q));
       EXPECT_EQ(fixture.gaussian_control(), 0u);
       EXPECT_TRUE(fixture.output_is_exact_base());
+      EXPECT_TRUE(std::all_of(fixture.gaussian_weights().begin(), fixture.gaussian_weights().end(), [](float value) {
+        return std::bit_cast<std::uint32_t>(value) == 0u;
+      }));
+
+      // A bad first sample cannot suppress a later genuine finite horizontal slab. Its
+      // own cell still abstains locally, while a known zero-budget cell pins current UI.
+      q.assign(q.size(), contour_distance_infinity);
+      q[0u] = bad;
+      std::fill_n(q.begin() + 364u * field_width, field_width, 0.f);
+      ASSERT_TRUE(fixture.condition_with_distance_field(q));
+      EXPECT_EQ(fixture.gaussian_control(), 1u);
+      EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.gaussian_weights()[0u]), 0u);
+      EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[0u]), std::bit_cast<std::uint32_t>(fixture.base()[0u]));
+      const auto positive = 364u * field_width + 200u;
+      EXPECT_EQ(fixture.gaussian_weights()[positive], 1.f);
+      EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[positive]), fixture.condition_params()[5u]);
     }
     ASSERT_TRUE(fixture.condition_with_distance_field(std::vector<float>(fixture.base().size(), contour_distance_infinity)));
-    EXPECT_EQ(fixture.gaussian_control(), 1u);
-    auto q = std::vector<float>(fixture.base().size(), contour_distance_infinity);
-    constexpr auto malformed_pixel = 364u * field_width + 300u;
-    q[malformed_pixel] = std::numeric_limits<float>::quiet_NaN();
-    ASSERT_TRUE(fixture.condition_with_distance_field(q));
-    EXPECT_EQ(fixture.gaussian_control(), 1u);
-    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.gaussian_weights()[malformed_pixel]), 0u);
-    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(300u, 364u)),
-      std::bit_cast<std::uint32_t>(fixture.base()[malformed_pixel]))
-      << "a finite rectangle distance must not hide a malformed native q at this node";
-    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(301u, 364u)), fixture.condition_params()[5u]);
-    for (const auto packed : {0u, v2::subtitle_plane_warmup_cue_bit}) {
-      SCOPED_TRACE(packed);
-      ASSERT_TRUE(fixture.overwrite_state_word(v2::subtitle_plane_warmup_word, packed));
-      // Cue-only8 is a valid settled state: actual pixel q still authorizes conditioning.
-      ASSERT_TRUE(fixture.condition_with_distance_field(std::vector<float>(fixture.base().size(), 0.f)));
-      EXPECT_EQ(fixture.gaussian_control(), 1u);
-      EXPECT_TRUE(std::all_of(fixture.gaussian_weights().begin(), fixture.gaussian_weights().end(),
-        [](float weight) { return weight == 1.f; }));
-      ASSERT_TRUE(fixture.condition_with_distance_field(std::vector<float>(fixture.base().size(), contour_distance_infinity)));
-      EXPECT_EQ(fixture.gaussian_control(), 0u);
-      EXPECT_TRUE(fixture.output_is_exact_base()) << "a cue latch alone cannot revive provisional cover protection";
-    }
+    EXPECT_EQ(fixture.gaussian_control(), 0u);
+    EXPECT_TRUE(fixture.output_is_exact_base());
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, DirectCurrentCoversNeedNoGeometryOwnerConfirmation) {
@@ -2043,7 +1910,7 @@ namespace {
     EXPECT_TRUE(fixture.output_is_exact_base());
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, SourceTimeDwellStartsWithFirstCurrentCover) {
+  TEST(HostSbsSubtitleSlr13GpuTest, FirstClearanceIsImmediateContinuationIsBoundedAndEmptyClears) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
@@ -2051,24 +1918,154 @@ namespace {
     const line_box_t line {180u, 360u, 590u, 370u};
     constexpr auto a = v2::subtitle_plane_adaptive_offset;
     ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
-    EXPECT_EQ(fixture.state()[a + 6u], 1u);
-    EXPECT_EQ(fixture.state()[a + 2u], 0u);
-    ASSERT_TRUE(fixture.observe_at(2u, {line}, 100000u));
-    EXPECT_EQ(fixture.state()[a + 2u], 0u);
-    ASSERT_TRUE(fixture.observe_at(3u, {line}, 100001u));
     EXPECT_EQ(fixture.state()[a + 2u], 2u);
-    EXPECT_GT(std::bit_cast<float>(fixture.state()[a + 3u]), 0.0f);
-    ASSERT_TRUE(fixture.observe_at(4u, {line}, 400001u));
     EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 8.0f / 1920.0f);
+    fixture.set_base(13.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(2u, {line}, 33334u));
+    EXPECT_EQ(fixture.state()[a + 2u], 4u);
+    EXPECT_NEAR(std::bit_cast<float>(fixture.state()[a + 3u]), 8.99999f / 1920.0f,
+      ui_retreat_arithmetic_tolerance);
+    fixture.set_base(21.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(3u, {line}, 66667u));
+    EXPECT_EQ(fixture.state()[a + 2u], 6u);
+    EXPECT_NEAR(std::bit_cast<float>(fixture.state()[a + 3u]), 9.99998f / 1920.0f,
+      ui_retreat_arithmetic_tolerance);
+
     fixture.set_base(-0.01f);
-    ASSERT_TRUE(fixture.observe_at(5u, {}, 500001u));
-    ASSERT_TRUE(fixture.observe_at(6u, {}, 2000000u));
-    EXPECT_EQ(fixture.state()[a + 2u], 2u);
-    ASSERT_TRUE(fixture.observe_at(7u, {}, 2000001u));
+    ASSERT_TRUE(fixture.observe_at(4u, {}, 100001u));
     EXPECT_EQ(fixture.state()[a + 2u], 0u);
-    EXPECT_GT(std::bit_cast<float>(fixture.state()[a + 3u]), 0.0f);
-    EXPECT_EQ(fixture.state()[3u], 0u);
+    EXPECT_EQ(fixture.state()[a + 3u], 0u);
+    EXPECT_EQ(fixture.state()[a + 4u], 100001u);
+    EXPECT_EQ(fixture.state()[a + 1u], 8u);
+    for (auto word : {6u, 7u, 8u, 9u, 10u, 11u, 13u, 14u, 15u})
+      EXPECT_EQ(fixture.state()[a + word], 0u) << word;
+    EXPECT_EQ(fixture.condition_params()[2u], 0u);
     EXPECT_TRUE(fixture.output_is_exact_base());
+    const auto empty_state = fixture.state();
+    ASSERT_TRUE(fixture.observe_at(4u, {}, 1600000u));
+    EXPECT_TRUE(std::equal(empty_state.begin() + a, empty_state.end(), fixture.state().begin() + a))
+      << "redispatch must not spend source time even for an empty cue";
+    fixture.set_base(1.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(5u, {line}, 1600001u));
+    EXPECT_EQ(fixture.state()[a + 2u], 1u);
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 4.0f / 1920.0f)
+      << "the new cue uses only its current floor, not the old24px history";
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, ContinuousCueRetreatUsesCurrentGoalWithoutDwellOrStaircase) {
+    subtitle_plane_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+    const line_box_t line {180u, 360u, 590u, 370u};
+    constexpr auto a = v2::subtitle_plane_adaptive_offset;
+    fixture.set_base(37.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
+    const auto initial = std::bit_cast<float>(fixture.state()[a + 3u]);
+    EXPECT_FLOAT_EQ(initial, 40.0f / 1920.0f);
+    fixture.set_base(33.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(2u, {line}, 33334u));
+    const auto after_first = std::bit_cast<float>(fixture.state()[a + 3u]);
+    EXPECT_EQ(fixture.state()[a + 2u], 9u);
+    EXPECT_NEAR(after_first, expected_ui_presentation_step(initial, 36.0f / 1920.0f, .033333),
+      ui_retreat_arithmetic_tolerance);
+    EXPECT_LT(after_first, initial) << "a lower current goal starts retreat now";
+    fixture.set_base(1.0f / 1920.0f);
+    auto expected = static_cast<double>(after_first);
+    std::uint64_t last_clock = 33334u;
+    for (const auto now : {66667ull, 100001ull, 200001ull, 333334ull}) {
+      ASSERT_TRUE(fixture.observe_at(3u + now / 10000u, {line}, now));
+      EXPECT_EQ(fixture.state()[a + 2u], 1u) << "no intermediate historical9-level goal";
+      expected = expected_ui_presentation_step(expected, 4.0f / 1920.0f, (now - last_clock) * 1.0e-6);
+      last_clock = now;
+      EXPECT_NEAR(std::bit_cast<float>(fixture.state()[a + 3u]), expected,
+        ui_retreat_arithmetic_tolerance);
+      EXPECT_GE(std::bit_cast<float>(fixture.state()[a + 3u]), 4.0f / 1920.0f);
+      for (auto word : {6u, 7u, 8u, 9u, 10u, 11u}) EXPECT_EQ(fixture.state()[a + word], 0u);
+    }
+    EXPECT_GT(std::bit_cast<float>(fixture.state()[a + 3u]) * 1920.0f, 30.0f)
+      << "long observation gaps cannot spend more than50ms each";
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, RetreatIsSourceTimeInvariantAtThirtySixtyAndNinetyFps) {
+    const auto run = [](std::uint32_t fps, float &result) {
+      subtitle_plane_fixture_t fixture;
+      std::string error;
+      if (!fixture.initialize(error)) { ADD_FAILURE() << error; return false; }
+      const line_box_t line {180u, 360u, 590u, 370u};
+      constexpr auto a = v2::subtitle_plane_adaptive_offset;
+      fixture.set_base(37.0f / 1920.0f);
+      if (!fixture.observe_at(1u, {line}, 1u)) return false;
+      fixture.set_base(1.0f / 1920.0f);
+      const auto samples = fps * 3u / 10u;
+      for (std::uint32_t step = 1u; step <= samples; ++step) {
+        const auto clock = 1u + static_cast<std::uint64_t>(step) * 300000u / samples;
+        if (!fixture.observe_at(1u + step, {line}, clock)) return false;
+      }
+      result = std::bit_cast<float>(fixture.state()[a + 3u]);
+      EXPECT_EQ(fixture.state()[a + 2u], 1u);
+      return true;
+    };
+    std::array<float, 3u> results {};
+    const std::array<std::uint32_t, 3u> fps {30u, 60u, 90u};
+    for (std::size_t index = 0u; index < fps.size(); ++index) {
+      SCOPED_TRACE(fps[index]);
+      ASSERT_TRUE(run(fps[index], results[index]));
+      EXPECT_NEAR(results[index], 31.0f / 1920.0f, ui_retreat_arithmetic_tolerance);
+      EXPECT_NEAR(results[index], results[0u], ui_retreat_arithmetic_tolerance);
+    }
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, Live7709EmptyAnd7712ReentryCannotRetainTheFortyPixelPlane) {
+    subtitle_plane_fixture_t fixture(1540u, 868u, 2536u, 1427u,
+      std::numeric_limits<std::uint32_t>::max(), std::numeric_limits<std::uint32_t>::max(),
+      {0u, 0u, 1540u, 866u});
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+    const line_box_t line {360u, 760u, 1180u, 780u};
+    constexpr auto a = v2::subtitle_plane_adaptive_offset;
+    // Authored Base isolates controller behavior at the exact observed source clocks.
+    // This is not a claim to replay missing7658source pixels or classifier observations.
+    fixture.set_base(37.0f / 2536.0f);
+    ASSERT_TRUE(fixture.observe_at(7658u, {line}, 329676082655ull));
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 40.0f / 2536.0f);
+    ASSERT_TRUE(fixture.observe_at(7709u, {}, 329677159653ull));
+    EXPECT_EQ(fixture.state()[a + 2u], 0u);
+    EXPECT_EQ(fixture.state()[a + 3u], 0u);
+    EXPECT_TRUE(fixture.output_is_exact_base());
+    fixture.set_base(5.0f / 2536.0f);
+    ASSERT_TRUE(fixture.observe_at(7712u, {line}, 329677259474ull));
+    EXPECT_EQ(fixture.state()[a + 2u], 2u);
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 8.0f / 2536.0f);
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, RetreatCapsIntegrationAndGeometryRearmDoesNotSpendMissingTime) {
+    subtitle_plane_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+    const line_box_t line {180u, 360u, 590u, 370u};
+    constexpr auto a = v2::subtitle_plane_adaptive_offset;
+    fixture.set_base(37.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
+    fixture.set_base(1.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(2u, {line}, 1000001u));
+    EXPECT_NEAR(std::bit_cast<float>(fixture.state()[a + 3u]),
+      expected_ui_presentation_step(40.0f / 1920.0f, 4.0f / 1920.0f, .25),
+      ui_retreat_arithmetic_tolerance);
+    fixture.set_base(37.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(3u, {line}, 1100001u));
+    const auto before_gap = fixture.state()[a + 3u];
+    fixture.set_geometry_available(false);
+    fixture.set_base(1.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(4u, {line}, 2100001u));
+    EXPECT_EQ(fixture.state()[a + 3u], before_gap);
+    EXPECT_EQ(fixture.state()[a + 4u], 0u);
+    fixture.set_geometry_available(true);
+    ASSERT_TRUE(fixture.observe_at(5u, {line}, 3100001u));
+    EXPECT_EQ(fixture.state()[a + 3u], before_gap) << "ready source rearms; missing seconds are not integrated";
+    ASSERT_TRUE(fixture.observe_at(6u, {line}, 3200001u));
+    EXPECT_NEAR(std::bit_cast<float>(fixture.state()[a + 3u]),
+      expected_ui_presentation_step(std::bit_cast<float>(before_gap), 4.0f / 1920.0f, .1),
+      ui_retreat_arithmetic_tolerance);
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, ClockFaultDisarmsAndDuplicateDoesNotSpendUiTime) {
@@ -2082,6 +2079,7 @@ namespace {
     ASSERT_TRUE(fixture.observe_at(2u, {line}, 100001u));
     ASSERT_TRUE(fixture.observe_at(3u, {line}, 400001u));
     const auto tail = fixture.state();
+    fixture.set_base(0.028f); // A stronger current requirement cannot bypass source-clock admission.
     ASSERT_TRUE(fixture.observe_at(3u, {line}, 800001u));
     EXPECT_TRUE(std::equal(tail.begin() + a, tail.end(), fixture.state().begin() + a));
     for (const auto now : {399999ull, 400001ull}) {
@@ -2122,7 +2120,55 @@ namespace {
     EXPECT_EQ(fixture.condition_params()[2u], 1u);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, CutAndDomainResetClearPlaneWithoutRejectingCurrentText) {
+  TEST(HostSbsSubtitleSlr13GpuTest, ReadyGeometryRearmsWithoutSnappingOrSpendingMissingInterval) {
+    subtitle_plane_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+    const line_box_t line {180u, 360u, 590u, 370u};
+    constexpr auto a = v2::subtitle_plane_adaptive_offset;
+    fixture.set_base(5.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 8.0f / 1920.0f);
+    fixture.set_geometry_available(false);
+    fixture.set_base(13.0f / 1920.0f);
+    ASSERT_TRUE(fixture.observe_at(2u, {line}, 1000001u));
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 8.0f / 1920.0f);
+    EXPECT_EQ(fixture.state()[a + 4u], 0u);
+    EXPECT_TRUE(fixture.output_is_exact_base());
+    fixture.set_geometry_available(true);
+    ASSERT_TRUE(fixture.observe_at(3u, {line}, 4000001u));
+    EXPECT_EQ(fixture.state()[a + 4u], 4000001u);
+    EXPECT_EQ(fixture.state()[a + 2u], 4u);
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 8.0f / 1920.0f);
+    EXPECT_EQ(fixture.state()[a + 1u] & 3u, 0u);
+    EXPECT_EQ(fixture.condition_params()[2u], 1u);
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, RetiredApproachAndRetreatFieldsCannotAuthorizeCurrentConditioning) {
+    subtitle_plane_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+    fixture.set_base(5.0f / 1920.0f);
+    const line_box_t line {180u, 360u, 590u, 370u};
+    constexpr auto a = v2::subtitle_plane_adaptive_offset;
+    ASSERT_TRUE(fixture.observe_at(1u, {line}, 1u));
+    const auto original = fixture.state();
+    ASSERT_FALSE(fixture.output_is_exact_base());
+    for (const auto [word, value] : {std::pair {1u, 1u}, {1u, 2u},
+           {6u, 1u}, {7u, 1u}, {8u, 1u}, {9u, 1u}, {10u, 1u}, {11u, 1u}}) {
+      SCOPED_TRACE(word);
+      SCOPED_TRACE(value);
+      ASSERT_TRUE(fixture.overwrite_state_word(a + word, original[a + word] | value));
+      ASSERT_TRUE(fixture.condition_only());
+      EXPECT_TRUE(fixture.output_is_exact_base());
+      EXPECT_EQ(fixture.gaussian_control(), 0u);
+      ASSERT_TRUE(fixture.overwrite_state_word(a + word, original[a + word]));
+      ASSERT_TRUE(fixture.condition_only());
+      EXPECT_FALSE(fixture.output_is_exact_base());
+    }
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, CutAndDomainResetBootstrapCurrentClearanceWithoutRejectingCurrentText) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
@@ -2136,7 +2182,7 @@ namespace {
     ASSERT_TRUE(fixture.observe_at(6u, {line}, 1400001u));
     EXPECT_EQ(fixture.state()[20u], 2u);
     EXPECT_EQ(fixture.state()[3u], 1u);
-    EXPECT_EQ(fixture.state()[a + 3u], 0u);
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 40.0f / 1920.0f);
     const auto state = fixture.state();
     fixture.set_cut(2u, true);
     ASSERT_TRUE(fixture.observe_at(6u, {line}, 1400001u));
@@ -2144,9 +2190,9 @@ namespace {
     fixture.set_analysis_generation(9u);
     ASSERT_TRUE(fixture.observe_at(7u, {line}, 1600001u));
     EXPECT_EQ(fixture.state()[6u], 9u);
-    EXPECT_EQ(fixture.state()[a + 3u], 0u);
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 40.0f / 1920.0f);
     ASSERT_TRUE(fixture.observe_at(8u, {line}, 1800001u, true));
-    EXPECT_EQ(fixture.state()[a + 3u], 0u);
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 40.0f / 1920.0f);
     EXPECT_EQ(fixture.condition_params()[2u], 1u);
   }
 
@@ -2335,14 +2381,14 @@ namespace {
     EXPECT_GT(std::bit_cast<float>(fixture.state()[a + 3u]), 0.0f);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, HostModelUiProposalUsesExactCentersAndActualGaussianForNonuniformBase) {
+  TEST(HostSbsSubtitleSlr13GpuTest, HostModelUiProposalUsesActualBudgetForNonuniformBase) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
     fixture.set_adaptive_policy_words(v2::adaptive_policy_id, 0u, 0.0065625f);
     fixture.set_base(-0.006f);
-    // A nonuniform Base verifies that actual M, rather than a reconstructed ideal alpha,
-    // drives each proposal cell. This fixture deliberately stops before shared post-limits.
+    // A nonuniform Base verifies the current cell's gap budget and direct feasible-interval
+    // projection. This fixture deliberately stops before shared post-limits.
     for (std::uint32_t column = 0u; column < 32u; ++column) {
       fixture.set_base_columns(column * field_width / 32u,
         (column + 1u) * field_width / 32u, -0.006f + 0.0004f * column);
@@ -2372,13 +2418,14 @@ namespace {
     EXPECT_GT(maximum_horizontal_step, 0.0f);
     EXPECT_GT(maximum_vertical_step, 0.0f);
     ASSERT_EQ(fixture.gaussian_control(), 1u);
-    const auto sample = 354u * field_width + 300u;
+    const auto sample = 358u * field_width + 300u;
     const auto m = fixture.gaussian_weights()[sample];
     ASSERT_GT(m, 0.0f);
     ASSERT_LT(m, 1.0f);
-    volatile float base_term = (1.0f - m) * fixture.base()[sample];
-    volatile float ui_term = m * std::bit_cast<float>(target_bits);
-    EXPECT_NEAR(fixture.output()[sample], base_term + ui_term,
+    const auto expected = expected_minimum_extension(fixture.base()[sample],
+      std::bit_cast<float>(target_bits), fixture.contour_distances()[sample], 1920u);
+    EXPECT_NEAR(m, expected.first, v2::subtitle_contour_gaussian_weight_absolute_error_limit);
+    EXPECT_NEAR(fixture.output()[sample], expected.second,
       4.0f * std::numeric_limits<float>::epsilon() * v2::direct_container_limit);
   }
 
@@ -2391,14 +2438,13 @@ namespace {
     const line_box_t line {180u, 360u, 590u, 370u};
     constexpr auto a = v2::subtitle_plane_adaptive_offset;
     ASSERT_TRUE(fixture.observe_at(330u, {line}, 1u));
+    EXPECT_EQ(fixture.state()[a + 3u], std::bit_cast<std::uint32_t>(0.04f))
+      << "the first valid observation reaches the representation cap without promising clearance";
     ASSERT_TRUE(fixture.observe_at(331u, {line}, 100001u));
     ASSERT_TRUE(fixture.observe_at(332u, {line}, 200001u));
     EXPECT_EQ(fixture.state()[a + 2u], 20u);
     EXPECT_NE(fixture.state()[a + 1u] & 4u, 0u);
     EXPECT_EQ(fixture.state()[a + 14u], fixture.state()[a + 13u]);
-    for (std::uint64_t update = 1u; update <= 8u; ++update) {
-      ASSERT_TRUE(fixture.observe_at(332u + update, {line}, 200001u + update * 250000u));
-    }
     EXPECT_EQ(fixture.state()[a + 3u], std::bit_cast<std::uint32_t>(0.04f));
     EXPECT_FLOAT_EQ(fixture.output_at(300u, 365u), 0.04f);
     EXPECT_FLOAT_EQ(fixture.output_at(0u, 0u), 0.0395f);
@@ -2407,7 +2453,7 @@ namespace {
     EXPECT_TRUE(fixture.output_is_exact_base());
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, HostModelUiPeripheralUnionAndRetreatWaitForAppliedTarget) {
+  TEST(HostSbsSubtitleSlr13GpuTest, HostModelUiPeripheralUnionRetreatsOnFirstLowerCurrentProbe) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
@@ -2420,6 +2466,7 @@ namespace {
     };
     constexpr auto a = v2::subtitle_plane_adaptive_offset;
     ASSERT_TRUE(fixture.observe_at(350u, {ribbon}, 1u));
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 40.0f / 1920.0f);
     ASSERT_TRUE(fixture.observe_at(351u, {ribbon}, 100001u));
     EXPECT_EQ(fixture.state()[a + 13u], field_width * (field_height - 346u));
     ASSERT_TRUE(fixture.observe_at(352u, {ribbon}, 200001u));
@@ -2427,12 +2474,15 @@ namespace {
     EXPECT_EQ(fixture.state()[a + 1u] & 4u, 0u);
     fixture.set_base(-0.01f);
     ASSERT_TRUE(fixture.observe_at(353u, {ribbon}, 300001u));
-    EXPECT_EQ(fixture.state()[a + 2u], 10u);
-    EXPECT_EQ(fixture.state()[a + 1u] & 2u, 0u);
-    EXPECT_EQ(fixture.state()[a + 8u], 0u);
+    EXPECT_EQ(fixture.state()[a + 2u], 0u);
+    EXPECT_NEAR(std::bit_cast<float>(fixture.state()[a + 3u]),
+      expected_ui_presentation_step(40.0f / 1920.0f, 0.0f, .1),
+      ui_retreat_arithmetic_tolerance);
+    EXPECT_EQ(fixture.state()[a + 1u] & 3u, 0u);
+    for (auto word : {6u, 7u, 8u, 9u, 10u, 11u}) EXPECT_EQ(fixture.state()[a + word], 0u);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, GaussianProposalUsesLiteralWeightsWithoutHardMarginOrTruncation) {
+  TEST(HostSbsSubtitleSlr13GpuTest, MinimumExtensionUsesOnlyTheRequiredCurrentGapBudget) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
@@ -2450,11 +2500,11 @@ namespace {
     ASSERT_EQ(fixture.gaussian_control(), 1u);
     const auto target_bits = fixture.condition_params()[5u];
     const float target = std::bit_cast<float>(target_bits);
-    const float sigma = std::min(fixture.contour_identity()[8u], fixture.contour_identity()[9u]) / v2::subtitle_contour_gaussian_sigma_short_side_divisor;
     for (std::size_t index = 0u; index < mask.size(); ++index) {
       const float q = fixture.contour_distances()[index], m = fixture.gaussian_weights()[index];
       ASSERT_TRUE(std::isfinite(q));
-      EXPECT_NEAR(m, std::exp(-static_cast<double>(q) / (2.0 * sigma * sigma)),
+      const auto expected = expected_minimum_extension(fixture.base()[index], target, q, 1920u);
+      EXPECT_NEAR(m, expected.first,
         v2::subtitle_contour_gaussian_weight_absolute_error_limit);
       if (q == 0.0f) {
         EXPECT_EQ(std::bit_cast<std::uint32_t>(m), std::bit_cast<std::uint32_t>(1.0f));
@@ -2462,21 +2512,25 @@ namespace {
       } else if (m == 0.0f) {
         EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[index]), std::bit_cast<std::uint32_t>(fixture.base()[index]));
       } else {
-        volatile float bt = (1.0f - m) * fixture.base()[index];
-        volatile float ut = m * target;
-        EXPECT_NEAR(fixture.output()[index], bt + ut, 4.0f * std::numeric_limits<float>::epsilon() * v2::direct_container_limit);
+        EXPECT_NEAR(fixture.output()[index], expected.second,
+          4.0f * std::numeric_limits<float>::epsilon() * v2::direct_container_limit);
       }
     }
-    // q>0 one node from support is a tail, not a presentation-only exact target margin.
+    // One node away has a nonzero permitted gap; it is not another exact UI pin.
     const auto adjacent = 372u * field_width + 269u;
     EXPECT_GT(fixture.contour_distances()[adjacent], 0.0f);
     EXPECT_GT(fixture.gaussian_weights()[adjacent], 0.0f);
     EXPECT_LT(fixture.gaussian_weights()[adjacent], 1.0f);
-    EXPECT_GT(fixture.output()[adjacent], target);
-    // Forty field columns from the ring is about 100 source pixels, beyond five current sigmas.
-    const auto untruncated = 372u * field_width + 230u;
-    EXPECT_GT(fixture.gaussian_weights()[untruncated], 0.0f);
-    EXPECT_LT(fixture.gaussian_weights()[untruncated], 1.0e-6f);
+    EXPECT_GT(fixture.output()[adjacent], std::min(fixture.base()[adjacent], target));
+    EXPECT_LT(fixture.output()[adjacent], std::max(fixture.base()[adjacent], target));
+    // Once Base is already feasible, distance has no presentation tail at all. The boundary
+    // follows this cell's actual Base/UI gap, not a global truncation radius.
+    const auto already_feasible = 372u * field_width + 240u;
+    EXPECT_GE(fixture.contour_distances()[already_feasible],
+      std::abs(target - fixture.base()[already_feasible]) * 1920.0f);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.gaussian_weights()[already_feasible]), 0u);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[already_feasible]),
+      std::bit_cast<std::uint32_t>(fixture.base()[already_feasible]));
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, GaussianProposalPreservesSignedZeroAndExactZeroWeightBaseEndpoints) {
@@ -2492,7 +2546,7 @@ namespace {
     ASSERT_EQ(fixture.state()[v2::subtitle_plane_warmup_word], 0u);
     std::vector<float> q(fixture.base().size(), std::numeric_limits<float>::infinity());
     q[364u * field_width + 300u] = 0.0f;
-    q[0u] = 1.0e6f;  // Legal finite q enables smoothing; far cells underflow in FP32.
+    q[0u] = 1.0e6f;  // A legal finite budget enables the tuple while distant cells copy Base.
     for (const auto target_bits : {0u, 0x80000000u}) {
       for (const float base : {-0.03f, 0.03f, std::bit_cast<float>(0x33000001u)}) {
         fixture.set_base(base);
@@ -2508,11 +2562,11 @@ namespace {
     }
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, GaussianActualExpSweepBoundsFractionalCentersAndFiniteUnderflow) {
+  TEST(HostSbsSubtitleSlr13GpuTest, MinimumExtensionBudgetSweepCoversBothDirectionsAndExactFeasibleEndpoints) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    fixture.set_base(0.0395f);
+    fixture.set_base(0.03f);
     const line_box_t line {180u, 360u, 590u, 390u};
     ASSERT_TRUE(fixture.observe_at(435u, {line}, 1u));
     ASSERT_TRUE(fixture.observe_at(436u, {line}, 100001u));
@@ -2520,36 +2574,53 @@ namespace {
     ASSERT_TRUE(fixture.observe_at(438u, {line}, 100003u));
     ASSERT_TRUE(fixture.observe_at(439u, {line}, 100004u));
     ASSERT_EQ(fixture.state()[v2::subtitle_plane_warmup_word], 0u);
-    const std::array<float, 14u> samples {
-      0.0f, 0.0001f, 0.01f, 0.125f, 0.5f, 1.0f, 2.25f, 10.5f, 25.0f, 100.0f,
+    const std::array<float, 19u> samples {
+      0.0f, std::numeric_limits<float>::denorm_min(), std::bit_cast<float>(0x007fffffu),
+      std::numeric_limits<float>::min(), 1.0e-8f, 1.0e-6f,
+      0.0001f, 0.01f, 0.125f, 0.5f, 1.0f, 2.25f, 10.5f, 25.0f, 100.0f,
       1000.25f, 10000.0f, 1000000.0f, std::numeric_limits<float>::infinity()
     };
     std::vector<float> q(fixture.base().size());
     for (std::size_t i = 0u; i < q.size(); ++i) q[i] = samples[i % samples.size()];
-    ASSERT_TRUE(fixture.condition_with_distance_field(q));
-    ASSERT_EQ(fixture.gaussian_control(), 1u);
-    const float sigma = 1080.0f / v2::subtitle_contour_gaussian_sigma_short_side_divisor;
-    volatile float sigma_squared = sigma * sigma;
-    volatile float denominator = 2.0f * sigma_squared;
     double maximum_error = 0.0;
-    for (std::size_t i = 0u; i < q.size(); ++i) {
-      const auto actual = fixture.gaussian_weights()[i];
-      ASSERT_TRUE(std::isfinite(actual));
-      const double expected = std::isfinite(q[i]) ? std::exp(-static_cast<double>(q[i]) / denominator) : 0.0;
-      maximum_error = std::max(maximum_error, std::abs(static_cast<double>(actual) - expected));
-      if (q[i] == 0.0f) {
-        EXPECT_EQ(std::bit_cast<std::uint32_t>(actual), std::bit_cast<std::uint32_t>(1.0f));
-        EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[i]), fixture.condition_params()[5u]);
-      } else if (!std::isfinite(q[i]) || q[i] == 1000000.0f) {
-        EXPECT_EQ(std::bit_cast<std::uint32_t>(actual), 0u);
-        EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[i]), std::bit_cast<std::uint32_t>(fixture.base()[i]));
+    for (const auto base : {-0.03f, 0.03f, 0.0f, std::bit_cast<float>(0x80000000u)}) {
+      SCOPED_TRACE(base);
+      fixture.set_base(base);
+      ASSERT_TRUE(fixture.overwrite_state_word(v2::subtitle_plane_adaptive_offset + 3u, 0u));
+      ASSERT_TRUE(fixture.condition_with_parameter_word(5u, 0u));
+      ASSERT_TRUE(fixture.condition_with_distance_field(q));
+      ASSERT_EQ(fixture.gaussian_control(), 1u);
+      for (std::size_t i = 0u; i < q.size(); ++i) {
+        const auto actual = fixture.gaussian_weights()[i];
+        ASSERT_TRUE(std::isfinite(actual));
+        const auto expected = expected_minimum_extension(base, 0.0f, q[i], 1920u);
+        maximum_error = std::max(maximum_error,
+          std::abs(static_cast<double>(actual) - expected.first));
+        if (expected.first == 1.0f) {
+          EXPECT_EQ(std::bit_cast<std::uint32_t>(actual), std::bit_cast<std::uint32_t>(1.0f))
+            << "field=" << i % field_width << ',' << i / field_width
+            << " distance_bits=" << std::bit_cast<std::uint32_t>(q[i]);
+          EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[i]), 0u);
+        } else if (expected.first == 0.0f) {
+          EXPECT_EQ(std::bit_cast<std::uint32_t>(actual), 0u)
+            << "field=" << i % field_width << ',' << i / field_width
+            << " distance_bits=" << std::bit_cast<std::uint32_t>(q[i]);
+          EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[i]), std::bit_cast<std::uint32_t>(base));
+        } else {
+          EXPECT_NEAR(fixture.output()[i], expected.second,
+            4.0f * std::numeric_limits<float>::epsilon() * v2::direct_container_limit);
+          // Any result closer to Base would violate this nearest footprint's interval.
+          const float output_gap = std::abs(fixture.output()[i]) * 1920.0f;
+          EXPECT_NEAR(output_gap, q[i], 4.0f * std::numeric_limits<float>::epsilon() *
+            std::max(q[i], 1.0f));
+        }
       }
     }
-    RecordProperty("gaussian_weight_max_absolute_error", maximum_error);
+    RecordProperty("minimum_extension_weight_max_absolute_error", maximum_error);
     EXPECT_LE(maximum_error, v2::subtitle_contour_gaussian_weight_absolute_error_limit);
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, GaussianEmptyAndInvalidFirstContentNodeDisableExactBase) {
+  TEST(HostSbsSubtitleSlr13GpuTest, GaussianAllInvalidBudgetsDisableWhileMalformedSamplesAbstainLocally) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
@@ -2561,15 +2632,28 @@ namespace {
     ASSERT_TRUE(fixture.observe_at(443u, {line}, 100003u));
     ASSERT_TRUE(fixture.observe_at(444u, {line}, 100004u));
     ASSERT_EQ(fixture.state()[v2::subtitle_plane_warmup_word], 0u);
-    for (const auto bad_q : {std::numeric_limits<float>::infinity(), -1.0f,
-           std::numeric_limits<float>::quiet_NaN(), -std::numeric_limits<float>::infinity()}) {
-      std::vector<float> q(fixture.base().size(), 0.0f);
-      q[0u] = bad_q;
+    ASSERT_EQ(fixture.gaussian_control(), 1u);
+    ASSERT_EQ(fixture.gaussian_weights()[364u * field_width + 200u], 1.f);
+    ASSERT_EQ(std::bit_cast<std::uint32_t>(fixture.output_at(200u, 364u)), fixture.condition_params()[5u]);
+    for (const auto bad_q : {std::numeric_limits<float>::infinity(), -1.0f, std::numeric_limits<float>::quiet_NaN(), -std::numeric_limits<float>::infinity()}) {
+      SCOPED_TRACE(std::bit_cast<std::uint32_t>(bad_q));
+      std::vector<float> q(fixture.base().size(), bad_q);
       ASSERT_TRUE(fixture.condition_with_distance_field(q));
       EXPECT_EQ(fixture.gaussian_control(), 0u);
       EXPECT_TRUE(fixture.output_is_exact_base());
-      EXPECT_TRUE(std::all_of(fixture.gaussian_weights().begin(), fixture.gaussian_weights().end(),
-        [](const float value) { return std::bit_cast<std::uint32_t>(value) == 0u; }));
+      EXPECT_TRUE(std::all_of(fixture.gaussian_weights().begin(), fixture.gaussian_weights().end(), [](const float value) {
+        return std::bit_cast<std::uint32_t>(value) == 0u;
+      }));
+      q.assign(q.size(), contour_distance_infinity);
+      q[0u] = bad_q;
+      std::fill_n(q.begin() + 364u * field_width, field_width, 0.f);
+      ASSERT_TRUE(fixture.condition_with_distance_field(q));
+      EXPECT_EQ(fixture.gaussian_control(), 1u);
+      EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.gaussian_weights()[0u]), 0u);
+      EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[0u]), std::bit_cast<std::uint32_t>(fixture.base()[0u]));
+      const auto positive = 364u * field_width + 200u;
+      EXPECT_EQ(fixture.gaussian_weights()[positive], 1.f);
+      EXPECT_EQ(std::bit_cast<std::uint32_t>(fixture.output()[positive]), fixture.condition_params()[5u]);
     }
     ASSERT_TRUE(fixture.set_authored_contour_mask(std::vector<std::uint32_t>(fixture.base().size(), 0u)));
     ASSERT_TRUE(fixture.condition_only());
@@ -2642,12 +2726,13 @@ namespace {
     }
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, LiteralGaussianProposalCanExceedSlopeAndRequiresSharedPostConditioning) {
+  TEST(HostSbsSubtitleSlr13GpuTest, MinimumExtensionProposalRespectsBothAxisBoundsBeforeSharedGuard) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
-    // The valid representation endpoint preserves an exposed-arc slope witness at the wider sigma.
-    fixture.set_base(v2::direct_container_limit);
+    // This immutable constant Base is already bounded. The nearest-footprint interval must
+    // preserve both bounds before the unchanged shared post-conditioner is invoked.
+    fixture.set_base(-v2::direct_container_limit);
     const line_box_t line {180u, 360u, 590u, 390u};
     ASSERT_TRUE(fixture.set_authored_contour_mask(authored_hollow_and_disjoint_contours()));
     ASSERT_TRUE(fixture.observe_at(460u, {line}, 1u));
@@ -2665,10 +2750,10 @@ namespace {
         if (y != 0u) maximum_vertical = std::max(maximum_vertical, std::abs(fixture.output()[i] - fixture.output()[i - field_width]));
       }
     }
-    // This fixture executes the literal proposal writer only. Shared subtitle_main tests
-    // independently qualify the final C75/Q30 field; no exact re-pin is asserted afterward.
-    EXPECT_GT(maximum_horizontal, v2::max_horizontal_slope / field_width);
-    EXPECT_GT(maximum_vertical, v2::max_vertical_shear / field_width);
+    // This fixture executes the proposal writer only. Shared subtitle_main tests separately
+    // qualify the final C75/Q30 guard; there is no post-limiter re-pin in this assertion.
+    EXPECT_LE(maximum_horizontal, v2::max_horizontal_slope / field_width + 1.0e-7f);
+    EXPECT_LE(maximum_vertical, v2::max_vertical_shear / field_width + 1.0e-7f);
   }
 
 

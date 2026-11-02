@@ -1,6 +1,6 @@
 /**
  * @file tests/unit/test_host_sbs_subtitle_contour_distance_gpu.cpp
- * @brief Native five-center Euclidean scans and shared subtitle smoothing guards.
+ * @brief Native five-center horizontal budgets with finite row footprints and row-local guards.
  */
 #include <gtest/gtest.h>
 
@@ -31,6 +31,10 @@ namespace {
   constexpr int center_offset = static_cast<int>(v2::subtitle_contour_gaussian_center_offset_source_pixels);
   constexpr std::uint32_t limiter_lines = 8u;
 
+  struct rectangle_metric_t {
+    double radius_x, horizontal;
+  };
+
   struct distance_constants_t {
     rect_t source;  // W, H, crop top, crop height.
     rect_t field;  // W, H, reserved, reserved.
@@ -44,6 +48,14 @@ namespace {
     rect_t content;
     std::vector<point_t> seeds;
   };
+
+  rectangle_metric_t rectangle_metric(const distance_case_t &test) {
+    const double width = test.content[2] - test.content[0];
+    const double h_step = (v2::limiter_horizontal_step_q_numerator /
+                           static_cast<std::uint32_t>(width)) /
+                          static_cast<double>(v2::limiter_q_scale);
+    return {test.source_w / width + v2::subtitle_contour_distance_completion_source_pixels, h_step * width};
+  }
 
   distance_constants_t constants(const distance_case_t &test) {
     const auto crop_h = std::min(test.source_h, static_cast<std::uint32_t>(v2::subtitle_ocr_ceil_div(static_cast<std::uint64_t>(test.source_w) * v2::subtitle_ocr_crop_aspect_height, v2::subtitle_ocr_crop_aspect_width)));
@@ -251,10 +263,20 @@ namespace {
         }
       }
       const std::vector<point_t> centers(union_set.begin(), union_set.end());
+      const auto metric = rectangle_metric(test);
       constexpr double epsilon = std::numeric_limits<float>::epsilon();
       const double x_error = 4.0 * epsilon * test.source_w;
-      const double y_error = 6.0 * epsilon * test.source_h;
-      const double position_error = std::hypot(x_error, y_error);
+      const double horizontal_coordinate_error = metric.horizontal *
+                                                 (x_error + 2.0 * epsilon * metric.radius_x);
+      const double horizontal_magnitude = metric.horizontal *
+                                          (test.source_w + 2 * center_offset + metric.radius_x);
+      const double gamma8 = 8.0 * epsilon / (1.0 - 8.0 * epsilon);
+      const auto error_bound = [&](double expected) {
+        return horizontal_coordinate_error +
+               gamma8 * (horizontal_magnitude + std::max(expected, 1.0));
+      };
+      oracle_final_.assign(final_.size(), std::numeric_limits<double>::infinity());
+      oracle_error_bounds_.assign(final_.size(), 0.0);
 
       struct error_stats_t {
         std::size_t failures = 0u;
@@ -262,14 +284,13 @@ namespace {
         std::string first_failure;
       } horizontal_error, q_error;
 
-      const auto check = [](error_stats_t &stats, float value, double expected, double error_bound, std::uint32_t x, std::uint32_t y) {
+      const auto check = [](error_stats_t &stats, float value, double expected, double allowed, std::uint32_t x, std::uint32_t y) {
         bool passed;
         if (std::isinf(expected)) {
           passed = std::isinf(value) && value > 0.0f;
         } else {
-          // Real-coordinate rounding and final FP32 cost arithmetic, not bit-identical hulls.
-          const double allowed = 2.0 * std::sqrt(expected) * error_bound + error_bound * error_bound +
-                                 4.0 * std::numeric_limits<float>::epsilon() * std::max(expected, 1.0);
+          // Only horizontal FP32 projection/cost arithmetic has an error envelope. Vertical
+          // membership below is exact integer arithmetic and has no boundary epsilon.
           const double error = std::abs(static_cast<double>(value) - expected);
           stats.maximum_absolute = std::max(stats.maximum_absolute, error);
           if (expected > 0.0) {
@@ -286,8 +307,8 @@ namespace {
           }
         }
       };
-      // Exhaustive combinatorial nearest-center oracle, independent of prefix chunk carries or
-      // parabola hull construction. It computes distance only, never a renderer/classifier.
+      // Exhaustive five-center oracle, independent of the production scans. Eligible rows
+      // contribute only horizontal Q30-derived parallax-pixel cost; other rows are +infinity.
       for (std::uint32_t row = 0u; row < data.source[3] + 4u; ++row) {
         for (std::uint32_t x = 0u; x < test.field_w; ++x) {
           double expected = std::numeric_limits<double>::infinity();
@@ -297,11 +318,11 @@ namespace {
                               0.5;
             for (const auto &[cx, cy] : centers) {
               if (cy + center_offset == static_cast<int>(row)) {
-                expected = std::min(expected, (sx - cx) * (sx - cx));
+                expected = std::min(expected, metric.horizontal * std::max(std::abs(sx - cx) - metric.radius_x, 0.0));
               }
             }
           }
-          check(horizontal_error, horizontal_[static_cast<std::size_t>(row) * test.field_w + x], expected, x_error, x, row);
+          check(horizontal_error, horizontal_[static_cast<std::size_t>(row) * test.field_w + x], expected, error_bound(expected), x, row);
         }
       }
       for (std::uint32_t y = 0u; y < test.field_h; ++y) {
@@ -311,14 +332,24 @@ namespace {
             const double sx = (static_cast<double>(x - test.content[0]) + 0.5) * test.source_w /
                                 (test.content[2] - test.content[0]) -
                               0.5;
-            const double sy = (static_cast<double>(y - test.content[1]) + 0.5) * test.source_h /
-                                (test.content[3] - test.content[1]) -
-                              0.5 - data.source[2];
+            const std::int64_t content_height = test.content[3] - test.content[1];
+            const std::int64_t query_y_numerator =
+              (2ll * (y - test.content[1]) + 1ll) * test.source_h - content_height -
+              2ll * content_height * data.source[2];
+            const std::int64_t radius_y_numerator = 2ll * test.source_h +
+                                                    2ll * content_height * v2::subtitle_contour_distance_completion_source_pixels;
             for (const auto &[cx, cy] : centers) {
-              expected = std::min(expected, (sx - cx) * (sx - cx) + (sy - cy) * (sy - cy));
+              const auto delta = query_y_numerator - 2ll * content_height * cy;
+              if (delta < -radius_y_numerator || delta > radius_y_numerator) {
+                continue;
+              }
+              expected = std::min(expected, metric.horizontal * std::max(std::abs(sx - cx) - metric.radius_x, 0.0));
             }
           }
-          check(q_error, final_[static_cast<std::size_t>(y) * test.field_w + x], expected, position_error, x, y);
+          const auto index = static_cast<std::size_t>(y) * test.field_w + x;
+          oracle_final_[index] = expected;
+          oracle_error_bounds_[index] = error_bound(expected);
+          check(q_error, final_[index], expected, oracle_error_bounds_[index], x, y);
         }
       }
       EXPECT_EQ(horizontal_error.failures, 0u) << horizontal_error.first_failure;
@@ -326,9 +357,9 @@ namespace {
       maximum_q_absolute_error_ = std::max(maximum_q_absolute_error_, q_error.maximum_absolute);
       maximum_q_relative_error_ = std::max(maximum_q_relative_error_, q_error.maximum_relative);
       maximum_q_bound_ratio_ = std::max(maximum_q_bound_ratio_, q_error.maximum_bound_ratio);
-      RecordProperty("gaussian_q_max_absolute_error", maximum_q_absolute_error_);
-      RecordProperty("gaussian_q_max_relative_error_nonzero", maximum_q_relative_error_);
-      RecordProperty("gaussian_q_max_error_to_bound_ratio", maximum_q_bound_ratio_);
+      RecordProperty("minimum_extension_D_max_absolute_error", maximum_q_absolute_error_);
+      RecordProperty("minimum_extension_D_max_relative_error_nonzero", maximum_q_relative_error_);
+      RecordProperty("minimum_extension_D_max_error_to_bound_ratio", maximum_q_bound_ratio_);
     }
 
     double maximum_q_absolute_error_ = 0.0, maximum_q_relative_error_ = 0.0, maximum_q_bound_ratio_ = 0.0;
@@ -336,12 +367,13 @@ namespace {
     ComPtr<ID3D11DeviceContext> context_;
     ComPtr<ID3D11ComputeShader> horizontal_shader_, vertical_shader_;
     std::vector<float> horizontal_, final_;
+    std::vector<double> oracle_final_, oracle_error_bounds_;
 
     struct smoothing_result_t {
       std::vector<std::uint32_t> upper, vertical, final;
     };
 
-    bool smooth(std::uint32_t width, std::uint32_t height, const rect_t &content, const std::vector<float> &proposal, const std::vector<float> &base, const std::vector<std::uint32_t> &control_words, bool subtitle, smoothing_result_t &result, bool zero_dispatch = false, std::uint32_t control_stride = sizeof(std::uint32_t)) {
+    bool smooth(std::uint32_t width, std::uint32_t height, const rect_t &content, const std::vector<float> &proposal, const std::vector<float> &base, const std::vector<std::uint32_t> &control_words, bool subtitle, smoothing_result_t &result, bool zero_dispatch = false, std::uint32_t control_stride = sizeof(std::uint32_t), bool original_horizontal_only_reference = false) {
       const auto size = static_cast<std::size_t>(width) * height;
       if (proposal.size() != size || base.size() != size) {
         return false;
@@ -408,7 +440,7 @@ namespace {
         context_->Dispatch((width + limiter_lines - 1u) / limiter_lines, 1u, 1u);
       }
       unbind();
-      srvs[0] = vertical.srv.Get();
+      srvs[0] = original_horizontal_only_reference && !subtitle ? candidate.srv.Get() : vertical.srv.Get();
       context_->CSSetShaderResources(0u, 4u, srvs);
       context_->CSSetUnorderedAccessViews(0u, 1u, final.uav.GetAddressOf(), nullptr);
       context_->CSSetShader(horizontal_shader.Get(), nullptr, 0u);
@@ -454,12 +486,12 @@ namespace {
     }
   }
 
-  TEST_F(HostSbsSubtitleContourDistanceGpuTest, FractionalAnisotropicNodesUseFiveCircularSourceCenters) {
+  TEST_F(HostSbsSubtitleContourDistanceGpuTest, FractionalAnisotropicNodesUseFiveSourceRectangles) {
     const distance_case_t test {31u, 29u, 23u, 17u, {2u, 1u, 21u, 16u}, {{13, 4}}};
     ASSERT_TRUE(run(test));
     expect_oracle(test);
-    // Fractional field samples generally do not land on a center. A projected field-pin or L1
-    // transform cannot silently replace real-source Euclidean distances.
+    // Fractional field samples retain noninteger budgets. A projected binary field pin or
+    // isotropic source metric cannot replace the source rectangles and Q30-derived axis costs.
     bool fractional = false;
     for (auto q : final_) {
       if (std::isfinite(q) && std::abs(q - std::round(q)) > 0.01f) {
@@ -467,6 +499,28 @@ namespace {
       }
     }
     EXPECT_TRUE(fractional);
+  }
+
+  TEST_F(HostSbsSubtitleContourDistanceGpuTest, HorizontalFootprintRowsHaveExactInclusiveEdgesAndGlyphZeroBudgets) {
+    const distance_case_t test {160u, 90u, 160u, 90u, {0u, 0u, 160u, 90u}, {{80, 12}}};
+    ASSERT_TRUE(run(test));
+    expect_oracle(test);
+    // Unit pitch, radius1+completion3, and vertical virtual centers12+/-2 give the exact
+    // inclusive row interval69..81 after adding cropTop63. No FP32 Y threshold is used.
+    for (std::uint32_t y = 0u; y < 90u; ++y) {
+      for (std::uint32_t x = 0u; x < 160u; ++x) {
+        const auto value = final_[static_cast<std::size_t>(y) * 160u + x];
+        if (y < 69u || y > 81u) {
+          EXPECT_TRUE(std::isinf(value) && value > 0.f);
+        } else {
+          EXPECT_TRUE(std::isfinite(value) && value >= 0.f);
+        }
+      }
+    }
+    EXPECT_EQ(bits(final_[69u * 160u + 80u]), 0u);
+    EXPECT_EQ(bits(final_[75u * 160u + 80u]), 0u);
+    EXPECT_EQ(bits(final_[81u * 160u + 80u]), 0u);
+    EXPECT_GT(final_[75u * 160u], 0.f);
   }
 
   TEST_F(HostSbsSubtitleContourDistanceGpuTest, VirtualEdgeCentersStayOutsideCropAndPaddingIsInfinity) {
@@ -488,7 +542,7 @@ namespace {
     EXPECT_GT(final_[30u * 127u + 80u], 0.0f);
   }
 
-  TEST_F(HostSbsSubtitleContourDistanceGpuTest, ParabolaHullCrossingsMatchExhaustiveNearestCenter) {
+  TEST_F(HostSbsSubtitleContourDistanceGpuTest, CompetingRowsMatchExhaustiveNearestRectangle) {
     distance_case_t test {1023u, 768u, 77u, 141u, {2u, 3u, 75u, 139u}, {}};
     for (int y = 0; y < 171; ++y) {
       test.seeds.emplace_back((y * 127 + (y % 7) * 31) % 1023, y);
@@ -586,7 +640,7 @@ namespace {
     }
   }
 
-  TEST_F(HostSbsSubtitleContourDistanceGpuTest, DisabledAndMalformedSmoothingCopyBaseBitsAndNearestContentPadding) {
+  TEST_F(HostSbsSubtitleContourDistanceGpuTest, DisabledAndMalformedSmoothingCopyFullBaseBitsIncludingPadding) {
     constexpr std::uint32_t width = 35u, height = 27u;
     const rect_t content {3u, 4u, 31u, 24u};
     std::vector<float> base(width * height, 0.03f), proposal(width * height, -0.04f);
@@ -604,11 +658,9 @@ namespace {
       ASSERT_TRUE(smooth(width, height, content, proposal, base, control, true, result));
       for (std::uint32_t y = 0u; y < height; ++y) {
         for (std::uint32_t x = 0u; x < width; ++x) {
-          const auto sx = std::clamp(x, content[0], content[2] - 1u);
-          const auto sy = std::clamp(y, content[1], content[3] - 1u);
-          const auto expected = bits(base[sy * width + sx]);
           const auto index = y * width + x;
-          ASSERT_EQ(result.upper[index], expected);
+          const auto expected = bits(base[index]);
+          ASSERT_EQ(result.upper[index], 0x7fc12345u) << "subtitle processing must not write the scene-only majorant";
           ASSERT_EQ(result.vertical[index], expected);
           ASSERT_EQ(result.final[index], expected);
         }
@@ -618,64 +670,100 @@ namespace {
     ASSERT_TRUE(smooth(width, height, content, proposal, base, {1u, 0u}, true, wrong_stride, false, 8u));
     for (std::uint32_t y = 0u; y < height; ++y) {
       for (std::uint32_t x = 0u; x < width; ++x) {
-        const auto sx = std::clamp(x, content[0], content[2] - 1u);
-        const auto sy = std::clamp(y, content[1], content[3] - 1u);
-        const auto expected = bits(base[sy * width + sx]);
         const auto index = y * width + x;
-        ASSERT_EQ(wrong_stride.upper[index], expected);
+        const auto expected = bits(base[index]);
+        ASSERT_EQ(wrong_stride.upper[index], 0x7fc12345u);
         ASSERT_EQ(wrong_stride.vertical[index], expected);
         ASSERT_EQ(wrong_stride.final[index], expected);
       }
     }
   }
 
-  TEST_F(HostSbsSubtitleContourDistanceGpuTest, EnabledSubtitleEntriesUseIdenticalOriginalCoreAndBothSlopeBounds) {
+  TEST_F(HostSbsSubtitleContourDistanceGpuTest, SubtitleCopiesProposalVerticallyThenUsesOriginalHorizontalCore) {
     for (const auto &[width, height] : std::array {std::pair {7u, 5u}, std::pair {509u, 293u}}) {
       SCOPED_TRACE(std::to_string(width) + "x" + std::to_string(height));
       const rect_t content {0u, 0u, width, height};
-      std::vector<float> proposal(static_cast<std::size_t>(width) * height), base(proposal.size(), -0.031f);
-      bool input_exceeds_slope = false;
+      std::vector<float> proposal(static_cast<std::size_t>(width) * height), base(proposal.size(), -.031f);
+      bool input_exceeds_horizontal = false;
       for (std::uint32_t y = 0u; y < height; ++y) {
         for (std::uint32_t x = 0u; x < width; ++x) {
-          // A deliberately unsafe scalar proposal. The native shared limiter, rather than a
-          // CPU recurrence or a hard-pin correction, must restore the two slope bounds.
-          proposal[static_cast<std::size_t>(y) * width + x] =
-            width == 7u ? ((x & 1u) != 0u ? -v2::direct_container_limit : v2::direct_container_limit) :
-                          v2::direct_container_limit * std::sin(0.7f * x) * std::cos(0.8f * y);
           const auto index = static_cast<std::size_t>(y) * width + x;
-          if (x != 0u) {
-            input_exceeds_slope |= std::abs(proposal[index] - proposal[index - 1u]) > v2::max_horizontal_slope / width;
-          }
-          if (y != 0u) {
-            input_exceeds_slope |= std::abs(proposal[index] - proposal[index - width]) > v2::max_vertical_shear / width;
+          proposal[index] = width == 7u ? ((x & 1u) ? -v2::direct_container_limit : v2::direct_container_limit) :
+                                          v2::direct_container_limit * std::sin(.7f * x) * std::cos(.8f * y);
+          if (x) {
+            input_exceeds_horizontal |= std::abs(proposal[index] - proposal[index - 1u]) > v2::max_horizontal_slope / width;
           }
         }
       }
-      ASSERT_TRUE(input_exceeds_slope);
-      smoothing_result_t original, subtitle;
+      ASSERT_TRUE(input_exceeds_horizontal);
+      smoothing_result_t original, subtitle, horizontal_reference;
       ASSERT_TRUE(smooth(width, height, content, proposal, base, {1u}, false, original));
       ASSERT_TRUE(smooth(width, height, content, proposal, base, {1u}, true, subtitle));
-      EXPECT_EQ(subtitle.upper, original.upper);
-      EXPECT_EQ(subtitle.vertical, original.vertical);
-      EXPECT_EQ(subtitle.final, original.final);
+      // Native main-horizontal receives the original proposal directly, independently of
+      // both subtitle entrypoints and of the unchanged main vertical limiter.
+      ASSERT_TRUE(smooth(width, height, content, proposal, base, {1u}, false, horizontal_reference, false, 4u, true));
+      EXPECT_EQ(subtitle.final, horizontal_reference.final);
       bool changed = false;
       for (std::uint32_t y = 0u; y < height; ++y) {
         for (std::uint32_t x = 0u; x < width; ++x) {
           const auto index = static_cast<std::size_t>(y) * width + x;
+          EXPECT_EQ(subtitle.upper[index], 0x7fc12345u);
+          EXPECT_EQ(subtitle.vertical[index], bits(proposal[index]));
           const auto value = from_bits(subtitle.final[index]);
           ASSERT_TRUE(std::isfinite(value));
           EXPECT_LE(std::abs(value), v2::direct_container_limit);
           changed |= subtitle.final[index] != bits(proposal[index]);
-          if (x != 0u) {
-            EXPECT_LE(std::abs(value - from_bits(subtitle.final[index - 1u])), v2::max_horizontal_slope / width + 1.0e-7f);
+          if (x) {
+            EXPECT_LE(std::abs(value - from_bits(subtitle.final[index - 1u])), v2::max_horizontal_slope / width + 1e-7f);
           }
-          if (y != 0u) {
-            EXPECT_LE(std::abs(value - from_bits(subtitle.final[index - width])), v2::max_vertical_shear / width + 1.0e-7f);
+          // The ordinary Base path retains both of its original bounds.
+          const auto original_value = from_bits(original.final[index]);
+          if (x) {
+            EXPECT_LE(std::abs(original_value - from_bits(original.final[index - 1u])), v2::max_horizontal_slope / width + 1e-7f);
+          }
+          if (y) {
+            EXPECT_LE(std::abs(original_value - from_bits(original.final[index - width])), v2::max_vertical_shear / width + 1e-7f);
           }
         }
       }
       EXPECT_TRUE(changed);
     }
+  }
+
+  TEST_F(HostSbsSubtitleContourDistanceGpuTest, SubtitlePreservesVerticalStepsAndExactUntouchedRowsIncludingPadding) {
+    constexpr std::uint32_t width = 509u, height = 9u;
+    const rect_t content {3u, 1u, width - 4u, height - 1u};
+    std::vector<float> base(width * height), proposal;
+    for (std::uint32_t y = 0u; y < height; ++y) {
+      for (std::uint32_t x = 0u; x < width; ++x) {
+        const auto index = static_cast<std::size_t>(y) * width + x;
+        base[index] = (x + y) % 3u == 0u ? from_bits(0x80000000u) : from_bits(0x3b123457u + (x + 3u * y) % 13u);
+      }
+    }
+    proposal = base;
+    for (auto y : {3u, 4u}) {
+      for (std::uint32_t x = content[0]; x < content[2]; ++x) {
+        proposal[static_cast<std::size_t>(y) * width + x] = y == 3u ? .02f : -.02f;
+      }
+    }
+    smoothing_result_t result;
+    ASSERT_TRUE(smooth(width, height, content, proposal, base, {1u}, true, result));
+    for (std::uint32_t y = 0u; y < height; ++y) {
+      for (std::uint32_t x = 0u; x < width; ++x) {
+        const auto index = static_cast<std::size_t>(y) * width + x;
+        EXPECT_EQ(result.upper[index], 0x7fc12345u);
+        EXPECT_EQ(result.vertical[index], bits(proposal[index]));
+        if (y != 3u && y != 4u) {
+          EXPECT_EQ(result.final[index], bits(base[index])) << "whole untouched row must preserve every Base bit";
+        }
+        if ((y == 3u || y == 4u) && x > content[0] && x < content[2]) {
+          EXPECT_LE(std::abs(from_bits(result.final[index]) - from_bits(result.final[index - 1u])), v2::max_horizontal_slope / (content[2] - content[0]) + 1e-7f);
+        }
+      }
+    }
+    const auto x = (content[0] + content[2]) / 2u;
+    EXPECT_GT(std::abs(from_bits(result.final[3u * width + x]) - from_bits(result.final[4u * width + x])), v2::max_vertical_shear / (content[2] - content[0]) + 1e-4f)
+      << "the subtitle path deliberately imposes no cross-row UI transition bound";
   }
 
   TEST_F(HostSbsSubtitleContourDistanceGpuTest, ZeroIndirectReuseHoldsAllSubtitleSmoothingOutputs) {
@@ -690,13 +778,51 @@ namespace {
     }
   }
 
-  TEST_F(HostSbsSubtitleContourDistanceGpuTest, LiteralGaussianProposalAloneDoesNotGuaranteeContractivity) {
-    // Mathematical exposed-arc witness, not a generated field or a renderer. The production
-    // proposal must be followed by the actual shared limiter tested above.
-    constexpr double gap = 32.0, sigma = 12.0;
-    const double slope = gap * std::exp(-0.5) / sigma;
-    EXPECT_GT(slope, 1.0);
+  TEST_F(HostSbsSubtitleContourDistanceGpuTest, NativeHorizontalBudgetIsBoundedOnFootprintRowsAndInfiniteElsewhere) {
+    const distance_case_t test {2536u, 1427u, 1540u, 868u, {0u, 0u, 1540u, 866u}, {{957, 349}, {1201, 381}}};
+    ASSERT_TRUE(run(test));
+    expect_oracle(test);
+    const double horizontal_step = (v2::limiter_horizontal_step_q_numerator / 1540u) /
+                                   static_cast<double>(v2::limiter_q_scale) * test.source_w;
+    bool saw_zero = false, saw_positive = false, saw_infinite_row = false;
+    double maximum_raw_excess = 0.0, maximum_excess_ratio = 0.0;
+    for (std::uint32_t y = 0u; y < 866u; ++y) {
+      const auto first = static_cast<std::size_t>(y) * 1540u;
+      const bool finite_row = std::isfinite(final_[first]);
+      saw_infinite_row |= !finite_row;
+      for (std::uint32_t x = 0u; x < 1540u; ++x) {
+        const auto i = first + x;
+        const double value = final_[i];
+        if (!finite_row) {
+          EXPECT_TRUE(std::isinf(value) && value > 0.0);
+          continue;
+        }
+        ASSERT_TRUE(std::isfinite(value) && value >= 0.0);
+        saw_zero |= value == 0.0;
+        saw_positive |= value > 0.0;
+        if (x == 0u) {
+          continue;
+        }
+        const auto other = i - 1u;
+        const double mathematical_tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
+                                              std::max({std::abs(oracle_final_[i]), std::abs(oracle_final_[other]), static_cast<double>(test.source_w)});
+        EXPECT_LE(std::abs(oracle_final_[i] - oracle_final_[other]), horizontal_step + mathematical_tolerance);
+        const double arithmetic_bound = oracle_error_bounds_[i] + oracle_error_bounds_[other];
+        const double raw_step = std::abs(value - final_[other]);
+        EXPECT_LE(raw_step, horizontal_step + arithmetic_bound + mathematical_tolerance);
+        maximum_raw_excess = std::max(maximum_raw_excess, raw_step - horizontal_step);
+        if (arithmetic_bound > 0.0) {
+          maximum_excess_ratio = std::max(maximum_excess_ratio, std::max(raw_step - horizontal_step, 0.0) / arithmetic_bound);
+        }
+      }
+    }
+    EXPECT_TRUE(saw_zero);
+    EXPECT_TRUE(saw_positive);
+    EXPECT_TRUE(saw_infinite_row);
+    RecordProperty("raw_budget_max_horizontal_excess_pixels", maximum_raw_excess);
+    RecordProperty("raw_budget_horizontal_excess_over_two_point_error_ratio", maximum_excess_ratio);
   }
+
 }  // namespace
 
 #endif

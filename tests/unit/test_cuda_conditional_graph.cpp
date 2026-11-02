@@ -1,22 +1,21 @@
-#include <gtest/gtest.h>
-
 #include "src/cuda_conditional_graph.h"
 #include "src/model_manager.h"
 #include "src/video_depth_estimator.h"
 
-#include <NvInfer.h>
-#include <NvInferPlugin.h>
-
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <gtest/gtest.h>
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <NvInfer.h>
+#include <NvInferPlugin.h>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -35,6 +34,7 @@ struct CUgraphNode_st {
   std::vector<CUgraphNode> dependents;
   CUDA_MEMCPY3D memcpy {};
   CUevent event = nullptr;
+  CUfunction kernel_function = nullptr;
 };
 
 namespace {
@@ -79,6 +79,41 @@ namespace {
     st.global.u32 [%rd1], %r1;
     ret;
 }
+// Test-only companion: observe receipt while a child is active, then write its original marker.
+// clock64 delay has a finite loop cap; cycles are not a wall-time/performance measurement.
+.visible .entry observe_staged_then_mark(
+    .param .u64 output_ptr,
+    .param .u32 marker_value,
+    .param .u64 record_ptr,
+    .param .u64 probe_ptr,
+    .param .u64 delay_cycles
+)
+{
+    .reg .pred %p<3>;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<9>;
+    ld.param.u64 %rd1, [output_ptr];
+    ld.param.u32 %r1, [marker_value];
+    ld.param.u64 %rd2, [record_ptr];
+    ld.param.u64 %rd3, [probe_ptr];
+    ld.param.u64 %rd4, [delay_cycles];
+    mov.u64 %rd5, %clock64;
+    mov.u32 %r3, 0;
+probe_delay:
+    mov.u64 %rd6, %clock64;
+    sub.u64 %rd7, %rd6, %rd5;
+    setp.ge.u64 %p1, %rd7, %rd4;
+    @%p1 bra probe_sample;
+    add.u32 %r3, %r3, 1;
+    setp.lt.u32 %p2, %r3, 10000000;
+    @%p2 bra probe_delay;
+probe_sample:
+    ld.global.u32 %r2, [%rd2+24];
+    st.global.u32 [%rd3], %r2;
+    st.global.u32 [%rd1], %r1;
+    ret;
+}
+
 )ptx";
 
   static_assert(proposal_magic == models::near_identical_proposal_magic);
@@ -341,6 +376,8 @@ namespace {
     bool graph_destroyed = false;
     bool executable_destroyed = false;
     bool module_unloaded = false;
+    bool fail_commit_function = false;
+    bool fail_commit_node = false;
     std::size_t event_create_calls = 0u;
     std::size_t event_node_calls = 0u;
     std::size_t event_elapsed_calls = 0u;
@@ -366,12 +403,18 @@ namespace {
   }
 
   CUresult __stdcall transaction_module_get_function(
-    CUfunction *function, CUmodule, const char *
+    CUfunction *function,
+    CUmodule,
+    const char *name
   ) {
     if (!function || !transactional_graph_fake) {
       return CUDA_ERROR_INVALID_HANDLE;
     }
-    *function = reinterpret_cast<CUfunction>(0x2020u);
+    const bool commit = std::string_view(name) == "commit_after_children";
+    if (commit && transactional_graph_fake->fail_commit_function) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    *function = reinterpret_cast<CUfunction>(commit ? 0x2120u : 0x2020u);
     return CUDA_SUCCESS;
   }
 
@@ -487,6 +530,7 @@ namespace {
     node->dependents.clear();
     node->memcpy = {};
     node->event = nullptr;
+    node->kernel_function = nullptr;
     return node;
   }
 
@@ -535,10 +579,12 @@ namespace {
     CUgraph graph,
     const CUgraphNode *dependencies,
     const std::size_t dependency_count,
-    const CUDA_KERNEL_NODE_PARAMS *
+    const CUDA_KERNEL_NODE_PARAMS *params
   ) {
-    if (!transactional_graph_fake || !node ||
-        graph != &transactional_graph_fake->wrapper) {
+    if (!transactional_graph_fake || !node || !params || graph != &transactional_graph_fake->wrapper) {
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    if (params->func == reinterpret_cast<CUfunction>(0x2120u) && transactional_graph_fake->fail_commit_node) {
       return CUDA_ERROR_INVALID_HANDLE;
     }
     CUgraphNode created = next_transaction_node(CU_GRAPH_NODE_TYPE_KERNEL);
@@ -548,6 +594,7 @@ namespace {
     if (dependencies && dependency_count != 0u) {
       created->dependencies.assign(dependencies, dependencies + dependency_count);
     }
+    created->kernel_function = params->func;
     graph->nodes.push_back(created);
     *node = created;
     return CUDA_SUCCESS;
@@ -758,9 +805,16 @@ namespace {
       const bool with_reuse_child = false,
       const bool with_scalar_prefix = false,
       const bool with_optional_child = false,
-      const bool with_branch_timing = false
+      const bool with_branch_timing = false,
+      const bool with_receipt_probe = false,
+      const std::uint64_t depth_delay_cycles = 0u,
+      const std::uint64_t optional_delay_cycles = 0u
     ) {
       cuda_ = &cuda_driver_api::get();
+      receipt_probe_enabled_ = with_receipt_probe;
+      if (with_receipt_probe && with_scalar_prefix) {
+        return initialize_result_e::failed;
+      }
       if (!cuda_->is_valid() || !cuda_->has_conditional_graph_support() ||
           !cuda_->cuDevicePrimaryCtxRetain || !cuda_->cuDevicePrimaryCtxRelease ||
           !cuda_->cuGraphAddKernelNode || !cuda_->cuGraphAddMemsetNode ||
@@ -779,24 +833,15 @@ namespace {
         return initialize_result_e::unavailable;
       }
       retained_ = true;
-      if (cuda_->cuCtxSetCurrent(context_) != CUDA_SUCCESS ||
-          cuda_->cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS ||
-          cuda_->cuMemAlloc(&records_, sizeof(decision_record_t) +
-                                        sizeof(request_record_t)) != CUDA_SUCCESS ||
-          cuda_->cuMemAlloc(&output_, sizeof(std::uint32_t)) != CUDA_SUCCESS ||
-          (with_optional_child &&
-           cuda_->cuMemAlloc(&optional_output_, sizeof(std::uint32_t)) != CUDA_SUCCESS) ||
-          cuda_->cuGraphCreate(&child_, 0u) != CUDA_SUCCESS ||
-          cuda_->cuModuleLoadDataEx(
-            &scalar_module_, scalar_prefix_consumer_ptx, 0u, nullptr, nullptr
-          ) != CUDA_SUCCESS ||
-          cuda_->cuModuleGetFunction(
-            &marker_writer_, scalar_module_, "write_inference_marker"
-          ) != CUDA_SUCCESS || !marker_writer_) {
+      if (cuda_->cuCtxSetCurrent(context_) != CUDA_SUCCESS || cuda_->cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS || cuda_->cuMemAlloc(&records_, sizeof(decision_record_t) + sizeof(request_record_t)) != CUDA_SUCCESS || cuda_->cuMemAlloc(&output_, sizeof(std::uint32_t)) != CUDA_SUCCESS || (with_optional_child && cuda_->cuMemAlloc(&optional_output_, sizeof(std::uint32_t)) != CUDA_SUCCESS) || (with_receipt_probe && cuda_->cuMemAlloc(&receipt_probe_, 2u * sizeof(std::uint32_t)) != CUDA_SUCCESS) || cuda_->cuGraphCreate(&child_, 0u) != CUDA_SUCCESS || cuda_->cuModuleLoadDataEx(&scalar_module_, scalar_prefix_consumer_ptx, 0u, nullptr, nullptr) != CUDA_SUCCESS || cuda_->cuModuleGetFunction(&marker_writer_, scalar_module_, "write_inference_marker") != CUDA_SUCCESS || !marker_writer_) {
         return initialize_result_e::failed;
       }
 
       scalar_prefix_ = with_scalar_prefix;
+      if (with_receipt_probe && (cuda_->cuModuleGetFunction(&receipt_probe_writer_, scalar_module_, "observe_staged_then_mark") != CUDA_SUCCESS || !receipt_probe_writer_)) {
+        return initialize_result_e::failed;
+      }
+
       if (scalar_prefix_) {
         if (!cuda_->cuGraphAddMemcpyNode ||
             cuda_->cuMemAlloc(&scalar_targets_[0], sizeof(std::uint64_t)) != CUDA_SUCCESS ||
@@ -856,16 +901,19 @@ namespace {
       } else {
         CUdeviceptr output = output_;
         std::uint32_t value = marker;
+        CUdeviceptr records = records_, probe = receipt_probe_;
+        auto delay = depth_delay_cycles;
         void *kernel_args[] = {&output, &value};
+        void *probe_args[] = {&output, &value, &records, &probe, &delay};
         CUDA_KERNEL_NODE_PARAMS kernel {};
-        kernel.func = marker_writer_;
+        kernel.func = with_receipt_probe ? receipt_probe_writer_ : marker_writer_;
         kernel.gridDimX = 1u;
         kernel.gridDimY = 1u;
         kernel.gridDimZ = 1u;
         kernel.blockDimX = 1u;
         kernel.blockDimY = 1u;
         kernel.blockDimZ = 1u;
-        kernel.kernelParams = kernel_args;
+        kernel.kernelParams = with_receipt_probe ? probe_args : kernel_args;
         CUgraphNode kernel_node = nullptr;
         if (cuda_->cuGraphAddKernelNode(
               &kernel_node, child_, nullptr, 0u, &kernel
@@ -892,16 +940,19 @@ namespace {
       if (with_optional_child) {
         CUdeviceptr optional_output = optional_output_;
         std::uint32_t value = optional_marker;
+        CUdeviceptr records = records_, probe = receipt_probe_ + sizeof(std::uint32_t);
+        auto delay = optional_delay_cycles;
         void *kernel_args[] = {&optional_output, &value};
+        void *probe_args[] = {&optional_output, &value, &records, &probe, &delay};
         CUDA_KERNEL_NODE_PARAMS kernel {};
-        kernel.func = marker_writer_;
+        kernel.func = with_receipt_probe ? receipt_probe_writer_ : marker_writer_;
         kernel.gridDimX = 1u;
         kernel.gridDimY = 1u;
         kernel.gridDimZ = 1u;
         kernel.blockDimX = 1u;
         kernel.blockDimY = 1u;
         kernel.blockDimZ = 1u;
-        kernel.kernelParams = kernel_args;
+        kernel.kernelParams = with_receipt_probe ? probe_args : kernel_args;
         CUgraphNode optional_kernel_node = nullptr;
         if (cuda_->cuGraphCreate(&optional_child_, 0u) != CUDA_SUCCESS ||
             cuda_->cuGraphAddKernelNode(
@@ -952,6 +1003,28 @@ namespace {
       return bridge_.read_branch_completion_timing(timing, current_root_complete) == CUDA_SUCCESS;
     }
 
+    bool reset_receipt_probe() {
+      if (!receipt_probe_enabled_) {
+        return true;
+      }
+      const std::array<std::uint32_t, 2u> unset {0xffffffffu, 0xffffffffu};
+      return receipt_probe_ && cuda_->cuMemcpyHtoD(
+                                 receipt_probe_,
+                                 unset.data(),
+                                 sizeof(unset)
+                               ) == CUDA_SUCCESS;
+    }
+
+    bool staged_receipt_was_uncommitted(const bool depth_ran, const bool optional_ran) {
+      if (!receipt_probe_enabled_ || !receipt_probe_) {
+        return false;
+      }
+      std::array<std::uint32_t, 2u> observed {};
+      return cuda_->cuMemcpyDtoH(observed.data(), receipt_probe_, sizeof(observed)) == CUDA_SUCCESS &&
+             observed[0] == (depth_ran ? 0u : 0xffffffffu) &&
+             observed[1] == (optional_ran ? 0u : 0xffffffffu);
+    }
+
     bool run(
       const decision_record_t &proposal,
       const request_record_t &request,
@@ -961,13 +1034,7 @@ namespace {
     ) {
       const std::uint32_t zero = 0u;
       decision_record_t receipt {};
-      if (cuda_->cuMemcpyHtoD(output_, &zero, sizeof(zero)) != CUDA_SUCCESS ||
-          cuda_->cuMemcpyHtoD(records_, &proposal, sizeof(proposal)) != CUDA_SUCCESS ||
-          cuda_->cuMemcpyHtoD(
-            records_ + sizeof(proposal), &request, sizeof(request)
-          ) != CUDA_SUCCESS ||
-          cuda_->cuGraphLaunch(bridge_.get(), stream_) != CUDA_SUCCESS ||
-          cuda_->cuStreamSynchronize(stream_) != CUDA_SUCCESS) {
+      if (!reset_receipt_probe() || cuda_->cuMemcpyHtoD(output_, &zero, sizeof(zero)) != CUDA_SUCCESS || cuda_->cuMemcpyHtoD(records_, &proposal, sizeof(proposal)) != CUDA_SUCCESS || cuda_->cuMemcpyHtoD(records_ + sizeof(proposal), &request, sizeof(request)) != CUDA_SUCCESS || cuda_->cuGraphLaunch(bridge_.get(), stream_) != CUDA_SUCCESS || cuda_->cuStreamSynchronize(stream_) != CUDA_SUCCESS) {
         return false;
       }
 
@@ -978,7 +1045,9 @@ namespace {
           cuda_->cuMemcpyDtoH(&receipt, records_, sizeof(receipt)) != CUDA_SUCCESS) {
         return false;
       }
-      return observed_output == expected_output &&
+      const auto expected = resolve_proposal(proposal, request, optional_child_ != nullptr);
+      return std::memcmp(&receipt, &expected, sizeof(receipt)) == 0 &&
+             observed_output == expected_output &&
              authenticated_receipt(receipt, request) == expected_authenticated_receipt &&
              (!expected_authenticated_receipt ||
               receipt.decision == static_cast<std::uint32_t>(expected_branch));
@@ -998,14 +1067,7 @@ namespace {
       }
       const std::uint32_t zero = 0u;
       decision_record_t receipt {};
-      if (cuda_->cuMemcpyHtoD(output_, &zero, sizeof(zero)) != CUDA_SUCCESS ||
-          cuda_->cuMemcpyHtoD(optional_output_, &zero, sizeof(zero)) != CUDA_SUCCESS ||
-          cuda_->cuMemcpyHtoD(records_, &proposal, sizeof(proposal)) != CUDA_SUCCESS ||
-          cuda_->cuMemcpyHtoD(
-            records_ + sizeof(proposal), &request, sizeof(request)
-          ) != CUDA_SUCCESS ||
-          cuda_->cuGraphLaunch(bridge_.get(), stream_) != CUDA_SUCCESS ||
-          cuda_->cuStreamSynchronize(stream_) != CUDA_SUCCESS) {
+      if (!reset_receipt_probe() || cuda_->cuMemcpyHtoD(output_, &zero, sizeof(zero)) != CUDA_SUCCESS || cuda_->cuMemcpyHtoD(optional_output_, &zero, sizeof(zero)) != CUDA_SUCCESS || cuda_->cuMemcpyHtoD(records_, &proposal, sizeof(proposal)) != CUDA_SUCCESS || cuda_->cuMemcpyHtoD(records_ + sizeof(proposal), &request, sizeof(request)) != CUDA_SUCCESS || cuda_->cuGraphLaunch(bridge_.get(), stream_) != CUDA_SUCCESS || cuda_->cuStreamSynchronize(stream_) != CUDA_SUCCESS) {
         return false;
       }
       std::uint32_t observed_depth = 0u;
@@ -1019,7 +1081,9 @@ namespace {
           cuda_->cuMemcpyDtoH(&receipt, records_, sizeof(receipt)) != CUDA_SUCCESS) {
         return false;
       }
-      return observed_depth == expected_depth_output &&
+      const auto expected = resolve_proposal(proposal, request, true);
+      return std::memcmp(&receipt, &expected, sizeof(receipt)) == 0 &&
+             observed_depth == expected_depth_output &&
              observed_optional == expected_optional_output &&
              authenticated_receipt(receipt, request) == expected_authenticated_receipt &&
              authenticated_optional_infer_receipt(receipt, request) ==
@@ -1133,6 +1197,9 @@ namespace {
       if (optional_output_ && cuda_->cuMemFree) {
         cuda_->cuMemFree(optional_output_);
       }
+      if (receipt_probe_ && cuda_->cuMemFree) {
+        cuda_->cuMemFree(receipt_probe_);
+      }
       if (records_ && cuda_->cuMemFree) {
         cuda_->cuMemFree(records_);
       }
@@ -1149,6 +1216,8 @@ namespace {
       output_ = 0u;
       optional_output_ = 0u;
       records_ = 0u;
+      receipt_probe_ = 0u;
+      receipt_probe_writer_ = nullptr;
       stream_ = nullptr;
       cuda_->cuCtxSetCurrent(previous_context_);
       if (retained_) {
@@ -1167,6 +1236,9 @@ namespace {
     CUcontext context_ = nullptr;
     CUstream stream_ = nullptr;
     CUdeviceptr records_ = 0u;
+    CUdeviceptr receipt_probe_ = 0u;
+    CUfunction receipt_probe_writer_ = nullptr;
+    bool receipt_probe_enabled_ = false;
     CUdeviceptr output_ = 0u;
     CUdeviceptr optional_output_ = 0u;
     CUgraph child_ = nullptr;
@@ -1336,6 +1408,7 @@ TEST(CudaConditionalGraphContract, MalformedAndStaleInputsFailOpenToInfer) {
   const auto receipt = resolve_proposal(valid_reuse, bad_request);
   EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch_e::infer));
   EXPECT_FALSE(authenticated_receipt(receipt, bad_request));
+  EXPECT_EQ(receipt.magic, 0u) << "Invalid RQST must remain uncommitted after child completion";
 
   const auto zero_request = make_request(0u, work_flag_e::optional_infer);
   EXPECT_FALSE(authenticated_request(zero_request));
@@ -1345,7 +1418,7 @@ TEST(CudaConditionalGraphContract, MalformedAndStaleInputsFailOpenToInfer) {
   ));
 }
 
-TEST(CudaConditionalGraphContract, EmbeddedPtxPublishesReceiptBeforeSettingCondition) {
+TEST(CudaConditionalGraphContract, EmbeddedPtxStagesThenCommitsAfterChildren) {
   const std::string_view ptx = bridge_ptx_source();
   EXPECT_NE(ptx.find(".extern .func cudaGraphSetConditional"), std::string_view::npos);
   EXPECT_NE(ptx.find("0x504f5250"), std::string_view::npos);  // PROP
@@ -1364,16 +1437,19 @@ TEST(CudaConditionalGraphContract, EmbeddedPtxPublishesReceiptBeforeSettingCondi
     << "The OCR sibling requires both optional work and the infer branch";
   EXPECT_EQ(ptx.find("or.pred %p27"), std::string_view::npos)
     << "No independent subtitle mode can bypass the joint infer branch";
-  const auto receipt_publish = ptx.find("st.global.u32 [%rd3+24], %r24");
-  const auto conditional_call = ptx.find("call.uni cudaGraphSetConditional");
+  const auto commit_entry = ptx.find(".visible .entry commit_after_children");
+  ASSERT_NE(commit_entry, std::string_view::npos);
+  const auto setter = ptx.substr(0u, commit_entry);
+  const auto commit = ptx.substr(commit_entry);
+  EXPECT_NE(setter.find("st.global.u32 [%rd3+24], 0"), std::string_view::npos);
+  EXPECT_EQ(setter.find("0x47524243"), std::string_view::npos);
+  EXPECT_NE(commit.find("setp.eq.u32 %p14, %r7, 0"), std::string_view::npos);
+  const auto guard = commit.find("@!%p17 ret;");
+  const auto receipt_publish = commit.find("st.global.u32 [%rd1+24], %r24");
+  ASSERT_NE(guard, std::string_view::npos);
   ASSERT_NE(receipt_publish, std::string_view::npos);
-  ASSERT_NE(conditional_call, std::string_view::npos);
-  EXPECT_LT(receipt_publish, conditional_call);
-  const auto post_publish_barrier = ptx.find("membar.gl", receipt_publish);
-  ASSERT_NE(post_publish_barrier, std::string_view::npos);
-  EXPECT_LT(post_publish_barrier, conditional_call);
-  EXPECT_EQ(ptx.find("st.global", receipt_publish + 1u), std::string_view::npos)
-    << "The receipt tag must be the final global store";
+  EXPECT_LT(guard, receipt_publish);
+  EXPECT_EQ(commit.find("st.global", receipt_publish + 1u), std::string_view::npos);
   const auto first_conditional_call = ptx.find("call.uni cudaGraphSetConditional");
   ASSERT_NE(first_conditional_call, std::string_view::npos);
   EXPECT_NE(
@@ -1536,6 +1612,64 @@ TEST(CudaConditionalGraphContract, BranchEventNodesStayInParentAndPreserveSiblin
   ASSERT_TRUE(graph.reset());
   EXPECT_EQ(state.destroyed_events, state.created_events);
   EXPECT_FALSE(state.event_destroyed_before_graph);
+}
+
+TEST(CudaConditionalGraphContract, CommitJoinsBothSiblingsWithOrWithoutOptionalWork) {
+  for (const bool optional : {false, true}) {
+    for (const bool timing : {false, true}) {
+      transactional_graph_fake_t state;
+      cuda_driver_api cuda = transactional_graph_api(state);
+      enable_transaction_timing_api(cuda);
+      CUgraphNode_st kernel {.type = CU_GRAPH_NODE_TYPE_KERNEL};
+      CUgraph_st child {{&kernel}};
+      auto graph = executable_t::build(cuda, {
+                                               .context = reinterpret_cast<CUcontext>(1u),
+                                               .infer_child = &child,
+                                               .optional_infer_child = optional ? &child : nullptr,
+                                               .decision_record = 0x1000u,
+                                               .request_record = 0x1100u,
+                                               .record_branch_timing = timing,
+                                             });
+      ASSERT_TRUE(graph.ready());
+      std::vector<CUgraphNode> conditionals;
+      std::vector<CUgraphNode> commits;
+      for (const auto node : state.wrapper.nodes) {
+        if (node->type == CU_GRAPH_NODE_TYPE_CONDITIONAL) {
+          conditionals.push_back(node);
+        }
+        if (node->kernel_function == reinterpret_cast<CUfunction>(0x2120u)) {
+          commits.push_back(node);
+        }
+      }
+      ASSERT_EQ(conditionals.size(), 2u);
+      ASSERT_EQ(commits.size(), 1u);
+      EXPECT_EQ(commits[0]->dependencies, conditionals);
+      ASSERT_TRUE(graph.reset());
+    }
+  }
+}
+
+TEST(CudaConditionalGraphContract, CommitBuildFailureNeverExposesExecutable) {
+  for (const bool missing_function : {false, true}) {
+    transactional_graph_fake_t state;
+    state.fail_commit_function = missing_function;
+    state.fail_commit_node = !missing_function;
+    cuda_driver_api cuda = transactional_graph_api(state);
+    CUgraphNode_st kernel {.type = CU_GRAPH_NODE_TYPE_KERNEL};
+    CUgraph_st child {{&kernel}};
+    auto graph = executable_t::build(cuda, {
+                                             .context = reinterpret_cast<CUcontext>(1u),
+                                             .infer_child = &child,
+                                             .decision_record = 0x1000u,
+                                             .request_record = 0x1100u,
+                                           });
+    EXPECT_FALSE(graph.ready());
+    EXPECT_EQ(graph.get(), nullptr);
+    EXPECT_EQ(graph.failure(), missing_function ? build_failure_e::commit_function_missing : build_failure_e::commit_node_add_failed);
+    EXPECT_TRUE(state.module_unloaded);
+    EXPECT_EQ(state.graph_destroyed, !missing_function);
+    EXPECT_TRUE(graph.empty());
+  }
 }
 
 TEST(CudaConditionalGraphContract, TimingRequiresExactRootAndCannotOverwritePendingLaunch) {
@@ -2063,6 +2197,68 @@ TEST(CudaConditionalGraphHardware, AlternatesBranchesAndFailsMalformedProposalTo
     reuse, bad_request, conditional_hardware_fixture_t::infer_marker, branch_e::infer, false
   ));
   EXPECT_TRUE(fixture.reset_restores_null_context());
+}
+
+TEST(CudaConditionalGraphHardware, ReceiptStaysUncommittedInsideEitherSiblingOrder) {
+  constexpr std::uint64_t token = 0x13572468abcdef01ull;
+  // Delay opposite siblings in separate immutable wrappers. Tests assert ordering, not timing.
+  for (const bool optional : {false, true}) {
+    for (const bool delay_depth : {false, true}) {
+      conditional_hardware_fixture_t fixture;
+      const auto initialized = fixture.initialize(false, false, optional, false, true, delay_depth ? 2000000u : 0u, delay_depth ? 0u : 2000000u);
+      if (initialized == conditional_hardware_fixture_t::initialize_result_e::unavailable) {
+        GTEST_SKIP() << "CUDA conditional graphs unavailable";
+      }
+      ASSERT_EQ(initialized, conditional_hardware_fixture_t::initialize_result_e::ready);
+      for (const auto work : {work_flag_e::none, work_flag_e::optional_ocr, work_flag_e::subtitle_observation}) {
+        for (const auto branch : {branch_e::reuse, branch_e::infer}) {
+          const auto request = make_request(token, work);
+          const bool depth_ran = branch == branch_e::infer;
+          const bool optional_ran = optional && depth_ran && work == work_flag_e::optional_ocr;
+          const auto proposal = make_proposal(branch, token);
+          if (optional) {
+            ASSERT_TRUE(fixture.run_optional(proposal, request, depth_ran ? conditional_hardware_fixture_t::infer_marker : 0u, optional_ran ? conditional_hardware_fixture_t::optional_infer_marker : 0u, branch, true, optional_ran));
+          } else {
+            ASSERT_TRUE(fixture.run(proposal, request, depth_ran ? conditional_hardware_fixture_t::infer_marker : 0u, branch, true));
+          }
+          EXPECT_TRUE(fixture.staged_receipt_was_uncommitted(depth_ran, optional_ran));
+        }
+      }
+    }
+  }
+}
+
+TEST(CudaConditionalGraphHardware, InvalidRequestsNeverCommitButKeepInferFallback) {
+  constexpr std::uint64_t token = 0x86421357fedcba09ull;
+  conditional_hardware_fixture_t fixture;
+  const auto initialized = fixture.initialize(false, false, true, false, true);
+  if (initialized == conditional_hardware_fixture_t::initialize_result_e::unavailable) {
+    GTEST_SKIP() << "CUDA conditional graphs unavailable";
+  }
+  ASSERT_EQ(initialized, conditional_hardware_fixture_t::initialize_result_e::ready);
+  const auto valid = make_request(token, work_flag_e::optional_ocr);
+  std::array<request_record_t, 8u> bad;
+  bad.fill(valid);
+  bad[0] = make_request(0u, work_flag_e::optional_ocr);
+  bad[1].token_low_cookie ^= 1u;
+  bad[2].token_high_cookie ^= 1u;
+  bad[3].magic = 0u;
+  bad[4].work_flags = 3u;
+  bad[4].work_flags_cookie = 3u ^ work_flags_cookie;
+  bad[5].work_flags = 4u;
+  bad[5].work_flags_cookie = 4u ^ work_flags_cookie;
+  bad[6].work_flags_cookie ^= 1u;
+  bad[7].reserved = 1u;
+  for (const auto &request : bad) {
+    EXPECT_FALSE(authenticated_request(request));
+    ASSERT_TRUE(fixture.run_optional(make_proposal(branch_e::reuse, token), request, conditional_hardware_fixture_t::infer_marker, 0u, branch_e::infer, false, false));
+    EXPECT_TRUE(fixture.staged_receipt_was_uncommitted(true, false));
+  }
+  // A bad PROP under good RQST still commits infer/noOOCR: preserve the established fallback.
+  auto bad_proposal = make_proposal(branch_e::reuse, token);
+  bad_proposal.magic = 0u;
+  ASSERT_TRUE(fixture.run_optional(bad_proposal, valid, conditional_hardware_fixture_t::infer_marker, 0u, branch_e::infer, true, false));
+  EXPECT_TRUE(fixture.staged_receipt_was_uncommitted(true, false));
 }
 
 TEST(CudaConditionalGraphHardware, ExecutesOptionalReuseElseChild) {
