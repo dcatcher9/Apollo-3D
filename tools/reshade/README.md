@@ -1756,8 +1756,8 @@ own pool count and log queue ([`test_game3d_view_quiesce.cpp`](test_game3d_view_
 the executable, which binds itself (`bind(GetModuleHandleW(nullptr))`). The seam characterization,
 the Streamline probe (with the capture owner's regressions it runs), the NGX call trace, the UI
 capture bridge, the diagnostic-texture fixture and the D3D12 native renderer runtime engage it at
-their start; their waits for a source age, an association window or a poll cadence are
-`hitch(ms)`. The seam characterization has no `--wall-clock` mode: its rows pin exact clock edges,
+their start; their waits for a source age, an association window, a poll cadence or Dump 3D's
+no-SDK window are `hitch(ms)`. The seam characterization has no `--wall-clock` mode: its rows pin exact clock edges,
 which only the game clock holds. Where such a fixture held a call to a real-time limit (the
 diagnostic-texture fixture's 100 ms for calls that must not wait for the GPU, the native renderer's
 50 ms 4K start and toggle back and the present-thread executor's 40 ms call, the Streamline probe's
