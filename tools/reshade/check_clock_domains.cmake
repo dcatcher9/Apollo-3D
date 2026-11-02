@@ -66,12 +66,17 @@ set(allowed
   "game3d_pool_submit.h|pool|2|pool|pool::submit, shipping and test branch: every pool callback of the add-on starts here, by family, so the test add-on counts it until it returns")
 
 # Code with its comments and its string and character literals blanked (raw
-# strings without a delimiter included), lines kept as lines.
+# strings without a delimiter included), lines kept as lines. Each pattern is
+# unrolled (a run of plain characters, then each escape, star run or
+# parenthesis run with the plain run after it), so that CMake's recursive
+# regex engine recurses once per escape or run, not once per character: a
+# long literal or comment cannot overflow its stack (the per-character form
+# crashed, with no output, on a literal of 25,000 characters).
 function(clock_code text out)
   string(REPLACE ";" "<semicolon>" text "${text}")
   string(REPLACE "\r" "" text "${text}")
   string(REGEX REPLACE
-    "//[^\n]*|/\\*([^*]|\\*+[^*/])*\\*+/|R\"\\(([^)]|\\)+[^)\"])*\\)+\"|\"([^\"\\\\\n]|\\\\.)*\"|'([^'\\\\\n]|\\\\.)*'"
+    "//[^\n]*|/\\*[^*]*\\*+([^*/][^*]*\\*+)*/|R\"\\([^)]*\\)+([^)\"][^)]*\\)+)*\"|\"[^\"\\\\\n]*(\\\\.[^\"\\\\\n]*)*\"|'[^'\\\\\n]*(\\\\.[^'\\\\\n]*)*'"
     " " text "${text}")
   set(${out} "${text}" PARENT_SCOPE)
 endfunction()
@@ -124,7 +129,9 @@ endfunction()
 
 set(kinds tick os qpc chrono pool)
 
-# The check must itself find what it exists to find.
+# The check must itself find what it exists to find, also after a literal or
+# comment far longer than any in the add-on.
+string(REPEAT "x" 40000 long_text)
 foreach(sample IN ITEMS
     "tick|  const auto now = GetTickCount64();\n"
     "tick|  auto read = &GetTickCount64;\n"
@@ -140,7 +147,11 @@ foreach(sample IN ITEMS
     "pool|  TrySubmitThreadpoolCallback(task, context, nullptr);\n"
     "pool|  std::thread worker(run);\n"
     "pool|  auto f = std::async(std::launch::async, run);\n"
-    "pool|  RegisterWaitForSingleObject(&wait, event, run, nullptr, INFINITE, WT_EXECUTEONLYONCE);\n")
+    "pool|  RegisterWaitForSingleObject(&wait, event, run, nullptr, INFINITE, WT_EXECUTEONLYONCE);\n"
+    "pool|  const char *text = \"${long_text}\";\n  TrySubmitThreadpoolCallback(task, context, nullptr);\n"
+    "tick|  /* ${long_text}\n ${long_text} */\n  const auto now = GetTickCount64();\n"
+    "chrono|  const auto shader = R\"(${long_text})\";\n  const auto now = std::chrono::steady_clock::now();\n"
+    "qpc|  const char quote = '\\\"', escaped[] = \"\\\\\\\" ${long_text}\";\n  QueryPerformanceCounter(&start);\n")
   string(REPLACE ";" "<semicolon>" sample "${sample}")
   string(REPLACE "|" ";" parts "${sample}")
   list(GET parts 0 kind)
