@@ -665,33 +665,48 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       // (observe_uncopied_member, 11-01): its layout epoch advances there,
       // so its evidence, set membership and raw roster entry follow the
       // change as with a copy. Without it B's layout moved only at its next
-      // copy, about one Present in five here (the fix review's
-      // fixrev-generic-1: no row changed an uncopied peer's crop before).
-      // Each change is judged where B was a retained set member when it
-      // drew the new crop and A showed its own current copy: a member whose
-      // layout changed leaves the set until it qualifies again, so the next
-      // change waits for B to be a member again (and 10 Presents).
+      // copy (the fix review's fixrev-generic-1: no row changed an uncopied
+      // peer's crop before). A change is judged where B was a retained set
+      // member, A showed its own current copy and B was not copied on that
+      // Present (its capture ticket), the case the helper exists for. A
+      // member whose layout changed leaves the set, and a non-member is not
+      // sampled, so after each change B returns to its full view and
+      // qualifies again in the ABC rotation before the next one.
       layout_epoch=reinterpret_cast<decltype(layout_epoch)>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineDepthTestLayoutEpoch"));
-      require(layout_epoch,"The overlap case needs the test add-on's layout epoch query");
+      const auto ticket_of=reinterpret_cast<decltype(capture_ticket)>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineDepthTestCaptureTicket"));
+      require(layout_epoch && ticket_of,"The overlap case needs the test add-on's layout epoch and capture ticket queries");
       const auto peer=[&](BOOL &retained){
         std::uint64_t value=0;retained=FALSE;
         require(layout_epoch(observed.runtime,reinterpret_cast<std::uint64_t>(member(2).texture.p),&value,&retained),"The layout epoch query failed");
         return value;
       };
-      unsigned judged=0,followed=0,presents=0,since=0;
-      while(judged<4 && presents<400){
-        BOOL member_before=FALSE;const auto before=peer(member_before);
-        const bool change=member_before && since>=10;
-        if(change){decoy->partial_viewport=!decoy->partial_viewport;since=0;}
-        tick("concurrent-peer-crop");++presents;++since;
-        if(change && capture_ready && !held && current(1)){
-          BOOL member_after=FALSE;++judged;followed+=peer(member_after)>before;
+      unsigned judged=0,followed=0,copied_changes=0,cycles=0;
+      while(judged<3 && cycles<10){
+        ++cycles;
+        set_mode(cadence::concurrent);warm("concurrent-peer-crop-anchor");
+        BOOL retained=FALSE;
+        for(unsigned waited=0;waited<200;++waited){
+          peer(retained);if(retained && waited>=10)break;
+          tick("concurrent-peer-crop-wait");
         }
+        if(retained){
+          const auto before=peer(retained);
+          decoy->partial_viewport=true;
+          tick("concurrent-peer-crop");
+          std::uint64_t copy=0;
+          require(ticket_of(observed.runtime,reinterpret_cast<std::uint64_t>(member(2).texture.p),&copy),"The capture ticket query failed");
+          if(capture_ready && !held && current(1)){
+            if(copy)++copied_changes;
+            else{++judged;followed+=peer(retained)>before;}
+          }
+          decoy->partial_viewport=false;
+        }
+        set_mode(cadence::abc);warm("concurrent-peer-crop-rotation");
       }
-      decoy->partial_viewport=false;layout_epoch=nullptr;
-      std::printf("MEASURE concurrent-peer-crop presents=%u judged=%u followed=%u\n",presents,judged,followed);
-      require(judged>=3,"The peer-crop phase judged fewer than three crop changes of a set member beside the shown anchor");
-      require(followed==judged,"A peer drawn with a new crop beside the shown anchor kept its old layout until its next copy");
+      layout_epoch=nullptr;
+      std::printf("MEASURE concurrent-peer-crop cycles=%u judged=%u followed=%u copied_changes=%u\n",cycles,judged,followed,copied_changes);
+      require(judged>=3,"The peer-crop phase judged fewer than three uncopied crop changes of a set member beside the shown anchor");
+      require(followed==judged,"A peer drawn with a new crop beside the shown anchor, not copied, kept its old layout until its next copy");
       set_mode(cadence::abc);warm("concurrent-back-to-ABC");stable("concurrent-back-to-ABC",30);
       missing_then_recover();
       require(stereo_observed[0]>0,"Concurrent preferred source never produced actual stereo pixels");

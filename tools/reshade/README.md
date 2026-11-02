@@ -1575,10 +1575,11 @@ DIRECT lists of one device: an [open gap](../../docs/reshade-sbs.md#selecting-sc
 cover complementary rotation becoming concurrent rendering (with A current on every Present, its
 peers B and C, drawn on every Present too, must hold their own end-of-frame copies on fewer than
 three quarters of those Presents, A on all of them: until 11-01 every member was copied on every
-Present; and B, drawn with a new crop while it is a retained set member and A is shown (three to
-four such changes, each after B qualified again), must take that crop on the Present it draws it,
-copied or not, by its layout epoch, the test add-on's `SunshineDepthTestLayoutEpoch`: the fix
-review's fixrev-generic-1, since no row changed an uncopied peer's crop before),
+Present; and B, drawn with a new crop while it is a retained set member, A is shown and B is not
+copied (three such changes, B returning to its full view and qualifying again in the ABC rotation
+after each), must take that crop on the Present it draws it, by its layout epoch, the test
+add-on's `SunshineDepthTestLayoutEpoch`: the fix review's fixrev-generic-1, since no row changed an
+uncopied peer's crop before),
 real asynchronous startup samples across missing presents, changing central depth from the
 first rendered scene, fresh ABC rotation without any prior continuous-source calibration,
 and a stable captured crop despite unrelated viewport activity. The layout case also requires
