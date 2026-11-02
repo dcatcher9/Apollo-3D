@@ -30,12 +30,19 @@ namespace sunshine_game3d::clock {
     return value ? value : GetTickCount64();
   }
 
-  // Engages the virtual clock at the later of the real tick and its current
-  // value, so every tick stamped before stays in the past: never 0, never
-  // backwards, and there is no disengage. Returns the engaged value.
-  inline std::uint64_t engage() {
+  // Engages the virtual clock lead_ms ahead of the real tick, or leaves it
+  // where it is when it is further ahead already, and returns its value: the
+  // virtual value is never 0 and never moves back, and there is no
+  // disengage. The lead is for reads on other threads: a read that raced the
+  // engage saw the clock unengaged and returned the real tick of its own
+  // moment, which stays in the past only while it is less than lead_ms after
+  // the engage's. Fixtures engage once their setup is done, under the pool
+  // and log barrier (SunshineGame3DTestQuiesce), with the long hitch that
+  // follows their setup as the lead.
+  inline std::uint64_t engage(std::uint64_t lead_ms) {
     const std::uint64_t real = GetTickCount64();
-    const std::uint64_t start = real ? real : 1;
+    const std::uint64_t ahead = lead_ms <= UINT64_MAX - real ? real + lead_ms : UINT64_MAX;
+    const std::uint64_t start = ahead ? ahead : 1;
     auto current = virtual_ms.load(std::memory_order_acquire);
     while (current < start &&
         !virtual_ms.compare_exchange_weak(current, start, std::memory_order_acq_rel, std::memory_order_acquire)) {}

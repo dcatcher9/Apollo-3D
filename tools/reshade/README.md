@@ -1707,9 +1707,14 @@ log throttles and the ticks its diagnostics print) only through `sunshine_game3d
 in [`game3d_clock.h`](game3d_clock.h). In the shipping build it is the `GetTickCount64` import under
 a second name, so each read compiles as a direct `GetTickCount64()` call. In the test add-on
 (`SUNSHINE_GAME3D_TEST_CLOCK`) it reads a virtual clock once a fixture engages it with
-`SunshineGame3DTestClockEngage` (at the later of the real tick and its current value: never 0,
-never backwards, no disengage), and the real tick before that; `SunshineGame3DTestClockNow` reads it
-and `SunshineGame3DTestClockAdvance` moves it forward, only while engaged
+`SunshineGame3DTestClockEngage(lead_ms)`, and the real tick before that. The engage starts the
+clock `lead_ms` ahead of the real tick, or leaves it where it is when it is further ahead already:
+the virtual value is never 0 and never moves back, and there is no disengage. The lead covers reads
+on other threads: a read that raced the engage saw the clock unengaged and returned the real tick
+of its own moment, which stays in the past while it is less than `lead_ms` after the engage's, so
+a fixture engages under `SunshineGame3DTestQuiesce` once its setup is done, with the long hitch that
+follows its setup as the lead. `SunshineGame3DTestClockNow` reads the clock and
+`SunshineGame3DTestClockAdvance` moves it forward, only while engaged
 ([`test_game3d_clock_exports.cpp`](test_game3d_clock_exports.cpp); `reshade_game3d_clock` tests the
 header's test branch). Wall time keeps its literal operating-system call: `release_device`'s
 fence-wait bound, the export ring's `steady_clock` lifetimes (the receiver process sees them), the
