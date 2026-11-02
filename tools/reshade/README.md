@@ -2349,20 +2349,25 @@ frame's recording before the add-on began an evaluation of that frame, the last 
 frame; one after that evaluation began, the frame being recorded. It is judged where depth
 presented a frame at that Present that offered the tag (its acquisition's presenting floor, read
 through `SunshineDepthTestQueueChoice`): without that window the UI still counts Presents, a limit
-of having no frame identity there. The other way too (`ui_frame:dropped`, the 11-01 final
-review's F13): a generated Present that presents that frame, within the declared generated count
-of Presents after its real Present (depth's window and the hold end there), and offers no UI input
-of its own must hold its decision (a UI row `held`, `generated_present` or
-`same_snapshot_inputs`). Its record tells a missing hold from a withdrawn one: the hold turns each
-UI row the add-on found `absent` into `held`, and a qualification that withdrew what a Present
-offered or held (its scope changed, or its last observation is older than the source age) refuses
-those rows as `qualification_unavailable`, which `ui_qualification` owns; so a Present with an
-`absent` UI row and no row ready, held or withdrawn made no hold. Until 11-01 only the first way
-was judged, so an add-on whose depth window ended early, or whose UI compared the wrong window,
-dropped every such hold (HUD parallax or mask flicker on each generated frame) unseen. Before the add-on read depth's window for it, five fixed-set
+of having no frame identity there. Before the add-on read depth's window for it, five fixed-set
 seeds failed there (a real Present of the next frame held as the earlier frame's generated one
-where DLSS-G presented no generated Present), and `--trace` prints `TRACE frame=<n> ui_frame` at
-each Present that offered or held.
+where DLSS-G presented no generated Present). The other way too (`ui_frame:dropped`, the 11-01
+final review's F13): a generated Present that presents that frame must hold its decision where it
+offers no UI input of its own (a UI row `held`, `generated_present` or `same_snapshot_inputs`),
+while depth's window reaches it (the frame supplied an FG copy its live scope accepts, and the
+Present is within the declared generated count of Presents after the frame's real Present) and
+the UI's evidence is fresh (a UI tag call within `evidence_age_ms`, 250 ms: the UI scope,
+`query_ui_scope`, ends after it, so after a pause of that long the UI shows no mask until the next
+UI tag, a limit of the UI's evidence age, not of this decision). Its record tells a missing hold
+from a withdrawn one: the hold turns each UI row the add-on found `absent` into `held`, and a
+qualification that withdrew what a Present offered or held (its scope changed, or its last
+observation is older than the source age) refuses those rows as `qualification_unavailable`,
+which `ui_qualification` owns; so a Present with an `absent` UI row and no row ready, held or
+withdrawn made no hold. Until 11-01 only the first way was judged, so an add-on whose depth window
+ended early, or whose UI compared the wrong window, dropped every such hold (HUD parallax or mask
+flicker on each generated frame) unseen. `--trace` prints `TRACE frame=<n> ui_frame` at each
+Present that offered or held and at each generated Present of the frame that offered (with each
+UI row, depth's presenting floor there and at the offer, and the UI tag's age).
 `reads=lost_at_present` fails every metadata read of the add-on during the Presents made while
 the frame is current, after its calls (`SunshineStreamlineTestFailMetadataReads`), as a read fails
 that failed on every attempt (`observer_snapshot.h`: the publication changed under it, or the
@@ -3030,9 +3035,10 @@ stale at frame 27, 2 of 2 runs),
 and one for the UI's hold at the generated Presents of the frame that
 offered its tag, `fg-on-ui-generated-hold-kept` (the 11-01 final review's F13: FG 3x with DLSS-G's
 copy and UI tags every frame, generated Presents after each real one, then inside each next frame's
-recording before its evaluation; with the add-on's UI made to ignore depth's window it fails
-`ui_frame:dropped` and its own `regression:no_ui_hold`, at least 20 judged holds, while before
-11-01 the timelines passed it),
+recording before its evaluation, two of those frames pausing before their calls so that their
+generated Presents offer no snapshot and hold by depth's window; it must judge at least 6 such
+holds, `regression:no_ui_hold`, and with the add-on's UI hold made to ignore depth's window those
+6 fail `ui_frame:dropped`, which the timelines did not judge before 11-01),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
