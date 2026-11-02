@@ -22,8 +22,10 @@
 // begin_evaluation, mark_pending) and every read the production functions
 // make are one value, so the exact edges hold without pinning (open item C:
 // on the real tick a step inside a row's setup put its stamps ahead of its
-// now). Rows age stamps on purpose (now - source_age - 1). There is no
-// --wall-clock mode: the rows' edges hold only on the game clock.
+// now). Rows age stamps on purpose (now - source_age - 1). --wall-clock runs
+// the rows as before the game clock: on the real tick, with the stamps a
+// row's setup made after its now pinned back to it (pin_clock) and the FG
+// scope's reads fixed to its now (scope_clock).
 #ifndef SUNSHINE_STREAMLINE_PROBE_TEST
   #error "Built only into the Streamline probe tests' view of the production sources"
 #endif
@@ -70,6 +72,36 @@ namespace sunshine_streamline::depth_capture {
     // The capture owner's globals, emptied before each row.
     void reset() {
       fixture::reset_owner();
+    }
+
+    // --wall-clock only (the real tick, as before the game clock): a row that
+    // reads now once before its setup: the stamps its fixture calls made after
+    // that read (make, begin_evaluation, mark_pending, each a later
+    // GetTickCount64, which steps about every 15.6 ms) are now, as when no
+    // step fell between them. A tick ahead of now is not fresh (fresh_lt), so
+    // a step inside a row's setup failed it (open item C, one run in 46: the
+    // FG owner whose own copies are gone). Stamps a row ages on purpose
+    // (now - source_age - 1) stay as they are. On the game clock nothing
+    // steps, so there is nothing to pin.
+    void pin_clock(std::uint64_t now) {
+      if (!fixture_clock().wall_clock()) {
+        return;
+      }
+      for (auto &value : capture_pool.slots) {
+        if (value.metadata.tick > now) {
+          value.metadata.tick = now;
+        }
+      }
+      for (auto &space : evaluations) {
+        for (auto &view : space.views) {
+          if (view.tick > now) {
+            view.tick = now;
+          }
+        }
+        if (space.pending_nomination.tick > now) {
+          space.pending_nomination.tick = now;
+        }
+      }
     }
 
     // One submitted, successful capture on the native queue (an FG input when
@@ -1150,10 +1182,14 @@ namespace sunshine_streamline::depth_capture {
         case edge_site::scope_enabled:
         case edge_site::scope_accepted:
           {
-            // Viewport 0's FG scope, on the game clock: FG turned on age ms
-            // ago, with no copy (alone) or one accepted now; or turned on long
-            // ago with a copy accepted age ms ago.
+            // Viewport 0's FG scope, on the game clock (--wall-clock: on the
+            // real tick, the scope's own reads fixed to now): FG turned on age
+            // ms ago, with no copy (alone) or one accepted now; or turned on
+            // long ago with a copy accepted age ms ago.
             const auto now = fixture_clock().now();
+            if (fixture_clock().wall_clock()) {
+              scope_clock = now;
+            }
             std::uint64_t enabled_tick = now - age;
             if (site != edge_site::scope_enabled_alone) {
               auto &view = views[0];
@@ -1164,7 +1200,9 @@ namespace sunshine_streamline::depth_capture {
               enabled_tick = now - sunshine_freshness::fg_silent_ms - 1;
               views[0].accepted_tick = now - age;
             }
-            return frame_generation_scope_live(epoch, 0, enabled_tick) ? "live" : "silent";
+            const bool live = frame_generation_scope_live(epoch, 0, enabled_tick);
+            scope_clock = 0;
+            return live ? "live" : "silent";
           }
         case edge_site::handoff_association:
           {
@@ -1400,6 +1438,7 @@ namespace sunshine_streamline::depth_capture {
         }
         const bool required = r.kind == variant::fg_policy;
         const selection_policy policy {required, required ? epoch : 0, 0, false, now - 16};
+        pin_clock(now);
         const auto pick = select_provider(owner, native, 2, now, policy);
         const char picked = label(pick, &sr, 'S', &fg, 'F');
         if (picked != r.picked || pick.result != r.result || pick.selection != r.selection) {
@@ -1686,6 +1725,7 @@ namespace sunshine_streamline::depth_capture {
         // Present's idle sweep or another record could recycle it first).
         const bool stands_in = std::string(r.outcome) == "C ready completed_snapshot" || std::string(r.outcome) == "C ready lineage_snapshot";
         const bool kept = !reclaimable(copy);
+        pin_clock(now);
         const auto pick = select_provider(owner, native, 2, now, policy);
         const auto got = pick_outcome(pick, &copy, 'C', own_slot, 'H');
         const bool interrupts = interrupts_admission(owner, pick);
@@ -2694,6 +2734,7 @@ namespace sunshine_streamline::depth_capture {
         head.source_nominated = true;
         head.metadata.source = storage;
         head.finished = false;
+        pin_clock(fixture_clock().now());
         if (reclaimable(copy)) {
           fail(std::string("P6 storage before retention, the copy ") + (between ? "completing between the reads" : "complete at both reads") + " is recycled");
         }
@@ -2749,6 +2790,7 @@ namespace sunshine_streamline::depth_capture {
         head.producer_fence = 5;
         head.copied_out = true;
         const auto now = fixture_clock().now();
+        pin_clock(now);
         const auto pick = select_provider(owner, native, 2, now, {});
         const auto got = std::string(1, label(pick, &own, 'O', &head, 'H')) + " " + name(pick.result) + " " + name(pick.selection);
         const char *expected = between ? "H ready current_capture" : "O ready completed_snapshot";
@@ -2823,6 +2865,7 @@ namespace sunshine_streamline::depth_capture {
         auto &head = copy(make(2, provider_kind::streamline, epoch, 30, fg_source, 0, 0));
         head.finished = false;
         const auto now = fixture_clock().now();
+        pin_clock(now);
         const selection_policy policy {true, epoch, 0, false, now - 16};
         const auto pick = select_provider(owner, native, 2, now, policy);
         const auto got = std::string(1, label(pick, sr, 'S', &fg, 'F')) + " " + name(pick.result) + " " + name(pick.selection);
@@ -3165,6 +3208,7 @@ namespace sunshine_streamline::depth_capture {
         }
         selection_policy policy {};
         scope.presenting_generated = generated;
+        pin_clock(now);
         const auto pick = select_provider(owner, native, 2, now, policy);
         const char picked = label(pick, expected, 'S', nullptr, '?');
         if (picked != r.picked || pick.result != r.result || pick.selection != r.selection) {
@@ -3845,11 +3889,9 @@ namespace sunshine_streamline::depth_capture {
 
 int main(int argc, char **argv) {
   using namespace sunshine_streamline::depth_capture;
-  if (sunshine_game3d_fixture::take_wall_clock_option(argc, argv)) {
-    std::fputs("Seam characterization has no --wall-clock mode: its rows pin exact clock edges, which only the game clock holds\n",
-      stderr);
-    return 2;
-  }
+  // --wall-clock: the real tick and the rows' old pins (pin_clock,
+  // scope_clock), as before the game clock; engage() then never engages.
+  sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
   try {
     auto &clock = fixture_clock();
     if (!clock.bind(GetModuleHandleW(nullptr))) {

@@ -726,6 +726,9 @@ namespace sunshine_streamline::depth_capture {
     bool reusable_preserved(const slot &entry, const input &value, std::uint64_t recording);
     void describe_packet(const slot &value, std::uint64_t consumer, packet &out);
     void expire_association(queue_state &owner, std::uint64_t now);
+    // Nonzero: frame_generation_scope_live's fixed clock (the seam
+    // characterization's --wall-clock mode).
+    extern std::atomic<std::uint64_t> scope_clock;
     void record_frame_generation_copy(const input &value);
     consumer_status preserved_admission(const slot &value, const preservation_ticket &ticket,
       std::uint64_t consumer, std::uint64_t consumer_device, std::uint64_t recording);
