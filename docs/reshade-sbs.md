@@ -1401,7 +1401,15 @@ nothing) while DLSS-G presented fewer generated Presents of the frame before tha
 add-on sees exactly what it sees at that earlier frame's next generated Present, so depth's window
 still presents the earlier frame there and the UI holds its decision, which the T1 grace would show
 there as well (soak seed 117a6b99131447b1 at frame 40; the session timelines leave that hold
-unjudged since 11-01, row `fg-silent-tag-only-then-callless-real-present-hitch`). The
+unjudged since 11-01, row `fg-silent-tag-only-then-callless-real-present-hitch`), and so at that
+frame's own generated Presents while they are within the earlier frame's count (row
+`fg-silent-tag-only-then-callless-generated-hitch`, since the second fix review of 11-01). Depth
+there holds the earlier frame's own copy as its window's, however old (`own_frame`): after a hitch
+of the source age that copy, 400 ms or more old, shows on the new frame's image for that Present.
+The session timelines record this as the found defect `OPEN-C-depth-unidentified-real`, awaiting
+the owner: accept that depth there, or show mono, which the add-on could do only by also flashing
+2D at the generated Presents owner ruling Q2 (10-30) keeps in depth, since it sees the same calls
+there. The
 capture owner, however, offers each kind's
 newest ready snapshot on every Present while it is recent (250 ms), and the offscreen UI layer its
 newest copy, so a generated Present normally re-offers its real frame's inputs instead of offering

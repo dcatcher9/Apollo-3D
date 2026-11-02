@@ -2375,14 +2375,23 @@ frame's recording before the add-on began an evaluation of that frame, the last 
 frame; one after that evaluation began, the frame being recorded. It is judged where depth
 presented a frame at that Present that offered the tag (its acquisition's presenting floor, read
 through `SunshineDepthTestQueueChoice`): without that window the UI still counts Presents, a limit
-of having no frame identity there. Nor is a hold of the last real Present's frame judged at a real
-Present (11-01, OPEN C) whose frame made no depth call before it (no tag call, SR or DLSS-G
-evaluation, no FG options event) while fewer Presents than the declared generated count presented
-that frame since its Present: the add-on sees there what it sees at that frame's next generated
-Present, where DLSS-G presents all of them (a frame's constants and a UI tag call end no window;
-the 4-frame reproducer of `fg-on-deferred-tag-generated-inside-after-hitch-untag` makes the same
-calls at its frame 3 and must hold), so depth's window still presents that frame there, the same
-limit of no frame identity. Before the add-on read depth's window for it, five fixed-set
+of having no frame identity there. Nor is a hold of the decision of the last real Present whose
+frame made a depth call judged at a Present without frame identity (11-01, OPEN C): the real
+Present of a frame that made no depth call before it (no tag call, SR or DLSS-G evaluation, no FG
+On or Off; its constants, UI tag calls and its own count in the FG options are none), and each
+generated Present after it before a later frame's evaluation began, while the Presents since that
+earlier real Present are within the generated count in force at the Present (the add-on's grant
+reads each Present's count, so a callless frame that raises it extends the window there as the
+add-on does). The add-on sees there what it sees at that earlier frame's generated Presents, where
+DLSS-G presents all of them (a frame's constants and a UI tag call end no window; the 4-frame
+reproducer of `fg-on-deferred-tag-generated-inside-after-hitch-untag` makes the same calls at its
+frame 3 and must hold), so depth's window still presents that frame there, the same limit of no
+frame identity. Each such unjudged hold is counted, and a row written for it must make at least
+the holds it names (`regression:no_unidentified_hold`). Until the second fix review of 11-01 only
+the callless frame's real Present was left out, so its own generated Presents within the count
+failed (`fg-silent-tag-only-then-callless-generated-hitch`). The depth twin, that frame's copy held
+past the source age at such a real Present, is the found defect `OPEN-C-depth-unidentified-real`
+(Found defects). Before the add-on read depth's window for it, five fixed-set
 seeds failed there (a real Present of the next frame held as the earlier frame's generated one
 where DLSS-G presented no generated Present). The other way too (`ui_frame:dropped`, the 11-01
 final review's F13): a generated Present that presents that frame must hold its decision where it
@@ -2599,8 +2608,17 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
 Only C2 (until Step 4; C1 closed on 10-27) and R1-late-signaller (O1, 10-27) are limitations the owner approved; a matrix row's recorded gap
 over frames would be one too (C5, the last, closed on 10-26). Any other row is a defect these tests
 found, its `found` naming when and which test; it is excused only until the owner decides it, so that
-the gate stays usable meanwhile, and the decision removes its row and witness. None is open: the
-last, C8, closed on 10-26. Each run prints found defects apart
+the gate stays usable meanwhile, and the decision removes its row and witness. One is open,
+`OPEN-C-depth-unidentified-real` (11-01, recorded by the second fix review; C8, the one before,
+closed on 10-26): with FG on, a frame that makes no depth call before its real Present (its
+constants and UI tags only, after a hitch of the source age) inside the earlier frame's declared
+generated count while DLSS-G presented fewer. The add-on cannot tell that real Present from the
+earlier frame's generated Present, where owner ruling Q2 (10-30) shows that frame's own copy however
+old, so depth's window holds that copy past the source age on the new frame's image for that
+Present (`continuity:stale`, limitation `unidentified_real`: the row excuses staleness only, and
+only on such a frame; the UI's hold there is left unjudged). Its witness is C1-openc's evidence
+list twinDepth (14ec980a). The owner decides between accepting that depth there and mono, which
+the add-on could show only by also flashing 2D at Q2's generated Presents. Each run prints found defects apart
 (`MEASURE native-provider continuity-found-defects` and `MEASURE session-timelines found-defects`,
 each row's violations, or `none`), and a strict run fails their violations as any other:
 `SUNSHINE_GAME3D_CONTINUITY_STRICT=1`, or the contract runner's `-StrictContinuity`, which also
@@ -3074,20 +3092,25 @@ holds, `regression:no_ui_hold`, and with the add-on's window hold removed (no ho
 named the input's frame) those 6 fail `ui_frame:dropped`, which the timelines did not judge before
 11-01; a UI that fell back to Present counting would still hold them, which `ui_frame:held` judges in
 `fg-on-ui-window-ends-at-next-evaluation-hitch`),
-and one for a real Present without frame identity, `fg-silent-tag-only-then-callless-real-present-hitch`
+and two for Presents without frame identity: `fg-silent-tag-only-then-callless-real-present-hitch`
 (soak seed 117a6b99131447b1's frames 29 to 42 and its frames 37 to 42 again: on a silent FG scope a
 tag-only frame whose FG tag is refused at its call declares one generated Present that DLSS-G does
 not present, then a frame whose only calls are its constants and UI tags, after a hitch of the
 source age, makes its real Present; the tag-only frame's window, open since its refused call ends
 the earlier one, holds its UI decision there, as Present counting did before 11-01; the judge
-failed that hold, `ui_frame:held` at frame 31, every run, until 11-01 left it unjudged),
+failed that hold, `ui_frame:held` at frame 31, every run, until 11-01 left it unjudged; it must
+make at least one such hold), and `fg-silent-tag-only-then-callless-generated-hitch` (the same with
+two generated Presents declared and the callless frame presenting two after its real Present: its
+first is within the tag-only frame's count and holds that frame's decision too; it must make at
+least two such holds, and until the second fix review of 11-01 that generated Present failed
+`ui_frame:held`),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
-every seed), and one witness per open row the timelines found or carry (none is open since C5 closed
-on 10-26): an event list whose frames meet the limitation alone, long enough to lose depth on every
+every seed), and one witness per open row the timelines found or carry (one is open: OPEN C's depth
+twin, 11-01; C5's closed on 10-26): an event list whose frames meet the limitation alone, long enough to lose depth on every
 run; a witness that loses none fails the set, as the matrix's gap seeds keep a recorded gap's own
-failing cell. `--trace` prints every Present's
+failing cell. `--only <name>` runs one regression or witness with its own checks. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.
 
 A regression timeline whose per-Present trace T1 compares exactly states when the GPU runs the SR
@@ -3122,7 +3145,7 @@ watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first; t
 twice a full run when the set took about 235 s, and each regression row adds about 2 s). Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
-      --seeds N [--from M]] [--shard i/N] [--shrink-runs N] [--trace]
+      --seeds N [--from M]] [--only <regression or witness>] [--shard i/N] [--shrink-runs N] [--trace]
       official.dll frozenShaders test.addon64 freshOutput frame_generation_interposer.dll
 
 `--list` prints each selected timeline's seed (or regression or witness) and event list;

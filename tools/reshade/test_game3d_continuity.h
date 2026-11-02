@@ -174,6 +174,13 @@ namespace game3d_continuity {
     // queue's) then reached: the add-on stops holding that copy
     // (late_conflict), so it may drop the hold there.
     late_signaller,
+    // A real Present of an FG frame that made no depth call before it (no
+    // tag call, SR or DLSS-G evaluation, no FG On or Off), within the
+    // earlier frame's declared generated count (the session timelines'
+    // ui_unidentified, OPEN C): the add-on sees what it sees at that earlier
+    // frame's generated Present, so depth's window still presents that
+    // frame and holds its copy as its own (own_frame), however old.
+    unidentified_real,
   };
 
   // What one frame supplied, stamped when the fixture made the first call
@@ -431,6 +438,8 @@ namespace game3d_continuity {
         return "cross_queue_generic";
       case limitation::late_signaller:
         return "late_signaller";
+      case limitation::unidentified_real:
+        return "unidentified_real";
       default:
         return "none";
     }
@@ -474,11 +483,16 @@ namespace game3d_continuity {
     // Every loss of a tagged frame is the row's, also one within the source
     // age of a readable copy: the limitation drops that hold itself.
     bool drops_hold {};
+    // The limitation holds an older copy past the source age rather than
+    // losing depth: a stale violation of a tagged frame is the row's, and
+    // no loss is (11-01; until then staleness had no row).
+    bool stale {};
   };
 
   inline constexpr gap_row known_gaps[] {
     {"C2-cross-queue-generic", limitation::cross_queue_generic, nullptr, "Until Step 4's fence hooks. Generic's end-of-frame copy runs on the presenting queue, and a proof belongs to the queue whose executed list made it, so a depth-stencil view drawn on another queue with no boundary but the end of the frame is refused (missing_state; 18e5d922, docs/reshade-sbs.md, the last proven state). Seven of the eight games of the 10-06 to 10-23 logs render on another queue. Either owner option (accept the other queue's proof once fence hooks show the presenting queue ordered after it, or copy on the proving queue) shows depth here and removes this row."},
     {"R1-late-signaller", limitation::late_signaller, nullptr, "Owner decision O1 (10-27, Step 4 design section 1): accepted. A Present reads a copy from another queue in flight once the game's own fence waits order the presenting queue after its copy-out (U-C1); no observation at that decision can exclude a signal of the waited fence, first submitted after it by the CPU or another queue, that runs before the producer's own signal. The add-on poisons such a fence for good (O3), counts each relied read it reaches within the source age as late_conflict, and stops holding that read's presentation copy from the next Present (fail-safe: mono rather than pixels its producer may not have written). The session timelines tag the generated Presents of a frame whose fence such a signal reaches after its Present (supply::late_after), and judge real Presents by what else they could hold, a copy read through the signalled fence being unholdable from the signal on (judge::late_signal; until 10-27 a window tagged every legal source of every real frame within the source age, which excused any loss there); unordered_read counts a read the script orders by its calls up to the read's Present, but not with every later signal, as this row's (test_queue_order_script.h, judge_reads). A tagged generated Present's dropped hold is the row's: the fail-safe drops the hold itself.", true},
+    {"OPEN-C-depth-unidentified-real", limitation::unidentified_real, "11-01, the session timelines (C1-openc's twinDepth at 14ec980a; recorded by the second fix review's REPAIR4)", "OPEN C's depth twin, awaiting the owner. With FG on, a frame that makes no depth call before its real Present (its constants and UI tags only, after a hitch of the source age), inside the earlier frame's declared generated count while DLSS-G presented fewer: the add-on cannot tell that real Present from the earlier frame's generated Present, where owner ruling Q2 (10-30) shows the earlier frame's own copy however old (no 2D flash). So depth's window (frame_presenting) holds that copy, past the source age, on the new frame's image for that Present (continuity:stale; the UI's hold there is left unjudged, ui_unidentified). Either owner decision removes this row: accept that depth there (the judge then ages such a Present as that frame's generated one), or show mono there, which the add-on can do only by also flashing 2D at Q2's generated Presents, since it sees the same calls.", false, true},
   };
   inline constexpr std::size_t gap_count = std::size(known_gaps);
 
@@ -492,17 +506,22 @@ namespace game3d_continuity {
   }
 
   constexpr int known(const violation &value) {
-    if (value.kind == violation_kind::stale || value.kind == violation_kind::stale_shown || value.frame.limit == limitation::none) {
+    if (value.kind == violation_kind::stale_shown || value.frame.limit == limitation::none) {
       return -1;
     }
     for (std::size_t i = 0; i != gap_count; ++i) {
       if (known_gaps[i].limit != value.frame.limit) {
         continue;
       }
+      // A stale row's limitation shows an older copy: only staleness is its;
+      // every other row's loses depth: staleness is none of its.
+      if ((value.kind == violation_kind::stale) != known_gaps[i].stale) {
+        return -1;
+      }
       // A limitation loses depth once the presenting queue's newest copy
       // aged out (C1's note); a loss while that copy could still be held is
       // no row's.
-      if (!known_gaps[i].drops_hold && value.readable_age_ms < sunshine_freshness::source_age_ms) {
+      if (!known_gaps[i].stale && !known_gaps[i].drops_hold && value.readable_age_ms < sunshine_freshness::source_age_ms) {
         return -1;
       }
       return int(i);

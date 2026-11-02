@@ -80,11 +80,13 @@
 // and each Assassin's Creed Shadows fix a regression timeline that must not.
 //
 // Command line: [--list] [--timeline <seed> | --events <list> | --seeds N
-// [--from M]] [--shard i/N] [--shrink-runs N] [--trace] official.dll
-// frozenShaders test.addon64 freshOutput interposer.dll. Without a selection
-// it runs the fixed set, the first fixed_timelines seeds, the regressions
-// and the witnesses, as the registered test does; --trace prints every
-// Present's frame record.
+// [--from M]] [--only <regression or witness>] [--shard i/N]
+// [--shrink-runs N] [--trace] official.dll frozenShaders test.addon64
+// freshOutput interposer.dll. Without a selection it runs the fixed set, the
+// first fixed_timelines seeds, the regressions and the witnesses, as the
+// registered test does; --only runs the one regression or witness of that
+// name with its own checks (its minimums, a witness's loss); --trace prints
+// every Present's frame record.
 // An event list holds frames separated by ';', each "defaults" or
 // name=value pairs separated by ',', optionally repeated as "N*frame".
 #define SUNSHINE_NATIVE_PROVIDER_FIXTURE_ONLY
@@ -485,6 +487,7 @@ namespace {
     bool lossless {};  // regression::lossless.
     unsigned late_reads {};  // regression::late_reads.
     unsigned ui_holds {};  // regression::ui_holds.
+    unsigned unidentified_holds {};  // regression::unidentified_holds.
   };
 
   // Each Assassin's Creed Shadows fix has a regression timeline: an event
@@ -533,6 +536,11 @@ namespace {
     // generated_present), so a row written for that judgement cannot pass
     // without exercising it.
     unsigned ui_holds {};
+    // The holds of the earlier frame's UI decision at Presents without frame
+    // identity it must make at least (ui_unidentified_now, left unjudged),
+    // so a row written for that limit cannot pass where the hold no longer
+    // happens (the second fix review of 11-01).
+    unsigned unidentified_holds {};
   };
 
   constexpr regression regressions[] {
@@ -1092,10 +1100,22 @@ namespace {
     // nothing). The tag-only frame's refused call ends the earlier window
     // and begins its own (fg-silent-refused-tag-ends-window), which presents
     // the next Present as its generated one: the UI holds its decision there
-    // (ui_unidentified_real; the same hold by Present count before 11-01,
-    // when that frame had no window). Before the judge left that hold
-    // unjudged it failed ui_frame:held at frame 31, every run.
-    {"fg-silent-tag-only-then-callless-real-present-hitch", "20*sr=local; fg=on,sr=local,state=proven,generated=1; sr=local,state=proven,generated=3; tag=evaluate_bare,sr=local,generated=2,ui=bare; tag=evaluate_bare,sr=other_queue,state=unprovable,generated=2,ui=bare; tag=now_bare,sr=local,state=proven,generated=2,at=evaluate,ui=bare; 5*tag=now_bare,sr=local,state=proven,generated=1,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between; generated=1,ui=bare; ui=bare; 2*tag=now_bare,sr=local,state=proven,generated=1,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between; generated=1,ui=bare; ui=bare"},
+    // (ui_unidentified; the same hold by Present count before 11-01, when
+    // that frame had no window). Before the judge left that hold unjudged it
+    // failed ui_frame:held at frame 31, every run; it must make at least one
+    // such hold. Its frame 23's SR copy on the game's queue keeps the prompt
+    // form: run after its frame's Present (sr_gpu=after_present), the parent
+    // judge passed the row (REPAIR4's c1pin-old).
+    {"fg-silent-tag-only-then-callless-real-present-hitch", "20*sr=local; fg=on,sr=local,state=proven,generated=1; sr=local,state=proven,generated=3; tag=evaluate_bare,sr=local,generated=2,ui=bare; tag=evaluate_bare,sr=other_queue,state=unprovable,generated=2,ui=bare; tag=now_bare,sr=local,state=proven,generated=2,at=evaluate,ui=bare; 5*tag=now_bare,sr=local,state=proven,generated=1,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between; generated=1,ui=bare; ui=bare; 2*tag=now_bare,sr=local,state=proven,generated=1,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between; generated=1,ui=bare; ui=bare", false, 0, 0, 1},
+    // The same limit at the callless frame's own generated Presents (the
+    // second fix review of 11-01): the tag-only frame declares two generated
+    // Presents and DLSS-G presents none, then the callless frame after the
+    // hitch presents two after its real Present. Its real Present and its
+    // first generated one are both within the earlier frame's count, so
+    // depth's window presents that frame at both and the UI holds its
+    // decision at both; until then only the real Present was left out, and
+    // the first generated one failed ui_frame:held.
+    {"fg-silent-tag-only-then-callless-generated-hitch", "20*sr=local; fg=on,sr=local,state=proven,generated=1; sr=local,state=proven,generated=3; tag=evaluate_bare,sr=local,generated=2,ui=bare; tag=evaluate_bare,sr=other_queue,sr_gpu=after_present,state=unprovable,generated=2,ui=bare; tag=now_bare,sr=local,state=proven,generated=2,at=evaluate,ui=bare; 5*tag=now_bare,sr=local,state=proven,generated=2,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between,generated=2; ui=bare; 2*tag=now_bare,sr=local,state=proven,generated=2,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between,generated=2; ui=bare", false, 0, 0, 2},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -1103,13 +1123,21 @@ namespace {
   // there. The fixed set runs them after its seeds, and a witness that loses
   // none fails it (the gap closed: its fix removes the row and the witness,
   // which becomes a regression timeline), as the matrix's gap seeds keep a
-  // recorded gap's own failing cell. None is open: the last, C5's, closed on
-  // 10-26.
+  // recorded gap's own failing cell. C5's closed on 10-26. Open: OPEN C's
+  // depth twin (11-01), a found defect awaiting the owner: C1-openc's
+  // evidence job twinDepth at 14ec980a. FG 2x with UI tags, a tag-only frame
+  // (its FG tag copied at its Present, an SR copy on the game's queue; two
+  // generated Presents declared, none presented), then a frame with no
+  // depth call after a hitch of the source age: depth's window still
+  // presents the tag-only frame there and holds its copy, past the source
+  // age, at the new frame's real Present (continuity:stale at frame 23).
   struct witness {
     const char *row, *events;
   };
 
-  constexpr std::array<witness, 0> witnesses {};
+  constexpr std::array<witness, 1> witnesses {{
+    {"OPEN-C-depth-unidentified-real", "20*sr=local; fg=on,sr=local,generated=2; tag=evaluate_list,untag=after_global,generated=2,at=inside,ui=bare; tag=present_bare,untag=after_global,sr=other_queue,ui=bare; ui=bare,hitch=between; 5*sr=local,ui=bare"},
+  }};
 
   // The seed of the fixed set's or a soak's index-th timeline.
   std::uint64_t seed_of(std::uint64_t index) {
@@ -1282,6 +1310,9 @@ namespace {
     // Generated Presents of the last UI tag's frame that held its UI
     // decision by depth's window (judge_ui_frame, generated_present).
     unsigned ui_holds {};
+    // Presents without frame identity that held the earlier frame's UI
+    // decision, left unjudged (ui_unidentified_now).
+    unsigned ui_unidentified_holds {};
     std::uint64_t elapsed_ms {};
   };
 
@@ -2103,8 +2134,13 @@ namespace {
       ++result.generated;
       judge_present_modes(inside ? "a generated Present inside its recording" : "a generated Present after it");
       generated_since_real += continuity_log.between;
+      ui_window_presents += continuity_log.between;
+      // Still no frame identity (ui_unidentified): a generated Present
+      // between, within the earlier frame's count.
+      ui_unidentified_now = ui_unidentified && continuity_log.between && ui_window_presents <= declared_generated;
       judge_ui_frame(inside ? "a generated Present inside its recording" : "a generated Present after it",
         continuity_log.between && inside ? frame - 1 : frame, continuity_log.between ? generated_since_real : 1);
+      ui_unidentified_now = false;
       poll("generated");
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;
@@ -2565,6 +2601,23 @@ namespace {
       // The frame's Present comes with FG off (also after a late Off).
       continuity_log.pending.fg_off = !fg_on;
       continuity_log.pending.limit = supply.legal ? continuity::limitation::none : supply.limit;
+      // Frame identity (ui_unidentified): a frame with a depth call, or one
+      // with FG off, begins a window of its own at its real Present; a
+      // callless one counts as a Present of the earlier frame's. Its supply
+      // (none) meets OPEN C's depth twin while that window still counts it.
+      const auto fg_change = of<fg_event>(value, events::fg);
+      const bool depth_called = form != tag_form::none || sr_choice != sr_form::none ||
+        dlssg_choice != dlssg_form::none || fg_change != fg_event::keep;
+      if (!fg_on || depth_called) {
+        ui_window_frame = frame;
+        ui_window_presents = 0;
+        ui_unidentified = false;
+      } else {
+        ui_unidentified = ++ui_window_presents <= declared_generated;
+      }
+      if (ui_unidentified && !supply.legal) {
+        continuity_log.pending.limit = continuity::limitation::unidentified_real;
+      }
       continuity_log.pending.tick = supply.tick;
       continuity_log.pending.late_after = std::any_of(late_signals.begin(), late_signals.end(), [&](const order_fence *order) {
         return late_relied(*order, now_late);
@@ -2823,24 +2876,44 @@ namespace {
     // The generated Presents that presented the last real Present's frame
     // since that Present (between).
     std::uint32_t generated_since_real {};
-    // This real Present has no frame identity for the add-on (11-01, OPEN
-    // C): with FG on, its frame made no depth call before it (no tag call,
-    // SR or DLSS-G evaluation, no FG options event), and fewer Presents than
-    // the declared generated count presented the last real Present's frame
-    // since that Present. The add-on then sees exactly what it sees at that
-    // frame's next generated Present where DLSS-G presents all of them (a
-    // frame's Streamline constants and a UI tag call end no window: DLSS-G
-    // presents the earlier frame's generated Presents inside the next
-    // frame's recording before its evaluation, owner ruling Q2 and F13), so
-    // depth's window still presents that frame there and the UI may hold
-    // its decision, as the T1 grace would reuse it. Soak seed
-    // 117a6b99131447b1 at frame 40 (its frame 39 declared one generated
-    // Present and DLSS-G presented none) makes the same calls as the 4-frame
-    // reproducer of fg-on-deferred-tag-generated-inside-after-hitch-untag at
-    // its frame 3, whose generated Presents must hold. Such a hold of the
-    // last real frame's decision is not judged ui_frame:held, a limit of no
-    // frame identity like a Present without a depth window at its input.
-    bool ui_unidentified_real {};
+    // Frame identity for the add-on (11-01, OPEN C). With FG on, a frame
+    // that makes no depth call before its real Present (no tag call, SR or
+    // DLSS-G evaluation, no FG On or Off event; its Streamline constants,
+    // UI tag calls and its own count in the FG options are none) gives the
+    // add-on no frame of its own: at its real Present, and at every Present
+    // after it until a later frame begins an evaluation, the add-on sees
+    // exactly what it sees at the generated Presents of the last real
+    // Present's frame that had one (ui_window_frame) where DLSS-G presents
+    // all of them (a frame's constants and UI tag calls end no window:
+    // DLSS-G presents the earlier frame's generated Presents inside the next
+    // frame's recording before its evaluation, owner ruling Q2 and F13). So
+    // while the Presents since that real Present (ui_window_presents: the
+    // callless frames' real Presents and every generated Present between)
+    // are within the generated count in force at the Present (the add-on's
+    // grant reads the count each Present's FG snapshot holds, a callless
+    // frame's own count included, so the judge does too), depth's window
+    // still presents that frame and the UI may hold its decision, as the T1
+    // grace would reuse it. Soak seed 117a6b99131447b1 at frame 40 (its
+    // frame 39 declared one generated Present and DLSS-G presented none)
+    // makes the same calls as the 4-frame reproducer of
+    // fg-on-deferred-tag-generated-inside-after-hitch-untag at its frame 3,
+    // whose generated Presents must hold. Such a hold of that frame's
+    // decision is not judged ui_frame:held, a limit of no frame identity
+    // like a Present without a depth window at its input (counted:
+    // ui_unidentified_holds). Until the second fix review of 11-01 only the
+    // callless frame's real Present was left out, so its own generated
+    // Presents within the earlier frame's count still failed. Its depth
+    // twin, the earlier frame's copy held past the source age at such a
+    // real Present, is the known gap OPEN-C-depth-unidentified-real
+    // (limitation::unidentified_real).
+    unsigned ui_window_frame {UINT_MAX};
+    std::uint32_t ui_window_presents {};
+    // A callless real Present came since ui_window_frame's within its count
+    // (frame_body), until the next real Present of a frame with identity.
+    bool ui_unidentified {};
+    // This Present is such a Present (the real one, or a generated one
+    // between within the count).
+    bool ui_unidentified_now {};
 
     // generated: 0 for a real Present, else the generated Present's place
     // among those of its frame (generated_since_real; 1 where it presents
@@ -2886,15 +2959,17 @@ namespace {
         }
         sunshine_streamline::depth_capture::depth_choice now_choice {};
         const auto floor = queue_choice(observed.runtime, &now_choice) ? now_choice.decision.presenting_floor : 0;
-        std::printf("TRACE frame=%u ui_frame %s present=%llu shown=%u input=%d window=%u offered=%u held=%u kept=%u absent=%u own_input=%u nth=%u floor=%llu input_floor=%llu tag_age=%lld fg=%u fg_frame=%u due=%u rows=%s\n", frame, which, static_cast<unsigned long long>(r.present), shown_frame, ui_input_frame == UINT_MAX ? -1 : int(ui_input_frame), unsigned(ui_input_window), unsigned(offered), unsigned(held), unsigned(kept), unsigned(absent), unsigned(input), generated, static_cast<unsigned long long>(floor), static_cast<unsigned long long>(ui_input_floor), ui_tag_tick ? static_cast<long long>(GetTickCount64() - ui_tag_tick) : -1ll, unsigned(fg_on), unsigned(ui_presented_fg), unsigned(due), rows.c_str());
+        std::printf("TRACE frame=%u ui_frame %s present=%llu shown=%u input=%d window=%u offered=%u held=%u kept=%u absent=%u own_input=%u nth=%u floor=%llu input_floor=%llu tag_age=%lld fg=%u fg_frame=%u due=%u unidentified=%u window_frame=%d window_presents=%u rows=%s\n", frame, which, static_cast<unsigned long long>(r.present), shown_frame, ui_input_frame == UINT_MAX ? -1 : int(ui_input_frame), unsigned(ui_input_window), unsigned(offered), unsigned(held), unsigned(kept), unsigned(absent), unsigned(input), generated, static_cast<unsigned long long>(floor), static_cast<unsigned long long>(ui_input_floor), ui_tag_tick ? static_cast<long long>(GetTickCount64() - ui_tag_tick) : -1ll, unsigned(fg_on), unsigned(ui_presented_fg), unsigned(due), unsigned(ui_unidentified_now), ui_window_frame == UINT_MAX ? -1 : int(ui_window_frame), ui_window_presents, rows.c_str());
       }
       if (offered) {
         sunshine_streamline::depth_capture::depth_choice choice {};
         ui_input_frame = shown_frame;
         ui_input_window = queue_choice(observed.runtime, &choice) && choice.decision.presenting_floor;
         ui_input_floor = ui_input_window ? choice.decision.presenting_floor : 0;
-      } else if (held && ui_input_window && shown_frame != ui_input_frame &&
-          !(ui_unidentified_real && !generated && ui_input_frame + 1 == shown_frame)) {
+      } else if (held && ui_input_window && shown_frame != ui_input_frame && ui_unidentified_now &&
+          ui_input_frame == ui_window_frame) {
+        ++result.ui_unidentified_holds;
+      } else if (held && ui_input_window && shown_frame != ui_input_frame) {
         fail("ui_frame:held", frame_text(frame) + ": " + which + " held frame " + std::to_string(ui_input_frame) + "'s UI decision as a generated Present of it, and it presents frame " + std::to_string(shown_frame), frame, "generated_present");
       } else if (due && absent && !input && !kept) {
         fail("ui_frame:dropped", frame_text(frame) + ": " + which + " presents frame " + std::to_string(shown_frame) + ", whose Present offered the last UI tag, offered no UI input of its own and did not hold that Present's UI decision", frame, "generated_present");
@@ -2950,15 +3025,12 @@ namespace {
         renew_order();
       }
       judge_present_modes("its Present");
-      // No frame identity here (ui_unidentified_real).
-      const bool depth_called = of<tag_form>(value, events::tag) != tag_form::none ||
-        of<sr_form>(value, events::sr) != sr_form::none || of<dlssg_form>(value, events::dlssg) != dlssg_form::none ||
-        event != fg_event::keep;
-      ui_unidentified_real = fg_on && !depth_called && generated_since_real < declared_generated;
       generated_since_real = 0;
       ui_presented_fg = fg_supplied;
+      // No frame identity here (ui_unidentified, frame_body).
+      ui_unidentified_now = ui_unidentified;
       judge_ui_frame("its Present", frame, 0);
-      ui_unidentified_real = false;
+      ui_unidentified_now = false;
       poll("present");
       // The frame's tag copy deferred to this Present, published by it.
       if (deferred_copy_before) {
@@ -3094,6 +3166,9 @@ namespace {
       ui_tag_tick = 0;
       ui_presented_fg = false;
       generated_since_real = 0;
+      ui_window_frame = UINT_MAX;
+      ui_window_presents = 0;
+      ui_unidentified = ui_unidentified_now = false;
       // A new viewport: no read of this run names an earlier run's copy, and
       // its order fences are new, so a run's fence events are its own.
       script_order.clear();
@@ -3284,7 +3359,7 @@ namespace {
     bool list {}, explicit_seed {}, explicit_events {}, trace {};
     std::uint64_t seed {}, seeds {fixed_timelines}, from {};
     unsigned shard {}, shards {1}, shrink_runs {40};
-    std::string events;
+    std::string events, only;
   };
 
   bool parse_options(int argc, char **argv, options &out, std::vector<std::string> &positional, std::string &error) {
@@ -3303,6 +3378,8 @@ namespace {
         out.events = argv[++i];
       } else if (argument == "--seeds" && value) {
         out.seeds = std::strtoull(argv[++i], nullptr, 10);
+      } else if (argument == "--only" && value) {
+        out.only = argv[++i];
       } else if (argument == "--from" && value) {
         out.from = std::strtoull(argv[++i], nullptr, 10);
       } else if (argument == "--shrink-runs" && value) {
@@ -3326,6 +3403,10 @@ namespace {
     }
     if (out.explicit_seed && out.explicit_events) {
       error = "--timeline and --events each select one timeline";
+      return false;
+    }
+    if (!out.only.empty() && (out.explicit_seed || out.explicit_events)) {
+      error = "--only selects a regression or witness, not a seed or an event list";
       return false;
     }
     return true;
@@ -3355,7 +3436,7 @@ int main(int argc, char **argv) {
   std::vector<std::string> positional;
   std::string error;
   if (!parse_options(argc, argv, chosen, positional, error) || (!chosen.list && positional.size() != 5)) {
-    std::fprintf(stderr, "%s%susage: reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events <list> | --seeds N [--from M]] [--shard i/N] [--shrink-runs N] official.dll frozenShaders test.addon64 freshOutput interposer.dll\n", error.c_str(), error.empty() ? "" : "\n");
+    std::fprintf(stderr, "%s%susage: reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events <list> | --seeds N [--from M]] [--only <regression or witness>] [--shard i/N] [--shrink-runs N] official.dll frozenShaders test.addon64 freshOutput interposer.dll\n", error.c_str(), error.empty() ? "" : "\n");
     return 2;
   }
   std::vector<timeline_case> selected_cases;
@@ -3379,6 +3460,7 @@ int main(int argc, char **argv) {
       kept.lossless = value.lossless;
       kept.late_reads = value.late_reads;
       kept.ui_holds = value.ui_holds;
+      kept.unidentified_holds = value.unidentified_holds;
       if (!parse_events(value.events, kept.frames, error)) {
         std::fprintf(stderr, "FAIL session timelines: the regression of %s: %s\n", value.fix, error.c_str());
         return 2;
@@ -3395,12 +3477,19 @@ int main(int argc, char **argv) {
       cases.push_back(witnessed);
     }
     for (std::size_t i = 0; i != cases.size(); ++i) {
-      if (i % chosen.shards == chosen.shard) {
-        selected_cases.push_back(cases[i]);
+      const auto &value = cases[i];
+      const bool named = chosen.only.empty() || (value.regression && chosen.only == value.regression) ||
+                         (value.witness && chosen.only == value.witness);
+      if (i % chosen.shards == chosen.shard && named) {
+        selected_cases.push_back(value);
       }
     }
+    if (!chosen.only.empty() && selected_cases.empty()) {
+      std::fprintf(stderr, "FAIL session timelines: --only %s names no regression or witness\n", chosen.only.c_str());
+      return 2;
+    }
   }
-  const bool fixed_set = !chosen.explicit_seed && !chosen.explicit_events && chosen.from == 0 && chosen.seeds == fixed_timelines && chosen.shards == 1;
+  const bool fixed_set = !chosen.explicit_seed && !chosen.explicit_events && chosen.from == 0 && chosen.seeds == fixed_timelines && chosen.shards == 1 && chosen.only.empty();
   std::size_t total_frames {};
   for (const auto &value : selected_cases) {
     total_frames += value.frames.size();
@@ -3491,6 +3580,9 @@ int main(int argc, char **argv) {
       }
       if (result.ui_holds < value.ui_holds) {
         result.failures.push_back({"regression:no_ui_hold", 0, std::string("the regression of ") + value.regression + " judged " + std::to_string(result.ui_holds) + " UI generated-Present holds by depth's window of the " + std::to_string(value.ui_holds) + " its scenario needs", "regression:no_ui_hold"});
+      }
+      if (result.ui_unidentified_holds < value.unidentified_holds) {
+        result.failures.push_back({"regression:no_unidentified_hold", 0, std::string("the regression of ") + value.regression + " made " + std::to_string(result.ui_unidentified_holds) + " UI holds at Presents without frame identity of the " + std::to_string(value.unidentified_holds) + " its scenario needs", "regression:no_unidentified_hold"});
       }
       for (std::size_t r = 0; r != rows.size(); ++r) {
         rows[r].exercised += result.rows[r].exercised;
