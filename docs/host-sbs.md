@@ -81,16 +81,16 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `parallax_v2_coordinate_diagnostic` | 1 | `dfd32986c4fe9d3a9925d0c58c9b8827e3a25cd95d6b67726c7a1c4901fca134` |
 | `near_identical_detector` | 4 | `39f10cb7fce278d93d60898aaec16f6ac593fb629fbd517e361b1cc48e52fd19` |
 | `gpu_trace` | 1 | `44f412f253a201aabea111688f6c5b67769abe41a0d4b5697d103e42303a9ea9` |
-| `parallax_v2_live_renderer` | 2 | `3914683f4b325648676935065e8029792819d85aae535ec446bb31feef240783` |
-| `parallax_v2_p010_y` | 1 | `b365e2f96247e89280f73f42af72380087576b1b7253fabba916b272d106c2ce` |
+| `parallax_v2_live_renderer` | 2 | `b613c1c9f2dc0fbdc40e8e42efb1e5cb23b874282122178960763bfd37967fc3` |
+| `parallax_v2_p010_y` | 1 | `5200cb756ed2fde68cca61ec8cd116d50f791d7b7198ec8db66b7b6db71c08c2` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `824ad9a4099801e38afc352a988deae5e5635eb69b922d396494b07f046a333c` |
+| `parallax_v2_live_diagnostic` | 2 | `907dea6cd46f2eeac70ed18c956751e09b820abbd7c0438912696cd378d48b5a` |
 | `subtitle_cohort_prototype_research` | 3 | `14873875da041fb60bbe1dd59196cfa316ce6b2dc537359bb7282c3dee18511a` |
 | `subtitle_cohort_research` | 4 | `6d248d05f6c3cf56029e07493de747d36f25be20e57c892964be1a40b483c85c` |
 | `subtitle_inner_colour_research` | 5 | `f77e92b943f7807ea90a8f3c5b8b34370e2ea0befa0a568b0b94966b24ecdbf4` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
 | `subtitle_matte_guard_research` | 1 | `98a0ab18056da96db491aebd2de5090ad7e17e0c905a2ad11d0263b1a8b61bdb` |
-| `parallax_v2_queued_renderer` | 1 | `f696d6d26829d8d4570e2dc121a4543d21b7d1e6b4482f776abfad283331693f` |
+| `parallax_v2_queued_renderer` | 1 | `1c471451746c041ea6d4ae34c0bb560a65f2708d18a57df2e989f021294c46d6` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
