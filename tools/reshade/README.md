@@ -1732,6 +1732,21 @@ of real time, until none is out and the log writer's queue is empty with no drai
 state `SunshineSbsTestLogBacklog` reads); when the bound passes first it returns `FALSE` with the
 bit of each family still out. The add-on lifecycle fixture checks both outcomes.
 
+Fixtures play game time through [`test_game3d_clock.h`](test_game3d_clock.h): the process's
+`game_clock`, which the shared D3D12 fixture holds as `clock`. Until a fixture binds it to the test
+add-on's exports (`bind`) and engages it once its setup is done (`engage`: the rings it watches
+complete, the add-on quiesces, then the clock starts 120 s ahead of the real tick), game time is the
+real tick: `now()` reads `GetTickCount64`, `hitch(ms)` sleeps and `step()` paces each Present with
+`Sleep(3)`, which lasts until the next 15.6 ms timer tick. Engaged, each Present ends at
+`frame_boundary()`: every watched ring's done fence reaches its last signalled value (except a ring
+that a closed fixture gate holds), `SunshineGame3DTestQuiesce` returns, and only then game time
+moves 16 ms; `hitch(ms)` is the same barrier, then `ms` at once. Each barrier waits at most 3 s of
+real time and otherwise fails the fixture by name with the clock unmoved; nothing moves game time
+without a barrier. Watchdogs and bounds on real hangs read `wall_now()`. A fixture's `--wall-clock`
+(`take_wall_clock_option`) never engages, so it runs on the real clock as before.
+`reshade_game3d_fixture_clock` tests the helper against stand-in exports over the clock's test
+branch.
+
 [`check_clock_domains.cmake`](check_clock_domains.cmake) (the `reshade_clock_domains` test) keeps
 both complete. It counts every other clock read and every thread-pool submission, new thread,
 timer, wait or work object of the add-on's sources, the test add-on's own export sources included

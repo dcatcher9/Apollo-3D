@@ -388,6 +388,16 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME reshade_game3d_clock COMMAND reshade_game3d_clock_tests)
   set_tests_properties(reshade_game3d_clock PROPERTIES TIMEOUT 15)
+  # The fixtures' side of that clock (test_game3d_clock.h) against stand-in
+  # add-on exports over the same test branch, with CPU fences for its rings.
+  add_executable(reshade_game3d_fixture_clock_tests test_game3d_fixture_clock.cpp)
+  target_compile_features(reshade_game3d_fixture_clock_tests PRIVATE cxx_std_17)
+  target_compile_definitions(reshade_game3d_fixture_clock_tests PRIVATE SUNSHINE_GAME3D_TEST_CLOCK WIN32_LEAN_AND_MEAN NOMINMAX)
+  if(MINGW)
+    target_link_options(reshade_game3d_fixture_clock_tests PRIVATE -static)
+  endif()
+  add_test(NAME reshade_game3d_fixture_clock COMMAND reshade_game3d_fixture_clock_tests)
+  set_tests_properties(reshade_game3d_fixture_clock PROPERTIES TIMEOUT 30)
   # Every clock read and thread-pool submission of the add-on's sources, the
   # test add-on's own included, has a stated domain; game time is read only
   # through game3d_clock.h.

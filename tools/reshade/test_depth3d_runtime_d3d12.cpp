@@ -29,6 +29,7 @@
 #include "test_depth3d_color.h"
 #include "test_game3d_camera.h"
 #include "test_game3d_jitter.h"
+#include "test_game3d_clock.h"
 
 namespace {
   namespace api = reshade::api;
@@ -274,6 +275,10 @@ namespace {
     // Runs once the official runtime is loaded, before the fixture creates its
     // game device: devices a game creates and destroys before that one.
     std::function<void()> before_game_device;
+    // The process's game clock (test_game3d_clock.h). Until a fixture binds
+    // and engages it, game time is the real tick and step() paces each
+    // Present with Sleep(3).
+    sunshine_game3d_fixture::game_clock &clock = sunshine_game3d_fixture::fixture_clock();
 
     ~fixture_t() {
       observed.capture = observed.inject = false;
@@ -603,7 +608,11 @@ namespace {
         require(sunshine_parity::timeline_tick == before_tick + 1 && !sunshine_parity::timeline_pending,
           "Deterministic input did not produce exactly one complete stereo execution");
       require(unsigned(observed.color) == color, "Actual runtime transfer differs from the native game swapchain");
-      Sleep(3);
+      // Engaged, the Present ends at a virtual frame boundary. Otherwise the
+      // real pace: Sleep(3) lasts until the next timer tick, one Present per
+      // 15.6 ms.
+      if (clock.engaged()) clock.frame_boundary();
+      else Sleep(3);
     }
 
     api::effect_uniform_variable uniform(const char *name, bool required = true) {
