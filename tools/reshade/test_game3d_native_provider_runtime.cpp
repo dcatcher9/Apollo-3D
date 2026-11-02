@@ -375,30 +375,32 @@ namespace {
         s.source.current.height == active_area.height && s.source.current.capture && s.source.current.sequence;
     }
     status settle(const char *label) {
-      const auto until = GetTickCount64() + 15000;
+      const auto until = clock.now() + 15000;
       unsigned consecutive{};
       status s;
       do {
         present_frame(); s = inspect();
         consecutive = active(s) && !s.source.reused_depth ? consecutive + 1 : 0;
         if (consecutive >= 12) { log_status(label, s); return s; }
-      } while (GetTickCount64() < until);
+      } while (clock.now() < until);
       log_status(label, s);
       throw std::runtime_error("Native provider did not establish ready projection scale and the actual supplied depth source");
     }
     // A line of the isolated runtime's ReShade.log containing every part.
     // Add-on lines reach it through the asynchronous log writer, and bounded
-    // lines are written at most every 5 s, so keep presenting the current
-    // scenario for at most wait_ms while waiting.
+    // lines are written at most every 5 s of game time, so keep presenting
+    // the current scenario for at most wait_ms of game time while waiting.
+    // Engaged, every frame boundary drains the log writer (its quiesce), so
+    // each read sees every line the add-on logged up to the last Present.
     bool reshade_log_contains(std::initializer_list<const char *> parts, std::uint64_t wait_ms = 7000) {
-      const auto until = GetTickCount64() + wait_ms;
+      const auto until = clock.now() + wait_ms;
       do {
         std::ifstream file(runtime_directory / "ReShade.log", std::ios::binary);
         for (std::string line; std::getline(file, line);)
           if (std::all_of(parts.begin(), parts.end(), [&](const char *part) { return line.find(part) != std::string::npos; }))
             return true;
         present_frame();
-      } while (GetTickCount64() < until);
+      } while (clock.now() < until);
       return false;
     }
     // How many lines of the isolated runtime's ReShade.log contain every part
@@ -434,10 +436,11 @@ namespace {
     }
     // Whether a line of the isolated runtime's ReShade.log containing
     // line_part has a number above minimum right after field, presenting the
-    // current scenario for at most wait_ms while waiting (bounded lines).
+    // current scenario for at most wait_ms of game time while waiting
+    // (bounded lines; read as reshade_log_contains reads).
     bool reshade_log_number_above(const char *line_part, const char *field, std::uint64_t minimum,
         std::uint64_t wait_ms = 7000) {
-      const auto until = GetTickCount64() + wait_ms;
+      const auto until = clock.now() + wait_ms;
       do {
         std::ifstream file(runtime_directory / "ReShade.log", std::ios::binary);
         for (std::string line; std::getline(file, line);) {
@@ -447,7 +450,7 @@ namespace {
             return true;
         }
         present_frame();
-      } while (GetTickCount64() < until);
+      } while (clock.now() < until);
       return false;
     }
     // The test add-on's newest depth refusal (SunshineDepthTestLastRefusal).
@@ -459,9 +462,9 @@ namespace {
     // The newest refusal once one after serial is recorded, presenting the
     // current scenario for at most wait_ms. No log line is awaited.
     sunshine_depth_refusal::record refusal_after(std::uint64_t serial, std::uint64_t wait_ms = 2000) {
-      const auto until = GetTickCount64() + wait_ms;
+      const auto until = clock.now() + wait_ms;
       auto value = last_refusal();
-      while (value.serial <= serial && GetTickCount64() < until) {
+      while (value.serial <= serial && clock.now() < until) {
         present_frame();
         value = last_refusal();
       }
@@ -509,8 +512,9 @@ namespace {
     std::size_t matched_lines{};
     std::uint64_t matched_present{};
     void require_records_match_log(const char *label) {
-      // The asynchronous writer flushes this scenario's lines meanwhile.
-      for (const auto until = GetTickCount64() + 300; GetTickCount64() < until;) present_frame();
+      // The asynchronous writer flushes this scenario's lines meanwhile (300 ms
+      // of game time; engaged, each frame boundary drains it).
+      for (const auto until = clock.now() + 300; clock.now() < until;) present_frame();
       const auto lines = provider_lines();
       auto &records = record_history.records;
       std::size_t next{}, matched{};
@@ -599,9 +603,9 @@ namespace {
         namespace dump = ::game3d_debug;
         request_id = state->request_id + 1;
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state->request_id), request_id);
-        const auto until = GetTickCount64() + 10000;
+        const auto until = fixture.clock.wall_now() + 10000;
         while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&state->response_id), 0, 0)) != request_id &&
-            GetTickCount64() < until)
+            fixture.clock.wall_now() < until)
           fixture.present_frame();
         require(state->response_id == request_id && state->response.result == dump::status::complete &&
             state->response.json_bytes <= dump::max_json_bytes && state->response.texture_count <= dump::max_textures, incomplete);
@@ -614,7 +618,10 @@ namespace {
     // frames under test and judges them, and recovery restores the fixture's
     // control. Every frame of a script begins before its deadline, the sum of
     // the bounds its own waits allow, so a case that stops making progress
-    // fails by name; MEASURE reports each case's time.
+    // fails by name; MEASURE reports each case's time. Both are wall time:
+    // its waits are bounded in game time (clock.now()), which an engaged
+    // clock plays faster than real time, and its hitches move game time at
+    // once (clock.hitch()).
     struct frame_script {
       const char *name;
       std::uint64_t deadline_ms;
@@ -624,14 +631,14 @@ namespace {
     std::uint64_t script_deadline{};
     // One game frame and its Present, observed without FX.
     void present_frame() {
-      if (script_deadline && GetTickCount64() >= script_deadline)
+      if (script_deadline && clock.wall_now() >= script_deadline)
         throw std::runtime_error(std::string("Native provider case ") + script_name + " passed its frame deadline");
       step(); no_effects();
     }
     void run_script(const frame_script &script) {
       // Frames outside any script are judged as the session's.
       end_segment("session");
-      const auto started = GetTickCount64();
+      const auto started = clock.wall_now();
       script_name = script.name; script_deadline = started + script.deadline_ms;
       continuity_log.where = script.name;
       struct end_script {
@@ -642,7 +649,7 @@ namespace {
       script.stimulus();
       if (script.recovery) script.recovery();
       std::printf("MEASURE native-provider case=%s elapsed_ms=%llu deadline_ms=%llu\n", script.name,
-        static_cast<unsigned long long>(GetTickCount64() - started), static_cast<unsigned long long>(script.deadline_ms));
+        static_cast<unsigned long long>(clock.wall_now() - started), static_cast<unsigned long long>(script.deadline_ms));
       script_violations = continuity_log.judge.take();
       require_ordered_reads(script.name);
       if (continuity_per_script) require_continuity(script.name, script_violations);
@@ -657,12 +664,14 @@ namespace {
     bool continuity_per_script{true};
     std::vector<game3d_continuity::violation> script_violations;
     static void supplied(std::uint8_t sources, game3d_continuity::limitation meets = game3d_continuity::limitation::none) {
-      continuity_log.pending.add(sources, GetTickCount64(), meets);
+      continuity_log.pending.add(sources, sunshine_game3d_fixture::fixture_clock().now(), meets);
     }
     // A source the add-on may show but need not: an EITHER outcome, or the
     // full-size decoy view every game frame draws (a Generic end-of-frame
     // capture that API ownership leaves aside, H).
-    static void permitted_supply(std::uint8_t sources) { continuity_log.pending.allow(sources, GetTickCount64()); }
+    static void permitted_supply(std::uint8_t sources) {
+      continuity_log.pending.allow(sources, sunshine_game3d_fixture::fixture_clock().now());
+    }
     // A later call of the same frame withdrew what it supplied.
     static void withdraw_supply() { continuity_log.pending = {}; }
     // The copy-out contract (docs/reshade-sbs.md, Copy-out on the producer
@@ -672,7 +681,9 @@ namespace {
     // presenting queue reads that copy-out once its work completed (or once
     // the game's own fence waits order it after it, U-C1, which the rule
     // does not count: it never asks for a read earlier than certain).
-    static void supplied_elsewhere(std::uint8_t sources) { continuity_log.pending.add_elsewhere(sources, GetTickCount64()); }
+    static void supplied_elsewhere(std::uint8_t sources) {
+      continuity_log.pending.add_elsewhere(sources, sunshine_game3d_fixture::fixture_clock().now());
+    }
     static void completes(std::uint8_t sources, std::function<bool()> probe) {
       continuity_log.pending.completes(sources, std::move(probe));
     }
@@ -753,8 +764,8 @@ namespace {
 
     void load_native(const fs::path &directory) {
       evidence.open(directory / "native-provider-status.txt"); evidence.precision(9);
-      const auto until = GetTickCount64() + 30000;
-      while ((!observed.runtime || !observed.reloads) && GetTickCount64() < until) step();
+      const auto until = clock.wall_now() + 30000;
+      while ((!observed.runtime || !observed.reloads) && clock.wall_now() < until) step();
       require(observed.runtime && observed.reloads, "Provider fixture runtime initialization failed");
       check_unified_addon();
       const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
@@ -784,12 +795,12 @@ namespace {
       sunshine_test_files::rename_when_free(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
       const auto reloads = observed.reloads;
       observed.runtime->reload_effect_next_frame(nullptr);
-      const auto empty_until = GetTickCount64() + 30000;
+      const auto empty_until = clock.wall_now() + 30000;
       unsigned count = 1;
       do {
         step(); count = 0;
         observed.runtime->enumerate_techniques(nullptr, [&](api::effect_runtime *, api::effect_technique) { ++count; });
-      } while ((observed.reloads == reloads || count) && GetTickCount64() < empty_until);
+      } while ((observed.reloads == reloads || count) && clock.wall_now() < empty_until);
       require(observed.reloads > reloads && !count, "FX remained loaded before provider tests");
       for (const auto &entry : fs::recursive_directory_iterator(directory / "effects"))
         require(entry.path().extension() != ".fx", "Provider fixture still has an installed FX");
@@ -807,7 +818,7 @@ namespace {
       reshade::register_event<reshade::addon_event::reshade_present>(record_present);
       // What completed before a real Present's decision (judge::before_present).
       before_present = [] { if (!continuity_log.generated) continuity_log.judge.before_present(continuity_log.pending); };
-      for (const auto until = GetTickCount64() + 300; GetTickCount64() < until;) { step(); no_effects(); }
+      for (const auto until = clock.now() + 300; clock.now() < until;) { step(); no_effects(); }
       matched_lines = provider_lines().size();
     }
 
@@ -840,16 +851,16 @@ namespace {
       }
       const auto before_reload = observed.reloads;
       observed.runtime->reload_effect_next_frame(nullptr);
-      const auto reload_until = GetTickCount64() + 15000;
+      const auto reload_until = clock.now() + 15000;
       do {
         present_frame(); const auto s = inspect();
         require(active(s) && same_scale(s.scale, first_ready.scale), "FX reload reset native provider capture or scale");
-      } while (observed.reloads == before_reload && GetTickCount64() < reload_until);
+      } while (observed.reloads == before_reload && clock.now() < reload_until);
       require(observed.reloads > before_reload, "Native provider empty-FX reload did not complete");
       const auto fresh = inspect();
       log_status("SL-after-FX-reload", fresh);
       require(active(fresh) && !fresh.source.reused_depth, "Native provider showed no fresh depth before the failed evaluations");
-      const auto fresh_tick = GetTickCount64();
+      const auto fresh_tick = clock.now();
 
       // Failed evaluations hold the newest completed copy within its source
       // age, like any failed or missing successor, then stay current-color
@@ -858,10 +869,10 @@ namespace {
       // in the background here, where every Present invalidated reuse.)
       valid_evaluation = false;
       unsigned mono{}, holds{};
-      for (const auto until = GetTickCount64() + 15000; mono < 4 && GetTickCount64() < until;) {
+      for (const auto until = clock.now() + 15000; mono < 4 && clock.now() < until;) {
         // The hold is decided after this tick, within the capture's age,
         // and the capture is older than fresh_tick.
-        const auto presented = GetTickCount64();
+        const auto presented = clock.now();
         present_frame(); const auto s = inspect();
         require(s.source.selected && same_scale(s.scale, first_ready.scale),
           "Failed provider evaluation fell back to Generic or discarded native scale");
@@ -923,11 +934,21 @@ namespace {
       resize(1, "SL-display-grown");
       // The content sampler's reference to the first display ends with its
       // sample; the next shape retires that display.
-      for (const auto until = GetTickCount64() + 300; GetTickCount64() < until;) present_frame();
+      for (const auto until = clock.now() + 300; clock.now() < until;) present_frame();
+      // From the third shape to the runtime reset the Presents hold game time
+      // (hold_game_time): the sentinel holds the first display's release on
+      // its pool thread across Presents on purpose, and an engaged frame
+      // boundary's quiesce would wait for it. No game time passes meanwhile,
+      // so the wait for the release is bounded in wall time.
+      struct release_hold {
+        bool &held;
+        ~release_hold() { held = false; }
+      } hold{hold_game_time};
+      hold_game_time = true;
       resized_targets.push_back(target_uav(first->width + 128, first->height + 64, 0));
       selected = resized_targets.back().get();
       active_area = {0, 0, selected->width, selected->height};
-      for (const auto until = GetTickCount64() + 5000; !sentinel->released && GetTickCount64() < until;) present_frame();
+      for (const auto until = clock.wall_now() + 5000; !sentinel->released && clock.wall_now() < until;) present_frame();
       require(sentinel->released, "A retired display texture was never released");
       require(sentinel->thread != sentinel->present_thread, "A retired display texture was released on the present thread");
       for (unsigned i = 0; i != 4; ++i) present_frame();
@@ -942,12 +963,13 @@ namespace {
       checked(resized, "Reset the runtime with ResizeBuffers");
       require(drained, "A runtime teardown returned before its display release finished");
       for (unsigned i = 0; i != 2; ++i) checked(swapchain->GetBuffer(i, IID_PPV_ARGS(backbuffers[i].put())), "Get the reset backbuffer");
+      hold_game_time = false;
       // The reset runtime shows depth again from a later copy: until then the
       // fixture's SR depth is permitted, not owed.
       selected = first.get();
       active_area = {0, 0, selected->width, selected->height};
       render_tracked_depth = [&] { draw_frame(); permitted_supply(game3d_continuity::generic_boundary | game3d_continuity::sr_evaluate); };
-      for (const auto until = GetTickCount64() + 15000; GetTickCount64() < until;) {
+      for (const auto until = clock.now() + 15000; clock.now() < until;) {
         present_frame();
         if (const auto s = inspect(); active(s) && !s.source.reused_depth) break;
       }
@@ -998,11 +1020,11 @@ namespace {
       // Up, then down: the smaller display is reused at once, and the larger
       // one is released off the present thread once unused for the idle
       // period, while Presents go on.
-      const auto dropped = GetTickCount64();
+      const auto dropped = clock.now();
       show(small, "SL-display-idle-dropped");
       require(active_texture() == small_texture, "Returning to the earlier render size reallocated its display");
-      while (!large_released->released && GetTickCount64() - dropped < 8000) present_frame();
-      const auto released_ms = GetTickCount64() - dropped;
+      while (!large_released->released && clock.now() - dropped < 8000) present_frame();
+      const auto released_ms = clock.now() - dropped;
       std::printf("MEASURE native-provider display-idle released_ms=%llu\n", static_cast<unsigned long long>(released_ms));
       require(large_released->released, "A display unused since a resolution drop was never released (its VRAM stayed allocated)");
       require(large_released->thread != large_released->present_thread, "An idle display was released on the present thread");
@@ -1022,14 +1044,14 @@ namespace {
       auto *small_kept = watch(small_texture);
       auto *large_kept = watch(oscillating_large);
       constexpr unsigned changes = 9;
-      const auto oscillation_start = GetTickCount64();
+      const auto oscillation_start = clock.now();
       for (unsigned change = 0; change != changes; ++change) {
         show(change % 2 ? large : small, "SL-display-oscillation");
         require(active_texture() == (change % 2 ? oscillating_large : small_texture),
           "Dynamic resolution between two render sizes reallocated a display");
-        for (const auto next = GetTickCount64() + 300; GetTickCount64() < next;) present_frame();
+        for (const auto next = clock.now() + 300; clock.now() < next;) present_frame();
       }
-      const auto oscillation_ms = GetTickCount64() - oscillation_start;
+      const auto oscillation_ms = clock.now() - oscillation_start;
       require(!small_kept->released && !large_kept->released,
         "Dynamic resolution between two render sizes released a display it kept using");
       require(oscillation_ms > 2000, "The display oscillation did not outlast the idle period");
@@ -1117,9 +1139,9 @@ namespace {
       sentinel->Release();
       // No frame: the SR source stops, and its association lapses.
       render_tracked_depth = {};
-      const auto stopped = GetTickCount64();
-      while (!sentinel->released && GetTickCount64() - stopped < 8000) present_frame();
-      const auto released_ms = GetTickCount64() - stopped;
+      const auto stopped = clock.now();
+      while (!sentinel->released && clock.now() - stopped < 8000) present_frame();
+      const auto released_ms = clock.now() - stopped;
       std::printf("MEASURE native-provider display-gone released_ms=%llu\n", static_cast<unsigned long long>(released_ms));
       require(sentinel->released, "The provider's last display stayed allocated after its API source was gone");
       require(sentinel->thread != sentinel->present_thread, "The provider's last display was released on the present thread");
@@ -1128,7 +1150,7 @@ namespace {
       // The source resumes: until the provider shows depth again its SR
       // depth is permitted, not owed (a new display is allocated).
       render_tracked_depth = [&] { draw_frame(); permitted_supply(game3d_continuity::generic_boundary | game3d_continuity::sr_evaluate); };
-      for (const auto until = GetTickCount64() + 15000; GetTickCount64() < until;) {
+      for (const auto until = clock.now() + 15000; clock.now() < until;) {
         present_frame();
         if (const auto s = inspect(); active(s) && !s.source.reused_depth) break;
       }
@@ -1264,7 +1286,7 @@ namespace {
       // The tag is a declared source: its first valid selective sample accepts
       // it (A1), from the render after that sample is read. A few sample
       // intervals pass before the dump.
-      for (const auto until = GetTickCount64() + 500; GetTickCount64() < until;) { present_frame(); }
+      for (const auto until = clock.now() + 500; clock.now() < until;) { present_frame(); }
 
       struct mailbox {
         HANDLE handle{};
@@ -1291,8 +1313,8 @@ namespace {
       box.state->consumer_nonce = 0x5549484f4f4bULL;
       box.request = box.state->request_id + 1;
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
-      const auto until = GetTickCount64() + 10000;
-      while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request && GetTickCount64() < until) {
+      const auto until = clock.wall_now() + 10000;
+      while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request && clock.wall_now() < until) {
         present_frame();
       }
       require(box.state->response_id == box.request && box.state->response.result == dump::status::complete &&
@@ -1424,15 +1446,15 @@ namespace {
         require(read(retained[i].p, D3D12_RESOURCE_STATE_COMMON) == retained_bytes[i],
           "Host acknowledgement or later game write changed UI snapshot");
 
-      // Draws for a while (a second by default), then dumps; the caller
-      // releases the dump.
+      // Draws for a while (a second of game time by default), then dumps; the
+      // caller releases the dump.
       const auto dump_after_layer_frames = [&](std::uint64_t draw_ms = 1000) {
-        for (const auto until = GetTickCount64() + draw_ms; GetTickCount64() < until;) { present_frame(); }
+        for (const auto until = clock.now() + draw_ms; clock.now() < until;) { present_frame(); }
         box.request = box.state->request_id + 1;
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
-        for (const auto until = GetTickCount64() + 10000;
+        for (const auto until = clock.wall_now() + 10000;
              std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request &&
-             GetTickCount64() < until;) { present_frame(); }
+             clock.wall_now() < until;) { present_frame(); }
         require(box.state->response_id == box.request && box.state->response.result == dump::status::complete &&
             box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
           "Production Dump3D did not complete the offscreen UI layer capture");
@@ -1763,10 +1785,12 @@ namespace {
           for (unsigned i = 0; i != 4; ++i) { present_frame(); }
           skip_layer = true;
         };
+        // One frame's wall time, a MEASURE value: the verdicts below are
+        // events (a gate still closed when a Present returned), not times.
         const auto timed_step = [&] {
-          const auto start = GetTickCount64();
+          const auto start = clock.wall_now();
           present_frame();
-          return GetTickCount64() - start;
+          return clock.wall_now() - start;
         };
         // A fence the test signals from the CPU at open(), or after the limit
         // armed (arm), so a regression that waits on the GPU never strands a
@@ -1783,6 +1807,8 @@ namespace {
             });
           }
           void open() { if (opened) SetEvent(opened); }
+          // Whether the gate's fence was still below its value (no CPU opened it).
+          bool closed() const { return fence->GetCompletedValue() < value; }
           ~cpu_gate() {
             open();
             if (opener.joinable()) opener.join();
@@ -1800,8 +1826,10 @@ namespace {
           bool &defer;
           ~clear_hooks() { before = {}; after = {}; defer = false; }
         } hooks{before_frame, after_present, defer_completion};
-        // A regression that waits on the GPU would hold a Present until the
-        // gate opens at this limit.
+        // A regression that waits on the GPU (or on the CPU for the gated
+        // work) would hold a Present until the gate opens at this real-time
+        // limit: a Present that returned while its gate was still closed did
+        // not wait (the event verdicts below; their times are MEASURE lines).
         constexpr DWORD gate_limit_ms = 1000;
         // Held, then offered: the second queue's copy waits for a gate. Inside
         // ReShade's execute event, after the add-on's own handler and before
@@ -1849,10 +1877,12 @@ namespace {
               " offered=" + std::to_string(submitted.offered_id)).c_str());
           gate.arm(gate_limit_ms);
           held_present_ms = timed_step();
+          const bool returned_gated = gate.closed();
           live = query();
-          require(held_present_ms < gate_limit_ms / 2 && live.awaiting == 1 && live.offered_id == before_held.offered_id &&
+          require(returned_gated && live.awaiting == 1 && live.offered_id == before_held.offered_id &&
               live.in_order && live.order == unsigned(order::queue),
-            ("A Present waited for a held second-queue layer copy or read it before its fence reached it: elapsed_ms=" +
+            ("A Present waited for a held second-queue layer copy or read it before its fence reached it: returned_gated=" +
+              std::to_string(returned_gated) + " elapsed_ms=" +
               std::to_string(held_present_ms) + " awaiting=" + std::to_string(live.awaiting) + " offered=" +
               std::to_string(live.offered_id) + " held=" + std::to_string(window.capture_id)).c_str());
           checked(foreign[0].list->Reset(reset_allocator.p, nullptr), "Reset the held copy's list after its submission");
@@ -1900,7 +1930,7 @@ namespace {
           after_present = [&, gate = presented.fence.p] {
             checked(queue->Signal(gate, 1), "Open the second queue's gate after Present N");
           };
-          const auto start = GetTickCount64();
+          const auto start = clock.wall_now();
           defer_completion = true;
           present_frame();
           defer_completion = false;
@@ -1919,11 +1949,15 @@ namespace {
             checked(queue->Signal(gate, 2), "Open the second queue's gate after Present N+1");
           };
           present_frame();
-          cycle_elapsed = GetTickCount64() - start;
+          cycle_elapsed = clock.wall_now() - start;
           before_frame = {};
           after_present = {};
           live = query();
-          require(cycle_elapsed < gate_limit_ms / 2 && frame_n.awaiting == 1 && frame_n.offered_id == before_cycle.offered_id &&
+          // Present N+1's own completion wait (3 s) proves the schedule ran
+          // at GPU speed: a GPU wait for frame N's copy before Present N closes
+          // a cycle no CPU opens before the gates' destructors, and fails that
+          // wait. Its time is a MEASURE line.
+          require(frame_n.awaiting == 1 && frame_n.offered_id == before_cycle.offered_id &&
               frame_n.order == unsigned(order::queue) && frame_n.capture_id == before_cycle.capture_id + 1 &&
               (live.offered_id == before_cycle.offered_id || live.offered_id == frame_n.capture_id) &&
               live.capture_id == frame_n.capture_id + 1,
@@ -1992,7 +2026,7 @@ namespace {
           // Expire the layer: no clear for longer than max_clear_gap_ms.
           render_tracked_depth = [&] { real_frame(); };
           present_frame();
-          Sleep(DWORD(sunshine_game3d::ui_layer::max_clear_gap_ms + 50));
+          clock.hitch(sunshine_game3d::ui_layer::max_clear_gap_ms + 50);
           present_frame();
           const auto expired = query().capture_id;
           render_tracked_depth = [&] { real_frame(); pass_layer(); };
@@ -2076,8 +2110,10 @@ namespace {
             present_frame();
             require(!responded(), "A census dump completed at the Present that armed it");
           };
+          // A Dump 3D mailbox, bounded in wall time (the census deadline it
+          // may wait for is game time, which an engaged clock plays faster).
           const auto await_census = [&](std::uint64_t limit_ms) {
-            for (const auto until = GetTickCount64() + limit_ms; !responded() && GetTickCount64() < until;) { present_frame(); }
+            for (const auto until = clock.wall_now() + limit_ms; !responded() && clock.wall_now() < until;) { present_frame(); }
             require(responded() && box.state->response.result == dump::status::complete &&
                 box.state->response.json_bytes <= dump::max_json_bytes && box.state->response.texture_count <= dump::max_textures,
               "Production Dump3D did not complete a census capture");
@@ -2123,11 +2159,12 @@ namespace {
                 " pending=" + std::to_string(submitted.census_pending)).c_str());
             for (unsigned i = 0; i != 4; ++i) {
               gated_ms = std::max(gated_ms, timed_step());
+              require(gate.closed(), ("A Present waited for a gated census copy: its gate opened at the limit first, "
+                "slowest_ms=" + std::to_string(gated_ms)).c_str());
               require(!responded(), "The dump read a census copy whose second-queue fence had not reached its value");
             }
-            require(gated_ms < gate_limit_ms / 2 && query().census_awaiting == 1,
-              ("A Present waited for a gated census copy, or the copy left its fence: slowest_ms=" +
-                std::to_string(gated_ms)).c_str());
+            require(query().census_awaiting == 1,
+              ("The gated census copy left its fence: slowest_ms=" + std::to_string(gated_ms)).c_str());
             gate.open();
           }
           wait(second.p);
@@ -2166,8 +2203,8 @@ namespace {
             request_census();
             run_foreign_on(foreign[1], gate.fence.p, 1);
             gate.arm(census_gate_ms);
-            const auto until = GetTickCount64() + census_gate_ms - 300;
-            while (!responded() && GetTickCount64() < until) deadline_ms = std::max(deadline_ms, timed_step());
+            const auto until = clock.now() + census_gate_ms - 300;
+            while (!responded() && clock.now() < until) deadline_ms = std::max(deadline_ms, timed_step());
             require(responded() && gate.fence->GetCompletedValue() < 1,
               "The census dump did not complete at its deadline while the copy's queue was still gated");
             const auto metadata = await_census(0);
@@ -2175,7 +2212,7 @@ namespace {
             const auto row = layer_row(metadata);
             if (!(row.at("captured") == false && row.at("status") == "awaiting_fence" && row.at("read_order").is_null() &&
                   row.at("fence_value") > 0 && census.at("settled") == false && census.at("wait_ms") >= census_wait_ms &&
-                  artifact(row.at("artifact_id").get<unsigned>()) < 0 && deadline_ms < gate_limit_ms / 2))
+                  artifact(row.at("artifact_id").get<unsigned>()) < 0))
               throw std::runtime_error("A census copy gated past the wait was read, waited for, or not reported awaiting "
                 "its fence: slowest_ms=" + std::to_string(deadline_ms) + " " + census.dump());
             release_census();
@@ -2309,8 +2346,8 @@ namespace {
       // Only public SDK hooks supply UI/depth. The optional failure case calls
       // unsupported FG Off immediately after each tag, matching the live game.
       // No evaluation or private capture export is used.
-      const auto warm_until = GetTickCount64() + 750;
-      do { present_frame(); } while (GetTickCount64() < warm_until);
+      const auto warm_until = clock.now() + 750;
+      do { present_frame(); } while (clock.now() < warm_until);
       settle("public-SL-global-tags-no-FG-no-evaluate");
       struct mailbox {
         HANDLE handle{}; dump::shared_state_t *state{}; std::uint64_t request{};
@@ -2338,8 +2375,8 @@ namespace {
         for (unsigned i = 0; i != 20; ++i) { present_frame(); }
         box.request = box.state->request_id + 1;
         InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->request_id), box.request);
-        const auto until = GetTickCount64() + 10000;
-        while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request && GetTickCount64() < until) {
+        const auto until = clock.wall_now() + 10000;
+        while (std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&box.state->response_id), 0, 0)) != box.request && clock.wall_now() < until) {
           present_frame();
         }
         require(box.state->response_id == box.request && box.state->response.result == dump::status::complete &&
@@ -2449,7 +2486,7 @@ namespace {
     // frames are, so the lineage judge (10-28) never asks for it while FG is
     // on. Within the slack of the hold's end the add-on may hold it still.
     void fg_held_sr() {
-      if (fg_copy_tick && GetTickCount64() - fg_copy_tick < sunshine_freshness::source_age_ms + game3d_continuity::tag_slack_ms) {
+      if (fg_copy_tick && clock.now() - fg_copy_tick < sunshine_freshness::source_age_ms + game3d_continuity::tag_slack_ms) {
         continuity_log.pending.owned |= game3d_continuity::sr_evaluate;
         continuity_log.pending.fg_held |= game3d_continuity::sr_evaluate;
       }
@@ -2503,12 +2540,12 @@ namespace {
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
       // FG is on wherever a script uses this frame: its tag call copies (S1).
       supplied(game3d_continuity::tag_copy);
-      fg_copy_tick = tag_started = GetTickCount64();
+      fg_copy_tick = tag_started = clock.now();
       const auto tagged = sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command)) :
         sl.global_tag(fg_viewport, &tag, 1, reinterpret_cast<void *>(game_native_command));
       require(tagged == 0,
         "FG tag observation changed the SDK result");
-      tag_returned = GetTickCount64();
+      tag_returned = clock.now();
       const base_structure *inputs[]{&fg_viewport.base};
       require(sl.evaluate(0, token, inputs, 1, reinterpret_cast<void *>(game_native_command)) == 0,
         "FG same-frame SR observation changed the SDK result");
@@ -2521,7 +2558,7 @@ namespace {
       const auto resource = depth_resource();
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
       supplied(game3d_continuity::tag_copy);  // Copied before its frame's Present (R2).
-      fg_copy_tick = GetTickCount64();
+      fg_copy_tick = clock.now();
       require(sl.global_tag(fg_viewport, &tag, 1, nullptr) == 0, "Command-less FG tag changed the SDK result");
     }
     // An FG frame whose longer-lived depth tag (lifecycle 1 or 2) declares
@@ -2541,7 +2578,7 @@ namespace {
       const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, lifecycle, active_area};
       const auto command = reinterpret_cast<void *>(game_native_command);
       supplied(game3d_continuity::tag_copy);  // At its call from the recorded state, or before its Present (S11).
-      fg_copy_tick = GetTickCount64();
+      fg_copy_tick = clock.now();
       require((sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, command) : sl.global_tag(fg_viewport, &tag, 1, command)) == 0,
         "Recorded-state FG tag changed the SDK result");
       if (!write) transition(list, selected->resource.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -2570,7 +2607,7 @@ namespace {
       if (fg_commands) {
         const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 0, active_area};
         supplied(game3d_continuity::tag_copy);
-        fg_copy_tick = GetTickCount64();
+        fg_copy_tick = clock.now();
         require((sl.frame_tag ? sl.frame_tag(token, fg_viewport, &tag, 1, command) : sl.global_tag(fg_viewport, &tag, 1, command)) == 0,
           "Accepted FG tag changed the SDK result");
         return;
@@ -2610,14 +2647,14 @@ namespace {
     // Presents until twelve consecutive Presents have fresh depth from the FG
     // input (frame_generation_input) or from the viewport's SR evaluation.
     void settle_route(const char *label, bool frame_generation_input) {
-      const auto until = GetTickCount64() + 15000;
+      const auto until = clock.now() + 15000;
       unsigned consecutive{};
       status s;
       do {
         present_frame(); s = inspect();
         consecutive = active(s) && !s.source.reused_depth && s.source.frame_generation_input == frame_generation_input ?
           consecutive + 1 : 0;
-      } while (consecutive < 12 && GetTickCount64() < until);
+      } while (consecutive < 12 && clock.now() < until);
       log_status(label, s);
       require(consecutive >= 12, frame_generation_input ? "An accepted FG copy did not take its viewport's depth back" :
         "A silent FG scope did not let the same viewport's SR depth through");
@@ -2808,9 +2845,10 @@ namespace {
       }
       stats(nullptr, TRUE);
       const auto lists_before = lists.load(std::memory_order_relaxed);
-      const auto start = GetTickCount64();
+      // Real time: the contention mode never engages the game clock.
+      const auto start = clock.wall_now();
       unsigned presents{};
-      while (GetTickCount64() - start < std::uint64_t(seconds) * 1000) {
+      while (clock.wall_now() - start < std::uint64_t(seconds) * 1000) {
         present_frame();
         ++presents;
         { std::lock_guard lock(pace_mutex); ++frames; }
@@ -2818,7 +2856,7 @@ namespace {
       }
       depth_capture::lock_stats::values values;
       stats(&values, FALSE);
-      const auto elapsed = GetTickCount64() - start;
+      const auto elapsed = clock.wall_now() - start;
       const auto recorded = lists.load(std::memory_order_relaxed) - lists_before;
       { std::lock_guard lock(pace_mutex); stop = true; }
       pace.notify_all();
@@ -2882,7 +2920,7 @@ namespace {
         },
         [&] {
           for (unsigned pair = 0; pair < 8; ++pair) {
-            const auto pair_start = GetTickCount64();
+            const auto pair_start = clock.wall_now();
             render_tracked_depth = [this] { real_fg_frame(); };
             present_frame(); const auto real = inspect();
             log_status("SLFG-pair-real-depth", real);
@@ -2897,7 +2935,7 @@ namespace {
             present_frame(); const auto generated = inspect();
             log_status("SLFG-generated-previous-depth", generated);
             std::printf("MEASURE native FG pair=%u elapsed_ms=%llu real_resource=0x%llx generated_resource=0x%llx expected_resource=0x%llx\n",
-              pair, static_cast<unsigned long long>(GetTickCount64()-pair_start),
+              pair, static_cast<unsigned long long>(clock.wall_now()-pair_start),
               static_cast<unsigned long long>(real.source.current.resource),
               static_cast<unsigned long long>(generated.source.current.resource),
               static_cast<unsigned long long>(native(*selected)));
@@ -2951,16 +2989,16 @@ namespace {
             render_tracked_depth = [this, after_real, stall] {
               real_fg_frame();
               if (!after_real) {
-                Sleep(stall);
+                clock.hitch(stall);
               }
             };
-            const auto started = GetTickCount64();
+            const auto started = clock.now();
             present_frame();
             const auto real = inspect();
             const auto real_blend = blend();
             render_tracked_depth = {};
             if (after_real) {
-              Sleep(stall);
+              clock.hitch(stall);
             }
             // A generated Present of the real Present's frame, after it
             // (judge::present, between).
@@ -2969,7 +3007,7 @@ namespace {
             continuity_log.generated = continuity_log.between = false;
             const auto generated = inspect();
             const auto generated_blend = blend();
-            const auto generated_ms = GetTickCount64() - started;
+            const auto generated_ms = clock.now() - started;
             render_tracked_depth = [this] { real_fg_frame(); };
             present_frame();
             const auto next = inspect();
@@ -3037,11 +3075,11 @@ namespace {
           render_tracked_depth = {};
           configure_fg(false);
           held_fg(off_seed, "FG-off-without-new-depth");
-          require(GetTickCount64() - off_seed_returned < sunshine_freshness::source_age_ms,
+          require(clock.now() - off_seed_returned < sunshine_freshness::source_age_ms,
             "Native FG-off fixture expired before its hold was observed");
           const auto expiry_at = off_seed_returned + sunshine_freshness::source_age_ms + 20;
-          const auto before_expiry_wait = GetTickCount64();
-          if (before_expiry_wait < expiry_at) Sleep(DWORD(expiry_at - before_expiry_wait));
+          const auto before_expiry_wait = clock.now();
+          if (before_expiry_wait < expiry_at) clock.hitch(expiry_at - before_expiry_wait);
           present_frame();
           const auto off = inspect(); log_status("FG-off-after-source-age", off);
           require(!off.ready() && !off.source.ready && !off.source.reused_depth,
@@ -3081,7 +3119,7 @@ namespace {
           std::uint64_t last_held{};
           do {
             held_fg(expiry_seed, holds ? nullptr : "SLFG-cache-expiry-first-hold");
-            last_held = GetTickCount64(); ++holds;
+            last_held = clock.now(); ++holds;
           } while (holds < 2 || last_held < seed_returned + 140);
           require(last_held >= seed_started && last_held - seed_started < sunshine_freshness::source_age_ms,
             "Native expiry fixture exhausted its source-age window before exercising repeated holds");
@@ -3091,10 +3129,10 @@ namespace {
           // while the most recent successful hold is still young, distinguishes the
           // original capture lifetime from a TTL accidentally renewed on each hold.
           const auto expiry_at = seed_returned + sunshine_freshness::source_age_ms + 20;
-          const auto before_expiry_wait = GetTickCount64();
-          if (before_expiry_wait < expiry_at) Sleep(DWORD(expiry_at - before_expiry_wait));
+          const auto before_expiry_wait = clock.now();
+          if (before_expiry_wait < expiry_at) clock.hitch(expiry_at - before_expiry_wait);
           missing_fg("SLFG-cache-expired-after-repeated-holds");
-          const auto expired = GetTickCount64();
+          const auto expired = clock.now();
           require(expired >= expiry_at && expired >= last_held &&
             expired - last_held < sunshine_freshness::source_age_ms && fg_frame == seed_frame &&
             tag_started == seed_started && tag_returned == seed_returned,
@@ -3131,7 +3169,7 @@ namespace {
             require(sl.constants(constants, *last_token, fg_viewport) == 0, "Camera recovery changed the SDK result");
           };
           held_fg(reset_seed, "SLFG-cache-camera-valid-without-depth");
-          require(GetTickCount64() - reset_seed_started < sunshine_freshness::source_age_ms,
+          require(clock.now() - reset_seed_started < sunshine_freshness::source_age_ms,
             "Native camera-reset fixture expired before its holds were observed");
           render_tracked_depth = {};
           require(fg_frame == reset_seed_frame, "Camera-reset hold case accidentally produced a new real frame");
@@ -3154,11 +3192,11 @@ namespace {
           held_fg(mode_seed, "SLFG-cache-mode-before-hold");
           configure_fg(false); held_fg(mode_seed, "SLFG-cache-mode-off");
           configure_fg(true); held_fg(mode_seed, "SLFG-cache-mode-on-without-depth");
-          require(GetTickCount64() - mode_seed_returned < sunshine_freshness::source_age_ms,
+          require(clock.now() - mode_seed_returned < sunshine_freshness::source_age_ms,
             "Native FG mode fixture expired before its holds were observed");
           const auto expiry_at = mode_seed_returned + sunshine_freshness::source_age_ms + 20;
-          const auto before_expiry_wait = GetTickCount64();
-          if (before_expiry_wait < expiry_at) Sleep(DWORD(expiry_at - before_expiry_wait));
+          const auto before_expiry_wait = clock.now();
+          if (before_expiry_wait < expiry_at) clock.hitch(expiry_at - before_expiry_wait);
           missing_fg("SLFG-cache-mode-on-expired");
           missing_fg("SLFG-cache-mode-on-no-revival");
           require(fg_frame == mode_seed_frame, "FG mode no-revival case accidentally produced a new real frame");
@@ -3414,7 +3452,7 @@ namespace {
           // domain), so it settles on SR's after the switch, as at any FG/SR
           // switch; the provider's depth never lapses meanwhile.
           {
-            const auto started = GetTickCount64();
+            const auto started = clock.now();
             status first;
             unsigned held = 0;
             for (;; ++held) {
@@ -3431,12 +3469,12 @@ namespace {
               }
               require(s.source.reused_depth && s.source.current.capture == first.source.current.capture,
                 "A frame without an FG copy did not hold the last FG copy");
-              require(GetTickCount64() - started < 2 * sunshine_freshness::source_age_ms,
+              require(clock.now() - started < 2 * sunshine_freshness::source_age_ms,
                 "FG's last copy kept SR depth out past the source age");
             }
             require(held >= 2, "SR took over at the first frame whose SR copy was fresh, while FG's last copy could be held");
             std::printf("MEASURE native-provider SLFG-silent-scope-FG-held presents=%u ms=%llu\n", held,
-              static_cast<unsigned long long>(GetTickCount64() - started));
+              static_cast<unsigned long long>(clock.now() - started));
           }
           settle_route("SLFG-silent-scope-SR-depth", false);
           require(readiness_losses() == losses_before_takeover, "SR's takeover of a viewport without FG copies lost depth");
@@ -3460,8 +3498,8 @@ namespace {
           render_tracked_depth = [this] { fallback_frame(false, true); };
           present_frame();
           require(active(inspect()), "The export stop withdrew a fresh SR copy");
-          for (const auto until = GetTickCount64() + 7000;
-              reshade_log_count({"Sunshine SBS: export inactive (not_foreground"}) == pauses && GetTickCount64() < until;) {
+          for (const auto until = clock.now() + 7000;
+              reshade_log_count({"Sunshine SBS: export inactive (not_foreground"}) == pauses && clock.now() < until;) {
             present_frame();
             require(active(inspect()), "A real Present in the background lost its fresh SR depth");
           }
@@ -3489,7 +3527,7 @@ namespace {
                 stray.source.frame_generation_input, "A frame's accepted FG copy did not show at its Present");
             unrendered += unsigned(!stray.ready()); ++presents;
             render_tracked_depth = [this] { fallback_frame(false, true); };
-            const auto started = GetTickCount64();
+            const auto started = clock.now();
             unsigned held = 0;
             for (;; ++held) {
               present_frame(); const auto s = inspect();
@@ -3502,7 +3540,7 @@ namespace {
               }
               require(s.source.reused_depth && s.source.current.capture == stray.source.current.capture,
                 "The frames after a single FG copy did not hold it");
-              require(GetTickCount64() - started < 2 * sunshine_freshness::source_age_ms,
+              require(clock.now() - started < 2 * sunshine_freshness::source_age_ms,
                 "A single FG copy kept SR depth out past the source age");
             }
             require(held >= 2, "SR returned at the first frame whose SR copy was fresh, while the FG copy could be held");
@@ -3633,6 +3671,8 @@ namespace {
       bool on_compute = false;
       queue_ring<3> dlssg_ring;
       dlssg_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+      // Engaged, every frame boundary waits for the ring's work.
+      const auto dlssg_watch = clock.watch("dlssg_ring", dlssg_ring);
       // The game's HUD-less and Backbuffer tags: without a command list (as in
       // Shadows), the same followed by the same frame's null untag of both
       // kinds (which cancels their copies deferred to the frame's Present,
@@ -3681,7 +3721,7 @@ namespace {
           auto *compute = reinterpret_cast<ID3D12GraphicsCommandList *>(native);
           if (observed_state) transition(compute, selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
           if (observed_state) supplied_elsewhere(game3d_continuity::dlssg_input);
-          if (observed_state) fg_copy_tick = GetTickCount64();
+          if (observed_state) fg_copy_tick = clock.now();
           require(ngx_evaluate(compute, feature, &inputs, nullptr) == ngx_fixture::success,
             "DLSS-G's compute evaluation observation changed the SDK result");
           if (observed_state) transition(compute, selected->resource.p, read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -3694,7 +3734,7 @@ namespace {
           transition(list, hudless.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
           transition(list, backbuffer.p, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, read);
           supplied(game3d_continuity::dlssg_input);
-          fg_copy_tick = GetTickCount64();
+          fg_copy_tick = clock.now();
         }
         require(ngx_evaluate(list, feature, &inputs, nullptr) == ngx_fixture::success,
           "DLSS-G evaluation observation changed the SDK result");
@@ -3779,7 +3819,7 @@ namespace {
                 backbuffer_row.key.api == sunshine_game3d::source_api::ngx;
             };
             bool paired = false;
-            for (const auto until = GetTickCount64() + 3000; !paired && GetTickCount64() < until;) {
+            for (const auto until = clock.now() + 3000; !paired && clock.now() < until;) {
               present_frame(); paired = exact_pair();
             }
             if (!paired) log_record("DLSSG-exact-pair", newest_record());
@@ -3792,11 +3832,11 @@ namespace {
           // copy competes for the kind's two snapshots, and UI detection keeps
           // the tags' own same-batch pair.
           ui_tags = ui_tags_form::listed;
-          for (const auto settled = GetTickCount64() + 300; GetTickCount64() < settled;) present_frame();
+          for (const auto settled = clock.now() + 300; clock.now() < settled;) present_frame();
           const auto ngx_lines = [&] { return reshade_log_lines({"Sunshine NGX depth:", "dlssg_ui={offered="}); };
           const auto gate_lines = [&] { return reshade_log_lines({"Sunshine UI capture gate:", "hudless_presents={batch="}); };
           const auto wait_lines = [&](const auto &lines, std::size_t count) {
-            for (const auto until = GetTickCount64() + 16000; lines().size() < count && GetTickCount64() < until;) present_frame();
+            for (const auto until = clock.now() + 16000; lines().size() < count && clock.now() < until;) present_frame();
             auto found = lines();
             require(found.size() >= count, "The bounded NGX or UI capture gate line stopped while Streamline tags copied UI");
             return found;
@@ -3865,7 +3905,7 @@ namespace {
             render_tracked_depth = dlssg_frame;
             // A whole NGX line written after the switch: no command_type refusal in it.
             const auto copied = [&] { return reshade_log_lines({"Sunshine NGX depth:", "dlssg_depth={copied="}); };
-            for (const auto until = GetTickCount64() + 16000; copied().size() < copied_lines + 2 && GetTickCount64() < until;)
+            for (const auto until = clock.now() + 16000; copied().size() < copied_lines + 2 && clock.now() < until;)
               present_frame();
             const auto lines = copied();
             require(lines.size() >= copied_lines + 2, "The bounded NGX line stopped during DLSS-G's compute evaluations");
@@ -3946,10 +3986,10 @@ namespace {
             return s;
           };
           render_tracked_depth = [this] { fallback_frame(false, false); };
-          for (const auto until = GetTickCount64() + 7000; silent_lines() == silent_before && GetTickCount64() < until;) held_frame();
+          for (const auto until = clock.now() + 7000; silent_lines() == silent_before && clock.now() < until;) held_frame();
           require(silent_lines() > silent_before, "Refused FG tags without SR did not turn the FG scope silent");
           status mono;
-          for (const auto start = GetTickCount64(); GetTickCount64() - start < 1500;) mono = held_frame();
+          for (const auto start = clock.now(); clock.now() - start < 1500;) mono = held_frame();
           log_status("SLFG-silent-scope-no-API-source", mono);
           require(!mono.source.ready && generic_lines() == generic_before,
             "A silent FG scope with no API source supplied depth or used the generic depth fallback");
@@ -4023,7 +4063,7 @@ namespace {
             provider::center_sample sampled;
             status s;
             unsigned consecutive{};
-            const auto until = GetTickCount64() + 15000;
+            const auto until = clock.now() + 15000;
             do {
               present_frame(); s = inspect();
               const bool complete = query_center(observed.runtime, &sampled) && sampled.metadata.sequence > preceding &&
@@ -4037,7 +4077,7 @@ namespace {
                 s.basis == unsigned(sunshine_game3d::automatic_scale_basis::linear_distance) &&
                 s.scale_state == unsigned(sunshine_game3d::automatic_scale_state::active) && std::isfinite(s.scale) && s.scale > 0;
               consecutive = complete && selected_linear ? consecutive + 1 : 0;
-            } while (consecutive < 8 && GetTickCount64() < until);
+            } while (consecutive < 8 && clock.now() < until);
             log_status("SL-RR-linear-no-camera", s);
             require(consecutive >= 8, "Linear RR input failed native capture/acquisition/calibration without camera matrices");
             const auto raw = read(selected->resource.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -4099,7 +4139,7 @@ namespace {
           configure_fg(true);
           settle_route("FG-reset-seed", true);
           // Any switch line of the seed is written within a second.
-          for (const auto until = GetTickCount64() + 1200; GetTickCount64() < until;) present_frame();
+          for (const auto until = clock.now() + 1200; clock.now() < until;) present_frame();
         },
         [&] {
           const auto before = on_lines();
@@ -4110,7 +4150,7 @@ namespace {
           };
           render_tracked_depth = reset_frame;
           reset_runtime();
-          for (const auto until = GetTickCount64() + 2000; GetTickCount64() < until;) present_frame();
+          for (const auto until = clock.now() + 2000; clock.now() < until;) present_frame();
           require(on_lines() == before, "A runtime reset with FG on logged an FG switch the game never made");
           // FG Off, then a reset inside its line: the reset runtime keeps
           // counting it, to a second after the Off (no depth is drawn).
@@ -4120,7 +4160,7 @@ namespace {
           configure_fg(false);
           present_frame(); present_frame();
           reset_runtime();
-          for (const auto until = GetTickCount64() + 7000; off_lines() == offs && GetTickCount64() < until;) present_frame();
+          for (const auto until = clock.now() + 7000; off_lines() == offs && clock.now() < until;) present_frame();
           const auto off = reshade_log_lines({"Sunshine depth FG switch: viewport=", " mode=1->0 "});
           require(off.size() == offs + 1 && number_after(off.back(), "presents=") > 2,
             "A runtime reset ended the FG Off's switch line: the reset runtime's Presents were not counted");
@@ -4130,7 +4170,7 @@ namespace {
           configure_fg(true);
           reset_runtime();
           render_tracked_depth = reset_frame;
-          for (const auto until = GetTickCount64() + 7000; on_lines() == ons && GetTickCount64() < until;) present_frame();
+          for (const auto until = clock.now() + 7000; on_lines() == ons && clock.now() < until;) present_frame();
           require(on_lines() == ons + 1, "An FG On applied right before a runtime reset logged no FG switch");
           // The same across two resets with no Present between (a display
           // settings Apply): the runtime between them never presents and
@@ -4143,7 +4183,7 @@ namespace {
           configure_fg(false);
           present_frame(); present_frame();
           reset_runtime(); reset_runtime();
-          for (const auto until = GetTickCount64() + 7000; off_lines() == offs_twice && GetTickCount64() < until;) present_frame();
+          for (const auto until = clock.now() + 7000; off_lines() == offs_twice && clock.now() < until;) present_frame();
           const auto off_twice = reshade_log_lines({"Sunshine depth FG switch: viewport=", " mode=1->0 "});
           require(off_twice.size() == offs_twice + 1 && number_after(off_twice.back(), "presents=") > 2,
             "Two runtime resets ended the FG Off's switch line: the last runtime's Presents were not counted");
@@ -4151,16 +4191,16 @@ namespace {
           configure_fg(true);
           reset_runtime(); reset_runtime();
           render_tracked_depth = reset_frame;
-          for (const auto until = GetTickCount64() + 7000; on_lines() == ons_twice && GetTickCount64() < until;) present_frame();
+          for (const auto until = clock.now() + 7000; on_lines() == ons_twice && clock.now() < until;) present_frame();
           require(on_lines() == ons_twice + 1, "An FG On applied right before two runtime resets logged no FG switch");
           // FG off again for the recovery below.
           render_tracked_depth = {};
           configure_fg(false);
-          for (const auto until = GetTickCount64() + 1200; GetTickCount64() < until;) present_frame();
+          for (const auto until = clock.now() + 1200; clock.now() < until;) present_frame();
         },
         [&] {
           render_tracked_depth = [&] { draw_frame(); permitted_supply(game3d_continuity::generic_boundary | game3d_continuity::sr_evaluate); };
-          for (const auto until = GetTickCount64() + 15000; GetTickCount64() < until;) {
+          for (const auto until = clock.now() + 15000; clock.now() < until;) {
             present_frame();
             if (const auto s = inspect(); active(s) && !s.source.reused_depth) break;
           }
@@ -4189,14 +4229,19 @@ namespace {
       constexpr DWORD ring_pace_ms = 20;
       static_assert(decltype(game_ring)::size * ring_pace_ms > sunshine_freshness::source_age_ms + 50);
       game_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
+      // Engaged, every frame boundary and hitch waits for the ring's executed
+      // work; a frame's own work, gated until after its Present, is executed
+      // after its pace.
+      const auto game_watch = clock.watch("game_ring", game_ring);
       // The queue that waits for each game-queue SR submission's ring signal
       // (the presenting queue, as these games' presenting queues do; none in
       // the in-flight cases without that wait).
       ID3D12CommandQueue *game_queue_waiter = queue.p;
       // The clock just before each game-queue SR evaluation, after its
-      // pacing: the previous frame's copy, captured before that frame's
-      // Present and at least ring_pace_ms earlier, has an older capture tick
-      // (a GetTickCount64 step is shorter), and this frame's copy no older.
+      // pacing (a hitch of ring_pace_ms): the previous frame's copy, captured
+      // before that frame's Present and at least ring_pace_ms earlier, has an
+      // older capture tick (a real tick's step is shorter; engaged, the copy
+      // reads exactly this game time), and this frame's copy no older.
       std::uint64_t game_queue_stamp = 0;
       // FG off: the viewport's SR evaluation with its own depth input, on
       // the presenting queue's list (sr_evaluate) or the game queue's.
@@ -4207,8 +4252,8 @@ namespace {
       };
       const auto game_queue_sr = [&] {
         using namespace sunshine_streamline;
-        Sleep(ring_pace_ms);
-        game_queue_stamp = GetTickCount64();
+        clock.hitch(ring_pace_ms);
+        game_queue_stamp = clock.now();
         abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
         require(sl.new_token(token, &frame) == 0 && token, "Game-queue SR did not supply a frame token");
         last_token = token;
@@ -4234,7 +4279,7 @@ namespace {
         },
         [&] {
           render_tracked_depth = game_queue_sr;
-          for (const auto until = GetTickCount64() + sunshine_freshness::source_age_ms + 600; GetTickCount64() < until;)
+          for (const auto until = clock.now() + sunshine_freshness::source_age_ms + 600; clock.now() < until;)
             present_frame();
           log_status("SR-game-queue", inspect());
         },
@@ -4295,7 +4340,7 @@ namespace {
             configure_fg(false);
             active_area = {0, 0, selected->width, selected->height};
             render_tracked_depth = game_queue_sr;
-            for (const auto until = GetTickCount64() + sunshine_freshness::source_age_ms + 600; GetTickCount64() < until;)
+            for (const auto until = clock.now() + sunshine_freshness::source_age_ms + 600; clock.now() < until;)
               present_frame();
           },
           [&] {
@@ -4428,7 +4473,7 @@ namespace {
       };
       const auto settle_generic = [&](const char *label) {
         unsigned consecutive{};
-        for (const auto until = GetTickCount64() + 8000; consecutive < 12 && GetTickCount64() < until;) {
+        for (const auto until = clock.now() + 8000; consecutive < 12 && clock.now() < until;) {
           present_frame();
           consecutive = generic_ready() ? consecutive + 1 : 0;
         }
@@ -4451,12 +4496,12 @@ namespace {
       run_script({"generic-other-queue", 30000,
         [&] {
           render_tracked_depth = {};
-          for (const auto until = GetTickCount64() + sunshine_freshness::association_ms + 200; GetTickCount64() < until;)
+          for (const auto until = clock.now() + sunshine_freshness::association_ms + 200; clock.now() < until;)
             present_frame();
         },
         [&] {
           render_tracked_depth = game_queue_view;
-          for (const auto until = GetTickCount64() + game3d_continuity::establish_ms + 300; GetTickCount64() < until;)
+          for (const auto until = clock.now() + game3d_continuity::establish_ms + 300; clock.now() < until;)
             present_frame();
           log_record("Generic-game-queue", newest_record());
         },
@@ -4485,11 +4530,14 @@ namespace {
 #ifndef SUNSHINE_NATIVE_PROVIDER_FIXTURE_ONLY
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // --wall-clock (anywhere): never engage the game clock; the run plays real
+  // time as before the clock (test_game3d_clock.h).
+  sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
   // --recorder-threads N (after the interposer): the capture lock under N
   // recording threads for 60 s (run_contention), instead of the regressions.
   const bool contention = argc == 10 && std::string(argv[8]) == "--recorder-threads";
   if (argc != 5 && argc != 7 && argc != 8 && !contention) {
-    std::fputs("usage: test_game3d_native_provider_runtime official.dll frozenShaders test.addon64 freshOutput [width height [frame_generation_interposer.dll [--recorder-threads N]]]\n", stderr);
+    std::fputs("usage: test_game3d_native_provider_runtime official.dll frozenShaders test.addon64 freshOutput [width height [frame_generation_interposer.dll [--recorder-threads N]]] [--wall-clock]\n", stderr);
     return 2;
   }
   constexpr unsigned contention_seconds = 60;
@@ -4498,7 +4546,7 @@ int main(int argc, char **argv) {
     std::fputs("--recorder-threads takes 1 to 16\n", stderr);
     return 2;
   }
-  const auto run_start = GetTickCount64();
+  const auto run_start = sunshine_game3d_fixture::game_clock::wall_now();
   // A hang bound, above the longest run (the FG runs take up to about 140 s,
   // 11-01) and below ctest's 240 s timeout. Until 11-01 it was 150 s, about
   // 11 s above native_provider_continuity's longest run.
@@ -4533,6 +4581,16 @@ int main(int argc, char **argv) {
     native_provider_fixture fixture; fixture.runtime_directory = directory;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), directory, public_ui ? 3 : 2, 0, fs::absolute(argv[3]));
     fixture.load_native(directory);
+    // Game time from here (README, native provider fixture): the clock
+    // engages once setup is done, 120 s ahead, so every window, hitch and
+    // source age below is exact game time. The contention mode measures real
+    // contention over 60 s and never engages; the public UI regression
+    // (manual, not in a check) stays on the real clock too.
+    if (!contention && !public_ui) {
+      require(fixture.clock.bind(GetModuleHandleW(L"SunshineSBSTest.addon64")),
+        "The test add-on lacks the game clock exports");
+      fixture.clock.engage();
+    }
     // The fixture's per-Present trace (record_present), written at its end.
     game3d_present_trace::out.open(directory / "trace.txt", "native");
     if (contention) {
@@ -4551,6 +4609,7 @@ int main(int argc, char **argv) {
       if (sdk) fixture.run_fg(sdk);
     }
     fixture.finish();
+    fixture.clock.report("native-provider");
     game3d_present_trace::out.close();
     // The whole run's capture lock counters (the fixture records, submits
     // and presents on one thread outside the contention mode).
@@ -4559,7 +4618,7 @@ int main(int argc, char **argv) {
           "SunshineDepthTestCaptureLockStats")); stats && !contention) {
       sunshine_streamline::depth_capture::lock_stats::values values;
       stats(&values, FALSE);
-      report_capture_lock("run", values, GetTickCount64() - run_start, run_presents, 0, 0);
+      report_capture_lock("run", values, sunshine_game3d_fixture::game_clock::wall_now() - run_start, run_presents, 0, 0);
     }
     return 0;
   } catch (const std::exception &error) {

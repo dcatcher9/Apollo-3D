@@ -279,6 +279,12 @@ namespace {
     // and engages it, game time is the real tick and step() paces each
     // Present with Sleep(3).
     sunshine_game3d_fixture::game_clock &clock = sunshine_game3d_fixture::fixture_clock();
+    // Engaged only: Presents at one game instant. step() then ends without a
+    // frame boundary, so game time does not move and nothing is quiesced: for
+    // add-on pool work a fixture holds across Presents on purpose (the native
+    // provider fixture's release sentinel holds a display release), which a
+    // boundary's quiesce would wait for.
+    bool hold_game_time = false;
 
     ~fixture_t() {
       observed.capture = observed.inject = false;
@@ -608,11 +614,11 @@ namespace {
         require(sunshine_parity::timeline_tick == before_tick + 1 && !sunshine_parity::timeline_pending,
           "Deterministic input did not produce exactly one complete stereo execution");
       require(unsigned(observed.color) == color, "Actual runtime transfer differs from the native game swapchain");
-      // Engaged, the Present ends at a virtual frame boundary. Otherwise the
-      // real pace: Sleep(3) lasts until the next timer tick, one Present per
-      // 15.6 ms.
-      if (clock.engaged()) clock.frame_boundary();
-      else Sleep(3);
+      // Engaged, the Present ends at a virtual frame boundary (none while the
+      // fixture holds game time). Otherwise the real pace: Sleep(3) lasts until
+      // the next timer tick, one Present per 15.6 ms.
+      if (!clock.engaged()) Sleep(3);
+      else if (!hold_game_time) clock.frame_boundary();
     }
 
     api::effect_uniform_variable uniform(const char *name, bool required = true) {
