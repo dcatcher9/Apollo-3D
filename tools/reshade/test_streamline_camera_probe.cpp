@@ -936,8 +936,18 @@ namespace {
       locked = false;
     }
   };
+  // How long a worker thread may take to finish while the fixture holds a
+  // lock its call must not wait for. The verdict is that it finished while
+  // the lock was still held; this bound only ends a call that waits for the
+  // lock, so it is a hang bound, not a time limit (owner decision 11-02): a
+  // starved machine schedules the worker late (40 busy processes failed the
+  // token-table row at 250 ms, also on the real clock). --wall-clock keeps
+  // the old 250 ms.
+  std::chrono::milliseconds finish_bound() {
+    return std::chrono::milliseconds(fixture_clock().wall_clock() ? 250 : 10000);
+  }
   bool bounded_finish(const std::atomic<bool> &done) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    const auto deadline = std::chrono::steady_clock::now() + finish_bound();
     while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     return done.load(std::memory_order_acquire);
@@ -2174,7 +2184,7 @@ namespace {
       forwarded = original_result && constants_call.incoming_error == incoming_error && original_error == outgoing_error;
       finished.store(true, std::memory_order_release);
     });
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    const auto deadline = std::chrono::steady_clock::now() + finish_bound();
     while (!finished.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     const bool nonblocking = finished.load(std::memory_order_acquire);
@@ -3391,7 +3401,7 @@ namespace {
         queried = query_frame_generation(UINT32_MAX, contended_snapshot, &contended_status);
         completed.store(true, std::memory_order_release);
       });
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+      const auto deadline = std::chrono::steady_clock::now() + finish_bound();
       while (!completed.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       const bool nonblocking = completed.load(std::memory_order_acquire);

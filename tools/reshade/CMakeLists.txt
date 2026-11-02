@@ -560,7 +560,9 @@ if(BUILD_TESTING)
     endif()
   endforeach()
   add_test(NAME reshade_streamline_camera_probe COMMAND reshade_streamline_camera_probe_tests)
-  set_tests_properties(reshade_streamline_camera_probe PROPERTIES TIMEOUT 20)
+  # A hang bound: about 15 s of CPU work, which a loaded machine stretches
+  # past 20 s (8 timeouts in 50 loops beside other GPU and CPU runs).
+  set_tests_properties(reshade_streamline_camera_probe PROPERTIES TIMEOUT 60)
   add_test(NAME reshade_contract_matrix_cpu COMMAND reshade_contract_matrix_cpu_tests)
   set_tests_properties(reshade_contract_matrix_cpu PROPERTIES TIMEOUT 60 LABELS "contract;cpu")
 

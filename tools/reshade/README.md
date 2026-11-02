@@ -1760,13 +1760,15 @@ their start; their waits for a source age, an association window or a poll caden
 `hitch(ms)`. The seam characterization has no `--wall-clock` mode: its rows pin exact clock edges,
 which only the game clock holds. Where such a fixture held a call to a real-time limit (the
 diagnostic-texture fixture's 100 ms for calls that must not wait for the GPU, the native renderer's
-50 ms 4K start and toggle back and the present-thread executor's 40 ms call), the verdict is the
-behaviour that limit stood for (owner decision of 11-02) and the time a `MEASURE` line: the call
-returned while the GPU work it must not wait for was still held behind a closed gate; the 4K
-start's setup ran in a pool build and the ready call adopted a renderer whose first render's
-objects were prepared; a toggle back returned while the build it cancelled was still held in its
-first step; the present-thread executor built over more than three calls. Under `--wall-clock` the
-old limits hold as well.
+50 ms 4K start and toggle back and the present-thread executor's 40 ms call, the Streamline probe's
+250 ms for a worker whose call must not wait for a lock the fixture holds), the verdict is the
+behaviour that limit stood for (owner decision of 11-02) and the time a `MEASURE` line or a hang
+bound: the call returned while the GPU work it must not wait for was still held behind a closed
+gate; the 4K start's setup ran in a pool build and the ready call adopted a renderer whose first
+render's objects were prepared; a toggle back returned while the build it cancelled was still held
+in its first step; the present-thread executor built over more than three calls; the probe's
+worker finished while the lock was still held (within 10 s). Under `--wall-clock` the old limits
+hold as well.
 
 [`check_clock_domains.cmake`](check_clock_domains.cmake) (the `reshade_clock_domains` test) keeps
 both complete. It counts every other clock read and every thread-pool submission, new thread,
