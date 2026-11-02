@@ -6,6 +6,9 @@
 // unpinned field h of the same scene, with CPU references: the band in double
 // precision, and for binary masks the distance rule the band replaced, in the
 // shader's float32 arithmetic (each bound one multiply-add, fused or not).
+// envelope() is the CPU reference of the anchored pin with per-texel targets
+// (docs/game3d-anchored-ui-planes.md, stage A1); reshade_game3d_ui_anchor_envelope
+// checks it against band(). No GPU pass implements it yet.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -58,6 +61,54 @@ namespace sunshine_game3d_test {
         for (unsigned x = width - 1; x-- > 0;) bound[x] = std::min(bound[x], bound[x + 1] + step);
         for (unsigned x = 0; x < width; ++x)
           out[row + x] = std::clamp(double(h[row + x]), plane - bound[x], plane + bound[x]);
+      }
+      return out;
+    }
+
+    // The anchored pin (docs/game3d-anchored-ui-planes.md, Pin pass): a texel u
+    // with w(u) > 0 has a target t(u), the plane where targets is null or t(u)
+    // is the sentinel NaN, and slack r(u) = (1 - w(u))|h(u) - t(u)|.
+    // U(x) = min_u [t(u) + r(u) + 0.5*max(|x - u| - 1, 0)/W],
+    // L(x) = max_u [t(u) - r(u) - 0.5*max(|x - u| - 1, 0)/W], and the field is
+    // min(max(h, L), U). Rows without UI keep h, with L and U infinite. With
+    // every target at the plane, U = p + b and L = p - b: band().
+    struct envelope_result {
+      std::vector<double> field, lower, upper;
+    };
+
+    inline envelope_result envelope(const std::vector<float> &h, const std::vector<float> &alpha, const std::vector<double> *targets,
+        unsigned width, unsigned height, double plane, double gain) {
+      const double step = .5 / width, none = std::numeric_limits<double>::infinity();
+      envelope_result out {std::vector<double>(h.begin(), h.end()), std::vector<double>(h.size(), -none), std::vector<double>(h.size(), none)};
+      std::vector<double> high(width), low(width);
+      for (unsigned y = 0; y < height; ++y) {
+        const size_t row = size_t(y) * width;
+        bool ui = false;
+        for (unsigned x = 0; x < width; ++x) {
+          const float a = alpha[row + x];
+          const double w = std::isfinite(a) && a > 0.f ? std::min(1., double(a) * gain) : 0.;
+          const double t = targets && !std::isnan((*targets)[row + x]) ? (*targets)[row + x] : plane;
+          const double slack = (1 - w) * std::abs(double(h[row + x]) - t);
+          high[x] = w > 0 ? t + slack : none;
+          low[x] = w > 0 ? t - slack : -none;
+          ui = ui || w > 0;
+        }
+        if (!ui) continue;
+        auto *upper = out.upper.data() + row, *lower = out.lower.data() + row;
+        // The collar shares each texel's bounds with its neighbours; the ramp grows beyond it.
+        for (unsigned x = 0; x < width; ++x) {
+          upper[x] = std::min({high[x], x ? high[x - 1] : none, x + 1 < width ? high[x + 1] : none});
+          lower[x] = std::max({low[x], x ? low[x - 1] : -none, x + 1 < width ? low[x + 1] : -none});
+        }
+        for (unsigned x = 1; x < width; ++x) {
+          upper[x] = std::min(upper[x], upper[x - 1] + step);
+          lower[x] = std::max(lower[x], lower[x - 1] - step);
+        }
+        for (unsigned x = width - 1; x-- > 0;) {
+          upper[x] = std::min(upper[x], upper[x + 1] + step);
+          lower[x] = std::max(lower[x], lower[x + 1] - step);
+        }
+        for (unsigned x = 0; x < width; ++x) out.field[row + x] = std::min(std::max(double(h[row + x]), lower[x]), upper[x]);
       }
       return out;
     }
