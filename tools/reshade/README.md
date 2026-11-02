@@ -976,7 +976,8 @@ generated Present holds that frame's own copy and every Present keeps full stere
 extent changing every second real frame (dynamic resolution: fresh depth of each extent, held on
 the generated frame, the matrix scale active without recalibration, and a
 `Sunshine depth render size` line), FG Off holding the finished copy within its source age and
-fresh SL recovery. Below 4K (the 4K FG run is the nearest to the watchdog), a runtime reset
+fresh SL recovery. Below 4K (the handover does not depend on the extent, and the 4K FG run already
+takes about 133 s of the fixture's 180-second watchdog, 150 s until 11-01), a runtime reset
 (ResizeBuffers) with FG on logs no `Sunshine depth FG switch` line, the reset runtime keeps counting
 an FG Off's line begun before the reset (more than its two Presents before it), and an FG On
 applied right before a reset, with no Present between, logs `mode=0->1` (`fg-runtime-reset`,

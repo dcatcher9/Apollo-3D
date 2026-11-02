@@ -2690,7 +2690,10 @@ namespace {
       fg_silent_scope_without_api_source();
       fg_linear_rr();
       fg_other_queue();
-      // Not at 4K, whose FG run is the nearest to the fixture's watchdog.
+      // Below 4K only: the handover across resets does not depend on the
+      // extent, and the 4K FG run (fg4k) is already about 133 s. The sub-4K
+      // FG runs that include it took 116 to 139 s before its double-reset
+      // steps (fx-full-p3 to INT4, 11-01), a few seconds more since.
       if (width < 3840) fg_runtime_reset();
     }
 
@@ -4496,8 +4499,11 @@ int main(int argc, char **argv) {
     return 2;
   }
   const auto run_start = GetTickCount64();
+  // A hang bound, above the longest run (the FG runs take up to about 140 s,
+  // 11-01) and below ctest's 240 s timeout. Until 11-01 it was 150 s, about
+  // 11 s above native_provider_continuity's longest run.
   std::thread([contention] {
-    Sleep(150000 + (contention ? contention_seconds * 1000 : 0));
+    Sleep(180000 + (contention ? contention_seconds * 1000 : 0));
     std::fputs("FAIL native provider runtime watchdog\n", stderr); TerminateProcess(GetCurrentProcess(),124);
   }).detach();
   try {
