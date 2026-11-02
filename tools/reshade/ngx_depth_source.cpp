@@ -4,8 +4,8 @@
 #include "api_contract.h"
 #include "game3d_diagnostic_metadata.h"
 #include "streamline_depth_capture.h"
-#ifndef SUNSHINE_UPSCALER_TRACE_TEST
 #include "streamline_camera_probe.h"
+#ifndef SUNSHINE_UPSCALER_TRACE_TEST
 #include "streamline_native_observer.h"
 #endif
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -412,6 +412,11 @@ namespace sunshine_ngx {
   void shutdown() { active_epoch.store(0, std::memory_order_release); }
   bool enabled() { return !sunshine_addon_lifetime::stopping() && active_epoch.load(std::memory_order_acquire) != 0; }
   std::uint64_t epoch() { return sunshine_addon_lifetime::stopping() ? 0 : active_epoch.load(std::memory_order_acquire); }
+  bool frame_generation_owns_evaluation() {
+    sunshine_streamline::frame_generation_snapshot fg;
+    return sunshine_streamline::query_frame_generation(UINT32_MAX, fg) &&
+      frame_generation_owns_depth(fg.enabled, fg.epoch, fg.viewport, fg.enabled_tick);
+  }
   namespace {
     // device_default: the feature's documented depth input is device depth when
     // DLSS.Use.HW.Depth is absent. That holds for Super Resolution/DLAA only;
@@ -652,8 +657,7 @@ namespace sunshine_ngx {
     // (F98); its Reset pulse and sequence above are still committed. An
     // owned evaluation with incomplete parameters counts as fg_owned, not
     // missing_parameters.
-    if (frame_generation_snapshot fg; query_frame_generation(UINT32_MAX, fg) &&
-        frame_generation_owns_depth(fg.enabled, fg.epoch, fg.viewport, fg.enabled_tick)) {
+    if (frame_generation_owns_evaluation()) {
       depth_capture::begin_evaluation(value.epoch, value.sequence, value.viewport, value.provider, value.source_id);
       attempt.capture_suppressed_by_depth_owner = true;
       ++fg_owned;

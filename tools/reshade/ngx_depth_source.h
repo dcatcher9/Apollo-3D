@@ -59,6 +59,13 @@ namespace sunshine_ngx {
   evaluation before_evaluate(HMODULE owner, const parameter_api &api, std::uint64_t command,
     const void *handle, const void *parameters, bool capture_depth = true, bool observe_diagnostics = true);
   void after_evaluate(const evaluation &value, bool successful);
+  // Whether confirmed Streamline FG owns a direct NGX evaluation's depth now
+  // (before_evaluate records no copy then): the any-viewport FG read
+  // (query_frame_generation) observed enabled options whose scope is live
+  // (frame_generation_owns_depth, presentation_scope.h). The call-trace
+  // build's before_evaluate takes its owner from its callbacks instead; the
+  // probe tests run this one against the real options store.
+  bool frame_generation_owns_evaluation();
 
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
   namespace testing {

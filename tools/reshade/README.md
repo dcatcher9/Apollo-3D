@@ -3276,7 +3276,9 @@ serial is 30 there); each Present establishes any selected copy, as
   ([Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection)). The test
   states whether a live FG scope owns depth through a callback that only the call-trace build has
   (`sunshine_ngx::testing::callbacks`), in place of the Streamline FG query; the seam
-  characterization pins the production rule. It also pins each nomination's state proof: Super
+  characterization pins the production rule, and the probe row `test_ngx_fg_ownership` runs the
+  production query (`sunshine_ngx::frame_generation_owns_evaluation`) against the real FG options
+  store and the scope's liveness (11-01, lane L-fg, F96). It also pins each nomination's state proof: Super
   Resolution's contract state for SR and for a registration recovered from a map without
   `DLSS.Use.HW.Depth`, and only an observed state for Ray Reconstruction and for a recovered
   registration with that key (N1b).

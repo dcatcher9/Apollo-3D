@@ -14,6 +14,7 @@
 #include "test_minhook_ledger.h"
 #include "test_sl_fixture_sdk.h"
 #include "test_streamline_depth_capture_fixture.h"
+#include "ngx_depth_source.h"
 #include <reshade.hpp>
 
 #include <algorithm>
@@ -4301,6 +4302,45 @@ namespace {
       "F88: DLSS-G's evaluation that stood aside for its frame's recorded FG tag copy did not anchor the frame's presenting window");
   }
 
+  // Direct NGX's FG ownership against the real FG options store (lane L-fg,
+  // F96, 11-01): enabled options whose scope is live own a direct NGX
+  // evaluation's depth (no copy), a silent scope and FG Off do not, and
+  // another viewport's confirmed Off leaves the FG viewport's ownership
+  // (R5-3). Until then only a stub (the call-trace build) and a direct
+  // predicate call (the seam rows) were tested; the store read at the
+  // evaluation was compiled out of every test build.
+  void test_ngx_fg_ownership() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(151), other = viewport(152);
+    fg_options on; on.generated_frames = 1;
+    fg_options off; off.mode = 0; off.generated_frames = 0;
+    std::string failed;
+    const auto check = [&](bool passed, const char *what) { if (!passed) failed += std::string(failed.empty() ? "" : "; ") + what; };
+    require(set_options(view, on) == 0, "FG On options failed");
+    frame_generation_snapshot fg;
+    require(query_frame_generation(view.value, fg) && fg.enabled, "FG On was not committed");
+    depth_capture::fixture::reset_owner();
+    check(!sunshine_ngx::frame_generation_owns_evaluation(), "A silent FG scope owned NGX's depth");
+    // The scope's FG copy accepted now: the scope is live.
+    auto &scope_view = depth_capture::evaluations[depth_capture::provider_index(sunshine_scene_depth::provider_kind::streamline)].views[0];
+    scope_view = {fg.epoch, 1, GetTickCount64(), sunshine_scene_depth::fg_source_id(view.value), view.value};
+    scope_view.accepted_tick = GetTickCount64(); scope_view.accepted_sequence = 1;
+    check(sunshine_ngx::frame_generation_owns_evaluation(), "A live FG scope did not own NGX's depth");
+    require(set_options(other, off) == 0, "FG Off options failed");
+    check(sunshine_ngx::frame_generation_owns_evaluation(), "Another viewport's FG Off took NGX's depth from the live FG scope");
+    require(set_options(view, off) == 0, "FG Off options failed");
+    check(!sunshine_ngx::frame_generation_owns_evaluation(), "FG Off still owned NGX's depth");
+    depth_capture::fixture::reset_owner();
+    depth_capture::requested = false;
+    require(failed.empty(), ("F96: " + failed).c_str());
+  }
+
   // DLSS-G's evaluation supply (lane P, PD10 and round 1's C1, 11-01). A
   // refused FG tag boundary reads it once for both of its decisions: whether
   // a command-less boundary withdraws nothing, and whether its frame is missed
@@ -4721,6 +4761,8 @@ int main(int argc, char **argv) {
     std::puts("PASS a refused deferred FG copy and DLSS-G's evaluation without a copy attempt end an earlier frame's presenting window");
     test_dlssg_anchor_for_recorded_tag_copy();
     std::puts("PASS DLSS-G's evaluation standing aside for its frame's recorded FG tag copy anchors that frame's presenting window");
+    test_ngx_fg_ownership();
+    std::puts("PASS direct NGX's FG ownership reads the FG options store and the scope's liveness");
     test_evaluation_supply_read();
     std::puts("PASS an FG tag boundary reads DLSS-G's supply once, also under a held lock, and FG On revokes the supply of the FG period before it");
     test_camera_read_retry();
