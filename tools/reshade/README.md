@@ -718,10 +718,14 @@ session's first mode line only when it turned FG on) with what the Presents afte
 add-on's `Sunshine depth FG switch` line, logged once per change since 10-28 at the first Present
 that showed a fresh copy or a second after the change; a runtime's teardown (a swapchain resize or
 recreation) hands its FG mode and its line to the runtime whose first Present comes next, which
-keeps counting it, so a reset
-with FG unchanged logs no switch and one applied across a reset, in either order, logs one line
-over both runtimes' Presents (since the 11-01 fix review; F100's teardown wrote the line marked
-`ended=runtime_reset`, which this check read as no fresh depth within a second) (Presents to fresh depth, those that held a
+keeps counting it (a runtime torn down before its first Present, as at two resets in a row, passes
+it on unchanged), so a reset
+with FG unchanged logs no switch and one applied across resets, in either order, logs one line
+over the runtimes' Presents (since the 11-01 fix review; F100's teardown wrote the line marked
+`ended=runtime_reset`, which this check read as no fresh depth within a second). A line no runtime
+adopted before another runtime's teardown (one that already presented: another swapchain) is
+written there marked `ended=runtime_reset`, and this check lists its Presents as ended by that
+teardown, not as no fresh depth within a second (Presents to fresh depth, those that held a
 copy and the oldest held copy's age, the mono ones, and the first Present's reason and selection;
 status lines come at most once a second, so a hold of one or two Presents shows only there), and
 each depth loss that began at the switch (its time and Presents without depth, reason, selection
@@ -978,7 +982,10 @@ an FG Off's line begun before the reset (more than its two Presents before it), 
 applied right before a reset, with no Present between, logs `mode=0->1` (`fg-runtime-reset`,
 11-01; until F100 the reset runtime logged `mode=0->1` with FG on and the Off's line was dropped,
 and until the fix review the teardown ended the Off's line and the new runtime, starting from the
-options' mode, logged no line for the On, X1, F100-a, F100-b). It also checks repeated holds against the original capture's
+options' mode, logged no line for the On, X1, F100-a, F100-b); both hold across two resets with no
+Present between, whose middle runtime never presents and passes the handover on (until the second
+fix review of 11-01 it handed over its own empty line, which wrote the Off's line at the second
+reset counted to the first, and lost the On's switch). It also checks repeated holds against the original capture's
 expiry, camera reset, and FG off/on without a fresh capture; none may revive expired depth.
 Fresh copies must recover each interval. A `ValidUntilPresent` FG depth tag sent without a command
 list is copied before its frame's Present, and every Present shows that frame's fresh FG depth (R2;

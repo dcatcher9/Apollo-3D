@@ -177,6 +177,20 @@ namespace {
     line.selection = depth_capture::selection_reason::no_completed_snapshot;
     provider::format_fg_switch(text, sizeof(text), line);
     emit("FG switch: no fresh copy within a second", text);
+    // A line no runtime adopted before another runtime's teardown wrote it
+    // (hand_over_fg_switch: another swapchain's runtime that already
+    // presented).
+    line.from = 1;
+    line.to = 0;
+    line.presents = 2;
+    line.held = 2;
+    line.max_held_age = 33;
+    line.mono = 0;
+    line.first_reason = "FG_successor_pending";
+    line.selection = depth_capture::selection_reason::no_completed_snapshot;
+    line.runtime_reset = true;
+    provider::format_fg_switch(text, sizeof(text), line);
+    emit("FG switch: written unadopted at another runtime's teardown", text);
   }
 
   void readiness() {

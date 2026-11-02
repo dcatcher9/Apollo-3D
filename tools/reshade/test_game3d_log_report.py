@@ -1250,6 +1250,14 @@ class ReadinessReport(unittest.TestCase):
                                 'first_reason=FG_successor_pending selection=no_completed_snapshot')
         self.assertIn('60 Presents to no fresh depth within 1 s, 12 held (oldest 250 ms), 48 mono',
                       run(BASE + [on, off, late])['Depth at FG switches'].times[1])
+        # A line no runtime adopted before another runtime's teardown wrote it counts its Presents only to that
+        # teardown: it is cut short, not a second without fresh depth (11-01, the second fix review of F100).
+        cut = line('10:00:18', '[Sunshine 3D] Sunshine depth FG switch: viewport=0 mode=1->0 presents=2 '
+                               'first_fresh_ms=none held=2 max_held_age_ms=33 mono=0 '
+                               'first_reason=FG_successor_pending selection=no_completed_snapshot ended=runtime_reset')
+        self.assertEqual(run(BASE + [on, off, cut])['Depth at FG switches'].times[1],
+                         "10:00:17.400 FG off: 2 Presents until another runtime's teardown ended the line, 2 held "
+                         '(oldest 33 ms), first FG_successor_pending selection=no_completed_snapshot')
 
     def test_a_loss_belongs_to_one_fg_switch_and_an_export_stop_is_no_loss(self):
         # E33 2026-10-22b: two switches 2.8 s apart listed one loss under both, as the first switch's window ran

@@ -140,10 +140,11 @@ SELECTION = re.compile(r'\bselection=(\w+)')
 PRIOR_AGE = re.compile(r'\bprior_age_ms=(\d+)')
 # Since 10-28, once per FG mode change: what the Presents after it showed, at the first Present that showed a fresh
 # copy (first_fresh_ms) or 1 s after the change (none). Status lines come at most once a second, so a hold of one or
-# two Presents at a switch shows only here.
+# two Presents at a switch shows only here. ended=runtime_reset: no runtime adopted the line before another runtime's
+# teardown wrote it (another swapchain's), so it counts the Presents only to that point.
 FG_SWITCH_LINE = re.compile(r'Sunshine depth FG switch: viewport=(\d+) mode=(\d+)->(\d+) presents=(\d+) '
                             r'first_fresh_ms=(\w+) held=(\d+) max_held_age_ms=(\d+) mono=(\d+) '
-                            r'first_reason=(\S+) selection=(\S+)')
+                            r'first_reason=(\S+) selection=(\S+)(?: ended=(runtime_reset))?')
 RUNTIME = re.compile(r'\bruntime=(0x[0-9a-fA-F]+)')
 PRESENT = re.compile(r'\bpresent=(\d+)')  # Not prior_present: '_' is a word character.
 GENERATION_FIELD = re.compile(r'\bgeneration=(\d+)')
@@ -822,7 +823,8 @@ class Session:
     overlay: list[float] = field(default_factory=list)
     fg_switches: list[tuple[float, int]] = field(default_factory=list)
     # The add-on's own line per FG mode change (FG_SWITCH_LINE): time, viewport, from, to, Presents, first fresh ms
-    # (None: none within 1 s), held, oldest held ms, mono, first reason, its selection.
+    # (None: none within 1 s), held, oldest held ms, mono, first reason, its selection, and whether another runtime's
+    # teardown ended it (ended=runtime_reset).
     fg_switch_lines: list[tuple] = field(default_factory=list)
     # Each readiness line's time and Present index (the add-on's count of Presents), in log order.
     presents: list[tuple[float, int]] = field(default_factory=list)
@@ -982,7 +984,7 @@ def parse(lines) -> Session:
             g = found.groups()
             fresh = None if g[4] == 'none' else int(g[4])
             s.fg_switch_lines.append((t, int(g[0]), int(g[1]), int(g[2]), int(g[3]), fresh, int(g[5]), int(g[6]),
-                                      int(g[7]), g[8], g[9]))
+                                      int(g[7]), g[8], g[9], g[10] is not None))
         if found := DELIVERY.search(text):
             published, runtime, generation, dropped, overwritten = found.groups()
             s.delivery.append((t, runtime.lower(), int(generation), int(published), int(dropped), int(overwritten)))
@@ -1353,10 +1355,11 @@ def fg_switch_checks(s: Session, add, depth_from: float | None = None) -> None:
         line = next((v for v in s.fg_switch_lines if t - SWITCH_LEAD_S <= v[0] < min(until, t + SETTLE_S)
                      and v[3] == mode), None)
         if line:
-            _, _, _, _, presents, fresh, held, held_age, mono, reason, selection = line
+            _, _, _, _, presents, fresh, held, held_age, mono, reason, selection, cut = line
             counted = depth_from is not None and t >= depth_from and streaming(s, t)
-            parts.append(f'{presents} Present{"s" if presents != 1 else ""} to '
-                         + (f'fresh depth ({fresh} ms)' if fresh is not None else 'no fresh depth within 1 s')
+            parts.append(f'{presents} Present{"s" if presents != 1 else ""} '
+                         + (f'to fresh depth ({fresh} ms)' if fresh is not None else
+                            "until another runtime's teardown ended the line" if cut else 'to no fresh depth within 1 s')
                          + (f', {held} held (oldest {held_age} ms)' if held else '')
                          + (f', {mono} mono' if mono else '')
                          + (f', first {reason} selection={selection}' if held or mono else '')

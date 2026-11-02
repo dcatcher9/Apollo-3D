@@ -16,19 +16,34 @@
     // releases the old one): a reset with FG unchanged logs nothing, and a switch
     // the game applied across one, in either order, logs one line, counted
     // to the first fresh copy or a second after the change over the Presents
-    // of both runtimes. A handed line no runtime adopted before the next
-    // teardown is written as counted. Until 11-01 the teardown wrote the
-    // line, marked ended=runtime_reset, so no line counted the Presents to
+    // of both runtimes. A runtime torn down before its first Present (a
+    // second ResizeBuffers with no Present between, as at a display-settings
+    // Apply) takes over the handover first and passes it on unchanged: it saw
+    // no Present, so its mode is only the options' and its line is empty.
+    // A handed line no runtime adopted before another runtime's teardown
+    // (one that already presented: another swapchain) is written there,
+    // counted to that point and marked ended=runtime_reset. Until 11-01 the
+    // teardown wrote the line so marked, so no line counted the Presents to
     // fresh depth after the reset and the report read the marked line as no
     // fresh depth within a second (the fix review's X1, F100-b); and the new
     // runtime started from the options' mode, so an options call just
-    // before the reset logged no switch at all (F100-a). Before F100 the
-    // line was dropped and the new runtime started at mode 0.
-    void hand_over_fg_switch(const state &data) {
+    // before the reset logged no switch at all (F100-a). Until the second
+    // fix review a runtime that never presented handed over its own empty
+    // line and seeded mode, which wrote the earlier runtime's line at the
+    // second of two resets and lost an FG On made just before them. Before
+    // F100 the line was dropped and the new runtime started at mode 0.
+    void hand_over_fg_switch(state &data) {
+      if (!data.fg_switch_first_present) {
+        data.fg_switch_first_present = true;
+        adopt_fg_switch(data);
+      }
       AcquireSRWLockExclusive(&fg_switch_handover_lock);
       auto unadopted = std::exchange(fg_switch_handed, {true, data.fg_mode, data.fg_switch});
       ReleaseSRWLockExclusive(&fg_switch_handover_lock);
-      if (unadopted.valid && unadopted.line.active) emit_fg_switch(unadopted.line);
+      if (unadopted.valid && unadopted.line.active) {
+        unadopted.line.runtime_reset = true;
+        emit_fg_switch(unadopted.line);
+      }
     }
 
     void adopt_fg_switch(state &data) {
@@ -315,10 +330,11 @@
     if (line.fresh_ms != UINT64_MAX) std::snprintf(fresh, sizeof(fresh), "%llu", static_cast<unsigned long long>(line.fresh_ms));
     std::snprintf(text, size,
       "Sunshine depth FG switch: viewport=%u mode=%u->%u presents=%llu first_fresh_ms=%s held=%llu max_held_age_ms=%llu "
-      "mono=%llu first_reason=%s selection=%s",
+      "mono=%llu first_reason=%s selection=%s%s",
       line.viewport, line.from, line.to, static_cast<unsigned long long>(line.presents), fresh,
       static_cast<unsigned long long>(line.held), static_cast<unsigned long long>(line.max_held_age),
-      static_cast<unsigned long long>(line.mono), line.first_reason, depth_capture::name(line.selection));
+      static_cast<unsigned long long>(line.mono), line.first_reason, depth_capture::name(line.selection),
+      line.runtime_reset ? " ended=runtime_reset" : "");
   }
 
   void format_unassociated(char *text, std::size_t size, depth_capture::status status,

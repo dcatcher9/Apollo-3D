@@ -232,7 +232,8 @@ namespace sunshine_streamline::provider {
     // A runtime's teardown hands its FG mode and its FG switch line (active
     // or not) to the runtime whose first Present comes next (track_fg_switch),
     // across a swapchain resize or recreation, whichever of the old runtime's
-    // teardown and the new one's creation comes first. Guarded by
+    // teardown and the new one's creation comes first; a runtime torn down
+    // before its first Present passes a handover on unchanged. Guarded by
     // fg_switch_handover_lock.
     struct fg_switch_handover {
       bool valid{};
@@ -241,7 +242,7 @@ namespace sunshine_streamline::provider {
     };
     SRWLOCK fg_switch_handover_lock = SRWLOCK_INIT;
     fg_switch_handover fg_switch_handed;
-    void hand_over_fg_switch(const state &data);
+    void hand_over_fg_switch(state &data);
     void adopt_fg_switch(state &data);
     void trace_readiness(api::effect_runtime *runtime, state &data, const readiness_evidence &e,
         bool ready, const char *why, bool presenting = true);

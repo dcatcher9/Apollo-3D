@@ -4079,7 +4079,9 @@ namespace {
     // Presents after the reset); and an FG On applied right before a reset,
     // with no Present between (one settings apply), logs mode=0->1 on the
     // new runtime (F100's runtime, which started from the options' mode,
-    // logged no switch for it).
+    // logged no switch for it). Both again across two resets with no Present
+    // between, whose middle runtime never presents (the second fix review
+    // of 11-01).
     void fg_runtime_reset() {
       const auto reset_runtime = [&] {
         for (auto &backbuffer : backbuffers) backbuffer.reset();
@@ -4127,6 +4129,27 @@ namespace {
           render_tracked_depth = reset_frame;
           for (const auto until = GetTickCount64() + 7000; on_lines() == ons && GetTickCount64() < until;) present_frame();
           require(on_lines() == ons + 1, "An FG On applied right before a runtime reset logged no FG switch");
+          // The same across two resets with no Present between (a display
+          // settings Apply): the runtime between them never presents and
+          // passes the handover on (until the second fix review of 11-01 it
+          // handed over its own empty line and options mode, which wrote the
+          // Off's line at the second reset, counted to the first, and lost
+          // the On's switch).
+          const auto offs_twice = off_lines();
+          render_tracked_depth = {};
+          configure_fg(false);
+          present_frame(); present_frame();
+          reset_runtime(); reset_runtime();
+          for (const auto until = GetTickCount64() + 7000; off_lines() == offs_twice && GetTickCount64() < until;) present_frame();
+          const auto off_twice = reshade_log_lines({"Sunshine depth FG switch: viewport=", " mode=1->0 "});
+          require(off_twice.size() == offs_twice + 1 && number_after(off_twice.back(), "presents=") > 2,
+            "Two runtime resets ended the FG Off's switch line: the last runtime's Presents were not counted");
+          const auto ons_twice = on_lines();
+          configure_fg(true);
+          reset_runtime(); reset_runtime();
+          render_tracked_depth = reset_frame;
+          for (const auto until = GetTickCount64() + 7000; on_lines() == ons_twice && GetTickCount64() < until;) present_frame();
+          require(on_lines() == ons_twice + 1, "An FG On applied right before two runtime resets logged no FG switch");
           // FG off again for the recovery below.
           render_tracked_depth = {};
           configure_fg(false);
