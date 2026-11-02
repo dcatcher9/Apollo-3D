@@ -23,7 +23,8 @@ endif()
 
 # The kinds of site the check counts.
 #   tick:  GetTickCount64, the real tick behind game_now();
-#   os:    the operating system's other clocks;
+#   os:    the operating system's other clocks, and the C runtime's (in
+#          call form: time and clock are also plain words);
 #   qpc:   QueryPerformanceCounter;
 #   chrono: the std::chrono clocks, named or read (an alias's clock::now());
 #   pool:  a thread-pool submission, a new thread, a timer, or a wait or
@@ -35,7 +36,8 @@ set(std_clocks steady_clock system_clock high_resolution_clock utc_clock tai_clo
 set(pool_calls TrySubmitThreadpoolCallback SubmitThreadpoolWork CreateThreadpoolWork QueueUserWorkItem CreateThread
   CreateRemoteThread CreateRemoteThreadEx _beginthread _beginthreadex CreateThreadpoolTimer SetThreadpoolTimer
   CreateTimerQueueTimer CreateWaitableTimer CreateWaitableTimerW CreateWaitableTimerExW CreateThreadpoolWait
-  CreateThreadpoolIo RegisterWaitForSingleObject)
+  CreateThreadpoolIo RegisterWaitForSingleObject SetThreadpoolWait SetThreadpoolWaitEx StartThreadpoolIo
+  BindIoCompletionCallback CreateTimerQueue SetTimer SetCoalescableTimer QueueUserAPC QueueUserAPC2)
 set(pool_std thread jthread async)
 
 # The allowed sites: "<file>|<kind>|<count>|<domain>|<reason>". Domains:
@@ -98,6 +100,15 @@ function(clock_sites code kind out)
         list(APPEND found "${name}")
       endif()
     endforeach()
+    # time(, std::time(, ::clock(, _time64(, _ftime(...: a call, not a member
+    # (. or ->) or another namespace's function (the blanked ; reads n>).
+    string(REGEX MATCHALL
+      "(^|[^A-Za-z0-9_.:>]|[^-]>)(std[ \t]*::[ \t]*|::[ \t]*)?(time|clock|_time32|_time64|_ftime|_ftime32|_ftime64|_ftime_s|_ftime32_s|_ftime64_s|timespec_get|_timespec32_get|_timespec64_get)[ \t]*\\("
+      calls "${code}")
+    foreach(call IN LISTS calls)
+      string(REGEX MATCH "(std[ \t]*::[ \t]*|::[ \t]*)?[A-Za-z0-9_]+[ \t]*\\($" call "${call}")
+      list(APPEND found "${call}")
+    endforeach()
   elseif(kind STREQUAL "qpc")
     string(REGEX MATCHALL "[A-Za-z0-9_]*QueryPerformanceCounter[A-Za-z0-9_]*" names "${code}")
     foreach(name IN LISTS names)
@@ -114,7 +125,8 @@ function(clock_sites code kind out)
       endif()
     endforeach()
   elseif(kind STREQUAL "pool")
-    string(REGEX MATCHALL "(std[ \t]*::[ \t]*)?[A-Za-z0-9_]*(Thread|Timer|WorkItem|Wait|thread|async)[A-Za-z0-9_]*" names "${code}")
+    string(REGEX MATCHALL "(std[ \t]*::[ \t]*)?[A-Za-z0-9_]*(Thread|Timer|WorkItem|Wait|APC|Completion|thread|async)[A-Za-z0-9_]*"
+      names "${code}")
     foreach(name IN LISTS names)
       string(REGEX REPLACE "^std[ \t]*::[ \t]*" "" bare "${name}")
       if(bare IN_LIST pool_calls OR (NOT bare STREQUAL name AND bare IN_LIST pool_std))
@@ -139,6 +151,9 @@ foreach(sample IN ITEMS
     "tick|  a = GetTickCount64() + GetTickCount64();|2"
     "os|  const DWORD now = GetTickCount();\n"
     "os|  GetSystemTimeAsFileTime(&now);\n"
+    "os|  const auto now = time(nullptr);\n"
+    "os|  stamp = std::time(nullptr); used = clock();|2"
+    "os|  _ftime64(&now); x = ::time (nullptr);|2"
     "qpc|  QueryPerformanceCounter(&start);\n"
     "chrono|  const auto now = std::chrono::steady_clock::now();\n"
     "chrono|  using c = std::chrono::steady_clock; auto t = c::now();\n"
@@ -148,6 +163,12 @@ foreach(sample IN ITEMS
     "pool|  std::thread worker(run);\n"
     "pool|  auto f = std::async(std::launch::async, run);\n"
     "pool|  RegisterWaitForSingleObject(&wait, event, run, nullptr, INFINITE, WT_EXECUTEONLYONCE);\n"
+    "pool|  SetThreadpoolWait(wait, event, nullptr);\n"
+    "pool|  StartThreadpoolIo(io);\n"
+    "pool|  BindIoCompletionCallback(file, done, 0);\n"
+    "pool|  const auto queue = CreateTimerQueue();\n"
+    "pool|  SetTimer(window, 1, 100, nullptr);\n"
+    "pool|  QueueUserAPC(run, thread, 0);\n"
     "pool|  const char *text = \"${long_text}\";\n  TrySubmitThreadpoolCallback(task, context, nullptr);\n"
     "tick|  /* ${long_text}\n ${long_text} */\n  const auto now = GetTickCount64();\n"
     "chrono|  const auto shader = R\"(${long_text})\";\n  const auto now = std::chrono::steady_clock::now();\n"
@@ -168,7 +189,7 @@ foreach(sample IN ITEMS
     message(FATAL_ERROR "The clock domain check found ${got} ${kind} sites, not ${want}, in:\n${text}")
   endif()
 endforeach()
-set(sample "// GetTickCount64() ticks, steady_clock::now(), QueryPerformanceCounter, TrySubmitThreadpoolCallback\n/* GetTickCount64() and\n std::thread */\nconst char *a = \"GetTickCount64 ms; steady_clock\";\nconstexpr char b[] = R\"(QueryPerformanceCounter(\"x\"); GetTickCount())\";\nconst char c = '\"';\nconst auto t = sunshine_game3d::clock::game_now() + lock_clock() + scope_clock + MyGetTickCount64Helper();\nstd::this_thread::yield();\n")
+set(sample "// GetTickCount64() ticks, steady_clock::now(), QueryPerformanceCounter, TrySubmitThreadpoolCallback\n/* GetTickCount64() and\n std::thread */\nconst char *a = \"GetTickCount64 ms; steady_clock\";\nconstexpr char b[] = R\"(QueryPerformanceCounter(\"x\"); GetTickCount())\";\nconst char c = '\"';\nconst auto t = sunshine_game3d::clock::game_now() + lock_clock() + scope_clock + MyGetTickCount64Helper();\nstd::this_thread::yield();\nframe.time(); frame->clock(); runtime(now); const auto time_ms = mktime(&t) + localtime(&s);\nstd::chrono::time_point<C> at; WaitForSingleObject(event, INFINITE); SwitchToThread();\n")
 clock_code("${sample}" code)
 foreach(kind IN LISTS kinds)
   clock_sites("${code}" ${kind} found)
