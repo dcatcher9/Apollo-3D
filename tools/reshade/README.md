@@ -717,7 +717,8 @@ Off's revoked SR copies and C8's losses): `Depth at FG switches` lists every FG 
 session's first mode line only when it turned FG on) with what the Presents after it showed: the
 add-on's `Sunshine depth FG switch` line, logged once per change since 10-28 at the first Present
 that showed a fresh copy or a second after the change; a runtime's teardown (a swapchain resize or
-recreation) hands its FG mode and its line to the next runtime, which keeps counting it, so a reset
+recreation) hands its FG mode and its line to the runtime whose first Present comes next, which
+keeps counting it, so a reset
 with FG unchanged logs no switch and one applied across a reset, in either order, logs one line
 over both runtimes' Presents (since the 11-01 fix review; F100's teardown wrote the line marked
 `ended=runtime_reset`, which this check read as no fresh depth within a second) (Presents to fresh depth, those that held a

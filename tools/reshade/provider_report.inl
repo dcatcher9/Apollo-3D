@@ -10,8 +10,10 @@
     }
 
     // A runtime's teardown hands its FG mode and its FG switch line to the
-    // next runtime, which adopts both (initialize): a reset (a swapchain
-    // resize or recreation) with FG unchanged logs nothing, and a switch
+    // runtime whose first Present comes next, which adopts both
+    // (track_fg_switch; a resize tears down before the new runtime exists,
+    // a recreation may create the new swapchain's runtime before it
+    // releases the old one): a reset with FG unchanged logs nothing, and a switch
     // the game applied across one, in either order, logs one line, counted
     // to the first fresh copy or a second after the change over the Presents
     // of both runtimes. A handed line no runtime adopted before the next
@@ -29,21 +31,25 @@
       if (unadopted.valid && unadopted.line.active) emit_fg_switch(unadopted.line);
     }
 
-    bool adopt_fg_switch(state &data) {
+    void adopt_fg_switch(state &data) {
       AcquireSRWLockExclusive(&fg_switch_handover_lock);
       const auto handed = std::exchange(fg_switch_handed, {});
       ReleaseSRWLockExclusive(&fg_switch_handover_lock);
-      if (!handed.valid) return false;
+      if (!handed.valid) return;
       data.fg_mode = handed.fg_mode;
       data.fg_switch = handed.line;
-      return true;
     }
 
     // One "Sunshine depth FG switch" line per FG mode change (fg_switch_line),
     // from every Present's readiness evidence. ready: the Present shows depth
     // (fresh when copied, else a held copy). Diagnostic only. A runtime starts
-    // from the FG mode the game's options stand at (initialize).
+    // from the FG mode the game's options stand at (initialize), and its
+    // first Present takes over a torn-down runtime's mode and line.
     void track_fg_switch(state &data, const readiness_evidence &e, bool ready, const char *why) {
+      if (!data.fg_switch_first_present) {
+        data.fg_switch_first_present = true;
+        adopt_fg_switch(data);
+      }
       auto &line = data.fg_switch;
       const auto now = e.tick ? e.tick : GetTickCount64();
       const auto emit = [&] { emit_fg_switch(line); };
