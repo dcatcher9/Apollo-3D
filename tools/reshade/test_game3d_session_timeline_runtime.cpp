@@ -124,7 +124,8 @@ namespace {
   // how long its first failure is shrunk once every timeline ran: a failing
   // run holds the GPU about a minute longer than a passing one and prints
   // its reproducer in time. --shrink-runs outside the fixed set shrinks for
-  // longer.
+  // longer. These are real-time durations (--wall-clock); on the game clock
+  // the set takes about 15 s (11-02), and the bound only ends a hang.
   constexpr std::uint64_t fixed_budget_ms = 460000, shrink_ms = 60000;
 
   // The frame language: one row of this family per real frame.
