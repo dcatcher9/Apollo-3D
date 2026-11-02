@@ -3,11 +3,14 @@
 // The capture owner's slot and evaluation fixtures, shared by its white-box
 // regressions (test_streamline_depth_capture.cpp) and the seam
 // characterization (test_game3d_seam_characterization.cpp). They write the
-// owner's globals through its test-access header, with no device.
+// owner's globals through its test-access header, with no device. Their
+// stamps are game time: the probe view's test clock once a fixture engaged
+// it (test_game3d_clock.h), else the real tick.
 #ifndef SUNSHINE_STREAMLINE_PROBE_TEST
   #error "Built only into the Streamline probe tests' view of the production sources"
 #endif
 #include "streamline_depth_capture_test_access.h"
+#include "test_game3d_clock.h"
 
 #include <cstdint>
 
@@ -73,7 +76,7 @@ namespace sunshine_streamline::depth_capture::fixture {
     value.metadata.viewport = viewport;
     value.metadata.epoch = epoch;
     value.metadata.sequence = sequence;
-    value.metadata.tick = GetTickCount64();
+    value.metadata.tick = sunshine_game3d_fixture::fixture_clock().now();
     begin_evaluation(epoch, sequence, viewport, provider, source, superseded);
     return value;
   }

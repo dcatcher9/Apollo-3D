@@ -8,9 +8,14 @@
 // second render with automatic UI detection and the adaptive UI probe, whose
 // GPU objects a renderer used to create on its first render. Evidence only:
 // the driver's shader cache decides most of these numbers (a fresh executable
-// name gives a cold one).
+// name gives a cold one). The verdict is the behaviour that keeps them small
+// (owner decision 11-02): the setup ran in a pool build while configure kept
+// the game 2D, and the ready call adopted a renderer whose first render's
+// objects were prepared; under --wall-clock (test_game3d_clock.h) the 50 ms
+// bound holds as well, as before the game clock.
 #include "game3d_renderer.h"
 #include "game3d_diagnostics.h"
+#include "test_game3d_clock.h"
 #include <windows.h>
 #include <algorithm>
 #include <chrono>
@@ -23,6 +28,10 @@ namespace sunshine_game3d_test {
     unsigned configure_calls = 0;
     double configure_max_ms = 0, configure_sum_ms = 0, ready_setup_ms = 0, ready_wall_ms = 0;
     double first_render_ms = 0, second_render_ms = 0;
+    // A configure call that kept the game 2D returned with the build
+    // registered on the pool; the adopted renderer had its first render's
+    // objects prepared.
+    bool pool_build_seen = false, first_render_prepared = false;
   };
 
   inline startup_timing measure_startup(reshade::api::effect_runtime *runtime, unsigned color, const char *api_name,
@@ -66,6 +75,7 @@ namespace sunshine_game3d_test {
         const auto before = clock::now();
         ready = target.configure(runtime, source, space, {}, true);
         if (ready) {
+          result.first_render_prepared = target.first_render_prepared();
           // The rest of the exporter's setup section on the ready Present.
           target.set_pq_output(color != 1);
           check(target.native_rtv(source).handle != 0, "The 4K startup renderer has no back-buffer view");
@@ -80,6 +90,7 @@ namespace sunshine_game3d_test {
           result.ready_wall_ms = ms(start, after);
         } else {
           check(target.preparing(), "The 4K startup renderer was unavailable instead of preparing");
+          result.pool_build_seen = result.pool_build_seen || renderer::builds_in_flight() != 0;
           Sleep(1);
         }
       }
@@ -105,7 +116,7 @@ namespace sunshine_game3d_test {
       frame.ui.automatic = &automatic;
       frame.ui.adaptive = &adaptive;
       for (unsigned index = 0; index != 2; ++index) {
-        const std::uint64_t now = GetTickCount64();
+        const std::uint64_t now = sunshine_game3d_fixture::fixture_clock().now();
         automatic.now_ms = automatic.tick_ms = adaptive.now_ms = adaptive.tick_ms = now;
         automatic.sequence = adaptive.sequence = index + 1;
         target.begin_present();
@@ -132,11 +143,16 @@ namespace sunshine_game3d_test {
       "ready_setup_ms=%.3f ready_wall_ms=%.1f first_render_ms=%.3f second_render_ms=%.3f\n", api_name, width, height, color,
       result.configure_calls, result.configure_max_ms, result.configure_sum_ms, result.ready_setup_ms, result.ready_wall_ms,
       result.first_render_ms, result.second_render_ms);
-    // Loose bounds (an idle machine measures well under a few ms): before the
-    // background build a cold start took ~470 ms of configure and ~340 ms of
-    // first render on D3D12 at 4K.
-    check(result.configure_max_ms < 50.0 && result.first_render_ms < 50.0,
-      "A 4K renderer start blocked the present thread (configure or first render over 50 ms)");
+    // Before the background build a cold start took ~470 ms of configure and
+    // ~340 ms of first render on D3D12 at 4K: the setup ran in configure and
+    // the first render created its objects.
+    check(result.pool_build_seen && result.first_render_prepared,
+      "A 4K renderer start blocked the present thread (its setup ran outside a pool build, or the first render had to "
+      "create its objects)");
+    // Loose bounds (an idle machine measures well under a few ms).
+    if (sunshine_game3d_fixture::fixture_clock().wall_clock())
+      check(result.configure_max_ms < 50.0 && result.first_render_ms < 50.0,
+        "A 4K renderer start blocked the present thread (configure or first render over 50 ms)");
     return result;
   }
 }

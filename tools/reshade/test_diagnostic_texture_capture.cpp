@@ -7,6 +7,7 @@
 #include "native_resource_identity.h"
 #include "depth_view_format.h"
 #include "freshness.h"
+#include "test_game3d_clock.h"
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -37,10 +38,14 @@ extern "C" __declspec(dllexport) void ReShadeLogMessage(void *, int, const char 
   if (message && logged_lines.size() < 4096) logged_lines.emplace_back(message);
 }
 
+// Game time is the probe view's test clock (test_game3d_clock.h), engaged in
+// main and moved only by hitch() (after the producer queue and the capture
+// owner's pool work are done); --wall-clock runs it on the real clock.
 namespace {
   namespace capture = sunshine_streamline::depth_capture;
   namespace observer = sunshine_streamline::native_observer;
   using Microsoft::WRL::ComPtr;
+  using sunshine_game3d_fixture::fixture_clock;
   template<class T> std::uint64_t native(T *value) { return reinterpret_cast<std::uint64_t>(value); }
   // ReShade reports every game list's lifecycle from its proxy, in this order
   // around the native calls; these stand in for it. A runtime's own immediate
@@ -260,15 +265,49 @@ namespace {
       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&result)), "consumer destination");
     return result;
   }
+  // The queue waits for the gate's fence to reach 1, which the fixture
+  // signals (open). Armed, a thread also opens it once limit_ms of real time
+  // passed, so that a call which waits for the gated GPU work returns instead
+  // of hanging, and finds the gate no longer closed.
   struct gate {
     ComPtr<ID3D12Fence> value;
+    HANDLE opened {};
+    std::thread opener;
     gate(ID3D12Device *device, ID3D12CommandQueue *queue) {
       check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&value)), "GPU test gate");
       check(queue->Wait(value.Get(), 1), "GPU test wait");
     }
-    void open() { check(value->Signal(1), "release GPU test gate"); }
-    ~gate() { value->Signal(1); } // An assertion failure must not strand the GPU.
+    void arm(DWORD limit_ms = 10000) {
+      opened = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(opened != nullptr, "GPU test gate event");
+      opener = std::thread([this, limit_ms] {
+        WaitForSingleObject(opened, limit_ms);
+        value->Signal(1);
+      });
+    }
+    bool closed() const { return value->GetCompletedValue() < 1; }
+    void open() {
+      if (opened) SetEvent(opened);
+      check(value->Signal(1), "release GPU test gate");
+    }
+    ~gate() {
+      if (opened) SetEvent(opened);
+      if (opener.joinable()) opener.join();
+      if (opened) CloseHandle(opened);
+      value->Signal(1); // An assertion failure must not strand the GPU.
+    }
   };
+  // A call that must not wait for the GPU returned while the GPU work it reads
+  // was still held behind an armed gate, which only the fixture or the gate's
+  // limit opens: an event verdict (owner decision 11-02); the real time it
+  // took is a MEASURE line. --wall-clock also holds it to the 100 ms it was
+  // held to before the game clock.
+  void returned_while_gated(const gate &held, std::uint64_t since, const char *what, const char *failure) {
+    const auto elapsed = sunshine_game3d_fixture::game_clock::wall_now() - since;
+    std::printf("MEASURE no GPU wait, %s: elapsed_ms=%llu\n", what, static_cast<unsigned long long>(elapsed));
+    require(held.closed(), failure);
+    if (fixture_clock().wall_clock()) require(elapsed < 100, failure);
+  }
   struct readback {
     ComPtr<ID3D12Resource> bytes;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
@@ -346,7 +385,7 @@ namespace {
     require(bool(input.source), "retain source after its first ordinary barrier");
     input.provider = sunshine_scene_depth::provider_kind::ngx;
     input.epoch = 73; input.sequence = 1; input.source_id = 91; input.viewport = 0;
-    input.tick = GetTickCount64();
+    input.tick = fixture_clock().now();
     input.native_state = 0; // NGX supplies no resource-state declaration.
     input.proof = sunshine_scene_depth::state_proof::observed_nonzero;
     capture::record_diagnostic diagnostic;
@@ -358,7 +397,7 @@ namespace {
     check(close_list(empty_list.Get()), "empty first-recording close");
     destroyed(empty_list.Get()); capture::command_destroyed(native(empty_list.Get()));
 
-    input.sequence = 2; input.tick = GetTickCount64();
+    input.sequence = 2; input.tick = fixture_clock().now();
     const auto ticket = capture::nominate_evaluation(native(source_list.Get()), input, UINT64_MAX, &diagnostic);
     if (ticket) capture::finish(ticket, diagnostic.result == capture::status::recorded);
     if (diagnostic.result != capture::status::recorded) std::fprintf(stderr,
@@ -589,7 +628,7 @@ namespace {
         input.projection.encoding = kind; input.projection.direction_supplied = true;
         input.projection.raw_scale = 1; input.projection.raw_bias = 0;
       }
-      input.sequence = ++sequence; input.tick = GetTickCount64();
+      input.sequence = ++sequence; input.tick = fixture_clock().now();
       if (mips > 1) {
         // Mip 3 leaves COPY_DEST on this recording; subresource 0 keeps no entry.
         D3D12_RESOURCE_BARRIER other{}; other.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -662,7 +701,7 @@ namespace {
     input.proof = sunshine_scene_depth::state_proof::sdk_contract;
     capture::record_diagnostic diagnostic;
     const auto nominate = [&](std::uint64_t sequence) {
-      input.sequence = sequence; input.tick = GetTickCount64();
+      input.sequence = sequence; input.tick = fixture_clock().now();
       return capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic);
     };
 
@@ -752,7 +791,7 @@ namespace {
     input.proof = sunshine_scene_depth::state_proof::sdk_contract;
     capture::record_diagnostic diagnostic;
     const auto nominate = [&](std::uint64_t sequence) {
-      input.sequence = sequence; input.tick = GetTickCount64();
+      input.sequence = sequence; input.tick = fixture_clock().now();
       const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic);
       require(ticket && diagnostic.result == capture::status::recorded, "copy-out: the depth copy was refused");
       capture::finish(ticket, true);
@@ -884,7 +923,7 @@ namespace {
     input.proof = sunshine_scene_depth::state_proof::sdk_contract;
     capture::record_diagnostic diagnostic;
     const auto nominate = [&](std::uint64_t sequence) {
-      input.sequence = sequence; input.tick = GetTickCount64();
+      input.sequence = sequence; input.tick = fixture_clock().now();
       const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic);
       require(ticket && diagnostic.result == capture::status::recorded, "reader moves: the depth copy was refused");
       capture::finish(ticket, true);
@@ -934,7 +973,7 @@ namespace {
     // FG off again: the render queue reads. Past the source age of the last
     // submission elsewhere, a new copy takes no copy-out storage.
     present(gpu.queue.Get(), 12103);
-    Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
+    fixture_clock().hitch(sunshine_freshness::source_age_ms + 20);
     const auto own = nominate(3);
     require(!capture::testing::holds_copy_out_storage(own),
       "reader moves: a copy read on its own queue still took copy-out storage after FG went off");
@@ -969,7 +1008,7 @@ namespace {
       spare_input.epoch = 79; spare_input.source_id = 97; spare_input.viewport = 0; spare_input.sequence = 1;
       spare_input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; spare_input.force_snapshot = false;
       spare_input.source_present_generation = capture::source_present_generation(spare_input.source);
-      spare_input.proof = sunshine_scene_depth::state_proof::sdk_contract; spare_input.tick = GetTickCount64();
+      spare_input.proof = sunshine_scene_depth::state_proof::sdk_contract; spare_input.tick = fixture_clock().now();
       const auto retired = capture::nominate_evaluation(native(spare_list.Get()), spare_input, UINT64_MAX, &diagnostic);
       require(retired, "reader moves: the spare source's copy was refused");
       capture::finish(retired, true);
@@ -994,7 +1033,7 @@ namespace {
     // sweep released it unused: a burst of allocations on the game's thread
     // for a game that pools its lists).
     present(gpu.queue.Get(), 12106);
-    Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
+    fixture_clock().hitch(sunshine_freshness::source_age_ms + 20);
     struct fresh_list {
       ComPtr<ID3D12CommandAllocator> allocator;
       ComPtr<ID3D12GraphicsCommandList> list;
@@ -1008,7 +1047,7 @@ namespace {
       ~fresh_list() { destroyed(list.Get()); capture::command_destroyed(native(list.Get())); }
     };
     const auto record_on = [&](fresh_list &fresh, capture::input &value, std::uint64_t sequence) {
-      value.sequence = sequence; value.tick = GetTickCount64();
+      value.sequence = sequence; value.tick = fixture_clock().now();
       const auto ticket = capture::nominate_evaluation(native(fresh.list.Get()), value, UINT64_MAX, &diagnostic);
       require(ticket && diagnostic.result == capture::status::recorded, "reader moves: the fresh list's copy was refused");
       capture::finish(ticket, true);
@@ -1110,7 +1149,7 @@ namespace {
     // (until 10-27 it kept the Reset rule, so FG's first Present was flat).
     {
       present(gpu.queue.Get(), 12111);
-      capture::frame_generation_enabled(GetTickCount64());
+      capture::frame_generation_enabled(fixture_clock().now());
       const auto first = nominate(7);
       require(capture::testing::holds_copy_out_storage(first),
         "reader moves: FG turned on, a render-queue copy before Present moved took no copy-out storage");
@@ -1134,10 +1173,10 @@ namespace {
     // move is counted, and not as unreadable.
     {
       present(gpu.queue.Get(), 12120);
-      capture::frame_generation_enabled(GetTickCount64());
-      Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
+      capture::frame_generation_enabled(fixture_clock().now());
+      fixture_clock().hitch(sunshine_freshness::source_age_ms + 20);
       const auto moves = counts().reader_moves, unreadable = counts().reader_move_unreadable;
-      capture::frame_generation_activity(GetTickCount64());
+      capture::frame_generation_activity(fixture_clock().now());
       const auto first = nominate(8);
       require(capture::testing::holds_copy_out_storage(first),
         "reader moves: FG's first frame, later than the source age after FG turned on, took no copy-out storage");
@@ -1161,7 +1200,7 @@ namespace {
       fresh_source.epoch = 78; fresh_source.source_id = 99; fresh_source.viewport = 0; fresh_source.sequence = 10;
       fresh_source.valid_until = sunshine_scene_depth::lifetime::until_evaluation; fresh_source.force_snapshot = false;
       fresh_source.source_present_generation = capture::source_present_generation(fresh_source.source);
-      fresh_source.proof = sunshine_scene_depth::state_proof::sdk_contract; fresh_source.tick = GetTickCount64();
+      fresh_source.proof = sunshine_scene_depth::state_proof::sdk_contract; fresh_source.tick = fixture_clock().now();
       const auto own = capture::nominate_evaluation(native(gpu.list.Get()), fresh_source, UINT64_MAX, &diagnostic);
       require(own && diagnostic.result == capture::status::recorded, "reader moves: the new source's copy was refused");
       capture::finish(own, true);
@@ -1220,7 +1259,7 @@ namespace {
     const auto sr_input = [&](const texture_case &image) {
       auto value = image.input;
       value.provider = sunshine_scene_depth::provider_kind::streamline;
-      value.epoch = epoch; value.source_id = sr_source; value.viewport = 0; value.sequence = ++sequence; value.tick = GetTickCount64();
+      value.epoch = epoch; value.source_id = sr_source; value.viewport = 0; value.sequence = ++sequence; value.tick = fixture_clock().now();
       value.valid_until = sunshine_scene_depth::lifetime::until_evaluation; value.force_snapshot = false;
       value.source_present_generation = capture::source_present_generation(value.source);
       return value;
@@ -1249,7 +1288,7 @@ namespace {
     const auto refuse_dlssg = [&] {
       auto value = first.input;
       value.provider = sunshine_scene_depth::provider_kind::streamline;
-      value.epoch = epoch; value.sequence = ++sequence; value.tick = GetTickCount64(); value.viewport = 0;
+      value.epoch = epoch; value.sequence = ++sequence; value.tick = fixture_clock().now(); value.viewport = 0;
       value.frame_generation_input = true;
       value.source_id = sunshine_scene_depth::encode_source_id(sunshine_scene_depth::fg_depth_key(0));
       sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, value);
@@ -1383,7 +1422,7 @@ namespace {
     std::uint64_t sequence{}, present = 60;
     capture::record_diagnostic diagnostic;
     const auto begin = [&](capture::evaluation_nomination &nominating) {
-      input.sequence = ++sequence; input.tick = GetTickCount64();
+      input.sequence = ++sequence; input.tick = fixture_clock().now();
       nominating.begin(input.epoch, input.sequence, input.viewport, input.provider, input.source_id);
     };
     const auto nominate = [&](capture::evaluation_nomination &nominating) {
@@ -1528,7 +1567,7 @@ namespace {
     capture::record_diagnostic diagnostic;
     const auto nominate = [&](sunshine_scene_depth::state_proof proof, std::uint32_t state) {
       auto value = input;
-      value.proof = proof; value.native_state = state; value.sequence = ++sequence; value.tick = GetTickCount64();
+      value.proof = proof; value.native_state = state; value.sequence = ++sequence; value.tick = fixture_clock().now();
       return capture::nominate_evaluation(native(list.Get()), value, UINT64_MAX, &diagnostic);
     };
 
@@ -1692,7 +1731,7 @@ namespace {
       value.source_id = input.source_id + n;
       value.proof = sunshine_scene_depth::state_proof::sdk_contract;
       value.native_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-      value.sequence = ++sequence; value.tick = GetTickCount64();
+      value.sequence = ++sequence; value.tick = fixture_clock().now();
       const auto ticket = capture::nominate_evaluation(native(list.Get()), value, UINT64_MAX, &diagnostic);
       require(ticket && diagnostic.result == capture::status::recorded, "a compute-list copy was refused while queues churned");
       capture::finish(ticket, true);
@@ -1806,7 +1845,7 @@ namespace {
     const auto dlssg_input = [&] {
       capture::input input;
       input.provider = sunshine_scene_depth::provider_kind::streamline;
-      input.epoch = epoch; input.sequence = ++sequence; input.tick = GetTickCount64(); input.viewport = 0;
+      input.epoch = epoch; input.sequence = ++sequence; input.tick = fixture_clock().now(); input.viewport = 0;
       input.frame_generation_input = true; input.source_id = source_id;
       input.projection.encoding = sunshine_scene_depth::depth_encoding::device;
       input.resource.native = native(depth.Get()); input.resource.area = {0, 0, 64, 48};
@@ -1889,7 +1928,7 @@ namespace {
     gpu.submit(); gpu.wait(); gpu.reset();
     auto ui = color.input;
     ui.provider = sunshine_scene_depth::provider_kind::streamline;
-    ui.epoch = epoch; ui.sequence = ++sequence; ui.tick = GetTickCount64(); ui.viewport = 0;
+    ui.epoch = epoch; ui.sequence = ++sequence; ui.tick = fixture_clock().now(); ui.viewport = 0;
     ui.source_id = source_id; ui.frame_generation_input = true;
     sunshine_api_contract::apply(sunshine_api_contract::ngx::frame_generation_input, ui);
     ui.force_snapshot = true; ui.at_tag_call = true;
@@ -2250,11 +2289,11 @@ namespace {
       "unsubmitted auxiliary copy accepted");
     capture::finish_diagnostic_texture(ticket, true);
     {
-      gate delayed(gpu.device.Get(), gpu.queue.Get()); gpu.submit(); gpu.reset();
-      const auto before = std::chrono::steady_clock::now();
+      gate delayed(gpu.device.Get(), gpu.queue.Get()); delayed.arm(); gpu.submit(); gpu.reset();
+      const auto before = sunshine_game3d_fixture::game_clock::wall_now();
       require(!copy(native(target.Get())) && diagnostic.result == capture::consumer_status::capture_not_ready,
         "pending producer was consumed after Reset but before completion");
-      require(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(100), "auxiliary copy waited for producer GPU");
+      returned_while_gated(delayed, before, "auxiliary copy", "auxiliary copy waited for producer GPU");
       delayed.open(); gpu.wait();
     }
     capture::diagnostic_texture snapshot;
@@ -2371,9 +2410,9 @@ namespace {
     std::weak_ptr<const capture::texture_reference> source_lifetime = local.ownership;
     std::weak_ptr<const capture::source_reference> target_lifetime;
     {
-      gate delayed(gpu.device.Get(), gpu.queue.Get());
+      gate delayed(gpu.device.Get(), gpu.queue.Get()); delayed.arm();
       gpu.submit(); // Keep the producer closed and its GPU submission blocked.
-      const auto before = std::chrono::steady_clock::now();
+      const auto before = sunshine_game3d_fixture::game_clock::wall_now();
       require(capture::acquire_local_texture(local, native(gpu.queue.Get()), pixels) == capture::status::recorded &&
           !copy(local, native(gpu.queue.Get()), target.Get()), "unfinished SDK call admitted local pixels");
       capture::finish_diagnostic_texture(local, true);
@@ -2402,7 +2441,7 @@ namespace {
       require(!copy(local, native(gpu.queue.Get()), other_target.Get()) &&
           !copy(local, native(gpu.foreign_queue.Get()), target.Get()),
         "ordered local copy rebound its destination or consuming queue");
-      require(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(100),
+      returned_while_gated(delayed, before, "local auxiliary admission and copy",
         "local auxiliary admission/copy waited for GPU completion");
       actual.record(consumer.list.Get(), target.Get());
       check(close_list(consumer.list.Get()), "ordered consumer close");
@@ -3038,15 +3077,14 @@ namespace {
     require(bool(after_mutation), "state restoration prevented later capture");
     capture::finish_diagnostic_texture(after_mutation, true);
     capture::finish_diagnostic_texture(ticket, true);
-    ComPtr<ID3D12Fence> gate; check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "gate fence");
-    check(gpu.queue->Wait(gate.Get(), 1), "test GPU gate");
+    gate held(gpu.device.Get(), gpu.queue.Get()); held.arm();
     gpu.submit();
-    const auto start = std::chrono::steady_clock::now();
+    const auto start = sunshine_game3d_fixture::game_clock::wall_now();
     require(capture::acquire_diagnostic_texture(ticket, snapshot) == capture::status::submitted && !snapshot.texture, "pending copy exposed");
-    require(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(100), "acquire waited for GPU");
+    returned_while_gated(held, start, "acquire", "acquire waited for GPU");
     gpu.reset(); // Different allocator: retirement is not GPU completion.
     require(capture::acquire_diagnostic_texture(ticket, snapshot) == capture::status::submitted, "reset assumed GPU completion");
-    check(gate->Signal(1), "release test gate"); gpu.wait();
+    held.open(); gpu.wait();
     require(capture::acquire_diagnostic_texture(ticket, snapshot) == capture::status::ready, "completed immutable copy not ready");
     image.verify_host(gpu, snapshot, 0, nullptr, snapshot_format);
     capture::diagnostic_texture changed;
@@ -3166,7 +3204,7 @@ namespace {
       value.frame_generation_input = source_id == fg_id;
       value.valid_until = sunshine_scene_depth::lifetime::until_evaluation; value.force_snapshot = false;
       value.source_present_generation = capture::source_present_generation(value.source);
-      value.proof = sunshine_scene_depth::state_proof::sdk_contract; value.tick = GetTickCount64();
+      value.proof = sunshine_scene_depth::state_proof::sdk_contract; value.tick = fixture_clock().now();
       const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), value, UINT64_MAX, &diagnostic);
       require(ticket && diagnostic.result == capture::status::recorded, "retired FG storage: a copy was refused");
       capture::finish(ticket, true);
@@ -3175,7 +3213,7 @@ namespace {
     // The render queue presents and reads its own copies, past the source
     // age of any copy read elsewhere: no copy takes copy-out storage.
     present(gpu.queue.Get(), 13100);
-    Sleep(DWORD(sunshine_freshness::source_age_ms + 20));
+    fixture_clock().hitch(sunshine_freshness::source_age_ms + 20);
     // DLSS-G's copy of viewport 0, executed, completed and Reset; then a
     // confirmed FG Off keeps it as the viewport's ordinary source.
     const auto fg = record(fg_depth, fg_id, 1);
@@ -3201,7 +3239,7 @@ namespace {
     // no evaluation for the association window, so device_release finds the
     // queue unowned, as after the cases before.
     capture::frame_generation_restored(epoch, 0);
-    Sleep(DWORD(sunshine_freshness::association_ms + 20));
+    fixture_clock().hitch(sunshine_freshness::association_ms + 20);
     require(!capture::provider_active(native(gpu.foreign_queue.Get())),
       "retired FG storage: the foreign queue stayed associated past the association window");
     capture::poll();
@@ -3256,7 +3294,7 @@ namespace {
     value.frame_generation_input = true;
     value.valid_until = sunshine_scene_depth::lifetime::until_evaluation; value.force_snapshot = false;
     value.source_present_generation = capture::source_present_generation(value.source);
-    value.proof = sunshine_scene_depth::state_proof::sdk_contract; value.tick = GetTickCount64();
+    value.proof = sunshine_scene_depth::state_proof::sdk_contract; value.tick = fixture_clock().now();
     const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), value, UINT64_MAX, &diagnostic);
     require(ticket && diagnostic.result == capture::status::recorded, "F63 acquire floor: the FG copy was refused");
     capture::finish(ticket, true);
@@ -3518,7 +3556,7 @@ namespace {
     input.proof = sunshine_scene_depth::state_proof::sdk_contract;
     capture::record_diagnostic diagnostic;
     const auto nominate = [&](std::uint64_t sequence) {
-      input.sequence = sequence; input.tick = GetTickCount64();
+      input.sequence = sequence; input.tick = fixture_clock().now();
       return capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic);
     };
     const auto first = nominate(1);
@@ -3622,6 +3660,10 @@ namespace {
 #ifndef SUNSHINE_DIAGNOSTIC_TEXTURE_FIXTURE_ONLY
 int main(int argc, char **argv) {
   try {
+    auto &clock = sunshine_game3d_fixture::fixture_clock();
+    sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
+    require(clock.bind(GetModuleHandleW(nullptr)), "the probe view's test clock exports are missing");
+    clock.engage();
     if (argc > 1 && std::strcmp(argv[1], "--gpu-validation") == 0) {
       // GPU-based validation checks each copy's layouts at execution time. It
       // needs the D3D12 debug layer (Windows Graphics Tools).
@@ -3641,6 +3683,8 @@ int main(int argc, char **argv) {
     }
     require(capture::testing::diagnostic_snapshot_regression(), "diagnostic retirement/fence/format policy regression");
     fixture gpu;
+    // A hitch waits for the producer queue's last signalled work.
+    const auto producer_ring = clock.watch("producer queue", gpu.fence.GetAddressOf(), &gpu.completion);
     unlocked_allocation(gpu);
     local_view_lease(gpu);
     first_recording_depth_capture(gpu);
@@ -3737,6 +3781,7 @@ int main(int argc, char **argv) {
     acquire_presenting_floor(gpu);
     // Last: it releases the fixture device's capture state.
     device_release(gpu);
+    clock.report("diagnostic texture");
     std::puts("PASS diagnostic texture capture functional GPU regression (no performance measurement)");
     return 0;
   } catch (const std::exception &error) { std::fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }

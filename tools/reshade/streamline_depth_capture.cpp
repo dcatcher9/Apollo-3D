@@ -523,14 +523,6 @@ namespace sunshine_streamline::depth_capture {
     constexpr std::uint64_t idle_live_storage_ms = 2000;
   }
 
-  SUNSHINE_CAPTURE_INTERNAL {
-    // frame_generation_scope_live's clock. The seam characterization fixes it
-    // to pin the scope's exact edges (streamline_depth_capture_test_access.h).
-#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
-    std::atomic<std::uint64_t> scope_clock{};
-#endif
-  }
-
   std::uint64_t game_executions_on(std::uint64_t queue) {
     com_ptr<ID3D12CommandQueue> checked;
     if (!queue || !query_native(queue, IID_ID3D12CommandQueue, checked)) return 0;

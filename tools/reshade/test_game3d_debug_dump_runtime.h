@@ -4,6 +4,7 @@
 #include "game3d_ui_detection_contract.h"
 #include "scene_gain.h"
 #include "src/game3d_debug_protocol.h"
+#include "test_game3d_clock.h"
 
 #include <d3d11_1.h>
 #include <d3d12.h>
@@ -65,9 +66,11 @@ namespace sunshine_game3d_test {
       consumer_context_->CopyResource(staging.Get(), texture);
       consumer_context_->End(done.Get());
       consumer_context_->Flush();
-      const auto deadline = GetTickCount64() + 5000;
+      using sunshine_game3d_fixture::game_clock;
+      const auto deadline = game_clock::wall_now() + 5000;
       HRESULT ready;
-      while ((ready = consumer_context_->GetData(done.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE && GetTickCount64() < deadline) {
+      while ((ready = consumer_context_->GetData(done.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE &&
+             game_clock::wall_now() < deadline) {
         Sleep(1);
       }
       check(ready == S_OK, "D3D11 diagnostic reception did not complete");
@@ -193,9 +196,12 @@ namespace sunshine_game3d_test {
       publish(shared_->request_id, ++request_);
       producer_.poll(true);
       check(!producer_.requested(), "Dump consumed the frame before arming its API observation window");
-      const auto observation_deadline = GetTickCount64() + 250;
-      while (!producer_.requested() && GetTickCount64() < observation_deadline) {
-        Sleep(1);
+      // Without an SDK call the dump admits its capture 100 ms of game time
+      // after it armed: hitch toward that, at most 250 ms (a real sleep on
+      // the real clock, the process's game clock once a fixture engaged it).
+      auto &clock = sunshine_game3d_fixture::fixture_clock();
+      for (std::uint64_t waited = 0; !producer_.requested() && waited < 250; waited += 10) {
+        clock.hitch(10);
         producer_.poll(true);
       }
       check(producer_.requested(), "Real dump request did not admit the bounded no-SDK observation window");
@@ -216,8 +222,9 @@ namespace sunshine_game3d_test {
       // ReShade's test drain need not make a separate native D3D11 fence
       // CPU-visible immediately. Follow the real consumer's asynchronous
       // contract without submitting another signal or bypassing completion.
-      const auto completion_deadline = GetTickCount64() + 5000;
-      while (shared_->response_id != request_ && GetTickCount64() < completion_deadline) {
+      using sunshine_game3d_fixture::game_clock;
+      const auto completion_deadline = game_clock::wall_now() + 5000;
+      while (shared_->response_id != request_ && game_clock::wall_now() < completion_deadline) {
         Sleep(1);
         producer_.poll();
       }

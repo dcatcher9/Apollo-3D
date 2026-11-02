@@ -1766,6 +1766,29 @@ without a barrier. Watchdogs and bounds on real hangs read `wall_now()`. A fixtu
 `reshade_game3d_fixture_clock` tests the helper against stand-in exports over the clock's test
 branch.
 
+In-process fixtures link a view of the add-on's sources into their own executable instead of
+loading the test add-on. The probe view (`sunshine_game3d_core_probe_test`) and the renderer view
+(`sunshine_game3d_core_renderer_test`) also carry `SUNSHINE_GAME3D_TEST_CLOCK`, and
+CMakeLists.txt's `sunshine_view_clock(target)` builds the clock exports
+([`test_game3d_clock_exports.cpp`](test_game3d_clock_exports.cpp)) and a barrier over the view's
+own pool count and log queue ([`test_game3d_view_quiesce.cpp`](test_game3d_view_quiesce.cpp)) into
+the executable, which binds itself (`bind(GetModuleHandleW(nullptr))`). The seam characterization,
+the Streamline probe (with the capture owner's regressions it runs), the NGX call trace, the UI
+capture bridge, the diagnostic-texture fixture and the D3D12 native renderer runtime engage it at
+their start; their waits for a source age, an association window, a poll cadence or Dump 3D's
+no-SDK window are `hitch(ms)`. The seam characterization has no `--wall-clock` mode: its rows pin exact clock edges,
+which only the game clock holds. Where such a fixture held a call to a real-time limit (the
+diagnostic-texture fixture's 100 ms for calls that must not wait for the GPU, the native renderer's
+50 ms 4K start and toggle back and the present-thread executor's 40 ms call, the Streamline probe's
+250 ms for a worker whose call must not wait for a lock the fixture holds), the verdict is the
+behaviour that limit stood for (owner decision of 11-02) and the time a `MEASURE` line or a hang
+bound: the call returned while the GPU work it must not wait for was still held behind a closed
+gate; the 4K start's setup ran in a pool build and the ready call adopted a renderer whose first
+render's objects were prepared; a toggle back returned while the build it cancelled was still held
+in its first step; the present-thread executor built over more than three calls; the probe's
+worker finished while the lock was still held (within 10 s). Under `--wall-clock` the old limits
+hold as well.
+
 [`check_clock_domains.cmake`](check_clock_domains.cmake) (the `reshade_clock_domains` test) keeps
 both complete. It counts every other clock read and every thread-pool submission, new thread,
 timer, wait or work object of the add-on's sources, the test add-on's own export sources included
@@ -3487,17 +3510,17 @@ serial is 30 there); each Present establishes any selected copy, as
   fence completes between the two reads stays; until 11-01 it was recycled), the source a head refused before its capture existed names to
   the display (another viewport's or NGX feature's drops the retained copy), and every reason of
   `decide_display`. Its freshness table
-  pins each age limit one millisecond either side against an explicit clock: the source age at
+  pins each age limit one millisecond either side against the game clock: the source age at
   every selection site, the association timeout of `expire_association` and `evaluation_live`, an
-  FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock (the capture
-  owner's `scope_clock` fixes `frame_generation_scope_live`'s clock in this view only), and the
+  FG scope's enabled and accepted ticks, which also admit a tick ahead of the clock, and the
   provider's handoff limit in `provider::handoff_hold` and the `evaluation_live` window it passes.
-  Each limit is named once in [`freshness.h`](freshness.h). A row that reads its clock once
-  before its setup pins every stamp its setup made after that read to it (`pin_clock`): a
+  Each limit is named once in [`freshness.h`](freshness.h). The test engages the probe view's
+  game clock and never moves it, so a row's clock, the stamps its setup makes and every read the
+  production functions make are one value. On the real tick a row pinned its setup's stamps to its
+  read (`pin_clock`) and the capture owner fixed the FG scope's clock (`scope_clock`): a
   `GetTickCount64` step (about 15.6 ms) inside a row's setup made those stamps tick ahead of the
-  clock, which is not fresh, and failed the row (open item C of the 10-28 review, one run in 46;
-  a 20 ms sleep after each such read fails 36 rows without the pin and none with it, 10-28,
-  temporary build). Its
+  clock, which is not fresh, and failed the row (open item C of the 10-28 review, one run in 46).
+  Its
   UI table pins the UI adapter's admission of each ready UI snapshot (`ui_mask::admit_candidate`)
   and of the Present's own color (`ui_input::current_color_refusal`). Their contracts are in
   [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection) and the
