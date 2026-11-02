@@ -59,6 +59,25 @@ namespace sunshine_streamline::depth_capture {
         scope.newest_evaluation_present <= last && n <= last + generated;
     }
 
+    // Requires mutex. The presenting floor (acquisition_decision): while this
+    // Present still presents the newest evaluated frame (frame_presenting),
+    // the first stamp of that frame when the newest evaluation is one of its
+    // stamps (from its first FG stamp to its anchor: its own evaluations up to
+    // the anchor, as frame_presenting counts them), else the newest
+    // evaluation's ordinal; 0 otherwise. A copy of that frame stamped at its
+    // call (presented_by: no submission on the reader seen) before the
+    // frame's own later evaluation is that frame's own (own_frame). Until
+    // 11-01 the floor was the newest evaluation's ordinal, so after the
+    // earlier frame's generated Presents and the frame's own SR evaluation
+    // its call-stamped FG copy lost its hold after a hitch (F63).
+    std::uint64_t presenting_floor() {
+      const auto newest = scope.newest_evaluation_present;
+      if (!frame_presenting(newest)) return 0;
+      const auto first = scope.frame_generation_present;
+      return scope.presenting_generated && first && newest >= first &&
+        newest <= std::max(first, scope.frame_generation_anchor) ? first : newest;
+    }
+
     // Requires mutex. A frame-generation stamp at ordinal (an FG input's
     // evaluation began, or its copy was published): the newest FG frame's
     // own while it is no later than that frame's stamps and anchor (its FG

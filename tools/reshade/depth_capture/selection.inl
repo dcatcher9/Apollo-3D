@@ -891,7 +891,7 @@ namespace sunshine_streamline::depth_capture {
     if (interrupts_admission(*owner, chosen)) owner->admission_after = serial.load(std::memory_order_relaxed);
     // The display may hold the newest evaluated frame's own copy at this
     // Present, whatever its age (depth_hold.h, own_frame).
-    decision.presenting_floor = frame_presenting(scope.newest_evaluation_present) ? scope.newest_evaluation_present : 0;
+    decision.presenting_floor = presenting_floor();
     // A head refused before its capture existed names its sequence too, so a
     // missing frame's stand-in reads as sequence < newest_sequence.
     if (diagnostic) diagnostic->newest_sequence = chosen.latest ? chosen.latest->metadata.sequence :

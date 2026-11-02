@@ -1372,7 +1372,7 @@ and a real frame without a decision of its own reuses the previous real frame's 
 after that there is no mask. There is no multiplier constant and no time bound. Depth's window
 tells real from generated Presents (since 11-01, PD7): under FG, a Present that offers no input is
 generated while the frame its API depth acquisition presents (the presenting floor, the newest
-evaluated frame's Present ordinal while that frame's window is open, `frame_presenting`) is the
+evaluated frame's first Present ordinal while that frame's window is open, `frame_presenting`) is the
 frame depth presented at the last Present that offered a Streamline UI tag
 (`ui_evidence::generated_in_window`, published per Present as `present_fg::depth_frame`). So UI and
 depth take one decision: the next frame's first evaluation (a silent FG scope's refused FG tag call
@@ -3835,7 +3835,12 @@ the earlier frame inside the next frame's recording after that call shows the ea
 depth however old, never one flat Present: owner ruling Q2, 10-30): its views
 are active, its copies current, the stand-in of its own SR snapshot for its DLSS-G copy in flight
 admitted (`lineage_snapshot`, below) and the display's hold of its own copy kept (`own_frame`:
-`retained_depth::present_stamp` at or after the acquisition's `presenting_floor`) whatever their
+`retained_depth::present_stamp` at or after the acquisition's `presenting_floor`, the frame's first
+stamp, also after its own later evaluations; until 11-01 the newest evaluation's ordinal, so a copy
+stamped at its call, on a queue that no longer presents, lost its hold after the frame's SR
+evaluation: up to `generated` Presents mono after a freeze, F63; the seam characterization's
+anchored rows pin it, as the session timelines' event language records every FG tag copy on the
+presenting queue's list) whatever their
 age. Until the 10-27 review only the first counted, so a hitch of the source age between a frame's
 evaluation and its later Presents made them mono (`inactive_views`, `retained_depth_expired`), and
 the first Present after the pause without depth restarted the stereo fade (the session timelines'

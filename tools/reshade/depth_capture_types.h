@@ -93,9 +93,11 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t epoch{}, sequence{}, source_id{}, capture_id{};
     std::uint32_t viewport{};
     bool source_valid{}, repeated_frame{}, pending_frame{};
-    // The newest evaluated frame's present ordinal while this Present still
-    // presents that frame (frame_presenting), else 0: a retained copy of
-    // that frame or a later one is its own depth here (decide_display).
+    // The newest evaluated frame's first present ordinal (its first FG stamp
+    // when its own evaluations followed it, else the evaluation's) while this
+    // Present still presents that frame (presenting_floor), else 0: a
+    // retained copy of that frame or a later one is its own depth here
+    // (decide_display).
     std::uint64_t presenting_floor{};
   };
 }

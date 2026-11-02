@@ -3005,6 +3005,7 @@ namespace sunshine_streamline::depth_capture {
         {"The same: its third generated Present", 3, 3, anchor::submission, false, 3, false, true},
         {"The same: a fourth Present after its real one", 3, 3, anchor::submission, false, 4, false, false},
         {"Anchored by DLSS-G's evaluation of its recorded tag copy: its third generated Present", 3, 3, anchor::dlssg, false, 3, false, true},
+        {"Anchored by DLSS-G's evaluation after its own SR evaluation, its tag copy stamped at its call: its third generated Present", 3, 3, anchor::dlssg, true, 3, false, true},
         {"MFG 3x, two earlier generated Presents, anchored: its second generated Present", 2, 2, anchor::submission, false, 2, false, true},
         {"MFG 2x, one earlier generated Present, anchored: its generated Present", 1, 1, anchor::submission, false, 1, false, true},
         {"MFG 2x anchored: a second Present after its real one", 1, 1, anchor::submission, false, 2, false, false},
@@ -3052,6 +3053,15 @@ namespace sunshine_streamline::depth_capture {
         if (got != r.expected || copy != got) {
           fail(std::string("F1 anchored frame_presenting, ") + r.pins + ": got " + (got ? "presenting" : "not presenting") +
                (copy != got ? " (its submission's stamp differs)" : ""));
+        }
+        // The display holds a copy of the presented frame stamped at its call
+        // as its own (own_frame: stamp at or above the presenting floor), also
+        // after the frame's own later evaluation (F63, 11-01: the floor was
+        // that evaluation's ordinal, above the copy's stamp).
+        const auto floor = presenting_floor();
+        if (got && (!floor || floor > stamp)) {
+          fail(std::string("F63 presenting floor, ") + r.pins + ": floor " + std::to_string(floor) + ", the frame's stamp " +
+               std::to_string(stamp));
         }
       }
       std::printf("PASS F1 anchored frame_presenting: %zu rows\n", std::size(rows));

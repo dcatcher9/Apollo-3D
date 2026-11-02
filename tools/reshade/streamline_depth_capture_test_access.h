@@ -640,6 +640,7 @@ namespace sunshine_streamline::depth_capture {
     extern std::uint64_t reader;
     std::uint64_t present_ordinal();
     bool frame_presenting(std::uint64_t ordinal);
+    std::uint64_t presenting_floor();
     void stamp_frame_generation(std::uint64_t ordinal);
     void anchor_frame_generation(std::uint64_t call, std::uint64_t ordinal);
     std::uint64_t presented_by(const slot &value);
