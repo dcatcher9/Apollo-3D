@@ -1144,16 +1144,24 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestCaptureTicket(effect_runt
 }
 
 // The layout epoch a native depth-stencil's preserved crop is at (0: none
-// tracked). The alternating fixture's overlap case: a capture member drawn
-// with a new crop beside the shown anchor advances it on that Present,
-// copied or not (observe_uncopied_member). Read-only.
-extern "C" __declspec(dllexport) BOOL SunshineDepthTestLayoutEpoch(effect_runtime *runtime, uint64_t native_resource, uint64_t *epoch)
+// tracked), and whether it is a retained member of the runtime's capture
+// set (a member view not retiring). The alternating fixture's overlap
+// case: a member drawn with a new crop beside the shown anchor advances
+// its epoch on that Present, copied or not (observe_uncopied_member), and
+// then leaves the set until it qualifies again. Read-only; on the
+// Present's thread between Presents.
+extern "C" __declspec(dllexport) BOOL SunshineDepthTestLayoutEpoch(effect_runtime *runtime, uint64_t native_resource, uint64_t *epoch,
+	BOOL *member)
 {
-	if (!s_registered || runtime == nullptr || native_resource == 0 || epoch == nullptr) return FALSE;
+	if (!s_registered || runtime == nullptr || native_resource == 0 || epoch == nullptr || member == nullptr) return FALSE;
+	const auto *data = runtime->get_private_data<generic_depth_data>();
 	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
-	if (device_data == nullptr) return FALSE;
+	if (data == nullptr || device_data == nullptr) return FALSE;
 	const std::shared_lock<std::shared_mutex> lock(s_mutex);
 	const auto found = device_data->depth_stencil_resources.find(resource { native_resource });
 	*epoch = found != device_data->depth_stencil_resources.end() ? found->second.layout_epoch : 0;
+	*member = std::any_of(data->member_views.begin(), data->member_views.end(), [native_resource](const auto &entry) {
+		return entry.source.handle == native_resource && entry.view != 0 && !entry.retire_after;
+	}) ? TRUE : FALSE;
 	return TRUE;
 }
