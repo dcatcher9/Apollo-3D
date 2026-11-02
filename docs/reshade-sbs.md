@@ -4983,10 +4983,14 @@ readable copy; an options store that knows both viewports' modes enabled reads a
 old viewport's camera record goes, and the views tie meanwhile, while the old viewport's confirmed
 Off binds nothing, so the new viewport's scope is read at once. A confirmed Off of any viewport binds
 no FG scope: beside one enabled viewport that viewport is the scope, and with none enabled the read
-is the newest Off (11-01, lane L-fg, R5-3; until then any two viewports' known options read
-ambiguous, so a game that sets Off on its second SR viewport each frame had no confirmed scope, no
-tie-break and no FG input while both rendered; contract cells `sl_views` with
-`other_options=off`, probe row `test_any_viewport_read_beside_off`). The other viewport keeps copying its
+is the Off of the lowest viewport id (11-01, lane L-fg, R5-3; until then any two viewports' known
+options read ambiguous, so a game that sets Off on its second SR viewport each frame had no
+confirmed scope, no tie-break and no FG input while both rendered; contract cells `sl_views` with
+`other_options=off`, probe row `test_any_viewport_read_beside_off`). Until R5-3's fix review the
+all-Off read was the newest Off, whose sequence every call rewrites: with Off set on two viewports
+each frame it named either one by the calls' order around the Present's read, and each flip moved
+the UI's FG viewport, which keys its source qualification where no Streamline UI tag names a scope,
+so the qualification restarted (probe row `test_all_off_read_is_stable`). The other viewport keeps copying its
 depth every frame although no Present can show it while the tie is broken (a limit: skipping it
 would need the FG viewport's activity at the copy point, and the copy is the depth to show if the FG
 viewport stops evaluating while the scope is silent). Until 11-01 two active SR viewports were mono
@@ -6463,7 +6467,7 @@ and direct NGX, DLSS-G's inputs and the SL UI tags; the SL route;
 role) gets the last committed options. The validity rules are unchanged: known,
 the current epoch and options loss revision, one enabled viewport for an
 any-viewport query (another viewport's confirmed Off binds nothing, and with none
-enabled the read is the newest Off; 11-01, R5-3), the current observation, an available FG target. A restart clears it
+enabled the read is the lowest viewport's Off; 11-01, R5-3), the current observation, an available FG target. A restart clears it
 (`release_camera_records`), and a viewport keeps its mode as long as its camera
 record, as before the store: when a newer viewport's camera, tag or evaluation
 replaces that record (the probe keeps four), the game renders the viewport no

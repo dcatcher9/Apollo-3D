@@ -4069,7 +4069,8 @@ namespace {
   // beside another viewport's enabled options the any-viewport read names
   // that viewport, so its view breaks a tie of two active SR views (owner
   // ruling R5); two enabled viewports stay ambiguous; with none enabled the
-  // read is the newest Off. Until then any two viewports' known options made
+  // read is the Off of the lowest viewport id (test_all_off_read_is_stable).
+  // Until then any two viewports' known options made
   // the read ambiguous, so a game that sets Off on its second SR viewport
   // every frame had no confirmed FG scope while both rendered.
   void test_any_viewport_read_beside_off() {
@@ -4105,8 +4106,47 @@ namespace {
       "R5-3: an FG viewport switch with the old viewport's Off stayed ambiguous");
     require(set_options(second_view, off) == 0, "FG Off options failed");
     check(query_frame_generation(UINT32_MAX, fg, &status) && status == frame_generation_query_status::observed && fg.known &&
-        !fg.enabled && fg.viewport == second_view.value,
-      "R5-3: two viewports' FG Off did not read as FG Off");
+        !fg.enabled && fg.viewport == main_view.value,
+      "R5-3: two viewports' FG Off did not read as the lowest viewport's FG Off");
+    require(failed.empty(), failed.c_str());
+  }
+
+  // Two viewports' FG Off set every frame, in either order (R5-3's fix
+  // review, 11-01): the any-viewport read names the same Off whatever the
+  // calls' order around each Present's read, so the UI's FG viewport, the
+  // key of its source qualification and detection scope where no SL UI
+  // tag names one (game3d_ui_input_provider), stays. Until then the read was
+  // the newest Off, whose sequence each call rewrites: it named either
+  // viewport, and each flip reset the UI's qualification.
+  void test_all_off_read_is_stable() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto first = viewport(111), second = viewport(112);
+    fg_options off; off.mode = 0; off.generated_frames = 0;
+    constexpr std::uint64_t chain = 0x7100;
+    std::uint32_t named{};
+    std::string failed;
+    for (unsigned frame = 0; frame != 6 && failed.empty(); ++frame) {
+      const bool swapped = frame % 2 != 0;
+      require(set_options(swapped ? second : first, off) == 0 && set_options(swapped ? first : second, off) == 0,
+        "FG Off options failed");
+      take_present_fg(chain);
+      const auto taken = present_frame_generation(chain);
+      end_present_fg();
+      if (taken.read != frame_generation_query_status::observed || !taken.ui.known || taken.ui.enabled) {
+        failed = "two viewports' FG Off did not read as FG Off";
+      } else if (!named) {
+        named = taken.ui.viewport;
+      } else if (taken.ui.viewport != named) {
+        failed = "R5-3: the UI's FG viewport moved between two viewports' FG Off with the calls' order (" +
+          std::to_string(named) + " then " + std::to_string(taken.ui.viewport) + " at frame " + std::to_string(frame) + ")";
+      }
+    }
     require(failed.empty(), failed.c_str());
   }
 
@@ -4752,6 +4792,7 @@ int main(int argc, char **argv) {
     test_fg_view_restart();
     std::puts("PASS a restart resets the process's FG view");
     test_any_viewport_read_beside_off();
+    test_all_off_read_is_stable();
     std::puts("PASS another viewport's FG Off binds no FG scope: the enabled viewport breaks the tie; two enabled stay ambiguous");
     test_fg_transition_order();
     std::puts("PASS two options calls' FG transitions follow their store commits");

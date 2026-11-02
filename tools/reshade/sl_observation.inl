@@ -1011,14 +1011,19 @@ namespace sunshine_streamline {
         if (!state.known || state.epoch != source_epoch || state.loss_revision != options_loss) { ambiguous = true; continue; }
         // A viewport's confirmed Off binds no FG scope: beside another
         // viewport's enabled options it leaves that one the FG scope, and
-        // with none enabled the read is the newest Off. Until 11-01 any two
-        // viewports' options made the any-viewport read ambiguous, so a game
-        // that sets Off on its second SR viewport each frame never had a
-        // confirmed FG scope: no tie-break of its two active views (owner
-        // ruling R5), no FG input and mono for as long as both rendered
-        // (R5-3).
+        // with none enabled the read is the Off of the lowest viewport id.
+        // Until 11-01 any two viewports' options made the any-viewport read
+        // ambiguous, so a game that sets Off on its second SR viewport each
+        // frame never had a confirmed FG scope: no tie-break of its two
+        // active views (owner ruling R5), no FG input and mono for as long
+        // as both rendered (R5-3). Then, until R5-3's fix review, the all-Off
+        // read was the newest Off: every in-order call rewrites its slot's
+        // sequence, so with Off set on two viewports each frame it named
+        // either one by where the Present's read fell between the calls, and
+        // each flip moved the UI's FG viewport, which reset its source
+        // qualification and detection scope.
         if (!state.enabled) {
-          if (!off || state.sequence > off->sequence) off = &state;
+          if (!off || state.viewport < off->viewport) off = &state;
           continue;
         }
         if (found) { ambiguous = true; continue; }
