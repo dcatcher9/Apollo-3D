@@ -46,7 +46,7 @@ namespace {
     }
 
     status wait_ready(const char *label) {
-      const auto until = GetTickCount64() + 15000;
+      const auto until = clock.now() + 15000;
       unsigned consecutive = 0;
       status value;
       do {
@@ -57,7 +57,7 @@ namespace {
           std::isfinite(value.scale) && value.scale > 0.f;
         consecutive = valid ? consecutive + 1 : 0;
         if (consecutive >= 16) { record(label, value); return value; }
-      } while (GetTickCount64() < until);
+      } while (clock.now() < until);
       record(label, value);
       throw std::runtime_error("Real drawn DSV did not establish native ready state and active positive relative scale");
     }
@@ -67,18 +67,18 @@ namespace {
     }
 
     void stable(unsigned milliseconds, float scale) {
-      const auto until = GetTickCount64() + milliseconds;
+      const auto until = clock.now() + milliseconds;
       do {
         step(); no_effects();
         const auto value = current();
         require(value.ready() && value.state == unsigned(sunshine_game3d::automatic_scale_state::active) &&
           same_scale(value.scale, scale), "Steady drawn source restarted calibration or changed native scale");
-      } while (GetTickCount64() < until);
+      } while (clock.now() < until);
     }
 
     void reload_without_depth_reset(float scale) {
       const auto reloads = observed.reloads;
-      const auto until = GetTickCount64() + 15000;
+      const auto until = clock.wall_now() + 15000;
       unsigned frames = 0;
       observed.runtime->reload_effect_next_frame(nullptr);
       do {
@@ -87,7 +87,7 @@ namespace {
         require(value.ready() && value.basis == unsigned(sunshine_game3d::automatic_scale_basis::relative_depth) &&
           value.state == unsigned(sunshine_game3d::automatic_scale_state::active) && same_scale(value.scale, scale),
           "Unrelated FX reload reset native capture readiness or established scale");
-      } while (observed.reloads == reloads && GetTickCount64() < until);
+      } while (observed.reloads == reloads && clock.wall_now() < until);
       require(observed.reloads > reloads, "Unrelated empty FX reload did not complete");
       // Continue after the reload callback too: delayed source/epoch resets
       // must not hide behind the UI snapshot retained during compilation.
@@ -99,8 +99,8 @@ namespace {
     void run_native_depth(const fs::path &directory) {
       report.open(directory / "native-depth-status.txt");
       report.precision(9);
-      const auto loaded_until = GetTickCount64() + 30000;
-      while ((!observed.runtime || !observed.reloads) && GetTickCount64() < loaded_until) step();
+      const auto loaded_until = clock.wall_now() + 30000;
+      while ((!observed.runtime || !observed.reloads) && clock.wall_now() < loaded_until) step();
       require(observed.runtime && observed.reloads, "Official runtime did not initialize the isolated fixture");
       check_unified_addon();
       const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
@@ -113,12 +113,12 @@ namespace {
       sunshine_test_files::rename_when_free(directory / "effects" / effect_file, directory / "effects" / "SunshineGame3D.fx.disabled");
       const auto reloads = observed.reloads;
       observed.runtime->reload_effect_next_frame(nullptr);
-      const auto empty_until = GetTickCount64() + 30000;
+      const auto empty_until = clock.wall_now() + 30000;
       unsigned techniques = 1;
       do {
         step(); techniques = 0;
         observed.runtime->enumerate_techniques(nullptr, [&](api::effect_runtime *, api::effect_technique) { ++techniques; });
-      } while ((observed.reloads == reloads || techniques) && GetTickCount64() < empty_until);
+      } while ((observed.reloads == reloads || techniques) && clock.wall_now() < empty_until);
       require(observed.reloads > reloads && techniques == 0, "Frozen FX was not unloaded before native depth capture");
       for (const auto &entry : fs::recursive_directory_iterator(directory / "effects"))
         require(entry.path().extension() != ".fx", "Native depth fixture still contains an installed FX");
@@ -126,6 +126,10 @@ namespace {
       no_effects();
       require(!current().ready(), "Native fixture claimed ready before any DSV was drawn");
       std::puts("PASS native depth phase starts without installed/loaded effects or injected depth/calibration");
+      // Setup is done: game time from here on, on the test add-on's clock
+      // (test_game3d_clock.h); --wall-clock keeps the real clock.
+      require(clock.bind(GetModuleHandleW(L"SunshineSBSTest.addon64")), "The test add-on lacks its game clock exports");
+      clock.engage();
 
       create_pipeline();
       // Exact binary bands give stable, spatially varied data independent of
@@ -139,13 +143,13 @@ namespace {
       reload_without_depth_reset(initial.scale);
 
       render_tracked_depth = {};
-      const auto gap_until = GetTickCount64() + 3000;
+      const auto gap_until = clock.now() + 3000;
       unsigned missing_frames = 0;
       status gap;
       do {
         step(); no_effects(); gap = current();
         missing_frames = gap.ready() ? 0 : missing_frames + 1;
-      } while (missing_frames < 16 && GetTickCount64() < gap_until);
+      } while (missing_frames < 16 && clock.now() < gap_until);
       record("color-only-gap", gap);
       require(missing_frames >= 16 && gap.state == unsigned(sunshine_game3d::automatic_scale_state::held) &&
         same_scale(gap.scale, initial.scale), "Color-only presents reused stale depth or discarded the established scale");
@@ -164,8 +168,9 @@ namespace {
 
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
   if (argc != 5 && argc != 7) {
-    std::fputs("usage: test_game3d_native_depth_runtime official-ReShade64.dll frozen-shader-directory SunshineSBSTest.addon64 fresh-output-directory [width height]\n", stderr);
+    std::fputs("usage: test_game3d_native_depth_runtime official-ReShade64.dll frozen-shader-directory SunshineSBSTest.addon64 fresh-output-directory [width height] [--wall-clock]\n", stderr);
     return 2;
   }
   std::thread([] {
@@ -188,6 +193,7 @@ int main(int argc, char **argv) {
     native_depth_fixture fixture;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), directory, 2, 0, fs::absolute(argv[3]));
     fixture.run_native_depth(directory);
+    fixture.clock.report("native-depth");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());

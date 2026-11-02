@@ -399,11 +399,11 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         submit();present_second();begin_commands();presented_between=true;
       }
       if(mode==cadence::moving){
-        if(!movement_started)movement_started=GetTickCount64();
+        if(!movement_started)movement_started=clock.now();
         // Looking repeatedly between coherent near/middle/far center patches
         // begins before the first effect frame. No stationary calibration lead-in.
         constexpr unsigned patterns[]{18,14,15};
-        scene->pattern=patterns[((GetTickCount64()-movement_started)/300)%3];
+        scene->pattern=patterns[((clock.now()-movement_started)/300)%3];
       }
       if(drift)for(unsigned r=1;r<=3;++r)member(r).pattern=100+std::min(128u,phase_present/6);
       ++phase_present;
@@ -525,7 +525,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     void tick(const char *phase){
       // A double present repeats the real frame's colour.
       if(!(mode==cadence::gap_double && phase_present%2))update_marker();
-      step_before=GetTickCount64();step();step_after=GetTickCount64();game3d.no_effects();
+      step_before=clock.now();step();step_after=clock.now();game3d.no_effects();
       latest=game3d.last_render();
       require(latest.sequence>rendered_sequence,"A Present had no native Game 3D render to observe");
       rendered_sequence=latest.sequence;
@@ -582,7 +582,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
         shown={captured.source_resource.handle,captured.source_id,captured.frame_index,0,step_before,last_raw,blend(),true};
       else if(!capture_ready)shown.valid=false;
       shown.known=true;
-      trace<<phase<<','<<GetTickCount64()<<','<<latest.sequence<<','<<drawn<<','
+      trace<<phase<<','<<clock.now()<<','<<latest.sequence<<','<<drawn<<','
         <<(drawn?reinterpret_cast<std::uint64_t>(member(drawn).texture.p):0)<<','<<captured.source_resource.handle<<','
         <<captured.source_id<<','<<captured.layout_epoch<<','<<captured.frame_index<<','<<capture_ready<<','<<ready()<<','
         <<gain()<<','<<zero()<<','<<blend()<<','
@@ -593,12 +593,12 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       presented_between=false;
     }
     void warm(const char *phase,bool basis=true,const std::function<void(std::uint64_t)> &guard={}){
-      const auto started=GetTickCount64();unsigned consecutive=0;
+      const auto started=clock.now();unsigned consecutive=0;
       do{
-        tick(phase);if(guard)guard(GetTickCount64()-started);
+        tick(phase);if(guard)guard(clock.now()-started);
         if(full()){if(basis)require_basis();++consecutive;}else consecutive=0;
-      }while(consecutive<12 && GetTickCount64()-started<15000);
-      std::printf("MEASURE %s warmup_ms=%llu consecutive_full=%u\n",phase,static_cast<unsigned long long>(GetTickCount64()-started),consecutive);
+      }while(consecutive<12 && clock.now()-started<15000);
+      std::printf("MEASURE %s warmup_ms=%llu consecutive_full=%u\n",phase,static_cast<unsigned long long>(clock.now()-started),consecutive);
       require(consecutive>=12,"Current rotating sources never reached continuous camera readiness/full blend within15s");
     }
     void stable(const char *phase,unsigned frames,bool basis=true){
@@ -625,8 +625,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     }
     void require_fade_in(cadence next,unsigned role,const char *phase){
       set_mode(next,role);
-      const auto until=GetTickCount64()+5000;
-      do tick(phase);while(!ready() && GetTickCount64()<until);
+      const auto until=clock.now()+5000;
+      do tick(phase);while(!ready() && clock.now()<until);
       require(ready() && blend()<1.f,"Depth returning after more than the source age did not fade stereo in again");
     }
     void missing_then_recover(){
@@ -713,16 +713,16 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       std::puts("PASS overlap: qualified A/ABC, persistent concurrent raster with current A (peers copied only when read, a peer's new crop taken on the Present it drew it), return to ABC, current mono on real gaps");
     }
     void check_interrupted_startup(){
-      const auto started=GetTickCount64();unsigned valid=0,missing=0,consecutive_valid=0;
+      const auto started=clock.now();unsigned valid=0,missing=0,consecutive_valid=0;
       do{
         tick("interrupted-startup");
         if(drawn){
           ++valid;
           if(full()){require_basis();++consecutive_valid;}else consecutive_valid=0;
         }else ++missing; // tick() verifies a hold within the source age, or mono.
-      }while(consecutive_valid<30 && GetTickCount64()-started<15000);
+      }while(consecutive_valid<30 && clock.now()-started<15000);
       std::printf("MEASURE interrupted-startup elapsed_ms=%llu valid=%u missing=%u full_valid_run=%u\n",
-        static_cast<unsigned long long>(GetTickCount64()-started),valid,missing,consecutive_valid);
+        static_cast<unsigned long long>(clock.now()-started),valid,missing,consecutive_valid);
       require(missing>=30 && consecutive_valid==30,
         "Interleaved missing presents prevented async exact-source startup/full-strength on valid frames");
       require(stereo_observed[0]>0,"Recovered valid frames never produced actual stereo pixels");
@@ -748,13 +748,13 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       // Every allocation is new. Older-lifetime unrelated buffers render on
       // every present, so a serial lifetime-ID tour cannot hide behind prior
       // source qualification. Content/camera state is never injected.
-      const auto started=GetTickCount64();unsigned consecutive=0;
+      const auto started=clock.now();unsigned consecutive=0;
       do{
         tick("crowded-fresh-ABC-startup");
         if(full()){require_basis();++consecutive;}else consecutive=0;
-      }while(consecutive<12 && GetTickCount64()-started<8000);
+      }while(consecutive<12 && clock.now()-started<8000);
       std::printf("MEASURE crowded-startup warmup_ms=%llu consecutive_full=%u unrelated=%zu\n",
-        static_cast<unsigned long long>(GetTickCount64()-started),consecutive,unrelated.size());
+        static_cast<unsigned long long>(clock.now()-started),consecutive,unrelated.size());
       require(consecutive==12,"Fresh rotating sources among12 unrelated buffers did not reach full stereo within8s");
       stereo_observed={};stable("crowded-ABC-sustained",90);
       for(unsigned role=0;role<3;++role){
@@ -770,14 +770,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       // effects loaded. It is written depth with a known clear convention,
       // but cannot supply a useful scene reference. No UI actions are used.
       const auto original=scene->texture.p;
-      const auto initial_started=GetTickCount64();unsigned flat_frames=0;
+      const auto initial_started=clock.now();unsigned flat_frames=0;
       do{
         tick("flat-startup-mono");++flat_frames;
         require(!ready() && blend()==0.f,
           "Flat interior depth initialized a camera instead of remaining current mono");
-      }while(GetTickCount64()-initial_started<2600);
+      }while(clock.now()-initial_started<2600);
       std::printf("PASS initial flat depth: %u actual .5 draws over%llu ms, current mono throughout\n",flat_frames,
-        static_cast<unsigned long long>(GetTickCount64()-initial_started));
+        static_cast<unsigned long long>(clock.now()-initial_started));
       scene->pattern=14;
       warm("flat-to-useful-fresh-reference");stable("flat-to-useful-sustained",30);
       const auto useful_lifetime=lifetimes[0];
@@ -789,19 +789,19 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       // controller holds its gain once the render is mono.
       const auto useful=expected_basis(14,width,height);
       scene->pattern=19;
-      const auto flat_return_started=GetTickCount64();unsigned expired_mono=0;
+      const auto flat_return_started=clock.now();unsigned expired_mono=0;
       do{
         tick("useful-to-flat-hold");
         if(ready())require(close(gain(),useful[0]) && close(zero(),useful[1]),
           "Rejected flat samples changed an established useful source's gain/zero");
         else require(close(game3d.automatic().scale,useful[0]),"Rejected flat samples changed the held gain");
         if(current(1))require(captured.source_id==useful_lifetime,"Same live flat source changed lifetime identity");
-        if(GetTickCount64()-flat_return_started>=1500){
+        if(clock.now()-flat_return_started>=1500){
           require(!ready() && blend()==0.f,
             "Flat-only evidence kept stale ready depth beyond target expiry");
           ++expired_mono;
         }
-      }while(GetTickCount64()-flat_return_started<2600);
+      }while(clock.now()-flat_return_started<2600);
       require(expired_mono>0,"Returning-flat phase did not exercise expired-evidence current mono");
       scene->pattern=14;stereo_observed[0]=0;
       warm("flat-return-useful-retained-reference");stable("flat-return-useful-sustained",30);
@@ -810,7 +810,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       std::puts("PASS flat content admission: no flat startup, fresh range/midpoint basis on useful depth, held basis through later flat rejection and same-source stereo recovery");
     }
     void check_moving_startup(){
-      const auto started=GetTickCount64();unsigned consecutive=0,changes=0,previous=scene->pattern;
+      const auto started=clock.now();unsigned consecutive=0,changes=0,previous=scene->pattern;
       do{
         tick("moving-center-startup");
         if(scene->pattern!=previous){++changes;previous=scene->pattern;}
@@ -822,9 +822,9 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
             "Moving-source camera escaped the independently known raw range");
           ++consecutive;
         }else consecutive=0;
-      }while((consecutive<60 || changes<6) && GetTickCount64()-started<15000);
+      }while((consecutive<60 || changes<6) && clock.now()-started<15000);
       std::printf("MEASURE moving-center-startup elapsed_ms=%llu center_changes=%u full_run=%u\n",
-        static_cast<unsigned long long>(GetTickCount64()-started),changes,consecutive);
+        static_cast<unsigned long long>(clock.now()-started),changes,consecutive);
       require(consecutive>=60 && changes>=6,"Continuous valid moving depth never reached persistent full stereo within15s");
       require(stereo_observed[0]>0,"Moving-source initialization never reached actual stereo pixels");
       color_only_gap("moving-real-gap");
@@ -838,7 +838,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       require(crops[0]==std::array<std::uint32_t,4>{0,0,width,height},"Layout control did not begin from the full captured view");
       set_mode(cadence::auxiliary);
       unsigned good=0;std::uint64_t partial_layout=0;
-      const auto until=GetTickCount64()+10000;
+      const auto until=clock.now()+10000;
       do{
         tick("stable-partial-capture-varying-auxiliary");
         require(!ready(),"Unsupported partial scene crop retained a full-view camera");
@@ -849,7 +849,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
           require(layouts[0]==partial_layout,"Unrelated auxiliary viewport activity changed the stable captured scene basis");
           ++good;
         }
-      }while(good<30 && GetTickCount64()<until);
+      }while(good<30 && clock.now()<until);
       require(good==30,"Stable partial captured view never supplied30 current native copies");
       set_mode(cadence::single,1);
       warm("actual-full-crop-return",true,[&](std::uint64_t elapsed){
@@ -895,8 +895,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       // every Present first.
       if(kind==cadence::gap_long){continuous(1);}
       set_mode(kind);
-      const auto started=GetTickCount64();unsigned consecutive=kind==cadence::gap_long ? 20 : 0;
-      while(consecutive<20 && GetTickCount64()-started<15000){tick(label);if(drawn){if(full())++consecutive;else consecutive=0;}}
+      const auto started=clock.now();unsigned consecutive=kind==cadence::gap_long ? 20 : 0;
+      while(consecutive<20 && clock.now()-started<15000){tick(label);if(drawn){if(full())++consecutive;else consecutive=0;}}
       require(consecutive>=20,"Real frames between held Presents never reached full stereo");
       if(kind==cadence::gap_long){
         unsigned held_run=0,mono=0,fades=0;std::uint64_t mono_since=0;
@@ -930,8 +930,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     // and after the pause the scene recovers.
     void check_gap_cleared(){
       set_mode(cadence::gap_cleared);
-      const auto started=GetTickCount64();unsigned consecutive=0;
-      while(consecutive<20 && GetTickCount64()-started<15000){tick("gap-cleared");if(drawn){if(full())++consecutive;else consecutive=0;}}
+      const auto started=clock.now();unsigned consecutive=0;
+      while(consecutive<20 && clock.now()-started<15000){tick("gap-cleared");if(drawn){if(full())++consecutive;else consecutive=0;}}
       require(consecutive>=20,"Real frames between cleared Presents never reached full stereo");
       unsigned real=0,cleared=0;
       for(unsigned i=0;i<120;++i){
@@ -942,8 +942,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       std::printf("PASS gap-cleared: %u real frames full stereo, %u Presents that cleared or discarded the scene's depth mono\n",real,cleared);
       set_mode(cadence::single,1);warm("before-pause");
       set_mode(cadence::paused);
-      const auto paused=GetTickCount64();unsigned mono=0;
-      do{tick("pause-erases-depth");++mono;}while(mono<20 || GetTickCount64()-paused<400);
+      const auto paused=clock.now();unsigned mono=0;
+      do{tick("pause-erases-depth");++mono;}while(mono<20 || clock.now()-paused<400);
       set_mode(cadence::single,1);warm("after-pause");stable("after-pause",20);
       std::printf("PASS pause: %u Presents that keep erasing the scene's depth mono from the first, then the scene recovers\n",mono);
     }
@@ -955,8 +955,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     // their own current depth at full stereo.
     void check_end_discard(){
       set_mode(cadence::end_discard);
-      const auto started=GetTickCount64();unsigned consecutive=0;
-      while(consecutive<20 && GetTickCount64()-started<15000){
+      const auto started=clock.now();unsigned consecutive=0;
+      while(consecutive<20 && clock.now()-started<15000){
         tick("end-discard");
         if(!end_discarded){if(full())++consecutive;else consecutive=0;}
       }
@@ -977,8 +977,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     // scene (the quarter drawn after the resume does not restart the crop).
     void check_resume_pass(){
       set_mode(cadence::resume_pass);
-      const auto started=GetTickCount64();unsigned consecutive=0;
-      while(consecutive<20 && GetTickCount64()-started<15000){tick("resume-pass");if(full())++consecutive;else consecutive=0;}
+      const auto started=clock.now();unsigned consecutive=0;
+      while(consecutive<20 && clock.now()-started<15000){tick("resume-pass");if(full())++consecutive;else consecutive=0;}
       require(consecutive>=20,"A scene drawn in a suspended render pass never reached full stereo");
       for(unsigned i=0;i<120;++i){
         tick("resume-pass");
@@ -997,14 +997,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     void cut_to(unsigned role,const char *label){
       require(full(),"The Present before a cut did not show full current depth");
       set_mode(cadence::single,role);
-      const auto started=GetTickCount64();unsigned mono=0;
+      const auto started=clock.now();unsigned mono=0;
       do{
         tick(label);
         require(!held,"A Present after a cut to another allocation held the previous scene's depth");
         // The new allocation has no calibrated camera yet: the cut Present is mono.
         require(mono || (!ready() && blend()==0.f),"The cut Present was not mono");
         if(!ready())++mono;
-      }while(!full() && GetTickCount64()-started<15000);
+      }while(!full() && clock.now()-started<15000);
       warm(label);stable(label,20);
       require(stereo_observed[role-1]>0,"The new allocation's scene never produced actual stereo pixels");
       std::printf("PASS %s: %u mono Presents from the cut Present on, nothing held, then full stereo on the new allocation's own depth\n",label,mono);
@@ -1078,8 +1078,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       second_between=between;
       set_mode(between ? cadence::gap_cleared : cadence::interrupted);
       const char *label=between ? "second-window-between" : "second-window";
-      const auto started=GetTickCount64();unsigned consecutive=0;
-      while((consecutive<20 || !second_renders) && GetTickCount64()-started<30000){tick(label);if(drawn){if(full())++consecutive;else consecutive=0;}}
+      const auto started=clock.now();unsigned consecutive=0;
+      while((consecutive<20 || !second_renders) && clock.now()-started<30000){tick(label);if(drawn){if(full())++consecutive;else consecutive=0;}}
       require(consecutive>=20,"Real frames beside a second window never reached full stereo");
       require(second_renders>0,"The second window's runtime never rendered natively");
       const auto renders=second_renders;unsigned real=0,others=0;
@@ -1146,12 +1146,15 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       trace.open(runtime_directory/"rotation-trajectory.csv");summary.open(runtime_directory/"rotation-summary.csv");
       trace<<std::setprecision(17)<<"phase,wall_ms,render,drawn,drawn_original,current_original,lifetime,layout,frame,capture_ready,camera_ready,H,t0,blend,marker_half,eye_max_difference,raw_center,crop_x,crop_y,crop_width,crop_height,raster_mask,held\n";
       summary<<"phase,frames,A,B,C,result\n";
-      const auto until=GetTickCount64()+45000;
-      while((!observed.runtime || !observed.renders) && GetTickCount64()<until)step();
+      const auto until=clock.wall_now()+45000;
+      while((!observed.runtime || !observed.renders) && clock.wall_now()<until)step();
       require(observed.runtime && observed.renders && !observed.inject,"Actual rotation fixture did not initialize");
       check_unified_addon();
       game3d.start();game3d.attach_export();game3d.set_strength(100);
       rendered_sequence=game3d.await_render([&]{update_marker();step();});
+      // Setup is done: game time from here on (engage_game_clock). A moving
+      // scene keeps moving; its pattern starts again on the game clock.
+      engage_game_clock();movement_started=0;
       for(unsigned band=0;band<4;++band)for(unsigned i=0;i<8;++i)points[band*8+i]={(2*band+1)*width/8+i-4,height/4};
       buffer(pixel_readback,UINT64(slots)*512,D3D12_HEAP_TYPE_READBACK);
       if(!test_case.empty()){
@@ -1197,7 +1200,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       const auto old_crop=crops[0];const auto crop_lifetime=lifetimes[0];
       require(old_crop==std::array<std::uint32_t,4>{0,0,width,height},"Crop-change control did not start from a captured full view");
       scene->partial_viewport=true;scene->pattern=15;set_mode(cadence::single,1);
-      const auto crop_until=GetTickCount64()+12000;unsigned crop_frames=0;
+      const auto crop_until=clock.now()+12000;unsigned crop_frames=0;
       do{
         tick("member-A-unsupported-crop");
         require(!ready(),"Unsupported partial crop reused a ready full-frame camera");
@@ -1211,7 +1214,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
                   "Partial-viewport control did not publish the changed copy crop on its original live resource");
           ++crop_frames;
         }
-      }while(crop_frames<16 && GetTickCount64()<crop_until);
+      }while(crop_frames<16 && clock.now()<crop_until);
       require(crop_frames>=16,"Unsupported-crop control never provided actual current captured depth");
       scene->partial_viewport=false;scene->pattern=14;set_mode(cadence::single,1);
       warm("full-layout-fresh-reference",true,[&](std::uint64_t elapsed){
@@ -1237,7 +1240,8 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
 
 int main(int argc,char **argv){
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--copy-rescue-rect|--copy-rescue-pass-clear|--copy-rescue-discard|--copy-rescue-boxed|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain|--second-swapchain-between|--end-discard|--resume-pass]\n",stderr);return 2;}
+  sunshine_game3d_fixture::take_wall_clock_option(argc,argv);
+  if(argc!=5 && argc!=6){std::fputs("usage: depth_alternating_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [--overlap|--interrupted-startup|--moving-startup|--rotating-startup|--crowded-rotating-startup|--flat-startup|--layout|--copy-history|--copy-end|--copy-rescue|--copy-rescue-rect|--copy-rescue-pass-clear|--copy-rescue-discard|--copy-rescue-boxed|--gap-none|--gap-double|--gap-ui|--gap-overlay|--gap-long|--gap-cleared|--gap-cut|--second-swapchain|--second-swapchain-between|--end-discard|--resume-pass] [--wall-clock]\n",stderr);return 2;}
   std::thread([]{Sleep(360000);std::fputs("FAIL rotation watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try{
     const std::string test_case=argc==6 ? argv[5] : "";
@@ -1251,6 +1255,6 @@ int main(int argc,char **argv){
     select_native_boot();
     width=3840;height=2160;require(!fs::exists(fs::absolute(argv[4])),"Fresh rotation output required");
     rotation_fixture f;f.runtime_directory=fs::absolute(argv[4]);
-    f.initialize(fs::absolute(argv[1]),fs::absolute(argv[2]),f.runtime_directory,2,0,fs::absolute(argv[3]));f.run(test_case);return 0;
+    f.initialize(fs::absolute(argv[1]),fs::absolute(argv[2]),f.runtime_directory,2,0,fs::absolute(argv[3]));f.run(test_case);f.clock.report("alternating");return 0;
   }catch(const std::exception &e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }

@@ -11,6 +11,15 @@ namespace {
   struct raw_runtime_fixture : selection_fixture_t {
     bool normal = false;
     fs::path runtime_directory;
+    // Once setup is done (the official runtime up, the boot FX removed and
+    // native Game 3D rendering), the rest of the run plays game time on the
+    // test add-on's clock (test_game3d_clock.h): it engages 120 s ahead of
+    // the real tick and each Present is one 16 ms frame. --wall-clock keeps
+    // the real clock.
+    void engage_game_clock() {
+      require(clock.bind(GetModuleHandleW(L"SunshineSBSTest.addon64")), "The test add-on lacks its game clock exports");
+      clock.engage();
+    }
     std::vector<std::uint8_t> selected_native_depth() {
       ID3D12Resource *selected = nullptr;
       observed.runtime->enumerate_texture_variables(effect_file, [&](api::effect_runtime *runtime, api::effect_texture_variable variable) {

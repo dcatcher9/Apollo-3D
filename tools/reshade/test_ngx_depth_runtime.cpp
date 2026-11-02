@@ -304,7 +304,7 @@ RWTexture2D<float> depth : register(u0);
         frame.active_height==active_height && frame.x==left && frame.y==top;
     }
     void ngx_tick(const char *phase) {
-      present_started=GetTickCount64();
+      present_started=clock.now();
       step();game3d.no_effects();
       // Every judged Present reached native depth preparation: a Present the
       // exporter left 2D before it (a renderer still preparing) acquires no
@@ -315,8 +315,8 @@ RWTexture2D<float> depth : register(u0);
       status=game3d.automatic();
       require(query_provider_status(observed.runtime,&provider),"NGX provider UI observation failed");
       unready_presents+=!status.ready();
-      if(provider.ready && !provider.reused_depth) {fresh_ended=GetTickCount64();fresh_sequence=provider.current.sequence;}
-      trace<<phase<<','<<GetTickCount64()<<','<<++presents<<','<<sequence<<','<<native(ngx_source())<<",present,"<<provider.selected<<','
+      if(provider.ready && !provider.reused_depth) {fresh_ended=clock.now();fresh_sequence=provider.current.sequence;}
+      trace<<phase<<','<<clock.now()<<','<<++presents<<','<<sequence<<','<<native(ngx_source())<<",present,"<<provider.selected<<','
         <<provider.ready<<','<<provider.reused_depth<<','<<provider.current.resource<<','<<provider.current.sequence<<','<<status.ready()<<','<<status.scale_state<<','<<status.scale<<",,,,,,,\n";
       require(trace.good(),"Cannot write actual NGX trajectory");
     }
@@ -324,14 +324,14 @@ RWTexture2D<float> depth : register(u0);
     // between also runs the caller's per-present check.
     native_render inspect(const char *phase,const std::function<void()> &each={}) {
       const auto frame=game3d.capture(phase,false,[&]{ngx_tick(phase);if(each)each();});
-      trace<<phase<<','<<GetTickCount64()<<','<<presents<<','<<sequence<<','<<native(ngx_source())<<",render,,,,,,,,,"
+      trace<<phase<<','<<clock.now()<<','<<presents<<','<<sequence<<','<<native(ngx_source())<<",render,,,,,,,,,"
         <<frame.source_resource<<','<<frame.source_id<<','<<frame.depth_ready<<','<<frame.camera_ready<<','<<frame.depth_scale<<','
         <<frame.convergence[1]<<','<<frame.strength_blend<<'\n';
       require(trace.good(),"Cannot write actual NGX trajectory");
       return frame;
     }
     native_render ngx_settle(const char *phase,unsigned timeout=15000) {
-      const auto started=GetTickCount64();unsigned continuous=0;
+      const auto started=clock.now();unsigned continuous=0;
       native_render frame;
       do {
         ngx_tick(phase);
@@ -341,12 +341,12 @@ RWTexture2D<float> depth : register(u0);
         frame=inspect(phase);
         if(ngx_current(frame) && frame.camera_ready && frame.strength_blend==1.f && present_current() && status.ready()) {
           std::printf("MEASURE %s elapsed_ms=%llu source=%llu H=%.9g t0=%.9g K=%.9g getters=%u\n",phase,
-            static_cast<unsigned long long>(GetTickCount64()-started),static_cast<unsigned long long>(frame.source_id),
+            static_cast<unsigned long long>(clock.now()-started),static_cast<unsigned long long>(frame.source_id),
             frame.depth_scale,frame.convergence[1],status.scale,ngx_fixture::getters);
           return frame;
         }
         continuous=0;
-      } while(GetTickCount64()-started<timeout);
+      } while(clock.now()-started<timeout);
       std::printf("MEASURE failed %s current=%u ready=%u consumed_current=%u camera=%u blend=%.9g provider=%s\n",phase,
         unsigned(present_current()),unsigned(status.ready()),unsigned(ngx_current(frame)),unsigned(frame.camera_ready),
         frame.strength_blend,frame.provider.c_str());
@@ -723,8 +723,8 @@ RWTexture2D<float> depth : register(u0);
       // effect has rendered. Startup discovery must catch Create itself; a
       // later evaluation cannot reconstruct the feature's depth convention.
       armed=true;
-      const auto timeout=GetTickCount64()+45000;
-      while((!observed.runtime || !observed.renders) && GetTickCount64()<timeout) step();
+      const auto timeout=clock.wall_now()+45000;
+      while((!observed.runtime || !observed.renders) && clock.wall_now()<timeout) step();
       require(observed.runtime && observed.renders && !observed.inject,"NGX HDR runtime failed to initialize");
       check_unified_addon();
       const auto module=GetModuleHandleW(L"SunshineSBSTest.addon64");
@@ -739,10 +739,12 @@ RWTexture2D<float> depth : register(u0);
       // at once and the first valid evaluation then met a renderer still
       // preparing, on a cold cache every time).
       rendered_sequence=game3d.await_render([&]{step();game3d.no_effects();});
+      // Setup is done: game time from here on (engage_game_clock).
+      engage_game_clock();
 
       // Failed evaluations may be seen, but must not establish provider ownership.
-      const auto invalid_until=GetTickCount64()+1500;
-      do {ngx_tick("initial-failed-evaluation");require_status(false,false);} while(GetTickCount64()<invalid_until);
+      const auto invalid_until=clock.now()+1500;
+      do {ngx_tick("initial-failed-evaluation");require_status(false,false);} while(clock.now()<invalid_until);
       require(ngx_fixture::created==1 && ngx_fixture::getters>0,"Production NGX module discovery did not intercept real exported entry points");
       std::puts("PASS first failed NGX evaluations do not take ownership from Generic");
 
@@ -855,7 +857,7 @@ RWTexture2D<float> depth : register(u0);
       hold_then_mono("missing-established-depth","NGX without depth fell back to an unrelated Generic scene or outlived the retained depth");
       provide_depth=true;ngx_settle("missing-depth-recovery");
       emit=false;
-      const auto silence_began=GetTickCount64();
+      const auto silence_began=clock.now();
       hold_then_mono("silent-established-provider","Silent NGX provider exposed stale depth or Generic fallback");
       // A silent provider keeps the queue mono only for the association
       // timeout (one second without an evaluation); then Generic may run.
@@ -865,13 +867,13 @@ RWTexture2D<float> depth : register(u0);
         sunshine_streamline::provider::source_status current;
         require(query_provider_status(observed.runtime,&current),"NGX provider UI observation failed");
         require(!provider.ready && !current.ready,"Silent NGX provider exposed stale depth");
-        if(GetTickCount64()-silence_began<900)
+        if(clock.now()-silence_began<900)
           require(current.selected && !status.ready() && status.scale==reference_scale,
             "Silent NGX provider released its association before the timeout");
         // Released, the fixture's Generic scene depth may take over.
         if(!current.selected) association_released=true;
         else require(!association_released,"A released NGX association returned without an evaluation");
-      } while(GetTickCount64()-silence_began<1800);
+      } while(clock.now()-silence_began<1800);
       require(association_released,"Silent NGX provider kept the queue mono past the association timeout");
       emit=true;
       const auto initial=ngx_settle("silent-provider-recovery");
@@ -881,13 +883,13 @@ RWTexture2D<float> depth : register(u0);
       // A center change starts smooth refinement with its fresh measurements.
       // Refinement never interrupts the current source or its readiness.
       center_raw=.03125f;
-      const auto adapt_until=GetTickCount64()+5000;
+      const auto adapt_until=clock.now()+5000;
       do {
         ngx_tick("zero-plane-NGX-reference");
         require(present_current() && status.ready() && status.active_scale(),
           "NGX scene refinement changed source or interrupted readiness");
         require_status(true,true);
-      } while(GetTickCount64()<adapt_until);
+      } while(clock.now()<adapt_until);
       const auto refined=inspect("zero-plane-NGX-reference");verify_ngx_depth(refined);
       require(refined.source_id==logical_source && refined.strength_blend==1.f && refined.depth_scale==status.scale,
         "NGX scene refinement changed its logical source, stereo re-entry or applied scale");
@@ -954,7 +956,8 @@ RWTexture2D<float> depth : register(u0);
 
 int main(int argc,char **argv) {
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=7) {std::fputs("usage: ngx_depth_runtime <official.dll> <Shaders> <test.addon64> <fresh-output> [width height]\n",stderr);return 2;}
+  sunshine_game3d_fixture::take_wall_clock_option(argc,argv);
+  if(argc!=5 && argc!=7) {std::fputs("usage: ngx_depth_runtime <official.dll> <Shaders> <test.addon64> <fresh-output> [width height] [--wall-clock]\n",stderr);return 2;}
   std::thread([]{Sleep(300000);std::fputs("FAIL NGX runtime watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try {
     // These cases observed FX callbacks and uniforms. Native SL/FG coverage
@@ -989,6 +992,6 @@ int main(int argc,char **argv) {
     fixture.initialize(fs::absolute(argv[1]),fs::absolute(argv[2]),fixture.runtime_directory,2,0,fs::absolute(argv[3]));
     if(sunshine_camera_fixture::flag("SUNSHINE_D3D12_DEBUG_TEST"))
       checked(fixture.game->QueryInterface(IID_PPV_ARGS(fixture.debug_messages.put())),"Requested D3D12 debug layer did not expose its diagnostic queue");
-    fixture.run_ngx();return 0;
+    fixture.run_ngx();fixture.clock.report("ngx");return 0;
   } catch(const std::exception &error) {std::fprintf(stderr,"FAIL %s\n",error.what());return 1;}
 }
