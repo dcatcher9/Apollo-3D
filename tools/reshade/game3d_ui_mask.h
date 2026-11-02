@@ -46,7 +46,7 @@ namespace sunshine_game3d::ui_mask {
   // was refused or its SDK call failed. refused: the tick the kind's newest
   // copy deferred to its frame's Present (R2, the matrix's U2 and U5) was
   // refused, zero once one is made. A recorded copy or a deferred one of
-  // another scope starts that scope's entry. Ticks are GetTickCount64 ms.
+  // another scope starts that scope's entry. Ticks are game-clock ms.
   struct tag_precedence {
     std::uint64_t epoch{};
     std::uint32_t viewport{};

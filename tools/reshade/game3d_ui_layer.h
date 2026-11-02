@@ -109,7 +109,7 @@ namespace sunshine_game3d::ui_layer {
   bool qualifies(const api::resource_desc &desc, const float color[4], std::uint32_t width, std::uint32_t height,
     std::uint32_t rect_count, const api::rect *rects);
 
-  // latest()'s recency gate, on GetTickCount64 ticks: the layer is still
+  // latest()'s recency gate, on game-clock ticks: the layer is still
   // being cleared (its newest recorded copy is at most max_clear_gap_ms old)
   // and the offered copy belongs to that unbroken run of copies (recorded at
   // most max_clear_gap_ms before the newest). After a gap in clears or in
@@ -553,7 +553,7 @@ namespace sunshine_game3d::ui_layer {
     // The fence value signalled after the copy on another queue (0: none).
     std::uint64_t fence_value{};
     std::uint64_t capture_id{}; // The offered entry's copy id; never zero when valid.
-    std::uint64_t tick{};       // GetTickCount64 when the offered copy was recorded.
+    std::uint64_t tick{};       // Game clock when the offered copy was recorded.
     std::uint32_t format{};     // Typed format of the copy.
     // Presents observed since the offered copy (layer_tracker::
     // presents_since): the copy holds the frame of the Present that many back.

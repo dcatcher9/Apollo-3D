@@ -384,6 +384,11 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME reshade_game3d_clock COMMAND reshade_game3d_clock_tests)
   set_tests_properties(reshade_game3d_clock PROPERTIES TIMEOUT 15)
+  # Every clock read and thread-pool submission of the add-on's sources has a
+  # stated domain; game time is read only through game3d_clock.h.
+  add_test(NAME reshade_clock_domains COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/check_clock_domains.cmake")
+  set_tests_properties(reshade_clock_domains PROPERTIES TIMEOUT 60)
   # The first-run report's checks and its goldens over saved game logs (log_report_goldens). They need
   # only a Python 3 interpreter and are not registered without one.
   find_package(Python3 3.9 COMPONENTS Interpreter)

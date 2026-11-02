@@ -313,7 +313,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     bool pq_requested = false;
     // A runtime's device never changes adapter; resolve its LUID once.
     // Bounded timing of the add-on's own work inside the game's Present.
-    // start: GetTickCount64 when the window began (its first Present, or the
+    // start: the game clock when the window began (its first Present, or the
     // previous timing line).
     struct {
       std::uint64_t presents = 0, next_log = 0, start = 0;

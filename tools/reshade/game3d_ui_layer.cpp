@@ -189,7 +189,7 @@ namespace sunshine_game3d::ui_layer {
       const ring_entry *latest() const { return newest >= 0 ? &ring[unsigned(newest)] : nullptr; }
     };
 
-    // The skip gap's clock: steady microseconds, finer than GetTickCount64's
+    // The skip gap's clock: steady microseconds, finer than the game clock's
     // ~16 ms ticks (an uncapped game clears the layer every 2 ms).
     std::uint64_t steady_us() {
       return std::uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -272,7 +272,7 @@ namespace sunshine_game3d::ui_layer {
       std::array<queue_fence, fence_capacity> fences{};
       std::uint64_t fence_generation{};
       std::array<std::atomic<std::uint64_t>, ring_capacity + max_candidates> owed{};
-      // GetTickCount64 when the submission listener was last called (0:
+      // The game clock when the submission listener was last called (0:
       // never): within listener_window_ms, a D3D12 execution is held for it.
       std::atomic<std::uint64_t> listened_ms{0};
       // The periodic timing line's live-copy counters (take_stats), updated

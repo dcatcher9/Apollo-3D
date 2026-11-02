@@ -1676,7 +1676,7 @@ every file of a binary sees the same declarations; a binary links one view.
 | View | Seam defines | Linked by |
 |---|---|---|
 | `sunshine_game3d_core` | none | `SunshineSBS`, `replay_game3d_dump`, and the tests without a seam (UI mask, UI capture, UI layer, camera data, queue-cycle and source-alpha) |
-| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, `SUNSHINE_GAME3D_RENDERER_TEST` (the renderer's build hooks, inert until the lifecycle test sets them) | `SunshineSBSTest` |
+| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, `SUNSHINE_GAME3D_RENDERER_TEST` (the renderer's build hooks, inert until the lifecycle test sets them), `SUNSHINE_GAME3D_TEST_CLOCK` (the virtual game clock, inert until a fixture engages it) | `SunshineSBSTest` |
 | `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file includes `exporter_internal.h` and links this view's one compiled `exporter.cpp` |
 | `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix (pure, hook and device layers), seam characterization, call trace, native observer and diagnostic-texture tests |
 | `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` | the native runtime tests |
@@ -1701,6 +1701,25 @@ its binding cache, and each event handler that reaches one (its phase),
 call a recorder of [`game3d_test_depth_events.h`](game3d_test_depth_events.h) under
 `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, and a fixture reads them after each Present through
 `SunshineDepthTestBindingEvents`, another of the depth add-on's exports.
+
+Clock domains. The add-on reads game time (source ages, holds and windows, cadences, idle releases,
+log throttles and the ticks its diagnostics print) only through `sunshine_game3d::clock::game_now()`
+in [`game3d_clock.h`](game3d_clock.h). In the shipping build it is the `GetTickCount64` import under
+a second name, so each read compiles as a direct `GetTickCount64()` call. In the test add-on
+(`SUNSHINE_GAME3D_TEST_CLOCK`) it reads a virtual clock once a fixture engages it with
+`SunshineGame3DTestClockEngage` (at the later of the real tick and its current value: never 0,
+never backwards, no disengage), and the real tick before that; `SunshineGame3DTestClockNow` reads it
+and `SunshineGame3DTestClockAdvance` moves it forward, only while engaged
+([`test_game3d_clock_exports.cpp`](test_game3d_clock_exports.cpp); `reshade_game3d_clock` tests the
+header's test branch). Wall time keeps its literal operating-system call: `release_device`'s
+fence-wait bound, the export ring's `steady_clock` lifetimes (the receiver process sees them), the
+renderer's present-thread build slice, the `QueryPerformanceCounter` measurements, shader-cache
+file times, and the diagnostics library, which is built outside the views and so cannot read the
+test clock. [`check_clock_domains.cmake`](check_clock_domains.cmake) (the `reshade_clock_domains`
+test) counts every other clock read and every thread-pool submission, new thread or timer of the
+add-on's sources (fixtures, `experiments/` and the replay tools aside) against its list of allowed
+sites, each with its domain and reason, so a new site fails until it reads `game_now()` or is
+listed.
 
 One test binary compiles a production file outside every view: the opt-in D3D11 sampler fixture
 `reshade_depth_sampler_d3d11_test`, which no `ctest` runs, compiles `depth_content_sampler.cpp`
@@ -1874,7 +1893,7 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 - [`overlay_compositor.cpp`](overlay_compositor.cpp), [`overlay_compositor.h`](overlay_compositor.h), [`overlay_shaders.h`](overlay_shaders.h): the overlay compositor and its GUI shaders. Docs: [Color and HDR](../../docs/reshade-sbs.md#color-and-hdr).
 - [`game3d_controls.cpp`](game3d_controls.cpp), [`game3d_controls.h`](game3d_controls.h), [`game3d_controls_model.h`](game3d_controls_model.h): the overlay controls and their settings model. Docs: [Setup](../../docs/reshade-sbs.md#setup).
 - [`game3d_debug_dump.cpp`](game3d_debug_dump.cpp), [`game3d_debug_dump.h`](game3d_debug_dump.h), [`game3d_diagnostic_metadata.cpp`](game3d_diagnostic_metadata.cpp), [`game3d_diagnostic_metadata.h`](game3d_diagnostic_metadata.h): Dump 3D and its bounded metadata observation. Docs: [Dump 3D diagnostics](../../docs/reshade-sbs.md#dump-3d-diagnostics).
-- [`addon_lifetime.h`](addon_lifetime.h), [`freshness.h`](freshness.h): the process-exit fence for detours and callbacks, and every API depth age limit, defined once. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`addon_lifetime.h`](addon_lifetime.h), [`freshness.h`](freshness.h), [`game3d_clock.h`](game3d_clock.h): the process-exit fence for detours and callbacks, every API depth age limit, defined once, and the game clock those ages are read on ([Test builds](#test-builds)). Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
 
 ### API contract matrix
 
