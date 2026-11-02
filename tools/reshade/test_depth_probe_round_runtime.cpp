@@ -110,7 +110,7 @@ namespace {
       frame = game3d.last_render();
       require(frame.sequence > rendered_sequence, "A Present had no native Game 3D render to observe");
       rendered_sequence = frame.sequence;
-      trace << phase << ',' << GetTickCount64() << ',' << frame.sequence << ','
+      trace << phase << ',' << clock.now() << ',' << frame.sequence << ','
         << frame.depth.source_id << ',' << frame.depth.source_resource.handle << ','
         << frame.depth.frame_index << ',' << frame.depth.ready << ',' << frame.parameters.camera_ready << ','
         << frame.parameters.depth_scale << ',' << frame.parameters.strength_blend << '\n';
@@ -129,12 +129,12 @@ namespace {
                 "A candidate without a legal current capture displaced useful scene depth");
     }
     void await_current(const char *phase, const target_t &target, unsigned limit_ms) {
-      const auto started = GetTickCount64();
-      do { tick(phase); } while (!current(target) && GetTickCount64() - started < limit_ms);
+      const auto started = clock.now();
+      do { tick(phase); } while (!current(target) && clock.now() - started < limit_ms);
       std::printf("MEASURE %s promotion_ms=%llu limit_ms=%u source=%llu\n", phase,
-        static_cast<unsigned long long>(GetTickCount64() - started), limit_ms,
+        static_cast<unsigned long long>(clock.now() - started), limit_ms,
         static_cast<unsigned long long>(frame.depth.source_id));
-      require(current(target) && GetTickCount64() - started <= limit_ms,
+      require(current(target) && clock.now() - started <= limit_ms,
               "Qualified native challenger did not promote within its bounded visit; inspect trajectory and ReShade log");
     }
     // The production Dump 3D capture of one native render: the exact depth
@@ -160,9 +160,9 @@ namespace {
       }
     }
     void stable(const char *phase, const target_t &target, unsigned milliseconds) {
-      const auto until=GetTickCount64()+milliseconds;
+      const auto until=clock.now()+milliseconds;
       do { tick(phase); require(current(target), "Useful selected source was lost during stable rendering"); }
-      while (GetTickCount64()<until);
+      while (clock.now()<until);
     }
     void check_rotating_lower_promotion() {
       // Give the per-member raw captures real recurring work before a
@@ -178,7 +178,7 @@ namespace {
         static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(lower_peers[1]->texture.p)));
       // The three members draw identical depth, so each member's own
       // controller reaches the same positive scale and screen plane.
-      const auto began=GetTickCount64(); unsigned consecutive=0;
+      const auto began=clock.now(); unsigned consecutive=0;
       float scale=0.f; std::array<float,2> zero{};
       do {
         tick("rotating-lower-calibration");
@@ -192,15 +192,15 @@ namespace {
           require(std::isfinite(scale) && scale>0.f, "Rotating lower-res control has no positive automatic scale");
           if (frame.parameters.depth_scale==scale && frame.parameters.convergence==zero) ++consecutive; else consecutive=0;
         } else consecutive=0;
-      } while (consecutive<12 && GetTickCount64()-began<15000);
+      } while (consecutive<12 && clock.now()-began<15000);
       require(consecutive>=12, "Rotating lower-res sources did not calibrate before the challenger scheduling test");
       std::printf("MEASURE rotating-lower H=%.9g t0=%.9g\n", scale, zero[1]);
-      const auto steady_until=GetTickCount64()+1200;
+      const auto steady_until=clock.now()+1200;
       do {
         tick("rotating-lower-steady");
         require(current(*lower_rendered) && full() && frame.parameters.depth_scale==scale && frame.parameters.convergence==zero,
           "Calibrated rotating sources lost current readiness or their scale before introduction of the native challenger");
-      } while (GetTickCount64()<steady_until);
+      } while (clock.now()<steady_until);
       std::puts("PASS calibrated lower-res ABC remains current and full-strength before challenger introduction");
       decoy=target(width,height,1,9);
       await_current("rotating-raw-does-not-starve-native",*decoy,4000);
@@ -218,21 +218,21 @@ namespace {
     // without its own current copy yet holds the previous Present's depth).
     void check_set_challenger() {
       for (auto &member:native_set) member=target(width,height,1,9);
-      const auto began=GetTickCount64(); unsigned consecutive=0;
+      const auto began=clock.now(); unsigned consecutive=0;
       do {
         tick("native-set-challenger");
         require(frame.depth.ready, "A Present had no depth while a native A/B/C set challenged every-Present lower-resolution depth");
         consecutive=current(*set_rendered) && !frame.depth.reused_depth && full() ? consecutive+1 : 0;
-      } while (consecutive<30 && GetTickCount64()-began<12000);
+      } while (consecutive<30 && clock.now()-began<12000);
       std::printf("MEASURE native-set-challenger promotion_ms=%llu consecutive=%u\n",
-        static_cast<unsigned long long>(GetTickCount64()-began), consecutive);
+        static_cast<unsigned long long>(clock.now()-began), consecutive);
       require(consecutive>=30, "A native A/B/C set covering every Present did not promote over lower-resolution depth");
-      const auto steady_until=GetTickCount64()+1200;
+      const auto steady_until=clock.now()+1200;
       do {
         tick("native-set-steady");
         require(current(*set_rendered) && !frame.depth.reused_depth && full(),
           "The promoted native set lost its own current depth on a Present");
-      } while (GetTickCount64()<steady_until);
+      } while (clock.now()<steady_until);
       verify_pattern("native-set-promoted",*native_set[0],{native_set[1].get(),native_set[2].get()});
       std::puts("PASS a native A/B/C set judged as one capture set promotes over every-Present lower-resolution depth with no Present without depth");
     }
@@ -275,7 +275,7 @@ namespace {
           "Cannot watch the first set's destruction");
         flag->Release();
       }
-      const auto released=GetTickCount64();
+      const auto released=clock.now();
       for (auto &member:native_set) member.reset();
       watch.active=true; // Present 1 is the first without the set.
       await_current(keep_first_set ? "set-abandoned-scaled-recovery" : "set-destroyed-scaled-recovery",*scene,12000);
@@ -302,10 +302,10 @@ namespace {
         // The member views of a set that left the routed capture set retire
         // within 50 depth frames; nothing else may keep the game's buffers.
         constexpr unsigned release_limit_ms=4000;
-        while (!(destroyed[0] && destroyed[1] && destroyed[2]) && GetTickCount64()-released<release_limit_ms)
+        while (!(destroyed[0] && destroyed[1] && destroyed[2]) && clock.now()-released<release_limit_ms)
           tick("set-destroyed-release");
         std::printf("MEASURE set-destroyed-release release_ms=%llu limit_ms=%u destroyed=%d%d%d\n",
-          static_cast<unsigned long long>(GetTickCount64()-released),release_limit_ms,
+          static_cast<unsigned long long>(clock.now()-released),release_limit_ms,
           int(destroyed[0].load()),int(destroyed[1].load()),int(destroyed[2].load()));
         require(destroyed[0] && destroyed[1] && destroyed[2],
           "The add-on kept a depth-stencil the game released alive (its last end-of-frame capture held it)");
@@ -328,22 +328,22 @@ namespace {
         static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(scene->texture.p)),
         static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(native_set[0]->texture.p)),
         static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(native_set[1]->texture.p)));
-      const auto began=GetTickCount64(); unsigned consecutive=0;
+      const auto began=clock.now(); unsigned consecutive=0;
       do {
         tick("second-set-challenger");
         require(frame.depth.ready, "A Present had no depth while a second native A/B set challenged the recovered incumbent");
         consecutive=current(*set_rendered) && !frame.depth.reused_depth && full() ? consecutive+1 : 0;
-      } while (consecutive<30 && GetTickCount64()-began<12000);
+      } while (consecutive<30 && clock.now()-began<12000);
       std::printf("MEASURE second-set-challenger promotion_ms=%llu consecutive=%u\n",
-        static_cast<unsigned long long>(GetTickCount64()-began), consecutive);
+        static_cast<unsigned long long>(clock.now()-began), consecutive);
       require(consecutive>=30, "A second native set covering every Present did not promote over the recovered lower-resolution incumbent");
       std::puts("PASS a native A/B set appearing after an A/B/C set came and went promotes over the recovered every-Present incumbent with no Present without depth");
-      const auto steady_until=GetTickCount64()+4000;
+      const auto steady_until=clock.now()+4000;
       do {
         tick("second-set-steady");
         require(current(*set_rendered) && !frame.depth.reused_depth && full(),
           "The re-promoted native set lost its own current depth on a Present (flapped back to the incumbent)");
-      } while (GetTickCount64()<steady_until);
+      } while (clock.now()<steady_until);
       verify_pattern("second-set-promoted",*native_set[0],{native_set[1].get()});
       std::puts("PASS the re-promoted native A/B set keeps its own current depth on every Present for 4 s (no flapping)");
     }
@@ -379,16 +379,18 @@ namespace {
       render_tracked_depth=[&]{render_depth();};
       trace.open(runtime_directory/"probe-round-trajectory.csv");
       trace << std::setprecision(17) << "phase,wall_ms,render,source,resource,frame,depth_ready,camera_ready,H,blend\n";
-      const auto until=GetTickCount64()+45000;
-      while ((!observed.runtime || !observed.renders) && GetTickCount64()<until) step();
+      const auto until=clock.wall_now()+45000;
+      while ((!observed.runtime || !observed.renders) && clock.wall_now()<until) step();
       require(observed.runtime && observed.renders && !observed.inject, "Actual probe-round fixture did not initialize");
       check_unified_addon();
       game3d.start();
       game3d.set_strength(100);
       rendered_sequence=game3d.await_render([&]{ step(); });
+      // Setup is done: game time and the trace from here on.
+      game3d.begin_game_time();
       await_current("sole-scaled-startup",*scene,12000);
-      const auto calibrated=GetTickCount64()+12000;
-      while (!(current(*scene) && full()) && GetTickCount64()<calibrated)
+      const auto calibrated=clock.now()+12000;
+      while (!(current(*scene) && full()) && clock.now()<calibrated)
         tick("sole-scaled-calibration");
       require(current(*scene) && full(),
               "Incumbent must be genuinely calibrated before testing challenger scheduling");
@@ -446,11 +448,12 @@ namespace {
 
 int main(int argc,char **argv) {
   std::setvbuf(stdout,nullptr,_IONBF,0);
+  sunshine_game3d_fixture::take_wall_clock_option(argc,argv);
   const char *mode=argc==6 ? argv[5] : "";
   if(argc!=5 && (argc!=6 || (std::strcmp(mode,"--native-priority")!=0 && std::strcmp(mode,"--set-challenger")!=0 &&
                               std::strcmp(mode,"--set-repromotion")!=0 && std::strcmp(mode,"--set-repromotion-kept")!=0))){
     std::fputs("usage: depth_probe_round_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> "
-               "[--native-priority|--set-challenger|--set-repromotion|--set-repromotion-kept]\n",stderr);return 2;
+               "[--native-priority|--set-challenger|--set-repromotion|--set-repromotion-kept] [--wall-clock]\n",stderr);return 2;
   }
   std::thread([]{Sleep(150000);std::fputs("FAIL probe-round watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try {
@@ -461,6 +464,6 @@ int main(int argc,char **argv) {
     f.initialize(fs::absolute(argv[1]),fs::absolute(argv[2]),f.runtime_directory,2,0,fs::absolute(argv[3]));
     const bool kept=std::strcmp(mode,"--set-repromotion-kept")==0;
     f.run(std::strcmp(mode,"--native-priority")==0,std::strcmp(mode,"--set-challenger")==0,
-          kept || std::strcmp(mode,"--set-repromotion")==0,kept); return 0;
+          kept || std::strcmp(mode,"--set-repromotion")==0,kept); f.clock.report("probe-round"); return 0;
   } catch(const std::exception &e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }

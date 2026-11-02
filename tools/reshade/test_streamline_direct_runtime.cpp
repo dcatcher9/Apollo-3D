@@ -462,7 +462,7 @@ RWTexture2D<float> depth : register(u0);
       return true;
     }
     void tick(const char *phase) {
-      present_started=GetTickCount64();
+      present_started=clock.now();
       step(); direct_native.no_effects();
       latest=direct_native.last_render();
       require(latest.sequence>rendered_sequence,"A Present had no native Game 3D render to observe");
@@ -470,26 +470,26 @@ RWTexture2D<float> depth : register(u0);
       captured=latest.depth; captured_ready=captured.ready;
       if(query_provider_status) require(query_provider_status(observed.runtime,&provider),"SL provider UI observation failed");
       if(captured_ready && !captured.reused_depth) {
-        fresh_ended=GetTickCount64(); fresh_source=captured.source_resource.handle;
+        fresh_ended=clock.now(); fresh_source=captured.source_resource.handle;
         fresh_sequence=query_provider_status ? provider.current.sequence : 0;
       }
       if(captured_ready) {
         drawn_frames.push_back({captured.frame_index,native(*selected),selected->pattern,center_raw});
         if(drawn_frames.size()>64) drawn_frames.pop_front();
       }
-      trace<<phase<<','<<GetTickCount64()<<','<<latest.sequence<<','<<sequence<<','<<ticket<<','<<unsigned(mode)<<','<<native(*selected)<<','
+      trace<<phase<<','<<clock.now()<<','<<latest.sequence<<','<<sequence<<','<<ticket<<','<<unsigned(mode)<<','<<native(*selected)<<','
         <<captured.source_resource.handle<<','<<captured.projection.supplied<<','<<captured_ready<<','<<ready()<<','
         <<gain()<<','<<zero()[1]<<','<<blend()<<'\n';
       require(trace.good(),"Cannot record direct Streamline trajectory");
     }
     void settle(const char *phase,unsigned timeout=15000) {
-      const auto started=GetTickCount64(); unsigned continuous=0;
+      const auto started=clock.now(); unsigned continuous=0;
       do {
         tick(phase);
         continuous=current() && ready() && blend()==1.f ? continuous+1 : 0;
-      } while (continuous<6 && GetTickCount64()-started<timeout);
+      } while (continuous<6 && clock.now()-started<timeout);
       std::printf("MEASURE %s elapsed_ms=%llu current=%d camera_ready=%d ticket=%llu K=%.9g q0=%.9g\n",phase,
-        static_cast<unsigned long long>(GetTickCount64()-started),current(),ready(),static_cast<unsigned long long>(ticket),
+        static_cast<unsigned long long>(clock.now()-started),current(),ready(),static_cast<unsigned long long>(ticket),
         gain(),zero()[1]);
       require(continuous>=6,"Direct native source did not reach sustained projection rendering");
     }
@@ -505,21 +505,21 @@ RWTexture2D<float> depth : register(u0);
         require(close(zero()[1],oracle(*selected,center_raw)[1]),"The screen plane is not the current depth's contrast midpoint");
     }
     void establish_new_reference(const char *phase) {
-      const auto started=GetTickCount64();
+      const auto started=clock.now();
       require(recenter(observed.runtime),"Explicit projection Reset reference action was rejected");
       bool saw_unready=false;unsigned continuous=0;
       do {
         tick(phase);
-        const auto elapsed=GetTickCount64()-started;
+        const auto elapsed=clock.now()-started;
         saw_unready|=!ready();
         require(elapsed>=750 || !ready(),"Reset reference reused old samples instead of gathering four fresh spaced captures");
         continuous=current() && ready() && blend()==1.f ? continuous+1 : 0;
-      } while(continuous<6 && GetTickCount64()-started<15000);
+      } while(continuous<6 && clock.now()-started<15000);
       require(saw_unready && continuous>=6,"Explicit Reset reference failed to reinitialize from fresh rendered samples");
       expect_gain=expect_zero=true;
       check_projection();
       std::printf("MEASURE %s elapsed_ms=%llu reference=%.9g q0=%.9g\n",phase,
-        static_cast<unsigned long long>(GetTickCount64()-started),gain(),zero()[1]);
+        static_cast<unsigned long long>(clock.now()-started),gain(),zero()[1]);
     }
     // One production Dump 3D capture: the exact depth and projection one
     // native render consumed, matched to what its own Present drew.
@@ -625,7 +625,7 @@ RWTexture2D<float> depth : register(u0);
       check_prepared();
       // Keep the first changed matrix adjacent to a valid current tick; slow
       // readback/inspection deliberately does not count as continuous exposure.
-      tick("matrix-before-change");Sleep(16);
+      tick("matrix-before-change");clock.hitch(16);
       // A new matrix changes every decoded distance, its nearest Q among them:
       // the gain and zero then adapt toward the new targets.
       expect_gain=expect_zero=false;
@@ -635,19 +635,20 @@ RWTexture2D<float> depth : register(u0);
       require(std::abs(changed[1]-before[1])>.05 && std::abs(changed[0]-before[0])>.5,
         "Matrix fixture did not change decoded distance independently of the reference");
       check_prepared();check_hdr();
-      // The readbacks above present nothing for longer than the one-second
-      // association timeout; resume the provider before the timed gap.
+      // On the real clock the readbacks above present nothing for longer
+      // than the one-second association timeout (on the game clock they take
+      // no game time); resume the provider before the timed gap.
       settle("matrix-before-provider-gap");
 
       const float held_gain=gain();
-      emit=false;const auto missing_until=GetTickCount64()+700;
+      emit=false;const auto missing_until=clock.now()+700;
       hold_begin();
       do {
         tick("matrix-transition-provider-gap");
         require_held_mono("A provider gap exposed stale or Generic depth");
         require(direct_native.automatic().scale==held_gain && (!ready() || gain()==held_gain),
           "A provider gap changed the retained projection scale");
-      } while(GetTickCount64()<missing_until);
+      } while(clock.now()<missing_until);
       require(hold_saw_mono,"A 700 ms provider gap outlived the source age bound");
       check_exported_mono();
       emit=true;tick("matrix-transition-gap-return");check_current_matrix();
@@ -655,12 +656,12 @@ RWTexture2D<float> depth : register(u0);
         "Returning from a provider gap credited missing time or reset the retained projection gain");
 
       unsigned seen=0,transition_frames=0;
-      const auto deadline=GetTickCount64()+10000;
+      const auto deadline=clock.now()+10000;
       do {
         tick("matrix-zero-plane-follows-depth");check_current_matrix();
         seen|=selected==first.get()?1u:2u;++transition_frames;
       } while((!close(zero()[1],changed[1]) || !close(gain(),changed[0]) || blend()!=1.f || transition_frames<6) &&
-        GetTickCount64()<deadline);
+        clock.now()<deadline);
       require(close(zero()[1],changed[1]) && close(gain(),changed[0]) && seen==3,
         "Gain and zero plane did not follow current decoded depth across both real sources");
       expect_gain=expect_zero=true;
@@ -788,7 +789,7 @@ RWTexture2D<float> depth : register(u0);
     void cold_v1_rotation() {
       require(mode==capture_mode::v1_observed_state && rotate && !v1_capture_calls && !v2_capture_calls,
         "Cold V1 regression was warmed by an earlier capture");
-      const auto started=GetTickCount64();
+      const auto started=clock.now();
       unsigned tagged=0, submitted=0, continuous=0;
       do {
         tick("cold-v1-pretag-rotation");
@@ -796,9 +797,9 @@ RWTexture2D<float> depth : register(u0);
         tagged|=source;
         if(current()) submitted|=source;
         continuous=current() && ready() && blend()==1.f ? continuous+1 : 0;
-      } while(continuous<8 && GetTickCount64()-started<15000);
+      } while(continuous<8 && clock.now()-started<15000);
       std::printf("MEASURE cold V1 elapsed_ms=%llu v1_calls=%u v2_calls=%u tagged_mask=%u copied_mask=%u continuous=%u current=%d camera_ready=%d\n",
-        static_cast<unsigned long long>(GetTickCount64()-started),v1_capture_calls,v2_capture_calls,
+        static_cast<unsigned long long>(clock.now()-started),v1_capture_calls,v2_capture_calls,
         tagged,submitted,continuous,current(),ready());
       require(!v2_capture_calls && tagged==3,"Cold V1 regression did not independently exercise both sources");
       require(submitted==3 && continuous>=8,
@@ -1168,8 +1169,8 @@ RWTexture2D<float> depth : register(u0);
       trace<<std::setprecision(17)<<"phase,wall_ms,render,evaluation,ticket,capture_mode,tagged,current,projection,capture_ready,camera_ready,K,q0,blend\n";
       reshade::register_event<reshade::addon_event::reset_command_list>(observe_reset);
       render_tracked_depth=[&]{draw_frame();};
-      const auto timeout=GetTickCount64()+45000;
-      while ((!observed.runtime || !observed.renders) && GetTickCount64()<timeout) step();
+      const auto timeout=clock.wall_now()+45000;
+      while ((!observed.runtime || !observed.renders) && clock.wall_now()<timeout) step();
       require(observed.runtime && observed.renders && !observed.inject,"Actual Automatic HDR runtime failed to initialize");
       check_unified_addon();
       const auto module=GetModuleHandleW(L"SunshineSBSTest.addon64");
@@ -1196,6 +1197,8 @@ RWTexture2D<float> depth : register(u0);
       emit=false;
       direct_native.start();direct_native.attach_export();direct_native.set_strength(100);
       rendered_sequence=direct_native.await_render([&]{step();});
+      // Setup is done: game time and the trace from here on.
+      direct_native.begin_game_time();
       emit=true;
       // The capture-only variants vary the center every frame below the
       // bands' nearest depth: the gain stays L/Q while the zero follows.
@@ -1241,17 +1244,17 @@ RWTexture2D<float> depth : register(u0);
         // the 10-27 ruling any gap over 250 ms restarted the fade from flat).
         const DWORD stall_ms=DWORD(sunshine_freshness::source_age_ms+150);
         bool stall_at_present=false;
-        before_present=[&]{if(stall_at_present){stall_at_present=false;Sleep(stall_ms);}};
+        before_present=[&]{if(stall_at_present){stall_at_present=false;clock.hitch(stall_ms);}};
         struct stall_case{const char *phase;bool after_evaluation;std::uint64_t gap;bool own_fresh;float before,after;};
         stall_case stalls[]{{"stall-before-evaluation",false,0,false,0.f,0.f},{"stall-after-evaluation",true,0,false,0.f,0.f}};
         for(auto &stall:stalls) {
           settle(stall.phase);
           stall.before=blend();
-          const auto previous_present=GetTickCount64();
+          const auto previous_present=clock.now();
           if(stall.after_evaluation) stall_at_present=true;
-          else Sleep(stall_ms);
+          else clock.hitch(stall_ms);
           tick(stall.phase);
-          stall.gap=GetTickCount64()-previous_present;
+          stall.gap=clock.now()-previous_present;
           stall.own_fresh=current() && ready() && !captured.reused_depth && ticket &&
             (!query_provider_status || (provider.ready && provider.current.sequence==sequence));
           stall.after=blend();
@@ -1278,25 +1281,25 @@ RWTexture2D<float> depth : register(u0);
         settle("before-disable");
         const auto before=blend();
         direct_native.set_enabled(false);
-        const auto disabled_at=GetTickCount64();
+        const auto disabled_at=clock.now();
         unsigned disabled_presents=0;
-        while(GetTickCount64()-disabled_at<1000) { step(); direct_native.no_effects(); ++disabled_presents; }
+        while(clock.now()-disabled_at<1000) { step(); direct_native.no_effects(); ++disabled_presents; }
         require(direct_native.last_render().sequence==rendered_sequence,"A Present rendered native Game 3D while it was disabled");
         direct_native.set_enabled(true);
-        const auto enabled_at=GetTickCount64();
+        const auto enabled_at=clock.now();
         unsigned until_ready=0;
-        do { tick("enabled-first-ready"); ++until_ready; } while(!(current() && ready()) && GetTickCount64()-enabled_at<5000);
+        do { tick("enabled-first-ready"); ++until_ready; } while(!(current() && ready()) && clock.now()-enabled_at<5000);
         require(current() && ready(),"Game 3D enabled again showed no ready depth within 5 s");
         const auto first=blend();
         float previous=first; bool monotonic=true; unsigned ramp_presents=0;
-        const auto ramp_started=GetTickCount64();
-        while(blend()<1.f && GetTickCount64()-ramp_started<5000) {
+        const auto ramp_started=clock.now();
+        while(blend()<1.f && clock.now()-ramp_started<5000) {
           tick("enabled-ramp"); ++ramp_presents;
           monotonic=monotonic && current() && ready() && blend()>=previous; previous=blend();
         }
         std::printf("MEASURE disable-enable disabled_ms=%llu disabled_presents=%u presents_to_ready=%u blend_before=%g blend_first=%g ramp_ms=%llu ramp_presents=%u blend_end=%g\n",
           static_cast<unsigned long long>(enabled_at-disabled_at),disabled_presents,until_ready,before,first,
-          static_cast<unsigned long long>(GetTickCount64()-ramp_started),ramp_presents,blend());
+          static_cast<unsigned long long>(clock.now()-ramp_started),ramp_presents,blend());
         require(before==1.f && disabled_presents>10,"The disable case did not start from full stereo or presented too little while disabled");
         require(first==0.f,"Game 3D enabled after a second without stereo returned at full stereo strength instead of fading in");
         require(monotonic && blend()==1.f,"Stereo did not fade back in monotonically to full strength after Game 3D was enabled again");
@@ -1316,12 +1319,12 @@ RWTexture2D<float> depth : register(u0);
         const DWORD stall_ms=DWORD(sunshine_freshness::source_age_ms+150);
         settle("before-camera-less-pause");
         const auto before=blend();
-        const auto previous_present=GetTickCount64();
-        Sleep(stall_ms);
+        const auto previous_present=clock.now();
+        clock.hitch(stall_ms);
         camera.reset=1;
         tick("camera-less-after-pause");
         camera.reset=0;
-        const auto gap=GetTickCount64()-previous_present;
+        const auto gap=clock.now()-previous_present;
         const bool fresh=captured_ready && !captured.reused_depth && !captured.projection.supplied &&
           captured.source_resource.handle==native(*selected);
         const bool shown=ready();
@@ -1352,8 +1355,8 @@ RWTexture2D<float> depth : register(u0);
       center_raw=.03125f;
       expect_zero=false;
       const double changed_zero=oracle(*selected,center_raw)[1];
-      const auto adapt_until=GetTickCount64()+6000;
-      do {tick("center-adaptation");check_projection();} while(GetTickCount64()<adapt_until && !close(zero()[1],changed_zero));
+      const auto adapt_until=clock.now()+6000;
+      do {tick("center-adaptation");check_projection();} while(clock.now()<adapt_until && !close(zero()[1],changed_zero));
       require(close(zero()[1],changed_zero) && zero()[1]>initial_zero,"Projection screen plane did not follow a changed scene");
       center_raw=.0234375f;
       establish_new_reference("projection-reset-reference");
@@ -1391,7 +1394,7 @@ RWTexture2D<float> depth : register(u0);
       std::puts("PASS actual projection shader preserves zero-strength HDR color and responds proportionally to user strength");
 
       valid_evaluation=false;
-      const auto rejection_began=GetTickCount64();
+      const auto rejection_began=clock.now();
       hold_begin();
       for(unsigned mono=0;mono<4;) {
         tick("failed-evaluation");
@@ -1405,15 +1408,15 @@ RWTexture2D<float> depth : register(u0);
         tick("failed-evaluation");
         require(!current(),"A rejected evaluation exposed its capture as current");
         if(!query_provider_status) continue;
-        if(GetTickCount64()-rejection_began<900)
+        if(clock.now()-rejection_began<900)
           require(provider.selected && !provider.ready && !ready(),"Rejected evaluations released the association before the timeout");
         if(!provider.selected) rejection_released=true;
         else require(!rejection_released,"A released SL association returned on a rejected evaluation");
-      } while(GetTickCount64()-rejection_began<1800);
+      } while(clock.now()-rejection_began<1800);
       require(rejection_released,"Rejected SL evaluations kept the queue mono past the association timeout");
       valid_evaluation=true;settle("successful-evaluation-recovery");
       emit=false;
-      const auto silence_began=GetTickCount64();
+      const auto silence_began=clock.now();
       hold_begin();
       for(unsigned mono=0;mono<4;) {
         tick("missing-provider-frame");
@@ -1428,11 +1431,11 @@ RWTexture2D<float> depth : register(u0);
         tick("missing-provider-frame");
         require(!current(),"A silent provider exposed its stale capture as current");
         if(!query_provider_status) continue;
-        if(GetTickCount64()-silence_began<900)
+        if(clock.now()-silence_began<900)
           require(provider.selected && !provider.ready && !ready(),"Silent provider released its association before the timeout");
         if(!provider.selected) association_released=true;
         else require(!association_released,"A released SL association returned without an evaluation");
-      } while(GetTickCount64()-silence_began<1800);
+      } while(clock.now()-silence_began<1800);
       require(association_released,"Silent SL provider kept the queue mono past the association timeout");
       emit=true;settle("missing-provider-frame-recovery");check_projection();
       std::puts("PASS failed and missing active-provider frames hold only the newest completed copy within its age bound, then render current-color mono despite a useful generic DSV; one second of silence or of rejected evaluations releases the association; recovery preserves projection scale");
@@ -1477,9 +1480,9 @@ RWTexture2D<float> depth : register(u0);
         const bool selected_before=query_provider_status && provider.selected;
         const auto reloads=observed.reloads;
         observed.runtime->reload_effect_next_frame(nullptr);
-        const auto reload_until=GetTickCount64()+15000;
+        const auto reload_until=clock.wall_now()+15000;
         unsigned disabled_presents=4;
-        do { step(); direct_native.no_effects(); ++disabled_presents; } while(observed.reloads==reloads && GetTickCount64()<reload_until);
+        do { step(); direct_native.no_effects(); ++disabled_presents; } while(observed.reloads==reloads && clock.wall_now()<reload_until);
         require(observed.reloads>reloads,"An effect reload with Game 3D disabled did not complete");
         for(unsigned i=0;i<4;++i) { step(); direct_native.no_effects(); ++disabled_presents; }
         const auto after_reload=direct_native.last_render().sequence;
@@ -1507,7 +1510,8 @@ RWTexture2D<float> depth : register(u0);
 #ifndef SUNSHINE_DIRECT_RUNTIME_FIXTURE_ONLY
 int main(int argc,char **argv) {
   std::setvbuf(stdout,nullptr,_IONBF,0);
-  if(argc!=5 && argc!=7) {std::fputs("usage: streamline_direct_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [width height]\n",stderr);return 2;}
+  sunshine_game3d_fixture::take_wall_clock_option(argc,argv);
+  if(argc!=5 && argc!=7) {std::fputs("usage: streamline_direct_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> [width height] [--wall-clock]\n",stderr);return 2;}
   std::thread([]{Sleep(300000);std::fputs("FAIL direct Streamline runtime watchdog\n",stderr);TerminateProcess(GetCurrentProcess(),124);}).detach();
   try {
     width=argc==7?unsigned(std::stoul(argv[5])):3840;height=argc==7?unsigned(std::stoul(argv[6])):2160;
@@ -1523,7 +1527,7 @@ int main(int argc,char **argv) {
       sunshine_camera_fixture::flag("SUNSHINE_STREAMLINE_COMMAND_CAPACITY_TEST"),
       sunshine_camera_fixture::flag("SUNSHINE_STREAMLINE_PENDING_EVALUATION_TEST"),
       sunshine_camera_fixture::flag("SUNSHINE_STREAMLINE_LARGE_BATCH_TEST"),
-      sunshine_camera_fixture::flag("SUNSHINE_STREAMLINE_MATRIX_CHANGE_TEST"));return 0;
+      sunshine_camera_fixture::flag("SUNSHINE_STREAMLINE_MATRIX_CHANGE_TEST"));fixture.clock.report("streamline-direct");return 0;
   } catch(const std::exception &error){std::fprintf(stderr,"FAIL %s\n",error.what());return 1;}
 }
 #endif

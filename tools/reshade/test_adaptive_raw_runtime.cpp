@@ -16,7 +16,10 @@ namespace {
     std::uint64_t step_before = 0, step_after = 0;
     bool require_continuous_frames = false;
     // Completed-frame intervals over 250 ms (pauses in Presents) between two
-    // Presents with ready depth, which earn adaptation no time.
+    // Presents with ready depth, which earn adaptation no time. On the game
+    // clock each Present is one 16 ms frame and the stretch that counts them
+    // has no hitch, so it stays 0; on the real clock (--wall-clock) it is
+    // this machine's load.
     std::uint64_t paused_ms = 0;
     native_game3d_observer game3d{*this};
     // What the native render of the latest Present consumed.
@@ -61,21 +64,21 @@ namespace {
       return std::isfinite(actual) && std::abs(actual - expected) <= 1e-5 * std::max(1., std::abs(expected));
     }
     void record(const char *phase) {
-      trajectory << phase << ',' << GetTickCount64() << ',' << latest.sequence << ',' << latest.depth.source_resource.handle << ','
+      trajectory << phase << ',' << clock.now() << ',' << latest.sequence << ',' << latest.depth.source_resource.handle << ','
         << latest.depth.source_id << ',' << latest.depth.frame_index << ',' << ready() << ',' << gain() << ',' << zero() << ',' << blend() << '\n';
       require(trajectory.good(), "Cannot record actual adaptive trajectory");
     }
     void frame(const char *phase) {
       const bool previous_ready = latest.sequence && ready() && selected_scene();
       const auto previous_frame = latest.depth.frame_index;
-      step_before = GetTickCount64(); step(); step_after = GetTickCount64(); game3d.no_effects();
+      step_before = clock.now(); step(); step_after = clock.now(); game3d.no_effects();
       latest = game3d.last_render();
       require(latest.sequence > rendered_sequence, "A Present had no native Game 3D render to observe");
       rendered_sequence = latest.sequence;
       recent.push_back(latest);
       if (recent.size() > 64) recent.pop_front();
       record(phase);
-      const auto now = GetTickCount64(), previous = last_frame_completed_ms;
+      const auto now = clock.now(), previous = last_frame_completed_ms;
       last_frame_completed_ms = now;
       if (require_continuous_frames && previous && now - previous > 250) {
         // A pause in Presents (this machine's load, as a game hitch) in a
@@ -105,8 +108,8 @@ namespace {
       return latest.depth.ready && latest.depth.source_resource.handle == reinterpret_cast<std::uint64_t>(scene->texture.p);
     }
     template<class Check> void pump(unsigned ms, const char *phase, Check check) {
-      const auto end = GetTickCount64() + ms;
-      do { frame(phase); check(); } while (GetTickCount64() < end);
+      const auto end = clock.now() + ms;
+      do { frame(phase); check(); } while (clock.now() < end);
     }
     // One production Dump 3D capture: the exact depth and constants a native
     // render consumed, and optionally its packed SBS.
@@ -138,8 +141,8 @@ namespace {
         "The native render did not consume the adaptive gain and screen plane of its own Present");
     }
     void settle_ready(const char *phase, unsigned timeout = 12000) {
-      const auto end = GetTickCount64() + timeout;
-      do { frame(phase); } while ((!ready() || !selected_scene() || blend() != 1.f) && GetTickCount64() < end);
+      const auto end = clock.now() + timeout;
+      do { frame(phase); } while ((!ready() || !selected_scene() || blend() != 1.f) && clock.now() < end);
       require(ready() && selected_scene() && blend() == 1.f, "Adaptive source did not reach ready full-strength stereo");
     }
     void qualify_source(const char *phase, bool changed, std::uint64_t retired_lifetime = 0) {
@@ -147,7 +150,7 @@ namespace {
       // Its samples may arrive before the renderer first selects it, so the
       // fresh-window lower bound belongs to this earliest possible draw, not
       // to first_selected. Keep selection latency as a separate upper bound.
-      const auto first_possible_draw = GetTickCount64(), end = first_possible_draw + 10000;
+      const auto first_possible_draw = clock.now(), end = first_possible_draw + 10000;
       std::uint64_t first_selected = 0, first_ready = 0;
       do {
         frame(phase);
@@ -155,20 +158,20 @@ namespace {
         // depth on it would show another screen's depth (not a missing frame),
         // which Generic's cut gate refuses. This names that cause; the check
         // below fails on it too.
-        if (GetTickCount64() - first_possible_draw < 650)
+        if (clock.now() - first_possible_draw < 650)
           require(!latest.depth.reused_depth, "A source's fresh initialization window showed held earlier depth");
-        if (GetTickCount64() - first_possible_draw < 650)
+        if (clock.now() - first_possible_draw < 650)
           require(!ready() && blend() == 0.f, "Source initialization reused old scale before one fresh reference window");
         if (selected_scene()) {
           require(!retired_lifetime || latest.depth.source_id != retired_lifetime,
             "Destroyed source replacement reused the retired lifetime identity");
-          if (!first_selected) first_selected = GetTickCount64();
+          if (!first_selected) first_selected = clock.now();
         }
         if (!first_selected) continue;
-        const auto elapsed = GetTickCount64() - first_selected;
-        if (ready()) { first_ready = GetTickCount64(); break; }
+        const auto elapsed = clock.now() - first_selected;
+        if (ready()) { first_ready = clock.now(); break; }
         require(elapsed <= 1400, "Source recovery exceeded one 750 ms reference window plus bounded capture latency");
-      } while (GetTickCount64() < end);
+      } while (clock.now() < end);
       require(first_selected && first_ready && first_ready - first_selected <= 1400,
         "Fresh selected source failed the bounded single-window initialization");
       const auto expected = oracle(changed);
@@ -188,13 +191,15 @@ namespace {
       scene->clear_depth = normal ? 1.f : 0.f;
       decoy = target(width / 2, height / 2, 12, 0);
       render_tracked_depth = [&] { if (decoy) draw(*decoy); if (scene) draw(*scene); };
-      const auto load_end = GetTickCount64() + 45000;
-      while ((!observed.runtime || !observed.renders) && GetTickCount64() < load_end) step();
+      const auto load_end = clock.wall_now() + 45000;
+      while ((!observed.runtime || !observed.renders) && clock.wall_now() < load_end) step();
       require(observed.runtime && observed.renders && !observed.inject, "Actual adaptive fixture did not initialize without injected depth");
       check_unified_addon();
       game3d.start();
       game3d.set_strength(100);
       rendered_sequence = game3d.await_render([&] { step(); });
+      // Setup is done: game time and the trace from here on.
+      game3d.begin_game_time();
       settle_ready("initial");
       const auto initial = oracle(false), changed_scene = oracle(true);
       std::printf("MEASURE adaptive oracle constant H=%.9g t0=%.9g changed t0=%.9g\n", initial[0], initial[1], changed_scene[1]);
@@ -214,12 +219,12 @@ namespace {
       // gain target, is unchanged while the zero follows the new contrast
       // midpoint with exponential smoothing, never moving away from it.
       scene->pattern = pattern(true);
-      const auto started = GetTickCount64();
+      const auto started = clock.now();
       require_continuous_frames = true;
       paused_ms = 0;
       double distance = std::abs(double(zero()) - changed_scene[1]);
-      // Adaptation time: wall time less the pauses in Presents, which earn none.
-      const auto adapted = [&] { return GetTickCount64() - started - paused_ms; };
+      // Adaptation time: game time less the pauses in Presents, which earn none.
+      const auto adapted = [&] { return clock.now() - started - paused_ms; };
       do {
         frame("zero-plane-changed-scene");
         require(ready() && blend() == 1.f && selected_scene() && gain() == constant_gain,
@@ -248,7 +253,7 @@ namespace {
       require(!latest.depth.reused_depth, "The Present before the depth gap did not show current depth");
       const auto shown = latest.depth;
       const auto shown_before = step_before, shown_after = step_after;
-      const auto gap_started = GetTickCount64();
+      const auto gap_started = clock.now();
       unsigned gap_held = 0, gap_mono = 0;
       render_tracked_depth = {};
       const auto missing_publication = [&] {
@@ -274,8 +279,8 @@ namespace {
           "Missing current depth beyond the source age rendered stereo or changed the held gain");
         ++gap_mono;
       };
-      const auto hold_end = GetTickCount64() + 2000;
-      do { frame("depth-gap-hold"); missing_publication(); } while (gap_mono < 4 && GetTickCount64() < hold_end);
+      const auto hold_end = clock.now() + 2000;
+      do { frame("depth-gap-hold"); missing_publication(); } while (gap_mono < 4 && clock.now() < hold_end);
       require(gap_held && gap_mono >= 4, "A depth gap did not hold within the source age and then go mono");
       // Change visible source color past the source age, so stale output cannot pass.
       for (size_t i = 0; i < size_t(width) * height; ++i) {
@@ -292,13 +297,13 @@ namespace {
       // hidden gain that would be revealed on the next ready publication.
       pump(1600, "depth-gap-no-new-samples", missing_publication);
       render_tracked_depth = [&] { if (scene) draw(*scene); };
-      const auto first_ready_until = GetTickCount64() + 12000;
-      do { frame("depth-return-first-ready"); } while (!ready() && GetTickCount64() < first_ready_until);
+      const auto first_ready_until = clock.now() + 12000;
+      do { frame("depth-return-first-ready"); } while (!ready() && clock.now() < first_ready_until);
       require(ready() && selected_scene(), "Depth return failed to render a fresh current scene");
       require(gain() == before_gap, "Missing captures or their return changed the held gain");
       require(zero() == zero_before_gap, "First ready depth return spent missing-time zero-plane credit");
       std::printf("PASS gap hold: elapsed=%llu ms gain=%.9g -> %.9g; zero held; %u Presents held within the source age, then %u mono\n",
-        static_cast<unsigned long long>(GetTickCount64() - gap_started), before_gap, gain(), gap_held, gap_mono);
+        static_cast<unsigned long long>(clock.now() - gap_started), before_gap, gain(), gap_held, gap_mono);
       settle_ready("depth-return");
       // A pause in Presents (a game hitch) before a frame's depth draws, then
       // one between its draws and its Present: the first Present after each
@@ -310,7 +315,7 @@ namespace {
       // runtime claim could not fail (the 10-27 review).
       const DWORD stall_ms = DWORD(sunshine_freshness::source_age_ms + 150);
       bool stall_at_present = false;
-      before_present = [&] { if (stall_at_present) { stall_at_present = false; Sleep(stall_ms); } };
+      before_present = [&] { if (stall_at_present) { stall_at_present = false; clock.hitch(stall_ms); } };
       struct pause_case { const char *phase; bool after_draws; std::uint64_t gap; bool own_depth; float before, after; };
       pause_case pauses[] {{"presentation-gap-before-draws", false, 0, false, 0.f, 0.f},
         {"presentation-gap-after-draws", true, 0, false, 0.f, 0.f}};
@@ -318,11 +323,11 @@ namespace {
         settle_ready(pause.phase);
         pause.before = blend();
         const auto frame_before = latest.depth.frame_index;
-        const auto previous_present = GetTickCount64();
+        const auto previous_present = clock.now();
         if (pause.after_draws) stall_at_present = true;
-        else Sleep(stall_ms);
+        else clock.hitch(stall_ms);
         frame(pause.phase);
-        pause.gap = GetTickCount64() - previous_present;
+        pause.gap = clock.now() - previous_present;
         pause.own_depth = ready() && selected_scene() && !latest.depth.reused_depth && latest.depth.frame_index > frame_before;
         pause.after = blend();
         std::printf("MEASURE %s present_gap_ms=%llu own_depth=%d frame=%llu->%llu blend_before=%g blend_after=%g\n",
@@ -350,16 +355,16 @@ namespace {
       qualify_source("replacement-B", true);
       auto replacement = std::move(scene);
       scene = std::move(original); scene->pattern = pattern(false);
-      const auto return_end = GetTickCount64() + 10000;
+      const auto return_end = clock.now() + 10000;
       std::uint64_t return_selected = 0;
       do {
         frame("return-A-retained-reference");
-        if (selected_scene() && !return_selected) return_selected = GetTickCount64();
+        if (selected_scene() && !return_selected) return_selected = clock.now();
         if (ready() && selected_scene()) break;
-        if (return_selected) require(GetTickCount64() - return_selected <= 1400,
+        if (return_selected) require(clock.now() - return_selected <= 1400,
           "Retained A did not resume within bounded fresh-capture latency");
-      } while (GetTickCount64() < return_end);
-      require(return_selected && ready() && selected_scene() && GetTickCount64() - return_selected <= 1400 &&
+      } while (clock.now() < return_end);
+      require(return_selected && ready() && selected_scene() && clock.now() - return_selected <= 1400 &&
         latest.depth.source_id == original_lifetime, "Retained A did not resume its exact live source");
       require(gain() == original_gain, "Retained A reset its gain while off-turn");
       require(zero() == original_zero, "Retained A reset its zero or spent off-turn motion credit");
@@ -399,7 +404,8 @@ namespace {
 
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (argc != 9) { std::fputs("usage: adaptive_raw_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> <scrgb|pq> <normal|reversed> width height\n", stderr); return 2; }
+  sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
+  if (argc != 9) { std::fputs("usage: adaptive_raw_runtime <official.dll> <frozenShaders> <test.addon64> <fresh-output> <scrgb|pq> <normal|reversed> width height [--wall-clock]\n", stderr); return 2; }
   std::thread([] { Sleep(180000); std::fputs("FAIL adaptive runtime watchdog\n", stderr); TerminateProcess(GetCurrentProcess(), 124); }).detach();
   try {
     width = unsigned(std::stoul(argv[7])); height = unsigned(std::stoul(argv[8]));
@@ -416,6 +422,7 @@ int main(int argc, char **argv) {
     adaptive_fixture fixture; fixture.runtime_directory = fs::absolute(argv[4]);
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fixture.runtime_directory, std::string(argv[5]) == "pq" ? 3 : 2, 0, fs::absolute(argv[3]));
     fixture.run_adaptive(std::string(argv[6]) == "reversed");
+    fixture.clock.report("adaptive");
     return 0;
   } catch (const std::exception &error) { std::fprintf(stderr, "FAIL %s\n", error.what()); return 1; }
 }

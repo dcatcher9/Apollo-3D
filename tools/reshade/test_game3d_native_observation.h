@@ -320,12 +320,12 @@ namespace {
       sunshine_test_files::rename_when_free(effects / effect_file, effects / (std::string(effect_file) + ".disabled"));
       const auto reloads = observed.reloads;
       observed.runtime->reload_effect_next_frame(nullptr);
-      const auto until = GetTickCount64() + 30000;
+      const auto until = wall_now() + 30000;
       unsigned count = 1;
       do {
         fixture_.step();
         count = techniques();
-      } while ((observed.reloads == reloads || count) && GetTickCount64() < until);
+      } while ((observed.reloads == reloads || count) && wall_now() < until);
       require(observed.reloads > reloads && !count, "FX remained loaded before native Game 3D validation");
       for (const auto &entry : fs::recursive_directory_iterator(effects))
         require(entry.path().extension() != ".fx", "Native fixture still has an installed FX");
@@ -347,7 +347,14 @@ namespace {
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state_->consumer_nonce), 0x4e41544956453344LL);
       evidence_.open(fixture_.runtime_directory / "native-renders.jsonl");
       require(evidence_.good(), "Cannot record native render evidence");
-      // The fixture's per-Present trace, written once when this observer ends.
+    }
+
+    // Once setup is done (start, then await_render): game time begins on the
+    // test add-on's clock (raw_runtime_fixture::engage_game_clock), and so
+    // does the fixture's per-Present trace, written once when this observer
+    // ends. Setup's Presents run on the real clock, so they add no line.
+    void begin_game_time() {
+      fixture_.engage_game_clock();
       game3d_present_trace::out.open(fixture_.runtime_directory / "trace.txt", "native");
       traced_ = true;
     }
@@ -389,11 +396,12 @@ namespace {
 
     // Presents through the caller until native Game 3D has rendered: the game
     // stays 2D while the renderer compiles its shaders on the thread pool.
-    // Returns the last render's sequence; every later Present renders.
+    // Returns the last render's sequence; every later Present renders. It is
+    // setup, before the game clock engages: its bound is wall time.
     std::uint64_t await_render(const std::function<void()> &present) const {
-      const auto until = GetTickCount64() + 30000;
+      const auto until = wall_now() + 30000;
       auto render = last_render();
-      while (!render.sequence && GetTickCount64() < until) { present(); render = last_render(); }
+      while (!render.sequence && wall_now() < until) { present(); render = last_render(); }
       require(render.sequence != 0, "Native Game 3D never rendered; its shaders did not finish compiling");
       return render.sequence;
     }
@@ -469,11 +477,12 @@ namespace {
 
     // Presents through the caller until the production owner completes one
     // native render capture. The caller's present also checks each frame.
+    // The mailbox's bound is wall time.
     native_render capture(const char *label, bool sbs, const std::function<void()> &present) {
       request_ = state_->request_id + 1;
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state_->request_id), request_);
-      const auto until = GetTickCount64() + 10000;
-      while (load(state_->response_id) != request_ && GetTickCount64() < until) present();
+      const auto until = wall_now() + 10000;
+      while (load(state_->response_id) != request_ && wall_now() < until) present();
       require(load(state_->response_id) == request_, "Production Dump3D did not capture a native render");
       const auto &response = state_->response;
       require(response.result == game3d_debug::status::complete && response.json_bytes <= game3d_debug::max_json_bytes &&
@@ -525,7 +534,7 @@ namespace {
       require(frame.depth_ready == !frame.raw_depth.empty(), "Native render capture lost its consumed depth artifact");
       require(!sbs || !frame.sbs.empty(), "Native render capture omitted its SBS");
       const auto &policy = metadata.at("render_scene_policy");
-      evidence_ << nlohmann::json{{"label", label}, {"wall_ms", GetTickCount64()}, {"consumed_depth", depth},
+      evidence_ << nlohmann::json{{"label", label}, {"wall_ms", wall_now()}, {"consumed_depth", depth},
         {"render_parameters", parameters}, {"render_scene_policy", {{"phase", policy.at("phase")}, {"basis", policy.at("basis")},
         {"active", policy.at("active")}, {"current_scale", policy.at("current_scale")}}}}.dump() << '\n';
       require(evidence_.good(), "Cannot record native render evidence");
@@ -541,6 +550,9 @@ namespace {
     using last_render_t = BOOL (*)(api::effect_runtime *, sunshine_game3d::test::last_render *);
     using set_enabled_t = BOOL (*)(api::effect_runtime *, BOOL);
 
+    // The FX removal's and the mailbox's bounds, and the evidence's wall_ms:
+    // wall time, never game time (test_game3d_clock.h).
+    static std::uint64_t wall_now() { return sunshine_game3d_fixture::game_clock::wall_now(); }
     static std::uint64_t load(std::uint64_t &value) {
       return std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&value), 0, 0));
     }
