@@ -738,18 +738,23 @@ namespace sunshine_streamline {
     void remember_fg_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t sequence) {
       remember_tag_copy(scope_epoch, viewport, true, sequence);
     }
-    void defer_depth(std::uint32_t viewport, const depth_capture::input &candidate) {
+    void defer_depth(std::uint32_t viewport, const depth_capture::input &candidate, std::uint64_t age_ms) {
       AcquireSRWLockExclusive(&evaluation_supply_lock);
       for (auto &entry : deferred_frames) if (!entry.used) {
         entry = {};
         entry.used = true; entry.observation = observation_ticket(); entry.epoch = epoch.load(std::memory_order_acquire);
-        entry.serial = ++call_sequence; entry.tick = GetTickCount64(); entry.executions = depth_capture::game_executions();
+        entry.serial = ++call_sequence; entry.tick = GetTickCount64() - age_ms; entry.executions = depth_capture::game_executions();
         entry.viewport = viewport;
+        entry.evaluations = fg_evaluation.tag(entry.epoch, viewport, entry.serial, true, {}, depth_capture::next_present_ordinal());
         entry.depth.candidates[0] = candidate; entry.depth.count = 1;
         break;
       }
       count_deferred();
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
+    }
+    deferral_counts deferrals_now() {
+      return {deferral_pending.load(std::memory_order_acquire), deferrals.lapsed.load(std::memory_order_relaxed),
+        deferrals.depth_refused.load(std::memory_order_relaxed)};
     }
     void arm_entry_policy() { entry_policy_armed = true; entry_policy_observed = false; }
     bool entry_policy(bool &selected, bool &admissible) {

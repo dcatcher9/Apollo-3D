@@ -4233,6 +4233,79 @@ namespace {
       "F3: a repeated FG Off retired the FG role again, or the first Off or a failed call after it retired nothing");
   }
 
+  // Dynamic FG without a generated count (mode 3, numFramesToGenerate 0) is
+  // one generated Present per real frame for the deferral clock and for
+  // DLSS-G's evaluation window (lane L-fg, F4, 11-01; the fix review's
+  // F4 row). Until then present_deferred took the raw count (0) for a
+  // deferral's window, so a frame's deferred FG copy lapsed at the earlier
+  // frame's generated Present after a hitch of the source age, and DLSS-G's
+  // evaluation kept no window, so after that hitch its evaluation of the
+  // frame no longer made the copy due at the frame's generated Present.
+  // The seam rows check only generated_presents(): reverting either call
+  // site (present_deferred's mode, observe_frame_generation_inputs's fg) to
+  // the raw count fails here.
+  void test_dynamic_fg_deferral_window() {
+    fixture cleanup;
+    source_setting = "1"; initialize(nullptr);
+    require(testing::install(testing::abi::v2_7_30, presentation_v2_targets), "FG source hook install failed");
+    returned_feature_function = reinterpret_cast<void *>(&fake_fg_options);
+    void *function{};
+    require(call_feature_function(1000, "slDLSSGSetOptions", function) == 0 && function, "FG getter returned no forwarding wrapper");
+    auto set_options = reinterpret_cast<fg_function>(function);
+    auto view = viewport(141);
+    fg_options dynamic; dynamic.mode = 3; dynamic.generated_frames = 0;
+    require(set_options(view, dynamic) == 0, "Dynamic FG options failed");
+    depth_capture::fixture::reset_owner();
+    std::string failed;
+    const auto check = [&](bool passed, const char *what) { if (!passed) failed += std::string(failed.empty() ? "" : "; ") + what; };
+    depth_capture::input candidate;
+    candidate.provider = sunshine_scene_depth::provider_kind::streamline;
+    candidate.epoch = 1; candidate.sequence = 1; candidate.viewport = view.value;
+    candidate.frame_generation_input = true; candidate.source_id = sunshine_scene_depth::fg_source_id(view.value);
+    struct no_interface final : IUnknown {
+      HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override { if (out) *out = nullptr; return E_NOINTERFACE; }
+      ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+      ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    } queue, list;
+    constexpr std::uint64_t chain = 0x8100;
+    const auto present = [&] {
+      take_present_fg(chain);
+      present_deferred(chain, reinterpret_cast<std::uint64_t>(&queue), reinterpret_cast<std::uint64_t>(&list));
+      end_present_fg();
+    };
+    // The deferral clock: the frame's tag call deferred its copy a source
+    // age ago, and one Present came since (the earlier frame's generated
+    // one): its frame's Present is still to come.
+    auto before = testing::deferrals_now();
+    testing::defer_depth(view.value, candidate, sunshine_freshness::source_age_ms + 50);
+    depth_capture::fixture::presents_since(1);
+    present();
+    auto after = testing::deferrals_now();
+    check(after.pending == 1 && after.lapsed == before.lapsed,
+      "F4: a Dynamic FG frame's deferred copy lapsed at the earlier frame's generated Present after a hitch (present_deferred read Dynamic's 0 generated frames)");
+    // Past that one Present it lapses.
+    depth_capture::fixture::presents_since(2);
+    present();
+    check(testing::deferrals_now().pending == 0, "F4: a Dynamic FG frame's deferred copy outlived its window");
+    // DLSS-G's evaluation window: the frame's tag call defers its copy,
+    // DLSS-G evaluates the frame at that Present, and a hitch of the source
+    // age passes before the frame's generated Present, at which the copy
+    // is due (its frame's Present: no source here, so it is refused).
+    before = testing::deferrals_now();
+    testing::defer_depth(view.value, candidate);
+    const auto attempt = observe_frame_generation_inputs({});
+    finish_frame_generation_inputs(attempt, true);
+    Sleep(DWORD(sunshine_freshness::source_age_ms + 30));
+    depth_capture::fixture::presents_since(1);
+    present();
+    after = testing::deferrals_now();
+    check(after.pending == 0 && after.depth_refused == before.depth_refused + 1 && after.lapsed == before.lapsed,
+      "F4: after a hitch DLSS-G's evaluation of a Dynamic FG frame did not make its deferred copy due at its generated Present (its window read Dynamic's 0 generated frames)");
+    depth_capture::fixture::reset_owner();
+    depth_capture::requested = false;
+    require(failed.empty(), failed.c_str());
+  }
+
   // A frame call that makes no copy still ends an earlier frame's
   // presenting window (frame_presenting) at its frame's Present or call
   // (lane L-fg, F2, 11-01): a deferred FG tag copy refused at its frame's
@@ -4799,6 +4872,7 @@ int main(int argc, char **argv) {
     test_repeated_fg_off_retires_once();
     std::puts("PASS FG Off retires the FG role once; a repeated Off retires nothing new");
     test_refused_frame_calls_end_window();
+    test_dynamic_fg_deferral_window();
     std::puts("PASS a refused deferred FG copy and DLSS-G's evaluation without a copy attempt end an earlier frame's presenting window");
     test_dlssg_anchor_for_recorded_tag_copy();
     std::puts("PASS DLSS-G's evaluation standing aside for its frame's recorded FG tag copy anchors that frame's presenting window");

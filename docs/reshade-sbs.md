@@ -4335,7 +4335,9 @@ own count or generates nothing, so such a scope binds no viewport in a tie of tw
 1 generated Present per real frame (`frame_generation_snapshot::generated_presents`): the Present's
 grant, the UI's count, the deferral clock and DLSS-G's evaluation window (until 11-01 the last two
 took it as none, so after a hitch of the source age a frame's deferred copy lapsed at an earlier
-frame's generated Present: lane L-fg, F4, seam rows `P5 deferral age` with Dynamic mode). A true
+frame's generated Present: lane L-fg, F4, seam rows `P5 deferral age` with Dynamic mode, which check
+only the count; probe row `test_dynamic_fg_deferral_window` runs both call sites, `present_deferred`
+and DLSS-G's evaluation, and fails if either reads the raw count). A true
 Dynamic multiplier above 1 can still lapse a deferral after such a hitch; DLSS-G's own copy of the
 frame then supplies it.
 The observer intercepts both newly returned and previously cached FG options function pointers.

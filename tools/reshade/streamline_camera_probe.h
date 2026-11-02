@@ -292,8 +292,17 @@ namespace sunshine_streamline {
     // aside for.
     void remember_fg_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, std::uint64_t sequence);
     // Defers candidate, a depth copy of the viewport's frame, to its frame's
-    // Present (present_deferred), as a tag call that could not copy it does.
-    void defer_depth(std::uint32_t viewport, const depth_capture::input &candidate);
+    // Present (present_deferred), as a tag call that could not copy it does,
+    // with that call's marks (DLSS-G's evaluations and the Present ordinal
+    // now, deferral_evaluations::tag); age_ms: the call that long ago.
+    void defer_depth(std::uint32_t viewport, const depth_capture::input &candidate, std::uint64_t age_ms = 0);
+    // The deferrals pending now, and the totals of those that lapsed and of
+    // the depth copies refused at their frame's Present.
+    struct deferral_counts {
+      unsigned pending{};
+      std::uint64_t lapsed{}, depth_refused{};
+    };
+    deferral_counts deferrals_now();
     // One explicitly armed fixture observation of the real pre-SDK policy.
     void arm_entry_policy();
     bool entry_policy(bool &selected, bool &admissible);
