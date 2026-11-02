@@ -315,9 +315,17 @@ if(BUILD_TESTING)
   endfunction()
   # Test views. Exporter tests share exporter_internal.h with one compiled exporter.cpp.
   sunshine_game3d_core_view(sunshine_game3d_core_sbs_test SEAMS SUNSHINE_SBS_TEST)
-  # The Streamline probe, NGX call trace and native observer seams.
+  # The Streamline probe, NGX call trace and native observer seams, and the
+  # test clock's (inert until a fixture engages it: sunshine_view_clock).
   sunshine_game3d_core_view(sunshine_game3d_core_probe_test SEAMS SUNSHINE_STREAMLINE_PROBE_TEST
-    SUNSHINE_UPSCALER_TRACE_TEST SUNSHINE_SYNCHRONOUS_LOG SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST)
+    SUNSHINE_UPSCALER_TRACE_TEST SUNSHINE_SYNCHRONOUS_LOG SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST SUNSHINE_GAME3D_TEST_CLOCK)
+  # An in-process fixture: an executable that links a view with the test
+  # clock's seam runs the add-on's code itself, so it exports the test
+  # add-on's clock exports and barrier, and test_game3d_clock.h binds the
+  # executable as it binds the test add-on (README, Test builds).
+  function(sunshine_view_clock target)
+    target_sources(${target} PRIVATE test_game3d_clock_exports.cpp test_game3d_view_quiesce.cpp)
+  endfunction()
   # The capture owner's white-box regressions, which the probe and
   # diagnostic-texture tests run.
   add_library(reshade_depth_capture_regressions STATIC test_streamline_depth_capture.cpp)
@@ -347,9 +355,12 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME reshade_game3d_diagnostic_metadata COMMAND reshade_game3d_diagnostic_metadata_tests)
   set_tests_properties(reshade_game3d_diagnostic_metadata PROPERTIES TIMEOUT 15)
+  # The probe view, whose test clock plays the capture's 250 ms completion
+  # deadline in game time.
   add_executable(reshade_game3d_ui_capture_tests test_game3d_ui_capture.cpp)
   target_compile_definitions(reshade_game3d_ui_capture_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_link_libraries(reshade_game3d_ui_capture_tests PRIVATE sunshine_game3d_core_archive)
+  target_link_libraries(reshade_game3d_ui_capture_tests PRIVATE sunshine_game3d_core_probe_test_archive)
+  sunshine_view_clock(reshade_game3d_ui_capture_tests)
   if(MINGW)
     target_link_options(reshade_game3d_ui_capture_tests PRIVATE -static)
   endif()
@@ -539,6 +550,7 @@ if(BUILD_TESTING)
   add_executable(reshade_streamline_camera_probe_tests test_streamline_camera_probe.cpp)
   target_link_libraries(reshade_streamline_camera_probe_tests PRIVATE reshade_depth_capture_regressions)
   sunshine_minhook_ledger(reshade_streamline_camera_probe_tests)
+  sunshine_view_clock(reshade_streamline_camera_probe_tests)
   add_executable(reshade_contract_matrix_cpu_tests test_game3d_api_contract_cpu.cpp)
   foreach(probe_target IN ITEMS reshade_streamline_camera_probe_tests reshade_contract_matrix_cpu_tests)
     target_compile_definitions(${probe_target} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -556,6 +568,7 @@ if(BUILD_TESTING)
   target_compile_definitions(reshade_upscaler_call_trace_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(reshade_upscaler_call_trace_tests PRIVATE sunshine_game3d_core_probe_test_archive)
   sunshine_minhook_ledger(reshade_upscaler_call_trace_tests)
+  sunshine_view_clock(reshade_upscaler_call_trace_tests)
   if(MINGW)
     target_link_options(reshade_upscaler_call_trace_tests PRIVATE -static)
   endif()
@@ -567,6 +580,7 @@ if(BUILD_TESTING)
   add_executable(reshade_seam_characterization_tests test_game3d_seam_characterization.cpp)
   target_compile_definitions(reshade_seam_characterization_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(reshade_seam_characterization_tests PRIVATE sunshine_game3d_core_probe_test_archive)
+  sunshine_view_clock(reshade_seam_characterization_tests)
   if(MINGW)
     target_link_options(reshade_seam_characterization_tests PRIVATE -static)
   endif()
@@ -725,6 +739,7 @@ if(BUILD_TESTING)
     add_executable(reshade_diagnostic_texture_capture_test test_diagnostic_texture_capture.cpp)
     target_compile_definitions(reshade_diagnostic_texture_capture_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(reshade_diagnostic_texture_capture_test PRIVATE reshade_depth_capture_regressions)
+    sunshine_view_clock(reshade_diagnostic_texture_capture_test)
     if(MINGW)
       target_link_options(reshade_diagnostic_texture_capture_test PRIVATE -static)
     endif()
@@ -854,10 +869,12 @@ if(BUILD_TESTING)
       target_link_options(reshade_depth3d_runtime_d3d12_test PRIVATE -static)
     endif()
 
-    # The renderer's background-build hooks (test_game3d_renderer_build.h).
-    sunshine_game3d_core_view(sunshine_game3d_core_renderer_test SEAMS SUNSHINE_GAME3D_RENDERER_TEST)
+    # The renderer's background-build hooks (test_game3d_renderer_build.h),
+    # and the test clock's seam (sunshine_view_clock).
+    sunshine_game3d_core_view(sunshine_game3d_core_renderer_test SEAMS SUNSHINE_GAME3D_RENDERER_TEST SUNSHINE_GAME3D_TEST_CLOCK)
     add_executable(reshade_game3d_native_runtime_test test_game3d_native_runtime.cpp)
     target_link_libraries(reshade_game3d_native_runtime_test PRIVATE sunshine_game3d_core_renderer_test_archive user32)
+    sunshine_view_clock(reshade_game3d_native_runtime_test)
     if(MINGW)
       target_link_options(reshade_game3d_native_runtime_test PRIVATE -static)
     endif()
