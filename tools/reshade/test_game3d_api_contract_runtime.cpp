@@ -879,7 +879,8 @@ namespace {
     bool legal {}, satisfied {};
     gaps::verdict verdict {};
     bool matched[N] {};
-    std::uint64_t elapsed_ms {};
+    // The case's game time (its evidence) and its wall time (MEASURE only).
+    std::uint64_t elapsed_ms {}, wall_ms {};
   };
 
   // At Present: a source shown steadily (with its extent, one logical
@@ -1408,9 +1409,10 @@ namespace {
     }
 
     // Stimulus: real frames until the first fresh capture of the case's
-    // source and steady_presents judged Presents from it, or the window.
+    // source and steady_presents judged Presents from it, or the window (in
+    // game time, as every window of a case: test_game3d_clock.h).
     void observe(const std::function<void(bool)> &frame, bool alternate, std::uint64_t window) {
-      const auto started = GetTickCount64();
+      const auto started = clock.now();
       std::uint64_t last_capture {}, identity {};
       unsigned since_first {}, steady_fresh {};
       for (bool tag_frame = true;; tag_frame = alternate ? !tag_frame : true) {
@@ -1432,7 +1434,7 @@ namespace {
         if (fresh) {
           last_capture = shown.capture;
         }
-        const auto elapsed = GetTickCount64() - started;
+        const auto elapsed = clock.now() - started;
         if (!tag_frame) {
           seen.late += fresh;  // An evaluate after its tag's Present made a copy.
         } else {
@@ -1460,7 +1462,7 @@ namespace {
         }
       }
       render_tracked_depth = {};
-      seen.elapsed_ms = GetTickCount64() - started;
+      seen.elapsed_ms = clock.now() - started;
     }
 
     // Recovery: frame generation off, the depth untagged and any NGX feature
@@ -1500,10 +1502,10 @@ namespace {
       }
       present_frame();
       render_tracked_depth = {};
-      const auto until = GetTickCount64() + isolation_ms;
+      const auto until = clock.now() + isolation_ms;
       do {
         present_frame();
-      } while (GetTickCount64() < until);
+      } while (clock.now() < until);
       present_frame();
       require(!sample_present().shows, "Isolation: a case's depth outlived its source age with no SDK call or draw");
       require(recalibrate(observed.runtime), "Isolation: SunshineGame3DTestRecalibrate failed");
@@ -1837,6 +1839,21 @@ namespace {
 
     static constexpr unsigned sl_rows = std::size(gaps::sl_runtime_rows), ngx_rows = std::size(gaps::ngx_runtime_rows), generic_rows = std::size(gaps::generic_runtime_rows), ui_rows = std::size(gaps::ui_runtime_rows);
 
+    // When a case starts and ends: game time, and wall time for MEASURE.
+    struct started_at {
+      std::uint64_t game, wall;
+    };
+
+    started_at start() const {
+      return {clock.now(), clock.wall_now()};
+    }
+
+    template<unsigned N>
+    void stop(judged_case<N> &out, const started_at &started) const {
+      out.elapsed_ms = clock.now() - started.game;
+      out.wall_ms = clock.wall_now() - started.wall;
+    }
+
     judged_case<sl_rows> judge_streamline(const generator::family &owner, const generator::row &assignment, const char *name) {
       judged_case<sl_rows> out;
       const auto value = sl_runtime::to_case(assignment, version);
@@ -1850,7 +1867,7 @@ namespace {
       // A copy at an evaluate waits past frame generation's first second.
       const bool frame_generation_wait = value.fg != matrix::fg_mode::off && value.at != matrix::copy_point::tag_call;
       const bool alternate = value.at == matrix::copy_point::after_present && !matrix::known_gaps::streamline::local(value.entry);
-      const auto started = GetTickCount64();
+      const auto started = start();
       run_script({name, 8000, [&] {
                     prepare(value, state);
                     const bool at_tag_call = decided.shown.at_tag_call;
@@ -1868,7 +1885,7 @@ namespace {
                   [&] {
                     isolate();
                   }});
-      out.elapsed_ms = GetTickCount64() - started;
+      stop(out, started);
       seen.continuity = script_violations;
       out.observed = seen;
       out.actual = result_of(out.decided, out.observed);
@@ -1885,7 +1902,7 @@ namespace {
       require(out.decided.expected.by != nullptr, "the oracle named no rule for an NGX runtime cell");
       out.decided.accept(out.decided.expected);
       const bool frame_generation = value.feature == matrix::ngx_feature::frame_generation;
-      const auto started = GetTickCount64();
+      const auto started = start();
       run_script({name, 8000, [&] {
                     prepare_ngx(value);
                     plan_supply(out.decided.expected, out.legal, frame_generation ? game3d_continuity::dlssg_input : game3d_continuity::sr_evaluate);
@@ -1902,7 +1919,7 @@ namespace {
                   [&] {
                     isolate();
                   }});
-      out.elapsed_ms = GetTickCount64() - started;
+      stop(out, started);
       judge_rows(out, gaps::ngx_runtime_rows, value);
       return out;
     }
@@ -1914,7 +1931,7 @@ namespace {
       out.decided.expected = matrix::expect(value);
       require(out.decided.expected.by != nullptr, "the oracle named no rule for a Generic runtime cell");
       out.decided.accept(out.decided.expected);
-      const auto started = GetTickCount64();
+      const auto started = start();
       run_script({name, 10000, [&] {
                     prepare_generic(value);
                     plan_supply(out.decided.expected, out.legal, game3d_continuity::generic_boundary);
@@ -1931,7 +1948,7 @@ namespace {
                   [&] {
                     isolate();
                   }});
-      out.elapsed_ms = GetTickCount64() - started;
+      stop(out, started);
       judge_rows(out, gaps::generic_runtime_rows, value);
       return out;
     }
@@ -1945,7 +1962,7 @@ namespace {
       out.legal = owner.legal(assignment);
       out.decided.expected = matrix::expect(value);
       require(out.decided.expected.by != nullptr, "the oracle named no rule for a UI runtime cell");
-      const auto started = GetTickCount64();
+      const auto started = start();
       run_script({name, 20000, [&] {
                     prepare_ui(value, ui_runtime::kinds[assignment[ui_runtime::kind]].type);
                   },
@@ -1958,7 +1975,7 @@ namespace {
                     render_tracked_depth = [&frame] {
                       frame(true);
                     };
-                    for (const auto until = GetTickCount64() + ui_settle_ms; GetTickCount64() < until;) {
+                    for (const auto until = clock.now() + ui_settle_ms; clock.now() < until;) {
                       present_frame();
                     }
                     dump_mailbox box(*this, 0x5549434f4e54ULL);
@@ -1968,7 +1985,7 @@ namespace {
                   [&] {
                     isolate();
                   }});
-      out.elapsed_ms = GetTickCount64() - started;
+      stop(out, started);
       seen.continuity = script_violations;
       out.observed = seen;
       // A refusal (the layer's, D12; a tag's, U5) shows as no candidate, as
@@ -2081,7 +2098,7 @@ namespace {
   template<unsigned N, class Case, class Judge>
   void run_cells(const generator::family &owner, const std::vector<generator::row> &rows, const std::vector<std::size_t> &positions, const generator::options &options, scope cells, const std::vector<seed> &seeds, const char *control, const gaps::row<Case> (&gap_rows)[N], std::ofstream &lines, Judge judge, const std::function<bool(const judged_case<N> &)> &controlled, judging::each_tally<N> &tally) {
     unsigned controls {};
-    std::uint64_t total_ms {}, slowest_ms {};
+    std::uint64_t total_ms {}, slowest_ms {}, total_wall_ms {};
     generator::row control_row;
     if (control) {
       std::string error;
@@ -2107,7 +2124,8 @@ namespace {
       const auto value = judge(owner, rows[i], name.c_str());
       total_ms += value.elapsed_ms;
       slowest_ms = std::max(slowest_ms, value.elapsed_ms);
-      std::printf("MEASURE contract-runtime family=%s case=%s elapsed_ms=%llu verdict=%s\n", owner.name, id.c_str(), static_cast<unsigned long long>(value.elapsed_ms), game3d_contract::jsonl::name(value.verdict));
+      total_wall_ms += value.wall_ms;
+      std::printf("MEASURE contract-runtime family=%s case=%s elapsed_ms=%llu verdict=%s wall_ms=%llu\n", owner.name, id.c_str(), static_cast<unsigned long long>(value.elapsed_ms), game3d_contract::jsonl::name(value.verdict), static_cast<unsigned long long>(value.wall_ms));
       lines << json_line(owner, rows[i], value, gap_rows, seed_name(owner, rows[i], seeds), cells).dump() << '\n';
       const auto *what = tally.add(value.verdict, value.matched, value.satisfied);
       if (what || !options.single.empty()) {
@@ -2116,7 +2134,7 @@ namespace {
     }
     run_control(rows.size());
     require(lines.good(), "Could not write the contract runtime's JSON lines");
-    std::printf("MEASURE contract-runtime family=%s cases=%zu controls=%u mean_ms=%llu max_ms=%llu total_s=%.1f estimate_ms=1300\n", owner.name, rows.size(), controls, static_cast<unsigned long long>(rows.empty() ? 0 : total_ms / rows.size()), static_cast<unsigned long long>(slowest_ms), double(total_ms) / 1000.);
+    std::printf("MEASURE contract-runtime family=%s cases=%zu controls=%u mean_ms=%llu max_ms=%llu total_s=%.1f estimate_ms=1300 wall_s=%.1f\n", owner.name, rows.size(), controls, static_cast<unsigned long long>(rows.empty() ? 0 : total_ms / rows.size()), static_cast<unsigned long long>(slowest_ms), double(total_ms) / 1000., double(total_wall_ms) / 1000.);
     // Only a whole family shows a row stale: the others sample the cells.
     tally.finish(gap_rows, owner.name, !options.partial() && cells == scope::whole);
   }
@@ -2407,8 +2425,14 @@ namespace {
 
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // --wall-clock: the cases play on the real clock, as before the game clock
+  // (test_game3d_clock.h); a family of several releases passes it on.
+  const bool wall_clock = sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
   std::vector<char *> flags {argv[0]};
   std::vector<std::string> forwarded, positional;
+  if (wall_clock) {
+    forwarded.push_back("--wall-clock");
+  }
   std::string family = "sl27";
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
@@ -2435,7 +2459,7 @@ int main(int argc, char **argv) {
   const auto *members = find_group(family);
   const bool known = members || find_family(family, kind);
   if (!known || !generator::parse_options(int(flags.size()), flags.data(), options, error) || (!options.list && positional.size() != 4 + interposers(family))) {
-    std::fprintf(stderr, "%s%susage: reshade_contract_matrix_runtime_tests [--family sl26|sl27|sl212_214|sl215_30|sl215|sl30|ngx|generic|ui] [--list | --case <id|family:name=value,...> | --shard i/N] official.dll frozenShaders test.addon64 freshOutput [interposer.dll per release]\n", error.c_str(), error.empty() ? "" : "\n");
+    std::fprintf(stderr, "%s%susage: reshade_contract_matrix_runtime_tests [--family sl26|sl27|sl212_214|sl215_30|sl215|sl30|ngx|generic|ui] [--list | --case <id|family:name=value,...> | --shard i/N] [--wall-clock] official.dll frozenShaders test.addon64 freshOutput [interposer.dll per release]\n", error.c_str(), error.empty() ? "" : "\n");
     return 2;
   }
   if (options.list) {
@@ -2480,6 +2504,11 @@ int main(int argc, char **argv) {
     fixture.initialize(fs::absolute(positional[0]), fs::absolute(positional[1]), directory, 2, 0, fs::absolute(positional[2]));
     fixture.load_native(directory);
     fixture.bind(sdk, fixture.version.major == 2);
+    // Setup is done: from here on every case plays game time, frame_ms per
+    // Present, with the add-on quiesced at each frame boundary (README, Test
+    // builds), unless --wall-clock keeps the real clock.
+    require(fixture.clock.bind(GetModuleHandleW(L"SunshineSBSTest.addon64")), "Test add-on lacks the game clock exports");
+    fixture.clock.engage();
 
     struct foreground_scope {
       contract_fixture &fixture;
@@ -2492,6 +2521,7 @@ int main(int argc, char **argv) {
     // The family's per-Present trace (record_present), written at its end.
     game3d_present_trace::out.open(directory / "trace.txt", "native");
     const auto result = run_family(fixture, family, options, directory / ("contract-" + family + ".jsonl"));
+    fixture.clock.report(family.c_str());
     fixture.finish();
     game3d_present_trace::out.close();
     return result;
