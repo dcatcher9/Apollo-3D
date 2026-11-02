@@ -1049,11 +1049,13 @@ class ReadinessReport(unittest.TestCase):
         self.assertEqual(between['Capture lock'].status, 'INFO')
         self.assertIn('shortened first: holders p+0x1099e4:400/0.600,g+0xf4926:200/0.300,other:5/0.010 at 10:00:20',
                       between['Capture lock'].detail)
-        # Each trigger of ruling Q5 alone, and the window that met the most.
+        # Each trigger of ruling Q5 alone, and the window that met the most. A printed p99 is its bucket's exclusive
+        # upper bound: 500 is a wait of 0.25 ms or more (the 250 bucket's waits are below 0.25 ms), 1000 one of 0.5 ms
+        # or more.
         for kwargs, reason in (({'waits_1ms': 10, 'max_ms': 1.5}, '10 game waits of 1 ms or more in 10.0 s'),
-                               ({'p99': 250}, 'game p99 250 us'),
+                               ({'p99': 500}, 'game p99 500 us'),
                                ({'pct': 1.0}, 'game waits 1.00% of wall time'),
-                               ({'present_p99': 500}, 'present p99 500 us')):
+                               ({'present_p99': 1000}, 'present p99 1000 us')):
             met = run(BASE + [window(), window('10:00:20', **kwargs)])
             self.assertEqual(met['Capture lock'].status, 'WARN', reason)
             self.assertIn(f'1 of 2 windows met the capture-lock split trigger (owner ruling Q5): {reason} at 10:00:20, '
@@ -1061,6 +1063,10 @@ class ReadinessReport(unittest.TestCase):
             self.assertEqual(met['Capture lock'].times, ['10:00:20'])
         below = run(BASE + [window(waits_1ms=9, max_ms=1.5)])
         self.assertEqual(below['Capture lock'].status, 'INFO')
+        # The bucket below each p99 trigger: waits below 0.25 ms (game; above parked, so INFO) and below 0.5 ms
+        # (present; the game side parked, so PASS) are no trigger.
+        for kwargs, status in (({'p99': 250}, 'INFO'), ({'present_p99': 500}, 'PASS')):
+            self.assertEqual(run(BASE + [window(), window('10:00:20', **kwargs)])['Capture lock'].status, status, kwargs)
         self.assertNotIn('Capture lock', run(BASE))
 
     def test_dlssg_inputs_name_copies_and_refusals(self):

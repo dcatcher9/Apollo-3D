@@ -752,7 +752,9 @@ WARN when a window met the trigger (game waits of 1 ms or more at least once a s
 0.25 ms or more, game waits of 1% or more of wall time, or a present p99 of 0.5 ms or more), with
 its holder sites, since the 60 s steady window and whether the holders are present-thread sections
 stay the owner's call; PASS when every window stayed parked (game p99 up to 50 us, largest wait
-below 0.5 ms); INFO in between, naming the holders to shorten first. INFO `Second signaller` (11-01)
+below 0.5 ms); INFO in between, naming the holders to shorten first. A printed p99 is its bucket's
+exclusive upper bound, so the triggers need a bound above 250 us (game) or 500 us (present); until
+the 11-01 fix review they fired one bucket early (F34). INFO `Second signaller` (11-01)
 lists each queue that poisoned a fence as its second signaller, with the first signaller and the
 calling modules, the live data the poison's relaxations wait for. `Queue order` warns on a late
 conflict as the residual R1 and names the relied reads a model reset or an eviction conflicted apart

@@ -1803,7 +1803,10 @@ def capture_lock_checks(s: Session, add) -> None:
     the split trigger, naming its holder sites (the 60 s steady window and whether the holders are present-thread
     sections that perf items 1 and 2 do not remove stay the owner's call); PASS when every window stayed parked; INFO
     in between (the named holder is shortened first). No line means no check: without Diagnostics a line comes only
-    for a window with a game thread's wait of a millisecond or more, so such a session is never parked."""
+    for a window with a game thread's wait of a millisecond or more, so such a session is never parked. A printed
+    percentile is its histogram bucket's exclusive upper bound (capture_lock_stats.h quantile_us): 250 means a wait
+    below 0.25 ms, so a p99 trigger of 0.25 ms or more needs a bound above 250 (500: 0.25 to 0.5 ms), and parked a
+    bound of at most 50 (below 0.05 ms). Until 11-01 the triggers compared the bound with >=, one bucket early."""
     if not s.capture_lock:
         return
 
@@ -1811,11 +1814,11 @@ def capture_lock_checks(s: Session, add) -> None:
         reasons = []
         if w['game_waits_1ms'] * 1000 >= Q5_LONG_WAITS_PER_S * w['window_ms']:
             reasons.append(f"{w['game_waits_1ms']} game waits of 1 ms or more in {w['window_ms'] / 1000:.1f} s")
-        if w['game_p99_us'] >= Q5_GAME_P99_US:
+        if w['game_p99_us'] > Q5_GAME_P99_US:
             reasons.append(f"game p99 {w['game_p99_us']} us")
         if w['game_wait_pct'] >= Q5_GAME_WAIT_PCT:
             reasons.append(f"game waits {w['game_wait_pct']:.2f}% of wall time")
-        if w['present_p99_us'] >= Q5_PRESENT_P99_US:
+        if w['present_p99_us'] > Q5_PRESENT_P99_US:
             reasons.append(f"present p99 {w['present_p99_us']} us")
         return reasons
 

@@ -657,7 +657,10 @@ summed wait is 1% or more of wall time, or the present thread's p99 wait is 0.5 
 dominant holder sites are present-thread sections that perf items 1 and 2 do not remove. Below a
 p99 of 0.05 ms and a largest wait of 0.5 ms it stays parked; in between, the named holder is
 shortened first. The readiness report's `Capture lock` check applies these thresholds to each logged
-window (WARN at the trigger with the window's holders, PASS parked, INFO in between, 11-01); the
+window (WARN at the trigger with the window's holders, PASS parked, INFO in between, 11-01), reading
+each printed percentile as its bucket's exclusive upper bound: a p99 of 0.25 ms or more is a bound
+above 250 us (game), 0.5 ms or more one above 500 us (present), and parked a bound of at most 50 us
+(until the 11-01 fix review the triggers took the bound itself as the wait, one bucket early, F34); the
 60 s steady window and whether the holders are present-thread sections stay the owner's call.
 
 ### Frame record
