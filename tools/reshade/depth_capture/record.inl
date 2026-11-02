@@ -122,19 +122,30 @@ namespace sunshine_streamline::depth_capture {
     // inputs admitted before this call (serial), and any while FG stays off,
     // are the viewport's ordinary source (frame_generation_role_retired,
     // frame_generation_retired). retiring_serial: the options call's. A new
-    // mark takes the slot of a mark FG On ended (inactive) before an active
-    // one, then the oldest: a viewport's FG Off is retired once (repeated
-    // Offs retire nothing new, hook_fg_options), so an active mark that
-    // gave way would stay gone while FG stays off. Until 11-01 the oldest
-    // went whether active or not (X4).
+    // mark takes the slot of a mark of another epoch first (it serves only
+    // copies of that epoch, which the device's recreation ended, and marks
+    // are never cleared),
+    // then of a mark FG On ended (inactive) before an active one, then the
+    // oldest: a viewport's FG Off is retired once (repeated Offs retire
+    // nothing new, hook_fg_options), so an active mark that gave way would
+    // stay gone while FG stays off, and an inactive mark of this epoch still
+    // names its serial to frame_generation_retired and to the lineage
+    // stand-in for a pre-Off FG copy after FG On (select_capture). Until
+    // 11-01 the oldest went whether active or not (X4), then (the second fix
+    // review) an inactive mark of this epoch went before a stale active one
+    // of an earlier epoch.
     if (fg_role) {
       auto *mark = fg_retirement_of(epoch, viewport);
       const auto kept = mark ? mark->serial : 0;
       if (!mark) {
+        // Whether a gives way before b.
+        const auto before = [epoch](const fg_retirement &a, const fg_retirement &b) {
+          if ((a.epoch == epoch) != (b.epoch == epoch)) return a.epoch != epoch;
+          if (a.active != b.active) return !a.active;
+          return a.epoch < b.epoch || (a.epoch == b.epoch && a.serial < b.serial);
+        };
         mark = &scope.fg_retirements[0];
-        for (auto &value : scope.fg_retirements)
-          if (value.active != mark->active ? !value.active :
-              value.epoch < mark->epoch || (value.epoch == mark->epoch && value.serial < mark->serial)) mark = &value;
+        for (auto &value : scope.fg_retirements) if (before(value, *mark)) mark = &value;
       }
       *mark = {epoch, std::max(kept, retiring_serial), viewport, true};
     }

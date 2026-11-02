@@ -552,7 +552,9 @@ namespace sunshine_streamline::depth_capture {
       std::atomic<std::uint64_t> frame_generation_on_tick{}, frame_generation_on_moves{};
       std::atomic<std::uint64_t> frame_generation_run_tick{}, frame_generation_run_moves{}, frame_generation_activity_tick{};
       // Protected by mutex: the viewports whose FG role FG Off retired, per
-      // epoch (retire_source; the oldest gives way).
+      // epoch (retire_source). A new mark takes the slot of another epoch's
+      // mark first, then of an inactive one (FG On ended it), then the
+      // oldest (X4).
       std::array<fg_retirement, 4> fg_retirements{};
       // Requires mutex. The first Present after the newest FG frame's newest
       // submission seen (anchor_frame_generation; 0 none since its first

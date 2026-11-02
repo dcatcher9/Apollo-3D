@@ -2195,8 +2195,31 @@ namespace sunshine_streamline::depth_capture {
           fail("X4 FG retirement marks: a viewport's FG On left its mark active");
         }
       }
+      // Marks are never cleared, so a device recreation (a new epoch) leaves
+      // the active marks of the earlier epoch behind. They give way first:
+      // an inactive mark of the current epoch still names its serial (the
+      // lineage stand-in for a pre-Off FG copy after FG On, and
+      // frame_generation_retired). Until the second fix review of 11-01 the
+      // inactive mark went first.
       reset();
-      std::puts("PASS X4 FG retirement marks: a new mark takes an inactive mark's slot before an active one");
+      constexpr std::uint64_t earlier = 40;
+      retire_source(provider_kind::streamline, earlier, sunshine_scene_depth::fg_source_id(1), 5, true);
+      retire_source(provider_kind::streamline, earlier, sunshine_scene_depth::fg_source_id(2), 6, true);
+      retire_source(provider_kind::streamline, epoch, sunshine_scene_depth::fg_source_id(3), 13, true);
+      retire_source(provider_kind::streamline, epoch, sunshine_scene_depth::fg_source_id(4), 14, true);
+      frame_generation_restored(epoch, 4);
+      retire_source(provider_kind::streamline, epoch, sunshine_scene_depth::fg_source_id(5), 20, true);
+      if (!frame_generation_retired(epoch, 4, 14)) {
+        fail("X4 FG retirement marks: another viewport's FG Off evicted this epoch's inactive mark before an earlier epoch's active one");
+      }
+      if (!frame_generation_retired(epoch, 3, 0) || !frame_generation_retired(epoch, 5, 0)) {
+        fail("X4 FG retirement marks: this epoch's active marks did not stay");
+      }
+      if (frame_generation_retired(earlier, 1, 0) || !frame_generation_retired(earlier, 2, 0)) {
+        fail("X4 FG retirement marks: the earlier epoch's oldest active mark did not give way first");
+      }
+      reset();
+      std::puts("PASS X4 FG retirement marks: a new mark takes another epoch's mark's slot, then an inactive mark's, before an active one");
     }
 
     // P6: two or more active Streamline views tie (S19): no view is the

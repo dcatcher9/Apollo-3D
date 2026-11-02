@@ -4837,9 +4837,13 @@ until this viewport's next evaluation, so the other viewport's copy showed at FG
 (a view that stopped evaluating, past the source age, makes nothing ambiguous). An NGX copy published after the shown
 FG copy takes the queue as at any handover, which makes the SR copies before it historical. The FG
 role stays retired until FG On (`frame_generation_restored`, the options call that turns FG on
-again; the capture owner keeps four viewports' retirement marks, and a new mark takes the slot of one
-FG On ended before an active one, since an Off is retired once and an active mark that gave way would
-stay gone while FG stays off: until 11-01 the oldest gave way, active or not, X4): an FG input admitted before the retiring options call (its tag call's or DLSS-G
+again; the capture owner keeps four viewports' retirement marks, and a new mark takes the slot of a
+mark of an earlier epoch first (marks are never cleared, and it serves only copies of a device that was
+recreated), then of one FG On ended before an active one, since an Off is retired once and an active
+mark that gave way would stay gone while FG stays off, while an ended mark of the current epoch still
+names its serial to the lineage stand-in for a pre-Off FG copy: until 11-01 the oldest gave way, active
+or not, X4, then until the second fix review such an ended mark went before an earlier epoch's active
+one): an FG input admitted before the retiring options call (its tag call's or DLSS-G
 evaluation's observation serial below the call's) or while the role stays retired is the frame's
 own depth of the display lineage, the viewport's ordinary source, never its FG input
 (`frame_generation_retired`): the probe re-keys a late Off's FG tag copy deferred to its frame's
