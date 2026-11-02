@@ -1747,6 +1747,27 @@ without a barrier. Watchdogs and bounds on real hangs read `wall_now()`. A fixtu
 `reshade_game3d_fixture_clock` tests the helper against stand-in exports over the clock's test
 branch.
 
+In-process fixtures link a view of the add-on's sources into their own executable instead of
+loading the test add-on. The probe view (`sunshine_game3d_core_probe_test`) and the renderer view
+(`sunshine_game3d_core_renderer_test`) also carry `SUNSHINE_GAME3D_TEST_CLOCK`, and
+CMakeLists.txt's `sunshine_view_clock(target)` builds the clock exports
+([`test_game3d_clock_exports.cpp`](test_game3d_clock_exports.cpp)) and a barrier over the view's
+own pool count and log queue ([`test_game3d_view_quiesce.cpp`](test_game3d_view_quiesce.cpp)) into
+the executable, which binds itself (`bind(GetModuleHandleW(nullptr))`). The seam characterization,
+the Streamline probe (with the capture owner's regressions it runs), the NGX call trace, the UI
+capture bridge, the diagnostic-texture fixture and the D3D12 native renderer runtime engage it at
+their start; their waits for a source age, an association window or a poll cadence are
+`hitch(ms)`. The seam characterization has no `--wall-clock` mode: its rows pin exact clock edges,
+which only the game clock holds. Where such a fixture held a call to a real-time limit (the
+diagnostic-texture fixture's 100 ms for calls that must not wait for the GPU, the native renderer's
+50 ms 4K start and toggle back and the present-thread executor's 40 ms call), the verdict is the
+behaviour that limit stood for (owner decision of 11-02) and the time a `MEASURE` line: the call
+returned while the GPU work it must not wait for was still held behind a closed gate; the 4K
+start's setup ran in a pool build and the ready call adopted a renderer whose first render's
+objects were prepared; a toggle back returned while the build it cancelled was still held in its
+first step; the present-thread executor built over more than three calls. Under `--wall-clock` the
+old limits hold as well.
+
 [`check_clock_domains.cmake`](check_clock_domains.cmake) (the `reshade_clock_domains` test) keeps
 both complete. It counts every other clock read and every thread-pool submission, new thread,
 timer, wait or work object of the add-on's sources, the test add-on's own export sources included
