@@ -2165,6 +2165,40 @@ namespace sunshine_streamline::depth_capture {
       std::printf("PASS P6 FG Off retires only the FG role: %zu rows\n", std::size(rows));
     }
 
+    // FG retirement marks (X4, 11-01). A viewport's FG Off is retired once
+    // (repeated Offs retire nothing new) and stays retired until its FG On,
+    // so a new mark of the four takes the slot of one FG On ended before an
+    // active one. Until 11-01 the oldest mark gave way whether active or not:
+    // after three later viewports' Off and On, a fourth viewport's Off
+    // evicted the first viewport's active mark, and its role read as not
+    // retired (frame_generation_retired) while its FG stayed off.
+    void fg_retirement_mark_rows() {
+      reset();
+      constexpr std::uint64_t epoch = 41;
+      // Viewport 1's FG Off: its mark stays active while FG stays off.
+      retire_source(provider_kind::streamline, epoch, sunshine_scene_depth::fg_source_id(1), 10, true);
+      // Viewports 2 to 4 turn FG off and on again: their marks are inactive.
+      for (std::uint32_t viewport = 2; viewport != 5; ++viewport) {
+        retire_source(provider_kind::streamline, epoch, sunshine_scene_depth::fg_source_id(viewport), 10 + viewport, true);
+        frame_generation_restored(epoch, viewport);
+      }
+      // A fifth viewport's FG Off needs one of the four slots.
+      retire_source(provider_kind::streamline, epoch, sunshine_scene_depth::fg_source_id(5), 20, true);
+      if (!frame_generation_retired(epoch, 1, 0)) {
+        fail("X4 FG retirement marks: another viewport's FG Off evicted the active mark of a viewport whose FG stays off");
+      }
+      if (!frame_generation_retired(epoch, 5, 0)) {
+        fail("X4 FG retirement marks: the fifth viewport's FG Off made no mark");
+      }
+      for (std::uint32_t viewport = 2; viewport != 5; ++viewport) {
+        if (frame_generation_retired(epoch, viewport, 0)) {
+          fail("X4 FG retirement marks: a viewport's FG On left its mark active");
+        }
+      }
+      reset();
+      std::puts("PASS X4 FG retirement marks: a new mark takes an inactive mark's slot before an active one");
+    }
+
     // P6: two or more active Streamline views tie (S19): no view is the
     // Present's source (ambiguous_views, which moves the admission
     // watermark), and the display holds only a copy of the viewport the
@@ -3819,6 +3853,7 @@ int main() {
   lineage_stand_in_rows();
   missing_frame_rows();
   fg_off_role_rows();
+  fg_retirement_mark_rows();
   view_tie_rows();
   storage_before_retention();
   named_head_rows();

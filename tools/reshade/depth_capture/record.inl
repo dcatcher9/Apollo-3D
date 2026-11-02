@@ -121,14 +121,20 @@ namespace sunshine_streamline::depth_capture {
     // The role stays retired until FG On (frame_generation_restored): the
     // inputs admitted before this call (serial), and any while FG stays off,
     // are the viewport's ordinary source (frame_generation_role_retired,
-    // frame_generation_retired). retiring_serial: the options call's.
+    // frame_generation_retired). retiring_serial: the options call's. A new
+    // mark takes the slot of a mark FG On ended (inactive) before an active
+    // one, then the oldest: a viewport's FG Off is retired once (repeated
+    // Offs retire nothing new, hook_fg_options), so an active mark that
+    // gave way would stay gone while FG stays off. Until 11-01 the oldest
+    // went whether active or not (X4).
     if (fg_role) {
       auto *mark = fg_retirement_of(epoch, viewport);
       const auto kept = mark ? mark->serial : 0;
       if (!mark) {
         mark = &scope.fg_retirements[0];
         for (auto &value : scope.fg_retirements)
-          if (value.epoch < mark->epoch || (value.epoch == mark->epoch && value.serial < mark->serial)) mark = &value;
+          if (value.active != mark->active ? !value.active :
+              value.epoch < mark->epoch || (value.epoch == mark->epoch && value.serial < mark->serial)) mark = &value;
       }
       *mark = {epoch, std::max(kept, retiring_serial), viewport, true};
     }
