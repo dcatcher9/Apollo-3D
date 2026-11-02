@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Real executable exports + MinHook. No game, graphics runtime or GPU needed.
+// Game time is the probe view's test clock (test_game3d_clock.h), engaged in
+// main and moved only by hitch(): discovery's 250 ms and 1000 ms poll
+// cadences run in game time. --wall-clock runs it on the real clock.
 #include "upscaler_call_trace.h"
 #include "ngx_depth_source.h"
 #include "streamline_depth_capture.h"
 #include "addon_lifetime.h"
 #include "game3d_diagnostic_metadata.h"
+#include "test_game3d_clock.h"
 #include "test_minhook_ledger.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -141,6 +145,9 @@ namespace {
     *output = reply == probe_reply::null_value ? nullptr : reinterpret_cast<void *>(1);
     return reply == probe_reply::failed ? ngx_failure : ngx_success;
   }
+  // Game time passes only here, after the add-on's pool work (a discovery in
+  // flight) has quiesced.
+  void hitch(std::uint64_t ms) { sunshine_game3d_fixture::fixture_clock().hitch(ms); }
   template<class Predicate> void await(Predicate predicate, const char *message) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!predicate() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
@@ -361,11 +368,11 @@ namespace {
     // Discovery walks every module's exports. With loader notifications it
     // must not repeat until a module actually loads.
     require(counts.load_notifications && counts.scans == 1, "initial discovery did not use loader notifications");
-    Sleep(1100); poll(); testing::wait_discovery();
+    hitch(1100); poll(); testing::wait_discovery();
     require(testing::counts().scans == 1, "discovery rescanned without a module load");
     const auto added = LoadLibraryExW(L"msimg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     require(added != nullptr, "discovery fixture could not load a system module");
-    Sleep(300); poll(); testing::wait_discovery();
+    hitch(300); poll(); testing::wait_discovery();
     require(testing::counts().scans == 2, "a newly loaded module did not trigger discovery");
     FreeLibrary(added);
     // A scan that reaches the 65536-module bound reports the truncation and
@@ -374,17 +381,17 @@ namespace {
     testing::set_synthetic_modules(65536 + 3);
     const auto bounded = LoadLibraryExW(L"msimg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     require(bounded != nullptr, "bound fixture could not load a system module");
-    Sleep(300); poll(); testing::wait_discovery();
+    hitch(300); poll(); testing::wait_discovery();
     counts = testing::counts();
     require(counts.scans == 3 && counts.truncated && counts.truncations == 1 && counts.modules == 0,
       "a scan at the module bound did not stop and report its truncation");
     testing::report_now();
     require(logged("modules=0 truncated=1 truncations=1"), "the coverage report omitted the truncation");
-    Sleep(300); poll(); testing::wait_discovery();
+    hitch(300); poll(); testing::wait_discovery();
     counts = testing::counts();
     require(counts.scans == 4 && !counts.truncated && counts.truncations == 1 && counts.modules >= 1 && counts.installed == 4,
       "a truncated scan did not resume at its first unexamined module");
-    Sleep(300); poll(); testing::wait_discovery();
+    hitch(300); poll(); testing::wait_discovery();
     require(testing::counts().scans == 4, "a completed resumed scan rescanned without a module load");
     testing::set_synthetic_modules(0);
     FreeLibrary(bounded);
@@ -1704,8 +1711,12 @@ namespace {
   }
 }
 
-int main() {
+int main(int argc, char **argv) {
   try {
+    auto &clock = sunshine_game3d_fixture::fixture_clock();
+    sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
+    require(clock.bind(GetModuleHandleW(nullptr)), "the probe view's test clock exports are missing");
+    clock.engage();
     using sunshine_upscaler_trace::testing::frame_generation_module;
     require(frame_generation_module(LR"(D:\Games\Game\bin\NVNGX_DLSSG.DLL)") &&
         frame_generation_module(LR"(C:\ProgramData\NVIDIA\NGX\models\dlssg\versions\1\files\160_E1.bin)") &&

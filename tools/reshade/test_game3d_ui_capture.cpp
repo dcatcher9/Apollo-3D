@@ -3,6 +3,7 @@
 #include "game3d_diagnostic_metadata.h"
 #include "streamline_buffer_contract.h"
 #include "streamline_depth_capture.h"
+#include "test_game3d_clock.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -14,6 +15,9 @@
 // This test exercises the real API-observation -> frozen dump bridge. The
 // native owner is a controllable asynchronous boundary, not a GPU simulation;
 // native fixture tests separately verify copies, states and fence retirement.
+// It plays game time on the probe view's test clock (test_game3d_clock.h),
+// engaged in main and moved only by hitch(): the optional captures' 250 ms
+// completion deadline is game time. --wall-clock runs it on the real clock.
 namespace sunshine_streamline::depth_capture {
   struct source_reference {};
   struct texture_reference {};
@@ -63,7 +67,8 @@ namespace {
     return sunshine_game3d::diagnostic_metadata_generation();
   }
   d::stamp stamp(std::uint64_t sequence = 1) {
-    return {sunshine_game3d::diagnostic_metadata_generation(), 71, sequence, GetTickCount64(), 19, 24, 0x4321, 7, true};
+    return {sunshine_game3d::diagnostic_metadata_generation(), 71, sequence, sunshine_game3d_fixture::fixture_clock().now(), 19,
+      24, 0x4321, 7, true};
   }
   void tag(unsigned type, std::uint64_t native, const d::stamp &at, std::uint32_t state = 128,
       std::uint32_t lifecycle = 0, std::uint64_t version = 1) {
@@ -273,7 +278,11 @@ namespace {
   }
 }
 
-int main() try {
+int main(int argc, char **argv) try {
+  auto &clock = sunshine_game3d_fixture::fixture_clock();
+  sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
+  require(clock.bind(GetModuleHandleW(nullptr)), "the probe view's test clock exports are missing");
+  clock.engage();
   // These fixtures emit 2.12+ tag numbers (UIAlpha 69) through the dump observer.
   sunshine_streamline::buffers::set_active({2, 12, 0, 0});
   dlssg_capture_admission_test();
@@ -593,7 +602,7 @@ int main() try {
     batch.freeze();
     auto response = primary(); std::uint64_t bytes = 64; std::string metadata = "{}";
     require(!batch.append(response, bytes, metadata, true), "pending native capture did not honor bounded deadline");
-    Sleep(270);
+    clock.hitch(270);
     require(batch.append(response, bytes, metadata, true) && row(metadata, 10)["status"] == "gpu_completion_timeout" &&
             response.texture_count == 1, "expired optional capture blocked or failed the primary dump");
   }

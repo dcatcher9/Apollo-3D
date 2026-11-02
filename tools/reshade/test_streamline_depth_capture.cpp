@@ -30,6 +30,9 @@
 #include <vector>
 
 namespace sunshine_streamline::depth_capture {
+  // Game time: the probe view's test clock once the running fixture engaged
+  // it (test_game3d_clock.h), else the real tick.
+  using sunshine_game3d_fixture::fixture_clock;
   using sunshine_game3d::depth_output::retained_depth;
   using sunshine_game3d::depth_output::display_action;
   using sunshine_game3d::depth_output::display_decision;
@@ -352,20 +355,20 @@ namespace sunshine_streamline::depth_capture {
         // queue in mono while SR's first capture is pending); never the
         // malformed-input marker, which alone uses epoch 0.
         begin_evaluation(5, 1, 0, provider_kind::streamline);
-        if (!evaluation_live(GetTickCount64(), 250)) return false;
+        if (!evaluation_live(fixture_clock().now(), 250)) return false;
         evaluations = {};
         begin_evaluation(0, 2, UINT32_MAX, provider_kind::streamline);
-        if (evaluation_live(GetTickCount64(), 250)) return false;
+        if (evaluation_live(fixture_clock().now(), 250)) return false;
         // An established Streamline SR owner (source 0) stays associated
         // through its own epoch's evaluations only, never through the marker.
         queue_state sr;
         sr.provider_established = true; sr.provider = provider_kind::streamline; sr.nominated_epoch = 5;
-        expire_association(sr, GetTickCount64());
+        expire_association(sr, fixture_clock().now());
         if (sr.provider_established) return false;
         evaluations = {};
         begin_evaluation(5, 3, 0, provider_kind::streamline);
         sr.provider_established = true; sr.nominated_epoch = 5;
-        expire_association(sr, GetTickCount64());
+        expire_association(sr, fixture_clock().now());
         if (!sr.provider_established) return false;
         // Evaluations the API rejects keep the owner only as long as silence
         // would (BF6 10-22: 70 s of mono while every DLSS call was rejected),
@@ -380,16 +383,16 @@ namespace sunshine_streamline::depth_capture {
           return capture_pool.slots[0].finished && capture_pool.slots[0].success == successful;
         };
         if (view.sequence != 3 || !finished(41, 3, false) || !view.rejected_since) return false;
-        expire_association(sr, GetTickCount64());
+        expire_association(sr, fixture_clock().now());
         if (!sr.provider_established) return false; // A brief rejected run keeps the owner.
         view.rejected_since -= sunshine_freshness::association_ms + 1;
         begin_evaluation(5, 4, 0, provider_kind::streamline);
         if (view.sequence != 4 || !view.rejected_since) return false;
-        expire_association(sr, GetTickCount64());
+        expire_association(sr, fixture_clock().now());
         if (sr.provider_established) return false;
         if (!finished(42, 4, true) || view.rejected_since || !finished(43, 3, false) || view.rejected_since) return false;
         sr.provider_established = true; sr.nominated_epoch = 5;
-        expire_association(sr, GetTickCount64());
+        expire_association(sr, fixture_clock().now());
         if (!sr.provider_established) return false;
         fixture::clear_captures();
       }
@@ -406,13 +409,13 @@ namespace sunshine_streamline::depth_capture {
           capture_pool.slots[0] = {}; capture_pool.slots[0].id = id; capture_pool.slots[0].nomination_only = metadata_only;
           capture_pool.slots[0].metadata.provider = provider_kind::streamline; capture_pool.slots[0].metadata.epoch = epoch;
           capture_pool.slots[0].metadata.sequence = sequence; capture_pool.slots[0].metadata.viewport = viewport; capture_pool.slots[0].metadata.source_id = source;
-          capture_pool.slots[0].metadata.tick = GetTickCount64();
+          capture_pool.slots[0].metadata.tick = fixture_clock().now();
           finish(id, successful);
           return capture_pool.slots[0].finished;
         };
-        const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
+        const auto silent_since = [] { return fixture_clock().now() - sunshine_freshness::fg_silent_ms - 1; };
         // FG On alone owns nothing.
-        if (frame_generation_scope_live(epoch, 2, GetTickCount64()) || frame_generation_scope_live(epoch, 2, silent_since()) ||
+        if (frame_generation_scope_live(epoch, 2, fixture_clock().now()) || frame_generation_scope_live(epoch, 2, silent_since()) ||
             frame_generation_scope_live(epoch, 2, 0)) return false;
         // A refused FG boundary begins an evaluation but accepts no copy.
         begin_evaluation(epoch, 10, 2, provider_kind::streamline, fg, 0);
@@ -433,7 +436,7 @@ namespace sunshine_streamline::depth_capture {
         begin_evaluation(epoch, 14, 2, provider_kind::streamline, fg, 0);
         if (!finished(55, fg, 2, 14, true) || !frame_generation_scope_live(epoch, 2, silent_since())) return false;
         // A copy accepted before this FG On belongs to an earlier scope.
-        if (frame_generation_scope_live(epoch, 2, GetTickCount64() + 1)) return false;
+        if (frame_generation_scope_live(epoch, 2, fixture_clock().now() + 1)) return false;
         // A newer frame without an FG copy turns it silent at once; another
         // viewport's miss, or one of an older frame, changes nothing.
         frame_generation_missed(epoch, 3, 99);
@@ -454,8 +457,8 @@ namespace sunshine_streamline::depth_capture {
         own->accepted_tick -= sunshine_freshness::fg_silent_ms + 1;
         if (frame_generation_scope_live(epoch, 2, silent_since())) return false;
         // Without an active capture owner nothing is live.
-        own->accepted_tick = GetTickCount64(); requested = false;
-        if (frame_generation_scope_live(epoch, 2, silent_since()) || frame_generation_scope_live(epoch, 2, GetTickCount64()))
+        own->accepted_tick = fixture_clock().now(); requested = false;
+        if (frame_generation_scope_live(epoch, 2, silent_since()) || frame_generation_scope_live(epoch, 2, fixture_clock().now()))
           return false;
         requested = true; fixture::clear_captures();
       }
@@ -484,13 +487,13 @@ namespace sunshine_streamline::depth_capture {
           ~release_queue() { entry->queue.p = nullptr; entry->fence.p = nullptr; entry.reset(); }
         } release{*entry};
         const auto compute_queue = reinterpret_cast<std::uint64_t>(&fence);
-        const auto silent_since = [] { return GetTickCount64() - sunshine_freshness::fg_silent_ms - 1; };
+        const auto silent_since = [] { return fixture_clock().now() - sunshine_freshness::fg_silent_ms - 1; };
         const auto copy = [&](std::uint64_t id, std::uint64_t sequence, bool compute, bool submitted) {
           begin_evaluation(epoch, sequence, 2, provider_kind::streamline, fg, 0);
           capture_pool.slots[0] = {}; capture_pool.slots[0].id = id; capture_pool.slots[0].compute_list = compute; capture_pool.slots[0].source_nominated = true;
           capture_pool.slots[0].metadata.provider = provider_kind::streamline; capture_pool.slots[0].metadata.epoch = epoch;
           capture_pool.slots[0].metadata.sequence = sequence; capture_pool.slots[0].metadata.viewport = 2; capture_pool.slots[0].metadata.source_id = fg;
-          capture_pool.slots[0].metadata.frame_generation_input = true; capture_pool.slots[0].metadata.tick = GetTickCount64();
+          capture_pool.slots[0].metadata.frame_generation_input = true; capture_pool.slots[0].metadata.tick = fixture_clock().now();
           capture_pool.slots[0].command = id; capture_pool.slots[0].producer_recording = std::make_shared<sunshine_native_command::recording_lifetime>();
           capture_pool.slots[0].producer_recording->cookie = id;
           if (submitted) { capture_pool.slots[0].producer_submitted = true; capture_pool.slots[0].producer_fence = sequence; capture_pool.slots[0].queue = compute_queue; }
@@ -639,7 +642,7 @@ namespace sunshine_streamline::depth_capture {
           std::uint64_t epoch, std::uint64_t sequence, std::uint64_t source) -> slot & {
         return fixture::make_capture(index, native, provider, epoch, sequence, source);
       };
-      const auto select = [&](std::uint64_t present) { return select_provider(owner, native, present, GetTickCount64(), {}); };
+      const auto select = [&](std::uint64_t present) { return select_provider(owner, native, present, fixture_clock().now(), {}); };
       // An observed API with no usable capture cannot suppress another source.
       begin_evaluation(1, 100, 0, provider_kind::streamline);
       if (owner.provider_established || select(1).value ||
@@ -672,12 +675,12 @@ namespace sunshine_streamline::depth_capture {
       capture_pool.slots[1].metadata.source_id = 1ull << 63;
       capture_pool.slots[1].metadata.sequence = 102;
       begin_evaluation(1, 102, 0, provider_kind::streamline, capture_pool.slots[1].metadata.source_id, 0);
-      if (select(2).value != &capture_pool.slots[1] || select_provider(owner, native, 2, GetTickCount64(), {true, 1, 0}).value != &capture_pool.slots[1]) return false;
+      if (select(2).value != &capture_pool.slots[1] || select_provider(owner, native, 2, fixture_clock().now(), {true, 1, 0}).value != &capture_pool.slots[1]) return false;
       queue_state takeover;
       takeover.provider_established = true; takeover.provider = provider_kind::ngx;
       takeover.source_id = 99; takeover.nominated_epoch = takeover.last_epoch = 1; takeover.last_sequence = 999;
       establish_provider(takeover, capture_pool.slots[1], 2);
-      if (select_provider(takeover, native, 3, GetTickCount64(), {}).value != &capture_pool.slots[1]) return false;
+      if (select_provider(takeover, native, 3, fixture_clock().now(), {}).value != &capture_pool.slots[1]) return false;
       capture_pool.slots[1].metadata.frame_generation_input = false;
       begin_evaluation(0, 9999, UINT32_MAX, provider_kind::streamline);
       if (select(1).value != &ngx) return false;
@@ -699,7 +702,7 @@ namespace sunshine_streamline::depth_capture {
       if (select(4).value != &preferred) return false;
       // Simultaneous distinct view/source identities remain ambiguous.
       begin_evaluation(3, 2, 1, provider_kind::ngx, 124);
-      const auto ambiguous = select_capture(owner, native, 4, provider_kind::ngx, GetTickCount64(), {});
+      const auto ambiguous = select_capture(owner, native, 4, provider_kind::ngx, fixture_clock().now(), {});
       if (ambiguous.value || ambiguous.result != status::ambiguous ||
           ambiguous.selection != selection_reason::ambiguous_views) return false;
       {
@@ -709,7 +712,7 @@ namespace sunshine_streamline::depth_capture {
         auto &preferred = make(1, provider_kind::streamline, 70, 1, 0);
         preferred.finished = false;
         const auto pick = [&](std::uint64_t presentation, selection_policy policy = {}) {
-          return select_provider(preferred_owner, native, presentation, GetTickCount64(), policy);
+          return select_provider(preferred_owner, native, presentation, fixture_clock().now(), policy);
         };
         if (pick(1).value != &fallback) return false;
         establish_provider(preferred_owner, fallback, 1);
@@ -731,14 +734,14 @@ namespace sunshine_streamline::depth_capture {
         make(2, provider_kind::ngx, 60, 2, 500).finished = false;
         if (pick(2).value == &preferred) return false;
         // An owner without a recently copied frame holds nothing.
-        preferred_owner.last_source_tick = GetTickCount64() - sunshine_freshness::source_age_ms - 1;
+        preferred_owner.last_source_tick = fixture_clock().now() - sunshine_freshness::source_age_ms - 1;
         if (pick(2).value != &preferred) return false;
         // Metadata observed after the copy (camera reset, tag change, loss)
         // never makes a readable SL copy yield to a ready NGX source.
         preferred.metadata.observation_revision = 5;
         make(2, provider_kind::ngx, 60, 2, 500);
         queue_state unowned; unowned.device_identity = preferred_owner.device_identity;
-        if (select_provider(unowned, native, 2, GetTickCount64(), {}).value != &preferred) return false;
+        if (select_provider(unowned, native, 2, fixture_clock().now(), {}).value != &preferred) return false;
         establish_provider(preferred_owner, preferred, 2);
         preferred_owner.last_epoch = 70; preferred_owner.last_sequence = 1;
         preferred_owner.last_source_tick = preferred.metadata.tick;
@@ -746,9 +749,9 @@ namespace sunshine_streamline::depth_capture {
         auto &pending = make(3, provider_kind::streamline, 70, 2, 0); pending.finished = false;
         auto held = pick(3);
         if (held.value || held.latest != &pending || held.result != status::recorded) return false;
-        preferred_owner.last_source_tick = GetTickCount64() - sunshine_freshness::source_age_ms - 1;
+        preferred_owner.last_source_tick = fixture_clock().now() - sunshine_freshness::source_age_ms - 1;
         if (pick(3).value != &next_fallback) return false;
-        preferred_owner.last_source_tick = GetTickCount64();
+        preferred_owner.last_source_tick = fixture_clock().now();
         pending.finished = true; pending.success = false;
         if (pick(3).value != &next_fallback) return false;
         pending.success = true;
@@ -769,7 +772,7 @@ namespace sunshine_streamline::depth_capture {
         constexpr std::uint64_t fg_epoch = 42, fg_id = 1ull << 63;
         const selection_policy fg_policy{true, fg_epoch, 0};
         const auto pick = [&](std::uint64_t present, selection_policy policy = {}) {
-          return select_provider(established, native, present, GetTickCount64(), policy);
+          return select_provider(established, native, present, fixture_clock().now(), policy);
         };
         auto &first_ngx = make(0, provider_kind::ngx, 30, 1, 400);
         if (pick(20).value != &first_ngx || pick(20, fg_policy).value) return false;
@@ -796,11 +799,11 @@ namespace sunshine_streamline::depth_capture {
             pick(21, {true, fg_epoch + 1, 0}).value || pick(21, {true, fg_epoch, 1}).value) return false;
         // No prior provider: the same policy still beats the earlier NGX ID.
         queue_state fresh;
-        if (select_provider(fresh, native, 21, GetTickCount64(), fg_policy).value != &fg) return false;
+        if (select_provider(fresh, native, 21, fixture_clock().now(), fg_policy).value != &fg) return false;
         queue_state sr_owner;
         establish_provider(sr_owner, sr, 20);
         sr_owner.last_epoch = fg_epoch; sr_owner.last_sequence = 1;
-        if (select_provider(sr_owner, native, 21, GetTickCount64(), fg_policy).value != &fg) return false;
+        if (select_provider(sr_owner, native, 21, fixture_clock().now(), fg_policy).value != &fg) return false;
         // A transient missing camera does not invent one from NGX or revoke
         // otherwise valid SL depth; consumers retain the raw-depth path.
         fg.metadata.projection.supplied = false;
@@ -839,7 +842,7 @@ namespace sunshine_streamline::depth_capture {
         selection_policy excluded;
         excluded.exclude_unconfirmed_fg = true;
         const auto pick = [&](std::uint64_t present, selection_policy policy) {
-          return select_provider(revoked_owner, native, present, GetTickCount64(), policy);
+          return select_provider(revoked_owner, native, present, fixture_clock().now(), policy);
         };
         auto &old_fg = make(0, provider_kind::streamline, fg_epoch, 1, fg_id);
         old_fg.metadata.frame_generation_input = true;
@@ -890,11 +893,11 @@ namespace sunshine_streamline::depth_capture {
         retire_source(provider_kind::streamline, fg_epoch, fg_id);
         finish(new_fg.id, true);
         if (!old_fg.invalid || !new_fg.invalid || established.provider_established ||
-            select_provider(established, native, 101, GetTickCount64(), {true, fg_epoch, 0}).value) return false;
+            select_provider(established, native, 101, fixture_clock().now(), {true, fg_epoch, 0}).value) return false;
         auto &fresh_ngx = make(2, provider_kind::ngx, 81, 1, 600);
-        if (select_provider(established, native, 102, GetTickCount64(), {}).value != &fresh_ngx) return false;
+        if (select_provider(established, native, 102, fixture_clock().now(), {}).value != &fresh_ngx) return false;
         establish_provider(established, fresh_ngx, 102);
-        if (select_provider(established, native, 103, GetTickCount64(), {true, fg_epoch, 0}).value) return false;
+        if (select_provider(established, native, 103, fixture_clock().now(), {true, fg_epoch, 0}).value) return false;
         // An FG nomination replaces its viewport's ordinary view, as the
         // probe's does (superseded 0), also the FG head FG Off passed to it,
         // once a successful options call turned FG on again: until then the
@@ -903,7 +906,7 @@ namespace sunshine_streamline::depth_capture {
         frame_generation_restored(fg_epoch, 0);
         auto &renewed_fg = fixture::make_capture(3, native, provider_kind::streamline, fg_epoch, 14, fg_id, 0, 0);
         renewed_fg.metadata.frame_generation_input = true;
-        if (select_provider(established, native, 103, GetTickCount64(), {true, fg_epoch, 0}).value != &renewed_fg) return false;
+        if (select_provider(established, native, 103, fixture_clock().now(), {true, fg_epoch, 0}).value != &renewed_fg) return false;
       }
       for (const bool complete_before_release : {false, true}) {
         fixture::clear_captures();
@@ -926,10 +929,10 @@ namespace sunshine_streamline::depth_capture {
         if (!retired.invalid || submitted_success(retired, native) || reclaimable(retired)) return false;
         // The immediately preceding capture is exactly serial, so subtracting
         // one at release would wrongly resurrect this other provider's frame.
-        if (select_provider(established, native, 6, GetTickCount64(), {}).value) return false;
+        if (select_provider(established, native, 6, fixture_clock().now(), {}).value) return false;
         auto &fresh = make(2, provider_kind::streamline, 4, 2, 0);
         if (fresh.id <= established.admission_after ||
-            select_provider(established, native, 6, GetTickCount64(), {}).value != &fresh) return false;
+            select_provider(established, native, 6, fixture_clock().now(), {}).value != &fresh) return false;
       }
       {
         // depth_choice (docs/reshade-sbs.md, Frame record) repeats what each
@@ -940,7 +943,7 @@ namespace sunshine_streamline::depth_capture {
         using sunshine_game3d::source_slot;
         queue_state chooser;
         const auto chosen = [&](std::uint64_t present, selection_policy policy = {}) {
-          const auto pick = select_provider(chooser, native, present, GetTickCount64(), policy);
+          const auto pick = select_provider(chooser, native, present, fixture_clock().now(), policy);
           const auto decision = classify_acquisition(pick, chooser, policy);
           const auto out = describe_choice(pick, decision, chooser, policy, present, 1234, pick.result == status::ready);
           const auto *source = pick.value ? pick.value : pick.latest;
@@ -1006,14 +1009,14 @@ namespace sunshine_streamline::depth_capture {
       constexpr std::uint64_t fg_source = 1ull << 63;
       make(0, provider_kind::streamline, 8, 1, 0);
       auto &fg = make(1, provider_kind::streamline, 8, 2, fg_source);
-      if (select_capture(role_owner, native, 7, provider_kind::streamline, GetTickCount64(), {}).result != status::ambiguous) return false;
+      if (select_capture(role_owner, native, 7, provider_kind::streamline, fixture_clock().now(), {}).result != status::ambiguous) return false;
       fg.metadata.sequence = 3;
       begin_evaluation(8, 3, 0, provider_kind::streamline, fg_source, 0);
-      if (select_capture(role_owner, native, 7, provider_kind::streamline, GetTickCount64(), {}).value != &fg) return false;
+      if (select_capture(role_owner, native, 7, provider_kind::streamline, fixture_clock().now(), {}).value != &fg) return false;
       begin_evaluation(8, 4, 1, provider_kind::streamline, 0);
       fg.metadata.sequence = 5;
       begin_evaluation(8, 5, 0, provider_kind::streamline, fg_source, 0);
-      if (select_capture(role_owner, native, 7, provider_kind::streamline, GetTickCount64(), {}).result != status::ambiguous) return false;
+      if (select_capture(role_owner, native, 7, provider_kind::streamline, fixture_clock().now(), {}).result != status::ambiguous) return false;
 
       // A Present can observe an SDK nomination after its watermark advances
       // but before native validation/allocation has produced a capture slot.
@@ -1034,7 +1037,7 @@ namespace sunshine_streamline::depth_capture {
         candidate.resource.native = 1;
         return candidate;
       };
-      const auto pending_pick = [&](std::uint64_t now = GetTickCount64()) {
+      const auto pending_pick = [&](std::uint64_t now = fixture_clock().now()) {
         return select_capture(pending_owner, native, 11, provider_kind::streamline, now, {});
       };
       auto candidate = prepare_pending();
@@ -1045,7 +1048,7 @@ namespace sunshine_streamline::depth_capture {
       auto &pending_fallback = make(1, provider_kind::ngx, 60, 1, 500);
       selection_policy excluded_pending;
       excluded_pending.exclude_unconfirmed_fg = true;
-      if (select_provider(pending_owner, native, 11, GetTickCount64(), excluded_pending).value != &pending_fallback) return false;
+      if (select_provider(pending_owner, native, 11, fixture_clock().now(), excluded_pending).value != &pending_fallback) return false;
       const auto pending_decision = classify_acquisition(pending, pending_owner, {true, 20, 0});
       if (pending_decision.source_selected || !pending_decision.source_valid || !pending_decision.pending_frame ||
           pending_decision.capture_id || pending_decision.epoch != candidate.epoch ||
@@ -1109,7 +1112,7 @@ namespace sunshine_streamline::depth_capture {
         if (!begin_nomination(candidate, UINT64_MAX)) return false;
         auto &current = evaluations[provider_index(candidate.provider)];
         if (mismatch == 2) current.views[0] = {}; // Isolate exact viewport identity from ambiguity.
-        if (mismatch == 3) current.views[1] = {20, 2, GetTickCount64(), fg_source + 1, 1};
+        if (mismatch == 3) current.views[1] = {20, 2, fixture_clock().now(), fg_source + 1, 1};
         if (pending_pick().pending_nomination || pending_pick().value) return false;
         end_nomination(candidate);
       }
@@ -1303,7 +1306,7 @@ namespace sunshine_streamline::depth_capture {
         value.metadata.provider = p.provider; value.metadata.epoch = p.epoch; value.metadata.sequence = ++p.sequence;
         value.metadata.source_id = p.source_id; value.metadata.source = p.source;
         value.metadata.frame_generation_input = p.frame_generation;
-        value.metadata.tick = GetTickCount64();
+        value.metadata.tick = fixture_clock().now();
         begin_evaluation(p.epoch, p.sequence, 0, p.provider, p.source_id);
         p.pending = &value;
         return value;
@@ -1352,7 +1355,7 @@ namespace sunshine_streamline::depth_capture {
           bool copied = true) {
         // on_present counts the Present before its selection.
         fixture::presents_since(1);
-        const auto chosen = select_provider(queue, consumer, present, GetTickCount64(), policy);
+        const auto chosen = select_provider(queue, consumer, present, fixture_clock().now(), policy);
         decided = classify_acquisition(chosen, queue, policy);
         // acquire()'s own predicate, so this timeline cannot drift from it.
         if (interrupts_admission(queue, chosen)) queue.admission_after = serial.load();
@@ -1372,7 +1375,7 @@ namespace sunshine_streamline::depth_capture {
       // decide_display() for the last Present against the retained frame.
       const auto display = [&](const capture_pick &chosen) {
         const auto candidate = chosen.value ? describe(*chosen.value, chosen.result) : packet{};
-        return decide_display(decided, candidate, retained, {}, GetTickCount64());
+        return decide_display(decided, candidate, retained, {}, fixture_clock().now());
       };
       const auto pending_result = [](const capture_pick &value) {
         return value.result == status::recorded || value.result == status::submitted;
@@ -1439,7 +1442,7 @@ namespace sunshine_streamline::depth_capture {
         advance(stale); finish_gpu(stale);
         expire(stale, fresh);
         advance(pending).producer_submitted = false; // CPU-recorded only: no source value yet.
-        const auto front = select_provider(fresh, consumer, ++present, GetTickCount64(), {});
+        const auto front = select_provider(fresh, consumer, ++present, fixture_clock().now(), {});
         if (front.value || front.latest != pending.pending || front.result != status::recorded) return false;
       }
       // (b) No owner (runtime reset or new generation): a source that is only
@@ -2661,7 +2664,7 @@ namespace sunshine_streamline::depth_capture {
       source->desc.DepthOrArraySize = source->desc.MipLevels = source->desc.SampleDesc.Count = 1;
       source->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; // Valid identity/extent, unsupported depth copy.
       input metadata; metadata.source = source; metadata.epoch = 1; metadata.sequence = 1;
-      metadata.source_id = 19; metadata.tick = GetTickCount64(); metadata.resource.native = 23;
+      metadata.source_id = 19; metadata.tick = fixture_clock().now(); metadata.resource.native = 23;
       copy_region region;
       if (source_region(source->desc, metadata.resource, region) != status::ready ||
           capture_region(source->desc, metadata.resource, region) != status::unsupported_resource) return false;
@@ -2675,7 +2678,7 @@ namespace sunshine_streamline::depth_capture {
       value.source_nominated = value.nomination_only = true; value.pixel_failure = status::unsupported_resource;
       queue_state owner; owner.device_identity = 41;
       constexpr std::uint64_t consumer = 101;
-      const auto select = [&] { return select_provider(owner, consumer, 1, GetTickCount64(), {}); };
+      const auto select = [&] { return select_provider(owner, consumer, 1, fixture_clock().now(), {}); };
       if (select().value) return false;
       finish(ticket, true);
       if (select().value) return false; // Successful but never submitted is not source authority.
@@ -2705,7 +2708,7 @@ namespace sunshine_streamline::depth_capture {
       // snapshot's transition timeline. Repeating Q2 effects cannot turn that
       // authority-only result into permission to read the same texture.
       for (unsigned attempt = 0; attempt != 2; ++attempt) {
-        const auto other = select_provider(other_owner, consumer + 1, 1, GetTickCount64(), {});
+        const auto other = select_provider(other_owner, consumer + 1, 1, fixture_clock().now(), {});
         if (other.value != &value || other.result != status::unsupported_queue) return false;
         bind_pixel_consumer(value, consumer + 1, other.result);
         establish_provider(other_owner, value, 1);

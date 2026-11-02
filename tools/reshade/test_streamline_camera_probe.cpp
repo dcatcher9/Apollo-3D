@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Real MinHook regression against isolated, noinline fixture entrypoints. No game,
-// Streamline DLL, graphics device, or GPU work is involved.
+// Streamline DLL, graphics device, or GPU work is involved. Game time is the
+// probe view's test clock (test_game3d_clock.h), engaged in main and moved
+// only by hitch(); --wall-clock runs it on the real clock.
 #include "streamline_camera_data.h"
 #include "addon_lifetime.h"
 #include "streamline_camera_probe.h"
@@ -11,6 +13,7 @@
 #include "upscaler_call_trace.h"
 #include "game3d_diagnostics.h"
 #include "game3d_ui_mask.h"
+#include "test_game3d_clock.h"
 #include "test_minhook_ledger.h"
 #include "test_sl_fixture_sdk.h"
 #include "test_streamline_depth_capture_fixture.h"
@@ -77,6 +80,7 @@ namespace sunshine_streamline::testing::abi {
 
 namespace {
   using namespace sunshine_streamline;
+  using sunshine_game3d_fixture::fixture_clock;
 
   struct invocation {
     std::uint64_t calls {};
@@ -2103,7 +2107,7 @@ namespace {
     const auto event_for = [&](std::uint64_t revision, loss_diagnostics::reason cause, DWORD thread) {
       loss_diagnostics::event event;
       require(query_depth_observation_loss(revision, event) && event.revision == revision && event.cause == cause &&
-        event.tick && event.tick <= GetTickCount64() && event.thread_id == thread && event.line && event.site && *event.site,
+        event.tick && event.tick <= fixture_clock().now() && event.thread_id == thread && event.line && event.site && *event.site,
         "Loss journal did not describe the exact real-hook invalidation");
       return event;
     };
@@ -2503,7 +2507,8 @@ namespace {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!original_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
     const bool entered = original_entered.load(std::memory_order_acquire);
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    // 25 ms of game time pass while the call is blocked in the original.
+    fixture_clock().hitch(25);
     block_original = false;
     release_original = true;
     delayed.join();
@@ -2512,7 +2517,7 @@ namespace {
     call_v1_evaluate(nullptr, 0, 1, 1);
     // The evaluation's time: read as its call returns (the deleted store
     // stamped it as the call finished).
-    const auto evaluated = GetTickCount64();
+    const auto evaluated = fixture_clock().now();
     evaluation_snapshot snapshot;
     require(nominated_snapshot(1, snapshot) && evaluated >= snapshot.camera_tick + 10,
       "blocked constants call completion made old input look newly observed");
@@ -2836,7 +2841,7 @@ namespace {
       frame_generation_snapshot fg;
       require(query_frame_generation(view.value, fg) && fg.enabled, "versioned UI alpha FG mode was not confirmed");
       constexpr std::uint64_t runtime = 0x101, device = 0x201;
-      mask::set_request({runtime, device, fg.epoch, depth_observation_revision(), view.value, 1920, 1080, true}, GetTickCount64());
+      mask::set_request({runtime, device, fg.epoch, depth_observation_revision(), view.value, 1920, 1080, true}, fixture_clock().now());
       int native{}, commands{};
       auto resource = modern_resource(&native); resource.width = 1920; resource.height = 1080; resource.state = 8;
       auto tag = depth_tag_for(resource); tag.type = c.raw; tag.lifecycle = 0; tag.area = {0, 0, 1920, 1080};
@@ -2925,7 +2930,7 @@ namespace {
     require(query_frame_generation(view.value, fg) && fg.enabled, "FG alpha mode was not confirmed");
     constexpr std::uint64_t runtime = 0x100, device = 0x200;
     mask::request wanted{runtime, device, fg.epoch, depth_observation_revision(), view.value, 3840, 2160, true};
-    mask::set_request(wanted, GetTickCount64());
+    mask::set_request(wanted, fixture_clock().now());
     int native{}, commands{};
     auto resource = modern_resource(&native); resource.width = 3840; resource.height = 2160; resource.state = 8;
     auto tag = depth_tag_for(resource); tag.type = 53; tag.lifecycle = 0; tag.area = {0, 0, 3840, 2160};
@@ -3018,25 +3023,25 @@ namespace {
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed) && observed.source.sequence == null_sequence,
       "new observation revision captured into an old requested alpha scope");
-    wanted.revision = depth_observation_revision(); mask::set_request(wanted, GetTickCount64());
+    wanted.revision = depth_observation_revision(); mask::set_request(wanted, fixture_clock().now());
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed), "renewed alpha scope failed to recover");
     options.mode = 0; options_call(view, options);
-    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, GetTickCount64()) &&
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, fixture_clock().now()) &&
         !mask::testing::last_attempt(runtime, observed), "FG Off retained alpha owner scope");
-    wanted.revision = depth_observation_revision(); mask::set_request(wanted, GetTickCount64());
+    wanted.revision = depth_observation_revision(); mask::set_request(wanted, fixture_clock().now());
     tag.type = 2;
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed) && observed.kind == mask::source_kind::hudless &&
         !observed.source.frame_generation_input, "Fresh FG-off scope did not capture HUD-less color");
     options.mode = 1; options_call(view, options);
-    wanted.revision = depth_observation_revision(); mask::set_request(wanted, GetTickCount64());
+    wanted.revision = depth_observation_revision(); mask::set_request(wanted, fixture_clock().now());
     call_v2_tag(view, &tag, 1, &commands);
     require(mask::testing::last_attempt(runtime, observed), "re-enabled FG did not resume color-only alpha capture");
     result_v2 = -7; options_call(view, options); result_v2 = 0;
-    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, GetTickCount64()), "failed FG options retained alpha scope");
-    mask::set_request(wanted, GetTickCount64()); shutdown();
-    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, GetTickCount64()), "shutdown retained live alpha request");
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, fixture_clock().now()), "failed FG options retained alpha scope");
+    mask::set_request(wanted, fixture_clock().now()); shutdown();
+    require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, fixture_clock().now()), "shutdown retained live alpha request");
   }
 
   void test_ui_gate_viewport_zero_mixed_batch() {
@@ -3061,7 +3066,7 @@ namespace {
     require(query_ui_scope(UINT32_MAX, scope) && !scope.viewport,
       "Mixed viewport-zero tags did not establish live UI discovery scope");
     mask::request wanted{0x710, 0x720, scope.epoch, scope.revision, 0, 3840, 2160, true};
-    mask::set_request(wanted, GetTickCount64());
+    mask::set_request(wanted, fixture_clock().now());
     SetLastError(incoming_error);
     require(call_v2_tag(view, tags, 3, &commands) == 0 && GetLastError() == outgoing_error,
       "Mixed UI capture gate changed public SDK forwarding");
@@ -3074,7 +3079,7 @@ namespace {
         !observed.latest_boundary.source.viewport && !observed.latest_boundary.source.frame_generation_input,
       "Mixed viewport-zero HUDless batch did not reach its matching live capture boundary");
     ++wanted.revision;
-    mask::set_request(wanted, GetTickCount64());
+    mask::set_request(wanted, fixture_clock().now());
     call_v2_tag(view, tags, 3, &commands);
     require(mask::query_diagnostic(wanted.runtime, observed) && !observed.latest_boundary.source.sequence &&
         observed.hook_gate.state == mask::capture_gate::no_matching_request && !observed.hook_gate.matching_requests &&
@@ -3119,7 +3124,7 @@ namespace {
       ui_observation_scope scope;
       require(query_ui_scope(0, scope), "Repeated Off prevented independent UI scope discovery");
       const mask::request wanted{0x730, 0x740, scope.epoch, scope.revision, 0, 3840, 2160, true};
-      mask::set_request(wanted, GetTickCount64());
+      mask::set_request(wanted, fixture_clock().now());
       mask::diagnostic_snapshot observed;
       require(mask::query_diagnostic(wanted.runtime, observed), "Repeated Off fixture lost initial request");
       const auto generation = observed.request_generation;
@@ -3147,7 +3152,7 @@ namespace {
         "Confirmed FG On did not retain its distinct input role");
       options.mode = options.generated_frames = 0;
       set_options(result);
-      require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, GetTickCount64()),
+      require(!mask::interested(wanted.epoch, wanted.revision, wanted.viewport, fixture_clock().now()),
         "Actual FG mode/knowledge loss retained the previous UI request");
     }
   }
@@ -3171,7 +3176,7 @@ namespace {
     require(query_ui_scope(view.value, scope), "Fresh UI scope could not be selected explicitly");
     constexpr std::uint64_t runtime = 0x100, device = 0x200;
     mask::request wanted{runtime, device, scope.epoch, scope.revision, scope.viewport, 3840, 2160, true};
-    mask::set_request(wanted, GetTickCount64());
+    mask::set_request(wanted, fixture_clock().now());
     mask::boundary observed;
     for (const auto kind : {mask::source_kind::hudless, mask::source_kind::backbuffer,
         mask::source_kind::color_and_alpha, mask::source_kind::alpha}) {
@@ -3253,7 +3258,7 @@ namespace {
     require(nominated_source(0, 0, normalized) && !normalized.projection.supplied,
       "Fresh tag borrowed a camera from before observation loss");
     call_v2_constants(constants, token.ref(), view);
-    std::this_thread::sleep_for(std::chrono::milliseconds(270)); tag_now();
+    fixture_clock().hitch(270); tag_now();
     require(nominated_source(0, 0, normalized) && !normalized.projection.supplied &&
         !normalized.projection.direction_supplied && !normalized.jitter.supplied,
       "Stale camera calibrated standalone raw depth");
@@ -3718,7 +3723,7 @@ namespace {
     call_v2_framed_tag(token.ref(), view, &tag, 1, &commands);
     require(!nominated_source(view.value, 0, normalized), "untracked explicit token borrowed global camera-call evidence");
     call_v2_constants(constants, token.ref(), view);
-    std::this_thread::sleep_for(std::chrono::milliseconds(270)); tag_now();
+    fixture_clock().hitch(270); tag_now();
     require(!nominated_source(view.value, 0, normalized), "stale global FG constants were accepted");
     call_v2_constants(constants, token.ref(), view); testing::lose_observation(); tag_now();
     require(!nominated_source(view.value, 0, normalized), "global FG constants crossed observation loss");
@@ -4295,7 +4300,7 @@ namespace {
     testing::defer_depth(view.value, candidate);
     const auto attempt = observe_frame_generation_inputs({});
     finish_frame_generation_inputs(attempt, true);
-    Sleep(DWORD(sunshine_freshness::source_age_ms + 30));
+    fixture_clock().hitch(sunshine_freshness::source_age_ms + 30);
     depth_capture::fixture::presents_since(1);
     present();
     after = testing::deferrals_now();
@@ -4442,8 +4447,8 @@ namespace {
     check(!sunshine_ngx::frame_generation_owns_evaluation(), "A silent FG scope owned NGX's depth");
     // The scope's FG copy accepted now: the scope is live.
     auto &scope_view = depth_capture::evaluations[depth_capture::provider_index(sunshine_scene_depth::provider_kind::streamline)].views[0];
-    scope_view = {fg.epoch, 1, GetTickCount64(), sunshine_scene_depth::fg_source_id(view.value), view.value};
-    scope_view.accepted_tick = GetTickCount64(); scope_view.accepted_sequence = 1;
+    scope_view = {fg.epoch, 1, fixture_clock().now(), sunshine_scene_depth::fg_source_id(view.value), view.value};
+    scope_view.accepted_tick = fixture_clock().now(); scope_view.accepted_sequence = 1;
     check(sunshine_ngx::frame_generation_owns_evaluation(), "A live FG scope did not own NGX's depth");
     require(set_options(other, off) == 0, "FG Off options failed");
     check(sunshine_ngx::frame_generation_owns_evaluation(), "Another viewport's FG Off took NGX's depth from the live FG scope");
@@ -4481,7 +4486,7 @@ namespace {
     testing::age_frame_generation(500);
     std::string failed;
     const auto check = [&](bool passed, const char *what) { if (!passed) failed += std::string(failed.empty() ? "" : "; ") + what; };
-    testing::supply_evaluation(fg.epoch, view.value, GetTickCount64() - 100);
+    testing::supply_evaluation(fg.epoch, view.value, fixture_clock().now() - 100);
     check(testing::evaluation_supplied(fg.epoch, view.value), "A fresh supply of the FG period did not supply its scope");
     {
       testing::hold_evaluation_supply();
@@ -4501,7 +4506,7 @@ namespace {
     require(set_options(view, on) == 0, "FG On options failed");
     check(!testing::evaluation_supplied(fg.epoch, view.value),
       "C1: DLSS-G's supply from before an FG Off and On supplied the new FG period");
-    testing::supply_evaluation(fg.epoch, view.value, GetTickCount64());
+    testing::supply_evaluation(fg.epoch, view.value, fixture_clock().now());
     check(testing::evaluation_supplied(fg.epoch, view.value), "DLSS-G's supply of the new FG period did not supply it");
     require(failed.empty(), failed.c_str());
   }
@@ -4737,6 +4742,10 @@ static void test_call_trace_only(bool modern) {
 
 int main(int argc, char **argv) {
   try {
+    auto &clock = sunshine_game3d_fixture::fixture_clock();
+    sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
+    require(clock.bind(GetModuleHandleW(nullptr)), "the probe view's test clock exports are missing");
+    clock.engage();
     if (argc == 2 && std::strcmp(argv[1], "--standalone-depth-tags") == 0) {
       test_standalone_depth_tags();
       std::puts("PASS standalone viewport-zero mixed depth tags capture independently of FG and SL evaluation with bounded camera/raw-only evidence");
