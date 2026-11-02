@@ -938,7 +938,14 @@ namespace {
     const auto own = nominate(3);
     require(!capture::testing::holds_copy_out_storage(own),
       "reader moves: a copy read on its own queue still took copy-out storage after FG went off");
-    gpu.submit(); gpu.wait(); gpu.reset();
+    gpu.submit();
+    // The render queue is the reader again: its submission stamps the copy
+    // with its Present again (PD9; a reader that once moved away must not
+    // stay unstamped, which would leave FG-off copies on their call's
+    // stamp, the 10-27 P2 hitch case).
+    require(capture::testing::submitted_present(own) == capture::next_present_ordinal(),
+      "reader moves: a copy submitted on the render queue after it became the reader again was not stamped with its submission's Present (PD9)");
+    gpu.wait(); gpu.reset();
     require(counts().copied_out == made + 1, "reader moves: a copy on the reader's queue was copied out");
     // A copy recorded while the render queue reads, submitted once Present
     // moved: copied out from an idle slot's cached storage of its shape (a
