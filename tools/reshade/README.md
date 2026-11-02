@@ -2136,16 +2136,25 @@ available to UI detection. Their gaps are `ngx_runtime_rows`, `generic_runtime_r
 
 The executable takes `--family` and the generator's `--list`, `--case` and `--shard`, and appends
 one JSON line per case (with the family's scope) to `contract-<family>.jsonl` in its output
-directory. It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the official
+directory. Once its setup is done (the runtime, discovery's hooks and the bind's frames) it engages
+the fixtures' game clock ([Test builds](#test-builds)): every case then plays game time, 16 ms per
+Present with the add-on quiesced at each frame boundary, so the first-capture window, the isolation
+past the source age and a UI case's settle window are Present counts, and a case's `elapsed_ms` and
+`first_fresh_ms` are game time (its MEASURE line adds its `wall_ms`). `--wall-clock` never engages
+and runs the cases on the real clock as before; a family of several releases passes it on to its
+members. It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the official
 `ReShade64.dll`) and `SUNSHINE_GAME3D_FROZEN_SHADERS` (a directory with the frozen
 `SunshineGame3D.fx`) are configured: one test per family, labelled `contract;gpu`, `RUN_SERIAL` with
 the `gpu` resource lock and a 240 s timeout, after `reshade_contract_matrix_runtime_output` removes
-the families' output directory. At 1280x720 the seven families run 318 cells in about 5.5 minutes:
-`sl27` 123 cells and 14 controls in 107 s, `sl26` 49 in 61 s, `sl212_214` 48 in 58 s, `sl215_30` 38
-in 37 s, `ngx` 34 in 32 s, `generic` 12 in 17 s and `ui` 14 in 19 s. A capture takes 0.4 s, a
-refusal or hold 0.9 s (its 600 ms window and the isolation), an FG case copied at an evaluate up to
-1.9 s (FG owns its viewport's depth for a second after it is enabled), and a UI case its Dump3D.
-Repeated runs give the same result for every cell.
+the families' output directory. At 1280x720 the seven families run 323 cells, in game time `sl27`
+123 cells and 14 controls in 97 s (6064 Presents), `sl26` 49 in 48 s, `sl212_214` 48 in 48 s,
+`sl215_30` 38 in 32 s, `ngx` 34 in 32 s, `generic` 9 in 8 s and `ui` 22 in 25 s: about 30 s of wall
+time in all, most of it each process's setup (about 5 minutes with `--wall-clock`). A capture takes
+0.4 s of game time, a refusal or hold 0.9 s (its 600 ms window and the isolation), an FG case copied
+at an evaluate up to 1.9 s (FG owns its viewport's depth for a second after it is enabled), and a UI
+case its Dump3D. Repeated runs, alone or beside other GPU work, give the same per-Present trace and
+the same JSON line for every cell (a UI case's Dump3D candidates apart from the add-on's own
+counters, handles and ticks).
 
 [`Invoke-Game3DContractMatrix.ps1`](Invoke-Game3DContractMatrix.ps1) configures and builds this
 directory on its own (the Sunshine build forces the add-on's tests off), runs `ctest -L contract`
