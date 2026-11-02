@@ -3857,8 +3857,9 @@ admitted (`lineage_snapshot`, below) and the display's hold of its own copy kept
 stamp, also after its own later evaluations; until 11-01 the newest evaluation's ordinal, so a copy
 stamped at its call, on a queue that no longer presents, lost its hold after the frame's SR
 evaluation: up to `generated` Presents mono after a freeze, F63; the seam characterization's
-anchored rows pin the rule, `presenting_floor`, but no fixture reaches the case through `acquire`,
-whose use of it is guarded by review only: the session timelines' event language records every FG
+anchored rows pin the rule, `presenting_floor`, and the diagnostic texture fixture's
+`acquire_presenting_floor` its use through `acquire` (since the second fix review of 11-01; until
+then that use was guarded by review only, as the session timelines' event language records every FG
 tag copy on the presenting queue's list) whatever their
 age. Until the 10-27 review only the first counted, so a hitch of the source age between a frame's
 evaluation and its later Presents made them mono (`inactive_views`, `retained_depth_expired`), and

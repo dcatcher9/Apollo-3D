@@ -3534,7 +3534,13 @@ serial is 30 there); each Present establishes any selected copy, as
   with exact bytes into storage resting in COMMON, unobserved it is refused as `missing_state`, a
   Streamline FG tag input there is copied as well (S22, never refused as `command_type`), the
   compute queue takes a fence at its first submission of the copy, and the direct consumer reads it
-  only once the compute recording was reset.
+  only once the compute recording was reset. Its `acquire_presenting_floor` (F63, the second fix
+  review of 11-01) presents on another queue through the capture owner's `present` (MFG 4x),
+  records an FG copy at its call on the render queue (its call's stamp, PD9), then the earlier
+  frame's three generated Presents, the frame's own SR evaluation and DLSS-G's evaluation of it:
+  `acquire`'s decision names that stamp as the presenting floor at the frame's real Present and its
+  three generated Presents, and none after them; with `acquire`'s call site back on the newest
+  evaluation's ordinal it fails at the real Present (the seam rows call `presenting_floor` directly).
 - Compute lists (S22, N7): [`test_capture_state_policy.cpp`](test_capture_state_policy.cpp) pins
   `copy_state::list_basis` (the states and layouts a COMPUTE list may name, none of a compute
   queue's own layouts on a DIRECT list) and the copy's compute-queue source layout;

@@ -3209,6 +3209,81 @@ namespace {
     std::puts("PASS a copy FG Off kept gives its storage up for a live copy's copy-out, which is readable on the new "
       "presenting queue before its recording's Reset");
   }
+  // F63 through acquire (the second fix review of 11-01). FG on: Present
+  // runs on another queue (DLSS-G's), so a frame's FG tag copy recorded at
+  // its call on the render queue keeps its call's stamp (PD9). DLSS-G then
+  // presents the earlier frame's three generated Presents (MFG 4x), the
+  // frame's own SR evaluation begins, and DLSS-G's evaluation of the frame
+  // (frame_generation_evaluated) anchors its window at its real Present. At
+  // that real Present and its three generated Presents, acquire's decision
+  // names the copy's stamp as the presenting floor (presenting_floor), so the
+  // display holds that copy as the frame's own (own_frame) however long the
+  // frame took; at the Present after them it names none. Until F63
+  // (b5b34ef0) acquire took the newest evaluation's ordinal, the SR
+  // evaluation's, above the copy's stamp, and after a hitch of the source age
+  // those generated Presents were mono. The seam rows call presenting_floor()
+  // directly, so only this row fails if acquire's call site goes back.
+  void acquire_presenting_floor(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    // A shape no other case caches storage for.
+    texture_case fg_depth(gpu, DXGI_FORMAT_R32_FLOAT, 4, D3D12_RESOURCE_FLAG_NONE, true, 1, 1, 52, 36);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    constexpr std::uint64_t epoch = 87;
+    constexpr std::uint32_t generated = 3;
+    const auto fg_id = sunshine_scene_depth::fg_source_id(0);
+    const auto foreign = native(gpu.foreign_queue.Get());
+    capture::record_diagnostic diagnostic;
+    capture::packet packet;
+    capture::acquisition_decision decision;
+    capture::capture_diagnostic acquired;
+    std::uint64_t index = 14100;
+    // A Present on DLSS-G's queue: the add-on's present() at its start, then
+    // its acquisition.
+    const auto floor_at_present = [&] {
+      capture::present(foreign, generated);
+      capture::acquire(foreign, ++index, packet, decision, &acquired);
+      packet = {};
+      return decision.presenting_floor;
+    };
+    floor_at_present();
+    // The frame's FG tag call: its evaluation begins and its copy is recorded
+    // on the render queue at the call.
+    const auto stamp = capture::next_present_ordinal();
+    capture::begin_evaluation(epoch, 1, 0, sunshine_scene_depth::provider_kind::streamline, fg_id);
+    auto value = fg_depth.input;
+    value.provider = sunshine_scene_depth::provider_kind::streamline;
+    value.epoch = epoch; value.source_id = fg_id; value.viewport = 0; value.sequence = 1;
+    value.frame_generation_input = true;
+    value.valid_until = sunshine_scene_depth::lifetime::until_evaluation; value.force_snapshot = false;
+    value.source_present_generation = capture::source_present_generation(value.source);
+    value.proof = sunshine_scene_depth::state_proof::sdk_contract; value.tick = GetTickCount64();
+    const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), value, UINT64_MAX, &diagnostic);
+    require(ticket && diagnostic.result == capture::status::recorded, "F63 acquire floor: the FG copy was refused");
+    capture::finish(ticket, true);
+    gpu.submit(); gpu.wait();
+    require(!capture::testing::submitted_present(ticket),
+      "F63 acquire floor: the FG copy submitted on the render queue, which no longer presents, took its submission's stamp (PD9)");
+    // The earlier frame's generated Presents.
+    for (unsigned i = 0; i != generated; ++i) floor_at_present();
+    // The frame's own SR evaluation, then DLSS-G's evaluation of the frame.
+    capture::begin_evaluation(epoch, 2, 0, sunshine_scene_depth::provider_kind::streamline, 0);
+    capture::frame_generation_evaluated(epoch);
+    for (unsigned i = 0; i <= generated; ++i) {
+      const auto floor = floor_at_present();
+      if (floor != stamp)
+        throw std::runtime_error("F63 acquire floor: at the frame's " + std::string(i ? "generated" : "real") +
+          " Present " + std::to_string(i) + " acquire's presenting floor was " + std::to_string(floor) +
+          ", not the frame's FG copy's stamp " + std::to_string(stamp) +
+          " (the frame's own SR evaluation followed the earlier frame's generated Presents)");
+    }
+    require(!floor_at_present(), "F63 acquire floor: a Present after the frame's generated Presents still presented it");
+    gpu.reset();
+    capture::frame_generation_restored(epoch, 0);
+    capture::poll();
+    gpu.check_debug_errors();
+    std::puts("PASS F63 through acquire: an FG frame's call-stamped copy is the presenting floor at its real and generated "
+      "Presents after its own SR evaluation, and no floor after them");
+  }
   void replay_and_cancel(fixture &gpu) {
     // Dump copies never evict live caches: age out those of earlier cases so
     // this case fills the whole pool.
@@ -3657,6 +3732,9 @@ int main(int argc, char **argv) {
     auxiliary_consumer_replay_and_discard(gpu);
     replay_and_cancel(gpu);
     copy_out_takes_retired_fg_storage(gpu);
+    // After the cases above: its Presents move the capture owner's Present
+    // count, which they never did.
+    acquire_presenting_floor(gpu);
     // Last: it releases the fixture device's capture state.
     device_release(gpu);
     std::puts("PASS diagnostic texture capture functional GPU regression (no performance measurement)");
