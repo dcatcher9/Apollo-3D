@@ -130,6 +130,8 @@ namespace {
     std::atomic<DWORD> thread{};
     std::atomic<bool> released{}, finished{};
     HANDLE gate{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    // Set once the last Release began (released), before it waits for the gate.
+    HANDLE entered{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
       if (!out) return E_POINTER;
       *out = IsEqualGUID(iid, IID_IUnknown) ? static_cast<IUnknown *>(this) : nullptr;
@@ -143,6 +145,7 @@ namespace {
       if (!left) {
         thread = GetCurrentThreadId();
         released = true;
+        SetEvent(entered);
         // A deadlock guard only: the run opens the gate within a second.
         if (thread != present_thread) WaitForSingleObject(gate, 30000);
         finished = true;
@@ -945,10 +948,25 @@ namespace {
         ~release_hold() { held = false; }
       } hold{hold_game_time};
       hold_game_time = true;
+      // The add-on submits the release job at a Present (its pool family is
+      // then out: SunshineGame3DTestQuiesce without a wait names it); after
+      // that Present the fixture waits for the job to reach the sentinel, so
+      // the case ends at that same Present on any machine.
+      const auto pool_out = reinterpret_cast<BOOL (*)(unsigned, unsigned *)>(
+        GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineGame3DTestQuiesce"));
+      require(pool_out != nullptr, "The test add-on does not report its pool work");
+      const auto release_out = [&] {
+        unsigned out = 0;
+        return !pool_out(0, &out) &&
+          (out & sunshine_game3d::pool::family_bit(sunshine_game3d::pool::family::display_release)) != 0;
+      };
       resized_targets.push_back(target_uav(first->width + 128, first->height + 64, 0));
       selected = resized_targets.back().get();
       active_area = {0, 0, selected->width, selected->height};
-      for (const auto until = clock.wall_now() + 5000; !sentinel->released && clock.wall_now() < until;) present_frame();
+      for (const auto until = clock.wall_now() + 5000; !sentinel->released && clock.wall_now() < until;) {
+        present_frame();
+        if (release_out()) WaitForSingleObject(sentinel->entered, 2000);
+      }
       require(sentinel->released, "A retired display texture was never released");
       require(sentinel->thread != sentinel->present_thread, "A retired display texture was released on the present thread");
       for (unsigned i = 0; i != 4; ++i) present_frame();
@@ -3671,7 +3689,8 @@ namespace {
       bool on_compute = false;
       queue_ring<3> dlssg_ring;
       dlssg_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_COMPUTE);
-      // Engaged, every frame boundary waits for the ring's work.
+      // Engaged, every frame boundary waits for the ring's work, and so does
+      // C3b's wait before each Present (main()).
       const auto dlssg_watch = clock.watch("dlssg_ring", dlssg_ring);
       // The game's HUD-less and Backbuffer tags: without a command list (as in
       // Shadows), the same followed by the same frame's null untag of both
@@ -4230,9 +4249,9 @@ namespace {
       static_assert(decltype(game_ring)::size * ring_pace_ms > sunshine_freshness::source_age_ms + 50);
       game_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
       // Engaged, every frame boundary and hitch waits for the ring's executed
-      // work; a frame's own work, gated until after its Present, is executed
-      // after its pace.
-      const auto game_watch = clock.watch("game_ring", game_ring);
+      // work (and C3b's wait before each Present: main()); a frame's own work
+      // is executed after its pace.
+      auto game_watch = clock.watch("game_ring", game_ring);
       // The queue that waits for each game-queue SR submission's ring signal
       // (the presenting queue, as these games' presenting queues do; none in
       // the in-flight cases without that wait).
@@ -4315,6 +4334,11 @@ namespace {
         checked(game->CreateCommandQueue(&desc, IID_PPV_ARGS(third.put())), "Create the game's third queue");
       }
       std::uint64_t gate_value = 0, handoff_value = 0;
+      // From here the ring's frame work may wait for gate until after its
+      // Present (the in-flight cases): no barrier before that Present waits
+      // for it (C3b's wait before the Present skips it; the frame boundary,
+      // after the gate opened, does not).
+      game_watch = clock.watch("game_ring", game_ring, [&] { return gate->GetCompletedValue() < gate_value; });
       // The late form's own fence (the CPU signal poisons it for good).
       com_ptr<ID3D12Fence> late_handoff;
       checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(late_handoff.put())), "Create the late handoff fence");
@@ -4589,7 +4613,18 @@ int main(int argc, char **argv) {
     if (!contention && !public_ui) {
       require(fixture.clock.bind(GetModuleHandleW(L"SunshineSBSTest.addon64")),
         "The test add-on lacks the game clock exports");
-      fixture.clock.engage();
+      if (fixture.clock.engage()) {
+        // C3b (owner decision 11-02): the work a frame executed on a watched
+        // ring (DLSS-G's compute ring, the game queue's) completes before that
+        // frame's Present, as on a GPU ahead of it, unless a closed fixture
+        // gate holds it; otherwise whether the Present reads it completed is
+        // GPU timing. The in-flight cases keep their gates.
+        auto judge = std::move(fixture.before_present);
+        fixture.before_present = [&fixture, judge = std::move(judge)] {
+          fixture.clock.wait_rings("before present");
+          if (judge) judge();
+        };
+      }
     }
     // The fixture's per-Present trace (record_present), written at its end.
     game3d_present_trace::out.open(directory / "trace.txt", "native");
