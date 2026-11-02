@@ -1080,6 +1080,22 @@ namespace {
     // counting would still hold them, which ui_frame:held judges in
     // fg-on-ui-window-ends-at-next-evaluation-hitch).
     {"fg-on-ui-generated-hold-kept", "20*sr=local; fg=on,sr=local,dlssg=direct,generated=3; 10*sr=local,dlssg=direct,generated=3,ui=listed; 5*sr=local,dlssg=direct,generated=3,at=inside,ui=bare; sr=local,dlssg=direct,generated=3,at=inside,ui=bare,hitch=before_sources; 3*sr=local,dlssg=direct,generated=3,at=inside,ui=bare; sr=local,dlssg=direct,generated=3,at=inside,ui=bare,hitch=before_sources; 3*sr=local,dlssg=direct,generated=3,at=inside,ui=bare", false, 0, 6},
+    // A real Present without frame identity (11-01, OPEN C): soak seed
+    // 117a6b99131447b1's frames 29 to 42, then its frames 37 to 42 again.
+    // FG on with a silent scope (each FG tag call refused at the call:
+    // boundary_without_commands), UI tags every frame copied at their
+    // frame's Present (ui=bare, the FG inputs that stamp a frame), a tag-only
+    // frame (its FG tag refused, no SR; declared one generated Present,
+    // DLSS-G presents none), then a frame whose only calls before its real
+    // Present, after a hitch of the source age, are its constants and its UI
+    // tags (the UI's capture request lapsed in the pause, so they copy
+    // nothing). The tag-only frame's refused call ends the earlier window
+    // and begins its own (fg-silent-refused-tag-ends-window), which presents
+    // the next Present as its generated one: the UI holds its decision there
+    // (ui_unidentified_real; the same hold by Present count before 11-01,
+    // when that frame had no window). Before the judge left that hold
+    // unjudged it failed ui_frame:held at frame 31, every run.
+    {"fg-silent-tag-only-then-callless-real-present-hitch", "20*sr=local; fg=on,sr=local,state=proven,generated=1; sr=local,state=proven,generated=3; tag=evaluate_bare,sr=local,generated=2,ui=bare; tag=evaluate_bare,sr=other_queue,state=unprovable,generated=2,ui=bare; tag=now_bare,sr=local,state=proven,generated=2,at=evaluate,ui=bare; 5*tag=now_bare,sr=local,state=proven,generated=1,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between; generated=1,ui=bare; ui=bare; 2*tag=now_bare,sr=local,state=proven,generated=1,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between; generated=1,ui=bare; ui=bare"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -2807,6 +2823,24 @@ namespace {
     // The generated Presents that presented the last real Present's frame
     // since that Present (between).
     std::uint32_t generated_since_real {};
+    // This real Present has no frame identity for the add-on (11-01, OPEN
+    // C): with FG on, its frame made no depth call before it (no tag call,
+    // SR or DLSS-G evaluation, no FG options event), and fewer Presents than
+    // the declared generated count presented the last real Present's frame
+    // since that Present. The add-on then sees exactly what it sees at that
+    // frame's next generated Present where DLSS-G presents all of them (a
+    // frame's Streamline constants and a UI tag call end no window: DLSS-G
+    // presents the earlier frame's generated Presents inside the next
+    // frame's recording before its evaluation, owner ruling Q2 and F13), so
+    // depth's window still presents that frame there and the UI may hold
+    // its decision, as the T1 grace would reuse it. Soak seed
+    // 117a6b99131447b1 at frame 40 (its frame 39 declared one generated
+    // Present and DLSS-G presented none) makes the same calls as the 4-frame
+    // reproducer of fg-on-deferred-tag-generated-inside-after-hitch-untag at
+    // its frame 3, whose generated Presents must hold. Such a hold of the
+    // last real frame's decision is not judged ui_frame:held, a limit of no
+    // frame identity like a Present without a depth window at its input.
+    bool ui_unidentified_real {};
 
     // generated: 0 for a real Present, else the generated Present's place
     // among those of its frame (generated_since_real; 1 where it presents
@@ -2859,7 +2893,8 @@ namespace {
         ui_input_frame = shown_frame;
         ui_input_window = queue_choice(observed.runtime, &choice) && choice.decision.presenting_floor;
         ui_input_floor = ui_input_window ? choice.decision.presenting_floor : 0;
-      } else if (held && ui_input_window && shown_frame != ui_input_frame) {
+      } else if (held && ui_input_window && shown_frame != ui_input_frame &&
+          !(ui_unidentified_real && !generated && ui_input_frame + 1 == shown_frame)) {
         fail("ui_frame:held", frame_text(frame) + ": " + which + " held frame " + std::to_string(ui_input_frame) + "'s UI decision as a generated Present of it, and it presents frame " + std::to_string(shown_frame), frame, "generated_present");
       } else if (due && absent && !input && !kept) {
         fail("ui_frame:dropped", frame_text(frame) + ": " + which + " presents frame " + std::to_string(shown_frame) + ", whose Present offered the last UI tag, offered no UI input of its own and did not hold that Present's UI decision", frame, "generated_present");
@@ -2915,9 +2950,15 @@ namespace {
         renew_order();
       }
       judge_present_modes("its Present");
+      // No frame identity here (ui_unidentified_real).
+      const bool depth_called = of<tag_form>(value, events::tag) != tag_form::none ||
+        of<sr_form>(value, events::sr) != sr_form::none || of<dlssg_form>(value, events::dlssg) != dlssg_form::none ||
+        event != fg_event::keep;
+      ui_unidentified_real = fg_on && !depth_called && generated_since_real < declared_generated;
       generated_since_real = 0;
       ui_presented_fg = fg_supplied;
       judge_ui_frame("its Present", frame, 0);
+      ui_unidentified_real = false;
       poll("present");
       // The frame's tag copy deferred to this Present, published by it.
       if (deferred_copy_before) {

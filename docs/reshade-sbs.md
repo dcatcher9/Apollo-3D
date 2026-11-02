@@ -1394,7 +1394,14 @@ real Present and its generated Presents, the UI shows no mask until the next UI 
 still presents that frame. Where the Present that offered the tag had no depth window (presenting floor 0 at that Present: no API depth, or an API scope without an open window, such as a silent FG scope without FG stamps), Present
 counting decides as before: a Present that offers no input within the reported generated count
 (one while it is unknown) of that Present is generated (`ui_evidence::generated_without_input`, the
-fallback of `ui_evidence::generated_in_window`). The
+fallback of `ui_evidence::generated_in_window`). Neither way has frame identity at a real Present
+whose frame made no depth call before it (only its Streamline constants and UI tags, for example
+the first frame after a pause, when the UI capture request has lapsed and its UI tags copy
+nothing) while DLSS-G presented fewer generated Presents of the frame before than declared: the
+add-on sees exactly what it sees at that earlier frame's next generated Present, so depth's window
+still presents the earlier frame there and the UI holds its decision, which the T1 grace would show
+there as well (soak seed 117a6b99131447b1 at frame 40; the session timelines leave that hold
+unjudged since 11-01, row `fg-silent-tag-only-then-callless-real-present-hitch`). The
 capture owner, however, offers each kind's
 newest ready snapshot on every Present while it is recent (250 ms), and the offscreen UI layer its
 newest copy, so a generated Present normally re-offers its real frame's inputs instead of offering

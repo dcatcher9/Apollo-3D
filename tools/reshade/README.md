@@ -2362,7 +2362,14 @@ frame's recording before the add-on began an evaluation of that frame, the last 
 frame; one after that evaluation began, the frame being recorded. It is judged where depth
 presented a frame at that Present that offered the tag (its acquisition's presenting floor, read
 through `SunshineDepthTestQueueChoice`): without that window the UI still counts Presents, a limit
-of having no frame identity there. Before the add-on read depth's window for it, five fixed-set
+of having no frame identity there. Nor is a hold of the last real Present's frame judged at a real
+Present (11-01, OPEN C) whose frame made no depth call before it (no tag call, SR or DLSS-G
+evaluation, no FG options event) while fewer Presents than the declared generated count presented
+that frame since its Present: the add-on sees there what it sees at that frame's next generated
+Present, where DLSS-G presents all of them (a frame's constants and a UI tag call end no window;
+the 4-frame reproducer of `fg-on-deferred-tag-generated-inside-after-hitch-untag` makes the same
+calls at its frame 3 and must hold), so depth's window still presents that frame there, the same
+limit of no frame identity. Before the add-on read depth's window for it, five fixed-set
 seeds failed there (a real Present of the next frame held as the earlier frame's generated one
 where DLSS-G presented no generated Present). The other way too (`ui_frame:dropped`, the 11-01
 final review's F13): a generated Present that presents that frame must hold its decision where it
@@ -3054,6 +3061,13 @@ holds, `regression:no_ui_hold`, and with the add-on's window hold removed (no ho
 named the input's frame) those 6 fail `ui_frame:dropped`, which the timelines did not judge before
 11-01; a UI that fell back to Present counting would still hold them, which `ui_frame:held` judges in
 `fg-on-ui-window-ends-at-next-evaluation-hitch`),
+and one for a real Present without frame identity, `fg-silent-tag-only-then-callless-real-present-hitch`
+(soak seed 117a6b99131447b1's frames 29 to 42 and its frames 37 to 42 again: on a silent FG scope a
+tag-only frame whose FG tag is refused at its call declares one generated Present that DLSS-G does
+not present, then a frame whose only calls are its constants and UI tags, after a hitch of the
+source age, makes its real Present; the tag-only frame's window, open since its refused call ends
+the earlier one, holds its UI decision there, as Present counting did before 11-01; the judge
+failed that hold, `ui_frame:held` at frame 31, every run, until 11-01 left it unjudged),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -3085,8 +3099,8 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 89 regression timelines, 6980
-frames and about 20600 Presents, with the seeds' hitches and late FG Offs) in about 350 s
+`reshade_session_timelines` runs the fixed set (24 seeds and 90 regression timelines, 7020
+frames and about 20700 Presents, with the seeds' hitches and late FG Offs) in about 350 s
 (integration run f3-INT3-rows1, 11-01: 20564 Presents in 351 s; about 340 s with 87 rows in lane run
 f2-P0-int1-followups-c5-sessions; 61 rows and about 285 s in the full check's registered run of
 10-28), registered like
