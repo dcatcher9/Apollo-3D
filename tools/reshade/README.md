@@ -1807,7 +1807,11 @@ timer, wait or work object of the add-on's sources, the test add-on's own export
 (CMakeLists.txt's `sunshine_test_addon_sources`; fixtures, `experiments/` and the replay tools
 aside), against its list of allowed sites, each with its domain and reason, so a new site fails
 until it reads `game_now()`, submits through `pool::submit` or is listed; only
-`game3d_pool_submit.h` may call `TrySubmitThreadpoolCallback`.
+`game3d_pool_submit.h` may call `TrySubmitThreadpoolCallback`. The fixtures on the game clock (its
+`converted_fixtures` list) are held to the clock domains too, for the real tick only: they read
+game time through the fixture clock and wall time through `game_clock::wall_now()`, so a
+`GetTickCount64` in one of them fails unless listed (the helper itself, and the shared fixture's
+crash dump name).
 
 One test binary compiles a production file outside every view: the opt-in D3D11 sampler fixture
 `reshade_depth_sampler_d3d11_test`, which no `ctest` runs, compiles `depth_content_sampler.cpp`

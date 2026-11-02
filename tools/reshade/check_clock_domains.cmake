@@ -17,6 +17,13 @@
 # although their names start with test_. Comments, string literals and
 # character literals are not code.
 #
+# The fixtures that play game time (converted_fixtures below, plan C3 item
+# 10) are scanned for the real tick only: they read game time through the
+# fixture clock (test_game3d_clock.h: clock.now(), hitch(), the frame
+# boundary) and wall time only through game_clock::wall_now(), so a
+# GetTickCount64 in one of them fails here as in the add-on. Their threads,
+# waits and other clocks (watchdogs, hang bounds) are the fixtures' own.
+#
 #   cmake -DSOURCE_DIR=<tools/reshade> -DTEST_ADDON_SOURCES=<a.cpp|b.cpp|...> -P check_clock_domains.cmake
 cmake_minimum_required(VERSION 3.24)
 
@@ -75,7 +82,23 @@ set(allowed
   "game3d_ui_layer.cpp|chrono|1|perf|the skip gap's microsecond clock, for the timing line's maximum"
   "test_depth_addon_exports.cpp|chrono|2|perf|SunshineDepthTestSnapshot's timed copies of the depth selection snapshot, a measurement"
   "test_addon_lifetime_exports.cpp|chrono|2|wall|SunshineGame3DTestQuiesce's bound: real time, so that a barrier that is never reached cannot hang"
-  "game3d_pool_submit.h|pool|2|pool|pool::submit, shipping and test branch: every pool callback of the add-on starts here, by family, so the test add-on counts it until it returns")
+  "game3d_pool_submit.h|pool|2|pool|pool::submit, shipping and test branch: every pool callback of the add-on starts here, by family, so the test add-on counts it until it returns"
+  "test_game3d_clock.h|tick|2|wall|the fixture clock itself: game_clock::wall_now(), and now() until the clock engages"
+  "test_depth3d_runtime_d3d12.cpp|tick|1|wall|the crash dump's file name, unique per crash")
+
+# The fixtures that play game time on the fixture clock (README, Test
+# builds): every one a fixture converts joins this list.
+set(converted_fixtures
+  test_game3d_clock.h test_depth3d_runtime_d3d12.cpp test_game3d_continuity.h
+  test_game3d_session_timeline_runtime.cpp test_game3d_api_contract_runtime.cpp test_game3d_native_provider_runtime.cpp
+  test_streamline_direct_runtime.cpp test_ngx_depth_runtime.cpp test_depth_probe_round_runtime.cpp
+  test_adaptive_raw_runtime.cpp test_depth_alternating_runtime.cpp test_game3d_native_depth_runtime.cpp
+  test_game3d_native_observation.h test_raw_runtime_fixture.h
+  test_streamline_camera_probe.cpp test_upscaler_call_trace.cpp test_game3d_ui_capture.cpp
+  test_diagnostic_texture_capture.cpp test_game3d_native_runtime.cpp test_game3d_native_runtime_d3d11.cpp
+  test_game3d_debug_dump_runtime.h test_game3d_seam_characterization.cpp test_streamline_depth_capture.cpp
+  test_streamline_depth_capture_fixture.h test_game3d_renderer_build.h test_game3d_startup_measure.h
+  test_game3d_view_quiesce.cpp)
 
 # Code with its comments and its string and character literals blanked (raw
 # strings without a delimiter included), lines kept as lines. Each pattern is
@@ -228,6 +251,11 @@ foreach(source IN LISTS test_addon_sources)
     message(FATAL_ERROR "The test add-on's source ${source} (TEST_ADDON_SOURCES) is not under ${SOURCE_DIR}")
   endif()
 endforeach()
+foreach(source IN LISTS converted_fixtures)
+  if(NOT EXISTS "${SOURCE_DIR}/${source}" OR source IN_LIST scanned)
+    message(FATAL_ERROR "The converted fixture ${source} is not a fixture under ${SOURCE_DIR}")
+  endif()
+endforeach()
 
 # Every entry names a scanned file and a known kind, at most once.
 set(entries "")
@@ -239,8 +267,8 @@ foreach(entry IN LISTS allowed)
   if(NOT n EQUAL 5 OR NOT kind IN_LIST kinds)
     message(FATAL_ERROR "Malformed clock domain entry: ${entry}")
   endif()
-  if(NOT file IN_LIST scanned)
-    message(FATAL_ERROR "The clock domain entry names a file that is not an add-on source: ${entry}")
+  if(NOT file IN_LIST scanned AND NOT (file IN_LIST converted_fixtures AND kind STREQUAL "tick"))
+    message(FATAL_ERROR "The clock domain entry names a file that is not an add-on source (or a converted fixture's tick): ${entry}")
   endif()
   if("${file}|${kind}" IN_LIST entries)
     message(FATAL_ERROR "Two clock domain entries for ${file} (${kind})")
@@ -250,10 +278,14 @@ endforeach()
 
 set(failures "")
 set(total 0)
-foreach(source IN LISTS scanned)
+foreach(source IN LISTS scanned converted_fixtures)
   file(READ "${SOURCE_DIR}/${source}" text)
   clock_code("${text}" code)
-  foreach(kind IN LISTS kinds)
+  set(source_kinds ${kinds})
+  if(source IN_LIST converted_fixtures)
+    set(source_kinds tick)
+  endif()
+  foreach(kind IN LISTS source_kinds)
     clock_sites("${code}" ${kind} found)
     list(LENGTH found count)
     set(want 0)
@@ -283,7 +315,10 @@ foreach(source IN LISTS scanned)
       else()
         set(rule "${want} allowed (${domain})")
       endif()
-      if(kind STREQUAL "tick")
+      if(kind STREQUAL "tick" AND source IN_LIST converted_fixtures)
+        string(APPEND rule " (a fixture on the game clock reads game time with clock.now() and wall time with "
+          "game_clock::wall_now(), test_game3d_clock.h)")
+      elseif(kind STREQUAL "tick")
         string(APPEND rule " (game time is read with sunshine_game3d::clock::game_now(), game3d_clock.h)")
       endif()
       string(APPEND failures "\n${source}: ${count} ${kind} sites, ${rule}${lines}")
@@ -297,6 +332,7 @@ if(failures)
     "allowed ones, README, Test builds):${failures}")
 endif()
 list(LENGTH scanned files)
+list(LENGTH converted_fixtures fixtures)
 list(LENGTH allowed listed)
-message(STATUS "PASS ${files} add-on sources: ${total} clock reads and pool submissions outside game_now(), all at "
-  "the ${listed} listed sites with a stated domain")
+message(STATUS "PASS ${files} add-on sources and ${fixtures} fixtures on the game clock: ${total} clock reads and "
+  "pool submissions outside game_now() and the fixture clock, all at the ${listed} listed sites with a stated domain")
