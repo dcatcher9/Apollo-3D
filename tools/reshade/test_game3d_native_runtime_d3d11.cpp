@@ -296,6 +296,10 @@ namespace {
 
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // --wall-clock: the old real-time bounds of the shared startup and build
+  // checks, as before the game clock (test_game3d_clock.h). The D3D11 fixture
+  // plays no game time of its own, so it never engages the clock.
+  sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
   if (argc != 5) {
     std::fputs("usage: test_game3d_native_runtime_d3d11 official-ReShade64.dll frozen-shader-directory fresh-output-directory srgb|scrgb|pq\n", stderr);
     return 2;

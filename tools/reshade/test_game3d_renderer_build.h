@@ -6,8 +6,13 @@
 // it exactly once: a configuration change, a toggle back to the current or
 // cached renderer, a runtime reset or park, a destroyed device, a failed
 // step, and the present-thread executor of a single-threaded device.
-// Requires SUNSHINE_GAME3D_RENDERER_TEST (the build hooks).
+// Requires SUNSHINE_GAME3D_RENDERER_TEST (the build hooks). Its verdicts are
+// behaviour, not real time (owner decision 11-02): a toggle back returns while
+// the build it cancels is still held in its step, and the present-thread
+// executor builds over several calls; their times are MEASURE lines, and
+// under --wall-clock (test_game3d_clock.h) the old bounds hold as well.
 #include "game3d_renderer.h"
+#include "test_game3d_clock.h"
 #include <windows.h>
 #include <chrono>
 #include <cstdio>
@@ -108,11 +113,20 @@ namespace sunshine_game3d_test {
       check(!r.configure(runtime, b.resource, space, {}, true) && r.preparing(), "an extent change did not stay 2D");
       until_ready(r, b, space);
       render_once(r, b);
+      // The second extent's build is held in its first step's delay (the pool
+      // task's first act), longer than any wait for it could hide.
+      hooks(nullptr, 1000, false);
       check(!r.configure(runtime, a.resource, space, {}, true) && r.building(), "a second extent did not build");
-      Sleep(30);
+      Sleep(100);
       const auto back = clock::now();
       check(r.configure(runtime, b.resource, space, {}, true) && !r.building(), "a toggle back did not keep the current renderer");
-      check(std::chrono::duration<double, std::milli>(clock::now() - back).count() < 50.0, "a toggle back waited for a build");
+      const double toggle_ms = std::chrono::duration<double, std::milli>(clock::now() - back).count();
+      const bool returned_mid_build = renderer::builds_in_flight() == 1;
+      std::printf("MEASURE %s background build: toggle back over a held build %.3f ms, the build still registered %d\n",
+        api_name, toggle_ms, returned_mid_build ? 1 : 0);
+      check(returned_mid_build, "a toggle back waited for a build");
+      if (sunshine_game3d_fixture::fixture_clock().wall_clock()) check(toggle_ms < 50.0, "a toggle back waited for a build");
+      hooks(nullptr, 10, false);
       settled();
       check(renderer::builds_started() == started + 3, "an extent change did not build exactly once per configuration");
       // An SDR and HDR toggle: the other transfer builds; the toggle back
@@ -222,8 +236,9 @@ namespace sunshine_game3d_test {
         "a present-thread build was registered or finished at once");
       check(!r.configure(runtime, b.resource, space, {}, true) && r.building(), "a present-thread build was not replaced");
       const auto calls = until_ready(r, b, space);
-      check(calls.count > 3 && calls.longest_ms < 40.0 && !renderer::builds_in_flight(),
-        "the present-thread build did not run in bounded slices");
+      check(calls.count > 3 && !renderer::builds_in_flight(), "the present-thread build did not run in bounded slices");
+      if (sunshine_game3d_fixture::fixture_clock().wall_clock())
+        check(calls.longest_ms < 40.0, "the present-thread build did not run in bounded slices");
       render_once(r, b);
       {
         renderer abandoned;
@@ -231,8 +246,10 @@ namespace sunshine_game3d_test {
           "a second present-thread build did not start");
       }
       r.reset_after_runtime_drain();
-      std::printf("PASS %s background build: the present-thread executor builds over %u calls (longest %.1f ms) and ends "
-        "in place when cancelled\n", api_name, calls.count, calls.longest_ms);
+      std::printf("MEASURE %s background build: the present-thread executor built over %u calls, longest %.1f ms\n", api_name,
+        calls.count, calls.longest_ms);
+      std::printf("PASS %s background build: the present-thread executor builds over more than 3 calls and ends in place "
+        "when cancelled\n", api_name);
     }
     hooks(nullptr, 0, false);
     settled();

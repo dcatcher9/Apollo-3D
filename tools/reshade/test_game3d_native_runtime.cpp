@@ -2477,6 +2477,9 @@ namespace {
 
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // --wall-clock: the real clock and the old real-time bounds, as before the
+  // game clock (test_game3d_clock.h).
+  sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
   if (argc != 5 && argc != 7) {
     std::fputs("usage: test_game3d_native_runtime official-ReShade64.dll frozen-shader-directory fresh-output-directory srgb|scrgb|pq [width height]\n", stderr);
     return 2;
@@ -2513,7 +2516,12 @@ int main(int argc, char **argv) {
     sunshine_game3d::diagnostics::set_enabled(true);
     fixture_t fixture;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), directory, color, 0);
+    // The renderer view's game clock, in this executable (sunshine_view_clock):
+    // once the runtime is up, every Present ends at a virtual frame boundary.
+    require(fixture.clock.bind(GetModuleHandleW(nullptr)), "the renderer view's test clock exports are missing");
+    fixture.clock.engage();
     check_native_parity(fixture, directory);
+    fixture.clock.report("native runtime");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL %s\n", error.what());
