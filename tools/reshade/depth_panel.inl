@@ -25,7 +25,7 @@ static void log_depth_status(generic_depth_data &data)
 	// immediate. Logging must never turn physical rotation into per-frame I/O.
 	// The copy counts alone repeat the line at most every 10 s.
 	const uint64_t copy_frames = data.boundary_copy_frames + data.end_of_frame_copy_frames + data.held_frames + data.end_of_frame_refused;
-	if (data.status_log.due(GetTickCount64(), selection_changed || binding_changed,
+	if (data.status_log.due(sunshine_game3d::clock::game_now(), selection_changed || binding_changed,
 		binding_changed && data.binding_state == depth_binding_state::binding_failed,
 		copy_frames != data.logged_copy_frames))
 	{

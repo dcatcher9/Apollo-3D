@@ -44,7 +44,7 @@ std::size_t sunshine_depth::get_raw_samples(effect_runtime *runtime,
 	const auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
 	if (!data || !device_data || !data->raw_scene_requested) return 0;
 	std::size_t count = 0;
-	const auto now = GetTickCount64();
+	const auto now = sunshine_game3d::clock::game_now();
 	const std::shared_lock<std::shared_mutex> lock(s_mutex);
 	for (const auto &member : data->raw_members)
 	{

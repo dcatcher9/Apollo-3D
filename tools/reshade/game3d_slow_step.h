@@ -8,6 +8,7 @@
 #include <reshade.hpp>
 #include "async_log.h"
 #include "game3d_vram.h"
+#include "game3d_clock.h"
 
 namespace sunshine_game3d {
   namespace slow_step_detail {
@@ -60,7 +61,7 @@ namespace sunshine_game3d {
       const double ms = double(end.QuadPart - start_.QuadPart) * 1000.0 / double(frequency.QuadPart);
       if (ms < threshold_ms_) return;
       auto &throttle = slow_step_detail::find(name_);
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       auto due = throttle.next_log.load(std::memory_order_relaxed);
       if (now < due || !throttle.next_log.compare_exchange_strong(due, now + 1000)) return;
       // The game process's latest video-memory sample (game3d_vram.h) follows.

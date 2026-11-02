@@ -96,7 +96,7 @@ struct activity_present_trace
 		if (!enabled) return;
 		activity_trace_text out;
 		out.append("Sunshine frame activity: present burst=%u device=%llu p=%llu f=%llu->%llu depth_p=%llu tick=%llu thread=%lu swap=%llx queue=%llx bb_index=%u focus=%llu queues=%zu rows=%zu dropped_rows=%zu previous_dropped_events=%u;",
-			burst, device_epoch, present, frame_before, frame_after, depth_present, GetTickCount64(), GetCurrentThreadId(),
+			burst, device_epoch, present, frame_before, frame_after, depth_present, sunshine_game3d::clock::game_now(), GetCurrentThreadId(),
 			chain->get_native(), presenting_queue ? presenting_queue->get_native() : 0,
 			chain->get_current_back_buffer_index(), focus,
 			queues, used, total_rows - used, previous_dropped_events);
@@ -121,7 +121,7 @@ static void trace_activity_effect(effect_runtime *runtime, generic_depth_data &d
 	{
 		const std::unique_lock<std::shared_mutex> lock(s_mutex);
 		auto &trace = device_data.activity_trace;
-		const auto now = GetTickCount64(), present = device_data.native_present_index;
+		const auto now = sunshine_game3d::clock::game_now(), present = device_data.native_present_index;
 		// A physical member change (or selected=0 on rejection) is not a new
 		// capture set. Observe gaps against the stable budget generation and anchor.
 		if (!access)
@@ -336,7 +336,7 @@ static bool hold_shown_capture(effect_runtime *runtime, const generic_depth_data
 	const auto &shown = data.shown;
 	const auto &record = shown.record;
 	if (!sunshine_game3d::depth_output::generic_capture_matches(data, color_width, color_height,
-		check_age, [] { return GetTickCount64(); })) return false;
+		check_age, [] { return sunshine_game3d::clock::game_now(); })) return false;
 	{
 		const std::shared_lock<std::shared_mutex> lock(s_mutex);
 		const auto found = device_data.depth_stencil_resources.find(resource{record.source});
@@ -717,7 +717,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 			break;
 		}
 	const bool raw_sampling = anchor_shown && data.raw_scene_requested && !sunshine_depth::busy();
-	const uint64_t now = raw_sampling ? GetTickCount64() : 0;
+	const uint64_t now = raw_sampling ? sunshine_game3d::clock::game_now() : 0;
 	for (const auto &member : data.member_views)
 	{
 		if (member.retire_after || member.view == 0 || member.identity == anchor) continue;
@@ -827,7 +827,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 		const auto &shown = data.shown;
 		const auto current_id = decision.source ? decision.source :
 			shown.record.identity && shown.anchor == anchor && shown.record.runtime == data.runtime_epoch &&
-			sunshine_freshness::within_source_age(shown.tick, GetTickCount64()) ? shown.record.identity : 0;
+			sunshine_freshness::within_source_age(shown.tick, sunshine_game3d::clock::game_now()) ? shown.record.identity : 0;
 		for (const auto &[value, info] : snapshot)
 			if (current_id && info.identity == current_id &&
 				std::any_of(data.member_views.begin(), data.member_views.end(), [&](const auto &entry) {
