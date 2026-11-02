@@ -3212,9 +3212,11 @@ keep the default, are judged by their verdicts, which accept either outcome.
 The timelines play game time on the test add-on's clock (clock C3, 11-02; the fixture clock in
 [Test builds](#test-builds)). Once setup is done the clock engages 120 s ahead of the real tick, so
 nothing setup stamped survives into the first timeline. Each Present then ends at a 16 ms virtual
-frame boundary: the game's ring and DLSS-G's ring, and the order fences their queues and the third
-queue signal, complete; the add-on's pool work and log writer quiesce; only then does game time
-move. A seed's `hitch=` is that barrier and then its milliseconds at once, also inside a frame's
+frame boundary: the game's ring and DLSS-G's ring complete, and so does each ring's own signal of
+its order fence (not a value the CPU or the third queue signals one ahead for `order=cpu` or
+`second`: the ring's signal of the value before it can land after that one and set the fence back,
+also in real time, so only the ring's value is certain); the add-on's pool work and log writer
+quiesce; only then does game time move. A seed's `hitch=` is that barrier and then its milliseconds at once, also inside a frame's
 recording, where a ring that the frame's `sr_gpu` or `dlssg_gpu` gate holds until after its Present
 is not waited for (the frame's boundary waits for it once the gate opened). Every stamp and window
 the judges read (each source's `made` and the frame's tick, the FG hold's window and the deferred

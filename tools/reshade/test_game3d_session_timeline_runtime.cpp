@@ -1392,8 +1392,8 @@ namespace {
     // The game's fences that order the presenting queue after each ring's
     // work (frame_events::order_form), created anew for each run and at each
     // FG toggle, and a third queue of the game's that signals one too (a
-    // second signaller; it waits for the value first, so a fence never
-    // decreases). token: the fence's name in the unordered_read script, one
+    // second signaller; it waits for the value first, yet the fence can fall
+    // back, signal_again). token: the fence's name in the unordered_read script, one
     // per fence object, so that a fence created at a released one's address
     // is another fence there as it is to the add-on.
     struct order_fence {
@@ -1408,10 +1408,6 @@ namespace {
       // frame's copy was last readable at its Present only by relying on it
       // (U-C1: a read in flight that a later signal can conflict, O1).
       std::uint64_t waited {}, relied {};
-      // The highest value a queue of the game's signalled on it (the ring's
-      // queue, or the third queue), which the game clock's barriers wait for
-      // (watch_rings); a CPU signal is complete at once.
-      std::uint64_t signalled {};
     };
 
     order_fence game_order, dlssg_order;
@@ -1693,11 +1689,17 @@ namespace {
 
     // The game's queues each barrier of the game clock waits for, so that
     // their work completed before game time moves (test_game3d_clock.h): the
-    // game's ring and its order fence, DLSS-G's ring and its order fence
-    // (the third queue's signals among them). Inside a frame whose gate holds
-    // a ring's work until after its Present (sr_gpu or dlssg_gpu
-    // after_present) that ring and its order fence are not waited for: the
-    // gate opens after the Present, and the frame's boundary waits then.
+    // game's ring and DLSS-G's ring (their done fences), and each ring's own
+    // signal of its order fence (the value order_fence::value names). Not a
+    // value the CPU or the third queue signals ahead (order_form cpu and
+    // second): the ring's own signal of the value before it can land after
+    // that one, so the fence falls back to the ring's value (it does in
+    // real time too: the third queue's wait for that value is met by its own
+    // earlier signal one ahead), and only the ring's value is certain to be
+    // reached. Inside a frame whose gate holds a ring's work until after its
+    // Present (sr_gpu or dlssg_gpu after_present) that ring and its order
+    // fence are not waited for: the gate opens after the Present, and the
+    // frame's boundary waits then.
     void watch_rings() {
       const auto sr_held = [this] {
         return sr_gate_closed;
@@ -1705,7 +1707,7 @@ namespace {
       const auto dlssg_held = [this] {
         return dlssg_gate_closed;
       };
-      ring_watches = {clock.watch("game_work", game_work, sr_held), clock.watch("game_order", &game_order.fence.p, &game_order.signalled, sr_held), clock.watch("dlssg_work", dlssg_work, dlssg_held), clock.watch("dlssg_order", &dlssg_order.fence.p, &dlssg_order.signalled, dlssg_held)};
+      ring_watches = {clock.watch("game_work", game_work, sr_held), clock.watch("game_order", &game_order.fence.p, &game_order.value, sr_held), clock.watch("dlssg_work", dlssg_work, dlssg_held), clock.watch("dlssg_order", &dlssg_order.fence.p, &dlssg_order.value, dlssg_held)};
     }
 
     void create_queues() {
@@ -1756,7 +1758,7 @@ namespace {
       for (auto *order : {&game_order, &dlssg_order}) {
         finish_order(*order);
         checked(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(order->fence.put())), "Create an order fence");
-        order->value = order->waited = order->relied = order->signalled = 0;
+        order->value = order->waited = order->relied = 0;
         order->token = script_fence_token();
         order->poisoned = order->settled = false;
       }
@@ -1808,7 +1810,6 @@ namespace {
       checked(ring.queue->Signal(order.fence.p, next), "Signal a ring's order fence");
       script_order.signal(ring.queue.p, order.token, next);
       order.value = next;
-      order.signalled = std::max(order.signalled, next);
       if (form == order_form::cpu_wait || form == order_form::cpu) {
         // On the ring's own fence, which nobody else signals.
         checked(ring.done->SetEventOnCompletion(ring.value, nullptr), "Wait for a ring's work on the CPU");
@@ -1830,7 +1831,7 @@ namespace {
     }
 
     // A signal of the order fence by the CPU, or by the third queue once its
-    // last value was reached (so the fence never decreases): of that value
+    // last value was reached: of that value
     // (late), or one ahead of it (cpu, second), which the ring's next signal
     // repeats, so the presenting queue's next wait is reached before that
     // ring's work: an order the add-on must refuse (sticky poison, O3),
@@ -1840,6 +1841,12 @@ namespace {
     // a late window then tagged every legal source of every real frame
     // within the source age with R1-late-signaller, which excused any loss
     // there, also of a copy the presenting queue could read.
+    // The fence can fall back (seen 11-02, also in real time): one ahead,
+    // after the ring's work but before the ring's own signal of the last
+    // value (the CPU waits for the ring's done fence, which the ring
+    // signals first; in consecutive second frames the third queue's wait is
+    // met by its own earlier signal one ahead), that signal lands later and
+    // sets the fence back to the ring's value until the ring's next signal.
     void signal_again(order_fence &order, bool cpu, bool ahead) {
       if (!order.poisoned) {
         continuity_log.judge.late_signal(order.token);
@@ -1858,7 +1865,6 @@ namespace {
       script_order.wait(third.p, order.token, order.value);
       checked(third->Signal(order.fence.p, value), "Signal an order fence from the third queue");
       script_order.signal(third.p, order.token, value);
-      order.signalled = std::max(order.signalled, value);
     }
 
     // Whether a first signal of order now may conflict a read in flight.
