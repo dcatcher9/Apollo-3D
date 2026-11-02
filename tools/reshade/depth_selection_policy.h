@@ -437,7 +437,13 @@ namespace sunshine_depth {
     // be mono. The incumbent keeps every Present until the challenger's next
     // visit allocates one (prepare_probe_target gives a won challenger the
     // next visit).
-    selection_result choose(std::uint64_t frame, std::uint64_t current_id = 0, bool depth_present = true) {
+    // choose_assuming_ready: the same with every challenger's backup taken
+    // as tracked (the policy tests, which track none). The add-on decides
+    // with its capture slots (choose_generic_source), so the policy has no
+    // overload without capture_ready: until 11-01 a three-argument choose
+    // assumed every backup tracked, and a call site reverted to it brought
+    // back the one-Present mono takeover and still compiled (F87).
+    selection_result choose_assuming_ready(std::uint64_t frame, std::uint64_t current_id = 0, bool depth_present = true) {
       return choose(frame, current_id, depth_present, [](std::uint64_t) { return true; });
     }
     template <class CaptureReady>

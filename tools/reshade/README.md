@@ -1409,6 +1409,9 @@ takeover wiring (`choose_generic_source`, `first_probe_choice`; deferred item 7a
 comparison won after its probe visit ended has no tracked backup, so the incumbent must keep the
 Present, the won challenger must get the next probe visit, and once a backup is tracked for it it
 must take over (since 11-01; before, only the policy predicate was tested, with its own lambda).
+The policy has no `choose` without that readiness predicate, so a call site cannot drop it and
+still compile; the policy tests' always-ready form is named `choose_assuming_ready` (the 11-01 fix
+review of F87).
 Its synthetic workload timings include construction, consumption and destruction; reported value
 bytes exclude allocator overhead.
 

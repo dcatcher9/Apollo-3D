@@ -124,26 +124,26 @@ namespace {
     const auto flat = analyze(std::vector<float>(width * height, 1.f));
     policy.observe(candidate(1, 10, 10000, 1280, 720));
     policy.observe(candidate(2, 10, 2));
-    require(policy.choose(10).id == 1, "startup without content should preserve conventional workload fallback");
+    require(policy.choose_assuming_ready(10).id == 1, "startup without content should preserve conventional workload fallback");
     policy.sample(1, flat, 10);
     policy.sample(2, useful, 10);
-    require(policy.choose(10, 1).id == 1, "one promising capture cannot cause a switch");
+    require(policy.choose_assuming_ready(10, 1).id == 1, "one promising capture cannot cause a switch");
     policy.sample(2, useful, 11);
-    require(policy.choose(11, 1).id == 2, "confirmed low-draw scene must beat high-draw flat depth");
+    require(policy.choose_assuming_ready(11, 1).id == 2, "confirmed low-draw scene must beat high-draw flat depth");
     policy.sample(1, useful, 11);
     policy.sample(1, useful, 12);
-    require(policy.choose(12, 2).id == 2, "higher workload cannot dislodge current confirmed scene");
+    require(policy.choose_assuming_ready(12, 2).id == 2, "higher workload cannot dislodge current confirmed scene");
 
     // Same resource dimensions now carry different contents: three bad captures
     // revoke confidence, then another confirmed source can replace the old one.
     policy.sample(2, flat, 12);
-    require(policy.choose(12, 2).id == 2, "one bad scene capture must be tolerated");
+    require(policy.choose_assuming_ready(12, 2).id == 2, "one bad scene capture must be tolerated");
     policy.sample(2, flat, 13);
-    require(policy.choose(13, 2).id == 2, "two bad scene captures must be tolerated");
+    require(policy.choose_assuming_ready(13, 2).id == 2, "two bad scene captures must be tolerated");
     policy.observe(candidate(1, 14, 10000, 640, 360));
     policy.observe(candidate(2, 14, 2, 640, 360));
     policy.sample(2, flat, 14);
-    require(policy.choose(14, 2).id == 1, "sustained bad content must yield to confirmed same-size replacement");
+    require(policy.choose_assuming_ready(14, 2).id == 1, "sustained bad content must yield to confirmed same-size replacement");
     std::puts("PASS ranking: low-draw scene wins, single noise ignored, same-size contents recover with hysteresis");
   }
 
@@ -155,13 +155,13 @@ namespace {
       policy.observe(candidate(id, 10, id * 100));
     policy.sample(1, useful, 10);
     policy.sample(1, useful, 11);
-    require(policy.choose(11, 1).id == 1, "test scene should begin confirmed");
+    require(policy.choose_assuming_ready(11, 1).id == 1, "test scene should begin confirmed");
     for (std::uint64_t frame = 12; frame < 30; ++frame) {
       for (std::uint64_t id : {1u, 2u, 3u}) {
         policy.observe(candidate(id, frame, id * frame * 100));
         policy.sample(id, flat, frame);
       }
-      require(policy.choose(frame, 1).id == 1, "flat menu must not oscillate through high-workload buffers");
+      require(policy.choose_assuming_ready(frame, 1).id == 1, "flat menu must not oscillate through high-workload buffers");
     }
     policy.sample(1, depth_quality {}, 30);
     require(policy.evidence(1)->sampled_frame == 29, "missing readback must not overwrite actual content evidence");
@@ -181,17 +181,17 @@ namespace {
       require(policy.next_probe(10, 11) == expected, "round-robin must visit low-draw candidate and current fairly");
     policy.sample(2, useful, 10);
     policy.sample(2, useful, 11);
-    require(policy.choose(11, 7).id == 2, "candidate should have established positive confidence");
+    require(policy.choose_assuming_ready(11, 7).id == 2, "candidate should have established positive confidence");
     policy.erase(2);
     policy.observe(candidate(20, 11, 1)); // Same native pointer may now have this new generation.
     policy.sample(2, useful, 12); // Late result for the destroyed generation.
     require(policy.evidence(2) == nullptr, "late readback must not resurrect destroyed candidate");
     require(!policy.evidence(20)->confirmed_good, "resource-address reuse must not inherit prior confidence");
-    require(policy.choose(12, 2).id != 2, "destroyed selected candidate cannot remain selected");
+    require(policy.choose_assuming_ready(12, 2).id != 2, "destroyed selected candidate cannot remain selected");
     policy.sample(20, useful, 12);
     policy.sample(20, useful, 12);
     require(!policy.evidence(20)->confirmed_good, "duplicate same-frame capture cannot establish confidence");
-    require(policy.next_probe(100) == 0 && policy.choose(100, 11).id == 0, "inactive candidate metadata cannot remain selectable/probeable");
+    require(policy.next_probe(100) == 0 && policy.choose_assuming_ready(100, 11).id == 0, "inactive candidate metadata cannot remain selectable/probeable");
     std::puts("PASS lifetime: fair exploration, destruction, pointer reuse, delayed/duplicate samples, stale activity");
   }
 
@@ -205,13 +205,13 @@ namespace {
       policy.sample(id, useful, 9);
       policy.sample(id, useful, 10);
     }
-    require(policy.choose(10).id == 3, "ties must use stable lifetime ordering independent of insertion");
+    require(policy.choose_assuming_ready(10).id == 3, "ties must use stable lifetime ordering independent of insertion");
     policy.observe(candidate(9, 17, 100));
     policy.observe(candidate(3, 17, 100));
     policy.sample(9, useful, 16);
     require(!policy.evidence(9)->confirmed_good, "one fresh capture cannot renew expired positive evidence");
     policy.sample(9, useful, 17);
-    require(policy.choose(17, 3).id == 9, "stale historical confidence cannot beat recent confirmed contents");
+    require(policy.choose_assuming_ready(17, 3).id == 9, "stale historical confidence cannot beat recent confirmed contents");
     policy.sample(9, analyze(std::vector<float>(width * height, 1.f)), 15);
     require(policy.evidence(9)->sampled_frame == 17, "out-of-order readback cannot replace newer evidence");
     std::puts("PASS evidence freshness and deterministic total ordering");
@@ -277,7 +277,7 @@ namespace {
       for (std::uint64_t ordinary : {1u, 2u, 3u, 100u}) {
         require(policy.next_probe(10, 1) == 100, "a flat native candidate may still receive a bounded discovery visit");
         require(policy.next_probe(10, 1) == ordinary, "unusable native contents must not starve lower-resolution exploration");
-        require(policy.choose(10, 1).id == 1, "native probing must not bypass useful-content selection");
+        require(policy.choose_assuming_ready(10, 1).id == 1, "native probing must not bypass useful-content selection");
       }
     }
     std::puts("PASS native discovery fallback: unusable full-resolution source cannot starve other sources or replace useful selected depth");
@@ -329,23 +329,23 @@ namespace {
     policy.observe(candidate(1, 100, 1));
     policy.sample(1, useful, 99);
     policy.sample(1, useful, 100);
-    require(policy.choose(100).id == 1, "rendered scene must qualify before a clear-only frame");
+    require(policy.choose_assuming_ready(100).id == 1, "rendered scene must qualify before a clear-only frame");
 
     // The automatic loop observes every live candidate, including an incumbent
     // whose frame only cleared it. Cached positive captures cannot turn that
     // clear into scene work.
     policy.observe(candidate(1, 101, 0));
-    require(policy.choose(101, 1).id == 0, "clear-only current source cannot remain an active automatic candidate");
+    require(policy.choose_assuming_ready(101, 1).id == 0, "clear-only current source cannot remain an active automatic candidate");
     require(policy.next_probe(101) == 0, "clear-only source cannot schedule a content capture");
     policy.sample(1, useful, 101); // Late preserved pixels still cannot establish current rendering.
-    require(policy.choose(101, 1).id == 0, "new readback cannot substitute for a current scene draw");
+    require(policy.choose_assuming_ready(101, 1).id == 0, "new readback cannot substitute for a current scene draw");
 
     policy.observe(candidate(2, 101, 1));
     policy.sample(2, useful, 100);
     policy.sample(2, useful, 101);
-    require(policy.choose(101, 1).id == 2, "current useful replacement must outrank a clear-only incumbent");
+    require(policy.choose_assuming_ready(101, 1).id == 2, "current useful replacement must outrank a clear-only incumbent");
     policy.observe(candidate(1, 102, 1));
-    require(policy.choose(102, 1).id == 1, "resumed rendering must restore the retained scene without inventing a new lifetime");
+    require(policy.choose_assuming_ready(102, 1).id == 1, "resumed rendering must restore the retained scene without inventing a new lifetime");
     std::puts("PASS clear-only activity: no ready candidate or probe, no late-readback substitute for a draw, fresh replacement and resumed rendering");
   }
 
@@ -365,7 +365,7 @@ namespace {
       policy.observe(challenger);
       policy.sample(incumbent.id, current_quality, first + round);
       policy.sample(challenger.id, challenger_quality, first + round);
-      selected = policy.choose(first + round, incumbent.id);
+      selected = policy.choose_assuming_ready(first + round, incumbent.id);
       require(selected.id == (round == 2 ? challenger.id : incumbent.id),
               "healthy replacement needs three fresh paired wins, not merely three useful challenger captures");
     }
@@ -384,12 +384,12 @@ namespace {
     policy.sample(2, native, 11);
     require(policy.evidence(2)->confirmed_good, "native candidate should already satisfy basic content qualification");
     for (unsigned repeat = 0; repeat < 100; ++repeat)
-      require(policy.choose(11, 1).id == 1, "per-frame choose calls must not manufacture a third independent capture");
+      require(policy.choose_assuming_ready(11, 1).id == 1, "per-frame choose calls must not manufacture a third independent capture");
     policy.sample(2, native, 12);
     paired_challenge(policy, 12, candidate(1, 12, 1), smaller, candidate(2, 12, 1, 1280, 720), native);
     require(policy.source_coverage(1) == .5f && policy.source_coverage(2) == 1.f, "coverage must describe effective source scale");
     require(policy.comparison_score(2) >= policy.retention_score(1) + .04, "native challenge must clear a meaningful bounded score margin");
-    require(policy.choose(14, 2).id == 2, "native selection must not immediately switch back to smoother lower resolution");
+    require(policy.choose_assuming_ready(14, 2).id == 2, "native selection must not immediately switch back to smoother lower resolution");
     std::puts("PASS qualified challenge: replay-like native vs smoother half source, three distinct captures, meaningful margin");
   }
 
@@ -403,7 +403,7 @@ namespace {
       equal.sample(2, quality_score(.99f), frame);
     }
     for (unsigned repeat = 0; repeat < 100; ++repeat)
-      require(equal.choose(10, 1).id == 1, "equal-size content and workload differences cannot cause marginal switching");
+      require(equal.choose_assuming_ready(10, 1).id == 1, "equal-size content and workload differences cannot cause marginal switching");
 
     selection_policy policy;
     policy.observe(candidate(1, 10, 1));
@@ -412,15 +412,15 @@ namespace {
       policy.sample(1, strong, frame);
       policy.sample(2, weak, frame);
     }
-    require(policy.choose(10, 1).id == 1, "substantially less credible native contents cannot win on size");
+    require(policy.choose_assuming_ready(10, 1).id == 1, "substantially less credible native contents cannot win on size");
     policy.sample(1, weak, 11);
-    require(policy.choose(11, 1).id == 1, "one weak incumbent sample must not cheapen its replacement threshold");
+    require(policy.choose_assuming_ready(11, 1).id == 1, "one weak incumbent sample must not cheapen its replacement threshold");
     policy.sample(1, flat, 12);
-    require(policy.choose(12, 1).id == 1, "one bad incumbent sample must not enable an unrelated native switch");
+    require(policy.choose_assuming_ready(12, 1).id == 1, "one bad incumbent sample must not enable an unrelated native switch");
     policy.sample(2, strong, 11);
-    require(policy.choose(12, 1).id == 1, "one high-quality challenger blip cannot hide its weaker recent captures");
+    require(policy.choose_assuming_ready(12, 1).id == 1, "one high-quality challenger blip cannot hide its weaker recent captures");
     policy.sample(2, strong, 12);
-    require(policy.choose(12, 1).id == 1, "two improved captures still retain one weaker recent challenger sample");
+    require(policy.choose_assuming_ready(12, 1).id == 1, "two improved captures still retain one weaker recent challenger sample");
     policy.sample(2, strong, 13);
     paired_challenge(policy, 13, candidate(1, 13, 1), strong, candidate(2, 13, 10000, 1280, 720), strong);
     std::puts("PASS comparison hysteresis: equal-size stability, incumbent weakness protection, sustained challenger quality");
@@ -436,15 +436,15 @@ namespace {
     policy.sample(1, useful, 9);
     policy.sample(1, useful, 10);
     for (std::uint64_t frame : {8u, 9u, 10u}) policy.sample(2, flat, frame);
-    require(policy.choose(10, 2).id == 1, "useful lower resolution must replace bad native even with only two positive captures");
+    require(policy.choose_assuming_ready(10, 2).id == 1, "useful lower resolution must replace bad native even with only two positive captures");
     for (std::uint64_t frame : {11u, 12u, 13u}) {
       policy.observe(candidate(1, frame, 1));
       policy.observe(candidate(2, frame, 1000000, 1280, 720));
       policy.sample(2, noisy, frame);
-      require(policy.choose(frame, 1).id == 1, "noisy native must never outrank useful lower resolution");
+      require(policy.choose_assuming_ready(frame, 1).id == 1, "noisy native must never outrank useful lower resolution");
     }
     policy.sample(2, depth_quality {}, 14);
-    require(policy.choose(14, 1).id == 1, "missing native readback must not imply positive evidence");
+    require(policy.choose_assuming_ready(14, 1).id == 1, "missing native readback must not imply positive evidence");
 
     selection_policy oversized;
     oversized.observe(candidate(1, 10, 1));
@@ -453,7 +453,7 @@ namespace {
       oversized.sample(1, useful, frame);
       oversized.sample(3, useful, frame);
     }
-    require(oversized.source_coverage(3) == 0 && oversized.choose(10, 1).id == 1, "oversized allocation must not earn a native-coverage reward");
+    require(oversized.source_coverage(3) == 0 && oversized.choose_assuming_ready(10, 1).id == 1, "oversized allocation must not earn a native-coverage reward");
     auto padded = candidate(3, 11, 1, 2560, 1440);
     padded.viewport_width = padded.viewport_height = 0;
     oversized.observe(padded);
@@ -475,13 +475,13 @@ namespace {
     for (std::uint64_t frame : {20u, 21u, 22u}) policy.sample(1, useful, frame);
     for (std::uint64_t frame : {17u, 18u, 22u}) policy.sample(2, useful, frame);
     require(policy.evidence(2)->good_samples == 3 && policy.evidence(2)->confirmed_good, "test challenger must have three historical positive captures");
-    require(policy.choose(23, 1).id == 1, "all three comparison captures must be fresh, not just the last one");
+    require(policy.choose_assuming_ready(23, 1).id == 1, "all three comparison captures must be fresh, not just the last one");
     policy.sample(2, useful, 23);
     paired_challenge(policy, 23, candidate(1, 23, 1), useful, candidate(2, 23, 1, 1280, 720), useful);
     policy.erase(2);
     policy.observe(candidate(12, 25, 1, 1280, 720));
     policy.sample(2, useful, 26);
-    require(policy.choose(26, 1).id == 1, "late native score cannot transfer to a new resource lifetime");
+    require(policy.choose_assuming_ready(26, 1).id == 1, "late native score cannot transfer to a new resource lifetime");
     std::puts("PASS comparison freshness: three fresh captures, no delayed evidence transfer across resource lifetimes");
   }
 
@@ -551,7 +551,7 @@ namespace {
     same_size.sample(2, scene, 10);
     same_size.sample(2, scene, 11);
     for (unsigned i = 0; i < 100; ++i)
-      require(same_size.choose(11, 1).id == 1, "fuller same-size source needs three real captures, not repeated choose calls");
+      require(same_size.choose_assuming_ready(11, 1).id == 1, "fuller same-size source needs three real captures, not repeated choose calls");
     same_size.sample(2, scene, 12);
     paired_challenge(same_size, 12, candidate(1, 12, 1, 1280, 720), people, candidate(2, 12, 1, 1280, 720), scene);
 
@@ -563,7 +563,7 @@ namespace {
       lower_resolution.sample(2, scene, frame);
     }
     paired_challenge(lower_resolution, 10, candidate(1, 10, 1000, 1280, 720), people, candidate(2, 10, 1), scene);
-    require(lower_resolution.choose(12, 2).id == 2, "partial native must not steal selection back from a complete smaller source");
+    require(lower_resolution.choose_assuming_ready(12, 2).id == 2, "partial native must not steal selection back from a complete smaller source");
 
     selection_policy worse_quality;
     worse_quality.observe(candidate(1, 10, 1, 1280, 720));
@@ -577,7 +577,7 @@ namespace {
       worse_quality.sample(1, reliable_partial, frame);
       worse_quality.sample(2, borderline_complete, frame);
     }
-    require(worse_quality.choose(10, 1).id == 1, "meaningfully poorer full-support quality cannot displace reliable partial contents");
+    require(worse_quality.choose_assuming_ready(10, 1).id == 1, "meaningfully poorer full-support quality cannot displace reliable partial contents");
     std::puts("PASS fuller-source preference: same resolution, lower-resolution complete scene, global quality guard");
   }
 
@@ -660,7 +660,7 @@ namespace {
       marginal.sample(2, slightly_larger, frame);
     }
     require(marginal.comparison_score(2) > marginal.retention_score(1) + .04, "weighted score alone would switch this deliberately subthreshold completeness change");
-    require(marginal.choose(10, 1).id == 1, "weighted fallback must not bypass the explicit same-size completeness margin");
+    require(marginal.choose_assuming_ready(10, 1).id == 1, "weighted fallback must not bypass the explicit same-size completeness margin");
 
     selection_policy transient;
     transient.observe(candidate(1, 10, 1, 1280, 720));
@@ -674,7 +674,7 @@ namespace {
       transient.observe(candidate(2, frame, 1, 1280, 720));
       transient.sample(1, people, frame);
       transient.sample(2, frame == 12 ? people : scene, frame);
-      require(transient.choose(frame, 1).id == (frame == 17 ? 2u : 1u), "fuller history must qualify, then win three fresh paired comparisons");
+      require(transient.choose_assuming_ready(frame, 1).id == (frame == 17 ? 2u : 1u), "fuller history must qualify, then win three fresh paired comparisons");
     }
 
     selection_policy incumbent_history;
@@ -689,7 +689,7 @@ namespace {
       incumbent_history.observe(candidate(2, frame, 1, 1280, 720));
       incumbent_history.sample(1, people, frame);
       incumbent_history.sample(2, scene, frame);
-      require(incumbent_history.choose(frame, 1).id == (frame == 15 ? 2u : 1u), "old fuller incumbent history must expire before three fresh relative wins can replace it");
+      require(incumbent_history.choose_assuming_ready(frame, 1).id == (frame == 15 ? 2u : 1u), "old fuller incumbent history must expire before three fresh relative wins can replace it");
     }
     std::puts("PASS completeness hysteresis: explicit minimum gain, transient fuller candidate, incumbent support history ages out");
   }
@@ -717,9 +717,9 @@ namespace {
       stable_sky.sample(1, analyze(sky_depth(.70f, 1)), frame);
       stable_sky.sample(2, analyze(people_depth()), frame);
     }
-    require(stable_sky.choose(10, 1).id == 1, "a coherent sky-heavy scene must not be discarded for a similarly sparse people-only source");
+    require(stable_sky.choose_assuming_ready(10, 1).id == 1, "a coherent sky-heavy scene must not be discarded for a similarly sparse people-only source");
     stable_sky.sample(1, analyze(std::vector<float>(width * height, 1.f)), 11);
-    require(stable_sky.choose(11, 1).id == 1, "one all-sky frame must not discard the incumbent");
+    require(stable_sky.choose_assuming_ready(11, 1).id == 1, "one all-sky frame must not discard the incumbent");
     std::puts("PASS legitimate sky: endpoint0/1, tiny reversed-Z terrain, coherent low occupancy, stable partial-scene comparison");
   }
 
@@ -783,9 +783,9 @@ namespace {
       policy.sample(2, broad, 10);
       policy.sample(2, broad, 11);
       for (unsigned repeat = 0; repeat < 100; ++repeat)
-        require(policy.choose(11, 1).id == 1, "broader histogram needs three captures; repeated choose calls cannot manufacture evidence");
+        require(policy.choose_assuming_ready(11, 1).id == 1, "broader histogram needs three captures; repeated choose calls cannot manufacture evidence");
       policy.sample(2, broad, 11);
-      require(policy.choose(11, 1).id == 1, "duplicate same-frame histogram must not complete challenge history");
+      require(policy.choose_assuming_ready(11, 1).id == 1, "duplicate same-frame histogram must not complete challenge history");
       policy.sample(2, broad, 12);
       selection_result selected {1, "native coverage retained"};
       if (!scaled) {
@@ -799,7 +799,7 @@ namespace {
         policy.observe(candidate(2, frame, 1, scaled ? 640 : 1280, scaled ? 360 : 720));
         policy.sample(1, narrow, frame);
         policy.sample(2, broad, frame);
-        require(policy.choose(frame, selected.id).id == selected.id, "histogram breadth alone cannot demote useful native depth or reverse a same-size histogram promotion");
+        require(policy.choose_assuming_ready(frame, selected.id).id == selected.id, "histogram breadth alone cannot demote useful native depth or reverse a same-size histogram promotion");
       }
     }
     std::puts("PASS histogram promotion: same-size fresh paired wins, useful native protected from broader lower-resolution content");
@@ -828,7 +828,7 @@ namespace {
         policy.sample(1, narrow, frame);
         policy.sample(2, challenger, frame);
       }
-      require(policy.choose(10, 1).id == 1, "broader sparse people, weaker quality, or noise must not override useful complete depth");
+      require(policy.choose_assuming_ready(10, 1).id == 1, "broader sparse people, weaker quality, or noise must not override useful complete depth");
     }
 
     // Independently isolate both material histogram requirements. A diagnostic
@@ -844,7 +844,7 @@ namespace {
         policy.sample(1, narrow, frame);
         policy.sample(2, insufficient, frame);
       }
-      require(policy.choose(10, 1).id == 1, "histogram promotion must require both material span and genuinely populated-bin gains");
+      require(policy.choose_assuming_ready(10, 1).id == 1, "histogram promotion must require both material span and genuinely populated-bin gains");
     }
     std::puts("PASS histogram guards: complete support, coherence, quality, robust span and populated-bin requirements");
   }
@@ -863,14 +863,14 @@ namespace {
       transient.observe(candidate(2, frame, 1, 1280, 720));
       transient.sample(1, narrow, frame);
       transient.sample(2, frame == 12 ? narrow : broad, frame);
-      require(transient.choose(frame, 1).id == (frame == 17 ? 2u : 1u), "broad history must qualify before three fresh paired wins can promote it");
+      require(transient.choose_assuming_ready(frame, 1).id == (frame == 17 ? 2u : 1u), "broad history must qualify before three fresh paired wins can promote it");
     }
     for (std::uint64_t frame = 18; frame <= 22; ++frame) {
       transient.observe(candidate(1, frame, 1, 1280, 720));
       transient.observe(candidate(2, frame, 1, 1280, 720));
       transient.sample(1, broad, frame);
       transient.sample(2, narrow, frame);
-      require(transient.choose(frame, 2).id == (frame == 22 ? 1u : 2u), "incumbent broad history must age out before three fresh opposite relative wins can replace it");
+      require(transient.choose_assuming_ready(frame, 2).id == (frame == 22 ? 1u : 2u), "incumbent broad history must age out before three fresh opposite relative wins can replace it");
     }
 
     policy_options options;
@@ -880,13 +880,13 @@ namespace {
     freshness.observe(candidate(2, 23, 1, 1280, 720));
     for (std::uint64_t frame : {20u, 21u, 22u}) freshness.sample(1, narrow, frame);
     for (std::uint64_t frame : {17u, 18u, 22u}) freshness.sample(2, broad, frame);
-    require(freshness.choose(23, 1).id == 1, "stale oldest histogram capture must not count toward a fresh sustained challenge");
+    require(freshness.choose_assuming_ready(23, 1).id == 1, "stale oldest histogram capture must not count toward a fresh sustained challenge");
     freshness.sample(2, broad, 23);
     paired_challenge(freshness, 23, candidate(1, 23, 1, 1280, 720), narrow, candidate(2, 23, 1, 1280, 720), broad);
     freshness.erase(2);
     freshness.observe(candidate(12, 25, 1, 1280, 720));
     freshness.sample(2, broad, 26);
-    require(freshness.choose(26, 1).id == 1 && freshness.evidence(12)->candidate_histogram_span == 0, "resource lifetime replacement must not inherit old histogram evidence");
+    require(freshness.choose_assuming_ready(26, 1).id == 1 && freshness.evidence(12)->candidate_histogram_span == 0, "resource lifetime replacement must not inherit old histogram evidence");
     std::puts("PASS histogram history: transient breadth, incumbent ageing, freshness, destroyed and reused resource identities");
   }
 
@@ -902,27 +902,27 @@ namespace {
       capture(1, narrow, frame);
       capture(2, broad, frame);
     }
-    require(policy.choose(10, 1).id == 1, "three useful candidate captures establish only one relative win");
+    require(policy.choose_assuming_ready(10, 1).id == 1, "three useful candidate captures establish only one relative win");
     require(policy.pending_challenger_id() == 2, "qualified challenger must be exposed for bounded follow-up sampling");
     for (unsigned repeat = 0; repeat < 100; ++repeat) {
-      require(policy.choose(10, 1).id == 1, "cached choose calls cannot count as sustained relative superiority");
+      require(policy.choose_assuming_ready(10, 1).id == 1, "cached choose calls cannot count as sustained relative superiority");
       require(policy.pending_challenger_id() == 2, "reading the pending challenger must not consume its comparison");
     }
     for (std::uint64_t frame : {11u, 12u, 13u}) {
       capture(2, broad, frame);
-      require(policy.choose(frame, 1).id == 1, "challenger-only readbacks cannot replace fresh incumbent comparisons");
+      require(policy.choose_assuming_ready(frame, 1).id == 1, "challenger-only readbacks cannot replace fresh incumbent comparisons");
     }
     capture(1, narrow, 14);
-    require(policy.choose(14, 1).id == 1, "both sources advanced only once since the first paired win");
+    require(policy.choose_assuming_ready(14, 1).id == 1, "both sources advanced only once since the first paired win");
     require(policy.won_challenger_id() == 0, "a comparison with fewer than three paired wins counted as won");
     capture(2, broad, 14);
     capture(2, broad, 13); // An out-of-order completion must not count.
-    require(policy.choose(14, 1).id == 1, "a second challenger sample cannot reuse the incumbent capture");
+    require(policy.choose_assuming_ready(14, 1).id == 1, "a second challenger sample cannot reuse the incumbent capture");
     capture(1, narrow, 15);
     // The third paired win completes on a Present that only the incumbent
     // rendered: the challenger has no current copy there, so it takes over on
     // the next Present that advances the depth frame with its own work.
-    const auto waiting = policy.choose(15, 1);
+    const auto waiting = policy.choose_assuming_ready(15, 1);
     require(waiting.id == 1 && std::string(waiting.reason) == "waiting for the challenger's next rendered Present" &&
             policy.pending_challenger_id() == 2, "a won comparison took over on a Present its challenger did not render");
     // The probe keeps its visit to a won challenger, past its deadline, until
@@ -932,14 +932,14 @@ namespace {
     {
       auto idle = policy; // The challenger last rendered on frame 13.
       idle.observe(candidate(1, 16, 1, 1280, 720));
-      require(idle.choose(16, 1).id == 1 && idle.won_challenger_id() == 2,
+      require(idle.choose_assuming_ready(16, 1).id == 1 && idle.won_challenger_id() == 2,
               "a won challenger still within the activity grace lost its comparison");
       idle.observe(candidate(1, 17, 1, 1280, 720));
-      require(idle.choose(17, 1).id == 1 && idle.won_challenger_id() == 0 && idle.pending_challenger_id() == 0,
+      require(idle.choose_assuming_ready(17, 1).id == 1 && idle.won_challenger_id() == 0 && idle.pending_challenger_id() == 0,
               "a won challenger that stopped rendering kept its comparison past the activity grace");
     }
     policy.observe(candidate(2, 15, 1, 1280, 720));
-    require(policy.choose(15, 1, false).id == 1, "a won comparison took over on a Present that did not advance the depth frame");
+    require(policy.choose_assuming_ready(15, 1, false).id == 1, "a won comparison took over on a Present that did not advance the depth frame");
     // Its visit ended on the deadline before the last paired win (the
     // incumbent's later sample paired the challenger's last one): no backup
     // is tracked for the challenger, so a new capture slot would count copies
@@ -949,9 +949,9 @@ namespace {
     require(no_capture.id == 1 && std::string(no_capture.reason) == "waiting for the won challenger's capture" &&
             policy.won_challenger_id() == 2 && policy.pending_challenger_id() == 2,
             "a won challenger without a tracked backup took over (a mono takeover Present)");
-    require(policy.choose(15, 1).id == 2 && policy.won_challenger_id() == 2,
+    require(policy.choose_assuming_ready(15, 1).id == 2 && policy.won_challenger_id() == 2,
             "three distinct paired wins must eventually promote a better same-size source, still won on its takeover Present");
-    require(policy.choose(15, 2).id == 2 && policy.pending_challenger_id() == 0 && policy.won_challenger_id() == 0,
+    require(policy.choose_assuming_ready(15, 2).id == 2 && policy.pending_challenger_id() == 0 && policy.won_challenger_id() == 0,
             "adopting the promoted source must release its old pending comparison");
     std::puts("PASS relative evidence: useful captures are not relative wins; cached, duplicate and one-sided samples cannot advance promotion");
   }
@@ -968,16 +968,16 @@ namespace {
         policy.sample(2, challenger, frame);
       };
       for (std::uint64_t frame : {8u, 9u, 10u}) capture(frame, broad);
-      require(policy.choose(10, 1).id == 1, "first relative win must retain source");
+      require(policy.choose_assuming_ready(10, 1).id == 1, "first relative win must retain source");
       capture(11, broad);
-      require(policy.choose(11, 1).id == 1, "second relative win must retain source");
+      require(policy.choose_assuming_ready(11, 1).id == 1, "second relative win must retain source");
       capture(12, bad_without_choose ? flat : narrow);
       if (!bad_without_choose)
-        require(policy.choose(12, 1).id == 1, "lost useful histogram advantage must reset pending wins");
+        require(policy.choose_assuming_ready(12, 1).id == 1, "lost useful histogram advantage must reset pending wins");
       require(policy.pending_challenger_id() == 0, "lost advantage or bad content must release pending follow-up sampling");
       for (std::uint64_t frame = 13; frame <= 17; ++frame) {
         capture(frame, broad);
-        require(policy.choose(frame, 1).id == (frame == 17 ? 2u : 1u),
+        require(policy.choose_assuming_ready(frame, 1).id == (frame == 17 ? 2u : 1u),
                 "regained advantage must qualify its history then earn three new relative wins");
       }
     }
@@ -988,12 +988,12 @@ namespace {
         policy.observe(candidate(2, frame, 1, 1280, 720));
         policy.sample(1, narrow, frame);
         policy.sample(2, broad, frame);
-        if (frame >= 10) require(policy.choose(frame, 1).id == 1, "pending challenge must not switch early");
+        if (frame >= 10) require(policy.choose_assuming_ready(frame, 1).id == 1, "pending challenge must not switch early");
       }
       policy.erase(destroy_current ? 1 : 2);
       require(policy.pending_challenger_id() == 0, "destroying either comparison source must release pending follow-up sampling");
       if (destroy_current) {
-        require(policy.choose(12, 1).id == 2, "destroyed incumbent must recover immediately to confirmed useful depth");
+        require(policy.choose_assuming_ready(12, 1).id == 2, "destroyed incumbent must recover immediately to confirmed useful depth");
       } else {
         for (std::uint64_t frame = 12; frame <= 16; ++frame) {
           policy.observe(candidate(1, frame, 1, 1280, 720));
@@ -1001,7 +1001,7 @@ namespace {
           policy.sample(1, narrow, frame);
           policy.sample(2, broad, frame); // Late completion for destroyed source.
           policy.sample(3, broad, frame);
-          require(policy.choose(frame, 1).id == (frame == 16 ? 3u : 1u), "new source lifetime cannot inherit pending wins");
+          require(policy.choose_assuming_ready(frame, 1).id == (frame == 16 ? 3u : 1u), "new source lifetime cannot inherit pending wins");
         }
       }
     }
@@ -1014,7 +1014,7 @@ namespace {
       expired.sample(1, narrow, frame);
       expired.sample(2, broad, frame);
       if (frame >= 10)
-        require(expired.choose(frame, 1).id == (frame == 24 ? 2u : 1u), "expired evidence must discard pending relative wins before rebuilding confirmation");
+        require(expired.choose_assuming_ready(frame, 1).id == (frame == 24 ? 2u : 1u), "expired evidence must discard pending relative wins before rebuilding confirmation");
     }
     std::puts("PASS evolving comparisons: lost advantage, skipped bad sample, destruction, replacement and stale-history resets");
   }
@@ -1044,7 +1044,7 @@ namespace {
       policy.observe(candidate(2, frame, 1, 1280, 720));
       policy.sample(1, smaller, frame);
       policy.sample(2, changing_native, frame);
-      require(policy.choose(frame, 2).id == 2, "useful .99-complete native must survive 1.0-complete lower-resolution histogram churn");
+      require(policy.choose_assuming_ready(frame, 2).id == 2, "useful .99-complete native must survive 1.0-complete lower-resolution histogram churn");
     }
     std::puts("PASS native stability: comparable .99/1.0 support, broader lower-resolution source, changing scene histogram");
   }
@@ -1077,7 +1077,7 @@ namespace {
         std::array<bool, 5> seen {};
         seen[current] = true;
         for (unsigned repeat = 0; repeat < 100; ++repeat) {
-          const auto next = policy.choose(10, current).id;
+          const auto next = policy.choose_assuming_ready(10, current).id;
           require(next >= 1 && next <= 4, "fixed useful comparison must select an existing resource");
           if (next == current) continue;
           require(!seen[next], "frozen content evidence must not revisit a previously replaced source through pairwise tradeoffs");
@@ -1160,7 +1160,7 @@ namespace {
         for (auto it = readbacks.begin(); it != readbacks.end();)
           if (it->frame + latency <= frame) { policy.sample(it->id, it->quality, it->frame); it = readbacks.erase(it); }
           else ++it;
-        const auto choice = policy.choose(frame, current);
+        const auto choice = policy.choose_assuming_ready(frame, current);
         if (choice.id != current) {
           ++changes; reason = choice.reason;
           // A promotion on a Present its source did not render has no current

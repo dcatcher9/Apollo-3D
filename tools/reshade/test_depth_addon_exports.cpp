@@ -622,11 +622,11 @@ static void check_won_challenger_takeover()
 	// test_depth_selection's fresh relative wins: the challenger 2 wins its
 	// third paired comparison on a Present only the incumbent 1 rendered.
 	for (uint64_t frame : {8u, 9u, 10u}) { capture(1, narrow, frame); capture(2, broad, frame); }
-	policy.choose(10, 1);
-	for (uint64_t frame : {11u, 12u, 13u}) { capture(2, broad, frame); policy.choose(frame, 1); }
-	capture(1, narrow, 14); policy.choose(14, 1);
-	capture(2, broad, 14); policy.choose(14, 1);
-	capture(1, narrow, 15); policy.choose(15, 1);
+	policy.choose_assuming_ready(10, 1);
+	for (uint64_t frame : {11u, 12u, 13u}) { capture(2, broad, frame); policy.choose_assuming_ready(frame, 1); }
+	capture(1, narrow, 14); policy.choose_assuming_ready(14, 1);
+	capture(2, broad, 14); policy.choose_assuming_ready(14, 1);
+	capture(1, narrow, 15); policy.choose_assuming_ready(15, 1);
 	policy.observe(candidate(2, 15));
 	require_snapshot(policy.won_challenger_id() == 2, "The takeover row's challenger did not win its comparison");
 	std::unordered_map<resource, depth_stencil_resource, resource_hash> resources;
@@ -748,7 +748,7 @@ static void check_depth_snapshot_contract()
 			"Snapshot changed viewport fallback without an earlier observed region");
 		++old;
 	}
-	require_snapshot(old_data.selection.choose(100).id == new_data.selection.choose(100).id,
+	require_snapshot(old_data.selection.choose_assuming_ready(100).id == new_data.selection.choose_assuming_ready(100).id,
 		"Snapshot changed candidate scoring");
 	const auto resource = compact.front().first;
 	const auto original = resources.at(resource);
