@@ -3209,19 +3209,49 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
+The timelines play game time on the test add-on's clock (clock C3, 11-02; the fixture clock in
+[Test builds](#test-builds)). Once setup is done the clock engages 120 s ahead of the real tick, so
+nothing setup stamped survives into the first timeline. Each Present then ends at a 16 ms virtual
+frame boundary: the game's ring and DLSS-G's ring complete, and so does each ring's own signal of
+its order fence (not a value the CPU or the third queue signals one ahead for `order=cpu` or
+`second`: the ring's signal of the value before it can land after that one and set the fence back,
+also in real time, so only the ring's value is certain); the add-on's pool work and log writer
+quiesce; only then does game time move. A seed's `hitch=` is that barrier and then its
+milliseconds at once, also inside a frame's recording, where a ring that the frame's `sr_gpu` or
+`dlssg_gpu` gate holds until after its Present is not waited for (the frame's boundary waits for
+it once the gate opened). Before each real Present the fixture also waits, moving no time, for the
+work the frame gave the rings (owner decision C3b), so whether a copy the frame recorded there
+completed by the add-on's read at its own Present no longer races the GPU: in the first proof runs
+without that wait 39 of the fixed set's 117 traces differed between runs at such a read
+(`ro=completed` against `ordered`, a fresh copy against the one before), and with it all 117 and
+the soak's 293 were the same in every run. The gated forms (`sr_gpu=after_present`,
+`dlssg_gpu=after_present`) are then the only such copies in flight at their own Present. Every
+stamp and window the judges read (each source's `made` and the frame's tick, the FG hold's window and the deferred
+copy's restamp, the late signaller's window, the UI tag's age, isolation's association and 200 ms,
+the log window of `require_records_match_log`) reads that clock, as the add-on reads its own. Wall
+time stays for the watchdog, each timeline's frame deadline, the shrinker's budget and `MEASURE
+... elapsed_ms`; `MEASURE game clock session timelines` counts the barriers. `--wall-clock` never
+engages the clock: each Present is paced by `Sleep(3)` and each hitch sleeps, as before (the
+real-time lane).
+
 `reshade_session_timelines` runs the fixed set (24 seeds, 92 regression timelines and the witness,
-7153 frames and about 21200 Presents, with the seeds' hitches and late FG Offs) in about 360 s
-(X1's fix run x1-fix-1, 11-02: 21157 to 21232 Presents in 361 to 365 s, 3 runs;
+7153 frames and 20834 Presents, with the seeds' hitches and late FG Offs) in about 15 s on the game
+clock (clock C3's proof run clock-s-proof-1102c, 11-02: 14.7 to 15.3 s in 3 runs alone, 20.5 to
+20.8 s in 5 runs beside a loaded pool, the same Presents and traces in all 8; the soak's
+`--seeds 200 --from 24`, 293 timelines and 71212 Presents, in 42.7 and 43.5 s alone and 52.4 s
+loaded), and with `--wall-clock` in about 365 s (11-02: 21543 Presents in 367.6 s; X1's fix run
+x1-fix-1, 11-02: 21157 to 21232 Presents in 361 to 365 s, 3 runs;
 integration run f3-INT3-rows1, 11-01: 20564 Presents in 351 s; about 340 s with 87 rows in lane run
 f2-P0-int1-followups-c5-sessions; 61 rows and about 285 s in the full check's registered run of
 10-28), registered like
-`reshade_native_provider_continuity` but with a 480 s timeout, about 1.4 times a full run (its own
-watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first; the bound was about
-twice a full run when the set took about 235 s, and each regression row adds about 2 s). Locally:
+`reshade_native_provider_continuity` but with a 480 s timeout, about 1.4 times a full real-time run
+(its own watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first; the bound
+was about twice a full run when the set took about 235 s, and each regression row adds about 2 s;
+on the game clock both are bounds on a hang only). Locally:
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
       --seeds N [--from M]] [--only <regression or witness>] [--shard i/N] [--shrink-runs N] [--trace]
-      official.dll frozenShaders test.addon64 freshOutput frame_generation_interposer.dll
+      [--wall-clock] official.dll frozenShaders test.addon64 freshOutput frame_generation_interposer.dll
 
 `--list` prints each selected timeline's seed (or regression or witness) and event list;
 `--timeline` replays one seed and `--events` one list (frames separated by `;`, each `defaults` or

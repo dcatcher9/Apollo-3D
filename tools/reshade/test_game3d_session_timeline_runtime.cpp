@@ -79,10 +79,18 @@
 // timelines found has a witness timeline that must lose depth on every run,
 // and each Assassin's Creed Shadows fix a regression timeline that must not.
 //
+// The timelines play game time (test_game3d_clock.h): once setup is done the
+// test add-on's game clock engages, each Present ends at a virtual frame
+// boundary of 16 ms (watched rings complete, the add-on quiesces, then game
+// time moves), a hitch moves game time at once after the same barrier, and
+// every stamp and window of the judges reads that clock, as the add-on does.
+// Watchdogs, the timelines' frame deadlines and the shrinker's budget read
+// wall time. --wall-clock never engages it: the real clock, as before.
+//
 // Command line: [--list] [--timeline <seed> | --events <list> | --seeds N
 // [--from M]] [--only <regression or witness>] [--shard i/N]
-// [--shrink-runs N] [--trace] official.dll frozenShaders test.addon64
-// freshOutput interposer.dll. Without a selection it runs the fixed set, the
+// [--shrink-runs N] [--trace] [--wall-clock] official.dll frozenShaders
+// test.addon64 freshOutput interposer.dll. Without a selection it runs the fixed set, the
 // first fixed_timelines seeds, the regressions and the witnesses, as the
 // registered test does; --only runs the one regression or witness of that
 // name with its own checks (its minimums, a witness's loss); --trace prints
@@ -116,7 +124,8 @@ namespace {
   // how long its first failure is shrunk once every timeline ran: a failing
   // run holds the GPU about a minute longer than a passing one and prints
   // its reproducer in time. --shrink-runs outside the fixed set shrinks for
-  // longer.
+  // longer. These are real-time durations (--wall-clock); on the game clock
+  // the set takes about 15 s (11-02), and the bound only ends a hang.
   constexpr std::uint64_t fixed_budget_ms = 460000, shrink_ms = 60000;
 
   // The frame language: one row of this family per real frame.
@@ -1384,8 +1393,8 @@ namespace {
     // The game's fences that order the presenting queue after each ring's
     // work (frame_events::order_form), created anew for each run and at each
     // FG toggle, and a third queue of the game's that signals one too (a
-    // second signaller; it waits for the value first, so a fence never
-    // decreases). token: the fence's name in the unordered_read script, one
+    // second signaller; it waits for the value first, yet the fence can fall
+    // back, signal_again). token: the fence's name in the unordered_read script, one
     // per fence object, so that a fence created at a released one's address
     // is another fence there as it is to the add-on.
     struct order_fence {
@@ -1420,6 +1429,8 @@ namespace {
     std::uint64_t sr_gate_value {};
     const void *sr_gate_token {};
     bool sr_gate_closed {};
+    // What the game clock's barriers wait for (watch_rings).
+    std::array<sunshine_game3d_fixture::game_clock::ring_watch, 4> ring_watches;
     // A late FG Off (fg=off_late) renews the order fences after the frame's
     // Present and its late signals (the frame's work signals the old ones).
     bool renew_after_present {};
@@ -1668,12 +1679,36 @@ namespace {
       dlssg_inputs.set_ui("DLSSG.DepthInverted", 1);
       dlssg_inputs.set_ui("DLSSG.MultiFrameIndex", 1);
       dlssg_inputs.set_ui("DLSSG.MultiFrameCount", 1);
+      watch_rings();
       // The native observer installs its hooks for the new queues before any
       // timeline is judged.
       render_tracked_depth = {};
-      for (const auto until = GetTickCount64() + sunshine_freshness::association_ms; GetTickCount64() < until;) {
+      for (const auto until = clock.now() + sunshine_freshness::association_ms; clock.now() < until;) {
         present_frame();
       }
+    }
+
+    // The game's queues each barrier of the game clock waits for, so that
+    // their work completed before game time moves (test_game3d_clock.h): the
+    // game's ring and DLSS-G's ring (their done fences), and each ring's own
+    // signal of its order fence (the value order_fence::value names). Not a
+    // value the CPU or the third queue signals ahead (order_form cpu and
+    // second): the ring's own signal of the value before it can land after
+    // that one, so the fence falls back to the ring's value (it does in
+    // real time too: the third queue's wait for that value is met by its own
+    // earlier signal one ahead), and only the ring's value is certain to be
+    // reached. Inside a frame whose gate holds a ring's work until after its
+    // Present (sr_gpu or dlssg_gpu after_present) that ring and its order
+    // fence are not waited for: the gate opens after the Present, and the
+    // frame's boundary waits then.
+    void watch_rings() {
+      const auto sr_held = [this] {
+        return sr_gate_closed;
+      };
+      const auto dlssg_held = [this] {
+        return dlssg_gate_closed;
+      };
+      ring_watches = {clock.watch("game_work", game_work, sr_held), clock.watch("game_order", &game_order.fence.p, &game_order.value, sr_held), clock.watch("dlssg_work", dlssg_work, dlssg_held), clock.watch("dlssg_order", &dlssg_order.fence.p, &dlssg_order.value, dlssg_held)};
     }
 
     void create_queues() {
@@ -1767,7 +1802,7 @@ namespace {
       const auto wait = [&] {
         checked(queue->Wait(order.fence.p, next), "Order the presenting queue after a ring's queue");
         script_order.wait(queue.p, order.token, next);
-        order.waited = GetTickCount64();
+        order.waited = clock.now();
       };
       if (form == order_form::wait_first) {
         wait();
@@ -1790,14 +1825,14 @@ namespace {
       const bool complete = form == order_form::cpu_wait || form == order_form::cpu;
       relied_on = nullptr;
       if (!complete && relied && form != order_form::second) {
-        order.relied = GetTickCount64();
+        order.relied = clock.now();
         relied_on = order.token;
       }
       return !mutable_copy && (complete || (relied && form != order_form::second));
     }
 
     // A signal of the order fence by the CPU, or by the third queue once its
-    // last value was reached (so the fence never decreases): of that value
+    // last value was reached: of that value
     // (late), or one ahead of it (cpu, second), which the ring's next signal
     // repeats, so the presenting queue's next wait is reached before that
     // ring's work: an order the add-on must refuse (sticky poison, O3),
@@ -1807,6 +1842,12 @@ namespace {
     // a late window then tagged every legal source of every real frame
     // within the source age with R1-late-signaller, which excused any loss
     // there, also of a copy the presenting queue could read.
+    // The fence can fall back (seen 11-02, also in real time): one ahead,
+    // after the ring's work but before the ring's own signal of the last
+    // value (the CPU waits for the ring's done fence, which the ring
+    // signals first; in consecutive second frames the third queue's wait is
+    // met by its own earlier signal one ahead), that signal lands later and
+    // sets the fence back to the ring's value until the ring's next signal.
     void signal_again(order_fence &order, bool cpu, bool ahead) {
       if (!order.poisoned) {
         continuity_log.judge.late_signal(order.token);
@@ -2003,7 +2044,7 @@ namespace {
       } else {
         return;
       }
-      const auto now = GetTickCount64();
+      const auto now = clock.now();
       supply.tick = supply.tick ? supply.tick : now;
       for (unsigned i = 0; i != supply.made.size(); ++i) {
         if ((source & (1u << i)) && !supply.made[i]) {
@@ -2204,7 +2245,7 @@ namespace {
         return;
       }
       const bool fresh = !s.reused_depth && s.current.capture && s.current.capture != last_capture;
-      const auto now = GetTickCount64();
+      const auto now = clock.now();
       const auto within = [now](std::uint64_t tick, std::uint64_t slack) {
         return tick && now - tick < sunshine_freshness::source_age_ms + slack;
       };
@@ -2238,7 +2279,7 @@ namespace {
     }
 
     bool other_queue_pending() const {
-      return other_queue_copy && GetTickCount64() - other_queue_copy < sunshine_freshness::source_age_ms + continuity::tag_slack_ms;
+      return other_queue_copy && clock.now() - other_queue_copy < sunshine_freshness::source_age_ms + continuity::tag_slack_ms;
     }
 
     // One real frame's calls on the game's open list: the decoy and the
@@ -2257,15 +2298,15 @@ namespace {
       // this frame's first call and its stamp.
       const auto hitch = of<hitch_form>(value, events::hitch);
       if (hitch == hitch_form::between) {
-        Sleep(hitch_ms(hitch));
+        clock.hitch(hitch_ms(hitch));
       }
       draw(*decoy);
       supply.permitted |= continuity::generic_boundary;
-      supply.tick = GetTickCount64();
+      supply.tick = clock.now();
       supply.made[3] = supply.tick;
       // A hitch before the frame's calls, after its stamp.
       if (hitch == hitch_form::brief || hitch == hitch_form::before_sources) {
-        Sleep(hitch_ms(hitch));
+        clock.hitch(hitch_ms(hitch));
       }
       require(selected->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "A timeline frame began with its depth outside UNORDERED_ACCESS");
       write_depth_pixels();
@@ -2375,7 +2416,7 @@ namespace {
       if (ui_choice != ui_form::none) {
         const auto hudless_input = color_input(hudless.p), backbuffer_input = color_input(backbuffer.p);
         const abi_v2::resource_tag tags[] {{{nullptr, tag_guid, 1}, &hudless_input, 2, 1, {0, 0, width, height}}, {{nullptr, tag_guid, 1}, &backbuffer_input, 53, 1, {0, 0, width, height}}};
-        ui_tag_tick = GetTickCount64();
+        ui_tag_tick = clock.now();
         returned(sl.global_tag(view, tags, 2, ui_choice == ui_form::listed ? command() : nullptr), "the HUD-less and Backbuffer tags");
         if (ui_choice == ui_form::untagged) {
           const abi_v2::resource_tag untags[] {{{nullptr, tag_guid, 1}, nullptr, 2, 1, {}}, {{nullptr, tag_guid, 1}, nullptr, 53, 1, {}}};
@@ -2454,7 +2495,7 @@ namespace {
         // unstored=1), and inside the fixed set, whose earlier timelines had
         // run every list, it passed (the 10-28 review's H5).
         const bool cold = !game_work_carried[n] &&
-                          !(other_queue_copy && GetTickCount64() - other_queue_copy < sunshine_freshness::source_age_ms);
+                          !(other_queue_copy && clock.now() - other_queue_copy < sunshine_freshness::source_age_ms);
         const bool readable = execute_elsewhere(game_work, n, game_order, cold);
         auto completion = game_work.completion();
         if (cold) {
@@ -2464,12 +2505,12 @@ namespace {
         }
         recorded_elsewhere(continuity::sr_evaluate, std::move(completion), readable);
         game_work_carried[n] = game_work_carried[n] || (supply.elsewhere & continuity::sr_evaluate);
-        other_queue_copy = GetTickCount64();
+        other_queue_copy = clock.now();
       }
       // A hitch right before DLSS-G's evaluation of the frame, after its other
       // calls (before_dlssg).
       if (hitch == hitch_form::before_dlssg) {
-        Sleep(hitch_ms(hitch));
+        clock.hitch(hitch_ms(hitch));
       }
       dlssg_evaluation(of<dlssg_form>(value, events::dlssg));
       // FG as the frame's evaluations saw it, then a late FG Off: the game's
@@ -2489,7 +2530,7 @@ namespace {
       // 10-27 review read before the hitch, so SR stayed kept out at a
       // Present where the held FG copy had expired, the review's J2).
       if (hitch == hitch_form::after_sources) {
-        Sleep(hitch_ms(hitch));
+        clock.hitch(hitch_ms(hitch));
       }
       // A copy deferred to the frame's Present (R2) is made right before
       // that Present, after any hitch here: its made tick is now (until
@@ -2501,7 +2542,7 @@ namespace {
       if (deferred_tag && !cancel_expected) {
         for (unsigned i = 0; i != supply.made.size(); ++i) {
           if ((continuity::tag_copy & (1u << i)) && supply.made[i]) {
-            supply.made[i] = GetTickCount64();
+            supply.made[i] = clock.now();
           }
         }
       }
@@ -2516,7 +2557,7 @@ namespace {
       // C6 until 10-26, when it deferred to an earlier frame's tag copy for
       // the source age).
       const auto dlssg_choice = of<dlssg_form>(value, events::dlssg);
-      const auto now = GetTickCount64();
+      const auto now = clock.now();
       if (fg_on && deferred_tag && awaits_dlssg && dlssg_choice == dlssg_form::none && dlssg_evaluated && now - dlssg_evaluated < sunshine_freshness::source_age_ms + continuity::tag_slack_ms && (supply.legal & continuity::tag_copy)) {
         supply.legal &= std::uint8_t(~continuity::tag_copy);
         supply.permitted |= continuity::tag_copy;
@@ -2625,7 +2666,7 @@ namespace {
       // after its Present may drop the hold (late_after, R1).
       const bool unordered = !readable_here && (supply.legal & supply.elsewhere) &&
                              !(supply.legal & std::uint8_t(~supply.elsewhere) & std::uint8_t(~owned_sr));
-      const auto now_late = GetTickCount64();
+      const auto now_late = clock.now();
       // The frame's supply: a frame whose legal sources all meet a known
       // limitation is tagged with it; any other legal source must show.
       continuity_log.pending = {};
@@ -2697,7 +2738,7 @@ namespace {
         !supply.capture[1] ? std::max<std::uint64_t>(newest_copy(), 1) : 0;
       // A pause after the bookkeeping, before the frame's real Present.
       if (hitch == hitch_form::before_present) {
-        Sleep(hitch_ms(hitch));
+        clock.hitch(hitch_ms(hitch));
       }
     }
 
@@ -2760,7 +2801,7 @@ namespace {
         const bool readable = execute_elsewhere(dlssg_work, n, dlssg_order);
         recorded_elsewhere(continuity::dlssg_input, dlssg_work.completion(), readable);
         if (observed) {
-          other_queue_copy = GetTickCount64();
+          other_queue_copy = clock.now();
         }
         return;
       }
@@ -2796,7 +2837,7 @@ namespace {
       returned(sl.set_options(view, value), "slDLSSGSetOptions");
       dlssg_inputs.set_ui("DLSSG.MultiFrameCount", declared_generated);
       if (on && !fg_on) {
-        fg_enabled_at = GetTickCount64();
+        fg_enabled_at = clock.now();
       }
       fg_on = on;
     }
@@ -2828,7 +2869,18 @@ namespace {
     }
 
     // Once the frame's calls are made, right before its real Present.
+    // Engaged, the work the frame gave its rings completes first (their
+    // done fences and each ring's own order value, wait_rings), except work
+    // a gate holds until after the Present (sr_gpu or dlssg_gpu
+    // after_present), the in-flight cases: with the default (prompt) the
+    // add-on's read at that Present raced the GPU's completion (the
+    // regression rows' note above), which the frame boundary's barrier
+    // after the Present comes too late to settle (owner decision C3b,
+    // 11-02). --wall-clock keeps that race.
     void before_real_present() {
+      if (clock.engaged()) {
+        clock.wait_rings("before the frame's Present");
+      }
       if (pending_options.armed) {
         options_at_depth_frame(&timeline_fixture::make_pending_options, this);
       }
@@ -2991,7 +3043,7 @@ namespace {
       // presented frame supplied an FG copy its live scope accepts) and the
       // UI's evidence is fresh (a UI tag call within the evidence age: the
       // UI scope, query_ui_scope, ends after it).
-      const bool fresh_evidence = ui_tag_tick && GetTickCount64() - ui_tag_tick < sunshine_freshness::evidence_age_ms;
+      const bool fresh_evidence = ui_tag_tick && clock.now() - ui_tag_tick < sunshine_freshness::evidence_age_ms;
       const bool due = same_frame && ui_presented_fg && fresh_evidence;
       result.ui_holds += due && held;
       if (trace && (offered || held || same_frame)) {
@@ -3003,7 +3055,7 @@ namespace {
         }
         sunshine_streamline::depth_capture::depth_choice now_choice {};
         const auto floor = queue_choice(observed.runtime, &now_choice) ? now_choice.decision.presenting_floor : 0;
-        std::printf("TRACE frame=%u ui_frame %s present=%llu shown=%u input=%d window=%u offered=%u held=%u kept=%u absent=%u own_input=%u nth=%u floor=%llu input_floor=%llu tag_age=%lld fg=%u fg_frame=%u due=%u unidentified=%u window_frame=%d window_presents=%u rows=%s\n", frame, which, static_cast<unsigned long long>(r.present), shown_frame, ui_input_frame == UINT_MAX ? -1 : int(ui_input_frame), unsigned(ui_input_window), unsigned(offered), unsigned(held), unsigned(kept), unsigned(absent), unsigned(input), generated, static_cast<unsigned long long>(floor), static_cast<unsigned long long>(ui_input_floor), ui_tag_tick ? static_cast<long long>(GetTickCount64() - ui_tag_tick) : -1ll, unsigned(fg_on), unsigned(ui_presented_fg), unsigned(due), unsigned(ui_unidentified_now), ui_window_frame == UINT_MAX ? -1 : int(ui_window_frame), ui_window_presents, rows.c_str());
+        std::printf("TRACE frame=%u ui_frame %s present=%llu shown=%u input=%d window=%u offered=%u held=%u kept=%u absent=%u own_input=%u nth=%u floor=%llu input_floor=%llu tag_age=%lld fg=%u fg_frame=%u due=%u unidentified=%u window_frame=%d window_presents=%u rows=%s\n", frame, which, static_cast<unsigned long long>(r.present), shown_frame, ui_input_frame == UINT_MAX ? -1 : int(ui_input_frame), unsigned(ui_input_window), unsigned(offered), unsigned(held), unsigned(kept), unsigned(absent), unsigned(input), generated, static_cast<unsigned long long>(floor), static_cast<unsigned long long>(ui_input_floor), ui_tag_tick ? static_cast<long long>(clock.now() - ui_tag_tick) : -1ll, unsigned(fg_on), unsigned(ui_presented_fg), unsigned(due), unsigned(ui_unidentified_now), ui_window_frame == UINT_MAX ? -1 : int(ui_window_frame), ui_window_presents, rows.c_str());
       }
       if (offered) {
         sunshine_streamline::depth_capture::depth_choice choice {};
@@ -3060,7 +3112,7 @@ namespace {
       };
       deferred_copy_before = 0;
       present_frame();
-      const auto presented = GetTickCount64();
+      const auto presented = clock.now();
       lose_reads(false);
       render_tracked_depth = {};
       after_present = {};
@@ -3141,7 +3193,7 @@ namespace {
         renew_order();
       }
       if (supply.legal || supply.limited || (supply.permitted & continuity::api_sources)) {
-        api_supplied = GetTickCount64();
+        api_supplied = clock.now();
       }
       judge_decisions();
       if (trace) {
@@ -3154,7 +3206,7 @@ namespace {
       // A hitch after the frame's real Present, before its generated
       // Presents after it.
       if (of<hitch_form>(value, events::hitch) == hitch_form::after_present) {
-        Sleep(hitch_ms(hitch_form::after_present));
+        clock.hitch(hitch_ms(hitch_form::after_present));
       }
       for (unsigned i = 0, n = unsigned(value[events::generated]); i != n && of<generated_at>(value, events::at) == generated_at::between; ++i) {
         generated_present(false);
@@ -3185,7 +3237,7 @@ namespace {
       };
       present_frame();
       render_tracked_depth = {};
-      for (const auto until = GetTickCount64() + sunshine_freshness::association_ms + 200; GetTickCount64() < until;) {
+      for (const auto until = clock.now() + sunshine_freshness::association_ms + 200; clock.now() < until;) {
         present_frame();
       }
       drain();
@@ -3251,11 +3303,11 @@ namespace {
       late_signals.clear();
       renew_after_present = false;
       script_name = where.c_str();
-      script_deadline = GetTickCount64() + 15000 + 150 * value.frames.size();
+      script_deadline = clock.wall_now() + 15000 + 150 * value.frames.size();
     }
 
     run_result run(const timeline_case &value, const std::string &label) {
-      const auto started = GetTickCount64();
+      const auto started = clock.wall_now();
       begin_run(value, label, next_viewport++);
       // The timeline's per-Present trace (record_present): its frames,
       // written after its last one, before isolation presents for a time.
@@ -3272,7 +3324,7 @@ namespace {
       script_name = nullptr;
       script_deadline = 0;
       continuity_log.where = "session";
-      result.elapsed_ms = GetTickCount64() - started;
+      result.elapsed_ms = clock.wall_now() - started;
       const auto &judge = continuity_log.judge;
       result.rows = judge.rows();
       result.presents = judge.presents();
@@ -3339,7 +3391,7 @@ namespace {
     // Whether frames fail with the signature; a kept candidate is cut after
     // the frame where it failed.
     bool fails(std::vector<generator::row> &frames) {
-      if (runs >= budget || frames.empty() || GetTickCount64() + 60 * frames.size() + 3000 > stop_at) {
+      if (runs >= budget || frames.empty() || fixture.clock.wall_now() + 60 * frames.size() + 3000 > stop_at) {
         return false;
       }
       ++runs;
@@ -3504,11 +3556,14 @@ namespace {
 #ifndef SUNSHINE_SESSION_TIMELINE_FIXTURE_ONLY
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // --wall-clock: the real clock, never the game clock (test_game3d_clock.h).
+  sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
+  using sunshine_game3d_fixture::game_clock;
   options chosen;
   std::vector<std::string> positional;
   std::string error;
   if (!parse_options(argc, argv, chosen, positional, error) || (!chosen.list && positional.size() != 5)) {
-    std::fprintf(stderr, "%s%susage: reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events <list> | --seeds N [--from M]] [--only <regression or witness>] [--shard i/N] [--shrink-runs N] official.dll frozenShaders test.addon64 freshOutput interposer.dll\n", error.c_str(), error.empty() ? "" : "\n");
+    std::fprintf(stderr, "%s%susage: reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events <list> | --seeds N [--from M]] [--only <regression or witness>] [--shard i/N] [--shrink-runs N] [--wall-clock] official.dll frozenShaders test.addon64 freshOutput interposer.dll\n", error.c_str(), error.empty() ? "" : "\n");
     return 2;
   }
   std::vector<timeline_case> selected_cases;
@@ -3573,8 +3628,8 @@ int main(int argc, char **argv) {
     return 0;
   }
   // Each frame's bound and isolation, setup and the shrink budget; the
-  // fixed set's own bound.
-  const auto started = GetTickCount64();
+  // fixed set's own bound (wall time).
+  const auto started = game_clock::wall_now();
   const auto budget_ms = fixed_set ? fixed_budget_ms : 60000 + 3000 * selected_cases.size() + 60 * total_frames + 6000 * std::uint64_t(chosen.shrink_runs);
   const auto watchdog_ms = DWORD(std::min<std::uint64_t>(budget_ms + 10000, 0x7fffffff));
   std::thread([watchdog_ms] {
@@ -3601,6 +3656,11 @@ int main(int argc, char **argv) {
     fixture.load_native(directory);
     fixture.setup(sdk);
     fixture.trace = chosen.trace;
+    // Setup is done: the timelines play game time on the test add-on's
+    // clock, which engages its lead ahead of the real tick, so nothing setup
+    // stamped survives into the first timeline (unless --wall-clock).
+    require(fixture.clock.bind(GetModuleHandleW(L"SunshineSBSTest.addon64")), "The test add-on lacks the game clock");
+    fixture.clock.engage();
 
     struct foreground_scope {
       timeline_fixture &fixture;
@@ -3693,7 +3753,7 @@ int main(int argc, char **argv) {
     if (first_failing && chosen.shrink_runs) {
       // Within the budget, and in the fixed set (ctest) for no longer than
       // shrink_ms: the reproducer is printed well before ctest's timeout.
-      const auto shrink_from = GetTickCount64();
+      const auto shrink_from = game_clock::wall_now();
       const auto stop_at = fixed_set ? std::min(started + budget_ms, shrink_from + shrink_ms) : started + budget_ms;
       shrinker reduce {fixture, first_failure.signature, chosen.shrink_runs, 0, stop_at};
       const auto minimal = reduce.shrink(first_failing->frames, first_failure.frame);
@@ -3701,11 +3761,13 @@ int main(int argc, char **argv) {
       // run follows the earlier ones, and a fresh process's --events replay
       // may still differ in timing.
       reduce.budget = reduce.runs + 1;
-      reduce.stop_at = std::max(reduce.stop_at, GetTickCount64() + 60 * minimal.size() + 3000);
+      reduce.stop_at = std::max(reduce.stop_at, game_clock::wall_now() + 60 * minimal.size() + 3000);
       auto replay = minimal;
       const bool reproduced = reduce.fails(replay);
       std::printf("REPRODUCER %s %s runs=%u frames=%zu reproduced=%s: --events \"%s\"\n", name_of(*first_failing).c_str(), first_failure.signature.c_str(), reduce.runs, minimal.size(), reproduced ? "yes" : "no", describe(minimal).c_str());
     }
+    // The game clock's barriers over the run (their times are wall time).
+    fixture.clock.report("session timelines");
     std::printf("MEASURE session-timelines timelines=%zu frames=%u presents=%u generated=%u legal=%u shown=%u decisions=%u failed=%u", selected_cases.size(), frames_run, presents, generated, legal, shown, decisions, failed);
     for (std::size_t r = 0; r != rows.size(); ++r) {
       std::printf(" %s={supplied=%u violations=%u}", continuity::known_gaps[r].id, rows[r].exercised, rows[r].violations);

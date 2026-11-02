@@ -509,8 +509,9 @@ namespace {
     std::size_t matched_lines{};
     std::uint64_t matched_present{};
     void require_records_match_log(const char *label) {
-      // The asynchronous writer flushes this scenario's lines meanwhile.
-      for (const auto until = GetTickCount64() + 300; GetTickCount64() < until;) present_frame();
+      // The asynchronous writer flushes this scenario's lines meanwhile (in
+      // game time; an engaged clock drains the log at every frame boundary).
+      for (const auto until = clock.now() + 300; clock.now() < until;) present_frame();
       const auto lines = provider_lines();
       auto &records = record_history.records;
       std::size_t next{}, matched{};
@@ -622,9 +623,10 @@ namespace {
     };
     const char *script_name{};
     std::uint64_t script_deadline{};
-    // One game frame and its Present, observed without FX.
+    // One game frame and its Present, observed without FX. The deadline is
+    // wall time (a bound on a case that stops making progress).
     void present_frame() {
-      if (script_deadline && GetTickCount64() >= script_deadline)
+      if (script_deadline && clock.wall_now() >= script_deadline)
         throw std::runtime_error(std::string("Native provider case ") + script_name + " passed its frame deadline");
       step(); no_effects();
     }
