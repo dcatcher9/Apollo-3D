@@ -3071,9 +3071,10 @@ copies are read from the next Present on, so their timing changes no trace. Seed
 keep the default, are judged by their verdicts, which accept either outcome.
 
 `reshade_session_timelines` runs the fixed set (24 seeds and 89 regression timelines, 6980
-frames and about 19600 Presents, with the seeds' hitches and late FG Offs) in about 340 s
-(lane run f2-P0-int1-followups-c5-sessions, 11-01, with 87 rows; 61 rows and about 285 s in the
-full check's registered run of 10-28), registered like
+frames and about 20600 Presents, with the seeds' hitches and late FG Offs) in about 350 s
+(integration run f3-INT3-rows1, 11-01: 20564 Presents in 351 s; about 340 s with 87 rows in lane run
+f2-P0-int1-followups-c5-sessions; 61 rows and about 285 s in the full check's registered run of
+10-28), registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about 1.4 times a full run (its own
 watchdog, 10 s after its 460 s bound `fixed_budget_ms`, ends a hung run first; the bound was about
 twice a full run when the set took about 235 s, and each regression row adds about 2 s). Locally:
