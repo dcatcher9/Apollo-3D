@@ -2617,7 +2617,10 @@ earlier frame's generated Present, where owner ruling Q2 (10-30) shows that fram
 old, so depth's window holds that copy past the source age on the new frame's image for that
 Present (`continuity:stale`, limitation `unidentified_real`: the row excuses staleness only, and
 only on such a frame; the UI's hold there is left unjudged). Its witness is C1-openc's evidence
-list twinDepth (14ec980a). The owner decides between accepting that depth there and mono, which
+list twinDepth (14ec980a) with its frame 22's SR copy on the presenting queue: with that copy on
+the game's queue it completed only after the pause in one fixed-set run and showed fresh at frame
+23 (`oracle:unsupplied_fresh`, REPAIR4's f3-REPAIR4-f1), the same lost frame identity, which the
+row does not excuse. The owner decides between accepting that depth there and mono, which
 the add-on could show only by also flashing 2D at Q2's generated Presents. Each run prints found defects apart
 (`MEASURE native-provider continuity-found-defects` and `MEASURE session-timelines found-defects`,
 each row's violations, or `none`), and a strict run fails their violations as any other:

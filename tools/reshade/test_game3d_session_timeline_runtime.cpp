@@ -1125,18 +1125,23 @@ namespace {
   // which becomes a regression timeline), as the matrix's gap seeds keep a
   // recorded gap's own failing cell. C5's closed on 10-26. Open: OPEN C's
   // depth twin (11-01), a found defect awaiting the owner: C1-openc's
-  // evidence job twinDepth at 14ec980a. FG 2x with UI tags, a tag-only frame
-  // (its FG tag copied at its Present, an SR copy on the game's queue; two
-  // generated Presents declared, none presented), then a frame with no
-  // depth call after a hitch of the source age: depth's window still
-  // presents the tag-only frame there and holds its copy, past the source
-  // age, at the new frame's real Present (continuity:stale at frame 23).
+  // evidence job twinDepth at 14ec980a, its frame 22's SR copy moved to the
+  // presenting queue. FG 2x with UI tags, a frame whose FG tag is deferred
+  // to its Present (two generated Presents declared, none presented), then a
+  // frame with no depth call after a hitch of the source age: depth's window
+  // still presents the earlier frame there and holds its copy, past the
+  // source age, at the new frame's real Present (continuity:stale at frame
+  // 23). With that SR copy on the game's queue (twinDepth's form) it is
+  // readable at frame 22's Present in most runs, and the same stale hold
+  // follows; in one fixed-set run (REPAIR4's f3-REPAIR4-f1) it completed only
+  // after the pause and showed fresh at frame 23 (oracle:unsupplied_fresh),
+  // the same lost frame identity, which this row does not excuse.
   struct witness {
     const char *row, *events;
   };
 
   constexpr std::array<witness, 1> witnesses {{
-    {"OPEN-C-depth-unidentified-real", "20*sr=local; fg=on,sr=local,generated=2; tag=evaluate_list,untag=after_global,generated=2,at=inside,ui=bare; tag=present_bare,untag=after_global,sr=other_queue,ui=bare; ui=bare,hitch=between; 5*sr=local,ui=bare"},
+    {"OPEN-C-depth-unidentified-real", "20*sr=local; fg=on,sr=local,generated=2; tag=evaluate_list,untag=after_global,generated=2,at=inside,ui=bare; tag=present_bare,untag=after_global,sr=local,ui=bare; ui=bare,hitch=between; 5*sr=local,ui=bare"},
   }};
 
   // The seed of the fixed set's or a soak's index-th timeline.
