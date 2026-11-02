@@ -1956,6 +1956,12 @@ namespace {
           // gated behind it, was held and the copy before it was offered.
           const auto frame_n = query();
           run_foreign_on(foreign[1], presented.fence.p, 2);
+          // C3b (main()): engaged, frame N's copy on the second queue, which
+          // only Present N's queued signal gates, completes before Present
+          // N+1, as on a GPU ahead of it; otherwise whether Present N+1 offers
+          // it is GPU timing (the verdict below allows both).
+          const std::uint64_t frame_n_copied = 1;
+          const auto frame_n_watch = clock.watch("second_queue_frame_n", &copied.fence.p, &frame_n_copied);
           // Frame N's list may still execute: frame N+1 records with another
           // allocator.
           std::swap(allocator.p, spare.p);

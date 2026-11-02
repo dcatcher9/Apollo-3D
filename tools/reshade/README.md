@@ -1060,9 +1060,13 @@ the FG hitches, the UI layer's expiry, the game queue's 20 ms pace) and every ag
 game time, 16 ms per Present, the same on any machine; `--wall-clock` runs it on the real clock
 instead. The contention mode never engages: its 60 s window measures real contention. Wall time
 bounds only real hangs: the watchdog, each frame script's deadline, the Dump 3D mailboxes and the
-release sentinels. From the third render size to the runtime reset the display release case
-presents with game time held (`hold_game_time`, no frame boundary): the sentinel holds that release
-on its pool thread across Presents on purpose, and a boundary's quiesce would wait for it. The
+release sentinels. Engaged, the work a frame executes on another queue the fixture watches (DLSS-G's
+compute ring, the game queue's ring, the frame-generation schedule's second-queue copy) completes
+before that frame's Present, as on a GPU ahead of it, unless a closed fixture gate holds it (the
+in-flight cases keep their gates). From the third render size to the runtime reset the display
+release case presents with game time held (`hold_game_time`, no frame boundary): the sentinel holds
+that release on its pool thread across Presents on purpose, and a boundary's quiesce would wait for
+it; the case ends at the Present that submitted the release job. The
 layer queue-order cases judge events, not times: each gated Present must return while the CPU gate
 a regression would wait for is still closed (it opens at its 1 s real limit), and the
 frame-generation schedule must complete within the fixture's own 3 s GPU wait; `MEASURE layer
