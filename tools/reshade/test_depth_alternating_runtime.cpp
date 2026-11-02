@@ -53,6 +53,8 @@ namespace {
     // current depth, which members hold an end-of-frame copy of their own
     // (the test add-on's capture ticket query).
     BOOL (*capture_ticket)(api::effect_runtime *,std::uint64_t,std::uint64_t *)=nullptr;
+    // Its peer-crop phase: a member's layout epoch (the test add-on's query).
+    BOOL (*layout_epoch)(api::effect_runtime *,std::uint64_t,std::uint64_t *)=nullptr;
     std::array<unsigned,3> copied_members{};unsigned anchor_presents=0;
     bool ready() const {return latest.rendered && latest.parameters.depth_ready && latest.parameters.camera_ready;}
     float gain() const {return latest.parameters.depth_scale;}
@@ -658,10 +660,37 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       // Presents.
       require(copies[1]*4<counted*3 && copies[2]*4<counted*3,
         "A peer drawn beside the shown anchor was copied on most Presents although nothing read its copy");
+      // A peer B drawn with a new crop beside the shown anchor takes that
+      // crop on the Present it draws it, copied or not
+      // (observe_uncopied_member, 11-01): its layout epoch advances there,
+      // so its evidence, set membership and raw roster entry follow the
+      // change as with a copy. Without it B's layout moved only at its next
+      // copy, about one Present in five here (the fix review's
+      // fixrev-generic-1: no row changed an uncopied peer's crop before).
+      layout_epoch=reinterpret_cast<decltype(layout_epoch)>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineDepthTestLayoutEpoch"));
+      require(layout_epoch,"The overlap case needs the test add-on's layout epoch query");
+      const auto epoch_of=[&]{
+        std::uint64_t value=0;
+        require(layout_epoch(observed.runtime,reinterpret_cast<std::uint64_t>(member(2).texture.p),&value),"The layout epoch query failed");
+        return value;
+      };
+      unsigned crop_changes=0,followed=0;
+      for(unsigned i=0;i<16;++i){
+        const auto before=epoch_of();
+        decoy->partial_viewport=!decoy->partial_viewport;
+        tick("concurrent-peer-crop");
+        // Judged where A showed its own current copy (B a peer beside it).
+        if(!capture_ready || held || !current(1))continue;
+        ++crop_changes;followed+=epoch_of()>before;
+      }
+      decoy->partial_viewport=false;layout_epoch=nullptr;
+      std::printf("MEASURE concurrent-peer-crop crop_changes=%u followed=%u\n",crop_changes,followed);
+      require(crop_changes>=8,"The peer-crop phase lost the shown anchor on most Presents");
+      require(followed==crop_changes,"A peer drawn with a new crop beside the shown anchor kept its old layout until its next copy");
       set_mode(cadence::abc);warm("concurrent-back-to-ABC");stable("concurrent-back-to-ABC",30);
       missing_then_recover();
       require(stereo_observed[0]>0,"Concurrent preferred source never produced actual stereo pixels");
-      std::puts("PASS overlap: qualified A/ABC, persistent concurrent raster with current A (peers copied only when read), return to ABC, current mono on real gaps");
+      std::puts("PASS overlap: qualified A/ABC, persistent concurrent raster with current A (peers copied only when read, their crops followed every Present), return to ABC, current mono on real gaps");
     }
     void check_interrupted_startup(){
       const auto started=GetTickCount64();unsigned valid=0,missing=0,consecutive_valid=0;

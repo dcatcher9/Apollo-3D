@@ -6690,7 +6690,8 @@ Present copies the anchor's member first; another member is copied only when the
 current qualified copy of its own that Present, when that member's raw sample may be taken (its
 250 ms deadline due and the sampler idle), or when the probe samples it (a sample that falls due during
 the Present's effects waits for the next Present). A member not copied still has the crop it drew
-observed, as its copy would have, so a crop change advances its layout on that Present. Until 11-01
+observed, as its copy would have, so a crop change advances its layout on that Present (the
+alternating fixture's overlap case checks it on every Present of a peer's crop changes). Until 11-01
 every working member was copied on every Present (on D3D12 a snapshot and a publish copy of the
 whole plane apiece) although nothing read the copies of members not shown or sampled, and the
 selected member's copy was tried a second time, so a refused one counted twice in
