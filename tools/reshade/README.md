@@ -1050,9 +1050,28 @@ Each FG case is a frame script: a warm-up that presents until the case's startin
 stimulus whose frames it judges, and a recovery to the fixture's control, with the per-frame SDK calls
 as fixture members. Every frame of a script begins before the script's own deadline, so a case that
 stops making progress fails by name, and a `MEASURE native-provider case=<name> elapsed_ms=` line
-reports each case's time. Every Present of the run, in its scripts and between them, is also
+reports each case's time (both wall time). Every Present of the run, in its scripts and between them, is also
 judged by the continuity invariant ([Session-level tests](#session-level-tests)); its last two
 scripts move SR and Generic depth onto the game's own direct queue for the invariant's known gaps.
+
+The run plays game time ([Test builds](#test-builds)): once its setup is done the fixture engages
+the test add-on's clock, so every window of presented frames, every hitch (the source-age expiries,
+the FG hitches, the UI layer's expiry, the game queue's 20 ms pace) and every age it judges is exact
+game time, 16 ms per Present, the same on any machine; `--wall-clock` runs it on the real clock
+instead. The contention mode never engages: its 60 s window measures real contention. Wall time
+bounds only real hangs: the watchdog, each frame script's deadline, the Dump 3D mailboxes and the
+release sentinels. Engaged, the work a frame executes on another queue the fixture watches (DLSS-G's
+compute ring, the game queue's ring, the frame-generation schedule's second-queue copy) completes
+before that frame's Present, as on a GPU ahead of it, unless a closed fixture gate holds it (the
+in-flight cases keep their gates). From the third render size to the runtime reset the display
+release case presents with game time held (`hold_game_time`, no frame boundary): the sentinel holds
+that release on its pool thread across Presents on purpose, and a boundary's quiesce would wait for
+it; the case ends at the Present that submitted the release job. The
+layer queue-order cases judge events, not times: each gated Present must return while the CPU gate
+a regression would wait for is still closed (it opens at its 1 s real limit), and the
+frame-generation schedule must complete within the fixture's own 3 s GPU wait; `MEASURE layer
+cross-queue` and `MEASURE layer census` report the times (until the clock each had to stay under
+half the limit).
 
 Both runtime tests also check the
 [frame record](../../docs/reshade-sbs.md#frame-record). Each queue-cycle acquisition's
