@@ -4058,13 +4058,17 @@ namespace {
         }});
     }
 
-    // The add-on's FG switch line across a runtime reset (F100, 11-01). A
-    // runtime created while the game's FG options stand (a swapchain resize
-    // or recreation) starts from their mode, so its first Present is no
-    // switch; until 11-01 it logged mode=0->1 with FG on. A runtime torn down
-    // inside a switch's line writes that line, ended=runtime_reset; until
-    // 11-01 the line was dropped, and the new runtime, which started at mode
-    // 0, logged none for that FG Off.
+    // The add-on's FG switch line across a runtime reset (F100 and the fix
+    // review's X1, 11-01). A runtime created after another's teardown (a
+    // swapchain resize or recreation) takes over its FG mode and its line:
+    // a reset with FG on is no switch (until 11-01 the new runtime logged
+    // mode=0->1); the reset runtime keeps counting an FG Off's line begun
+    // before the reset (until F100 it was dropped, then until the fix review
+    // the teardown wrote it, ended=runtime_reset, and nothing counted the
+    // Presents after the reset); and an FG On applied right before a reset,
+    // with no Present between (one settings apply), logs mode=0->1 on the
+    // new runtime (F100's runtime, which started from the options' mode,
+    // logged no switch for it).
     void fg_runtime_reset() {
       const auto reset_runtime = [&] {
         for (auto &backbuffer : backbuffers) backbuffer.reset();
@@ -4085,19 +4089,37 @@ namespace {
           const auto before = on_lines();
           // The reset runtime shows FG depth again from a later copy: until
           // then the frame's FG copy is permitted, not owed.
-          render_tracked_depth = [this] {
+          const auto reset_frame = [this] {
             real_fg_frame(); withdraw_supply(); permitted_supply(game3d_continuity::tag_copy);
           };
+          render_tracked_depth = reset_frame;
           reset_runtime();
           for (const auto until = GetTickCount64() + 2000; GetTickCount64() < until;) present_frame();
           require(on_lines() == before, "A runtime reset with FG on logged an FG switch the game never made");
-          // FG Off, then a reset inside its line: the old runtime writes it.
+          // FG Off, then a reset inside its line: the reset runtime keeps
+          // counting it, to a second after the Off (no depth is drawn).
+          const auto off_lines = [&] { return reshade_log_count({"Sunshine depth FG switch: viewport=", " mode=1->0 "}); };
+          const auto offs = off_lines();
           render_tracked_depth = {};
           configure_fg(false);
           present_frame(); present_frame();
           reset_runtime();
-          require(reshade_log_contains({"Sunshine depth FG switch: viewport=", " mode=1->0 ", " ended=runtime_reset"}),
-            "A runtime reset dropped the FG Off's switch line");
+          for (const auto until = GetTickCount64() + 7000; off_lines() == offs && GetTickCount64() < until;) present_frame();
+          const auto off = reshade_log_lines({"Sunshine depth FG switch: viewport=", " mode=1->0 "});
+          require(off.size() == offs + 1 && number_after(off.back(), "presents=") > 2,
+            "A runtime reset ended the FG Off's switch line: the reset runtime's Presents were not counted");
+          // FG On, then a reset before any Present: the new runtime logs
+          // the switch from its first Present.
+          const auto ons = on_lines();
+          configure_fg(true);
+          reset_runtime();
+          render_tracked_depth = reset_frame;
+          for (const auto until = GetTickCount64() + 7000; on_lines() == ons && GetTickCount64() < until;) present_frame();
+          require(on_lines() == ons + 1, "An FG On applied right before a runtime reset logged no FG switch");
+          // FG off again for the recovery below.
+          render_tracked_depth = {};
+          configure_fg(false);
+          for (const auto until = GetTickCount64() + 1200; GetTickCount64() < until;) present_frame();
         },
         [&] {
           render_tracked_depth = [&] { draw_frame(); permitted_supply(game3d_continuity::generic_boundary | game3d_continuity::sr_evaluate); };
@@ -4107,7 +4129,7 @@ namespace {
           }
           render_tracked_depth = [this] { evaluated_frame(); };
           settle("SL-recovered-after-FG-reset");
-          std::puts("PASS native FG switch line across a runtime reset: no switch logged for a runtime created with FG on, and an FG Off's line ended by the reset is written");
+          std::puts("PASS native FG switch line across a runtime reset: no switch logged for a runtime created with FG on, an FG Off's line continued over the reset runtime's Presents, and an FG On applied right before a reset logged");
         }});
     }
 

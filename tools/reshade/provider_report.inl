@@ -9,13 +9,34 @@
       line.active = false;
     }
 
-    // A runtime's teardown writes its active FG switch line, marked
-    // ended=runtime_reset (until 11-01 it was dropped, so an FG toggle the
-    // game applied with a swapchain recreation lost its line, F100).
-    void end_fg_switch(state &data) {
-      if (!data.fg_switch.active) return;
-      data.fg_switch.runtime_reset = true;
-      emit_fg_switch(data.fg_switch);
+    // A runtime's teardown hands its FG mode and its FG switch line to the
+    // next runtime, which adopts both (initialize): a reset (a swapchain
+    // resize or recreation) with FG unchanged logs nothing, and a switch
+    // the game applied across one, in either order, logs one line, counted
+    // to the first fresh copy or a second after the change over the Presents
+    // of both runtimes. A handed line no runtime adopted before the next
+    // teardown is written as counted. Until 11-01 the teardown wrote the
+    // line, marked ended=runtime_reset, so no line counted the Presents to
+    // fresh depth after the reset and the report read the marked line as no
+    // fresh depth within a second (the fix review's X1, F100-b); and the new
+    // runtime started from the options' mode, so an options call just
+    // before the reset logged no switch at all (F100-a). Before F100 the
+    // line was dropped and the new runtime started at mode 0.
+    void hand_over_fg_switch(const state &data) {
+      AcquireSRWLockExclusive(&fg_switch_handover_lock);
+      auto unadopted = std::exchange(fg_switch_handed, {true, data.fg_mode, data.fg_switch});
+      ReleaseSRWLockExclusive(&fg_switch_handover_lock);
+      if (unadopted.valid && unadopted.line.active) emit_fg_switch(unadopted.line);
+    }
+
+    bool adopt_fg_switch(state &data) {
+      AcquireSRWLockExclusive(&fg_switch_handover_lock);
+      const auto handed = std::exchange(fg_switch_handed, {});
+      ReleaseSRWLockExclusive(&fg_switch_handover_lock);
+      if (!handed.valid) return false;
+      data.fg_mode = handed.fg_mode;
+      data.fg_switch = handed.line;
+      return true;
     }
 
     // One "Sunshine depth FG switch" line per FG mode change (fg_switch_line),
@@ -288,11 +309,10 @@
     if (line.fresh_ms != UINT64_MAX) std::snprintf(fresh, sizeof(fresh), "%llu", static_cast<unsigned long long>(line.fresh_ms));
     std::snprintf(text, size,
       "Sunshine depth FG switch: viewport=%u mode=%u->%u presents=%llu first_fresh_ms=%s held=%llu max_held_age_ms=%llu "
-      "mono=%llu first_reason=%s selection=%s%s",
+      "mono=%llu first_reason=%s selection=%s",
       line.viewport, line.from, line.to, static_cast<unsigned long long>(line.presents), fresh,
       static_cast<unsigned long long>(line.held), static_cast<unsigned long long>(line.max_held_age),
-      static_cast<unsigned long long>(line.mono), line.first_reason, depth_capture::name(line.selection),
-      line.runtime_reset ? " ended=runtime_reset" : "");
+      static_cast<unsigned long long>(line.mono), line.first_reason, depth_capture::name(line.selection));
   }
 
   void format_unassociated(char *text, std::size_t size, depth_capture::status status,

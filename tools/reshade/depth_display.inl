@@ -242,19 +242,25 @@
     // retirement (a driver create on the present thread).
     if (data && runtime->get_device()->get_api() == api::device_api::d3d12)
       runtime->get_device()->create_fence(0, api::fence_flags::none, &data->retire_fence);
-    // A runtime created while the game's FG options stand (a swapchain
-    // resize or recreation) starts from their mode, as track_fg_switch reads
-    // it: its first Present is no FG switch (until 11-01 it logged
-    // mode=0->N with FG on, F100).
-    frame_generation_snapshot fg;
-    auto read = frame_generation_query_status::unavailable;
-    query_frame_generation(UINT32_MAX, fg, &read);
-    if (data && read == frame_generation_query_status::observed && fg.known) data->fg_mode = fg.mode;
+    // A runtime created after another's teardown (a swapchain resize or
+    // recreation) takes over its FG mode and FG switch line
+    // (adopt_fg_switch): a reset with FG unchanged is no switch, and one
+    // across a switch keeps that switch's line. The process's first
+    // runtime starts from the mode the game's options stand at, as
+    // track_fg_switch reads it, so FG On set before it is no switch either
+    // (until 11-01 every runtime started at 0 and logged mode=0->N with FG
+    // on, F100).
+    if (data && !adopt_fg_switch(*data)) {
+      frame_generation_snapshot fg;
+      auto read = frame_generation_query_status::unavailable;
+      query_frame_generation(UINT32_MAX, fg, &read);
+      if (read == frame_generation_query_status::observed && fg.known) data->fg_mode = fg.mode;
+    }
   }
 
   void destroy(api::effect_runtime *runtime) {
     if (auto *data = runtime->get_private_data<state>()) {
-      if (!sunshine_addon_lifetime::stopping()) end_fg_switch(*data);
+      if (!sunshine_addon_lifetime::stopping()) hand_over_fg_switch(*data);
       // Every release job of this runtime finished first: none outlives it.
       wait_releases(*data->releases);
       const bool owned = std::any_of(data->displays.begin(), data->displays.end(),

@@ -80,9 +80,11 @@ namespace sunshine_streamline::provider {
       // counted; the line comes at most every 5 s, naming the newest state.
       bool fg_scope_silent{};
       std::uint64_t fg_scope_changes{}, fg_scope_logged_changes{}, fg_scope_line_tick{};
-      // The game's newest FG mode (0 before any options call; a runtime
-      // created later starts from the mode its options stand at, initialize)
-      // and the Presents after its last change (track_fg_switch).
+      // The game's newest FG mode as this runtime's Presents saw it (0 before
+      // any options call) and the Presents after its last change
+      // (track_fg_switch). A runtime created after another's teardown takes
+      // over both (fg_switch_handover); the process's first runtime starts
+      // from the mode its options stand at (initialize).
       std::uint32_t fg_mode{};
       fg_switch_line fg_switch;
       api::resource display_texture{};
@@ -225,7 +227,18 @@ namespace sunshine_streamline::provider {
         sunshine_game3d::record_api_depth(*record, decision, present, GetTickCount64());
     }
     void track_fg_switch(state &data, const readiness_evidence &e, bool ready, const char *why);
-    void end_fg_switch(state &data);
+    // A runtime's teardown hands its FG mode and its FG switch line (active
+    // or not) to the next runtime it creates (initialize), across a
+    // swapchain resize or recreation. Guarded by fg_switch_handover_lock.
+    struct fg_switch_handover {
+      bool valid{};
+      std::uint32_t fg_mode{};
+      fg_switch_line line;
+    };
+    SRWLOCK fg_switch_handover_lock = SRWLOCK_INIT;
+    fg_switch_handover fg_switch_handed;
+    void hand_over_fg_switch(const state &data);
+    bool adopt_fg_switch(state &data);
     void trace_readiness(api::effect_runtime *runtime, state &data, const readiness_evidence &e,
         bool ready, const char *why, bool presenting = true);
     void log_render_size(render_size_state &size, std::uint64_t now);

@@ -716,9 +716,11 @@ counts like any other since 10-28 (until then the switch's settle time excused i
 Off's revoked SR copies and C8's losses): `Depth at FG switches` lists every FG mode change (a
 session's first mode line only when it turned FG on) with what the Presents after it showed: the
 add-on's `Sunshine depth FG switch` line, logged once per change since 10-28 at the first Present
-that showed a fresh copy or a second after the change, or at the runtime's teardown, marked
-`ended=runtime_reset` (since 11-01; a runtime created with FG on starts from that mode and logs no
-switch) (Presents to fresh depth, those that held a
+that showed a fresh copy or a second after the change; a runtime's teardown (a swapchain resize or
+recreation) hands its FG mode and its line to the next runtime, which keeps counting it, so a reset
+with FG unchanged logs no switch and one applied across a reset, in either order, logs one line
+over both runtimes' Presents (since the 11-01 fix review; F100's teardown wrote the line marked
+`ended=runtime_reset`, which this check read as no fresh depth within a second) (Presents to fresh depth, those that held a
 copy and the oldest held copy's age, the mono ones, and the first Present's reason and selection;
 status lines come at most once a second, so a hold of one or two Presents shows only there), and
 each depth loss that began at the switch (its time and Presents without depth, reason, selection
@@ -966,9 +968,12 @@ extent changing every second real frame (dynamic resolution: fresh depth of each
 the generated frame, the matrix scale active without recalibration, and a
 `Sunshine depth render size` line), FG Off holding the finished copy within its source age and
 fresh SL recovery. Below 4K (the 4K FG run is the nearest to the watchdog), a runtime reset
-(ResizeBuffers) with FG on logs no `Sunshine depth FG switch` line, and one inside an FG Off's line
-writes that line, `ended=runtime_reset` (`fg-runtime-reset`, 11-01; until then the reset runtime
-logged `mode=0->1` and the Off's line was dropped). It also checks repeated holds against the original capture's
+(ResizeBuffers) with FG on logs no `Sunshine depth FG switch` line, the reset runtime keeps counting
+an FG Off's line begun before the reset (more than its two Presents before it), and an FG On
+applied right before a reset, with no Present between, logs `mode=0->1` (`fg-runtime-reset`,
+11-01; until F100 the reset runtime logged `mode=0->1` with FG on and the Off's line was dropped,
+and until the fix review the teardown ended the Off's line and the new runtime, starting from the
+options' mode, logged no line for the On, X1, F100-a, F100-b). It also checks repeated holds against the original capture's
 expiry, camera reset, and FG off/on without a fresh capture; none may revive expired depth.
 Fresh copies must recover each interval. A `ValidUntilPresent` FG depth tag sent without a command
 list is copied before its frame's Present, and every Present shows that frame's fresh FG depth (R2;
