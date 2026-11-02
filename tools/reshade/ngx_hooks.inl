@@ -264,7 +264,7 @@ namespace sunshine_upscaler_trace {
     reports = 0;
     next_poll = next_report = 0;
     scanned_loads = 0;
-    began = GetTickCount64();
+    began = sunshine_game3d::clock::game_now();
     addon_module.store(addon);
     if (requested) active_epoch.store(++next_epoch, std::memory_order_release);
     ReleaseSRWLockExclusive(&records_lock);
@@ -287,7 +287,7 @@ namespace sunshine_upscaler_trace {
   void poll() {
     last_error_guard error;
     if ((!enabled() && !capture_enabled()) || !TryAcquireSRWLockExclusive(&poll_lock)) return;
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     const auto loads = module_loads.load(std::memory_order_acquire);
     const bool notified = loader_cookie.load(std::memory_order_acquire) != nullptr;
     const bool pending = discovery_pending.load(std::memory_order_acquire);

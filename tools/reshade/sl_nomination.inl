@@ -172,7 +172,7 @@ namespace sunshine_streamline {
         const evaluated_depth_tag &tag, bool version_one) {
       report_declared_size(tag);
       sunshine_scene_depth::frame value;
-      value.epoch = snapshot.epoch; value.sequence = snapshot.sequence; value.tick = GetTickCount64();
+      value.epoch = snapshot.epoch; value.sequence = snapshot.sequence; value.tick = sunshine_game3d::clock::game_now();
       value.observation_revision = snapshot.loss_revision;
       value.feedback = snapshot.feedback;
       value.viewport = snapshot.viewport;
@@ -525,7 +525,7 @@ namespace sunshine_streamline {
       bool copy_recorded{};
       const auto captured = sample ? nominate_depth_source(snapshot, true, &copy_recorded) : 0;
       call_trace.claim_depth_capture(sample && owns_nested_depth_capture(snapshot, copy_recorded));
-      const auto diagnostic = dump_stamp(ticket, snapshot.sequence, GetTickCount64(), viewport, 0, frame, true, reinterpret_cast<std::uint64_t>(commands));
+      const auto diagnostic = dump_stamp(ticket, snapshot.sequence, sunshine_game3d::clock::game_now(), viewport, 0, frame, true, reinterpret_cast<std::uint64_t>(commands));
       SetLastError(incoming);
       const bool result = original_evaluate_v1(commands, feature, frame, viewport);
       const DWORD outgoing = GetLastError();
@@ -550,7 +550,7 @@ namespace sunshine_streamline {
       const auto serial = ticket ? ++call_sequence : 0;
       const loss_context_scope loss_scope(serial, UINT32_MAX, feature);
       const auto loss = loss_revision.load(std::memory_order_acquire);
-      const auto entry_tick = ticket ? GetTickCount64() : 0;
+      const auto entry_tick = ticket ? sunshine_game3d::clock::game_now() : 0;
       batch out;
       if (ticket) out = read_local_inputs(inputs, count, reinterpret_cast<std::uintptr_t>(&frame), known_contract);
       const auto identity = ticket && (known_contract || out.valid_viewport) ?

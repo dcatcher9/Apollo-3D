@@ -27,6 +27,7 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+#include "game3d_clock.h"
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   #include "game3d_test_depth_events.h"
 #endif
@@ -226,7 +227,7 @@ namespace sunshine_streamline::provider {
     void record_depth(api::effect_runtime *runtime, const sunshine_game3d::api_depth_decision &decision,
         std::uint64_t present) {
       if (auto *record = sunshine_game3d::frame_record_store::writable(runtime))
-        sunshine_game3d::record_api_depth(*record, decision, present, GetTickCount64());
+        sunshine_game3d::record_api_depth(*record, decision, present, sunshine_game3d::clock::game_now());
     }
     void track_fg_switch(state &data, const readiness_evidence &e, bool ready, const char *why);
     // A runtime's teardown hands its FG mode and its FG switch line (active
@@ -452,7 +453,7 @@ namespace sunshine_streamline::provider {
       // Capture admissions by ReShade's list lifecycle, which decides coverage.
       const sunshine_game3d::slow_step step("depth list coverage report");
       char text[256];
-      if (depth_capture::list_coverage_report(GetTickCount64(), text, sizeof(text)))
+      if (depth_capture::list_coverage_report(sunshine_game3d::clock::game_now(), text, sizeof(text)))
         sunshine_log::message(reshade::log::level::info, text);
       // A safety bound of the capture owner that refused a capture, once each.
       char bound[384];
@@ -462,7 +463,7 @@ namespace sunshine_streamline::provider {
       // every 10 s, for a window with a wait of a millisecond or more, or
       // every window with Diagnostics.
       char waits[640];
-      if (depth_capture::capture_lock_report(GetTickCount64(), sunshine_game3d::diagnostics::enabled(), waits, sizeof(waits)))
+      if (depth_capture::capture_lock_report(sunshine_game3d::clock::game_now(), sunshine_game3d::diagnostics::enabled(), waits, sizeof(waits)))
         sunshine_log::message(reshade::log::level::info, waits);
     }
     // The FG mode of this Present (its FG snapshot, taken at its start): the
@@ -488,7 +489,7 @@ namespace sunshine_streamline::provider {
       ++data->fg_scope_changes;
     if (!policy.require_frame_generation) data->fg_scope_logged_changes = data->fg_scope_changes;
     if (data->fg_scope_changes != data->fg_scope_logged_changes) {
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       if (!data->fg_scope_line_tick || now - data->fg_scope_line_tick >= 5000) {
         char text[384]{};
         format_frame_generation_scope(text, sizeof(text), fg_silent, policy.viewport, policy.epoch, data->fg_scope_changes);
@@ -573,7 +574,7 @@ namespace sunshine_streamline::provider {
     // source age by the FG hold (which shuts out the readable ordinary
     // candidate) could be judged expired by the cache a tick later, and that
     // Present was mono (F84, F53).
-    const auto decision_tick = GetTickCount64();
+    const auto decision_tick = sunshine_game3d::clock::game_now();
     const char *fg_hold = nullptr;
     if ((fg_silent || (selection.require_frame_generation && acquisition.source_selected)) &&
         !(acquisition.source_selected && data->frame.metadata.frame_generation_input) &&
@@ -604,7 +605,7 @@ namespace sunshine_streamline::provider {
       depth_capture::frame_generation_retained(data->cache.reference(), policy, decision_tick);
     std::uint32_t frame_width{}, frame_height{};
     runtime->get_screenshot_width_and_height(&frame_width, &frame_height);
-    const auto handoff_tick = GetTickCount64();
+    const auto handoff_tick = sunshine_game3d::clock::game_now();
     if (available || associated) {
       data->associated_tick = handoff_tick;
       data->associated_width = frame_width; data->associated_height = frame_height;
@@ -635,7 +636,7 @@ namespace sunshine_streamline::provider {
       data->presentations.reset();
       data->presentation_source = {};
       if (!hold) data->associated_tick = 0;
-      if (data->logging.due(GetTickCount64(), status != data->last_status, previously_owned)) {
+      if (data->logging.due(sunshine_game3d::clock::game_now(), status != data->last_status, previously_owned)) {
         // The initial failure needs the same handoff evidence as an established
         // provider. Otherwise a valid captured depth rejected on another queue
         // looks indistinguishable from an absent API or an unknown queue.
@@ -781,7 +782,7 @@ namespace sunshine_streamline::provider {
     auto *data = runtime->get_private_data<state>();
     if (!data || !data->owns_pass) return false;
     data->open = false;
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     if (!data->output.ready || data->output.reused_depth) return true;
     if (now >= data->next_sample && !sunshine_depth::busy()) {
       sunshine_depth::sample_request request;
@@ -892,7 +893,7 @@ namespace sunshine_streamline::provider {
     if (!data) return out;
     out.selected = data->owns_pass;
     out.last_valid = data->last_valid;
-    out.presentations = data->presentations.snapshot(GetTickCount64());
+    out.presentations = data->presentations.snapshot(sunshine_game3d::clock::game_now());
     out.provider = data->source_metadata.provider;
     std::uint64_t source{};
     if (!data->owns_pass)

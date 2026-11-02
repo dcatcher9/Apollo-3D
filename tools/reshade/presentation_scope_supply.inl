@@ -43,7 +43,7 @@
       AcquireSRWLockShared(&evaluation_supply_lock);
       const auto supply = evaluation_supply;
       ReleaseSRWLockShared(&evaluation_supply_lock);
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       return supply.tick && supply.epoch == scope_epoch && supply.viewport == viewport &&
         sunshine_freshness::ahead_tolerant_le(supply.tick, now, sunshine_freshness::fg_silent_ms);
     }
@@ -58,7 +58,7 @@
     void remember_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, bool recorded, std::uint64_t sequence = 0,
         const frame_identity &frame = {}) {
       const frame_generation::frame_mark tag{frame_key(frame), sequence};
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       AcquireSRWLockExclusive(&evaluation_supply_lock);
       tag_copy.remember(scope_epoch, viewport, recorded, tag, now);
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
@@ -92,7 +92,7 @@
     sunshine_game3d::ui_mask::tag_precedence ui_tag_copy;
     void remember_ui_tag_copy(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot, bool recorded,
         bool deferred = false) {
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       AcquireSRWLockExclusive(&evaluation_supply_lock);
       ui_tag_copy.remember(scope_epoch, viewport, slot, recorded, deferred, now);
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
@@ -103,7 +103,7 @@
       ReleaseSRWLockExclusive(&evaluation_supply_lock);
     }
     bool ui_deferral_refused(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot) {
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       AcquireSRWLockShared(&evaluation_supply_lock);
       const bool refused = ui_tag_copy.deferral_refused(scope_epoch, viewport, slot, now);
       ReleaseSRWLockShared(&evaluation_supply_lock);
@@ -152,7 +152,7 @@
     bool ui_tags_supply(std::uint64_t scope_epoch, std::uint32_t viewport, unsigned slot) {
       if (slot >= ui_tag_copy.copied.size()) return false;
       const bool deferrals = deferral_pending.load(std::memory_order_acquire) != 0;
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       AcquireSRWLockShared(&evaluation_supply_lock);
       bool pending = false;
       if (deferrals)
@@ -170,7 +170,7 @@
     bool tags_supply_frame(std::uint64_t scope_epoch, std::uint32_t viewport, const frame_generation::frame_mark &evaluated,
         bool *recorded = nullptr) {
       const bool deferrals = deferral_pending.load(std::memory_order_acquire) != 0;
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       AcquireSRWLockShared(&evaluation_supply_lock);
       frame_generation::frame_mark pending;
       bool waiting = false;

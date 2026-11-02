@@ -4,6 +4,7 @@
 #include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
 #include "upscaler_call_trace.h"
+#include "game3d_clock.h"
 
 namespace sunshine_game3d::hook_host {
   void poll() {
@@ -17,7 +18,7 @@ namespace sunshine_game3d::hook_host {
     if (!api_requested && !sunshine_streamline::depth_capture::active()) return;
     auto guard = sunshine_streamline::try_poll();
     if (!guard) return;
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     sunshine_streamline::discovery_step(api_requested, now);
     sunshine_streamline::coverage_step();
     sunshine_upscaler_trace::poll();

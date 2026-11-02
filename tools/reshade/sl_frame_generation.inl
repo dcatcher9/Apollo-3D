@@ -34,7 +34,7 @@ namespace sunshine_streamline {
       // The retiring call observed FG off (a successful mode 0 call), not
       // a failed or unknown one (retire_source's confirmed_off).
       bool confirmed_off{};
-      if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, GetTickCount64(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, sdk_ok);
+      if (sample) dump_metadata::observe_sl_fg(dump_stamp(ticket, serial, sunshine_game3d::clock::game_now(), valid_viewport ? id : UINT32_MAX), copy.mode, copy.generated_frames, valid, sdk_ok);
       bool changed = false;
       // The FG options store (presentation_scope_mode.inl), whose only writer
       // of options this is: the write cannot be lost to the camera and tag
@@ -71,7 +71,7 @@ namespace sunshine_streamline {
               // capture lock (once per frame in a game played with FG off).
               const bool retired_already = state.sequence && !state.enabled && state.known == known &&
                 state.epoch == source_epoch && state.loss_revision == options_loss;
-              const auto now = GetTickCount64();
+              const auto now = sunshine_game3d::clock::game_now();
               state = {source_epoch, serial, now, options_loss, id, copy.mode, copy.generated_frames,
                 known, known && copy.mode != 0, valid && copy.mode >= 2};
               if (state.enabled) state.enabled_tick = enabled_since ? enabled_since : now;
@@ -321,7 +321,7 @@ namespace sunshine_streamline {
     const auto ticket = observation_ticket();
     const auto executions = depth_capture::game_executions();
     const auto queue_executions = depth_capture::game_executions_on(queue);
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     // This Present's ordinal: it is counted after this call (on_present).
     const auto ordinal = depth_capture::next_present_ordinal();
     const auto source_epoch = epoch.load(std::memory_order_acquire);
@@ -520,7 +520,7 @@ namespace sunshine_streamline {
     // with every Streamline call (the capture owner's FG view and the UI
     // request's newest boundary compare it with tag sequences).
     const auto serial = ++call_sequence;
-    const auto tick = GetTickCount64();
+    const auto tick = sunshine_game3d::clock::game_now();
     // This frame's Present comes next (present_deferred).
     AcquireSRWLockExclusive(&evaluation_supply_lock);
     fg_evaluation.evaluated(fg.epoch, fg.viewport, tick, depth_capture::next_present_ordinal(), fg.generated_presents());

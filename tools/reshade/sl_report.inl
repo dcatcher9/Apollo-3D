@@ -46,7 +46,7 @@ namespace sunshine_streamline {
     void report_fg_refusal(const evaluation_snapshot &snapshot, const char *reason, bool withdrawn, bool live,
         bool supplied) {
       const auto count = fg_refusals.fetch_add(1, std::memory_order_relaxed) + 1;
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       auto next = next_fg_refusal_report.load(std::memory_order_relaxed);
       if (now < next || !next_fg_refusal_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
       static const evaluated_depth_tag none;
@@ -85,7 +85,7 @@ namespace sunshine_streamline {
           candidates[i].proof == sunshine_scene_depth::state_proof::declared_for_use && diagnostic.used_observed_state;
       if (!over) return;
       const auto over_total = tag_call_copies.recorded_over_declared.fetch_add(1, std::memory_order_relaxed) + 1;
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       auto next = next_tag_call_report.load(std::memory_order_relaxed);
       if (now < next || !next_tag_call_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
       char text[480]{};
@@ -102,7 +102,7 @@ namespace sunshine_streamline {
     void report_deferrals() {
       const auto activity = deferrals.depth.load(std::memory_order_relaxed) + deferrals.ui.load(std::memory_order_relaxed) +
         deferrals.cancelled.load(std::memory_order_relaxed) + deferrals.lapsed.load(std::memory_order_relaxed);
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       auto next = next_deferral_report.load(std::memory_order_relaxed);
       if (activity == reported_deferrals.load(std::memory_order_relaxed) || now < next ||
           !next_deferral_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
@@ -132,7 +132,7 @@ namespace sunshine_streamline {
       // A null Resource also reads as the zero header; only a real native is
       // the compatibility layout. An untag is reported on its own line.
       if (value.supported && zero_resource_header && index < 3 && tag.resource_ptr && value.value.native_resource) {
-        const auto now = GetTickCount64();
+        const auto now = sunshine_game3d::clock::game_now();
         auto next = next_compatibility_report.load(std::memory_order_relaxed);
         if (now >= next && next_compatibility_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
           char text[384]{};
@@ -146,7 +146,7 @@ namespace sunshine_streamline {
       }
       if (value.supported && index < 3 && !value.value.native_resource) {
         const auto count = depth_untags.fetch_add(1, std::memory_order_relaxed) + 1;
-        const auto now = GetTickCount64();
+        const auto now = sunshine_game3d::clock::game_now();
         auto next = next_untag_report.load(std::memory_order_relaxed);
         if (now >= next && next_untag_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
           char text[320]{};
@@ -161,7 +161,7 @@ namespace sunshine_streamline {
     }
     void report_rejected_tag(const batch &out, const abi_v2::resource_tag &tag, const tag_record &value,
         const abi_v2::resource &resource, bool precision_ok, bool resource_ok, std::atomic<std::uint64_t> &next_tag_report) {
-        const auto now = GetTickCount64();
+        const auto now = sunshine_game3d::clock::game_now();
         auto next = next_tag_report.load(std::memory_order_relaxed);
         if (now >= next && next_tag_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
           char text[700]{};
@@ -178,7 +178,7 @@ namespace sunshine_streamline {
     void report_v1_state_lookup(const evaluation_snapshot &snapshot, const evaluated_depth_tag &tag,
         const depth_capture::input &value, const v1_resource_state::read_details &state_details,
         std::atomic<std::uint64_t> &next_state_report) {
-          const auto now = GetTickCount64();
+          const auto now = sunshine_game3d::clock::game_now();
           auto next = next_state_report.load(std::memory_order_relaxed);
           if (now >= next && next_state_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
             char text[640]{};

@@ -3,7 +3,7 @@
     const bool handoff_changed = display != data->last_display || consumer.result != data->last_consumer ||
       capture_info.selection != data->last_selection ||
       consumer.invalidation != data->last_loss || data->output.ready != data->last_output_ready;
-    if (data->logging.due(GetTickCount64(), status != data->last_status ||
+    if (data->logging.due(sunshine_game3d::clock::game_now(), status != data->last_status ||
         capture_info.failure != data->last_capture_failure || handoff_changed, !previously_owned, !available)) {
       char text[2560]{};
       if (available) {
@@ -27,7 +27,7 @@
         const bool known = revision && sunshine_streamline::query_depth_observation_loss(revision, loss);
         const auto since = revision >= data->logged_loss_revision ? revision - data->logged_loss_revision : 0;
         data->logged_loss_revision = revision;
-        append_loss(text, sizeof(text), known, loss, known ? GetTickCount64() - loss.tick : 0, since);
+        append_loss(text, sizeof(text), known, loss, known ? sunshine_game3d::clock::game_now() - loss.tick : 0, since);
       }
       sunshine_log::message(reshade::log::level::info, text);
       data->last_status = status;
