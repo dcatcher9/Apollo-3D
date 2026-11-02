@@ -277,10 +277,12 @@ add_custom_target(Sunshine3DPackage ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/SunshineDepth3D.fx" "${CMAKE_CURRENT_BINARY_DIR}/Shaders/SunshineDepth3D.fx"
   DEPENDS SunshineSBS
   COMMENT "Staging one production Sunshine 3D add-on and its installer")
+# The test add-on's exports, which reach depth_addon.cpp's and the probe's
+# internals through their test-access headers, and the game clock's. They run
+# in the game process as add-on code, so the clock domain guard scans them too.
+set(sunshine_test_addon_sources test_depth_addon_exports.cpp test_streamline_camera_probe_exports.cpp test_addon_lifetime_exports.cpp test_game3d_clock_exports.cpp)
 if(SUNSHINE_SBS_RUNTIME_TESTS)
-  # The test add-on's exports, which reach depth_addon.cpp's and the probe's
-  # internals through their test-access headers, and the game clock's.
-  target_sources(SunshineSBSTest PRIVATE test_depth_addon_exports.cpp test_streamline_camera_probe_exports.cpp test_addon_lifetime_exports.cpp test_game3d_clock_exports.cpp)
+  target_sources(SunshineSBSTest PRIVATE ${sunshine_test_addon_sources})
   target_compile_definitions(SunshineSBSTest PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   if(MINGW)
     target_compile_options(SunshineSBSTest PRIVATE -Wall -Wextra -Wno-attributes)
@@ -386,10 +388,12 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME reshade_game3d_clock COMMAND reshade_game3d_clock_tests)
   set_tests_properties(reshade_game3d_clock PROPERTIES TIMEOUT 15)
-  # Every clock read and thread-pool submission of the add-on's sources has a
-  # stated domain; game time is read only through game3d_clock.h.
+  # Every clock read and thread-pool submission of the add-on's sources, the
+  # test add-on's own included, has a stated domain; game time is read only
+  # through game3d_clock.h.
+  list(JOIN sunshine_test_addon_sources "|" sunshine_test_addon_source_list)
   add_test(NAME reshade_clock_domains COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
-    -P "${CMAKE_CURRENT_SOURCE_DIR}/check_clock_domains.cmake")
+    "-DTEST_ADDON_SOURCES=${sunshine_test_addon_source_list}" -P "${CMAKE_CURRENT_SOURCE_DIR}/check_clock_domains.cmake")
   set_tests_properties(reshade_clock_domains PROPERTIES TIMEOUT 60)
   # The first-run report's checks and its goldens over saved game logs (log_report_goldens). They need
   # only a Python 3 interpreter and are not registered without one.

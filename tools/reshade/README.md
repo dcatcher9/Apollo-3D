@@ -1729,8 +1729,9 @@ bit of each family still out. The add-on lifecycle fixture checks both outcomes.
 
 [`check_clock_domains.cmake`](check_clock_domains.cmake) (the `reshade_clock_domains` test) keeps
 both complete. It counts every other clock read and every thread-pool submission, new thread,
-timer, wait or work object of the add-on's sources (fixtures, `experiments/` and the replay tools
-aside) against its list of allowed sites, each with its domain and reason, so a new site fails
+timer, wait or work object of the add-on's sources, the test add-on's own export sources included
+(CMakeLists.txt's `sunshine_test_addon_sources`; fixtures, `experiments/` and the replay tools
+aside), against its list of allowed sites, each with its domain and reason, so a new site fails
 until it reads `game_now()`, submits through `pool::submit` or is listed; only
 `game3d_pool_submit.h` may call `TrySubmitThreadpoolCallback`.
 

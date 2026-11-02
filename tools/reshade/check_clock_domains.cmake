@@ -11,15 +11,23 @@
 # anything else as a new entry.
 #
 # Scanned: every .cpp, .h and .inl under SOURCE_DIR except the fixtures
-# (test_*), experiments/ and the replay tools, whose clocks are their own.
-# Comments, string literals and character literals are not code.
+# (test_*), experiments/ and the replay tools, whose clocks are their own; and
+# the test add-on's own sources (TEST_ADDON_SOURCES, CMakeLists.txt's
+# sunshine_test_addon_sources), which run in the game process as add-on code
+# although their names start with test_. Comments, string literals and
+# character literals are not code.
 #
-#   cmake -DSOURCE_DIR=<tools/reshade> -P check_clock_domains.cmake
+#   cmake -DSOURCE_DIR=<tools/reshade> -DTEST_ADDON_SOURCES=<a.cpp|b.cpp|...> -P check_clock_domains.cmake
 cmake_minimum_required(VERSION 3.24)
 
 if(NOT SOURCE_DIR)
   message(FATAL_ERROR "SOURCE_DIR is required")
 endif()
+if(NOT TEST_ADDON_SOURCES)
+  message(FATAL_ERROR "TEST_ADDON_SOURCES is required: the test add-on's own sources, joined with | "
+    "(CMakeLists.txt, sunshine_test_addon_sources)")
+endif()
+string(REPLACE "|" ";" test_addon_sources "${TEST_ADDON_SOURCES}")
 
 # The kinds of site the check counts.
 #   tick:  GetTickCount64, the real tick behind game_now();
@@ -65,6 +73,8 @@ set(allowed
   "exporter_internal.h|chrono|2|wall|the export ring's 2 s retry stamps"
   "game3d_renderer.cpp|chrono|6|wall|the background build's 4 ms present-thread time slice, and its build_ms"
   "game3d_ui_layer.cpp|chrono|1|perf|the skip gap's microsecond clock, for the timing line's maximum"
+  "test_depth_addon_exports.cpp|chrono|2|perf|SunshineDepthTestSnapshot's timed copies of the depth selection snapshot, a measurement"
+  "test_addon_lifetime_exports.cpp|chrono|2|wall|SunshineGame3DTestQuiesce's bound: real time, so that a barrier that is never reached cannot hang"
   "game3d_pool_submit.h|pool|2|pool|pool::submit, shipping and test branch: every pool callback of the add-on starts here, by family, so the test add-on counts it until it returns")
 
 # Code with its comments and its string and character literals blanked (raw
@@ -204,8 +214,8 @@ set(replay_tools replay_game3d_dump.cpp preview_game3d_dump.cpp ui_detection_rep
 set(scanned "")
 foreach(source IN LISTS sources)
   get_filename_component(name "${source}" NAME)
-  if(source MATCHES "^experiments/" OR source MATCHES "(^|/)(cmake-build-[^/]*|CMakeFiles)/" OR name MATCHES "^test_"
-      OR source IN_LIST replay_tools)
+  if(source MATCHES "^experiments/" OR source MATCHES "(^|/)(cmake-build-[^/]*|CMakeFiles)/"
+      OR (name MATCHES "^test_" AND NOT source IN_LIST test_addon_sources) OR source IN_LIST replay_tools)
     continue()
   endif()
   list(APPEND scanned "${source}")
@@ -213,6 +223,11 @@ endforeach()
 if(NOT "game3d_clock.h" IN_LIST scanned OR NOT "game3d_pool_submit.h" IN_LIST scanned)
   message(FATAL_ERROR "SOURCE_DIR ${SOURCE_DIR} does not hold the add-on's sources")
 endif()
+foreach(source IN LISTS test_addon_sources)
+  if(NOT source IN_LIST scanned)
+    message(FATAL_ERROR "The test add-on's source ${source} (TEST_ADDON_SOURCES) is not under ${SOURCE_DIR}")
+  endif()
+endforeach()
 
 # Every entry names a scanned file and a known kind, at most once.
 set(entries "")
