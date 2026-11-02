@@ -1747,6 +1747,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 
 #### Presentation scope
 
+- [`frame_generation_count.h`](frame_generation_count.h): the one reading of DLSS-G's generated count (`presents_per_frame`: 1 while FG is enabled without one), for the FG options, the Present's grant and the UI's Present counting. Docs: [Presentation scope](../../docs/reshade-sbs.md#presentation-scope).
 - [`presentation_scope.h`](presentation_scope.h): FG policy/value declarations and their predicates, including DLSS-G frame inputs: most are pure, and `select_frame_generation_scope`, `frame_generation_retained` and `sunshine_ngx::frame_generation_owns_depth` read the capture owner under its mutex, so none may be called with it held; consumer state and live adapter reads remain at their call sites. Docs: [Presentation scope](../../docs/reshade-sbs.md#presentation-scope).
 
 #### Depth capture

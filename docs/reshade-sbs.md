@@ -4340,7 +4340,8 @@ of frames to generate inbetween fully rendered frames" for every mode and adds f
 `DLSSGState::bIsDynamicMFGSupported`. It does not say whether Dynamic with a count of 0 picks its
 own count or generates nothing, so such a scope binds no viewport in a tie of two active views
 ([Streamline depth selection](#streamline-depth-selection)). Every reader of its count takes it as
-1 generated Present per real frame (`frame_generation_snapshot::generated_presents`): the Present's
+1 generated Present per real frame (`frame_generation::presents_per_frame`, one helper since the
+second fix review of 11-01, read through `frame_generation_snapshot::generated_presents`): the Present's
 grant, the UI's count, the deferral clock and DLSS-G's evaluation window (until 11-01 the last two
 took it as none, so after a hitch of the source age a frame's deferred copy lapsed at an earlier
 frame's generated Present: lane L-fg, F4, seam rows `P5 deferral age` with Dynamic mode, which check

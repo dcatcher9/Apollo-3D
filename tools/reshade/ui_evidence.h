@@ -2,6 +2,7 @@
 #pragma once
 // Pure UI capture/presentation evidence. The owning contract is
 // docs/reshade-sbs.md, UI source discovery and snapshot qualification.
+#include "frame_generation_count.h"
 #include "game3d_ui_qualification.h"
 #include <array>
 #include <cstddef>
@@ -67,8 +68,7 @@ namespace sunshine_game3d::ui_evidence {
   constexpr bool generated_without_input(std::uint64_t present, std::uint64_t input_present, bool fg_active,
       std::uint32_t generated_frames) {
     if (!fg_active || !input_present || present <= input_present) return false;
-    const std::uint64_t generated = !generated_frames ? 1u : generated_frames;
-    return present - input_present <= generated;
+    return present - input_present <= sunshine_streamline::frame_generation::presents_per_frame(true, generated_frames);
   }
   static_assert(generated_without_input(11, 10, true, 3) && generated_without_input(13, 10, true, 3) &&
     !generated_without_input(14, 10, true, 3) && generated_without_input(11, 10, true, 0) &&

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "freshness.h"
+#include "frame_generation_count.h"
 #include "game3d_ui_mask.h"
 #include "scene_depth_source.h"
 #include "streamline_depth_capture.h"
@@ -297,15 +298,12 @@ namespace sunshine_streamline {
     // Enabled: the tick of the options call that turned FG on in this epoch,
     // kept while later calls leave it on (depth_capture::frame_generation_scope_live).
     std::uint64_t enabled_tick{};
-    // The Presents DLSS-G adds per real frame under these options: their
-    // generated count, 1 while enabled without one (Dynamic mode with
-    // numFramesToGenerate 0, whose count DLSS-G may pick), 0 without FG.
-    // Every reader of a viewport's count takes it so: the deferral clock
-    // (present_deferred) and DLSS-G's evaluation window
-    // (deferral_evaluations), as the Present's grant (present_fg) and the UI
-    // (ui_evidence) do. Until 11-01 the deferral clock and the evaluation
-    // window took Dynamic's 0 as no generated Present (F4).
-    std::uint32_t generated_presents() const { return enabled ? (generated_frames ? generated_frames : 1u) : 0u; }
+    // The Presents DLSS-G adds per real frame under these options
+    // (frame_generation::presents_per_frame). Every reader of a viewport's
+    // count takes it so: the deferral clock (present_deferred) and DLSS-G's
+    // evaluation window (deferral_evaluations), as the Present's grant
+    // (present_fg) and the UI (ui_evidence) do.
+    std::uint32_t generated_presents() const { return frame_generation::presents_per_frame(enabled, generated_frames); }
   };
   // Successful, version-checked game options only. Enabled means requested by
   // the game; it does not identify any particular real/generated presentation.
@@ -399,14 +397,15 @@ namespace sunshine_streamline::presentation_scope {
     // for a silent scope; 1 when the count is unknown), 0 without FG: the
     // Present's grant (depth_capture::present, frame_presenting).
     std::uint32_t generated_presents() const {
-      return depth.require_frame_generation ? (generated_frames ? generated_frames : 1u) : 0u;
+      return frame_generation::presents_per_frame(depth.require_frame_generation, generated_frames);
     }
     // The frame this Present presents by depth's window (PD7): its API depth
-    // acquisition's presenting floor (the newest evaluated frame's present
-    // ordinal while this Present still presents that frame,
-    // frame_presenting), else 0, as the provider published it after its
-    // acquisition (present_depth_frame). The UI holds a generated Present's
-    // decision by it.
+    // acquisition's presenting floor (the newest evaluated frame's first
+    // present ordinal, its first FG stamp when its own evaluations followed
+    // it, while this Present still presents that frame, frame_presenting;
+    // until F63 the newest evaluation's ordinal), else 0, as the provider
+    // published it after its acquisition (present_depth_frame). The UI holds
+    // a generated Present's decision by it.
     std::uint64_t depth_frame{};
   };
 }
