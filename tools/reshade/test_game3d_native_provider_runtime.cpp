@@ -510,7 +510,7 @@ namespace {
     std::uint64_t matched_present{};
     void require_records_match_log(const char *label) {
       // The asynchronous writer flushes this scenario's lines meanwhile (in
-      // game time: an engaged clock's frame boundaries drain the writer).
+      // game time; an engaged clock drains the log at every frame boundary).
       for (const auto until = clock.now() + 300; clock.now() < until;) present_frame();
       const auto lines = provider_lines();
       auto &records = record_history.records;
