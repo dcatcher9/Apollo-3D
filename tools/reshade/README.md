@@ -3209,6 +3209,22 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
+The timelines play game time on the test add-on's clock (clock C3, 11-02; the fixture clock in
+[Test builds](#test-builds)). Once setup is done the clock engages 120 s ahead of the real tick, so
+nothing setup stamped survives into the first timeline. Each Present then ends at a 16 ms virtual
+frame boundary: the game's ring and DLSS-G's ring, and the order fences their queues and the third
+queue signal, complete; the add-on's pool work and log writer quiesce; only then does game time
+move. A seed's `hitch=` is that barrier and then its milliseconds at once, also inside a frame's
+recording, where a ring that the frame's `sr_gpu` or `dlssg_gpu` gate holds until after its Present
+is not waited for (the frame's boundary waits for it once the gate opened). Every stamp and window
+the judges read (each source's `made` and the frame's tick, the FG hold's window and the deferred
+copy's restamp, the late signaller's window, the UI tag's age, isolation's association and 200 ms,
+the log window of `require_records_match_log`) reads that clock, as the add-on reads its own. Wall
+time stays for the watchdog, each timeline's frame deadline, the shrinker's budget and `MEASURE
+... elapsed_ms`; `MEASURE game clock session timelines` counts the barriers. `--wall-clock` never
+engages the clock: each Present is paced by `Sleep(3)` and each hitch sleeps, as before (the
+real-time lane).
+
 `reshade_session_timelines` runs the fixed set (24 seeds, 92 regression timelines and the witness,
 7153 frames and about 21200 Presents, with the seeds' hitches and late FG Offs) in about 360 s
 (X1's fix run x1-fix-1, 11-02: 21157 to 21232 Presents in 361 to 365 s, 3 runs;
@@ -3221,7 +3237,7 @@ twice a full run when the set took about 235 s, and each regression row adds abo
 
     reshade_game3d_session_timeline_runtime_test [--list] [--timeline <seed> | --events "<list>" |
       --seeds N [--from M]] [--only <regression or witness>] [--shard i/N] [--shrink-runs N] [--trace]
-      official.dll frozenShaders test.addon64 freshOutput frame_generation_interposer.dll
+      [--wall-clock] official.dll frozenShaders test.addon64 freshOutput frame_generation_interposer.dll
 
 `--list` prints each selected timeline's seed (or regression or witness) and event list;
 `--timeline` replays one seed and `--events` one list (frames separated by `;`, each `defaults` or
