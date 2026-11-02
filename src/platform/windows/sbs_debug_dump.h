@@ -6,9 +6,11 @@
 
 // platform includes
 #include <d3d11.h>
+#include <wrl/client.h>
 
 // standard includes
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +37,27 @@ namespace models {
 namespace platf::sbs_debug {
 
   struct frame;
+
+  /** Optional requested-dump observation of one successful draw, not UI authority. */
+  struct actual_draw_evidence {
+    bool requested = false, captured = false, selected_shader = false, queued_geometry = false;
+    bool background_queue_issued = false, background_role_matched = false, background_bound = false;
+    std::uint64_t conversion_frame = 0, model_frame = 0, observation_us = 0;
+    std::uint64_t owner_serial = 0, transport_serial = 0, context_address = 0, pixel_shader_address = 0;
+    std::array<std::uint64_t, 4> colour_key {};
+    std::array<std::uint64_t, 7> actual_role_pointers {};
+    std::array<std::uint32_t, 4> analysis_source_rect {}, analysis_shape {};
+    std::string program = "not-observed", pixel_shader_closure;
+    std::string unavailable_reason = "no successful attributable draw";
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> matte, legacy_matte, background;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_receipt, background_proof;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> expected, source_c24, geometry_constants, subtitle_constants;
+
+    void release_resources() noexcept {
+      matte.Reset(); legacy_matte.Reset(); background.Reset(); selected_receipt.Reset(); background_proof.Reset();
+      expected.Reset(); source_c24.Reset(); geometry_constants.Reset(); subtitle_constants.Reset();
+    }
+  };
 
   namespace detail {
     class publication_state;
@@ -97,7 +120,7 @@ namespace platf::sbs_debug {
     bool composite_runtime_provenance_is_authenticated(const frame &completed) noexcept;
 
     enum class subtitle_contour_texture_e : std::uint8_t {
-      support, field_pin, distance, history, source, gaussian_weight, gaussian_blend, gaussian_vertical_conditioned,
+      support, glyph_matte, field_pin, distance, history, source, gaussian_weight, gaussian_blend, gaussian_vertical_conditioned,
     };
 
     /** Exact texture ABI, including the canonical 1x1 unsupported-source variant. */
@@ -147,6 +170,17 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &final
     ) noexcept;
 
+    /** Replay the same-observation native matte and bind separate SCP4 without relying on a trace. */
+    bool subtitle_analytic_tuple_is_authenticated(
+      const std::vector<std::uint8_t> &identity,
+      const std::vector<std::uint8_t> &locator,
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<std::uint8_t> &support,
+      const std::vector<std::uint8_t> &source,
+      const std::vector<std::uint8_t> &matte,
+      const std::vector<std::uint8_t> &condition
+    ) noexcept;
+
     /** Authenticate the optional OCR8/UIP4 and complete contour resource set. */
     bool subtitle_capture_resources_are_authenticated(const frame &completed) noexcept;
 
@@ -167,7 +201,7 @@ namespace platf::sbs_debug {
    *        belong to it.
    *
    * model_input and raw_depth are immutable estimator snapshots. warp_depth is a non-owning alias
-   * used only to prove that production V2 consumed shadow_final_parallax itself; it is never
+   * used only to prove that production V2 consumed ordinary Base (or its unconditioned Final alias); it is never
    * staged or serialized separately. That single authenticated final artifact is full-source-U in
    * ordinary mode and ROI-local-U in window-region mode. ROI renderer authority is the pair of
    * that ROI-local field and depth_input_region's scale/outside-collar embedding. The
@@ -177,7 +211,7 @@ namespace platf::sbs_debug {
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
    * shadow_base_final_parallax. When OCR8 and UIP4 are active, the compact publication record,
    * current UI-plane state, and exact native contour support condition that Base into shadow_final_parallax;
-   * empty current authority copies Base bit for bit. That complete atomic field is sampled directly by the renderer. In
+   * empty current authority copies Base bit for bit. That field remains an independently authenticated diagnostic. Live rendering selects the ordinary Base inverse or analytic UI plane using the native glyph matte and SCP4. In
    * ROI mode it remains crop-local and is not by itself a full-source position field.
    * shadow_coordinate is allocated and written only for this explicit
    * dump; it is never a live resource. V2 supplies an exact fixed-point inverse warp_map when its
@@ -207,6 +241,8 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *ocr_box_record = nullptr;
     ID3D11ShaderResourceView *subtitle_locator_state = nullptr;
     ID3D11ShaderResourceView *subtitle_contour_support = nullptr;
+    ID3D11ShaderResourceView *subtitle_glyph_matte = nullptr;
+    ID3D11ShaderResourceView *subtitle_condition_params = nullptr;
     ID3D11ShaderResourceView *subtitle_contour_field_pin = nullptr;
     ID3D11ShaderResourceView *subtitle_contour_distance = nullptr;
     ID3D11ShaderResourceView *subtitle_contour_identity = nullptr;
@@ -248,6 +284,8 @@ namespace platf::sbs_debug {
     bool gpu_undecided_completion = false;
     /** True when native interaction published Base as target without advancing OCR8/UIP4. */
     bool subtitle_work_suppressed = false;
+    /** Exact b3 draw permission, independent of retained subtitle observation authority. */
+    bool subtitle_render_enabled = false;
     /** Optional matched-window provenance stamped onto matched_frame_id. */
     std::optional<window_region_snapshot> window_region;
     std::string window_region_observer_status = "not-observed";
@@ -262,6 +300,7 @@ namespace platf::sbs_debug {
     std::uint32_t parallax_v2_joint_plane_mode = models::depth_coordinate_v2::adaptive_policy_id;
     models::input_color_space color_space {};
     std::string depth_model;
+    actual_draw_evidence actual_draw;
   };
 
   /**

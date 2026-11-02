@@ -499,6 +499,37 @@ namespace video_dom_probe {
     return candidate.visible_rect;
   }
 
+  // The retained document/video identities are authenticated by the caller. An unrelated
+  // document layout change does not revoke a video whose exact geometry and visible authority
+  // remain unchanged. Still validate containment against the CURRENT document and client.
+  [[nodiscard]] inline bool windowed_cache_refresh_matches(
+    const rect_t &cached_element_rect,
+    const rect_t &cached_authority_rect,
+    const rect_t &current_client_rect,
+    const rect_t &current_document_rect,
+    const rect_t &current_video_rect,
+    long coordinate_tolerance = 1
+  ) noexcept {
+    if (current_video_rect != cached_element_rect) {
+      return false;
+    }
+    const auto document_in_client = clip_if_within_tolerance(
+      current_client_rect, current_document_rect, coordinate_tolerance
+    );
+    const auto video_in_client = clip_if_within_tolerance(
+      current_client_rect, current_video_rect, coordinate_tolerance
+    );
+    const auto video_in_document = clip_if_within_tolerance(
+      current_document_rect, current_video_rect, coordinate_tolerance
+    );
+    if (!document_in_client || !video_in_client || !video_in_document ||
+        rect_area(current_video_rect) < rect_area(current_client_rect) / 20) {
+      return false;
+    }
+    const auto visible = rect_intersection(*video_in_client, *video_in_document);
+    return visible && *visible == cached_authority_rect;
+  }
+
   // Fullscreen cache refresh deliberately has no document-rectangle input. The authority is the
   // unchanged foreground client plus the retained semantic video identity; Chromium may clip or
   // relocate its document rectangle and may change harmless video overscan between full censuses.

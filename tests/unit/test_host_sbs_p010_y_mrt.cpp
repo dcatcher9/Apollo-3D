@@ -25,6 +25,7 @@
 #include <src/depth_coordinate_v2.h>
 #include <src/host_sbs_shader_cache.h>
 #include <src/host_sbs_v2_geometry.h>
+#include <src/host_sbs_subtitle_render.h>
 #include <src/video_colorspace.h>
 #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
 
@@ -231,7 +232,8 @@ namespace {
       std::vector<std::uint16_t> &mrt_y,
       std::string &error,
       const bool actual_p010 = false,
-      bool *p010_unsupported = nullptr
+      bool *p010_unsupported = nullptr,
+      const bool native_glyph = false
     ) {
       if (p010_unsupported) {
         *p010_unsupported = false;
@@ -283,6 +285,56 @@ namespace {
       ComPtr<ID3D11Buffer> geometry_buffer;
       if (!create_constant_buffer(geometry, geometry_buffer, error)) {
         return false;
+      }
+      ComPtr<ID3D11Texture2D> glyph_texture, snapshot_texture;
+      ComPtr<ID3D11ShaderResourceView> glyph_srv, snapshot_srv, condition_srv, identity_srv;
+      ComPtr<ID3D11Buffer> condition_buffer, identity_buffer, subtitle_buffer;
+      if (native_glyph) {
+        namespace v2 = models::depth_coordinate_v2;
+        const auto count = static_cast<std::size_t>(source_width) * source_height;
+        const auto glyph = static_cast<std::size_t>(source_height / 2u) * source_width + source_width / 2u;
+        std::vector<std::uint32_t> mask(count);
+        mask[glyph] = 1u;
+        std::vector<rgba16_bits_t> snapshot(count, {0u, 0u, 0u, 0x3c00u});
+        snapshot[glyph] = {0x39e2u, 0x39e2u, 0x39e2u, 0x3c00u};
+        const std::array<std::uint32_t, 6u> condition {
+          v2::subtitle_condition_param_schema, v2::subtitle_condition_param_tag,
+          1u, 0u, v2::subtitle_condition_param_fully_active_value,
+          std::bit_cast<std::uint32_t>(2.0f / static_cast<float>(source_width)),
+        };
+        std::array<std::uint32_t, 32u> identity {};
+        identity[0] = v2::subtitle_contour_schema; identity[1] = v2::subtitle_contour_history_tag;
+        identity[2] = 1u; identity[3] = state[v2::confirmed_cut_count];
+        identity[4] = 1u; identity[6] = 7u;
+        identity[8] = source_width; identity[9] = source_height; identity[11] = source_height;
+        identity[12] = depth_width; identity[13] = depth_height; identity[15] = depth_height;
+        identity[18] = depth_width; identity[19] = depth_height;
+        identity[20] = state[v2::gain_last_observation_low];
+        identity[21] = state[v2::gain_last_observation_high];
+        identity[22] = v2::subtitle_contour_recipe; identity[23] = 1u;
+        const auto words = [&](const auto &value, ComPtr<ID3D11Buffer> &buffer,
+                               ComPtr<ID3D11ShaderResourceView> &view) {
+          D3D11_BUFFER_DESC desc {};
+          desc.ByteWidth = static_cast<UINT>(sizeof(value)); desc.Usage = D3D11_USAGE_IMMUTABLE;
+          desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+          desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; desc.StructureByteStride = 4u;
+          const D3D11_SUBRESOURCE_DATA initial {value.data(), 0u, 0u};
+          return SUCCEEDED(device->CreateBuffer(&desc, &initial, &buffer)) &&
+            SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &view));
+        };
+        const models::host_sbs_subtitle_render_constants_t subtitle {
+          1u, 2u, 7u, 0u, 0u, 0u, source_width, source_height,
+        };
+        if (!create_immutable_texture_srv(DXGI_FORMAT_R32_UINT, source_width, source_height,
+              sizeof(std::uint32_t), mask.data(), glyph_texture, glyph_srv, error) ||
+            !create_immutable_texture_srv(DXGI_FORMAT_R16G16B16A16_FLOAT, source_width, source_height,
+              sizeof(rgba16_bits_t), snapshot.data(), snapshot_texture, snapshot_srv, error) ||
+            !words(condition, condition_buffer, condition_srv) ||
+            !words(identity, identity_buffer, identity_srv) ||
+            !create_constant_buffer(subtitle, subtitle_buffer, error)) {
+          error = "could not create active native glyph parity tuple: " + error;
+          return false;
+        }
       }
       const auto *color_vectors =
         video::color_vectors_from_colorspace(colorspace, true);
@@ -397,9 +449,11 @@ namespace {
         source_srv.Get(),
         parallax_srv.Get(),
         state_srv.Get(),
+        glyph_srv.Get(), snapshot_srv.Get(), condition_srv.Get(), identity_srv.Get(),
       };
       ID3D11SamplerState *samplers[] = {linear_sampler.Get()};
       ID3D11Buffer *geometry_buffers[] = {geometry_buffer.Get()};
+      ID3D11Buffer *subtitle_buffers[] = {subtitle_buffer.Get()};
 
       // Established reference: authenticated warp into FP16, then a distinct PQ luma draw.
       context->OMSetRenderTargets(1, reference_rgb_rtv.GetAddressOf(), nullptr);
@@ -412,6 +466,7 @@ namespace {
       );
       context->PSSetSamplers(0, 1, samplers);
       context->PSSetConstantBuffers(2, 1, geometry_buffers);
+      context->PSSetConstantBuffers(3, 1, subtitle_buffers);
       context->Draw(3, 0);
       unbind_outputs_and_srvs();
 
@@ -448,6 +503,7 @@ namespace {
       context->PSSetSamplers(0, 1, samplers);
       context->PSSetConstantBuffers(0, 1, color_buffers);
       context->PSSetConstantBuffers(2, 1, geometry_buffers);
+      context->PSSetConstantBuffers(3, 1, subtitle_buffers);
       context->Draw(3, 0);
       unbind_outputs_and_srvs();
 
@@ -839,7 +895,7 @@ namespace {
     void unbind_outputs_and_srvs() {
       std::array<ID3D11RenderTargetView *, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT>
         null_targets {};
-      std::array<ID3D11ShaderResourceView *, 3> null_srvs {};
+      std::array<ID3D11ShaderResourceView *, 7u> null_srvs {};
       context->OMSetRenderTargets(
         static_cast<UINT>(null_targets.size()),
         null_targets.data(),
@@ -850,6 +906,8 @@ namespace {
         static_cast<UINT>(null_srvs.size()),
         null_srvs.data()
       );
+      ID3D11Buffer *null_constants = nullptr;
+      context->PSSetConstantBuffers(3u, 1u, &null_constants);
     }
 
     ComPtr<ID3D11Device> device;
@@ -1017,6 +1075,28 @@ TEST(HostSbsP010YMrtGpuTest, MatchesEstablishedFp16ThenPqLumaPathBitForBit) {
     }
     EXPECT_TRUE(observed_nonzero_luma);
   }
+}
+
+TEST(HostSbsP010YMrtGpuTest, ActiveNativeGlyphSelectionMatchesPackedRgbAndLuma) {
+  constexpr UINT width = 128u, height = 4u, depth_width = 16u, depth_height = 4u;
+  std::vector<rgba16_bits_t> source(width * height, {0u, 0u, 0u, 0x3c00u});
+  source[(height / 2u) * width + width / 2u] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  const std::vector<float> base(depth_width * depth_height, -2.0f / width);
+  p010_y_mrt_fixture_t fixture;
+  std::string error;
+  ASSERT_TRUE(fixture.initialize(error)) << error;
+  std::vector<rgba16_bits_t> reference_rgb, mrt_rgb;
+  std::vector<std::uint16_t> reference_y, mrt_y;
+  ASSERT_TRUE(fixture.compare_paths(width, height, source, depth_width, depth_height,
+    base, make_authenticated_state(), {}, {video::colorspace_e::bt2020, false, 10u},
+    reference_rgb, mrt_rgb, reference_y, mrt_y, error, false, nullptr, true)) << error;
+  EXPECT_EQ(reference_rgb, mrt_rgb);
+  EXPECT_EQ(reference_y, mrt_y);
+  const auto left_glyph = (height / 2u) * width * 2u + 66u;
+  const auto right_glyph = (height / 2u) * width * 2u + width + 62u;
+  ASSERT_LT(right_glyph, mrt_rgb.size());
+  EXPECT_EQ(mrt_rgb[left_glyph], source[(height / 2u) * width + width / 2u]);
+  EXPECT_EQ(mrt_rgb[right_glyph], source[(height / 2u) * width + width / 2u]);
 }
 
 TEST(HostSbsP010YMrtGpuTest, ActualP010YPlaneMatchesAtProductionPackedWidth) {

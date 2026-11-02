@@ -116,6 +116,54 @@ class HostSbsShaderManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "generated Python identifiers collide"):
             generator.validate_manifest(colliding)
 
+    def test_subtitle_cohort_experiment_is_separate_from_production(self):
+        manifest = generator.load_manifest()
+        research = generator.closure_group(manifest, "subtitle_cohort_research")
+        members = set(research["specs"])
+        self.assertEqual(members, {
+            "host_sbs_subtitle_cohort_prepare", "host_sbs_subtitle_cohort_members",
+            "host_sbs_subtitle_cohort_filter", "host_sbs_subtitle_cohort_snapshot",
+        })
+        for group in manifest["groups"]:
+            if group is not research and group["name"] != "subtitle_cohort_prototype_research":
+                self.assertTrue(members.isdisjoint(group["specs"]))
+
+    def test_opt_in_diagnostic_groups_pin_the_exact_loader_specs(self):
+        manifest = generator.load_manifest()
+        prototype = generator.group_specs(manifest, "subtitle_cohort_prototype_research")
+        cohort = generator.group_specs(manifest, "subtitle_cohort_research")
+        self.assertEqual(tuple(prototype), tuple(cohort)[:3])
+        self.assertEqual(tuple(generator.group_specs(manifest, "subtitle_inner_colour_research")), tuple(
+            ("host_sbs_subtitle_inner_colour_global_validation_cs.hlsl", entry, "cs_5_0")
+            for entry in ("palette_main", "emit_main", "clear_main", "accumulate_main", "validate_main")
+        ))
+        self.assertEqual(tuple(generator.group_specs(manifest, "subtitle_inner_components_research")), tuple(
+            ("host_sbs_subtitle_seeded_components_cs.hlsl", entry, "cs_5_0")
+            for entry in ("init_main", "union_main", "reduce_main", "resolve_main", "dilate_main", "dilate_box_main")
+        ))
+        generator.validate_group_pins(manifest)
+        for name in ("subtitle_cohort_prototype_research", "subtitle_inner_colour_research", "subtitle_inner_components_research"):
+            stale = copy.deepcopy(manifest)
+            generator.closure_group(stale, name)["source_closure_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "source closure pin is stale"):
+                generator.validate_group_pins(stale)
+
+    def test_opt_in_diagnostic_specs_never_join_production_groups(self):
+        manifest = generator.load_manifest()
+        names = ("subtitle_cohort_prototype_research", "subtitle_cohort_research", "subtitle_inner_colour_research", "subtitle_inner_components_research", "subtitle_matte_guard_research")
+        diagnostic_specs = set().union(*(set(generator.closure_group(manifest, name)["specs"]) for name in names))
+        for group in manifest["groups"]:
+            if group["name"] not in names:
+                self.assertTrue(diagnostic_specs.isdisjoint(group["specs"]))
+
+    def test_final_matte_guard_is_separate_from_cohort_and_production(self):
+        manifest = generator.load_manifest()
+        guard = generator.closure_group(manifest, "subtitle_matte_guard_research")
+        self.assertEqual(guard["specs"], ["host_sbs_subtitle_matte_guard"])
+        for group in manifest["groups"]:
+            if group is not guard:
+                self.assertNotIn("host_sbs_subtitle_matte_guard", group["specs"])
+
     def test_order_or_pin_change_requires_closure_refresh(self):
         manifest = generator.load_manifest()
         reordered = copy.deepcopy(manifest)

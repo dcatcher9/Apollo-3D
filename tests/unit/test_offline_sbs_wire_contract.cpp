@@ -548,6 +548,21 @@ TEST(OfflineSbsWireContractTest, SceneCacheRejectsUnknownAndOverflowGeometry) {
   );
 }
 
+TEST(OfflineSbsWireContractTest, SceneCacheRequiresCompleteGlyphRenderDependencies) {
+  const auto valid = offline_sbs::wire::to_json(scene_cache());
+  EXPECT_EQ(valid.at("schema"), 4u);
+  EXPECT_EQ(valid.at("depth").at("semantics"), "depth-coordinate-v2-signed-base-parallax-source-u");
+  for (unsigned mutation = 0u; mutation < 4u; ++mutation) {
+    auto invalid = valid;
+    if (mutation == 0u) invalid["schema"] = 3u;
+    if (mutation == 1u) invalid.erase("subtitle_tuple");
+    if (mutation == 2u) invalid["subtitle_tuple"]["payload_suffixes"].erase(3u);
+    if (mutation == 3u) invalid["subtitle_tuple"]["renderer"] = "final-field-only";
+    EXPECT_THROW(offline_sbs::wire::parse_scene_cache_contract(invalid),
+                 offline_sbs::wire::contract_error) << mutation;
+  }
+}
+
 TEST(OfflineSbsWireContractTest, SceneAuditRoundTripsTypedSceneAndBoundary) {
   const offline_sbs::wire::scene_audit_contract_t original {
     .status = "complete",

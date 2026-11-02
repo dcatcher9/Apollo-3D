@@ -1979,7 +1979,8 @@ class EvalContractTests(unittest.TestCase):
             "sbs_reprojection_v2_live_ps.hlsl")
         with open(live_shader_path, encoding="utf-8") as fh:
             live_shader = fh.read()
-        self.assertIn("Texture2D<float> FinalParallax : register(t1);", live_shader)
+        self.assertIn("Texture2D<float> BaseParallax : register(t1);", live_shader)
+        self.assertIn('include/host_sbs_subtitle_render.hlsl', live_shader)
         self.assertNotIn("pop_strength", live_shader)
         self.assertNotIn("adaptive_ratio", live_shader)
 

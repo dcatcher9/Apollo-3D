@@ -25,7 +25,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 49
+DUMP_MANIFEST_SCHEMA = 50
 GPU_TRACE_RING_SCHEMA = 5
 GPU_TRACE_CONTRACT_SCHEMA = 6
 GPU_TRACE_DECODED_SCHEMA = 7
@@ -183,16 +183,96 @@ _SUBTITLE_CONTOUR_ARTIFACT_FILES = {
 _SUBTITLE_CONTOUR_ARTIFACT_STAGES = {
     "contour_support": "native current subtitle contour support",
     "contour_field_pin": "projected subtitle contour field pins",
-    "contour_distance": "native-source squared Euclidean subtitle distance",
+    "contour_distance": "native support rectangle completion budget in parallax pixels",
     "contour_identity": "SCT5 subtitle temporal-mask identity",
     "contour_history": "native subtitle contour history",
     "contour_source": "joined subtitle source display crop",
     "ocr_probability": "joined OCR detector probability",
-    "gaussian_weight": "literal max-union Gaussian subtitle weight",
-    "gaussian_blend": "literal Gaussian UI-Base proposal",
-    "gaussian_vertical_conditioned": "post-Gaussian shared vertical75-25 field",
-    "gaussian_control": "actual Gaussian smoothing-enabled control",
+    "gaussian_weight": "bounded native support completion presentation weight",
+    "gaussian_blend": "direct bounded UI-Base completion proposal",
+    "gaussian_vertical_conditioned": "bit-exact subtitle proposal copy; compatibility vertical name",
+    "gaussian_control": "actual completion smoothing-enabled control",
 }
+
+
+_SUBTITLE_RENDER_ARTIFACT_FILES = {
+    "subtitle_glyph_matte": "subtitle_glyph_matte.u32",
+    "subtitle_condition_params": "subtitle_condition_params.u32",
+}
+_SUBTITLE_RENDER_ARTIFACT_STAGES = {
+    "subtitle_glyph_matte": "native completed subtitle glyph matte",
+    "subtitle_condition_params": "joined subtitle analytic plane condition params",
+}
+
+
+def _subtitle_render_metadata() -> Dict[str, Dict[str, Any]]:
+    return {
+        "subtitle_glyph_matte.json": {
+            "schema": coordinate_contract.EXPECTED_SUBTITLE_OCR["glyph_matte_policy"]["schema"],
+            "artifact": "subtitle_glyph_matte.u32",
+            "recipe": dict(coordinate_contract.EXPECTED_SUBTITLE_OCR["glyph_matte_policy"]),
+            "identity_artifact": "contour_identity.u32", "source_artifact": "contour_source.rgba16f",
+            "source_support_artifact": "contour_support.u32",
+        },
+        "subtitle_condition_params.json": {
+            "schema": coordinate_contract.SUBTITLE_OCR.condition_param_schema,
+            "artifact": "subtitle_condition_params.u32",
+            "word_count": coordinate_contract.SUBTITLE_OCR.condition_param_word_count,
+            "identity_artifact": "contour_identity.u32",
+        },
+    }
+
+
+def subtitle_dense_glyph_matte(support: Any, source: Any) -> Any:
+    """Replay only the versioned same-observation native matte transform, never a stereo warp."""
+    import numpy as np
+    policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["glyph_matte_policy"]
+    pixels = np.asarray(source, dtype=np.float32)
+    seeds = np.asarray(support)
+    if seeds.ndim != 2 or pixels.shape != (*seeds.shape, 4) or not seeds.size:
+        raise ValueError("native glyph matte replay requires exact support/source shapes")
+    if np.any((seeds != 0) & (seeds != 1)):
+        raise ValueError("native glyph matte seeds must be literal zero or one")
+    valid = (np.isfinite(pixels).all(axis=2) & (pixels[..., 3] == np.float32(1)) &
+             (pixels[..., :3] >= 0).all(axis=2) & (pixels[..., :3] <= 1).all(axis=2))
+    valid &= ((pixels[..., :3] >= 0) & (pixels[..., :3] <= 1)).all(axis=2)
+    if np.any((seeds != 0) & ~valid):
+        raise ValueError("native glyph matte seed has no valid joined display pixel")
+    bright = np.max(pixels[..., :3], axis=2) >= np.float32(policy["brightness_split"])
+    body = seeds.astype(bool).copy()
+    height, width = seeds.shape
+    def slices(dx: int, dy: int) -> tuple[Any, Any]:
+        dst = (slice(max(0, dy), min(height, height + dy)), slice(max(0, dx), min(width, width + dx)))
+        src = (slice(max(0, -dy), min(height, height - dy)), slice(max(0, -dx), min(width, width - dx)))
+        return dst, src
+    for _ in range(policy["steps"]):
+        grown = body.copy()
+        for dy in range(-1, 2):
+            for dx in range(-1, 2):
+                if dx == 0 and dy == 0: continue
+                dst, src = slices(dx, dy)
+                coherent = np.max(np.abs(pixels[dst][..., :3] - pixels[src][..., :3]), axis=2) <= np.float32(policy["rgb_distance"])
+                grown[dst] |= body[src] & valid[src] & valid[dst] & (bright[src] == bright[dst]) & coherent
+        body = grown
+    matte = body.copy()
+    radius = policy["collar_radius_source_pixels"]
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx * dx + dy * dy <= policy["collar_radius_squared"]:
+                dst, src = slices(dx, dy)
+                matte[dst] |= body[src]
+    # The finite joined display snapshot must independently authorize each output texel.
+    return (matte & valid).astype(np.uint32)
+
+
+def _subtitle_render_artifact_layouts(source_width: int, source_height: int,
+                                      field_width: int, field_height: int) -> Dict[str, tuple[Dict[str, Any], int]]:
+    contour = _subtitle_contour_artifact_layouts(source_width, source_height, field_width, field_height)
+    return {
+        "subtitle_glyph_matte": contour["contour_support"],
+        "subtitle_condition_params": ({"word_count": coordinate_contract.SUBTITLE_OCR.condition_param_word_count,
+            "format": "uint32-le structured buffer"}, coordinate_contract.SUBTITLE_OCR.condition_param_word_count * 4),
+    }
 
 
 def _float32(value: float) -> float:
@@ -476,6 +556,70 @@ def _decode_subtitle_ocr_boxes(
     return decoded
 
 
+def _validate_subtitle_classifier_history(
+        words: tuple[int, ...], *, authoritative: bool,
+        identity: Dict[str, Any], content: tuple[int, int, int, int]) -> Dict[str, Any]:
+    """Authenticate layout memory separately from current cover authority.
+
+    This checks the serialized prior, not historical classification accuracy. The
+    producer's authenticated shader owns decisions over observations not in a dump.
+    """
+    policy = coordinate_contract.SUBTITLE_OCR.classifier_policy
+    tail = words[policy["history_offset"]:]
+    if len(tail) != policy["history_word_count"]:
+        raise ValueError("subtitle classifier history has an invalid size")
+    if not any(tail):
+        return {"initialized": False, "episodes": 0, "votes": [0] * policy["prior_bin_count"]}
+    if (not authoritative or tail[0] != policy["history_tag"] or
+            tail[1] != policy["history_schema"] or tail[2] != policy["history_known_flags"] or
+            tail[3] > policy["prior_cap"]):
+        raise ValueError("subtitle classifier history has invalid authority/schema/flags")
+    clock = _uint64_words(tail[4], tail[5])
+    frame = _uint64_words(tail[6], tail[7])
+    generation = _uint64_words(tail[8], tail[9])
+    width, height = identity["source_width"], identity["source_height"]
+    crop_height = min(height, (width + 5) // 6)
+    expected = (width, height, height - crop_height, crop_height,
+                identity["field_width"], identity["field_height"], *content)
+    if (clock == 0 or frame != identity["matched_frame_id"] or
+            generation != identity["analysis_generation"] or tuple(tail[10:20]) != expected):
+        raise ValueError("subtitle classifier history has stale frame/clock/geometry")
+    center = struct.unpack("<i", struct.pack("<I", tail[20]))[0]
+    search_top = struct.unpack("<i", struct.pack("<I", tail[22]))[0]
+    extent_limit = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]["source_max_extent"]
+    if (tail[21] == 0 or tail[21] > extent_limit or abs(center) > tail[21] or
+            abs(search_top) > extent_limit):
+        raise ValueError("subtitle classifier history has invalid reference geometry")
+    gap_clock = _uint64_words(tail[25], tail[26])
+    if (tail[23] not in (0, 1) or tail[24] not in (0, 1) or
+            (tail[24] == 0 and gap_clock != 0) or
+            (tail[24] == 1 and not 0 < gap_clock <= clock) or any(tail[30:32])):
+        raise ValueError("subtitle classifier history has invalid episode/blank clock/reserved words")
+    trusted_height = struct.unpack("<f", struct.pack("<I", tail[27]))[0]
+    safe_top = coordinate_contract.SUBTITLE_OCR.ocr_safe_row_top
+    safe_bottom = coordinate_contract.SUBTITLE_OCR.ocr_safe_row_bottom
+    if (not math.isfinite(trusted_height) or trusted_height < 0 or
+            trusted_height > safe_bottom - safe_top):
+        raise ValueError("subtitle classifier history has invalid trusted height")
+    if trusted_height == 0:
+        if tail[28] != 0 or tail[29] != 0:
+            raise ValueError("unlearned subtitle classifier history has a trusted span")
+    elif not safe_top <= tail[28] < tail[29] <= safe_bottom:
+        raise ValueError("subtitle classifier history has invalid trusted span")
+    votes = list(tail[32:])
+    if (len(votes) != policy["prior_bin_count"] or any(v > policy["prior_cap"] for v in votes) or
+            (any(votes) and (tail[3] == 0 or trusted_height <= 0))):
+        raise ValueError("subtitle classifier history has invalid independent-episode votes")
+    return {"initialized": True, "episodes": tail[3], "votes": votes,
+            "observation_timestamp_us": clock, "episode_active": bool(tail[23]),
+            "blank_seen": bool(tail[24]), "blank_timestamp_us": gap_clock,
+            "trusted_height_detector_pixels": trusted_height,
+            "trusted_span": [tail[28], tail[29]],
+            "reference": {"center_twice_source": center, "width_source": tail[21],
+                          "search_top_source": search_top},
+            "historical_decisions_replayed": False}
+
+
 def validate_subtitle_ocr_record(
         payload: Any, *, matched_frame_id: int, analysis_generation: int,
         source_width: int, source_height: int, field_width: int, field_height: int,
@@ -591,6 +735,8 @@ def validate_subtitle_ocr_record(
         "raw_boxes": raw_boxes,
         "final_boxes": final_boxes,
         "tensor_content_rect": expected_content,
+        "classifier_history": _validate_subtitle_classifier_history(
+            words, authoritative=flags == 1, identity=identity, content=expected_content),
         "ordinary_cover_horizontal_guard": {
             "cells": coordinate_contract.SUBTITLE_OCR.ordinary_cover_horizontal_guard_cells,
             "policy": coordinate_contract.SUBTITLE_OCR.ordinary_cover_horizontal_guard_policy,
@@ -619,6 +765,12 @@ def validate_subtitle_ocr_record(
     }
 
 
+def _subtitle_ui_empty_has_no_hidden_plane(words: tuple[int, ...]) -> bool:
+    tail = words[SUBTITLE_PLANE_ADAPTIVE_OFFSET:SUBTITLE_PLANE_STATE_WORD_COUNT]
+    return (tail[2] == 0 and tail[3] == 0 and not tail[1] & (4 | coordinate_contract.SUBTITLE_OCR.plane_adaptive_presented_flag) and
+            not any(tail[index] for index in (13, 14, 15)))
+
+
 def _validate_adaptive_ui_tail(words: tuple[int, ...], source_width: int,
                                content: tuple[int, int, int, int], *,
                                joint_plane_mode: int | None = 3,
@@ -634,8 +786,12 @@ def _validate_adaptive_ui_tail(words: tuple[int, ...], source_width: int,
     if not 0 < source_width <= _MAXIMUM_SOURCE_LONG_SIDE:
         raise ValueError("UIP4 mode3 source width exceeds its supported histogram range")
     maximum_level = (source_width + 99) // 100
-    if (tail[0] != 1 or tail[1] & ~15 or (tail[1] & 3) == 3 or
-            any(tail[i] > maximum_level for i in (2, 10, 11))):
+    policy = coordinate_contract.SUBTITLE_OCR
+    if (tail[0] != 1 or tail[1] & ~policy.plane_adaptive_known_flags or
+            tail[1] & (policy.plane_adaptive_retired_approach_flag |
+                       policy.plane_adaptive_retired_retreat_flag) or
+            any(tail[i] != 0 for i in (6, 7, 8, 9, 10, 11)) or
+            tail[2] > maximum_level):
         raise ValueError("UIP4 adaptive UI schema, flags, or index is invalid")
     applied, limit = _float32_bits(tail[3]), _float32_bits(tail[12])
     expected_limit = _float32(display_budget)
@@ -643,17 +799,15 @@ def _validate_adaptive_ui_tail(words: tuple[int, ...], source_width: int,
     expected_limit_bits = struct.unpack("<I", struct.pack("<f", expected_limit))[0]
     area = (content[2] - content[0]) * (content[3] - content[1])
     last = _uint64_words(tail[4], tail[5])
-    approach = _uint64_words(tail[6], tail[7])
-    retreat = _uint64_words(tail[8], tail[9])
     if (not math.isfinite(applied) or not math.isfinite(limit) or
             tail[12] != expected_limit_bits or
             not 0.0 <= applied <= limit or
             tail[13] > area or tail[14] > tail[13] or tail[15] > tail[13] or
-            (bool(tail[1] & 8) != (last != 0)) or
-            (bool(tail[1] & 1) != (approach != 0)) or
-            (bool(tail[1] & 2) != (retreat != 0)) or
-            approach > last or retreat > last):
+            (bool(tail[1] & 8) != (last != 0))):
         raise ValueError("UIP4 adaptive UI range, clock, or count is invalid")
+    # Contract124 separates the current histogram clearance goal from presentation.
+    # After first entry the plane may lag that goal while bounded source-time smoothing
+    # runs; authenticating it as an instantaneous floor would reject valid states.
     capped_conflict = tail[14] * 5 > tail[13] or tail[14] * 50 > area
     if bool(tail[1] & 4) != capped_conflict:
         raise ValueError("UIP4 adaptive UI capped-conflict flag does not match its counts")
@@ -686,9 +840,8 @@ def validate_subtitle_plane_snapshot(
     # not proof that any qualifying same-pixel RGB reference or count was reset.
     resets = words[policy.plane_history_reset_mask_word]
     warmup = words[policy.plane_warmup_word]
-    warmup_known_bits = policy.plane_warmup_remaining_mask | policy.plane_warmup_cue_bit
     capacity_mask = (1 << SUBTITLE_PLANE_COVER_CAPACITY) - 1
-    if (warmup & ~warmup_known_bits or (warmup & policy.plane_warmup_remaining_mask) > policy.plane_warmup_observations or flags & ~SUBTITLE_PLANE_CURRENT_VALID_FLAG or mask & ~capacity_mask or
+    if (warmup != 0 or flags & ~SUBTITLE_PLANE_CURRENT_VALID_FLAG or mask & ~capacity_mask or
             mask & (mask + 1) or (flags == 0 and mask != 0) or resets & ~mask or
             any(words[policy.plane_reserved_offset:policy.plane_adaptive_offset])):
         raise ValueError("UIP4 flags/slot mask/reserved words are not canonical")
@@ -714,8 +867,6 @@ def validate_subtitle_plane_snapshot(
     _validate_adaptive_ui_tail(words, source_width, content,
                               joint_plane_mode=joint_plane_mode, requested_gain=requested_gain)
     tail = words[policy.plane_adaptive_offset:]
-    if warmup and (flags != SUBTITLE_PLANE_CURRENT_VALID_FLAG or mask == 0 or tail[0] != 1 or tail[15] != 0):
-        raise ValueError("UIP4 warmup requires current nonempty authority and a valid probe")
     if resets and tail[15]:
         raise ValueError("UIP4 invalid Base probe cannot publish history resets")
     return {
@@ -735,6 +886,11 @@ def validate_subtitle_plane_snapshot(
         "display_budget": _display_budget_for_mode(requested_gain, joint_plane_mode),
         "adaptive": {
             "initialized": tail[0] == 1, "flags": tail[1], "current_level": tail[2],
+            "current_entry_requirement_level": tail[2],
+            "presented_active": bool(tail[1] & coordinate_contract.SUBTITLE_OCR.plane_adaptive_presented_flag),
+            "smoothing_time_constant_ms": coordinate_contract.SUBTITLE_OCR.plane_smoothing_time_constant_ms,
+            "slew_per_eye_source_pixels_per_second": coordinate_contract.SUBTITLE_OCR.plane_slew_source_pixels_per_second,
+            "retreat_time_constant_ms": coordinate_contract.SUBTITLE_OCR.plane_retreat_time_constant_ms,
             "accepted_observation_timestamp_us": _uint64_words(tail[4], tail[5]),
             "approach_since_us": _uint64_words(tail[6], tail[7]),
             "retreat_since_us": _uint64_words(tail[8], tail[9]),
@@ -1860,10 +2016,11 @@ def _validate_shadow_manifest_summary(value: Any) -> Dict[str, Any]:
 
 def _required_hashed_artifact(
         artifacts: Dict[str, Any], name: str, label: str, *,
-        byte_count: int | None = None) -> Dict[str, Any]:
+        byte_count: int | None = None,
+        require_byte_count: bool = False) -> Dict[str, Any]:
     descriptor = artifacts.get(name)
     keys = {"available", "required", "stage", "description", "sha256"}
-    if byte_count is not None:
+    if byte_count is not None or require_byte_count:
         keys.add("byte_count")
     if (not isinstance(descriptor, dict) or set(descriptor) != keys or
             descriptor.get("available") is not True or
@@ -1873,6 +2030,9 @@ def _required_hashed_artifact(
             not descriptor["description"] or
             not _is_sha256_hex(descriptor.get("sha256"))):
         raise ValueError(f"dump_manifest.json has an invalid {label} artifact descriptor")
+    if require_byte_count and (type(descriptor.get("byte_count")) is not int or
+                               descriptor["byte_count"] <= 0):
+        raise ValueError(f"dump_manifest.json has an invalid {label} byte_count")
     if byte_count is not None and (type(descriptor.get("byte_count")) is not int or
                                   descriptor["byte_count"] != byte_count):
         raise ValueError(f"dump_manifest.json has an invalid {label} byte_count")
@@ -1945,6 +2105,8 @@ def _subtitle_ocr_producer_contract() -> Dict[str, Any]:
         "record_schema": SUBTITLE_OCR_RECORD_SCHEMA,
         "record_tag": SUBTITLE_OCR_RECORD_TAG,
         "record_word_count": SUBTITLE_OCR_RECORD_WORD_COUNT,
+        "current_prefix_word_count": coordinate_contract.SUBTITLE_OCR.classifier_policy["history_offset"],
+        "classifier": dict(coordinate_contract.SUBTITLE_OCR.classifier_policy),
         "raw_box_capacity": SUBTITLE_OCR_RAW_BOX_CAPACITY,
         "final_box_capacity": SUBTITLE_OCR_FINAL_BOX_CAPACITY,
         "model": {
@@ -1987,21 +2149,30 @@ def _subtitle_plane_resolver_contract() -> Dict[str, Any]:
         "state_tag": SUBTITLE_PLANE_STATE_TAG,
         "state_word_count": SUBTITLE_PLANE_STATE_WORD_COUNT,
         "cover_capacity": SUBTITLE_PLANE_COVER_CAPACITY,
+        "classifier": dict(coordinate_contract.SUBTITLE_OCR.classifier_policy),
         "contour_policy": dict(coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]),
         "adaptive_ui": {
             "policy_id": coordinate_contract.CALIBRATED_DEFAULTS.adaptive_policy_id,
             "state_offset": SUBTITLE_PLANE_ADAPTIVE_OFFSET, "state_word_count": 16,
             "clock": "source-observation-microseconds",
             "geometry_authority": coordinate_contract.SUBTITLE_OCR.geometry_authority,
+            "forward_policy": coordinate_contract.SUBTITLE_OCR.ui_plane_policy,
+            "known_flags": coordinate_contract.SUBTITLE_OCR.plane_adaptive_known_flags,
             "probe": "union-of-current-authorized-covers-in-content",
             "clearance_per_eye_source_pixels": 2,
             "enter_covered_fraction": _float32(0.20),
             "enter_content_fraction": _float32(0.02),
-            "release_covered_fraction": _float32(0.15),
-            "release_content_fraction": _float32(0.015),
-            "approach_delay_ms": 100, "retreat_delay_ms": 1500,
-            "approach_source_u_per_second": _float32(0.03),
-            "retreat_source_u_per_second": _float32(0.005),
+            "release_covered_fraction": _float32(0.0),
+            "release_content_fraction": _float32(0.0),
+            "approach_delay_ms": 0, "retreat_delay_ms": 0,
+            "approach_source_u_per_second": _float32(0.0),
+            "retreat_source_u_per_second": _float32(0.0),
+            "retreat_time_constant_ms": coordinate_contract.SUBTITLE_OCR.plane_retreat_time_constant_ms,
+            "smoothing_time_constant_ms": coordinate_contract.SUBTITLE_OCR.plane_smoothing_time_constant_ms,
+            "slew_per_eye_source_pixels_per_second": coordinate_contract.SUBTITLE_OCR.plane_slew_source_pixels_per_second,
+            "rate_tick_cap_us": coordinate_contract.SUBTITLE_OCR.plane_max_tick_gap_ms * 1000,
+            "first_visible_policy": "current-goal-immediate",
+            "current_clearance_is_presentation_floor": False,
             "geometric_pin": "full-on-current-contour-authority",
             "host_model_policy": {
                 "mode": 3,
@@ -2010,7 +2181,7 @@ def _subtitle_plane_resolver_contract() -> Dict[str, Any]:
                 "last_candidate": "exact-representation-cap",
                 "maximum_candidate_index": "ceil-analysis-source-width-over-100",
                 "core_range_per_eye_source_pixels": 0,
-                "retreat_requires_applied_target": True,
+                "retreat_requires_applied_target": False,
                 "capped_conflict": "derived-from-top-candidate-counts",
             },
         },
@@ -2018,22 +2189,27 @@ def _subtitle_plane_resolver_contract() -> Dict[str, Any]:
             "selection": "all-valid-current-ocr8-core-cover-pairs",
             "capacity": SUBTITLE_PLANE_COVER_CAPACITY,
             "geometry_source": "exact-current-ocr8-record-final-payload",
-            "history_authority": "per-pixel-four-genuine-rgb-confirmations",
+            "history_authority": "diagnostic-fixed-rgb-duration-positive-count-only-for-duplicate-admission",
             "box_identity_resets_history": False,
             "held_reuse": "byte-identical-latest-published-ocr8-and-uip2-tuple",
         },
         "target_policy": {
             "units": "one-eye-analysis-source-U",
             "selection": "authenticated-current-cover-conflict-histogram",
+            "forward_policy": coordinate_contract.SUBTITLE_OCR.ui_plane_policy,
             "candidate_step_per_eye_source_pixels": 4,
             "clearance_per_eye_source_pixels": 2,
-            "approach_dwell_us": 100000,
-            "retreat_dwell_us": 1500000,
-            "approach_rate_source_u_per_second": _float32(0.03),
-            "retreat_rate_source_u_per_second": _float32(0.005),
-            "rate_tick_cap_us": 250000,
-            "current_cover_pin": "confirmed-native-temporal-support-literal-gaussian-weight",
-            "collar": "untruncated-max-union-gaussian-before-shared-slope-conditioning",
+            "approach_dwell_us": 0,
+            "retreat_dwell_us": 0,
+            "approach_rate_source_u_per_second": _float32(0.0),
+            "retreat_rate_source_u_per_second": _float32(0.0),
+            "retreat_time_constant_ms": coordinate_contract.SUBTITLE_OCR.plane_retreat_time_constant_ms,
+            "smoothing_time_constant_ms": coordinate_contract.SUBTITLE_OCR.plane_smoothing_time_constant_ms,
+            "slew_per_eye_source_pixels_per_second": coordinate_contract.SUBTITLE_OCR.plane_slew_source_pixels_per_second,
+            "current_clearance_is_presentation_floor": False,
+            "rate_tick_cap_us": coordinate_contract.SUBTITLE_OCR.plane_max_tick_gap_ms * 1000,
+            "current_cover_pin": "current-evidence-native-support-rectangle-slope-budget",
+            "collar": "minimum-ui-depth-influence-within-current-support-slope-feasible-interval-before-shared-conditioning",
             "representation_limit": "direct-parallax-container",
         },
         "shader_contract": _subtitle_shader_contract(_SUBTITLE_PLANE_SHADER_SPECS),
@@ -2074,6 +2250,7 @@ def _validate_subtitle_conditioning_manifest(
             "base_field": "shadow_base_final_parallax.f32",
             "conditioned_field": "shadow_final_parallax.f32",
             **_SUBTITLE_CONTOUR_ARTIFACT_FILES,
+            **_SUBTITLE_RENDER_ARTIFACT_FILES,
         }
         if subtitle.get("request") is not True:
             raise ValueError("active UIP4 subtitle conditioning must bind an enabled request")
@@ -2109,6 +2286,22 @@ def _validate_subtitle_conditioning_manifest(
                 raise ValueError(f"dump_manifest.json misattributes contour artifact {name}")
             if dimensions.get(role) != layout:
                 raise ValueError(f"dump_manifest.json contour tuple dimensions disagree for {role}")
+        render_layouts = _subtitle_render_artifact_layouts(
+            source_shape.get("width"), source_shape.get("height"), field_shape.get("width"), field_shape.get("height"))
+        for role, (layout, byte_count) in render_layouts.items():
+            name = _SUBTITLE_RENDER_ARTIFACT_FILES[role]
+            descriptor = _required_hashed_artifact(artifacts, name, "analytic subtitle " + name, byte_count=byte_count)
+            if descriptor["stage"] != _SUBTITLE_RENDER_ARTIFACT_STAGES[role] or dimensions.get(role) != layout:
+                raise ValueError("dump_manifest.json analytic subtitle dimensions/stage disagree for " + role)
+        for name, stage in (("subtitle_glyph_matte.json", "native glyph matte recipe metadata"),
+                            ("subtitle_condition_params.json", "joined analytic plane params metadata"),
+                            ("render_source.bin", "exact rendered native color source")):
+            descriptor = _required_hashed_artifact(
+                artifacts, name, stage, require_byte_count=True)
+            if descriptor.get("stage") != stage:
+                raise ValueError("dump_manifest.json misattributes analytic subtitle metadata")
+        if dimensions.get("render_source") != dimensions.get("source"):
+            raise ValueError("native rendered source dimensions disagree with source")
         return {
             "mode": _SUBTITLE_MODE_CONTOURS,
             "live": True,
@@ -2195,13 +2388,13 @@ def _validate_final_parallax_manifest(document: Dict[str, Any]) -> Dict[str, Any
     expected = {
         "contract_schema": contract.schema,
         "artifact": "shadow_final_parallax.f32",
-        "warp_input_artifact": "shadow_final_parallax.f32",
+        "warp_input_artifact": None,
         "authority": contract.authority,
         "publication_policy": contract.publication_policy,
         "reuse_policy": contract.reuse_policy,
         "invalid_policy": contract.invalid_policy,
         "current_rgb_policy": contract.current_rgb_policy,
-        "warp_relation": "same authenticated artifact",
+        "warp_relation": "independent diagnostic; selected map consumes Base and the joined analytic glyph tuple",
     }
     if final != expected:
         raise ValueError("dump_manifest.json has an invalid final-parallax contract")
@@ -2219,14 +2412,14 @@ def _validate_warp_map_manifest(
     map_descriptor = artifacts.get("warp_map.f32")
     mask_descriptor = artifacts.get("warp_mask.png")
     required = input_mode == "window-region"
-    expected_schema = 2
+    expected_schema = 3
     if not isinstance(contract, dict) or contract.get("schema") != expected_schema:
         raise ValueError("dump_manifest.json has an invalid warp-map contract")
     available = contract.get("available")
     if not isinstance(available, bool):
         raise ValueError("dump_manifest.json has an invalid warp-map availability flag")
     if not available:
-        if (contract != {"available": False, "schema": 2, "artifact": None} or
+        if (contract != {"available": False, "schema": 3, "artifact": None} or
                 required or dimensions.get("warp_map") is not None or
                 dimensions.get("warp_mask") is not None):
             raise ValueError("dump_manifest.json lacks required inverse-map evidence")
@@ -2254,10 +2447,10 @@ def _validate_warp_map_manifest(
     expected_validity = {
         "content": "derive from content_scale_x/content_scale_y and packed output coordinate",
         "inverse": (
-            "11-step contractive fixed-point solution of crop-local q embedded by "
-            "depth_input_region.json scale and outside-only zero-plane collar"
+            "selected pre-clamp U from crop-local Base inverse with depth_input_region "
+            "embedding or analytic UI plane via native glyph matte"
             if required else
-            "11-step contractive fixed-point solution of the signed final-parallax field"),
+            "selected pre-clamp U from ordinary Base inverse or analytic UI plane via native glyph matte"),
         "mask": ("warp_mask.png red marks finite-source boundary extrapolation; V2 has no "
                  "internal owner or synthetic-fill path"),
     }
@@ -2441,6 +2634,12 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         document, artifacts)
     subtitle_live = subtitle_conditioning["live"]
     gpu_trace = _validate_gpu_trace_manifest(document, artifacts)
+    selected_map = document.get("selected_map")
+    if (not isinstance(selected_map, dict) or
+            type(selected_map.get("render_enabled")) is not bool or
+            {name: value for name, value in selected_map.items() if name != "render_enabled"} !=
+            coordinate_contract.SELECTED_MAP):
+        raise ValueError("dump_manifest.json has an invalid analytic selected-map contract")
     final_parallax = _validate_final_parallax_manifest(document)
     warp_map = _validate_warp_map_manifest(
         document, artifacts, dimensions, input_mode,
@@ -2465,19 +2664,15 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             mapping_matches != warp_map["available"]):
         raise ValueError("dump_manifest.json has invalid V2 renderer request attribution")
 
-    expected_position = (
-        "shadow_final_parallax + depth_input_region embedding"
-        if selected and input_mode == "window-region" else
-        "shadow_final_parallax" if selected else None
-    )
+    expected_position = ('ordinary Base inverse + optional analytic UI glyph selector + depth_input_region embedding' if input_mode == "window-region" else 'ordinary Base inverse + optional analytic UI glyph selector') if selected else None
     expected_authority = (
-        ("authenticated crop-local atomic final field plus depth-input-region embedding"
+        ("authenticated Base inverse plus analytic UI glyph selector and depth-input-region embedding"
          if input_mode == "window-region" else
-         "authenticated-parallax-v2-atomic-final-field")
+         "authenticated-base-inverse-plus-analytic-ui-glyph-selector")
         if selected else None
     )
     expected_inverse = (
-        "11-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill"
+        "at-most-11-step Base inverse plus analytic UI glyph selection; selected map may be discontinuous; no synthetic fill"
         if selected else None
     )
     expected_coordinate_role = (
@@ -2510,27 +2705,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "feeds the row majorant"
         if selected else None
     )
-    expected_final_role = (
-        (("least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= "
-          "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-          "shadow_base_final_parallax; UIP4 publishes shadow_final_parallax atomically as "
-          "direct live authority with depth_input_region embedding")
-         if subtitle_live and input_mode == "window-region" else
-         ("least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
-          "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-          "shadow_base_final_parallax; UIP4 publishes shadow_final_parallax atomically as "
-          "direct live authority")
-         if subtitle_live else
-         ("least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= "
-          "max_horizontal_slope and vertical shear <= max_vertical_shear publishes "
-          "shadow_final_parallax atomically as direct live authority with "
-          "depth_input_region embedding")
-         if input_mode == "window-region" else
-         ("least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
-          "max_horizontal_slope and vertical shear <= max_vertical_shear publishes "
-          "shadow_final_parallax atomically as direct live authority"))
-        if selected else None
-    )
+    expected_final_role = 'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering' if selected else None
     expected_collar_defocus = ({
         "enabled": False,
         "role": ("disabled after live hand-boundary halo regression; live color uses one "
@@ -2560,7 +2735,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "shadow_vertical_conditioned.f32":
             ("parallax-v2 orientation-selective vertical conditioner", False),
         "shadow_final_parallax.f32": (
-            "parallax-v2 atomic final displacement field", True),
+            "parallax-v2 independent protected final displacement diagnostic", True),
     }
     if subtitle_live:
         expected_artifacts["shadow_base_final_parallax.f32"] = (
@@ -2737,6 +2912,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "rendered_output_selected": selected,
         "mapping_artifacts_match_selected_renderer": mapping_matches,
         "position_field": expected_position,
+        "subtitle_render_enabled": selected_map["render_enabled"],
         "vertical_majorant_available": active,
         "vertical_conditioned_available": active,
         "capture_grid_kind": capture_grid[0],
@@ -2747,8 +2923,10 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "depth_input_region_available": True,
         "depth_input_mode": input_mode,
         "position_authority": (
-            ["shadow_final_parallax", "depth_input_region"]
-            if input_mode == "window-region" else ["shadow_final_parallax"]),
+            (["shadow_base_final_parallax", "subtitle_glyph_matte", "contour_source",
+              "subtitle_condition_params", "contour_identity", "render_source"]
+             if subtitle_live else ["shadow_final_parallax"]) +
+            (["depth_input_region"] if input_mode == "window-region" else [])),
         "window_region_available": region_available,
         "window_region_observer_status": region_observer_status,
         "window_region_mapping_status": region_mapping_status,
@@ -3093,6 +3271,8 @@ def validate_gpu_trace_ring(
     records = []
     matched_sequence = 0
     previous_observation_timestamp_us = 0
+    previous_ui_plane = None
+    previous_ui_domain_tag = 0
     for ordinal in range(count):
         slot = (oldest_slot + ordinal) % GPU_TRACE_CAPACITY
         base = GPU_TRACE_HEADER_WORD_COUNT + slot * GPU_TRACE_RECORD_WORD_COUNT
@@ -3158,8 +3338,24 @@ def validate_gpu_trace_ring(
             validate_subtitle_condition_words(
                 struct.pack("<6I", *condition), plane_state=decoded_plane,
                 geometry_ready=decoded_plane["current_valid"], require_ocr_kinds=False)
+            explicit_reset = bool(record[16] & GPU_TRACE_FLAG_INPUT_DOMAIN_RESET) or (
+                previous_ui_plane is not None and
+                (previous_ui_domain_tag != domain_tag or previous_ui_plane[20] != plane[20]))
+            genuinely_newer = (
+                previous_ui_plane is not None and previous_ui_domain_tag == domain_tag and
+                plane_frame_id != _uint64_words(previous_ui_plane[4], previous_ui_plane[5]) and
+                decoded_plane["observation_timestamp_us"] >
+                _uint64_words(previous_ui_plane[28], previous_ui_plane[29]))
+            if (not subtitle_held and decoded_plane["current_valid"] and
+                    decoded_plane["current_count"] == 0 and
+                    _uint64_words(plane[28], plane[29]) == decoded_plane["observation_timestamp_us"] and
+                    (explicit_reset or genuinely_newer) and
+                    not _subtitle_ui_empty_has_no_hidden_plane(plane)):
+                raise ValueError("GPU trace genuinely newer empty UI retains hidden plane history")
+            previous_ui_plane, previous_ui_domain_tag = plane, domain_tag
         else:
             decoded_plane = None
+            previous_ui_plane = None
 
         matched = frame_id == matched_frame_id
         if matched:
@@ -3253,6 +3449,11 @@ def validate_gpu_trace_ring(
                 "target_bits": plane[27],
                 "adaptive": {
                     "initialized": plane[24] == 1, "flags": plane[25], "current_level": plane[26],
+                    "current_entry_requirement_level": plane[26],
+                    "presented_active": bool(plane[25] & coordinate_contract.SUBTITLE_OCR.plane_adaptive_presented_flag),
+                    "smoothing_time_constant_ms": coordinate_contract.SUBTITLE_OCR.plane_smoothing_time_constant_ms,
+                    "slew_per_eye_source_pixels_per_second": coordinate_contract.SUBTITLE_OCR.plane_slew_source_pixels_per_second,
+                    "retreat_time_constant_ms": coordinate_contract.SUBTITLE_OCR.plane_retreat_time_constant_ms,
                     "accepted_observation_timestamp_us": _uint64_words(plane[28], plane[29]),
                     "approach_since_us": _uint64_words(plane[30], plane[31]),
                     "retreat_since_us": _uint64_words(plane[32], plane[33]),
@@ -3392,13 +3593,13 @@ def _subtitle_contour_project_support(
     return result
 
 
-def _subtitle_contour_squared_source_distance(
+def _subtitle_contour_slope_budget(
         support: Any, source_width: int, source_height: int, crop_top: int,
         field_width: int, field_height: int, content: tuple[int, int, int, int]) -> Any:
-    """Independent float64 nearest-five-center minimum; no classifier or stereo rendering.
+    """Independent horizontal budget within exact rational five-center vertical slabs.
 
-    Horizontal nearest-center queries and a float64 parabola envelope avoid the native FP32
-    prefix/hull implementation. The declared numerical envelope is checked separately.
+    Sorted horizontal nearest queries and direct blocked row minima do not reproduce the
+    production prefix/suffix intercept algorithm. No classifier or stereo rendering occurs.
     """
     import numpy as np
 
@@ -3412,7 +3613,9 @@ def _subtitle_contour_squared_source_distance(
     for dx, dy in ((0, 0), (-offset, 0), (offset, 0), (0, -offset), (0, offset)):
         expanded[offset + dy:offset + dy + mask.shape[0], offset + dx:offset + dx + source_width] |= mask
     x = (np.arange(right - left, dtype=np.float64) + .5) * source_width / (right - left) - .5 + offset
-    y = (np.arange(bottom - top, dtype=np.float64) + .5) * source_height / (bottom - top) - .5 - crop_top + offset
+    policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]
+    radius_x = source_width / (right - left) + policy["distance_completion_source_pixels"]
+    coefficient_x, _ = _subtitle_budget_coefficients(source_width, source_height, content)
     costs = np.full((expanded.shape[0], right - left), np.inf, dtype=np.float64)
     for row in range(expanded.shape[0]):
         centers = np.flatnonzero(expanded[row])
@@ -3421,75 +3624,358 @@ def _subtitle_contour_squared_source_distance(
         position = np.searchsorted(centers, x)
         before = centers[np.maximum(position - 1, 0)]
         after = centers[np.minimum(position, len(centers) - 1)]
-        costs[row] = np.minimum((x - before) ** 2, (x - after) ** 2)
+        nearest = np.minimum(np.abs(x - before), np.abs(x - after))
+        costs[row] = np.maximum(nearest - radius_x, 0) * coefficient_x
     rows = np.flatnonzero(np.isfinite(costs[:, 0]))
-    for column in range(right - left):
-        hull, starts = [], []
-        for row in rows:
-            row = int(row)
-            start = -math.inf
-            while hull:
-                previous = hull[-1]
-                start = .5 * (row + previous) + (costs[row, column] - costs[previous, column]) / (2 * (row - previous))
-                if start > starts[-1]:
-                    break
-                hull.pop(); starts.pop()
-            hull.append(row); starts.append(-math.inf if len(hull) == 1 else start)
-        chosen = np.maximum(np.searchsorted(starts, y, side="left") - 1, 0)
-        selected = np.asarray(hull, dtype=np.int64)[chosen]
-        result[top:bottom, left + column] = costs[selected, column] + (y - selected) ** 2
+    content_height = bottom - top
+    denominator = 2 * content_height
+    radius_numerator = 2 * source_height + denominator * policy["distance_completion_source_pixels"]
+    for row in range(content_height):
+        center_numerator = ((2 * row + 1) * source_height - content_height +
+                            denominator * (offset - crop_top))
+        eligible = ((rows * denominator >= center_numerator - radius_numerator) &
+                    (rows * denominator <= center_numerator + radius_numerator))
+        if eligible.any():
+            result[top + row, left:right] = costs[rows[eligible]].min(axis=0)
     return result
 
 
-def _subtitle_gaussian_q_error_bound(reference: Any, source_width: int, source_height: int) -> Any:
-    """Explicit IEEE FP32 coordinate/square/add bound shared with native exhaustive tests.
+def _subtitle_budget_coefficients(source_width: int, source_height: int,
+                                  content: tuple[int, int, int, int]) -> tuple[float, float]:
+    """Exact-real costs from the same integer Q30 steps, with source aspect conversion."""
+    width, height = content[2] - content[0], content[3] - content[1]
+    scale = 1 << 30
+    horizontal_step = max(1, int(_DEFAULTS.max_horizontal_slope * scale) // width) / scale
+    vertical_step = max(1, int(_DEFAULTS.max_vertical_shear * scale) // width) / scale
+    return horizontal_step * width, vertical_step * source_width * height / source_height
 
-    Native x uses four and y six epsilon-scaled source-coordinate operations. This is a
-    representational admission envelope, never a quality tolerance or exact-word claim.
+
+def _subtitle_budget_error_bound(reference: Any, source_width: int, source_height: int,
+                                 content: tuple[int, int, int, int]) -> Any:
+    """IEEE FP32 bound for horizontal coordinates, radius and nearest-center costs.
+
+    Vertical slab membership is exact integer arithmetic and has no numeric admission band.
+    Horizontal coordinates take at most four rounded operations; radius takes divide/add.
+    The coefficient takes one rounded operation after exact integer-Q30 steps. Eight further
+    epsilon-scaled terms enclose horizontal subtraction, max-with-zero and multiplication.
+    Minima and max-with-zero are nonexpansive. This is numeric admission, not a quality waiver.
     """
     import numpy as np
 
-    q = np.asarray(reference, dtype=np.float64)
+    budget = np.asarray(reference, dtype=np.float64)
     epsilon = float(np.finfo(np.float32).eps)
-    delta = math.hypot(4 * epsilon * source_width, 6 * epsilon * source_height)
-    return 2 * np.sqrt(q) * delta + delta * delta + 4 * epsilon * np.maximum(q, 1)
+    policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]
+    offset = policy["gaussian_center_offset_source_pixels"]
+    radius_x = source_width / (content[2] - content[0]) + policy["distance_completion_source_pixels"]
+    cx, _ = _subtitle_budget_coefficients(source_width, source_height, content)
+    coordinate_error = cx * (4 * epsilon * source_width + 2 * epsilon * radius_x)
+    magnitude = cx * (source_width + 2 * offset + radius_x)
+    return coordinate_error + (8 * epsilon / (1 - 8 * epsilon)) * (magnitude + np.maximum(budget, 1))
 
 
-def _subtitle_gaussian_weight_from_q(q: Any, source_width: int, source_height: int) -> Any:
+def _subtitle_completion_weight_and_proposal(base: Any, budget: Any, target: Any,
+                                            source_width: int) -> tuple[Any, Any]:
+    """Separate FP32 operations and exact rounded weight endpoints of direct completion."""
     import numpy as np
 
+    b, d, ui = np.asarray(base, dtype=np.float32), np.asarray(budget, dtype=np.float32), np.float32(target)
+    if b.shape != d.shape:
+        raise ValueError("completion Base/budget shapes differ")
+    difference = np.subtract(ui, b, dtype=np.float32)
+    gap = np.multiply(np.abs(difference), np.float32(source_width), dtype=np.float32)
+    weight, proposal = np.zeros_like(b), b.copy()
+    center = d == 0
+    active = np.isfinite(d) & (d > 0) & (gap > 0) & (d < gap)
+    weight[center] = np.float32(1)
+    with np.errstate(under="ignore", over="ignore", invalid="ignore", divide="ignore"):
+        ratio = np.divide(d[active], gap[active], dtype=np.float32)
+        weight[active] = np.clip(np.subtract(np.float32(1), ratio, dtype=np.float32),
+                                 np.float32(0), np.float32(1))
+        normalized = np.divide(d, np.float32(source_width), dtype=np.float32)
+        interior = active & (weight > 0) & (weight < 1)
+        lower = np.subtract(ui, normalized, dtype=np.float32)
+        upper = np.add(ui, normalized, dtype=np.float32)
+        proposal[interior] = np.where(difference[interior] > 0, lower[interior], upper[interior])
+        # The rounded difference/gap can be one ulp wider than the exact Base/UI interval.
+        # Copy its endpoint words explicitly when direct division/addition reaches or crosses it.
+        base_endpoint = interior & np.where(difference > 0, proposal <= b, proposal >= b)
+        ui_endpoint = interior & np.where(difference > 0, proposal >= ui, proposal <= ui)
+        proposal[base_endpoint] = b[base_endpoint]
+        proposal[ui_endpoint] = ui
+    proposal[weight == 1] = ui
+    return weight, proposal
+
+
+def _subtitle_current_probability(probability: Any, source_width: int, crop_height: int) -> tuple[Any, Any]:
+    """Validate four contributors and sample the joined map at native pixel centers."""
+    import numpy as np
+
+    height, width = coordinate_contract.SUBTITLE_OCR.output_shape[-2:]
+    image = np.asarray(probability, dtype=np.float32).reshape(height, width)
+    ratio_x = np.float32(width) / np.float32(source_width)
+    ratio_y = np.float32(height) / np.float32(crop_height)
+    centered_x = np.arange(source_width, dtype=np.float32) + np.float32(.5)
+    centered_y = np.arange(crop_height, dtype=np.float32) + np.float32(.5)
+    scaled_x, scaled_y = centered_x * ratio_x, centered_y * ratio_y
+    x, y = scaled_x - np.float32(.5), scaled_y - np.float32(.5)
+    xlo, ylo = np.floor(x).astype(np.int32), np.floor(y).astype(np.int32)
+    fx, fy = x - np.floor(x), y - np.floor(y)
+    xa, xb = np.clip(xlo, 0, width - 1), np.clip(xlo + 1, 0, width - 1)
+    ya, yb = np.clip(ylo, 0, height - 1), np.clip(ylo + 1, 0, height - 1)
+    tl, tr = image[np.ix_(ya, xa)], image[np.ix_(ya, xb)]
+    bl, br = image[np.ix_(yb, xa)], image[np.ix_(yb, xb)]
+    valid = np.ones((crop_height, source_width), dtype=bool)
+    for contributor in (tl, tr, bl, br):
+        valid &= np.isfinite(contributor) & (contributor >= 0) & (contributor <= 1)
+    with np.errstate(invalid="ignore", over="ignore"):
+        upper_delta, lower_delta = tr - tl, br - bl
+        upper_product, lower_product = upper_delta * fx[None, :], lower_delta * fx[None, :]
+        upper, lower = tl + upper_product, bl + lower_product
+        vertical_delta = lower - upper
+        vertical_product = vertical_delta * fy[:, None]
+        sampled = upper + vertical_product
+    return valid, sampled
+
+
+def _subtitle_current_spatial_edges(source: Any) -> tuple[Any, Any]:
+    """Current native contrast only; invalid/out-of-crop neighbors cannot supply evidence."""
+    import numpy as np
+
+    values = np.asarray(source, dtype=np.float32)
+    height, width = values.shape[:2]
+    valid = ((values[..., 3] == 1) & np.isfinite(values[..., :3]).all(axis=2) &
+             (values[..., :3] >= 0).all(axis=2) & (values[..., :3] <= 1).all(axis=2))
+    horizontal = np.zeros((height, width), dtype=bool)
+    vertical = np.zeros((height, width), dtype=bool)
     policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]
-    sigma = np.divide(np.float32(min(source_width, source_height)),
-                      np.float32(policy["gaussian_sigma_short_side_divisor"]), dtype=np.float32)
-    denominator = np.multiply(np.float32(2), np.multiply(sigma, sigma, dtype=np.float32), dtype=np.float32)
-    values = np.asarray(q, dtype=np.float32)
-    with np.errstate(under="ignore"):
-        result = np.exp(-values.astype(np.float64) / float(denominator)).astype(np.float32)
-    result[np.isposinf(values)] = np.float32(0)
-    result[values == 0] = np.float32(1)
+    radius = policy["spatial_edge_radius_source_pixels"]
+    threshold = np.float32(policy["spatial_edge_rgb_distance"])
+    for dx, dy in ((-radius, 0), (radius, 0), (0, -radius), (0, radius)):
+        x0, x1 = max(0, -dx), min(width, width - dx)
+        y0, y1 = max(0, -dy), min(height, height - dy)
+        if x0 >= x1 or y0 >= y1:
+            continue
+        own = values[y0:y1, x0:x1, :3]
+        neighbor = values[y0 + dy:y1 + dy, x0 + dx:x1 + dx, :3]
+        neighbor_valid = valid[y0 + dy:y1 + dy, x0 + dx:x1 + dx]
+        with np.errstate(invalid="ignore", over="ignore"):
+            contrast = np.max(np.abs(own - neighbor), axis=2)
+        result = horizontal if dx else vertical
+        result[y0:y1, x0:x1] |= valid[y0:y1, x0:x1] & neighbor_valid & (contrast > threshold)
+    return horizontal, vertical
+
+
+def _subtitle_current_spatial_edge(source: Any) -> Any:
+    x, y = _subtitle_current_spatial_edges(source)
+    return x | y
+
+
+def _subtitle_current_search_rectangles(cores: Any, covers: Any, source_width: int,
+                                        content: tuple[int, int, int, int],
+                                        current_reference_center_twice_source: int | None = None,
+                                        current_ribbon_mask: int = 0) -> list[dict[str, int]]:
+    """Current fixed-core line center controls only the corrective expanded search side."""
+    policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]
+    reference = source_width if current_reference_center_twice_source is None else current_reference_center_twice_source
+    if type(reference) is not int or abs(reference) > policy["source_max_extent"]:
+        raise ValueError("native glyph search has an invalid current signed center reference")
+    if type(current_ribbon_mask) is not int or not 0 <= current_ribbon_mask < (1 << len(cores)):
+        raise ValueError("native glyph search has an invalid current ribbon mask")
+    cw = content[2] - content[0]
+    detector_width = coordinate_contract.SUBTITLE_OCR.output_shape[-1]
+    inset = policy["ordinary_search_inset_detector_pixels"] * cw // detector_width
+    bias = policy["ordinary_search_center_bias_detector_pixels"]
+    numerator = coordinate_contract.SUBTITLE_OCR.line_group_min_vertical_iou_numerator
+    denominator = coordinate_contract.SUBTITLE_OCR.line_group_min_vertical_iou_denominator
+    result = []
+    for slot, (core, cover) in enumerate(zip(cores, covers)):
+        if current_ribbon_mask & (1 << slot):
+            result.append({key: cover[key] for key in ("left", "top", "right", "bottom")})
+            continue
+        line_left, line_right = core["left"], core["right"]
+        for other_slot, other in enumerate(cores):
+            if current_ribbon_mask & (1 << other_slot):
+                continue
+            intersection = max(0, min(core["bottom"], other["bottom"]) - max(core["top"], other["top"]))
+            union = max(core["bottom"], other["bottom"]) - min(core["top"], other["top"])
+            if intersection * denominator >= union * numerator:
+                line_left, line_right = min(line_left, other["left"]), max(line_right, other["right"])
+        # Cross-products preserve the strict one-producer-cell boundary and signed references.
+        center_numerator = (line_left + line_right - 2 * content[0]) * source_width * detector_width
+        allow_left = center_numerator > (reference * detector_width + 2 * bias * source_width) * cw
+        allow_right = center_numerator < (reference * detector_width - 2 * bias * source_width) * cw
+        search = {key: cover[key] for key in ("left", "top", "right", "bottom")}
+        if not allow_left and cover["left"] != content[0]:
+            search["left"] = min(core["left"], search["left"] + inset)
+        if not allow_right and cover["right"] != content[2]:
+            search["right"] = max(core["right"], search["right"] - inset)
+        height = core["bottom"] - core["top"]
+        pad = (height * policy["ordinary_search_pad_height_numerator"] +
+               policy["ordinary_search_pad_height_denominator"] - 1) // policy["ordinary_search_pad_height_denominator"]
+        search["top"] = max(search["top"], core["top"] - pad)
+        result.append(search)
     return result
 
 
-def _subtitle_current_cover_gaussian_q(field_width: int, field_height: int, source_width: int,
-                                       source_height: int, content: tuple[int, int, int, int],
-                                       rectangles: list[Dict[str, Any]]) -> Any:
-    """Presentation distance to current rectangles; this never changes native support/q."""
+def _subtitle_current_glyph_evidence(source: Any, probability_valid: Any, probability: Any,
+                                     cores: Any, covers: Any, source_height: int,
+                                     crop_top: int, content: tuple[int, int, int, int],
+                                     current_reference_center_twice_source: int | None = None,
+                                     current_ribbon_mask: int = 0) -> Any:
+    """Authenticate current integer palettes/strokes, independently of diagnostic history.
+
+    Strong probability locates palette anchors; it never directly authorizes a source pixel.
+    All color-mode decisions after the explicit FP32 Q16 conversion use integer rationals.
+    """
+    from functools import cmp_to_key
     import numpy as np
 
-    cx = np.clip(np.arange(field_width), content[0], content[2] - 1)
-    cy = np.clip(np.arange(field_height), content[1], content[3] - 1)
-    scale_x = np.float32(source_width) / np.float32(content[2] - content[0])
-    scale_y = np.float32(source_height) / np.float32(content[3] - content[1])
-    x = cx.astype(np.float32) + np.float32(.5)
-    y = cy.astype(np.float32) + np.float32(.5)
-    q = np.full((field_height, field_width), np.inf, dtype=np.float32)
-    for rectangle in rectangles:
-        left, right = np.float32(rectangle["left"]), np.float32(rectangle["right"])
-        top, bottom = np.float32(rectangle["top"]), np.float32(rectangle["bottom"])
-        dx = np.maximum(np.maximum(left - x, np.float32(0)), x - right) * scale_x
-        dy = np.maximum(np.maximum(top - y, np.float32(0)), y - bottom) * scale_y
-        q = np.minimum(q, dy[:, None] * dy[:, None] + dx[None, :] * dx[None, :])
-    return q
+    policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]
+    values = np.asarray(source, dtype=np.float32)
+    rgb = values[..., :3]
+    height, width = rgb.shape[:2]
+    valid = ((values[..., 3] == 1) & np.isfinite(rgb).all(axis=2) &
+             (rgb >= 0).all(axis=2) & (rgb <= 1).all(axis=2))
+    ex, ey = _subtitle_current_spatial_edges(values)
+    edge = ex | ey
+    maximum_channel = policy["palette_channel_max"]
+    # Invalid samples are not quantized into evidence; avoid NaN-to-integer conversion.
+    safe_rgb = np.where(valid[..., None], rgb, np.float32(0))
+    scaled = np.multiply(safe_rgb, np.float32(maximum_channel), dtype=np.float32)
+    q = np.floor(np.add(scaled, np.float32(.5), dtype=np.float32)).astype(np.int64)
+    qmax, qmin = q.max(axis=2), q.min(axis=2)
+    result = np.zeros((height, width), dtype=bool)
+    columns, rows = policy["palette_grid_columns"], policy["palette_grid_rows"]
+    cw, ch = content[2] - content[0], content[3] - content[1]
+    threshold = np.float32(policy["spatial_edge_rgb_distance"])
+
+    def match_modes(modes: list[tuple[Any, int, int]]) -> Any:
+        matches = np.zeros((height, width), dtype=bool)
+        for sums, count, _ in modes:
+            delta = q * count - sums
+            distance = np.abs(delta).max(axis=2)
+            scale = maximum_channel * count
+            symmetric = (policy["palette_match_rgb_denominator"] * distance <=
+                         policy["palette_match_rgb_numerator"] * scale)
+            matches |= symmetric
+        return matches & valid
+
+    def short_tangent(candidates: Any, axis: int, limit: int) -> Any:
+        accepted = np.zeros((height, width), dtype=bool)
+        ys, xs = np.nonzero(candidates)
+        if limit == 0 or len(xs) == 0:
+            return accepted
+        lengths = np.ones(len(xs), dtype=np.int64)
+        good = np.ones(len(xs), dtype=bool)
+        own = rgb[ys, xs]
+        for sign in (-1, 1):
+            active = good.copy()
+            for step in range(1, limit + 1):
+                ids = np.flatnonzero(active)
+                if not len(ids):
+                    break
+                nx = xs[ids] + (sign * step if axis == 0 else 0)
+                ny = ys[ids] + (sign * step if axis == 1 else 0)
+                inside = (nx >= 0) & (nx < width) & (ny >= 0) & (ny < height)
+                active[ids[~inside]] = False
+                ids, nx, ny = ids[inside], nx[inside], ny[inside]
+                if not len(ids):
+                    continue
+                coherent = valid[ny, nx] & (np.abs(rgb[ny, nx] - own[ids]).max(axis=1) <= threshold)
+                active[ids[~coherent]] = False
+                lengths[ids[coherent]] += 1
+                over = lengths[ids] > limit
+                good[ids[over]] = False
+                active[ids[over]] = False
+        accepted[ys, xs] = good
+        return accepted
+
+    searches = _subtitle_current_search_rectangles(cores, covers, width, content,
+        current_reference_center_twice_source, current_ribbon_mask)
+    for core, cover in zip(cores, searches):
+        sx = (((core["left"] - content[0]) * (2 * columns) +
+               (2 * np.arange(columns, dtype=np.int64) + 1) * (core["right"] - core["left"])) * width) // (2 * columns * cw)
+        sy = (((core["top"] - content[1]) * (2 * rows) +
+               (2 * np.arange(rows, dtype=np.int64) + 1) * (core["bottom"] - core["top"])) * source_height) // (2 * rows * ch) - crop_top
+        sx, sy = np.clip(sx, 0, width - 1), np.clip(sy, 0, height - 1)
+        ax, ay = np.meshgrid(sx, sy)
+        anchors = (valid[ay, ax] & edge[ay, ax] & probability_valid[ay, ax] &
+                   (probability[ay, ax] > np.float32(coordinate_contract.SUBTITLE_OCR.detector_active_probability_threshold)))
+        aq, ar = q[ay, ax][anchors], rgb[ay, ax][anchors]
+        if not len(aq):
+            continue
+        bins = np.minimum((ar * np.float32(4)).astype(np.int64), 3)
+        codes = bins[:, 0] * 16 + bins[:, 1] * 4 + bins[:, 2]
+        anchor_peak = int(aq.max())
+        modes = []
+        for code in range(policy["palette_bin_count"]):
+            selected = aq[codes == code]
+            count = len(selected)
+            if not count:
+                continue
+            # An actual sampled color, never a mean that invents an unobserved shade.
+            # np.argmax returns the earliest row-major grid index on equal peak ties.
+            representative = selected[int(np.argmax(selected.max(axis=1)))]
+            sums = representative * count
+            if (policy["palette_brightness_denominator"] * int(sums.max()) >=
+                    policy["palette_brightness_numerator"] * anchor_peak * count):
+                modes.append((sums, count, code))
+
+        def compare(a: Any, b: Any) -> int:
+            left, right = int(a[0].max()) * b[1], int(b[0].max()) * a[1]
+            if left != right:
+                return -1 if left > right else 1
+            if a[1] != b[1]:
+                return -1 if a[1] > b[1] else 1
+            return (a[2] > b[2]) - (a[2] < b[2])
+
+        def hue_normalized(value: Any) -> Any:
+            peak = int(value.max())
+            hue_max = policy["palette_hue_channel_max"]
+            return (value * hue_max + peak // 2) // max(peak, 1)
+
+        retained = []
+        for mode in sorted(modes, key=cmp_to_key(compare)):
+            rounded = (mode[0] + mode[1] // 2) // mode[1]
+            if any(policy["palette_merge_hue_denominator"] *
+                   int(np.abs(hue_normalized(rounded) -
+                       hue_normalized((prior[0] + prior[1] // 2) // prior[1])).max()) <=
+                   policy["palette_merge_hue_numerator"] * policy["palette_hue_channel_max"] for prior in retained):
+                continue
+            retained.append(mode)
+            if len(retained) == policy["palette_max_modes"]:
+                break
+        if not retained:
+            continue
+        matches = match_modes(retained)
+        if cover["left"] >= cover["right"] or cover["top"] >= cover["bottom"]:
+            continue
+        covered = _subtitle_contour_cover_mask([cover], width, source_height, crop_top, height, content)
+        own = covered & valid & probability_valid & edge
+        foreground = own & matches
+        limit = (policy["long_line_core_height_numerator"] * (core["bottom"] - core["top"]) * source_height //
+                 (policy["long_line_core_height_denominator"] * ch))
+        result |= short_tangent(foreground & ex, 1, limit)
+        result |= short_tangent(foreground & ey, 0, limit)
+        brightest_sum, brightest_count, _ = retained[0]
+        dark = (own &
+            (policy["outline_value_denominator"] * qmax * brightest_count <=
+             policy["outline_value_numerator"] * int(brightest_sum.max())) &
+            (policy["outline_chroma_denominator"] * (qmax - qmin) <=
+             policy["outline_chroma_numerator"] * maximum_channel))
+        radius = policy["outline_probe_radius_source_pixels"]
+        for dy in (-radius, 0, radius):
+            for dx in (-radius, 0, radius):
+                if dx == 0 and dy == 0:
+                    continue
+                x0, x1 = max(0, -dx), min(width, width - dx)
+                y0, y1 = max(0, -dy), min(height, height - dy)
+                if x0 >= x1 or y0 >= y1:
+                    continue
+                neighbor_match = matches[y0 + dy:y1 + dy, x0 + dx:x1 + dx]
+                contrast = np.abs(rgb[y0:y1, x0:x1] - rgb[y0 + dy:y1 + dy, x0 + dx:x1 + dx]).max(axis=2)
+                result[y0:y1, x0:x1] |= dark[y0:y1, x0:x1] & neighbor_match & (contrast > threshold)
+    return result
 
 
 def validate_subtitle_contour_tuple(
@@ -3498,12 +3984,16 @@ def validate_subtitle_contour_tuple(
         tensor_content: tuple[int, int, int, int], roi_top: int, roi_bottom: int,
         scene_epoch: int, observation_timestamp_us: int, geometry_ready: bool,
         ocr_authoritative: bool, current_rectangles: Any,
-        plane_state: Any) -> Dict[str, Any]:
-    """Authenticate the eleven joined contour/Gaussian artifacts, without reimplementing classification.
+        plane_state: Any, current_cores: Any = None,
+        current_reference_center_twice_source: int | None = None) -> Dict[str, Any]:
+    """Authenticate the eleven joined current-probability/diagnostic-history artifacts.
 
     The context is supplied by the strict OCR8/UIP4, geometry and accepted-root trace readers.
     Source belongs to the retained inference owner. It is deliberately not compared with current
-    presentation RGB. Probability is opaque detector evidence, never a recovered glyph alpha.
+    presentation RGB. Current palette/stroke evidence admits support; it is not glyph alpha.
+    An initialized classifier payload supplies its independently validated CURRENT geometry center;
+    the optional source-center fallback is for a canonical all-zero classifier payload or authored
+    legacy contour fixtures. Learned position votes never supply this reference.
     """
     import numpy as np
 
@@ -3586,7 +4076,7 @@ def validate_subtitle_contour_tuple(
         raise ValueError("subtitle temporal support/pin has nonbinary support or unknown enum values")
     if (np.any(np.isnan(distance)) or np.any(distance < 0) or np.any(np.isneginf(distance)) or
             np.any((distance == 0) & (distance.view(np.uint32) != 0))):
-        raise ValueError("Gaussian squared source distance has invalid nonnegative float/positive-zero evidence")
+        raise ValueError("native support slope budget has invalid nonnegative float/positive-zero evidence")
     if not snapshot_gate:
         if np.any(source.view(np.uint16)) or np.any(probability.view(np.uint32)):
             raise ValueError("globally invalid OCR/geometry/source must publish canonical cleared source/probability snapshots")
@@ -3603,6 +4093,14 @@ def validate_subtitle_contour_tuple(
         covers = _subtitle_contour_cover_mask(current_rectangles, source_width, source_height, crop_top, crop_height, content)
         if np.any(admitted & (~covers | ~color_valid)):
             raise ValueError("native temporal support escapes current covers or valid current source pixels")
+        if not isinstance(current_cores, list) or len(current_cores) != len(current_rectangles):
+            raise ValueError("native support search requires the paired current raw cores")
+        for slot, (cover, core) in enumerate(zip(current_rectangles, current_cores)):
+            if (not isinstance(core, dict) or any(type(core.get(k)) is not int
+                    for k in ("left", "top", "right", "bottom")) or
+                    not cover["left"] <= core["left"] < core["right"] <= cover["right"] or
+                    not cover["top"] <= core["top"] < core["bottom"] <= cover["bottom"]):
+                raise ValueError("native support search has malformed paired current raw cores")
     # Authenticate the saved state, not an unobserved temporal chain or a replicated classifier.
     # Valid empty OCR still retains current RGB at count0. Counts0/1 use current RGB exactly;
     # established streaks carry a fixed anchor bounded against this genuine current observation.
@@ -3622,8 +4120,17 @@ def validate_subtitle_contour_tuple(
     # Cast only validated small exact codes, avoiding NaN/Inf integer coercion.
     counts = np.zeros(native_shape, dtype=np.uint32)
     counts[valid_history] = code[valid_history].astype(np.uint32) >> count_shift
-    if np.any(admitted != (valid_history & (counts == confirmation_count))):
-        raise ValueError("temporal history confirmed count and binary support disagree")
+    expected_support = np.zeros(native_shape, dtype=bool)
+    if authority:
+        probability_valid, sampled_probability = _subtitle_current_probability(probability, source_width, crop_height)
+        glyph = _subtitle_current_glyph_evidence(source, probability_valid, sampled_probability,
+            current_cores, current_rectangles, source_height, crop_top, content,
+            current_reference_center_twice_source, plane_state["current_ribbon_mask"])
+        expected_support = color_valid & covers & probability_valid & (counts > 0) & glyph
+        if np.any((counts != 0) & ~probability_valid):
+            raise ValueError("temporal history positive count lacks valid current probability contributors")
+    if np.any(admitted != expected_support):
+        raise ValueError("native support disagrees with current palette/stroke evidence and positive-count duplicate admission")
     if not authority and np.any(counts):
         raise ValueError("temporal history without current pin authority must retain count0 only")
     if authority and np.any((counts != 0) & ~covers):
@@ -3644,33 +4151,31 @@ def validate_subtitle_contour_tuple(
     expected_pin = _subtitle_contour_project_support(admitted, source_height, crop_top, field_width, field_height, content)
     if not np.array_equal(pin, expected_pin.astype(np.uint32)):
         raise ValueError("contour field pins differ from the exact integer bilinear footprint")
-    reference = _subtitle_contour_squared_source_distance(admitted, source_width, source_height, crop_top,
+    reference = _subtitle_contour_slope_budget(admitted, source_width, source_height, crop_top,
         field_width, field_height, content)
     finite_reference = np.isfinite(reference)
     if (np.any(distance[~finite_reference].view(np.uint32) != policy["distance_empty_bits"]) or
             not np.isfinite(distance[finite_reference]).all()):
-        raise ValueError("Gaussian squared source distance empty/padding or finite-content state differs from admitted centers")
+        raise ValueError("native support slope budget empty/padding or finite-content state differs from admitted rectangles")
     error = np.abs(distance[finite_reference].astype(np.float64) - reference[finite_reference])
-    bound = _subtitle_gaussian_q_error_bound(reference[finite_reference], source_width, source_height)
+    bound = _subtitle_budget_error_bound(reference[finite_reference], source_width, source_height, content)
     if np.any(error > bound):
-        raise ValueError("Gaussian squared source distance differs from independent nearest-five-center minimum beyond its IEEE coordinate bound")
+        raise ValueError("native support slope budget differs from independent nearest-rectangle minimum beyond its IEEE coordinate bound")
     weight = np.frombuffer(payloads["gaussian_weight"], dtype="<f4").reshape(field_height, field_width)
     proposal = np.frombuffer(payloads["gaussian_blend"], dtype="<f4").reshape(field_height, field_width)
     vertical = np.frombuffer(payloads["gaussian_vertical_conditioned"], dtype="<f4").reshape(field_height, field_width)
     control = _uint32_words(payloads["gaussian_control"], 1, "Gaussian smoothing control")[0]
     warmup = _uint32(plane_state.get("warmup_packed"), "UIP4 packed warmup")
-    warmup_policy = coordinate_contract.SUBTITLE_OCR
-    if warmup & ~(warmup_policy.plane_warmup_remaining_mask | warmup_policy.plane_warmup_cue_bit) or (warmup & warmup_policy.plane_warmup_remaining_mask) > warmup_policy.plane_warmup_observations or (warmup and not authority):
-        raise ValueError("UIP4 packed warmup lacks current nonempty valid authority")
-    warmup_remaining = warmup & warmup_policy.plane_warmup_remaining_mask
+    if warmup != 0:
+        raise ValueError("UIP4 retired warmup word must be canonical zero")
+    warmup_remaining = 0
     presentation_q = distance
-    if warmup_remaining:
-        presentation_q = np.minimum(distance, _subtitle_current_cover_gaussian_q(
-            field_width, field_height, source_width, source_height, content, current_rectangles))
-    expected_control = int(authority and np.isfinite(presentation_q[content[1], content[0]]) and presentation_q[content[1], content[0]] >= 0)
+    control_column = presentation_q[content[1]:content[3], content[0]]
+    expected_control = int(authority and np.any(np.isfinite(control_column) & (control_column >= 0)))
     if control not in (0, 1) or control != expected_control:
-        raise ValueError("Gaussian smoothing control disagrees with current authority and first-content distance")
+        raise ValueError("Gaussian smoothing control disagrees with current authority and any eligible content row")
     if (not np.isfinite(weight).all() or np.any((weight < 0) | (weight > 1)) or
+            np.any((weight == 0) & np.signbit(weight)) or
             not np.isfinite(proposal).all() or not np.isfinite(vertical).all() or
             np.any(np.abs(proposal) > np.float32(_DEFAULTS.direct_container_limit)) or
             np.any(np.abs(vertical) > np.float32(_DEFAULTS.direct_container_limit))):
@@ -3678,19 +4183,20 @@ def validate_subtitle_contour_tuple(
     cx = np.clip(np.arange(field_width), content[0], content[2] - 1)
     cy = np.clip(np.arange(field_height), content[1], content[3] - 1)
     joined_q = presentation_q[np.ix_(cy, cx)]
-    expected_weight = (_subtitle_gaussian_weight_from_q(joined_q, source_width, source_height)
-                       if control else np.zeros_like(weight))
-    if (np.any(np.abs(weight.astype(np.float64) - expected_weight.astype(np.float64)) > policy["gaussian_weight_absolute_error_limit"]) or
-            np.any(weight[(joined_q == 0) & bool(control)].view(np.uint32) != np.float32(1).view(np.uint32)) or
+    # M depends on immutable Base in the current minimum-budget recipe. The geometry verifier joins Base
+    # below and proves the actual M/direct proposal there; this tuple proves D and mandatory
+    # source-footprint endpoints without fabricating an unobserved Base value.
+    if (np.any(weight[(joined_q == 0) & bool(control)].view(np.uint32) != np.float32(1).view(np.uint32)) or
+            np.any(weight[~np.isfinite(joined_q)].view(np.uint32)) or
             (not control and np.any(weight.view(np.uint32)))):
-        raise ValueError("Gaussian weight differs from literal untruncated exp or exact disabled/center endpoints")
+        raise ValueError("completion weight differs from exact disabled/rectangle endpoints")
     return {
         "tuple_verified": True, "authority_valid": authority, "snapshot_gate_valid": snapshot_gate,
         "native_source_eligible": eligible, "native_width": native_shape[1], "native_height": native_shape[0],
         "inference_owner_frame_id": evidence_frame_id, "inference_owner_observation_timestamp_us": observation_timestamp_us,
         "support_pixels": int(admitted.sum()), "field_pin_nodes": int(pin.sum()),
         "weak_support_pixels": 0,
-        "support_semantics": "binary-current-temporal-RGB-stability-not-semantic-text-membership",
+        "support_semantics": "binary-current-cover-current-palette-short-stroke-or-local-dark-outline-not-semantic-text-membership",
         "history_rgb_valid_pixels": int(valid_history.sum()),
         "history_confirmation_count_histogram": {
             str(count): int(np.count_nonzero(valid_history & (counts == count)))
@@ -3700,18 +4206,18 @@ def validate_subtitle_contour_tuple(
             valid_history & np.any(history[..., :3] != current_rgb, axis=2))),
         "history_confirmation_chain_verified": False,
         "warmup_packed": warmup, "warmup_remaining": warmup_remaining,
-        "gaussian_presentation_policy": "current-cover-max-union-until-four-genuine-cue-free-observations-otherwise-confirmed-pixels",
+        "gaussian_presentation_policy": policy["gaussian_weight_policy"],
         "source_alpha_zero_pixels": int(np.count_nonzero(source[..., 3] == 0)),
         "probability_nonfinite_words": int(np.count_nonzero(~np.isfinite(probability))),
         "probability_out_of_range_finite_words": int(np.count_nonzero(np.isfinite(probability) & ((probability < 0) | (probability > 1)))),
         "probability_semantics": "opaque-joined-detector-evidence-not-glyph-alpha",
         "source_pixel_relation": "sealed-inference-owner-snapshot-no-current-presentation-RGB-equality-claim",
-        "integer_bilinear_projection_verified": True, "squared_source_distance_verified": True,
-        "squared_source_distance_admission": "float64-independent-nearest-five-center-IEEE-coordinate-error-envelope",
-        "squared_source_distance_max_absolute_error": float(error.max()) if error.size else 0.0,
-        "squared_source_distance_max_error_to_bound_ratio": float(np.max(error / bound)) if error.size else 0.0,
-        "gaussian_smoothing_enabled": bool(control), "gaussian_weight_verified": True,
-        "gaussian_weight_max_absolute_error": float(np.max(np.abs(weight.astype(np.float64) - expected_weight))),
+        "integer_bilinear_projection_verified": True, "slope_budget_verified": True,
+        "slope_budget_admission": "exact-integer-vertical-slab-float64-horizontal-nearest-center-IEEE-operation-envelope",
+        "slope_budget_max_absolute_error": float(error.max()) if error.size else 0.0,
+        "slope_budget_max_error_to_bound_ratio": float(np.max(error / bound)) if error.size else 0.0,
+        "gaussian_smoothing_enabled": bool(control), "gaussian_weight_endpoints_verified": True,
+        "gaussian_weight_base_join_required": True,
     }
 
 
@@ -3721,7 +4227,8 @@ def _verify_subtitle_conditioning_artifacts(
         field_width: int, field_height: int,
         tensor_content: tuple[int, int, int, int],
         confirmed_cut_count: int, gpu_trace: Dict[str, Any], shadow_state: Dict[str, Any],
-        joint_plane_mode: int = 3, requested_gain: float | None = None) -> Dict[str, Any]:
+        joint_plane_mode: int = 3, requested_gain: float | None = None,
+        input_region: Dict[str, Any] | None = None) -> Dict[str, Any]:
     import json
 
     metadata_payload = _read_hashed_artifact(dump_dir, manifest["artifacts"], "subtitle_conditioning.json")
@@ -3764,6 +4271,27 @@ def _verify_subtitle_conditioning_artifacts(
         source_width=source_width, source_height=source_height,
         field_width=field_width, field_height=field_height,
         roi_top=roi_top, roi_bottom=roi_bottom, tensor_content=content)
+    classifier_history = ocr["classifier_history"]
+    if (classifier_history["initialized"] and
+            classifier_history["observation_timestamp_us"] != publication_timestamp):
+        raise ValueError("subtitle classifier history clock differs from its current OCR owner")
+    if classifier_history["initialized"] and input_region is not None:
+        authorization = input_region.get("authorization") or {}
+        video_reference = authorization.get("authority_kind") == "chromium-video"
+        if video_reference:
+            reference_width, reference_height = source_width, source_height
+            left, top = 0, 0
+        else:
+            reference_width = input_region["source_width"]
+            reference_height = input_region["source_height"]
+            left, top = input_region["inference_rect"][:2]
+        expected_reference = {
+            "center_twice_source": reference_width - 2 * left,
+            "width_source": reference_width,
+            "search_top_source": reference_height - (reference_height + 3) // 4 - top,
+        }
+        if classifier_history["reference"] != expected_reference:
+            raise ValueError("subtitle classifier history reference differs from the authenticated video/screen domain")
     plane = validate_subtitle_plane_state(
         plane_payload, ocr_record=ocr, matched_frame_id=evidence_frame_id,
         analysis_generation=analysis_generation, source_width=source_width, source_height=source_height,
@@ -3792,6 +4320,12 @@ def _verify_subtitle_conditioning_artifacts(
             struct.pack("<6I", *matched_trace["subtitle_condition_words"]),
             plane_state=plane, geometry_ready=geometry_ready)
         active = condition[4] == coordinate_contract.SUBTITLE_OCR.condition_param_fully_active_value
+    condition = validate_subtitle_condition_words(
+        _read_hashed_artifact(dump_dir, manifest["artifacts"], "subtitle_condition_params.u32"),
+        plane_state=plane, geometry_ready=geometry_ready)
+    if matched_trace is not None and tuple(matched_trace["subtitle_condition_words"]) != condition:
+        raise ValueError("SCP4 render artifact differs from matched trace tuple")
+    active = condition[4] == coordinate_contract.SUBTITLE_OCR.condition_param_fully_active_value
     contour = validate_subtitle_contour_tuple(
         {role: _read_hashed_artifact(dump_dir, manifest["artifacts"], name)
          for role, name in _SUBTITLE_CONTOUR_ARTIFACT_FILES.items()},
@@ -3801,7 +4335,35 @@ def _verify_subtitle_conditioning_artifacts(
         roi_top=roi_top, roi_bottom=roi_bottom, scene_epoch=plane["scene_epoch"],
         observation_timestamp_us=publication_timestamp, geometry_ready=geometry_ready,
         ocr_authoritative=ocr["authoritative"], current_rectangles=plane["current_rectangles"],
+        current_cores=ocr["raw_boxes"][:plane["current_count"]],
+        current_reference_center_twice_source=(classifier_history["reference"]["center_twice_source"]
+            if classifier_history["initialized"] else None),
         plane_state=plane)
+    import numpy as np
+    for name, expected in _subtitle_render_metadata().items():
+        try:
+            metadata = json.loads(_read_hashed_artifact(dump_dir, manifest["artifacts"], name))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("analytic subtitle metadata is invalid JSON") from error
+        if metadata != expected:
+            raise ValueError("analytic subtitle metadata has an unknown recipe or tuple binding")
+    native_shape = (contour["native_height"], contour["native_width"])
+    dense = np.frombuffer(_read_hashed_artifact(dump_dir, manifest["artifacts"], "subtitle_glyph_matte.u32"), dtype="<u4").reshape(native_shape)
+    sparse = np.frombuffer(_read_hashed_artifact(dump_dir, manifest["artifacts"], "contour_support.u32"), dtype="<u4").reshape(native_shape)
+    joined = np.frombuffer(_read_hashed_artifact(dump_dir, manifest["artifacts"], "contour_source.rgba16f"), dtype="<f2").reshape(*native_shape, 4)
+    expected_dense = subtitle_dense_glyph_matte(sparse, joined) if contour["authority_valid"] else np.zeros(native_shape, dtype="<u4")
+    if not np.array_equal(dense, expected_dense):
+        raise ValueError("native glyph matte differs from the authenticated same-observation recipe")
+    raw_source = _read_hashed_artifact(dump_dir, manifest["artifacts"], "render_source.bin")
+    source_layout = manifest["dimensions"]["render_source"]
+    native_bpp = {87: 4, 88: 4, 28: 4, 10: 8}.get(source_layout.get("format_value"))
+    if native_bpp is None or len(raw_source) != source_layout["width"] * source_layout["height"] * native_bpp:
+        raise ValueError("exact rendered native source has invalid format or byte length")
+    analytic = {"tuple_verified": True, "matte_recipe_verified": True,
+        "matte_pixels": int(np.count_nonzero(dense)), "condition_params_verified": True,
+        "native_render_source_verified": True, "selected_map_contract": dict(coordinate_contract.SELECTED_MAP),
+        "render_enabled": manifest["selected_map"]["render_enabled"],
+        "current_rgb_policy": "exact-native-source-preserved-for-pointwise-revocation; no-preview-equality-claim"}
     return {
         "mode": _SUBTITLE_MODE_CONTOURS, "subtitle_evidence_verified": True,
         "geometry_ready": geometry_ready, "geometry_publication_timestamp_us": publication_timestamp,
@@ -3818,7 +4380,7 @@ def _verify_subtitle_conditioning_artifacts(
         "target": plane["target"], "target_bits": plane["target_bits"], "active_level": 2 if active else 0,
         "joint_plane_mode": joint_plane_mode, "display_budget": plane["display_budget"],
         "adaptive": plane["adaptive"], "warmup_packed": plane["warmup_packed"],
-        "warmup_remaining": plane["warmup_remaining"], "contour": contour,
+        "warmup_remaining": plane["warmup_remaining"], "contour": contour, "analytic": analytic,
     }
 
 
@@ -3830,9 +4392,9 @@ def _subtitle_gaussian_joined_base(base_field: Any, subtitle: Dict[str, Any]) ->
         raise ValueError("Gaussian Base must be a finite two-dimensional sealed display field")
     height, width = base.shape
     content = _subtitle_tensor_content(width, height, subtitle.get("tensor_content_rect"))
-    cx = np.clip(np.arange(width), content[0], content[2] - 1)
-    cy = np.clip(np.arange(height), content[1], content[3] - 1)
-    return base[np.ix_(cy, cx)], content
+    # A disabled observation copies the complete immutable input, including real padding bits.
+    # Finite active budgets use nearest-content Base; infinite rows retain dispatch Base bits.
+    return base, content
 
 
 def _subtitle_gaussian_target(subtitle: Dict[str, Any]) -> Any:
@@ -3846,28 +4408,16 @@ def _subtitle_gaussian_target(subtitle: Dict[str, Any]) -> Any:
     return target32
 
 
-def _subtitle_gaussian_literal_blend(base: Any, weight: Any, target: Any) -> Any:
-    import numpy as np
+def _subtitle_completion_proposal_interval(base: Any, budget: Any, target: Any,
+                                           source_width: int) -> tuple[Any, Any]:
+    """SM5 operation-specific enclosure for divide then signed add/subtract.
 
-    base = np.asarray(base, dtype=np.float32)
-    m = np.asarray(weight, dtype=np.float32)
-    if m.shape != base.shape or not np.isfinite(m).all() or np.any((m < 0) | (m > 1)):
-        raise ValueError("Gaussian weight must be finite unit-range and match Base")
-    one_minus = np.subtract(np.float32(1), m, dtype=np.float32)
-    base_term = np.multiply(one_minus, base, dtype=np.float32)
-    ui_term = np.multiply(m, np.float32(target), dtype=np.float32)
-    proposal = np.add(base_term, ui_term, dtype=np.float32)
-    proposal[m == 0] = base[m == 0]
-    proposal[m == 1] = np.float32(target)
-    return proposal
-
-
-def _subtitle_gaussian_blend_interval(base: Any, weight: Any, target: Any) -> tuple[Any, Any]:
-    """SM5 representational enclosure for separate subtract/multiply/multiply/add.
-
-    Each exact double operation on binary FP32 operands is enclosed by its adjacent FP32
-    values, including signed-zero flush only for genuinely subnormal operation results.
-    This never admits FMA or an alternate interpolation formula; endpoints are exact.
+    D3D11.3 Functional Specification 3.1.3.2 permits x/y as x*(1/y), with a 1-ULP
+    reciprocal and 0.5-ULP (round-to-nearest) multiply, or an equally accurate direct divide:
+    https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm
+    Enclose those attributed intermediate results, then the separate signed add/subtract.
+    Signed-zero flush is admitted only for genuinely subnormal operation results.
+    This is not a visual epsilon or a weighted interpolation formula; endpoints stay exact.
     """
     import numpy as np
 
@@ -3887,22 +4437,41 @@ def _subtitle_gaussian_blend_interval(base: Any, weight: Any, target: Any) -> tu
         return np.where((exact < 0) & (exact > -np.finfo(np.float32).tiny),
                         np.float32(-0.0), enclosed).astype(np.float32)
 
-    b = np.asarray(base, dtype=np.float32).astype(np.float64)
-    m = np.asarray(weight, dtype=np.float32).astype(np.float64)
-    om_lo, om_hi = floor32(1.0 - m).astype(np.float64), ceil32(1.0 - m).astype(np.float64)
-    bt_lo = floor32(np.minimum(om_lo * b, om_hi * b)).astype(np.float64)
-    bt_hi = ceil32(np.maximum(om_lo * b, om_hi * b)).astype(np.float64)
-    ui_lo = floor32(m * float(np.float32(target))).astype(np.float64)
-    ui_hi = ceil32(m * float(np.float32(target))).astype(np.float64)
-    return floor32(bt_lo + ui_lo), ceil32(bt_hi + ui_hi)
+    b = np.asarray(base, dtype=np.float32)
+    d = np.asarray(budget, dtype=np.float32).astype(np.float64)
+    ui = float(np.float32(target))
+    width = float(np.float32(source_width))
+    normalized_lo = floor32(d / width).astype(np.float64)
+    normalized_hi = ceil32(d / width).astype(np.float64)
+    if source_width != 1:  # D3D explicitly requires x/1 == x, except permitted denorm flush.
+        reciprocal = 1.0 / width
+        reciprocal_ulp = math.ldexp(1.0, math.frexp(reciprocal)[1] - 24)
+        # Only representable reciprocals within one ULP of the exact reciprocal can occur.
+        reciprocal_lo = float(ceil32(reciprocal - reciprocal_ulp))
+        reciprocal_hi = float(floor32(reciprocal + reciprocal_ulp))
+        product_lo_exact, product_hi_exact = d * reciprocal_lo, d * reciprocal_hi
+        product_lo = product_lo_exact.astype(np.float32).astype(np.float64)
+        product_hi = product_hi_exact.astype(np.float32).astype(np.float64)
+        product_lo = np.where((product_lo_exact > 0) & (product_lo_exact < np.finfo(np.float32).tiny),
+                              0.0, product_lo)
+        normalized_lo = np.minimum(normalized_lo, product_lo)
+        normalized_hi = np.maximum(normalized_hi, product_hi)
+    positive = np.subtract(np.float32(target), b, dtype=np.float32) > 0
+    low = np.where(positive, ui - normalized_hi, ui + normalized_lo)
+    high = np.where(positive, ui - normalized_lo, ui + normalized_hi)
+    interval_low, interval_high = floor32(low), ceil32(high)
+    # Production saturates the direct arithmetic to the immutable closed interval, with
+    # explicit endpoint copies. Monotonic clipping encloses every admitted rounded result.
+    minimum, maximum = np.minimum(b, np.float32(target)), np.maximum(b, np.float32(target))
+    return np.clip(interval_low, minimum, maximum), np.clip(interval_high, minimum, maximum)
 
 
 def validate_subtitle_gaussian_fields(
         payloads: Dict[str, bytes], base_field: Any, subtitle: Dict[str, Any], *,
         final_field: Any = None) -> Dict[str, Any]:
-    """Authenticate actual saved M/proposal/C75 and optional renderer Final; no stereo renderer.
+    """Authenticate actual saved M/proposal/vertical copy and horizontal Final; no stereo renderer.
 
-    Call validate_subtitle_contour_tuple first for independent q/M/current-authority admission.
+    Call validate_subtitle_contour_tuple first for independent D/current-authority admission.
     The limiter is replayed from the saved literal proposal, never from a fabricated ideal M.
     """
     import numpy as np
@@ -3923,39 +4492,67 @@ def validate_subtitle_gaussian_fields(
     if control not in (0, 1) or bool(control) != bool(subtitle["contour"]["gaussian_smoothing_enabled"]):
         raise ValueError("Gaussian field control does not bind the authenticated tuple verdict")
     m, proposal, vertical = (leaves[role] for role in ("gaussian_weight", "gaussian_blend", "gaussian_vertical_conditioned"))
-    if np.any((m < 0) | (m > 1)):
+    if np.any((m < 0) | (m > 1)) or np.any((m == 0) & np.signbit(m)):
         raise ValueError("Gaussian weight is not finite unit-range")
     if not control:
         if (np.any(m.view(np.uint32)) or not np.array_equal(proposal.view(np.uint32), base.view(np.uint32)) or
                 not np.array_equal(vertical.view(np.uint32), base.view(np.uint32))):
-            raise ValueError("inactive Gaussian M/proposal/C75 must publish exact Base bits without reconditioning")
+            raise ValueError("inactive Gaussian M/proposal/vertical must publish exact Base bits without reconditioning")
         replayed_final = base
     else:
+        original_base = base
+        cx = np.clip(np.arange(shape[1]), content[0], content[2] - 1)
+        cy = np.clip(np.arange(shape[0]), content[1], content[3] - 1)
+        clamped_base = base[np.ix_(cy, cx)]
         target = _subtitle_gaussian_target(subtitle)
+        distance_payload = payloads["contour_distance"]
+        if len(distance_payload) != base.size * 4:
+            raise ValueError("completion slope budget has wrong exact byte length")
+        distance = np.frombuffer(distance_payload, dtype="<f4").reshape(shape)[np.ix_(cy, cx)]
+        if np.isnan(distance).any() or np.isneginf(distance).any() or np.any(distance < 0):
+            raise ValueError("active completion slope budget must be nonnegative or canonical positive infinity")
+        finite_budget = np.isfinite(distance)
+        # No vertical ramp: outside a current footprint row, copy the original dispatch
+        # pixel instead of a clamped content pixel, including distinct padding/signed zero.
+        base = np.where(finite_budget, clamped_base, original_base).astype(np.float32)
+        expected_m, _ = _subtitle_completion_weight_and_proposal(base, distance, target, subtitle["source_width"])
+        policy = coordinate_contract.EXPECTED_SUBTITLE_OCR["contour_policy"]
+        difference = np.subtract(target, base, dtype=np.float32)
+        gap = np.multiply(np.abs(difference), np.float32(subtitle["source_width"]), dtype=np.float32)
+        forced_base = ~finite_budget | ((distance != 0) & ((gap == 0) | (distance >= gap)))
+        if (np.any(np.abs(m.astype(np.float64) - expected_m.astype(np.float64)) > policy["gaussian_weight_absolute_error_limit"]) or
+                np.any(m[distance == 0].view(np.uint32) != np.float32(1).view(np.uint32)) or
+                np.any(m[forced_base].view(np.uint32))):
+            raise ValueError("completion weight differs from Base-dependent slope budget or exact interval endpoints")
         if (np.any(proposal[m == 0].view(np.uint32) != base[m == 0].view(np.uint32)) or
                 np.any(proposal[m == 1].view(np.uint32) != target.view(np.uint32))):
             raise ValueError("Gaussian literal blend zero/one endpoints are not bit-exact Base/target")
-        low, high = _subtitle_gaussian_blend_interval(base, m, target)
+        low, high = _subtitle_completion_proposal_interval(base,
+            np.where(finite_budget, distance, np.float32(0)), target, subtitle["source_width"])
         interior = (m > 0) & (m < 1)
+        if (np.any(proposal[interior & (proposal == base)].view(np.uint32) != base[interior & (proposal == base)].view(np.uint32)) or
+                np.any(proposal[interior & (proposal == target)].view(np.uint32) != target.view(np.uint32))):
+            raise ValueError("completion arithmetic clamp endpoints are not bit-exact Base/target")
         impossible_negative_zero = interior & (proposal == 0) & np.signbit(proposal) & ~np.signbit(base) & ~np.signbit(target)
         if (np.any(impossible_negative_zero) or
                 np.any((proposal[interior] < low[interior]) | (proposal[interior] > high[interior]))):
-            raise ValueError("Gaussian proposal differs from separate literal precise arithmetic beyond SM5 representational enclosure")
-        _, replayed_vertical, replayed_final = _replay_v2_limiter_fields(proposal, content[2] - content[0])
-        if not np.array_equal(vertical.view(np.uint32), replayed_vertical.view(np.uint32)):
-            raise ValueError("Gaussian vertical-conditioned field is not exact shared C75/serial-Q30 replay of saved proposal")
+            raise ValueError("completion proposal differs from direct precise arithmetic beyond SM5 representational enclosure")
+        if not np.array_equal(vertical.view(np.uint32), proposal.view(np.uint32)):
+            raise ValueError("subtitle vertical output is not a bit-exact copy of the saved proposal")
+        replayed_final = _replay_subtitle_horizontal_conditioner(proposal, original_base, content[2] - content[0])
     if final_field is not None:
         final = np.asarray(final_field, dtype=np.float32)
         if final.shape != shape or not np.array_equal(final.view(np.uint32), replayed_final.view(np.uint32)):
             raise ValueError("Gaussian Final is not exact shared horizontal Q30 replay or inactive Base copy")
-    return {"gaussian_blend_verified": True, "gaussian_vertical_conditioned_verified": True,
+    return {"gaussian_weight_verified": True, "gaussian_blend_verified": True, "gaussian_vertical_conditioned_verified": True,
             "gaussian_final_verified": final_field is not None, "gaussian_smoothing_enabled": bool(control),
-            "blend_arithmetic_admission": "separate-fp32-operation-adjacent-representable-enclosure-bit-exact-endpoints",
-            "post_conditioning": "shared-vertical75-25-horizontal-Q30-no-exact-repin"}
+            "gaussian_weight_max_absolute_error": float(np.max(np.abs(m.astype(np.float64) - expected_m.astype(np.float64)))) if control else 0.0,
+            "blend_arithmetic_admission": "direct-budget-SM5-1ULP-reciprocal-RNE-multiply-or-direct-division-signed-add-closed-endpoint-enclosure",
+            "post_conditioning": "vertical-proposal-bit-copy-horizontal-Q30-unchanged-rows-original-base"}
 
 
 def _replay_subtitle_contour_conditioner(base_field: Any, subtitle: Dict[str, Any], distance_field: Any) -> Any:
-    """Mathematical literal Gaussian proposal helper for authored fixtures, not actual exp words.
+    """Mathematical direct completion proposal helper for authored fixtures.
 
     Actual native validation consumes saved M/blend and validate_subtitle_gaussian_fields.
     """
@@ -3965,17 +4562,54 @@ def _replay_subtitle_contour_conditioner(base_field: Any, subtitle: Dict[str, An
     q = np.asarray(distance_field, dtype=np.float32)
     if q.shape != base.shape:
         raise ValueError("Gaussian Base/q field shapes differ")
-    if not subtitle["contour"]["authority_valid"] or not np.isfinite(q[content[1], content[0]]) or q[content[1], content[0]] < 0:
+    control_column = q[content[1]:content[3], content[0]]
+    if not subtitle["contour"]["authority_valid"] or not np.any(np.isfinite(control_column) & (control_column >= 0)):
         return base.copy()
     x = np.clip(np.arange(base.shape[1]), content[0], content[2] - 1)
     y = np.clip(np.arange(base.shape[0]), content[1], content[3] - 1)
-    weight = _subtitle_gaussian_weight_from_q(q[np.ix_(y, x)], subtitle["source_width"], subtitle["source_height"])
-    return _subtitle_gaussian_literal_blend(base, weight, _subtitle_gaussian_target(subtitle))
+    joined_q = q[np.ix_(y, x)]
+    base = np.where(np.isfinite(joined_q), base[np.ix_(y, x)], base).astype(np.float32)
+    _, proposal = _subtitle_completion_weight_and_proposal(
+        base, joined_q, _subtitle_gaussian_target(subtitle), subtitle["source_width"])
+    return proposal
+
+
+def _replay_subtitle_horizontal_conditioner(proposal: Any, original_base: Any, content_width: int) -> Any:
+    """Shared horizontal serial/Q30 guard, restoring bit-identical original proposal rows."""
+    import numpy as np
+
+    values, base = np.asarray(proposal, dtype=np.float32), np.asarray(original_base, dtype=np.float32)
+    if values.ndim != 2 or values.shape != base.shape or not values.size or content_width <= 0:
+        raise ValueError("subtitle horizontal replay requires matched nonempty fields and content width")
+    width = values.shape[1]
+    if width <= 32:
+        step = np.float32(_DEFAULTS.max_horizontal_slope / content_width)
+        final = values.copy()
+        for column in range(1, width):
+            final[:, column] = np.maximum(final[:, column], final[:, column - 1] - step)
+        for column in range(width - 2, -1, -1):
+            final[:, column] = np.maximum(final[:, column], final[:, column + 1] - step)
+    else:
+        scale = np.float32(1073741824.0)
+        limit = np.float32(_DEFAULTS.direct_container_limit)
+        bounded = np.clip(values, -limit, limit).astype(np.float32)
+        candidate = np.ceil(np.multiply(bounded, scale, dtype=np.float32)).astype(np.int64)
+        limit_q30 = int(np.ceil(np.float32(limit * scale)))
+        step = max(1, min(0x20000000 // content_width, 2 * limit_q30))
+        result = candidate.copy()
+        for column in range(1, width):
+            result[:, column] = np.maximum(candidate[:, column], result[:, column - 1] - step)
+        for column in range(width - 2, -1, -1):
+            result[:, column] = np.maximum(result[:, column], result[:, column + 1] - step)
+        final = np.divide(result.astype(np.float32), scale, dtype=np.float32)
+    unchanged = np.all(values.view(np.uint32) == base.view(np.uint32), axis=1)
+    final[unchanged] = base[unchanged]
+    return final
 
 
 def _verify_roi_exterior_zero_warp_map(
         dump_dir: Any, manifest: Dict[str, Any], input_region: Dict[str, Any],
-        final_parallax: Any) -> Dict[str, Any]:
+        final_parallax: Any, ui_target: float = 0.0) -> Dict[str, Any]:
     """Prove exact-zero exterior samples from the selected full-source inverse map."""
 
     import hashlib
@@ -4016,7 +4650,7 @@ def _verify_roi_exterior_zero_warp_map(
             source.get("width") != source_width or source.get("height") != source_height or
             warp_dimensions.get("format") != "DXGI_FORMAT_R32_FLOAT" or
             warp_dimensions.get("format_value") != 41 or
-            shape.get("schema") != 2 or shape.get("width") != map_width or
+            shape.get("schema") != 3 or shape.get("width") != map_width or
             shape.get("height") != map_height or shape.get("eye_width") != eye_width or
             shape.get("eye_height") != eye_height or
             shape.get("source_width") != source_width or
@@ -4098,7 +4732,7 @@ def _verify_roi_exterior_zero_warp_map(
     ).astype(np.float32)
     maximum_embedded_magnitude = np.float32(
         np.float32(input_region["full_source_parallax_scale"]) *
-        np.float32(np.max(np.abs(final_parallax))))
+        np.float32(max(float(np.max(np.abs(final_parallax))), float(ui_target))))
     horizontal_slope = np.float32(
         input_region["horizontal_slope_source_u_per_source_u"])
     vertical_slope = np.float32(
@@ -4282,8 +4916,9 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
       3. the conditioning chain is internally consistent with the contract's serial/Q30 branches:
          ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
          recurrences recomputed from ``candidate``; the native Gaussian proposal and shared limiter chain
-         exactly reproduce the atomic final field; and the atomic final artifact is the sole
-         warp-input authority.
+         exactly reproduce the independent protected Final diagnostic;
+      4. native matte, SCP4, joined source and exact rendered source authenticate the analytic
+         selected-map tuple independently of the diagnostic Final field.
 
     Returns a summary dict on success; raises ``ValueError`` on the first violation.
     """
@@ -4456,6 +5091,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         joint_plane_mode=shadow_state["joint_plane_mode_bits"],
         requested_gain=shadow_state_constant_float32(shadow_state_document, "requested_gain"),
         shadow_state=shadow_state,
+        input_region=input_region,
     )
     subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_CONTOURS
     geometry_chain_fields = (
@@ -4519,7 +5155,8 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
             dump_dir,
             manifest,
             input_region,
-            fields["shadow_final_parallax"],
+            fields["shadow_base_final_parallax"] if subtitle_live else fields["shadow_final_parallax"],
+            subtitle_summary["target"] if subtitle_live and subtitle_summary["active_level"] == 2 else 0.0,
         )
 
     return {

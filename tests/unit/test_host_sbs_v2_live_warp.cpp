@@ -6,29 +6,42 @@
 
 #ifdef _WIN32
 
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <filesystem>
-#include <limits>
-#include <sstream>
-#include <string>
-#include <utility>
-#include <vector>
+  #include <algorithm>
+  #include <array>
+  #include <bit>
+  #include <cmath>
+  #include <cstddef>
+  #include <cstdint>
+  #include <cstdlib>
+  #include <cstring>
+  #include <d3d11.h>
+  #include <d3dcompiler.h>
+  #include <filesystem>
+  #include <fstream>
+  #include <limits>
+  #include <nlohmann/json.hpp>
+  #include <src/crypto.h>
+  #include <src/depth_coordinate_v2.h>
+  #include <src/host_sbs_queued_render_guard.h>
+  #include <src/host_sbs_shader_cache.h>
+  #include <src/host_sbs_subtitle_render.h>
+  #include <src/host_sbs_v2_geometry.h>
+  #include <src/platform/windows/host_sbs_v2_renderer.h>
+  #include <sstream>
+  #include <stdexcept>
+  #include <string>
+  #include <string_view>
+  #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
+  #include <utility>
+  #include <vector>
+  #include <wrl/client.h>
 
-#include <d3d11.h>
-#include <d3dcompiler.h>
-#include <wrl/client.h>
-
-#include <src/depth_coordinate_v2.h>
-#include <src/host_sbs_shader_cache.h>
-#include <src/host_sbs_v2_geometry.h>
-#include <src/platform/windows/host_sbs_v2_renderer.h>
-#include <tests/fixtures/host_sbs_adaptive_camera_state.h>
+class HostSbsV2LiveWarpGpuTest_QueuedRenderRecorderScopeMatchesLegacyOrIndependentFlat_Test;
+class HostSbsV2LiveWarpGpuTest_ActualV5BackgroundRepairColourReference_Test;
+class HostSbsV2LiveWarpGpuTest_ActualV5PushPullBackgroundColourReference_Test;
+class HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageColourReference_Test;
+class HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageBalancedDrawCost_Test;
+class HostSbsV2LiveWarpGpuTest_ActualCurrentExactGlyphErasureColourReference_Test;
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -78,13 +91,33 @@ namespace {
     flat_main,
   };
 
+  struct subtitle_inputs_t {
+    models::host_sbs_subtitle_render_constants_t constants;
+    UINT width = 0u;
+    UINT height = 0u;
+    std::vector<std::uint32_t> matte;
+    std::vector<rgba16_bits_t> snapshot;
+    std::array<std::uint32_t, 6u> condition {};
+    std::array<std::uint32_t, 32u> identity {};
+  };
+
   class live_v2_warp_fixture_t {
+    friend class ::HostSbsV2LiveWarpGpuTest_QueuedRenderRecorderScopeMatchesLegacyOrIndependentFlat_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_ActualV5BackgroundRepairColourReference_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_ActualV5PushPullBackgroundColourReference_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageColourReference_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageBalancedDrawCost_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentExactGlyphErasureColourReference_Test;
   public:
     bool initialize(
       std::string &error,
       const warp_shader_e shader = warp_shader_e::live_main,
-      const bool fixed_eleven_reference = false
+      const bool fixed_eleven_reference = false,
+      const bool hardware = false
     ) {
+      if (const auto *cache_root = std::getenv("SUNSHINE_TEST_HOST_SBS_SHADER_CACHE")) {
+        models::host_sbs_shader_cache::configure_persistent_cache(cache_root);
+      }
       mapping_output =
         shader == warp_shader_e::live_mapping ||
         shader == warp_shader_e::direct_mapping;
@@ -95,7 +128,7 @@ namespace {
       D3D_FEATURE_LEVEL actual {};
       auto status = D3D11CreateDevice(
         nullptr,
-        D3D_DRIVER_TYPE_WARP,
+        hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP,
         nullptr,
         0,
         requested,
@@ -106,7 +139,7 @@ namespace {
         &context
       );
       if (FAILED(status) || actual < D3D_FEATURE_LEVEL_11_0) {
-        error = "D3D11 WARP feature level 11 initialization failed";
+        error = "D3D11 feature level 11 initialization failed";
         return false;
       }
 
@@ -169,7 +202,7 @@ namespace {
           error = "could not create the authenticated live V2 pixel shader";
           return false;
         }
-      } else if (shader == warp_shader_e::live_mapping && !fixed_eleven_reference) {
+      } else if ((shader == warp_shader_e::live_mapping || shader == warp_shader_e::live_mask) && !fixed_eleven_reference) {
         const auto diagnostic_sources =
           models::host_sbs_shader_cache::snapshot_sources(
             shader_root,
@@ -189,7 +222,9 @@ namespace {
         }
         const auto pixel_bytecode = models::host_sbs_shader_cache::get(
           diagnostic_sources,
-          models::host_sbs_shader_cache::parallax_v2_live_mapping
+          shader == warp_shader_e::live_mask ?
+            models::host_sbs_shader_cache::parallax_v2_live_mask :
+            models::host_sbs_shader_cache::parallax_v2_live_mapping
         );
         if (!pixel_bytecode || FAILED(device->CreatePixelShader(pixel_bytecode->data(), pixel_bytecode->size(), nullptr, &pixel_shader))) {
           error = "could not create the authenticated live V2 mapping pixel shader";
@@ -277,6 +312,95 @@ namespace {
       return true;
     }
 
+    nlohmann::json adapter_identity() const {
+      ComPtr<IDXGIDevice> dxgi_device;
+      ComPtr<IDXGIAdapter> adapter;
+      DXGI_ADAPTER_DESC desc {};
+      if (FAILED(device.As(&dxgi_device)) || FAILED(dxgi_device->GetAdapter(&adapter)) ||
+          FAILED(adapter->GetDesc(&desc))) {
+        throw std::runtime_error("Cannot identify replay D3D11 adapter");
+      }
+      return {{"description", std::filesystem::path(desc.Description).string()},
+              {"vendor_id", desc.VendorId}, {"device_id", desc.DeviceId},
+              {"adapter_luid_low", desc.AdapterLuid.LowPart},
+              {"adapter_luid_high", desc.AdapterLuid.HighPart}};
+    }
+
+    // Research-only: compile a pinned private shader and own immutable guard operands.
+    bool configure_private_guard(const std::filesystem::path &root, const std::string &closure, const models::research_queued_render_guard_v1::expected_t *expected, const std::vector<std::uint32_t> *transaction, std::string &error, std::string_view source_file = "sbs_reprojection_v2_live_ps.hlsl") {
+      if (!device || !context) {
+        error = "private guard requires initialized fixture";
+        return false;
+      }
+      const std::array specs {models::host_sbs_shader_cache::shader_spec {
+        source_file,
+        "main_ps",
+        "ps_5_0"
+      }};
+      const auto sources = models::host_sbs_shader_cache::snapshot_sources(root, specs);
+      if (!sources || models::host_sbs_shader_cache::source_closure_sha256(sources) != closure) {
+        error = "private queued guard closure mismatch";
+        return false;
+      }
+      const auto code = models::host_sbs_shader_cache::get(sources, specs[0]);
+      ComPtr<ID3D11PixelShader> ps;
+      if (!code || FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &ps))) {
+        error = "private queued guard PS unavailable";
+        return false;
+      }
+      ComPtr<ID3D11Buffer> cb, packet;
+      ComPtr<ID3D11ShaderResourceView> srv;
+      if (expected) {
+        D3D11_BUFFER_DESC d {};
+        d.ByteWidth = sizeof(*expected);
+        d.Usage = D3D11_USAGE_IMMUTABLE;
+        d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA init {expected, 0u, 0u};
+        if (FAILED(device->CreateBuffer(&d, &init, &cb))) {
+          error = "private queued CB failed";
+          return false;
+        }
+      }
+      if (transaction && !transaction->empty()) {
+        D3D11_BUFFER_DESC d {};
+        d.ByteWidth = static_cast<UINT>(transaction->size() * sizeof(std::uint32_t));
+        d.Usage = D3D11_USAGE_IMMUTABLE;
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        d.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        D3D11_SUBRESOURCE_DATA init {transaction->data(), 0u, 0u};
+        D3D11_SHADER_RESOURCE_VIEW_DESC view {};
+        view.Format = DXGI_FORMAT_R32_TYPELESS;
+        view.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+        view.BufferEx.NumElements = static_cast<UINT>(transaction->size());
+        view.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+        if (FAILED(device->CreateBuffer(&d, &init, &packet)) || FAILED(device->CreateShaderResourceView(packet.Get(), &view, &srv))) {
+          error = "private queued raw packet failed";
+          return false;
+        }
+      }
+      pixel_shader = ps;
+      private_guard_cb = cb;
+      private_guard_packet = packet;
+      private_guard_srv = srv;
+      private_guard_configured = true;
+      return true;
+    }
+
+    bool private_guard_slots_clear() const {
+      ID3D11Buffer *cb = nullptr;
+      ID3D11ShaderResourceView *srv = nullptr;
+      context->PSGetConstantBuffers(5u, 1u, &cb);
+      context->PSGetShaderResources(10u, 1u, &srv);
+      const bool clear = cb == nullptr && srv == nullptr;
+      if (cb) {
+        cb->Release();
+      }
+      if (srv) {
+        srv->Release();
+      }
+      return clear;
+    }
+
     bool render(
       const DXGI_FORMAT color_format,
       const UINT color_bytes_per_pixel,
@@ -291,7 +415,10 @@ namespace {
       std::string &error,
       const UINT depth_width = 0u,
       const UINT depth_height = 0u,
-      const host_sbs_v2_geometry_t &geometry = host_sbs_v2_geometry_t {}
+      const host_sbs_v2_geometry_t &geometry = host_sbs_v2_geometry_t {},
+      const subtitle_inputs_t *subtitle = nullptr,
+      ComPtr<ID3D11Texture2D> *gpu_output = nullptr,
+      const bool readback_output = true
     ) {
       const UINT resolved_depth_width = depth_width == 0u ? source_width : depth_width;
       const UINT resolved_depth_height = depth_height == 0u ? source_height : depth_height;
@@ -381,6 +508,46 @@ namespace {
         return false;
       }
 
+      ComPtr<ID3D11Texture2D> matte_texture, snapshot_texture;
+      ComPtr<ID3D11ShaderResourceView> matte_srv, snapshot_srv, condition_srv, identity_srv;
+      ComPtr<ID3D11Buffer> subtitle_buffer, condition_buffer, identity_buffer;
+      if (subtitle) {
+        if (subtitle->matte.size() != static_cast<std::size_t>(subtitle->width) * subtitle->height ||
+            subtitle->snapshot.size() != subtitle->matte.size() ||
+            !create_immutable_texture_srv(DXGI_FORMAT_R32_UINT, subtitle->width, subtitle->height,
+                                         sizeof(std::uint32_t), subtitle->matte.data(), matte_texture, matte_srv) ||
+            !create_immutable_texture_srv(DXGI_FORMAT_R16G16B16A16_FLOAT, subtitle->width, subtitle->height,
+                                         sizeof(rgba16_bits_t), subtitle->snapshot.data(), snapshot_texture, snapshot_srv)) {
+          error = "could not create native glyph matte/snapshot operands";
+          return false;
+        }
+        const auto words_srv = [&](const auto &words, ComPtr<ID3D11Buffer> &buffer,
+                                   ComPtr<ID3D11ShaderResourceView> &srv) {
+          D3D11_BUFFER_DESC desc {};
+          desc.ByteWidth = static_cast<UINT>(sizeof(words));
+          desc.Usage = D3D11_USAGE_IMMUTABLE;
+          desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+          desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+          desc.StructureByteStride = sizeof(std::uint32_t);
+          D3D11_SUBRESOURCE_DATA initial {};
+          initial.pSysMem = words.data();
+          return SUCCEEDED(device->CreateBuffer(&desc, &initial, &buffer)) &&
+            SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &srv));
+        };
+        D3D11_BUFFER_DESC desc {};
+        desc.ByteWidth = sizeof(subtitle->constants);
+        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA initial {};
+        initial.pSysMem = &subtitle->constants;
+        if (!words_srv(subtitle->condition, condition_buffer, condition_srv) ||
+            !words_srv(subtitle->identity, identity_buffer, identity_srv) ||
+            FAILED(device->CreateBuffer(&desc, &initial, &subtitle_buffer))) {
+          error = "could not create glyph owner/plane/constants operands";
+          return false;
+        }
+      }
+
       ComPtr<ID3D11Buffer> direct_constants_buffer;
       if (direct_replay) {
         const direct_parallax_constants_t direct_constants {};
@@ -413,7 +580,8 @@ namespace {
       output_desc.Format = output_format;
       output_desc.SampleDesc.Count = 1u;
       output_desc.Usage = D3D11_USAGE_DEFAULT;
-      output_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+      output_desc.BindFlags = D3D11_BIND_RENDER_TARGET |
+        (gpu_output ? D3D11_BIND_SHADER_RESOURCE : 0u);
       ComPtr<ID3D11Texture2D> output_texture;
       ComPtr<ID3D11RenderTargetView> output_rtv;
       if (FAILED(device->CreateTexture2D(
@@ -454,16 +622,67 @@ namespace {
           color_srv.Get(),
           parallax_srv.Get(),
           state_srv.Get(),
+          matte_srv.Get(),
+          snapshot_srv.Get(),
+          condition_srv.Get(),
+          identity_srv.Get(),
         },
         .geometry_constants = geometry_buffer.Get(),
+        .subtitle_constants = subtitle_buffer.Get(),
+        .queued_guard_override = use_recorder_guard_scope,
+        .queued_guard_constants = use_recorder_guard_scope ? private_guard_cb.Get() : nullptr,
+        .queued_guard_transaction = use_recorder_guard_scope ? private_guard_srv.Get() : nullptr,
       };
-      const bool submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
+      bool submitted = false;
+      recorder_flat_fallback_used = false;
+      {
+        models::research_queued_render_guard_v1::scoped_binding_t guard;
+        if (private_guard_configured && !use_recorder_guard_scope && !guard.bind(context.Get(), private_guard_cb.Get(), private_guard_srv.Get())) {
+          error = "private queued guard binding rejected";
+          return false;
+        }
+        submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
+      }
+      if (!submitted && use_recorder_guard_scope && recorder_flat_fallback_ps) {
+        ComPtr<ID3D11Predicate> previous_predicate;
+        BOOL previous_predicate_value = FALSE;
+        context->GetPredication(&previous_predicate, &previous_predicate_value);
+        context->SetPredication(nullptr, FALSE);
+        auto fallback = draw_command;
+        fallback.pixel_shader = recorder_flat_fallback_ps.Get();
+        fallback.shader_resources = {color_srv.Get(), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+        fallback.subtitle_constants = nullptr;
+        fallback.queued_guard_override = false;
+        fallback.queued_guard_constants = nullptr;
+        fallback.queued_guard_transaction = nullptr;
+        submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), fallback);
+        context->SetPredication(previous_predicate.Get(), previous_predicate_value);
+        recorder_flat_fallback_used = submitted;
+      }
       ID3D11Buffer *null_constants = nullptr;
       context->PSSetConstantBuffers(4u, 1u, &null_constants);
       if (!submitted) {
         error = "shared Host SBS V2 draw recorder rejected complete operands";
         return false;
       }
+
+      std::array<ID3D11ShaderResourceView *, 7u> remaining_resources {};
+      context->PSGetShaderResources(0u, static_cast<UINT>(remaining_resources.size()), remaining_resources.data());
+      ID3D11Buffer *remaining_subtitle = nullptr;
+      context->PSGetConstantBuffers(3u, 1u, &remaining_subtitle);
+      bool unbound = remaining_subtitle == nullptr;
+      if (remaining_subtitle) remaining_subtitle->Release();
+      for (auto *resource : remaining_resources) {
+        unbound = unbound && resource == nullptr;
+        if (resource) resource->Release();
+      }
+      if (!unbound) {
+        error = "shared renderer left native subtitle resources or b3 bound";
+        return false;
+      }
+
+      if (gpu_output) *gpu_output = output_texture;
+      if (!readback_output) { packed_output.clear(); return true; }
 
       auto staging_desc = output_desc;
       staging_desc.Usage = D3D11_USAGE_STAGING;
@@ -494,6 +713,600 @@ namespace {
       context->Unmap(staging.Get(), 0);
       return true;
     }
+
+    struct private_layer_output_t {
+      std::vector<std::byte> reconstructed_rgba8;
+      std::vector<std::byte> base_background_bgra8;
+      std::vector<std::byte> reference_rgba8;
+      std::vector<std::byte> shifted_foreground_rgba32f;
+      std::vector<std::byte> shifted_body_alpha_f32;
+    };
+
+    // External diagnostic extension: the production Base draw remains the only
+    // background inverse warp. All reference premultiplication, UI resampling and
+    // compositing occur on this device; no CPU-derived warped image is uploaded.
+    bool render_private_layer_reference(
+      UINT width, UINT height, const std::vector<bgra8_t> &background,
+      const std::vector<std::array<std::uint8_t, 4u>> &foreground_rgba,
+      const std::vector<std::uint8_t> &effective_body_alpha,
+      const std::vector<float> &base,
+      const models::depth_coordinate_v2::state_words_t &state,
+      UINT field_width, UINT field_height, const host_sbs_v2_geometry_t &geometry,
+      const subtitle_inputs_t &subtitle, const std::filesystem::path &reference_root,
+      const std::string &expected_closure, private_layer_output_t &output, std::string &error
+    ) {
+      namespace cache = models::host_sbs_shader_cache;
+      constexpr std::array<cache::shader_spec, 3u> specs {{
+        {"private_layer_reference_cs.hlsl", "premultiply_main", "cs_5_0"},
+        {"private_layer_reference_cs.hlsl", "reconstruct_main", "cs_5_0"},
+        {"private_layer_reference_cs.hlsl", "reference_main", "cs_5_0"},
+      }};
+      const auto sources = cache::snapshot_sources(reference_root, specs);
+      if (!sources || cache::source_closure_sha256(sources) != expected_closure) {
+        error = "Private layered-reference shader closure does not match its separate pin";
+        return false;
+      }
+      std::array<ComPtr<ID3D11ComputeShader>, 3u> shaders;
+      for (std::size_t i = 0u; i < specs.size(); ++i) {
+        const auto code = cache::get(sources, specs[i]);
+        if (!code || FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &shaders[i]))) {
+          error = "Could not create private layered-reference compute shader";
+          return false;
+        }
+      }
+      if (background.size() != std::size_t(width) * height || foreground_rgba.size() != background.size() ||
+          effective_body_alpha.size() != background.size()) {
+        error = "Private reference requires full-source authored background and straight RGBA";
+        return false;
+      }
+      auto disabled = subtitle;
+      disabled.constants.enabled = 0u;
+      ComPtr<ID3D11Texture2D> base_background;
+      std::vector<std::byte> unused_readback;
+      if (!render(DXGI_FORMAT_B8G8R8A8_UNORM, sizeof(bgra8_t), width, height, background.data(),
+            base, base, state, {}, unused_readback, error, field_width, field_height, geometry,
+            &disabled, &base_background, false)) return false;
+
+      ComPtr<ID3D11Texture2D> foreground_texture, background_texture, body_alpha_texture;
+      ComPtr<ID3D11ShaderResourceView> foreground_srv, background_srv, base_background_srv, body_alpha_srv;
+      if (!create_immutable_texture_srv(DXGI_FORMAT_R8G8B8A8_UNORM, width, height, 4u,
+            foreground_rgba.data(), foreground_texture, foreground_srv) ||
+          !create_immutable_texture_srv(DXGI_FORMAT_B8G8R8A8_UNORM, width, height, 4u,
+            background.data(), background_texture, background_srv) ||
+          !create_immutable_texture_srv(DXGI_FORMAT_R8_UNORM, width, height, 1u,
+            effective_body_alpha.data(), body_alpha_texture, body_alpha_srv) ||
+          FAILED(device->CreateShaderResourceView(base_background.Get(), nullptr, &base_background_srv))) {
+        error = "Could not create private authored-layer source views";
+        return false;
+      }
+      struct plane_t {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        ComPtr<ID3D11UnorderedAccessView> uav;
+      };
+      const auto plane = [&](UINT w, UINT h, DXGI_FORMAT format, plane_t &value) {
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = w; desc.Height = h; desc.MipLevels = desc.ArraySize = 1u;
+        desc.Format = format; desc.SampleDesc.Count = 1u;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &value.texture)) &&
+          SUCCEEDED(device->CreateShaderResourceView(value.texture.Get(), nullptr, &value.srv)) &&
+          SUCCEEDED(device->CreateUnorderedAccessView(value.texture.Get(), nullptr, &value.uav));
+      };
+      plane_t premult, reconstruction, reference, shifted, shifted_body;
+      if (!plane(width, height, DXGI_FORMAT_R32G32B32A32_FLOAT, premult) ||
+          !plane(width, height, DXGI_FORMAT_R8G8B8A8_UNORM, reconstruction) ||
+          !plane(width * 2u, height, DXGI_FORMAT_R8G8B8A8_UNORM, reference) ||
+          !plane(width * 2u, height, DXGI_FORMAT_R32G32B32A32_FLOAT, shifted) ||
+          !plane(width * 2u, height, DXGI_FORMAT_R32_FLOAT, shifted_body)) {
+        error = "Could not create private reference outputs";
+        return false;
+      }
+      ComPtr<ID3D11Buffer> reference_cb, geometry_cb, condition_buffer;
+      ComPtr<ID3D11ShaderResourceView> condition_srv;
+      const std::array<std::uint32_t, 4u> reference_words {width, height, subtitle.constants.source_width, 0u};
+      const auto immutable_buffer = [&](const void *data, UINT size, UINT bind, UINT stride,
+                                       ComPtr<ID3D11Buffer> &buffer) {
+        D3D11_BUFFER_DESC desc {};
+        desc.ByteWidth = size; desc.Usage = D3D11_USAGE_IMMUTABLE; desc.BindFlags = bind;
+        if (stride) { desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; desc.StructureByteStride = stride; }
+        D3D11_SUBRESOURCE_DATA initial {}; initial.pSysMem = data;
+        return SUCCEEDED(device->CreateBuffer(&desc, &initial, &buffer));
+      };
+      if (!immutable_buffer(reference_words.data(), sizeof(reference_words), D3D11_BIND_CONSTANT_BUFFER, 0u, reference_cb) ||
+          !immutable_buffer(&geometry, sizeof(geometry), D3D11_BIND_CONSTANT_BUFFER, 0u, geometry_cb) ||
+          !immutable_buffer(subtitle.condition.data(), sizeof(subtitle.condition), D3D11_BIND_SHADER_RESOURCE, 4u, condition_buffer) ||
+          FAILED(device->CreateShaderResourceView(condition_buffer.Get(), nullptr, &condition_srv))) {
+        error = "Could not create private reference constants/plane view";
+        return false;
+      }
+
+      // A private fixture owns its context. Explicit unbinds separate each SRV/UAV
+      // role; production's shared recorder has already unbound all PS readers/RTVs.
+      ID3D11ShaderResourceView *null_srvs[6] {};
+      ID3D11UnorderedAccessView *null_uavs[5] {};
+      const auto unbind = [&]() {
+        context->CSSetShaderResources(0u, 6u, null_srvs);
+        context->CSSetUnorderedAccessViews(0u, 5u, null_uavs, nullptr);
+      };
+      ID3D11Buffer *b0 = reference_cb.Get(), *b2 = geometry_cb.Get();
+      ID3D11SamplerState *linear = sampler.Get();
+      context->CSSetConstantBuffers(0u, 1u, &b0);
+      context->CSSetConstantBuffers(2u, 1u, &b2);
+      context->CSSetSamplers(0u, 1u, &linear);
+      ID3D11ShaderResourceView *srvs[6] {foreground_srv.Get(), background_srv.Get(),
+        base_background_srv.Get(), condition_srv.Get(), nullptr, body_alpha_srv.Get()};
+      ID3D11UnorderedAccessView *uavs[5] {premult.uav.Get(), nullptr, nullptr, nullptr, nullptr};
+      context->CSSetShaderResources(0u, 6u, srvs);
+      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
+      context->CSSetShader(shaders[0].Get(), nullptr, 0u);
+      context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
+      unbind();
+
+      srvs[4] = premult.srv.Get();
+      uavs[0] = nullptr; uavs[1] = reconstruction.uav.Get();
+      context->CSSetShaderResources(0u, 6u, srvs);
+      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
+      context->CSSetShader(shaders[1].Get(), nullptr, 0u);
+      context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
+      unbind();
+
+      uavs[1] = nullptr; uavs[2] = reference.uav.Get(); uavs[3] = shifted.uav.Get();
+      uavs[4] = shifted_body.uav.Get();
+      context->CSSetShaderResources(0u, 6u, srvs);
+      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
+      context->CSSetShader(shaders[2].Get(), nullptr, 0u);
+      context->Dispatch((width * 2u + 15u) / 16u, (height + 15u) / 16u, 1u);
+      unbind();
+      ID3D11Buffer *null_buffer = nullptr;
+      context->CSSetConstantBuffers(0u, 1u, &null_buffer);
+      context->CSSetConstantBuffers(2u, 1u, &null_buffer);
+      ID3D11SamplerState *null_sampler = nullptr;
+      context->CSSetSamplers(0u, 1u, &null_sampler);
+      context->CSSetShader(nullptr, nullptr, 0u);
+
+      // These are diagnostic transport/readbacks after all reference commands.
+      // None is uploaded again or used to choose a reference pixel.
+      const auto readback = [&](ID3D11Texture2D *texture, UINT bytes_per_pixel, std::vector<std::byte> &bytes) {
+        D3D11_TEXTURE2D_DESC desc {}; texture->GetDesc(&desc);
+        desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0u; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) return false;
+        context->CopyResource(staging.Get(), texture);
+        D3D11_MAPPED_SUBRESOURCE mapped {};
+        if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+        const auto row = std::size_t(desc.Width) * bytes_per_pixel;
+        bytes.resize(row * desc.Height);
+        for (UINT y = 0u; y < desc.Height; ++y) {
+          std::memcpy(bytes.data() + y * row, static_cast<const std::byte *>(mapped.pData) + y * mapped.RowPitch, row);
+        }
+        context->Unmap(staging.Get(), 0u);
+        return true;
+      };
+      if (!readback(reconstruction.texture.Get(), 4u, output.reconstructed_rgba8) ||
+          !readback(base_background.Get(), 4u, output.base_background_bgra8) ||
+          !readback(reference.texture.Get(), 4u, output.reference_rgba8) ||
+          !readback(shifted.texture.Get(), 16u, output.shifted_foreground_rgba32f) ||
+          !readback(shifted_body.texture.Get(), 4u, output.shifted_body_alpha_f32)) {
+        error = "Could not read private layered-reference result";
+        return false;
+      }
+      return true;
+    }
+
+    bool render_private_selector(
+      const DXGI_FORMAT color_format,
+      const UINT color_bytes_per_pixel,
+      const UINT source_width,
+      const UINT source_height,
+      const void *source_pixels,
+      const std::vector<float> &final_parallax,
+      const std::vector<float> &candidate_parallax,
+      const models::depth_coordinate_v2::state_words_t &state,
+      const std::array<float, 4> &clear_color,
+      std::vector<std::byte> &packed_output,
+      std::string &error,
+      const std::filesystem::path &private_shader_root,
+      const std::string &expected_private_closure,
+      std::vector<std::byte> &repeat_colour,
+      std::array<std::vector<std::byte>, 2u> &diagnostic_output,
+      const UINT depth_width = 0u,
+      const UINT depth_height = 0u,
+      const host_sbs_v2_geometry_t &geometry = host_sbs_v2_geometry_t {},
+      const subtitle_inputs_t *subtitle = nullptr,
+      ComPtr<ID3D11Texture2D> *gpu_output = nullptr,
+      const bool readback_output = true
+    ) {
+      namespace cache = models::host_sbs_shader_cache;
+      constexpr std::array<cache::shader_spec, 2u> private_specs {{
+        {"private_two_sided_selector_ps.hlsl", "private_selector_ps", "ps_5_0"},
+        {"sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0"},
+      }};
+      const auto private_sources = cache::snapshot_sources(private_shader_root, private_specs);
+      if (!private_sources || cache::source_closure_sha256(private_sources) != expected_private_closure) {
+        error = "Private two-sided selector closure differs from its explicit research pin";
+        return false;
+      }
+      const auto private_code = cache::get(private_sources, private_specs[0]);
+      ComPtr<ID3D11PixelShader> private_pixel_shader;
+      if (!private_code || FAILED(device->CreatePixelShader(private_code->data(), private_code->size(),
+          nullptr, &private_pixel_shader))) {
+        error = "Cannot compile the pinned private two-sided selector";
+        return false;
+      }
+      if (color_format != DXGI_FORMAT_B8G8R8A8_UNORM || color_bytes_per_pixel != 4u ||
+          mapping_output || direct_replay || !subtitle || !readback_output) {
+        error = "Private selector requires full SDR BGRA8 colour, current subtitle tuple, and readback";
+        return false;
+      }
+      const UINT resolved_depth_width = depth_width == 0u ? source_width : depth_width;
+      const UINT resolved_depth_height = depth_height == 0u ? source_height : depth_height;
+      if (!source_pixels || source_width == 0u || source_height == 0u ||
+          (depth_width == 0u) != (depth_height == 0u) ||
+          final_parallax.size() !=
+            static_cast<std::size_t>(resolved_depth_width) * resolved_depth_height ||
+          candidate_parallax.size() !=
+            static_cast<std::size_t>(resolved_depth_width) * resolved_depth_height) {
+        error = "invalid live V2 render input";
+        return false;
+      }
+
+      ComPtr<ID3D11Texture2D> color_texture;
+      ComPtr<ID3D11ShaderResourceView> color_srv;
+      if (!create_immutable_texture_srv(
+            color_format,
+            source_width,
+            source_height,
+            color_bytes_per_pixel,
+            source_pixels,
+            color_texture,
+            color_srv
+          )) {
+        error = "could not create the mono color texture";
+        return false;
+      }
+
+      ComPtr<ID3D11Texture2D> parallax_texture;
+      ComPtr<ID3D11ShaderResourceView> parallax_srv;
+      if (!create_immutable_texture_srv(
+            DXGI_FORMAT_R32_FLOAT,
+            resolved_depth_width,
+            resolved_depth_height,
+            sizeof(float),
+            final_parallax.data(),
+            parallax_texture,
+            parallax_srv
+          )) {
+        error = "could not create the signed parallax texture";
+        return false;
+      }
+
+      ComPtr<ID3D11Buffer> state_buffer;
+      ComPtr<ID3D11ShaderResourceView> state_srv;
+      D3D11_BUFFER_DESC state_desc {};
+      state_desc.ByteWidth = sizeof(state);
+      state_desc.Usage = D3D11_USAGE_IMMUTABLE;
+      state_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      state_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+      state_desc.StructureByteStride =
+        models::depth_coordinate_v2::state_vector_width * sizeof(float);
+      D3D11_SUBRESOURCE_DATA state_data {};
+      state_data.pSysMem = state.data();
+      D3D11_SHADER_RESOURCE_VIEW_DESC state_srv_desc {};
+      state_srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+      state_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+      state_srv_desc.Buffer.FirstElement = 0;
+      state_srv_desc.Buffer.NumElements =
+        models::depth_coordinate_v2::state_vector_count;
+      if (FAILED(device->CreateBuffer(&state_desc, &state_data, &state_buffer)) ||
+          FAILED(device->CreateShaderResourceView(
+            state_buffer.Get(),
+            &state_srv_desc,
+            &state_srv
+          ))) {
+        error = "could not create the authenticated V2 state buffer";
+        return false;
+      }
+
+      // Exact 48-byte mirror of HostSbsV2Geometry at b2. Creating one immutable buffer for each
+      // draw also proves that ROI geometry belongs to that exact matched render rather than to
+      // mutable fixture state retained from an earlier frame.
+      ComPtr<ID3D11Buffer> geometry_buffer;
+      D3D11_BUFFER_DESC geometry_desc {};
+      geometry_desc.ByteWidth = sizeof(geometry);
+      geometry_desc.Usage = D3D11_USAGE_IMMUTABLE;
+      geometry_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      D3D11_SUBRESOURCE_DATA geometry_data {};
+      geometry_data.pSysMem = &geometry;
+      if (FAILED(device->CreateBuffer(
+            &geometry_desc,
+            &geometry_data,
+            &geometry_buffer
+          ))) {
+        error = "could not create live V2 render constants";
+        return false;
+      }
+
+      ComPtr<ID3D11Texture2D> matte_texture, snapshot_texture;
+      ComPtr<ID3D11ShaderResourceView> matte_srv, snapshot_srv, condition_srv, identity_srv;
+      ComPtr<ID3D11Buffer> subtitle_buffer, condition_buffer, identity_buffer;
+      if (subtitle) {
+        if (subtitle->matte.size() != static_cast<std::size_t>(subtitle->width) * subtitle->height ||
+            subtitle->snapshot.size() != subtitle->matte.size() ||
+            !create_immutable_texture_srv(DXGI_FORMAT_R32_UINT, subtitle->width, subtitle->height,
+                                         sizeof(std::uint32_t), subtitle->matte.data(), matte_texture, matte_srv) ||
+            !create_immutable_texture_srv(DXGI_FORMAT_R16G16B16A16_FLOAT, subtitle->width, subtitle->height,
+                                         sizeof(rgba16_bits_t), subtitle->snapshot.data(), snapshot_texture, snapshot_srv)) {
+          error = "could not create native glyph matte/snapshot operands";
+          return false;
+        }
+        const auto words_srv = [&](const auto &words, ComPtr<ID3D11Buffer> &buffer,
+                                   ComPtr<ID3D11ShaderResourceView> &srv) {
+          D3D11_BUFFER_DESC desc {};
+          desc.ByteWidth = static_cast<UINT>(sizeof(words));
+          desc.Usage = D3D11_USAGE_IMMUTABLE;
+          desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+          desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+          desc.StructureByteStride = sizeof(std::uint32_t);
+          D3D11_SUBRESOURCE_DATA initial {};
+          initial.pSysMem = words.data();
+          return SUCCEEDED(device->CreateBuffer(&desc, &initial, &buffer)) &&
+            SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &srv));
+        };
+        D3D11_BUFFER_DESC desc {};
+        desc.ByteWidth = sizeof(subtitle->constants);
+        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA initial {};
+        initial.pSysMem = &subtitle->constants;
+        if (!words_srv(subtitle->condition, condition_buffer, condition_srv) ||
+            !words_srv(subtitle->identity, identity_buffer, identity_srv) ||
+            FAILED(device->CreateBuffer(&desc, &initial, &subtitle_buffer))) {
+          error = "could not create glyph owner/plane/constants operands";
+          return false;
+        }
+      }
+
+      ComPtr<ID3D11Buffer> direct_constants_buffer;
+      if (direct_replay) {
+        const direct_parallax_constants_t direct_constants {};
+        D3D11_BUFFER_DESC direct_desc {};
+        direct_desc.ByteWidth = sizeof(direct_constants);
+        direct_desc.Usage = D3D11_USAGE_IMMUTABLE;
+        direct_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA direct_data {};
+        direct_data.pSysMem = &direct_constants;
+        if (FAILED(device->CreateBuffer(
+              &direct_desc,
+              &direct_data,
+              &direct_constants_buffer
+            ))) {
+          error = "could not create direct-parallax constants";
+          return false;
+        }
+      }
+
+      const UINT packed_width = source_width * 2u;
+      const DXGI_FORMAT output_format =
+        mapping_output ? DXGI_FORMAT_R32_FLOAT : color_format;
+      const UINT output_bytes_per_pixel =
+        mapping_output ? sizeof(float) : color_bytes_per_pixel;
+      D3D11_TEXTURE2D_DESC output_desc {};
+      output_desc.Width = packed_width;
+      output_desc.Height = source_height;
+      output_desc.MipLevels = 1u;
+      output_desc.ArraySize = 1u;
+      output_desc.Format = output_format;
+      output_desc.SampleDesc.Count = 1u;
+      output_desc.Usage = D3D11_USAGE_DEFAULT;
+      output_desc.BindFlags = D3D11_BIND_RENDER_TARGET |
+        (gpu_output ? D3D11_BIND_SHADER_RESOURCE : 0u);
+      ComPtr<ID3D11Texture2D> output_texture;
+      ComPtr<ID3D11RenderTargetView> output_rtv;
+      if (FAILED(device->CreateTexture2D(
+            &output_desc,
+            nullptr,
+            &output_texture
+          )) ||
+          FAILED(device->CreateRenderTargetView(
+            output_texture.Get(),
+            nullptr,
+            &output_rtv
+          ))) {
+        error = "could not create the packed V2 render target";
+        return false;
+      }
+
+      // Two unchanged production-recorder draws; b5 chooses only the diagnostic MRT layout.
+      std::array<ComPtr<ID3D11Texture2D>, 2u> diagnostic_textures;
+      std::array<ComPtr<ID3D11RenderTargetView>, 2u> diagnostic_rtvs;
+      auto diagnostic_desc = output_desc;
+      diagnostic_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+      diagnostic_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+      for (std::size_t diagnostic_index = 0u; diagnostic_index < 2u; ++diagnostic_index) {
+        if (FAILED(device->CreateTexture2D(&diagnostic_desc, nullptr, &diagnostic_textures[diagnostic_index])) ||
+            FAILED(device->CreateRenderTargetView(diagnostic_textures[diagnostic_index].Get(), nullptr,
+              &diagnostic_rtvs[diagnostic_index]))) {
+          error = "Cannot allocate private selector UV/weight diagnostic MRT";
+          return false;
+        }
+        context->ClearRenderTargetView(diagnostic_rtvs[diagnostic_index].Get(), clear_color.data());
+      }
+      ComPtr<ID3D11Texture2D> repeat_colour_texture;
+      ComPtr<ID3D11RenderTargetView> repeat_colour_rtv;
+      if (FAILED(device->CreateTexture2D(&output_desc, nullptr, &repeat_colour_texture)) ||
+          FAILED(device->CreateRenderTargetView(repeat_colour_texture.Get(), nullptr, &repeat_colour_rtv))) {
+        error = "Cannot allocate repeated candidate colour proof target";
+        return false;
+      }
+      context->ClearRenderTargetView(repeat_colour_rtv.Get(), clear_color.data());
+      std::array<ComPtr<ID3D11Buffer>, 2u> diagnostic_constants;
+      for (std::uint32_t diagnostic_mode = 0u; diagnostic_mode < 2u; ++diagnostic_mode) {
+        const std::array<std::uint32_t, 4u> words {diagnostic_mode, 0u, 0u, 0u};
+        D3D11_BUFFER_DESC diagnostic_cb_desc {};
+        diagnostic_cb_desc.ByteWidth = sizeof(words);
+        diagnostic_cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
+        diagnostic_cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA diagnostic_cb_data {};
+        diagnostic_cb_data.pSysMem = words.data();
+        if (FAILED(device->CreateBuffer(&diagnostic_cb_desc, &diagnostic_cb_data, &diagnostic_constants[diagnostic_mode]))) {
+          error = "Cannot allocate private selector diagnostic b5";
+          return false;
+        }
+      }
+      context->ClearRenderTargetView(output_rtv.Get(), clear_color.data());
+      const D3D11_VIEWPORT viewport {
+        0.0f,
+        0.0f,
+        static_cast<float>(packed_width),
+        static_cast<float>(source_height),
+        0.0f,
+        1.0f,
+      };
+      if (direct_constants_buffer) {
+        ID3D11Buffer *direct_constants[] = {direct_constants_buffer.Get()};
+        context->PSSetConstantBuffers(4, 1, direct_constants);
+      }
+      const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
+        .render_targets = {output_rtv.Get(), nullptr},
+        .render_target_count = 1u,
+        .vertex_shader = vertex_shader.Get(),
+        .pixel_shader = private_pixel_shader.Get(),
+        .viewport = viewport,
+        .sampler = sampler.Get(),
+        .shader_resources = {
+          color_srv.Get(),
+          parallax_srv.Get(),
+          state_srv.Get(),
+          matte_srv.Get(),
+          snapshot_srv.Get(),
+          condition_srv.Get(),
+          identity_srv.Get(),
+        },
+        .geometry_constants = geometry_buffer.Get(),
+        .subtitle_constants = subtitle_buffer.Get(),
+      };
+      struct restore_private_b5_t {
+        ID3D11DeviceContext *context;
+        ComPtr<ID3D11Buffer> previous;
+        explicit restore_private_b5_t(ID3D11DeviceContext *selected) : context(selected) {
+          context->PSGetConstantBuffers(5u, 1u, previous.GetAddressOf());
+        }
+        ~restore_private_b5_t() {
+          auto *value = previous.Get();
+          context->PSSetConstantBuffers(5u, 1u, &value);
+        }
+      };
+      bool submitted = true;
+      for (std::size_t diagnostic_pass = 0u; diagnostic_pass < 2u; ++diagnostic_pass) {
+        restore_private_b5_t restore_private_b5(context.Get());
+        auto private_command = draw_command;
+        private_command.render_target_count = 2u;
+        private_command.render_targets = {
+          diagnostic_pass == 0u ? output_rtv.Get() : repeat_colour_rtv.Get(),
+          diagnostic_rtvs[diagnostic_pass].Get()};
+        auto *diagnostic_cb = diagnostic_constants[diagnostic_pass].Get();
+        context->PSSetConstantBuffers(5u, 1u, &diagnostic_cb);
+        submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), private_command) && submitted;
+      }
+      ID3D11Buffer *null_constants = nullptr;
+      context->PSSetConstantBuffers(4u, 1u, &null_constants);
+      if (!submitted) {
+        error = "shared Host SBS V2 draw recorder rejected complete operands";
+        return false;
+      }
+
+      std::array<ID3D11ShaderResourceView *, 7u> remaining_resources {};
+      context->PSGetShaderResources(0u, static_cast<UINT>(remaining_resources.size()), remaining_resources.data());
+      ID3D11Buffer *remaining_subtitle = nullptr;
+      context->PSGetConstantBuffers(3u, 1u, &remaining_subtitle);
+      bool unbound = remaining_subtitle == nullptr;
+      if (remaining_subtitle) remaining_subtitle->Release();
+      for (auto *resource : remaining_resources) {
+        unbound = unbound && resource == nullptr;
+        if (resource) resource->Release();
+      }
+      if (!unbound) {
+        error = "shared renderer left native subtitle resources or b3 bound";
+        return false;
+      }
+
+      if (gpu_output) *gpu_output = output_texture;
+      if (!readback_output) { packed_output.clear(); return true; }
+
+      auto staging_desc = output_desc;
+      staging_desc.Usage = D3D11_USAGE_STAGING;
+      staging_desc.BindFlags = 0;
+      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      ComPtr<ID3D11Texture2D> staging;
+      if (FAILED(device->CreateTexture2D(&staging_desc, nullptr, &staging))) {
+        error = "could not create the packed V2 staging texture";
+        return false;
+      }
+      context->CopyResource(staging.Get(), output_texture.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        error = "could not read the packed V2 render result";
+        return false;
+      }
+      const std::size_t row_bytes =
+        static_cast<std::size_t>(packed_width) * output_bytes_per_pixel;
+      packed_output.resize(row_bytes * source_height);
+      for (UINT y = 0; y < source_height; ++y) {
+        std::memcpy(
+          packed_output.data() + static_cast<std::size_t>(y) * row_bytes,
+          static_cast<const std::byte *>(mapped.pData) +
+            static_cast<std::size_t>(y) * mapped.RowPitch,
+          row_bytes
+        );
+      }
+      context->Unmap(staging.Get(), 0);
+      for (std::size_t diagnostic_index = 0u; diagnostic_index < 2u; ++diagnostic_index) {
+        auto diagnostic_staging_desc = diagnostic_desc;
+        diagnostic_staging_desc.Usage = D3D11_USAGE_STAGING;
+        diagnostic_staging_desc.BindFlags = 0u;
+        diagnostic_staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> diagnostic_staging;
+        if (FAILED(device->CreateTexture2D(&diagnostic_staging_desc, nullptr, &diagnostic_staging))) {
+          error = "Cannot allocate private selector diagnostic staging";
+          return false;
+        }
+        context->CopyResource(diagnostic_staging.Get(), diagnostic_textures[diagnostic_index].Get());
+        D3D11_MAPPED_SUBRESOURCE diagnostic_mapped {};
+        if (FAILED(context->Map(diagnostic_staging.Get(), 0u, D3D11_MAP_READ, 0u, &diagnostic_mapped))) {
+          error = "Cannot read private selector diagnostics";
+          return false;
+        }
+        const std::size_t diagnostic_row_bytes = std::size_t(packed_width) * 16u;
+        diagnostic_output[diagnostic_index].resize(diagnostic_row_bytes * source_height);
+        for (UINT diagnostic_row = 0u; diagnostic_row < source_height; ++diagnostic_row) {
+          std::memcpy(diagnostic_output[diagnostic_index].data() + std::size_t(diagnostic_row) * diagnostic_row_bytes,
+            static_cast<const std::byte *>(diagnostic_mapped.pData) + std::size_t(diagnostic_row) * diagnostic_mapped.RowPitch,
+            diagnostic_row_bytes);
+        }
+        context->Unmap(diagnostic_staging.Get(), 0u);
+      }
+      context->CopyResource(staging.Get(), repeat_colour_texture.Get());
+      D3D11_MAPPED_SUBRESOURCE repeat_mapped {};
+      if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &repeat_mapped))) {
+        error = "Cannot read repeated candidate colour";
+        return false;
+      }
+      repeat_colour.resize(packed_output.size());
+      for (UINT repeat_row = 0u; repeat_row < source_height; ++repeat_row) {
+        std::memcpy(repeat_colour.data() + std::size_t(repeat_row) * row_bytes,
+          static_cast<const std::byte *>(repeat_mapped.pData) + std::size_t(repeat_row) * repeat_mapped.RowPitch,
+          row_bytes);
+      }
+      context->Unmap(staging.Get(), 0u);
+      if (repeat_colour != packed_output) {
+        error = "The two diagnostic draws produced different candidate colour bytes";
+        return false;
+      }
+      return true;
+    }
+
 
   private:
     bool create_immutable_texture_srv(
@@ -532,6 +1345,12 @@ namespace {
     ComPtr<ID3D11SamplerState> sampler;
     bool mapping_output = false;
     bool direct_replay = false;
+    bool private_guard_configured = false;
+    bool use_recorder_guard_scope = false;
+    ComPtr<ID3D11PixelShader> recorder_flat_fallback_ps;
+    bool recorder_flat_fallback_used = false;
+    ComPtr<ID3D11Buffer> private_guard_cb, private_guard_packet;
+    ComPtr<ID3D11ShaderResourceView> private_guard_srv;
   };
 
   template <typename Pixel>
@@ -672,6 +1491,42 @@ namespace {
     state[v2::mapping_state_reserved_2] = 0u;
     host_sbs_test::seal_adaptive_camera(state);
     return state;
+  }
+
+  subtitle_inputs_t make_subtitle_inputs(
+    const UINT width, const UINT height,
+    const models::depth_coordinate_v2::state_words_t &state,
+    const float plane, const UINT field_width = 0u, const UINT field_height = 0u
+  ) {
+    namespace v2 = models::depth_coordinate_v2;
+    subtitle_inputs_t input;
+    input.width = width;
+    input.height = height;
+    input.constants = {1u, 0u, 7u, 0u, 0u, 0u, width, height};
+    input.matte.resize(static_cast<std::size_t>(width) * height);
+    input.snapshot.resize(input.matte.size(), {0u, 0u, 0u, 0x3c00u});
+    input.condition = {v2::subtitle_condition_param_schema, v2::subtitle_condition_param_tag,
+      1u, 0u, v2::subtitle_condition_param_fully_active_value, std::bit_cast<std::uint32_t>(plane)};
+    auto &id = input.identity;
+    id[0] = v2::subtitle_contour_schema;
+    id[1] = v2::subtitle_contour_history_tag;
+    id[2] = 1u;
+    id[3] = state[v2::confirmed_cut_count];
+    id[4] = 1u;
+    id[6] = 7u;
+    id[8] = width;
+    id[9] = height;
+    id[11] = height;
+    id[12] = field_width == 0u ? width : field_width;
+    id[13] = field_height == 0u ? height : field_height;
+    id[15] = id[13];
+    id[18] = id[12];
+    id[19] = id[13];
+    id[20] = state[v2::gain_last_observation_low];
+    id[21] = state[v2::gain_last_observation_high];
+    id[22] = v2::subtitle_contour_recipe;
+    id[23] = 1u;
+    return input;
   }
 
   std::vector<rgba32f_t> unpack_rgba32f(const std::vector<std::byte> &bytes) {
@@ -2367,11 +3222,6 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
   }
   std::size_t active_compare = std::string::npos;
   std::string active_zero_register;
-  const auto division_count = static_cast<std::size_t>(std::count_if(
-    lines.begin(),
-    lines.end(),
-    [](const std::string &line) { return line.starts_with("div "); }
-  ));
   for (std::size_t index = 0u; index < lines.size(); ++index) {
     const auto &line = lines[index];
     if (line.starts_with("eq ") && line.find("cb2[0].z") != std::string::npos &&
@@ -2404,6 +3254,9 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
   std::size_t roi_resinfo = 0u;
   std::size_t source_resinfo = 0u;
   std::size_t full_source_resinfo = 0u;
+  std::size_t base_divisions = 0u;
+  std::size_t full_base_samples = 0u;
+  std::size_t roi_base_samples = 0u;
   for (std::size_t index = full_branch; index < lines.size(); ++index) {
     const auto &line = lines[index];
     if (line.starts_with("if_") || line.starts_with("loop")) {
@@ -2413,6 +3266,14 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
     } else if (line == "endif" || line == "endloop") {
       --branch_depth;
       if (branch_depth == 0) break;
+    }
+    base_divisions += line.starts_with("div ") ? 1u : 0u;
+    if (line.starts_with("sample_l") && line.find("t1.") != std::string::npos) {
+      if (roi_else) {
+        ++roi_base_samples;
+      } else {
+        ++full_base_samples;
+      }
     }
     if (line.find("resinfo") != std::string::npos &&
         line.find("t1.") != std::string::npos) {
@@ -2433,10 +3294,307 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
   EXPECT_EQ(roi_resinfo, 1u);
   EXPECT_EQ(full_source_resinfo, 0u);
   EXPECT_EQ(source_resinfo, 0u);
-  // This is a whole-bytecode count, not the full-frame branch's arithmetic. Every mode shares
-  // the production continuous ROI embedding; only FinalParallax needs its tensor dimensions.
-  // SourceColor is sampled once without a dimension query or source-kind/fill classification.
-  EXPECT_LE(division_count, 8u);
+  // Inspect the actual production Base branch, which ends before native glyph selection and
+  // its display/HDR RGB validation. Those later operations are covered by the selector tests;
+  // they do not belong to the inverse's arithmetic or field-query budget.
+  EXPECT_LE(base_divisions, 8u);
+  EXPECT_GE(full_base_samples, 1u);
+  EXPECT_LE(full_base_samples, 11u);
+  EXPECT_GE(roi_base_samples, 1u);
+  EXPECT_LE(roi_base_samples, 11u);
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, PrivateQueuedRenderGuardMatchesLegacyOrIndependentFlat) {
+  namespace guard = models::research_queued_render_guard_v1;
+  namespace v2 = models::depth_coordinate_v2;
+  const char *root = std::getenv("APOLLO_QUEUED_RENDER_GUARD_SHADER_ROOT");
+  if (!root || !*root) {
+    GTEST_SKIP() << "Opt-in private shader root required";
+  }
+  const char *hw = std::getenv("APOLLO_QUEUED_RENDER_GUARD_HARDWARE");
+  const bool hardware = hw && std::string_view(hw) == "1";
+  constexpr UINT width = 128u, height = 4u, row = 2u, xglyph = 64u;
+  constexpr std::uint64_t token = 0x123456789abcdef0ull, clock = 0x1020304050607080ull;
+  const auto expected = guard::make_expected(token, 1u, clock);
+  auto state = make_live_state(true, true);
+  state[v2::gain_last_observation_low] = static_cast<std::uint32_t>(clock);
+  state[v2::gain_last_observation_high] = static_cast<std::uint32_t>(clock >> 32u);
+  state[v2::gain_seed_first_low] = state[v2::gain_seed_last_low] = static_cast<std::uint32_t>(clock);
+  state[v2::gain_seed_first_high] = state[v2::gain_seed_last_high] = static_cast<std::uint32_t>(clock >> 32u);
+  state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
+  auto subtitle = make_subtitle_inputs(width, height, state, 2.5f / width);
+  subtitle.matte[row * width + xglyph] = 1u;
+  subtitle.snapshot[row * width + xglyph] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  std::vector<rgba32f_t> source(width * height);
+  for (UINT y = 0; y < height; ++y) {
+    for (UINT x = 0; x < width; ++x) {
+      source[y * width + x] = {float(x) / width, float(y) / height, 0.2f, 1.0f};
+    }
+  }
+  source[row * width + xglyph] = {1.0f, 1.0f, 1.0f, 1.0f};
+  const std::vector<float> base(width * height, -2.0f / width);
+  std::string error;
+  live_v2_warp_fixture_t legacy, flat, private_ps;
+  ASSERT_TRUE(legacy.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
+  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main, false, hardware)) << error;
+  ASSERT_TRUE(private_ps.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
+  const auto render = [&](live_v2_warp_fixture_t &f, const auto &s, const subtitle_inputs_t *ui) {
+    std::vector<std::byte> out;
+    EXPECT_TRUE(f.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t), width, height, source.data(), base, base, s, {}, out, error, 0u, 0u, {}, ui)) << error;
+    return out;
+  };
+  const auto legacy_pixels = render(legacy, state, &subtitle), flat_pixels = render(flat, state, &subtitle);
+  ASSERT_NE(legacy_pixels, flat_pixels) << "Exercise a real nonidentity Base/UI draw";
+  ASSERT_NE(legacy_pixels, render(legacy, state, nullptr)) << "Fixture must exercise analytic UI too";
+  const auto packet_for = [&](const guard::expected_t &e, std::uint32_t marker) {
+    std::vector<std::uint32_t> p(64u);
+    p[0] = 1u;
+    p[1] = 1u ^ 0xd1ec15a5u ^ marker;
+    p[2] = e.root[0];
+    p[3] = e.root[1];
+    p[4] = e.root[0] ^ 0xa3756c91u;
+    p[5] = e.root[1] ^ 0x5c8a936eu;
+    p[6] = 0x47524243u;
+    p[7] = marker;
+    p[8] = p[2];
+    p[9] = p[3];
+    p[10] = p[4];
+    p[11] = p[5];
+    p[12] = 0x54535152u;
+    p[13] = e.root[2];
+    p[14] = e.root[3];
+    p[20] = p[21] = p[22] = 1u;
+    p[24] = (width + 15u) / 16u;
+    p[25] = (height + 15u) / 16u;
+    p[26] = 1u;
+    return p;
+  };
+  constexpr const char *closure = "dea3e41340dc8e5a219a823a1c438d9cd6812a2c3fc7ed7477c52a40443f0660";
+  auto disabled = expected;
+  disabled.control[0] = 0u;
+  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &disabled, nullptr, error)) << error;
+  EXPECT_EQ(render(private_ps, state, &subtitle), legacy_pixels);
+  EXPECT_TRUE(private_ps.private_guard_slots_clear());
+  for (const auto work : {0u, 1u, 2u}) {
+    for (const auto marker : {0u, 0x52434f4fu}) {
+      if (marker && work != 1u) {
+        continue;
+      }
+      const auto e = guard::make_expected(token, work, clock);
+      const auto p = packet_for(e, marker);
+      ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &e, &p, error)) << error;
+      EXPECT_EQ(render(private_ps, state, &subtitle), legacy_pixels) << "work=" << work << " marker=" << marker;
+      EXPECT_TRUE(private_ps.private_guard_slots_clear());
+    }
+  }
+
+  struct bad_t {
+    std::string name;
+    guard::expected_t e;
+    std::vector<std::uint32_t> p;
+    v2::state_words_t s;
+    bool missing = false;
+  };
+
+  const auto good = packet_for(expected, 0x52434f4fu);
+  std::vector<bad_t> bad;
+  const auto add = [&](const std::string &name) {
+    bad.push_back({name, expected, good, state, false});
+    return &bad.back();
+  };
+  add("missing_raw_packet")->missing = true;
+  add("raw_packet_wrong_size")->p.resize(63u);
+  add("control_bad_enable")->e.control[0] = 2u;
+  add("control_bad_tag")->e.control[1] ^= 1u;
+  add("control_bad_schema")->e.control[2] = 2u;
+  add("control_bad_reserved")->e.control[3] = 1u;
+  add("zero_expected_token")->e.root[0] = 0u;
+  bad.back().e.root[1] = 0u;
+  add("bad_expected_work4")->e.root[2] = 4u;
+  add("bad_expected_cookie")->e.root[3] ^= 1u;
+  add("zero_expected_clock")->e.observation = {0u, 0u, 0u, 0u};
+  add("expected_reserved")->e.observation[2] = 1u;
+  for (const auto index : {8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u}) {
+    add("bad_request_word_" + std::to_string(index))->p[index] ^= 1u;
+  }
+  add("request_mixed_work3")->p[13] = 3u;
+  bad.back().p[14] = 3u ^ 0x6f435257u;
+  add("request_work4")->p[13] = 4u;
+  bad.back().p[14] = 4u ^ 0x6f435257u;
+  add("pre_child_magic0")->p[6] = 0u;
+  add("proposal_magic")->p[6] = 0x504f5250u;
+  add("reuse_not_infer")->p[0] = 0u;
+  bad.back().p[1] = 0xd1ec15a5u;
+  bad.back().p[7] = 0u;
+  for (const auto index : {1u, 2u, 3u, 4u, 5u, 7u}) {
+    add("bad_receipt_word_" + std::to_string(index))->p[index] ^= 1u;
+  }
+  add("OOCR_wrong_work2")->e = guard::make_expected(token, 2u, clock);
+  bad.back().p = packet_for(bad.back().e, 0x52434f4fu);
+  for (const auto index : {20u, 21u, 22u, 23u, 24u, 25u, 26u, 27u}) {
+    add("bad_finalizer_word_" + std::to_string(index))->p[index] ^= 1u;
+  }
+  add("old_state_clock")->s[v2::gain_last_observation_low] ^= 1u;
+  bad.back().s[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(bad.back().s);
+  for (const auto &c : bad) {
+    SCOPED_TRACE(c.name);
+    ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &c.e, c.missing ? nullptr : &c.p, error)) << error;
+    EXPECT_EQ(render(private_ps, c.s, &subtitle), flat_pixels) << "Both Base and UI must be rejected";
+    EXPECT_TRUE(private_ps.private_guard_slots_clear());
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, QueuedRenderRecorderScopeMatchesLegacyOrIndependentFlat) {
+  namespace guard = models::research_queued_render_guard_v1;
+  namespace v2 = models::depth_coordinate_v2;
+  const char *root = std::getenv("APOLLO_QUEUED_LIVE_SHADER_ROOT");
+  if (!root || !*root) {
+    GTEST_SKIP() << "Opt-in private shader root required";
+  }
+  const char *hw = std::getenv("APOLLO_QUEUED_RENDER_GUARD_HARDWARE");
+  const bool hardware = hw && std::string_view(hw) == "1";
+  constexpr UINT width = 128u, height = 4u, row = 2u, xglyph = 64u;
+  constexpr std::uint64_t token = 0x123456789abcdef0ull, clock = 0x1020304050607080ull;
+  const auto expected = guard::make_expected(token, 1u, clock);
+  auto state = make_live_state(true, true);
+  state[v2::gain_last_observation_low] = static_cast<std::uint32_t>(clock);
+  state[v2::gain_last_observation_high] = static_cast<std::uint32_t>(clock >> 32u);
+  state[v2::gain_seed_first_low] = state[v2::gain_seed_last_low] = static_cast<std::uint32_t>(clock);
+  state[v2::gain_seed_first_high] = state[v2::gain_seed_last_high] = static_cast<std::uint32_t>(clock >> 32u);
+  state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
+  auto subtitle = make_subtitle_inputs(width, height, state, 2.5f / width);
+  subtitle.matte[row * width + xglyph] = 1u;
+  subtitle.snapshot[row * width + xglyph] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  std::vector<rgba32f_t> source(width * height);
+  for (UINT y = 0; y < height; ++y) {
+    for (UINT x = 0; x < width; ++x) {
+      source[y * width + x] = {float(x) / width, float(y) / height, 0.2f, 1.0f};
+    }
+  }
+  source[row * width + xglyph] = {1.0f, 1.0f, 1.0f, 1.0f};
+  const std::vector<float> base(width * height, -2.0f / width);
+  std::string error;
+  live_v2_warp_fixture_t legacy, flat, private_ps;
+  ASSERT_TRUE(legacy.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
+  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main, false, hardware)) << error;
+  ASSERT_TRUE(private_ps.initialize(error, warp_shader_e::flat_main, false, hardware)) << error;
+  private_ps.use_recorder_guard_scope = true;
+  // Every fixture owns a different D3D device; keep the fallback PS on this device.
+  private_ps.recorder_flat_fallback_ps = private_ps.pixel_shader;
+  const auto object_device = [](ID3D11DeviceChild *object) {
+    ComPtr<ID3D11Device> owner;
+    object->GetDevice(&owner);
+    return owner;
+  };
+  ASSERT_EQ(object_device(private_ps.recorder_flat_fallback_ps.Get()).Get(), private_ps.device.Get());
+  const auto render = [&](live_v2_warp_fixture_t &f, const auto &s, const subtitle_inputs_t *ui) {
+    std::vector<std::byte> out;
+    EXPECT_TRUE(f.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t), width, height, source.data(), base, base, s, {}, out, error, 0u, 0u, {}, ui)) << error;
+    return out;
+  };
+  const auto legacy_pixels = render(legacy, state, &subtitle), flat_pixels = render(flat, state, &subtitle);
+  ASSERT_NE(legacy_pixels, flat_pixels) << "Exercise a real nonidentity Base/UI draw";
+  ASSERT_NE(legacy_pixels, render(legacy, state, nullptr)) << "Fixture must exercise analytic UI too";
+  const auto packet_for = [&](const guard::expected_t &e, std::uint32_t marker) {
+    std::vector<std::uint32_t> p(64u);
+    p[0] = 1u;
+    p[1] = 1u ^ 0xd1ec15a5u ^ marker;
+    p[2] = e.root[0];
+    p[3] = e.root[1];
+    p[4] = e.root[0] ^ 0xa3756c91u;
+    p[5] = e.root[1] ^ 0x5c8a936eu;
+    p[6] = 0x47524243u;
+    p[7] = marker;
+    p[8] = p[2];
+    p[9] = p[3];
+    p[10] = p[4];
+    p[11] = p[5];
+    p[12] = 0x54535152u;
+    p[13] = e.root[2];
+    p[14] = e.root[3];
+    p[20] = p[21] = p[22] = 1u;
+    p[24] = (width + 15u) / 16u;
+    p[25] = (height + 15u) / 16u;
+    p[26] = 1u;
+    return p;
+  };
+  constexpr const char *closure = "9c5c978e1c09a573cf5c12f6b248afe37a21d08b102ffe63a8e2423094dd80ee";
+  constexpr const char *filename = "sbs_reprojection_v2_queued_ps.hlsl";
+  const auto good = packet_for(expected, 0x52434f4fu);
+  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
+  const auto sentinel_cb = private_ps.private_guard_cb;
+  const auto sentinel_srv = private_ps.private_guard_srv;
+  auto malformed = good;
+  malformed[6] = 0u;
+  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &malformed, error, filename)) << error;
+  auto *old_cb = sentinel_cb.Get();
+  auto *old_srv = sentinel_srv.Get();
+  private_ps.context->PSSetConstantBuffers(5u, 1u, &old_cb);
+  private_ps.context->PSSetShaderResources(10u, 1u, &old_srv);
+  EXPECT_EQ(render(private_ps, state, &subtitle), flat_pixels);
+  ComPtr<ID3D11Buffer> restored_cb;
+  ComPtr<ID3D11ShaderResourceView> restored_srv;
+  private_ps.context->PSGetConstantBuffers(5u, 1u, &restored_cb);
+  private_ps.context->PSGetShaderResources(10u, 1u, &restored_srv);
+  EXPECT_EQ(restored_cb.Get(), sentinel_cb.Get());
+  EXPECT_EQ(restored_srv.Get(), sentinel_srv.Get());
+  // Create the legacy sentinels on its own device, then restore its ordinary PS.
+  const auto ordinary_ps = legacy.pixel_shader;
+  ASSERT_TRUE(legacy.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
+  const auto legacy_sentinel_cb = legacy.private_guard_cb;
+  const auto legacy_sentinel_srv = legacy.private_guard_srv;
+  legacy.pixel_shader = ordinary_ps;
+  legacy.private_guard_configured = false;
+  ASSERT_EQ(object_device(legacy_sentinel_cb.Get()).Get(), legacy.device.Get());
+  ASSERT_EQ(object_device(legacy_sentinel_srv.Get()).Get(), legacy.device.Get());
+  auto *legacy_old_cb = legacy_sentinel_cb.Get();
+  auto *legacy_old_srv = legacy_sentinel_srv.Get();
+  legacy.context->PSSetConstantBuffers(5u, 1u, &legacy_old_cb);
+  legacy.context->PSSetShaderResources(10u, 1u, &legacy_old_srv);
+  EXPECT_EQ(render(legacy, state, &subtitle), legacy_pixels);
+  ComPtr<ID3D11Buffer> legacy_cb;
+  ComPtr<ID3D11ShaderResourceView> legacy_srv;
+  legacy.context->PSGetConstantBuffers(5u, 1u, &legacy_cb);
+  legacy.context->PSGetShaderResources(10u, 1u, &legacy_srv);
+  EXPECT_EQ(legacy_cb.Get(), legacy_sentinel_cb.Get());
+  EXPECT_EQ(legacy_srv.Get(), legacy_sentinel_srv.Get());
+  ID3D11Buffer *null_cb = nullptr;
+  ID3D11ShaderResourceView *null_srv = nullptr;
+  private_ps.context->PSSetConstantBuffers(5u, 1u, &null_cb);
+  private_ps.context->PSSetShaderResources(10u, 1u, &null_srv);
+  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
+  EXPECT_EQ(render(private_ps, state, &subtitle), legacy_pixels);
+  EXPECT_TRUE(private_ps.private_guard_slots_clear());
+  EXPECT_FALSE(private_ps.recorder_flat_fallback_used);
+  // Both incomplete binding forms execute the caller's independent current-flat GPU path.
+  private_ps.private_guard_cb.Reset();
+  EXPECT_EQ(render(private_ps, state, &subtitle), flat_pixels);
+  EXPECT_TRUE(private_ps.recorder_flat_fallback_used);
+  EXPECT_TRUE(private_ps.private_guard_slots_clear());
+  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
+  private_ps.private_guard_srv.Reset();
+  EXPECT_EQ(render(private_ps, state, &subtitle), flat_pixels);
+  EXPECT_TRUE(private_ps.recorder_flat_fallback_used);
+  EXPECT_TRUE(private_ps.private_guard_slots_clear());
+  auto disabled = expected;
+  disabled.control[0] = 0u;
+  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &disabled, &good, error, filename)) << error;
+  EXPECT_EQ(render(private_ps, state, &subtitle), legacy_pixels);
+  EXPECT_TRUE(private_ps.private_guard_slots_clear());
+  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
+  ComPtr<ID3D11Predicate> predicate;
+  D3D11_QUERY_DESC predicate_desc {D3D11_QUERY_OCCLUSION_PREDICATE, 0u};
+  ASSERT_TRUE(SUCCEEDED(private_ps.device->CreatePredicate(&predicate_desc, &predicate)));
+  private_ps.context->SetPredication(predicate.Get(), TRUE);
+  EXPECT_EQ(render(private_ps, state, &subtitle), flat_pixels);
+  EXPECT_TRUE(private_ps.recorder_flat_fallback_used);
+  ComPtr<ID3D11Predicate> restored_predicate;
+  BOOL restored_predicate_value = FALSE;
+  private_ps.context->GetPredication(&restored_predicate, &restored_predicate_value);
+  EXPECT_EQ(restored_predicate.Get(), predicate.Get());
+  EXPECT_EQ(restored_predicate_value, TRUE);
+  private_ps.context->SetPredication(nullptr, FALSE);
+  EXPECT_TRUE(private_ps.private_guard_slots_clear());
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {
@@ -2471,6 +3629,1157 @@ TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {
     error
   )) << error;
   expect_flat_identity(source, unpack_rgba32f(packed_bytes), width);
+}
+
+
+TEST(HostSbsV2LiveWarpGpuTest, NativeGlyphUnionMovesCaptionAndErasesBaseGhostWithoutOffGlyphWarp) {
+  constexpr UINT width = 128u, height = 4u, row = 2u, glyph_x = 64u;
+  const auto state = make_live_state(true, true);
+  const std::array<float, 4> clear {};
+  const std::vector<float> base(width * height, -2.0f / width);
+  std::vector<rgba32f_t> source(width * height, {0.0f, 0.0f, 0.0f, 1.0f});
+  source[row * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
+  std::string error;
+  live_v2_warp_fixture_t color, mapping;
+  ASSERT_TRUE(color.initialize(error)) << error;
+  ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping)) << error;
+  const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *subtitle) {
+    std::vector<std::byte> output;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t),
+      width, height, source.data(), base, base, state, clear, output, error,
+      0u, 0u, {}, subtitle)) << error;
+    return output;
+  };
+  const auto base_map_bytes = render(mapping, nullptr);
+  ASSERT_EQ(base_map_bytes.size(), width * height * 2u * sizeof(float));
+  std::vector<float> base_map(width * height * 2u);
+  std::memcpy(base_map.data(), base_map_bytes.data(), base_map_bytes.size());
+  for (const float shift : {2.0f, 2.5f}) {
+    auto subtitle = make_subtitle_inputs(width, height, state, shift / width);
+    subtitle.matte[row * width + glyph_x] = 1u;
+    subtitle.snapshot[row * width + glyph_x] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+    const auto output = unpack_rgba32f(render(color, &subtitle));
+    const auto map_bytes = render(mapping, &subtitle);
+    ASSERT_EQ(map_bytes.size(), base_map_bytes.size());
+    std::vector<float> map(base_map.size());
+    std::memcpy(map.data(), map_bytes.data(), map_bytes.size());
+    ASSERT_EQ(output.size(), map.size());
+    for (UINT eye = 0u; eye < 2u; ++eye) {
+      const float eye_sign = eye == 0u ? -1.0f : 1.0f;
+      const UINT ghost_x = eye == 0u ? 62u : 66u;
+      const UINT first_ui_x = eye == 0u ? 66u : (shift == 2.0f ? 62u : 61u);
+      const UINT last_ui_x = eye == 0u ? (shift == 2.0f ? 66u : 67u) : 62u;
+      const auto index = [&](UINT x, UINT y) { return y * width * 2u + eye * width + x; };
+      EXPECT_EQ(output[index(ghost_x, row)].r, 0.0f) << "Base glyph ghost, eye=" << eye;
+      for (UINT x = first_ui_x; x <= last_ui_x; ++x) {
+        EXPECT_NEAR(output[index(x, row)].r, shift == 2.0f ? 1.0f : 0.5f, 2.0e-6f);
+      }
+      for (UINT y = 0u; y < height; ++y) {
+        for (UINT x = 0u; x < width; ++x) {
+          const bool selected = y == row &&
+            (x == ghost_x || (x >= first_ui_x && x <= last_ui_x));
+          const auto i = index(x, y);
+          if (selected) {
+            const float expected = (static_cast<float>(x) + 0.5f + eye_sign * shift) / width;
+            EXPECT_FLOAT_EQ(map[i], expected) << "eye=" << eye << ", x=" << x;
+          } else {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(map[i]), std::bit_cast<std::uint32_t>(base_map[i]))
+              << "Off-glyph source changed, eye=" << eye << ", x=" << x << ", y=" << y;
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, GlyphAbsenceAndInvalidTupleImmediatelyUseGpuBaseReference) {
+  constexpr UINT width = 128u, height = 4u, row = 2u, glyph_x = 64u;
+  const auto state = make_live_state(true, true);
+  const std::array<float, 4> clear {};
+  const std::vector<float> base(width * height, -2.0f / width);
+  std::vector<rgba32f_t> source(width * height, {0.0f, 0.0f, 0.0f, 1.0f});
+  source[row * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
+  auto original = make_subtitle_inputs(width, height, state, 2.0f / width);
+  original.matte[row * width + glyph_x] = 1u;
+  original.snapshot[row * width + glyph_x] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  std::string error;
+  live_v2_warp_fixture_t color, mapping;
+  ASSERT_TRUE(color.initialize(error)) << error;
+  ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping)) << error;
+  const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *subtitle) {
+    std::vector<std::byte> output;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t),
+      width, height, source.data(), base, base, state, clear, output, error,
+      0u, 0u, {}, subtitle)) << error;
+    return output;
+  };
+  for (UINT fault = 0u; fault < 12u; ++fault) {
+    SCOPED_TRACE(fault);
+    auto subtitle = original;
+    source[row * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
+    switch (fault) {
+      case 0u: subtitle.constants.enabled = 0u; break;
+      case 1u: subtitle.condition[4] = 0u; break;
+      case 2u: subtitle.condition[2] = 0u; break;
+      case 3u: subtitle.identity[3] ^= 1u; break;
+      case 4u: subtitle.constants.analysis_generation_low ^= 1u; break;
+      case 5u: subtitle.identity[20] ^= 1u; break;
+      case 6u: subtitle.snapshot[row * width + glyph_x].a = 0u; break;
+      case 7u: subtitle.identity[22] ^= 1u; break;
+      case 8u: subtitle.identity[24] = 1u; break;
+      case 9u: subtitle.condition[5] = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN()); break;
+      case 10u: subtitle.matte[row * width + glyph_x] = 0u; break;
+      case 11u: source[row * width + glyph_x] = {0.2f, 0.0f, 0.0f, 1.0f}; break;
+    }
+    EXPECT_EQ(render(color, &subtitle), render(color, nullptr));
+    EXPECT_EQ(render(mapping, &subtitle), render(mapping, nullptr));
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, GlyphUiPlaneUsesRoiWidthAndNativeBottomCropCoordinates) {
+  constexpr UINT width = 128u, height = 16u, field_width = 16u, field_height = 4u;
+  constexpr UINT glyph_x = 64u, glyph_y = 10u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(field_width * field_height, 0.0f);
+  std::vector<rgba32f_t> source(width * height, {0.0f, 0.0f, 0.0f, 1.0f});
+  source[glyph_y * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
+  host_sbs_v2_geometry_t geometry {
+    .video_roi_active = 1.0f,
+    .video_roi_left = 0.25f, .video_roi_top = 0.25f,
+    .video_roi_right = 0.75f, .video_roi_bottom = 0.75f,
+    .tensor_content_right = field_width, .tensor_content_bottom = field_height,
+  };
+  auto subtitle = make_subtitle_inputs(64u, 8u, state, 2.0f / 64u, field_width, field_height);
+  subtitle.constants.source_left = 32u;
+  subtitle.constants.source_top = 4u;
+  subtitle.height = 4u;
+  subtitle.identity[10u] = 4u;
+  subtitle.identity[11u] = 4u;
+  subtitle.matte.resize(64u * 4u);
+  subtitle.snapshot.resize(64u * 4u);
+  const auto native_index = (glyph_y - 8u) * 64u + (glyph_x - 32u);
+  subtitle.matte[native_index] = 1u;
+  subtitle.snapshot[native_index] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  std::string error;
+  live_v2_warp_fixture_t color, mapping;
+  ASSERT_TRUE(color.initialize(error)) << error;
+  ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping)) << error;
+  const auto render = [&](live_v2_warp_fixture_t &fixture) {
+    std::vector<std::byte> bytes;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t),
+      width, height, source.data(), base, base, state, {}, bytes, error,
+      field_width, field_height, geometry, &subtitle)) << error;
+    return bytes;
+  };
+  const auto output = unpack_rgba32f(render(color));
+  const auto map_bytes = render(mapping);
+  std::vector<float> map(width * height * 2u);
+  ASSERT_EQ(map_bytes.size(), map.size() * sizeof(float));
+  std::memcpy(map.data(), map_bytes.data(), map_bytes.size());
+  for (UINT eye = 0u; eye < 2u; ++eye) {
+    const UINT moved_x = eye == 0u ? 66u : 62u;
+    const auto i = glyph_y * width * 2u + eye * width + moved_x;
+    ASSERT_LT(i, output.size());
+    EXPECT_FLOAT_EQ(output[i].r, 1.0f);
+    EXPECT_FLOAT_EQ(map[i], (glyph_x + 0.5f) / width);
+    EXPECT_FLOAT_EQ(output[glyph_y * width * 2u + eye * width + glyph_x].r, 0.0f);
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, NativeGlyphRgbRevocationUsesSdrLinearAndHdrDisplayHalfSnapshot) {
+  constexpr UINT width = 128u, height = 2u, glyph_x = 64u, row = 1u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(width * height, -2.0f / width);
+  std::string error;
+  live_v2_warp_fixture_t warp;
+  ASSERT_TRUE(warp.initialize(error)) << error;
+  for (UINT mode = 0u; mode < 3u; ++mode) {
+    SCOPED_TRACE(mode);
+    auto subtitle = make_subtitle_inputs(width, height, state, 2.0f / width);
+    subtitle.constants.color_mode = mode;
+    // For encoded SDR, native .5 stays .5. Linear .5 and scRGB1 both map to
+    // display-sRGB OETF(.5), whose stored FP16 is 0x39e2.
+    const std::uint16_t native = mode == 2u ? 0x3c00u : 0x3800u;
+    const std::uint16_t display = mode == 0u ? 0x3800u : 0x39e2u;
+    std::vector<rgba16_bits_t> source(width * height, {0u, 0u, 0u, 0x3c00u});
+    source[row * width + glyph_x] = {native, native, native, 0x3c00u};
+    subtitle.matte[row * width + glyph_x] = 1u;
+    subtitle.snapshot[row * width + glyph_x] = {display, display, display, 0x3c00u};
+    std::vector<std::byte> bytes;
+    ASSERT_TRUE(warp.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t),
+      width, height, source.data(), base, base, state, {}, bytes, error,
+      0u, 0u, {}, &subtitle)) << error;
+    const auto output = unpack_rgba16(bytes);
+    for (UINT eye = 0u; eye < 2u; ++eye) {
+      const UINT moved_x = eye == 0u ? 66u : 62u;
+      EXPECT_EQ(output[row * width * 2u + eye * width + moved_x], source[row * width + glyph_x]);
+    }
+  }
+}
+
+
+// Opt-in evidence replay. The imported state and seven operands are literal saved bytes;
+// unlike the small fixtures above, this path never seals or fabricates a camera/owner state.
+TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
+  const auto *cases_env = std::getenv("SUNSHINE_TEST_GLYPH_TUPLE_REPLAY_CASES");
+  if (!cases_env || !*cases_env) GTEST_SKIP() << "No saved glyph tuple specification selected";
+  const auto *output_env = std::getenv("SUNSHINE_TEST_GLYPH_TUPLE_REPLAY_OUTPUT");
+  ASSERT_TRUE(output_env && *output_env) << "Saved replay requires an explicit output directory";
+  namespace v2 = models::depth_coordinate_v2;
+  namespace cache = models::host_sbs_shader_cache;
+  namespace fs = std::filesystem;
+  using json = nlohmann::json;
+  try {
+    const auto require = [](bool valid, const std::string &message) {
+      if (!valid) throw std::runtime_error(message);
+    };
+    const auto read_bytes = [](const fs::path &path) {
+      std::ifstream input(path, std::ios::binary | std::ios::ate);
+      if (!input || input.tellg() < 0) throw std::runtime_error("Cannot read replay input: " + path.string());
+      std::vector<char> bytes(static_cast<std::size_t>(input.tellg()));
+      input.seekg(0);
+      if (!bytes.empty()) input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+      if (!input) throw std::runtime_error("Incomplete replay input: " + path.string());
+      return bytes;
+    };
+    const auto sha256 = [](const void *data, std::size_t size) {
+      const auto digest = crypto::hash(std::string_view(static_cast<const char *>(data), size));
+      constexpr char digits[] = "0123456789abcdef";
+      std::string hex;
+      for (const auto byte : digest) {
+        hex.push_back(digits[byte >> 4u]);
+        hex.push_back(digits[byte & 15u]);
+      }
+      return hex;
+    };
+    const auto write_bytes = [](const fs::path &path, const void *data, std::size_t size) {
+      std::ofstream output(path, std::ios::binary);
+      output.write(static_cast<const char *>(data), static_cast<std::streamsize>(size));
+      if (!output) throw std::runtime_error("Cannot write replay output: " + path.string());
+    };
+    const fs::path cases_path(cases_env), output_root(output_env);
+    require(!fs::exists(output_root) || (fs::is_directory(output_root) && fs::is_empty(output_root)),
+            "Replay output must be a new or empty directory");
+    const auto specification_bytes = read_bytes(cases_path);
+    const auto specification = json::parse(specification_bytes.begin(), specification_bytes.end());
+    require(specification.at("schema") == 1 && specification.at("driver") == "hardware",
+            "Saved glyph tuple evidence requires schema 1 and hardware D3D11");
+    const auto &cases = specification.at("cases");
+    require(cases.is_array() && !cases.empty() && cases.size() <= 64u, "Replay requires 1..64 cases");
+    std::string error;
+    live_v2_warp_fixture_t color, mapping, mask;
+    ASSERT_TRUE(color.initialize(error, warp_shader_e::live_main, false, true)) << error;
+    ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping, false, true)) << error;
+    ASSERT_TRUE(mask.initialize(error, warp_shader_e::live_mask, false, true)) << error;
+    const auto adapter = color.adapter_identity();
+    require(mapping.adapter_identity() == adapter && mask.adapter_identity() == adapter,
+            "Reference routes selected different adapters");
+    std::array<wchar_t, 32768u> executable_path {};
+    const auto executable_path_size = GetModuleFileNameW(nullptr, executable_path.data(), static_cast<DWORD>(executable_path.size()));
+    require(executable_path_size > 0u && executable_path_size < executable_path.size(), "Cannot locate replay executable");
+    const auto executable_sha256 = [&]() {
+      const auto bytes = read_bytes(fs::path(executable_path.data()));
+      return sha256(bytes.data(), bytes.size());
+    }();
+    const fs::path fixture_path = fs::path(SUNSHINE_SOURCE_DIR) / "tests/unit/test_host_sbs_v2_live_warp.cpp";
+    const auto fixture_bytes = read_bytes(fixture_path);
+    fs::create_directories(output_root);
+    json report {{"schema", 1}, {"driver", "hardware"}, {"adapter", adapter},
+      {"test_executable_path", fs::path(executable_path.data()).string()},
+      {"test_executable_sha256", executable_sha256},
+      {"fixture_source_path", fixture_path.string()},
+      {"fixture_source_sha256", sha256(fixture_bytes.data(), fixture_bytes.size())},
+      {"input_specification_path", cases_path.string()},
+      {"input_specification_sha256", sha256(specification_bytes.data(), specification_bytes.size())},
+      {"coordinate_contract_schema", v2::contract_schema},
+      {"coordinate_contract_sha256", v2::contract_canonical_sha256},
+      {"live_renderer_source_closure_sha256", cache::parallax_v2_live_renderer_source_closure_sha256},
+      {"live_diagnostic_source_closure_sha256", cache::parallax_v2_live_diagnostic_source_closure_sha256},
+      {"scope", "Literal saved seven-SRV tuple, production D3D11 shaders and shared recorder; no CPU inverse or color warp"},
+      {"route_definitions", {
+        {"base", "Saved Base/state/b2 and all saved subtitle resources; only b3.enabled set to zero"},
+        {"ui", "Constant GPU field at SCPtarget*(analysis_width/full_width); saved state and PackedToSource content scales; ROI Base embedding disabled; b3.enabled zero"},
+        {"selected", "All seven saved operands and both saved b2/b3 constant buffers, unchanged"}}},
+      {"cases", json::array()}};
+    for (std::size_t case_index = 0u; case_index < cases.size(); ++case_index) {
+      const auto &entry = cases[case_index];
+      const auto name = entry.at("name").get<std::string>();
+      SCOPED_TRACE(name);
+      const auto source_shape = entry.at("source").get<std::array<UINT, 2u>>();
+      const auto field_shape = entry.at("field").get<std::array<UINT, 2u>>();
+      const auto [width, height] = source_shape;
+      const auto [field_width, field_height] = field_shape;
+      require(width > 0u && width <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION / 2u &&
+              height > 0u && height <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+              field_width > 0u && field_width <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+              field_height > 0u && field_height <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION,
+              "Invalid source or field shape");
+      json input_bindings = json::object();
+      const auto operand = [&](const char *key, std::size_t expected_size) {
+        const auto &binding = entry.at(key);
+        fs::path path(binding.at("path").get<std::string>());
+        if (path.is_relative()) path = cases_path.parent_path() / path;
+        const auto bytes = read_bytes(path);
+        require(bytes.size() == expected_size, std::string(key) + " byte count/shape mismatch");
+        const auto hash = sha256(bytes.data(), bytes.size());
+        require(hash == binding.at("sha256").get<std::string>(), std::string(key) + " SHA-256 mismatch");
+        input_bindings[key] = {{"path", path.string()}, {"sha256", hash}, {"byte_count", bytes.size()}};
+        return bytes;
+      };
+      const auto load_object = [&]<typename T>(const char *key, T &value) {
+        const auto bytes = operand(key, sizeof(value));
+        std::memcpy(&value, bytes.data(), sizeof(value));
+      };
+      const auto load_vector = [&]<typename T>(const char *key, std::size_t count) {
+        const auto bytes = operand(key, count * sizeof(T));
+        std::vector<T> values(count);
+        std::memcpy(values.data(), bytes.data(), bytes.size());
+        return values;
+      };
+      models::depth_coordinate_v2::state_words_t state {};
+      host_sbs_v2_geometry_t geometry;
+      subtitle_inputs_t subtitle;
+      load_object("state", state);
+      load_object("geometry", geometry);
+      load_object("subtitle_constants", subtitle.constants);
+      load_object("condition", subtitle.condition);
+      load_object("identity", subtitle.identity);
+      const auto source = load_vector.template operator()<bgra8_t>("source_bgra8", std::size_t(width) * height);
+      const auto base = load_vector.template operator()<float>("base", std::size_t(field_width) * field_height);
+      const auto &id = subtitle.identity;
+      const auto &scp = subtitle.condition;
+      const auto &b3 = subtitle.constants;
+      require(v2::parallax_state_words_are_authenticated(state, entry.at("raw_coordinate_scale").get<float>(), v2::adaptive_policy_id),
+              "Saved ParallaxState is not authenticated");
+      require(state[v2::renderer_authorization_bits] == v2::contract_tag, "Saved frame has no authorized Base");
+      require(std::all_of(base.begin(), base.end(), [](float value) {
+        return std::isfinite(value) && std::abs(value) <= v2::direct_container_limit;
+      }), "Saved Base has nonfinite or out-of-container values");
+      require(b3.enabled == 1u && b3.color_mode == 0u && b3.source_width > 0u && b3.source_height > 0u &&
+              b3.source_width <= v2::subtitle_contour_source_max_extent &&
+              b3.source_height <= v2::subtitle_contour_source_max_extent &&
+              b3.source_left <= width && b3.source_top <= height &&
+              b3.source_width <= width - b3.source_left && b3.source_height <= height - b3.source_top,
+              "Saved b3 must bind an exact SDR8 analysis source inside full color");
+      require(std::isfinite(geometry.content_scale_x) && geometry.content_scale_x > 0.0f && geometry.content_scale_x <= 1.0f &&
+              std::isfinite(geometry.content_scale_y) && geometry.content_scale_y > 0.0f && geometry.content_scale_y <= 1.0f &&
+              geometry.reserved == 0.0f && (geometry.video_roi_active == 0.0f || geometry.video_roi_active == 1.0f),
+              "Invalid saved b2 geometry");
+      require(id[0] == v2::subtitle_contour_schema && id[1] == v2::subtitle_contour_history_tag &&
+              id[2] <= 1u && id[23] == 1u && id[22] == v2::subtitle_contour_recipe &&
+              (id[4] != 0u || id[5] != 0u) && id[6] == b3.analysis_generation_low && id[7] == b3.analysis_generation_high &&
+              id[8] == b3.source_width && id[9] == b3.source_height && id[11] > 0u &&
+              id[10] <= id[9] && id[11] <= id[9] - id[10] &&
+              id[12] == field_width && id[13] == field_height &&
+              id[16] < id[18] && id[17] < id[19] && id[18] <= field_width && id[19] <= field_height &&
+              id[3] == state[v2::confirmed_cut_count] &&
+              (id[20] != 0u || id[21] != 0u) && id[20] == state[v2::gain_last_observation_low] &&
+              id[21] == state[v2::gain_last_observation_high] &&
+              std::all_of(id.begin() + v2::subtitle_contour_history_reserved_offset, id.end(), [](auto value) { return value == 0u; }),
+              "Saved SCT owner/observation/cut/generation/shape binding is invalid");
+      subtitle.width = id[8];
+      subtitle.height = id[11];
+      subtitle.matte = load_vector.template operator()<std::uint32_t>("matte", std::size_t(subtitle.width) * subtitle.height);
+      subtitle.snapshot = load_vector.template operator()<rgba16_bits_t>("snapshot", subtitle.matte.size());
+      require(std::all_of(subtitle.matte.begin(), subtitle.matte.end(), [](auto value) { return value <= 1u; }),
+              "Saved matte is not literal binary R32_UINT");
+      const float target = std::bit_cast<float>(scp[5]);
+      const bool active = scp[2] > 0u;
+      require(scp[0] == v2::subtitle_condition_param_schema && scp[1] == v2::subtitle_condition_param_tag &&
+              std::isfinite(target) && target >= 0.0f && target <= v2::direct_container_limit &&
+              scp[2] <= v2::subtitle_plane_cover_capacity && (scp[3] & ~((1u << scp[2]) - 1u)) == 0u &&
+              (active ? scp[4] == v2::subtitle_condition_param_fully_active_value && id[2] == 1u :
+                        scp[3] == 0u && scp[4] == 0u && scp[5] == 0u && id[2] == 0u),
+              "Saved SCP activity/target disagrees with SCT");
+      require(active || std::all_of(subtitle.matte.begin(), subtitle.matte.end(), [](auto value) { return value == 0u; }),
+              "Inactive saved tuple retains a positive glyph matte");
+      if (geometry.video_roi_active == 1.0f) {
+        require(geometry.tensor_content_left == id[16] && geometry.tensor_content_top == id[17] &&
+                geometry.tensor_content_right == id[18] && geometry.tensor_content_bottom == id[19],
+                "Saved ROI b2 content differs from SCT");
+        const std::array actual_roi {geometry.video_roi_left, geometry.video_roi_top, geometry.video_roi_right, geometry.video_roi_bottom};
+        const std::array expected_roi {float(b3.source_left) / width, float(b3.source_top) / height,
+          float(b3.source_left + b3.source_width) / width, float(b3.source_top + b3.source_height) / height};
+        for (std::size_t i = 0u; i < actual_roi.size(); ++i) {
+          require(std::isfinite(actual_roi[i]) && actual_roi[i] >= 0.0f && actual_roi[i] <= 1.0f &&
+                  std::abs(actual_roi[i] - expected_roi[i]) * (i % 2u == 0u ? width : height) <= 0.25f,
+                  "Saved ROI b2 and integer b3 source rectangles differ");
+        }
+      } else {
+        require(b3.source_left == 0u && b3.source_top == 0u && b3.source_width == width && b3.source_height == height,
+                "Full-source saved tuple has a conflicting b3 analysis source");
+      }
+      // A constant production GPU field is the UI reference. Only the Base ROI embedding is
+      // disabled: PackedToSource's content scale and the exact saved ParallaxState are unchanged.
+      // The full-source displacement is rounded once to FP32, matching the shader's SCP product.
+      const float full_source_target = target * (float(b3.source_width) / float(width));
+      const std::vector<float> ui_field(base.size(), full_source_target);
+      auto ui_geometry = geometry;
+      ui_geometry.video_roi_active = 0.0f;
+      auto disabled_subtitle = subtitle;
+      disabled_subtitle.constants.enabled = 0u;
+      const auto case_dir = output_root / ("case_" + std::to_string(case_index));
+      fs::create_directory(case_dir);
+      json result {{"name", name}, {"source", source_shape}, {"field", field_shape},
+        {"packed", {width * 2u, height}}, {"input_bindings", input_bindings},
+        {"formats", {{"map", "float32-le raw unclamped source U, packed row-major"},
+                     {"color", "BGRA8_UNORM packed row-major"},
+                     {"mask", "BGRA8_UNORM packed row-major; red marks raw U outside [0,1]"}}},
+        {"provenance", entry.at("provenance")}, {"ui_target_bits", scp[5]},
+        {"full_source_ui_target_bits", std::bit_cast<std::uint32_t>(full_source_target)},
+        {"state_uploaded_without_modification", true}, {"routes", json::object()}};
+      for (const auto route : {"base", "ui", "selected"}) {
+        const bool is_ui = std::string_view(route) == "ui";
+        const bool is_selected = std::string_view(route) == "selected";
+        const auto &field = is_ui ? ui_field : base;
+        const auto &render_geometry = is_ui ? ui_geometry : geometry;
+        const auto *render_subtitle = is_selected ? &subtitle : &disabled_subtitle;
+        for (const auto kind : {"map", "color", "mask"}) {
+          const bool is_map = std::string_view(kind) == "map";
+          auto &fixture = is_map ? mapping : std::string_view(kind) == "mask" ? mask : color;
+          std::vector<std::byte> output;
+          ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM, sizeof(bgra8_t), width, height,
+            source.data(), field, field, state, {}, output, error, field_width, field_height,
+            render_geometry, render_subtitle)) << route << '/' << kind << ": " << error;
+          const auto path = case_dir / (std::string(route) + "_" + kind + (is_map ? ".f32" : ".bgra8"));
+          write_bytes(path, output.data(), output.size());
+          const auto hash = sha256(output.data(), output.size());
+          result["routes"][route][kind] = {{"path", path.string()}, {"sha256", hash}, {"byte_count", output.size()}};
+          const std::string expected_key = std::string("expected_selected_") + kind;
+          if (is_selected && entry.contains(expected_key)) {
+            const auto expected = operand(expected_key.c_str(), output.size());
+            const auto expected_hash = sha256(expected.data(), expected.size());
+            result["routes"][route][kind]["expected_sha256"] = expected_hash;
+            result["routes"][route][kind]["expected_bitexact"] = hash == expected_hash;
+            EXPECT_EQ(hash, expected_hash) << "Saved actual harness " << kind << " differs from selected replay";
+          }
+        }
+      }
+      result["input_bindings"] = input_bindings;
+      const auto result_text = result.dump(2);
+      write_bytes(case_dir / "metadata.json", result_text.data(), result_text.size());
+      report["cases"].push_back(std::move(result));
+    }
+    const auto report_text = report.dump(2);
+    write_bytes(output_root / "report.json", report_text.data(), report_text.size());
+  } catch (const std::exception &failure) {
+    FAIL() << failure.what();
+  }
+}
+
+
+// Research-only opt-in extension, separate from canonical SavedGlyphTupleReplay.
+// Small GPU-reference checks, independent of authored segmentation or scores.
+TEST(HostSbsV2LiveWarpGpuTest, PrivateLayerReferenceZeroOpaqueAndPremultipliedSampling) {
+  const auto *cases_env = std::getenv("SUNSHINE_TEST_PRIVATE_LAYER_REPLAY_CASES");
+  if (!cases_env || !*cases_env) GTEST_SKIP() << "No private reference shader specification selected";
+  std::ifstream stream(cases_env);
+  ASSERT_TRUE(stream);
+  const auto specification = nlohmann::json::parse(stream);
+  const bool hardware = specification.at("driver") == "hardware";
+  live_v2_warp_fixture_t fixture;
+  std::string error;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
+  constexpr UINT width = 32u, height = 2u;
+  const auto state = make_live_state(true, true);
+  const std::vector<bgra8_t> background(width * height, {20u, 40u, 80u, 255u});
+  const std::vector<float> base(width * height, 0.0f);
+  auto subtitle = make_subtitle_inputs(width, height, state, 0.0f);
+  std::vector<std::array<std::uint8_t, 4u>> foreground(width * height, {0u, 0u, 255u, 0u});
+  std::vector<std::uint8_t> body_alpha(width * height, 0u);
+  live_v2_warp_fixture_t::private_layer_output_t result;
+  const auto run = [&]() {
+    return fixture.render_private_layer_reference(width, height, background, foreground, body_alpha,
+      base, state, width, height, {}, subtitle,
+      specification.at("private_layer_shader_root").get<std::string>(),
+      specification.at("private_layer_source_closure_sha256").get<std::string>(), result, error);
+  };
+  ASSERT_TRUE(run()) << error;
+  ASSERT_EQ(result.reference_rgba8.size(), width * 2u * height * 4u);
+  for (std::size_t pixel = 0u; pixel < width * 2u * height; ++pixel) {
+    EXPECT_EQ(std::to_integer<unsigned int>(result.reference_rgba8[pixel * 4u]), 80u);
+    EXPECT_EQ(std::to_integer<unsigned int>(result.reference_rgba8[pixel * 4u + 1u]), 40u);
+    EXPECT_EQ(std::to_integer<unsigned int>(result.reference_rgba8[pixel * 4u + 2u]), 20u);
+    EXPECT_EQ(std::to_integer<unsigned int>(result.reference_rgba8[pixel * 4u + 3u]), 255u);
+  }
+  // Alpha-zero blue texels must not bleed blue into a red half-pixel edge.
+  foreground[16u] = {255u, 0u, 0u, 255u};
+  body_alpha[16u] = 255u;
+  subtitle.condition[5u] = std::bit_cast<std::uint32_t>(0.5f / width);
+  ASSERT_TRUE(run()) << error;
+  ASSERT_EQ(result.reconstructed_rgba8.size(), width * height * 4u);
+  EXPECT_EQ(std::to_integer<unsigned int>(result.reconstructed_rgba8[16u * 4u]), 255u);
+  EXPECT_EQ(std::to_integer<unsigned int>(result.reconstructed_rgba8[16u * 4u + 1u]), 0u);
+  EXPECT_EQ(std::to_integer<unsigned int>(result.reconstructed_rgba8[16u * 4u + 2u]), 0u);
+  for (const auto pixel : {17u, width + 16u}) {
+    EXPECT_LE(std::abs(int(std::to_integer<unsigned int>(result.reference_rgba8[pixel * 4u])) - 168), 1);
+    EXPECT_LE(std::abs(int(std::to_integer<unsigned int>(result.reference_rgba8[pixel * 4u + 1u])) - 20), 1);
+    EXPECT_LE(std::abs(int(std::to_integer<unsigned int>(result.reference_rgba8[pixel * 4u + 2u])) - 10), 1);
+    EXPECT_EQ(std::to_integer<unsigned int>(result.reference_rgba8[pixel * 4u + 3u]), 255u);
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
+  const auto *cases_env = std::getenv("SUNSHINE_TEST_PRIVATE_LAYER_REPLAY_CASES");
+  if (!cases_env || !*cases_env) GTEST_SKIP() << "No saved glyph tuple specification selected";
+  const auto *output_env = std::getenv("SUNSHINE_TEST_PRIVATE_LAYER_REPLAY_OUTPUT");
+  ASSERT_TRUE(output_env && *output_env) << "Saved replay requires an explicit output directory";
+  namespace v2 = models::depth_coordinate_v2;
+  namespace cache = models::host_sbs_shader_cache;
+  namespace fs = std::filesystem;
+  using json = nlohmann::json;
+  try {
+    const auto require = [](bool valid, const std::string &message) {
+      if (!valid) throw std::runtime_error(message);
+    };
+    const auto read_bytes = [](const fs::path &path) {
+      std::ifstream input(path, std::ios::binary | std::ios::ate);
+      if (!input || input.tellg() < 0) throw std::runtime_error("Cannot read replay input: " + path.string());
+      std::vector<char> bytes(static_cast<std::size_t>(input.tellg()));
+      input.seekg(0);
+      if (!bytes.empty()) input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+      if (!input) throw std::runtime_error("Incomplete replay input: " + path.string());
+      return bytes;
+    };
+    const auto sha256 = [](const void *data, std::size_t size) {
+      const auto digest = crypto::hash(std::string_view(static_cast<const char *>(data), size));
+      constexpr char digits[] = "0123456789abcdef";
+      std::string hex;
+      for (const auto byte : digest) {
+        hex.push_back(digits[byte >> 4u]);
+        hex.push_back(digits[byte & 15u]);
+      }
+      return hex;
+    };
+    const auto write_bytes = [](const fs::path &path, const void *data, std::size_t size) {
+      std::ofstream output(path, std::ios::binary);
+      output.write(static_cast<const char *>(data), static_cast<std::streamsize>(size));
+      if (!output) throw std::runtime_error("Cannot write replay output: " + path.string());
+    };
+    const fs::path cases_path(cases_env), output_root(output_env);
+    require(!fs::exists(output_root) || (fs::is_directory(output_root) && fs::is_empty(output_root)),
+            "Replay output must be a new or empty directory");
+    const auto specification_bytes = read_bytes(cases_path);
+    const auto specification = json::parse(specification_bytes.begin(), specification_bytes.end());
+    require(specification.at("schema") == 1 && (specification.at("driver") == "hardware" || specification.at("driver") == "warp"),
+            "Private layered replay requires schema 1 and an explicit hardware/warp driver");
+    const auto &cases = specification.at("cases");
+    require(cases.is_array() && !cases.empty() && cases.size() <= 8u, "Private replay requires 1..8 matched cases");
+    std::string error;
+    const bool hardware = specification.at("driver") == "hardware";
+    live_v2_warp_fixture_t color, mapping;
+    ASSERT_TRUE(color.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
+    ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping, false, hardware)) << error;
+    const auto adapter = color.adapter_identity();
+    require(mapping.adapter_identity() == adapter,
+            "Reference routes selected different adapters");
+    std::array<wchar_t, 32768u> executable_path {};
+    const auto executable_path_size = GetModuleFileNameW(nullptr, executable_path.data(), static_cast<DWORD>(executable_path.size()));
+    require(executable_path_size > 0u && executable_path_size < executable_path.size(), "Cannot locate replay executable");
+    const auto executable_sha256 = [&]() {
+      const auto bytes = read_bytes(fs::path(executable_path.data()));
+      return sha256(bytes.data(), bytes.size());
+    }();
+    const fs::path fixture_path = fs::path(SUNSHINE_SOURCE_DIR) / "tests/unit/test_host_sbs_v2_live_warp.cpp";
+    const auto fixture_bytes = read_bytes(fixture_path);
+    fs::create_directories(output_root);
+    json report {{"schema", 1}, {"driver", specification.at("driver")}, {"adapter", adapter},
+      {"test_executable_path", fs::path(executable_path.data()).string()},
+      {"test_executable_sha256", executable_sha256},
+      {"fixture_source_path", fixture_path.string()},
+      {"fixture_source_sha256", sha256(fixture_bytes.data(), fixture_bytes.size())},
+      {"input_specification_path", cases_path.string()},
+      {"input_specification_sha256", sha256(specification_bytes.data(), specification_bytes.size())},
+      {"coordinate_contract_schema", v2::contract_schema},
+      {"coordinate_contract_sha256", v2::contract_canonical_sha256},
+      {"live_renderer_source_closure_sha256", cache::parallax_v2_live_renderer_source_closure_sha256},
+      {"live_diagnostic_source_closure_sha256", cache::parallax_v2_live_diagnostic_source_closure_sha256},
+      {"scope", "PRIVATE saved-input old/new native-M rendering with unchanged production PS; authored known-layer GPU reference; no live/producer qualification"},
+      {"production_tuple_claim_for_candidate", false},
+      {"private_layer_shader_root", specification.at("private_layer_shader_root")},
+      {"private_layer_source_closure_sha256", specification.at("private_layer_source_closure_sha256")},
+      {"cases", json::array()}};
+    for (std::size_t case_index = 0u; case_index < cases.size(); ++case_index) {
+      const auto &entry = cases[case_index];
+      const auto name = entry.at("name").get<std::string>();
+      SCOPED_TRACE(name);
+      const auto source_shape = entry.at("source").get<std::array<UINT, 2u>>();
+      const auto field_shape = entry.at("field").get<std::array<UINT, 2u>>();
+      const auto [width, height] = source_shape;
+      const auto [field_width, field_height] = field_shape;
+      require(width > 0u && width <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION / 2u &&
+              height > 0u && height <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+              field_width > 0u && field_width <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+              field_height > 0u && field_height <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION,
+              "Invalid source or field shape");
+      json input_bindings = json::object();
+      const auto operand = [&](const char *key, std::size_t expected_size) {
+        const auto &binding = entry.at(key);
+        fs::path path(binding.at("path").get<std::string>());
+        if (path.is_relative()) path = cases_path.parent_path() / path;
+        const auto bytes = read_bytes(path);
+        require(bytes.size() == expected_size, std::string(key) + " byte count/shape mismatch");
+        const auto hash = sha256(bytes.data(), bytes.size());
+        require(hash == binding.at("sha256").get<std::string>(), std::string(key) + " SHA-256 mismatch");
+        input_bindings[key] = {{"path", path.string()}, {"sha256", hash}, {"byte_count", bytes.size()}};
+        return bytes;
+      };
+      const auto load_object = [&]<typename T>(const char *key, T &value) {
+        const auto bytes = operand(key, sizeof(value));
+        std::memcpy(&value, bytes.data(), sizeof(value));
+      };
+      const auto load_vector = [&]<typename T>(const char *key, std::size_t count) {
+        const auto bytes = operand(key, count * sizeof(T));
+        std::vector<T> values(count);
+        std::memcpy(values.data(), bytes.data(), bytes.size());
+        return values;
+      };
+      models::depth_coordinate_v2::state_words_t state {};
+      host_sbs_v2_geometry_t geometry;
+      subtitle_inputs_t subtitle;
+      load_object("state", state);
+      load_object("geometry", geometry);
+      load_object("subtitle_constants", subtitle.constants);
+      load_object("condition", subtitle.condition);
+      load_object("identity", subtitle.identity);
+      const auto source = load_vector.template operator()<bgra8_t>("source_bgra8", std::size_t(width) * height);
+      const auto base = load_vector.template operator()<float>("base", std::size_t(field_width) * field_height);
+      const auto &id = subtitle.identity;
+      const auto &scp = subtitle.condition;
+      const auto &b3 = subtitle.constants;
+      require(v2::parallax_state_words_are_authenticated(state, entry.at("raw_coordinate_scale").get<float>(), v2::adaptive_policy_id),
+              "Saved ParallaxState is not authenticated");
+      require(state[v2::renderer_authorization_bits] == v2::contract_tag, "Saved frame has no authorized Base");
+      require(std::all_of(base.begin(), base.end(), [](float value) {
+        return std::isfinite(value) && std::abs(value) <= v2::direct_container_limit;
+      }), "Saved Base has nonfinite or out-of-container values");
+      require(b3.enabled == 1u && b3.color_mode == 0u && b3.source_width > 0u && b3.source_height > 0u &&
+              b3.source_width <= v2::subtitle_contour_source_max_extent &&
+              b3.source_height <= v2::subtitle_contour_source_max_extent &&
+              b3.source_left <= width && b3.source_top <= height &&
+              b3.source_width <= width - b3.source_left && b3.source_height <= height - b3.source_top,
+              "Saved b3 must bind an exact SDR8 analysis source inside full color");
+      require(std::isfinite(geometry.content_scale_x) && geometry.content_scale_x > 0.0f && geometry.content_scale_x <= 1.0f &&
+              std::isfinite(geometry.content_scale_y) && geometry.content_scale_y > 0.0f && geometry.content_scale_y <= 1.0f &&
+              geometry.reserved == 0.0f && (geometry.video_roi_active == 0.0f || geometry.video_roi_active == 1.0f),
+              "Invalid saved b2 geometry");
+      require(id[0] == v2::subtitle_contour_schema && id[1] == v2::subtitle_contour_history_tag &&
+              id[2] <= 1u && id[23] == 1u && id[22] == v2::subtitle_contour_recipe &&
+              (id[4] != 0u || id[5] != 0u) && id[6] == b3.analysis_generation_low && id[7] == b3.analysis_generation_high &&
+              id[8] == b3.source_width && id[9] == b3.source_height && id[11] > 0u &&
+              id[10] <= id[9] && id[11] <= id[9] - id[10] &&
+              id[12] == field_width && id[13] == field_height &&
+              id[16] < id[18] && id[17] < id[19] && id[18] <= field_width && id[19] <= field_height &&
+              id[3] == state[v2::confirmed_cut_count] &&
+              (id[20] != 0u || id[21] != 0u) && id[20] == state[v2::gain_last_observation_low] &&
+              id[21] == state[v2::gain_last_observation_high] &&
+              std::all_of(id.begin() + v2::subtitle_contour_history_reserved_offset, id.end(), [](auto value) { return value == 0u; }),
+              "Saved SCT owner/observation/cut/generation/shape binding is invalid");
+      subtitle.width = id[8];
+      subtitle.height = id[11];
+      subtitle.matte = load_vector.template operator()<std::uint32_t>("matte", std::size_t(subtitle.width) * subtitle.height);
+      subtitle.snapshot = load_vector.template operator()<rgba16_bits_t>("snapshot", subtitle.matte.size());
+      require(std::all_of(subtitle.matte.begin(), subtitle.matte.end(), [](auto value) { return value <= 1u; }),
+              "Saved matte is not literal binary R32_UINT");
+      const float target = std::bit_cast<float>(scp[5]);
+      const bool active = scp[2] > 0u;
+      require(scp[0] == v2::subtitle_condition_param_schema && scp[1] == v2::subtitle_condition_param_tag &&
+              std::isfinite(target) && target >= 0.0f && target <= v2::direct_container_limit &&
+              scp[2] <= v2::subtitle_plane_cover_capacity && (scp[3] & ~((1u << scp[2]) - 1u)) == 0u &&
+              (active ? scp[4] == v2::subtitle_condition_param_fully_active_value && id[2] == 1u :
+                        scp[3] == 0u && scp[4] == 0u && scp[5] == 0u && id[2] == 0u),
+              "Saved SCP activity/target disagrees with SCT");
+      require(active || std::all_of(subtitle.matte.begin(), subtitle.matte.end(), [](auto value) { return value == 0u; }),
+              "Inactive saved tuple retains a positive glyph matte");
+      if (geometry.video_roi_active == 1.0f) {
+        require(geometry.tensor_content_left == id[16] && geometry.tensor_content_top == id[17] &&
+                geometry.tensor_content_right == id[18] && geometry.tensor_content_bottom == id[19],
+                "Saved ROI b2 content differs from SCT");
+        const std::array actual_roi {geometry.video_roi_left, geometry.video_roi_top, geometry.video_roi_right, geometry.video_roi_bottom};
+        const std::array expected_roi {float(b3.source_left) / width, float(b3.source_top) / height,
+          float(b3.source_left + b3.source_width) / width, float(b3.source_top + b3.source_height) / height};
+        for (std::size_t i = 0u; i < actual_roi.size(); ++i) {
+          require(std::isfinite(actual_roi[i]) && actual_roi[i] >= 0.0f && actual_roi[i] <= 1.0f &&
+                  std::abs(actual_roi[i] - expected_roi[i]) * (i % 2u == 0u ? width : height) <= 0.25f,
+                  "Saved ROI b2 and integer b3 source rectangles differ");
+        }
+      } else {
+        require(b3.source_left == 0u && b3.source_top == 0u && b3.source_width == width && b3.source_height == height,
+                "Full-source saved tuple has a conflicting b3 analysis source");
+      }
+      const auto candidate_identity_bytes = operand("candidate_native_identity", entry.at("candidate_native_identity").at("byte_count").get<std::size_t>());
+      require(!candidate_identity_bytes.empty(), "Private mask needs an actual native-run identity binding");
+      std::array<std::uint32_t, 24u> candidate_constants {};
+      load_object("candidate_constants", candidate_constants);
+      require(candidate_constants[0] == id[8] && candidate_constants[1] == id[9] &&
+              candidate_constants[2] == id[10] && candidate_constants[3] == id[11] &&
+              candidate_constants[4] == id[12] && candidate_constants[5] == id[13] &&
+              candidate_constants[6] == id[14] && candidate_constants[7] == id[15] &&
+              std::equal(candidate_constants.begin() + 8u, candidate_constants.begin() + 12u, id.begin() + 16u) &&
+              candidate_constants[12] == id[4] && candidate_constants[13] == id[5] &&
+              candidate_constants[14] == id[6] && candidate_constants[15] == id[7] &&
+              candidate_constants[16] == id[20] && candidate_constants[17] == id[21] &&
+              candidate_constants[19] == 0u && candidate_constants[22] == 0u && candidate_constants[23] == 0u,
+              "Private native mask CB differs from the saved source/crop/field/content/frame/generation/clock context");
+      auto candidate_subtitle = subtitle;
+      candidate_subtitle.matte = load_vector.template operator()<std::uint32_t>("candidate_matte", subtitle.matte.size());
+      require(std::all_of(candidate_subtitle.matte.begin(), candidate_subtitle.matte.end(), [](auto value) { return value <= 1u; }),
+              "Private candidate matte is not literal binary R32_UINT");
+      require(active || std::all_of(candidate_subtitle.matte.begin(), candidate_subtitle.matte.end(), [](auto value) { return value == 0u; }),
+              "Inactive frame cannot publish a positive private candidate matte");
+      const auto background = load_vector.template operator()<bgra8_t>("background_bgra8", std::size_t(width) * height);
+      const auto foreground = load_vector.template operator()<std::array<std::uint8_t, 4u>>("foreground_rgba8", background.size());
+      const auto effective_body_alpha = load_vector.template operator()<std::uint8_t>("effective_body_alpha_u8", background.size());
+      require(std::all_of(background.begin(), background.end(), [](const auto &value) { return value.a == 255u; }) &&
+              std::all_of(source.begin(), source.end(), [](const auto &value) { return value.a == 255u; }),
+              "Private SDR reference currently requires an opaque authored background and source");
+      const auto case_dir = output_root / ("case_" + std::to_string(case_index));
+      fs::create_directory(case_dir);
+      json result {{"name", name}, {"source", source_shape}, {"field", field_shape},
+        {"packed", {width * 2u, height}}, {"input_bindings", input_bindings},
+        {"provenance", entry.at("provenance")}, {"ui_target_bits", scp[5]},
+        {"state_uploaded_without_modification", true}, {"geometry_uploaded_without_modification", true},
+        {"recipe27_identity_is_context_only_for_candidate", true},
+        {"candidate_is_canonical_recipe27_matte", false},
+        {"candidate_matte_transport", "literal previously GPU-produced native mask; no CPU inferred pixels"},
+        {"routes", json::object()}, {"reference", json::object()}};
+      const auto save = [&](const std::string &filename, const std::vector<std::byte> &bytes) {
+        const auto path = case_dir / filename;
+        write_bytes(path, bytes.data(), bytes.size());
+        return json {{"path", path.string()}, {"sha256", sha256(bytes.data(), bytes.size())}, {"byte_count", bytes.size()}};
+      };
+      auto disabled_subtitle = subtitle;
+      disabled_subtitle.constants.enabled = 0u;
+      for (const auto route : {"base_composite", "old_matte", "candidate_matte"}) {
+        const bool candidate_route = std::string_view(route) == "candidate_matte";
+        const bool old_route = std::string_view(route) == "old_matte";
+        const auto *render_subtitle = candidate_route ? &candidate_subtitle : old_route ? &subtitle : &disabled_subtitle;
+        for (const auto kind : {"map", "color"}) {
+          const bool is_map = std::string_view(kind) == "map";
+          auto &fixture = is_map ? mapping : color;
+          std::vector<std::byte> output;
+          ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM, sizeof(bgra8_t), width, height,
+            source.data(), base, base, state, {}, output, error, field_width, field_height,
+            geometry, render_subtitle)) << route << '/' << kind << ": " << error;
+          const auto filename = std::string(route) + "_" + kind + (is_map ? ".f32" : ".bgra8");
+          result["routes"][route][kind] = save(filename, output);
+          const std::string expected_key = std::string("expected_selected_") + kind;
+          if (old_route && entry.contains(expected_key)) {
+            const auto expected = operand(expected_key.c_str(), output.size());
+            const auto expected_hash = sha256(expected.data(), expected.size());
+            result["routes"][route][kind]["expected_bitexact"] = sha256(output.data(), output.size()) == expected_hash;
+            EXPECT_EQ(sha256(output.data(), output.size()), expected_hash) << "Baseline replay differs from actual harness output";
+          }
+        }
+      }
+      live_v2_warp_fixture_t::private_layer_output_t layered;
+      ASSERT_TRUE(color.render_private_layer_reference(width, height, background, foreground, effective_body_alpha, base, state,
+        field_width, field_height, geometry, subtitle,
+        specification.at("private_layer_shader_root").get<std::string>(),
+        specification.at("private_layer_source_closure_sha256").get<std::string>(), layered, error)) << error;
+      require(layered.reconstructed_rgba8.size() == source.size() * 4u, "Reconstruction shape differs from full source");
+      std::array<std::uint64_t, 256u> identity_max_error_histogram {};
+      std::uint32_t maximum_identity_rgb_error = 0u;
+      for (std::size_t pixel = 0u; pixel < source.size(); ++pixel) {
+        const std::array<std::uint8_t, 3u> expected {source[pixel].r, source[pixel].g, source[pixel].b};
+        std::uint32_t maximum = 0u;
+        for (std::size_t channel = 0u; channel < 3u; ++channel) {
+          const auto actual = std::to_integer<unsigned int>(layered.reconstructed_rgba8[pixel * 4u + channel]);
+          maximum = std::max(maximum, static_cast<std::uint32_t>(std::abs(int(actual) - int(expected[channel]))));
+        }
+        ++identity_max_error_histogram[maximum];
+        maximum_identity_rgb_error = std::max(maximum_identity_rgb_error, maximum);
+      }
+      result["reference"] = {
+        {"reconstructed_source", save("reference_reconstructed_source.rgba8", layered.reconstructed_rgba8)},
+        {"base_background", save("reference_base_background.bgra8", layered.base_background_bgra8)},
+        {"layered_color", save("reference_layered.rgba8", layered.reference_rgba8)},
+        {"ui_foreground_premultiplied", save("reference_ui_foreground.rgba32f", layered.shifted_foreground_rgba32f)},
+        {"ui_effective_body_alpha", save("reference_ui_effective_body_alpha.f32", layered.shifted_body_alpha_f32)},
+        {"identity_max_rgb8_error", maximum_identity_rgb_error},
+        {"identity_rgb8_max_error_histogram", identity_max_error_histogram},
+        {"predeclared_identity_tolerance_rgb8", 1u},
+        {"authored_layer_identity_pass", maximum_identity_rgb_error <= 1u},
+        {"body_and_optional_black_outline_metrics_are_separate", true},
+        {"color_domain", "SDR UNORM numeric RGB, matching production SourceColor; not linear-light conversion"},
+        {"scope", "Production Base warp of authored background plus premultiplied authored RGBA sampled at current UI plane, composited entirely on GPU"}};
+      result["input_bindings"] = input_bindings;
+      const auto result_text = result.dump(2);
+      write_bytes(case_dir / "metadata.json", result_text.data(), result_text.size());
+      report["cases"].push_back(std::move(result));
+      // A failed plate/source reconstruction is evidence, never permission to
+      // reinterpret the reference or silently repair the supplied author layers.
+      EXPECT_LE(maximum_identity_rgb_error, 1u) << "Authored layers do not reconstruct the actual current source under the predeclared GPU compositor";
+    }
+    const auto report_text = report.dump(2);
+    write_bytes(output_root / "report.json", report_text.data(), report_text.size());
+  } catch (const std::exception &failure) {
+    FAIL() << failure.what();
+  }
+}
+
+
+// Opt-in external two-sided32 selector experiment, independent of production qualification.
+TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteTwoSidedSelectorReplay) {
+  const auto *cases_env = std::getenv("SUNSHINE_TEST_PRIVATE_SELECTOR_REPLAY_CASES");
+  if (!cases_env || !*cases_env) GTEST_SKIP() << "No saved glyph tuple specification selected";
+  const auto *output_env = std::getenv("SUNSHINE_TEST_PRIVATE_SELECTOR_REPLAY_OUTPUT");
+  ASSERT_TRUE(output_env && *output_env) << "Saved replay requires an explicit output directory";
+  namespace v2 = models::depth_coordinate_v2;
+  namespace cache = models::host_sbs_shader_cache;
+  namespace fs = std::filesystem;
+  using json = nlohmann::json;
+  try {
+    const auto require = [](bool valid, const std::string &message) {
+      if (!valid) throw std::runtime_error(message);
+    };
+    const auto read_bytes = [](const fs::path &path) {
+      std::ifstream input(path, std::ios::binary | std::ios::ate);
+      if (!input || input.tellg() < 0) throw std::runtime_error("Cannot read replay input: " + path.string());
+      std::vector<char> bytes(static_cast<std::size_t>(input.tellg()));
+      input.seekg(0);
+      if (!bytes.empty()) input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+      if (!input) throw std::runtime_error("Incomplete replay input: " + path.string());
+      return bytes;
+    };
+    const auto sha256 = [](const void *data, std::size_t size) {
+      const auto digest = crypto::hash(std::string_view(static_cast<const char *>(data), size));
+      constexpr char digits[] = "0123456789abcdef";
+      std::string hex;
+      for (const auto byte : digest) {
+        hex.push_back(digits[byte >> 4u]);
+        hex.push_back(digits[byte & 15u]);
+      }
+      return hex;
+    };
+    const auto write_bytes = [](const fs::path &path, const void *data, std::size_t size) {
+      std::ofstream output(path, std::ios::binary);
+      output.write(static_cast<const char *>(data), static_cast<std::streamsize>(size));
+      if (!output) throw std::runtime_error("Cannot write replay output: " + path.string());
+    };
+    const fs::path cases_path(cases_env), output_root(output_env);
+    require(!fs::exists(output_root) || (fs::is_directory(output_root) && fs::is_empty(output_root)),
+            "Replay output must be a new or empty directory");
+    const auto specification_bytes = read_bytes(cases_path);
+    const auto specification = json::parse(specification_bytes.begin(), specification_bytes.end());
+    require(specification.at("schema") == 1 && (specification.at("driver") == "hardware" || specification.at("driver") == "warp"),
+            "Private layered replay requires schema 1 and an explicit hardware/warp driver");
+    const auto selector_mode_kind = specification.value("selector_mode_kind", std::string {"blend"});
+    require(selector_mode_kind == "blend" || selector_mode_kind == "nearest", "Unknown private selector semantic mode");
+    const bool nearest_selector = selector_mode_kind == "nearest";
+    const auto &cases = specification.at("cases");
+    require(cases.is_array() && !cases.empty() && cases.size() <= 8u, "Private replay requires 1..8 matched cases");
+    std::string error;
+    const bool hardware = specification.at("driver") == "hardware";
+    live_v2_warp_fixture_t color, mapping, selector;
+    ASSERT_TRUE(color.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
+    ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping, false, hardware)) << error;
+    ASSERT_TRUE(selector.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
+    const auto adapter = color.adapter_identity();
+    require(mapping.adapter_identity() == adapter && selector.adapter_identity() == adapter,
+            "Reference routes selected different adapters");
+    std::array<wchar_t, 32768u> executable_path {};
+    const auto executable_path_size = GetModuleFileNameW(nullptr, executable_path.data(), static_cast<DWORD>(executable_path.size()));
+    require(executable_path_size > 0u && executable_path_size < executable_path.size(), "Cannot locate replay executable");
+    const auto executable_sha256 = [&]() {
+      const auto bytes = read_bytes(fs::path(executable_path.data()));
+      return sha256(bytes.data(), bytes.size());
+    }();
+    const fs::path fixture_path = fs::path(SUNSHINE_SOURCE_DIR) / "tests/unit/test_host_sbs_v2_live_warp.cpp";
+    const auto fixture_bytes = read_bytes(fixture_path);
+    require(sha256(fixture_bytes.data(), fixture_bytes.size()) == specification.at("expected_fixture_source_sha256").get<std::string>(),
+      "Fixture source is not the exact independently frozen proposal");
+    fs::create_directories(output_root);
+    json report {{"schema", 1}, {"driver", specification.at("driver")}, {"adapter", adapter},
+      {"test_executable_path", fs::path(executable_path.data()).string()},
+      {"test_executable_sha256", executable_sha256},
+      {"fixture_source_path", fixture_path.string()},
+      {"fixture_source_sha256", sha256(fixture_bytes.data(), fixture_bytes.size())},
+      {"input_specification_path", cases_path.string()},
+      {"input_specification_sha256", sha256(specification_bytes.data(), specification_bytes.size())},
+      {"coordinate_contract_schema", v2::contract_schema},
+      {"coordinate_contract_sha256", v2::contract_canonical_sha256},
+      {"live_renderer_source_closure_sha256", cache::parallax_v2_live_renderer_source_closure_sha256},
+      {"live_diagnostic_source_closure_sha256", cache::parallax_v2_live_diagnostic_source_closure_sha256},
+      {"scope", "PRIVATE saved-input two-sided32 selector experiment; canonical old/new M routes unchanged; authored GPU reference evaluation only"},
+      {"production_tuple_claim_for_candidate", false},
+      {"private_layer_shader_root", specification.at("private_layer_shader_root")},
+      {"private_layer_source_closure_sha256", specification.at("private_layer_source_closure_sha256")},
+      {"private_selector_shader_root", specification.at("private_selector_shader_root")},
+      {"private_selector_source_closure_sha256", specification.at("private_selector_source_closure_sha256")},
+      {"selector_mode_kind", selector_mode_kind},
+      {"selector_rule", nearest_selector ?
+        "UI-hit preserved; Base-only-hit bilateral clear footprints within32 then nearer CURRENT sample, LEFT ties; missing side oldUI fallback" :
+        "UI-hit preserved; Base-only-hit nearest bilateral clear footprints within32 then current-colour lerp; missing side oldUI fallback"},
+      {"selector_is_private_not_production", true},
+      {"candidate_single_source_U_map_exists", nearest_selector},
+      {"cases", json::array()}};
+    for (std::size_t case_index = 0u; case_index < cases.size(); ++case_index) {
+      const auto &entry = cases[case_index];
+      const auto name = entry.at("name").get<std::string>();
+      SCOPED_TRACE(name);
+      const auto source_shape = entry.at("source").get<std::array<UINT, 2u>>();
+      const auto field_shape = entry.at("field").get<std::array<UINT, 2u>>();
+      const auto [width, height] = source_shape;
+      const auto [field_width, field_height] = field_shape;
+      require(width > 0u && width <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION / 2u &&
+              height > 0u && height <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+              field_width > 0u && field_width <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+              field_height > 0u && field_height <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION,
+              "Invalid source or field shape");
+      json input_bindings = json::object();
+      const auto operand = [&](const char *key, std::size_t expected_size) {
+        const auto &binding = entry.at(key);
+        fs::path path(binding.at("path").get<std::string>());
+        if (path.is_relative()) path = cases_path.parent_path() / path;
+        const auto bytes = read_bytes(path);
+        require(bytes.size() == expected_size, std::string(key) + " byte count/shape mismatch");
+        const auto hash = sha256(bytes.data(), bytes.size());
+        require(hash == binding.at("sha256").get<std::string>(), std::string(key) + " SHA-256 mismatch");
+        input_bindings[key] = {{"path", path.string()}, {"sha256", hash}, {"byte_count", bytes.size()}};
+        return bytes;
+      };
+      const auto load_object = [&]<typename T>(const char *key, T &value) {
+        const auto bytes = operand(key, sizeof(value));
+        std::memcpy(&value, bytes.data(), sizeof(value));
+      };
+      const auto load_vector = [&]<typename T>(const char *key, std::size_t count) {
+        const auto bytes = operand(key, count * sizeof(T));
+        std::vector<T> values(count);
+        std::memcpy(values.data(), bytes.data(), bytes.size());
+        return values;
+      };
+      models::depth_coordinate_v2::state_words_t state {};
+      host_sbs_v2_geometry_t geometry;
+      subtitle_inputs_t subtitle;
+      load_object("state", state);
+      load_object("geometry", geometry);
+      load_object("subtitle_constants", subtitle.constants);
+      load_object("condition", subtitle.condition);
+      load_object("identity", subtitle.identity);
+      const auto source = load_vector.template operator()<bgra8_t>("source_bgra8", std::size_t(width) * height);
+      const auto base = load_vector.template operator()<float>("base", std::size_t(field_width) * field_height);
+      const auto &id = subtitle.identity;
+      const auto &scp = subtitle.condition;
+      const auto &b3 = subtitle.constants;
+      require(v2::parallax_state_words_are_authenticated(state, entry.at("raw_coordinate_scale").get<float>(), v2::adaptive_policy_id),
+              "Saved ParallaxState is not authenticated");
+      require(state[v2::renderer_authorization_bits] == v2::contract_tag, "Saved frame has no authorized Base");
+      require(std::all_of(base.begin(), base.end(), [](float value) {
+        return std::isfinite(value) && std::abs(value) <= v2::direct_container_limit;
+      }), "Saved Base has nonfinite or out-of-container values");
+      require(b3.enabled == 1u && b3.color_mode == 0u && b3.source_width > 0u && b3.source_height > 0u &&
+              b3.source_width <= v2::subtitle_contour_source_max_extent &&
+              b3.source_height <= v2::subtitle_contour_source_max_extent &&
+              b3.source_left <= width && b3.source_top <= height &&
+              b3.source_width <= width - b3.source_left && b3.source_height <= height - b3.source_top,
+              "Saved b3 must bind an exact SDR8 analysis source inside full color");
+      require(std::isfinite(geometry.content_scale_x) && geometry.content_scale_x > 0.0f && geometry.content_scale_x <= 1.0f &&
+              std::isfinite(geometry.content_scale_y) && geometry.content_scale_y > 0.0f && geometry.content_scale_y <= 1.0f &&
+              geometry.reserved == 0.0f && (geometry.video_roi_active == 0.0f || geometry.video_roi_active == 1.0f),
+              "Invalid saved b2 geometry");
+      require(id[0] == v2::subtitle_contour_schema && id[1] == v2::subtitle_contour_history_tag &&
+              id[2] <= 1u && id[23] == 1u && id[22] == v2::subtitle_contour_recipe &&
+              (id[4] != 0u || id[5] != 0u) && id[6] == b3.analysis_generation_low && id[7] == b3.analysis_generation_high &&
+              id[8] == b3.source_width && id[9] == b3.source_height && id[11] > 0u &&
+              id[10] <= id[9] && id[11] <= id[9] - id[10] &&
+              id[12] == field_width && id[13] == field_height &&
+              id[16] < id[18] && id[17] < id[19] && id[18] <= field_width && id[19] <= field_height &&
+              id[3] == state[v2::confirmed_cut_count] &&
+              (id[20] != 0u || id[21] != 0u) && id[20] == state[v2::gain_last_observation_low] &&
+              id[21] == state[v2::gain_last_observation_high] &&
+              std::all_of(id.begin() + v2::subtitle_contour_history_reserved_offset, id.end(), [](auto value) { return value == 0u; }),
+              "Saved SCT owner/observation/cut/generation/shape binding is invalid");
+      subtitle.width = id[8];
+      subtitle.height = id[11];
+      subtitle.matte = load_vector.template operator()<std::uint32_t>("matte", std::size_t(subtitle.width) * subtitle.height);
+      subtitle.snapshot = load_vector.template operator()<rgba16_bits_t>("snapshot", subtitle.matte.size());
+      require(std::all_of(subtitle.matte.begin(), subtitle.matte.end(), [](auto value) { return value <= 1u; }),
+              "Saved matte is not literal binary R32_UINT");
+      const float target = std::bit_cast<float>(scp[5]);
+      const bool active = scp[2] > 0u;
+      require(scp[0] == v2::subtitle_condition_param_schema && scp[1] == v2::subtitle_condition_param_tag &&
+              std::isfinite(target) && target >= 0.0f && target <= v2::direct_container_limit &&
+              scp[2] <= v2::subtitle_plane_cover_capacity && (scp[3] & ~((1u << scp[2]) - 1u)) == 0u &&
+              (active ? scp[4] == v2::subtitle_condition_param_fully_active_value && id[2] == 1u :
+                        scp[3] == 0u && scp[4] == 0u && scp[5] == 0u && id[2] == 0u),
+              "Saved SCP activity/target disagrees with SCT");
+      require(active || std::all_of(subtitle.matte.begin(), subtitle.matte.end(), [](auto value) { return value == 0u; }),
+              "Inactive saved tuple retains a positive glyph matte");
+      if (geometry.video_roi_active == 1.0f) {
+        require(geometry.tensor_content_left == id[16] && geometry.tensor_content_top == id[17] &&
+                geometry.tensor_content_right == id[18] && geometry.tensor_content_bottom == id[19],
+                "Saved ROI b2 content differs from SCT");
+        const std::array actual_roi {geometry.video_roi_left, geometry.video_roi_top, geometry.video_roi_right, geometry.video_roi_bottom};
+        const std::array expected_roi {float(b3.source_left) / width, float(b3.source_top) / height,
+          float(b3.source_left + b3.source_width) / width, float(b3.source_top + b3.source_height) / height};
+        for (std::size_t i = 0u; i < actual_roi.size(); ++i) {
+          require(std::isfinite(actual_roi[i]) && actual_roi[i] >= 0.0f && actual_roi[i] <= 1.0f &&
+                  std::abs(actual_roi[i] - expected_roi[i]) * (i % 2u == 0u ? width : height) <= 0.25f,
+                  "Saved ROI b2 and integer b3 source rectangles differ");
+        }
+      } else {
+        require(b3.source_left == 0u && b3.source_top == 0u && b3.source_width == width && b3.source_height == height,
+                "Full-source saved tuple has a conflicting b3 analysis source");
+      }
+      const auto candidate_identity_bytes = operand("candidate_native_identity", entry.at("candidate_native_identity").at("byte_count").get<std::size_t>());
+      require(!candidate_identity_bytes.empty(), "Private mask needs an actual native-run identity binding");
+      std::array<std::uint32_t, 24u> candidate_constants {};
+      load_object("candidate_constants", candidate_constants);
+      require(candidate_constants[0] == id[8] && candidate_constants[1] == id[9] &&
+              candidate_constants[2] == id[10] && candidate_constants[3] == id[11] &&
+              candidate_constants[4] == id[12] && candidate_constants[5] == id[13] &&
+              candidate_constants[6] == id[14] && candidate_constants[7] == id[15] &&
+              std::equal(candidate_constants.begin() + 8u, candidate_constants.begin() + 12u, id.begin() + 16u) &&
+              candidate_constants[12] == id[4] && candidate_constants[13] == id[5] &&
+              candidate_constants[14] == id[6] && candidate_constants[15] == id[7] &&
+              candidate_constants[16] == id[20] && candidate_constants[17] == id[21] &&
+              candidate_constants[19] == 0u && candidate_constants[22] == 0u && candidate_constants[23] == 0u,
+              "Private native mask CB differs from the saved source/crop/field/content/frame/generation/clock context");
+      auto candidate_subtitle = subtitle;
+      candidate_subtitle.matte = load_vector.template operator()<std::uint32_t>("candidate_matte", subtitle.matte.size());
+      require(std::all_of(candidate_subtitle.matte.begin(), candidate_subtitle.matte.end(), [](auto value) { return value <= 1u; }),
+              "Private candidate matte is not literal binary R32_UINT");
+      require(active || std::all_of(candidate_subtitle.matte.begin(), candidate_subtitle.matte.end(), [](auto value) { return value == 0u; }),
+              "Inactive frame cannot publish a positive private candidate matte");
+      const auto background = load_vector.template operator()<bgra8_t>("background_bgra8", std::size_t(width) * height);
+      const auto foreground = load_vector.template operator()<std::array<std::uint8_t, 4u>>("foreground_rgba8", background.size());
+      const auto effective_body_alpha = load_vector.template operator()<std::uint8_t>("effective_body_alpha_u8", background.size());
+      require(std::all_of(background.begin(), background.end(), [](const auto &value) { return value.a == 255u; }) &&
+              std::all_of(source.begin(), source.end(), [](const auto &value) { return value.a == 255u; }),
+              "Private SDR reference currently requires an opaque authored background and source");
+      const auto case_dir = output_root / ("case_" + std::to_string(case_index));
+      fs::create_directory(case_dir);
+      json result {{"name", name}, {"source", source_shape}, {"field", field_shape},
+        {"packed", {width * 2u, height}}, {"input_bindings", input_bindings},
+        {"provenance", entry.at("provenance")}, {"ui_target_bits", scp[5]},
+        {"state_uploaded_without_modification", true}, {"geometry_uploaded_without_modification", true},
+        {"recipe27_identity_is_context_only_for_candidate", true},
+        {"candidate_is_canonical_recipe27_matte", false},
+        {"candidate_matte_transport", "literal previously GPU-produced native mask; no CPU inferred pixels"},
+        {"routes", json::object()}, {"reference", json::object()}};
+      const auto save = [&](const std::string &filename, const std::vector<std::byte> &bytes) {
+        const auto path = case_dir / filename;
+        write_bytes(path, bytes.data(), bytes.size());
+        return json {{"path", path.string()}, {"sha256", sha256(bytes.data(), bytes.size())}, {"byte_count", bytes.size()}};
+      };
+      auto disabled_subtitle = subtitle;
+      disabled_subtitle.constants.enabled = 0u;
+      for (const auto route : {"base_composite", "old_matte", "candidate_matte"}) {
+        const bool candidate_route = std::string_view(route) == "candidate_matte";
+        const bool old_route = std::string_view(route) == "old_matte";
+        const auto *render_subtitle = candidate_route ? &candidate_subtitle : old_route ? &subtitle : &disabled_subtitle;
+        for (const auto kind : {"map", "color"}) {
+          const bool is_map = std::string_view(kind) == "map";
+          auto &fixture = is_map ? mapping : color;
+          std::vector<std::byte> output;
+          ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM, sizeof(bgra8_t), width, height,
+            source.data(), base, base, state, {}, output, error, field_width, field_height,
+            geometry, render_subtitle)) << route << '/' << kind << ": " << error;
+          const auto filename = std::string(route) + "_" + kind + (is_map ? ".f32" : ".bgra8");
+          result["routes"][route][kind] = save(filename, output);
+          const std::string expected_key = std::string("expected_selected_") + kind;
+          if (old_route && entry.contains(expected_key)) {
+            const auto expected = operand(expected_key.c_str(), output.size());
+            const auto expected_hash = sha256(expected.data(), expected.size());
+            result["routes"][route][kind]["expected_bitexact"] = sha256(output.data(), output.size()) == expected_hash;
+            EXPECT_EQ(sha256(output.data(), output.size()), expected_hash) << "Baseline replay differs from actual harness output";
+          }
+          if (candidate_route) {
+            const std::string candidate_key = std::string("expected_candidate_selected_") + kind;
+            const auto expected_candidate = operand(candidate_key.c_str(), output.size());
+            const auto candidate_expected_hash = sha256(expected_candidate.data(), expected_candidate.size());
+            result["routes"][route][kind]["prior_hardware_expected_bitexact"] =
+              sha256(output.data(), output.size()) == candidate_expected_hash;
+            EXPECT_EQ(sha256(output.data(), output.size()), candidate_expected_hash)
+              << "Unchanged M5 route differs from the prior authenticated hardware replay";
+          }
+
+        }
+      }
+      std::vector<std::byte> selected_colour, repeated_selected_colour;
+      std::array<std::vector<std::byte>, 2u> selected_diagnostics;
+      ASSERT_TRUE(selector.render_private_selector(DXGI_FORMAT_B8G8R8A8_UNORM, sizeof(bgra8_t), width, height,
+        source.data(), base, base, state, {}, selected_colour, error,
+        specification.at("private_selector_shader_root").get<std::string>(),
+        specification.at("private_selector_source_closure_sha256").get<std::string>(), repeated_selected_colour, selected_diagnostics,
+        field_width, field_height, geometry, &candidate_subtitle)) << error;
+      require(selected_diagnostics[0].size() == std::size_t(width) * 2u * height * 16u &&
+              selected_diagnostics[1].size() == selected_diagnostics[0].size(), "Private selector diagnostic extent mismatch");
+      // Diagnostic semantics only: renderer calls, operands and numerical shader branches are unchanged.
+      for (std::size_t pixel = 0u; pixel < std::size_t(width) * 2u * height; ++pixel) {
+        std::array<float, 4u> selection {};
+        std::memcpy(selection.data(), selected_diagnostics[1].data() + pixel * sizeof(selection), sizeof(selection));
+        require(std::all_of(selection.begin(), selection.end(), [](float x) { return std::isfinite(x); }), "Nonfinite selector diagnostics");
+        require(selection[1] >= 0.0f && selection[1] <= 3.0f && std::floor(selection[1]) == selection[1], "Malformed selector mode");
+        if (selection[1] == 2.0f) {
+          require(selection[2] >= 1.0f && selection[2] <= 32.0f && std::floor(selection[2]) == selection[2] &&
+                  selection[3] >= 1.0f && selection[3] <= 32.0f && std::floor(selection[3]) == selection[3], "Malformed bilateral distance");
+          if (nearest_selector) {
+            require(selection[0] == (selection[2] <= selection[3] ? 0.0f : 1.0f), "Nearest endpoint weight/LEFT tie differs from declared rule");
+          } else {
+            require(selection[0] > 0.0f && selection[0] < 1.0f, "Blend mode requires strict interior weight");
+          }
+        } else {
+          require(selection[0] == 0.0f && selection[2] == 0.0f && selection[3] == 0.0f, "Single mode contains bilateral diagnostics");
+        }
+      }
+      result["routes"]["two_sided32"] = {
+        {"color", save("two_sided32_color.bgra8", selected_colour)},
+        {"color_repeat", save("two_sided32_color_repeat.bgra8", repeated_selected_colour)},
+        {"two_diagnostic_draw_colours_byte_exact", repeated_selected_colour == selected_colour},
+        {"sample_uvs", save("two_sided32_sample_uvs.rgba32f", selected_diagnostics[0])},
+        {"selection", save("two_sided32_selection.rgba32f", selected_diagnostics[1])},
+        {"single_source_map", nearest_selector},
+        {"single_source_map_exported", false},
+        {"sample_uvs_layout", "leftU,leftV,rightU,rightV"},
+        {"selection_layout", "weightRight,mode,leftDistance,rightDistance"},
+        {"mode_values", {{"0", "Base"}, {"1", "UI footprint"}, {"2", nearest_selector ? "nearest clear endpoint; LEFT ties" : "two-sided blend"}, {"3", "missing-side UI fallback"}}}
+      };
+      live_v2_warp_fixture_t::private_layer_output_t layered;
+      ASSERT_TRUE(color.render_private_layer_reference(width, height, background, foreground, effective_body_alpha, base, state,
+        field_width, field_height, geometry, subtitle,
+        specification.at("private_layer_shader_root").get<std::string>(),
+        specification.at("private_layer_source_closure_sha256").get<std::string>(), layered, error)) << error;
+      require(layered.reconstructed_rgba8.size() == source.size() * 4u, "Reconstruction shape differs from full source");
+      std::array<std::uint64_t, 256u> identity_max_error_histogram {};
+      std::uint32_t maximum_identity_rgb_error = 0u;
+      for (std::size_t pixel = 0u; pixel < source.size(); ++pixel) {
+        const std::array<std::uint8_t, 3u> expected {source[pixel].r, source[pixel].g, source[pixel].b};
+        std::uint32_t maximum = 0u;
+        for (std::size_t channel = 0u; channel < 3u; ++channel) {
+          const auto actual = std::to_integer<unsigned int>(layered.reconstructed_rgba8[pixel * 4u + channel]);
+          maximum = std::max(maximum, static_cast<std::uint32_t>(std::abs(int(actual) - int(expected[channel]))));
+        }
+        ++identity_max_error_histogram[maximum];
+        maximum_identity_rgb_error = std::max(maximum_identity_rgb_error, maximum);
+      }
+      result["reference"] = {
+        {"reconstructed_source", save("reference_reconstructed_source.rgba8", layered.reconstructed_rgba8)},
+        {"base_background", save("reference_base_background.bgra8", layered.base_background_bgra8)},
+        {"layered_color", save("reference_layered.rgba8", layered.reference_rgba8)},
+        {"ui_foreground_premultiplied", save("reference_ui_foreground.rgba32f", layered.shifted_foreground_rgba32f)},
+        {"ui_effective_body_alpha", save("reference_ui_effective_body_alpha.f32", layered.shifted_body_alpha_f32)},
+        {"identity_max_rgb8_error", maximum_identity_rgb_error},
+        {"identity_rgb8_max_error_histogram", identity_max_error_histogram},
+        {"predeclared_identity_tolerance_rgb8", 1u},
+        {"authored_layer_identity_pass", maximum_identity_rgb_error <= 1u},
+        {"body_and_optional_black_outline_metrics_are_separate", true},
+        {"color_domain", "SDR UNORM numeric RGB, matching production SourceColor; not linear-light conversion"},
+        {"scope", "Production Base warp of authored background plus premultiplied authored RGBA sampled at current UI plane, composited entirely on GPU"}};
+      result["input_bindings"] = input_bindings;
+      const auto result_text = result.dump(2);
+      write_bytes(case_dir / "metadata.json", result_text.data(), result_text.size());
+      report["cases"].push_back(std::move(result));
+      // A failed plate/source reconstruction is evidence, never permission to
+      // reinterpret the reference or silently repair the supplied author layers.
+      EXPECT_LE(maximum_identity_rgb_error, 1u) << "Authored layers do not reconstruct the actual current source under the predeclared GPU compositor";
+    }
+    const auto report_text = report.dump(2);
+    write_bytes(output_root / "report.json", report_text.data(), report_text.size());
+  } catch (const std::exception &failure) {
+    FAIL() << failure.what();
+  }
 }
 
 #endif  // _WIN32

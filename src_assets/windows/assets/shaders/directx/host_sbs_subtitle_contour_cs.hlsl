@@ -1,6 +1,7 @@
-// Native subtitle contours: four genuine fixed-anchor RGB confirmations inside current OCR covers.
-// OCR selects the current search region; temporal stability is not semantic text truth.
-// Support is binary0/1. Arbitrary colors use the same fixed-anchor RGB stability predicate.
+// Native subtitle contours use current detector evidence inside current OCR covers.
+// Fixed-anchor RGB confirmation remains diagnostic history, not presentation authority.
+// Detector evidence learns a current text palette; it is not a glyph mask. Current native
+// stroke/outline evidence selects binary support within each current paired cover.
 // Shared exact UI pins, margin and slope collar remain the downstream depth policy.
 
 #include "include/depth_coordinate_v2_ocr_assert.generated.hlsl"
@@ -35,6 +36,7 @@ RWTexture2D<float4> HistoryFeaturesWrite : register(u2);
 RWStructuredBuffer<uint> HistoryIdentityWrite : register(u3);
 RWTexture2D<float4> CompletedDisplayBandWrite : register(u4); // same RGBA16F as input
 RWStructuredBuffer<float> CompletedProbabilityWrite : register(u5);
+RWTexture2D<uint> DenseGlyphMatteWrite : register(u6); // native R32_UINT literal 0/1, never aliases t5
 
 static const uint CONTOUR_SCHEMA = V2_SUBTITLE_CONTOUR_SCHEMA;
 static const uint RECIPE_SCHEMA = V2_SUBTITLE_CONTOUR_RECIPE;
@@ -47,11 +49,31 @@ groupshared uint CurrentGate;
 groupshared uint CurrentCount;
 groupshared uint CurrentEpoch;
 groupshared uint CurrentResetMask;
+groupshared int CurrentReferenceCenterTwice;
 groupshared uint4 CurrentCovers[V2_SUBTITLE_PLANE_COVER_CAPACITY];
 groupshared uint4 CurrentCores[V2_SUBTITLE_PLANE_COVER_CAPACITY];
+groupshared uint4 CurrentSupportSearch[V2_SUBTITLE_PLANE_COVER_CAPACITY];
 groupshared uint HistoryGate;
 groupshared uint HistoryDuplicate;
 groupshared uint SnapshotGate;
+groupshared uint PaletteNeeded;
+groupshared uint PaletteHistogramCount[V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT];
+groupshared uint PaletteHistogramRepresentative[V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT];
+groupshared uint PaletteAnchorPeak;
+groupshared uint PaletteCount[V2_SUBTITLE_PLANE_COVER_CAPACITY];
+groupshared uint4 PaletteMode[V2_SUBTITLE_PLANE_COVER_CAPACITY * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES];
+
+// The dense current glyph matte is a native-color membership resource, independent of the
+// diagnostic sparse contour/distance field. Each output tile owns its complete dependency
+// halo, so all bounded same-frame growth happens in one dispatch without inter-group reads.
+#define GLYPH_TILE_SIDE 16u
+#define GLYPH_TILE_HALO (V2_SUBTITLE_GLYPH_MATTE_STEPS + V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SOURCE_PIXELS)
+#define GLYPH_TILE_EXTENT (GLYPH_TILE_SIDE + 2u * GLYPH_TILE_HALO)
+#define GLYPH_TILE_PIXELS (GLYPH_TILE_EXTENT * GLYPH_TILE_EXTENT)
+groupshared float4 GlyphTileColors[GLYPH_TILE_PIXELS];
+groupshared uint GlyphTileMask[GLYPH_TILE_PIXELS];
+groupshared uint GlyphTileNext[GLYPH_TILE_PIXELS];
+groupshared uint2 GlyphTileGroupStride;
 
 bool ContourFinite(float value) {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
@@ -136,7 +158,62 @@ bool CurrentGeometryReady() {
             asuint(SBS_STATE_HARD_CUT_COUNT(CurrentCutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]));
 }
 
-bool CurrentSnapshotEvidenceValid() {
+bool CurrentClassifierReferenceValid(out int reference_center) {
+    reference_center = (int)contour_source.x;
+    uint base = V2_OCR_CLASSIFIER_HISTORY_OFFSET;
+    bool empty = true;
+    [loop]
+    for (uint word = 0u; word < V2_OCR_CLASSIFIER_HISTORY_WORD_COUNT; ++word)
+        empty = empty && CurrentOcrRecord[base + word] == 0u;
+    if (empty) return true;
+    uint2 clock = uint2(CurrentOcrRecord[base + 4u], CurrentOcrRecord[base + 5u]);
+    if (CurrentOcrRecord[base] != V2_OCR_CLASSIFIER_HISTORY_TAG ||
+        CurrentOcrRecord[base + 1u] != V2_OCR_CLASSIFIER_HISTORY_SCHEMA ||
+        CurrentOcrRecord[base + 2u] != V2_OCR_CLASSIFIER_HISTORY_KNOWN_FLAGS ||
+        CurrentOcrRecord[base + 3u] > V2_OCR_CLASSIFIER_PRIOR_CAP ||
+        !any(clock != 0u) || any(clock != contour_observation.xy)) return false;
+    [unroll]
+    for (uint lane = 0u; lane < 4u; ++lane) {
+        if (CurrentOcrRecord[base + 6u + lane] != contour_frame[lane] ||
+            CurrentOcrRecord[base + 10u + lane] != contour_source[lane] ||
+            CurrentOcrRecord[base + 16u + lane] != contour_content[lane]) return false;
+    }
+    if (CurrentOcrRecord[base + 14u] != contour_field.x ||
+        CurrentOcrRecord[base + 15u] != contour_field.y) return false;
+    uint reference_width = CurrentOcrRecord[base + 21u];
+    int center = asint(CurrentOcrRecord[base + 20u]);
+    int search_top = asint(CurrentOcrRecord[base + 22u]);
+    if (reference_width == 0u || reference_width > MAX_SOURCE_EXTENT ||
+        center < -(int)reference_width || center > (int)reference_width ||
+        search_top < -(int)MAX_SOURCE_EXTENT || search_top > (int)MAX_SOURCE_EXTENT ||
+        CurrentOcrRecord[base + 23u] > 1u || CurrentOcrRecord[base + 24u] > 1u ||
+        CurrentOcrRecord[base + 30u] != 0u || CurrentOcrRecord[base + 31u] != 0u) return false;
+    uint2 gap = uint2(CurrentOcrRecord[base + 25u], CurrentOcrRecord[base + 26u]);
+    if (CurrentOcrRecord[base + 24u] == 0u) {
+        if (any(gap != 0u)) return false;
+    } else if (!any(gap != 0u) || ClockLess(clock, gap)) return false;
+    float trusted_height = asfloat(CurrentOcrRecord[base + 27u]);
+    uint trusted_top = CurrentOcrRecord[base + 28u], trusted_bottom = CurrentOcrRecord[base + 29u];
+    if (!ContourFinite(trusted_height) || trusted_height < 0.0f ||
+        trusted_height > (float)(V2_OCR_SAFE_ROW_BOTTOM - V2_OCR_SAFE_ROW_TOP)) return false;
+    if (trusted_height == 0.0f) {
+        if (trusted_top != 0u || trusted_bottom != 0u) return false;
+    } else if (trusted_top < V2_OCR_SAFE_ROW_TOP || trusted_top >= trusted_bottom ||
+        trusted_bottom > V2_OCR_SAFE_ROW_BOTTOM) return false;
+    bool votes = false;
+    [unroll]
+    for (uint bin = 0u; bin < V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT; ++bin) {
+        uint vote = CurrentOcrRecord[base + 32u + bin];
+        if (vote > V2_OCR_CLASSIFIER_PRIOR_CAP) return false;
+        votes = votes || vote != 0u;
+    }
+    if (votes && (trusted_height <= 0.0f || CurrentOcrRecord[base + 3u] == 0u)) return false;
+    reference_center = center;
+    return true;
+}
+
+bool CurrentSnapshotEvidenceValid(out int reference_center) {
+    reference_center = (int)contour_source.x;
     // Current detector evidence includes a legal empty record. Plane/condition state is not
     // read here: this independent source/probability snapshot cannot authorize pins.
     uint band_w, band_h, probability_count, probability_stride;
@@ -213,12 +290,15 @@ bool CurrentSnapshotEvidenceValid() {
             if (CurrentOcrRecord[offset + word] != 0u) return false;
         }
     }
-    return true;
+    return CurrentClassifierReferenceValid(reference_center);
 }
 
 [numthreads(16, 16, 1)]
 void snapshot_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV_GroupIndex) {
-    if (group_index == 0u) SnapshotGate = CurrentSnapshotEvidenceValid() ? 1u : 0u;
+    if (group_index == 0u) {
+        int reference_center;
+        SnapshotGate = CurrentSnapshotEvidenceValid(reference_center) ? 1u : 0u;
+    }
     GroupMemoryBarrierWithGroupSync();
     uint width, height, words, word_stride;
     CompletedDisplayBandWrite.GetDimensions(width, height);
@@ -256,7 +336,6 @@ bool CurrentAdaptiveTailValid() {
     uint base = V2_SUBTITLE_PLANE_ADAPTIVE_OFFSET;
     uint flags = CurrentPlane[base + 1u];
     uint2 clock = uint2(CurrentPlane[base + 4u], CurrentPlane[base + 5u]);
-    uint2 approach = uint2(CurrentPlane[base + 6u], CurrentPlane[base + 7u]);
     uint2 retreat = uint2(CurrentPlane[base + 8u], CurrentPlane[base + 9u]);
     float applied = asfloat(CurrentPlane[base + 3u]);
     uint maximum_level = (contour_source.x + 99u) / 100u;
@@ -265,15 +344,17 @@ bool CurrentAdaptiveTailValid() {
     uint covered = CurrentPlane[base + 13u];
     uint conflicts = CurrentPlane[base + 14u];
     // Accepted controller time may be held or disarmed independently of this source tuple.
-    return CurrentPlane[base] == 1u && (flags & ~15u) == 0u && (flags & 3u) != 3u &&
+    return CurrentPlane[base] == 1u && (flags & ~V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS) == 0u &&
+        CurrentPlane[base + 6u] == 0u && CurrentPlane[base + 7u] == 0u &&
+        CurrentPlane[base + 8u] == 0u && CurrentPlane[base + 9u] == 0u &&
+        CurrentPlane[base + 10u] == 0u && CurrentPlane[base + 11u] == 0u &&
         CurrentPlane[base + 2u] <= maximum_level &&
         CurrentPlane[base + 10u] <= maximum_level && CurrentPlane[base + 11u] <= maximum_level &&
         ContourFinite(applied) && applied >= 0.0f && applied <= V2DisplayBudget() &&
         CurrentPlane[base + 12u] == asuint(V2DisplayBudget()) &&
         (((flags & 8u) != 0u) == any(clock != 0u)) &&
-        (((flags & 1u) != 0u) == any(approach != 0u)) &&
         (((flags & 2u) != 0u) == any(retreat != 0u)) &&
-        !ClockLess(clock, approach) && !ClockLess(clock, retreat) &&
+        !ClockLess(clock, retreat) &&
         covered <= area && conflicts <= covered && CurrentPlane[base + 15u] <= covered &&
         (((flags & 4u) != 0u) == (conflicts * 5u > covered || conflicts * 50u > area));
 }
@@ -327,11 +408,8 @@ bool CurrentAuthorityValid(out uint current_count, out uint epoch) {
             CurrentPlane[V2_SUBTITLE_PLANE_FIELD_EXTENT_OFFSET + component] != contour_field[component] ||
             CurrentPlane[V2_SUBTITLE_PLANE_ROI_OFFSET + component] != contour_field[2u + component]) return false;
     }
-    // Provisional presentation never changes the four-observation RGB detector. Its packed
-    // countdown/cue latch is nevertheless part of the authenticated current plane header.
-    uint warmup = CurrentPlane[V2_SUBTITLE_PLANE_WARMUP_WORD];
-    if ((warmup & ~(V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK | V2_SUBTITLE_PLANE_WARMUP_CUE_BIT)) != 0u ||
-        (warmup & V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK) > V2_SUBTITLE_PLANE_WARMUP_OBSERVATIONS) return false;
+    // Current probability owns presentation. The retired provisional countdown word is zero.
+    if (CurrentPlane[V2_SUBTITLE_PLANE_WARMUP_WORD] != 0u) return false;
     [unroll]
     for (uint component = 0u; component < 4u; ++component) {
         if (CurrentPlane[V2_SUBTITLE_PLANE_CONTENT_OFFSET + component] != contour_content[component]) return false;
@@ -345,10 +423,80 @@ bool CurrentAuthorityValid(out uint current_count, out uint epoch) {
     return true;
 }
 
+bool WideGreater(uint a_low, uint a_high, uint b_low, uint b_high) {
+    return a_high > b_high || (a_high == b_high && a_low > b_low);
+}
+
+void CurrentWideProduct(uint a, uint b, out uint low, out uint high) {
+    // FXC/SM5 has no umulExtended intrinsic. Split both operands into 16-bit limbs;
+    // every intermediate fits uint32, including carries, and the result is exact.
+    uint p0 = (a & 65535u) * (b & 65535u);
+    uint t = (a >> 16u) * (b & 65535u) + (p0 >> 16u);
+    uint cross = (a & 65535u) * (b >> 16u) + (t & 65535u);
+    low = (cross << 16u) | (p0 & 65535u);
+    high = (a >> 16u) * (b >> 16u) + (t >> 16u) + (cross >> 16u);
+}
+
+bool CurrentSlotRibbon(uint slot) {
+    return (CurrentOcrRecord[V2_OCR_RAW_BOX_OFFSET + slot * V2_OCR_BOX_WORD_COUNT + 5u] &
+        V2_OCR_BOX_FLAG_RIBBON) != 0u;
+}
+
+uint4 CurrentOrdinarySupportSearch(uint slot) {
+    uint4 cover = CurrentCovers[slot], core = CurrentCores[slot];
+    // Ribbon covers have their own producer meaning; none of the ordinary expansion is
+    // applied to them. Group only against this fixed core, never a growing/transitive union.
+    if (CurrentSlotRibbon(slot)) return cover;
+    uint left = core.x, right = core.z;
+    [loop]
+    for (uint member = 0u; member < CurrentCount; ++member) {
+        if (CurrentSlotRibbon(member)) continue;
+        uint4 other = CurrentCores[member];
+        uint overlap_top = max(core.y, other.y), overlap_bottom = min(core.w, other.w);
+        if (overlap_bottom <= overlap_top) continue;
+        uint intersection = overlap_bottom - overlap_top;
+        uint union_height = max(core.w, other.w) - min(core.y, other.y);
+        if (intersection * V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_DENOMINATOR <
+            union_height * V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR) continue;
+        left = min(left, other.x);
+        right = max(right, other.z);
+    }
+    uint content_width = contour_content.z - contour_content.x;
+    uint center_field = left + right - 2u * contour_content.x;
+    uint line_low, line_high;
+    CurrentWideProduct(center_field * contour_source.x, V2_OCR_OUTPUT_WIDTH, line_low, line_high);
+    int reference_scaled = CurrentReferenceCenterTwice * (int)V2_OCR_OUTPUT_WIDTH;
+    int margin = (int)(2u * V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_CENTER_BIAS_DETECTOR_PIXELS * contour_source.x);
+    int upper = reference_scaled + margin, lower = reference_scaled - margin;
+    bool right_biased = upper < 0;
+    if (upper >= 0) {
+        uint upper_low, upper_high;
+        CurrentWideProduct((uint)upper, content_width, upper_low, upper_high);
+        right_biased = WideGreater(line_low, line_high, upper_low, upper_high);
+    }
+    bool left_biased = false;
+    if (lower > 0) {
+        uint lower_low, lower_high;
+        CurrentWideProduct((uint)lower, content_width, lower_low, lower_high);
+        left_biased = WideGreater(lower_low, lower_high, line_low, line_high);
+    }
+    uint inset = V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_INSET_DETECTOR_PIXELS * content_width / V2_OCR_OUTPUT_WIDTH;
+    // Preserve the current core and any producer side already clamped to actual content.
+    if (cover.x != contour_content.x && !right_biased) cover.x = min(core.x, cover.x + inset);
+    if (cover.z != contour_content.z && !left_biased) cover.z = max(core.z, cover.z - min(inset, cover.z));
+    uint pad = ((core.w - core.y) * V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_PAD_HEIGHT_NUMERATOR +
+        V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_PAD_HEIGHT_DENOMINATOR - 1u) /
+        V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_PAD_HEIGHT_DENOMINATOR;
+    cover.y = max(cover.y, core.y - min(pad, core.y));
+    return cover;
+}
+
 void PrepareCurrentGate(uint group_index) {
     if (group_index == 0u) {
         uint count, epoch;
-        SnapshotGate = CurrentSnapshotEvidenceValid() ? 1u : 0u;
+        int reference_center;
+        SnapshotGate = CurrentSnapshotEvidenceValid(reference_center) ? 1u : 0u;
+        CurrentReferenceCenterTwice = reference_center;
         // Pins and their published snapshot must share the same global source/OCR verdict.
         // In particular, a rejected ribbon in epoch zero cannot borrow prior valid RGB.
         CurrentGate = CurrentAuthorityValid(count, epoch) && SnapshotGate != 0u ? 1u : 0u;
@@ -363,7 +511,11 @@ void PrepareCurrentGate(uint group_index) {
                 ReadCurrentRect(slot, V2_OCR_FINAL_BOX_OFFSET) : uint4(0u, 0u, 0u, 0u);
             CurrentCores[slot] = CurrentGate != 0u && slot < count ?
                 ReadCurrentRect(slot, V2_OCR_RAW_BOX_OFFSET) : uint4(0u, 0u, 0u, 0u);
+            CurrentSupportSearch[slot] = CurrentCovers[slot];
         }
+        [loop]
+        for (uint active_slot = 0u; active_slot < CurrentCount; ++active_slot)
+            CurrentSupportSearch[active_slot] = CurrentOrdinarySupportSearch(active_slot);
     }
     GroupMemoryBarrierWithGroupSync();
 }
@@ -402,7 +554,7 @@ bool LoadDisplayColor(int2 p, out float3 color) {
 bool SourcePixelInRect(int2 p, uint4 r) {
     if (CurrentGate == 0u || !BandPositionValid(p)) return false;
     // Current source centers and half-open field edges are compared as integer rationals.
-    // Covers grant search authority; flagged raw/cores localize count invalidation only.
+    // The supplied rectangle is a current coarse cover, paired core, or derived support search.
     uint2 scaled = uint2(
         2u * contour_content.x * contour_source.x +
             (2u * (uint)p.x + 1u) * (contour_content.z - contour_content.x),
@@ -422,6 +574,16 @@ bool CoveredSourcePixel(int2 p) {
     return false;
 }
 
+bool SupportSearchSourcePixel(int2 p) {
+    [unroll]
+    for (uint slot = 0u; slot < V2_SUBTITLE_PLANE_COVER_CAPACITY; ++slot) {
+        if (slot < CurrentCount) {
+            if (SourcePixelInRect(p, CurrentSupportSearch[slot])) return true;
+        }
+    }
+    return false;
+}
+
 bool ChangedCurrentCorePixel(int2 p) {
     [unroll]
     for (uint slot = 0u; slot < V2_SUBTITLE_PLANE_COVER_CAPACITY; ++slot) {
@@ -436,11 +598,15 @@ bool ChangedCurrentCorePixel(int2 p) {
 
 bool CurrentProbabilityEvidence(int2 p, out float probability) {
     probability = 0.0f;
-    float2 detector = (float2(p) + 0.5f) *
-        float2((float)V2_OCR_OUTPUT_WIDTH / (float)contour_source.x,
-               (float)V2_OCR_OUTPUT_HEIGHT / (float)contour_source.w) - 0.5f;
+    // This strict rendering threshold is also authenticated by saved-state readers. Keep
+    // each FP32 operation and its rounding point explicit; fused lerp/MAD can cross it.
+    precise float2 ratio = float2((float)V2_OCR_OUTPUT_WIDTH / (float)contour_source.x,
+        (float)V2_OCR_OUTPUT_HEIGHT / (float)contour_source.w);
+    precise float2 centered = float2(p) + 0.5f;
+    precise float2 scaled = centered * ratio;
+    precise float2 detector = scaled - 0.5f;
     int2 lo = int2(floor(detector));
-    float2 blend = frac(detector);
+    precise float2 blend = detector - floor(detector);
     int2 a = clamp(lo, int2(0, 0), int2(V2_OCR_OUTPUT_WIDTH - 1u, V2_OCR_OUTPUT_HEIGHT - 1u));
     int2 b = clamp(lo + int2(1, 1), int2(0, 0), int2(V2_OCR_OUTPUT_WIDTH - 1u, V2_OCR_OUTPUT_HEIGHT - 1u));
     float tl = ProbabilityMap[(uint)a.y * V2_OCR_OUTPUT_WIDTH + (uint)a.x];
@@ -452,7 +618,16 @@ bool CurrentProbabilityEvidence(int2 p, out float probability) {
     if (!ContourFinite(tl) || !ContourFinite(tr) || !ContourFinite(bl) || !ContourFinite(br) ||
         tl < 0.0f || tl > 1.0f || tr < 0.0f || tr > 1.0f ||
         bl < 0.0f || bl > 1.0f || br < 0.0f || br > 1.0f) return false;
-    probability = lerp(lerp(tl, tr, blend.x), lerp(bl, br, blend.x), blend.y);
+    precise float upper_delta = tr - tl;
+    precise float upper_product = upper_delta * blend.x;
+    precise float upper = tl + upper_product;
+    precise float lower_delta = br - bl;
+    precise float lower_product = lower_delta * blend.x;
+    precise float lower = bl + lower_product;
+    precise float vertical_delta = lower - upper;
+    precise float vertical_product = vertical_delta * blend.y;
+    precise float sampled = upper + vertical_product;
+    probability = sampled;
     return true;
 }
 
@@ -461,6 +636,262 @@ bool CurrentProbabilityEvidence(int2 p, out float probability) {
 float ColorDistance(float3 a, float3 b) {
     float3 d = abs(a - b);
     return max(d.x, max(d.y, d.z));
+}
+
+bool CurrentContrastAt(int2 p, float3 color) {
+    float3 neighbor;
+    if (!LoadDisplayColor(p, neighbor)) return false;
+    return ColorDistance(color, neighbor) > V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RGB_DISTANCE;
+}
+
+bool2 CurrentSpatialEdges(int2 p, float3 color) {
+    const int radius = (int)V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RADIUS_SOURCE_PIXELS;
+    bool x = CurrentContrastAt(p + int2(radius, 0), color) || CurrentContrastAt(p - int2(radius, 0), color);
+    bool y = CurrentContrastAt(p + int2(0, radius), color) || CurrentContrastAt(p - int2(0, radius), color);
+    return bool2(x, y);
+}
+
+bool CurrentSpatialEdge(int2 p, float3 color) {
+    return any(CurrentSpatialEdges(p, color));
+}
+
+uint MaxChannel(uint3 value) { return max(value.x, max(value.y, value.z)); }
+
+uint3 PaletteQuantize(float3 color) {
+    precise float3 scaled = color * (float)V2_SUBTITLE_CONTOUR_PALETTE_CHANNEL_MAX;
+    precise float3 rounded = scaled + 0.5f;
+    return (uint3)floor(rounded);
+}
+
+bool SourceTileTouchesCurrentCover(uint2 first) {
+    if (any(first >= uint2(contour_source.x, contour_source.w))) return false;
+    uint2 last = min(first + 15u, uint2(contour_source.x - 1u, contour_source.w - 1u));
+    uint2 content = contour_content.zw - contour_content.xy;
+    uint2 start = uint2(2u * contour_content.x * contour_source.x + (2u * first.x + 1u) * content.x,
+        2u * contour_content.y * contour_source.y + (2u * (first.y + contour_source.z) + 1u) * content.y);
+    uint2 finish = uint2(2u * contour_content.x * contour_source.x + (2u * last.x + 1u) * content.x,
+        2u * contour_content.y * contour_source.y + (2u * (last.y + contour_source.z) + 1u) * content.y);
+    [loop]
+    for (uint slot = 0u; slot < CurrentCount; ++slot) {
+        uint4 r = CurrentCovers[slot];
+        if (finish.x >= 2u * r.x * contour_source.x && start.x < 2u * r.z * contour_source.x &&
+            finish.y >= 2u * r.y * contour_source.y && start.y < 2u * r.w * contour_source.y) return true;
+    }
+    return false;
+}
+
+int2 CurrentPaletteSamplePosition(uint4 core, uint sample_index) {
+    uint gx = sample_index % V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS;
+    uint gy = sample_index / V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS;
+    uint content_width = contour_content.z - contour_content.x;
+    uint content_height = contour_content.w - contour_content.y;
+    // Integer field-core grid centers, then floor to a native source pixel. At the
+    // bounded 5120 extents even the 64-column numerator fits an unsigned 32-bit word.
+    uint x = (((core.x - contour_content.x) * (2u * V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS) +
+        (2u * gx + 1u) * (core.z - core.x)) * contour_source.x) /
+        (2u * V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS * content_width);
+    uint absolute_y = (((core.y - contour_content.y) * (2u * V2_SUBTITLE_CONTOUR_PALETTE_GRID_ROWS) +
+        (2u * gy + 1u) * (core.w - core.y)) * contour_source.y) /
+        (2u * V2_SUBTITLE_CONTOUR_PALETTE_GRID_ROWS * content_height);
+    return int2(min(x, contour_source.x - 1u),
+        clamp((int)absolute_y - (int)contour_source.z, 0, (int)contour_source.w - 1));
+}
+
+uint3 PaletteHue(uint3 color) {
+    uint peak = max(MaxChannel(color), 1u);
+    return (color * V2_SUBTITLE_CONTOUR_PALETTE_HUE_CHANNEL_MAX + peak / 2u) / peak;
+}
+
+void PrepareCurrentPalettes(uint group_index, uint2 dispatch_position) {
+    if (group_index < V2_SUBTITLE_PLANE_COVER_CAPACITY) {
+        PaletteCount[group_index] = 0u;
+    }
+    if (group_index == 0u) {
+        PaletteNeeded = 0u;
+        uint2 first = dispatch_position - uint2(group_index % 16u, group_index / 16u);
+        uint2 stride = SourceDispatchStride();
+        if (CurrentGate != 0u) {
+            // Include every grid-stride tile owned by this group, including a second native
+            // tile to the right of the field grid. Outside groups still publish normal history.
+            [loop]
+            for (uint y = first.y; y < contour_source.w && PaletteNeeded == 0u; y += stride.y) {
+                [loop]
+                for (uint x = first.x; x < contour_source.x; x += stride.x) {
+                    if (SourceTileTouchesCurrentCover(uint2(x, y))) { PaletteNeeded = 1u; break; }
+                }
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (PaletteNeeded == 0u) return;
+    [loop]
+    for (uint slot = 0u; slot < CurrentCount; ++slot) {
+        if (group_index < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) {
+            PaletteHistogramCount[group_index] = 0u;
+            PaletteHistogramRepresentative[group_index] = 0u;
+        }
+        if (group_index == 0u) PaletteAnchorPeak = 0u;
+        GroupMemoryBarrierWithGroupSync();
+        uint4 core = CurrentCores[slot];
+        [loop]
+        for (uint sample_index = group_index;
+             sample_index < V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS * V2_SUBTITLE_CONTOUR_PALETTE_GRID_ROWS;
+             sample_index += 256u) {
+            int2 p = CurrentPaletteSamplePosition(core, sample_index);
+            float3 color;
+            float probability;
+            bool color_valid = LoadDisplayColor(p, color);
+            bool probability_valid = CurrentProbabilityEvidence(p, probability);
+            bool anchor = false;
+            if (color_valid && probability_valid) {
+                if (probability > V2_OCR_ACTIVE_PROBABILITY_THRESHOLD) anchor = CurrentSpatialEdge(p, color);
+            }
+            if (anchor) {
+                uint3 q = PaletteQuantize(color);
+                // Bin from actual RGB, not q>>14: RGB.75 rounds to q49151.
+                uint3 bin = min((uint3)(color * 4.0f), uint3(3u, 3u, 3u));
+                uint code = bin.x * 16u + bin.y * 4u + bin.z;
+                uint peak = MaxChannel(q);
+                uint key = (peak << V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS) |
+                    (V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK - sample_index);
+                InterlockedAdd(PaletteHistogramCount[code], 1u);
+                InterlockedMax(PaletteHistogramRepresentative[code], key);
+                InterlockedMax(PaletteAnchorPeak, peak);
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (group_index == 0u) {
+            // Scalar bitsets avoid FXC forcing an unroll for a dynamically written vector lane.
+            uint visited_low = 0u, visited_high = 0u;
+            [loop]
+            for (uint attempt = 0u; attempt < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++attempt) {
+                uint best = V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT;
+                uint best_peak = 0u, best_count = 1u;
+                [loop]
+                for (uint bin = 0u; bin < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++bin) {
+                    uint count = PaletteHistogramCount[bin];
+                    uint peak = PaletteHistogramRepresentative[bin] >> V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS;
+                    uint visited_word = bin < 32u ? visited_low : visited_high;
+                    if (count == 0u || (visited_word & (1u << (bin % 32u))) != 0u ||
+                        V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_DENOMINATOR * peak <
+                            V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_NUMERATOR * PaletteAnchorPeak) continue;
+                    if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT || peak > best_peak ||
+                        (peak == best_peak && (count > best_count || (count == best_count && bin < best)))) {
+                        best = bin; best_peak = peak; best_count = count;
+                    }
+                }
+                if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) break;
+                if (best < 32u) visited_low |= 1u << best;
+                else visited_high |= 1u << (best - 32u);
+                uint representative_index = V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK -
+                    (PaletteHistogramRepresentative[best] & V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK);
+                float3 representative_color;
+                bool representative_valid = LoadDisplayColor(CurrentPaletteSamplePosition(core, representative_index), representative_color);
+                if (!representative_valid) continue;
+                uint3 representative = PaletteQuantize(representative_color);
+                uint3 hue = PaletteHue(representative);
+                bool represented = false;
+                [loop]
+                for (uint prior_mode = 0u; prior_mode < PaletteCount[slot]; ++prior_mode) {
+                    uint4 prior = PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + prior_mode];
+                    uint3 prior_rounded = (prior.xyz + prior.w / 2u) / prior.w;
+                    uint3 prior_hue = PaletteHue(prior_rounded);
+                    uint distance = MaxChannel((uint3)abs(int3(hue) - int3(prior_hue)));
+                    if (V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_DENOMINATOR * distance <=
+                        V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_NUMERATOR * V2_SUBTITLE_CONTOUR_PALETTE_HUE_CHANNEL_MAX)
+                        represented = true;
+                }
+                if (represented) continue;
+                uint selected_mode = PaletteCount[slot];
+                // Keep the existing exact rational matcher representation: virtual sum/count.
+                PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + selected_mode] =
+                    uint4(representative * best_count, best_count);
+                PaletteCount[slot] = selected_mode + 1u;
+                if (PaletteCount[slot] == V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES) break;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
+
+bool CurrentPaletteMatches(uint slot, uint3 color) {
+    [loop]
+    for (uint mode = 0u; mode < PaletteCount[slot]; ++mode) {
+        uint4 value = PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + mode];
+        int3 delta = int3(color * value.w) - int3(value.xyz);
+        uint distance = MaxChannel((uint3)abs(delta));
+        uint scale = V2_SUBTITLE_CONTOUR_PALETTE_CHANNEL_MAX * value.w;
+        if (V2_SUBTITLE_CONTOUR_PALETTE_MATCH_RGB_DENOMINATOR * distance <=
+            V2_SUBTITLE_CONTOUR_PALETTE_MATCH_RGB_NUMERATOR * scale) return true;
+    }
+    return false;
+}
+
+bool CurrentShortTangent(int2 p, float3 color, int2 direction, uint maximum) {
+    uint length = 1u;
+    if (maximum == 0u) return false;
+    [unroll]
+    for (int sign = -1; sign <= 1; sign += 2) {
+        [loop]
+        for (uint distance = 1u; distance <= maximum; ++distance) {
+            float3 neighbor;
+            bool neighbor_valid = LoadDisplayColor(p + direction * sign * (int)distance, neighbor);
+            if (!neighbor_valid) break;
+            float contrast = ColorDistance(color, neighbor);
+            if (contrast > V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RGB_DISTANCE) break;
+            ++length;
+            if (length > maximum) return false;
+        }
+    }
+    return true;
+}
+
+bool CurrentOutlineNeighborMatches(int2 p, float3 color, uint slot) {
+    float3 neighbor;
+    bool neighbor_valid = LoadDisplayColor(p, neighbor);
+    if (!neighbor_valid) return false;
+    float contrast = ColorDistance(color, neighbor);
+    if (contrast <= V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RGB_DISTANCE) return false;
+    uint3 neighbor_quantized = PaletteQuantize(neighbor);
+    return CurrentPaletteMatches(slot, neighbor_quantized);
+}
+
+bool CurrentGlyphEvidence(int2 p, float3 color) {
+    bool2 edges = CurrentSpatialEdges(p, color);
+    if (!any(edges)) return false;
+    uint3 q = PaletteQuantize(color);
+    uint maximum = MaxChannel(q), minimum = min(q.x, min(q.y, q.z));
+    [loop]
+    for (uint slot = 0u; slot < CurrentCount; ++slot) {
+        if (!SourcePixelInRect(p, CurrentSupportSearch[slot]) || PaletteCount[slot] == 0u) continue;
+        if (CurrentPaletteMatches(slot, q)) {
+            uint limit = (V2_SUBTITLE_CONTOUR_LONG_LINE_CORE_HEIGHT_NUMERATOR *
+                (CurrentCores[slot].w - CurrentCores[slot].y) * contour_source.y) /
+                (V2_SUBTITLE_CONTOUR_LONG_LINE_CORE_HEIGHT_DENOMINATOR * (contour_content.w - contour_content.y));
+            if ((edges.x && CurrentShortTangent(p, color, int2(0, 1), limit)) ||
+                (edges.y && CurrentShortTangent(p, color, int2(1, 0), limit))) return true;
+        }
+        // The first retained mode has the greatest mean peak by construction. Read the
+        // authoritative retained payload directly instead of a redundant shared cache.
+        uint4 brightest_mode = PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES];
+        uint2 peak = uint2(MaxChannel(brightest_mode.xyz), brightest_mode.w);
+        if (V2_SUBTITLE_CONTOUR_OUTLINE_VALUE_DENOMINATOR * maximum * peak.y >
+                V2_SUBTITLE_CONTOUR_OUTLINE_VALUE_NUMERATOR * peak.x ||
+            V2_SUBTITLE_CONTOUR_OUTLINE_CHROMA_DENOMINATOR * (maximum - minimum) >
+                V2_SUBTITLE_CONTOUR_OUTLINE_CHROMA_NUMERATOR * V2_SUBTITLE_CONTOUR_PALETTE_CHANNEL_MAX) continue;
+        const int radius = (int)V2_SUBTITLE_CONTOUR_OUTLINE_PROBE_RADIUS_SOURCE_PIXELS;
+        // Explicit calls preserve the exact eight-point set without nested unrolled
+        // continue/early-return lowering in FXC.
+        if (CurrentOutlineNeighborMatches(p + int2(-radius, -radius), color, slot)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(0, -radius), color, slot)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(radius, -radius), color, slot)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(-radius, 0), color, slot)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(radius, 0), color, slot)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(-radius, radius), color, slot)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(0, radius), color, slot)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(radius, radius), color, slot)) return true;
+    }
+    return false;
 }
 
 bool DecodeFeature(float4 feature, out uint count) {
@@ -552,6 +983,7 @@ float4 AdvanceFeature(int2 p, float3 color, bool candidate) {
 void temporal_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV_GroupIndex) {
     PrepareCurrentGate(group_index);
     PrepareHistoryGate(group_index);
+    PrepareCurrentPalettes(group_index, dispatch_id.xy);
     uint width, height, feature_w, feature_h;
     NativeSupportWrite.GetDimensions(width, height);
     HistoryFeaturesWrite.GetDimensions(feature_w, feature_h);
@@ -564,11 +996,11 @@ void temporal_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : S
         for (uint x = dispatch_id.x; x < width; x += stride.x) {
             int2 p = int2(x, y);
             float3 color;
-            float probability;
             float4 feature = 0.0f;
             uint mask = 0u;
             if (valid && LoadDisplayColor(p, color)) {
                 bool candidate = false;
+                float probability = 0.0f;
                 if (CurrentGate != 0u) {
                     // Current-frame OCR8 covers authorize each pixel independently.
                     // Box count, ordering, splits and merges are not RGB-history reset keys.
@@ -576,10 +1008,112 @@ void temporal_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : S
                         CurrentProbabilityEvidence(p, probability);
                 }
                 feature = AdvanceFeature(p, color, candidate);
-                mask = (uint)feature.w & V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_MASK_BIT;
+                // Current learned-color stroke evidence admits and withdraws support here.
+                // Probability is palette-anchor evidence, never a filled word/glyph bitmap.
+                // Positive count keeps duplicate admission fail-closed;
+                // every genuine eligible observation starts at one without an acquisition wait.
+                uint count = (uint)feature.w >> V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_COUNT_SHIFT;
+                mask = candidate && count != 0u && SupportSearchSourcePixel(p) &&
+                    CurrentGlyphEvidence(p, color) ? 1u : 0u;
             }
             NativeSupportWrite[uint2(x, y)] = mask;
             if (x < feature_w && y < feature_h) HistoryFeaturesWrite[uint2(x, y)] = feature;
+        }
+    }
+}
+
+// Current sparse support seeds a bounded color-geodesic body fill. The final small native
+// collar preserves the full nonzero-alpha outline/AA footprint, including RGB-rounded AA.
+// Neither probability values nor history counts supply new membership or a frame wait.
+[numthreads(16, 16, 1)]
+void dense_main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID,
+                uint group_index : SV_GroupIndex) {
+    if (group_index == 0u) GlyphTileGroupStride = max((contour_field.xy + 15u) / 16u, uint2(1u, 1u));
+    GroupMemoryBarrierWithGroupSync();
+    uint2 group_stride = GlyphTileGroupStride;
+    // The group has consumed its immutable loop controls before PrepareCurrentGate's lane-0
+    // reads of the same constant buffer. This also makes their uniform lifetime explicit to
+    // SM5's barrier/race analysis rather than propagating lane-local gate control into loops.
+    GroupMemoryBarrierWithGroupSync();
+    PrepareCurrentGate(group_index);
+    uint width, height, support_w, support_h;
+    DenseGlyphMatteWrite.GetDimensions(width, height);
+    CurrentSupportRead.GetDimensions(support_w, support_h);
+    bool valid = CurrentGate != 0u && CurrentCount != 0u &&
+        width == contour_source.x && height == contour_source.w &&
+        support_w == width && support_h == height;
+    // Authority is a data gate, never a barrier/loop-control gate. All lanes execute the
+    // same texture-dimension tile loops even for current empty/invalid or canonical 1x1
+    // resources. Invalid authority loads zero membership and overwrites every output zero.
+    [loop]
+    for (uint tile_y = group_id.y * GLYPH_TILE_SIDE; tile_y < height;
+         tile_y += group_stride.y * GLYPH_TILE_SIDE) {
+        [loop]
+        for (uint tile_x = group_id.x * GLYPH_TILE_SIDE; tile_x < width;
+             tile_x += group_stride.x * GLYPH_TILE_SIDE) {
+            [loop]
+            for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u) {
+                int2 p = int2(tile_x, tile_y) +
+                    int2(index % GLYPH_TILE_EXTENT, index / GLYPH_TILE_EXTENT) - (int)GLYPH_TILE_HALO;
+                float3 color;
+                bool color_valid = LoadDisplayColor(p, color) && valid;
+                GlyphTileColors[index] = color_valid ? float4(color, 1.0f) : 0.0f;
+                GlyphTileMask[index] = color_valid && CurrentSupportRead.Load(int3(p, 0)) == 1u ? 1u : 0u;
+            }
+            GroupMemoryBarrierWithGroupSync();
+            [loop]
+            for (uint step = 0u; step < V2_SUBTITLE_GLYPH_MATTE_STEPS; ++step) {
+                [loop]
+                for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u) {
+                    uint admitted = GlyphTileMask[index];
+                    float4 color = GlyphTileColors[index];
+                    if (admitted == 0u && color.a == 1.0f) {
+                        int2 p = int2(index % GLYPH_TILE_EXTENT, index / GLYPH_TILE_EXTENT);
+                        bool bright = max(color.r, max(color.g, color.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
+                        [unroll]
+                        for (int dy = -1; dy <= 1; ++dy) {
+                            [unroll]
+                            for (int dx = -1; dx <= 1; ++dx) {
+                                int2 q = p + int2(dx, dy);
+                                if ((dx == 0 && dy == 0) || any(q < 0) ||
+                                    any(q >= (int)GLYPH_TILE_EXTENT)) continue;
+                                uint neighbor = (uint)q.y * GLYPH_TILE_EXTENT + (uint)q.x;
+                                float4 other = GlyphTileColors[neighbor];
+                                bool other_bright = max(other.r, max(other.g, other.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
+                                if (GlyphTileMask[neighbor] == 1u && other.a == 1.0f && bright == other_bright &&
+                                    ColorDistance(color.rgb, other.rgb) <= V2_SUBTITLE_GLYPH_MATTE_RGB_DISTANCE) admitted = 1u;
+                            }
+                        }
+                    }
+                    GlyphTileNext[index] = admitted;
+                }
+                GroupMemoryBarrierWithGroupSync();
+                [loop]
+                for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u)
+                    GlyphTileMask[index] = GlyphTileNext[index];
+                GroupMemoryBarrierWithGroupSync();
+            }
+            uint2 output = uint2(tile_x, tile_y) + thread_id.xy;
+            if (output.x < width && output.y < height) {
+                uint center = (thread_id.y + GLYPH_TILE_HALO) * GLYPH_TILE_EXTENT + thread_id.x + GLYPH_TILE_HALO;
+                uint admitted = 0u;
+                if (GlyphTileColors[center].a == 1.0f) {
+                    const int radius = (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SOURCE_PIXELS;
+                    [unroll]
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        [unroll]
+                        for (int dx = -radius; dx <= radius; ++dx) {
+                            if (dx * dx + dy * dy <= (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SQUARED) {
+                                uint neighbor = (uint)((int)center + dy * (int)GLYPH_TILE_EXTENT + dx);
+                                admitted |= GlyphTileMask[neighbor];
+                            }
+                        }
+                    }
+                }
+                DenseGlyphMatteWrite[output] = admitted != 0u ? 1u : 0u;
+            }
+            // Every lane finishes reading this tile before any lane loads the next one.
+            GroupMemoryBarrierWithGroupSync();
         }
     }
 }

@@ -211,10 +211,11 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
     }
 }
 
-// The subtitle proposal is smoothed by the same core as Base. Disabled, empty, or malformed
-// control copies immutable Base bits instead; it never re-quantizes an already published Base.
+// Only current proposal rows use the shared horizontal core. Rows whose complete proposal
+// equals immutable Base retain every Base bit rather than acquiring another Q30 rounding.
 StructuredBuffer<uint> GaussianSmoothingControl : register(t2);
 Texture2D<float> GaussianBase : register(t3);
+groupshared uint SubtitleRowChanged[V2_LIMIT_GROUP_LINES];
 
 bool GaussianSmoothingEnabled() {
     uint words, stride;
@@ -230,19 +231,36 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_GroupThreadID)
 
 [numthreads(V2_LIMIT_GROUP_LINES, V2_LIMIT_LINE_CHUNKS, 1)]
 void subtitle_main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_GroupThreadID) {
-    // All lanes choose the same immutable control branch. Keep the branches structured:
-    // lane-varying exits from the copy path would invalidate the core's group barriers.
-    // Padding extends the nearest content cell.
+    // Every lane follows the shared core and its barriers. Per-row copy decisions occur only
+    // after all core writes complete, so independent rows cannot invalidate group barriers.
     if (GaussianSmoothingEnabled()) {
+        uint row = group_thread_id.x;
+        uint y = group_id.x * V2_LIMIT_GROUP_LINES + row;
+        if (group_thread_id.y == 0u) SubtitleRowChanged[row] = 0u;
+        GroupMemoryBarrierWithGroupSync();
+        if (y < target_h) {
+            [loop]
+            for (uint x = group_thread_id.y; x < target_w; x += V2_LIMIT_LINE_CHUNKS) {
+                uint2 position = uint2(x, y);
+                if (asuint(VerticalShare.Load(int3(position, 0))) != asuint(GaussianBase.Load(int3(position, 0))))
+                    InterlockedOr(SubtitleRowChanged[row], 1u);
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
         V2LimitMain(group_id, group_thread_id);
+        DeviceMemoryBarrierWithGroupSync();
+        if (y < target_h && SubtitleRowChanged[row] == 0u) {
+            [loop]
+            for (uint copy_x = group_thread_id.y; copy_x < target_w; copy_x += V2_LIMIT_LINE_CHUNKS)
+                FinalOut[uint2(copy_x, y)] = GaussianBase.Load(int3(copy_x, y, 0));
+        }
     } else {
         uint y = group_id.x * V2_LIMIT_GROUP_LINES + group_thread_id.x;
         if (y < target_h) {
             [loop]
             for (uint x = group_thread_id.y; x < target_w; x += V2_LIMIT_LINE_CHUNKS) {
                 uint2 position = uint2(x, y);
-                uint2 source = DepthAnalysisContentValid() ? DepthAnalysisClampCell(position) : position;
-                FinalOut[position] = GaussianBase.Load(int3(source, 0));
+                FinalOut[position] = GaussianBase.Load(int3(position, 0));
             }
         }
     }

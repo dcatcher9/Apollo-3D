@@ -38,6 +38,10 @@ cbuffer NearIdenticalOcrConstants : register(b2) {
     uint near_identical_ocr_line_reference_width;
     int near_identical_ocr_line_search_top_source;
     uint near_identical_ocr_line_reserved;
+    uint near_identical_ocr_observation_timestamp_low;
+    uint near_identical_ocr_observation_timestamp_high;
+    uint near_identical_ocr_input_domain_reset;
+    uint near_identical_ocr_observation_reserved;
 };
 
 // The single-high finalizer binds the same immutable high-grid depth constants at b0 and b3.
@@ -62,6 +66,9 @@ cbuffer NearIdenticalGeometryConstants : register(b3) {
 
 #define NEAR_IDENTICAL_REQUEST_AUTHORIZED (1u << 0u)
 #define NEAR_IDENTICAL_REQUEST_FORCE_INFER (1u << 1u)
+// Queue-only force work has not received CPU completion proof. It must authenticate the
+// post-child CUDA receipt before consuming either model output or advancing any observation.
+#define NEAR_IDENTICAL_REQUEST_QUEUED_FORCE_INFER (1u << 2u)
 #define NEAR_IDENTICAL_RESOLVE_THREADS 64u
 #define NEAR_IDENTICAL_REDUCE_ELEMENTS_PER_GROUP 256u
 #define NEAR_IDENTICAL_RESOLVE_FLAG_MALFORMED (1u << 0u)
@@ -197,7 +204,8 @@ bool NearIdenticalGeometryConstantsValid() {
 bool NearIdenticalPublicationConstantsValid() {
     bool request_valid =
         (near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED ||
-         near_identical_request_flags == NEAR_IDENTICAL_REQUEST_FORCE_INFER) &&
+         near_identical_request_flags == NEAR_IDENTICAL_REQUEST_FORCE_INFER ||
+         near_identical_request_flags == NEAR_IDENTICAL_REQUEST_QUEUED_FORCE_INFER) &&
         (near_identical_request_token_low != 0u ||
          near_identical_request_token_high != 0u) &&
         (near_identical_current_frame_low != 0u ||
@@ -283,8 +291,11 @@ bool NearIdenticalReceiptValid(
 // A conditional joint refresh also authenticates its comparison/reduction geometry. The common
 // request/receipt check above supplies the one branch authority for both depth and subtitles.
 bool NearIdenticalDepthConstantsValid() {
+    bool queued_force = near_identical_request_flags ==
+        NEAR_IDENTICAL_REQUEST_QUEUED_FORCE_INFER;
     return
-        near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED &&
+        (near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED ||
+         queued_force) &&
         near_identical_tile_group_width == NearIdenticalTileAxisGroups(target_w) &&
         near_identical_tile_group_height == NearIdenticalTileAxisGroups(target_h) &&
         near_identical_tile_group_count ==
@@ -292,7 +303,7 @@ bool NearIdenticalDepthConstantsValid() {
         near_identical_reduce_groups == NearIdenticalExpectedReduceGroups() &&
         near_identical_stream_frame_delta > 0u &&
         near_identical_stream_frame_delta <= 65535u &&
-        NearIdenticalOwnerIsNewer();
+        (queued_force || NearIdenticalOwnerIsNewer());
 }
 
 void NearIdenticalWriteOcrAbstention() {
@@ -541,10 +552,11 @@ void resolve_main(uint3 group_thread : SV_GroupThreadID) {
     }
 }
 
-// The joined CUDA root has completed and every interop resource is unmapped. One direct finalizer
+// Every interop resource has been unmapped. One direct finalizer
 // validates the joint refresh authority, publishes every postprocess shape, and
 // writes an exact-current abstention whenever no authenticated optional OCR receipt may be
-// consumed. Force-infer depth work remains host-authored and therefore skips the indirect shapes.
+// consumed. CPU-completed force work keeps its host-authored direct shapes. Queue-only force
+// work instead authenticates the post-child receipt and uses the same indirect shapes as infer.
 [numthreads(1, 1, 1)]
 void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
     uint decision;
@@ -597,7 +609,8 @@ void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
 
     // A force-infer root runs every depth postprocess stage with host-authored direct dispatches.
     // Only an opaque GPU-undecided root may replace these records with receipt-gated arguments.
-    if (near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED) {
+    if (near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED ||
+        near_identical_request_flags == NEAR_IDENTICAL_REQUEST_QUEUED_FORCE_INFER) {
         // The depth textures are rotated before these arguments are consumed. A malformed opaque
         // receipt cannot authorize current inference state, but it must still restore the retained
         // normalized field into the new target. This bounded hold advances no inference, scene,

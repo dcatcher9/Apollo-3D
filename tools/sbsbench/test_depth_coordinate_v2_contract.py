@@ -147,6 +147,19 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             113: "7dd439ebe1cf597c4e3c58af5a3370bcd716dc29711d794f01cdc36c349809d7",
             114: "d7e7c7e1d8a297ddc350b16af48ba227801db45948479e55f12284850f578fdf",
             115: "4527ef5a2ef2f8b15b0eb74dbec4057ca27f9d64770aeb26b709c91604c3c1f2",
+            116: "db7daae9571274281f811bee2e0ce87cef61c48f72156351f658ce88c71a4d3b",
+            117: "6708b66744278c2d2434bf953131d6da5197152e8974b3906b5f166b42018869",
+            118: "1ab1fbe43c8804d4478a63eef9aace392e39e3db8c1e6e17e7748f3173875c22",
+            119: "f8c3c3f40f56749fb0f48f3b988d0f8feeda70bed48d721fbf5a58dc45d5cb9a",
+            120: "901a91154c91e63e4e1f5c7733be951bb6e3919b58860684bc5dc70936097894",
+            121: "2bd6a1898c974851ccb6767aa025de88f75fef5fea55239869a507fe8b69f62d",
+            122: "802c668fd27c0a34db951c32ad69b0d096d31f35e8fa50e36ae66dc30e550eec",
+            123: "ff544c05913356fde6ed5c15057758b5e751f3bf249c5b88c7a0436c5975ebe1",
+            # Build133 removes an unused subtitle-only UAV write. The full source
+            # identity changes; the independently pinned semantic GPU tag below does not.
+            124: "e8fdaa554e81f349cd3dc883835d493284d8422e1757fe81cc6ef76df66ed0f2",
+            # Build141 tightens current OCR group centering to two percent.
+            125: "9f880740eeef58299845a23542cd8dbff63bb2066d4f7f3b4c393207a34f350d",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -154,14 +167,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x640A940C)
+        self.assertEqual(generator.contract_tag(contract), 0x41F6E047)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "640a940c9509bbf043fe18dd7b4d8116e6ad4fb77ca2a8a49ad354660ba323b6",
+            "41f6e047e28b97251b83881fdbb30d0aaa9befa9c7cd9b00185ef92358c732d2",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "f899c1f6325de5a08e5de47f42c5495027e50e2e53ab089063f86ac8214964b5",
+            "7ab5a59ec1a60b8d7764897df95ab28dde5f612b38dabdedc8f8be66541e476c",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -315,7 +328,16 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_subtitle_ocr_contract_binds_model_profile_tensor_and_record_abis(self):
         ocr = python_contract.SUBTITLE_OCR
-        self.assertEqual(ocr.schema, 27)
+        self.assertEqual(ocr.schema, 37)
+        self.assertEqual(
+            ocr.classifier_policy["policy"],
+            "current-local-lines-envelope-orientation-bracketed-stack-and-tight-two-percent-group-center-span-before-protection-v6")
+        self.assertEqual(
+            ocr.classifier_policy["ordinary_group_center_policy"],
+            "current-ordinary-tight-group-must-contain-signed-reference-center-half-open-before-horizontal-current-line-or-prior-admission-ribbons-exempt-v1")
+        self.assertEqual(
+            ocr.classifier_policy["prior_only_group_center_policy"],
+            "current-half-open-group-must-contain-signed-reference-center-without-borrowing-prior-location-as-current-line-evidence-v1")
         self.assertEqual(ocr.logical_model, "ppocrv6_tiny_det_modelopt_fp16")
         self.assertEqual(
             ocr.asset_path,
@@ -360,10 +382,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(
             (ocr.text_join_gap_cells, ocr.ribbon_join_gap_cells),
             (4, 12))
-        self.assertEqual(ocr.ordinary_cover_horizontal_guard_cells, 1)
+        self.assertEqual(ocr.ordinary_cover_horizontal_guard_cells, 4)
         self.assertEqual(
             ocr.ordinary_cover_horizontal_guard_policy,
-            "ordinary-only-add-guard-cells-times-producer-ocr-cell-width-to-horizontal-db-unclip-cover-clamped-detector-bounds-before-map-current-canonical-cover-all-consumers-no-second-mask-vertical-and-ribbon-unchanged-v1")
+            "ordinary-only-four-producer-cell-horizontal-guard-and-ceil-half-tight-detector-height-vertical-guard-add-db-unclip-clamp-before-map-current-cover-search-no-rectangle-protection-ribbon-unchanged-v2")
         self.assertEqual(
             (ocr.line_group_min_vertical_iou_numerator,
              ocr.line_group_min_vertical_iou_denominator), (1, 2))
@@ -375,30 +397,32 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             "native-source-horizontal-gap-to-current-union-edge-relative-to-max-candidate-and-fixed-anchor-height-exact-cross-multiplied-v1")
         self.assertEqual(
             (ocr.line_center_tolerance_numerator,
-             ocr.line_center_tolerance_denominator), (1, 10))
+             ocr.line_center_tolerance_denominator), (1, 50))
         self.assertEqual(
             (ocr.line_search_bottom_height_numerator,
              ocr.line_search_bottom_height_denominator), (1, 4))
         self.assertIn("intersect-existing-safe-detector-crop", ocr.line_search_region)
         self.assertEqual(ocr.line_group_policy, generator.CANONICAL_SUBTITLE_OCR[
             "field_policy"]["line_group_policy"])
-        self.assertIn("fixed-tight-core-anchor", ocr.line_group_policy)
-        self.assertIn("bounded-native-horizontal-union-gap", ocr.line_group_policy)
-        self.assertIn("union-eligibility-only", ocr.line_group_policy)
+        self.assertIn("fixed-span", ocr.line_group_policy)
+        self.assertIn("centered-native-line-union", ocr.line_group_policy)
+        self.assertIn("before-classified-capacity", ocr.line_group_policy)
         self.assertIn("full-screen", ocr.line_center_reference)
         self.assertNotIn("foreground", ocr.line_center_reference)
-        self.assertIn("signed-twice-center", ocr.line_center_reference_params)
-        self.assertIn("signed-search-top", ocr.line_center_reference_params)
-        self.assertIn("80bytes", ocr.line_center_reference_params)
+        self.assertIn("prefix20", ocr.line_center_reference_params)
+        self.assertIn("source-clock-low-high-domain-reset", ocr.line_center_reference_params)
+        self.assertIn("96bytes", ocr.line_center_reference_params)
         self.assertGreater(ocr.text_join_gap_cells, 0)
         self.assertLess(ocr.text_join_gap_cells, ocr.ribbon_join_gap_cells)
         self.assertGreaterEqual(
             ocr.ribbon_join_gap_cells,
             ocr.ribbon_structural_gap_min_cells)
-        self.assertEqual((ocr.record_schema, ocr.record_tag), (3, 0x3852434F))
-        self.assertEqual((ocr.record_word_count, ocr.raw_box_offset), (208, 16))
+        self.assertEqual((ocr.record_schema, ocr.record_tag), (4, 0x3852434F))
+        self.assertEqual((ocr.record_word_count, ocr.raw_box_offset), (256, 16))
         self.assertEqual((ocr.final_box_offset, ocr.final_box_capacity), (144, 8))
         self.assertEqual((ocr.plane_schema, ocr.plane_tag), (4, 0x34504955))
+        self.assertEqual(ocr.ui_plane_policy, "current-clearance-goal-first-visible-immediate-symmetric-source-time-exponential-native-slew-empty-reset-v3")
+        self.assertEqual((ocr.plane_adaptive_known_flags, ocr.plane_adaptive_retired_approach_flag), (28, 1))
         self.assertEqual(ocr.plane_warmup_remaining_mask, 7)
         self.assertEqual(ocr.plane_warmup_observations, generator.CANONICAL_SUBTITLE_OCR["contour_policy"]["history_confirmation_observations"])
         self.assertEqual(
@@ -419,16 +443,22 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 115u',
-                'final_parallax_contract_schema = 3u',
+                'contract_schema = 125u',
+                'final_parallax_contract_schema = 4u',
                 'final_parallax_authority = '
-                '"complete-atomic-subtitle-conditioned-r32f-live-render-authority"',
+                '"authenticated-subtitle-conditioned-r32f-diagnostic-only"',
                 'final_parallax_publication_policy = '
-                '"authenticated-infer-or-cpu-known-publication-direct-render"',
+                '"atomic-joined-publication-retains-independent-final-diagnostic"',
                 'final_parallax_reuse_policy = '
-                '"reuse-holds-complete-depth-ocr-uip4-final-tuple-byte-for-byte"',
-                'subtitle_ocr_contract_schema = 27u',
-                'subtitle_contour_recipe = 23u',
+                '"reuse-holds-complete-base-state-matte-sct-scp-source-and-diagnostics-tuple"',
+                'subtitle_ocr_contract_schema = 37u',
+                'subtitle_ui_plane_policy = "current-clearance-goal-first-visible-immediate-symmetric-source-time-exponential-native-slew-empty-reset-v3"',
+                'subtitle_plane_adaptive_known_flags = 28u',
+                'subtitle_plane_adaptive_retired_approach_flag = 1u',
+                'subtitle_contour_recipe = 27u',
+                'subtitle_contour_distance_completion_source_pixels = 3u',
+                'subtitle_contour_spatial_edge_radius_source_pixels = 2u',
+                'subtitle_contour_spatial_edge_rgb_distance = 0.08f',
                 'subtitle_contour_schema = 5u',
                 'subtitle_contour_history_snapshot_valid_word = 23u',
                 'subtitle_contour_history_feature_valid_bit = 2u',
@@ -438,7 +468,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'subtitle_contour_history_confirmation_observations = 4u',
                 'subtitle_contour_history_feature_count_shift = 2u',
                 'subtitle_contour_gaussian_center_offset_source_pixels = 2u',
-                'subtitle_contour_gaussian_sigma_short_side_divisor = 60.0f',
+                'subtitle_contour_gaussian_sigma_short_side_divisor = 120.0f',
                 'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
                 'subtitle_ocr_asset_path = '
                 '"models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx"',
@@ -492,9 +522,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'subtitle_ocr_crop_aspect_width = 6u',
                 'subtitle_ocr_crop_aspect_height = 1u',
                 'subtitle_ocr_text_join_gap_cells = 4u',
-                'subtitle_ocr_ordinary_cover_horizontal_guard_cells = 1u',
+                'subtitle_ocr_ordinary_cover_horizontal_guard_cells = 4u',
                 'subtitle_ocr_ordinary_cover_horizontal_guard_policy = '
-                '"ordinary-only-add-guard-cells-times-producer-ocr-cell-width-to-horizontal-db-unclip-cover-clamped-detector-bounds-before-map-current-canonical-cover-all-consumers-no-second-mask-vertical-and-ribbon-unchanged-v1"',
+                '"ordinary-only-four-producer-cell-horizontal-guard-and-ceil-half-tight-detector-height-vertical-guard-add-db-unclip-clamp-before-map-current-cover-search-no-rectangle-protection-ribbon-unchanged-v2"',
                 'subtitle_ocr_line_group_min_vertical_iou_numerator = 1u',
                 'subtitle_ocr_line_group_min_vertical_iou_denominator = 2u',
                 'subtitle_ocr_line_group_max_horizontal_gap_height_numerator = 4u',
@@ -502,17 +532,24 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'subtitle_ocr_line_group_horizontal_gap_metric = '
                 '"native-source-horizontal-gap-to-current-union-edge-relative-to-max-candidate-and-fixed-anchor-height-exact-cross-multiplied-v1"',
                 'subtitle_ocr_line_center_tolerance_numerator = 1u',
-                'subtitle_ocr_line_center_tolerance_denominator = 10u',
+                'subtitle_ocr_line_center_tolerance_denominator = 50u',
                 'subtitle_ocr_line_search_bottom_height_numerator = 1u',
                 'subtitle_ocr_line_search_bottom_height_denominator = 4u',
                 'subtitle_ocr_ribbon_join_gap_cells = 12u',
                 'subtitle_ocr_active_probability_threshold = 0.2f',
                 'subtitle_ocr_min_mean_score = 0.4f',
+                'subtitle_ocr_classifier_stack_max_gap_height_numerator = 1u',
+                'subtitle_ocr_classifier_stack_max_gap_height_denominator = 1u',
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 115u',
-                '#define V2_SUBTITLE_CONTOUR_RECIPE 23u',
+                '#define V2_CONTRACT_SCHEMA 125u',
+                '#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS 28u',
+                '#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG 1u',
+                '#define V2_SUBTITLE_CONTOUR_RECIPE 27u',
+                '#define V2_SUBTITLE_CONTOUR_DISTANCE_COMPLETION_SOURCE_PIXELS 3u',
+                '#define V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RADIUS_SOURCE_PIXELS 2u',
+                '#define V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RGB_DISTANCE 0.08f',
                 '#define V2_SUBTITLE_CONTOUR_SCHEMA 5u',
                 '#define V2_SUBTITLE_CONTOUR_HISTORY_SNAPSHOT_VALID_WORD 23u',
                 '#define V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_VALID_BIT 2u',
@@ -522,14 +559,16 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 '#define V2_SUBTITLE_CONTOUR_HISTORY_CONFIRMATION_OBSERVATIONS 4u',
                 '#define V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_COUNT_SHIFT 2u',
                 '#define V2_SUBTITLE_CONTOUR_GAUSSIAN_CENTER_OFFSET_SOURCE_PIXELS 2u',
-                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 27u',
-                '#define V2_OCR_ORDINARY_COVER_HORIZONTAL_GUARD_CELLS 1u',
+                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 37u',
+                '#define V2_OCR_CLASSIFIER_STACK_MAX_GAP_HEIGHT_NUMERATOR 1u',
+                '#define V2_OCR_CLASSIFIER_STACK_MAX_GAP_HEIGHT_DENOMINATOR 1u',
+                '#define V2_OCR_ORDINARY_COVER_HORIZONTAL_GUARD_CELLS 4u',
                 '#define V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR 1u',
                 '#define V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_DENOMINATOR 2u',
                 '#define V2_OCR_LINE_GROUP_MAX_HORIZONTAL_GAP_HEIGHT_NUMERATOR 4u',
                 '#define V2_OCR_LINE_GROUP_MAX_HORIZONTAL_GAP_HEIGHT_DENOMINATOR 1u',
                 '#define V2_OCR_LINE_CENTER_TOLERANCE_NUMERATOR 1u',
-                '#define V2_OCR_LINE_CENTER_TOLERANCE_DENOMINATOR 10u',
+                '#define V2_OCR_LINE_CENTER_TOLERANCE_DENOMINATOR 50u',
                 '#define V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_NUMERATOR 1u',
                 '#define V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_DENOMINATOR 4u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
@@ -600,6 +639,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             "history_reset_mask_word": 21, "warmup_word": 22, "warmup_observations": 4,
             "warmup_cue_bit": 8, "reserved_offset": 23, "reserved_word_count": 1,
             "adaptive_offset": 24, "adaptive_word_count": 16,
+            "adaptive_known_flags": 28, "adaptive_retired_approach_flag": 1,
+            "adaptive_retired_retreat_flag": 2, "retreat_time_constant_ms": 100,
+            "adaptive_presented_flag": 16, "smoothing_time_constant_ms": 100,
+            "slew_source_pixels_per_second": 30, "max_tick_gap_ms": 50,
         })
         self.assertNotIn("locator_state", ocr)
         self.assertFalse(any(key.startswith("locator_") for key in ocr["field_policy"]))
@@ -679,7 +722,18 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         policy = original["subtitle_ocr"]["contour_policy"]
         self.assertIs(type(policy["gaussian_center_offset_source_pixels"]), int)
         self.assertEqual(policy["gaussian_center_offset_source_pixels"], 2)
-        self.assertEqual(policy["gaussian_sigma_short_side_divisor"], 60.0)
+        self.assertEqual(policy["gaussian_sigma_short_side_divisor"], 120.0)
+        self.assertEqual(policy["recipe"], 27)
+        self.assertIs(type(policy["distance_completion_source_pixels"]), int)
+        self.assertEqual(policy["distance_completion_source_pixels"], 3)
+        self.assertIn("exact-rational-y-slab-horizontal-q30-parallax-pixel-budget", policy["distance_policy"])
+        self.assertIn("no-vertical-cost-or-cross-row-transition", policy["distance_axis_policy"])
+        self.assertIn("inclusive-exact-integer-rational-field-node", policy["distance_row_policy"])
+        self.assertIn("any-finite-nonnegative-first-content-column-budget-row", policy["conditioning_control_policy"])
+        self.assertIn("vertical-proposal-bit-copy-unchanged-rows", policy["conditioning"])
+        self.assertIn("closed-base-ui-roundoff-clamp-bit-exact-endpoints", policy["gaussian_blend_policy"])
+        self.assertEqual((policy["ordinary_search_pad_height_numerator"],
+                          policy["ordinary_search_pad_height_denominator"]), (1, 2))
         self.assertEqual(policy["distance_empty_bits"], 0x7f800000)
         self.assertNotIn("presentation_margin_field_cells", policy)
         self.assertNotIn("distance_horizontal_weight", policy)
@@ -688,7 +742,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertNotIn("subtitle_contour_local_contrast", generator.render_cpp(original))
         self.assertNotIn("V2_SUBTITLE_CONTOUR_LOCAL_CONTRAST", generator.render_hlsl(original))
         self.assertIn("subtitle_contour_gaussian_center_offset_source_pixels = 2u", generator.render_cpp(original))
-        self.assertIn("#define V2_SUBTITLE_CONTOUR_GAUSSIAN_SIGMA_SHORT_SIDE_DIVISOR 60.0f", generator.render_hlsl(original))
+        self.assertIn("#define V2_SUBTITLE_CONTOUR_GAUSSIAN_SIGMA_SHORT_SIDE_DIVISOR 120.0f", generator.render_hlsl(original))
         mutations = [("gaussian_center_offset_source_pixels", value) for value in
                      (2.0, True, -1, 3, None, "2", 0, 1)]
         mutations += [(key, value) for key in
@@ -697,7 +751,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         mutations += [("presentation_margin_field_cells", 2)]
         mutations += [("local_contrast_distance", 0.16),
                       ("local_contrast_radius_detector_pixels", 2)]
-        mutations += [("gaussian_sigma_short_side_divisor", 120.0)]
+        mutations += [("gaussian_sigma_short_side_divisor", 60.0)]
         for key, value in mutations:
             with self.subTest(key=key, value=value):
                 changed = copy.deepcopy(original)
@@ -962,7 +1016,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                     path.write_text(json.dumps(changed), encoding="utf-8")
                     generator.validate_contract(changed)
                     self.assertEqual(python_contract.load_contract(path), changed)
-                    self.assertEqual(changed["subtitle_ocr"]["contour_policy"]["gaussian_sigma_short_side_divisor"], 60.0)
+                    self.assertEqual(changed["subtitle_ocr"]["contour_policy"]["gaussian_sigma_short_side_divisor"], 120.0)
 
     def test_vertical_share_rejects_values_that_round_to_float32_endpoints(self):
         original = generator.load_contract()

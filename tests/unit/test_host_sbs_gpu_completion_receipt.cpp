@@ -490,9 +490,10 @@ namespace {
       EXPECT_FALSE(receipt::decode(malformed_warmup, expected)) << "warmup=" << malformed;
     }
     for (const auto legal : {0u, 1u, 2u, 3u, 4u, 8u, 9u, 10u, 11u, 12u}) {
-      auto valid_warmup = words;
-      valid_warmup[locator + v2::subtitle_plane_warmup_word] = legal;
-      EXPECT_TRUE(receipt::decode(valid_warmup, expected)) << "warmup=" << legal;
+      auto retired_warmup = words;
+      retired_warmup[locator + v2::subtitle_plane_warmup_word] = legal;
+      EXPECT_EQ(bool(receipt::decode(retired_warmup, expected)), legal == 0u)
+        << "only canonical zero remains legal, warmup=" << legal;
     }
     publish_zero_condition(words);
     EXPECT_FALSE(receipt::decode(words, expected)); // No slots cannot carry a reset witness.
@@ -533,6 +534,28 @@ namespace {
     EXPECT_FALSE(held->subtitle_is_current());
     fixture::put_u64(words, receipt::history_owner_begin + 8u, expected.observation_timestamp_us + 1u);
     EXPECT_FALSE(receipt::decode(words, expected));
+  }
+
+  TEST(HostSbsGpuCompletionReceipt, RetiredApproachStateCannotAuthorizeCurrentOrHeldProtection) {
+    const auto expected = fixture::expected();
+    constexpr auto tail = receipt::subtitle_locator_begin + v2::subtitle_plane_adaptive_offset;
+    for (const auto branch : {graph::branch_e::infer, graph::branch_e::reuse}) {
+      auto good = fixture::snapshot(expected, branch);
+      publish_retained_coverage(good);
+      publish_active_condition(good);
+      ASSERT_TRUE(receipt::decode(good, expected));
+      for (const auto offset : {6u, 7u, 10u}) {
+        auto retired = good;
+        retired[tail + offset] = 1u;
+        EXPECT_FALSE(receipt::decode(retired, expected)) << "retired approach word " << offset;
+      }
+      auto retired = good;
+      retired[tail + 1u] = 9u;  // Former approach flag plus a valid accepted clock.
+      fixture::put_u64(retired, tail + 4u, expected.observation_timestamp_us);
+      fixture::put_u64(retired, tail + 6u, expected.observation_timestamp_us);
+      retired[tail + 10u] = 1u;
+      EXPECT_FALSE(receipt::decode(retired, expected));
+    }
   }
 
   TEST(HostSbsGpuCompletionReceipt, CurrentPlaneRequiresExactSourceClockAndCompleteDomain) {

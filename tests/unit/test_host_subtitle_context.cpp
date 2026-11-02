@@ -154,3 +154,235 @@ namespace {
     EXPECT_TRUE(tracker.eligible());
   }
 }  // namespace
+
+#ifdef _WIN32
+  #include "src/platform/windows/subtitle_context_policy.h"
+
+namespace {
+  namespace foreground = platf::foreground_window;
+  namespace dom = platf::video_dom;
+  namespace policy = platf::subtitle_context_policy;
+  using namespace std::chrono_literals;
+
+  class BrowserSubtitleContextPolicyTest: public testing::Test {
+  protected:
+    const std::chrono::steady_clock::time_point now {10s};
+    std::optional<std::chrono::steady_clock::time_point> content {now - 5ms};
+    foreground::capture_target_t target {
+      .screen_rect = {0, 0, 1920, 1080}, .width = 1920, .height = 1080, .monitor = 0x200u,
+    };
+    foreground::snapshot_t root {
+      .status = foreground::status_e::ok, .generation = 5u, .window = 0x100u,
+      .process_id = 42u, .monitor = 0x200u, .monitor_screen_rect = {0, 0, 1920, 1080},
+      .client_screen_rect = {-100, 50, 1850, 1040},
+      .frame_screen_rect = {-110, 20, 1860, 1050},
+      .observed_at = now - 1ms, .geometry_valid_since = now - 1s,
+    };
+    dom::snapshot_t browser {
+      .status = dom::status_e::ok, .generation = 9u, .helper_sequence = 3u,
+      .window = 0x100u, .process_id = 42u, .document_id = 7, .video_id = 8,
+      .screen_rect = {200, 200, 1600, 900},
+      .received_at = now - 100ms, .geometry_valid_since = now - 1s,
+    };
+
+    policy::evaluation_t evaluate(const std::uint64_t epoch = 4u) {
+      const auto client_mapping = foreground::map_to_capture(root, target);
+      return policy::evaluate(&root, static_cast<bool>(client_mapping), client_mapping, &browser, epoch,
+        {target.screen_rect.left, target.screen_rect.top, target.screen_rect.right, target.screen_rect.bottom},
+        target.width, target.height, content, now);
+    }
+
+    void expect_disabled() {
+      const auto result = evaluate();
+      EXPECT_EQ(result.browser_key.kind, context::kind_e::disabled);
+      context::tracker_t tracker;
+      EXPECT_FALSE(tracker.update(result.browser_key));
+      EXPECT_FALSE(tracker.eligible());
+    }
+  };
+
+  TEST_F(BrowserSubtitleContextPolicyTest, ContainedDomVideoSurvivesPartiallyOutsideClient) {
+    const auto client = foreground::map_to_capture(root, target);
+    ASSERT_EQ(client.status, foreground::mapping_status_e::partially_outside_capture);
+    ASSERT_FALSE(client);
+    ASSERT_TRUE(foreground::usable_for_content(root, content, now));
+    const auto video = dom::map_screen_rect_to_capture(browser.screen_rect, {0, 0, 1920, 1080}, 1920, 1080);
+    ASSERT_TRUE(video);
+    EXPECT_EQ(video.capture_pixels, browser.screen_rect);
+    const auto result = evaluate();
+    EXPECT_TRUE(result.foreground_usable);
+    EXPECT_TRUE(result.browser_identity_matches);
+    EXPECT_TRUE(result.browser_usable);
+    EXPECT_TRUE(result.mapping_succeeded);
+    EXPECT_FALSE(result.registered_player_candidate);
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(result.browser_key));
+    EXPECT_TRUE(tracker.eligible());
+    EXPECT_EQ(tracker.kind(), context::kind_e::browser_video);
+    EXPECT_EQ(result.browser_key, (context::key_t {context::kind_e::browser_video, 0x100u, 42u, 5u, 4u}));
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, ContainedClientKeepsSameBrowserKeyAndNativeFallback) {
+    const auto clipped_key = evaluate().browser_key;
+    root.client_screen_rect.left = 100;
+    root.frame_screen_rect.left = 90;
+    ASSERT_TRUE(foreground::map_to_capture(root, target));
+    EXPECT_EQ(evaluate().browser_key, clipped_key);
+    const auto native = policy::evaluate(&root, true, foreground::map_to_capture(root, target), nullptr, 0u, {0, 0, 1920, 1080}, 1920, 1080, content, now);
+    EXPECT_TRUE(native.foreground_usable);
+    EXPECT_TRUE(native.registered_player_candidate);
+    root.client_screen_rect.left = -100;
+    root.frame_screen_rect.left = -110;
+    const bool client_mapped = static_cast<bool>(foreground::map_to_capture(root, target));
+    ASSERT_FALSE(client_mapped);
+    const auto clipped_native = policy::evaluate(&root, client_mapped, foreground::map_to_capture(root, target), nullptr, 0u,
+      {0, 0, 1920, 1080}, 1920, 1080, content, now);
+    EXPECT_TRUE(clipped_native.foreground_usable);
+    EXPECT_FALSE(clipped_native.registered_player_candidate);
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, OutsideVideoAndInvalidCaptureStayDisabled) {
+    browser.screen_rect.left = -2;
+    ASSERT_EQ(dom::map_screen_rect_to_capture(browser.screen_rect, {0, 0, 1920, 1080}, 1920, 1080).status,
+      dom::mapping_status_e::outside_capture);
+    expect_disabled();
+    browser.screen_rect.left = 200;
+    target.width = 1919;
+    EXPECT_EQ(foreground::map_to_capture(root, target).status, foreground::mapping_status_e::invalid_capture_target);
+    EXPECT_FALSE(evaluate().foreground_target_usable);
+    EXPECT_FALSE(evaluate().mapping_attempted);
+    expect_disabled();
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, WrongIdentityOrMissingBrowserAuthorityStaysDisabled) {
+    browser.process_id++;
+    expect_disabled();
+    browser.process_id--;
+    browser.window++;
+    expect_disabled();
+    browser.window--;
+    EXPECT_EQ(evaluate(0u).browser_key.kind, context::kind_e::disabled);
+    const auto missing_root = policy::evaluate(nullptr, false, foreground::map_to_capture(root, target), &browser, 4u,
+      {0, 0, 1920, 1080}, 1920, 1080, content, now);
+    EXPECT_FALSE(missing_root.foreground_usable);
+    EXPECT_EQ(missing_root.browser_key.kind, context::kind_e::disabled);
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, InteractiveMoveStaleAndNoncausalContentStayDisabled) {
+    root.status = foreground::status_e::interactive_move_size;
+    expect_disabled();
+    root.status = foreground::status_e::ok;
+    root.observed_at = now - 251ms;
+    expect_disabled();
+    root.observed_at = now - 1ms;
+    browser.received_at = now - 2501ms;
+    expect_disabled();
+    browser.received_at = now - 100ms;
+    root.geometry_valid_since = *content + 1ms;
+    expect_disabled();
+    root.geometry_valid_since = now - 1s;
+    browser.geometry_valid_since = *content + 1ms;
+    expect_disabled();
+    browser.geometry_valid_since = now - 1s;
+    content = now + 1ms;
+    expect_disabled();
+    content.reset();
+    expect_disabled();
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, FullscreenClaimStillRequiresWholeCapture) {
+    browser.status = dom::status_e::ok_fullscreen;
+    EXPECT_TRUE(evaluate().mapping_succeeded);
+    EXPECT_FALSE(evaluate().fullscreen_match);
+    expect_disabled();
+    browser.screen_rect = {0, 0, 1920, 1080};
+    EXPECT_EQ(evaluate().browser_key.kind, context::kind_e::browser_video);
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, NoncausalBrowserRevokesPreviousContextWithoutNativeFallback) {
+    root.client_screen_rect.left = 100;
+    root.frame_screen_rect.left = 90;
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(evaluate().browser_key));
+    const auto accepted_generation = tracker.generation();
+    browser.received_at = now - 1ms;
+    browser.geometry_valid_since = now - 1ms;
+    const auto rejected = evaluate();
+    EXPECT_FALSE(rejected.registered_player_candidate);
+    ASSERT_TRUE(tracker.update(rejected.browser_key));
+    EXPECT_FALSE(tracker.eligible());
+    EXPECT_FALSE(tracker.matches(accepted_generation));
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, RealManual139GeometryRemainsBrowserEligible) {
+    target = {{0, 0, 3840, 2160}, 3840, 2160, 0x200u, true};
+    root.window = 0x140B14u;
+    root.process_id = 3172u;
+    root.generation = 8u;
+    root.monitor_screen_rect = target.screen_rect;
+    root.client_screen_rect = {875, 10, 3949, 1739};
+    root.frame_screen_rect = {865, -20, 3959, 1749};
+    browser.window = root.window;
+    browser.process_id = root.process_id;
+    browser.document_id = -35710;
+    browser.video_id = -35868;
+    browser.screen_rect = {1089, 425, 2984, 1492};
+    browser.received_at = now - 426ms;
+    browser.geometry_valid_since = now - 223208ms;
+    content = now;
+    ASSERT_EQ(foreground::map_to_capture(root, target).status,
+      foreground::mapping_status_e::partially_outside_capture);
+    const auto result = evaluate();
+    EXPECT_TRUE(result.foreground_target_usable);
+    EXPECT_EQ(result.browser_key.kind, context::kind_e::browser_video);
+    EXPECT_EQ(result.browser_key.window, root.window);
+    EXPECT_EQ(result.browser_key.process_id, root.process_id);
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, MonitorMismatchStaysDisabledButExactCloneRemainsEligible) {
+    target.monitor = 0x201u;
+    root.monitor_screen_rect = {-1920, 0, 0, 1080};
+    ASSERT_EQ(foreground::map_to_capture(root, target).status, foreground::mapping_status_e::monitor_mismatch);
+    const auto wrong_monitor = evaluate();
+    EXPECT_FALSE(wrong_monitor.foreground_target_usable);
+    EXPECT_FALSE(wrong_monitor.mapping_attempted);
+    expect_disabled();
+    root.monitor_screen_rect = target.screen_rect;
+    ASSERT_EQ(foreground::map_to_capture(root, target).status,
+      foreground::mapping_status_e::partially_outside_capture);
+    EXPECT_EQ(evaluate().browser_key.kind, context::kind_e::browser_video);
+    root.client_screen_rect.left = 100;
+    root.frame_screen_rect.left = 90;
+    ASSERT_TRUE(foreground::map_to_capture(root, target));
+    EXPECT_EQ(evaluate().browser_key.kind, context::kind_e::browser_video);
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, UnsupportedOrientationExtentAndFailedTargetStayDisabled) {
+    // Covers180 degrees and square90 degrees: matching extents alone never grant orientation.
+    for (const auto square : {false, true}) {
+      target.identity_orientation = false;
+      if (square) {
+        target.screen_rect = {0, 0, 1920, 1920};
+        target.height = 1920;
+        root.monitor_screen_rect = target.screen_rect;
+      }
+      ASSERT_EQ(foreground::map_to_capture(root, target).status, foreground::mapping_status_e::unsupported_orientation);
+      EXPECT_FALSE(evaluate().foreground_target_usable);
+      EXPECT_FALSE(evaluate().mapping_attempted);
+      expect_disabled();
+    }
+    target.identity_orientation = true;
+    target.width--;
+    ASSERT_EQ(foreground::map_to_capture(root, target).status, foreground::mapping_status_e::invalid_capture_target);
+    expect_disabled();
+    target.width++;
+    // Failed GetDesc must remain invalid even if COM wrote apparently valid output coordinates.
+    const foreground::mapping_result_t failed_target {.status = foreground::mapping_status_e::invalid_capture_target};
+    const auto rejected = policy::evaluate(&root, false, failed_target, &browser, 4u,
+      {0, 0, 1920, 1920}, 1920, 1920, content, now);
+    EXPECT_FALSE(rejected.foreground_target_usable);
+    EXPECT_FALSE(rejected.mapping_attempted);
+    EXPECT_EQ(rejected.browser_key.kind, context::kind_e::disabled);
+  }
+}  // namespace
+#endif

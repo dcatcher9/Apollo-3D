@@ -45,7 +45,7 @@ LIMITER_Q_SCALE = 1 << LIMITER_Q_FRACTION_BITS
 EXPECTED_TOP_LEVEL_KEYS = {
     "schema", "vector_width", "calibrated_defaults", "constant_buffer", "frame_stats",
     "shadow_state", "model_calibrations", "capture_provenance", "shader_implementation",
-    "subtitle_ocr", "final_parallax",
+    "subtitle_ocr", "final_parallax", "selected_map",
 }
 
 
@@ -91,13 +91,25 @@ EXPECTED_SHADER_IMPLEMENTATION_KEYS = {
 EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
-CANONICAL_FINAL_PARALLAX = {'schema': 3,
- 'authority': 'complete-atomic-subtitle-conditioned-r32f-live-render-authority',
- 'publication_policy': 'authenticated-infer-or-cpu-known-publication-direct-render',
- 'reuse_policy': 'reuse-holds-complete-depth-ocr-uip4-final-tuple-byte-for-byte',
+CANONICAL_SELECTED_MAP = {'schema': 1,
+ 'authority': 'base-inverse-plus-analytic-ui-glyph-selector-v1',
+ 'base_inverse': 'at-most-11-step-contractive-fixed-point-on-ordinary-base-with-existing-roi-embedding',
+ 'ui_source_u': 'destination-source-u-plus-eye-sign-times-scp-target-times-analysis-width-over-full-source-width',
+ 'ui_source_v': 'unchanged-source-v',
+ 'selector': 'ui-if-either-base-or-ui-bilinear-color-footprint-has-any-surviving-native-glyph-contributor-otherwise-base',
+ 'contributor_policy': 'saturate-u-then-clamp-finite-image-indices-positive-bilinear-weights-only',
+ 'current_rgb_revocation': 'same-native-texel-display-srgb-fp16-roundtrip-linf-at-most-contour-history-rgb-distance-no-new-support',
+ 'combined_map': 'potentially-discontinuous-selected-map-no-monotonicity-or-final-field-inverse-claim',
+ 'sample_policy': 'one-native-bilinear-color-sample-at-selected-uv',
+ 'invalid_subtitle_policy': 'preserve-authorized-base',
+ 'empty_policy': 'joined-new-empty-matte-zero-scp-inactive-immediate-base-no-added-frame-delay'}
+CANONICAL_FINAL_PARALLAX = {'schema': 4,
+ 'authority': 'authenticated-subtitle-conditioned-r32f-diagnostic-only',
+ 'publication_policy': 'atomic-joined-publication-retains-independent-final-diagnostic',
+ 'reuse_policy': 'reuse-holds-complete-base-state-matte-sct-scp-source-and-diagnostics-tuple',
  'invalid_policy': 'fail-closed-flat',
- 'current_rgb_policy': 'always-current-never-retained'}
-CANONICAL_SUBTITLE_OCR = {'schema': 27,
+ 'current_rgb_policy': 'bounded-matched-color-reuse-current-draw-can-only-revoke-matte'}
+CANONICAL_SUBTITLE_OCR = {'schema': 37,
  'logical_model': 'ppocrv6_tiny_det_modelopt_fp16',
  'asset_path': 'models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx',
  'artifact_onnx_sha256': '169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44',
@@ -117,10 +129,7 @@ CANONICAL_SUBTITLE_OCR = {'schema': 27,
                   'channels': ['B', 'G', 'R'],
                   'imagenet_mean': [0.485, 0.456, 0.406],
                   'imagenet_std': [0.229, 0.224, 0.225]},
- 'output_tensor': {'name': 'fetch_name_0',
-                   'dtype': 'float32',
-                   'layout': 'NCHW',
-                   'shape': [1, 1, 160, 960]},
+ 'output_tensor': {'name': 'fetch_name_0', 'dtype': 'float32', 'layout': 'NCHW', 'shape': [1, 1, 160, 960]},
  'field_policy': {'live_field_shapes': [{'width': 1540, 'height': 868},
                                         {'width': 2044, 'height': 868},
                                         {'width': 2072, 'height': 868},
@@ -152,21 +161,21 @@ CANONICAL_SUBTITLE_OCR = {'schema': 27,
                   'source_crop_aspect_width': 6,
                   'source_crop_aspect_height': 1,
                   'text_join_gap_cells': 4,
-                  'ordinary_cover_horizontal_guard_cells': 1,
-                  'ordinary_cover_horizontal_guard_policy': 'ordinary-only-add-guard-cells-times-producer-ocr-cell-width-to-horizontal-db-unclip-cover-clamped-detector-bounds-before-map-current-canonical-cover-all-consumers-no-second-mask-vertical-and-ribbon-unchanged-v1',
+                  'ordinary_cover_horizontal_guard_cells': 4,
+                  'ordinary_cover_horizontal_guard_policy': 'ordinary-only-four-producer-cell-horizontal-guard-and-ceil-half-tight-detector-height-vertical-guard-add-db-unclip-clamp-before-map-current-cover-search-no-rectangle-protection-ribbon-unchanged-v2',
                   'line_group_min_vertical_iou_numerator': 1,
                   'line_group_min_vertical_iou_denominator': 2,
                   'line_group_max_horizontal_gap_height_numerator': 4,
                   'line_group_max_horizontal_gap_height_denominator': 1,
                   'line_group_horizontal_gap_metric': 'native-source-horizontal-gap-to-current-union-edge-relative-to-max-candidate-and-fixed-anchor-height-exact-cross-multiplied-v1',
                   'line_center_tolerance_numerator': 1,
-                  'line_center_tolerance_denominator': 10,
+                  'line_center_tolerance_denominator': 50,
                   'line_search_bottom_height_numerator': 1,
                   'line_search_bottom_height_denominator': 4,
                   'line_search_region': 'lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1',
-                  'line_group_policy': 'same-detector-active-row-band-first-qualifying-fixed-tight-core-anchor-span-iou-and-bounded-native-horizontal-union-gap-before-capacity-union-eligibility-only-original-ordinary-and-ribbon-pairs-v2',
+                  'line_group_policy': 'local-column-island-row-components-true-piece-bounds-fixed-span-ordinary-aggregation-then-centered-native-line-union-before-classified-capacity-v3',
                   'line_center_reference': 'video-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v1',
-                  'line_center_reference_params': 'ocr-resolve-prefix16-then-signed-twice-center-unsigned-width-signed-search-top-zero-reserved-word-80bytes-v1',
+                  'line_center_reference_params': 'ocr-resolve-prefix20-then-source-clock-low-high-domain-reset-reserved-96bytes-v2',
                   'ribbon_join_gap_cells': 12,
                   'ribbon_structural_gap_min_cells': 3,
                   'ribbon_min_structural_gaps': 3,
@@ -174,16 +183,18 @@ CANONICAL_SUBTITLE_OCR = {'schema': 27,
                   'ribbon_min_width_denominator': 2,
                   'ribbon_bottom_tolerance_pixels': 2,
                   'ribbon_bottom_tolerance_projection': 'exact-ceil-detector-edge-through-bottom-crop-v1',
-                  'ribbon_cover_pad_limit': 8},
+                  'ribbon_cover_pad_limit': 8,
+                  'ordinary_cover_vertical_guard_height_numerator': 1,
+                  'ordinary_cover_vertical_guard_height_denominator': 2},
  'candidate_selection': {'policy': 'bounded-largest-core-area-v1',
                          'capacity': 'min-raw-and-final-box-capacity',
                          'ranking': 'tight-core-field-area-descending',
                          'tie_break': 'earlier-raster-discovery',
                          'publication_order': 'raster-discovery-order',
                          'overflow': 'retain-best-paired-candidates'},
- 'ocr_record': {'schema': 3,
+ 'ocr_record': {'schema': 4,
                 'tag': 944915279,
-                'word_count': 208,
+                'word_count': 256,
                 'header_word_count': 16,
                 'box_word_count': 8,
                 'box_flag_ribbon': 1,
@@ -200,44 +211,88 @@ CANONICAL_SUBTITLE_OCR = {'schema': 27,
                       'fully_active_value': 2,
                       'target_word': 5,
                       'tag': 877675347},
- 'geometry_authority': 'same-observation-sealed-parallax-state-required-for-ui-probe-and-time-advance-v1',
+ 'geometry_authority': 'native-glyph-matte-selects-analytic-ui-otherwise-ordinary-base-inverse-v1',
+ 'ui_plane_policy': 'current-clearance-goal-first-visible-immediate-symmetric-source-time-exponential-native-slew-empty-reset-v3',
  'contour_policy': {'schema': 5,
-                    'recipe': 23,
+                    'recipe': 27,
                     'source': 'same-joined-ocr-source-bottom-crop-display-srgb-finite-rgba16f-v1',
                     'source_max_extent': 5120,
                     'source_extent_policy': 'native-exact-crop-for-supported-source-otherwise-canonical-1x1-empty-support-history-source-and-zero-probability-v1',
                     'history_jitter_radius_source_pixels': 2,
-                    'probability_validity_policy': 'all-interpolation-contributors-finite-in-unit-range-even-without-fresh-threshold-v1',
+                    'spatial_edge_radius_source_pixels': 2,
+                    'spatial_edge_rgb_distance': 0.08,
+                    'probability_validity_policy': 'all-four-interpolation-contributors-finite-in-unit-range-current-native-center-bilinear-probability-v2',
+                    'probability_sampling_arithmetic': 'precise-fp32-divide-center-multiply-subtract-floor-fraction-separated-lerp-delta-multiply-add-no-contraction-no-support-epsilon-v1',
                     'diagnostic_snapshot_policy': 'same-joined-valid-ocr-geometry-source-clock-copy-before-next-admission-clear-invalid-whole-reuse-hold-v1',
-                    'native_support': 'r32u-binary-current-temporally-stable-ui-support-v1',
-                    'authority': 'current-ocr8-uip4-scp4-cut-source-clock-identity-only-v2',
+                    'native_support': 'r32u-binary-current-classified-centered-bounded-search-valid-current-peak-ink-color-short-stroke-or-local-dark-outline-positive-diagnostic-count-v6',
+                    'authority': 'current-ocr8-uip4-scp4-cut-source-clock-and-current-signed-reference-geometry-no-history-vote-authority-v3',
                     'projection': 'native-visible-support-to-all-bilinear-field-nodes-integer-footprint-v1',
-                    'history': 'current-cover-fixed-rgb-anchor-four-genuine-confirmations-same-pixel-first-current-core-probability-cue-blocks-neighbor-fallback-v4',
+                    'history': 'diagnostic-current-cover-fixed-rgb-anchor-four-genuine-observations-same-pixel-first-cue-blocks-neighbor-fallback-no-four-count-render-gate-v5',
                     'history_schema': 5,
                     'history_tag': 894714707,
                     'history_word_count': 32,
-                    'conditioning': 'post-gaussian-shared-vertical75-25-and-horizontal-q30-no-presentation-support-or-invalid-current-authority-exact-base-v2',
+                    'conditioning': 'horizontal-only-post-minimum-slope-budget-shared-q30-guard-vertical-proposal-bit-copy-unchanged-rows-and-empty-or-invalid-current-exact-base-v4',
                     'reuse': 'whole-depth-ocr-uip4-native-mask-field-pin-q-gaussian-weight-blend-vertical-control-history-source-probability-final-tuple-held-v1',
-                    'uncertain_support': 'raw-support-abstains-presentation-current-cover-fallback-until-four-genuine-cue-free-observations-v3',
+                    'uncertain_support': 'current-rgb-glyph-admits-withdraws-immediately-no-coarse-cover-pin-no-four-count-render-wait-uip4-word22-zero-v6',
                     'history_snapshot_valid_word': 23,
                     'history_feature_valid_bit': 2,
                     'history_feature_mask_bit': 1,
                     'history_rgb_distance': 0.08,
-                    'mask_evidence_policy': 'current-ocr8-cover-color-agnostic-four-genuine-fixed-anchor-matches-same-pixel-first-probability-cue-blocks-neighbor-fallback-in-current-raw-core-v8',
+                    'mask_evidence_policy': 'current-core-strong-probability-edge-anchors-64x8-brightest-actual-center-rgb-representatives-hue-dedup-strict-color-stroke-or-eight-explicit-local-dark-outline-neighbors-no-probability-only-bypass-v13',
                     'history_confirmation_observations': 4,
                     'history_feature_count_shift': 2,
                     'history_anchor_policy': 'same-pixel-qualified-fixed-anchor-first-even-with-current-core-probability-cue-otherwise-unflagged-min-rgb-distance-then-squared-spatial-distance-then-scan-order-v3',
-                    'distance_policy': 'source-pixel-five-center-euclidean-squared-r32f-positive-infinity-v1',
+                    'distance_policy': 'native-five-center-rectangular-field-footprint-plus-completion-exact-rational-y-slab-horizontal-q30-parallax-pixel-budget-positive-infinity-off-slab-v3',
                     'distance_empty_bits': 2139095040,
                     'gaussian_center_offset_source_pixels': 2,
-                    'gaussian_sigma_short_side_divisor': 60.0,
-                    'gaussian_weight_policy': 'fp32-exp-negative-min-native-q-current-cover-q-until-four-genuine-cue-free-observations-max-union-v3',
+                    'gaussian_sigma_short_side_divisor': 120.0,
+                    'gaussian_weight_policy': 'fp32-equivalent-bounded-minimum-ui-depth-influence-from-slope-budget-zero-budget-ui-gap-or-outside-interval-base-v8',
                     'gaussian_weight_absolute_error_limit': 2e-06,
-                    'gaussian_blend_policy': 'precise-ui-times-M-plus-base-times-one-minus-M-bit-exact-endpoints-v1',
+                    'gaussian_blend_policy': 'precise-nearest-ui-plus-minus-budget-closed-base-ui-roundoff-clamp-bit-exact-endpoints-v3',
                     'history_reserved_offset': 24,
                     'history_reserved_word_count': 8,
                     'probability_change_ratio': 0.125,
-                    'probability_change_policy': 'current-core-native-center-soft-probability-unit-mass-spatial-tv-strict-ratio-cue-both-zero-no-cue-one-zero-cue-v3'},
+                    'probability_change_policy': 'current-core-native-center-soft-probability-unit-mass-spatial-tv-strict-ratio-cue-both-zero-no-cue-one-zero-cue-v3',
+                    'ordinary_search_pad_height_numerator': 1,
+                    'ordinary_search_pad_height_denominator': 2,
+                    'ordinary_search_policy': 'ordinary-only-current-fixed-core-half-iou-line-envelope-corrective-x-side-wide-only-beyond-one-detector-cell-signed-current-reference-otherwise-outward-floor-24-detector-pixel-inset-nonclamped-side-top-ceil-half-core-height-bottom-full-cover-ribbon-full-cover-unchanged-v3',
+                    'diagnostic_search_policy': 'fixed-rgb-diagnostic-counts-retain-current-coarse-cover-scope-no-four-count-render-wait-v2',
+                    'distance_completion_source_pixels': 3,
+                    'distance_axis_policy': 'horizontal-q30-limiter-step-exact-source-content-geometry-no-vertical-cost-or-cross-row-transition-v2',
+                    'gaussian_sigma_policy': 'legacy-serialized-divisor-unused-by-minimum-slope-budget-recipe-v1',
+                    'palette_policy': 'per-current-core-64x8-exact-center-grid-valid-strong-probability-native-edge-q16-64-bins-count-and-max-peak-earliest-grid-index-actual-anchor-representative-sort-peak-count-bin-hue-prune-cap-eight-v2',
+                    'palette_match_policy': 'exact-integer-q16-representative-linf-symmetric-three-twentieths-only-no-common-brightening-cone-v2',
+                    'outline_policy': 'current-dark-low-chroma-native-edge-plus-eight-explicit-fixed-current-palette-neighbor-calls-including-diagonals-radius-six-no-dilation-v2',
+                    'long_line_policy': 'palette-foreground-native-edge-normal-tangent-color-coherent-run-no-longer-than-three-core-native-heights-v1',
+                    'palette_grid_columns': 64,
+                    'palette_grid_rows': 8,
+                    'palette_channel_max': 65535,
+                    'palette_bin_count': 64,
+                    'palette_max_modes': 8,
+                    'palette_brightness_numerator': 1,
+                    'palette_brightness_denominator': 2,
+                    'palette_match_rgb_numerator': 3,
+                    'palette_match_rgb_denominator': 20,
+                    'outline_value_numerator': 2,
+                    'outline_value_denominator': 5,
+                    'outline_chroma_numerator': 3,
+                    'outline_chroma_denominator': 20,
+                    'outline_probe_radius_source_pixels': 6,
+                    'long_line_core_height_numerator': 3,
+                    'long_line_core_height_denominator': 1,
+                    'palette_representative_index_bits': 10,
+                    'palette_representative_index_mask': 1023,
+                    'palette_hue_channel_max': 4095,
+                    'palette_merge_hue_numerator': 3,
+                    'palette_merge_hue_denominator': 20,
+                    'ordinary_search_inset_detector_pixels': 24,
+                    'ordinary_search_center_bias_detector_pixels': 8,
+                    'palette_representative_policy': 'max-key-q16-max-channel-shift10-or-1023-minus-grid-index-reload-actual-valid-center-anchor-no-neighbor-endpoint-no-mean-color-v1',
+                    'palette_merge_policy': 'greedy-dimmer-representative-q12-normalized-rgb-nearest-integer-max-channel-distance-three-twentieths-from-retained-brighter-mode-v1',
+                    'ordinary_search_reference_policy': 'current-canonical-scl1-clock-frame-generation-source-crop-field-content-bounded-signed-reference-only-zero48-source-center-fallback-invalid-nonzero-fail-closed-never-layout-votes-v1',
+                    'ordinary_search_inset_preserves_core': True,
+                    'distance_row_policy': 'inclusive-exact-integer-rational-field-node-center-plus-minus-source-height-over-content-height-plus-completion-native-row-membership-v1',
+                    'conditioning_control_policy': 'current-authority-and-any-finite-nonnegative-first-content-column-budget-row-local-infinity-publishes-original-base-zero-weight-v1'},
  'plane_state': {'schema': 4,
                  'word_count': 40,
                  'header_word_count': 24,
@@ -257,11 +312,70 @@ CANONICAL_SUBTITLE_OCR = {'schema': 27,
                  'reserved_word_count': 1,
                  'adaptive_offset': 24,
                  'adaptive_word_count': 16,
+                 'adaptive_known_flags': 28,
+                 'adaptive_retired_approach_flag': 1,
                  'tag': 877676885,
                  'history_reset_mask_word': 21,
                  'warmup_word': 22,
                  'warmup_observations': 4,
-                 'warmup_cue_bit': 8}}
+                 'warmup_cue_bit': 8,
+                 'adaptive_retired_retreat_flag': 2,
+                 'retreat_time_constant_ms': 100,
+                 'adaptive_presented_flag': 16,
+                 'smoothing_time_constant_ms': 100,
+                 'slew_source_pixels_per_second': 30,
+                 'max_tick_gap_ms': 50},
+ 'classifier': {'policy': 'current-local-lines-envelope-orientation-bracketed-stack-and-tight-two-percent-group-center-span-before-protection-v6',
+                'local_candidate_capacity': 1980,
+                'local_candidate_word_count': 24,
+                'capacity_proof': 'at-most60-disjoint-active-column-islands-times33-valid-three-row-pieces-in131-safe-rows-v1',
+                'scratch_policy': 'fixed-per-estimator-uint4-uav-unretained-candidates-no-readback-v1',
+                'history_offset': 208,
+                'history_word_count': 48,
+                'history_tag': 827081555,
+                'history_schema': 1,
+                'history_known_flags': 1,
+                'x_bins': 8,
+                'min_populated_bins': 6,
+                'envelope_low_quantile_numerator': 1,
+                'envelope_high_quantile_numerator': 9,
+                'envelope_quantile_denominator': 10,
+                'horizontal_tan': 0.03492076949174773,
+                'scene_tan': 0.17632698070846498,
+                'orientation_policy': 'native-source-least-squares-of-nearest-rank-active-mask-y10-y90-in-eight-horizontal-bins-v1',
+                'candidate_assembly_policy': 'per-band-raster-order-global-current-pool-deferred-stack-assistance-and-publication-v1',
+                'stack_policy': 'current-individually-centered-ambiguous-single-flat-envelope-bounded-by-scene-angle-bracketed-by-independent-horizontal-centered-height-compatible-overlapping-anchors-never-teaches-v1',
+                'stack_max_gap_height_numerator': 1,
+                'stack_max_gap_height_denominator': 1,
+                'prior_bin_count': 16,
+                'prior_decay': 1,
+                'prior_increment': 4,
+                'prior_cap': 255,
+                'prior_assist': 8,
+                'learning_gap_us': 100000,
+                'min_height_ratio': 0.5,
+                'max_height_ratio': 2.0,
+                'learning_policy': 'independent-current-horizontal-entry-after-authoritative-blank-not-per-frame-assisted-candidates-never-teach-v1',
+                'release_policy': 'current-classified-covers-only-empty-current-clears-mask-immediately-layout-never-authorizes-pixels-v1',
+                'reset_policy': 'domain-context-source-field-content-reference-or-invalid-clock-clears-prior-layout-survives-scene-cuts-v1',
+                'unknown_policy': 'current-compatible-line-or-qualified-position-height-prior-required-no-fixed-frame-wait-v1',
+                'prior_geometry_policy': 'ambiguous-prior-requires-both-envelopes-within-scene-angle-and-either-one-horizontal-or-coherent-same-direction-moderate-slopes-unknown-separate-v1',
+                'prior_only_group_center_policy': 'current-half-open-group-must-contain-signed-reference-center-without-borrowing-prior-location-as-current-line-evidence-v1',
+                'ordinary_group_center_policy': 'current-ordinary-tight-group-must-contain-signed-reference-center-half-open-before-horizontal-current-line-or-prior-admission-ribbons-exempt-v1'},
+ 'glyph_matte_policy': {'schema': 1,
+                        'source': 'same-joined-native-current-support-and-display-rgba16f-v1',
+                        'steps': 3,
+                        'rgb_distance': 0.12,
+                        'brightness_split': 0.4,
+                        'collar_radius_source_pixels': 3,
+                        'collar_radius_squared': 10,
+                        'body_policy': 'three-synchronous-eight-neighbor-valid-rgba-rgb-geodesic-steps-same-peak-brightness-class-v1',
+                        'collar_policy': '37-native-offsets-dx-dy-within-three-and-squared-distance-at-most-ten-v1',
+                        'empty_policy': 'same-current-authority-zero-without-delay',
+                        'history_policy': 'no-new-history-or-observation-wait',
+                        'field_policy': 'no-field-pitch-or-distance-budget-dilation',
+                        'format': 'R32_UINT-literal-zero-or-one'}}
+
 EXPECTED_CONSTANT_FIELD_NAMES = (
     "raw_coordinate_scale",
     "collapse_abs_epsilon",
@@ -323,7 +437,6 @@ SHADER_COMPILE_FLAGS = SHADER_MANIFEST["shader_compile_flags"]
 SOURCE_CLOSURE_SCHEMA = SHADER_MANIFEST["source_closure_schema"]
 ALGORITHM_TAG_SHADER_DIGEST_SENTINEL = (
     "shader-source-closure-sha256-authenticated-separately-v1")
-
 
 def _identifier(value: str) -> str:
     identifier = re.sub(r"[^a-zA-Z0-9_]", "_", value)
@@ -441,6 +554,8 @@ def validate_contract(
         raise ValueError(
             "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/UIP4 contract")
     for name in ("ordinary_cover_horizontal_guard_cells",
+                 "ordinary_cover_vertical_guard_height_numerator",
+                 "ordinary_cover_vertical_guard_height_denominator",
                  "line_search_bottom_height_numerator", "line_search_bottom_height_denominator",
                  "line_group_min_vertical_iou_numerator", "line_group_min_vertical_iou_denominator",
                  "line_group_max_horizontal_gap_height_numerator", "line_group_max_horizontal_gap_height_denominator",
@@ -450,10 +565,17 @@ def validate_contract(
     for name in ("plane_state", "condition_params"):
         if any(type(value) is not int for value in contract["subtitle_ocr"][name].values()):
             raise ValueError(f"subtitle_ocr.{name} layout words must be exact integers")
-    for name in ("schema", "recipe", "history_schema", "history_tag", "history_word_count",
-                 "history_reserved_offset", "history_reserved_word_count"):
+    for name, expected in CANONICAL_SUBTITLE_OCR["contour_policy"].items():
+        if type(expected) is bool:
+            if type(contract["subtitle_ocr"]["contour_policy"][name]) is not bool:
+                raise ValueError("subtitle_ocr.contour_policy switches must be exact booleans")
+            continue
+        if type(expected) is not int:
+            continue
         if type(contract["subtitle_ocr"]["contour_policy"][name]) is not int:
             raise ValueError("subtitle_ocr.contour_policy layout words must be exact integers")
+    if contract.get("selected_map") != CANONICAL_SELECTED_MAP:
+        raise ValueError("selected_map must exactly match the authenticated analytic glyph selector")
     if contract.get("final_parallax") != CANONICAL_FINAL_PARALLAX:
         raise ValueError(
             "final_parallax must exactly match the authenticated direct-render contract")
@@ -517,6 +639,9 @@ def validate_contract(
     offset = contour_policy["gaussian_center_offset_source_pixels"]
     if type(offset) is not int or not 0 <= offset <= 2:
         raise ValueError("subtitle Gaussian center offset must be a bounded source-pixel integer")
+    completion = contour_policy['distance_completion_source_pixels']
+    if type(completion) is not int or not 0 <= completion <= 3:
+        raise ValueError("subtitle distance completion must be a bounded source-pixel integer")
     for name in ("gaussian_sigma_short_side_divisor", "gaussian_weight_absolute_error_limit"):
         value = contour_policy[name]
         if type(value) is not float or not math.isfinite(value) or value <= 0.0:
@@ -777,6 +902,36 @@ def _initial_word_cpp(field: dict[str, Any], tag: int) -> str:
     return f"std::bit_cast<std::uint32_t>({_float_literal(initial)})"
 
 
+def _classifier_declarations(policy: dict[str, Any], language: str) -> list[str]:
+    """Project the complete classifier policy; numeric values have one canonical owner."""
+    result: list[str] = []
+    if language == "cpp":
+        result.append("  inline constexpr std::string_view subtitle_ocr_classifier_policy_json = " +
+                      json.dumps(json.dumps(policy, separators=(",", ":"))) + ";")
+        result.append(f"  inline constexpr std::uint32_t subtitle_ocr_current_prefix_word_count = {policy['history_offset']}u;")
+    else:
+        result.append(f"#define V2_OCR_CURRENT_PREFIX_WORD_COUNT {policy['history_offset']}u")
+    for key, value in policy.items():
+        if isinstance(value, str):
+            if language == "cpp":
+                result.append(f"  inline constexpr std::string_view subtitle_ocr_classifier_{key} = {json.dumps(value)};")
+            continue
+        name = key if key.startswith("local_candidate_") else "classifier_" + key
+        if type(value) is int:
+            literal = f"{value}u"
+            native_type = "std::uint32_t"
+        elif type(value) is float:
+            literal = _float_literal(value)
+            native_type = "float"
+        else:
+            raise ValueError(f"unsupported classifier parameter: {key}")
+        if language == "cpp":
+            result.append(f"  inline constexpr {native_type} subtitle_ocr_{name} = {literal};")
+        else:
+            result.append(f"#define V2_OCR_{name.upper()} {literal}")
+    return result
+
+
 def render_cpp(contract: dict[str, Any]) -> str:
     fields = contract["shadow_state"]["fields"]
     defaults = contract["calibrated_defaults"]
@@ -845,8 +1000,17 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{json.dumps(final_parallax['invalid_policy'])};",
         f"  inline constexpr std::string_view final_parallax_current_rgb_policy = "
         f"{json.dumps(final_parallax['current_rgb_policy'])};",
+        f"  inline constexpr std::string_view selected_map_contract_json = {json.dumps(json.dumps(contract['selected_map'], separators=(',', ':')))};",
+        f"  inline constexpr std::string_view subtitle_glyph_matte_policy_json = {json.dumps(json.dumps(subtitle_ocr['glyph_matte_policy'], separators=(',', ':')))};",
+        f"  inline constexpr std::uint32_t subtitle_glyph_matte_schema = {subtitle_ocr['glyph_matte_policy']['schema']}u;",
+        f"  inline constexpr std::uint32_t subtitle_glyph_matte_steps = {subtitle_ocr['glyph_matte_policy']['steps']}u;",
+        f"  inline constexpr float subtitle_glyph_matte_rgb_distance = {_float_literal(subtitle_ocr['glyph_matte_policy']['rgb_distance'])};",
+        f"  inline constexpr float subtitle_glyph_matte_brightness_split = {_float_literal(subtitle_ocr['glyph_matte_policy']['brightness_split'])};",
+        f"  inline constexpr std::uint32_t subtitle_glyph_matte_collar_radius_source_pixels = {subtitle_ocr['glyph_matte_policy']['collar_radius_source_pixels']}u;",
+        f"  inline constexpr std::uint32_t subtitle_glyph_matte_collar_radius_squared = {subtitle_ocr['glyph_matte_policy']['collar_radius_squared']}u;",
         f"  inline constexpr std::string_view subtitle_geometry_authority = "
         f"{json.dumps(subtitle_ocr['geometry_authority'])};",
+        f"  inline constexpr std::string_view subtitle_ui_plane_policy = {json.dumps(subtitle_ocr['ui_plane_policy'])};",
         f"  inline constexpr std::uint32_t subtitle_ocr_contract_schema = "
         f"{subtitle_ocr['schema']}u;",
         f"  inline constexpr std::uint32_t subtitle_contour_schema = {subtitle_ocr['contour_policy']['schema']}u;",
@@ -864,9 +1028,16 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"  inline constexpr std::uint32_t subtitle_contour_history_feature_count_shift = {subtitle_ocr['contour_policy']['history_feature_count_shift']}u;",
         f"  inline constexpr std::uint32_t subtitle_contour_source_max_extent = {subtitle_ocr['contour_policy']['source_max_extent']}u;",
         f"  inline constexpr std::uint32_t subtitle_contour_history_jitter_radius_source_pixels = {subtitle_ocr['contour_policy']['history_jitter_radius_source_pixels']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_ordinary_search_pad_height_numerator = {subtitle_ocr['contour_policy']['ordinary_search_pad_height_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_ordinary_search_pad_height_denominator = {subtitle_ocr['contour_policy']['ordinary_search_pad_height_denominator']}u;",
+        f"  inline constexpr std::string_view subtitle_contour_ordinary_search_policy = {json.dumps(subtitle_ocr['contour_policy']['ordinary_search_policy'])};",
+        f"  inline constexpr std::string_view subtitle_contour_diagnostic_search_policy = {json.dumps(subtitle_ocr['contour_policy']['diagnostic_search_policy'])};",
+        f"  inline constexpr std::uint32_t subtitle_contour_spatial_edge_radius_source_pixels = {subtitle_ocr['contour_policy']['spatial_edge_radius_source_pixels']}u;",
+        f"  inline constexpr float subtitle_contour_spatial_edge_rgb_distance = {_float_literal(subtitle_ocr['contour_policy']['spatial_edge_rgb_distance'])};",
         f"  inline constexpr std::uint32_t subtitle_contour_distance_empty_bits = {subtitle_ocr['contour_policy']['distance_empty_bits']}u;",
         f"  inline constexpr std::uint32_t subtitle_contour_gaussian_center_offset_source_pixels = {subtitle_ocr['contour_policy']['gaussian_center_offset_source_pixels']}u;",
         f"  inline constexpr float subtitle_contour_gaussian_sigma_short_side_divisor = {_float_literal(subtitle_ocr['contour_policy']['gaussian_sigma_short_side_divisor'])};",
+        f"  inline constexpr std::uint32_t subtitle_contour_distance_completion_source_pixels = {subtitle_ocr['contour_policy']['distance_completion_source_pixels']}u;",
         f"  inline constexpr float subtitle_contour_gaussian_weight_absolute_error_limit = {_float_literal(subtitle_ocr['contour_policy']['gaussian_weight_absolute_error_limit'])};",
         f"  inline constexpr std::string_view subtitle_contour_policy_json = "
         f"{json.dumps(json.dumps(subtitle_ocr['contour_policy'], separators=(',', ':')))};",
@@ -923,6 +1094,31 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"  inline constexpr std::uint32_t subtitle_ocr_output_c = {ocr_output['shape'][1]}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_output_height = {ocr_output['shape'][2]}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_output_width = {ocr_output['shape'][3]}u;",
+        *_classifier_declarations(subtitle_ocr["classifier"], "cpp"),
+
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_representative_index_bits = {subtitle_ocr['contour_policy']['palette_representative_index_bits']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_representative_index_mask = {subtitle_ocr['contour_policy']['palette_representative_index_mask']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_hue_channel_max = {subtitle_ocr['contour_policy']['palette_hue_channel_max']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_merge_hue_numerator = {subtitle_ocr['contour_policy']['palette_merge_hue_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_merge_hue_denominator = {subtitle_ocr['contour_policy']['palette_merge_hue_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_ordinary_search_inset_detector_pixels = {subtitle_ocr['contour_policy']['ordinary_search_inset_detector_pixels']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_ordinary_search_center_bias_detector_pixels = {subtitle_ocr['contour_policy']['ordinary_search_center_bias_detector_pixels']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_grid_columns = {subtitle_ocr['contour_policy']['palette_grid_columns']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_grid_rows = {subtitle_ocr['contour_policy']['palette_grid_rows']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_channel_max = {subtitle_ocr['contour_policy']['palette_channel_max']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_bin_count = {subtitle_ocr['contour_policy']['palette_bin_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_max_modes = {subtitle_ocr['contour_policy']['palette_max_modes']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_brightness_numerator = {subtitle_ocr['contour_policy']['palette_brightness_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_brightness_denominator = {subtitle_ocr['contour_policy']['palette_brightness_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_match_rgb_numerator = {subtitle_ocr['contour_policy']['palette_match_rgb_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_palette_match_rgb_denominator = {subtitle_ocr['contour_policy']['palette_match_rgb_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_outline_value_numerator = {subtitle_ocr['contour_policy']['outline_value_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_outline_value_denominator = {subtitle_ocr['contour_policy']['outline_value_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_outline_chroma_numerator = {subtitle_ocr['contour_policy']['outline_chroma_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_outline_chroma_denominator = {subtitle_ocr['contour_policy']['outline_chroma_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_outline_probe_radius_source_pixels = {subtitle_ocr['contour_policy']['outline_probe_radius_source_pixels']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_long_line_core_height_numerator = {subtitle_ocr['contour_policy']['long_line_core_height_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_contour_long_line_core_height_denominator = {subtitle_ocr['contour_policy']['long_line_core_height_denominator']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_record_schema = {ocr_record['schema']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_record_tag = 0x{ocr_record['tag']:08X}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_record_word_count = {ocr_record['word_count']}u;",
@@ -948,6 +1144,8 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{field_policy['source_crop_aspect_height']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_text_join_gap_cells = "
         f"{field_policy['text_join_gap_cells']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ordinary_cover_vertical_guard_height_numerator = {field_policy['ordinary_cover_vertical_guard_height_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ordinary_cover_vertical_guard_height_denominator = {field_policy['ordinary_cover_vertical_guard_height_denominator']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_ordinary_cover_horizontal_guard_cells = "
         f"{field_policy['ordinary_cover_horizontal_guard_cells']}u;",
         f"  inline constexpr std::string_view subtitle_ocr_ordinary_cover_horizontal_guard_policy = "
@@ -1019,6 +1217,14 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"  inline constexpr std::uint32_t subtitle_plane_reserved_word_count = {plane_state['reserved_word_count']}u;",
         f"  inline constexpr std::uint32_t subtitle_plane_adaptive_offset = {plane_state['adaptive_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_plane_adaptive_word_count = {plane_state['adaptive_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_adaptive_known_flags = {plane_state['adaptive_known_flags']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_adaptive_retired_approach_flag = {plane_state['adaptive_retired_approach_flag']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_adaptive_retired_retreat_flag = {plane_state['adaptive_retired_retreat_flag']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_retreat_time_constant_ms = {plane_state['retreat_time_constant_ms']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_adaptive_presented_flag = {plane_state['adaptive_presented_flag']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_smoothing_time_constant_ms = {plane_state['smoothing_time_constant_ms']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_slew_source_pixels_per_second = {plane_state['slew_source_pixels_per_second']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_max_tick_gap_ms = {plane_state['max_tick_gap_ms']}u;",
         f"  inline constexpr std::uint32_t subtitle_plane_state_tag = 0x{plane_state['tag']:08X}u;",
         f"  inline constexpr std::uint32_t subtitle_condition_param_schema = "
         f"{condition_params['schema']}u;",
@@ -1058,8 +1264,9 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "                subtitle_ocr_safe_row_bottom);",
         "  static_assert(subtitle_ocr_final_box_offset == subtitle_ocr_raw_box_offset +",
         "                subtitle_ocr_raw_box_capacity * subtitle_ocr_box_word_count);",
-        "  static_assert(subtitle_ocr_record_word_count == subtitle_ocr_final_box_offset +",
+        "  static_assert(subtitle_ocr_classifier_history_offset == subtitle_ocr_final_box_offset +",
         "                subtitle_ocr_final_box_capacity * subtitle_ocr_box_word_count);",
+        "  static_assert(subtitle_ocr_record_word_count == subtitle_ocr_classifier_history_offset + subtitle_ocr_classifier_history_word_count);",
         "  static_assert(subtitle_condition_param_word_count == 6u);",
         "  inline constexpr std::uint32_t shader_source_closure_schema =",
         "    host_sbs_shader_cache::source_closure_schema;",
@@ -1566,6 +1773,37 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SHADOW_STATE_WORD_COUNT {len(fields)}u",
         f"#define V2_SHADOW_STATE_VECTOR_COUNT {len(fields) // contract['vector_width']}u",
         f"#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA {subtitle_ocr['schema']}u",
+        *_classifier_declarations(subtitle_ocr["classifier"], "hlsl"),
+
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS {subtitle_ocr['contour_policy']['palette_representative_index_bits']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK {subtitle_ocr['contour_policy']['palette_representative_index_mask']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_HUE_CHANNEL_MAX {subtitle_ocr['contour_policy']['palette_hue_channel_max']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_NUMERATOR {subtitle_ocr['contour_policy']['palette_merge_hue_numerator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_DENOMINATOR {subtitle_ocr['contour_policy']['palette_merge_hue_denominator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_INSET_DETECTOR_PIXELS {subtitle_ocr['contour_policy']['ordinary_search_inset_detector_pixels']}u",
+        f"#define V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_CENTER_BIAS_DETECTOR_PIXELS {subtitle_ocr['contour_policy']['ordinary_search_center_bias_detector_pixels']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS {subtitle_ocr['contour_policy']['palette_grid_columns']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_GRID_ROWS {subtitle_ocr['contour_policy']['palette_grid_rows']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_CHANNEL_MAX {subtitle_ocr['contour_policy']['palette_channel_max']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT {subtitle_ocr['contour_policy']['palette_bin_count']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES {subtitle_ocr['contour_policy']['palette_max_modes']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_NUMERATOR {subtitle_ocr['contour_policy']['palette_brightness_numerator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_DENOMINATOR {subtitle_ocr['contour_policy']['palette_brightness_denominator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_MATCH_RGB_NUMERATOR {subtitle_ocr['contour_policy']['palette_match_rgb_numerator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_PALETTE_MATCH_RGB_DENOMINATOR {subtitle_ocr['contour_policy']['palette_match_rgb_denominator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_OUTLINE_VALUE_NUMERATOR {subtitle_ocr['contour_policy']['outline_value_numerator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_OUTLINE_VALUE_DENOMINATOR {subtitle_ocr['contour_policy']['outline_value_denominator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_OUTLINE_CHROMA_NUMERATOR {subtitle_ocr['contour_policy']['outline_chroma_numerator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_OUTLINE_CHROMA_DENOMINATOR {subtitle_ocr['contour_policy']['outline_chroma_denominator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_OUTLINE_PROBE_RADIUS_SOURCE_PIXELS {subtitle_ocr['contour_policy']['outline_probe_radius_source_pixels']}u",
+        f"#define V2_SUBTITLE_CONTOUR_LONG_LINE_CORE_HEIGHT_NUMERATOR {subtitle_ocr['contour_policy']['long_line_core_height_numerator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_LONG_LINE_CORE_HEIGHT_DENOMINATOR {subtitle_ocr['contour_policy']['long_line_core_height_denominator']}u",
+        f"#define V2_SUBTITLE_GLYPH_MATTE_SCHEMA {subtitle_ocr['glyph_matte_policy']['schema']}u",
+        f"#define V2_SUBTITLE_GLYPH_MATTE_STEPS {subtitle_ocr['glyph_matte_policy']['steps']}u",
+        f"#define V2_SUBTITLE_GLYPH_MATTE_RGB_DISTANCE {_float_literal(subtitle_ocr['glyph_matte_policy']['rgb_distance'])}",
+        f"#define V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT {_float_literal(subtitle_ocr['glyph_matte_policy']['brightness_split'])}",
+        f"#define V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SOURCE_PIXELS {subtitle_ocr['glyph_matte_policy']['collar_radius_source_pixels']}u",
+        f"#define V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SQUARED {subtitle_ocr['glyph_matte_policy']['collar_radius_squared']}u",
         f"#define V2_SUBTITLE_CONTOUR_SCHEMA {subtitle_ocr['contour_policy']['schema']}u",
         f"#define V2_SUBTITLE_CONTOUR_RECIPE {subtitle_ocr['contour_policy']['recipe']}u",
         f"#define V2_SUBTITLE_CONTOUR_HISTORY_SCHEMA {subtitle_ocr['contour_policy']['history_schema']}u",
@@ -1582,9 +1820,14 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_COUNT_SHIFT {subtitle_ocr['contour_policy']['history_feature_count_shift']}u",
         f"#define V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT {subtitle_ocr['contour_policy']['source_max_extent']}u",
         f"#define V2_SUBTITLE_CONTOUR_HISTORY_JITTER_RADIUS_SOURCE_PIXELS {subtitle_ocr['contour_policy']['history_jitter_radius_source_pixels']}u",
+        f"#define V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_PAD_HEIGHT_NUMERATOR {subtitle_ocr['contour_policy']['ordinary_search_pad_height_numerator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_PAD_HEIGHT_DENOMINATOR {subtitle_ocr['contour_policy']['ordinary_search_pad_height_denominator']}u",
+        f"#define V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RADIUS_SOURCE_PIXELS {subtitle_ocr['contour_policy']['spatial_edge_radius_source_pixels']}u",
+        f"#define V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RGB_DISTANCE {_float_literal(subtitle_ocr['contour_policy']['spatial_edge_rgb_distance'])}",
         f"#define V2_SUBTITLE_CONTOUR_DISTANCE_EMPTY_BITS {subtitle_ocr['contour_policy']['distance_empty_bits']}u",
         f"#define V2_SUBTITLE_CONTOUR_GAUSSIAN_CENTER_OFFSET_SOURCE_PIXELS {subtitle_ocr['contour_policy']['gaussian_center_offset_source_pixels']}u",
         f"#define V2_SUBTITLE_CONTOUR_GAUSSIAN_SIGMA_SHORT_SIDE_DIVISOR {_float_literal(subtitle_ocr['contour_policy']['gaussian_sigma_short_side_divisor'])}",
+        f"#define V2_SUBTITLE_CONTOUR_DISTANCE_COMPLETION_SOURCE_PIXELS {subtitle_ocr['contour_policy']['distance_completion_source_pixels']}u",
         f"#define V2_SUBTITLE_CONTOUR_GAUSSIAN_WEIGHT_ABSOLUTE_ERROR_LIMIT {_float_literal(subtitle_ocr['contour_policy']['gaussian_weight_absolute_error_limit'])}",
         f"#define V2_OCR_INPUT_N {ocr_input['shape'][0]}u",
         f"#define V2_OCR_INPUT_C {ocr_input['shape'][1]}u",
@@ -1638,6 +1881,8 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{field_policy['source_crop_aspect_height']}u",
         f"#define V2_OCR_TEXT_JOIN_GAP_CELLS "
         f"{field_policy['text_join_gap_cells']}u",
+        f"#define V2_OCR_ORDINARY_COVER_VERTICAL_GUARD_HEIGHT_NUMERATOR {field_policy['ordinary_cover_vertical_guard_height_numerator']}u",
+        f"#define V2_OCR_ORDINARY_COVER_VERTICAL_GUARD_HEIGHT_DENOMINATOR {field_policy['ordinary_cover_vertical_guard_height_denominator']}u",
         f"#define V2_OCR_ORDINARY_COVER_HORIZONTAL_GUARD_CELLS "
         f"{field_policy['ordinary_cover_horizontal_guard_cells']}u",
         f"#define V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR "
@@ -1695,6 +1940,14 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SUBTITLE_PLANE_RESERVED_WORD_COUNT {plane_state['reserved_word_count']}u",
         f"#define V2_SUBTITLE_PLANE_ADAPTIVE_OFFSET {plane_state['adaptive_offset']}u",
         f"#define V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT {plane_state['adaptive_word_count']}u",
+        f"#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS {plane_state['adaptive_known_flags']}u",
+        f"#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG {plane_state['adaptive_retired_approach_flag']}u",
+        f"#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_RETREAT_FLAG {plane_state['adaptive_retired_retreat_flag']}u",
+        f"#define V2_SUBTITLE_PLANE_RETREAT_TIME_CONSTANT_MS {plane_state['retreat_time_constant_ms']}u",
+        f"#define V2_SUBTITLE_PLANE_ADAPTIVE_PRESENTED_FLAG {plane_state['adaptive_presented_flag']}u",
+        f"#define V2_SUBTITLE_PLANE_SMOOTHING_TIME_CONSTANT_MS {plane_state['smoothing_time_constant_ms']}u",
+        f"#define V2_SUBTITLE_PLANE_SLEW_SOURCE_PIXELS_PER_SECOND {plane_state['slew_source_pixels_per_second']}u",
+        f"#define V2_SUBTITLE_PLANE_MAX_TICK_GAP_MS {plane_state['max_tick_gap_ms']}u",
         f"#define V2_SUBTITLE_PLANE_STATE_TAG 0x{plane_state['tag']:08X}u",
         f"#define V2_SUBTITLE_CONDITION_PARAM_SCHEMA {condition_params['schema']}u",
         f"#define V2_SUBTITLE_CONDITION_PARAM_TAG 0x{condition_params['tag']:08X}u",
@@ -1841,7 +2094,8 @@ def render_hlsl_ocr_assertions() -> str:
  '    V2_OCR_CROP_ASPECT_HEIGHT > V2_OCR_CROP_ASPECT_WIDTH || \\',
  '    V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_NUMERATOR != 1u || V2_OCR_LINE_SEARCH_BOTTOM_HEIGHT_DENOMINATOR != 4u || \\',
  '    V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR != 1u || V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_DENOMINATOR != 2u || \\',
- '    V2_OCR_LINE_CENTER_TOLERANCE_NUMERATOR != 1u || V2_OCR_LINE_CENTER_TOLERANCE_DENOMINATOR != 10u || \\',
+ f'    V2_OCR_LINE_CENTER_TOLERANCE_NUMERATOR != {CANONICAL_SUBTITLE_OCR["field_policy"]["line_center_tolerance_numerator"]}u || '
+ f'V2_OCR_LINE_CENTER_TOLERANCE_DENOMINATOR != {CANONICAL_SUBTITLE_OCR["field_policy"]["line_center_tolerance_denominator"]}u || \\',
  '    V2_OCR_BOX_FLAG_RIBBON != 1u || V2_OCR_BOX_KNOWN_FLAGS != 1u || \\',
  '    V2_OCR_TEXT_JOIN_GAP_CELLS == 0u || V2_OCR_TEXT_JOIN_GAP_CELLS >= V2_OCR_RIBBON_JOIN_GAP_CELLS || \\',
  '    V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS == 0u || \\',
@@ -1854,8 +2108,9 @@ def render_hlsl_ocr_assertions() -> str:
  '    V2_OCR_RECORD_HEADER_WORD_COUNT != V2_OCR_RAW_BOX_OFFSET || \\',
  '    V2_OCR_FINAL_BOX_OFFSET != V2_OCR_RAW_BOX_OFFSET + V2_OCR_RAW_BOX_CAPACITY * V2_OCR_BOX_WORD_COUNT || '
  '\\',
- '    V2_OCR_RECORD_WORD_COUNT != V2_OCR_FINAL_BOX_OFFSET + V2_OCR_FINAL_BOX_CAPACITY * '
- 'V2_OCR_BOX_WORD_COUNT',
+ '    V2_OCR_CLASSIFIER_HISTORY_OFFSET != V2_OCR_FINAL_BOX_OFFSET + V2_OCR_FINAL_BOX_CAPACITY * '
+ 'V2_OCR_BOX_WORD_COUNT || \\',
+ '    V2_OCR_RECORD_WORD_COUNT != V2_OCR_CLASSIFIER_HISTORY_OFFSET + V2_OCR_CLASSIFIER_HISTORY_WORD_COUNT',
  '#error "Generated V2 OCR8 producer invariants are inconsistent"',
  '#endif',
  '',
