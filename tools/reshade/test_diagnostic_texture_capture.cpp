@@ -39,8 +39,11 @@ extern "C" __declspec(dllexport) void ReShadeLogMessage(void *, int, const char 
 }
 
 // Game time is the probe view's test clock (test_game3d_clock.h), engaged in
-// main and moved only by hitch() (after the producer queue and the capture
-// owner's pool work are done); --wall-clock runs it on the real clock.
+// main and moved only by hitch(), after the capture owner's pool work is
+// done; every hitch follows the fixture's own gpu.wait(), which completes
+// the producer queue's submitted work first (the fixture watches no ring:
+// submit() signals no fence the barrier could wait for). --wall-clock runs
+// it on the real clock.
 namespace {
   namespace capture = sunshine_streamline::depth_capture;
   namespace observer = sunshine_streamline::native_observer;
@@ -3683,8 +3686,6 @@ int main(int argc, char **argv) {
     }
     require(capture::testing::diagnostic_snapshot_regression(), "diagnostic retirement/fence/format policy regression");
     fixture gpu;
-    // A hitch waits for the producer queue's last signalled work.
-    const auto producer_ring = clock.watch("producer queue", gpu.fence.GetAddressOf(), &gpu.completion);
     unlocked_allocation(gpu);
     local_view_lease(gpu);
     first_recording_depth_capture(gpu);

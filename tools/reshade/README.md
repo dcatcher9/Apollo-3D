@@ -1070,8 +1070,13 @@ it; the case ends at the Present that submitted the release job. The
 layer queue-order cases judge events, not times: each gated Present must return while the CPU gate
 a regression would wait for is still closed (it opens at its 1 s real limit), and the
 frame-generation schedule must complete within the fixture's own 3 s GPU wait; `MEASURE layer
-cross-queue` and `MEASURE layer census` report the times (until the clock each had to stay under
-half the limit).
+cross-queue` and `MEASURE layer census` report the times. Under `--wall-clock` each must also stay
+under half the limit, as before the clock: a stall that a CPU rescue ends (the 10-05/10-06 design's
+1 s watchdog, 1078 ms live) finishes inside every hang bound, and only its real time tells it from
+GPU speed, so the weekly real-time lane is what catches that class. The schedule's frame boundary
+after the deferred Present N is the helper's one stated exception: game time moves while Present
+N's own work and frame N's second-queue copy may still run, and Present N+1's ring wait and
+completion wait cover both before the next boundary.
 
 Both runtime tests also check the
 [frame record](../../docs/reshade-sbs.md#frame-record). Each queue-cycle acquisition's
@@ -2196,7 +2201,8 @@ The executable takes `--family` and the generator's `--list`, `--case` and `--sh
 one JSON line per case (with the family's scope) to `contract-<family>.jsonl` in its output
 directory. Once its setup is done (the runtime, discovery's hooks and the bind's frames) it engages
 the fixtures' game clock ([Test builds](#test-builds)): every case then plays game time, 16 ms per
-Present with the add-on quiesced at each frame boundary, so the first-capture window, the isolation
+real frame (a frame's generated Presents share its game time) with the add-on quiesced at each frame
+boundary, so the first-capture window, the isolation
 past the source age and a UI case's settle window are Present counts, and a case's `elapsed_ms` and
 `first_fresh_ms` are game time (its MEASURE line adds its `wall_ms`). `--wall-clock` never engages
 and runs the cases on the real clock as before; a family of several releases passes it on to its
@@ -2205,7 +2211,7 @@ members. It is registered only where `SUNSHINE_GAME3D_RESHADE_RUNTIME` (the offi
 `SunshineGame3D.fx`) are configured: one test per family, labelled `contract;gpu`, `RUN_SERIAL` with
 the `gpu` resource lock and a 240 s timeout, after `reshade_contract_matrix_runtime_output` removes
 the families' output directory. At 1280x720 the seven families run 323 cells, in game time `sl27`
-123 cells and 14 controls in 97 s (6064 Presents), `sl26` 49 in 48 s, `sl212_214` 48 in 48 s,
+123 cells and 14 controls in 97 s (6064 frames), `sl26` 49 in 48 s, `sl212_214` 48 in 48 s,
 `sl215_30` 38 in 32 s, `ngx` 34 in 32 s, `generic` 9 in 8 s and `ui` 22 in 25 s: about 30 s of wall
 time in all, most of it each process's setup (about 5 minutes with `--wall-clock`). A capture takes
 0.4 s of game time, a refusal or hold 0.9 s (its 600 ms window and the isolation), an FG case copied
@@ -3279,11 +3285,13 @@ keep the default, are judged by their verdicts, which accept either outcome.
 The timelines play game time on the test add-on's clock (clock C3, 11-02; the fixture clock in
 [Test builds](#test-builds)). Once setup is done the clock engages 120 s ahead of the real tick, so
 nothing setup stamped survives into the first timeline. Each Present then ends at a 16 ms virtual
-frame boundary: the game's ring and DLSS-G's ring complete, and so does each ring's own signal of
-its order fence (not a value the CPU or the third queue signals one ahead for `order=cpu` or
-`second`: the ring's signal of the value before it can land after that one and set the fence back,
-also in real time, so only the ring's value is certain); the add-on's pool work and log writer
-quiesce; only then does game time move. A seed's `hitch=` is that barrier and then its
+frame boundary: the game's ring and DLSS-G's ring complete, and each ring's order fence reaches at
+least the ring's own value; the add-on's pool work and log writer quiesce; only then does game time
+move. The order fence is bounded from below only: for `order=cpu` or `second` the CPU or the third
+queue signals one ahead, and the ring's own signal of the value before it can land after that one
+and set the fence back (also in real time), so a barrier may pass on the value ahead before the
+ring's own signal landed, and that fence's value read at the next Present can still fall back; the
+add-on poisons such a fence (a second signaller), so no decision relies on it. A seed's `hitch=` is that barrier and then its
 milliseconds at once, also inside a frame's recording, where a ring that the frame's `sr_gpu` or
 `dlssg_gpu` gate holds until after its Present is not waited for (the frame's boundary waits for
 it once the gate opened). Before each real Present the fixture also waits, moving no time, for the

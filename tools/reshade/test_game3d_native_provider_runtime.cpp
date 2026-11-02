@@ -1961,6 +1961,12 @@ namespace {
             checked(queue->Signal(gate, 1), "Open the second queue's gate after Present N");
           };
           const auto start = clock.wall_now();
+          // The helper's one stated exception: an engaged frame boundary
+          // follows this deferred Present N while its own work and frame N's
+          // second-queue copy may still run (no ring watches them yet; the
+          // copy waits for the signal queued after Present N). Present N+1's
+          // ring wait (frame_n_watch) and completion wait cover both before
+          // the next boundary.
           defer_completion = true;
           present_frame();
           defer_completion = false;

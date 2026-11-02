@@ -1690,15 +1690,18 @@ namespace {
 
     // The game's queues each barrier of the game clock waits for, so that
     // their work completed before game time moves (test_game3d_clock.h): the
-    // game's ring and DLSS-G's ring (their done fences), and each ring's own
-    // signal of its order fence (the value order_fence::value names). Not a
-    // value the CPU or the third queue signals ahead (order_form cpu and
-    // second): the ring's own signal of the value before it can land after
-    // that one, so the fence falls back to the ring's value (it does in
-    // real time too: the third queue's wait for that value is met by its own
-    // earlier signal one ahead), and only the ring's value is certain to be
-    // reached. Inside a frame whose gate holds a ring's work until after its
-    // Present (sr_gpu or dlssg_gpu after_present) that ring and its order
+    // game's ring and DLSS-G's ring (their done fences), and each ring's
+    // order fence up to the ring's own value (order_fence::value). That bound
+    // is from below only. A value the CPU or the third queue signals ahead
+    // (order_form cpu and second) is not waited for: the ring's own signal
+    // of the value before it can land after that one, so the fence falls
+    // back to the ring's value (it does in real time too: the third queue's
+    // wait for that value is met by its own earlier signal one ahead). So a
+    // barrier can also pass on the value ahead before the ring's own signal
+    // landed, and that fence can still fall back after game time moved; the
+    // add-on poisons such a fence (second signaller), so no decision relies
+    // on its value. Inside a frame whose gate holds a ring's work until after
+    // its Present (sr_gpu or dlssg_gpu after_present) that ring and its order
     // fence are not waited for: the gate opens after the Present, and the
     // frame's boundary waits then.
     void watch_rings() {
