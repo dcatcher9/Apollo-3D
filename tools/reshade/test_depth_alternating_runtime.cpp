@@ -1055,6 +1055,14 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       main_runtime=observed.runtime;
       second_last=reinterpret_cast<decltype(second_last)>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineGame3DTestLastRender"));
       require(main_runtime && second_last,"The second-window case needs the test add-on's last-render query");
+      // The trace's first line lists only its own Present's events: the game
+      // window's first traced Present comes first (on the game clock the
+      // trace opens at the engage, right before this case), so the second
+      // runtime's first events, its initial effect reload's among them, are
+      // listed (T8) and not taken for setup's. It comes before the second
+      // swapchain exists: ReShade's init of the second runtime makes it
+      // observed.runtime until present_second() restores the game window's.
+      if(!native_trace.has_line())tick(between ? "second-window-between" : "second-window");
       RECT bounds{0,0,LONG(width),LONG(height)};
       require(AdjustWindowRectEx(&bounds,WS_OVERLAPPEDWINDOW,FALSE,WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW),"Could not size the second window");
       second_window=CreateWindowExW(WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,L"Depth3DRealDepthD3D12Fixture",L"Hidden second game window",WS_OVERLAPPEDWINDOW,
@@ -1073,12 +1081,6 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       checked(second_chain->SetColorSpace1(color==2 ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : color==3 ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 :
         DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709),"Set the second window's transfer");
       for(unsigned i=0;i<2;++i)checked(second_chain->GetBuffer(i,IID_PPV_ARGS(second_buffers[i].put())),"Get the second window's backbuffer");
-      // The trace's first line lists only its own Present's events: the game
-      // window's first traced Present comes first (on the game clock the
-      // trace opens at the engage, right before this case), so the second
-      // runtime's first events, its initial effect reload's among them, are
-      // listed (T8) and not taken for setup's.
-      if(!native_trace.has_line())tick(between ? "second-window-between" : "second-window");
       present_second();
       require(second_runtime && second_runtime!=main_runtime,"The second swapchain has no effect runtime of its own");
       second_between=between;
