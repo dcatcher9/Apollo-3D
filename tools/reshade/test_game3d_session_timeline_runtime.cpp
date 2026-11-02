@@ -2868,7 +2868,18 @@ namespace {
     }
 
     // Once the frame's calls are made, right before its real Present.
+    // Engaged, the work the frame gave its rings completes first (their
+    // done fences and each ring's own order value, wait_rings), except work
+    // a gate holds until after the Present (sr_gpu or dlssg_gpu
+    // after_present), the in-flight cases: with the default (prompt) the
+    // add-on's read at that Present raced the GPU's completion (the
+    // regression rows' note above), which the frame boundary's barrier
+    // after the Present comes too late to settle (owner decision C3b,
+    // 11-02). --wall-clock keeps that race.
     void before_real_present() {
+      if (clock.engaged()) {
+        clock.wait_rings("before the frame's Present");
+      }
       if (pending_options.armed) {
         options_at_depth_frame(&timeline_fixture::make_pending_options, this);
       }
