@@ -347,7 +347,14 @@ namespace {
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state_->consumer_nonce), 0x4e41544956453344LL);
       evidence_.open(fixture_.runtime_directory / "native-renders.jsonl");
       require(evidence_.good(), "Cannot record native render evidence");
-      // The fixture's per-Present trace, written once when this observer ends.
+    }
+
+    // Once setup is done (start, then await_render): game time begins on the
+    // test add-on's clock (raw_runtime_fixture::engage_game_clock), and so
+    // does the fixture's per-Present trace, written once when this observer
+    // ends. Setup's Presents run on the real clock, so they add no line.
+    void begin_game_time() {
+      fixture_.engage_game_clock();
       game3d_present_trace::out.open(fixture_.runtime_directory / "trace.txt", "native");
       traced_ = true;
     }

@@ -739,8 +739,8 @@ RWTexture2D<float> depth : register(u0);
       // at once and the first valid evaluation then met a renderer still
       // preparing, on a cold cache every time).
       rendered_sequence=game3d.await_render([&]{step();game3d.no_effects();});
-      // Setup is done: game time from here on (engage_game_clock).
-      engage_game_clock();
+      // Setup is done: game time and the trace from here on.
+      game3d.begin_game_time();
 
       // Failed evaluations may be seen, but must not establish provider ownership.
       const auto invalid_until=clock.now()+1500;

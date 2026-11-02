@@ -386,8 +386,8 @@ namespace {
       game3d.start();
       game3d.set_strength(100);
       rendered_sequence=game3d.await_render([&]{ step(); });
-      // Setup is done: game time from here on (engage_game_clock).
-      engage_game_clock();
+      // Setup is done: game time and the trace from here on.
+      game3d.begin_game_time();
       await_current("sole-scaled-startup",*scene,12000);
       const auto calibrated=clock.now()+12000;
       while (!(current(*scene) && full()) && clock.now()<calibrated)

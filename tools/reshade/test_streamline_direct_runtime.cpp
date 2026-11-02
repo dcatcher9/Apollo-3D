@@ -1197,8 +1197,8 @@ RWTexture2D<float> depth : register(u0);
       emit=false;
       direct_native.start();direct_native.attach_export();direct_native.set_strength(100);
       rendered_sequence=direct_native.await_render([&]{step();});
-      // Setup is done: game time from here on (engage_game_clock).
-      engage_game_clock();
+      // Setup is done: game time and the trace from here on.
+      direct_native.begin_game_time();
       emit=true;
       // The capture-only variants vary the center every frame below the
       // bands' nearest depth: the gain stays L/Q while the zero follows.

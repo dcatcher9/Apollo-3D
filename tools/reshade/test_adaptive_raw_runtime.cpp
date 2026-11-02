@@ -198,8 +198,8 @@ namespace {
       game3d.start();
       game3d.set_strength(100);
       rendered_sequence = game3d.await_render([&] { step(); });
-      // Setup is done: game time from here on (engage_game_clock).
-      engage_game_clock();
+      // Setup is done: game time and the trace from here on.
+      game3d.begin_game_time();
       settle_ready("initial");
       const auto initial = oracle(false), changed_scene = oracle(true);
       std::printf("MEASURE adaptive oracle constant H=%.9g t0=%.9g changed t0=%.9g\n", initial[0], initial[1], changed_scene[1]);
