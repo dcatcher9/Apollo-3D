@@ -110,14 +110,13 @@ namespace sunshine_streamline::depth_capture {
       if (owner && lineage_owner(*owner)) shown = std::max(shown, owner->shown_capture);
     auto &current = evaluations[provider_index(provider)];
     const auto now = GetTickCount64();
-    // Another viewport's view in this epoch is active (or presenting): the
-    // viewport's picks are ambiguous once FG is off (no FG scope breaks the
-    // views' tie, select_latest_capture), so its FG copies do not pass to its
-    // ordinary source (below).
+    // Another viewport's view in this epoch is active (view_active, the
+    // selection's own rule): the viewport's picks are ambiguous once FG is
+    // off (no FG scope breaks the views' tie, select_latest_capture), so its
+    // FG copies do not pass to its ordinary source (below).
     const bool other_viewport_active = fg_role &&
       std::any_of(current.views.begin(), current.views.end(), [&](const evaluation_head &view) {
-        return view.sequence && view.epoch == epoch && view.viewport != viewport &&
-          (sunshine_freshness::fresh_lt(view.tick, now, sunshine_freshness::source_age_ms) || view_presenting(view, provider));
+        return view.viewport != viewport && view_active(epoch, view, provider, now);
       });
     // The role stays retired until FG On (frame_generation_restored): the
     // inputs admitted before this call (serial), and any while FG stays off,

@@ -24,7 +24,7 @@ namespace sunshine_streamline::depth_capture {
       if (epoch == current.epoch && sequence == current.sequence && source_id == current.source_id) return true;
       for (const auto &view : current.views)
         if (view.epoch == epoch && view.sequence == sequence && view.source_id == source_id &&
-            view_active(current, view, provider, now)) return true;
+            view_active(current.epoch, view, provider, now)) return true;
       return false;
     }
 
@@ -90,7 +90,7 @@ namespace sunshine_streamline::depth_capture {
       if (stands_in(current.epoch, current.sequence, current.source_id)) return source_retention::completed_fallback;
       for (const auto &view : current.views)
         if ((view.sequence != current.sequence || view.source_id != current.source_id) &&
-            view_active(current, view, provider, now) && stands_in(view.epoch, view.sequence, view.source_id))
+            view_active(current.epoch, view, provider, now) && stands_in(view.epoch, view.sequence, view.source_id))
           return source_retention::completed_fallback;
       return source_retention::none;
     }
