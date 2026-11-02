@@ -255,8 +255,15 @@ namespace {
     // Present, before its generated Presents after it; before_dlssg, the
     // same after the frame's other calls, right before DLSS-G's evaluation
     // of it (a stall before a game's Present call, inside which DLSS-G
-    // evaluates the frame). Seeds never draw before_dlssg (hitch_weights
-    // leaves it out), so every seed keeps its frames; rows name it.
+    // evaluates the frame); before_present (11-02), the judge's tick slack
+    // (two clock periods and more) after the fixture's bookkeeping, right
+    // before the frame's real Present (a game thread preempted between its
+    // last call and its Present call: a copy the add-on makes inside that
+    // Present, a tag copy deferred there, R2, reads a later tick than that
+    // bookkeeping did; no longer, so that bookkeeping, read before it, stays
+    // within the slack the judge allows any stamp). Seeds never draw
+    // before_dlssg or before_present (hitch_weights leaves them out), so
+    // every seed keeps its frames; rows name them.
     enum class hitch_form {
       none,
       brief,
@@ -264,11 +271,13 @@ namespace {
       after_sources,
       between,
       after_present,
-      before_dlssg
+      before_dlssg,
+      before_present
     };
 
     constexpr DWORD hitch_ms(hitch_form value) {
-      return value == hitch_form::brief ? DWORD(sunshine_freshness::source_age_ms / 2) : value == hitch_form::none ? 0 : DWORD(sunshine_freshness::source_age_ms + 150);
+      return value == hitch_form::brief ? DWORD(sunshine_freshness::source_age_ms / 2) : value == hitch_form::none ? 0 :
+        value == hitch_form::before_present ? DWORD(continuity::tick_slack_ms) : DWORD(sunshine_freshness::source_age_ms + 150);
     }
 
     // When DLSS-G's compute work runs on the GPU: as soon as its queue gets
@@ -361,7 +370,7 @@ namespace {
           {"at", {"between", "inside", "evaluate"}},
           {"ui", {"none", "bare", "listed", "untagged"}},
           {"order", {"wait", "wait_first", "cpu_wait", "cpu", "second", "late"}},
-          {"hitch", {"none", "brief", "before_sources", "after_sources", "between", "after_present", "before_dlssg"}},
+          {"hitch", {"none", "brief", "before_sources", "after_sources", "between", "after_present", "before_dlssg", "before_present"}},
           {"dlssg_gpu", {"prompt", "after_present"}},
           {"sr_gpu", {"prompt", "after_present"}},
           {"fg_at", {"frame", "depth_read"}},
@@ -1116,6 +1125,22 @@ namespace {
     // decision at both; until then only the real Present was left out, and
     // the first generated one failed ui_frame:held.
     {"fg-silent-tag-only-then-callless-generated-hitch", "20*sr=local; fg=on,sr=local,state=proven,generated=1; sr=local,state=proven,generated=3; tag=evaluate_bare,sr=local,generated=2,ui=bare; tag=evaluate_bare,sr=other_queue,sr_gpu=after_present,state=unprovable,generated=2,ui=bare; tag=now_bare,sr=local,state=proven,generated=2,at=evaluate,ui=bare; 5*tag=now_bare,sr=local,state=proven,generated=2,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between,generated=2; ui=bare; 2*tag=now_bare,sr=local,state=proven,generated=2,at=evaluate,ui=bare; tag=now_bare,state=proven,ui=bare; ui=bare,hitch=between,generated=2; ui=bare", false, 0, 0, 2},
+    // The FG hold's window from the add-on's stamp of a deferred tag copy
+    // (11-02): fixed-set seed dda773a575be6561's frames 140 to 175 after 20
+    // SR frames. Frame 42 (the seed's 162) supplies the FG scope its tag
+    // copy deferred to its Present (R2), which the silent scope after frame
+    // 43 holds over the SR copies until the copy expires, then SR takes
+    // over. A pause of the judge's tick slack after frame 42's bookkeeping,
+    // before its Present (hitch=before_present), puts two clock periods and
+    // more between the fixture's clock read and the add-on's stamp of that
+    // copy (present_deferred). Until 11-02 the fixture began the hold's
+    // window at its own read, so it ended the hold that much before the
+    // add-on did and judged the add-on's last held Presents stale_shown, an
+    // SR copy readable beside them (frames 49 to 51 at add-on ages 203 to
+    // 235 ms, 3 of 3 runs with the restamp disabled); the seed failed so at
+    // frame 172 in 1 of 6 fixed-set runs, where the clock ticked between the
+    // two reads unprompted.
+    {"fg-on-deferred-tag-hitch-before-present-held", "20*sr=local; fg=off,tag=present_list,entry=global; tag=present_list,entry=global; fg=on,tag=present_list,entry=global,untag=after_global,sr=tag,dlssg=direct,generated=1; tag=present_list,entry=global,untag=after_global,sr=tag,dlssg=direct,generated=1; tag=present_list,entry=global,untag=after_global,sr=tag,dlssg=direct,generated=1; tag=present_list,entry=global,sr=tag,dlssg=direct,generated=1; tag=present_list,entry=global,sr=tag,dlssg=direct,generated=1; tag=present_list,entry=global,sr=tag,dlssg=direct,generated=1; tag=present_list,entry=global,sr=tag,dlssg=direct,state=unprovable,generated=3; tag=present_list,entry=global,sr=tag,dlssg=direct,state=unprovable,generated=3; drs=change,tag=present_list,entry=global,sr=local,dlssg=direct,state=unprovable,generated=3; tag=present_list,entry=global,sr=local,dlssg=direct,state=unprovable,generated=3; tag=present_list,entry=global,sr=local,dlssg=direct,state=unprovable,generated=3; tag=present_list,entry=global,sr=local,dlssg=direct,state=unprovable,generated=3; tag=present_list,entry=global,untag=after_global,sr=local,dlssg=direct,state=unprovable; fg=on,drs=change,tag=present_list,entry=global,sr=local,dlssg=direct,state=unprovable; fg=on,tag=present_list,entry=global,sr=local,dlssg=direct,state=unprovable,generated=1; tag=present_list,entry=global,sr=local,state=unprovable,generated=1; tag=present_list,entry=global,sr=local,state=unprovable,generated=1; tag=present_list,entry=global,sr=local,state=proven,generated=1; tag=present_list,entry=global,sr=local,generated=1; tag=present_list,entry=global,sr=local,generated=1; tag=present_list,entry=global,sr=local,generated=1,ui=bare,hitch=before_present; tag=present_list,entry=global,untag=after_global,sr=local,generated=1,ui=bare; untag=after_global,sr=other_queue,generated=1,ui=bare,order=second; fg=on,untag=after_global,sr=other_queue,dlssg=compute_unobserved,generated=1,ui=bare,order=second,dlssg_gpu=after_present; sr=local,dlssg=compute_unobserved,generated=1,ui=bare,order=second; sr=local,dlssg=compute_unobserved,generated=1,ui=bare,order=second; sr=local,dlssg=compute_unobserved,ui=bare,order=second; sr=local,dlssg=compute_unobserved,ui=bare; fg=on,sr=local,dlssg=compute_unobserved,ui=bare; sr=local,dlssg=compute_unobserved,order=wait_first; sr=local,dlssg=compute_unobserved,ui=bare,order=wait_first,dlssg_gpu=after_present; fg=on,sr=local,dlssg=compute_unobserved,ui=bare,order=wait_first; sr=local,dlssg=direct_unobserved,ui=bare; tag=now_list,sr=local,ui=bare; 10*sr=local"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
@@ -2518,7 +2543,15 @@ namespace {
       // Not once a late signal reached the fence that copy was read through
       // (fg_copy_lost): the add-on drops it and the SR copies stand in
       // (until the 10-27 review the fixture kept them out for the source
-      // age, which excused a mono Present and hid stale SR depth).
+      // age, which excused a mono Present and hid stale SR depth). That
+      // copy's age counts from fg_copy: this bookkeeping's clock read, or
+      // for a tag copy deferred to its frame's Present (R2) the add-on's own
+      // stamp of it there (run_frame, after that Present). Until 11-02 it
+      // was this read, before that Present, so where the clock ticked
+      // between the two the fixture ended the hold a clock period before
+      // the add-on did and judged the add-on's hold at its last Present
+      // stale_shown (fixed-set seed dda773a575be6561 at frame 172, 1 run in
+      // 6; fg-on-deferred-tag-hitch-before-present-held).
       const bool held_off = fg_on && !owned && fg_copy && !fg_copy_lost && fg_copy >= fg_enabled_at &&
                             now - fg_copy < sunshine_freshness::source_age_ms;
       // An FG copy its scope accepts: an FG tag's, or DLSS-G's in a state
@@ -2661,6 +2694,10 @@ namespace {
       }
       deferred_copy_before = deferred_tag && !cancel_expected && (supply.legal & continuity::tag_copy) &&
         !supply.capture[1] ? std::max<std::uint64_t>(newest_copy(), 1) : 0;
+      // A pause after the bookkeeping, before the frame's real Present.
+      if (hitch == hitch_form::before_present) {
+        Sleep(hitch_ms(hitch));
+      }
     }
 
     void dlssg_evaluation(frame_events::dlssg_form form) {
@@ -3021,6 +3058,7 @@ namespace {
       };
       deferred_copy_before = 0;
       present_frame();
+      const auto presented = GetTickCount64();
       lose_reads(false);
       render_tracked_depth = {};
       after_present = {};
@@ -3038,11 +3076,38 @@ namespace {
       ui_unidentified_now = false;
       poll("present");
       // The frame's tag copy deferred to this Present, published by it.
+      std::uint64_t deferred_copy {};
       if (deferred_copy_before) {
         if (const auto after = newest_copy(); after && after != deferred_copy_before) {
           supply.capture[1] = after;
+          deferred_copy = after & ~continuity::copy_fg_input;
           continuity_log.judge.learned_capture(continuity::tag_copy, after);
         }
+      }
+      // That copy is the FG copy the frame supplied its scope (fg_supplied),
+      // made inside this Present, where the add-on stamps it
+      // (present_deferred, docs/reshade-sbs.md#deferred-copy-tick): the FG
+      // hold's window (fg_copy, held_off) starts at that stamp, the record's
+      // depth tick where this Present shows the copy, which must lie between
+      // the bookkeeping's clock read before the Present and the read after
+      // it (else the add-on stamped the copy elsewhere); where the Present
+      // shows another copy, at the read after it (never early, late by at
+      // most the rest of that Present's step). Until 11-02 the window began
+      // at the bookkeeping's read (held_off).
+      if (deferred_copy && fg_supplied) {
+        auto tick = presented;
+        if (!record_history.records.empty()) {
+          const auto &shown = record_history.records.back();
+          if (shown.depth_owner == sunshine_game3d::source_slot::fg_depth && shown.depth_capture == deferred_copy) {
+            if (shown.depth_tick_ms < fg_copy || shown.depth_tick_ms > presented) {
+              fail("oracle:deferred_copy_tick", frame_text(frame) + ": its Present showed its tag copy deferred there (capture " + std::to_string(deferred_copy) + ") stamped at tick " + std::to_string(shown.depth_tick_ms) + ", outside that Present (the clock read " + std::to_string(fg_copy) + " before it and " + std::to_string(presented) + " after it)", frame, "fg_source");
+            } else {
+              tick = shown.depth_tick_ms;
+            }
+          }
+        }
+        fg_copy = tick;
+        fg_copy_capture = deferred_copy;
       }
       if (!record_history.records.empty()) {
         present_frames[record_history.records.back().present] = frame;

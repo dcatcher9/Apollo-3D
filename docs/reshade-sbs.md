@@ -4469,7 +4469,11 @@ from its declaration):
   enhanced barriers. A refusal changes nothing: the
   earlier capture holds within the source age, then mono. <a id="deferred-copy-tick"></a>The copy's
   tick, from which the source age of every later hold of it counts, is `present_deferred`'s read at
-  that Present, where the copy is made, as the session timelines' judge stamps it. Until 11-01 it
+  that Present, where the copy is made, as the session timelines' judge stamps it: its FG hold's
+  window starts at the frame record's depth tick of that copy (since 11-02; it began at the
+  fixture's clock read before the Present, so where the clock ticked between the two reads the
+  judge ended the hold a clock period early and failed the add-on's last held Presents as
+  `stale_shown`, `fg-on-deferred-tag-hitch-before-present-held`). Until 11-01 it
   kept its tag call's, so a hitch or a game thread preempted between the frame's calls and its
   Present aged the held copy by that delay, and a later Present that could only hold it went mono
   early (the session timelines' `fg-on-deferred-tag-hitch-after-sources-held`). An accepted depth

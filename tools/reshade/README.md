@@ -2335,9 +2335,12 @@ right after the frame's stamp, before its calls, `after_sources` (as long) after
 Present (the fixture's bookkeeping after it, such as whether a live FG scope still holds its copy,
 reads the clock after the hitch, as the add-on decides then), `between` (as long) before the
 frame's first call and its stamp, `after_present` (as long) after its real Present, before its
-generated Presents, or `before_dlssg` (as long; 11-01) right before DLSS-G's evaluation of the
-frame, after its other calls, a stall before a game's Present call, inside which DLSS-G evaluates
-(seeds never draw it); `dlssg_gpu=after_present` holds DLSS-G's compute work on the GPU until
+generated Presents, `before_dlssg` (as long; 11-01) right before DLSS-G's evaluation of the
+frame, after its other calls, a stall before a game's Present call, inside which DLSS-G evaluates,
+or `before_present` (the judge's 40 ms tick slack; 11-02) after the fixture's bookkeeping, right
+before the real Present, so a copy the add-on makes inside that Present (a deferred tag copy)
+reads two clock periods and more later than that bookkeeping did, while the bookkeeping stays
+within the slack (seeds draw neither of the last two); `dlssg_gpu=after_present` holds DLSS-G's compute work on the GPU until
 the frame's Present returned (its queue waits on a gate fence the CPU signals then, a GPU-bound
 game's copy in flight at its own Present; the gate is no order fence, so no read relies on it, and
 a GPU signal after the Present would deadlock against the presenting queue's wait before it);
@@ -3107,6 +3110,15 @@ two generated Presents declared and the callless frame presenting two after its 
 first is within the tag-only frame's count and holds that frame's decision too; it must make at
 least two such holds, and until the second fix review of 11-01 that generated Present failed
 `ui_frame:held`),
+and one for the FG hold's window: `fg-on-deferred-tag-hitch-before-present-held` (fixed-set seed
+dda773a575be6561's frames 140 to 175 after 20 SR frames: frame 42's FG tag copy, deferred to its
+Present, is held by the silent scope over the SR copies until it expires; a `before_present` pause
+in that frame puts two clock periods and more between the fixture's bookkeeping read and the
+add-on's stamp of the copy; until 11-02 the fixture began the hold's window at its own read, ended
+the hold before the add-on did and judged the add-on's last held Presents `stale_shown`, frames 49
+to 51 in 3 of 3 runs with the restamp disabled, as the seed failed at frame 172 in 1 of 6 fixed-set runs where
+the clock ticked between the two reads unprompted; since then the window begins at the frame
+record's depth tick of that copy, which must lie inside the Present, `oracle:deferred_copy_tick`),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -3138,9 +3150,10 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 90 regression timelines, 7020
-frames and about 20700 Presents, with the seeds' hitches and late FG Offs) in about 350 s
-(integration run f3-INT3-rows1, 11-01: 20564 Presents in 351 s; about 340 s with 87 rows in lane run
+`reshade_session_timelines` runs the fixed set (24 seeds, 92 regression timelines and the witness,
+7153 frames and about 21200 Presents, with the seeds' hitches and late FG Offs) in about 360 s
+(X1's fix run x1-fix-1, 11-02: 21157 to 21232 Presents in 361 to 365 s, 3 runs;
+integration run f3-INT3-rows1, 11-01: 20564 Presents in 351 s; about 340 s with 87 rows in lane run
 f2-P0-int1-followups-c5-sessions; 61 rows and about 285 s in the full check's registered run of
 10-28), registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about 1.4 times a full run (its own
