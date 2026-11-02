@@ -1152,9 +1152,11 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       check_unified_addon();
       game3d.start();game3d.attach_export();game3d.set_strength(100);
       rendered_sequence=game3d.await_render([&]{update_marker();step();});
-      // Setup is done: game time and the trace from here on. A moving scene
-      // keeps moving; its pattern starts again on the game clock.
-      game3d.begin_game_time();movement_started=0;
+      // Setup is done: game time and the trace from here on. The cadence
+      // (which member draws, which Presents have no depth) and a moving
+      // scene go on, from their first step again: setup's Presents, whose
+      // number is real time, do not choose where game time starts in them.
+      game3d.begin_game_time();phase_present=0;movement_started=0;
       for(unsigned band=0;band<4;++band)for(unsigned i=0;i<8;++i)points[band*8+i]={(2*band+1)*width/8+i-4,height/4};
       buffer(pixel_readback,UINT64(slots)*512,D3D12_HEAP_TYPE_READBACK);
       if(!test_case.empty()){
