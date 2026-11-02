@@ -46,10 +46,6 @@ namespace {
       observed.runtime->get_uniform_value_float(uniform("Sunshine_CameraConvergence"), value.data(), 2);
       return value;
     }
-    void frames_for(unsigned milliseconds) {
-      const auto until = GetTickCount64() + milliseconds;
-      do { step(); } while (GetTickCount64() < until);
-    }
     std::vector<std::uint8_t> check_current_mono() {
       return check_current_mono(read(exported.p));
     }
