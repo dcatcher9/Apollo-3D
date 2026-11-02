@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "streamline_camera_probe.h"
 #include "addon_lifetime.h"
+#include "game3d_pool_submit.h"
 #include "addon_config.h"
 #include "hook_host.h"
 #include "api_contract.h"

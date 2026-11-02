@@ -8,6 +8,7 @@
 #include "freshness.h"
 #include "game3d_slow_step.h"
 #include "addon_lifetime.h"
+#include "game3d_pool_submit.h"
 #include "streamline_depth_capture_test_access.h"
 #include "capture_lock_stats.h"
 #include "depth_capture/rules.h"

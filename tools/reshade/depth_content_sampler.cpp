@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "depth_content_sampler.h"
 #include "addon_lifetime.h"
+#include "game3d_pool_submit.h"
 #include "depth_view_format.h"
 #include "async_log.h"
 
@@ -848,6 +849,6 @@ void retire_runtime(api::effect_runtime *runtime) { sampler.retire(runtime); }
 void warm() {
   auto &state = warm_shader();
   if (state.started.exchange(true)) return;
-  if (!TrySubmitThreadpoolCallback(warm_task, nullptr, nullptr)) state.started.store(false); // Compiled on first use.
+  if (!sunshine_game3d::pool::submit(sunshine_game3d::pool::family::sampler_warm, warm_task, nullptr)) state.started.store(false); // Compiled on first use.
 }
 }

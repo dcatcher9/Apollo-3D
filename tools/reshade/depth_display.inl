@@ -84,7 +84,7 @@
         std::lock_guard lock(job->owner->mutex);
         ++job->owner->outstanding;
       }
-      if (TrySubmitThreadpoolCallback(release_task, job.get(), nullptr)) {
+      if (sunshine_game3d::pool::submit(sunshine_game3d::pool::family::display_release, release_task, job.get())) {
         job.release();
         return;
       }

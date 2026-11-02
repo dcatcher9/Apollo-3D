@@ -2,10 +2,13 @@
 # reshade_clock_domains, in script mode: every clock read and thread-pool
 # submission in the add-on's sources has a stated domain (README, Test
 # builds). Game time is read only through sunshine_game3d::clock::game_now()
-# (game3d_clock.h), which the test add-on can drive; every other clock read
-# and every pool submission is listed below, counted per file with its domain
+# (game3d_clock.h), which the test add-on can drive, and every pool callback
+# starts through sunshine_game3d::pool::submit (game3d_pool_submit.h), which
+# the test add-on counts until it returns; every other clock read and the
+# one pool submission are listed below, counted per file with their domain
 # and reason. A new site, or one that moved, fails here until it names its
-# domain: game time through game_now(), anything else as a new entry.
+# domain: game time through game_now(), pool work through pool::submit,
+# anything else as a new entry.
 #
 # Scanned: every .cpp, .h and .inl under SOURCE_DIR except the fixtures
 # (test_*), experiments/ and the replay tools, whose clocks are their own.
@@ -23,14 +26,16 @@ endif()
 #   os:    the operating system's other clocks;
 #   qpc:   QueryPerformanceCounter;
 #   chrono: the std::chrono clocks, named or read (an alias's clock::now());
-#   pool:  a thread-pool submission, a new thread or a timer.
+#   pool:  a thread-pool submission, a new thread, a timer, or a wait or
+#          work object whose callback runs on the pool.
 set(os_clocks GetTickCount timeGetTime GetSystemTime GetLocalTime GetSystemTimeAsFileTime GetSystemTimePreciseAsFileTime
   QueryInterruptTime QueryInterruptTimePrecise QueryUnbiasedInterruptTime QueryUnbiasedInterruptTimePrecise
   NtQuerySystemTime __rdtsc _rdtsc)
 set(std_clocks steady_clock system_clock high_resolution_clock utc_clock tai_clock gps_clock file_clock)
 set(pool_calls TrySubmitThreadpoolCallback SubmitThreadpoolWork CreateThreadpoolWork QueueUserWorkItem CreateThread
-  _beginthread _beginthreadex CreateThreadpoolTimer SetThreadpoolTimer CreateTimerQueueTimer CreateWaitableTimer
-  CreateWaitableTimerW CreateWaitableTimerExW)
+  CreateRemoteThread CreateRemoteThreadEx _beginthread _beginthreadex CreateThreadpoolTimer SetThreadpoolTimer
+  CreateTimerQueueTimer CreateWaitableTimer CreateWaitableTimerW CreateWaitableTimerExW CreateThreadpoolWait
+  CreateThreadpoolIo RegisterWaitForSingleObject)
 set(pool_std thread jthread async)
 
 # The allowed sites: "<file>|<kind>|<count>|<domain>|<reason>". Domains:
@@ -58,15 +63,7 @@ set(allowed
   "exporter_internal.h|chrono|2|wall|the export ring's 2 s retry stamps"
   "game3d_renderer.cpp|chrono|6|wall|the background build's 4 ms present-thread time slice, and its build_ms"
   "game3d_ui_layer.cpp|chrono|1|perf|the skip gap's microsecond clock, for the timing line's maximum"
-  "async_log.h|pool|1|pool|the asynchronous log writer's drain"
-  "depth_capture/pool.inl|pool|1|pool|storage release"
-  "depth_content_sampler.cpp|pool|1|pool|the content sampler's warm-up compile"
-  "depth_display.inl|pool|1|pool|display copy release"
-  "game3d_renderer.cpp|pool|1|pool|the renderer's background build"
-  "game3d_shader_cache.h|pool|1|pool|shader-cache prepare"
-  "ngx_hooks.inl|pool|1|pool|NGX discovery"
-  "overlay_compositor.cpp|pool|1|pool|the overlay's warm-up compile"
-  "sl_hooks.inl|pool|1|pool|the Streamline hook install")
+  "game3d_pool_submit.h|pool|2|pool|pool::submit, shipping and test branch: every pool callback of the add-on starts here, by family, so the test add-on counts it until it returns")
 
 # Code with its comments and its string and character literals blanked (raw
 # strings without a delimiter included), lines kept as lines.
@@ -112,7 +109,7 @@ function(clock_sites code kind out)
       endif()
     endforeach()
   elseif(kind STREQUAL "pool")
-    string(REGEX MATCHALL "(std[ \t]*::[ \t]*)?[A-Za-z0-9_]*(Thread|Timer|WorkItem|thread|async)[A-Za-z0-9_]*" names "${code}")
+    string(REGEX MATCHALL "(std[ \t]*::[ \t]*)?[A-Za-z0-9_]*(Thread|Timer|WorkItem|Wait|thread|async)[A-Za-z0-9_]*" names "${code}")
     foreach(name IN LISTS names)
       string(REGEX REPLACE "^std[ \t]*::[ \t]*" "" bare "${name}")
       if(bare IN_LIST pool_calls OR (NOT bare STREQUAL name AND bare IN_LIST pool_std))
@@ -142,7 +139,8 @@ foreach(sample IN ITEMS
     "chrono|  std::chrono::system_clock::time_point at{};\n"
     "pool|  TrySubmitThreadpoolCallback(task, context, nullptr);\n"
     "pool|  std::thread worker(run);\n"
-    "pool|  auto f = std::async(std::launch::async, run);\n")
+    "pool|  auto f = std::async(std::launch::async, run);\n"
+    "pool|  RegisterWaitForSingleObject(&wait, event, run, nullptr, INFINITE, WT_EXECUTEONLYONCE);\n")
   string(REPLACE ";" "<semicolon>" sample "${sample}")
   string(REPLACE "|" ";" parts "${sample}")
   list(GET parts 0 kind)
@@ -174,12 +172,13 @@ set(replay_tools replay_game3d_dump.cpp preview_game3d_dump.cpp ui_detection_rep
 set(scanned "")
 foreach(source IN LISTS sources)
   get_filename_component(name "${source}" NAME)
-  if(source MATCHES "^experiments/" OR name MATCHES "^test_" OR source IN_LIST replay_tools)
+  if(source MATCHES "^experiments/" OR source MATCHES "(^|/)(cmake-build-[^/]*|CMakeFiles)/" OR name MATCHES "^test_"
+      OR source IN_LIST replay_tools)
     continue()
   endif()
   list(APPEND scanned "${source}")
 endforeach()
-if(NOT "game3d_clock.h" IN_LIST scanned OR NOT "depth_capture/pool.inl" IN_LIST scanned)
+if(NOT "game3d_clock.h" IN_LIST scanned OR NOT "game3d_pool_submit.h" IN_LIST scanned)
   message(FATAL_ERROR "SOURCE_DIR ${SOURCE_DIR} does not hold the add-on's sources")
 endif()
 

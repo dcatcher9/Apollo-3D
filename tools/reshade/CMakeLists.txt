@@ -243,9 +243,11 @@ sunshine_game3d_core_view(sunshine_game3d_core)
 set(sunshine_addon_targets SunshineSBS)
 if(SUNSHINE_SBS_RUNTIME_TESTS)
   # The test add-on also carries the renderer's background-build hooks and the
-  # virtual game clock (game3d_clock.h), all inert until a fixture sets them
-  # (the add-on lifecycle fixture's mid-build device destruction; a fixture
-  # that engages the clock after its setup).
+  # test clock's seams (SUNSHINE_GAME3D_TEST_CLOCK: the virtual game clock,
+  # game3d_clock.h, and the pool work count behind SunshineGame3DTestQuiesce,
+  # game3d_pool_submit.h), all inert until a fixture sets them (the add-on
+  # lifecycle fixture's mid-build device destruction; a fixture that engages
+  # the clock after its setup).
   sunshine_game3d_core_view(sunshine_game3d_core_runtime_test SEAMS SUNSHINE_SBS_RUNTIME_TEST_ADDON SUNSHINE_GAME3D_RENDERER_TEST SUNSHINE_GAME3D_TEST_CLOCK)
   list(APPEND sunshine_addon_targets SunshineSBSTest)
 endif()

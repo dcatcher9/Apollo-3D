@@ -294,7 +294,7 @@ namespace sunshine_streamline {
     }
     void schedule_install() {
       if (install_scheduled.exchange(true, std::memory_order_acq_rel)) return;
-      if (TrySubmitThreadpoolCallback(install_on_pool, nullptr, nullptr)) return;
+      if (sunshine_game3d::pool::submit(sunshine_game3d::pool::family::sl_install, install_on_pool, nullptr)) return;
       install_hook_work(); // Without a pool thread, install here as before.
       install_scheduled.store(false, std::memory_order_release);
     }

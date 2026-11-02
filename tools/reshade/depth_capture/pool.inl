@@ -163,7 +163,7 @@ namespace sunshine_streamline::depth_capture {
           std::lock_guard lock(storage_jobs.mutex);
           ++storage_jobs.outstanding;
         }
-        if (TrySubmitThreadpoolCallback(storage_release_task, job.get(), nullptr)) {
+        if (sunshine_game3d::pool::submit(sunshine_game3d::pool::family::storage_release, storage_release_task, job.get())) {
           job.release();
           return;
         }

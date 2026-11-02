@@ -17,6 +17,7 @@
 #include "async_log.h"
 #include "game3d_slow_step.h"
 #include "addon_lifetime.h"
+#include "game3d_pool_submit.h"
 #include <d3d12.h>
 #include <algorithm>
 #include <atomic>

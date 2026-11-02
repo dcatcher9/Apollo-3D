@@ -4,6 +4,7 @@
 #include "overlay_shaders.h"
 
 #include "addon_lifetime.h"
+#include "game3d_pool_submit.h"
 
 #include <array>
 #include <atomic>
@@ -515,7 +516,7 @@ namespace sunshine::overlay {
   void warm(api::color_space export_color) {
     const int mode = export_color == api::color_space::hdr10_pq ? mode_pq : export_color == api::color_space::scrgb ? mode_scrgb : mode_sdr;
     if (blobs().warming[mode].exchange(true)) return;
-    if (!TrySubmitThreadpoolCallback(warm_task, reinterpret_cast<void *>(static_cast<std::intptr_t>(mode)), nullptr))
+    if (!sunshine_game3d::pool::submit(sunshine_game3d::pool::family::overlay_warm, warm_task, reinterpret_cast<void *>(static_cast<std::intptr_t>(mode))))
       blobs().warming[mode].store(false); // Compiled on first use instead.
   }
 
