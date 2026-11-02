@@ -1755,6 +1755,12 @@ namespace {
       require(entry.path().extension() != ".fx", "Native fixture still has an installed FX shader");
     const auto effect_renders = observed.renders;
     std::puts("PASS native phase has zero installed/loaded FX techniques");
+    // Setup is done (ReShade's discovery, the FX cases and the FX unload,
+    // whose numbers of Presents are ReShade's own real time): game time
+    // starts here, 120 s ahead, so nothing those Presents stamped is still
+    // within any window of the native phase, and the native phase plays the
+    // same game time on any machine. --wall-clock never engages.
+    fixture.clock.engage();
     // Evidence: the present-thread start of a 4K renderer, first in this
     // process (its own bytecode: no in-process pipeline reuse).
     sunshine_game3d_test::measure_startup(observed.runtime, fixture.color, "D3D12");
@@ -2517,9 +2523,9 @@ int main(int argc, char **argv) {
     fixture_t fixture;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), directory, color, 0);
     // The renderer view's game clock, in this executable (sunshine_view_clock):
-    // once the runtime is up, every Present ends at a virtual frame boundary.
+    // engaged once the native phase's setup is done (check_native_parity),
+    // every Present then ends at a virtual frame boundary.
     require(fixture.clock.bind(GetModuleHandleW(nullptr)), "the renderer view's test clock exports are missing");
-    fixture.clock.engage();
     check_native_parity(fixture, directory);
     fixture.clock.report("native runtime");
     return 0;
