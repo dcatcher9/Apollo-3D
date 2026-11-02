@@ -4,13 +4,16 @@
 // add-on unload, and the passive observations that fixture makes of the work
 // the add-on itself leaves in flight there: its asynchronous log writer, its
 // shader compiles and its renderer builds, and the order in which the
-// exporter's owners go at each unload. The production package excludes
-// these exports.
+// exporter's owners go at each unload; and the barrier that waits for the
+// add-on's pool work and log writer (SunshineGame3DTestQuiesce). The
+// production package excludes these exports.
 #include "async_log.h"
+#include "game3d_pool_submit.h"
 #include "game3d_renderer.h"
 #include "game3d_shader_cache.h"
 #include "game3d_test_teardown.h"
 
+#include <chrono>
 #include <cstdio>
 #include <d3dcompiler.h>
 #include <windows.h>
@@ -45,15 +48,16 @@ namespace {
   }
 }  // namespace
 
-// Submits one pool callback of this add-on's code: it waits for `proceed`,
-// compiles a shader and stores 1 in *compiled (-1 for a failed compile, -2
-// when `proceed` never came); the pool signals `returned` after it returns.
+// Submits one pool callback of this add-on's code (pool family test_held):
+// it waits for `proceed`, compiles a shader and stores 1 in *compiled (-1 for
+// a failed compile, -2 when `proceed` never came); the pool signals
+// `returned` after it returns.
 extern "C" __declspec(dllexport) BOOL SunshineSbsTestHoldPoolWork(HANDLE proceed, HANDLE returned, volatile LONG *compiled) {
   if (!proceed || !returned || !compiled) {
     return FALSE;
   }
   auto *work = new held_work {proceed, returned, compiled};
-  if (TrySubmitThreadpoolCallback(held_task, work, nullptr)) {
+  if (sunshine_game3d::pool::submit(sunshine_game3d::pool::family::test_held, held_task, work)) {
     return TRUE;
   }
   delete work;
@@ -83,6 +87,44 @@ extern "C" __declspec(dllexport) unsigned SunshineSbsTestLogBacklog(BOOL *draini
     *draining = queue.draining ? TRUE : FALSE;
   }
   return unsigned(queue.lines.size());
+}
+
+// Waits, at most bound_ms of real time, until the add-on's pool work and its
+// log writer are done: every callback submitted through pool::submit has
+// returned (game3d_pool_submit.h), then the writer's queue is empty and no
+// drain is under way (SunshineSbsTestLogBacklog). The pool is read first: a
+// callback that returned queued its lines before. FALSE when the bound
+// passed first; *missed_families (optional) then holds pool::family_bit of
+// each family with a callback still out, and of the log family while lines
+// wait (0 when the work ended at the bound).
+extern "C" __declspec(dllexport) BOOL SunshineGame3DTestQuiesce(unsigned bound_ms, unsigned *missed_families) {
+  namespace pool = sunshine_game3d::pool;
+  const auto log_idle = [] {
+    BOOL draining = FALSE;
+    return !SunshineSbsTestLogBacklog(&draining) && !draining;
+  };
+  const auto start = std::chrono::steady_clock::now();
+  for (;;) {
+    if (!pool::outstanding() && log_idle()) {
+      if (missed_families) {
+        *missed_families = 0;
+      }
+      return TRUE;
+    }
+    const auto waited = std::chrono::steady_clock::now() - start;
+    if (waited >= std::chrono::milliseconds(bound_ms)) {
+      if (missed_families) {
+        *missed_families = pool::outstanding_families() | (log_idle() ? 0u : pool::family_bit(pool::family::log));
+      }
+      return FALSE;
+    }
+    // Short work ends within a few yields; longer work is polled.
+    if (waited < std::chrono::milliseconds(2)) {
+      SwitchToThread();
+    } else {
+      Sleep(1);
+    }
+  }
 }
 
 // Shader entry points still loading or compiling on the pool

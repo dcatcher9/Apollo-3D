@@ -45,6 +45,11 @@
 // bound of the one before. After each unload the fixture writes the order in
 // which the exporter's owners went (SunshineGame3DTestTeardownOrder,
 // game3d_test_teardown.h), which a structure move of the exporter must keep.
+// The test add-on's pool and log barrier (SunshineGame3DTestQuiesce,
+// game3d_pool_submit.h) must then find all of the add-on's pool work returned
+// and its log written. Across the startup device's unload, while its module
+// discovery and the held callback are still out, that barrier must give up
+// at its 200 ms bound and name both of their pool families.
 //
 // The game devices of item 5 are the witnesses of the former known gap L1
 // (fixed 10-26): a device whose session captured depth outlived the game's
@@ -66,6 +71,7 @@
 // clang-format off
 #include "test_game3d_session_timeline_runtime.cpp"
 // clang-format on
+#include "game3d_pool_submit.h"
 #include "game3d_test_teardown.h"
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -244,6 +250,7 @@ namespace {
     BOOL (*set_diagnostics)(BOOL) {};
     decltype(&NVSDK_NGX_D3D12_ReleaseFeature) ngx_release {};
     unsigned (*teardown_order)(std::uint64_t *, sunshine_game3d::test::teardown::event *, unsigned, std::uint64_t *) {};
+    BOOL (*quiesce)(unsigned, unsigned *) {};
     // The serial of the last teardown event written.
     std::uint64_t teardown_cursor {};
 
@@ -282,7 +289,8 @@ namespace {
       present_tally.last_render = reinterpret_cast<decltype(present_tally.last_render)>(GetProcAddress(pinned, "SunshineGame3DTestLastRender"));
       ngx_release = reinterpret_cast<decltype(ngx_release)>(GetProcAddress(GetModuleHandleW(nullptr), "NVSDK_NGX_D3D12_ReleaseFeature"));
       teardown_order = reinterpret_cast<decltype(teardown_order)>(GetProcAddress(pinned, "SunshineGame3DTestTeardownOrder"));
-      require(shader_entries_pending && renderer_builds && renderer_step_delay && set_diagnostics && teardown_probe.log && teardown_probe.backlog && present_tally.last_render && ngx_release && teardown_order, "The test add-on lacks its lifecycle observations, or the fixture its NGX release");
+      quiesce = reinterpret_cast<decltype(quiesce)>(GetProcAddress(pinned, "SunshineGame3DTestQuiesce"));
+      require(shader_entries_pending && renderer_builds && renderer_step_delay && set_diagnostics && teardown_probe.log && teardown_probe.backlog && present_tally.last_render && ngx_release && teardown_order && quiesce, "The test add-on lacks its lifecycle observations, or the fixture its NGX release");
       reshade::register_event<reshade::addon_event::destroy_device>(probe_destroy_device);
       reshade::register_event<reshade::addon_event::reshade_present>(tally_present);
     }
@@ -375,10 +383,49 @@ namespace {
       teardown_trace.teardown(label, sequence.c_str());
     }
 
+    // The pool families named in a missed mask of SunshineGame3DTestQuiesce.
+    static std::string family_names(unsigned families) {
+      std::string names;
+      for (unsigned i = 0; i != unsigned(sunshine_game3d::pool::family::count); ++i) {
+        const auto kind = sunshine_game3d::pool::family(i);
+        if (families & sunshine_game3d::pool::family_bit(kind)) {
+          names += names.empty() ? "" : ",";
+          names += sunshine_game3d::pool::family_name(kind);
+        }
+      }
+      return names.empty() ? "none" : names;
+    }
+
+    // While pool work is held, the barrier gives up at its 200 ms bound and
+    // names every held family.
+    void require_quiesce_misses(unsigned held, const char *label) {
+      unsigned missed {};
+      const auto started = GetTickCount64();
+      const bool quiesced = quiesce(200, &missed);
+      const auto waited = GetTickCount64() - started;
+      std::printf("MEASURE addon-lifecycle %s held_quiesce=%u waited_ms=%llu missed=%s\n", label, unsigned(quiesced), static_cast<unsigned long long>(waited), family_names(missed).c_str());
+      if (quiesced || (missed & held) != held) {
+        throw std::runtime_error(std::string("With the ") + label + "'s pool work held (" + family_names(held) + "), the test add-on's quiesce barrier " + (quiesced ? "returned quiesced" : "missed only " + family_names(missed)));
+      }
+    }
+
+    // Once the add-on's work is done, the barrier finds every pool callback
+    // returned and the log written.
+    void require_quiesced(const char *label) {
+      unsigned missed {};
+      const auto started = GetTickCount64();
+      const bool quiesced = quiesce(10000, &missed);
+      std::printf("MEASURE addon-lifecycle %s quiesce_ms=%llu\n", label, static_cast<unsigned long long>(GetTickCount64() - started));
+      if (!quiesced) {
+        throw std::runtime_error(std::string("After the ") + label + "'s unload the test add-on's pool work or log writer stayed busy for 10 s: " + family_names(missed));
+      }
+    }
+
     // After an unload: the teardown order is written, the held pool work
     // completes, the queued lines are written, the capture owner released the
-    // device, and the shader compiles and renderer builds the add-on started
-    // finish or are released.
+    // device, the shader compiles and renderer builds the add-on started
+    // finish or are released, and the quiesce barrier finds the pool and log
+    // writer done.
     void after_unload(held_work &work, const char *label) {
       write_teardown(label);
       work.released = GetTickCount64();
@@ -392,6 +439,7 @@ namespace {
       renderer_builds(&started, &in_flight);
       std::printf("MEASURE addon-lifecycle %s shader_entries_pending=%u blobs=%u renderer_builds=%u in_flight=%u\n", label, shader_entries_pending(nullptr), blobs, started, in_flight);
       require(!shader_entries_pending(nullptr) && !in_flight, "Shader entries or a renderer build the add-on started stayed on the pool after the unload");
+      require_quiesced(label);
     }
 
     // -- The game's devices -------------------------------------------------
@@ -633,11 +681,15 @@ namespace {
     // Unpinned, the module is gone and the held discovery would resume in
     // unmapped code: it stays held, and the run fails here.
     fixture.require_unloaded("startup device");
+    // Both held callbacks are the add-on's pool work still out.
+    using sunshine_game3d::pool::family;
+    using sunshine_game3d::pool::family_bit;
+    fixture.require_quiesce_misses(family_bit(family::ngx_discover) | family_bit(family::test_held), "startup device");
     SetEvent(discovery_gate.release);
     fixture.after_unload(*work, "startup device");
     CloseHandle(discovery_gate.entered);
     CloseHandle(discovery_gate.release);
-    std::puts("PASS the add-on stays mapped across ReShade's unload with its startup device, and its held pool compile completes");
+    std::puts("PASS the add-on stays mapped across ReShade's unload with its startup device, its held pool compile completes, and the quiesce barrier names the held pool work, then finds it done");
   }
 
   // A device presented until pending holds, then destroyed with that work in

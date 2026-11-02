@@ -1676,7 +1676,7 @@ every file of a binary sees the same declarations; a binary links one view.
 | View | Seam defines | Linked by |
 |---|---|---|
 | `sunshine_game3d_core` | none | `SunshineSBS`, `replay_game3d_dump`, and the tests without a seam (UI mask, UI capture, UI layer, camera data, queue-cycle and source-alpha) |
-| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, `SUNSHINE_GAME3D_RENDERER_TEST` (the renderer's build hooks, inert until the lifecycle test sets them) | `SunshineSBSTest` |
+| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, `SUNSHINE_GAME3D_RENDERER_TEST` (the renderer's build hooks, inert until the lifecycle test sets them), `SUNSHINE_GAME3D_TEST_CLOCK` (the test clock's seams: the pool work count) | `SunshineSBSTest` |
 | `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file includes `exporter_internal.h` and links this view's one compiled `exporter.cpp` |
 | `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix (pure, hook and device layers), seam characterization, call trace, native observer and diagnostic-texture tests |
 | `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` | the native runtime tests |
@@ -1701,6 +1701,20 @@ its binding cache, and each event handler that reaches one (its phase),
 call a recorder of [`game3d_test_depth_events.h`](game3d_test_depth_events.h) under
 `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, and a fixture reads them after each Present through
 `SunshineDepthTestBindingEvents`, another of the depth add-on's exports.
+
+Every thread-pool callback of the add-on starts through `sunshine_game3d::pool::submit`
+([`game3d_pool_submit.h`](game3d_pool_submit.h)), named by its family (the log writer, capture
+storage and display releases, the sampler's and overlay's compiles, renderer builds, shader entries,
+NGX discovery and Streamline hook installation). The shipping add-on submits directly. Under
+`SUNSHINE_GAME3D_TEST_CLOCK` the test add-on counts each family's callbacks from submission until
+they return, and `SunshineGame3DTestQuiesce(bound_ms, missed_families)` waits, at most `bound_ms`
+of real time, until none is out and the log writer's queue is empty with no drain under way (the
+state `SunshineSbsTestLogBacklog` reads); when the bound passes first it returns `FALSE` with the
+bit of each family still out. The add-on lifecycle fixture checks both outcomes. The `ctest`
+guard `reshade_clock_domains` ([`check_clock_domains.cmake`](check_clock_domains.cmake)) keeps
+this complete: outside the tests, only `game3d_pool_submit.h` may call
+`TrySubmitThreadpoolCallback`, and no production file may start a thread, timer, wait or work
+object of its own.
 
 One test binary compiles a production file outside every view: the opt-in D3D11 sampler fixture
 `reshade_depth_sampler_d3d11_test`, which no `ctest` runs, compiles `depth_content_sampler.cpp`
@@ -1875,6 +1889,7 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 - [`game3d_controls.cpp`](game3d_controls.cpp), [`game3d_controls.h`](game3d_controls.h), [`game3d_controls_model.h`](game3d_controls_model.h): the overlay controls and their settings model. Docs: [Setup](../../docs/reshade-sbs.md#setup).
 - [`game3d_debug_dump.cpp`](game3d_debug_dump.cpp), [`game3d_debug_dump.h`](game3d_debug_dump.h), [`game3d_diagnostic_metadata.cpp`](game3d_diagnostic_metadata.cpp), [`game3d_diagnostic_metadata.h`](game3d_diagnostic_metadata.h): Dump 3D and its bounded metadata observation. Docs: [Dump 3D diagnostics](../../docs/reshade-sbs.md#dump-3d-diagnostics).
 - [`addon_lifetime.h`](addon_lifetime.h), [`freshness.h`](freshness.h): the process-exit fence for detours and callbacks, and every API depth age limit, defined once. Docs: [Streamline depth selection](../../docs/reshade-sbs.md#streamline-depth-selection).
+- [`game3d_pool_submit.h`](game3d_pool_submit.h): the add-on's one thread-pool submission, by family, and the test add-on's count of each family's callbacks. Docs: [Test builds](#test-builds).
 
 ### API contract matrix
 

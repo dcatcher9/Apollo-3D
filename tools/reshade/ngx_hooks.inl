@@ -297,7 +297,7 @@ namespace sunshine_upscaler_trace {
       scanned_loads = loads;
       next_poll = now + (notified ? 250 : 1000);
       discovery_pending.store(true, std::memory_order_release);
-      if (!TrySubmitThreadpoolCallback(discover_on_pool, nullptr, nullptr)) {
+      if (!sunshine_game3d::pool::submit(sunshine_game3d::pool::family::ngx_discover, discover_on_pool, nullptr)) {
         discover();
         discovery_pending.store(false, std::memory_order_release);
       }

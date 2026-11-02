@@ -244,8 +244,9 @@ set(sunshine_addon_targets SunshineSBS)
 if(SUNSHINE_SBS_RUNTIME_TESTS)
   # The test add-on also carries the renderer's background-build hooks, all
   # inert until a fixture sets them (the add-on lifecycle fixture's mid-build
-  # device destruction).
-  sunshine_game3d_core_view(sunshine_game3d_core_runtime_test SEAMS SUNSHINE_SBS_RUNTIME_TEST_ADDON SUNSHINE_GAME3D_RENDERER_TEST)
+  # device destruction), and the test clock's seams (SUNSHINE_GAME3D_TEST_CLOCK:
+  # the pool work count behind SunshineGame3DTestQuiesce, game3d_pool_submit.h).
+  sunshine_game3d_core_view(sunshine_game3d_core_runtime_test SEAMS SUNSHINE_SBS_RUNTIME_TEST_ADDON SUNSHINE_GAME3D_RENDERER_TEST SUNSHINE_GAME3D_TEST_CLOCK)
   list(APPEND sunshine_addon_targets SunshineSBSTest)
 endif()
 foreach(sunshine_addon_target IN LISTS sunshine_addon_targets)
@@ -393,6 +394,11 @@ if(BUILD_TESTING)
     "-DCOMPILER=${CMAKE_CXX_COMPILER}" "-DCOMPILER_FRONTEND=${CMAKE_CXX_COMPILER_FRONTEND_VARIANT}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/test_game3d_api_contract_independence.cmake")
   set_tests_properties(reshade_contract_oracle_independence PROPERTIES TIMEOUT 60 LABELS "contract")
+  # Clock and pool domains (README, Test builds): only the files a domain
+  # names may read its clock or start background work.
+  add_test(NAME reshade_clock_domains COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/check_clock_domains.cmake")
+  set_tests_properties(reshade_clock_domains PROPERTIES TIMEOUT 60)
   # The survey is a research artifact kept under the main checkout's build tree
   # (sl-abi-survey: downloaded release headers and their interposer DLLs'
   # version resources); no target produces it and the repository cannot

@@ -9,6 +9,7 @@
 #include <utility>
 #include <reshade.hpp>
 #include "addon_lifetime.h"
+#include "game3d_pool_submit.h"
 
 // ReShade writes every log line through to disk (FILE_FLAG_WRITE_THROUGH). On a
 // game streaming assets from the same disk one line took up to ~50 ms, and
@@ -74,7 +75,7 @@ namespace sunshine_log {
       submit = !std::exchange(q.draining, true);
     }
     // Without a pool thread, write on the caller rather than lose the line.
-    if (submit && !TrySubmitThreadpoolCallback(detail::drain_callback, nullptr, nullptr)) detail::drain();
+    if (submit && !sunshine_game3d::pool::submit(sunshine_game3d::pool::family::log, detail::drain_callback, nullptr)) detail::drain();
 #endif
   }
 }

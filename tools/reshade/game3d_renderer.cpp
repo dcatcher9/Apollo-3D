@@ -3,6 +3,7 @@
 #include "game3d_shader_source.h"
 #include <reshade.hpp>
 #include "addon_lifetime.h"
+#include "game3d_pool_submit.h"
 #include "async_log.h"
 #include "game3d_diagnostics.h"
 #include "game3d_shader_cache.h"
@@ -1753,7 +1754,7 @@ namespace sunshine_game3d {
           r.jobs.push_back(job);
         }
         auto *context = new std::shared_ptr<build_job>(job);
-        if (!TrySubmitThreadpoolCallback(build_job::task, context, nullptr)) {
+        if (!sunshine_game3d::pool::submit(sunshine_game3d::pool::family::renderer_build, build_job::task, context)) {
           // Without a pool thread, build here a slice per Present.
           delete context;
           std::lock_guard<std::mutex> lock(r.mutex);

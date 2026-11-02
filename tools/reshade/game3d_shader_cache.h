@@ -16,6 +16,7 @@
 #include <vector>
 #include <reshade.hpp>
 #include "addon_lifetime.h"
+#include "game3d_pool_submit.h"
 #include "async_log.h"
 
 // Compiled bytecode for the production Game 3D shader. D3DCompile of the whole
@@ -251,7 +252,7 @@ namespace sunshine_game3d::shader_cache {
     for (const auto &entry : job->entries) {
       auto *task = new detail::task_t{job, entry};
       // Without a pool thread, prepare here rather than never finish.
-      if (!TrySubmitThreadpoolCallback(detail::prepare_task, task, nullptr)) detail::prepare_task(nullptr, task);
+      if (!sunshine_game3d::pool::submit(sunshine_game3d::pool::family::shader_prepare, detail::prepare_task, task)) detail::prepare_task(nullptr, task);
     }
     char text[128];
     std::snprintf(text, sizeof(text), "Sunshine Game 3D: preparing %u shader entries off the present thread (%ux%u, color %u)",
