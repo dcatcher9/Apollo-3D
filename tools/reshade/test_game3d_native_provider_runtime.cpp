@@ -1010,20 +1010,31 @@ namespace {
       require(active_texture() == small_texture, "The active display changed while an idle one was released");
       // Dynamic resolution between two render sizes, each shown for less
       // than the idle period: both displays stay (no allocation per change).
+      // A fixed count of changes, small first, so the run ends on the small
+      // size the next step keeps and every run makes the same display
+      // changes, which the trace gate compares (11-01, F1: a 4.5 s time
+      // bound made 9 or 10 changes by machine load). Each size is shown for
+      // 300 ms of Presents after it settled, so the 9 changes outlast the
+      // 2 s idle period (depth_display.inl display_idle_ms) while each
+      // display is reused within it.
       show(large, "SL-display-oscillation-large");
       const auto oscillating_large = active_texture();
       auto *small_kept = watch(small_texture);
       auto *large_kept = watch(oscillating_large);
-      unsigned changes = 0;
-      for (const auto until = GetTickCount64() + 4500; GetTickCount64() < until; ++changes) {
-        show(changes % 2 ? large : small, "SL-display-oscillation");
-        require(active_texture() == (changes % 2 ? oscillating_large : small_texture),
+      constexpr unsigned changes = 9;
+      const auto oscillation_start = GetTickCount64();
+      for (unsigned change = 0; change != changes; ++change) {
+        show(change % 2 ? large : small, "SL-display-oscillation");
+        require(active_texture() == (change % 2 ? oscillating_large : small_texture),
           "Dynamic resolution between two render sizes reallocated a display");
         for (const auto next = GetTickCount64() + 300; GetTickCount64() < next;) present_frame();
       }
+      const auto oscillation_ms = GetTickCount64() - oscillation_start;
       require(!small_kept->released && !large_kept->released,
         "Dynamic resolution between two render sizes released a display it kept using");
-      std::printf("MEASURE native-provider display-oscillation changes=%u\n", changes);
+      require(oscillation_ms > 2000, "The display oscillation did not outlast the idle period");
+      std::printf("MEASURE native-provider display-oscillation changes=%u ms=%llu\n", changes,
+        static_cast<unsigned long long>(oscillation_ms));
       show(small, "SL-display-idle-done");
       std::puts("PASS native SL display idle release: a display unused for 2 s after a resolution drop is released off the present thread; render sizes alternating faster keep both displays");
     }
