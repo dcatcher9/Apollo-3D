@@ -14,7 +14,7 @@
       QueryPerformanceFrequency(&frequency);
       const double ms = double(end.QuadPart - start.QuadPart) * 1000.0 / double(frequency.QuadPart);
       static std::atomic<std::uint64_t> next_line{};
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       auto due = next_line.load(std::memory_order_relaxed);
       if (pooled && ms >= 8.0 && now >= due && next_line.compare_exchange_strong(due, now + 1000)) {
         const sunshine_game3d::vram::latest_suffix memory;

@@ -186,11 +186,11 @@ namespace sunshine_streamline::depth_capture {
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
     std::uint64_t scope_now() {
       const auto fixed = scope_clock.load(std::memory_order_relaxed);
-      return fixed ? fixed : GetTickCount64();
+      return fixed ? fixed : sunshine_game3d::clock::game_now();
     }
 
 #else
-    std::uint64_t scope_now() { return GetTickCount64(); }
+    std::uint64_t scope_now() { return sunshine_game3d::clock::game_now(); }
 #endif
 
     // Requires mutex. The FG scope's view when the scope is live
@@ -249,7 +249,7 @@ namespace sunshine_streamline::depth_capture {
 
   void frame_generation_frame(std::uint64_t epoch, std::uint32_t viewport, std::uint64_t enabled_tick) {
     if (!requested.load() || !epoch) return;
-    frame_generation_activity(GetTickCount64());
+    frame_generation_activity(sunshine_game3d::clock::game_now());
     std::lock_guard lock(mutex);
     auto *view = live_frame_generation_scope(epoch, viewport, enabled_tick);
     if (!view || !std::exchange(view->awaiting, true)) return;

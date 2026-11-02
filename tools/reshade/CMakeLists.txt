@@ -242,10 +242,11 @@ endfunction()
 sunshine_game3d_core_view(sunshine_game3d_core)
 set(sunshine_addon_targets SunshineSBS)
 if(SUNSHINE_SBS_RUNTIME_TESTS)
-  # The test add-on also carries the renderer's background-build hooks, all
-  # inert until a fixture sets them (the add-on lifecycle fixture's mid-build
-  # device destruction).
-  sunshine_game3d_core_view(sunshine_game3d_core_runtime_test SEAMS SUNSHINE_SBS_RUNTIME_TEST_ADDON SUNSHINE_GAME3D_RENDERER_TEST)
+  # The test add-on also carries the renderer's background-build hooks and the
+  # virtual game clock (game3d_clock.h), all inert until a fixture sets them
+  # (the add-on lifecycle fixture's mid-build device destruction; a fixture
+  # that engages the clock after its setup).
+  sunshine_game3d_core_view(sunshine_game3d_core_runtime_test SEAMS SUNSHINE_SBS_RUNTIME_TEST_ADDON SUNSHINE_GAME3D_RENDERER_TEST SUNSHINE_GAME3D_TEST_CLOCK)
   list(APPEND sunshine_addon_targets SunshineSBSTest)
 endif()
 foreach(sunshine_addon_target IN LISTS sunshine_addon_targets)
@@ -276,8 +277,8 @@ add_custom_target(Sunshine3DPackage ALL
   COMMENT "Staging one production Sunshine 3D add-on and its installer")
 if(SUNSHINE_SBS_RUNTIME_TESTS)
   # The test add-on's exports, which reach depth_addon.cpp's and the probe's
-  # internals through their test-access headers.
-  target_sources(SunshineSBSTest PRIVATE test_depth_addon_exports.cpp test_streamline_camera_probe_exports.cpp test_addon_lifetime_exports.cpp)
+  # internals through their test-access headers, and the game clock's.
+  target_sources(SunshineSBSTest PRIVATE test_depth_addon_exports.cpp test_streamline_camera_probe_exports.cpp test_addon_lifetime_exports.cpp test_game3d_clock_exports.cpp)
   target_compile_definitions(SunshineSBSTest PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   if(MINGW)
     target_compile_options(SunshineSBSTest PRIVATE -Wall -Wextra -Wno-attributes)
@@ -373,6 +374,21 @@ if(BUILD_TESTING)
   set_tests_properties(reshade_freshness PROPERTIES LABELS "characterization")
   # Each API's declaration-to-contract mapping (README, Characterization tests).
   set_tests_properties(reshade_api_contract PROPERTIES LABELS "characterization")
+  # The game clock's test branch (game3d_clock.h), compiled with the clock seam
+  # of the test add-on's view (README, Test builds).
+  add_executable(reshade_game3d_clock_tests test_game3d_clock.cpp)
+  target_compile_features(reshade_game3d_clock_tests PRIVATE cxx_std_17)
+  target_compile_definitions(reshade_game3d_clock_tests PRIVATE SUNSHINE_GAME3D_TEST_CLOCK WIN32_LEAN_AND_MEAN NOMINMAX)
+  if(MINGW)
+    target_link_options(reshade_game3d_clock_tests PRIVATE -static)
+  endif()
+  add_test(NAME reshade_game3d_clock COMMAND reshade_game3d_clock_tests)
+  set_tests_properties(reshade_game3d_clock PROPERTIES TIMEOUT 15)
+  # Every clock read and thread-pool submission of the add-on's sources has a
+  # stated domain; game time is read only through game3d_clock.h.
+  add_test(NAME reshade_clock_domains COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/check_clock_domains.cmake")
+  set_tests_properties(reshade_clock_domains PROPERTIES TIMEOUT 60)
   # The first-run report's checks and its goldens over saved game logs (log_report_goldens). They need
   # only a Python 3 interpreter and are not registered without one.
   find_package(Python3 3.9 COMPONENTS Interpreter)

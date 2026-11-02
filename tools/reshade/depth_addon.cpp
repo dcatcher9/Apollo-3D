@@ -50,6 +50,7 @@
 #include "game3d_frame_record.h"
 #include "depth_addon_test_access.h"
 #include "capture_inputs.h"
+#include "game3d_clock.h"
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
 #include "game3d_test_depth_events.h"
 namespace depth_events = sunshine_game3d::test::depth_events;
@@ -771,7 +772,7 @@ static void record_generic_row(effect_runtime *runtime, const generic_depth_data
 		decision.reason = binding_state_name(data.binding_state);
 		decision.identity = data.selected_identity;
 	}
-	sunshine_game3d::record_generic_depth(*record, decision, present, GetTickCount64());
+	sunshine_game3d::record_generic_depth(*record, decision, present, sunshine_game3d::clock::game_now());
 }
 
 static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
@@ -1074,7 +1075,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		data.shown = {};
 		data.shown.record = data.selected_record;
 		data.shown.metadata = data.selected_capture;
-		data.shown.tick = GetTickCount64();
+		data.shown.tick = sunshine_game3d::clock::game_now();
 		data.shown.anchor = data.anchor_identity;
 		data.shown.color_width = frame_width;
 		data.shown.color_height = frame_height;

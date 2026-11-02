@@ -11,6 +11,7 @@
 #include "streamline_camera_probe_test_access.h"
 #include "streamline_v1_resource_state.h"
 #include "streamline_native_observer.h"
+#include "game3d_clock.h"
 
 namespace sunshine_streamline {
   SUNSHINE_PROBE_INTERNAL {
@@ -51,7 +52,7 @@ namespace sunshine_streamline {
     camera_data copied;
     if (!camera || !read(camera, copied) || !sequence) return 0;
     depth_capture::input value;
-    value.epoch = 0x53554e534c544553ull; value.sequence = sequence; value.tick = GetTickCount64();
+    value.epoch = 0x53554e534c544553ull; value.sequence = sequence; value.tick = sunshine_game3d::clock::game_now();
     value.observation_revision = depth_observation_revision();
     const auto projection = validate(copied);
     value.projection = {projection.depth_offset, projection.depth_scale,

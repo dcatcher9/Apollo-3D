@@ -59,7 +59,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     // Sections end at the next mark, or at the end when the present left early.
     std::array<double, 5> sections{};
     for (unsigned i = 0; i < count; ++i) sections[i] = ms(marks[i], i + 1 < count ? marks[i + 1] : end);
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     char message[1024]{};
     unsigned long long window_ms = 0;
     {

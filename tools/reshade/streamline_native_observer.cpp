@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <memory>
 #include <new>
+#include "game3d_clock.h"
 
 namespace sunshine_streamline::native_observer {
   namespace {

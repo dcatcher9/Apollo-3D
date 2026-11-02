@@ -20,7 +20,7 @@
 static void release_challenger(effect_runtime *runtime, generic_depth_data &data, bool destroy_runtime = false)
 {
 	if (data.challenger_depth_stencil == 0)
-		data.last_current_sample_tick = GetTickCount64();
+		data.last_current_sample_tick = sunshine_game3d::clock::game_now();
 	if (data.challenger_depth_stencil != 0)
 	{
 		if (auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>())
@@ -87,12 +87,12 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 	if (data.challenger_depth_stencil == data.selected_depth_stencil && data.challenger_depth_stencil != 0)
 		release_challenger(runtime, data); // The selected view now holds its own tracking reference.
 
-	if (sunshine_depth::busy() || GetTickCount64() < data.next_sample_tick)
+	if (sunshine_depth::busy() || sunshine_game3d::clock::game_now() < data.next_sample_tick)
 		return;
 
 	// Missing/unsupported capture must not pin the round robin. A won comparison
 	// keeps its visit until the takeover adopts the backup (begin_depth_frame).
-	if (data.probe_target_id != 0 && sunshine_depth_probe::visit_expired(data.probe_started_tick, GetTickCount64(),
+	if (data.probe_target_id != 0 && sunshine_depth_probe::visit_expired(data.probe_started_tick, sunshine_game3d::clock::game_now(),
 		data.challenger_id != 0 && data.selection.won_challenger_id() == data.challenger_id))
 		release_challenger(runtime, data);
 	if (data.probe_target_id == 0)
@@ -100,13 +100,13 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 		data.probe_target_id = first_probe_choice(data.selection, data.discovery_hint, device_data.frame_index);
 		// Refresh the current source between round-robin challenger visits so a
 		// large candidate list cannot age out a working selection's evidence.
-		if (!data.probe_target_id && GetTickCount64() - data.last_current_sample_tick >= 1000)
+		if (!data.probe_target_id && sunshine_game3d::clock::game_now() - data.last_current_sample_tick >= 1000)
 		{
 			const std::shared_lock<std::shared_mutex> lock(s_mutex);
 			if (const auto current = device_data.depth_stencil_resources.find(data.selected_depth_stencil);
 				current != device_data.depth_stencil_resources.end() && current->second.last_used_in_frame == device_data.frame_index)
 				data.probe_target_id = current->second.identity;
-			data.last_current_sample_tick = GetTickCount64();
+			data.last_current_sample_tick = sunshine_game3d::clock::game_now();
 		}
 		if (data.probe_target_id == 0)
 		{
@@ -115,7 +115,7 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 			data.probe_target_id = data.selection.next_probe(device_data.frame_index, data.anchor_identity);
 			if (data.probe_target_id) data.discovery_hint.round_robin_started();
 		}
-		data.probe_started_tick = GetTickCount64();
+		data.probe_started_tick = sunshine_game3d::clock::game_now();
 	}
 	if (data.probe_target_id == 0)
 		return;
@@ -179,7 +179,7 @@ static void prepare_probe_target(effect_runtime *runtime, command_list *cmd_list
 		data.challenger_started_frame = device_data.frame_index;
 		// Retirement wait is not measurement time. Both the queued visit and
 		// this allocated capture phase have their own bounded two-second clock.
-		data.probe_started_tick = GetTickCount64();
+		data.probe_started_tick = sunshine_game3d::clock::game_now();
 		data.challenger_samples = 0;
 		return; // Let the challenger render one full frame before its first end-of-frame copy.
 	}
@@ -285,7 +285,7 @@ static void complete_raw_sample(effect_runtime *runtime, generic_depth_data &dat
 	readback.value_count = completed.values.size();
 	readback.valid = completed.valid;
 	sunshine_camera_binding::associated_sample associated;
-	const auto status = data.raw_sample_binding.complete(readback, GetTickCount64(), associated);
+	const auto status = data.raw_sample_binding.complete(readback, sunshine_game3d::clock::game_now(), associated);
 	data.raw_pending_capture_id = 0;
 	if (status != sunshine_camera_binding::status::associated || !data.raw_pending_metadata.depth_ready ||
 		!completed.moments.supplied)
@@ -325,7 +325,7 @@ static void sample_probe_target(effect_runtime *runtime, command_list *cmd_list,
 {
 	if (!data.generic_capture_enabled)
 		return;
-	const uint64_t now = GetTickCount64();
+	const uint64_t now = sunshine_game3d::clock::game_now();
 	// Every retained source owns its deadline. Sampling a usable off-turn copy
 	// does not depend on which other copy the renderer currently prefers.
 	generic_depth_data::raw_member_sample *due_member = nullptr;

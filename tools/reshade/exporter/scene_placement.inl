@@ -39,7 +39,7 @@
     sunshine_game3d::ui_adaptive::source ui_source;
     scene_parameters_t scene;
     sunshine_depth_jitter::correction jitter;
-    // When this Present's depth was prepared (GetTickCount64) and its
+    // When this Present's depth was prepared (the game clock) and its
     // runtime_t::presentation_ordinal: hold_projection_scene ages a held
     // placement by the time it was shown.
     std::uint64_t decided_ms = 0, present_ordinal = 0;

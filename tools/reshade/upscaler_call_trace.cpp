@@ -16,6 +16,7 @@
 #include <cwctype>
 #include <string>
 #include <utility>
+#include "game3d_clock.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
 #define SUNSHINE_TRACE_CALLER reinterpret_cast<std::uintptr_t>(_ReturnAddress())
@@ -286,7 +287,7 @@ namespace sunshine_upscaler_trace {
       char text[1200]{};
       std::snprintf(text, sizeof(text),
         "Sunshine upscaler trace: epoch=%llu elapsed_ms=%llu SL_hook=%u modules=%u truncated=%u truncations=%u skipped_frame_generation=%u exports=%u NGX_hooks=%u/%u rejected=%u SL_evaluate=%llu NGX_create=%llu NGX_evaluate=%llu NGX_release=%llu inside_observed_SL=%llu outside_observed_SL=%llu unknown_feature=%llu dropped=%llu stale=%llu; zero means no observed calls in this window, not API absence; outside is not proof of a direct path",
-        static_cast<unsigned long long>(active_epoch.load()), static_cast<unsigned long long>(GetTickCount64() - began),
+        static_cast<unsigned long long>(active_epoch.load()), static_cast<unsigned long long>(sunshine_game3d::clock::game_now() - began),
         streamline_covered.load() ? 1 : 0, found_modules, scan_truncated.load(std::memory_order_acquire) ? 1u : 0u,
         scan_truncations, skipped_frame_generation, found_exports, installed, target_count, rejected,
         static_cast<unsigned long long>(counts[3]), static_cast<unsigned long long>(counts[0]),

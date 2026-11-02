@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include "game3d_clock.h"
 
 namespace sunshine_ngx {
   namespace {
@@ -541,7 +542,7 @@ namespace sunshine_ngx {
       sunshine_scene_depth::frame diagnostic_frame;
       diagnostic_frame.epoch = attempt.epoch;
       diagnostic_frame.sequence = ++unknown_diagnostic_sequence;
-      diagnostic_frame.tick = GetTickCount64();
+      diagnostic_frame.tick = sunshine_game3d::clock::game_now();
       attempt.diagnostic_observation = observe_dump_parameters(api, parameters, diagnostic_frame, observed, handle, command,
         diagnostic_session, suppressed);
     };
@@ -562,9 +563,9 @@ namespace sunshine_ngx {
       // DLSS-G is producing frames: Present may move to its queue now, also
       // where no Streamline FG options call was seen (U-C1b's window).
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
-      if (backend.frame_generation_activity) backend.frame_generation_activity(GetTickCount64());
+      if (backend.frame_generation_activity) backend.frame_generation_activity(sunshine_game3d::clock::game_now());
 #else
-      sunshine_streamline::depth_capture::frame_generation_activity(GetTickCount64());
+      sunshine_streamline::depth_capture::frame_generation_activity(sunshine_game3d::clock::game_now());
 #endif
       if (diagnostic_session) observe_without_capture(selected, false);
       // MultiFrameIndex is 1-based (1..MultiFrameCount, nvsdk_ngx_defs_dlssg.h):
@@ -629,7 +630,7 @@ namespace sunshine_ngx {
     }
     ReleaseSRWLockExclusive(&feature_lock);
     if (!value.sequence) return attempt;
-    value.tick = GetTickCount64();
+    value.tick = sunshine_game3d::clock::game_now();
     if (diagnostic_session)
       attempt.diagnostic_observation = observe_dump_parameters(api, parameters, value, selected, handle, command, diagnostic_session);
     value.projection.encoding = selected.parameters.encoding;
@@ -785,7 +786,7 @@ namespace sunshine_ngx {
   void poll() {
     preserve_error error;
     if (!enabled()) return;
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     if (now < next_report) return;
     next_report = now + 5000;
     unsigned count = 0, capture_eligible = 0;

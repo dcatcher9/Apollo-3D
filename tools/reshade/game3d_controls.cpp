@@ -24,6 +24,7 @@
 #include "async_log.h" // After imgui.h and reshade.hpp, which emits the ImGui wrappers.
 #include "game3d_ui_input_provider.h"
 #include <unordered_map>
+#include "game3d_clock.h"
 
 namespace sunshine_game3d {
   namespace api = reshade::api;
@@ -422,7 +423,7 @@ namespace sunshine_game3d {
         ImGui::TextWrapped("UI protection: %s", blocked);
     // Auto without a usable UI mask for a while: say what the user sees, and
     // which game settings commonly provide one when the evidence fits.
-    if (const auto warning = ui_protection_warning_for(source_alpha, data->values, automatic.phase, GetTickCount64()); warning.show) {
+    if (const auto warning = ui_protection_warning_for(source_alpha, data->values, automatic.phase, sunshine_game3d::clock::game_now()); warning.show) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
       ImGui::BeginGroup();
       ImGui::TextWrapped("%s", ui_protection_warning_text);

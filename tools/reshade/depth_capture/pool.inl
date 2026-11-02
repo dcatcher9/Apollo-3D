@@ -34,7 +34,7 @@ namespace sunshine_streamline::depth_capture {
           value.nomination_invalid || (value.finished && !value.success) || !valid_provider(value.metadata.provider))
         return false;
       const auto &metadata = value.metadata;
-      return selectable_head(metadata.provider, metadata.epoch, metadata.sequence, metadata.source_id, GetTickCount64());
+      return selectable_head(metadata.provider, metadata.epoch, metadata.sequence, metadata.source_id, sunshine_game3d::clock::game_now());
     }
 
     // Logical retention keeps metadata-only authority separately from completed fallback pixels.
@@ -43,7 +43,7 @@ namespace sunshine_streamline::depth_capture {
         // Metadata-only nominations carry source authority but no GPU storage.
         const auto &metadata = value.metadata;
         const bool current = !value.invalid && (!value.finished || value.success) &&
-          selectable_head(metadata.provider, metadata.epoch, metadata.sequence, metadata.source_id, GetTickCount64());
+          selectable_head(metadata.provider, metadata.epoch, metadata.sequence, metadata.source_id, sunshine_game3d::clock::game_now());
         return current ? source_retention::current_nomination : source_retention::none;
       }
       if (!value.source_nominated || value.preservation_only || value.invalid || value.nomination_invalid ||
@@ -54,7 +54,7 @@ namespace sunshine_streamline::depth_capture {
       if (current_source_nomination(value)) return source_retention::current_nomination;
       const auto provider = value.metadata.provider;
       const auto &current = evaluations[provider_index(provider)];
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       // Preserve exactly the existing eligible completed fallback too, beneath
       // a pending successor, a nomination in progress or a missing frame
       // alike, and beneath an FG input the SR/RR snapshot of its lineage that
@@ -201,7 +201,7 @@ namespace sunshine_streamline::depth_capture {
     void collect_diagnostics(storage_list &discard) {
       if (!capture_pool.diagnostic_slots_active) return;
       bool retained = false;
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       for (auto &value : capture_pool.diagnostic_slots) {
         if (value.id && reclaimable(value)) {
           // Retire the capture identity/leases, not its reusable allocation.
@@ -221,7 +221,7 @@ namespace sunshine_streamline::depth_capture {
     // Requires the lock. A live reservation of another record attempt.
     bool reserved_by_other(const slot &entry, std::uint64_t own) {
       return entry.reservation && entry.reservation != own &&
-        GetTickCount64() - entry.reservation_tick < reservation_timeout_ms;
+        sunshine_game3d::clock::game_now() - entry.reservation_tick < reservation_timeout_ms;
     }
 
     // Requires the lock.
@@ -502,7 +502,7 @@ namespace sunshine_streamline::depth_capture {
       // Each nomination a Present can take as its head stays (selectable_head:
       // an API namespace's newest, and each active view's newest): selection
       // reports its failure or pending state.
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       const auto head = [now](const slot &value) {
         const auto &metadata = value.metadata;
         if (value.preservation_only || !metadata.epoch) return false;
@@ -565,7 +565,7 @@ namespace sunshine_streamline::depth_capture {
     collect_retired(discard);
     try {
       release_idle_slots(discard);
-      release_idle_diagnostics(discard, GetTickCount64());
+      release_idle_diagnostics(discard, sunshine_game3d::clock::game_now());
     } catch (...) {}
     // discard is released after the lock (declared before it).
   }

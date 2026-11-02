@@ -7,8 +7,9 @@
 // selection, association, the FG scope, the provider handoff, held copies and
 // the Streamline probe's camera and query evidence, defined once. Each call
 // site names its limit and the comparator that keeps its own edge; the edges
-// differ by site and are not unified here. Ticks are GetTickCount64
-// milliseconds, and a tick's age at now is now - tick. Cadences, log
+// differ by site and are not unified here. Ticks are the game clock's
+// milliseconds (sunshine_game3d::clock::game_now(), game3d_clock.h), and a
+// tick's age at now is now - tick. Cadences, log
 // throttles, the capture pool's leases, calibration and UI detection keep
 // their constants with their owners, since none ages API depth evidence:
 // among them UI detection's status sample freshness

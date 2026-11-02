@@ -347,7 +347,7 @@ namespace sunshine_streamline::depth_capture {
         std::uint64_t fence) {
       std::array<bool, slot_limit> out{};
       if (!fence) return out;
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       // The reader's own queue copies out too while FG may move Present off
       // it (reader_may_move); only a copy read elsewhere stamps its source.
       // Cross-section read: producer copy-out consults current consumer reader,

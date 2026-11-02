@@ -88,7 +88,7 @@ namespace sunshine_game3d {
     bool rendered = false, applied = false;
     // The swapchain presents SDR (sRGB), for the overlay's hints only.
     bool sdr_output = false;
-    // Since when (GetTickCount64) consecutive rendered frames were unprotected;
+    // Since when (game clock) consecutive rendered frames were unprotected;
     // zero while protected. The exporter owns it (next_unprotected_since).
     std::uint64_t unprotected_since_ms = 0;
     bool fg_active() const { return fg.known && fg.enabled; }

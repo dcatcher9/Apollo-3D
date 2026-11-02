@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include "game3d_clock.h"
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
 #include <functional>
 #endif
@@ -336,7 +337,7 @@ namespace sunshine_streamline {
       const auto serial = sample ? ++call_sequence : 0;
       const loss_context_scope loss_scope(serial, viewport);
       const auto loss = loss_revision.load(std::memory_order_acquire);
-      const auto entry_tick = sample ? GetTickCount64() : 0;
+      const auto entry_tick = sample ? sunshine_game3d::clock::game_now() : 0;
       const auto diagnostic = dump_stamp(ticket, serial, entry_tick, viewport, 0, frame, true);
       camera_data camera;
       decode_status decoded = decode_status::short_buffer;
@@ -366,7 +367,7 @@ namespace sunshine_streamline {
       out.serial = sample ? ++call_sequence : 0;
       const loss_context_scope loss_scope(out.serial, viewport);
       out.loss = loss_revision.load(std::memory_order_acquire);
-      out.tick = sample ? GetTickCount64() : 0;
+      out.tick = sample ? sunshine_game3d::clock::game_now() : 0;
       const auto diagnostic = dump_stamp(ticket, out.serial, out.tick, viewport);
       const bool resource_has_state = installed_abi != abi::legacy_no_state;
       if (sample && diagnostic.session) dump_metadata::observe_sl_tag_v1(diagnostic, resource, type, area, resource_has_state);
@@ -743,7 +744,7 @@ namespace sunshine_streamline {
       for (auto &entry : deferred_frames) if (!entry.used) {
         entry = {};
         entry.used = true; entry.observation = observation_ticket(); entry.epoch = epoch.load(std::memory_order_acquire);
-        entry.serial = ++call_sequence; entry.tick = GetTickCount64() - age_ms; entry.executions = depth_capture::game_executions();
+        entry.serial = ++call_sequence; entry.tick = sunshine_game3d::clock::game_now() - age_ms; entry.executions = depth_capture::game_executions();
         entry.viewport = viewport;
         entry.evaluations = fg_evaluation.tag(entry.epoch, viewport, entry.serial, true, {}, depth_capture::next_present_ordinal());
         entry.depth.candidates[0] = candidate; entry.depth.count = 1;

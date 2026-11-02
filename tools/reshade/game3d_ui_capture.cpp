@@ -11,6 +11,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include "game3d_clock.h"
 
 namespace sunshine_game3d {
   namespace capture = sunshine_streamline::depth_capture;
@@ -141,7 +142,7 @@ namespace sunshine_game3d {
   void ui_capture_batch::freeze() {
     std::lock_guard lock(state_->mutex);
     state_->accepting = false;
-    if (!state_->frozen_tick) state_->frozen_tick = GetTickCount64();
+    if (!state_->frozen_tick) state_->frozen_tick = sunshine_game3d::clock::game_now();
   }
   bool ui_capture_batch::append(wire::response_t &response, std::uint64_t &bytes, std::string &json_text, bool allow_pixels) {
     std::lock_guard lock(state_->mutex);
@@ -164,7 +165,7 @@ namespace sunshine_game3d {
     return true;
   }
   bool ui_capture_batch::append_transaction(wire::response_t &response, std::uint64_t &bytes, std::string &json_text, bool allow_pixels) {
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     const bool deadline = state_->frozen_tick && now - state_->frozen_tick >= 250;
     bool pending = false;
     for (auto &e : state_->entries) {

@@ -68,7 +68,7 @@ namespace sunshine_streamline::native_observer {
     // Requires order::lock exclusive: applies a deferred coverage reset.
     void apply_order_reset() {
       if (!order::reset_pending.load(std::memory_order_acquire) || !order::reset_pending.exchange(false, std::memory_order_acq_rel)) return;
-      order::model.reset(GetTickCount64());
+      order::model.reset(sunshine_game3d::clock::game_now());
       for (auto &slot : order::tickets) slot.id.store(0, std::memory_order_release);
       ++order::resets;
     }
@@ -239,7 +239,7 @@ namespace sunshine_streamline::native_observer {
       memory = read_fence(fence);
       if (!order::model.known_fence(memory.id)) {
         if (!device || device != order::model.queue_device(queue)) mark(sunshine_queue_order::poison::foreign_device);
-        memory.id = order::model.add_fence(device, baseline, {0, memory.signaller, memory.why}, why, GetTickCount64());
+        memory.id = order::model.add_fence(device, baseline, {0, memory.signaller, memory.why}, why, sunshine_game3d::clock::game_now());
         memory = order::model.memory(memory.id);
         write_fence(fence, memory);
       }
@@ -278,7 +278,7 @@ namespace sunshine_streamline::native_observer {
         else {
           const auto completed = fence->lpVtbl->GetCompletedValue(fence);
           const auto before = order::model.memory(id);
-          order::model.signal(recorded ? call.order_queue : 0, id, value, recorded ? call.ticket : 0, completed, GetTickCount64());
+          order::model.signal(recorded ? call.order_queue : 0, id, value, recorded ? call.ticket : 0, completed, sunshine_game3d::clock::game_now());
           const auto after = order::model.memory(id);
           if (after.signaller != before.signaller || after.why != before.why) write_fence(fence, after);
           if (before.why == sunshine_queue_order::poison::none && after.why == sunshine_queue_order::poison::second_signaller)
@@ -409,7 +409,7 @@ namespace sunshine_streamline::native_observer {
       const bool known = id && order::model.known_fence(id);
       const auto before = known ? order::model.memory(id) : sunshine_queue_order::fence_memory{};
       const auto completed = known ? fence->lpVtbl->GetCompletedValue(fence) : 0;
-      order::model.wait(call.order_queue, id, value, call.ticket, quiet, completed, GetTickCount64());
+      order::model.wait(call.order_queue, id, value, call.ticket, quiet, completed, sunshine_game3d::clock::game_now());
       if (known) {
         const auto after = order::model.memory(id);
         if (after.signaller != before.signaller || after.why != before.why) write_fence(fence, after);
@@ -425,7 +425,7 @@ namespace sunshine_streamline::native_observer {
       // sight covers this signal.
       auto memory = read_fence(fence);
       if (memory.id && order::model.known_fence(memory.id)) {
-        order::model.cpu_signal(memory.id, GetTickCount64());
+        order::model.cpu_signal(memory.id, sunshine_game3d::clock::game_now());
         const auto after = order::model.memory(memory.id);
         if (after.signaller != memory.signaller || after.why != memory.why) write_fence(fence, after);
       } else if (memory.id && memory.why == sunshine_queue_order::poison::none) {
@@ -546,7 +546,7 @@ namespace sunshine_streamline::native_observer {
     }
     // A pending reset forgets the verdict's fences, which conflicts it here.
     apply_order_reset();
-    const bool stands = order::model.rely(value, GetTickCount64(), tag);
+    const bool stands = order::model.rely(value, sunshine_game3d::clock::game_now(), tag);
     ReleaseSRWLockExclusive(&order::lock);
     return stands;
   }

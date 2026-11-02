@@ -56,7 +56,7 @@
       QueryPerformanceFrequency(&frequency);
       const double ms = double(end.QuadPart - start.QuadPart) * 1000.0 / double(frequency.QuadPart);
       static std::atomic<std::uint64_t> next_line{};
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       auto due = next_line.load(std::memory_order_relaxed);
       if (pooled && ms >= 8.0 && now >= due && next_line.compare_exchange_strong(due, now + 1000)) {
         const sunshine_game3d::vram::latest_suffix memory;
@@ -143,7 +143,7 @@
     // (signal_own), so it never waits on the queue-order lock. The present
     // thread only reads the fence and signals it.
     void collect_displays(api::effect_runtime *runtime, state &data, std::uint64_t present) {
-      expire_idle_displays(data, present, GetTickCount64());
+      expire_idle_displays(data, present, sunshine_game3d::clock::game_now());
       if (data.retired_displays.empty()) return;
       auto *device = runtime->get_device();
       // Only a fence initialize() failed to create is created here.
@@ -229,7 +229,7 @@
       created.view_format = packet.srv_format;
       // A new entry counts as used from its creation (expire_idle_displays),
       // also while a failed copy left it inactive.
-      created.used = GetTickCount64();
+      created.used = sunshine_game3d::clock::game_now();
       *victim = created;
       target = victim;
       return display_status::ready;

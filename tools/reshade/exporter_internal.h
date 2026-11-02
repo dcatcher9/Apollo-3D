@@ -63,6 +63,7 @@
 #include "game3d_ui_layer.h"
 #include "game3d_vram.h"
 #include "game3d_diagnostics.h"
+#include "game3d_clock.h"
 
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   #include "game3d_test_depth_events.h"
@@ -312,7 +313,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     bool pq_requested = false;
     // A runtime's device never changes adapter; resolve its LUID once.
     // Bounded timing of the add-on's own work inside the game's Present.
-    // start: GetTickCount64 when the window began (its first Present, or the
+    // start: the game clock when the window began (its first Present, or the
     // previous timing line).
     struct {
       std::uint64_t presents = 0, next_log = 0, start = 0;
@@ -530,7 +531,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         auto &proof = runtimes_[runtime];
         proof.addon_native = settings.enabled;
         source_alpha = sunshine_game3d::ui_input::resolve(settings, presentation);
-        const auto tick = GetTickCount64();
+        const auto tick = sunshine_game3d::clock::game_now();
         gap = measure_present_gap(proof, present_qpc.QuadPart, tick);
         note_shown_present(proof, tick);
       }
@@ -583,7 +584,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       // queried outside the lock; before depth preparation, whose readiness
       // line, like a hitch and the gap line below, reports this sample.
       auto &memory = sunshine_game3d::vram::process();
-      if (const auto tick = GetTickCount64(); memory.due(tick)) {
+      if (const auto tick = sunshine_game3d::clock::game_now(); memory.due(tick)) {
         IDXGIAdapter3 *adapter = nullptr;
         {
           std::lock_guard<std::mutex> lock(mutex_);
@@ -777,7 +778,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       // logged now (before the renderer, whose GPU timing it takes, is parked).
       if (current != runtimes_.end() && current->second.timing.presents) {
         char message[1024]{};
-        close_timing_window(current->second, GetTickCount64(), message);
+        close_timing_window(current->second, sunshine_game3d::clock::game_now(), message);
         log(reshade::log::level::info, message);
       }
       // destroy_effect_runtime also precedes every swapchain resize (an SDR
@@ -958,7 +959,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         const sunshine_game3d::slow_step step("depth input observation");
         sunshine_game3d::hook_host::poll();
       }
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       frame_decision_t frame;
       decide_scene_frame(runtime, proof, frame, previous_frame, depth, game_enabled, now);
       const sunshine_game3d::slow_step step("frame publication");
@@ -1124,7 +1125,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         // Logged here too (rate limited), so a ring that drops every Present
         // still reports it with published frozen.
         ++proof.output.dropped;
-        log_output(runtime, proof, GetTickCount64());
+        log_output(runtime, proof, sunshine_game3d::clock::game_now());
       } else if (overwrote) ++proof.output.overwritten_unconsumed;
       if (index != wire::slot_count) {
         auto &slot = ring_.shared_->slots[index];
@@ -1282,7 +1283,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         ++window_report_.changes;
         window_report_.pending = true;
       }
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       if (!window_report_.pending || now < window_report_.next_log) return;
       window_report_.pending = false;
       window_report_.next_log = now + 5000;

@@ -66,7 +66,7 @@
         adopt_fg_switch(data);
       }
       auto &line = data.fg_switch;
-      const auto now = e.tick ? e.tick : GetTickCount64();
+      const auto now = e.tick ? e.tick : sunshine_game3d::clock::game_now();
       const auto emit = [&] { emit_fg_switch(line); };
       if (e.fg_query == frame_generation_query_status::observed && e.fg.known && e.fg.mode != data.fg_mode) {
         if (line.active) emit();
@@ -105,7 +105,7 @@
       const bool changed = data.traced_ready != ready;
       data.traced_ready = ready;
       if (!changed) return;
-      const auto now = e.tick ? e.tick : GetTickCount64();
+      const auto now = e.tick ? e.tick : sunshine_game3d::clock::game_now();
       if (!ready) {
         data.trace_loss_tick = now;
         data.traced_loss = now >= data.next_trace_episode;
@@ -121,7 +121,7 @@
         };
         auto &loss = data.trace_observation_loss;
         loss.present = e.present;
-        loss.sampled_tick = GetTickCount64();
+        loss.sampled_tick = sunshine_game3d::clock::game_now();
         // Contemporaneous evidence only: depth decisions never consult it.
         loss.sampled = lookup(depth_observation_revision());
       } else if (!data.traced_loss) return; // No startup/recovery-only noise.
@@ -173,7 +173,7 @@
           packet.area.left != size.area.left || packet.area.top != size.area.top ||
           packet.area.width != size.area.width || packet.area.height != size.area.height);
         if (!same) {
-          if (size.changes) log_render_size(size, GetTickCount64());
+          if (size.changes) log_render_size(size, sunshine_game3d::clock::game_now());
           size = {source, 0, 0, 0, 0, {}, 0, 0, 0, size.next_line};
         }
         if (resized) {
@@ -196,7 +196,7 @@
         ++size.held;
       }
       if (!size.changes) return;
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       if (now >= size.next_line) log_render_size(size, now);
     }
   }

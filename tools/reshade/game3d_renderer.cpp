@@ -28,6 +28,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "game3d_clock.h"
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   #include "game3d_test_teardown.h"
 #endif
@@ -1661,7 +1662,7 @@ namespace sunshine_game3d {
     if (building_ && (!background || !(building_->key == key))) cancel_build();
     // A remembered failure lasts while the same configuration is requested.
     if (build_failed_ && !(failed_key_ == key)) build_failed_ = false;
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     // The cached renderer of the other colour transfer is released once idle
     // this long (item 6: bounded to one cached entry).
     if (cached_ && now - cached_since_ >= cached_idle_ms && cached_->idle()) cached_.reset();
@@ -1980,7 +1981,7 @@ namespace sunshine_game3d {
     d.consumed_detection = {};
     d.decision.begin_frame(detection_requested);
     if (d.detection_active) {
-      if (!observation.now_ms) observation.now_ms = observation.tick_ms = GetTickCount64();
+      if (!observation.now_ms) observation.now_ms = observation.tick_ms = sunshine_game3d::clock::game_now();
       // H1 (d): the offered layer's signature is proven the pre-UI scene image
       // by the session's acceptance ledger (never cleared by an identity
       // change, FG toggles or acceptance changes); read after any poll, so a

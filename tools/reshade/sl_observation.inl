@@ -55,7 +55,7 @@ namespace sunshine_streamline {
       const DWORD saved_error = GetLastError();
       // A contended or overwritten diagnostic slot is simply unavailable. It
       // must never itself lose source observations or alter the revision count.
-      loss_journal.publish({previous + 1, GetTickCount64(), GetCurrentThreadId(), line, cause, site, details});
+      loss_journal.publish({previous + 1, sunshine_game3d::clock::game_now(), GetCurrentThreadId(), line, cause, site, details});
       SetLastError(saved_error);
       return previous;
     }
@@ -385,7 +385,7 @@ namespace sunshine_streamline {
       }
       if (record.has_camera && record.decoded == decode_status::ok && record.camera.depth_inverted <= 1 &&
           record.camera.reset <= 1 && validate(record.camera).valid()) {
-        const auto now = GetTickCount64();
+        const auto now = sunshine_game3d::clock::game_now();
         if (sunshine_freshness::fresh_lt(record.camera_tick, now, sunshine_freshness::source_age_ms)) {
           out.viewport_direction = true;
           out.viewport_inverted = record.camera.depth_inverted;
@@ -665,7 +665,7 @@ namespace sunshine_streamline {
       const loss_context_scope loss_scope(serial);
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto identity = sample ? observed_frame(reinterpret_cast<std::uintptr_t>(&frame)) : frame_identity{};
-      const auto entry_tick = sample ? GetTickCount64() : 0;
+      const auto entry_tick = sample ? sunshine_game3d::clock::game_now() : 0;
       auto diagnostic = dump_stamp(ticket, serial, entry_tick, UINT32_MAX, reinterpret_cast<std::uintptr_t>(&frame), identity.numeric, identity.has_numeric);
       camera_data camera;
       decode_status decoded = decode_status::short_buffer;
@@ -764,7 +764,7 @@ namespace sunshine_streamline {
       const auto loss = loss_revision.load(std::memory_order_acquire);
       const auto token = reinterpret_cast<std::uintptr_t>(frame);
       const auto identity = sample && frame ? observed_frame(token) : frame_identity{};
-      const auto entry_tick = sample ? GetTickCount64() : 0;
+      const auto entry_tick = sample ? sunshine_game3d::clock::game_now() : 0;
       const auto diagnostic = dump_stamp(ticket, serial, entry_tick, UINT32_MAX, token, identity.numeric, identity.has_numeric,
         reinterpret_cast<std::uint64_t>(commands));
       if (sample && diagnostic.session) dump_metadata::observe_sl_tags_v2(diagnostic, viewport, tags, count,
@@ -963,7 +963,7 @@ namespace sunshine_streamline {
     auto pin = read_metadata();
     if (!pin) return false;
     const auto loss = loss_revision.load(std::memory_order_acquire);
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     bool found = false, ambiguous = false;
     for (const auto &record : pin->records) {
       if (!record.used || (viewport != UINT32_MAX && record.viewport != viewport)) continue;

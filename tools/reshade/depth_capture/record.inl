@@ -109,7 +109,7 @@ namespace sunshine_streamline::depth_capture {
     for (const auto &owner : capture_queues.queues)
       if (owner && lineage_owner(*owner)) shown = std::max(shown, owner->shown_capture);
     auto &current = evaluations[provider_index(provider)];
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     // Another viewport's view in this epoch is active (view_active, the
     // selection's own rule): the viewport's picks are ambiguous once FG is
     // off (no FG scope breaks the views' tie, select_latest_capture), so its
@@ -278,7 +278,7 @@ namespace sunshine_streamline::depth_capture {
     if (superseded_source_id != UINT64_MAX && superseded_source_id != source_id)
       for (auto &value : current.views)
         if (value.epoch == epoch && value.viewport == viewport && value.source_id == superseded_source_id) value = {};
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     const auto ordinal = present_ordinal();
     if (epoch) {
       scope.newest_evaluation_present = std::max(scope.newest_evaluation_present, ordinal);
@@ -322,7 +322,7 @@ namespace sunshine_streamline::depth_capture {
           (!renewed && same_nomination(current.pending_nomination, nomination)))
         return false;
       current.pending_nomination = nomination;
-      current.pending_nomination.tick = GetTickCount64();
+      current.pending_nomination.tick = sunshine_game3d::clock::game_now();
       current.pending_nomination.present = present_ordinal();
       return true;
     }
@@ -650,7 +650,7 @@ namespace sunshine_streamline::depth_capture {
       // Do not overwrite the only newly completed API snapshot with its pending
       // successor before the effects queue can consume it. This borrows an
       // existing pool slot; no extra owner, queue, or resource copy is introduced.
-      const auto *completed = nominate_source ? completed_snapshot(value, GetTickCount64()) : nullptr;
+      const auto *completed = nominate_source ? completed_snapshot(value, sunshine_game3d::clock::game_now()) : nullptr;
       // A Dump 3D copy (never cached) takes only a slot without live storage:
       // a live snapshot reuses its cache every frame. A full pool is exhausted.
       const bool dump_copy = diagnostic_copy && !reusable_storage;
@@ -683,7 +683,7 @@ namespace sunshine_streamline::depth_capture {
       // failed): the copy keeps the Reset rule. A list predicted to run on
       // the reader's queue takes it too while FG may move Present off that
       // queue (reader_may_move: the copies of FG's first Present).
-      const auto record_tick = GetTickCount64();
+      const auto record_tick = sunshine_game3d::clock::game_now();
       const bool read_elsewhere_before = read_elsewhere_recently(*value.source, record_tick);
       // Cross-section read: storage prediction consults the current consumer
       // reader; a queue's diagnostic chosen flag is not this ownership fact.
@@ -762,7 +762,7 @@ namespace sunshine_streamline::depth_capture {
         }
         clear_reservation(reservation);
         reservation = ++reservation_serial;
-        found->reservation = reservation; found->reservation_tick = GetTickCount64();
+        found->reservation = reservation; found->reservation_tick = sunshine_game3d::clock::game_now();
         found->reserved_bytes = plan.allocation_bytes; found->reserved_live = diagnostic_copy && reusable_storage;
         lock.unlock();
         discarded.clear();
@@ -792,7 +792,7 @@ namespace sunshine_streamline::depth_capture {
           discarded.push_back(std::move(prepared_published));
           copy_out_refused = true;
           capture_queues.copy_out_counters.failed.fetch_add(1, std::memory_order_relaxed);
-          copy_out_failure = {plan.device_identity, plan.desc.Width, plan.desc.Height, GetTickCount64(), plan.desc.Format};
+          copy_out_failure = {plan.device_identity, plan.desc.Width, plan.desc.Height, sunshine_game3d::clock::game_now(), plan.desc.Format};
         }
         release_on_exit.keep = true;
         continue;
@@ -1052,7 +1052,7 @@ namespace sunshine_streamline::depth_capture {
           if (m.sequence < view.result_sequence) continue;
           view.result_sequence = m.sequence;
           if (successful) view.rejected_since = 0;
-          else if (!view.rejected_since) view.rejected_since = GetTickCount64();
+          else if (!view.rejected_since) view.rejected_since = sunshine_game3d::clock::game_now();
         }
       accept_compute_copy(value);
       return;
