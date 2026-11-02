@@ -776,7 +776,7 @@ namespace sunshine_streamline::depth_capture {
     std::lock_guard lock(mutex);
     auto *owner = queue(native);
     if (!requested.load() || !owner || owner->retiring) return false;
-    expire_association(*owner, GetTickCount64());
+    expire_association(*owner, sunshine_game3d::clock::game_now());
     return owner->provider_established;
   }
 
@@ -801,7 +801,7 @@ namespace sunshine_streamline::depth_capture {
     std::lock_guard lock(mutex);
     auto *owner = queue(native);
     if (!owner || owner->retiring) return false;
-    expire_association(*owner, GetTickCount64());
+    expire_association(*owner, sunshine_game3d::clock::game_now());
     if (!owner->provider_established) return false;
     provider = owner->provider;
     source_id = owner->source_id;
@@ -860,7 +860,7 @@ namespace sunshine_streamline::depth_capture {
     if (!owner || owner->retiring) return result(status::unsupported_queue);
     native = reinterpret_cast<std::uint64_t>(owner->queue.p);
     if (diagnostic) diagnostic->consumer_queue = native;
-    const auto selection_tick = GetTickCount64();
+    const auto selection_tick = sunshine_game3d::clock::game_now();
     const auto chosen = select_provider(*owner, native, present, selection_tick, policy);
     progress = chosen.progress;
     const auto *selected = chosen.value ? chosen.value : chosen.latest;

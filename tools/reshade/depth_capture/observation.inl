@@ -330,7 +330,7 @@ namespace sunshine_streamline::depth_capture {
       const auto generation = capture_observation.command_generation.load();
       for (const auto &entry : covered_tables)
         if (entry.table == table && entry.generation == generation) return entry.covered;
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       if (now - coverage_window >= 1000) { coverage_window = now; coverage_checks = 0; }
       if (++coverage_checks > 16) return false;
       const bool covered = native_observer::states_ready(native);
