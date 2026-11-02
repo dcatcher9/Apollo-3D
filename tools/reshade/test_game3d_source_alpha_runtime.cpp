@@ -14,6 +14,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -37,6 +38,13 @@ namespace {
   using Microsoft::WRL::ComPtr;
   api::effect_runtime *observed_runtime{};
   unsigned runtime_reloads{};
+  // The run's progress, for its watchdog (main): the wall tick of its
+  // latest completed GPU round trip (fixture::drain_render, fixture::read).
+  // The run is work-bound, so its length follows the machine's load: the
+  // watchdog bounds the time without progress, not the whole run.
+  constexpr std::uint64_t progress_bound_ms = 60000;
+  std::atomic<std::uint64_t> last_progress_ms{GetTickCount64()};
+  void progress() { last_progress_ms.store(GetTickCount64(), std::memory_order_relaxed); }
   void init_runtime(api::effect_runtime *runtime) { observed_runtime = runtime; }
   void reload_runtime(api::effect_runtime *) { ++runtime_reloads; }
   void require(bool value, const std::string &message) { if (!value) throw std::runtime_error(message); }
@@ -85,7 +93,10 @@ namespace {
     HMODULE module{};
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
-    ComPtr<ID3D11Query> completion_query;
+    // drain_render's completion: DXGI signals the event once the work
+    // submitted before it has completed.
+    ComPtr<IDXGIDevice2> dxgi_device;
+    HANDLE completion_event{};
     ComPtr<IDXGISwapChain> swapchain;
     ComPtr<ID3D11Texture2D> runtime_backbuffer, backbuffer, source, depth;
     ComPtr<ID3D11RenderTargetView> rtv;
@@ -149,8 +160,9 @@ namespace {
       const auto create = reinterpret_cast<decltype(&D3D11CreateDeviceAndSwapChain)>(GetProcAddress(module, "D3D11CreateDeviceAndSwapChain"));
       require(create != nullptr, "official runtime has no D3D11 proxy");
       checked(create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &desc, &swapchain, &device, nullptr, &context), "create wrapped game device");
-      const D3D11_QUERY_DESC completion_desc{D3D11_QUERY_EVENT, 0};
-      checked(device->CreateQuery(&completion_desc, &completion_query), "create fixture completion query");
+      checked(device.As(&dxgi_device), "DXGI device for the fixture's completion event");
+      completion_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      require(completion_event != nullptr, "create the fixture's completion event");
       ComPtr<IDXGISwapChain3> chain; checked(swapchain.As(&chain), "swapchain3");
       checked(chain->SetColorSpace1(color == 2 ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : color == 3 ?
         DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709), "source color space");
@@ -191,23 +203,18 @@ namespace {
       if (observed_runtime) { observed_runtime->get_command_queue()->wait_idle(); renderer.reset_after_runtime_drain(); control_renderer.reset_after_runtime_drain(); }
       if (module) reshade::unregister_addon(GetModuleHandleW(nullptr), module);
       if (window) DestroyWindow(window);
+      if (completion_event) CloseHandle(completion_event);
     }
     void drain_render() {
       // ReShade 6.8's D3D11 wait_idle() is disabled. Explicitly complete all
       // work, including finish_present's fence signal, before a test assumes
       // its next render can consume a pending alpha observation. This wait is
       // test-only; the production renderer must retain nonblocking polling.
-      context->End(completion_query.Get());
-      context->Flush();
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-      BOOL complete = FALSE;
-      HRESULT status;
-      while ((status = context->GetData(completion_query.Get(), &complete, sizeof(complete), 0)) == S_FALSE) {
-        require(std::chrono::steady_clock::now() < deadline, "fixture GPU completion timed out");
-        Sleep(1);
-      }
-      checked(status, "wait for fixture GPU completion");
-      require(complete == TRUE, "fixture GPU completion query did not complete");
+      // DXGI flushes the submitted work and signals the event once it has
+      // completed: a wait on the event, not a poll.
+      checked(dxgi_device->EnqueueSetEvent(completion_event), "enqueue the fixture GPU completion event");
+      require(WaitForSingleObject(completion_event, 10000) == WAIT_OBJECT_0, "fixture GPU completion timed out");
+      progress();
     }
     image read(api::resource value) {
       auto *texture = reinterpret_cast<ID3D11Texture2D *>(value.handle); require(texture, "missing GPU output");
@@ -219,7 +226,7 @@ namespace {
       D3D11_MAPPED_SUBRESOURCE map{}; checked(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map), "GPU readback");
       out.bytes.resize(size_t(pitch) * desc.Height);
       for (unsigned y = 0; y < desc.Height; ++y) std::memcpy(out.bytes.data() + size_t(y) * pitch, static_cast<const unsigned char *>(map.pData) + size_t(y) * map.RowPitch, pitch);
-      context->Unmap(staging.Get(), 0); return out;
+      context->Unmap(staging.Get(), 0); progress(); return out;
     }
     void pattern(const std::vector<float> &alpha, bool fixed_rgb = false, unsigned color_phase = 0) {
       const auto bpp = color == 2 ? 8u : 4u; original.resize(size_t(width) * height * bpp);
@@ -3476,7 +3483,20 @@ namespace {
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (argc < 6 || argc > 8) { std::fputs("usage: source_alpha_runtime official-ReShade64.dll fresh-output srgb|scrgb|pq width height [frozen-control.hlsl] [--temporal-ui-probe|--temporal-ui-front-limit|--adaptive-ui-only|--timing] (pq: --timing only)\n", stderr); return 2; }
-  std::thread([] { Sleep(180000); TerminateProcess(GetCurrentProcess(), 124); }).detach();
+  // A progress watchdog (last_progress_ms): a completed GPU round trip at
+  // least every progress_bound_ms, however long the whole run takes.
+  std::thread([] {
+    for (;;) {
+      Sleep(1000);
+      const auto last = last_progress_ms.load(std::memory_order_relaxed), now = GetTickCount64();
+      const auto idle = now > last ? now - last : 0;
+      if (idle > progress_bound_ms) {
+        std::fprintf(stderr, "FAIL source-alpha progress watchdog: no completed GPU round trip for %llu ms\n",
+          static_cast<unsigned long long>(idle));
+        TerminateProcess(GetCurrentProcess(), 124);
+      }
+    }
+  }).detach();
   try {
     const unsigned color = !std::strcmp(argv[3], "srgb") ? 1 : !std::strcmp(argv[3], "scrgb") ? 2 : !std::strcmp(argv[3], "pq") ? 3 : 0;
     require(color != 0, "unsupported source transfer");
