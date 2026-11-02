@@ -1406,10 +1406,10 @@ frame's own generated Presents while they are within the earlier frame's count (
 `fg-silent-tag-only-then-callless-generated-hitch`, since the second fix review of 11-01). Depth
 there holds the earlier frame's own copy as its window's, however old (`own_frame`): after a hitch
 of the source age that copy, 400 ms or more old, shows on the new frame's image for that Present.
-The session timelines record this as the found defect `OPEN-C-depth-unidentified-real`, awaiting
-the owner: accept that depth there, or show mono, which the add-on could do only by also flashing
-2D at the generated Presents owner ruling Q2 (10-30) keeps in depth, since it sees the same calls
-there. The
+Owner ruling 11-02 accepts that depth there: mono would also flash 2D at the generated Presents
+owner ruling Q2 (10-30) keeps in depth, since the add-on sees the same calls there (see
+[scene-depth selection limits](#scene-depth-selection-limits); the session timelines keep it as the
+accepted limit `OPEN-C-depth-unidentified-real`). The
 capture owner, however, offers each kind's
 newest ready snapshot on every Present while it is recent (250 ms), and the offscreen UI layer its
 newest copy, so a generated Present normally re-offers its real frame's inputs instead of offering
@@ -7080,6 +7080,17 @@ accepted consequences:
   submitted between two Presents (of any swapchain), so a frame-generation Present that lands between one frame's
   own submissions, after its depth clear and before its draws, is taken for a cleared screen and
   is mono (fail-safe; whether any game presents that way has not been measured).
+- **A frame-generation frame with no depth call after a pause.** With FG on, after a pause of at
+  least the source age (250 ms), a game's next real frame may make no depth call before its
+  Present (only its Streamline constants and UI tags) while DLSS-G presented fewer of the earlier
+  frame's generated Presents than declared. The add-on then cannot tell that real Present from the
+  earlier frame's generated Present, so depth's window still holds the earlier frame's copy, about
+  400 ms old: the player sees the earlier frame's depth for one Present after a pause of at least
+  the source age. No rule can make that Present mono without breaking owner ruling Q2 (10-30),
+  which keeps the earlier frame's depth at its generated Presents, where the add-on sees the same
+  calls: session row `fg-on-deferred-tag-generated-inside-after-hitch-untag` would get a 2D flash.
+  Accepted by owner ruling 11-02; the session timelines' witness `OPEN-C-depth-unidentified-real`
+  keeps running, so a change of this behaviour fails them.
 - **A second swapchain that always presents first.** Presents of every swapchain of the game advance
   one depth frame for the device, and the first Present after the frame's depth work takes that
   work (on_present merges every queue's work into whichever swapchain presents first). A game

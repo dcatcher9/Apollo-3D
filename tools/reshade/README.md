@@ -2393,8 +2393,8 @@ frame identity. Each such unjudged hold is counted, and a row written for it mus
 the holds it names (`regression:no_unidentified_hold`). Until the second fix review of 11-01 only
 the callless frame's real Present was left out, so its own generated Presents within the count
 failed (`fg-silent-tag-only-then-callless-generated-hitch`). The depth twin, that frame's copy held
-past the source age at such a real Present, is the found defect `OPEN-C-depth-unidentified-real`
-(Found defects). Before the add-on read depth's window for it, five fixed-set
+past the source age at such a real Present, is the accepted limit `OPEN-C-depth-unidentified-real`
+(owner ruling 11-02; Found defects). Before the add-on read depth's window for it, five fixed-set
 seeds failed there (a real Present of the next frame held as the earlier frame's generated one
 where DLSS-G presented no generated Present). The other way too (`ui_frame:dropped`, the 11-01
 final review's F13): a generated Present that presents that frame must hold its decision where it
@@ -2608,23 +2608,27 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
 
 #### Found defects
 
-Only C2 (until Step 4; C1 closed on 10-27) and R1-late-signaller (O1, 10-27) are limitations the owner approved; a matrix row's recorded gap
+Only C2 (until Step 4; C1 closed on 10-27), R1-late-signaller (O1, 10-27) and
+OPEN-C-depth-unidentified-real (owner ruling 11-02) are limitations the owner approved; a matrix row's recorded gap
 over frames would be one too (C5, the last, closed on 10-26). Any other row is a defect these tests
 found, its `found` naming when and which test; it is excused only until the owner decides it, so that
-the gate stays usable meanwhile, and the decision removes its row and witness. One is open,
-`OPEN-C-depth-unidentified-real` (11-01, recorded by the second fix review; C8, the one before,
-closed on 10-26): with FG on, a frame that makes no depth call before its real Present (its
-constants and UI tags only, after a hitch of the source age) inside the earlier frame's declared
-generated count while DLSS-G presented fewer. The add-on cannot tell that real Present from the
-earlier frame's generated Present, where owner ruling Q2 (10-30) shows that frame's own copy however
-old, so depth's window holds that copy past the source age on the new frame's image for that
-Present (`continuity:stale`, limitation `unidentified_real`: the row excuses staleness only, and
-only on such a frame; the UI's hold there is left unjudged). Its witness is C1-openc's evidence
-list twinDepth (14ec980a) with its frame 22's SR copy on the presenting queue: with that copy on
-the game's queue it completed only after the pause in one fixed-set run and showed fresh at frame
-23 (`oracle:unsupplied_fresh`, REPAIR4's f3-REPAIR4-f1), the same lost frame identity, which the
-row does not excuse. The owner decides between accepting that depth there and mono, which
-the add-on could show only by also flashing 2D at Q2's generated Presents. Each run prints found defects apart
+the gate stays usable meanwhile, and the decision removes its row and witness, or, where the owner
+accepts it as a limit, clears its `found` and keeps both. None is open: the last, OPEN C's depth
+twin (found on 11-01, recorded by the second fix review), was accepted on 11-02, and C8, the one
+before, closed on 10-26. `OPEN-C-depth-unidentified-real`: with FG on, a frame that makes no depth
+call before its real Present (its constants and UI tags only, after a hitch of the source age)
+inside the earlier frame's declared generated count while DLSS-G presented fewer. The add-on cannot
+tell that real Present from the earlier frame's generated Present, where owner ruling Q2 (10-30)
+shows that frame's own copy however old, so depth's window holds that copy past the source age on
+the new frame's image for that Present (`continuity:stale`, limitation `unidentified_real`: the row
+excuses staleness only, and only on such a frame; the UI's hold there is left unjudged). No rule
+can show mono there instead: the add-on sees the same calls at Q2's generated Presents, so it would
+also flash 2D there (`fg-on-deferred-tag-generated-inside-after-hitch-untag`); the owner accepts
+the earlier frame's depth for that one Present. Its witness, kept so that a change of that
+behaviour still fails the set, is C1-openc's evidence list twinDepth (14ec980a) with its frame
+22's SR copy on the presenting queue: with that copy on the game's queue it completed only after
+the pause in one fixed-set run and showed fresh at frame 23 (`oracle:unsupplied_fresh`, REPAIR4's
+f3-REPAIR4-f1), the same lost frame identity, which the row does not excuse. Each run prints found defects apart
 (`MEASURE native-provider continuity-found-defects` and `MEASURE session-timelines found-defects`,
 each row's violations, or `none`), and a strict run fails their violations as any other:
 `SUNSHINE_GAME3D_CONTINUITY_STRICT=1`, or the contract runner's `-StrictContinuity`, which also
@@ -3122,8 +3126,9 @@ record's depth tick of that copy, which must lie inside the Present, `oracle:def
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
-every seed), and one witness per open row the timelines found or carry (one is open: OPEN C's depth
-twin, 11-01; C5's closed on 10-26): an event list whose frames meet the limitation alone, long enough to lose depth on every
+every seed), and one witness per row the timelines found or carry and that is not closed (one: OPEN
+C's depth twin, found on 11-01 and accepted as a limit on 11-02, whose witness keeps running so
+that a change of that behaviour still fails the set; C5's closed on 10-26): an event list whose frames meet the limitation alone, long enough to lose depth on every
 run; a witness that loses none fails the set, as the matrix's gap seeds keep a recorded gap's own
 failing cell. `--only <name>` runs one regression or witness with its own checks. `--trace` prints every Present's
 frame record, the supply it was judged with and each recorded refusal.

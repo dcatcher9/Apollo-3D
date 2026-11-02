@@ -1148,15 +1148,16 @@ namespace {
   // there. The fixed set runs them after its seeds, and a witness that loses
   // none fails it (the gap closed: its fix removes the row and the witness,
   // which becomes a regression timeline), as the matrix's gap seeds keep a
-  // recorded gap's own failing cell. C5's closed on 10-26. Open: OPEN C's
-  // depth twin (11-01), a found defect awaiting the owner: C1-openc's
-  // evidence job twinDepth at 14ec980a, its frame 22's SR copy moved to the
-  // presenting queue. FG 2x with UI tags, a frame whose FG tag is deferred
-  // to its Present (two generated Presents declared, none presented), then a
-  // frame with no depth call after a hitch of the source age: depth's window
-  // still presents the earlier frame there and holds its copy, past the
-  // source age, at the new frame's real Present (continuity:stale at frame
-  // 23). With that SR copy on the game's queue (twinDepth's form) it is
+  // recorded gap's own failing cell. C5's closed on 10-26. Carried: OPEN C's
+  // depth twin (found 11-01, an accepted limit since owner ruling 11-02,
+  // whose witness keeps running so a change of its behaviour still fails
+  // the set): C1-openc's evidence job twinDepth at 14ec980a, its frame 22's
+  // SR copy moved to the presenting queue. FG 2x with UI tags, a frame whose
+  // FG tag is deferred to its Present (two generated Presents declared, none
+  // presented), then a frame with no depth call after a hitch of the source
+  // age: depth's window still presents the earlier frame there and holds its
+  // copy, past the source age, at the new frame's real Present
+  // (continuity:stale at frame 23). With that SR copy on the game's queue (twinDepth's form) it is
   // readable at frame 22's Present in most runs, and the same stale hold
   // follows; in one fixed-set run (REPAIR4's f3-REPAIR4-f1) it completed only
   // after the pause and showed fresh at frame 23 (oracle:unsupplied_fresh),
@@ -2947,7 +2948,8 @@ namespace {
     // Presents within the earlier frame's count still failed. Its depth
     // twin, the earlier frame's copy held past the source age at such a
     // real Present, is the known gap OPEN-C-depth-unidentified-real
-    // (limitation::unidentified_real).
+    // (limitation::unidentified_real), an accepted limit (owner ruling
+    // 11-02).
     unsigned ui_window_frame {UINT_MAX};
     std::uint32_t ui_window_presents {};
     // A callless real Present came since ui_window_frame's within its count
