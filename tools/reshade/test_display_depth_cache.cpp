@@ -496,15 +496,18 @@ namespace {
       "The cache reused a copy past the source age for a hold not marked own_frame");
   }
 
-  // The FG hold and the cache's reuse judge the retained copy's age on the
-  // Present's one clock read (F84, F53, 11-01). At the source age's last
-  // millisecond frame_generation_holds keeps the scope's FG copy, which shuts
-  // out the readable ordinary candidate, and the cache reuses that copy on
-  // the same clock. Until 11-01 the provider read the clock again for the
-  // cache: one tick later the copy was expired there (the second check
-  // below), so a silent scope's hold ended in a mono Present although the
-  // ordinary candidate had been readable. The cache's own age rule stands.
-  void frame_generation_hold_one_clock() {
+  // The FG hold and the cache's reuse judge a retained copy's age by one
+  // rule on one clock value: at the source age's last millisecond
+  // frame_generation_holds keeps the scope's FG copy, which shuts out the
+  // readable ordinary candidate, and the cache reuses that copy on the same
+  // value; a millisecond later the cache refuses it. This pins only that age
+  // contract. That provider::begin hands the hold, the retention, the
+  // display decision and the cache one clock read (F84, F53, 11-01; until
+  // then it read the clock again for the cache, so a silent scope's hold
+  // could end in a mono Present although the ordinary candidate was
+  // readable) is guarded by review only: no test steps the provider's
+  // clock between its reads, and this test passes either way.
+  void cache_age_on_one_clock() {
     display_depth_cache cache;
     const auto value = fresh();
     arm(cache, value);
@@ -563,7 +566,7 @@ int main() {
     source_actions_and_commit();
     dynamic_resolution_sequence();
     frame_generation_hold();
-    frame_generation_hold_one_clock();
+    cache_age_on_one_clock();
     frame_generation_active_output();
     std::puts("display depth cache tests passed");
     return 0;

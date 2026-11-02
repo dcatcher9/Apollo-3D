@@ -191,6 +191,7 @@ namespace sunshine_game3d::ui_mask {
   using ui_evidence::hudless_pairing;
   using ui_evidence::pair_hudless_present;
   using ui_evidence::pair_hudless_offer;
+  // The count fallback of ui_evidence::generated_in_window only.
   using ui_evidence::generated_without_input;
   using ui_evidence::snapshot_input_slots;
   using ui_evidence::snapshot_inputs;

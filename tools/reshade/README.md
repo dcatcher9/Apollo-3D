@@ -1650,7 +1650,7 @@ every file of a binary sees the same declarations; a binary links one view.
 |---|---|---|
 | `sunshine_game3d_core` | none | `SunshineSBS`, `replay_game3d_dump`, and the tests without a seam (UI mask, UI capture, UI layer, camera data, queue-cycle and source-alpha) |
 | `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, `SUNSHINE_GAME3D_RENDERER_TEST` (the renderer's build hooks, inert until the lifecycle test sets them) | `SunshineSBSTest` |
-| `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file compiles `exporter.cpp` itself |
+| `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file includes `exporter_internal.h` and links this view's one compiled `exporter.cpp` |
 | `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix (pure, hook and device layers), seam characterization, call trace, native observer and diagnostic-texture tests |
 | `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` | the native runtime tests |
 
@@ -1675,12 +1675,10 @@ call a recorder of [`game3d_test_depth_events.h`](game3d_test_depth_events.h) un
 `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, and a fixture reads them after each Present through
 `SunshineDepthTestBindingEvents`, another of the depth add-on's exports.
 
-Two test binaries compile a production file outside every view: `reshade_exporter_tests`
-compiles `exporter.cpp` inside [`test_exporter.cpp`](test_exporter.cpp) (its view excludes that
-file), and the opt-in D3D11 sampler fixture `reshade_depth_sampler_d3d11_test`, which no `ctest`
-runs, compiles `depth_content_sampler.cpp` inside
-[`test_depth_content_sampler_d3d11.cpp`](test_depth_content_sampler_d3d11.cpp) to reach the
-sampler's internal pipeline cache and private command list. Neither links a view.
+One test binary compiles a production file outside every view: the opt-in D3D11 sampler fixture
+`reshade_depth_sampler_d3d11_test`, which no `ctest` runs, compiles `depth_content_sampler.cpp`
+inside [`test_depth_content_sampler_d3d11.cpp`](test_depth_content_sampler_d3d11.cpp) to reach the
+sampler's internal pipeline cache and private command list, and links no view.
 
 ### Source map
 
@@ -1722,7 +1720,7 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 
 #### Presentation scope
 
-- [`presentation_scope.h`](presentation_scope.h): FG policy/value declarations and existing pure predicates, including DLSS-G frame inputs; consumer state and live adapter reads remain at their call sites. Docs: [Presentation scope](../../docs/reshade-sbs.md#presentation-scope).
+- [`presentation_scope.h`](presentation_scope.h): FG policy/value declarations and their predicates, including DLSS-G frame inputs: most are pure, and `select_frame_generation_scope`, `frame_generation_retained` and `sunshine_ngx::frame_generation_owns_depth` read the capture owner under its mutex, so none may be called with it held; consumer state and live adapter reads remain at their call sites. Docs: [Presentation scope](../../docs/reshade-sbs.md#presentation-scope).
 
 #### Depth capture
 
@@ -3037,8 +3035,10 @@ offered its tag, `fg-on-ui-generated-hold-kept` (the 11-01 final review's F13: F
 copy and UI tags every frame, generated Presents after each real one, then inside each next frame's
 recording before its evaluation, two of those frames pausing before their calls so that their
 generated Presents offer no snapshot and hold by depth's window; it must judge at least 6 such
-holds, `regression:no_ui_hold`, and with the add-on's UI hold made to ignore depth's window those
-6 fail `ui_frame:dropped`, which the timelines did not judge before 11-01),
+holds, `regression:no_ui_hold`, and with the add-on's window hold removed (no hold wherever depth
+named the input's frame) those 6 fail `ui_frame:dropped`, which the timelines did not judge before
+11-01; a UI that fell back to Present counting would still hold them, which `ui_frame:held` judges in
+`fg-on-ui-window-ends-at-next-evaluation-hitch`),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -3316,7 +3316,11 @@ serial is 30 there); each Present establishes any selected copy, as
   (`sunshine_ngx::testing::callbacks`), in place of the Streamline FG query; the seam
   characterization pins the production rule, and the probe row `test_ngx_fg_ownership` runs the
   production query (`sunshine_ngx::frame_generation_owns_evaluation`) against the real FG options
-  store and the scope's liveness (11-01, lane L-fg, F96). It also pins each nomination's state proof: Super
+  store and the scope's liveness (11-01, lane L-fg, F96). That covers the function, not its call
+  site: no test runs the production `before_evaluate`'s ownership block (the call-trace build
+  replaces it with the callback, and no runtime fixture evaluates NGX SR under Streamline FG
+  options), so its place before the Depth getters and the nomination (F98) is guarded by review
+  only. It also pins each nomination's state proof: Super
   Resolution's contract state for SR and for a registration recovered from a map without
   `DLSS.Use.HW.Depth`, and only an observed state for Ray Reconstruction and for a recovered
   registration with that key (N1b).

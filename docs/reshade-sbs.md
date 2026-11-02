@@ -4729,7 +4729,9 @@ source_reason=FG_copy_held`), and SR/RR depth takes over only once that copy exp
 judged on one clock read per Present, shared by this hold, the queue's retention, the display
 decision and the display cache's reuse (until 11-01 the cache read the clock again, so a copy held
 at the age's last millisecond could expire there a tick later: a mono Present at the end of the
-hold although the ordinary candidate was readable). A frame
+hold although the ordinary candidate was readable). A CPU test pins the age rule on one clock value
+(`test_display_depth_cache.cpp`, `cache_age_on_one_clock`); that the provider passes one read to all
+four is guarded by review only, as no test steps the provider's clock between them. A frame
 without an FG copy is thus held as any missing frame of a source is: a game whose FG copies keep
 arriving with an occasional frame without one keeps FG depth and its placement throughout, and
 the SR/RR evaluations nominated meanwhile are ready when the copy expires. Enabled FG still holds
@@ -4879,8 +4881,8 @@ last committed options (the FG options store, [Presentation scope](#presentation
 confirmed policy changes at an observed options change, and is also revoked by an ambiguous read,
 or by an unavailable one while FG is required, which the FG target or its loss revision changing
 (`retain_fg_target`), an observation restart or a dropped viewport mode cause without any options
-call; this revoked-scope fallback policy changes only at an observed options change or a restart
-(F26); neither can
+call; this revoked-scope fallback policy changes only at an observed read (an options change, or a
+dropped viewport mode that resolves the ambiguity, `drop_fg_mode`) or a restart (F26); neither can
 restore the old FG scope (until 11-01 this said both changed only at an options call, F24). A subsequent successful enabled
 observation restores mandatory FG selection. Older captures from the
 previous ownership interval cannot be resurrected. While a live FG scope owns a viewport, ordinary

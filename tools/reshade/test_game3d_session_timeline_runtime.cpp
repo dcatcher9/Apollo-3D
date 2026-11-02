@@ -1075,7 +1075,10 @@ namespace {
     // holds (a depth window that ended early, or a UI that compared the
     // wrong window: HUD parallax or mask flicker on every generated frame)
     // passed; it must judge at least 6 holds by the window (with the UI's
-    // hold made to ignore depth's window, those 6 fail ui_frame:dropped).
+    // window hold removed, no hold wherever depth named the input's frame,
+    // those 6 fail ui_frame:dropped; a UI that fell back to Present
+    // counting would still hold them, which ui_frame:held judges in
+    // fg-on-ui-window-ends-at-next-evaluation-hitch).
     {"fg-on-ui-generated-hold-kept", "20*sr=local; fg=on,sr=local,dlssg=direct,generated=3; 10*sr=local,dlssg=direct,generated=3,ui=listed; 5*sr=local,dlssg=direct,generated=3,at=inside,ui=bare; sr=local,dlssg=direct,generated=3,at=inside,ui=bare,hitch=before_sources; 3*sr=local,dlssg=direct,generated=3,at=inside,ui=bare; sr=local,dlssg=direct,generated=3,at=inside,ui=bare,hitch=before_sources; 3*sr=local,dlssg=direct,generated=3,at=inside,ui=bare", false, 0, 6},
   };
 

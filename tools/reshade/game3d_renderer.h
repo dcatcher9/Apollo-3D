@@ -57,10 +57,13 @@ namespace sunshine_game3d {
     candidate_signatures signatures;
     reshade::api::resource_view hudless{};
     bool current_color = false;
-    // A generated Present by Present counting (UI framework T1): one that
-    // offers nothing within the reported generated count of the last Present
-    // that offered a UI tag (ui_evidence::generated_without_input). It never
-    // detects: it shows the last real decision, or has no mask
+    // A generated Present (UI framework T1): one that offers no input while it
+    // still presents the frame of the last Present that offered a UI tag, by
+    // depth's window (ui_evidence::generated_in_window; the reported
+    // generated count where that Present's presenting floor was 0), or one
+    // that re-offers exactly the last detecting Present's snapshots under FG
+    // (ui_evidence::same_snapshot_inputs). It never detects: it shows the
+    // last real decision, or has no mask
     // (ui_temporal::detection_state::arbitrate).
     bool hold_previous = false;
     // The game's own final color from the HUD-less image's tag batch (Streamline

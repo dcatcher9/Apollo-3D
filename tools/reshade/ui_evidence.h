@@ -86,8 +86,8 @@ namespace sunshine_game3d::ui_evidence {
   // (DLSS-G presenting earlier frames inside the next frame's recording;
   // multi-frame generation) the next frame's Presents held the earlier
   // frame's decision, or the reverse after a freeze. Without a depth window
-  // at the input (no API depth, input_frame 0) the count decides
-  // (generated_without_input).
+  // at the input (input_frame 0: no API depth, or an API scope without an
+  // open window at that Present) the count decides (generated_without_input).
   constexpr bool generated_in_window(std::uint64_t present, std::uint64_t input_present, bool fg_active,
       std::uint32_t generated_frames, std::uint64_t frame, std::uint64_t input_frame) {
     if (!input_frame) return generated_without_input(present, input_present, fg_active, generated_frames);
