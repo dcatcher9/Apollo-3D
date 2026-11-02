@@ -344,7 +344,7 @@
 
     template<class Counts>
     void complete_slot(std::uint32_t index, std::uint64_t qpc, const Counts &count_output) {
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       auto &slot = shared_->slots[index];
       slot.sequence = generation_->last_submitted;
       slot.qpc = qpc;

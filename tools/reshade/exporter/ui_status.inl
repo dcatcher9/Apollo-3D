@@ -37,7 +37,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 
   void publish_source_alpha_ui(api::effect_runtime *runtime, sunshine_game3d::source_alpha_ui_decision value,
       bool game3d_enabled, sunshine_game3d::alpha_auto_policy *ui_session) {
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     bool write_log = false;
     sunshine_game3d::alpha_auto_policy *counters_session = nullptr;
     {
