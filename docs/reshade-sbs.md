@@ -3821,7 +3821,8 @@ and the UI held that frame's decision there, soak seed f0b594e3ad951a96 at frame
 `fg-silent-refused-tag-ends-window`; so do, since 11-01 (lane L-fg, F2), a frame's deferred FG tag
 copy refused at its own Present (DLSS-G's evaluation of the frame stood aside for it and began none:
 where DLSS-G presented fewer of the earlier frame's generated Presents than declared, a hitch of the
-source age before that Present held the earlier frame's copy past the source age as its own) and
+source age before that Present held the earlier frame's copy past the source age as its own;
+session row `fg-on-refused-deferred-copy-ends-window-hitch`) and
 DLSS-G's evaluation that makes no copy attempt (a malformed subrect, its camera read lost again); a tag
 call whose copy is deferred to its frame's Present, R2, begins none, so DLSS-G's generated Present of
 the earlier frame inside the next frame's recording after that call shows the earlier frame's own

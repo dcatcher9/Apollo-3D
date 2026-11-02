@@ -3002,7 +3002,11 @@ judge aged it from the frame's stamp, stale at frame 20, every run), and one for
 scope's refused FG tag call, `fg-silent-refused-tag-ends-window` (soak seed f0b594e3ad951a96's
 frames 91 to 99: before 11-01 that refusal ended no presenting window, so the generated Present
 inside the frame's recording after it held the earlier frame's UI decision, `ui_frame:held` at
-frame 28, 3 of 3 runs),
+frame 28, 3 of 3 runs), and one for a frame's deferred FG tag copy refused at its own Present after
+a hitch of the source age, the earlier frame having presented none of its declared generated
+Presents, `fg-on-refused-deferred-copy-ends-window-hitch` (lane L-fg, F2: before 11-01 the refusal
+ended no presenting window, so that Present held the earlier frame's copy, 421 ms old, as its own,
+stale at frame 27, 2 of 2 runs),
 an event list shaped like the
 session it fixed and judged as any
 timeline (random seeds meet these shapes only by chance, and a change of the event language changes
@@ -3034,8 +3038,8 @@ copy reached the source age there (in `C8-fg-off-color-only` frame 19's, 13 fram
 copies are read from the next Present on, so their timing changes no trace. Seeds, and rows that
 keep the default, are judged by their verdicts, which accept either outcome.
 
-`reshade_session_timelines` runs the fixed set (24 seeds and 87 regression timelines, 6903
-frames and about 19300 Presents, with the seeds' hitches and late FG Offs) in about 340 s
+`reshade_session_timelines` runs the fixed set (24 seeds and 88 regression timelines, 6936
+frames and about 19500 Presents, with the seeds' hitches and late FG Offs) in about 340 s
 (lane run f2-P0-int1-followups-c5-sessions, 11-01; 61 rows and about 285 s in the full check's
 registered run of 10-28), registered like
 `reshade_native_provider_continuity` but with a 480 s timeout, about twice a full run (its own

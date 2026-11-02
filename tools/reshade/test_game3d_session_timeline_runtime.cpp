@@ -1043,6 +1043,15 @@ namespace {
     // still presented frame 27 there and the UI held frame 27's decision as
     // a generated Present of it (ui_frame:held at frame 28, 3 of 3 runs).
     {"fg-silent-refused-tag-ends-window", "20*sr=other_queue,state=proven; tag=present_bare,untag=after_global,sr=other_queue,state=proven,ui=listed; tag=present_bare,untag=after_global,sr=other_queue,state=proven; fg=on,untag=after_global,sr=other_queue,state=proven,generated=1,at=inside,sr_gpu=after_present; 2*tag=now_bare,untag=after_frame,sr=other_queue,generated=1,at=inside; 2*tag=evaluate_list,untag=after_frame,sr=other_queue,generated=1,at=inside,ui=listed; tag=evaluate_list,untag=after_frame,sr=other_queue,generated=1,at=inside,ui=listed,sr_gpu=after_present; 5*tag=evaluate_list,untag=after_frame,sr=local,generated=1,at=inside,ui=untagged"},
+    // Lane L-fg (F2, 11-01): FG 4x declared; frame 26 presents none of its
+    // generated Presents, then frame 27's FG depth tag defers its copy to its
+    // Present (R2), where it is refused (no provable state), after a hitch of
+    // the source age between frame 27's calls and that Present, with no SR
+    // or DLSS-G evaluation of frame 27 before it. The refused copy is still
+    // frame 27's call at its own Present and ends frame 26's presenting
+    // window. Until 11-01 nothing ended it there, so frame 27's Present held
+    // frame 26's copy, 421 ms old, as its own: stale at frame 27, 2 of 2 runs.
+    {"fg-on-refused-deferred-copy-ends-window-hitch", "20*sr=local; fg=on,tag=present_bare,generated=3; 5*tag=present_bare,generated=3; tag=present_bare; tag=present_bare,state=unprovable,hitch=after_sources,generated=3; 5*tag=present_bare,generated=3"},
   };
 
   // Each known gap the timelines found has a witness: an event list whose
