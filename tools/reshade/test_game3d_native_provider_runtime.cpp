@@ -509,8 +509,9 @@ namespace {
     std::size_t matched_lines{};
     std::uint64_t matched_present{};
     void require_records_match_log(const char *label) {
-      // The asynchronous writer flushes this scenario's lines meanwhile.
-      for (const auto until = GetTickCount64() + 300; GetTickCount64() < until;) present_frame();
+      // The asynchronous writer flushes this scenario's lines meanwhile (in
+      // game time; an engaged clock drains the log at every frame boundary).
+      for (const auto until = clock.now() + 300; clock.now() < until;) present_frame();
       const auto lines = provider_lines();
       auto &records = record_history.records;
       std::size_t next{}, matched{};
@@ -657,12 +658,12 @@ namespace {
     bool continuity_per_script{true};
     std::vector<game3d_continuity::violation> script_violations;
     static void supplied(std::uint8_t sources, game3d_continuity::limitation meets = game3d_continuity::limitation::none) {
-      continuity_log.pending.add(sources, GetTickCount64(), meets);
+      continuity_log.pending.add(sources, sunshine_game3d_fixture::fixture_clock().now(), meets);
     }
     // A source the add-on may show but need not: an EITHER outcome, or the
     // full-size decoy view every game frame draws (a Generic end-of-frame
     // capture that API ownership leaves aside, H).
-    static void permitted_supply(std::uint8_t sources) { continuity_log.pending.allow(sources, GetTickCount64()); }
+    static void permitted_supply(std::uint8_t sources) { continuity_log.pending.allow(sources, sunshine_game3d_fixture::fixture_clock().now()); }
     // A later call of the same frame withdrew what it supplied.
     static void withdraw_supply() { continuity_log.pending = {}; }
     // The copy-out contract (docs/reshade-sbs.md, Copy-out on the producer
@@ -672,7 +673,7 @@ namespace {
     // presenting queue reads that copy-out once its work completed (or once
     // the game's own fence waits order it after it, U-C1, which the rule
     // does not count: it never asks for a read earlier than certain).
-    static void supplied_elsewhere(std::uint8_t sources) { continuity_log.pending.add_elsewhere(sources, GetTickCount64()); }
+    static void supplied_elsewhere(std::uint8_t sources) { continuity_log.pending.add_elsewhere(sources, sunshine_game3d_fixture::fixture_clock().now()); }
     static void completes(std::uint8_t sources, std::function<bool()> probe) {
       continuity_log.pending.completes(sources, std::move(probe));
     }
