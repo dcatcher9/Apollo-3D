@@ -951,8 +951,9 @@ namespace {
       hold_game_time = true;
       // The add-on submits the release job at a Present (its pool family is
       // then out: SunshineGame3DTestQuiesce without a wait names it); after
-      // that Present the fixture waits for the job to reach the sentinel, so
-      // the case ends at that same Present on any machine.
+      // that Present an engaged fixture waits for the job to reach the
+      // sentinel, so the case ends at that same Present on any machine.
+      // --wall-clock presents on until the release, as before the clock.
       const auto pool_out = reinterpret_cast<BOOL (*)(unsigned, unsigned *)>(
         GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineGame3DTestQuiesce"));
       require(pool_out != nullptr, "The test add-on does not report its pool work");
@@ -966,7 +967,7 @@ namespace {
       active_area = {0, 0, selected->width, selected->height};
       for (const auto until = clock.wall_now() + 5000; !sentinel->released && clock.wall_now() < until;) {
         present_frame();
-        if (release_out()) WaitForSingleObject(sentinel->entered, 2000);
+        if (clock.engaged() && release_out()) WaitForSingleObject(sentinel->entered, 2000);
       }
       require(sentinel->released, "A retired display texture was never released");
       require(sentinel->thread != sentinel->present_thread, "A retired display texture was released on the present thread");
@@ -1850,6 +1851,16 @@ namespace {
         // limit: a Present that returned while its gate was still closed did
         // not wait (the event verdicts below; their times are MEASURE lines).
         constexpr DWORD gate_limit_ms = 1000;
+        // --wall-clock (the weekly real-time lane) also keeps the old real-time
+        // limits: half the gate's limit per Present or cycle. A stall that a
+        // CPU rescue ends (the 10-05/10-06 design: a 1 s CPU watchdog released
+        // its GPU wait; 1078 ms live in Stellar Blade) finishes inside every
+        // hang bound, and only elapsed real time tells it from GPU speed. On
+        // the game clock the times are MEASURE lines only (owner decision
+        // 11-02), so that class is the weekly lane's to catch.
+        const auto within_real_time_limit = [&](std::uint64_t elapsed_ms) {
+          return clock.engaged() || elapsed_ms < gate_limit_ms / 2;
+        };
         // Held, then offered: the second queue's copy waits for a gate. Inside
         // ReShade's execute event, after the add-on's own handler and before
         // the native call, the copy is held for its fence signal; once the
@@ -1898,8 +1909,8 @@ namespace {
           held_present_ms = timed_step();
           const bool returned_gated = gate.closed();
           live = query();
-          require(returned_gated && live.awaiting == 1 && live.offered_id == before_held.offered_id &&
-              live.in_order && live.order == unsigned(order::queue),
+          require(returned_gated && within_real_time_limit(held_present_ms) && live.awaiting == 1 &&
+              live.offered_id == before_held.offered_id && live.in_order && live.order == unsigned(order::queue),
             ("A Present waited for a held second-queue layer copy or read it before its fence reached it: returned_gated=" +
               std::to_string(returned_gated) + " elapsed_ms=" +
               std::to_string(held_present_ms) + " awaiting=" + std::to_string(live.awaiting) + " offered=" +
@@ -1978,11 +1989,15 @@ namespace {
           before_frame = {};
           after_present = {};
           live = query();
-          // Present N+1's own completion wait (3 s) proves the schedule ran
-          // at GPU speed: a GPU wait for frame N's copy before Present N closes
-          // a cycle no CPU opens before the gates' destructors, and fails that
-          // wait. Its time is a MEASURE line.
-          require(frame_n.awaiting == 1 && frame_n.offered_id == before_cycle.offered_id &&
+          // A GPU wait for frame N's copy before Present N closes a cycle that
+          // no CPU opens before the gates' destructors: Present N+1's own
+          // completion wait (3 s, a hang bound) fails it. A cycle the add-on
+          // itself rescued from the CPU ends inside that bound; only its real
+          // time tells it from GPU speed, so --wall-clock keeps the old limit
+          // (within_real_time_limit) and the game clock prints it as a
+          // MEASURE line.
+          require(within_real_time_limit(cycle_elapsed) && frame_n.awaiting == 1 &&
+              frame_n.offered_id == before_cycle.offered_id &&
               frame_n.order == unsigned(order::queue) && frame_n.capture_id == before_cycle.capture_id + 1 &&
               (live.offered_id == before_cycle.offered_id || live.offered_id == frame_n.capture_id) &&
               live.capture_id == frame_n.capture_id + 1,
@@ -2188,8 +2203,9 @@ namespace {
                 "slowest_ms=" + std::to_string(gated_ms)).c_str());
               require(!responded(), "The dump read a census copy whose second-queue fence had not reached its value");
             }
-            require(query().census_awaiting == 1,
-              ("The gated census copy left its fence: slowest_ms=" + std::to_string(gated_ms)).c_str());
+            require(within_real_time_limit(gated_ms) && query().census_awaiting == 1,
+              ("A Present waited for a gated census copy, or the copy left its fence: slowest_ms=" +
+                std::to_string(gated_ms)).c_str());
             gate.open();
           }
           wait(second.p);
@@ -2237,7 +2253,7 @@ namespace {
             const auto row = layer_row(metadata);
             if (!(row.at("captured") == false && row.at("status") == "awaiting_fence" && row.at("read_order").is_null() &&
                   row.at("fence_value") > 0 && census.at("settled") == false && census.at("wait_ms") >= census_wait_ms &&
-                  artifact(row.at("artifact_id").get<unsigned>()) < 0))
+                  artifact(row.at("artifact_id").get<unsigned>()) < 0 && within_real_time_limit(deadline_ms)))
               throw std::runtime_error("A census copy gated past the wait was read, waited for, or not reported awaiting "
                 "its fence: slowest_ms=" + std::to_string(deadline_ms) + " " + census.dump());
             release_census();
