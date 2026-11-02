@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include "game3d_clock.h"
 
 namespace sunshine_game3d::ui_layer {
   bool layer_tracker::clear(std::uint64_t resource, std::uint64_t now_ms) {
@@ -604,7 +605,7 @@ namespace sunshine_game3d::ui_layer {
 
     // Requires the state lock. Retires census copies that no dump took.
     void drop_candidates(state_t &s) {
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       for (const auto &e : s.census) retire_census(s, e, now);
       s.census.clear();
       publish_watch(s);
@@ -646,7 +647,7 @@ namespace sunshine_game3d::ui_layer {
       note_skip_gap(s, live.gap.record(steady_us()));
       record_into(commands, resource, entry.copy);
       entry.capture_id = live.capture_id = ++s.next_capture_id;
-      entry.tick = live.tick = GetTickCount64();
+      entry.tick = live.tick = sunshine_game3d::clock::game_now();
       // The Present count at the copy: it holds the previous Present's frame.
       entry.frame = live.tracker.frame();
       // A D3D11 immediate context is the presenting queue itself, so the copy
@@ -665,7 +666,7 @@ namespace sunshine_game3d::ui_layer {
     live_allocation capture_live(state_t &s, api::command_list *commands, api::device *device, api::resource resource,
         const api::resource_desc &desc, api::format typed) {
       auto &live = s.live;
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       if (live.entries && (live.width != desc.texture.width || live.height != desc.texture.height || live.format != typed)) {
         // A new copy shape is a new scope.
         for (unsigned i = 0; i != live.entries; ++i) retire_entry(s, device, live.ring[i], now);
@@ -854,7 +855,7 @@ namespace sunshine_game3d::ui_layer {
           std::lock_guard<std::mutex> lock(s.mutex);
           // The scope may have moved on meanwhile.
           if (!layer_target()) return;
-          const auto now = GetTickCount64();
+          const auto now = sunshine_game3d::clock::game_now();
           const auto dropped = s.live.tracker.dropped();
           if (s.live.tracker.clear(resource.handle, now) && demanded(s, now))
             live = capture_live(s, commands, device, resource, desc, format);
@@ -906,7 +907,7 @@ namespace sunshine_game3d::ui_layer {
       auto &s = state();
       // Cheap rejection before any lookup or lock: only exact transparent
       // black qualifies, and only while the layer is wanted.
-      if (!transparent_black(color) || !wanted(s, GetTickCount64())) return false;
+      if (!transparent_black(color) || !wanted(s, sunshine_game3d::clock::game_now())) return false;
       try {
         auto *device = commands->get_device();
         const auto resource = device->get_resource_from_view(view);
@@ -929,7 +930,7 @@ namespace sunshine_game3d::ui_layer {
     bool on_begin_render_pass(api::command_list *commands, std::uint32_t count, const api::render_pass_render_target_desc *rts,
         const api::render_pass_depth_stencil_desc *, api::render_pass_flags flags) {
       auto &s = state();
-      if (!rts || !count || (flags & api::render_pass_flags::resume) != 0 || !wanted(s, GetTickCount64())) return false;
+      if (!rts || !count || (flags & api::render_pass_flags::resume) != 0 || !wanted(s, sunshine_game3d::clock::game_now())) return false;
       try {
         auto *device = commands->get_device();
         if (device->get_api() != api::device_api::d3d12) return false;
@@ -1118,7 +1119,7 @@ namespace sunshine_game3d::ui_layer {
     try {
       auto &s = state();
       // The listener is heard: D3D12 executions are held for it.
-      const auto now = GetTickCount64();
+      const auto now = sunshine_game3d::clock::game_now();
       if (s.listened_ms.load(std::memory_order_relaxed) != now) s.listened_ms.store(now, std::memory_order_relaxed);
       // Lock-free filter: only a submission of a list a held live copy
       // waits for takes the lock.
@@ -1228,7 +1229,7 @@ namespace sunshine_game3d::ui_layer {
       auto &s = state();
       if (!queue || !watched(s, commands)) return;
       const bool d3d12 = queue->get_device()->get_api() == api::device_api::d3d12;
-      const auto now = GetTickCount64(), heard = s.listened_ms.load(std::memory_order_relaxed);
+      const auto now = sunshine_game3d::clock::game_now(), heard = s.listened_ms.load(std::memory_order_relaxed);
       const bool listening = heard && (now <= heard || now - heard <= listener_window_ms);
       std::lock_guard<std::mutex> lock(s.mutex);
       carriers_executed(s, reinterpret_cast<std::uint64_t>(commands), commands->get_native(), queue->get_native(), d3d12,
@@ -1298,7 +1299,7 @@ namespace sunshine_game3d::ui_layer {
 
   void observe_output(api::swapchain *swapchain, api::command_queue *queue) {
     auto &s = state();
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     auto *device = swapchain->get_device();
     if (!wanted(s, now)) {
       if (s.holding.load(std::memory_order_relaxed)) idle(s, now, device);
@@ -1393,7 +1394,7 @@ namespace sunshine_game3d::ui_layer {
     ++s.census_scope;
     device = s.device;
     settle(s);
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     std::vector<candidate> result;
     result.reserve(s.census.size());
     for (const auto &e : s.census) {
@@ -1438,7 +1439,7 @@ namespace sunshine_game3d::ui_layer {
     if (!device || !copy.handle) return;
     auto &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.graveyard.push_back({device, copy, GetTickCount64()});
+    s.graveyard.push_back({device, copy, sunshine_game3d::clock::game_now()});
     s.holding.store(true, std::memory_order_relaxed);
   }
 

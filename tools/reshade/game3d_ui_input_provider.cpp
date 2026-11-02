@@ -20,6 +20,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <utility>
+#include "game3d_clock.h"
 
 namespace sunshine_game3d::ui_input {
   static_assert(ui_detection_inputs::max_retained_presents == ui_evidence::max_late_presents,
@@ -192,7 +193,7 @@ namespace sunshine_game3d::ui_input {
   ui_qualification::status source_status(api::effect_runtime *runtime) {
     std::lock_guard<std::mutex> lock(source_mutex);
     const auto found = sources.find(runtime);
-    if (found != sources.end()) expire_available(found->second, GetTickCount64());
+    if (found != sources.end()) expire_available(found->second, sunshine_game3d::clock::game_now());
     return found == sources.end() ? ui_qualification::status{} : found->second.selection.snapshot();
   }
   void select_source(api::effect_runtime *runtime, choice source) {
@@ -249,7 +250,7 @@ namespace sunshine_game3d::ui_input {
     }
     ui_mask::set_request({reinterpret_cast<std::uint64_t>(runtime), device_identity,
       observed.epoch, observed.revision, observed.viewport, desc.texture.width, desc.texture.height, true, filter},
-      GetTickCount64());
+      sunshine_game3d::clock::game_now());
   }
   const char *current_color_refusal(const source_alpha_ui_decision &status, std::uint32_t output_format, choice wanted) {
     return ui_evidence::current_color_refusal(status, output_format, wanted, present_has_alpha);
@@ -281,7 +282,7 @@ namespace sunshine_game3d::ui_input {
         hudless_before = entry.hudless_offered;
       }
     }
-    const auto now = GetTickCount64();
+    const auto now = sunshine_game3d::clock::game_now();
     auto &input = result.observation;
     input.now_ms = input.tick_ms = now; input.session = &session;
     input.epoch = base.epoch; input.revision = base.revision; input.viewport = base.viewport; input.sequence = frame_sequence;

@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 #include <wrl/client.h>
+#include "game3d_clock.h"
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   #include "game3d_test_teardown.h"
 #endif
@@ -407,7 +408,7 @@ namespace sunshine_game3d {
         result["consumed_depth"]["allocation"] = allocation_json(allocation);
         result["consumed_depth"]["srv"] = {{"api_type", static_cast<unsigned>(view.type)}, {"api_format", static_cast<unsigned>(view.format)}, {"first_level", view.texture.first_level}, {"levels", view.texture.levels}, {"first_layer", view.texture.first_layer}, {"layers", view.texture.layers}};
       }
-      const auto tick = GetTickCount64();
+      const auto tick = sunshine_game3d::clock::game_now();
       result["consumed_depth"]["provider_observation_age_ms"] = provided.tick && provided.tick <= tick ? nlohmann::json(tick - provided.tick) : nlohmann::json(nullptr);
       result["consumed_depth"]["age_note"] = "Elapsed GetTickCount64 milliseconds since the consumed provider observation, when available; not a measured color/depth timestamp difference.";
       if (!d.ready || !d.shader_resource.handle) {
@@ -792,7 +793,7 @@ namespace sunshine_game3d {
           armed_request = id;
           armed_nonce = nonce;
           armed_ready = false;
-          armed_tick = GetTickCount64();
+          armed_tick = sunshine_game3d::clock::game_now();
           arm_diagnostic_metadata(false);
           arm_diagnostic_metadata(true);
           armed_optional = std::make_unique<ui_capture_batch>(diagnostic_metadata_generation());
@@ -804,7 +805,7 @@ namespace sunshine_game3d {
           // The UI layer census defers the capture while a copy is undecided
           // (its write not yet proven complete), at most census_wait_ms after
           // arming; the presenting queue never waits for it.
-          const auto now = GetTickCount64();
+          const auto now = sunshine_game3d::clock::game_now();
           armed_ready = (has_diagnostic_frame_observation() || now - armed_tick >= 100) &&
             (now - armed_tick >= ui_layer::census_wait_ms || !ui_layer::census_pending());
         }
@@ -914,7 +915,7 @@ namespace sunshine_game3d {
       if (!r.source.handle || !r.sbs.handle || !next->add(wire::artifact::source_color, r.source) || !next->add(wire::artifact::linear_color, r.linear_color) || !next->add(wire::artifact::candidate, r.candidate) || !next->add(wire::artifact::vertical_majorant, r.vertical_majorant) || !next->add(wire::artifact::vertical_field, r.vertical_field) || !next->add(wire::artifact::final_field, r.final_field) || !next->add(wire::artifact::sbs, r.sbs)) {
         throw std::runtime_error("Cannot allocate the bounded shared diagnostic textures");
       }
-      metadata["ui_layer_census"] = ui_layer_census(*next, runtime->get_device(), GetTickCount64() - d.armed_tick);
+      metadata["ui_layer_census"] = ui_layer_census(*next, runtime->get_device(), sunshine_game3d::clock::game_now() - d.armed_tick);
       next->json = metadata.dump();
       const auto &depth = frame.depth;
       if (depth.ready && depth.shader_resource.handle) {
