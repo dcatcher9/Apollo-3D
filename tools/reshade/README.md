@@ -1763,6 +1763,14 @@ moves 16 ms; `hitch(ms)` is the same barrier, then `ms` at once. Each barrier wa
 real time and otherwise fails the fixture by name with the clock unmoved; nothing moves game time
 without a barrier. Watchdogs and bounds on real hangs read `wall_now()`. A fixture's `--wall-clock`
 (`take_wall_clock_option`) never engages, so it runs on the real clock as before.
+The raw-runtime fixtures (Streamline direct, NGX, the probe round, adaptive, native depth and
+alternating) engage once their native observer's setup is done (`begin_game_time`, after
+`await_render`), and their per-Present trace starts there, so setup's real-time Presents add no
+line; their settle, gap, silence and refinement windows and stall hitches are game time, and so is
+the trajectory CSVs' `game_ms` column. A case whose first Present belongs to another runtime (the
+second window) traces one game-window Present first, since a trace's first line lists only its own
+Present's binding events. With `--wall-clock` the trace opens at the end of `start()` and
+alternating's cadence goes on, as before the clock.
 `reshade_game3d_fixture_clock` tests the helper against stand-in exports over the clock's test
 branch.
 

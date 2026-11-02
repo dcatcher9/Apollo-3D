@@ -1166,7 +1166,7 @@ RWTexture2D<float> depth : register(u0);
       second=packed_state_mode ? target_packed(low_width,low_height,1) : target_uav(low_width,low_height,1); selected=first.get();
       decoy=target(width,height,1,9);
       trace.open(runtime_directory/"streamline-direct-trajectory.csv");
-      trace<<std::setprecision(17)<<"phase,wall_ms,render,evaluation,ticket,capture_mode,tagged,current,projection,capture_ready,camera_ready,K,q0,blend\n";
+      trace<<std::setprecision(17)<<"phase,game_ms,render,evaluation,ticket,capture_mode,tagged,current,projection,capture_ready,camera_ready,K,q0,blend\n";
       reshade::register_event<reshade::addon_event::reset_command_list>(observe_reset);
       render_tracked_depth=[&]{draw_frame();};
       const auto timeout=clock.wall_now()+45000;

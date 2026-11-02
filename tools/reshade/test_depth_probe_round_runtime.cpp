@@ -378,7 +378,7 @@ namespace {
       scene=target(width/2,height/2,1,1);
       render_tracked_depth=[&]{render_depth();};
       trace.open(runtime_directory/"probe-round-trajectory.csv");
-      trace << std::setprecision(17) << "phase,wall_ms,render,source,resource,frame,depth_ready,camera_ready,H,blend\n";
+      trace << std::setprecision(17) << "phase,game_ms,render,source,resource,frame,depth_ready,camera_ready,H,blend\n";
       const auto until=clock.wall_now()+45000;
       while ((!observed.runtime || !observed.renders) && clock.wall_now()<until) step();
       require(observed.runtime && observed.renders && !observed.inject, "Actual probe-round fixture did not initialize");

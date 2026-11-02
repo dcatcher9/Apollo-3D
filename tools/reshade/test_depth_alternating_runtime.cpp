@@ -1073,6 +1073,12 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       checked(second_chain->SetColorSpace1(color==2 ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : color==3 ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 :
         DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709),"Set the second window's transfer");
       for(unsigned i=0;i<2;++i)checked(second_chain->GetBuffer(i,IID_PPV_ARGS(second_buffers[i].put())),"Get the second window's backbuffer");
+      // The trace's first line lists only its own Present's events: the game
+      // window's first traced Present comes first (on the game clock the
+      // trace opens at the engage, right before this case), so the second
+      // runtime's first events, its initial effect reload's among them, are
+      // listed (T8) and not taken for setup's.
+      if(!native_trace.has_line())tick(between ? "second-window-between" : "second-window");
       present_second();
       require(second_runtime && second_runtime!=main_runtime,"The second swapchain has no effect runtime of its own");
       second_between=between;
@@ -1144,7 +1150,7 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       if(test_case=="--flat-startup"){scene->pattern=19;scene->clear_depth=0.f;}
       render_tracked_depth=[&]{draw_depth();};
       trace.open(runtime_directory/"rotation-trajectory.csv");summary.open(runtime_directory/"rotation-summary.csv");
-      trace<<std::setprecision(17)<<"phase,wall_ms,render,drawn,drawn_original,current_original,lifetime,layout,frame,capture_ready,camera_ready,H,t0,blend,marker_half,eye_max_difference,raw_center,crop_x,crop_y,crop_width,crop_height,raster_mask,held\n";
+      trace<<std::setprecision(17)<<"phase,game_ms,render,drawn,drawn_original,current_original,lifetime,layout,frame,capture_ready,camera_ready,H,t0,blend,marker_half,eye_max_difference,raw_center,crop_x,crop_y,crop_width,crop_height,raster_mask,held\n";
       summary<<"phase,frames,A,B,C,result\n";
       const auto until=clock.wall_now()+45000;
       while((!observed.runtime || !observed.renders) && clock.wall_now()<until)step();
@@ -1156,7 +1162,9 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
       // (which member draws, which Presents have no depth) and a moving
       // scene go on, from their first step again: setup's Presents, whose
       // number is real time, do not choose where game time starts in them.
-      game3d.begin_game_time();phase_present=0;movement_started=0;
+      // --wall-clock keeps the old trace (from start()) and cadence.
+      game3d.begin_game_time();
+      if(clock.engaged()){phase_present=0;movement_started=0;}
       for(unsigned band=0;band<4;++band)for(unsigned i=0;i<8;++i)points[band*8+i]={(2*band+1)*width/8+i-4,height/4};
       buffer(pixel_readback,UINT64(slots)*512,D3D12_HEAP_TYPE_READBACK);
       if(!test_case.empty()){

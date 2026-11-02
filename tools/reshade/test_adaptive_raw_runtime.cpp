@@ -185,7 +185,7 @@ namespace {
     void run_adaptive(bool reversed) {
       normal = !reversed;
       trajectory.open(runtime_directory / "adaptive-trajectory.csv");
-      trajectory << std::setprecision(17) << "phase,wall_ms,render,source,lifetime,frame,ready,H,t0,blend\n";
+      trajectory << std::setprecision(17) << "phase,game_ms,render,source,lifetime,frame,ready,H,t0,blend\n";
       create_pipeline();
       scene = target(width, height, 1, pattern(false));
       scene->clear_depth = normal ? 1.f : 0.f;

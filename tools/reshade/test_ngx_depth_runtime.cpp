@@ -714,7 +714,7 @@ RWTexture2D<float> depth : register(u0);
         "Run distinct NGX queue and state-pressure regressions separately");
       if(cross_queue) create_producer_queue();
       trace.open(runtime_directory/"ngx-depth-trajectory.csv");
-      trace<<std::setprecision(17)<<"phase,wall_ms,present,evaluation,tagged,kind,selected,capture_ready,reused,current_resource,current_sequence,automatic_ready,scale_state,K,"
+      trace<<std::setprecision(17)<<"phase,game_ms,present,evaluation,tagged,kind,selected,capture_ready,reused,current_resource,current_sequence,automatic_ready,scale_state,K,"
         "consumed_source,source_id,consumed_ready,camera_ready,H,t0,blend\n";
       reshade::register_event<reshade::addon_event::reset_command_list>(observe_reset);
       reshade::register_event<reshade::addon_event::finish_present>(observe_ngx_present);

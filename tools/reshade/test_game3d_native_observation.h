@@ -120,6 +120,17 @@ namespace {
       events_skipped_ = 0;
     }
 
+  public:
+    // Whether the open trace has its first line yet. That line lists only
+    // its own Present's events, so a case whose first Present belongs to
+    // another runtime (a second window) traces one of the game window's
+    // Presents first, or that runtime's first events are never listed.
+    bool has_line() const {
+      return game3d_present_trace::out.active() && generation_ == game3d_present_trace::out.generation() && traced_;
+    }
+
+  private:
+
     // t8=: each pending event as runtime.present.phase.site.value, comma
     // separated, oldest first. runtime: its rank; present: the newest
     // event's Present ordinal minus its own (0: the newest Present's);
@@ -347,6 +358,9 @@ namespace {
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&state_->consumer_nonce), 0x4e41544956453344LL);
       evidence_.open(fixture_.runtime_directory / "native-renders.jsonl");
       require(evidence_.good(), "Cannot record native render evidence");
+      // --wall-clock: the trace opens here, as before the game clock, and
+      // await_render's first native render writes its first line.
+      if (sunshine_game3d_fixture::fixture_clock().wall_clock()) open_trace();
     }
 
     // Once setup is done (start, then await_render): game time begins on the
@@ -355,8 +369,7 @@ namespace {
     // ends. Setup's Presents run on the real clock, so they add no line.
     void begin_game_time() {
       fixture_.engage_game_clock();
-      game3d_present_trace::out.open(fixture_.runtime_directory / "trace.txt", "native");
-      traced_ = true;
+      if (!traced_) open_trace();
     }
 
     void no_effects() const {
@@ -553,6 +566,11 @@ namespace {
     // The FX removal's and the mailbox's bounds, and the evidence's wall_ms:
     // wall time, never game time (test_game3d_clock.h).
     static std::uint64_t wall_now() { return sunshine_game3d_fixture::game_clock::wall_now(); }
+    // The fixture's per-Present trace, written once when this observer ends.
+    void open_trace() {
+      game3d_present_trace::out.open(fixture_.runtime_directory / "trace.txt", "native");
+      traced_ = true;
+    }
     static std::uint64_t load(std::uint64_t &value) {
       return std::uint64_t(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64 *>(&value), 0, 0));
     }
