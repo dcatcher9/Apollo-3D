@@ -39,7 +39,7 @@ Game 3D readiness: witcher3.exe  23:26:08 to 23:35:12 (9m03s, exited)
 [INFO] UI full alpha: 149 frames decided a whole-frame alpha and 0 an exact full change-set (6) (0.47% of detection frames)
 [PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
 [INFO] UI holds: generated 19182, none 0 (38% of Auto frames); 13 detection frames (0.04%) reused the previous real frame's decision (T1)
-[INFO] UI no mask: 32% of Auto frames had no mask; decided none: ambiguous 31%, no candidate 0.55%; without detection: no candidates 0.05%; sampled reasons with the refused candidate: ambiguous (current alpha) 27
+[INFO] UI no mask: 32% of Auto frames had no mask; decided none: ambiguous 31%, no candidate 0.55%; without detection: no candidates 0.05%; sampled reasons with the refused candidate: ambiguous (current alpha) 27; no UI layer all session: UI layer refused at its clear boundary (enhanced-barrier layout or simultaneous access)
 [INFO] UI trust events: earned 1, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 2, legacy entries discarded 0, forgotten 0; 0 selective layer samples earned nothing for colour without coverage (A1)
 [PASS] UI holds without a decision: no window held most Auto frames without a decision
 [WARN] UI protection gaps: no usable UI mask for 108 s in 4 windows; HUD and menus took the scene's depth there

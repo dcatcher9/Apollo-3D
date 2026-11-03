@@ -702,14 +702,19 @@ labelled with that state after the last sample's reason. A line that offered no 
 unaccepted presented alpha (Backbuffer or current alpha) covering the whole frame (90% or more, which
 shows no UI shape and can never earn acceptance), reads `no usable UI source`: the missing UI channel
 or layer is the cause, not the presented alpha. When the offscreen UI layer refused clear-boundary
-copies in the session, that cause is named, `UI layer refused at its clear boundary (<reasons>)`
-(The Witcher 3 with FG off since 10-24: its layer's target allows simultaneous access or is in an
-enhanced-barrier layout, so the layer never copied and current alpha at 100% was the only candidate
-left). `UI layer refused` (WARN) sums those refusals: since the 11-03 contract by reason from the
-timing line's `ui_layer={... refused=<n> refused_by={simultaneous enhanced not_render_target no_state
-other}}` and with each once-per-reason `Sunshine UI layer: clear-boundary copy refused (<reason>);
-<what the player loses>` line; from 10-24 to 11-03 one line, logged once, named both reasons together
-and nothing was counted. It says whether the layer still recorded copies. `UI layer enhanced copies`
+copies and recorded none around the line (the timing window covering it recorded no layer copy and,
+where the timing lines count refusals, refused one; with no window there, none all session), that
+cause is named, `UI layer refused at its clear boundary (<reasons>)` (The Witcher 3 with FG off
+since 10-24: its layer's target allows simultaneous access or is in an enhanced-barrier layout, so
+the layer never copied and current alpha at 100% was the only candidate left); it follows the reason
+of a selective presented alpha that was left alone too. A refusal beside layer copies is another
+target's (any full-size transparent-black clear qualifies) and names no gap. `UI no mask` adds
+the cause when the layer recorded no copy all session. `UI layer refused` (WARN) sums those refusals:
+since the 11-03 contract by reason from the timing line's `ui_layer={... refused=<n>
+refused_by={simultaneous enhanced not_render_target no_state unobserved discarded latched other}}`
+and with each once-per-reason `Sunshine UI layer: clear-boundary copy refused (<reason>); <what it
+means>: <what the player loses>` line; from 10-24 to 11-03 one line, logged once, named both
+reasons together and nothing was counted. It says whether the layer still recorded copies. `UI layer enhanced copies`
 (INFO) counts the admitted copies recorded with enhanced barriers (`copies_enhanced`). The timing
 line's layer group is read field by field, so a field added anywhere in it leaves the others readable.
 
@@ -812,27 +817,37 @@ python tools\reshade\game3d_log_report.py "D:\Games\<game>" --save-dir E:\Apollo
 ```
 
 `--save-dir` writes the printed report to `<dir>\<executable>\<session start>.txt` and a JSON
-summary (schema 1: the session's start and end, overall status, fail and warn counts, every check
-and the compared metrics) beside it. `--compare` without a value compares with the newest saved
-summary of the same executable whose session started earlier and had no FAIL; with a value, with
-that summary (`.json`, its `.txt`, or a folder to search). The report prints `Compared with the
-<date> session of <executable>`, then one row per metric, before the overall line. A metric that
-moved at least its threshold in its bad direction is a regression and warns; a metric either
-session lacks is INFO. The thresholds (`COMPARE_RULES`):
+summary (schema 1: the session's identity, start and end, overall status, fail and warn counts, the
+regressions its comparison flagged, every check and the compared metrics) beside it. A session is
+identified by its log's first 64 lines: reporting the same log again, a copy with a fresh write time
+included, replaces its saved report and keeps its first report's dates, so it is never a newer
+session nor its own baseline. Saved reports are never pruned. Saving always compares with the
+baseline below and records the regressions; only `--compare` prints the rows. `--compare` without a
+value compares with the newest saved summary of the same executable whose session started earlier,
+had no FAIL and flagged no regression (a regressed session is never the default baseline, so a drop
+stays flagged until a session recovers; give its summary to compare with it anyway); with a value,
+with that summary (`.json` or its `.txt`, as it is), or the same choice in a folder (a `--save-dir`
+root searches its executable's folder). The report prints `Compared with the <date> session of
+<executable>` (and names another executable's summary as one), then one row per metric, before the
+overall line. A metric that moved at least its threshold in its bad direction is a regression and
+warns; a metric either session lacks, or a share taken over fewer than its least count in either
+session, is INFO. The thresholds (`COMPARE_RULES`, least counts `COMPARE_MINIMUM`):
 
 | Metric | Regression |
 | --- | --- |
-| UI layer share of detection frames | down 25 points (W3 FG off: 84% on 10-22, 0% on 11-02) |
+| UI layer share of FG-off Auto samples (at least 20 in each session) | down 25 points (W3 FG off: 74% on 10-22, 0% on 11-02) |
 | UI protection gaps, listed seconds per streamed minute | up 2.0 |
 | UI no-mask share of Auto frames | up 10 points |
 | Depth-loss episodes per streamed minute | up 1.0 |
-| FG switches with depth lost, of all FG switches | up 25 points |
+| FG switches with depth lost, of all FG switches (at least 5 in each session) | up 25 points |
 | Placement-flat share of publications | up 2 points |
 | Present hitches not explained, per session minute | up 0.5 |
 
-Without these options the output is unchanged. The golden test compares the saved Witcher 3 10-22
-session with its 11-02 session, which flags the UI layer share, the UI protection gaps and the
-no-mask share.
+The layer share is taken with FG off only: a game whose UI source depends on FG (W3: UI alpha with
+FG on, the layer with FG off) would otherwise move it with the time the player kept FG on. Without
+these options the output is unchanged. A report that cannot be saved says so on stderr and keeps
+its exit code. The golden test compares the saved Witcher 3 10-22 session with its 11-02 session,
+which flags the FG-off UI layer share, the UI protection gaps and the no-mask share.
 
 A failing check is a bug report: fix the rule at its root (see
 [the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a

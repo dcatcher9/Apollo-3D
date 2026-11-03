@@ -9,15 +9,17 @@ It only reads existing log lines; it adds no diagnostics to the add-on.
         [--save-dir E:/ApolloDev/game3d-reports [--compare [summary.json]]]
 
 --save-dir keeps each report per executable with a JSON summary; --compare compares the session with that game's last
-saved session without a FAIL (or a given summary) and warns where a metric regressed past its threshold
-(COMPARE_RULES). Without them the output is unchanged.
+saved session without a FAIL or a flagged regression (or a given summary) and warns where a metric regressed past its
+threshold (COMPARE_RULES). Without them the output is unchanged.
 
-Exit code: 0 when nothing failed, 1 when a check failed, 2 when the log is unusable.
+Exit code: 0 when nothing failed, 1 when a check failed, 2 when the log is unusable. A report that cannot be saved
+(--save-dir) is said on stderr and keeps its own exit code.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -271,7 +273,7 @@ LAYER_SATURATED = 'Sunshine UI layer: every live copy is offered, held or still 
 # its state exists, contract cell D12). From 10-24 (f45f1bb9) to the 11-03 contract one line logged it once for every
 # reason; since then the add-on logs one line per reason with what the player loses, and the timing line counts the
 # refusals by reason. UI layer refused reports both.
-LAYER_REFUSED = re.compile(r'Sunshine UI layer: clear-boundary copy refused \(([^)]*)\)(?:; (.*?))?'
+LAYER_REFUSED = re.compile(r'Sunshine UI layer: clear-boundary copy refused \((\w+)(?:[:;,][^)]*)?\)(?:; (.*?))?'
                            r'(?: \(logged once[^)]*\))?$')
 LAYER_REFUSED_ONCE = ('a cleared target is in an enhanced-barrier layout or allows simultaneous access; its '
                       'clear-boundary copy is refused')
@@ -728,7 +730,8 @@ class UISample(NamedTuple):
                              + ('' if self.is_accepted(c) else ' (not accepted)'))
         if self.candidates & HUDLESS_PAIR == HUDLESS_PAIR:
             parts.append('HUD-less difference rejected')
-        return '; '.join(parts) + self.named_reason()
+        # A refused layer the game may draw its UI to, after the reasons of the candidates that were offered.
+        return '; '.join(parts) + self.named_reason() + (f'; {cause}' if cause and not self.offered(4) else '')
 
     def bare_layer(self) -> bool:
         """The offscreen UI layer offered without coverage: the layer a pre-UI proof can be about (H1 d)."""
@@ -959,6 +962,7 @@ class Session:
     # by reason, copies recorded in it), the admitted copies recorded with enhanced barriers, and each refusal line
     # (time, reason key, what the player loses; the line of 10-24 to 11-03 as LAYER_REFUSED_ONCE_REASON).
     layer_refusals: list[tuple[float, int, dict[str, int], int]] = field(default_factory=list)
+    layer_counts_refusals: bool = False  # Some timing line's layer group has refused= (the 11-03 contract).
     layer_copies_enhanced: int = 0
     layer_refusal_lines: list[tuple[float, str, str]] = field(default_factory=list)
     # Numbers the checks computed, for the saved summary and --compare (summary_metrics).
@@ -1240,6 +1244,7 @@ def parse(lines) -> Session:
                 s.layer_windows.append((t, int(window_ms) / 1000.0 if window_ms else TIMING_WINDOW_S,
                                         int(found.group(1)), copies, skipped, offers, float(since['mean']),
                                         int(since['max']), float(gap) if gap is not None else None))
+                s.layer_counts_refusals = s.layer_counts_refusals or 'refused' in fields
                 if refused := int(fields.get('refused', 0)):
                     s.layer_refusals.append((t, refused, {k: int(v) for k, v in groups.get('refused_by', {}).items()
                                                           if v.isdigit()}, copies))
@@ -2244,8 +2249,6 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
         unresolved = flattened and (sampled or not revoked)
     names = S2B_SOURCE_NAMES if s2b else SOURCE_NAMES
     sources = [(source, get(f'decided.{source}')) for source in names]
-    if s is not None and detected:
-        s.metrics['ui_layer_share'] = get('decided.10') / detected
     add(Check('FAIL' if overrides or unresolved else 'WARN' if disputes else 'PASS', 'UI protection',
               'decided ' + (', '.join(f'{names[k]} ({k}) {percent(n, detected)}' for k, n in sources if n)
                             or 'nothing') + ' of detection frames'
@@ -2365,12 +2368,14 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                       + f' {n}' for (reason, kind), n in refused.most_common(6))
     if s is not None and auto:
         s.metrics['ui_no_mask_share'] = sum(n for _, n in none + skipped + unheld) / auto
+    cause = layer_refusal_cause(s) if s is not None else ''
     add(Check('INFO', 'UI no mask',
               f'{percent(sum(n for _, n in none + skipped + unheld), auto)} of Auto frames had no mask'
               + (f'; decided none: {shares(none)}' if shares(none) else '')
               + (f'; without detection: {shares(skipped)}' if shares(skipped) else '')
               + (f'; {shares(unheld)}' if shares(unheld) else '')
-              + (f'; sampled reasons with the refused candidate: {named}' if named else '')))
+              + (f'; sampled reasons with the refused candidate: {named}' if named else '')
+              + (f'; no UI layer all session: {cause}' if cause else '')))
     if s2a:
         add(Check('INFO', 'UI trust events',
                   f'earned {get("trust.earned")}, revoked one way by an exact pair {get("trust.revoked_exact")}, '
@@ -2520,12 +2525,26 @@ def layer_refusal_reasons(s: Session) -> list[tuple[str, int | None]]:
     return reasons
 
 
-def layer_refusal_cause(s: Session) -> str:
-    """Why a session without a usable UI source had no UI layer, when the add-on refused one: 'UI layer refused at
-    its clear boundary (<reasons>)', or '' when it refused none."""
+def layer_refused_at(s: Session, t: float | None) -> bool:
+    """Whether the UI layer was missing for a refusal at t: the timing window covering t (it ends at its line and lasts
+    its window_ms) recorded no layer copy and, where the timing lines count refusals (since 11-03), refused one; with
+    no window covering t (or t None), the layer recorded no copy all session. A refused target beside a layer that
+    copies is another target (any full-size transparent-black clear qualifies), never the gap's cause."""
+    window = next((w for w in s.layer_windows if t is not None and w[0] - w[1] <= t <= w[0]), None)
+    if window is None:
+        return not any(w[3] for w in s.layer_windows)
+    if window[3]:
+        return False
+    return not s.layer_counts_refusals or any(r[0] == window[0] for r in s.layer_refusals)
+
+
+def layer_refusal_cause(s: Session, t: float | None = None) -> str:
+    """Why a session without a usable UI source had no UI layer at t (layer_refused_at; None: all session), when the
+    add-on refused one: 'UI layer refused at its clear boundary (<reasons>)', or ''."""
     reasons = layer_refusal_reasons(s)
-    return ('UI layer refused at its clear boundary (' + ', '.join(layer_refusal_name(k) for k, _ in reasons) + ')'
-            if reasons else '')
+    if not reasons or not layer_refused_at(s, t):
+        return ''
+    return 'UI layer refused at its clear boundary (' + ', '.join(layer_refusal_name(k) for k, _ in reasons) + ')'
 
 
 def layer_refusal_checks(s: Session, add) -> None:
@@ -2789,12 +2808,12 @@ def unprotected_gaps(s: Session) -> tuple[list[Gap], float]:
     for u in s.ui:
         runtimes.setdefault(u.runtime, []).append(u)
     pieces, flat = [], 0.0
-    cause = layer_refusal_cause(s)
     for runtime, samples in runtimes.items():
         lost = depth_lost(s, runtime)
         last = ''
         for u, following in zip(samples, samples[1:] + [None]):
             if u.unprotected():
+                cause = layer_refusal_cause(s, u.t)
                 last = u.why_body(cause)
                 reason = u.why_unprotected(cause)
             elif last and (u.pending() or (u.mode == 'auto' and not u.rendered)):
@@ -3087,8 +3106,12 @@ def session_dates(log: Path, s: Session) -> tuple[datetime, datetime]:
 
 
 # Saved reports (--save-dir): one folder per executable, each session's report text and a JSON summary named by its
-# start, <exe>/<YYYYMMDD-HHMMSS>.txt and .json. The summary's schema version, read back by --compare.
+# start, <exe>/<YYYYMMDD-HHMMSS>.txt and .json. The summary's schema version, read back by --compare. A session is
+# identified by its log's text (session_id): reporting the same log again, a copy with a fresh write time included,
+# replaces its saved report instead of adding a newer one. Saved reports are never pruned.
 SUMMARY_SCHEMA = 1
+# The log lines session_id hashes: ReShade starts its log anew with each process, so they name the session.
+SESSION_ID_LINES = 64
 # --compare (tools/reshade/README.md, First run of a new game): each metric of the summary, how the report names it,
 # its bad direction (-1 a drop, +1 a rise) and the change in that direction that is a regression (WARN). Shares are
 # fractions (the threshold in percentage points of the session's own total); rates are per streamed minute, except
@@ -3096,9 +3119,12 @@ SUMMARY_SCHEMA = 1
 # reports: the UI protection gaps' listed seconds, the Depth losses' logged and counted episodes, Depth at FG
 # switches, Placement flat after depth started, and the Present hitches not explained by a reset, FG switch or
 # overlay opening. A metric missing on either side (no UI counters, no FG switch, no streamed export) is not compared.
-# W3 FG off 11-02 against 10-22: the UI layer share fell from 84% to 0% with its layer refused.
+# The UI layer's share is taken over the FG-off Auto samples: a game whose UI source differs with FG (W3: UI alpha
+# with FG on, the layer with FG off) would otherwise move it with the time the player kept FG on. W3 FG off 11-02
+# against 10-22: the layer's FG-off share fell from 74% to 0% with its layer refused. A share is compared only over
+# enough of what it counts (COMPARE_MINIMUM in both sessions): one FG switch of four is already 25 points.
 COMPARE_RULES = (
-    ('ui_layer_share', 'UI layer share of detection frames', -1, 0.25),
+    ('ui_layer_share_fg_off', 'UI layer share of FG-off Auto samples', -1, 0.25),
     ('ui_gap_s_per_min', 'UI protection gaps (s per streamed minute)', +1, 2.0),
     ('ui_no_mask_share', 'UI no-mask share of Auto frames', +1, 0.10),
     ('depth_losses_per_min', 'Depth-loss episodes per streamed minute', +1, 1.0),
@@ -3106,7 +3132,10 @@ COMPARE_RULES = (
     ('placement_flat_share', 'Placement-flat share of publications', +1, 0.02),
     ('present_hitches_per_min', 'Present hitches per session minute', +1, 0.5),
 )
-SHARE_METRICS = frozenset(('ui_layer_share', 'ui_no_mask_share', 'fg_switch_loss_share', 'placement_flat_share'))
+SHARE_METRICS = frozenset(('ui_layer_share_fg_off', 'ui_no_mask_share', 'fg_switch_loss_share', 'placement_flat_share'))
+# metric: (the count it is taken over, the least count compared, how the report names it).
+COMPARE_MINIMUM = {'ui_layer_share_fg_off': ('ui_fg_off_samples', 20, 'FG-off Auto samples'),
+                   'fg_switch_loss_share': ('fg_switches', 5, 'FG switches')}
 
 
 def summary_metrics(s: Session) -> dict:
@@ -3115,6 +3144,10 @@ def summary_metrics(s: Session) -> dict:
     minutes = streamed_minutes(s)
     session_min = max((s.last - s.first) / 60.0, 1 / 60.0) if s.first is not None else None
     losses = len(s.depth_episodes) + s.suppressed_episodes
+    fg_off = [u for u in s.ui if u.mode == 'auto' and u.rendered and not u.fg]
+    m['ui_fg_off_samples'] = len(fg_off)
+    if fg_off:
+        m['ui_layer_share_fg_off'] = sum(u.detection == 'detected' and u.source == 10 for u in fg_off) / len(fg_off)
     m.update({'streamed_min': minutes, 'session_min': session_min, 'depth_losses': losses,
               'ui_layer_copies': sum(w[3] for w in s.layer_windows),
               'ui_layer_refused': sum(r[1] for r in s.layer_refusals),
@@ -3164,6 +3197,13 @@ def compare_checks(new: dict, old: dict) -> list[Check]:
                        'the earlier session has none' if a is None else 'this session has none')
             checks.append(Check('INFO', name, f'not compared ({missing})'))
             continue
+        if key in COMPARE_MINIMUM:
+            count, least, what = COMPARE_MINIMUM[key]
+            few = [side for side, m in (('the earlier session', old), ('this session', new))
+                   if (m.get(count) or 0) < least]
+            if few:
+                checks.append(Check('INFO', name, f'not compared (fewer than {least} {what} in {" and ".join(few)})'))
+                continue
         delta = b - a
         context = (f' ({metric_context(key, old)} -> {metric_context(key, new)})'
                    if metric_context(key, new) else '')
@@ -3188,8 +3228,16 @@ def load_summary(path: Path) -> dict | None:
     return summary if isinstance(summary, dict) and summary.get('schema') == SUMMARY_SCHEMA else None
 
 
-def last_good(folder: Path, before: datetime) -> tuple[Path, dict] | None:
-    """The newest saved summary in folder of a session that started before this one and had no FAIL."""
+def session_id(lines: list[str]) -> str:
+    """The session's identity: a hash of its log's first lines (SESSION_ID_LINES)."""
+    return hashlib.sha1('\n'.join(lines[:SESSION_ID_LINES]).encode('utf-8', 'replace')).hexdigest()[:16]
+
+
+def last_good(folder: Path, before: datetime, exe: str | None = None, own: str = '') -> tuple[Path, dict] | None:
+    """The newest saved summary in folder of a session of exe (any, None) that started before this one, had no FAIL
+    and whose own comparison flagged no regression (a regressed session never becomes the baseline, so a drop stays
+    flagged until a later session recovers; --compare <its summary> compares with it anyway), other than this session
+    itself (own: its session_id)."""
     found = []
     for path in folder.glob('*.json') if folder.is_dir() else ():
         summary = load_summary(path)
@@ -3197,9 +3245,18 @@ def last_good(folder: Path, before: datetime) -> tuple[Path, dict] | None:
             start = datetime.fromisoformat(summary['start']) if summary else None
         except (KeyError, TypeError, ValueError):
             start = None
-        if start is not None and start < before and not summary.get('fails'):
+        if (start is not None and start < before and not summary.get('fails') and not summary.get('regressions')
+                and (exe is None or summary.get('exe') == exe) and (not own or summary.get('session') != own)):
             found.append((start, path, summary))
     return max(found, key=lambda f: f[0])[1:] if found else None
+
+
+def saved_session(folder: Path | None, own: str) -> tuple[str, dict] | None:
+    """This session's saved report in folder (by session_id): its stamp and summary; None when it has none."""
+    for path in folder.glob('*.json') if folder is not None and folder.is_dir() else ():
+        if (summary := load_summary(path)) and summary.get('session') == own:
+            return path.stem, summary
+    return None
 
 
 def find_log(path: Path) -> Path:
@@ -3219,14 +3276,16 @@ def main(argv=None) -> int:
                         help='keep this report in <dir>/<executable>/<session start>.txt with a JSON summary beside it '
                              '(for example E:/ApolloDev/game3d-reports)')
     parser.add_argument('--compare', nargs='?', const='', metavar='SUMMARY',
-                        help="compare with a saved session: a summary .json (or its .txt); without one, the newest "
-                             "session of the same executable in --save-dir that started earlier and had no FAIL")
+                        help="compare with a saved session: a summary .json (or its .txt) or a folder to search; "
+                             "without one, the newest session of the same executable in --save-dir that started "
+                             "earlier, had no FAIL and flagged no regression")
     args = parser.parse_args(argv)
     if args.compare == '' and not args.save_dir:
         parser.error('--compare without a summary needs --save-dir')
     try:
         log = find_log(args.log)
-        session = parse(log.read_text(encoding='utf-8', errors='replace').splitlines())
+        lines = log.read_text(encoding='utf-8', errors='replace').splitlines()
+        session = parse(lines)
     except OSError as error:
         print(f'cannot read the log: {error}')
         return 2
@@ -3263,24 +3322,43 @@ def main(argv=None) -> int:
     own_fails = sum(c.status == 'FAIL' for c in checks)
     metrics = summary_metrics(session)
     folder = report_folder(args.save_dir, session.exe) if args.save_dir else None
+    own = session_id(lines)
+    # A session reported again keeps the dates of its first report: a copy's write time is no session's date.
+    stamp, start_text, end_text = start.strftime('%Y%m%d-%H%M%S'), start.isoformat(), end.isoformat()
+    if again := saved_session(folder, own):
+        try:
+            start = datetime.fromisoformat(again[1]['start'])
+            stamp, start_text, end_text = again[0], again[1]['start'], again[1].get('end', end_text)
+        except (KeyError, TypeError, ValueError):
+            pass
     compared: list[Check] = []
     header = ''
-    if args.compare is not None:
+    # A saved session always records its comparison's regressions (last_good skips it as a baseline then); only
+    # --compare prints the comparison.
+    if args.compare is not None or folder is not None:
         path = Path(args.compare) if args.compare else None
         if path is None or path.is_dir():
-            found = last_good(folder if path is None else path, start)
+            # A --save-dir root holds one folder per executable.
+            where = folder if path is None else (report_folder(path, session.exe)
+                                                 if report_folder(path, session.exe).is_dir() else path)
+            found = last_good(where, start, session.exe, own)
         else:
             path = path.with_suffix('.json') if path.suffix == '.txt' else path
             found = (path, summary) if (summary := load_summary(path)) else None
         if found:
             base_path, base = found
+            other = (f', another executable than {session.exe}' if base.get('exe') and session.exe
+                     and base.get('exe') != session.exe else '')
             header = (f'Compared with the {base["start"].replace("T", " ")[:16]} session of {base.get("exe") or "?"} '
-                      f'(Overall {base.get("overall", "?")}): {base_path}')
+                      f'(Overall {base.get("overall", "?")}{other}): {base_path}')
             compared = compare_checks(metrics, base.get('metrics', {}))
         else:
             compared = [Check('INFO', 'Compared', 'no saved session of ' + (session.exe or 'this executable')
-                              + (f' in {folder}' if path is None else f' at {path}')
-                              + ' that started earlier and had no FAIL')]
+                              + (f' in {where}' if path is None or path.is_dir() else f' at {path}')
+                              + ' that started earlier, had no FAIL and flagged no regression')]
+    regressions = [c.name.split(': ', 1)[1] for c in compared if c.status == 'WARN']
+    if args.compare is None:
+        compared, header = [], ''
     for check in checks:
         emit(f'[{check.status:4}] {check.name}: {check.detail}')
         for when in check.times:
@@ -3295,10 +3373,9 @@ def main(argv=None) -> int:
     overall = 'FAIL' if fails else 'WARN' if warns else 'PASS'
     emit(f'Overall: {overall} ({fails} fail, {warns} warn)')
     if folder is not None:
-        stamp = start.strftime('%Y%m%d-%H%M%S')
-        summary = {'schema': SUMMARY_SCHEMA, 'exe': session.exe, 'log': str(log), 'start': start.isoformat(),
-                   'end': end.isoformat(), 'state': state, 'overall': overall, 'fails': own_fails, 'warns': warns,
-                   'metrics': metrics,
+        summary = {'schema': SUMMARY_SCHEMA, 'exe': session.exe, 'log': str(log), 'session': own,
+                   'start': start_text, 'end': end_text, 'state': state, 'overall': overall,
+                   'fails': own_fails, 'warns': warns, 'regressions': regressions, 'metrics': metrics,
                    'checks': [{'status': c.status, 'name': c.name, 'detail': c.detail, 'times': c.times}
                               for c in checks]}
         try:
@@ -3306,8 +3383,7 @@ def main(argv=None) -> int:
             (folder / f'{stamp}.txt').write_text('\n'.join(out) + '\n', encoding='utf-8')
             (folder / f'{stamp}.json').write_text(json.dumps(summary, indent=1) + '\n', encoding='utf-8')
         except OSError as error:
-            print(f'cannot save the report: {error}')
-            return 2
+            print(f'cannot save the report: {error}', file=sys.stderr)
     return 1 if fails else 0
 
 

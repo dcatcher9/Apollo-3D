@@ -105,9 +105,10 @@ class GoldenReports(unittest.TestCase):
                 self.assertEqual((copy / path.name).read_bytes(), path.read_bytes(), path.name)
 
     def test_comparison_flags_the_witcher3_ui_layer_regression(self):
-        # The Witcher 3 with FG off: on 10-22 its offscreen UI layer protected 84% of detection frames; from 10-24
-        # (f45f1bb9) the add-on refused the layer's clear-boundary copy, and on 11-02 every FG-off frame had no usable
-        # UI source. Compared with the saved 10-22 session, the 11-02 report flags the layer share and the gaps.
+        # The Witcher 3 with FG off: on 10-22 its offscreen UI layer decided 74% of the FG-off Auto samples (84% of
+        # detection frames); from 10-24 (f45f1bb9) the add-on refused the layer's clear-boundary copy, and on 11-02
+        # every FG-off frame had no usable UI source. Compared with the saved 10-22 session, the 11-02 report flags
+        # the layer share and the gaps.
         if UPDATE:
             self.skipTest('--update writes the goldens this compares with')
         fixtures = {fixture['name']: fixture for fixture in self.fixtures}
@@ -125,17 +126,17 @@ class GoldenReports(unittest.TestCase):
         self.assertEqual(own, golden[:golden.index('Overall: ')])
         self.assertTrue(compared.startswith('the 2026-10-22 14:45 session of witcher3.exe (Overall WARN): '), compared)
         rows = compared.splitlines()[1:]
-        self.assertIn('[WARN] Compared: UI layer share of detection frames: 84% -> 0%; down 84 points, a regression '
+        self.assertIn('[WARN] Compared: UI layer share of FG-off Auto samples: 74% -> 0%; down 74 points, a regression '
                       '(its threshold: down 25 points)', rows)
         self.assertIn('[WARN] Compared: UI protection gaps (s per streamed minute): 0.0 -> 14.6 (0 s in 3.1 min -> '
                       '108 s in 7.4 min); up 14.6, a regression (its threshold: up 2.0)', rows)
         self.assertIn('[WARN] Compared: UI no-mask share of Auto frames: 0.05% -> 32%; up 32 points, a regression (its '
                       'threshold: up 10 points)', rows)
-        # Depth at FG switches improved; the other metrics stayed within their thresholds.
-        self.assertIn('[PASS] Compared: FG switches with depth lost: 75% -> 10% (3 of 4 -> 1 of 10); down 65 points',
-                      rows)
+        # 10-22 switched FG four times, too few to compare; the other metrics stayed within their thresholds.
+        self.assertIn('[INFO] Compared: FG switches with depth lost: not compared (fewer than 5 FG switches in the '
+                      'earlier session)', rows)
         self.assertEqual([row.split(': ')[1] for row in rows if row.startswith('[WARN]')],
-                         ['UI layer share of detection frames', 'UI protection gaps (s per streamed minute)',
+                         ['UI layer share of FG-off Auto samples', 'UI protection gaps (s per streamed minute)',
                           'UI no-mask share of Auto frames'])
         self.assertEqual(rows[-2:], ['Overall: WARN (0 fail, 10 warn)', 'Exit code: 0'])
 

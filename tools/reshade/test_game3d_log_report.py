@@ -2877,8 +2877,13 @@ def timing(t, layer, window_ms=10000, presents=1000):
 REFUSED_LAYER = ('copies=0 skipped=0 offers=0 presents_since_copy={mean=0.00 max=0} skip_gap_ms=0.0 targets_dropped=0 '
                  'refused=600 refused_by={simultaneous=598 enhanced=2 not_render_target=0 no_state=0 other=0} '
                  'copies_enhanced=0')
-REFUSED_LINE = ('[Sunshine 3D] Sunshine UI layer: clear-boundary copy refused (simultaneous); FG-off UI that only this '
-                'layer carries has no UI protection (logged once per reason)')
+# The refusal line as the add-on logs it (game3d_ui_layer.cpp refused()): the reason's key, then what it means and
+# what the player loses.
+REFUSED_LOSS = ('simultaneous access, cleared from another state than RENDER_TARGET: the target cannot be the '
+                'offscreen UI layer, so UI protection gets no mask from it and, without another UI source, the HUD '
+                'and menus take the scene\'s depth')
+REFUSED_LINE = ('[Sunshine 3D] Sunshine UI layer: clear-boundary copy refused (simultaneous); ' + REFUSED_LOSS
+                + ' (logged once per reason; the timing line counts refused_by)')
 # Witcher 3 FG off (11-02): only current alpha offered, covering the whole frame, unaccepted, refused as ambiguous.
 WHOLE_CURRENT = dict(alpha=(0, 0, 0, 1000), candidates=0x8, accepted=0x0, reason='ambiguous', refused='current')
 
@@ -2900,8 +2905,7 @@ class LayerRefusal(unittest.TestCase):
                          '600 clear-boundary copies refused in 1 timing window: simultaneous access 598, '
                          'enhanced-barrier layout 2; the UI layer recorded no copy all session, so it protected no UI: '
                          'a game that draws its UI only into an offscreen layer had no UI source')
-        self.assertEqual(refused.times,
-                         ['10:00:05 simultaneous access: FG-off UI that only this layer carries has no UI protection'])
+        self.assertEqual(refused.times, [f'10:00:05 simultaneous access: {REFUSED_LOSS}'])
         gaps = checks['UI protection gaps']
         self.assertEqual(gaps.status, 'WARN')
         # The gap names the refused layer, never the whole-frame current alpha that was left.
@@ -2945,6 +2949,34 @@ class LayerRefusal(unittest.TestCase):
             times = run(BASE + [line('10:00:05', REFUSED_LINE), sample,
                                 ui2('10:00:12', 1, 5, (5, 0, 0, 0), 0x1, 0x1)])['UI protection gaps'].times
             self.assertNotIn('no usable UI source', times[0])
+        # A selective current alpha left alone by the refused layer names the refusal after its own reason; with the
+        # layer offered, the refusal is another target's.
+        selective = run(BASE + [line('10:00:05', REFUSED_LINE), ui2('10:00:06', 0, 0, (0, 0, 0, 600), 0x8, 0x0,
+                                                                    reason='ambiguous', refused='current'),
+                                ui2('10:00:12', 1, 5, (5, 0, 0, 0), 0x1, 0x1)])['UI protection gaps'].times
+        self.assertTrue(selective[0].endswith('; UI layer refused at its clear boundary (simultaneous access)'),
+                        selective)
+        self.assertNotIn('UI layer refused', times[0])
+
+    def test_refusals_beside_layer_copies_are_no_gap_cause(self):
+        # Probe 2 of the lane P review: a timing window that recorded 12 layer copies and refused 7 clears of another
+        # target. A gap inside it was not the refusal's doing; the window without copies that refused is.
+        beside = ('copies=12 skipped=0 offers=9 presents_since_copy={mean=1.50 max=4} skip_gap_ms=0.0 '
+                  'targets_dropped=0 refused=7 refused_by={no_state=7} copies_enhanced=0')
+        alone = REFUSED_LAYER.replace('refused=600 refused_by={simultaneous=598 enhanced=2',
+                                      'refused=40 refused_by={simultaneous=40 enhanced=0')
+        bare = dict(alpha=(0, 0, 0, 0), candidates=0x0, accepted=0x0, reason='no_candidate')
+        session = report.parse(BASE + [line('10:00:06', REFUSED_LINE), ui2('10:00:12', 0, 0, **bare),
+                                       ui2('10:00:18', 1, 5, (5, 0, 0, 0), 0x1, 0x1), timing('10:00:20', beside),
+                                       ui2('10:00:22', 0, 0, **bare), ui2('10:00:28', 1, 5, (5, 0, 0, 0), 0x1, 0x1),
+                                       timing('10:00:30', alone)])
+        checks = {c.name: c for c in report.evaluate(session)}
+        self.assertEqual(checks['UI protection gaps'].times, [
+            '10:00:12-10:00:18 (6 s) FG off: no UI source offered',
+            '10:00:22-10:00:28 (6 s) FG off: no usable UI source: UI layer refused at its clear boundary (simultaneous '
+            'access, no proven state)'])
+        # The layer copied in the session, so the session as a whole names no missing layer (UI no mask).
+        self.assertEqual(report.layer_refusal_cause(session), '')
 
     def test_layer_group_fields_in_any_order(self):
         layer = ('copies=12 copies_enhanced=5 skipped=3 offers=9 presents_since_copy={mean=1.50 max=4} refused=0 '
@@ -2968,6 +3000,13 @@ class LayerRefusal(unittest.TestCase):
         self.assertEqual(checks['UI layer enhanced copies'].status, 'INFO')
 
     def test_refusal_line_reasons(self):
+        # The key before the add-on's '; <description>' or a ': <description>' inside the brackets, a ')' in the
+        # description included.
+        inside = REFUSED_LINE.replace('(simultaneous); simultaneous access, cleared from another state than '
+                                      'RENDER_TARGET:', '(simultaneous: simultaneous access, cleared from another '
+                                      'state than RENDER_TARGET);')
+        for text in (REFUSED_LINE, inside):
+            self.assertEqual(report.LAYER_REFUSED.search(text).group(1), 'simultaneous', text)
         self.assertEqual(report.layer_refusal_key('simultaneous'), 'simultaneous')
         self.assertEqual(report.layer_refusal_key('simultaneous access'), 'simultaneous')
         self.assertEqual(report.layer_refusal_key('Not render-target'), 'not_render_target')
@@ -2977,9 +3016,9 @@ class LayerRefusal(unittest.TestCase):
 class Comparison(unittest.TestCase):
     """--compare: each metric against the same game's last good session, a regression past its threshold a WARN."""
 
-    BASE_METRICS = {'ui_layer_share': 0.84, 'ui_gap_s': 0.0, 'ui_gap_s_per_min': 0.0, 'streamed_min': 3.0,
-                    'ui_no_mask_share': 0.001, 'depth_losses': 4, 'depth_losses_per_min': 1.3,
-                    'fg_switches': 4, 'fg_switches_depth_lost': 1, 'fg_switch_loss_share': 0.25,
+    BASE_METRICS = {'ui_layer_share_fg_off': 0.84, 'ui_fg_off_samples': 30, 'ui_gap_s': 0.0, 'ui_gap_s_per_min': 0.0,
+                    'streamed_min': 3.0, 'ui_no_mask_share': 0.001, 'depth_losses': 4, 'depth_losses_per_min': 1.3,
+                    'fg_switches': 8, 'fg_switches_depth_lost': 2, 'fg_switch_loss_share': 0.25,
                     'placement_flat_share': 0.02, 'present_hitches': 0, 'present_hitches_per_min': 0.0,
                     'session_min': 3.0}
 
@@ -2989,12 +3028,20 @@ class Comparison(unittest.TestCase):
 
     def test_thresholds(self):
         self.assertTrue(all(c.status == 'PASS' for c in self.statuses().values()))
-        self.assertEqual(self.statuses(ui_layer_share=0.60)['UI layer share of detection frames'].status, 'PASS')
-        dropped = self.statuses(ui_layer_share=0.0)['UI layer share of detection frames']
+        layer = 'UI layer share of FG-off Auto samples'
+        self.assertEqual(self.statuses(ui_layer_share_fg_off=0.60)[layer].status, 'PASS')
+        dropped = self.statuses(ui_layer_share_fg_off=0.0)[layer]
         self.assertEqual((dropped.status, dropped.detail),
                          ('WARN', '84% -> 0%; down 84 points, a regression (its threshold: down 25 points)'))
         # A rise of the layer share is no regression.
-        self.assertEqual(self.statuses(ui_layer_share=1.0)['UI layer share of detection frames'].status, 'PASS')
+        self.assertEqual(self.statuses(ui_layer_share_fg_off=1.0)[layer].status, 'PASS')
+        # A share over too few of what it counts is not compared: one FG switch of four is already 25 points.
+        few = self.statuses(ui_layer_share_fg_off=0.0, ui_fg_off_samples=19)[layer]
+        self.assertEqual((few.status, few.detail),
+                         ('INFO', 'not compared (fewer than 20 FG-off Auto samples in this session)'))
+        few = self.statuses(fg_switches=4, fg_switches_depth_lost=3, fg_switch_loss_share=0.75)
+        self.assertEqual(few['FG switches with depth lost'].detail,
+                         'not compared (fewer than 5 FG switches in this session)')
         gaps = self.statuses(ui_gap_s=6.0, ui_gap_s_per_min=2.0)['UI protection gaps (s per streamed minute)']
         self.assertEqual((gaps.status, gaps.detail), ('WARN', '0.0 -> 2.0 (0 s in 3.0 min -> 6 s in 3.0 min); up 2.0, '
                                                               'a regression (its threshold: up 2.0)'))
@@ -3019,7 +3066,11 @@ class Comparison(unittest.TestCase):
                          ('INFO', 'not compared (the earlier session has none)'))
 
     def test_saved_sessions(self):
-        session = BASE + [ui2('10:00:12', 1, 5, (5, 0, 0, 0), 0x1, 0x1), line('10:00:20', 'Finished exiting.')]
+        def session_of(n):
+            # Distinct sessions differ in their log's text (session_id); the same text is the same session.
+            return BASE + [line('10:00:01', f'[Sunshine 3D] session {n}'),
+                           ui2('10:00:12', 1, 5, (5, 0, 0, 0), 0x1, 0x1), line('10:00:20', 'Finished exiting.')]
+        session = session_of(1)
         with TemporaryDirectory() as directory:
             root = Path(directory)
             log = root / 'ReShade.log'
@@ -3042,14 +3093,41 @@ class Comparison(unittest.TestCase):
             self.assertEqual((summary['exe'], summary['start'], summary['fails']),
                              ('game.exe', '2026-11-01T10:00:00', 0))
             # A later session compares with it; a session with a FAIL is never the baseline.
-            failed = [x for x in session if 'renderer ready' not in x]
+            failed = [x for x in session_of(2) if 'renderer ready' not in x]
             self.assertEqual(report_of(failed, 2)[0], 1)
-            code, text = report_of(session, 3, '--compare')
+            code, text = report_of(session_of(3), 3, '--compare')
             self.assertIn('Compared with the 2026-11-01 10:00 session of game.exe (Overall PASS): ', text)
             self.assertIn('[PASS] Compared: UI protection gaps (s per streamed minute): 0.0 -> 0.0', text)
             # A given summary is compared with as it is.
-            code, text = report_of(session, 3, '--compare', str(folder / '20261102-100000.txt'))
+            code, text = report_of(session_of(3), 3, '--compare', str(folder / '20261102-100000.txt'))
             self.assertIn('Compared with the 2026-11-02 10:00 session of game.exe (Overall FAIL): ', text)
+            # The same log again, a copy with a fresh write time included, replaces its saved report: it is never a
+            # newer session, so never its own baseline.
+            code, text = report_of(session_of(3), 5, '--compare')
+            self.assertIn('Compared with the 2026-11-01 10:00 session of game.exe (Overall PASS): ', text)
+            self.assertEqual(sorted(p.name for p in folder.glob('*.json')),
+                             ['20261101-100000.json', '20261102-100000.json', '20261103-100000.json'])
+            # A session whose comparison flagged a regression is never the default baseline (lane P review, the
+            # ratchet): the next session is compared with the last one that flagged none.
+            gap = [x for x in session_of(4) if 'detected' not in x or '10:00:12' not in x]
+            gap[-1:-1] = [ui2('10:00:12', 0, 0, (0, 0, 0, 0), 0x0, 0x0, reason='no_candidate'),
+                          ui2('10:00:19', 1, 5, (5, 0, 0, 0), 0x1, 0x1)]
+            code, text = report_of(gap, 6)
+            regressed = json.loads((folder / '20261106-100000.json').read_text(encoding='utf-8'))
+            self.assertIn('UI protection gaps (s per streamed minute)', regressed['regressions'])
+            self.assertNotIn('Compared', text)  # Saved without --compare: recorded, not printed.
+            code, text = report_of(session_of(5), 7, '--compare')
+            self.assertIn('Compared with the 2026-11-03 10:00 session of game.exe (Overall PASS): ', text)
+            # The --save-dir root finds the executable's folder.
+            code, text = report_of(session_of(5), 7, '--compare', str(saved))
+            self.assertIn('Compared with the 2026-11-03 10:00 session of game.exe (Overall PASS): ', text)
+            # A report that cannot be saved says so and keeps its own exit code.
+            log.write_text('\n'.join(failed) + '\n', encoding='utf-8')
+            blocked = root / 'blocked'
+            blocked.write_text('', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(report.main([str(log), '--save-dir', str(blocked)]), 1)
+            self.assertIn('cannot save the report', errors.getvalue())
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             report.main(['ReShade.log', '--compare'])
 
@@ -3132,8 +3210,12 @@ class SchemaMirrors(unittest.TestCase):
         def joined(text):
             return re.sub(r'"\s*"', '', text)  # Adjacent C string literals as one.
 
-        def filled(text, string='simultaneous'):
-            return re.sub(r'%(?:\.\d+)?(?:llu|lu|zu|u|d|f)', '1', text).replace('%s', string)
+        def filled(text, string='simultaneous', description=None):
+            text = re.sub(r'%(?:\.\d+)?(?:llu|lu|zu|u|d|f)', '1', text)
+            if description is not None:
+                text = text.replace('%s', string, 1)
+                string = description
+            return text.replace('%s', string)
         timing_format = re.search(r'"(Sunshine Game 3D timing: [^"]*)"', joined(exporter_sources())).group(1)
         layer = report.layer_group(filled(timing_format))
         self.assertIsNotNone(layer, timing_format)
@@ -3141,7 +3223,14 @@ class SchemaMirrors(unittest.TestCase):
         text = joined(source('game3d_ui_layer.cpp'))
         refusal = re.search(r'"(Sunshine UI layer: clear-boundary copy refused [^"]*)"', text)
         if refusal:
-            self.assertEqual(report.LAYER_REFUSED.search(filled(refusal.group(1))).group(1), 'simultaneous')
+            meaning = 'simultaneous access, no state: proven, or not (a ruling)'
+            found = report.LAYER_REFUSED.search(filled(refusal.group(1), 'no_state', meaning))
+            self.assertEqual(found.group(1), 'no_state')
+            self.assertTrue(found.group(2).startswith(meaning))
+            # Every reason the add-on names (depth_capture::name) is one the report names.
+            names = re.search(r'inline constexpr const char \*name\(clear_copy_refusal value\) \{(.*?)\n  \}',
+                              source('streamline_depth_capture.h'), re.S).group(1)
+            self.assertLessEqual(set(re.findall(r'return "(\w+)";', names)) - {'none'}, set(report.LAYER_REFUSAL_NAMES))
         else:
             self.assertIn(report.LAYER_REFUSED_ONCE, text)
 
