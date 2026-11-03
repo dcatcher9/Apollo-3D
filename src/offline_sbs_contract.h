@@ -20,7 +20,7 @@ namespace offline_sbs {
 
   // Increment whenever a cached scene's serialized meaning or authenticated replay
   // dependencies change. Both the producer and consumer must use this single value.
-  inline constexpr unsigned scene_cache_contract_schema = 3u;
+  inline constexpr unsigned scene_cache_contract_schema = 4u;
 
   // The manager performs bounded reads with these exact limits. Keep the worker's
   // pre-publication checks on the same contract so a successful child can always be

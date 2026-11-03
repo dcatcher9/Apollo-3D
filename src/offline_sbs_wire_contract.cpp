@@ -971,7 +971,7 @@ namespace offline_sbs::wire {
         {"dtype", "float32-le"},
         {"layout", "row-major"},
         {"row_order", "top-down"},
-        {"semantics", "depth-coordinate-v2-signed-final-parallax-source-u"},
+        {"semantics", "depth-coordinate-v2-signed-base-parallax-source-u"},
         {"source_u_limit", static_cast<double>(
           models::depth_coordinate_v2::direct_container_limit)},
         {"file_pattern", "frame_%010d.depth.r32f"},
@@ -987,6 +987,12 @@ namespace offline_sbs::wire {
         {"contract_tag", models::depth_coordinate_v2::contract_tag},
         {"file_pattern", "frame_%010d.state.u32"},
         {"bytes_per_frame", sizeof(models::depth_coordinate_v2::state_words_t)},
+      }},
+      {"subtitle_tuple", {
+        {"schema", 1}, {"commit_file_pattern", "frame_%010d.tuple.json"},
+        {"payload_suffixes", {".depth.r32f", ".state.u32", ".glyph.u32", ".source.rgba16f", ".sct.u32", ".scp.u32"}},
+        {"commit", "sha256-and-byte-count-of-all-six-payloads"},
+        {"renderer", "base-inverse-and-analytic-ui-glyph-selector"},
       }},
       {"render_config", {
         {"model", value.render.model},
@@ -1038,7 +1044,7 @@ namespace offline_sbs::wire {
     require_exact_keys(
       value,
       std::array {
-        "schema"sv, "status"sv, "source"sv, "depth"sv, "state"sv,
+        "schema"sv, "status"sv, "source"sv, "depth"sv, "state"sv, "subtitle_tuple"sv,
         "render_config"sv, "packed_sbs"sv, "first_sequence"sv,
         "processed_count"sv, "last_completed_sequence"sv, "frame_count"sv,
         "atomic_frame_publication"sv, "native_source_deletion"sv,
@@ -1166,7 +1172,7 @@ namespace offline_sbs::wire {
         value.at("native_source_deletion") != false ||
         depth.at("dxgi_format") != "R32_FLOAT" || depth.at("dtype") != "float32-le" ||
         depth.at("layout") != "row-major" || depth.at("row_order") != "top-down" ||
-        depth.at("semantics") != "depth-coordinate-v2-signed-final-parallax-source-u" ||
+        depth.at("semantics") != "depth-coordinate-v2-signed-base-parallax-source-u" ||
         depth.at("source_u_limit") != static_cast<double>(models::depth_coordinate_v2::direct_container_limit) ||
         depth.at("file_pattern") != "frame_%010d.depth.r32f" ||
         unsigned_integer<std::uint64_t>(depth, "bytes_per_frame", "scene cache depth") != depth_bytes ||
@@ -1177,6 +1183,11 @@ namespace offline_sbs::wire {
         state.at("contract_tag") != models::depth_coordinate_v2::contract_tag ||
         state.at("file_pattern") != "frame_%010d.state.u32" ||
         state.at("bytes_per_frame") != sizeof(models::depth_coordinate_v2::state_words_t) ||
+        value.at("subtitle_tuple") != json {
+          {"schema", 1}, {"commit_file_pattern", "frame_%010d.tuple.json"},
+          {"payload_suffixes", {".depth.r32f", ".state.u32", ".glyph.u32", ".source.rgba16f", ".sct.u32", ".scp.u32"}},
+          {"commit", "sha256-and-byte-count-of-all-six-payloads"},
+          {"renderer", "base-inverse-and-analytic-ui-glyph-selector"}} ||
         render.at("renderer") != "depth-coordinate-v2-live-signed-parallax" ||
         render.at("producer_source_closure_sha256") != models::depth_coordinate_v2::shader_source_closure_sha256 ||
         render.at("renderer_source_closure_sha256") != models::host_sbs_shader_cache::parallax_v2_live_renderer_source_closure_sha256 ||

@@ -50,6 +50,12 @@ EXPECTED_GROUP_NAMES = (
     "parallax_v2_p010_y",
     "sbs_flat_fallback",
     "parallax_v2_live_diagnostic",
+    "subtitle_cohort_prototype_research",
+    "subtitle_cohort_research",
+    "subtitle_inner_colour_research",
+    "subtitle_inner_components_research",
+    "subtitle_matte_guard_research",
+    "parallax_v2_queued_renderer",
 )
 ANY_INCLUDE = re.compile(rb"^\s*#\s*include\b")
 QUOTED_INCLUDE = re.compile(rb'^\s*#\s*include\s*"([^"]+)"')

@@ -19,6 +19,7 @@
 #include <src/depth_coordinate_v2.h>
 #include <src/generated/sbs_adaptive_state_contract.h>
 #include <src/host_sbs_shader_cache.h>
+#include <src/host_sbs_subtitle_plane.h>
 #include <src/model_manager.h>
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
@@ -1021,7 +1022,14 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 115u);
+  EXPECT_EQ(v2::contract_schema, 121u);
+  EXPECT_EQ(v2::subtitle_ocr_contract_schema, 33u);
+  EXPECT_EQ(v2::subtitle_ocr_record_schema, 4u);
+  EXPECT_EQ(v2::subtitle_ocr_record_word_count, 256u);
+  EXPECT_EQ(v2::subtitle_ocr_current_prefix_word_count, 208u);
+  EXPECT_EQ(v2::subtitle_ocr_classifier_history_offset, v2::subtitle_ocr_current_prefix_word_count);
+  EXPECT_EQ(v2::subtitle_ocr_classifier_history_word_count, 48u);
+  EXPECT_EQ(v2::subtitle_contour_recipe, 27u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 18u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 3u);
@@ -2764,7 +2772,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   EXPECT_FALSE(estimator.has_terminal_failure());
 }
 
-TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElevenViewTuple) {
+TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThirteenViewTuple) {
   const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
   if (!enabled || std::string_view {enabled} != "1") {
     GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
@@ -2870,11 +2878,11 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
     UINT width = 0u, height = 0u, element_stride = 0u;
     std::vector<std::uint8_t> bytes;
   };
-  using tuple_t = std::array<payload_t, 14u>;
-  constexpr std::array<const char *, 14u> names {
+  using tuple_t = std::array<payload_t, 16u>;
+  constexpr std::array<const char *, 16u> names {
     "support", "field pin", "distance", "identity", "history", "source", "probability",
     "Gaussian weight", "Gaussian blend", "Gaussian vertical conditioned", "Gaussian control",
-    "Final", "OCR8", "UIP4"
+    "Final", "OCR8", "UIP4", "native glyph matte", "SCP4"
   };
   const auto read_view = [&](ID3D11ShaderResourceView *view, payload_t &out) {
     if (!view) return false;
@@ -2933,14 +2941,15 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
     return true;
   };
   const auto read_tuple = [&](const models::estimate_result &result, tuple_t &out) {
-    const std::array<ID3D11ShaderResourceView *, 14u> views {
+    const std::array<ID3D11ShaderResourceView *, 16u> views {
       result.subtitle_contour_support.Get(), result.subtitle_contour_field_pin.Get(),
       result.subtitle_contour_distance.Get(), result.subtitle_contour_identity.Get(),
       result.subtitle_contour_history.Get(), result.subtitle_contour_source.Get(),
       result.subtitle_ocr_probability.Get(), result.subtitle_gaussian_weight.Get(),
       result.subtitle_gaussian_blend.Get(), result.subtitle_gaussian_vertical_conditioned.Get(),
       result.subtitle_gaussian_control.Get(), result.shadow_final_parallax.Get(),
-      result.ocr_box_record.Get(), result.subtitle_locator_state.Get()
+      result.ocr_box_record.Get(), result.subtitle_locator_state.Get(),
+      result.subtitle_glyph_matte.Get(), result.subtitle_condition_params.Get()
     };
     for (std::size_t i = 0u; i < views.size(); ++i) {
       if (!read_view(views[i], out[i])) return false;
@@ -3086,10 +3095,20 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
     EXPECT_EQ(identity[20u], static_cast<std::uint32_t>(clock_n));
     EXPECT_EQ(identity[21u], static_cast<std::uint32_t>(clock_n >> 32u));
     EXPECT_EQ(identity[22u], v2::subtitle_contour_recipe);
-    for (const auto index : {0u, 4u, 5u}) {
+    for (const auto index : {0u, 4u, 5u, 14u}) {
       EXPECT_EQ(before[index].width, source_width) << names[index];
       EXPECT_EQ(before[index].height, crop_height) << names[index];
     }
+    EXPECT_EQ(before[14u].format, DXGI_FORMAT_R32_UINT);
+    ASSERT_EQ(before[15u].dimension, D3D11_RESOURCE_DIMENSION_BUFFER);
+    ASSERT_EQ(before[15u].bytes.size(), v2::subtitle_condition_param_word_count * sizeof(std::uint32_t));
+    EXPECT_EQ(before[15u].element_stride, sizeof(std::uint32_t));
+    models::host_sbs_subtitle_plane::words_t plane {};
+    models::host_sbs_subtitle_plane::condition_words_t condition {};
+    ASSERT_EQ(before[13u].bytes.size(), sizeof(plane));
+    std::memcpy(plane.data(), before[13u].bytes.data(), sizeof(plane));
+    std::memcpy(condition.data(), before[15u].bytes.data(), sizeof(condition));
+    EXPECT_TRUE(models::host_sbs_subtitle_plane::condition_words_match_plane(condition, plane, true));
     for (std::size_t i = 0u; i < before.size(); ++i) {
       SCOPED_TRACE(names[i]);
       EXPECT_EQ(before[i].dimension, expected[i].dimension);
@@ -3140,6 +3159,15 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedElev
     EXPECT_EQ(completed_follower.subtitle_work_suppressed,
       test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle);
     EXPECT_FALSE(estimator.publication_is_current(completed_n.publication));
+    if (test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle) {
+      tuple_t disabled;
+      ASSERT_TRUE(read_tuple(completed_follower, disabled));
+      for (const auto index : {14u, 15u}) {
+        SCOPED_TRACE(names[index]);
+        EXPECT_TRUE(std::all_of(disabled[index].bytes.begin(), disabled[index].bytes.end(),
+          [](std::uint8_t value) { return value == 0u; }));
+      }
+    }
     EXPECT_FALSE(estimator.has_terminal_failure());
   }
 }
@@ -3233,11 +3261,12 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     UINT width = 0u, height = 0u, stride = 0u;
     std::vector<std::uint8_t> bytes;
   };
-  constexpr std::array<const char *, 24u> names {
+  constexpr std::array<const char *, 26u> names {
     "depth", "cut", "depth frame state", "raw model depth", "candidate", "vertical majorant",
     "vertical conditioned", "Base", "Final", "camera", "frame statistics", "OCR", "SLR",
     "support", "field pin", "distance", "contour identity", "contour history", "source", "Pmap",
-    "Gaussian weight", "Gaussian blend", "Gaussian vertical conditioned", "Gaussian control"
+    "Gaussian weight", "Gaussian blend", "Gaussian vertical conditioned", "Gaussian control",
+    "native glyph matte", "SCP4"
   };
   using tuple_t = std::array<payload_t, names.size()>;
   const auto read_view = [&](ID3D11ShaderResourceView *view, payload_t &out) {
@@ -3299,7 +3328,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
       result.subtitle_contour_identity.Get(), result.subtitle_contour_history.Get(),
       result.subtitle_contour_source.Get(), result.subtitle_ocr_probability.Get(),
       result.subtitle_gaussian_weight.Get(), result.subtitle_gaussian_blend.Get(),
-      result.subtitle_gaussian_vertical_conditioned.Get(), result.subtitle_gaussian_control.Get()
+      result.subtitle_gaussian_vertical_conditioned.Get(), result.subtitle_gaussian_control.Get(),
+      result.subtitle_glyph_matte.Get(), result.subtitle_condition_params.Get()
     };
     for (std::size_t i = 0u; i < views.size(); ++i) {
       if (!read_view(views[i], out[i])) return false;
@@ -3327,7 +3357,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     return word(tuple[12u], v2::subtitle_plane_flags_word) == v2::subtitle_plane_current_valid_flag &&
       word(tuple[12u], v2::subtitle_plane_current_slot_mask_word) != 0u && any_words(tuple[13u], false) &&
       any_words(tuple[14u], false) && any_words(tuple[15u], true) &&
-      tuple[7u].bytes != tuple[8u].bytes;
+      tuple[7u].bytes != tuple[8u].bytes && any_words(tuple[24u], false) &&
+      word(tuple[25u], v2::subtitle_condition_param_active_word) == v2::subtitle_condition_param_fully_active_value;
   };
   const auto feature_count = [&](const tuple_t &tuple, std::size_t pixel) {
     const auto code = std::bit_cast<float>(word(tuple[17u], pixel * 4u + 3u));
@@ -3343,6 +3374,103 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
       (count == v2::subtitle_contour_history_confirmation_observations ?
          v2::subtitle_contour_history_feature_mask_bit : 0u);
     return code == static_cast<float>(expected_code) ? count : 0u;
+  };
+  // This wrapper test verifies snapshots across reuse/context transitions. Native shader
+  // tests independently verify the interpolation threshold, support and Gaussian equations.
+  const auto current_pixel_support = [&](const tuple_t &tuple, std::size_t pixel) {
+    const auto width = tuple[17u].width, height = tuple[17u].height;
+    const auto count = word(tuple[11u], 4u);
+    if (width == 0u || height == 0u || pixel >= std::size_t(width) * height ||
+        word(tuple[16u], 2u) != 1u || word(tuple[11u], 2u) != 1u ||
+        count == 0u || count > v2::subtitle_ocr_final_box_capacity ||
+        tuple[18u].bytes.size() != std::size_t(width) * height * 8u ||
+        tuple[19u].bytes.size() != std::size_t(v2::subtitle_ocr_output_width) * v2::subtitle_ocr_output_height * sizeof(float)) {
+      return std::uint32_t {0u};
+    }
+    const auto source_height = word(tuple[16u], 9u), crop_top = word(tuple[16u], 10u);
+    const auto content_left = word(tuple[16u], 16u), content_top = word(tuple[16u], 17u);
+    const auto content_right = word(tuple[16u], 18u), content_bottom = word(tuple[16u], 19u);
+    if (source_height == 0u || content_left >= content_right || content_top >= content_bottom) return std::uint32_t {0u};
+    const auto source_x = pixel % width, source_y = pixel / width;
+    const auto sx = 2ull * content_left * width + (2ull * source_x + 1u) * (content_right - content_left);
+    const auto sy = 2ull * content_top * source_height +
+      (2ull * (source_y + crop_top) + 1u) * (content_bottom - content_top);
+    bool in_search = false;
+    for (std::uint32_t slot = 0u; slot < count; ++slot) {
+      const auto cover = v2::subtitle_ocr_final_box_offset + slot * v2::subtitle_ocr_box_word_count;
+      const auto core = v2::subtitle_ocr_raw_box_offset + slot * v2::subtitle_ocr_box_word_count;
+      auto top = word(tuple[11u], cover + 1u), bottom = word(tuple[11u], cover + 3u);
+      if ((word(tuple[11u], core + 5u) & v2::subtitle_ocr_box_flag_ribbon) == 0u) {
+        const auto core_top = word(tuple[11u], core + 1u), core_bottom = word(tuple[11u], core + 3u);
+        if (core_top >= core_bottom) return std::uint32_t {0u};
+        const auto pad = ((core_bottom - core_top) * v2::subtitle_contour_ordinary_search_pad_height_numerator +
+          v2::subtitle_contour_ordinary_search_pad_height_denominator - 1u) /
+          v2::subtitle_contour_ordinary_search_pad_height_denominator;
+        top = std::max(top, core_top > pad ? core_top - pad : 0u);
+        bottom = std::min(bottom, core_bottom + pad);
+      }
+      in_search |= sx >= 2ull * word(tuple[11u], cover) * width &&
+        sx < 2ull * word(tuple[11u], cover + 2u) * width &&
+        sy >= 2ull * top * source_height && sy < 2ull * bottom * source_height;
+    }
+    if (!in_search) return std::uint32_t {0u};
+    const auto x = static_cast<float>(pixel % width), y = static_cast<float>(pixel / width);
+    const float ratio_x = float(v2::subtitle_ocr_output_width) / width;
+    const float ratio_y = float(v2::subtitle_ocr_output_height) / height;
+    const float centered_x = x + .5f, centered_y = y + .5f;
+    const volatile float scaled_x = centered_x * ratio_x, scaled_y = centered_y * ratio_y;
+    const float detector_x = scaled_x - .5f, detector_y = scaled_y - .5f;
+    const auto left = static_cast<int>(std::floor(detector_x)), top = static_cast<int>(std::floor(detector_y));
+    const auto sample = [&](int dx, int dy) {
+      const auto px = static_cast<std::size_t>(std::clamp(left + dx, 0, int(v2::subtitle_ocr_output_width) - 1));
+      const auto py = static_cast<std::size_t>(std::clamp(top + dy, 0, int(v2::subtitle_ocr_output_height) - 1));
+      return std::bit_cast<float>(word(tuple[19u], py * v2::subtitle_ocr_output_width + px));
+    };
+    const auto tl = sample(0, 0), tr = sample(1, 0), bl = sample(0, 1), br = sample(1, 1);
+    for (const auto contributor : {tl, tr, bl, br}) {
+      if (!std::isfinite(contributor) || contributor < 0.0f || contributor > 1.0f) return std::uint32_t {0u};
+    }
+    const auto bx = detector_x - std::floor(detector_x), by = detector_y - std::floor(detector_y);
+    const float upper_delta = tr - tl, lower_delta = br - bl;
+    const volatile float upper_product = upper_delta * bx, lower_product = lower_delta * bx;
+    const float upper = tl + upper_product, lower = bl + lower_product;
+    const float vertical_delta = lower - upper;
+    const volatile float vertical_product = vertical_delta * by;
+    const float probability = upper + vertical_product;
+    const auto source_color = [&](int px, int py, std::array<float, 4u> &color) {
+      if (px < 0 || py < 0 || px >= int(width) || py >= int(height)) {
+        return false;
+      }
+      std::array<std::uint16_t, 4u> half {};
+      std::memcpy(half.data(), tuple[18u].bytes.data() + (std::size_t(py) * width + px) * 8u, 8u);
+      for (std::size_t lane = 0u; lane < 4u; ++lane) {
+        const auto exponent = (half[lane] >> 10u) & 31u;
+        if (exponent == 31u) {
+          return false;
+        }
+        const auto mantissa = half[lane] & 1023u;
+        const float value = exponent ? std::ldexp(float(1024u + mantissa), int(exponent) - 25) :
+          std::ldexp(float(mantissa), -24);
+        color[lane] = (half[lane] & 0x8000u) ? -value : value;
+        if (color[lane] < 0.f || color[lane] > 1.f) {
+          return false;
+        }
+      }
+      return color[3u] == 1.f;
+    };
+    std::array<float, 4u> current {};
+    if (!source_color(int(x), int(y), current)) return std::uint32_t {0u};
+    bool edge = false;
+    constexpr auto radius = int(v2::subtitle_contour_spatial_edge_radius_source_pixels);
+    for (const auto delta : std::array<std::array<int, 2u>, 4u> {{{-radius, 0}, {radius, 0}, {0, -radius}, {0, radius}}}) {
+      std::array<float, 4u> neighbor {};
+      if (source_color(int(x) + delta[0u], int(y) + delta[1u], neighbor)) {
+        edge |= std::max({std::abs(current[0u] - neighbor[0u]), std::abs(current[1u] - neighbor[1u]),
+                  std::abs(current[2u] - neighbor[2u])}) > v2::subtitle_contour_spatial_edge_rgb_distance;
+      }
+    }
+    return std::uint32_t(feature_count(tuple, pixel) != 0u &&
+      (probability > v2::subtitle_ocr_active_probability_threshold || edge));
   };
   const auto assets = std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets";
   models::video_depth_estimator estimator {
@@ -3413,6 +3541,31 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     ASSERT_EQ(expected[17u].format, DXGI_FORMAT_R32G32B32A32_FLOAT);
     EXPECT_EQ(word(expected[16u], 20u), static_cast<std::uint32_t>(clock_us));
     EXPECT_EQ(word(expected[16u], 21u), static_cast<std::uint32_t>(clock_us >> 32u));
+    ASSERT_EQ(expected[24u].format, DXGI_FORMAT_R32_UINT);
+    EXPECT_EQ(expected[24u].width, expected[18u].width);
+    EXPECT_EQ(expected[24u].height, expected[18u].height);
+    ASSERT_EQ(expected[25u].dimension, D3D11_RESOURCE_DIMENSION_BUFFER);
+    ASSERT_EQ(expected[25u].bytes.size(), v2::subtitle_condition_param_word_count * sizeof(std::uint32_t));
+    EXPECT_EQ(expected[25u].stride, sizeof(std::uint32_t));
+    models::host_sbs_subtitle_plane::words_t plane {};
+    models::host_sbs_subtitle_plane::condition_words_t condition {};
+    ASSERT_EQ(expected[12u].bytes.size(), sizeof(plane));
+    std::memcpy(plane.data(), expected[12u].bytes.data(), sizeof(plane));
+    std::memcpy(condition.data(), expected[25u].bytes.data(), sizeof(condition));
+    EXPECT_TRUE(models::host_sbs_subtitle_plane::condition_words_match_plane(condition, plane, true));
+    bool binary_matte = true, contains_current_seeds = true;
+    ASSERT_EQ(expected[24u].bytes.size(), expected[13u].bytes.size());
+    for (std::size_t pixel = 0u; pixel < expected[24u].bytes.size() / sizeof(std::uint32_t); ++pixel) {
+      const auto matte = word(expected[24u], pixel);
+      binary_matte &= matte <= 1u;
+      contains_current_seeds &= word(expected[13u], pixel) == 0u || matte == 1u;
+    }
+    EXPECT_TRUE(binary_matte);
+    EXPECT_TRUE(contains_current_seeds);
+    if (condition[v2::subtitle_condition_param_active_word] == 0u) {
+      EXPECT_FALSE(any_words(expected[24u], false));
+      EXPECT_EQ(condition[v2::subtitle_condition_param_target_word], 0u);
+    }
   };
   std::optional<std::size_t> witness;
   for (unsigned observation = 0u; observation < 8u; ++observation) {
@@ -3444,18 +3597,17 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   const auto subtitle_slot_mask = word(expected[12u], v2::subtitle_plane_current_slot_mask_word);
   ASSERT_NE(subtitle_slot_mask, 0u);
   EXPECT_EQ(feature_count(expected, *witness), 1u);
-  EXPECT_EQ(word(expected[13u], *witness), 0u);
+  EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
   for (std::uint32_t count = 2u; count <= v2::subtitle_contour_history_confirmation_observations; ++count) {
     ++frame_id; clock_us += 100000u;
     observe(source.Get());
     ASSERT_FALSE(HasFatalFailure());
     EXPECT_EQ(word(expected[12u], v2::subtitle_plane_current_slot_mask_word), subtitle_slot_mask);
     EXPECT_EQ(feature_count(expected, *witness), count);
-    EXPECT_EQ(word(expected[13u], *witness),
-      count == v2::subtitle_contour_history_confirmation_observations ? 1u : 0u);
+    EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
   }
   ASSERT_TRUE(nonempty(expected))
-    << "Four genuine eligible observations must produce nonzero support/pins and conditioned Final.";
+    << "Current text probability must produce nonzero support/pins and conditioned Final.";
   const auto original_owner_frame = owner->depth_owner_frame_id;
   const auto original_owner_clock = owner->depth_owner_timestamp_us;
   const auto verify_idle_hold = [&]() {
@@ -3511,7 +3663,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   EXPECT_EQ(word(expected[12u], v2::subtitle_plane_current_slot_mask_word), subtitle_slot_mask);
   EXPECT_NE(expected[18u].bytes, old_source);
   EXPECT_EQ(feature_count(expected, *witness), 1u);
-  EXPECT_EQ(word(expected[13u], *witness), 0u);
+  EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
   EXPECT_EQ(word(expected[17u], *witness * 4u), std::bit_cast<std::uint32_t>(0.0f));
   EXPECT_EQ(word(expected[17u], *witness * 4u + 1u), std::bit_cast<std::uint32_t>(1.0f));
   EXPECT_EQ(word(expected[17u], *witness * 4u + 2u), std::bit_cast<std::uint32_t>(0.0f));
@@ -3524,8 +3676,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     ASSERT_FALSE(HasFatalFailure());
     EXPECT_EQ(word(expected[12u], v2::subtitle_plane_current_slot_mask_word), subtitle_slot_mask);
     EXPECT_EQ(feature_count(expected, *witness), count);
-    EXPECT_EQ(word(expected[13u], *witness),
-      count == v2::subtitle_contour_history_confirmation_observations ? 1u : 0u);
+    EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
   }
   verify_idle_hold();
   ASSERT_FALSE(HasFatalFailure());
@@ -3562,7 +3713,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   }
 
   // Returning to ordinary work under that same epoch also resets. The unchanged source cannot
-  // borrow mature counts or a prior UIP4 plane, and reentry needs its own four observations.
+  // borrow mature counts or a prior UIP4 plane, and current evidence can protect reentry immediately.
   owner.reset();
   ++frame_id; clock_us += 100000u;
   observe(changed_source.Get());
@@ -3570,14 +3721,13 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   EXPECT_FALSE(baseline.input_domain_reset);
   EXPECT_EQ(baseline.publication.domain_tag, scope_domain);
   EXPECT_EQ(feature_count(expected, *witness), 1u);
-  EXPECT_EQ(word(expected[13u], *witness), 0u);
+  EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
   for (std::uint32_t count = 2u; count <= v2::subtitle_contour_history_confirmation_observations; ++count) {
     ++frame_id; clock_us += 100000u;
     observe(changed_source.Get());
     ASSERT_FALSE(HasFatalFailure());
     EXPECT_EQ(feature_count(expected, *witness), count);
-    EXPECT_EQ(word(expected[13u], *witness),
-      count == v2::subtitle_contour_history_confirmation_observations ? 1u : 0u);
+    EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
   }
 
   // An intervening disabled desktop may have been dropped while inference was busy. A later
@@ -3589,11 +3739,11 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   EXPECT_FALSE(baseline.input_domain_reset);
   EXPECT_EQ(baseline.publication.domain_tag, scope_domain);
   EXPECT_EQ(feature_count(expected, *witness), 1u);
-  EXPECT_EQ(word(expected[13u], *witness), 0u);
+  EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
 
   // An old-domain receipt is otherwise valid. A changed source extent must force/reset rather
   // than carry the mature old contour into a newly sized observation. The new current OCR
-  // cover can still provide provisional protection while its own pixel history confirms.
+  // evidence can protect immediately while its diagnostic pixel history restarts.
   ASSERT_TRUE(wait_until_reusable());
   ++frame_id; clock_us += 100000u;
   const auto old_domain = baseline.publication.domain_tag;
@@ -3619,18 +3769,20 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   ASSERT_TRUE(read_tuple(baseline, expected));
   EXPECT_EQ(expected[18u].width, 1920u);
   EXPECT_EQ(expected[18u].height, models::subtitle_ocr_source_crop_height(1920u, 1080u));
+  EXPECT_EQ(expected[24u].format, DXGI_FORMAT_R32_UINT);
+  EXPECT_EQ(expected[24u].width, expected[18u].width);
+  EXPECT_EQ(expected[24u].height, expected[18u].height);
+  EXPECT_EQ(expected[25u].bytes.size(), v2::subtitle_condition_param_word_count * sizeof(std::uint32_t));
   EXPECT_EQ(word(expected[16u], 8u), 1920u);
   EXPECT_EQ(word(expected[16u], 9u), 1080u);
   EXPECT_EQ(word(expected[16u], 20u), static_cast<std::uint32_t>(clock_us));
   EXPECT_EQ(word(expected[16u], 21u), static_cast<std::uint32_t>(clock_us >> 32u));
   EXPECT_EQ(word(expected[12u], v2::subtitle_plane_cut_epoch_word), word(expected[16u], 3u));
-  EXPECT_FALSE(any_words(expected[13u], false));
-  EXPECT_FALSE(any_words(expected[14u], false));
   bool canonical_empty_distance = true;
   for (std::size_t index = 0u; index < expected[15u].bytes.size() / sizeof(std::uint32_t); ++index) {
     canonical_empty_distance &= word(expected[15u], index) == v2::subtitle_contour_distance_empty_bits;
   }
-  EXPECT_TRUE(canonical_empty_distance);
+  EXPECT_EQ(canonical_empty_distance, !any_words(expected[13u], false));
   bool canonical_reset_history = true;
   std::uint32_t maximum_reset_count = 0u;
   for (std::size_t pixel = 0u; pixel < expected[17u].bytes.size() / 16u; ++pixel) {
@@ -3648,13 +3800,15 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   if (reset_slot_mask != 0u) {
     EXPECT_EQ(word(expected[12u], v2::subtitle_plane_flags_word), v2::subtitle_plane_current_valid_flag);
     EXPECT_EQ(maximum_reset_count, 1u);
-    EXPECT_EQ(reset_warmup & v2::subtitle_plane_warmup_remaining_mask,
-      v2::subtitle_plane_warmup_observations);
-    EXPECT_TRUE(any_words(expected[20u], false));
+    EXPECT_EQ(reset_warmup, 0u);
+    EXPECT_EQ(any_words(expected[20u], false), any_words(expected[13u], false));
   } else {
     EXPECT_EQ(maximum_reset_count, 0u);
     EXPECT_EQ(reset_warmup, 0u);
     EXPECT_EQ(expected[7u].bytes, expected[8u].bytes);
+    EXPECT_FALSE(any_words(expected[24u], false));
+    EXPECT_EQ(word(expected[25u], v2::subtitle_condition_param_active_word), 0u);
+    EXPECT_EQ(word(expected[25u], v2::subtitle_condition_param_target_word), 0u);
   }
 
   bool admitted = false;
@@ -4809,12 +4963,12 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesCurrentOc
   EXPECT_LT(resolve, condition);
   EXPECT_EQ(resolver.find("condition_prepare_main"), std::string::npos);
 
-  EXPECT_NE(source.find("{\"schema\", 49}"), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 50}"), std::string::npos);
   for (const auto *current_policy_key : {
          "{\"current_cover_policy\", {",
          "{\"selection\", \"all-valid-current-ocr8-core-cover-pairs\"}",
          "{\"geometry_source\", \"exact-current-ocr8-record-final-payload\"}",
-         "{\"history_authority\", \"per-pixel-four-genuine-rgb-confirmations\"}",
+         "{\"history_authority\", \"diagnostic-fixed-rgb-duration-positive-count-only-for-duplicate-admission\"}",
          "{\"box_identity_resets_history\", false}",
        }) {
     EXPECT_NE(resolver.find(current_policy_key), std::string::npos) << current_policy_key;
@@ -4822,7 +4976,7 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesCurrentOc
   for (const auto *target_policy_key : {
          "{\"target_policy\", {",
          "{\"selection\", \"authenticated-current-cover-conflict-histogram\"}",
-         "{\"current_cover_pin\", \"confirmed-native-temporal-support-literal-gaussian-weight\"}",
+         "{\"current_cover_pin\", \"current-evidence-native-support-rectangle-slope-budget\"}",
        }) {
     EXPECT_NE(resolver.find(target_policy_key), std::string::npos) << target_policy_key;
   }
@@ -7137,7 +7291,7 @@ TEST(DirectxShaderSourceTest, LiveAndOfflineShareStatelessV2DrawRecorder) {
     std::string::npos
   );
   EXPECT_NE(
-    recorder.find("std::array<ID3D11ShaderResourceView *, 6u> null_resources"),
+    recorder.find("std::array<ID3D11ShaderResourceView *, 7u> null_resources"),
     std::string::npos
   );
 }
@@ -9152,16 +9306,16 @@ TEST(DirectxShaderSourceTest, SubtitleResolveBindsExactOcrRecordAndConditionPara
   EXPECT_LT(unbind, contours);
 }
 
-TEST(DirectxShaderSourceTest, OcrResolveConstantsAppendSignedLineReferenceToExactPrefix) {
+TEST(DirectxShaderSourceTest, OcrResolveConstantsAppendReferenceAndSourceObservationToExactPrefix) {
   const auto estimator =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
   ASSERT_FALSE(estimator.empty());
   EXPECT_NE(
-    estimator.find("using ocr_resolve_constants_t = std::array<std::uint32_t, 20u>"),
+    estimator.find("using ocr_resolve_constants_t = std::array<std::uint32_t, 24u>"),
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find("static_assert(sizeof(ocr_resolve_constants_t) == 80u)"),
+    estimator.find("static_assert(sizeof(ocr_resolve_constants_t) == 96u)"),
     std::string::npos
   );
   EXPECT_NE(
@@ -9169,7 +9323,7 @@ TEST(DirectxShaderSourceTest, OcrResolveConstantsAppendSignedLineReferenceToExac
     std::string::npos
   );
 
-  const auto function = estimator.find("bool update_pending_ocr_constants()");
+  const auto function = estimator.find("bool update_pending_ocr_constants(const bool input_domain_reset)");
   const auto initializer = estimator.find(
     "const ocr_resolve_constants_t constants {", function
   );
@@ -9195,12 +9349,27 @@ TEST(DirectxShaderSourceTest, OcrResolveConstantsAppendSignedLineReferenceToExac
          "line_reference->width",
          "std::bit_cast<std::uint32_t>(line_reference->search_top_source)",
          "0u",
+         "static_cast<std::uint32_t>(pending_observation_timestamp_us)",
+         "static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u)",
+         "input_domain_reset ? 1u : 0u",
+         "0u",
        }) {
     cursor = layout.find(word, cursor);
     ASSERT_NE(cursor, std::string::npos) << word;
     cursor += std::char_traits<char>::length(word);
   }
-  EXPECT_EQ(layout.find("pending_observation_timestamp_us"), std::string::npos);
+  // Classifier learning uses the matched source clock and the admitted domain reset. A CPU
+  // wall-clock sample or a default reset would let an older layout learn from the wrong owner.
+  EXPECT_NE(
+    estimator.find("!update_pending_ocr_constants(input_domain_reset)"),
+    std::string::npos
+  );
+  const auto normalize = estimator.find("bool normalize_depth_output(");
+  ASSERT_NE(normalize, std::string::npos);
+  EXPECT_NE(
+    estimator.find("!dispatch_near_identical_finalizer(input_domain_reset)", normalize),
+    std::string::npos
+  );
 }
 
 TEST(DirectxShaderSourceTest, FusedDepthMapperUsesResolvedReferenceGridGradients) {

@@ -4,6 +4,7 @@
 import copy
 import hashlib
 import json
+import re
 import struct
 import sys
 import tempfile
@@ -56,6 +57,16 @@ PRODUCTION_SOURCE_PROFILE_CASES = (
 
 
 class DepthCoordinateV2DumpContractTests(unittest.TestCase):
+    def test_live_dump_resolver_lists_the_canonical_producer_stages(self):
+        source = (REPO / "src/platform/windows/sbs_debug_dump.cpp").read_text()
+        resolver = source.split("nlohmann::json subtitle_plane_resolver_contract_json(", 1)[1]
+        resolver = resolver.split("bool subtitle_target_is_representable(", 1)[0]
+        native_specs = tuple(re.findall(
+            r'\{"source_file", "([^"]+)"\},\s*'
+            r'\{"entrypoint", "([^"]+)"\},\s*'
+            r'\{"target", "([^"]+)"\}', resolver))
+        self.assertEqual(native_specs, dump_contract._SUBTITLE_PLANE_SHADER_SPECS)
+
     def test_renderer_closure_constants_match_native_authenticated_pins(self):
         pins = generator.validate_renderer_source_closure_pins()
         self.assertEqual(
@@ -327,7 +338,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "shadow_vertical_conditioned.f32":
                 ("parallax-v2 orientation-selective vertical conditioner", False),
             "shadow_final_parallax.f32":
-                ("parallax-v2 atomic final displacement field", True),
+                ("parallax-v2 independent protected final displacement diagnostic", True),
         }
         subtitle_none = {
             "mode": "none",
@@ -351,11 +362,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "subtitle_conditioning": subtitle_none,
             "renderer": {
                 "authority":
-                    "authenticated-parallax-v2-atomic-final-field",
+                    "authenticated-base-inverse-plus-analytic-ui-glyph-selector",
                 "parallax_v2_render_requested": True,
                 "parallax_v2_render_selected": True,
                 "mapping_artifacts_match_selected_renderer": False,
-                "parallax_v2_position_field": "shadow_final_parallax",
+                "parallax_v2_position_field": 'ordinary Base inverse + optional analytic UI glyph selector',
                 "parallax_v2_coordinate_role":
                     "shadow_coordinate is diagnostic only; it has no renderer authority",
                 "parallax_v2_vertical_majorant_role":
@@ -366,11 +377,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "fixed 75/25 share of column upper/lower envelopes; may raise or lower "
                     "candidate and feeds the row majorant",
                 "parallax_v2_conditioner_role":
-                    "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
-                    "max_horizontal_slope and vertical shear <= max_vertical_shear publishes "
-                    "shadow_final_parallax atomically as direct live authority",
+                    'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering',
                 "parallax_v2_inverse":
-                    "11-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill",
+                    "at-most-11-step Base inverse plus analytic UI glyph selection; selected map may be discontinuous; no synthetic fill",
                 "collar_defocus": {
                     "enabled": False,
                     "role": ("disabled after live hand-boundary halo regression; live color "
@@ -486,17 +495,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "final_parallax": {
                 "contract_schema": coordinate.FINAL_PARALLAX.schema,
                 "artifact": "shadow_final_parallax.f32",
-                "warp_input_artifact": "shadow_final_parallax.f32",
+                "warp_input_artifact": None,
                 "authority": coordinate.FINAL_PARALLAX.authority,
                 "publication_policy": coordinate.FINAL_PARALLAX.publication_policy,
                 "reuse_policy": coordinate.FINAL_PARALLAX.reuse_policy,
                 "invalid_policy": coordinate.FINAL_PARALLAX.invalid_policy,
                 "current_rgb_policy": coordinate.FINAL_PARALLAX.current_rgb_policy,
-                "warp_relation": "same authenticated artifact",
+                "warp_relation": "independent diagnostic; selected map consumes Base and the joined analytic glyph tuple",
             },
+            "selected_map": dict(coordinate.SELECTED_MAP, render_enabled=True),
             "warp_map_contract": {
                 "available": False,
-                "schema": 2,
+                "schema": 3,
                 "artifact": None,
             },
         }
@@ -633,7 +643,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertTrue(decoded["rendered_output_selected"])
         self.assertTrue(decoded["vertical_majorant_available"])
         self.assertTrue(decoded["vertical_conditioned_available"])
-        self.assertEqual(decoded["position_field"], "shadow_final_parallax")
+        self.assertEqual(decoded["position_field"], "ordinary Base inverse + optional analytic UI glyph selector")
         self.assertFalse(decoded["mapping_artifacts_match_selected_renderer"])
 
     def test_manifest_accepts_exact_native_capture_color_format_allowlist(self):
@@ -898,6 +908,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "base_field": "shadow_base_final_parallax.f32",
                 "conditioned_field": "shadow_final_parallax.f32",
                 **dump_contract._SUBTITLE_CONTOUR_ARTIFACT_FILES,
+                **dump_contract._SUBTITLE_RENDER_ARTIFACT_FILES,
             },
         }
         manifest["subtitle_conditioning"] = subtitle
@@ -939,11 +950,27 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "description": "complete independently authored test contour tuple",
                 "sha256": "0" * 64, "byte_count": byte_count,
             }
+        for role, (layout, byte_count) in dump_contract._subtitle_render_artifact_layouts(
+                manifest["dimensions"]["analysis_source"]["width"], manifest["dimensions"]["analysis_source"]["height"],
+                manifest["dimensions"]["shadow_final_parallax"]["width"], manifest["dimensions"]["shadow_final_parallax"]["height"]).items():
+            manifest["dimensions"][role] = layout
+            manifest["artifacts"][dump_contract._SUBTITLE_RENDER_ARTIFACT_FILES[role]] = {
+                "available": True, "required": True, "stage": dump_contract._SUBTITLE_RENDER_ARTIFACT_STAGES[role],
+                "description": "authored analytic renderer tuple", "sha256": "0" * 64, "byte_count": byte_count}
+        manifest["dimensions"]["render_source"] = dict(manifest["dimensions"]["source"])
+        for name, stage in (("subtitle_glyph_matte.json", "native glyph matte recipe metadata"),
+                            ("subtitle_condition_params.json", "joined analytic plane params metadata"),
+                            ("render_source.bin", "exact rendered native color source")):
+            metadata = dump_contract._subtitle_render_metadata().get(name)
+            byte_count = (len(json.dumps(metadata).encode("utf-8")) if metadata is not None else
+                          manifest["dimensions"]["source"]["width"] *
+                          manifest["dimensions"]["source"]["height"] *
+                          (8 if manifest["dimensions"]["source"]["format_value"] == 10 else 4))
+            manifest["artifacts"][name] = {"available": True, "required": True, "stage": stage,
+                "description": "authored selected-map metadata", "sha256": "0" * 64,
+                "byte_count": byte_count}
         manifest["renderer"]["parallax_v2_conditioner_role"] = (
-            "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
-            "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-            "shadow_base_final_parallax; UIP4 publishes shadow_final_parallax atomically as "
-            "direct live authority")
+            'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering')
         payload = json.dumps(subtitle).encode("utf-8")
         manifest["artifacts"]["subtitle_conditioning.json"]["sha256"] = (
             hashlib.sha256(payload).hexdigest())
@@ -1017,6 +1044,50 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "resolver provenance"):
                     dump_contract.validate_v2_dump_manifest_document(manifest)
 
+    def test_classifier_history_is_bound_to_current_identity_and_never_creates_covers(self):
+        policy = coordinate.SUBTITLE_OCR.classifier_policy
+        words = self._valid_ocr_record_words()
+        offset = policy["history_offset"]
+        tail = [0] * policy["history_word_count"]
+        tail[0:4] = [policy["history_tag"], policy["history_schema"], 1, 1]
+        tail[4:10] = [1000001, 0, 41, 0, 17, 0]
+        tail[10:20] = [1920, 1080, 760, 320, 770, 434, 0, 0, 770, 434]
+        tail[20:24] = [1920, 1920, 810, 1]
+        tail[27] = struct.unpack("<I", struct.pack("<f", 10.0))[0]
+        tail[28:30] = [100, 110]
+        tail[41] = 4
+        words[offset:] = tail
+
+        def decode(payload):
+            return dump_contract.validate_subtitle_ocr_record(
+                self._pack_uint32_words(payload), matched_frame_id=41,
+                analysis_generation=17, source_width=1920, source_height=1080,
+                field_width=770, field_height=434, roi_top=325, roi_bottom=430)
+
+        decoded = decode(words)
+        self.assertTrue(decoded["classifier_history"]["initialized"])
+        self.assertEqual(decoded["classifier_history"]["episodes"], 1)
+        empty = list(words)
+        empty[3:5] = [0, 0]
+        empty[dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET:offset] = (
+            [0] * (offset - dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET))
+        decoded_empty = decode(empty)
+        self.assertEqual(decoded_empty["final_count"], 0)
+        self.assertEqual(decoded_empty["final_boxes"], [])
+        self.assertEqual(decoded_empty["classifier_history"]["votes"],
+                         decoded["classifier_history"]["votes"])
+        for index, value in ((2, 2), (4, 0), (6, 42), (10, 0), (23, 2),
+                             (24, 1), (27, 0x7fc00000), (30, 1), (41, 256)):
+            with self.subTest(index=index):
+                corrupt = list(words)
+                corrupt[offset + index] = value
+                with self.assertRaisesRegex(ValueError, "classifier history"):
+                    decode(corrupt)
+        abstaining = list(empty)
+        abstaining[2] = 0
+        with self.assertRaisesRegex(ValueError, "classifier history"):
+            decode(abstaining)
+
     def test_current_ocr8_record_validates_exact_identity_boxes_and_empty_authority(self):
         decoded = dump_contract.validate_subtitle_ocr_record(
             self._pack_uint32_words(self._valid_ocr_record_words()),
@@ -1033,15 +1104,15 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(decoded["final_count"], 1)
         self.assertEqual(
             decoded["ordinary_cover_horizontal_guard"], {
-                "cells": 1,
-                "policy": "ordinary-only-add-guard-cells-times-producer-ocr-cell-width-to-horizontal-db-unclip-cover-clamped-detector-bounds-before-map-current-canonical-cover-all-consumers-no-second-mask-vertical-and-ribbon-unchanged-v1",
+                "cells": 4,
+                "policy": "ordinary-only-four-producer-cell-horizontal-guard-and-ceil-half-tight-detector-height-vertical-guard-add-db-unclip-clamp-before-map-current-cover-search-no-rectangle-protection-ribbon-unchanged-v2",
             })
         self.assertEqual(decoded["line_centering"]["minimum_vertical_span_iou_ratio"], [1, 2])
         self.assertEqual(decoded["line_centering"]["maximum_horizontal_gap_height_ratio"], [4, 1])
         self.assertEqual(
             decoded["line_centering"]["horizontal_gap_metric"],
             "native-source-horizontal-gap-to-current-union-edge-relative-to-max-candidate-and-fixed-anchor-height-exact-cross-multiplied-v1")
-        self.assertEqual(decoded["line_centering"]["center_tolerance_ratio"], [1, 10])
+        self.assertEqual(decoded["line_centering"]["center_tolerance_ratio"], [1, 50])
         self.assertEqual(decoded["line_centering"]["search_bottom_height_ratio"], [1, 4])
         self.assertFalse(decoded["line_centering"]["preselection_geometry_verified"])
         self.assertIn("full-screen", decoded["line_centering"]["center_reference"])
@@ -1135,14 +1206,16 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         content = (0, 0, *field) if content is None else content
         roi = dump_contract._subtitle_dynamic_roi(*source, content)
         assert roi is not None
-        target = struct.unpack("<I", struct.pack("<f", 0.00075))[0]
+        # A filtered plane may remain above a current entry requirement of zero.
+        # A genuine valid-empty fixture, however, starts with no hidden plane.
+        target = struct.unpack("<I", struct.pack("<f", 0.0 if current_valid and count == 0 else 0.00075))[0]
         limit = struct.unpack("<I", struct.pack("<f", 0.04))[0]
         mask = (1 << count) - 1 if current_valid else 0
         words = [dump_contract.SUBTITLE_PLANE_STATE_SCHEMA, dump_contract.SUBTITLE_PLANE_STATE_TAG,
                  int(current_valid), mask, frame & 0xffffffff, frame >> 32,
                  generation & 0xffffffff, generation >> 32, timestamp & 0xffffffff, timestamp >> 32,
                  *source, *field, *roi, *content, 3, 0, 0, 0,
-                 1, 8, 1, target, timestamp & 0xffffffff, timestamp >> 32, 0, 0, 0, 0,
+                 1, 8, 0, target, timestamp & 0xffffffff, timestamp >> 32, 0, 0, 0, 0,
                  0, 0, limit, max(count, invalid_probe), 0, invalid_probe]
         assert len(words) == 40
         return words
@@ -1260,14 +1333,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.subTest(word=index), self.assertRaises(ValueError):
                 dump_contract.validate_subtitle_plane_snapshot(
                     self._pack_uint32_words(changed), **self._uip1_context())
-        for packed in (0, 1, 2, 3, 4, 8, 9, 10, 11, 12):
+        for packed in (0,):
             changed = good.copy()
             changed[coordinate.SUBTITLE_OCR.plane_warmup_word] = packed
             decoded = dump_contract.validate_subtitle_plane_snapshot(
                 self._pack_uint32_words(changed), **self._uip1_context())
             self.assertEqual(decoded["warmup_packed"], packed)
             self.assertEqual(decoded["warmup_remaining"], packed & coordinate.SUBTITLE_OCR.plane_warmup_remaining_mask)
-        for packed in (5, 6, 7, 13, 14, 15, 16, 0xffffffff):
+        for packed in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0xffffffff):
             changed = good.copy()
             changed[coordinate.SUBTITLE_OCR.plane_warmup_word] = packed
             with self.subTest(packed=packed), self.assertRaises(ValueError):
@@ -1308,11 +1381,22 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertEqual(state["adaptive"]["accepted_observation_timestamp_us"], accepted_clock)
             self.assertEqual(state["current_count"], 1)
 
+    def test_uip4_presented_flag_survives_clock_abstention_but_is_not_an_empty_cue(self):
+        for flags, clock in ((24, 999900), (16, 0)):
+            words = self._valid_uip1_state_words()
+            words[25], words[28], words[29] = flags, clock, 0
+            state = dump_contract.validate_subtitle_plane_snapshot(
+                self._pack_uint32_words(words), **self._uip1_context())
+            self.assertTrue(state["adaptive"]["presented_active"])
+        words = self._valid_uip1_state_words(count=0)
+        words[25] |= coordinate.SUBTITLE_OCR.plane_adaptive_presented_flag
+        self.assertFalse(dump_contract._subtitle_ui_empty_has_no_hidden_plane(tuple(words)))
+
     def test_uip1_adaptive_controller_flags_clocks_levels_and_counts_are_canonical(self):
         float_bits = lambda value: struct.unpack("<I", struct.pack("<f", value))[0]
-        faults = ((24, 2), (25, 16), (25, 3), (26, 21), (27, 0x7fc00000),
+        faults = ((24, 2), (25, 16), (25, 1), (25, 9), (25, 3), (26, 21), (27, 0x7fc00000),
                   (27, float_bits(-0.001)), (27, float_bits(0.05)), (28, 0),
-                  (30, 1), (32, 1), (34, 21), (35, 21), (36, float_bits(0.039)),
+                  (30, 1), (31, 1), (32, 1), (34, 1), (34, 21), (35, 21), (36, float_bits(0.039)),
                   (37, 770 * 434 + 1), (38, 2), (39, 2), (25, 12))
         for index, value in faults:
             words = self._valid_uip1_state_words()
@@ -1320,12 +1404,67 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.subTest(word=index, value=value), self.assertRaisesRegex(ValueError, "adaptive UI"):
                 dump_contract.validate_subtitle_plane_snapshot(
                     self._pack_uint32_words(words), **self._uip1_context())
-        for flagged, offset in ((9, 30), (10, 32)):
+        for flagged, offset in ((10, 32),):
             words = self._valid_uip1_state_words()
             words[25], words[offset] = flagged, 1000002
-            with self.subTest(flags=flagged), self.assertRaisesRegex(ValueError, "clock"):
+            with self.subTest(flags=flagged), self.assertRaisesRegex(ValueError, "adaptive UI"):
                 dump_contract.validate_subtitle_plane_snapshot(
                     self._pack_uint32_words(words), **self._uip1_context())
+
+    def test_uip4_goal_metadata_has_immediate_entry_empty_and_symmetric_bounded_presentation(self):
+        import numpy as np
+
+        resolver = dump_contract._subtitle_plane_resolver_contract()
+        policy = coordinate.SUBTITLE_OCR.ui_plane_policy
+        adaptive = resolver["adaptive_ui"]
+        self.assertEqual(adaptive["forward_policy"], policy)
+        self.assertEqual(adaptive["known_flags"], 28)
+        self.assertEqual(adaptive["approach_delay_ms"], 0)
+        self.assertEqual(adaptive["approach_source_u_per_second"], 0.0)
+        self.assertEqual(adaptive["retreat_delay_ms"], 0)
+        self.assertEqual(adaptive["retreat_source_u_per_second"], 0.0)
+        self.assertEqual(adaptive["retreat_time_constant_ms"], 100)
+        self.assertEqual(adaptive["smoothing_time_constant_ms"], 100)
+        self.assertEqual(adaptive["slew_per_eye_source_pixels_per_second"], 30)
+        self.assertEqual(adaptive["first_visible_policy"], "current-goal-immediate")
+        self.assertFalse(adaptive["current_clearance_is_presentation_floor"])
+        self.assertEqual(adaptive["rate_tick_cap_us"], 50000)
+        self.assertEqual(adaptive["release_covered_fraction"], 0)
+        self.assertEqual(adaptive["release_content_fraction"], 0)
+        self.assertFalse(adaptive["host_model_policy"]["retreat_requires_applied_target"])
+        target = resolver["target_policy"]
+        self.assertEqual(target["forward_policy"], policy)
+        self.assertEqual(target["approach_dwell_us"], 0)
+        self.assertEqual(target["approach_rate_source_u_per_second"], 0.0)
+        self.assertEqual(target["retreat_dwell_us"], 0)
+        self.assertEqual(target["retreat_rate_source_u_per_second"], 0.0)
+        self.assertEqual(target["retreat_time_constant_ms"], 100)
+        self.assertEqual(target["rate_tick_cap_us"], 50000)
+        self.assertFalse(target["current_clearance_is_presentation_floor"])
+        self.assertEqual(target["slew_per_eye_source_pixels_per_second"], 30)
+
+    def test_uip4_current_goal_is_not_an_instantaneous_presentation_floor(self):
+        for width, height, lower_bits in ((854, 480, 0x3c197ae7),
+                                           (2536, 1427, 0x3b4ebcf8),
+                                           (1920, 1080, 0x3b888888)):
+            words = self._valid_uip1_state_words(source=(width, height))
+            words[26], words[27] = 2, lower_bits
+            context = self._uip1_context(source=(width, height))
+            decoded = dump_contract.validate_subtitle_plane_snapshot(
+                self._pack_uint32_words(words), **context)
+            self.assertEqual(decoded["adaptive"]["current_entry_requirement_level"], 2)
+            self.assertEqual(decoded["adaptive"]["retreat_time_constant_ms"], 100)
+            words[27] -= 1
+            # A valid continuing cue may be below its current goal while smoothing.
+            dump_contract.validate_subtitle_plane_snapshot(self._pack_uint32_words(words), **context)
+            words[26] = (width + 99) // 100
+            words[27] = struct.unpack("<I", struct.pack("<f", .04))[0]
+            dump_contract.validate_subtitle_plane_snapshot(self._pack_uint32_words(words), **context)
+            words[27] -= 1
+            dump_contract.validate_subtitle_plane_snapshot(self._pack_uint32_words(words), **context)
+            words[27] = struct.unpack("<I", struct.pack("<f", .05))[0]
+            with self.assertRaisesRegex(ValueError, "adaptive UI range"):
+                dump_contract.validate_subtitle_plane_snapshot(self._pack_uint32_words(words), **context)
 
     def test_uip4_history_reset_mask_is_bound_to_current_slots(self):
         words = self._valid_uip1_state_words(count=8)
@@ -1632,6 +1771,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
     def _write_hashed_payload(root, manifest, name, payload):
         (root / name).write_bytes(payload)
         manifest["artifacts"][name]["sha256"] = hashlib.sha256(payload).hexdigest()
+        # These three descriptors use the actual serialized file size in the C++ exporter.
+        if name in ("subtitle_glyph_matte.json", "subtitle_condition_params.json", "render_source.bin"):
+            manifest["artifacts"][name]["byte_count"] = len(payload)
 
     def _gpu_trace_ring_payload(
             self, input_region_document, field_width, field_height, *,
@@ -1915,11 +2057,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             source[..., 3] = np.float16(1)
             probability.fill(np.float32(0.6))
         if valid:
-            offset = dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET
+            offset = dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET
             left, top, right, bottom = ocr[offset:offset + 4]
-            # A single independently authored stable pixel, strictly inside its cover.
-            px = ((left + right) // 2 - content[0]) * source_width // (content[2] - content[0])
-            py = ((top + bottom) // 2 - content[1]) * source_height // (content[3] - content[1]) - crop_top
+            # An independently authored actual stroke at one generated raw-core grid sample.
+            columns, rows = policy["palette_grid_columns"], policy["palette_grid_rows"]
+            px = (((left - content[0]) * (2 * columns) + (columns - 1) * (right - left)) * source_width //
+                  (2 * columns * (content[2] - content[0])))
+            py = (((top - content[1]) * (2 * rows) + (rows - 1) * (bottom - top)) * source_height //
+                  (2 * rows * (content[3] - content[1]))) - crop_top
             support[py, px] = 1
             source[py, px, :3] = np.float16(0.875)
         if snapshot_gate:
@@ -1931,7 +2076,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         pin = (dump_contract._subtitle_contour_project_support(
             support != 0, source_height, crop_top, field_width, field_height, content)
                if valid else np.zeros((field_height, field_width), dtype=bool))
-        distance = dump_contract._subtitle_contour_squared_source_distance(
+        distance = dump_contract._subtitle_contour_slope_budget(
             support != 0, source_width, source_height, crop_top, field_width, field_height, content).astype("<f4")
         timestamp = manifest["matched_observation_timestamp_us"]
         identity = [policy["history_schema"], policy["history_tag"], int(valid), locator[20] if snapshot_gate else 0,
@@ -1947,20 +2092,36 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         cx = np.clip(np.arange(field_width), content[0], content[2] - 1)
         cy = np.clip(np.arange(field_height), content[1], content[3] - 1)
         joined_base = base[np.ix_(cy, cx)]
-        enabled = bool(valid and np.isfinite(distance[content[1], content[0]]))
-        weight = (dump_contract._subtitle_gaussian_weight_from_q(distance[np.ix_(cy, cx)], source_width, source_height)
-                  if enabled else np.zeros_like(base))
+        enabled = bool(valid and np.isfinite(distance[content[1]:content[3], content[0]]).any())
         target = np.asarray(locator[27], dtype=np.uint32).view(np.float32)
-        proposal = dump_contract._subtitle_gaussian_literal_blend(joined_base, weight, target) if enabled else joined_base.copy()
         if enabled:
-            _, vertical, final = dump_contract._replay_v2_limiter_fields(proposal, content[2] - content[0])
+            joined_distance = distance[np.ix_(cy, cx)]
+            effective_base = np.where(np.isfinite(joined_distance), joined_base, base).astype(np.float32)
+            weight, proposal = dump_contract._subtitle_completion_weight_and_proposal(
+                effective_base, joined_distance, target, source_width)
         else:
-            vertical = final = joined_base.copy()
+            weight, proposal = np.zeros_like(base), base.copy()
+        if enabled:
+            vertical = proposal.copy()
+            final = dump_contract._replay_subtitle_horizontal_conditioner(proposal, base, content[2] - content[0])
+        else:
+            vertical = final = base.copy()
         payloads.update(gaussian_weight=weight.astype("<f4").tobytes(), gaussian_blend=proposal.astype("<f4").tobytes(),
             gaussian_vertical_conditioned=vertical.astype("<f4").tobytes(), gaussian_control=struct.pack("<I", int(enabled)))
         for role, payload in payloads.items():
             self._write_hashed_payload(root, manifest, dump_contract._SUBTITLE_CONTOUR_ARTIFACT_FILES[role], payload)
         self._write_hashed_payload(root, manifest, "shadow_final_parallax.f32", final.astype("<f4").tobytes())
+        dense = dump_contract.subtitle_dense_glyph_matte(support, source) if valid else np.zeros_like(support)
+        self._write_hashed_payload(root, manifest, "subtitle_glyph_matte.u32", dense.astype("<u4").tobytes())
+        kinds = sum(1 << slot for slot in range(locator[3]) if ocr[coordinate.SUBTITLE_OCR.final_box_offset + slot * coordinate.SUBTITLE_OCR.box_word_count + 5] & 1)
+        condition = [coordinate.SUBTITLE_OCR.condition_param_schema, coordinate.SUBTITLE_OCR.condition_param_tag,
+            locator[3] if valid else 0, kinds if valid else 0, 2 if valid else 0, locator[27] if valid else 0]
+        self._write_hashed_payload(root, manifest, "subtitle_condition_params.u32", self._pack_uint32_words(condition))
+        for name, value in dump_contract._subtitle_render_metadata().items():
+            self._write_hashed_payload(root, manifest, name, json.dumps(value).encode())
+        source_layout = manifest["dimensions"]["source"]
+        native_source = np.zeros((source_layout["height"], source_layout["width"], 4), dtype="<f2") if source_layout["format_value"] == 10 else np.zeros((source_layout["height"], source_layout["width"], 4), dtype=np.uint8)
+        self._write_hashed_payload(root, manifest, "render_source.bin", native_source.tobytes())
         return distance, valid
 
 
@@ -2022,15 +2183,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         manifest["depth_input_region"]["mode"] = "window-region"
         manifest["renderer"].update({
             "authority":
-                "authenticated crop-local atomic final field plus depth-input-region embedding",
+                "authenticated Base inverse plus analytic UI glyph selector and depth-input-region embedding",
             "mapping_artifacts_match_selected_renderer": True,
             "parallax_v2_position_field":
-                "shadow_final_parallax + depth_input_region embedding",
+                'ordinary Base inverse + optional analytic UI glyph selector + depth_input_region embedding',
             "parallax_v2_conditioner_role":
-                "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal "
-                "slope <= max_horizontal_slope and vertical shear <= max_vertical_shear "
-                "publishes shadow_final_parallax atomically as direct live authority with "
-                "depth_input_region embedding",
+                'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering',
         })
         manifest["dimensions"].update({
             "source": {
@@ -2224,7 +2382,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         manifest["warp_map_contract"] = {
             "available": True,
-            "schema": 2,
+            "schema": 3,
             "artifact": "warp_map.f32",
             "width": 2 * source_width,
             "height": source_height,
@@ -2241,8 +2399,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "content":
                     "derive from content_scale_x/content_scale_y and packed output coordinate",
                 "inverse":
-                    "11-step contractive fixed-point solution of crop-local q embedded by "
-                    "depth_input_region.json scale and outside-only zero-plane collar",
+                    "selected pre-clamp U from crop-local Base inverse with depth_input_region "
+                    "embedding or analytic UI plane via native glyph matte",
                 "mask": (
                     "warp_mask.png red marks finite-source boundary extrapolation; V2 has no "
                     "internal owner or synthetic-fill path"),
@@ -2560,9 +2718,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertEqual(subtitle["mode"], "subtitle-contours-v1")
             self.assertTrue(subtitle["subtitle_evidence_verified"])
             self.assertTrue(subtitle["ocr_authoritative"])
-            self.assertEqual(subtitle["ocr_ordinary_cover_horizontal_guard"]["cells"], 1)
+            self.assertEqual(subtitle["ocr_ordinary_cover_horizontal_guard"]["cells"], 4)
             self.assertIn(
-                "vertical-and-ribbon-unchanged",
+                "vertical-guard",
                 subtitle["ocr_ordinary_cover_horizontal_guard"]["policy"])
             self.assertEqual(subtitle["current_count"], 0)
             self.assertIn(
@@ -2760,6 +2918,115 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not contain|not exact"):
                 dump_contract.verify_v2_dump_geometry(root)
 
+
+    def test_roi_warp_map_accepts_literal_cpp_exported_selected_map_contract(self):
+        # Literal Build122 schema50 exporter dictionary (3840x2160 ROI capture).
+        # This checks manifest semantics only, not availability/authenticity of its pixels.
+        exported = json.loads(r'''
+{
+  "warp_map_contract": {
+    "artifact": "warp_map.f32",
+    "available": true,
+    "channels": [
+      "raw_reproject_source_u_normalized"
+    ],
+    "content_scale_x": 1.0,
+    "content_scale_y": 1.0,
+    "derived_inverse_displacement_output_eye_px": "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * content_scale_x * eye_width",
+    "derived_signed_binocular_disparity_px": "invert both eye maps at common source-U samples; x_right - x_left",
+    "dtype": "float32-le",
+    "eye_height": 2160,
+    "eye_width": 3840,
+    "height": 2160,
+    "layout": "row-major",
+    "live_sample_source_u_normalized": "clamp(raw_reproject_source_u_normalized, 0, 1)",
+    "schema": 3,
+    "source_height": 2160,
+    "source_width": 3840,
+    "validity": {
+      "content": "derive from content_scale_x/content_scale_y and packed output coordinate",
+      "inverse": "selected pre-clamp U from crop-local Base inverse with depth_input_region embedding or analytic UI plane via native glyph matte",
+      "mask": "warp_mask.png red marks finite-source boundary extrapolation; V2 has no internal owner or synthetic-fill path"
+    },
+    "width": 7680
+  },
+  "dimensions": {
+    "warp_map": {
+      "format": "DXGI_FORMAT_R32_FLOAT",
+      "format_value": 41,
+      "height": 2160,
+      "width": 7680
+    },
+    "warp_mask": {
+      "format": "DXGI_FORMAT_B8G8R8A8_UNORM",
+      "format_value": 87,
+      "height": 2160,
+      "width": 7680
+    },
+    "packed_sbs": {
+      "format": "DXGI_FORMAT_R16G16B16A16_FLOAT",
+      "format_value": 10,
+      "height": 2160,
+      "width": 7680
+    },
+    "eye": {
+      "height": 2160,
+      "width": 3840
+    },
+    "source": {
+      "format": "DXGI_FORMAT_R16G16B16A16_FLOAT",
+      "format_value": 10,
+      "height": 2160,
+      "width": 3840
+    },
+    "content_fit": {
+      "scale_x": 1.0,
+      "scale_y": 1.0
+    }
+  },
+  "artifacts": {
+    "warp_map.f32": {
+      "available": true,
+      "description": "Raw normalized full-source U selected by production Reproject after crop-local field embedding and the outside-only zero-plane collar.",
+      "required": true,
+      "sha256": "7b50895bab9c5bf596fff9b8ce8380724d066ced27736a4f9c85a188411bf50f",
+      "stage": "exact full-source inverse-warp mapping"
+    },
+    "warp_mask.png": {
+      "available": true,
+      "description": "Red marks inverse samples outside the finite source interval that the live renderer clamps to the nearest boundary column; V2 has no internal owner selection or synthetic fill.",
+      "required": true,
+      "sha256": "ce3455569ff90b94ff0db9b72ad0f8e303bb14ea4e58569e41fc0751f454ddad",
+      "stage": "V2 boundary-extrapolation mask"
+    }
+  }
+}
+''')
+        value = dump_contract._validate_warp_map_manifest(
+            exported, exported["artifacts"], exported["dimensions"], "window-region")
+        self.assertTrue(value["available"])
+        self.assertEqual((value["width"], value["height"]), (7680, 2160))
+        self.assertIn(exported["warp_map_contract"]["validity"]["inverse"],
+                      (REPO / "src/platform/windows/sbs_debug_dump.cpp").read_text())
+        mutations = {
+            "retired-pure-inverse": lambda c: c["validity"].update({"inverse":
+                "11-step contractive fixed-point solution of crop-local q embedded by "
+                "depth_input_region.json scale and outside-only zero-plane collar"}),
+            "missing-ui-selection": lambda c: c["validity"].update({"inverse": "ordinary Base only"}),
+            "extra-validity": lambda c: c["validity"].update({"unknown": True}),
+            "extra-root": lambda c: c.update({"unknown": True}),
+            "changed-channel": lambda c: c.update({"channels": ["source_u"]}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(fault=name):
+                changed = copy.deepcopy(exported)
+                mutate(changed["warp_map_contract"])
+                with self.assertRaisesRegex(ValueError, "unknown warp-map semantics"):
+                    dump_contract._validate_warp_map_manifest(
+                        changed, changed["artifacts"], changed["dimensions"], "window-region")
+        with self.assertRaisesRegex(ValueError, "unknown warp-map semantics"):
+            dump_contract._validate_warp_map_manifest(
+                exported, exported["artifacts"], exported["dimensions"], "full-source")
 
     def test_roi_geometry_verifier_authenticates_region_border_map_and_zero_plane(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3377,6 +3644,81 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertNotIn("current_rectangles", row["subtitle_plane"])
         self.assertNotIn("subtitle_locator", row)
         self.assertNotIn("subtitle_locator_words", row)
+
+    def test_gpu_trace_rejects_all_retired_approach_and_retreat_fields(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
+        original = list(struct.unpack(f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        adaptive = (dump_contract.GPU_TRACE_HEADER_WORD_COUNT +
+                    dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_locator_begin"] +
+                    coordinate.SUBTITLE_OCR.plane_adaptive_offset)
+        for field in (1, 6, 7, 8, 9, 10, 11):
+            words = original.copy()
+            words[adaptive + field] |= 1
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "adaptive UI"):
+                dump_contract.validate_gpu_trace_ring(
+                    self._pack_uint32_words(words), matched_frame_id=41, analysis_generation=0,
+                    source_width=1920, source_height=1080, field_width=16, field_height=12,
+                    expected_domain_tag=domain_tag, input_domain_reset=False)
+        words = original.copy()
+        words[adaptive + 1] |= 2
+        with self.assertRaisesRegex(ValueError, "adaptive UI"):
+            dump_contract.validate_gpu_trace_ring(
+                self._pack_uint32_words(words), matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080, field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+    def test_gpu_trace_newer_valid_empty_clears_hidden_plane_but_duplicate_clock_holds(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
+        template = list(struct.unpack(f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        h, n = dump_contract.GPU_TRACE_HEADER_WORD_COUNT, dump_contract.GPU_TRACE_RECORD_WORD_COUNT
+        timestamp = self.manifest["matched_observation_timestamp_us"]
+        float_bits = lambda value: struct.unpack("<I", struct.pack("<f", value))[0]
+
+        def record(frame, sequence, clock, count, target):
+            row = template[h:h + n].copy()
+            row[2:6] = [sequence, 0, frame, 0]
+            work, marker = dump_contract.GPU_TRACE_WORK_OPTIONAL_OCR, dump_contract.GPU_TRACE_OPTIONAL_RECEIPT_MAGIC
+            row[14], row[15] = work, 1
+            row[25] = 1 ^ dump_contract.GPU_TRACE_DECISION_COOKIE ^ marker
+            row[31], row[37], row[38] = marker, work, work ^ dump_contract.GPU_TRACE_WORK_FLAGS_COOKIE
+            plane = self._valid_uip1_state_words(frame=frame, generation=0, timestamp=clock,
+                source=(1920, 1080), field=(16, 12), count=count, current_valid=True)
+            plane[27] = float_bits(target)
+            row[88:128] = plane
+            row[128:134] = [4, coordinate.SUBTITLE_OCR.condition_param_tag,
+                             count, 0, 2 if count else 0, plane[27] if count else 0]
+            row[134:136] = [clock & 0xffffffff, clock >> 32]
+            return row
+
+        def check(clock, target, *, reset=False, prior=True):
+            words = template.copy()
+            rows = ([record(41, 1, timestamp, 1, .01)] if prior else [])
+            current = record(42, 2 if prior else 1, clock, 0, target)
+            if reset:
+                current[16] |= dump_contract.GPU_TRACE_FLAG_INPUT_DOMAIN_RESET
+            rows.append(current)
+            words[4:8] = [len(rows) + 1, 0, len(rows), len(rows)]
+            for slot, row in enumerate(rows):
+                words[h + slot * n:h + (slot + 1) * n] = row
+            return dump_contract.validate_gpu_trace_ring(self._pack_uint32_words(words),
+                matched_frame_id=42, analysis_generation=0, source_width=1920, source_height=1080,
+                field_width=16, field_height=12, expected_domain_tag=domain_tag, input_domain_reset=reset)
+
+        check(timestamp + 33333, 0)
+        with self.assertRaisesRegex(ValueError, "newer empty UI"):
+            check(timestamp + 33333, .01)
+        check(timestamp, .01)  # A genuinely new frame with repeated source time must hold.
+        check(timestamp, 0, reset=True, prior=False)
+        with self.assertRaisesRegex(ValueError, "newer empty UI"):
+            check(timestamp, .01, reset=True, prior=False)
 
     def test_gpu_trace_rejects_retired_due_work_and_ocr_on_reuse(self):
         input_region = copy.deepcopy(self.depth_input_region)
@@ -4227,6 +4569,149 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.validate_shadow_frame_stats_document(changed)
 
 
+    def test_schema50_dense_matte_is_same_observation_bounded_and_clears_empty(self):
+        import numpy as np
+        source = np.full((21, 25, 4), np.float16(.8), dtype="<f2")
+        source[..., 3] = np.float16(1)
+        support = np.zeros((21, 25), dtype="<u4")
+        support[10, 12] = 1
+        dense = dump_contract.subtitle_dense_glyph_matte(support, source)
+        self.assertEqual(dense[10, 18], 1)  # three same-frame body steps plus native collar3
+        self.assertEqual(dense[10, 19], 0)  # strict maximum horizontal expansion6
+        self.assertEqual(dense[16, 18], 0)  # collar is37-offset shape, never a7x7 square
+        self.assertFalse(dump_contract.subtitle_dense_glyph_matte(np.zeros_like(support), source).any())
+        source[10, 13, 3] = np.float16(0)
+        self.assertEqual(dump_contract.subtitle_dense_glyph_matte(support, source)[10, 13], 0)
+        source[10, 13, 3] = np.float16(1)
+        source[10, 13, 0] = np.float16(1.25)
+        self.assertEqual(dump_contract.subtitle_dense_glyph_matte(support, source)[10, 13], 0)
+        source[10, 12, 0] = np.float16(-.25)
+        with self.assertRaisesRegex(ValueError, "valid joined display pixel"):
+            dump_contract.subtitle_dense_glyph_matte(support, source)
+        source[10, 12, 0] = np.float16(.8)
+        support[0, 0] = 2
+        with self.assertRaisesRegex(ValueError, "literal zero or one"):
+            dump_contract.subtitle_dense_glyph_matte(support, source)
+
+    def test_schema50_brightness_barrier_limits_body_but_keeps_native_collar(self):
+        import numpy as np
+        source = np.full((9, 19, 4), np.float16(.3), dtype="<f2")
+        source[..., 3] = np.float16(1)
+        source[:, :8, :3] = np.float16(.8)
+        support = np.zeros((9, 19), dtype="<u4")
+        support[4, 7] = 1
+        dense = dump_contract.subtitle_dense_glyph_matte(support, source)
+        self.assertEqual(dense[4, 10], 1)
+        self.assertEqual(dense[4, 11], 0)
+
+    def test_schema50_rejects_unknown_selected_map_even_with_valid_final_diagnostic(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["selected_map"]["combined_map"] = "continuous-final-inverse"
+        with self.assertRaisesRegex(ValueError, "selected-map contract"):
+            dump_contract.validate_v2_dump_manifest_document(manifest)
+
+    def test_schema50_render_permission_is_required_boolean_and_independent_of_tuple(self):
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value):
+                manifest = copy.deepcopy(self.manifest)
+                manifest["selected_map"]["render_enabled"] = value
+                with self.assertRaisesRegex(ValueError, "selected-map contract"):
+                    dump_contract.validate_v2_dump_manifest_document(manifest)
+        manifest = copy.deepcopy(self.manifest)
+        del manifest["selected_map"]["render_enabled"]
+        with self.assertRaisesRegex(ValueError, "selected-map contract"):
+            dump_contract.validate_v2_dump_manifest_document(manifest)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                manifest = self._active_uip1_manifest(self.manifest)
+                manifest["selected_map"]["render_enabled"] = enabled
+                decoded = dump_contract.validate_v2_dump_manifest_document(manifest)
+                self.assertIs(decoded["subtitle_render_enabled"], enabled)
+                self.assertTrue(decoded["subtitle_conditioning"]["live"])
+                self.assertNotIn("shadow_final_parallax", decoded["position_authority"])
+
+    def test_schema50_selected_map_metadata_requires_exported_byte_counts(self):
+        names = ("subtitle_glyph_matte.json", "subtitle_condition_params.json", "render_source.bin")
+        valid = self._active_uip1_manifest(self.manifest)
+        dump_contract.validate_v2_dump_manifest_document(valid)
+        for name in names:
+            for bad in (None, True, False, 0, -1, 1.5, "907"):
+                with self.subTest(artifact=name, byte_count=bad):
+                    changed = copy.deepcopy(valid)
+                    changed["artifacts"][name]["byte_count"] = bad
+                    with self.assertRaisesRegex(ValueError, "byte_count"):
+                        dump_contract.validate_v2_dump_manifest_document(changed)
+            for fault in ("missing-size", "extra-field"):
+                with self.subTest(artifact=name, fault=fault):
+                    changed = copy.deepcopy(valid)
+                    descriptor = changed["artifacts"][name]
+                    if fault == "missing-size":
+                        del descriptor["byte_count"]
+                    else:
+                        descriptor["unexpected"] = 1
+                    with self.assertRaisesRegex(ValueError, "artifact descriptor"):
+                        dump_contract.validate_v2_dump_manifest_document(changed)
+        # Other metadata roles retain their five-key contract; this is not a global relaxation.
+        descriptor = {"available": True, "required": True, "stage": "other metadata",
+                      "description": "five-key role", "sha256": "0" * 64}
+        dump_contract._required_hashed_artifact({"other.json": descriptor}, "other.json", "other")
+        with self.assertRaisesRegex(ValueError, "artifact descriptor"):
+            dump_contract._required_hashed_artifact(
+                {"other.json": dict(descriptor, byte_count=1)}, "other.json", "other")
+
+    def test_schema50_selected_map_metadata_authenticates_actual_length_and_hash(self):
+        payloads = {
+            "subtitle_glyph_matte.json": b'{"schema": 1}\n',
+            "subtitle_condition_params.json": b'{"artifact": "subtitle_condition_params.u32"}\n',
+            "render_source.bin": b"\x00" * 16,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, payload in payloads.items():
+                with self.subTest(artifact=name):
+                    path = root / name
+                    path.write_bytes(payload)
+                    descriptor = {"available": True, "required": True, "stage": "selected-map input",
+                                  "description": "exporter-sized payload", "sha256": hashlib.sha256(payload).hexdigest(),
+                                  "byte_count": len(payload)}
+                    artifacts = {name: descriptor}
+                    dump_contract._required_hashed_artifact(
+                        artifacts, name, name, require_byte_count=True)
+                    self.assertEqual(dump_contract._read_hashed_artifact(root, artifacts, name), payload)
+                    descriptor["byte_count"] += 1
+                    with self.assertRaisesRegex(ValueError, "exact byte_count mismatch"):
+                        dump_contract._read_hashed_artifact(root, artifacts, name)
+                    descriptor["byte_count"] = len(payload)
+                    path.write_bytes(payload + b" ")
+                    with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+                        dump_contract._read_hashed_artifact(root, artifacts, name)
+                    path.write_bytes(payload)
+                    descriptor["sha256"] = "0" * 64
+                    with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+                        dump_contract._read_hashed_artifact(root, artifacts, name)
+
+    def test_schema50_analytic_inputs_reject_independently_rehashed_corruption(self):
+        import tempfile
+        from pathlib import Path
+        corruptions = {
+            "matte": ("subtitle_glyph_matte.u32", lambda data: struct.pack("<I", 2) + data[4:], "native glyph matte"),
+            "condition": ("subtitle_condition_params.u32", lambda data: struct.pack("<I", 999) + data[4:], "SCP4 condition"),
+            "source-size": ("render_source.bin", lambda data: data[:-1], "native source"),
+            "matte-recipe": ("subtitle_glyph_matte.json", lambda data: data.replace(b'"schema": 1', b'"schema": 2', 1), "unknown recipe"),
+            "condition-binding": ("subtitle_condition_params.json", lambda data: data.replace(b'contour_identity.u32', b'foreign_identity.u32'), "unknown recipe"),
+        }
+        for name, (artifact, corrupt, expected) in corruptions.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                manifest, fields = self._write_synthetic_geometry_dump(root, width=770, height=434)
+                manifest = self._activate_synthetic_uip1_dump(root, manifest, fields)
+                original = (root / artifact).read_bytes()
+                self._write_hashed_payload(root, manifest, artifact, corrupt(original))
+                (root / "dump_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, expected):
+                    dump_contract.verify_v2_dump_geometry(root)
+
+
 class SubtitleContourTupleContractTests(unittest.TestCase):
     """Small independently authored tuple fixtures; no detector or native-renderer replica."""
 
@@ -4261,8 +4746,16 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
             support[1, 12] = 1
             support[1, 13] = 1
             support[1, 15] = 1
-            source[1, 12, :3] = np.float16(0.875)
-            source[1, 13:16, :3] = np.float16(0.0625)
+            probability.fill(0)
+            # Exact integer detector scale in this small fixture gives independent bilinear
+            # contributor indices. Positive-count diagnostic pixels elsewhere remain unprotected.
+            for py, px in ((1, 12), (1, 13), (1, 15)):
+                dx = int((px + .5) * 960 / source_width - .5)
+                dy = int((py + .5) * 160 / crop_height - .5)
+                probability[0, 0, dy:dy + 2, dx:dx + 2] = np.float32(.6)
+            # Three actual bright stroke samples with current contrast and learned palette.
+            # Probability alone no longer authorizes a flat filled word rectangle.
+            source[1, (12, 13, 15), :3] = np.float16(0.875)
         if snapshot:
             history[..., :3] = source[..., :3].astype(np.float32)
             history[..., 3] = np.float32(policy["history_feature_valid_bit"])
@@ -4290,10 +4783,21 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
                 if centers:
                     qx = (x - content[0] + .5) * source_width / (content[2] - content[0]) - .5
                     qy = (y - content[1] + .5) * source_height / (content[3] - content[1]) - .5 - crop_top
-                    distance[y, x] = min((qx - px) ** 2 + (qy - py) ** 2 for px, py in centers)
+                    cw, ch = content[2] - content[0], content[3] - content[1]
+                    rx = source_width / cw + policy["distance_completion_source_pixels"]
+                    ry = source_height / ch + policy["distance_completion_source_pixels"]
+                    cx = ((1 << 29) // cw) / (1 << 30) * cw
+                    rational_y = Fraction((2 * (y - content[1]) + 1) * source_height,
+                                          2 * ch) - Fraction(1, 2) - crop_top
+                    rational_radius_y = Fraction(source_height, ch) + policy["distance_completion_source_pixels"]
+                    eligible = [(px, py) for px, py in centers if abs(rational_y - py) <= rational_radius_y]
+                    if eligible:
+                        distance[y, x] = min(max(abs(qx - px) - rx, 0) * cx for px, py in eligible)
         cx = np.clip(np.arange(field_width), content[0], content[2] - 1)
         cy = np.clip(np.arange(field_height), content[1], content[3] - 1)
-        weight = (dump_contract._subtitle_gaussian_weight_from_q(distance[np.ix_(cy, cx)], source_width, source_height)
+        # Tuple-only proof has no Base. Author exact mandatory D0 endpoints; Base-dependent
+        # M/direct-proposal proof is exercised separately with the joined immutable field.
+        weight = ((distance[np.ix_(cy, cx)] == 0).astype("<f4")
                   if centers else np.zeros(pin.shape, dtype="<f4"))
         common = {"evidence_frame_id": 17, "analysis_generation": (1 << 32) + 2,
                   "source_width": source_width, "source_height": source_height,
@@ -4316,6 +4820,9 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
             "field_width": field_width, "field_height": field_height, "tensor_content_rect": content,
             "adaptive": {"invalid_count": int(invalid_probe)},
         }
+        # This authored contour fixture uses equal raw cores/covers. Integration fixtures pass
+        # the independently decoded OCR raw cores, including their narrower vertical search.
+        common["current_cores"] = copy.deepcopy(common["current_rectangles"])
         identity = [policy["history_schema"], policy["history_tag"], int(valid), 7 if snapshot else 0,
                     17, 0, 2, 1, source_width, source_height, crop_top, crop_height, 7, 6, 2, 5,
                     *content, 1234, 1, policy["recipe"], int(snapshot), *([0] * 8)]
@@ -4343,7 +4850,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         self.assertFalse(result["history_confirmation_chain_verified"])
         self.assertIn("not-semantic-text", result["support_semantics"])
         self.assertTrue(result["integer_bilinear_projection_verified"])
-        self.assertTrue(result["squared_source_distance_verified"])
+        self.assertTrue(result["slope_budget_verified"])
         self.assertEqual(result["inference_owner_frame_id"], 17)
         self.assertEqual(result["inference_owner_observation_timestamp_us"], (1 << 32) + 1234)
         self.assertIn("no-current-presentation", result["source_pixel_relation"])
@@ -4388,6 +4895,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
                                   (expanded, 0), (whole * 8, 255)):
             context = copy.deepcopy(common)
             context["current_rectangles"] = copy.deepcopy(rectangles)
+            context["current_cores"] = copy.deepcopy(rectangles)
             plane = context["plane_state"]
             plane["current_rectangles"] = copy.deepcopy(rectangles)
             plane["current_count"] = len(rectangles)
@@ -4530,14 +5038,13 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
             dump_contract.validate_subtitle_contour_tuple(
                 {**payloads, "contour_support": support.tobytes()}, **common)
 
-    def test_history_confirmation_codes_and_support_correspondence_reject_unknown_or_unjoined_states(self):
+    def test_history_confirmation_codes_reject_unknown_states_and_count_zero_cannot_authorize_support(self):
         import numpy as np
 
         payloads, common = self._tuple()
         original = np.frombuffer(payloads["contour_history"], dtype="<f4").reshape(4, 24, 4)
         self.assertEqual((float(original[0, 0, 3]), float(original[1, 12, 3])), (2.0, 19.0))
-        for y, x, code in ((0, 0, 0), (0, 0, 1), (0, 0, 3), (1, 12, 2),
-                           (1, 12, 6), (1, 12, 10), (1, 12, 14),
+        for y, x, code in ((0, 0, 0), (0, 0, 1), (0, 0, 3),
                            (0, 0, 18), (0, 0, 19), (0, 0, 22),
                            (0, 0, 2.5), (0, 0, 11), (0, 0, float("nan")),
                            (0, 0, float("inf")), (0, 0, -0.0)):
@@ -4546,17 +5053,280 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
             with self.subTest(pixel=(y, x), code=code), self.assertRaisesRegex(ValueError, "temporal history"):
                 dump_contract.validate_subtitle_contour_tuple(
                     {**payloads, "contour_history": changed.tobytes()}, **common)
+        changed = original.copy()
+        changed[1, 12, 3] = 2
+        with self.assertRaisesRegex(ValueError, "native support"):
+            dump_contract.validate_subtitle_contour_tuple(
+                {**payloads, "contour_history": changed.tobytes()}, **common)
         changed = original.view(np.uint32).copy()
         changed[0, 0, 0] ^= 1
         with self.assertRaisesRegex(ValueError, "temporal history"):
             dump_contract.validate_subtitle_contour_tuple(
                 {**payloads, "contour_history": changed.tobytes()}, **common)
 
-    def test_legal_streaks_keep_current_first_anchor_then_bounded_fixed_anchor_and_report_counts(self):
+    def test_current_palette_stroke_support_is_immediate_for_every_positive_diagnostic_count(self):
+        import numpy as np
+
+        payloads, common = self._tuple()
+        original = np.frombuffer(payloads["contour_history"], dtype="<f4").reshape(4, 24, 4)
+        for code in (6, 10, 14, 19):
+            history = original.copy()
+            history[1, (12, 13, 15), 3] = np.float32(code)
+            result = dump_contract.validate_subtitle_contour_tuple(
+                {**payloads, "contour_history": history.tobytes()}, **common)
+            self.assertEqual(result["support_pixels"], 3)
+
+    def test_current_probability_withdraws_support_despite_mature_rgb_and_current_cover(self):
+        import numpy as np
+
+        payloads, common = self._tuple()
+        source = np.frombuffer(payloads["contour_source"], dtype="<f2").reshape(4, 24, 4).copy()
+        source[..., :3] = np.float16(.25)
+        history = np.frombuffer(payloads["contour_history"], dtype="<f4").reshape(4, 24, 4).copy()
+        history[..., :3] = source[..., :3].astype(np.float32)
+        payloads.update(contour_source=source.tobytes(), contour_history=history.tobytes())
+        payloads.update(contour_support=bytes(4 * 24 * 4), contour_field_pin=bytes(7 * 6 * 4),
+                        contour_distance=np.full((6, 7), np.inf, dtype="<f4").tobytes(),
+                        gaussian_weight=bytes(7 * 6 * 4), gaussian_control=struct.pack("<I", 0))
+        for probability in (0.0, coordinate.SUBTITLE_OCR.detector_active_probability_threshold):
+            payloads["ocr_probability"] = np.full(coordinate.SUBTITLE_OCR.output_shape, probability, dtype="<f4").tobytes()
+            result = dump_contract.validate_subtitle_contour_tuple(payloads, **common)
+            self.assertEqual(result["history_confirmation_count_histogram"]["4"], 3)
+            self.assertEqual(result["support_pixels"], 0)
+            self.assertFalse(result["gaussian_smoothing_enabled"])
+
+    def test_current_palette_supports_model_missed_matching_strokes_without_four_observations(self):
         import numpy as np
 
         payloads, common = self._tuple()
         history = np.frombuffer(payloads["contour_history"], dtype="<f4").reshape(4, 24, 4).copy()
+        history[1, (12, 13, 15), 3] = np.float32(6)
+        probability = np.zeros(coordinate.SUBTITLE_OCR.output_shape, dtype="<f4")
+        # Only the first stroke is detector evidence. The matching current strokes at13/15
+        # remain eligible immediately from its palette, with no direct P bypass.
+        probability[0, 0, 59:61, 499:501] = np.float32(.6)
+        payloads.update(contour_history=history.tobytes(), ocr_probability=probability.tobytes())
+        result = dump_contract.validate_subtitle_contour_tuple(payloads, **common)
+        self.assertEqual(result["support_pixels"], 3)
+        self.assertEqual(result["history_confirmation_count_histogram"]["1"], 3)
+
+    def test_spatial_edge_uses_only_valid_in_crop_axial_neighbors_with_strict_threshold(self):
+        import numpy as np
+
+        source = np.full((5, 5, 4), np.float32(.25))
+        source[..., 3] = 1
+        for delta, expected in ((.079, False), (.081, True)):
+            changed = source.copy()
+            changed[2, 4, 0] += np.float32(delta)
+            self.assertEqual(bool(dump_contract._subtitle_current_spatial_edge(changed)[2, 2]), expected)
+        equality = source.copy()
+        equality[..., :3] = 0
+        equality[2, 4, 0] = np.float32(.08)
+        self.assertFalse(dump_contract._subtitle_current_spatial_edge(equality)[2, 2])
+        diagonal = source.copy()
+        diagonal[4, 4, :3] = 1
+        self.assertFalse(dump_contract._subtitle_current_spatial_edge(diagonal)[2, 2])
+        for value in (float("nan"), float("inf"), -1, 2):
+            changed = source.copy()
+            changed[2, 4, :3] = np.float32(value)
+            self.assertFalse(dump_contract._subtitle_current_spatial_edge(changed)[2, 2])
+        changed = source.copy()
+        changed[2, 4] = (1, 1, 1, 0)
+        self.assertFalse(dump_contract._subtitle_current_spatial_edge(changed)[2, 2])
+        tiny = source[:1, :1].copy()
+        self.assertFalse(dump_contract._subtitle_current_spatial_edge(tiny).any())
+
+    def test_palette_rejects_flat_probability_and_unanchored_edges(self):
+        import numpy as np
+
+        source = np.ones((24, 64, 4), dtype=np.float32)
+        source[..., :3] = .875
+        probability = np.ones((24, 64), dtype=np.float32)
+        rect = {"left": 0, "top": 0, "right": 64, "bottom": 24}
+        args = ([rect], [rect], 24, 0, (0, 0, 64, 24))
+        evidence = lambda p: dump_contract._subtitle_current_glyph_evidence(
+            source, np.ones((24, 64), dtype=bool), p, *args)
+        self.assertFalse(evidence(probability).any())
+        source[10:13, 20:23, :3] = 0
+        self.assertTrue(dump_contract._subtitle_current_spatial_edge(source).any())
+        self.assertFalse(evidence(np.zeros_like(probability)).any())
+
+    def test_palette_reuses_current_color_for_missed_strokes_and_fixed_outline_not_scene_color(self):
+        import numpy as np
+
+        source = np.ones((32, 128, 4), dtype=np.float32)
+        source[..., :3] = (.2, .3, .4)  # Non-neutral background is not a dark outline.
+        source[2:5, 10:13, :3] = .875  # Actual strong current palette anchor inside raw core.
+        source[14:17, 110:113, :3] = .875  # Model-missed matching current glyph fragment.
+        source[14:17, 80:83, :3] = (.1, .8, .8)  # Different-colored scene edge.
+        source[20, 110, :3] = 0  # Exactly six pixels from the matching foreground.
+        source[21, 110, :3] = 0  # Seven pixels away has no fixed-six palette witness.
+        probability = np.zeros((32, 128), dtype=np.float32)
+        probability[2:5, 10:13] = 1
+        core = {"left": 0, "top": 0, "right": 128, "bottom": 8}
+        cover = {"left": 0, "top": 0, "right": 128, "bottom": 32}
+        result = dump_contract._subtitle_current_glyph_evidence(source,
+            np.ones((32, 128), dtype=bool), probability, [core], [cover], 32, 0, (0, 0, 128, 32))
+        self.assertTrue(result[15, 111])
+        self.assertFalse(result[15, 81])
+        self.assertTrue(result[20, 110])
+        # Row15 also contains white, so row21 has its own genuine six-pixel witness.
+        self.assertTrue(result[21, 110])
+        source[22, 110, :3] = 0
+        result = dump_contract._subtitle_current_glyph_evidence(source,
+            np.ones((32, 128), dtype=bool), probability, [core], [cover], 32, 0, (0, 0, 128, 32))
+        self.assertTrue(result[22, 110])  # Row16 is also a current palette pixel.
+        source[23, 110, :3] = 0
+        result = dump_contract._subtitle_current_glyph_evidence(source,
+            np.ones((32, 128), dtype=bool), probability, [core], [cover], 32, 0, (0, 0, 128, 32))
+        self.assertFalse(result[23, 110])
+
+    def test_palette_short_tangent_rejects_long_scene_rule_but_retains_bounded_glyph(self):
+        import numpy as np
+
+        source = np.ones((32, 128, 4), dtype=np.float32)
+        source[..., :3] = (.2, .3, .4)
+        source[2:5, 10:13, :3] = .875
+        source[14:16, 10:101, :3] = .875  #91pixel same-color rule, coreheight8 gives limit24.
+        source[14:17, 110:113, :3] = .875
+        probability = np.zeros((32, 128), dtype=np.float32)
+        probability[2:5, 10:13] = 1
+        core = {"left": 0, "top": 0, "right": 128, "bottom": 8}
+        cover = {"left": 0, "top": 0, "right": 128, "bottom": 32}
+        result = dump_contract._subtitle_current_glyph_evidence(source,
+            np.ones((32, 128), dtype=bool), probability, [core], [cover], 32, 0, (0, 0, 128, 32))
+        self.assertFalse(result[14, 50])
+        self.assertTrue(result[15, 111])
+
+    def test_palette_strict_symmetric_match_rejects_retired_common_brightening_cone(self):
+        import numpy as np
+
+        source = np.ones((32, 128, 4), dtype=np.float32)
+        source[..., :3] = (.2, .3, .4)
+        source[2:5, 10:13, :3] = .625
+        source[14:17, 80:83, :3] = .875  # Common+.25 brightening is outside strict symmetric.15.
+        source[14:17, 90:93, :3] = (.875, .625, .625)  #+.25 only red fails bounded spread.
+        probability = np.zeros((32, 128), dtype=np.float32)
+        probability[2:5, 10:13] = 1
+        core = {"left": 0, "top": 0, "right": 128, "bottom": 8}
+        cover = {"left": 0, "top": 0, "right": 128, "bottom": 32}
+        result = dump_contract._subtitle_current_glyph_evidence(source,
+            np.ones((32, 128), dtype=bool), probability, [core], [cover], 32, 0, (0, 0, 128, 32))
+        self.assertFalse(result[15, 81])
+        self.assertFalse(result[15, 91])
+
+    def test_palette_uses_actual_peak_representative_with_earliest_grid_ties_not_bin_mean(self):
+        import numpy as np
+
+        core = {"left": 0, "top": 0, "right": 128, "bottom": 8}
+        cover = {"left": 0, "top": 0, "right": 128, "bottom": 32}
+        source = np.ones((32, 128, 4), dtype=np.float32)
+        source[..., :3] = (.2, .3, .4)
+        source[2:5, 10:41, :3] = .75
+        source[2:5, 50:53, :3] = .875  # Same RGB bin, rare actual brighter representative.
+        source[14:17, 90:93, :3] = .625  # Would match the dominant bin mean, not the representative.
+        probability = np.zeros((32, 128), dtype=np.float32)
+        probability[2:5, 10:53] = 1
+        evidence = lambda: dump_contract._subtitle_current_glyph_evidence(source,
+            np.ones((32, 128), dtype=bool), probability, [core], [cover], 32, 0, (0, 0, 128, 32))
+        self.assertFalse(evidence()[15, 91])
+        source[2:5, 10:41, :3] = (.875, .75, .75)
+        source[2:5, 50:53, :3] = (.75, .875, .75)  # Equal maxQ16: earliest row-major anchor wins.
+        source[14:17, 90:93, :3] = (.875, .625, .625)
+        source[14:17, 100:103, :3] = (.625, .875, .625)
+        result = evidence()
+        self.assertTrue(result[15, 91])
+        self.assertFalse(result[15, 101])
+
+    def test_current_center_search_has_strict_cell_boundary_signed_reference_and_clamped_sides(self):
+        rect = lambda left, top, right, bottom: dict(zip(("left", "top", "right", "bottom"),
+                                                         (left, top, right, bottom)))
+        cover = rect(300, 10, 660, 100)
+        search = lambda core, ref=None, wide=cover: dump_contract._subtitle_current_search_rectangles(
+            [core], [wide], 960, (0, 0, 960, 160), ref)[0]
+        self.assertEqual(search(rect(400, 30, 560, 50)), rect(324, 20, 636, 100))
+        self.assertEqual(search(rect(408, 30, 568, 50))["left"], 324)  # Exactly one8px cell is not corrective.
+        self.assertEqual(search(rect(409, 30, 569, 50))["left"], 300)
+        self.assertEqual(search(rect(391, 30, 551, 50))["right"], 660)
+        self.assertEqual(search(rect(400, 30, 560, 50), -100)["left"], 300)
+        self.assertEqual(search(rect(400, 30, 560, 50), wide=rect(0, 10, 960, 100)),
+                         rect(0, 20, 960, 100))
+        self.assertEqual(search(rect(400, 30, 560, 50), wide=rect(400, 30, 560, 50)),
+                         rect(400, 30, 560, 50))  # Narrow authored covers cannot trim their raw core.
+        with self.assertRaisesRegex(ValueError, "signed center"):
+            search(rect(400, 30, 560, 50), True)
+
+    def test_current_center_search_uses_fixed_half_iou_line_union_and_preserves_ribbons(self):
+        rect = lambda left, top, right, bottom: dict(zip(("left", "top", "right", "bottom"),
+                                                         (left, top, right, bottom)))
+        cores = [rect(400, 30, 440, 50), rect(520, 36, 560, 56), rect(800, 40, 840, 60)]
+        covers = [rect(300, 10, 660, 100)] * 3
+        result = dump_contract._subtitle_current_search_rectangles(cores, covers, 960, (0, 0, 960, 160))
+        # Slot0 groups slot1; slot2 overlaps slot1 enough but not the fixed slot0 anchor.
+        self.assertEqual(result[0]["left"], 324)
+        self.assertEqual(result[0]["right"], 636)
+        ribbons = dump_contract._subtitle_current_search_rectangles(
+            cores, covers, 960, (0, 0, 960, 160), current_ribbon_mask=2)
+        self.assertEqual(ribbons[1], covers[1])
+        self.assertEqual(ribbons[0]["right"], 660)  # Ribbon cannot balance an ordinary line center.
+
+    def test_palette_keeps_distinct_current_colors_and_prunes_redundant_dimmer_mode(self):
+        import numpy as np
+
+        source = np.ones((32, 128, 4), dtype=np.float32)
+        source[..., :3] = (.2, .3, .4)
+        source[2:5, 10:13, :3] = .75
+        source[2:5, 30:33, :3] = (.875, .875, .0625)
+        source[2:5, 50:53, :3] = .5  # Within.3 of the brighter neutral mode; must be pruned.
+        source[14:17, 80:83, :3] = .75
+        source[14:17, 90:93, :3] = (.875, .875, .0625)
+        source[14:17, 100:103, :3] = .375  # Would match the redundant.5 mode, not.75.
+        probability = np.zeros((32, 128), dtype=np.float32)
+        for left in (10, 30, 50):
+            probability[2:5, left:left + 3] = 1
+        core = {"left": 0, "top": 0, "right": 128, "bottom": 8}
+        cover = {"left": 0, "top": 0, "right": 128, "bottom": 32}
+        result = dump_contract._subtitle_current_glyph_evidence(source,
+            np.ones((32, 128), dtype=bool), probability, [core], [cover], 32, 0, (0, 0, 128, 32))
+        self.assertTrue(result[15, 81])
+        self.assertTrue(result[15, 91])
+        self.assertFalse(result[15, 101])
+
+    def test_all_four_probability_contributors_must_be_valid_for_current_support(self):
+        import numpy as np
+
+        payloads, common = self._tuple()
+        original = np.frombuffer(payloads["ocr_probability"], dtype="<f4").reshape(1, 1, 160, 960)
+        for value in (float("nan"), float("inf"), -.01, 1.01):
+            changed = original.copy()
+            changed[0, 0, 59, 499] = np.float32(value)
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "probability contributors"):
+                dump_contract.validate_subtitle_contour_tuple(
+                    {**payloads, "ocr_probability": changed.tobytes()}, **common)
+
+    def test_nonuniform_probability_near_threshold_uses_separate_fp32_interpolation_steps(self):
+        import numpy as np
+
+        probability = np.zeros((160, 960), dtype=np.float32)
+        # For native162x27, pixel31,13 maps to detector186.16665649414062,79.5.
+        # Contracting the horizontal multiply/add would round this positive witness to exactly.2.
+        probability[79:81, 186] = np.float32(.12226862460374832)
+        probability[79:81, 187] = np.float32(.5886853933334351)
+        valid, sampled = dump_contract._subtitle_current_probability(probability, 162, 27)
+        self.assertTrue(valid[13, 31])
+        self.assertEqual(int(sampled[13, 31].view(np.uint32)), 0x3e4cccce)
+        self.assertGreater(sampled[13, 31], np.float32(.2))
+
+    def test_legal_streaks_keep_current_first_anchor_then_bounded_fixed_anchor_and_report_counts(self):
+        import numpy as np
+
+        payloads, common = self._tuple()
+        source = np.frombuffer(payloads["contour_source"], dtype="<f2").reshape(4, 24, 4).copy()
+        source[..., :3] = np.float16(.25)
+        source[1, (12, 13, 15), :3] = np.float16(.875)
+        payloads["contour_source"] = source.tobytes()
+        history = np.frombuffer(payloads["contour_history"], dtype="<f4").reshape(4, 24, 4).copy()
+        history[..., :3] = source[..., :3].astype(np.float32)
         for y, code in ((1, 6), (2, 10), (3, 14)):
             history[y, 11, 3] = np.float32(code)
         history[2, 11, 0] += np.float32(0.0625)
@@ -4664,13 +5434,13 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "valid current source"):
             dump_contract.validate_subtitle_contour_tuple(changed, **common)
 
-    def test_literal_gaussian_no_hardcore_untruncated_tail_and_exact_signed_endpoints(self):
+    def test_minimum_completion_two_sided_interval_and_exact_signed_endpoints(self):
         import numpy as np
 
         base = np.full((12, 24), np.float32(0.0395))
         q = np.full(base.shape, np.inf, dtype=np.float32)
         q[2, 2] = np.float32(1e8)
-        q[5, 10:14] = np.array((0, .01, 1, 64), dtype=np.float32)
+        q[5, 10:14] = np.array((0, .01, 1, 12), dtype=np.float32)
         for target_bits in (0, 0x80000000):
             subtitle = {"contour": {"authority_valid": True}, "joint_plane_mode": 3,
                         "tensor_content_rect": (2, 2, 22, 10), "source_width": 120, "source_height": 120,
@@ -4680,87 +5450,32 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
             self.assertEqual(int(result[5, 10].view(np.uint32)), target_bits)
             self.assertGreater(float(result[5, 11]), 0)
             self.assertLess(float(result[5, 11]), float(base[5, 11]))
-            weight = dump_contract._subtitle_gaussian_weight_from_q(q, 120, 120)
-            self.assertGreater(float(weight[5, 13]), 0)  # exp(-32), no four-sigma cutoff.
+            weight, direct = dump_contract._subtitle_completion_weight_and_proposal(base, q, subtitle["target"], 120)
+            self.assertEqual(int(weight[5, 13].view(np.uint32)), 0)  # Base already inside UI +/- D/W.
+            self.assertEqual(int(direct[5, 13].view(np.uint32)), int(base[5, 13].view(np.uint32)))
             self.assertEqual(int(result[6, 14].view(np.uint32)), int(base[6, 14].view(np.uint32)))
             self.assertEqual(int(weight[2, 2].view(np.uint32)), 0)  # Finite underflow is legal.
             self.assertTrue(np.array_equal(original.view(np.uint32), base.view(np.uint32)))
             self.assertTrue(np.array_equal(result[0].view(np.uint32), result[2].view(np.uint32)))
 
-    def test_warmup_current_cover_gaussian_allows_empty_pixel_q_and_expires_without_promoting_raw_support(self):
-        import math
-        import numpy as np
-        from fractions import Fraction
-
+    def test_retired_whole_cover_protection_cannot_authorize_a_tuple(self):
         payloads, common = self._tuple()
-        source = np.frombuffer(payloads["contour_source"], dtype="<f2").reshape(4, 24, 4)
-        history = np.zeros((4, 24, 4), dtype="<f4")
-        history[..., :3] = source[..., :3].astype(np.float32)
-        history[..., 3] = 2
-        content = common["tensor_content"]
-        rectangle = common["current_rectangles"][0]
-        for y in range(4):
-            for x in range(24):
-                fx = content[0] + Fraction(2 * x + 1, 2) * 5 / 24
-                fy = content[1] + (20 + Fraction(2 * y + 1, 2)) * 4 / 24
-                if rectangle["left"] <= fx < rectangle["right"] and rectangle["top"] <= fy < rectangle["bottom"]:
-                    history[y, x, 3] = 6  # Current first observation, never confirmed support.
-        payloads["contour_history"] = history.tobytes()
-        payloads["contour_support"] = bytes(4 * 24 * 4)
-        payloads["contour_field_pin"] = bytes(7 * 6 * 4)
-        payloads["contour_distance"] = np.full((6, 7), np.inf, dtype="<f4").tobytes()
-        weight = np.zeros((6, 7), dtype="<f4")
-        sigma = 24 / 60
-        # Independent continuous field-edge geometry; no temporal mask or detector replica.
-        for y in range(6):
-            for x in range(7):
-                fx = min(max(x, content[0]), content[2] - 1) + .5
-                fy = min(max(y, content[1]), content[3] - 1) + .5
-                dx = max(rectangle["left"] - fx, 0, fx - rectangle["right"]) * 24 / 5
-                dy = max(rectangle["top"] - fy, 0, fy - rectangle["bottom"]) * 24 / 4
-                weight[y, x] = math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma))
-        payloads["gaussian_weight"] = weight.tobytes()
-        payloads["gaussian_control"] = struct.pack("<I", 1)
-        for packed in (1, 2, 3, 4, 9, 10, 11, 12):
+        for packed in (1, 2, 3, 4, 8, 9, 10, 11, 12, 5, 6, 7, 13, 14, 15, 16, 0xffffffff):
             common["plane_state"]["warmup_packed"] = packed
-            result = dump_contract.validate_subtitle_contour_tuple(payloads, **common)
-            self.assertEqual(result["support_pixels"], 0)
-            self.assertEqual(result["field_pin_nodes"], 0)
-            self.assertTrue(result["gaussian_smoothing_enabled"])
-            self.assertEqual(result["warmup_remaining"], packed & coordinate.SUBTITLE_OCR.plane_warmup_remaining_mask)
-        for packed in (0, 8):
-            common["plane_state"]["warmup_packed"] = packed
-            with self.assertRaisesRegex(ValueError, "smoothing control"):
+            with self.subTest(packed=packed), self.assertRaisesRegex(ValueError, "warmup word"):
                 dump_contract.validate_subtitle_contour_tuple(payloads, **common)
-        common["plane_state"]["warmup_packed"] = 0
-        payloads["gaussian_weight"] = bytes(7 * 6 * 4)
-        payloads["gaussian_control"] = struct.pack("<I", 0)
-        result = dump_contract.validate_subtitle_contour_tuple(payloads, **common)
-        self.assertFalse(result["gaussian_smoothing_enabled"])
-        self.assertEqual(result["support_pixels"], 0)
-
-    def test_warmup_rejects_unknown_packed_bits_empty_authority_and_invalid_probe(self):
-        payloads, common = self._tuple()
         del common["plane_state"]["warmup_packed"]
         with self.assertRaisesRegex(ValueError, "packed warmup"):
             dump_contract.validate_subtitle_contour_tuple(payloads, **common)
-        for packed in (5, 6, 7, 13, 14, 15, 16, 0xffffffff):
-            common["plane_state"]["warmup_packed"] = packed
-            with self.assertRaisesRegex(ValueError, "packed warmup"):
-                dump_contract.validate_subtitle_contour_tuple(payloads, **common)
-        for context in ({"rectangles": False}, {"invalid_probe": True}, {"ocr_authoritative": False}):
-            payloads, common = self._tuple(**context)
-            common["plane_state"]["warmup_packed"] = 4
-            with self.assertRaisesRegex(ValueError, "packed warmup"):
-                dump_contract.validate_subtitle_contour_tuple(payloads, **common)
 
     def test_gaussian_own_q_exp_and_control_faults_reject_without_changing_temporal_admission(self):
         import numpy as np
 
         payloads, common = self._tuple()
         result = dump_contract.validate_subtitle_contour_tuple(payloads, **common)
-        self.assertTrue(result["squared_source_distance_verified"])
-        self.assertTrue(result["gaussian_weight_verified"])
+        self.assertTrue(result["slope_budget_verified"])
+        self.assertTrue(result["gaussian_weight_endpoints_verified"])
+        self.assertTrue(result["gaussian_weight_base_join_required"])
         for role, values in (("contour_distance", (float("nan"), -1, -float("inf"))),
                              ("gaussian_weight", (float("nan"), -1, 1.01)),
                              ("gaussian_blend", (float("inf"), .041)),
@@ -4782,7 +5497,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty/padding"):
             dump_contract.validate_subtitle_contour_tuple({**payloads, "contour_distance": q.tobytes()}, **common)
 
-    def test_actual_saved_blend_c75_final_replay_does_not_repin_after_shared_conditioning(self):
+    def test_actual_saved_blend_vertical_copy_and_horizontal_final_does_not_repin(self):
         import numpy as np
 
         payloads, _ = self._tuple()
@@ -4791,9 +5506,13 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         subtitle = {"contour": {"authority_valid": True, "gaussian_smoothing_enabled": True},
                     "joint_plane_mode": 3, "tensor_content_rect": (0, 0, 24, 12),
                     "source_width": 120, "source_height": 120, "target": np.float32(0), "active_level": 2}
-        proposal = dump_contract._subtitle_gaussian_literal_blend(base, m, subtitle["target"])
-        _, vertical, final = dump_contract._replay_v2_limiter_fields(proposal, 24)
-        payloads.update(gaussian_weight=m.tobytes(), gaussian_blend=proposal.tobytes(),
+        distance = np.full_like(base, np.float32(100))
+        distance[5, 10] = np.float32(0)
+        distance[5, 11] = np.float32(.0395 * 120 * .5)
+        m, proposal = dump_contract._subtitle_completion_weight_and_proposal(base, distance, subtitle["target"], 120)
+        vertical = proposal.copy()
+        final = dump_contract._replay_subtitle_horizontal_conditioner(proposal, base, 24)
+        payloads.update(contour_distance=distance.tobytes(), gaussian_weight=m.tobytes(), gaussian_blend=proposal.tobytes(),
             gaussian_vertical_conditioned=vertical.tobytes(), gaussian_control=struct.pack("<I", 1))
         result = dump_contract.validate_subtitle_gaussian_fields(payloads, base, subtitle, final_field=final)
         self.assertTrue(result["gaussian_final_verified"])
@@ -4807,37 +5526,228 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Final"):
             dump_contract.validate_subtitle_gaussian_fields(payloads, base, subtitle, final_field=changed)
 
-    def test_gaussian_subnormal_interior_ftz_is_bounded_and_cannot_waive_endpoint_or_zero_sign(self):
+    def test_direct_completion_rejects_weighted_roundtrip_and_wrong_endpoint_sign(self):
         import numpy as np
 
         payloads, _ = self._tuple()
-        base = np.zeros((6, 7), dtype=np.float32)
-        m = np.full_like(base, np.float32(1e-36))
+        base = np.full((6, 7), np.float32(-0.014353686012327671))
+        distance = np.full_like(base, np.float32(2.863717794418335))
         target = np.float32(.01)
-        literal = dump_contract._subtitle_gaussian_literal_blend(base, m, target)
-        self.assertTrue(np.all((literal > 0) & (literal < np.finfo(np.float32).tiny)))
+        m, direct = dump_contract._subtitle_completion_weight_and_proposal(base, distance, target, 120)
+        # Deliberately author the retired alternate arithmetic: it must not be admitted
+        # merely because its displayed M is numerically equivalent to the direct clamp.
+        weighted = np.add(np.multiply(np.subtract(np.float32(1),m,dtype=np.float32),base,dtype=np.float32),
+                          np.multiply(m,target,dtype=np.float32),dtype=np.float32)
+        self.assertTrue(np.all(weighted != direct))
         subtitle = {"contour": {"authority_valid": True, "gaussian_smoothing_enabled": True},
                     "joint_plane_mode": 3, "tensor_content_rect": (0, 0, 7, 6),
                     "source_width": 120, "source_height": 120, "target": target, "active_level": 2}
-        zero = np.zeros_like(base)
-        payloads.update(gaussian_weight=m.tobytes(), gaussian_blend=zero.tobytes(),
-            gaussian_vertical_conditioned=zero.tobytes(), gaussian_control=struct.pack("<I", 1))
+        vertical = direct.copy()
+        final = dump_contract._replay_subtitle_horizontal_conditioner(direct, base, 7)
+        payloads.update(contour_distance=distance.tobytes(), gaussian_weight=m.tobytes(), gaussian_blend=direct.tobytes(),
+            gaussian_vertical_conditioned=vertical.tobytes(), gaussian_control=struct.pack("<I", 1))
         self.assertTrue(dump_contract.validate_subtitle_gaussian_fields(payloads, base, subtitle,
-            final_field=zero)["gaussian_final_verified"])
-        negative = zero.copy(); negative.view(np.uint32)[2, 2] = 0x80000000
+            final_field=final)["gaussian_final_verified"])
         with self.assertRaisesRegex(ValueError, "arithmetic"):
-            dump_contract.validate_subtitle_gaussian_fields({**payloads, "gaussian_blend": negative.tobytes()},
-                base, subtitle, final_field=zero)
-        wrong = zero.copy(); wrong[2, 2] = np.float32(1e-30)
-        with self.assertRaisesRegex(ValueError, "arithmetic"):
-            dump_contract.validate_subtitle_gaussian_fields({**payloads, "gaussian_blend": wrong.tobytes()},
-                base, subtitle, final_field=zero)
-        m[2, 2] = np.float32(1)
+            dump_contract.validate_subtitle_gaussian_fields({**payloads, "gaussian_blend": weighted.tobytes()},
+                base, subtitle, final_field=final)
+        wrong_m = m.copy(); wrong_m[2, 2] += np.float32(3e-6)
+        with self.assertRaisesRegex(ValueError, "weight"):
+            dump_contract.validate_subtitle_gaussian_fields({**payloads, "gaussian_weight": wrong_m.tobytes()},
+                base, subtitle, final_field=final)
+        base.fill(np.float32(0)); distance.fill(np.float32(100))
+        m, direct = dump_contract._subtitle_completion_weight_and_proposal(base, distance, target, 120)
+        payloads.update(contour_distance=distance.tobytes(), gaussian_weight=m.tobytes(), gaussian_blend=direct.tobytes(),
+                        gaussian_vertical_conditioned=direct.tobytes())
+        negative = direct.copy(); negative.view(np.uint32)[2, 2] = 0x80000000
         with self.assertRaisesRegex(ValueError, "endpoints"):
-            dump_contract.validate_subtitle_gaussian_fields({**payloads, "gaussian_weight": m.tobytes()},
-                base, subtitle, final_field=zero)
+            dump_contract.validate_subtitle_gaussian_fields({**payloads, "gaussian_blend": negative.tobytes()},
+                base, subtitle, final_field=direct)
+        negative_m = m.copy(); negative_m.view(np.uint32)[2,2] = 0x80000000
+        with self.assertRaisesRegex(ValueError,"weight"):
+            dump_contract.validate_subtitle_gaussian_fields({**payloads,"gaussian_weight":negative_m.tobytes()},
+                base,subtitle,final_field=direct)
 
-    def test_disabled_gaussian_keeps_base_bits_and_nearest_padding_without_requantization(self):
+    def test_horizontal_budget_matches_exhaustive_exact_vertical_slab_boundary_cases(self):
+        from fractions import Fraction
+        import numpy as np
+
+        policy = coordinate.EXPECTED_SUBTITLE_OCR["contour_policy"]
+        offset = policy["gaussian_center_offset_source_pixels"]
+        completion = policy["distance_completion_source_pixels"]
+        for sw, sh, fw, fh, content in ((162, 91, 31, 23, (3, 2, 29, 21)),
+                                        (91, 162, 23, 31, (2, 3, 21, 29)),
+                                        (53, 29, 17, 11, (0, 0, 17, 11))):
+            ch = min(sh, (sw + 5) // 6); crop_top = sh - ch
+            native = np.zeros((ch, sw), bool)
+            for y, x in ((0, 0), (ch - 1, sw - 1), (ch // 2, sw // 3)):
+                native[y, x] = True
+            centers = [(int(x)+dx, int(y)+dy) for y, x in zip(*np.nonzero(native))
+                       for dx, dy in ((0,0),(-offset,0),(offset,0),(0,-offset),(0,offset))]
+            got = dump_contract._subtitle_contour_slope_budget(native, sw, sh, crop_top, fw, fh, content)
+            cw, height = content[2]-content[0], content[3]-content[1]
+            lx = ((1 << 29) // cw) * cw / (1 << 30)
+            rx, ry = sw/cw+completion, sh/height+completion
+            expected = np.full((fh,fw), np.inf)
+            for y in range(content[1],content[3]):
+                py = Fraction((2 * (y-content[1]) + 1) * sh, 2 * height) - Fraction(1,2) - crop_top
+                radius_y = Fraction(sh, height) + completion
+                eligible = [(cx,cy) for cx,cy in centers if abs(py-cy) <= radius_y]
+                for x in range(content[0],content[2]):
+                    px = (x-content[0]+.5)*sw/cw-.5
+                    if eligible:
+                        expected[y,x] = min(lx*max(abs(px-cx)-rx,0) for cx,cy in eligible)
+            with self.subTest(source=(sw,sh),content=content):
+                self.assertTrue(np.array_equal(np.isfinite(got),np.isfinite(expected)))
+                np.testing.assert_allclose(got[np.isfinite(got)],expected[np.isfinite(expected)],rtol=0,atol=1e-12)
+                pins = dump_contract._subtitle_contour_project_support(native,sh,crop_top,fw,fh,content)
+                self.assertTrue(np.all(got[pins] == 0))
+
+    def test_completion_weight_uses_base_gap_two_sides_and_rounded_endpoints(self):
+        import numpy as np
+
+        base = np.array([[-.03,.03,.01,0.,-.0]],dtype=np.float32)
+        distance = np.array([[.6,.6,.1,0.,.1]],dtype=np.float32)
+        weight, proposal = dump_contract._subtitle_completion_weight_and_proposal(base,distance,np.float32(.01),120)
+        self.assertLess(float(proposal[0,0]),.01)
+        self.assertGreater(float(proposal[0,1]),.01)
+        self.assertEqual(int(weight[0,2].view(np.uint32)),0)
+        self.assertEqual(int(proposal[0,2].view(np.uint32)),int(base[0,2].view(np.uint32)))
+        self.assertEqual(int(proposal[0,3].view(np.uint32)),int(np.float32(.01).view(np.uint32)))
+        tiny = np.full_like(base,np.float32(1e-30))
+        weight, proposal = dump_contract._subtitle_completion_weight_and_proposal(base,tiny,np.float32(.01),120)
+        self.assertEqual(int(weight[0,0].view(np.uint32)),int(np.float32(1).view(np.uint32)))
+        self.assertEqual(int(proposal[0,0].view(np.uint32)),int(np.float32(.01).view(np.uint32)))
+
+    def test_horizontal_budget_has_inclusive_exact_slab_boundary_and_no_vertical_ramp(self):
+        import numpy as np
+
+        native = np.zeros((4,24), dtype=bool)
+        native[1,12] = True
+        distance = dump_contract._subtitle_contour_slope_budget(native,24,12,8,7,12,(1,0,6,12))
+        # Global centers are7,9,11 after the existing virtual±2 cross. RadiusY is1+3.
+        # Row3 touches the lower exact rectangle boundary; row2 has no eligible center.
+        self.assertTrue(np.isposinf(distance[2]).all())
+        self.assertTrue(np.isfinite(distance[3,1:6]).all())
+        self.assertTrue(np.isposinf(distance[0]).all())
+        self.assertTrue(np.isposinf(distance[:,0]).all())
+
+    def test_active_horizontal_only_completion_copies_inf_rows_and_restores_unchanged_q30_rows(self):
+        import numpy as np
+
+        payloads,_ = self._tuple()
+        base = np.full((5,64), np.float32(.0001234567))
+        base[0,0] = np.float32(-0.0)
+        base[0,1] = np.float32(.03)
+        base[2,0] = np.float32(.025)
+        content = (1,1,63,4)
+        distance = np.full(base.shape,np.inf,dtype=np.float32)
+        distance[2,1:63] = 100
+        distance[2,4] = 0
+        x = np.clip(np.arange(64),1,62)
+        y = np.clip(np.arange(5),1,3)
+        joined_distance = distance[np.ix_(y,x)]
+        effective_base = np.where(np.isfinite(joined_distance),base[np.ix_(y,x)],base).astype(np.float32)
+        target = np.float32(.02)
+        weight,proposal = dump_contract._subtitle_completion_weight_and_proposal(effective_base,joined_distance,target,120)
+        vertical = proposal.copy()
+        final = dump_contract._replay_subtitle_horizontal_conditioner(proposal,base,62)
+        subtitle = {"contour":{"authority_valid":True,"gaussian_smoothing_enabled":True},
+            "joint_plane_mode":3,"tensor_content_rect":content,"source_width":120,
+            "source_height":120,"target":target,"active_level":2}
+        payloads.update(contour_distance=distance.tobytes(),gaussian_weight=weight.tobytes(),
+            gaussian_blend=proposal.tobytes(),gaussian_vertical_conditioned=vertical.tobytes(),
+            gaussian_control=struct.pack('<I',1))
+        self.assertTrue(dump_contract.validate_subtitle_gaussian_fields(payloads,base,subtitle,
+            final_field=final)['gaussian_final_verified'])
+        self.assertTrue(np.array_equal(final[[0,1,3,4]].view(np.uint32),base[[0,1,3,4]].view(np.uint32)))
+        self.assertFalse(np.array_equal(final[2].view(np.uint32),proposal[2].view(np.uint32)))
+        changed = final.copy(); changed.view(np.uint32)[1,10] += 1
+        with self.assertRaisesRegex(ValueError,'Final'):
+            dump_contract.validate_subtitle_gaussian_fields(payloads,base,subtitle,final_field=changed)
+        changed = vertical.copy(); changed[1,4] = target
+        with self.assertRaisesRegex(ValueError,'vertical output'):
+            dump_contract.validate_subtitle_gaussian_fields({**payloads,'gaussian_vertical_conditioned':changed.tobytes()},
+                base,subtitle,final_field=final)
+        changed = proposal.copy(); changed[0,0] = base[1,1]  # Illegal clamping on anInf padding row.
+        with self.assertRaisesRegex(ValueError,'endpoints'):
+            dump_contract.validate_subtitle_gaussian_fields({**payloads,'gaussian_blend':changed.tobytes()},
+                base,subtitle,final_field=final)
+
+    def test_direct_completion_clamps_roundoff_to_exact_base_at_both_sides(self):
+        import numpy as np
+
+        # The FP32 difference/product rounds gap upward. Its preceding float is still
+        # strictly inside gap, yet direct UI +/- D/W crosses Base by one ulp.
+        for width, base_value, target_value, budget_value in (
+                (315, -.04, 12 / 315, 24.600000381469727),
+                (2365, .015083770267665386, .005073995795100927, 23.67311668395996)):
+            base = np.full((6,7),np.float32(base_value))
+            target, budget = np.float32(target_value), np.full_like(base,np.float32(budget_value))
+            difference = np.subtract(target,base,dtype=np.float32)
+            gap = np.multiply(np.abs(difference),np.float32(width),dtype=np.float32)
+            self.assertTrue(np.all(budget < gap))
+            normalized = np.divide(budget,np.float32(width),dtype=np.float32)
+            raw = (np.subtract(target,normalized,dtype=np.float32) if difference[0,0]>0 else
+                   np.add(target,normalized,dtype=np.float32))
+            self.assertTrue(np.all((raw<np.minimum(base,target))|(raw>np.maximum(base,target))))
+            weight, proposal = dump_contract._subtitle_completion_weight_and_proposal(base,budget,target,width)
+            self.assertTrue(np.all((weight>0)&(weight<1)))
+            self.assertTrue(np.array_equal(proposal.view(np.uint32),base.view(np.uint32)))
+            payloads,_=self._tuple()
+            vertical=proposal.copy()
+            final=dump_contract._replay_subtitle_horizontal_conditioner(proposal,base,7)
+            payloads.update(contour_distance=budget.tobytes(),gaussian_weight=weight.tobytes(),
+                gaussian_blend=proposal.tobytes(),gaussian_vertical_conditioned=vertical.tobytes(),
+                gaussian_control=struct.pack('<I',1))
+            subtitle={'contour':{'authority_valid':True,'gaussian_smoothing_enabled':True},
+                      'joint_plane_mode':3,'tensor_content_rect':(0,0,7,6),'source_width':width,
+                      'source_height':120,'target':target,'active_level':2}
+            with self.subTest(source_width=width):
+                self.assertTrue(dump_contract.validate_subtitle_gaussian_fields(payloads,base,subtitle,
+                    final_field=final)['gaussian_final_verified'])
+                # Near-one division has the declared M admission bound. A rounded/clamped
+                # M0 must select canonical Base, even while the nominal M is tiny and positive.
+                self.assertTrue(dump_contract.validate_subtitle_gaussian_fields(
+                    {**payloads,'gaussian_weight':np.zeros_like(weight).tobytes()},base,subtitle,
+                    final_field=final)['gaussian_final_verified'])
+                with self.assertRaises(ValueError):
+                    dump_contract.validate_subtitle_gaussian_fields({**payloads,'gaussian_blend':raw.tobytes()},
+                        base,subtitle,final_field=final)
+
+    def test_sm5_reciprocal_division_witnesses_are_attributed_and_interval_is_bounded(self):
+        import numpy as np
+
+        # Actual native119 W854 output at field(641,710) uses reciprocal then multiply.
+        # Its word is outside the adjacent exact-quotient bracket, but within SM5 3.1.3.2.
+        width=854; target=np.float32(.014051521196961403)
+        for base_value in (.004588784649968147,.03):
+            base=np.full((6,7),np.float32(base_value))
+            budget=np.full_like(base,np.float32(6.206886291503906))
+            m,_=dump_contract._subtitle_completion_weight_and_proposal(base,budget,target,width)
+            normalized=np.multiply(budget,np.divide(np.float32(1),np.float32(width),dtype=np.float32),dtype=np.float32)
+            proposal=(np.subtract(target,normalized,dtype=np.float32) if target>base_value else
+                      np.add(target,normalized,dtype=np.float32))
+            if target>base_value:
+                self.assertEqual(int(proposal[0,0].view(np.uint32)),1004423210)
+            vertical=proposal.copy()
+            final=dump_contract._replay_subtitle_horizontal_conditioner(proposal,base,7)
+            payloads,_=self._tuple()
+            payloads.update(contour_distance=budget.tobytes(),gaussian_weight=m.tobytes(),gaussian_blend=proposal.tobytes(),
+                            gaussian_vertical_conditioned=vertical.tobytes(),gaussian_control=struct.pack('<I',1))
+            subtitle={'contour':{'authority_valid':True,'gaussian_smoothing_enabled':True},'joint_plane_mode':3,
+                      'tensor_content_rect':(0,0,7,6),'source_width':width,'source_height':480,
+                      'target':target,'active_level':2}
+            with self.subTest(base=base_value):
+                self.assertTrue(dump_contract.validate_subtitle_gaussian_fields(payloads,base,subtitle,
+                    final_field=final)['gaussian_final_verified'])
+                lo,hi=dump_contract._subtitle_completion_proposal_interval(base,budget,target,width)
+                for outside in (np.nextafter(lo,np.float32(-np.inf)),np.nextafter(hi,np.float32(np.inf))):
+                    with self.assertRaisesRegex(ValueError,'arithmetic'):
+                        dump_contract.validate_subtitle_gaussian_fields({**payloads,'gaussian_blend':outside.tobytes()},
+                            base,subtitle,final_field=final)
+
+    def test_disabled_gaussian_keeps_full_base_bits_including_distinct_padding(self):
         import numpy as np
 
         payloads, _ = self._tuple(rectangles=False)
@@ -4846,14 +5756,19 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         base[0] = np.float32(.03)
         subtitle = {"contour": {"authority_valid": False, "gaussian_smoothing_enabled": False},
                     "tensor_content_rect": (1, 1, 6, 5)}
-        joined, _ = dump_contract._subtitle_gaussian_joined_base(base, subtitle)
-        payloads.update(gaussian_blend=joined.tobytes(), gaussian_vertical_conditioned=joined.tobytes())
-        result = dump_contract.validate_subtitle_gaussian_fields(payloads, base, subtitle, final_field=joined)
+        # Author the expected copy directly from the immutable input, not the verifier helper.
+        # The distinct top padding and signed zero must both survive the inactive path.
+        payloads.update(gaussian_blend=base.tobytes(), gaussian_vertical_conditioned=base.tobytes())
+        result = dump_contract.validate_subtitle_gaussian_fields(payloads, base, subtitle, final_field=base)
         self.assertFalse(result["gaussian_smoothing_enabled"])
         for role in ("gaussian_blend", "gaussian_vertical_conditioned"):
             changed = np.frombuffer(payloads[role], dtype="<u4").copy(); changed[2 * 7 + 2] = 0
             with self.subTest(role=role), self.assertRaisesRegex(ValueError, "exact Base"):
-                dump_contract.validate_subtitle_gaussian_fields({**payloads, role: changed.tobytes()}, base, subtitle, final_field=joined)
+                dump_contract.validate_subtitle_gaussian_fields({**payloads, role: changed.tobytes()}, base, subtitle, final_field=base)
+            clamped = base.copy(); clamped[0] = base[1]
+            with self.subTest(role=role, fault="padding-clamped"), self.assertRaisesRegex(ValueError, "exact Base"):
+                dump_contract.validate_subtitle_gaussian_fields(
+                    {**payloads, role: clamped.tobytes()}, base, subtitle, final_field=base)
 
 
 class WindowRegionDumpContractTests(unittest.TestCase):

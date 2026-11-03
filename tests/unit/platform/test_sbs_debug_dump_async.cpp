@@ -15,6 +15,7 @@
   #include <array>
   #include <bit>
   #include <chrono>
+  #include <cmath>
   #include <cstdlib>
   #include <cstring>
   #include <filesystem>
@@ -25,6 +26,7 @@
   #include <memory>
   #include <optional>
   #include <string>
+  #include <utility>
   #include <vector>
 
   #include <nlohmann/json.hpp>
@@ -158,7 +160,7 @@ namespace {
     words[v2::subtitle_plane_cut_epoch_word] = subtitle_scene_epoch;
     const auto a = v2::subtitle_plane_adaptive_offset;
     words[a] = 1u; words[a + 1u] = 8u;
-    words[a + 3u] = std::bit_cast<std::uint32_t>(target);
+    words[a + 3u] = std::bit_cast<std::uint32_t>(current_valid && count == 0u ? 0.0f : target);
     put64(a + 4u, frame.matched_observation_timestamp_us);
     words[a + 12u] = std::bit_cast<std::uint32_t>(v2::display_budget());
     return words;
@@ -748,6 +750,8 @@ namespace {
       completed.subtitle_locator_state = resource;
       completed.shadow_base_final_parallax = resource;
       completed.subtitle_contour_support = resource;
+      completed.subtitle_glyph_matte = resource;
+      completed.subtitle_condition_params = resource;
       completed.subtitle_contour_field_pin = resource;
       completed.subtitle_contour_distance = resource;
       completed.subtitle_contour_identity = resource;
@@ -766,6 +770,8 @@ namespace {
       EXPECT_TRUE(dump_detail::subtitle_capture_resources_are_authenticated(completed));
       for (auto member : {
              &platf::sbs_debug::frame::subtitle_contour_support,
+             &platf::sbs_debug::frame::subtitle_glyph_matte,
+             &platf::sbs_debug::frame::subtitle_condition_params,
              &platf::sbs_debug::frame::subtitle_contour_field_pin,
              &platf::sbs_debug::frame::subtitle_contour_distance,
              &platf::sbs_debug::frame::subtitle_contour_identity,
@@ -1061,17 +1067,9 @@ namespace {
     const auto store_word = [](auto &bytes, std::size_t index, std::uint32_t value) {
       std::memcpy(bytes.data() + index * sizeof(value), &value, sizeof(value));
     };
-    // Real content has signed zero in row0 and a non-Q30 constant in row1. Padding is poison.
+    // Distinct padding and signed-zero content must all survive an empty publication exactly.
     store_word(base, 1u, target_bits);
-    auto expected_base = base;
-    for (std::size_t row = 0u; row < 2u; ++row) {
-      const auto i = row * 3u + 1u;
-      std::uint32_t value;
-      std::memcpy(&value, base.data() + i * 4u, 4u);
-      store_word(expected_base, row * 3u, value);
-      store_word(expected_base, row * 3u + 2u, value);
-    }
-    auto blend = expected_base, vertical = expected_base, final = expected_base;
+    auto blend = base, vertical = base, final = base;
     auto control = repeated_word_bytes(0u, 1u);
     const auto valid = [&]() {
       return dump_detail::subtitle_gaussian_fields_are_authenticated(
@@ -1111,70 +1109,264 @@ namespace {
     EXPECT_FALSE(valid()) << "current full-strength plane authority is required";
   }
 
-  TEST(SbsDebugDumpContourTest, WarmupGaussianRequiresExactCurrentCoversAndExpiresWithEmptyNativeQ) {
+  TEST(SbsDebugDumpContourTest, CompletionBudgetAuthenticatesDirectProposalAndFeasibleBase) {
+    // Isolated admission samples: D is in parallax pixels, not squared source distance.
+    auto fixture = current_contour_dump_fixture();
+    fixture.identity[12u] = 3u; fixture.identity[13u] = 2u;
+    fixture.identity[16u] = 1u; fixture.identity[17u] = 0u;
+    fixture.identity[18u] = 2u; fixture.identity[19u] = 2u;
+    auto locator = fixture.locator;
+    locator[v2::subtitle_plane_current_slot_mask_word] = 1u;
+    locator[v2::subtitle_plane_field_extent_offset] = 3u;
+    locator[v2::subtitle_plane_field_extent_offset + 1u] = 2u;
+    locator[v2::subtitle_plane_content_offset] = 1u;
+    locator[v2::subtitle_plane_content_offset + 1u] = 0u;
+    locator[v2::subtitle_plane_content_offset + 2u] = 2u;
+    locator[v2::subtitle_plane_content_offset + 3u] = 2u;
+    locator[v2::subtitle_plane_adaptive_offset + 13u] = 2u;
+    constexpr float target = 0.015625f;  // 20 px at the fixture's source width 1280.
+    locator[v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(target);
+    auto distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, 6u);
+    const auto store_word = [](auto &bytes, std::size_t index, std::uint32_t value) {
+      std::memcpy(bytes.data() + index * sizeof(value), &value, sizeof(value));
+    };
+    for (const float b : {0.0078125f, 0.0234375f}) {  // Ten pixels below/above the UI.
+      SCOPED_TRACE(b);
+      const auto base = repeated_word_bytes(std::bit_cast<std::uint32_t>(b), 6u);
+      auto weight = repeated_word_bytes(std::bit_cast<std::uint32_t>(0.5f), 6u);
+      const float direct = b < target ? 0.01171875f : 0.01953125f;
+      auto blend = repeated_word_bytes(std::bit_cast<std::uint32_t>(direct), 6u);
+      auto vertical = blend, final = blend;
+      const auto control = repeated_word_bytes(1u, 1u);
+      for (std::size_t i : {1u, 4u}) store_word(distance, i, std::bit_cast<std::uint32_t>(5.0f));
+      const auto valid = [&]() {
+        return dump_detail::subtitle_gaussian_fields_are_authenticated(
+          word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr), distance, weight,
+          blend, vertical, control, base, final);
+      };
+      ASSERT_TRUE(valid()) << "D5 completes either ten-pixel Base gap directly, including padding";
+      constexpr float admitted_weight = 0.500001f;
+      weight = repeated_word_bytes(std::bit_cast<std::uint32_t>(admitted_weight), 6u);
+      ASSERT_TRUE(valid()) << "admitted M error must not perturb the direct budget proposal";
+      const volatile float inverse = 1.0f - admitted_weight;
+      const volatile float base_term = inverse * b;
+      const volatile float ui_term = admitted_weight * target;
+      const float obsolete_lerp = base_term + ui_term;
+      ASSERT_NE(std::bit_cast<std::uint32_t>(obsolete_lerp), std::bit_cast<std::uint32_t>(direct));
+      blend = repeated_word_bytes(std::bit_cast<std::uint32_t>(obsolete_lerp), 6u);
+      EXPECT_FALSE(valid()) << "a lerp reconstructed from rounded M is not the direct proposal";
+      blend = repeated_word_bytes(std::bit_cast<std::uint32_t>(direct), 6u);
+      weight = repeated_word_bytes(std::bit_cast<std::uint32_t>(0.500004f), 6u);
+      EXPECT_FALSE(valid()) << "the generated M error ceiling still applies";
+      for (const float d : {10.0f, 11.0f}) {
+        for (std::size_t i : {1u, 4u}) store_word(distance, i, std::bit_cast<std::uint32_t>(d));
+        weight = repeated_word_bytes(0u, 6u);
+        blend = base; vertical = base; final = base;
+        ASSERT_TRUE(valid()) << "D at or above the immutable Base gap has no influence";
+        weight[0u] = 1u;
+        EXPECT_FALSE(valid()) << "feasible Base requires exact +0 M, not a tiny positive weight";
+      }
+    }
+    // Equal numerical UI/Base depths still follow the Base-copy branch when D>0.
+    locator[v2::subtitle_plane_adaptive_offset + 3u] = 0x80000000u;
+    for (std::size_t i : {1u, 4u}) store_word(distance, i, std::bit_cast<std::uint32_t>(1.0f));
+    const auto zero = repeated_word_bytes(0u, 6u);
+    auto blend = zero;
+    ASSERT_TRUE(dump_detail::subtitle_gaussian_fields_are_authenticated(
+      word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr), distance, zero,
+      blend, zero, repeated_word_bytes(1u, 1u), zero, zero));
+    store_word(blend, 0u, 0x80000000u);
+    EXPECT_FALSE(dump_detail::subtitle_gaussian_fields_are_authenticated(
+      word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr), distance, zero,
+      blend, zero, repeated_word_bytes(1u, 1u), zero, zero));
+
+    struct near_endpoint_t {
+      std::uint32_t source_width;
+      float base;
+      float target;
+    };
+    for (const auto sample : {near_endpoint_t {315u, -0.04f, 12.0f / 315.0f},
+                             near_endpoint_t {2365u, 0.015083770267665386f, 0.005073995795100927f}}) {
+      SCOPED_TRACE(sample.source_width);
+      fixture.identity[8u] = sample.source_width;
+      locator[v2::subtitle_plane_source_extent_offset] = sample.source_width;
+      locator[v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(sample.target);
+      const volatile float difference = sample.target - sample.base;
+      const volatile float gap = std::abs(difference) * static_cast<float>(sample.source_width);
+      const float d = std::nextafter(static_cast<float>(gap), 0.0f);
+      const volatile float remaining = d / gap;
+      const float m = 1.0f - remaining;
+      ASSERT_GT(m, 0.0f);
+      ASSERT_LT(m, 1.0f);
+      const volatile float normalized = d / static_cast<float>(sample.source_width);
+      const float unclamped = difference > 0.0f ?
+        sample.target - normalized : sample.target + normalized;
+      if (difference > 0.0f) EXPECT_LT(unclamped, sample.base);
+      else EXPECT_GT(unclamped, sample.base);
+      for (std::size_t i : {1u, 4u}) store_word(distance, i, std::bit_cast<std::uint32_t>(d));
+      const auto base = repeated_word_bytes(std::bit_cast<std::uint32_t>(sample.base), 6u);
+      const auto weight = repeated_word_bytes(std::bit_cast<std::uint32_t>(m), 6u);
+      auto proposal = base;
+      const auto valid = [&]() {
+        return dump_detail::subtitle_gaussian_fields_are_authenticated(
+          word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr), distance, weight,
+          proposal, base, repeated_word_bytes(1u, 1u), base, base);
+      };
+      ASSERT_TRUE(valid()) << "interior M may complete to exact Base after endpoint clamping";
+      proposal = repeated_word_bytes(std::bit_cast<std::uint32_t>(unclamped), 6u);
+      EXPECT_FALSE(valid()) << "one-ULP overshoot beyond Base is never an admitted proposal";
+    }
+    // Actual saved SM5 output at W854 uses D * float(1/W), which can differ from
+    // a correctly rounded D/W followed by subtraction. Both signs are admitted.
+    for (const float b : {0.004588784649968147f, 0.03f}) {
+      constexpr std::uint32_t source_width = 854u;
+      constexpr float ui = 0.014051521196961403f, d = 6.206886291503906f;
+      fixture.identity[8u] = source_width;
+      locator[v2::subtitle_plane_source_extent_offset] = source_width;
+      locator[v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(ui);
+      const volatile float difference = ui - b;
+      const volatile float gap = std::abs(difference) * static_cast<float>(source_width);
+      const volatile float remaining = d / gap;
+      const float m = 1.0f - remaining;
+      const volatile float reciprocal = 1.0f / static_cast<float>(source_width);
+      const volatile float normalized = d * reciprocal;
+      const float native = difference > 0.0f ? ui - normalized : ui + normalized;
+      if (b < ui) {
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(native), 1004423210u);
+      }
+      for (std::size_t i : {1u, 4u}) store_word(distance, i, std::bit_cast<std::uint32_t>(d));
+      const auto base = repeated_word_bytes(std::bit_cast<std::uint32_t>(b), 6u);
+      const auto weight = repeated_word_bytes(std::bit_cast<std::uint32_t>(m), 6u);
+      const auto proposal = repeated_word_bytes(std::bit_cast<std::uint32_t>(native), 6u);
+      EXPECT_TRUE(dump_detail::subtitle_gaussian_fields_are_authenticated(
+        word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr), distance, weight,
+        proposal, proposal, repeated_word_bytes(1u, 1u), base, proposal));
+    }
+    // The representational enclosure remains specific to the direct budget operation.
+    // This retired weighted-blend witness lies beyond even the legal reciprocal path.
+    fixture.identity[8u] = 120u;
+    locator[v2::subtitle_plane_source_extent_offset] = 120u;
+    locator[v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(0.01f);
+    for (std::size_t i : {1u, 4u}) store_word(distance, i, std::bit_cast<std::uint32_t>(2.863717794418335f));
+    const auto negative_base = repeated_word_bytes(std::bit_cast<std::uint32_t>(-0.014353686012327671f), 6u);
+    const auto negative_weight = repeated_word_bytes(std::bit_cast<std::uint32_t>(0.02009439468383789f), 6u);
+    const auto direct = repeated_word_bytes(std::bit_cast<std::uint32_t>(-0.013864316046237946f), 6u);
+    const auto obsolete = repeated_word_bytes(std::bit_cast<std::uint32_t>(-0.013864313252270222f), 6u);
+    EXPECT_TRUE(dump_detail::subtitle_gaussian_fields_are_authenticated(
+      word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr), distance, negative_weight,
+      direct, direct, repeated_word_bytes(1u, 1u), negative_base, direct));
+    EXPECT_FALSE(dump_detail::subtitle_gaussian_fields_are_authenticated(
+      word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr), distance, negative_weight,
+      obsolete, direct, repeated_word_bytes(1u, 1u), negative_base, direct));
+  }
+
+  TEST(SbsDebugDumpContourTest, HorizontalOnlyActiveLowerRowPreservesInfRowsAndDistinctPaddingBits) {
+    // Isolated presentation authentication: first content row is empty, later row is active.
+    // Unchanged non-Q30 Base rows must survive the horizontal guard without quantization.
+    auto fixture = current_contour_dump_fixture();
+    const auto store_word = set_trace_word;
+    constexpr std::uint32_t width = 40u, height = 3u;
+    fixture.identity[12u] = width; fixture.identity[13u] = height;
+    fixture.identity[16u] = 3u; fixture.identity[17u] = 1u;
+    fixture.identity[18u] = 37u; fixture.identity[19u] = 3u;
+    auto locator = fixture.locator;
+    locator[v2::subtitle_plane_current_slot_mask_word] = 1u;
+    locator[v2::subtitle_plane_field_extent_offset] = width;
+    locator[v2::subtitle_plane_field_extent_offset + 1u] = height;
+    locator[v2::subtitle_plane_content_offset] = 3u;
+    locator[v2::subtitle_plane_content_offset + 1u] = 1u;
+    locator[v2::subtitle_plane_content_offset + 2u] = 37u;
+    locator[v2::subtitle_plane_content_offset + 3u] = 3u;
+    locator[v2::subtitle_plane_adaptive_offset + 13u] = 68u;
+    constexpr auto target = std::bit_cast<std::uint32_t>(0.015625f);
+    locator[v2::subtitle_plane_adaptive_offset + 3u] = target;
+    auto distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, width * height);
+    for (std::size_t x = 3u; x < 37u; ++x) store_word(distance, 2u * width + x, 0u);
+    auto base = repeated_word_bytes(std::bit_cast<std::uint32_t>(0.0001234567f), width * height);
+    store_word(base, 0u, 0x80000000u);
+    store_word(base, 1u, std::bit_cast<std::uint32_t>(0.03f));
+    auto weight = repeated_word_bytes(0u, width * height);
+    auto proposal = base;
+    for (std::size_t x = 0u; x < width; ++x) {
+      store_word(weight, 2u * width + x, std::bit_cast<std::uint32_t>(1.f));
+      store_word(proposal, 2u * width + x, target);
+    }
+    auto vertical = proposal, final = proposal;
+    const auto control = repeated_word_bytes(1u, 1u);
+    const auto valid = [&]() {
+      return dump_detail::subtitle_gaussian_fields_are_authenticated(
+        word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr), distance, weight,
+        proposal, vertical, control, base, final);
+    };
+    ASSERT_TRUE(valid()) << "any eligible row enables horizontal-only completion";
+    store_word(weight, 0u, std::bit_cast<std::uint32_t>(1.f));
+    EXPECT_FALSE(valid()) << "anInf budget row requires exact zero influence";
+    store_word(weight, 0u, 0u);
+    store_word(proposal, 0u, std::bit_cast<std::uint32_t>(0.0001234567f));
+    EXPECT_FALSE(valid()) << "localInf padding copies original Base signed zero, never a clamped neighbor";
+    proposal = base;
+    for (std::size_t x = 0u; x < width; ++x) store_word(proposal, 2u * width + x, target);
+    store_word(vertical, width + 4u, target);
+    EXPECT_FALSE(valid()) << "vertical subtitle output must be the exact proposal copy";
+    vertical = proposal;
+    store_word(final, width + 4u, std::bit_cast<std::uint32_t>(0.0001234567f) + 1u);
+    EXPECT_FALSE(valid()) << "an unchanged row cannot acquire a horizontal-Q30 roundoff edit";
+  }
+
+  TEST(SbsDebugDumpContourTest, RetiredWarmupCannotAuthorizeRectangleGaussianWithEmptyNativeQ) {
     auto fixture = current_contour_dump_fixture();
     auto locator = fixture.locator;
-    locator[v2::subtitle_plane_warmup_word] = v2::subtitle_plane_warmup_observations;
     locator[v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(0.0f);
     const auto width = fixture.identity[12u], height = fixture.identity[13u];
-    const auto left = fixture.identity[16u], top = fixture.identity[17u];
-    const auto right = fixture.identity[18u], bottom = fixture.identity[19u];
     const auto pixels = static_cast<std::size_t>(width) * height;
     const auto distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, pixels);
     auto weight = repeated_word_bytes(0u, pixels);
     const auto zero = repeated_word_bytes(0u, pixels);
-    auto control = repeated_word_bytes(1u, 1u);
-    const double sigma = std::min(fixture.identity[8u], fixture.identity[9u]) / 60.0;
-    for (std::uint32_t y = 0u; y < height; ++y) {
-      for (std::uint32_t x = 0u; x < width; ++x) {
-        const double fx = std::clamp(x, left, right - 1u) + .5;
-        const double fy = std::clamp(y, top, bottom - 1u) + .5;
-        double q = std::numeric_limits<double>::infinity();
-        for (std::uint32_t slot = 0u; slot < fixture.ocr[4u]; ++slot) {
-          const auto offset = v2::subtitle_ocr_final_box_offset + slot * v2::subtitle_ocr_box_word_count;
-          const double dx = std::max({fixture.ocr[offset] - fx, 0.0, fx - fixture.ocr[offset + 2u]}) *
-            fixture.identity[8u] / (right - left);
-          const double dy = std::max({fixture.ocr[offset + 1u] - fy, 0.0, fy - fixture.ocr[offset + 3u]}) *
-            fixture.identity[9u] / (bottom - top);
-          q = std::min(q, dx * dx + dy * dy);
-        }
-        const float m = static_cast<float>(std::exp(-q / (2.0 * sigma * sigma)));
-        std::memcpy(weight.data() + (static_cast<std::size_t>(y) * width + x) * 4u, &m, 4u);
-      }
-    }
+    auto control = repeated_word_bytes(0u, 1u);
     const auto valid = [&]() {
       return dump_detail::subtitle_gaussian_fields_are_authenticated(
         word_bytes(fixture.identity), word_bytes(locator), word_bytes(fixture.ocr),
         distance, weight, zero, zero, control, zero, zero);
     };
-    ASSERT_TRUE(valid()) << "presentation warmup can be finite while raw pixel q remains empty";
-    for (const auto packed : {1u, 2u, 3u, 4u, 9u, 10u, 11u, 12u}) {
+    ASSERT_TRUE(valid()) << "empty current support publishes exact Base";
+    for (const auto packed : {1u, 2u, 3u, 4u, 8u, 9u, 10u, 11u, 12u, 5u, 6u, 7u, 13u, 14u, 15u, 16u, 0xffffffffu}) {
       locator[v2::subtitle_plane_warmup_word] = packed;
-      EXPECT_TRUE(valid());
+      EXPECT_FALSE(valid()) << "no retired countdown or cue value has presentation authority";
     }
-    for (const auto packed : {0u, 8u, 5u, 6u, 7u, 13u, 14u, 15u, 16u, 0xffffffffu}) {
-      locator[v2::subtitle_plane_warmup_word] = packed;
-      EXPECT_FALSE(valid()) << "expired or malformed countdown cannot admit rectangle weight";
-    }
-    locator[v2::subtitle_plane_warmup_word] = 4u;
-    fixture.ocr[5u] ^= 1u;
-    EXPECT_FALSE(valid()) << "a stale current OCR frame cannot authorize warmup";
-    fixture.ocr[5u] ^= 1u;
-    fixture.ocr[v2::subtitle_ocr_final_box_offset + 4u] ^= 1u;
-    EXPECT_FALSE(valid()) << "raw/final cover payload correspondence remains authenticated";
+    locator[v2::subtitle_plane_warmup_word] = 0u;
+    weight = repeated_word_bytes(std::bit_cast<std::uint32_t>(1.f), pixels);
+    EXPECT_FALSE(valid()) << "current covers cannot add protection to an empty native mask";
+    control[0u] = 1u;
+    EXPECT_FALSE(valid()) << "an active flag cannot override empty native distance";
   }
 
-  TEST(SbsDebugDumpContourTest, ConfirmationCodesBindBinarySupportAndBoundedCurrentAnchors) {
+  TEST(SbsDebugDumpContourTest, CurrentEvidenceBindsSupportIndependentlyOfDiagnosticConfirmationCodes) {
     auto fixture = current_contour_dump_fixture();
     const auto native_pixels = static_cast<std::size_t>(fixture.identity[8u]) * fixture.identity[11u];
     const auto field_pixels = static_cast<std::size_t>(fixture.identity[12u]) * fixture.identity[13u];
-    const auto pixel = 64u * static_cast<std::size_t>(fixture.identity[8u]) + 200u;
+    // A genuine current-core palette-grid sample, with an actual current native edge.
+    // A flat P-filled rectangle must never satisfy the current glyph-mask contract.
+    const auto core = v2::subtitle_ocr_raw_box_offset;
+    const auto cw = fixture.identity[18u] - fixture.identity[16u];
+    const auto ch = fixture.identity[19u] - fixture.identity[17u];
+    constexpr auto columns = v2::subtitle_contour_palette_grid_columns;
+    constexpr auto rows = v2::subtitle_contour_palette_grid_rows;
+    const auto px = (((fixture.ocr[core] - fixture.identity[16u]) * (2u * columns) +
+      (columns - 1u) * (fixture.ocr[core + 2u] - fixture.ocr[core])) * fixture.identity[8u]) / (2u * columns * cw);
+    const auto py = (((fixture.ocr[core + 1u] - fixture.identity[17u]) * (2u * rows) +
+      (rows - 1u) * (fixture.ocr[core + 3u] - fixture.ocr[core + 1u])) * fixture.identity[9u]) / (2u * rows * ch) - fixture.identity[10u];
+    const auto pixel = py * static_cast<std::size_t>(fixture.identity[8u]) + px;
     std::vector<std::uint8_t> support(native_pixels * 4u), pin(field_pixels * 4u);
     std::vector<std::uint8_t> history(native_pixels * 16u), source(native_pixels * 8u);
     std::vector<std::uint8_t> probability(v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height * 4u);
     const auto distance = repeated_word_bytes(v2::subtitle_contour_distance_empty_bits, field_pixels);
     const std::array<std::uint16_t, 4u> color {0x3800u, 0x3800u, 0x3800u, 0x3c00u};
     std::memcpy(source.data() + pixel * sizeof(color), color.data(), sizeof(color));
+    const auto neighbor = pixel + v2::subtitle_contour_spatial_edge_radius_source_pixels;
+    const std::array<std::uint16_t, 4u> dark_color {0u, 0u, 0u, 0x3c00u};
+    const std::array<float, 4u> dark_history {0.f, 0.f, 0.f, 2.f};
+    std::memcpy(source.data() + neighbor * sizeof(color), dark_color.data(), sizeof(color));
+    std::memcpy(history.data() + neighbor * sizeof(dark_history), dark_history.data(), sizeof(dark_history));
     const auto set_history = [&](const std::array<float, 4u> &feature) {
       std::memcpy(history.data() + pixel * sizeof(feature), feature.data(), sizeof(feature));
     };
@@ -1186,23 +1378,56 @@ namespace {
         word_bytes(fixture.identity), word_bytes(fixture.ocr), fixture.state,
         support, pin, distance, history, source, probability);
     };
-    // This checks typed saved-state admission, not a fabricated four-observation chain.
-    for (std::uint32_t count = 0u; count <= v2::subtitle_contour_history_confirmation_observations; ++count) {
-      const auto mask = static_cast<std::uint32_t>(count == v2::subtitle_contour_history_confirmation_observations);
-      const auto code = v2::subtitle_contour_history_feature_valid_bit |
-        (count << v2::subtitle_contour_history_feature_count_shift) |
-        (mask ? v2::subtitle_contour_history_feature_mask_bit : 0u);
-      set_mask(mask);
-      set_history({0.5f, 0.5f, 0.5f, static_cast<float>(code)});
-      ASSERT_TRUE(valid()) << "legal count " << count;
-      set_mask(1u - mask);
-      EXPECT_FALSE(valid()) << "support disagrees with count " << count;
-      set_mask(mask);
-      set_history({0.5625f, 0.5f, 0.5f, static_cast<float>(code)});
-      EXPECT_EQ(valid(), count >= 2u) << "fixed anchor is permitted only at count2+";
+    // Typed admission checks current evidence, not a fabricated temporal confirmation chain.
+    const auto threshold = v2::subtitle_ocr_active_probability_threshold;
+    for (const auto current_probability : {0.f, threshold, std::nextafter(threshold, 1.f), .9f}) {
+      probability = repeated_word_bytes(std::bit_cast<std::uint32_t>(current_probability),
+        v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height);
+      for (std::uint32_t count = 0u; count <= v2::subtitle_contour_history_confirmation_observations; ++count) {
+        const auto mask = static_cast<std::uint32_t>(count != 0u && current_probability > threshold);
+        const auto code = v2::subtitle_contour_history_feature_valid_bit |
+          (count << v2::subtitle_contour_history_feature_count_shift) |
+          (count == v2::subtitle_contour_history_confirmation_observations ? v2::subtitle_contour_history_feature_mask_bit : 0u);
+        set_mask(mask);
+        set_history({0.5f, 0.5f, 0.5f, static_cast<float>(code)});
+        ASSERT_TRUE(valid()) << "legal diagnostic count " << count << ", P=" << current_probability;
+        set_mask(1u - mask);
+        EXPECT_FALSE(valid()) << "support disagrees with current evidence at count " << count;
+        set_mask(mask);
+        set_history({0.5625f, 0.5f, 0.5f, static_cast<float>(code)});
+        EXPECT_EQ(valid(), count >= 2u) << "fixed anchor is permitted only at count2+";
+      }
+    }
+    probability = repeated_word_bytes(std::bit_cast<std::uint32_t>(.9f),
+      v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height);
+    set_mask(1u);
+    set_history({0.5f, 0.5f, 0.5f, 6.0f}); // First genuine observation can already supply support.
+    ASSERT_TRUE(valid());
+    const auto detector_x = static_cast<int>(std::floor((static_cast<float>(px) + .5f) *
+      (static_cast<float>(v2::subtitle_ocr_output_width) / fixture.identity[8u]) - .5f));
+    const auto detector_y = static_cast<int>(std::floor((static_cast<float>(py) + .5f) *
+      (static_cast<float>(v2::subtitle_ocr_output_height) / fixture.identity[11u]) - .5f));
+    for (const auto contributor : {
+           std::size_t(detector_y) * v2::subtitle_ocr_output_width + detector_x,
+           std::size_t(detector_y) * v2::subtitle_ocr_output_width + detector_x + 1u,
+           std::size_t(detector_y + 1) * v2::subtitle_ocr_output_width + detector_x,
+           std::size_t(detector_y + 1) * v2::subtitle_ocr_output_width + detector_x + 1u}) {
+      for (const auto invalid : {-1.f, 1.01f, std::numeric_limits<float>::infinity(),
+             std::numeric_limits<float>::quiet_NaN()}) {
+        std::memcpy(probability.data() + contributor * sizeof(float), &invalid, sizeof(float));
+        EXPECT_FALSE(valid()) << "all four current contributors must authorize the positive count/support";
+        set_mask(0u);
+        set_history({0.5f, 0.5f, 0.5f, 2.0f});
+        EXPECT_TRUE(valid()) << "invalid probability is retained diagnostic evidence without support";
+        const float restored = .9f;
+        std::memcpy(probability.data() + contributor * sizeof(float), &restored, sizeof(float));
+        set_mask(1u);
+        set_history({0.5f, 0.5f, 0.5f, 6.0f});
+      }
     }
     set_mask(0u);
-    for (const auto code : {0.0f, 1.0f, 3.0f, 7.0f, 11.0f, 15.0f, 18.0f, 19.0f, 22.0f,
+    probability = repeated_word_bytes(0u, v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height);
+    for (const auto code : {0.0f, 1.0f, 3.0f, 7.0f, 11.0f, 15.0f, 18.0f, 22.0f,
                            2.5f, -0.0f, std::numeric_limits<float>::infinity(),
                            std::numeric_limits<float>::quiet_NaN()}) {
       set_history({0.5f, 0.5f, 0.5f, code});
@@ -1226,6 +1451,28 @@ namespace {
     EXPECT_TRUE(valid());
     set_history({0.0f, 0.0f, 0.0f, -0.0f});
     EXPECT_FALSE(valid()) << "invalid source must have bitwise zero history";
+
+    fixture.identity[2u] = 1u;
+    std::memcpy(source.data() + pixel * sizeof(color), color.data(), sizeof(color));
+    set_history({0.5f, 0.5f, 0.5f, 6.0f});
+    const std::array<std::uint16_t, 4u> contrasting_color {0x3b00u, 0x3b00u, 0x3b00u, 0x3c00u};
+    std::memcpy(source.data() + neighbor * sizeof(color), contrasting_color.data(), sizeof(color));
+    const std::array<float, 4u> neighbor_history {.875f, .875f, .875f, 2.f};
+    std::memcpy(history.data() + neighbor * sizeof(neighbor_history), neighbor_history.data(), sizeof(neighbor_history));
+    set_mask(0u);
+    ASSERT_TRUE(valid()) << "unanchored current contrast cannot invent a text palette";
+    set_mask(1u);
+    EXPECT_FALSE(valid()) << "current edge alone cannot override the absent palette";
+    probability = repeated_word_bytes(std::bit_cast<std::uint32_t>(.9f),
+      v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height);
+    ASSERT_TRUE(valid()) << "the current palette and stroke admit support on this observation";
+    set_mask(0u);
+    std::memcpy(source.data() + neighbor * sizeof(color), color.data(), sizeof(color));
+    const std::array<float, 4u> flat_neighbor_history {.5f, .5f, .5f, 2.f};
+    std::memcpy(history.data() + neighbor * sizeof(flat_neighbor_history), flat_neighbor_history.data(), sizeof(flat_neighbor_history));
+    ASSERT_TRUE(valid()) << "withdrawn current edge clears support with the cover and count retained";
+    set_mask(1u);
+    EXPECT_FALSE(valid()) << "retained history cannot replace withdrawn current evidence";
   }
 
   TEST(SbsDebugDumpTensorGridTest, SingleHighRoiRetainsCoarsePlannerAndDoublesContent) {
@@ -1672,6 +1919,11 @@ namespace {
     EXPECT_FALSE(infer_record.at("subtitle_condition").at("held_with_depth"));
     EXPECT_TRUE(infer_record.at("subtitle_condition").at("executed"));
     EXPECT_TRUE(infer_record.at("subtitle_condition").at("active"));
+    const auto &adaptive = infer_record.at("subtitle_plane").at("adaptive");
+    EXPECT_EQ(adaptive.at("current_entry_requirement_level"), adaptive.at("current_level"));
+    EXPECT_EQ(adaptive.at("retreat_time_constant_ms"), v2::subtitle_plane_retreat_time_constant_ms);
+    for (const auto key : {"approach_since_us", "retreat_since_us", "approach_level", "retreat_level"})
+      EXPECT_EQ(adaptive.at(key), 0u) << key;
   }
 
   TEST(SbsDebugDumpGpuTraceTest, EmptyAndInvalidProbeRequireFreshInactiveScp4) {
@@ -1700,6 +1952,47 @@ namespace {
     for (std::size_t index = 2u; index < v2::subtitle_condition_param_word_count; ++index)
       set_trace_word(invalid_probe, condition + index, 0u);
     EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(invalid_probe, frame));
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, NewEmptyClearsHiddenPlaneWhileRepeatedClockCanHoldIt) {
+    const auto previous = gpu_trace_frame();
+    auto current = previous;
+    ++current.matched_frame_id;
+    current.matched_observation_timestamp_us += 33333u;
+    const auto make_ring = [&](const platf::sbs_debug::frame &now, bool two_records, float hidden) {
+      auto ring = canonical_gpu_trace_ring(now);
+      const auto first_base = gpu_trace::record_base(0u);
+      const auto current_base = gpu_trace::record_base(two_records ? 1u : 0u);
+      if (two_records) {
+        const auto older = canonical_gpu_trace_ring(previous);
+        std::memcpy(ring.data() + current_base * sizeof(std::uint32_t),
+          ring.data() + first_base * sizeof(std::uint32_t), gpu_trace::record_word_count * sizeof(std::uint32_t));
+        std::memcpy(ring.data() + first_base * sizeof(std::uint32_t),
+          older.data() + first_base * sizeof(std::uint32_t), gpu_trace::record_word_count * sizeof(std::uint32_t));
+        set_trace_word(ring, current_base + gpu_trace::word_index(gpu_trace::record_word_e::sequence_low), 2u);
+        set_trace_word(ring, gpu_trace::word_index(gpu_trace::header_word_e::next_sequence_low), 3u);
+        set_trace_word(ring, gpu_trace::word_index(gpu_trace::header_word_e::next_slot), 2u);
+        set_trace_word(ring, gpu_trace::word_index(gpu_trace::header_word_e::committed_count), 2u);
+      }
+      auto empty = current_subtitle_plane(now, 0u);
+      empty[v2::subtitle_plane_adaptive_offset + 3u] = std::bit_cast<std::uint32_t>(hidden);
+      const auto plane = current_base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_locator_begin);
+      std::memcpy(ring.data() + plane * sizeof(std::uint32_t), empty.data(), sizeof(empty));
+      const auto condition = current_base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_condition_begin);
+      for (std::size_t word = 2u; word < v2::subtitle_condition_param_word_count; ++word)
+        set_trace_word(ring, condition + word, 0u);
+      return ring;
+    };
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(make_ring(current, true, 0.0f), current));
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(make_ring(current, true, .01f), current))
+      << "proven genuinely newer empty cannot retain hidden appliedplane";
+    auto duplicate_clock = current;
+    duplicate_clock.matched_observation_timestamp_us = previous.matched_observation_timestamp_us;
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(make_ring(duplicate_clock, true, .01f), duplicate_clock))
+      << "same-clock fault holds hiddenstate; it is not a genuine emptyadvance";
+    auto reset = current; reset.input_domain_reset = true;
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(make_ring(reset, false, .01f), reset));
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(make_ring(reset, false, 0.0f), reset));
   }
 
   TEST(SbsDebugDumpGpuTraceTest, WrappedChronologyAndSuppressedFrozenSectionsValidate) {
@@ -2014,11 +2307,11 @@ namespace {
          }) {
       EXPECT_EQ(source.find(retired), std::string::npos) << retired;
     }
-    EXPECT_NE(source.find("{\"schema\", 49}"), std::string::npos);
+    EXPECT_NE(source.find("{\"schema\", 50}"), std::string::npos);
     EXPECT_NE(source.find("{\"mode\", \"subtitle-contours-v1\"}"), std::string::npos);
     EXPECT_NE(source.find("nlohmann::json::parse(subtitle_contour_policy_json)"), std::string::npos);
     for (const std::string_view artifact : {
-           "contour_support.u32", "contour_field_pin.u32", "contour_distance.f32",
+           "contour_support.u32", "subtitle_glyph_matte.u32", "subtitle_condition_params.u32", "subtitle_glyph_matte.json", "subtitle_condition_params.json", "render_source.bin", "contour_field_pin.u32", "contour_distance.f32",
            "contour_identity.u32", "contour_history.rgba32f", "contour_source.rgba16f",
            "ocr_probability.f32", "gaussian_weight.f32", "gaussian_blend.f32",
            "gaussian_vertical_conditioned.f32", "gaussian_control.u32",
@@ -2028,7 +2321,7 @@ namespace {
     const auto terminal_query = source.find("ctx->End(pending->completion.Get())");
     ASSERT_NE(terminal_query, std::string::npos);
     for (const std::string_view resource : {
-           "subtitle_contour_support", "subtitle_contour_field_pin", "subtitle_contour_distance",
+           "subtitle_contour_support", "subtitle_glyph_matte", "subtitle_condition_params", "subtitle_contour_field_pin", "subtitle_contour_distance",
            "subtitle_contour_identity", "subtitle_contour_history", "subtitle_contour_source",
            "subtitle_ocr_probability", "subtitle_gaussian_weight", "subtitle_gaussian_blend",
            "subtitle_gaussian_vertical_conditioned", "subtitle_gaussian_control",
@@ -2041,7 +2334,7 @@ namespace {
     }
     EXPECT_NE(source.find("{\"matched_observation_timestamp_us\", completed.matched_observation_timestamp_us}"), std::string::npos);
     EXPECT_NE(
-      source.find("{\"warp_input_artifact\", \"shadow_final_parallax.f32\"}"),
+      source.find("{\"warp_input_artifact\", nullptr}"),
       std::string::npos
     );
   }
@@ -2238,6 +2531,7 @@ namespace {
     locator[a + 12u] = cap;
     const auto maximum_level = (frame.depth_input_region.width() + 99u) / 100u;
     locator[a + 2u] = maximum_level;
+    locator[a + 3u] = cap;  // Current goal and presentation each remain within their own range.
     EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
     ++locator[a + 2u];
     EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
@@ -2262,6 +2556,66 @@ namespace {
     EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
     locator[a + 1u] |= 4u;
     EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(locator), frame));
+  }
+
+  TEST(SbsDebugDumpAsyncTest, CurrentGoalAllowsSlewedPresentationWithinAuthenticatedRange) {
+    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
+    // The former8/W floor boundaries are deliberate regression inputs. Contract124
+    // allows presentation below the current goal without weakening range authentication.
+    struct example_t { std::uint32_t width, height, lower_bits; };
+    for (const auto example : {example_t {854u, 480u, 0x3c197ae7u},
+           example_t {2536u, 1427u, 0x3b4ebcf8u}, example_t {1920u, 1080u, 0x3b888888u}}) {
+      SCOPED_TRACE(example.width);
+      auto frame = subtitle_frame(content, example.width, example.height);
+      const auto geometry = models::fit_subtitle_analysis_geometry(example.width, example.height,
+        {frame.field_width, frame.field_height}, content);
+      ASSERT_TRUE(geometry.valid());
+      auto ocr = empty_ocr(frame, geometry);
+      ocr[2u] = 1u; ocr[3u] = ocr[4u] = 1u;
+      store_ocr_pair(ocr, 0u, {350u, geometry.roi_top + 4u, 420u, geometry.roi_top + 14u},
+        {348u, geometry.roi_top + 3u, 422u, geometry.roi_top + 15u});
+      auto plane = current_subtitle_plane(frame, 1u);
+      constexpr auto a = v2::subtitle_plane_adaptive_offset;
+      plane[a + 2u] = 2u;
+      plane[a + 1u] |= v2::subtitle_plane_adaptive_presented_flag;
+      plane[a + 3u] = example.lower_bits;
+      EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame));
+      --plane[a + 3u];
+      EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame));
+      plane[a + 3u] = std::bit_cast<std::uint32_t>(20.0f / example.width);
+      EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame))
+        << "a filtered presentation may also remain above a falling current goal";
+      plane[a + 2u] = (example.width + 99u) / 100u;
+      plane[a + 3u] = std::bit_cast<std::uint32_t>(v2::direct_container_limit);
+      EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame));
+      --plane[a + 3u];
+      EXPECT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame))
+        << "the goal can be the cap while current presentation is still catching up";
+      for (const auto invalid : {std::bit_cast<std::uint32_t>(-0.001f),
+             std::bit_cast<std::uint32_t>(0.05f), 0x7fc00000u}) {
+        plane[a + 3u] = invalid;
+        EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(plane), frame));
+      }
+    }
+  }
+
+  TEST(SbsDebugDumpAsyncTest, AllRetiredUiDwellFlagsAndWordsAreRejected) {
+    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
+    const auto frame = subtitle_frame(content, 1920u, 1080u);
+    const auto geometry = models::fit_subtitle_analysis_geometry(1920u, 1080u,
+      {frame.field_width, frame.field_height}, content);
+    auto ocr = empty_ocr(frame, geometry); ocr[2u] = 1u;
+    const auto canonical = current_subtitle_plane(frame, 0u);
+    ASSERT_TRUE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(canonical), frame));
+    constexpr auto a = v2::subtitle_plane_adaptive_offset;
+    const std::array<std::pair<std::uint32_t, std::uint32_t>, 8u> retired {{
+      {1u, 1u}, {1u, 2u}, {6u, 1u}, {7u, 1u}, {8u, 1u}, {9u, 1u}, {10u, 1u}, {11u, 1u}}};
+    for (const auto &[word, value] : retired) {
+        SCOPED_TRACE(word);
+        SCOPED_TRACE(value);
+      auto corrupt = canonical; corrupt[a + word] |= value;
+      EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(corrupt), frame));
+    }
   }
 
   TEST(SbsDebugDumpAsyncTest, NativeAdaptiveStateSerializationAdmitsStartupAndDisarmedFlatTuples) {

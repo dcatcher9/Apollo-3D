@@ -68,8 +68,11 @@ namespace cuda_conditional_graph {
 
   /** GPU producer proposal, overwritten in place by CUDA with the resolved receipt.
    *
-   * Publication tags are written last. A proposal is never accepted by a postprocess consumer;
-   * only a CBRG receipt matching a valid RQST record is authoritative.
+   * The setter stages resolved fields with magic zero, then selects the existing children.
+   * One parent kernel depending on BOTH conditional siblings publishes CBRG last. Invalid RQST
+   * or staged records remain uncommitted; valid RQST plus malformed PROP still selects infer
+   * without OCR. Only a committed CBRG matching valid RQST is consumable. This proves post-child
+   * execution ordering, not numerical model validity or CPU owner publication.
    */
   struct alignas(16) decision_record_t {
     std::uint32_t decision;
@@ -200,7 +203,7 @@ namespace cuda_conditional_graph {
       request.token_high,
       request.token_low ^ token_low_cookie,
       request.token_high ^ token_high_cookie,
-      receipt_magic,
+      authenticated_request(request) ? receipt_magic : 0u,
       optional_ocr ? optional_ocr_receipt_magic : 0u,
     };
   }
@@ -394,6 +397,9 @@ namespace cuda_conditional_graph {
     context_restore_failed,
     diagnostic_event_create_failed,
     diagnostic_event_node_add_failed,
+    // Appended to preserve prior diagnostic enum values.
+    commit_function_missing,
+    commit_node_add_failed,
   };
 
   /** Owns the PTX module, wrapper graph, and instantiated conditional executable.
@@ -403,8 +409,9 @@ namespace cuda_conditional_graph {
    * failure is terminal for that pipeline and the caller must not retry the raw inference child.
    * Neutral helper users may define a different policy, but production DAV2 never bypasses the
    * wrapper after its private bootstrap. The caller owns
-   * both input child graphs. The decision/request CUdeviceptrs are captured by value and must stay
-   * mapped and unchanged through each launch, completion, and interop-unmap tail. A later remap
+   * both input child graphs. The setter and post-both-child commit capture the same
+   * decision/request CUdeviceptrs by value; these must stay mapped and unchanged through each
+   * launch, completion, and interop-unmap tail. A later remap
    * must reproduce those captured addresses; rebuild before launch if it does not. For the fixed
    * DAV2 graph, two TensorRT-owned pageable scalar
    * copies are validated in the source graph. cuGraphAddChildGraphNode clones that source into its

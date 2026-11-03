@@ -1,4 +1,4 @@
-"""Document admission for one continuous ROI field; native shaders own rendering proof."""
+"""Admission for the continuous ROI Base and optional glyph selector; native shaders own rendering proof."""
 import copy
 import hashlib
 import tempfile
@@ -37,10 +37,11 @@ class HostContinuousRoiContractTests(unittest.TestCase):
         manifest["artifacts"]["warp_mask.png"]["sha256"] = hashlib.sha256(
             (root / "warp_mask.png").read_bytes()).hexdigest()
 
-    def test_adaptive_policy_uses_canonical_continuous_map_semantics(self):
+    def test_adaptive_policy_uses_canonical_selected_map_semantics(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest, _, _, _, _ = self.fixture(Path(temporary))
-            self.assertEqual(manifest["warp_map_contract"]["schema"], 2)
+            self.assertEqual(manifest["warp_map_contract"]["schema"], 3)
+            self.assertEqual(manifest["selected_map"]["schema"], 1)
             for mode in (3,):
                 with self.subTest(mode=mode):
                     admitted = contract._validate_warp_map_manifest(

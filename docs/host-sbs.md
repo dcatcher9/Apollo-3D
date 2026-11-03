@@ -38,7 +38,7 @@ flowchart LR
     CONTAINER["Independent signed displacement bound"]
     VERTICAL["75/25 vertical envelope share"]
     ROW["Horizontal majorant"]
-    PLANE["Native Gaussian subtitle protection and shared limits"]
+    PLANE["Native glyph matte and analytic UI selector"]
     INVERSE["At-most-11-step exact-settle inverse"]
     COLOR["One native linear-color sample"]
     ENCODE["Packed SBS and NVENC"]
@@ -46,26 +46,27 @@ flowchart LR
     CAPTURE --> MATCH --> DOMAIN --> PREPROCESS --> DAV2
     REGION -. optional authority .-> MATCH
     DAV2 --> CUT --> CAMERA
-    DAV2 --> CAMERA --> CURVE --> CONTAINER --> VERTICAL --> ROW --> PLANE --> INVERSE
+    DAV2 --> CAMERA --> CURVE --> CONTAINER --> VERTICAL --> ROW --> INVERSE --> PLANE
     CAPTURE -. current-ready infer work .-> OCR --> OCRPLANE
     CAPTURE -. authenticated current abstention .-> OCRPLANE
     CUT --> OCRPLANE --> PLANE
     CAPTURE --> COLOR
-    INVERSE --> COLOR --> ENCODE
+    PLANE --> COLOR --> ENCODE
 ```
 
-Only the complete atomic final parallax field has live rendering authority. It is the
-subtitle-conditioned publication selected by an authenticated infer, a CPU-known force/fail-safe
-path, and is sampled directly by reprojection. Every reuse retains the complete depth/OCR/UIP4/contour/history/final
-tuple. Raw depth, canonical coordinate, candidate parallax, vertical-envelope
-output, and the unconditioned row majorant are
-diagnostics that explain how the final field was produced.
+The selected live map uses the ordinary immutable Base inverse and an analytic constant UI plane.
+The native glyph matte selects UI when either candidate's actual bilinear color footprint contains
+an authorized glyph contributor; all other pixels use Base. Each Base map keeps its existing
+slope and fixed-point inverse contract, and the UI plane has zero slope. Their discrete selector
+can be discontinuous: the combined map has no continuous-Final or global monotonicity contract.
+The protected Final field remains an independently authenticated diagnostic. Reuse retains Base,
+ParallaxState, native matte, SCT5, SCP4, the joined source snapshot, and diagnostics as one tuple.
 
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 115/tag `0x640A940C`, canonical SHA-256
-`4527ef5a2ef2f8b15b0eb74dbec4057ca27f9d64770aeb26b709c91604c3c1f2`. It binds the
+schema 125/tag `0x41F6E047`, canonical SHA-256
+`9f880740eeef58299845a23542cd8dbff63bb2066d4f7f3b4c393207a34f350d`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -76,14 +77,20 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 27 | `f899c1f6325de5a08e5de47f42c5495027e50e2e53ab089063f86ac8214964b5` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `8d84dd68c42600b107ac392eb1b8727c5b325b3faf1ad43c0748ba23afb3f982` |
-| `near_identical_detector` | 4 | `12e429c6f617ebed9df2d267d41a4767b3a2b2508d76efe52b3ef43e0a6b7516` |
-| `gpu_trace` | 1 | `cd089deb118d2ae61a12c15531da1930317743b59352ada119e8744901e351b9` |
-| `parallax_v2_live_renderer` | 2 | `b91d6702173ae8e15425ef5b70a22b294100842cea6c5d4ec97d11d277c56070` |
-| `parallax_v2_p010_y` | 1 | `60092d23c490d9878e8326adb73b9dcaa63b292fcec1d1dcf582829c80cdf289` |
+| `parallax_v2_producer` | 28 | `7ab5a59ec1a60b8d7764897df95ab28dde5f612b38dabdedc8f8be66541e476c` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `dfd32986c4fe9d3a9925d0c58c9b8827e3a25cd95d6b67726c7a1c4901fca134` |
+| `near_identical_detector` | 4 | `39f10cb7fce278d93d60898aaec16f6ac593fb629fbd517e361b1cc48e52fd19` |
+| `gpu_trace` | 1 | `44f412f253a201aabea111688f6c5b67769abe41a0d4b5697d103e42303a9ea9` |
+| `parallax_v2_live_renderer` | 2 | `b613c1c9f2dc0fbdc40e8e42efb1e5cb23b874282122178960763bfd37967fc3` |
+| `parallax_v2_p010_y` | 1 | `5200cb756ed2fde68cca61ec8cd116d50f791d7b7198ec8db66b7b6db71c08c2` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `69f2a263ce2ce71a8030390bae0057ea59ab086ab8b0dc7cb92990bdc5310784` |
+| `parallax_v2_live_diagnostic` | 2 | `907dea6cd46f2eeac70ed18c956751e09b820abbd7c0438912696cd378d48b5a` |
+| `subtitle_cohort_prototype_research` | 3 | `14873875da041fb60bbe1dd59196cfa316ce6b2dc537359bb7282c3dee18511a` |
+| `subtitle_cohort_research` | 4 | `6d248d05f6c3cf56029e07493de747d36f25be20e57c892964be1a40b483c85c` |
+| `subtitle_inner_colour_research` | 5 | `f77e92b943f7807ea90a8f3c5b8b34370e2ea0befa0a568b0b94966b24ecdbf4` |
+| `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
+| `subtitle_matte_guard_research` | 1 | `98a0ab18056da96db491aebd2de5090ad7e17e0c905a2ad11d0263b1a8b61bdb` |
+| `parallax_v2_queued_renderer` | 1 | `1c471451746c041ea6d4ae34c0bb560a65f2708d18a57df2e989f021294c46d6` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -183,18 +190,32 @@ also does not cancel arbitrary independently changing per-frame model gauges. Co
 temporal pumping and foreground relief still require paired evaluation and physical live inspection.
 
 The subtitle path transfers Game 3D's UI mask/protection/plane ideas using Host's current OCR8
-cores and paired coarse covers to bound native temporal pixel evidence. It does not add a logo detector.
+cores and paired coarse covers to bound native current pixel evidence. It does not add a logo detector.
 Exact current OCR authority remains required; no separate cover ownership qualification remains.
 The controller probes immutable post-limit Base over the union of all current covers, deduplicating
 overlaps and including edge covers. Candidates advance in four per-eye analysis-source-pixel
 steps through the full `0.04` representation bound; the final candidate is exactly `0.04`.
 A Base sample conflicts above candidate minus two per-eye analysis-source pixels. Entry uses
-more than 20% of covered cells or 2% of content cells; release requires strictly less than 15% and
-1.5%. Approach waits 100 ms; retreat waits 1500 ms after reaching the goal. Rates are
-`0.03` source U/s forward and `0.005` backward. Integration is capped at 250 ms per observation,
-while dwell uses actual source time. An authenticated capped-conflict flag records that even the
-top candidate cannot satisfy the configured clearance; the controller cannot promise clearance
-when the scene consumes the same forward guard.
+more than 20% of covered cells or 2% of content cells. Under
+`current-clearance-goal-first-visible-immediate-symmetric-source-time-exponential-native-slew-empty-reset-v3`,
+this current histogram candidate is a clearance **goal**, not an instantaneous presentation floor.
+First visible entry after an authoritative empty or domain/cut reset uses that goal immediately;
+current glyph protection and empty clearing have no confirmation wait. During continued presence,
+both directions use `alpha = 1-exp(-min(source_dt,50ms)/100ms)` and clamp each update to
+`30 native pixels/second * min(source_dt,50ms)`. No post-filter floor restores the forward snap.
+The former 15%/1.5% release budget is retired. A changing subtitle alone does not reset presentation.
+Duplicate observations and reuse spend no time; missing/invalid clocks, invalid probes or interrupted
+geometry/OCR authority disarm timing. A continuing cue's first ready observation only rearms its
+clock, while an authoritative empty clears its hidden plane immediately. A shrinking representation
+budget still clamps immediately to remain in range; first entry, reset, empty and that clamp are
+explicit exceptions to slew. These response parameters are not an XR comfort qualification.
+
+The goal is the existing histogram entry-budget candidate, not the maximum Base value over the
+scene or an all-glyph clearance requirement. It permits the same conflict budgets as before.
+An authenticated capped-conflict flag records that even the top candidate cannot satisfy those
+budgets. Presentation can temporarily remain below a rising goal, so its current conflict budget
+can exceed 20%/2% during that transition. The goal, representation cap and subsequent shared limits do not guarantee no crossing,
+complete glyph clearance or comfortable presentation when scene content consumes the same guard.
 
 Within the resolve group, a publication barrier precedes a shared-memory snapshot of those current
 covers, and a group barrier precedes the probe. This scratch is neither retained cover authority
@@ -202,13 +223,18 @@ nor a new observation. Each lane keeps its original `lane + 256*k` row-major cel
 add/carry coordinates, including partial rows; overlap deduplication and conflict budgets are
 unchanged.
 
-Current covers authorize the native temporal detector. During cue-held grace they also provide a provisional whole-line Gaussian region. Confirmed pixels supply the Gaussian
-mask described below, which blends immutable Base toward the filtered UI plane before shared
-slope conditioning. No subtitle birth mixing or per-pixel fade is added. The final field may differ
+Current covers bound the native detector. A covered source pixel with valid current RGB and
+probability evidence supplies immediate binary support and an extension center when current
+palette/stroke or local dark-outline evidence passes the rule below. RGB confirmation
+counts remain diagnostic apart from positive-count duplicate admission; support does not wait for four.
+The diagnostic mask described below blends immutable Base toward the filtered UI plane before shared
+slope conditioning. No subtitle birth mixing or per-pixel fade is added. The diagnostic Final field may differ
 from the plane after that conditioning; the current cover is not a hard rectangular depth pin.
-Domain changes and confirmed cuts reset UI filter memory; an ordinary subtitle handoff does not.
-Missing current coverage means exact Base over real content. Reuse freezes the complete UI history,
-and invalid OCR/time cannot advance dwell. UI probing and time advance also require the complete
+Domain changes and confirmed cuts reset UI filter memory. A valid genuinely newer empty OCR
+observation also clears the invisible applied plane, current entry requirement and probe counters,
+while retaining its accepted source clock. The next cue therefore starts from its own current floor.
+Missing current coverage means exact Base over real content. Reuse freezes the complete UI history;
+invalid OCR/time cannot advance backward adaptation or invent a valid empty reset. UI probing and time advance also require the complete
 sealed ParallaxState at `t0` to authorize the same source observation and CutBridge epoch. Missing,
 stale, collapsed or invalid depth holds the UI plane and goal, clears dwell and the accepted clock,
 and copies Base. The next valid observation rearms without spending time from that gap.
@@ -218,9 +244,9 @@ same controller. A coarse cover can still miss part of
 a glyph, flatten enclosed scene pixels, or condition adjacent content. A full guard is not a comfort
 qualification. Include static-after-birth and partial-coverage cases in live inspection.
 
-For an exact authorized ROI, the pipeline uses the continuous full-capture inverse.
-DAV2 still analyzes only the authorized video/client rectangle. The renderer embeds its final
-parallax field into full-source coordinates and extends each signed boundary value through the
+For an exact authorized ROI, ordinary Base uses the continuous full-capture inverse.
+DAV2 still analyzes only the authorized video/client rectangle. The renderer embeds Base
+into full-source coordinates and extends each signed boundary value through the
 existing slope-limited exterior collar. The field reaches zero beyond that collar; nearby browser
 pixels may move smoothly. The ROI interior is not tapered merely because it approaches an edge.
 Both eyes sample the original full matched capture once, preserving source V. There is no separate
@@ -231,7 +257,7 @@ nearby browser deformation for a smooth transition. It does not reconstruct vide
 the original crop or recover the silhouette of an already-cropped object. A cropped foreground can
 still have conflicting framing cues; neither continuous depth nor a smoother browser sample proves
 comfortable out-of-screen projection. The [dump map contract](../tools/sbsbench/DUMP_FORMAT.md#analysis-domains-and-window-provenance)
-records the same continuous inverse and finite-source boundary mask in every mode.
+records the actual selected Base inverse or analytic UI coordinate and its finite-source boundary mask.
 
 The canonical current pipeline retains the existing limiter, joined depth/OCR observation and
 atomic publication. A policy change must be evaluated with exact source clocks, authenticated
@@ -305,6 +331,49 @@ reacquire the camera.
 
 ### Native subtitle contours and UI plane
 
+Build 121's live selector consumes seven SRVs: rendered native color, ordinary Base, ParallaxState,
+native `R32_UINT` glyph matte, joined display-sRGB `RGBA16F` source crop, six-word SCP4, and 32-word
+SCT5. Separate 32-byte PS b3 binds enabled/color mode, exact analysis-domain generation, and the
+integer analysis-source rectangle inside rendered color. Existing 48-byte b2 geometry is unchanged.
+Missing or invalid subtitle inputs preserve authorized Base; invalid Base authorization retains
+the existing flat fallback.
+
+The matte has its own schema 1 recipe, separate from SCT5's diagnostic contour recipe 27. Starting
+from literal current native support, three synchronous eight-neighbor steps admit finite valid
+joined RGB only when neighbor L-infinity distance is at most `0.12` and both pixels have the same
+`max(RGB) >= 0.4` brightness class. A same-frame native collar then takes the 37 offsets with
+`abs(dx),abs(dy) <= 3` and `dx*dx + dy*dy <= 10`. Each output pixel still requires a finite valid
+joined display pixel. The operation adds no probability threshold, field-pitch dilation, history
+wait, or source observation. The collar is a bounded antialias/outline completion compromise;
+false positive scene support can also expand by that bound.
+
+For each eye, BaseUV uses the existing at-most-eleven-step inverse. UIUV has unchanged V and
+`destination_source_u + eye_sign * SCP_target * (analysis_width / full_capture_width)` for U.
+The integer width ratio is exact ROI authority; full-source uses one. Query both candidates after
+the same U saturation and finite-image clamp used for color. Only source texels with nonzero
+bilinear color weight contribute. Convert each full-source texel index to the exact native
+analysis-source/bottom-crop index. A literal matte one survives only when its joined snapshot is
+valid and current native color converts through the existing display-sRGB policy and FP16
+roundtrip within the contour RGB-distance bound `0.08` at that identical texel. No neighbor search
+or new support comes from this comparison. Select UIUV when either candidate footprint has a
+surviving contributor, otherwise BaseUV; take one native bilinear color sample at the selected UV.
+Color output keeps its native SDR/HDR path.
+
+SCT5 must bind the retained state's owner observation clock and cut epoch, the b3 analysis
+generation, exact source/crop/field/content shape and current recipe, with valid bits exactly one
+and reserved words zero. SCP4 must match current count/kinds/fully-active target. A reused color
+publication B can retain depth/matte owner A; B's completed-frame identifier never relabels A's
+owner or becomes an equality requirement. Current color can revoke old matte only when a draw
+actually runs. Repeating packed output runs no new gate. Preserve the bounded matched-color
+presentation deadline and exact-unchanged indefinite reuse; add no frame delay or dwell. New empty
+OCR publishes zero matte and inactive zero-target SCP4 atomically, immediately selecting Base.
+Temporary work suppression and ineligible context disable the compositor for that draw.
+
+The following contour/D/M/proposal/conditioned-Final rules remain independently validated diagnostics.
+They explain the old field conditioner; their field pins and distance budgets do not supply live
+matte membership, and protected Final is not the analytic renderer's warp input.
+
+
 Live subtitle detection and protection run only in Host AI 3D with authenticated video context.
 The Chromium helper must supply current positive semantic video evidence, including its distinct
 fullscreen result; a generic foreground depth ROI or fullscreen geometry alone grants nothing.
@@ -326,13 +395,14 @@ Explicit offline video consumers keep their default eligible request with contex
 their evaluator identity and epoch behavior are unchanged.
 
 The adaptive UI controller samples Base under the current authenticated OCR covers. Those covers
-bound the contour search. Until four consecutive cue-free genuine observations, the current OCR cover union supplies provisional protection. Multi-frame confirmed native pixels supply Gaussian centers; the soft
-max-union mask blends Base toward the UI plane before shared slope conditioning.
+bound the contour search. Native pixels that pass the current palette/stroke or local-outline
+evidence rule supply current subtitle footprints immediately. A minimum slope-budget extension
+changes Base only where required by those footprints and the UI plane.
 Current-cover authentication remains independent of UI-plane filtering. The native contour recipe is
 experimental and still requires paired quality and live acceptance before release.
 
-The subtitle detector is the single current detector-only PP-OCRv6 tiny/OCR8/UIP4 route.
-It does not run text recognition, language classification, or logo recognition. For an authenticated
+The subtitle route uses one PP-OCRv6 tiny text detector followed by a GPU subtitle classifier,
+then OCR8/UIP4 publication. It does not run text recognition, language classification, or logo recognition. For an authenticated
 current-ready subtitle request in any of the six calibrated landscape/portrait logical fields, or
 their six exact-2x fused public fields, the GPU takes the exact
 bottom `6:1` analysis-source crop, resizes it to
@@ -346,8 +416,92 @@ NVIDIA ModelOpt `0.45.0` using
 `apollo-live8-bottom960x160-v1` from the pinned upstream FP32 ONNX, SHA-256
 `193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8`. The contract
 authenticates the bundled artifact and upstream source independently. The detector's
-`1x1x160x960` FP32 probability map is reduced on the GPU to bounded line boxes. It cannot create
-rendering geometry; no probability-map or intermediate-cell payload becomes cover authority.
+`1x1x160x960` FP32 probability map is reduced on the GPU to bounded line boxes. Only authenticated
+current covers authorize the native search; intermediate cells and probabilities alone cannot
+grant cover or geometry authority. Within that search, current probability selects palette anchors;
+current native RGB stroke/outline evidence selects pixels under the rule below.
+
+#### Subtitle classification before protection
+
+OCR37 classifies local text lines before publishing current covers. A global active row is only
+a discovery aid: each contiguous active column island is rescanned for its own active row runs.
+Each local piece recomputes its actual occupied columns. This prevents disconnected printed rows
+from borrowing another column's activity and merging with a caption before eligibility is checked.
+Ordinary pieces join against a fixed vertical anchor with the existing half-IoU and four-cell
+horizontal-gap rules. A smaller fully contained unknown piece can attach to an independently
+horizontal current line, including leading punctuation. Oblique scene pieces cannot attach through
+that exception. Center eligibility still uses the bounded native horizontal union before capacity
+selection; each accepted pair retains its own core and expanded cover.
+
+The classifier divides a local line into eight horizontal bins and measures the nearest-rank
+10th and 90th active-pixel row quantiles. A least-squares fit in native source units estimates both
+envelope slopes. Six populated bins and both absolute slopes within `tan(2 degrees)` supply
+independent horizontal evidence. Consistent same-sign slopes beyond `tan(10 degrees)` supply
+scene-text rejection. Other shapes are ambiguous or unknown. Every topology kind, including
+ribbons, passes classification. These experimental bounds are geometric hypotheses, not a
+semantic guarantee; square, short, curved, blurred or deliberately angled captions need particular
+recall inspection. Missing geometry is not itself proof of scene text.
+
+An ambiguous line with one envelope within the horizontal bound and the other within the scene
+angle bound can receive current stack assistance. It must be individually centered and bracketed
+above and below by independently horizontal, individually centered current lines. Each anchor
+must overlap its horizontal span, have a compatible height under the existing one-half to twice
+height bounds, and be separated by no more than the larger of the two line heights. Assisted
+lines retain their own core and cover, do not become independent horizontal evidence, cannot
+anchor another assisted line, and do not teach position history. This handles character-shape
+variation in a middle caption without promoting every one-flat-envelope logo or scene-text piece.
+Assembly preserves the original per-band raster ordering in a single bounded current-candidate
+pool; stack assistance and publication wait only for that same observation's discovery to finish.
+They add no observation-count or source-time delay.
+
+An unknown piece can use a compatible independently horizontal current line. Ambiguous/unknown
+current text can also use a qualified learned position with compatible line height. Ambiguous
+text must also have both envelope slopes within the scene-angle bound, and either one horizontal
+envelope or coherent same-direction moderate slopes. A learned location cannot override diverging
+non-horizontal edges or excessive current tilt. A group relying only on the learned prior must also
+contain the current signed subtitle reference center in its half-open horizontal span. Nearby
+off-axis fragments cannot borrow history as current line evidence. Every ordinary tight line group
+must now span that same reference center before admission, including independently horizontal lines,
+current bracketed-stack witnesses, and uncertain pieces on a current horizontal line. This check uses
+the current tight group union; expanded covers and protection margins cannot supply the missing span.
+Each current group midpoint must also lie within two percent of the matched reference width
+from its center. The earlier ten-percent allowance admitted off-center scene detections whose
+combined span crossed the center. Grouping still permits the existing four-height word gap;
+individual members may lie off center when their actual current group satisfies both checks.
+This position prior does not establish glyph membership or pixel stability. Full-width ribbons
+retain their separate extent policy and are exempt from this ordinary-group span check; their existing
+orientation and centered-line checks still apply. This adds no frame wait or temporal evidence.
+The prior-only span rule remains explicit and unchanged. The separate unknown short-glyph path
+still needs its applicable current group or prior evidence. The prior has
+16 detector-relative baseline bins, bound to the exact source/crop/field/content/reference domain.
+It never supplies a cover or a pixel by itself. Independently horizontal **retained** pairs teach
+the prior only on their first trusted entry or after an authoritative blank interval of at least
+100 ms of source time. Each learning episode decays bin votes by one, adds four to its trusted
+positions, and saturates at 255. Assistance requires eight votes and a current height between
+one half and twice the trusted height. Static frames and duplicate observations add no votes;
+assisted candidates do not teach. Direct cue replacements without a blank may undercount learning
+conservatively. The 100 ms rule controls learning only and adds no protection delay.
+The episode boundary currently uses an empty complete classified result, rather than a separate
+content-change history for each line. A retained false scene-text pair can therefore prevent
+blank-based learning for a real caption; the prior is not guaranteed to qualify after three cue
+changes. Nearly horizontal photographed-page text can also pass current geometry and teach it.
+
+Strong current evidence can enter at a new position immediately. An empty current classified result
+publishes zero covers and clears support immediately while preserving only layout memory. Scene
+cuts retain this layout prior; context/domain/geometry changes or an invalid source clock clear it.
+Reuse holds the complete record without learning. No text/background motion tracker or new model
+is introduced in this revision. Screen-fixed physical text in a plausible caption position can
+remain ambiguous, and first-entry unknown short captions may be missed.
+
+Discovery uses one fixed per-estimator 190,080-byte GPU scratch buffer: 1,980 entries of 24 words.
+The capacity follows from at most 60 disjoint column islands and 33 independently valid local row
+pieces per island within the 131 safe rows. Scratch is not retained or read back. OCR8 keeps its
+208-word current header/core/cover prefix and appends 48 words of separately validated classifier
+history, for 256 words total and record schema 4. Resolve constants retain their original 80-byte
+prefix and append the source clock, domain-reset flag and reserved zero, for 96 bytes. The history
+tail binds frame, generation, clock, all source/field/content/reference geometry, episode state,
+trusted span/height and 16 bounded vote counters. Abstention clears the tail. Its presence never
+changes current slot count or grants geometry authority to an old observation.
 
 When the authenticated detector is available, OCR is an optional child inside the same joined
 publication unit as DAV2. After private warmup/capture, DAV2 and OCR are sibling conditional children
@@ -367,8 +521,7 @@ authenticates the current abstention without granting subtitle geometry or prote
 exact Base. A malformed source/field policy cannot acquire this identity publication.
 
 Every reuse leaves OCR crop/TensorRT/postprocess/plane/condition work dormant and holds the complete
-depth/cut/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Reprojection samples that atomic
-field directly with current RGB. Once the joined root has submitted work, any asynchronous CUDA error
+depth/cut/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Reprojection selects ordinary Base or analytic UI from that retained tuple; exact current native RGB can only revoke matte contributors. Once the joined root has submitted work, any asynchronous CUDA error
 fails the whole estimator closed because a later API call may surface an earlier context-wide launch
 fault. OCR does not run for source frames dropped while the previous observation is busy.
 
@@ -410,8 +563,9 @@ metadata cannot prove the exact OCR tensor after the separately composed hardwar
 changed, so retained boxes are never relabeled as a new observation. An authenticated inference
 produces the complete depth and subtitle observation together; a reuse holds both.
 
-OCR8 is a fixed 208-word current record: a 16-word header followed by paired tight/core and cover
-slots, with at most eight authoritative pairs. Each eight-word slot stores half-open coordinates,
+OCR8 is a fixed 256-word record. Its 208-word current prefix has a 16-word header followed by paired
+tight/core and cover slots, with at most eight classified authoritative pairs; a separate 48-word
+classifier history tail follows. Each eight-word slot stores half-open coordinates,
 score bits, a ribbon-kind bit, island count, and structural-gap count. Tight cores lie in the active
 calibrated depth field's dynamic bottom
 ROI obtained by projecting detector rows `[24,155)` through the exact bottom-6:1 source crop. For a
@@ -431,9 +585,10 @@ Before capacity selection, OCR8 considers only detector rows in the reference pi
 quarter, intersected with the existing bottom-6:1 crop and safe detector rows. A matched Chromium
 video ROI supplies that reference; otherwise the full captured screen supplies it, including when
 analysis uses a foreground-client crop. The reference is expressed in analysis-source coordinates
-using signed offsets. The 80-byte resolve constants keep the original 16-word prefix and append
-the signed doubled horizontal center, reference width, signed search-top row, and a zero reserved
-word. Supported analysis dimensions and reference width are bounded by 5120 native pixels.
+using signed offsets. Resolve constants keep the original 16-word prefix, the signed doubled
+horizontal center, reference width, signed search-top row and reserved zero, then append the source
+clock, domain-reset flag and another reserved zero. Their total is 96 bytes. Supported analysis
+dimensions and reference width are bounded by 5120 native pixels.
 
 Within each active detector band, candidates belong to the same line when their vertical-span
 intersection over union is at least one half against the fixed first member and their horizontal
@@ -448,17 +603,17 @@ union is eligible when its horizontal center differs from the reference center b
 one tenth of the reference width. Exact integer comparisons include the boundary. The fixed
 anchor prevents tall texture and successive overlaps from joining unrelated text rows. The union
 is used only for eligibility: each accepted core keeps its original cover and metadata. Current
-cover protection, adaptive UI-plane probing, and confirmed pixel Gaussian protection consume the
+native support, adaptive UI-plane probing, and pixel Gaussian protection consume the
 same eligible OCR8 record; no union rectangle becomes a new protection mask.
 
 When more than eight eligible valid pairs are found, OCR8 retains the eight largest tight-core areas.
 Equal areas favor earlier raster discovery, and retained pairs are published in discovery order.
 Each tight core stays paired with its original expanded cover and metadata. Candidate capacity
 does not invalidate other valid text in the frame; geometry and nonfinite-data failures still
-abstain. Eligible pairs retain their discovery ordering. This bounded preselection adds no color,
-font, language, or extra production-buffer rule. All admitted pairs pass directly to current-cover
-search and adaptive plane probing. The existing four-frame pixel confirmation, Gaussian union,
-and shared depth conditioning are unchanged.
+abstain. Classified eligible pairs retain their discovery ordering. The classifier uses the current
+line geometry and separately learned layout described above, with no color or language selector.
+All admitted classified pairs pass directly to current-cover search and adaptive plane probing. Current-evidence support, Gaussian union,
+and shared depth conditioning consume those same pairs.
 
 OCR8 first discovers broad horizontal runs with a 12-cell inactive-gap allowance solely to decide
 whether their unfiltered topology is a bottom ribbon. It does not prefilter small or weak islands
@@ -473,13 +628,15 @@ islands. Thus a weak speck cannot borrow a subtitle's confidence or bridge its c
 foreground object, while a segmented bottom index remains one ribbon.
 
 A ribbon's expansion pad is capped at eight detector pixels. Ordinary covers retain DB's existing
-area/perimeter expansion and add one detector cell (eight detector pixels) on each horizontal side,
-clamped to the detector extent. Vertical padding is unchanged. This bounded line-end search guard
-can recover short tokens omitted by the probability model; it changes neither the tight core nor
+area/perimeter expansion and add four detector cells (32 detector pixels) on each horizontal side,
+plus `ceil(tight_detector_height / 2)` above and below, clamped to detector and safe ROI bounds.
+This bounded glyph search guard
+can include short tokens omitted by box reduction; it changes neither the tight core nor
 its eligibility, confidence, or capacity rank. The producer publishes one expanded cover for UI
-probing, temporary protection, and temporal search. Guard pixels need the same four RGB confirmations
-as other covered pixels, with the existing Gaussian treatment afterward. It is not a second mask,
-new OCR detection, palette rule, or guarantee that every omitted token lies within the guard.
+probing and native search. Guard pixels need the same current palette/stroke or outline
+evidence as other covered pixels, with the existing Gaussian treatment afterward. Cover membership
+alone does not supply support. This is not
+a second mask, new OCR detection, or guarantee that every omitted token is recovered.
 A ribbon's final cover is the canonical bottom strip of the tensor-content rectangle,
 `[content_left, cover_top, content_right, content_bottom)`, while its paired raw box remains tight
 evidence. `cover_top` is the floor projection of the ribbon's expanded detector top (its tight top
@@ -504,13 +661,23 @@ observation time; words 10--19 bind source/field extents, dynamic ROI and conten
 Word 20 binds the authenticated durable CutBridge epoch. Word 21 is the eight-bit current-core
 probability-change cue mask and must be a subset of word 3. The legacy `history_reset_mask`
 field names are retained for wire/API compatibility; they no longer imply an unconditional RGB
-count reset. Word 22 packs a provisional-protection countdown `0..4` in bits 0--2 and the preceding genuine observation's any-core change cue in bit 3. Legal packed values are `0..4` and `8..12`; the other low-bit combinations and unknown upper bits are invalid. Word 23 is zero. The
+count reset. Word 22 is canonical zero; the retired presentation countdown and cue latch grant no
+authority. Word 23 is zero. The
 existing 16-word adaptive controller occupies words 24--39, with its applied UI plane at word 27.
 There are no rectangle blocks or duplicate target in the header. Canonical initialization/reset
 may be zero and cannot grant current authority.
 
+The adaptive flags' known mask is `28` (`0x1c`); retired approach and retreat flag values `1`
+and `2` must be zero. Relative adaptive words 6..11 (the retired dwell clocks and pending levels)
+are canonical zero. Relative word 2 reports the current entry requirement, and word 3 is the applied
+plane. Flag16 records an accepted visible presentation since the last authoritative empty/reset;
+it survives abstention so a rearmed clock does not cause a new-entry snap. Compatibility delay,
+dwell and source-U-rate metadata is zero in both directions. `retreat_time_constant_ms=100`
+remains an alias for `smoothing_time_constant_ms=100`; the actual symmetric slew bound is
+`slew_per_eye_source_pixels_per_second=30`, with `rate_tick_cap_us=50000`.
+
 The header's source timestamp authenticates the current publication. The adaptive tail's accepted
-timestamp, dwell clocks and probe counters describe its last controller observation and can remain
+timestamp and probe counters describe its last controller observation and can remain
 held or disarmed while current covers refresh. They are not a second current-source clock or an
 exact area count for the header's current covers. Readers validate the controller's canonical
 bounds independently and do not require either clock equality or count equality.
@@ -528,12 +695,16 @@ contains the current cover count `1..8`, corresponding eight-bit ribbon-kind mas
 publishes count/kinds/active zero and positive-zero target. The adaptive target remains only in
 UIP4's tail; there is no fade or second target cache.
 
-The [adaptive UI controller](#adaptive-geometry-and-subtitle-plane) continues to observe immutable
-post-limit Base and the union of all current covers. Its numerical clearance, dwell and rate
-rules are unchanged. Ordinary OCR slot changes, ordering, splits or merges do not reset this
+The [adaptive UI controller](#adaptive-geometry-and-subtitle-plane) observes immutable post-limit
+Base and the union of all current covers. Its current authorized entry-budget candidate is a
+clearance goal; the linked controller policy owns immediate entry and symmetric continuation.
+Genuine valid-empty observations clear invisible controller memory. Pixel support and its extension
+follow the current recipe below. Ordinary OCR slot
+changes, ordering, splits or merges do not reset this
 controller. A hard-cut epoch change or input-domain change resets its memory; repeated maximum
 epochs and stale one-frame pulses do not manufacture a new cut. Invalid OCR/time cannot advance
-dwell. Missing or invalid depth holds the applied plane and goal, clears dwell and the accepted
+presentation timing. Missing or invalid depth holds the applied plane and current requirement,
+disarms timing and clears the accepted
 clock, clears UIP4 current-valid/slot authority, and copies Base. OCR8 may still contain valid
 current boxes, but those boxes alone cannot grant conditioning. The next valid observation rearms
 without spending the missing interval. Invalid Base probe samples can instead leave UIP4's
@@ -541,50 +712,420 @@ current-valid slots nonempty while SCP4's payload words 2--5 remain zero with fr
 That observation preserves independently authenticated RGB/probability snapshots but grants no
 positive temporal count or conditioning; it is distinct from an empty OCR result.
 
-Current authenticated OCR covers authorize a native-resolution search in the same joined source crop.
+Current classified OCR covers authorize a native-resolution search in the same joined source crop.
+The host constructs one current composition request and derives the selector operands from that
+publication's retained tuple. Strong resource leases preserve object lifetime; ordered GPU work and
+current receipts still establish pixel identity and draw eligibility. Submission success alone is
+not completion. The CBC and Raw stages share one compiled ROI graph program; their bindings and
+dispatches remain separate. Historical private replay roots retain their old ROI source locations
+for compatibility, while the production loader uses the canonical `current_outline/roi` owner.
+
+Queued diagnostic views authenticate the exact pending tuple and ticket independently of a
+completed publication. Completed views still require a current publication; neither diagnostic
+role grants GPU completion or drawing authority. Selector resources transfer their COM references
+and scalar ownership together on move. The three colour backends share one command emitter while
+retaining their original binding widths, unbind points and collection hooks. CBC adoption and
+phase-dependent bit accessors are shared without merging colour, geometry and width readiness.
+The subtitle-only vertical conditioner writes only its consumed conditioned output; the unused
+majorant image/store has been removed. The separate scene limiter is unchanged.
+
 The OCR preprocess writes finite-valid display-sRGB `RGBA16F` alongside its unchanged `960x160`
-model input. Recipe 23 uses four genuine fixed-reference RGB confirmations for every finite-valid
-source pixel inside any current authenticated OCR cover. These are completed eligible inference observations,
-not four displayed frames, duplicate deliveries, reused tuples or source frames dropped while the
-single inference is busy. Body, outline, antialias and flat interior colors
-have the same rule; no neighboring contrast is required. All four detector-probability contributors
-must be finite in `[0,1]`; they impose no minimum text-probability threshold. The separate
-current-core change witness below gates neighbor fallback only when no qualifying same-pixel
-fixed reference exists. Native raw detection and Gaussian
-presentation coverage are evaluated separately. Detection uses no palette, color class, spatial
-growth or Gaussian. Native support remains literal binary zero/one.
+model input. Recipe 27 bounds ordinary search by the current line center. Ordinary cores whose
+vertical IoU with the original slot core is at least one half form a fixed, nontransitive line
+envelope; ribbons do not join it. A canonical current SCL1 reference supplies the signed center,
+with source center used only for an all-zero SCL1 tail. Learned layout votes do not supply this
+reference. An ordinary cover's non-clamped sides are inset by the outward-floor projection of
+24 detector pixels, preserving its raw core. If the line center differs from the reference by
+more than eight detector pixels, only the corrective side retains the wider published guard.
+The top is clipped to the raw core plus a ceil-half-core-height guard; the bottom retains the
+published cover. Ribbons retain their complete published cover. These are search limits only.
+Cover membership and high detector probability alone cannot pin
+a pixel. Each pixel requires valid current RGB, all four finite unit-range probability contributors,
+positive diagnostic count for duplicate admission, and current glyph evidence.
+
+For each current tight core, a 64-by-8 grid samples exact native source centers. Palette anchors
+require current detector probability strictly above `0.2` and native axial contrast at radius two
+strictly above `0.08` in maximum-channel RGB distance. RGB is quantized with
+`floor(RGB * 65535 + 0.5)` into 64 bins, four per channel. Each bin retains its brightest actual
+anchor, with earliest grid index winning equal peaks; it does not average background-blended
+antialiasing shades into a new ink color. Its peak must be at least half the maximum individual
+anchor peak. Bins sort by descending representative peak, descending count, then ascending bin.
+A dimmer representative is redundant when its nearest-integer Q12 normalized RGB differs by at
+most `3/20` from a retained brighter mode. At most eight current modes survive. All comparisons
+use bounded integer arithmetic; no retained palette or additional inference is used.
+
+A foreground pixel matches a current representative within `0.15` symmetric maximum-channel
+distance. There is no common-brightening bypass. It also needs native
+contrast. Along the tangent to a qualifying contrast direction, its RGB-coherent run within
+`0.08` must be no longer than three current core heights in native coordinates. This rejects
+long matching rules while allowing thin glyph strokes. A dark outline instead requires current
+contrast, maximum channel at most two fifths of the brightest retained mode, channel spread at
+most `0.15`, and a contrasting palette-colored neighbor at one of eight axial/diagonal offsets
+with radius six. These are sample tests, not a six-pixel mask dilation.
+
+Every mode and outline test belongs to its current paired cover. Current source and neighbor RGB
+must be finite in `[0,1]` with alpha exactly one. Out-of-crop or invalid neighbors cannot supply
+evidence. Missing current cover, invalid RGB/probability, invalid conditioning, unsupported source,
+or failure of current glyph tests grants zero support. This is a bounded overlay-color and stroke
+hypothesis; it does not recover an exact text alpha matte or semantically identify dialogue.
+
+The current-colour refinement treats its baseline body-and-collar mask (`Code1`) as candidate
+support. Its experimental CFB7 final mask combines admitted BODY and validated packed support.
+One pure publication decision owns this union and its independent Raw fault fallback. Keeping this
+decision in one place does not make legacy BODY a semantic foreground matte: it can contain
+antialiasing or scene-colour candidates. Geometry, published protection and selector draw eligibility
+remain distinct responsibilities.
+Physical-black colour is learned from current contrast-qualified grid anchors. The original
+exact-colour and majority-population paths retain their existing rules. Cluster recovery requires
+one unique dark histogram split and support in a strict majority of sampled horizontal columns,
+with at least two supporting columns. Multiple samples along one stroke do not create independent
+spatial support. A successful recovery whose dark samples are not a population majority uses an
+explicit version-2 physical-black subrecord: its real sample and column counts are preserved,
+cluster count equals votes, supporting columns cannot exceed votes, and all existing source,
+prototype, RGB-box, count, capacity and reserved-word checks remain required. Version-2 UNKNOWN
+records are invalid; version-1 validation remains unchanged.
+
+An exact singleton of literal-black anchors needs no second histogram population. After the
+existing population and spatial guards, a no-split result may use private version 3 only when
+every sampled RGB equals the prototype, at least two sampled columns support it, and its largest
+RGB8 channel is at most the existing literal-black limit of one. This KNOWN-only record preserves
+the real counts: votes and cluster count equal all samples, supporting columns equal sampled
+columns, both RGB bounds equal the prototype and the cut equals its largest channel. Every reader
+validates this distinct case; version-1/2 rules remain unchanged. Uniform nonliteral dark or coloured
+samples remain UNKNOWN. KNOWN publication also tightens palette black witnesses to the learned
+box, so this is not an additive-only mask change.
+
+This recovery uses the existing current-palette pass and sample positions, without a retained
+mask or confirmation-frame wait. Recovered frames can execute existing geometry work that was
+previously skipped; unchanged dispatch structure is not a zero-GPU-cost or live-latency claim.
+A well-distributed colour cluster remains a text hypothesis, so glyph coverage and exterior
+protection require independent authored-alpha checks.
+
+Known physical-black colour is not proof that enclosure refinement was usable. The original BODY
+fallback remains when that unit has no accepted enclosure. With usable known-black geometry,
+trusted current colour or a closed nonblack BODY component supplies foreground evidence; an
+ambiguous outline-width estimate alone cannot grant all exterior legacy BODY protection.
+Remaining Code1 collar pixels require current-source black or antialiasing evidence. The local
+check runs only for residual candidates, reads immutable source/BODY/model inputs, and does not
+read neighboring final-mask values. It uses the existing three-pixel candidate radius and
+five-over-255 visible-fraction policy, with separate foreground-to-black and black-to-background
+compositing directions. Issued seeded-interior evidence is retained before scratch reuse. This
+removes unconditional Code1 publication without adding a resource, dispatch, or confirmation frame.
+The current candidate still has known thin-font antialiasing recall failures and is experimental;
+this policy is not a claim of complete glyph coverage or temporal stability.
+
+A residual collar reference selected from original LOW geometry can also be scene colour. With
+known black and adopted physical refinement, a LOW-only reference therefore needs both existing
+visibility bounds: the endpoint fraction and the black fraction must each be at least five over
+255 for every feasible blend. Trusted HIGH references and unknown or unadopted geometry retain
+their original rule. The exact same rational interval supplies both visibility bits in one solve;
+the first-LOW stop and the black-side traversal blockers are unchanged. Requiring HIGH alone is
+unsafe: native witnesses at black alpha 141 and 168 legitimately use a scene-colour reference.
+This restriction adds no resource, dispatch or confirmation frame. Finite replay reduces external
+A/B mask switches from 16 to 12 without new BODY, opaque or alpha-at-least-8 loss; its three new
+alpha-at-least-5 withdrawals are black fringe with maximum alpha 6 and remain an explicit strict
+check failure under the user's accepted faint-black scope. The 32 larger-AA switches remain;
+native clean-background data demonstrates that a neighbouring pixel is not always a reliable
+background reference. Simple two-sample linear extrapolation was mixed and is not adopted.
+
+Player-control overlap is a lower-priority compatibility case. Coarse local protection may include
+the visible controls when that avoids obvious subtitle breakage; exact glyph edges are not required
+for this case. An overlay-only change must preserve literal masks and actual stereo pixels on the
+ordinary no-controls regression cases. It must not weaken the ordinary classifier to improve an
+overlap sample. Video identity, mouse activity, OCR failure and a long image stripe do not establish
+current controls visibility. The current provider exports no such visibility authority, so automatic
+rectangle fallback remains deferred. Any future control-visibility evidence must be separate from
+the subtitle-context key, tied to the current source, and revoked when controls disappear. A large
+union rectangle is not automatically safe: the current glyph erasure and snapshot-validation path
+also affects its scene pixels, so the actual rendered result requires qualification.
+
+Additional core recovery uses the current caption's repeated ink colours, rather than detector
+probability alone. The existing 512-position core grid supplies distinct native RGB8 samples;
+within each existing colour bin, the most frequent colour wins, with RGB lexical order breaking
+ties. At least two distinct source pixels must repeat. Repeated colours define distance shells
+around that mode: the first missing shell bounds the continuous colour variation plus one RGB8
+quantum. This colour-only statistic has no retained palette or confirmation-frame wait. Only an
+already accepted per-mode BODY pixel inside its current native OCR core can receive this extra
+support. Within an already accepted strong component, the same reliable core colours also seed
+a separate reach channel (`0x2`). It propagates for three synchronous native eight-neighbour
+steps inside that immutable original four-connected component and the current native core; both
+endpoints must have finite joined display-encoded Source5 RGB within the existing `0.08` distance.
+The original seed channel (`0x1`) retains its exact propagation rule, and the direct colour hold
+still applies to weak accepted components. The existing 22-by-22 tile and three-pixel halo need
+13,560 bytes of shared memory. No prior-frame mask or additional dispatch is introduced. Original
+seeds and ordinary selected LOW geometry remain intact; current mode discovery and component acceptance still
+depend on detector evidence. Source-seed reach alone cannot grant HIGH foreground authority merely
+because its colour fits the foreground/black mixture. Repeated-ink anchored reach (`0x2` or the
+separate style-modal `0x4` channel), the direct current ink hold, and physical-enclosure selection
+retain their own authority. This removes a path that accepted exterior scene pixels as ink even
+after topology identified them as exterior. A matching scene colour remains ambiguous.
+
+A colour component with no accepted seed may offer its repeated fill-colour pixels for recovery.
+It still needs a known current black model, an accepted original colour component in the same
+current unit, and current support in its own closed physical-black component. The physical graph
+aggregates current support separately from its binary border seeds. This lets supported gray
+antialiasing corroborate a disconnected white stroke without filling the whole enclosed region.
+The offer uses Selected bits16--23 temporarily; selection clears them, and publication clears the
+unit's temporary original-BODY availability word. Raw and Inside do not receive the support alias.
+
+Admitted recovery requests selected BODY/BOX3 publication through the existing restoration word87.
+Rejected new offers do not request publication. The original closed counts, refinement status,
+adoption masks and old restoration policy remain unchanged: finding a missing stroke cannot grant
+permission to withdraw another stroke's existing LOW fallback. Previously unadopted units retain
+their existing BOX3/collar and independent Inside support; recovery alone does not certify a distant
+black rim. This adds no algorithm allocation, dispatch, retained mask or confirmation frame. The
+support read and recovery work still have a GPU cost that requires measurement.
+
+An optional black-band calibration cache handles a current `NO_INFORMATION` result with zero
+accepted profiles. A complete current KNOWN calibration for every active unit can record one
+common snapshot of the measured widths, display-encoded RGB8 and selected LOW geometry. Existing
+current-KNOWN publication remains unchanged. Other ambiguous or unavailable width statuses retain
+their existing calibration and Raw replacement decisions. A separate local offer may use the last
+complete strong calibration during a nonempty soft conflict, without declaring the current width KNOWN.
+
+Reuse requires current source/producer proof, the same input domain and analysis generation,
+the authenticated durable SCT/UIP hard-cut epoch, and the same active units. Current and stored
+LOW geometry must contain each other within one native pixel over the complete band. Each offered
+pixel also needs current physical-black evidence, exact current/stored RGB8 equality, current
+cover membership and a Euclidean distance no larger than the cached measured width from current
+immutable inner-ink evidence. The offer becomes final positive protection only after current geometry validation.
+It supplies no BODY, enclosure, profile, AA-donor or current-KNOWN authority. The current mask is
+computed from current evidence on each admitted observation.
+
+The retained strong reference and permission for whole-band reuse are separate. A current LOW
+geometry mismatch revokes whole-band reuse but can retain the intact reference for local validation.
+Local reuse requires the cached extent to occur in at least two current spatial profile bands.
+Each current anchor must also match the stored LOW geometry at that coordinate. Raw-inner anchors
+retain exact stored/current RGB8 equality; independently verified current Inside anchors may vary
+their RGB. Exterior offer pixels still require exact stored/current RGB8 equality, current physical
+black, current cover and the cached Euclidean distance bound. These positive-only offers cannot
+replace Raw, supply profile or AA evidence, or commit a new weak calibration.
+
+The existing current Inside graphs run before Raw so they can supply that local anchor evidence;
+their final matte union remains late. Each ROI publication replaces its own unit bit, including
+rejected pixels, while preserving other units. Glyph publication reads the current Inside image
+through its read-only view. The existing Inside finalizer owns full-image canonicalization against
+the completed glyph-publication result, current good units and covers, then unions that same kept
+value. Invalid publication clears the image before the finalizer's stricter readiness return.
+No resource or dispatch is added. An unissued Raw graph's shared parent/flags scratch is not a
+current Raw result and can differ when this ordering changes.
+
+A LOW candidate rejected by final BODY may recheck the existing inner-AA certificate only when
+its first distinct LOW foreground reference is also in the same unit's validated current Inside,
+current cover and ROI. The original ray stops, black model and mixture-visibility bounds remain;
+a rejected reference does not permit searching past it. This path requires a known adopted black
+model but does not require a currently KNOWN measured width. It cannot use the physical-black or
+exterior shortcuts, borrow another unit, or certify itself. A pixel already guaranteed by current
+Inside keeps the existing late union without repeating this new certificate. The original non-LOW
+certificate and UNKNOWN/unadopted fallback policies remain unchanged. This adds no confirmation
+frame; its GPU cost remains distinct from end-to-end playback latency.
+
+A current single-pixel nonblack gap may also receive AA protection between two opposite current
+physical-black donors. Both endpoints must have the same unit's measured BAND and RawSelected
+authority under its adopted known black model; the gap must be inside that cover and outside
+GlobalBody. Four forward directions visit each unordered bracket once in a bounded loop before
+the unchanged outer colour rays. Added AA cannot seed another bracket. This fills narrow
+concavities without searching farther from the glyph or adding a pass, history resource or
+confirmation frame. It can also protect a one-pixel background channel; it is bounded geometric
+overprotection, not an exact alpha certificate. These candidates and acceptances are included
+truthfully in the existing per-unit ray counters.
+
+Bracket validity and same-unit BAND checks run in a separate rejection branch before querying
+the opposite endpoint's RawSelected graph membership. This avoids that query on rejected
+brackets without changing any classification or publication criterion. The enabled 28-case
+comparison preserves all 1,120 native artifacts, and a matched fresh-observation replay preserves
+all 48 pairs and 96 owner states. Evaluator-entry reduction is a work-count observation, not a
+GPU-time or end-to-end latency measurement.
+
+Accepted AA has a separate two-bit R32 history paired with the existing strong RGB snapshot.
+Its construction bit excludes every private offer and retained result; its AA bit records direct
+current AA or accepted retention. A retained pixel must have prior AA authority, identical RGB
+at all nine local samples, and an unchanged ordinary-construction pattern at the eight distinct
+neighbours. A distinct neighbour must also have the same current owner in both covers and its
+measured BAND, current Raw support, a valid ROI and an adopted known physical-black model.
+Raw bitmap membership alone does not establish that black support. Current common ownership
+does not encode the historical AA pixel's unit.
+
+Cache begin freezes old-strong-reference permission in header word153 before validation revokes
+the old commit. Validation reads the old RGB/history and immutable construction bits, then sets
+only private offer bit24. Publication strips that bit from ordinary evidence before applying the
+validated retention. It reads no old neighbouring snapshot while overwriting RGB/history. Both
+images use the same immutable full-image write plan and become valid only through the same
+complete, fault-free commit. The reference can precede intervening weak observations. Current
+glyph evidence and first AA admission do not wait for history, and this adds no GPU dispatch.
+
+The optional AA observer owns RGB, positive colour-change witnesses, previous direct-AA
+candidates and actually accepted AA in a separate structured buffer. Its existing
+begin/validation/publication/commit passes validate the source domain, observation high-water
+mark and complete native write. Fresh EMPTY records RGB for a later appearance comparison while
+clearing glyph flags and episode qualification. Duplicates and Root0 provide no second
+confirmation. Overlapping current OCR cores/covers of the same ordered kinds tolerate detector
+bound jitter; confidence scores and component counts are not episode identity.
+
+Build152 restricts new weak AA only within a positively observed appearance episode. Following
+an authenticated glyph-map-empty RGB anchor, validation samples at most 64 unique native CBC-ROI
+cell centres per unit, considering only current trusted HIGH foreground under that unit's cover.
+At least four samples and a strict majority of changed RGB codes are required. Only a complete,
+fault-free commit qualifies the next observation. OCR-empty alone does not prove physical caption
+absence: cold visible captions, unchanged-raster OCR reacquisition and ambiguous samples keep
+original immediate admission. Sampling controls only whether the extra restriction is enabled;
+it generates no glyph mask. It adds no resource, pass or CPU readback to Build151.
+
+Only a new, otherwise unsupported direct-AA contribution in a qualified episode can wait for a
+second authenticated F2 observation. Current BODY, measured support, original certificates,
+qualified retained AA, normalized current Inside and a positive RGB witness remain immediate.
+Per-pixel prior coverage and independently published non-UI support prevent a new wait on cover
+expansion or a transition from other support to direct AA. Remembered Inside additionally requires
+current finalize-ready identity. These flags never create M without current AA or existing strict
+retention; accepted-AA history remains distinct. All original construction and certificate caller
+gates run first. Raw or Code1 bitmap membership alone is not an exemption, and deferred AA does not
+seed accepted-AA history. With no confidence plan, the original path remains available. The
+historical-AA offer shortcut applies only when the confidence plan is unavailable, allowing
+previously qualified AA retention to support a deferred current candidate.
+
+The six-observation warm comparison removes 51 alpha-zero cells with no added pixels or any-alpha
+ink withdrawal. The cold already-visible comparison preserves all six original masks and twelve
+render targets, repairing Build151's 6/11/6 visible-ink withdrawals. Three authored native tests
+exercise genuine appearance, pending/duplicate/Root0/stale/reset/EMPTY, unchanged-raster OCR
+reacquisition and immediate new-coverage admission; the existing fifteen focused tests also pass.
+An additional matched 28-case saved-input replay explicitly enables all three stability shaders
+in both the normal150 control and Build152. Native headers, accepted-AA history and schema2 state
+confirm the optional path actually ran. Final and pre-Inside masks remove 113 alpha-zero pixels
+and two alpha1..4 edge pixels, with no additions or new alpha>=5, BODY or opaque-ink loss; all
+other 25 case masks are exact. Appearance qualification and actual deferrals occur in the native
+state, rather than all cases falling back to the original path. Original assertions and their
+nonzero exits remain preserved; these fixed-GT criteria do not make the historical parity suite
+an all-tests pass. The stock Saved28 fixture leaves stability disabled, so that fixture alone
+does not qualify this optional policy.
+The Build153 bracket candidate adds 60 final/pre-Inside pixels across that enabled 28-case replay:
+27 visible alpha>=5 pixels, five alpha1..4 pixels and 28 alpha-zero pixels (two exterior, nine
+diagonal-connectivity ambiguities and 17 glyph-hole pixels). It withdraws no pixels and creates
+no disconnected mask component or component merge. The two exterior samples are the same
+single location in two cases. In both genuine real-estimator warm and cold six-observation
+comparisons, all eight inherited opposite-black fringe pixels gain protection from the first
+caption and retain it through the caption observations; EMPTY remains zero. No other mask
+changes, new scene/background protection or ink withdrawals occur in those two comparisons.
+All fifteen focused native checks pass. Three other inherited alpha8 omissions remain. The
+original changing-background probe incorrectly required Raw==0 where Raw's fallback is Code1.
+After correcting only that isolation assumption to Raw==Code1, all three authored tests pass in
+both versions, including immediate EMPTY and stable bounded one-pixel background-channel protection.
+These are finite qualifications. Moving-background changes can still admit false AA, and two
+adjacent F2 observations do not prove continuous source-frame presence across Root0 gaps. A separate
+inherited faint-edge case still misses pixels; neither an exact glyph mask nor universal
+live-flicker, recall or end-to-end latency improvement is established.
+
+A fresh EMPTY, absent current body, changed source domain/active units or hard-cut epoch revokes both permissions.
+The material observation clock remains a high-water mark across resets: a proof-valid stale tuple
+cannot clear or revive newer calibration. Exact duplicates can revalidate and reuse but advance
+neither the snapshot nor its epoch or LastSeen identity. Root0 continues to hold the published
+tuple. Invalid current proof fails closed. Optional-program or allocation failure leaves the
+existing F2 path available. A new snapshot becomes valid only after its complete native image
+write; partial writes and geometry faults cannot authorize reuse.
+
+The cache owns the packed RGB/LOW R32 image, the two-bit AA-history R32 image and a small header,
+and uses three ordered GPU dispatches.
+It adds no confirmation-frame wait. A fixed 2536-by-423 encoded-SDR current-load microbenchmark
+measured about 0.224 ms for the earlier complete-snapshot path and 0.238 ms for warm NOINFO duplicate
+revalidation above its preceding path. This predates local conflict offers, early Inside ordering
+and accepted-AA history;
+it does not establish their cost, hot fresh-frame, 4K, HDR or
+end-to-end playback cost. Dark inner antialiasing and background-dependent outer antialiasing
+remain separate precision and stability work.
+
+The Build134 candidate removes that one foreground term without changing LOW geometry, colour
+models, profile calibration, resources, dispatches or confirmation frames. In the finite A/B replay,
+external false protection falls from 304/311 to 16/18 pixels, with no BODY or opaque loss. Saved28
+also has no new BODY loss at any alpha and no new external protection. The original alpha-at-least-5
+check still fails: A/B loses 4/5 black fringe pixels at alpha 5--7, and Saved28 loses two at alpha 5.
+The user explicitly accepted tightening these extremely faint black edges for live testing; those
+failures remain in the reports. The A/B source/background pairs measure only 2--3 RGB8 code values
+of darkening at the withdrawn fringe. This does not establish complete antialiasing recall or live
+latency, and does not relax the existing AA predicates.
+
+Inactive palette slots return after the existing output, indirect-argument and shared-memory
+clears and the first synchronization. They publish the same invalid, empty or outside-slot header;
+the active path retains its existing validation and colour statistics. This skips unused-slot
+reductions without changing admission or adding a synchronization.
+
+Outline calibration separates an available physical width from confidence to replace current Raw
+geometry. The existing strict-majority common-band rule retains its combined-window measurements
+and replacement authority. An otherwise unresolved pair of exactly adjacent maximal windows can
+use at least two distinct common modal bands and strict-majority support across their union. This
+weaker rule retains only the shared extent, excluding both outer endpoints. It may add measured
+BAND, antialiasing and enclosed support, while preserving that unit's exact current RawAppend
+geometry. Width availability alone therefore cannot withdraw previously protected Raw pixels.
+
+One current per-unit confidence field owns this distinction: private word 36 is reset for each
+fresh calibration; zero preserves the old/default policy and one marks shared-width additive-only
+evidence. Replacement also requires the existing valid KNOWN extent; unsupported confidence values
+retain Raw conservatively. Shared widths cannot commit a new private temporal-cache extent. This
+opaque internal field keeps the CFB7 layout and public fields unchanged, and all outline/stability
+shaders must share the new source closures. Existing strong KNOWN estimates retain their prior
+behavior; wider or unsupported ties remain unavailable. The calculation adds no resource, dispatch
+or confirmation frame. Recovering width re-enables existing support work, so unchanged GPU cost or
+live latency is not established. Palette statistics retain their bounded shared-memory work.
+
+The outline policy bounds additional protection from a calibrated black component by that unit's
+learned spatial band. The same bound applies to raw-component donors for antialiasing and enclosed
+region completion. A connected clothing fold therefore cannot gain unlimited protection merely
+by touching a glyph's black outline. Unknown units retain their original component membership;
+this is accumulated per unit so an overlapping known unit cannot revoke it. The independent raw
+mask remains the literal fallback on a later path fault. This changes no palette, profile-width
+estimator, resource allocation, dispatch count or confirmation wait. A learned common width is
+still a font assumption, not a guarantee that every atypical stroke lies inside it.
+An already seeded physical-black component pixel immediately adjacent to the immutable measured
+band can supply a separate, one-native-pixel rim correction. It must retain valid current colour,
+known black and usable enclosure evidence. This correction never writes or recursively grows the
+measured-band bits. Corrected donors use the same exterior antialiasing colour checks as the
+original band. It adds no image, dispatch or confirmation frame. The binary matte and background
+reconstruction still do not recover an exact alpha layer; thin compositing halos remain a known
+limitation.
+
+The support probability sampler uses explicit precise FP32 operations. On each axis it first
+divides the detector extent by the native crop extent, adds `0.5` to the integer source index,
+multiplies that center by the ratio, and subtracts `0.5`. It floors that result and separately
+subtracts the floor to obtain the interpolation fraction; contributor indices clamp to the
+detector map. Each horizontal interpolation performs a rounded subtraction, multiplication and
+addition in that order, followed by the same three operations vertically. Contraction and
+reassociation are disabled for this dependency chain. The CPU readers perform the same FP32
+steps and compare the resulting anchor probability strictly against FP32 `0.2`; support has no epsilon.
+
+The spatial radius `2` and RGB distance `0.08` are explicit spatial-policy parameters. They happen
+to equal the diagnostic temporal jitter radius and fixed-anchor tolerance; this does not derive
+spatial validity from temporal correspondence. The spatial test assumes an overlay has nearby
+contrast and a compatible current text palette within a classified current cover. It is a bounded high-contrast-overlay hypothesis,
+not a calibrated semantic subtitle guarantee. The existing five-center interval extension can cover interiors
+around the supported edge pixels; it does not turn that assumption into text recognition.
+Native support remains literal binary zero/one and is recomputed from the current joined observation.
+It requires a positive diagnostic count only to preserve duplicate admission: every genuine eligible
+observation starts at one immediately, while an exact duplicate cannot discover a new pixel.
+Support does not wait for count four or borrow a previous pixel's support.
+
+The live native matte starts only from those current support pixels. There is no whole-cover
+provisional term, acquisition countdown, cue-held protection or per-pixel fade. An authenticated
+empty observation clears support immediately. If the detector retains a false cover after a subtitle
+disappears, only pixels with passing current palette/stroke or outline evidence can remain
+supported. RGB stability and cover membership alone cannot protect the region. False probabilities
+and textured scenery inside a false current cover can still protect scene pixels. Low-probability,
+low-contrast glyph pixels can be missed. The detector is not a
+semantic subtitle recognizer. Paired evaluation must inspect appearance, replacement, disappearance
+and false protection together.
+
+The existing fixed-RGB history continues independently as a diagnostic. It counts four genuine
+completed eligible inference observations, not displayed frames, duplicate deliveries, reused tuples
+or frames dropped while the single inference is busy. These counts and their feature-code low bit
+do not impose a four-observation rendering gate. The positive-count duplicate-admission rule above
+remains; the count-four feature bit does not authorize support. Probability-change cues affect only
+the diagnostic correspondence described below and do not delay or prolong protection.
 
 The count starts at one only inside a current authenticated OCR8 cover with valid RGB and
 probability evidence. History compatibility is bound to source/crop/field/content geometry,
 frame/generation/cut and source time. OCR slot mask, count, order, splits and merges alone are not
 history reset keys. Every current admitted cover can search; there is no pending or settled-group
 gate. Empty, invalid or off-cover current pixels carry no positive count. Newly admitted count-zero
-pixels still need four genuine confirmations. The adaptive UI-plane filter remains independent.
+pixels need four genuine confirmations to reach diagnostic count four. The adaptive UI-plane filter
+remains independent, and current pixel support can be present at diagnostic counts one through four.
 
-The presentation stage protects the union of current OCR covers while new pixels acquire their
-four genuine confirmations. A cold or reset eligible nonempty observation, including a first
-nonempty observation after empty/invalid authority, starts a countdown of four. Every strictly newer eligible source frame and timestamp with a nonzero current probability-reset
-mask rearms the countdown to four, including while it is active. A genuine zero-mask observation
-decrements a positive countdown once; four consecutive cue-free observations produce
-`3,2,1,0` and hand over to confirmed pixels. Consecutive cues, including cues from different current
-cores, can prolong current-cover protection. Exact duplicates preserve both countdown and cue latch; full reuse dispatches
-no observation. Empty, invalid geometry/OCR/probe or unsupported native source clears provisional
-protection. Current covers alone authorize provisional protection; no past rectangle is reused.
-
-While the countdown is positive, presentation uses the maximum of the pixel Gaussian and a
-Gaussian of the Euclidean distance to the union of current OCR covers, measured in native source
-pixels with the same sigma. Inside a current cover the provisional weight is exactly one; outside
-it decays smoothly. At zero the provisional term disappears and only confirmed-pixel Gaussians
-remain. Raw binary support, fixed-RGB counts and the native five-center squared-distance artifact
-retain their original meanings. This is a cue-held presentation fallback, not earlier pixel confirmation or
-semantic text identification. Persistent or frequently repeated cues can prolong it indefinitely;
-only the handover after the latest cue is bounded by four cue-free observations. Current OCR false positives receive the same provisional treatment;
-the genuine disappearance holdout must report that changed behavior explicitly. The counter
-maximum equals the four-RGB-confirmation policy, but a probability cue is not a pixel-onset clock.
-A late RGB change without a later cue, delayed cover admission or continued RGB variation can
-still leave unconfirmed pixels at handover. Repeated current cues can prolong provisional
-protection even after raw support is mature. Completing four cue-free observations does not
-prove complete semantic glyph coverage.
 Compatible genuine observations require both a strictly newer source frame and timestamp. A
 qualified pixel finds one prior counted reference within two native pixels on each axis and RGB
 maximum-channel distance `0.08`. A qualifying fixed reference at the same pixel has priority,
@@ -625,30 +1166,26 @@ cued. If the same-pixel reference is missing or fails the RGB rule, a cue blocks
 two-pixel neighbor search; valid eligible pixels then start at one with current RGB as their
 fixed reference. Outside cued cores, ordinary correspondence remains unchanged.
 
-The cue itself cannot grant support, change the independent adaptive UI controller, or substitute
-a rectangle for native confirmed pixels. It can trigger the separate cue-held current-cover presentation window. Four genuine RGB confirmations of a counted reference
-are still required; this is not a requirement for four new observations after every probability
-cue. On a later uncued RGB mismatch, the unchanged neighbor fallback can still select a mature
-reference elsewhere. No previous-box association is used. The independent packed presentation countdown does not change pixel history. The
-five-center Gaussian, literal maximum union, Base/UI blend and shared limits retain their
-numerical rules. Recipe 23 rejects recipe 22 history despite the unchanged 32-word SCT5 layout.
+The cue cannot grant support, change the independent adaptive UI controller, or substitute a
+rectangle for current-evidence-supported pixels. Four genuine RGB confirmations are required
+only for a diagnostic counted reference; they are not required after every probability cue. On a
+later uncued RGB mismatch, the unchanged neighbor fallback can still select a mature diagnostic
+reference elsewhere. No previous-box association is used. Recipe 27 changes current glyph selection while retaining recipe 26's
+five centers, completion radius three, the horizontal slope guard and minimum interval
+extension below. It rejects earlier recipe history despite the unchanged
+32-word SCT5 layout.
 
-This is a temporal stability filter, not semantic text recognition. Any static scenery inside a
-persistent OCR cover can satisfy the same rule, including a flat background. A pixel without a
-qualifying prior reference needs three additional observations before protection. Similar replacement
-colors and unchanged background pixels can retain qualifying same-pixel references even when a
-probability cue is present. A cue is not semantic glyph evidence. Nonqualifying RGB can still
-restart and rely on provisional current-cover protection until four cue-free observations.
-Repeated probability cues can delay handover even after those pixels are confirmed. Delay, partial confirmation,
-false protection and missed changes must therefore be evaluated together. The unchanged
-neighborhood correspondence has the later uncued fallback boundary described above. This
-exploratory ordering change does not establish subtitle completeness,
-same-shape replacement, disappearance, live quality or performance acceptance.
-The cue-held current-cover fallback described above supplies provisional presentation only. There is no historical mask union or per-pixel depth fade.
+RGB stability is not semantic text recognition. Static scenery and similar replacement colors may
+retain diagnostic counts even when a probability cue is present. Those counts have no protection
+authority apart from positive-count duplicate admission. Current probabilities or spatial contrast
+can still be false positives or omit glyphs; immediate support
+does not establish complete glyph coverage, same-shape replacement quality, live quality or
+performance acceptance. There is no historical mask union.
 
 The `RGBA32F` history stores a fixed RGB reference and an exact float feature code. Zero is invalid
 source; `2` is valid RGB with count zero; `6`, `10`, `14` encode counts one through three; `19`
-encodes count four and admitted support. Count zero/one RGB equals current source exactly; higher
+encodes diagnostic count four with the retained legacy feature low bit. This bit is not native
+support authority. Count zero/one RGB equals current source exactly; higher
 counts may retain a reference within the stability tolerance. A separate same-sized next-feature
 texture receives the current result before the old history is overwritten, avoiding in-place
 neighbor reads/writes. It is not a second detector or rendering authority. The 32-word `SCT5`
@@ -667,38 +1204,61 @@ globally invalid authority clears the snapshots. These copies cannot authorize r
 
 Each admitted native pixel still projects to every field node touched by its bilinear sampling
 footprint for diagnostics. Presentation uses the native pixel centers directly, rather than the
-lower-resolution projected pins. Each confirmed source pixel supplies five Gaussian centers: itself
-and centers displaced by two source pixels up, down, left and right. Virtual centers outside the
-source crop are retained. The same two-pass distance shader computes the minimum squared Euclidean
-source-pixel distance `q` at each fractional source position of the depth-field nodes. Horizontal
-scratch is R32_FLOAT with `field_width` by `crop_height + 4` elements; the final q field is
-R32_FLOAT. Empty support and synthetic padding publish positive infinity in q.
+lower-resolution projected pins. Each current supported source pixel supplies five centers: itself and centers displaced by two
+native pixels up, down, left and right. Virtual centers outside the source crop are retained.
+Recipe 27 uses a horizontal minimum slope-feasible interval. Each
+center owns a rectangle covering its full bilinear field footprint plus three native pixels for
+current glyph-edge completion. This completion supplies no historical or unauthenticated support.
+
+Let `pitch_x = source_width / content_width` and `pitch_y = source_height / content_height`.
+The rectangle half sizes are `pitch_x + 3` and `pitch_y + 3`. Axis costs derive from the same
+floored Q30 horizontal step numerator as the final horizontal limiter:
 
 ```text
-sigma = min(source_width, source_height) / 60
-M = exp(-q / (2 * sigma * sigma))
-proposal = (1 - M) * Base + M * UI_plane
-Final = shared_horizontal_Q30(shared_vertical_75_25(proposal))
+step_x = floor(horizontal_step_q_numerator / content_width) / Q30_scale
+cost_x = step_x * content_width
+D(x,y) = min_center_with_abs(y-cy)<=radius_y(cost_x * max(abs(x-cx) - radius_x, 0))
+proposal = clamp(Base, UI_plane - D/source_width, UI_plane + D/source_width)
+vertical_compatibility_field = proposal             // exact bit copy
+Final = shared_horizontal_Q30(proposal)             // unchanged rows copy Base bits
 ```
 
-The exponential of the minimum distance is exactly the maximum union of the individual Gaussian
-circles, subject to the declared FP32 arithmetic. It introduces no flat core, summed intensity or
-hard radius cutoff. Sigma is eight native pixels at 480p, eighteen at 1080p, and thirty-six at 2160p;
-this is an experimental presentation scale requiring native quality evaluation. The proposed
-weight arithmetic has a generated absolute admission ceiling of `2e-6`, checked by native GPU
-tests before accepting evidence. The distance reader uses a source-coordinate FP32 error envelope
-against an independent nearest-center oracle, rather than treating integer L1 distance as q.
+`D` is a native parallax-pixel budget, not a squared Euclidean distance. Two native passes compute
+it using the existing horizontal scratch and final R32_FLOAT resource. The second pass only
+reduces rows within the exact sampling/completion footprint. Inclusive row membership uses
+integer rational source/content geometry, avoiding a discontinuous decision at an FP32 divide
+boundary. There is no vertical cost or ramp outside that footprint. Rows without eligible centers,
+empty support and synthetic padding publish positive infinity. The footprint is fixed by current
+evidence. Within each affected row its horizontal distance is Lipschitz under the existing slope
+bound. Clamping already bounded Base to the two UI intervals gives the pointwise least change
+needed for these footprints, subject to FP32 arithmetic. This handles
+both Base in front of and behind the UI plane; it does not impose a Base-only foreground floor.
 
-M=0 copies Base bits exactly and M=1 copies the UI target bits exactly, including signed zero.
-Interior weights use separate precise FP32 multiply/add operations. M and the Gaussian proposal
-are saved independently from Final. The Gaussian proposal then runs the same existing vertical
-75/25 envelope and horizontal Q30 limiter, preserving the renderer's slope constraints. These
-passes can move the final depth away from the literal Gaussian blend or UI target; no pin is
-reasserted afterward. Empty support without active provisional protection, or invalid current authority, bypasses reconditioning and
-copies immutable Base bits exactly, including nearest-content padding. A separate one-word
-control records this decision. Padding M and proposal extend the nearest real content cell;
-the underlying q diagnostic remains infinite outside content. The original Base vertical
-diagnostics remain immutable; the post-Gaussian vertical field has its own backing resource.
+For compatibility, `gaussian_weight.f32` saves equivalent depth influence `M`: one when `D=0`,
+zero when the Base/UI gap is zero or already fits the budget, and otherwise
+`1 - D / abs((UI_plane - Base) * source_width)`. It is not a color alpha. The proposal uses a
+direct precise UI-plus/minus-budget operation, rather than a round trip through weighted RGB or
+depth blending. Weight endpoints are bounded to `[0,1]`, with canonical positive zero. A final
+closed Base/UI interval clamp bounds independent FP32 roundoff near the
+gap boundary. Exact endpoints preserve UI or Base bits, including signed zero. The serialized
+sigma divisor remains a legacy compatibility field and has no effect in recipes 26 and 27.
+Validators enclose the separate operations, including the reciprocal-plus-multiply division
+permitted by [Direct3D11 floating-point rules, section 3.1.3.2](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm).
+
+The ordinary scene retains its vertical75/25 and horizontalQ30 guards. Subtitle processing copies
+the proposal into the compatibility vertical field, then applies only the shared horizontalQ30
+guard. Rows whose complete proposal is bit-identical to immutable Base copy Base into Final
+exactly. Other rows retain the horizontal recurrence; M=0 at one pixel is not a Final shortcut.
+No pin is reasserted after that guard. Native tests and independent readers check actual proposal,
+compatibility copy, horizontal output, full-glyph coverage and off-glyph change. Subtitle rows do
+not claim the ordinary scene's vertical shear bound.
+Empty support or invalid current authority copies immutable Base bits exactly, including original
+padding. The one-word control requires current authority and a finite nonnegative budget on at
+least one content row. An infinite local content budget publishes zero M and original Base,
+including original padding. Finite active padding M/proposal extend the nearest real content
+cell; raw distance remains infinite outside content. A one-word control joins these
+decisions. Compatibility Gaussian artifact and shader names do not select the retired falloff.
+This experimental policy still requires paired quality and live halo/comfort acceptance.
 
 Lane zero of the 256-thread resolver group writes the complete 40-word UIP4 state. The group
 uses all-memory synchronization for the adaptive cover probe and UI controller, then
@@ -706,15 +1266,16 @@ snapshots that state into group memory and validates the snapshotâ€”includi
 its scene epoch and the authenticated CutBridge hard-cut count bound at `t1`â€”and publishes the six
 immutable condition words consumed by rendering: schema, tag, current count/kinds, active, and target.
 There is no separate preparation dispatch or live validation root. Every authenticated current OCR/UIP4
-observation runs contour history and projection, native Gaussian distance, the out-of-place
-Gaussian proposal, and shared vertical/horizontal conditioning. The proposal reads immutable Base
+observation runs contour history and projection, native slope-budget distance, the out-of-place
+interval proposal, an exact compatibility copy and horizontal conditioning. The proposal reads immutable Base
 at `t2`; `u3`, `u4`, and `u5` write a distinct blend texture, one-word smoothing control, and actual
-weight texture. SRVs and UAVs are unbound between stages. The two shared limiters read the control
+weight texture. SRVs and UAVs are unbound between stages. The compatibility copy and row limiter read the control
 at `t2` and immutable Base at `t3`, then publish the complete Final resource. No thread can partially
-accept malformed or cross-scene state. Infer/force publishes the complete final field. Exact cache
+accept malformed or cross-scene state. Infer/force publishes the complete diagnostic Final field. Exact cache
 reuse and adaptive reuse hold depth, OCR, UIP4, support, history, source/probability, q, M, blend,
-vertical field, control and Final together. Invalid publication fails closed to flat SBS. Current
-RGB is never retained: every disposition warps the current capture through the atomic final field.
+vertical field, control and Final together with Base, matte, SCT5 and SCP4. Invalid Base publication
+fails closed to flat SBS. Joined RGB retains the inference owner's snapshot for pointwise revocation;
+every rendered draw samples the current capture through the selected Base or analytic UI map.
 Contour history belongs to that same joined observation. It adds no independent inference clock,
 row lease, onset accumulator, signature, overlay model, or GST/OGR/ORS dependency.
 
@@ -970,8 +1531,12 @@ request, and twelve aligned 16-byte records hold the depth and optional-subtitle
 Before comparison the CPU publishes an authenticated `RQST`, unique nonzero frame token, requested
 optional-work flags, and zero proposal/argument records in one ordered D3D11 update. The resolve
 writes its authenticated `PROP` tag last. A small CUDA setter validates the current `RQST` and
-`PROP`, writes a tag-last `CBRG` receipt, and sets the depth handle plus the authenticated
-work-mode-gated optional-OCR handle. OCR is infer-only; reuse leaves both children dormant. D3D11 buffers marked `DRAWINDIRECT_ARGS` are not
+`PROP`, stages the resolved receipt with magic zero, and sets the depth handle plus the authenticated
+work-mode-gated optional-OCR handle. One parent kernel depending on both conditional children
+validates the staged fields and current request before publishing `CBRG` last. Invalid requests
+remain uncommitted; a valid request with a malformed proposal still selects infer without OCR.
+The tag establishes post-child execution ordering, not numeric model validity or CPU publication.
+OCR is infer-only; reuse leaves both children dormant. D3D11 buffers marked `DRAWINDIRECT_ARGS` are not
 CUDA-registerable on the production driver, so the registerable transaction has a same-sized
 D3D-only indirect twin. D3D copies it once after proposal resolution for authenticated OCR
 preprocessing on infer. After CUDA unmap, one direct one-thread detector finalizer validates the
@@ -998,7 +1563,24 @@ rotates two private depth targets before receipt validation, invalid GPU-undecid
 only the retained-depth copy needed to restore the previous normalized field into the new target;
 it advances no depth or subtitle temporal or ownership state.
 
-The conditional executable has one setter followed by two sibling conditional nodes. The first
+A private queued-force postprocess mode (`request_flags = 4`, distinct from optional-work flags)
+requires the current post-child receipt for both depth and subtitle indirect shapes. It cannot
+use the completed-force abstention fallback. Missing or malformed authority advances no
+observation; the queued renderer must independently reject retained fields. This mode is a
+research prerequisite, not a live completion or presentation path.
+
+The default-off same-source continuation experiment queues postprocess once after successful
+interop-unmap calls. Its separate ticket retains the submitted source, token, work disposition,
+observation clock and working views; it grants no completed publication or cache authority.
+Queuing invalidates the previous borrowed publication before writing shared fields. The real root
+query and error handling remain mandatory, and both acknowledgment paths skip already-queued
+normalization before publishing the ordinary completed receipt. An independent private pixel
+shader checks the current transaction, finalized shapes and state clock before using Base or UI;
+rejection renders current color through identity. Callers must serialize the immediate context and
+retain source contents until the draw is recorded. Live conversion has not adopted this ticket.
+
+The conditional executable has one setter followed by two sibling conditional nodes and their
+common receipt-commit kernel. The first conditional
 contains the already-captured DAV2 TensorRT graph as its inference child; the second contains the
 captured OCR TensorRT graph when optional work is available. A valid reuse proposal leaves DAV2
 dormant and also leaves OCR dormant. A valid infer proposal selects DAV2 and may select current-ready
@@ -1032,12 +1614,13 @@ An inference receipt runs the complete depth postprocess chain, including frame 
 normalization reductions and histogram, depth texture publication, scene-cut/history work, and
 every V2 state, mapping, limiter and Base-field pass. Ordinary subtitle work consumes OCR output with
 complete `RQST`/`CBRG`/`OOCR` proof, or publishes its requested abstention, then advances UIP4 and
-writes the complete conditioned final field from immutable Base.
+writes the complete conditioned Final diagnostic from immutable Base together with the native matte.
 
 A reuse receipt copies previous normalized depth through the swapped output target and preserves
 normalization, cut, camera, model-input history, DAV2/V2 Base, OCR8, UIP4, condition parameters and
-the conditioned final field byte-for-byte. Native USER32 suppression produces no OCR/UIP4 observation
-and atomically publishes Base as the final field. A failure to publish the complete joined tuple is
+the conditioned Final diagnostic, native matte, SCT5 and joined source byte-for-byte. Native USER32
+suppression produces no OCR/UIP4 observation and disables the analytic compositor for that draw.
+A failure to publish the complete joined tuple is
 terminal and produces no nominal completion. Optional OCR readiness remains independently checked,
 but depth and subtitle advance or hold as one coherent transaction.
 
@@ -1197,17 +1780,21 @@ nor a late receipt can establish authority on the new route.
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-49 dump preserves Base when UIP4 is active, the complete atomic conditioned final field,
-and the selected path's publication resources with ordered D3D11 `CopyResource` operations
-and one terminal event. Submission performs no GPU-to-CPU wait or synchronous Map. Later
-render-thread calls poll with `DONOTFLUSH`, collect staging resources with `DO_NOT_WAIT`, then hand
-the CPU snapshot to the existing publication worker. The renderer's warp SRV and the atomic final
-SRV must be the same resource at admission; the dump stages and authenticates it once as
-`shadow_final_parallax.f32`. The verifier replays the ordinary limiter and, when active, validates
-the native Gaussian distance, soft UI-plane blend, and shared post-blend limiters into that field. The same final-field contract and native renderer are used by live Host
-SBS and the native sbs-bench whole-clip harness.
+schema-50 dump preserves ordinary Base, the protected Final diagnostic, native matte, SCT5,
+SCP4, joined source snapshot and exact rendered native source bytes with ordered D3D11 copies
+and one terminal event. Submission performs no GPU-to-CPU wait or synchronous Map. Later callbacks
+poll with `DONOTFLUSH`, collect with `DO_NOT_WAIT`, and publish only a complete immutable tuple.
+The live warp SRV is Base. Field-only inactive fixtures can explicitly use their unconditioned
+Final alias. The reader independently validates the old Final diagnostic recurrence and the new
+same-observation matte transform/SCP4. `warp_map.f32` records actual selected pre-saturation U;
+its boundary mask follows that selected U. `source.png` remains a preview; exact `render_source.bin`
+preserves native SDR/HDR color for pointwise revocation audits. The required boolean
+`selected_map.render_enabled` records exact b3 draw permission separately from retained OCR/SCP
+authority. Live and whole-clip rendering share
+the selected-map policy. Offline scene-cache schema 4 commits Base/state/matte/SCT/SCP/source as one
+hashed six-payload tuple through a per-frame atomic `.tuple.json` record; partial tuples fail closed.
 
-The schema-49 root `matched_observation_timestamp_us` records the completed source transaction's
+The schema-50 root `matched_observation_timestamp_us` records the completed source transaction's
 clock. A fresh publication must bind that clock to the full sealed geometry state before UI
 conditioning can be verified. Conditional reuse retains an older geometry/UI owner; the authenticated
 GPU trace must identify that owner's original observation, whose clock remains in the retained
@@ -1282,8 +1869,8 @@ that status query only when the output owner's next cadence target leaves at lea
 slack after reserving `3 ms` for completed-depth postprocess, SBS warp/output, and NVENC submission or
 local presentation. Remote streaming uses the encode schedule. Local AR starts one refresh-interval
 render budget when DXGI's frame-latency handle admits a new draw. This bounds the admitted work; it
-does not predict the physical vblank. Each new admission gets its own budget instead of inheriting
-the remainder of an unrelated clock grid. A busy output retains its original deadline until Present
+does not predict the physical vblank. Each newly admitted output delivery gets its own budget
+instead of inheriting the remainder of an unrelated clock grid. A busy output retains its original deadline until Present
 succeeds, even if a newer capture replaces its pixels. DXGI keeps the single-frame queue bound;
 the render budget adds no separate pacing wait and does not change 2D passthrough.
 Repeated queries use all of that post-reserve cadence slack up to an absolute `8 ms` wait cap, with
@@ -1303,17 +1890,30 @@ own nonblocking D3D event and is never awaited by this loop. If readiness-event 
 same-frame completion safely downgrades to one full-stream nonblocking status query and does not
 spend the bounded-wait budget.
 
-At the start of a later conversion, any still-owned root receives one additional nonblocking
-completion query *before* current DDup/adaptive admission is derived. A ready completion is matched
-to its exact private color slot and authenticated. Ready completed-publication receipts are also
-consumed before admission, and only an exact current receipt can make conditional output reusable.
-Admission is then recomputed from that post-completion state, so a force root that narrowly missed the same-frame budget does not
-make every following frame compare against an older baseline. The completed render slot is reserved
-for the current delivery while a distinct free slot may own the newly submitted frame. If the early
-query is busy, empty, invalid, or has an unknown identity, that conversion cannot later submit a
-changed frame using stale proof; it keeps the pending owner or fails closed and retries admission on
-a later conversion. The CUDA query still exposes only joined-root readiness; the separate D3D
-receipt reports finalized publication without a decision wait.
+At the start of a later conversion, any still-owned root receives an immediate completion query
+*before* current DDup/adaptive admission is derived. It may repeat within the same cadence reserve
+and absolute wait cap. After a yielded wait, foreground/browser authority is freshly observed before
+current authority snapshots and temporal-source observation are derived. A ready completion is
+matched to its exact private color slot and authenticated. Ready completed-publication receipts are
+also consumed before admission; only an exact current receipt can make conditional output reusable.
+Admission is recomputed from that post-completion state. The completed render slot is reserved for
+the current delivery while a distinct free slot may own the newly submitted frame. A prior root B
+and a newly submitted C in one conversion share the first poll plan's absolute deadline: C can use
+only its remaining budget, with no second wait cap. An expired or sub-minimum remainder gets one
+nonblocking query. If B remains busy, returns no valid completed frame or reports an unknown
+identity, the conversion retains its pending owner or fails closed; it cannot admit C using stale proof. Root
+readiness still grants no reusable D3D receipt. The query budget bounds polling, not all completion
+postprocess, draw or encoder time; live onset/removal latency remains separately measured.
+
+Ordinary and queued rendering share one source-conversion watermark. Once newer current colour C
+has actually been drawn, including flat identity, an older private B whose source differs from the
+current capture cannot replace it. B's completion is still consumed normally; rejecting its old
+pixels does not cancel inference or supply current EMPTY evidence. Proven same-source redelivery
+remains allowed, and authenticated cached geometry drawn with current colour records the current
+pixel delivery rather than the older model owner. The successful draw command's actual colour SRV
+owns that identity, including a rejected command replaced with current-colour flat. Packed repeats
+check their stored pixel-source identity and never advance the watermark. Only the converter's
+explicit source-namespace reset resets it. This adds no mask history or confirmation wait.
 
 When remote capture goes idle with conversion still pending, the encoder's image wait is capped
 at the requested frame interval (with a `1 ms` floor), or the configured idle heartbeat interval
@@ -1646,7 +2246,7 @@ source aspect ratios use the centered integer contain-fit described above, with 
 padding excluded from analysis. No ordinary live ROI allocation or copy is submitted. Dump 3D alone
 may reconstruct the exact completed ROI as a same-format `CopySubresourceRegion` artifact after
 production timing has closed; failure rejects that dump without changing the live route. The
-original full color texture also remains the renderer source. The final ROI field is
+original full color texture also remains the renderer source. The ordinary Base ROI field is
 mapped back at its physical pixel scale, with the outside-only slope collar described above, and the
 desktop beyond that collar is exactly at zero parallax. Separately, the host grants the helper's
 true-fullscreen authority only when its foreground-client rectangle maps exactly to the capture;
@@ -1736,7 +2336,7 @@ source conversion poll so even a completely static desktop receives every later 
 session ends or changes mode first, its unpublished diagnostic batch is cancelled at teardown
 instead of making teardown wait for the GPU.
 
-Use `.f32` artifacts for quantitative comparisons. Schema 45 does not store redundant scalar/heat
+Use `.f32` artifacts for quantitative comparisons. Schema 50 does not store redundant scalar/heat
 preview PNGs or per-field shape sidecars; dimensions and warp-map semantics are authenticated in
 the manifest, while `model_input_shape.json` remains calibrated preprocess authority. Generate
 verified diagnostic previews on demand, outside the atomic package, with
@@ -1770,26 +2370,30 @@ transpose.
   `1022x434`, `1036x434`, and their portrait transposes) and all six corresponding exact-2x fused
   public fields. Every admitted current OCR8 pair can authorize search, up to eight covers. Any other
   fitted tensor copies ordinary V2. The
-  detector does not know whether a box contains a subtitle, UI text, a lower third, or a logo;
-  lower-quarter and approximate horizontal-center eligibility are geometric priors rather than
-  semantic classification. Centered HUD or desktop text can still authorize search, while an
+  detector does not know whether a box contains a subtitle, UI text, a lower third, or a logo.
+  The subsequent local-line angle and learned-layout classifier adds geometric and temporal
+  subtitle evidence; it is not a semantic dialogue recognizer. Centered horizontal HUD or scene
+  text can still qualify, while an
   off-center subtitle can be missed. Without a matched video ROI, a subtitle in an off-center
   embedded video is measured against the full screen. Horizontal adjacency prevents distant
   columns forming a false centered line but does not identify semantic dialogue. Detector evidence gates, bounded eight-pair
-  selection and exact identity remain the other cover controls. There is no additional color,
-  font, language, or winning subtitle-stack selector.
+  selection and exact identity remain the other cover controls. The classifier has no color or
+  language rule, text recognizer, motion tracker, or unrestricted new-position veto.
 - Detection, not recognition, is pinned. Very small, very low-contrast, stylized, vertical, curved,
   or partially clipped text can be missed or boxed inaccurately. Current off-cover, empty or invalid
-  evidence clears positive pixel counts. A newly admitted count-zero pixel needs four genuine
-  fixed-reference RGB confirmations. Similar-color replacements and static backgrounds may retain
-  qualifying same-pixel counts even when the current core has a probability cue; this rule cannot
-  identify semantic glyph identity. Partial confirmations can yield uneven Gaussian coverage.
+  evidence clears positive pixel counts and support. Current valid RGB/probability and the current
+  palette/stroke or outline rule admit support immediately within classified covers, with
+  positive count retained for duplicate admission only. Low-probability, low-contrast antialiasing,
+  outlines, thin glyphs or detector omissions can yield uneven Gaussian coverage. False probabilities
+  and textured scenery inside false current covers can still protect scene pixels. Four genuine
+  fixed-reference RGB confirmations remain diagnostic; count four cannot retain protection after
+  both current evidence tests fail.
   A detector can omit an isolated glyph even when the rest of its line is confidently detected;
   the bounded horizontal search guard cannot recover arbitrary omissions outside its extent.
-  A qualifying same-pixel reference continues despite the cue. Missing or mismatched references
-  inside cued cores restart and rely on provisional current-cover protection during a triggered warmup; a later
-  uncued neighborhood correspondence can select a mature reference. Slot/count/order changes alone
-  do not impose a second history reset. The temporal filter can protect static scenery inside persistent covers.
+  A qualifying same-pixel diagnostic reference continues despite a probability cue; missing or
+  mismatched references inside cued cores restart, and later uncued correspondence can select a
+  mature diagnostic reference. Slot/count/order changes alone do not impose a second history reset.
+  No whole-cover grace or temporal-confirmation delay applies to presentation.
 - Deterministic synthetic fixtures and native GPU sequences establish bounded implementation
   behavior; they do not measure the real-video distribution or a production false-positive rate.
   Historical genuine schema103/R15 captures do not qualify the fresh UIP4/SCT5 treatment.

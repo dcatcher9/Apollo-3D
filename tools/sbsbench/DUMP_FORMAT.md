@@ -1,7 +1,7 @@
 # Dump 3D format
 
 Dump 3D is one atomic, matched-frame diagnostic package for the authenticated Host SBS V2 path.
-The canonical geometry/metric reader accepts schema 49 only. Earlier schemas 44/45/46/47/48 and presentation-experiment
+The canonical geometry/metric reader accepts schema 50 only. Earlier schemas 44/45/46/47/48/49 and presentation-experiment
 schemas 41/42/43 remain historical artifacts and are rejected by the current reader. Retired SLR3--SLR9,
 GST/OGR/ORS, and offline overlay-detector packages are intentionally unsupported.
 
@@ -32,19 +32,22 @@ The core package contains:
 | `shadow_vertical_majorant.f32` | Vertical upper-envelope diagnostic |
 | `shadow_vertical_conditioned.f32` | Fixed vertical-share result |
 | `shadow_base_final_parallax.f32` | Required in active UIP4 packages; ordinary post-limiter field before subtitle conditioning |
-| `shadow_final_parallax.f32` | Complete atomic conditioned model-domain field; sole live render and warp-input authority |
+| `shadow_final_parallax.f32` | Protected conditioned model-domain diagnostic; no live renderer authority |
 | `shadow_state.json`, `shadow_frame_stats.json` | Typed V2 state and current-frame statistics |
-| `warp_map.f32` | Exact continuous inverse source map; dimensions, layout, validity, clamp, and derivation semantics live in manifest `warp_map_contract`; required for ROI packages |
+| `warp_map.f32` | Actual selected pre-saturation source-U map (Base inverse or analytic UI); dimensions, layout, validity, clamp, and derivation semantics live in manifest `warp_map_contract`; required for ROI packages |
 | `warp_mask.png` | Authenticated finite-source boundary evidence; required with `warp_map.f32` for ROI packages |
 | `window_region.json` | Required semantic observation for ROI packages |
 | `sbs.png` | Packed stereo preview |
 | `subtitle_conditioning.json` | Required current subtitle-authority descriptor; canonical `none` or `subtitle-contours-v1` |
 | `subtitle_ocr_record.u32` | Active-only OCR8 record for the atomic target's authenticated subtitle-publication frame: current on infer, older on whole-tuple reuse |
 | `subtitle_locator_state.u32` | Active-only compact UIP4 state in generated-contract word order |
-| `contour_support.u32`, `contour_history.rgba32f` | Active-only binary native temporal support and fixed-reference RGB/valid-bit/confirmation-count/mask-bit history |
-| `contour_field_pin.u32`, `contour_distance.f32` | Active-only projected field pins and native five-center squared Euclidean distance q |
-| `gaussian_weight.f32`, `gaussian_blend.f32` | Actual max-union Gaussian M and precise out-of-place UI/Base proposal |
-| `gaussian_vertical_conditioned.f32`, `gaussian_control.u32` | Actual shared post-Gaussian vertical field and one-word smoothing decision |
+| `contour_support.u32`, `contour_history.rgba32f` | Active-only binary current-evidence support and diagnostic fixed-reference RGB/valid-bit/count/legacy count-four-bit history |
+| `subtitle_glyph_matte.u32`, `subtitle_glyph_matte.json` | Native literal 0/1 matte and generated recipe/source/identity binding |
+| `subtitle_condition_params.u32`, `subtitle_condition_params.json` | Six raw SCP4 words and tuple binding; required independently of optional GPU trace |
+| `render_source.bin` | Exact tightly packed rendered native color; manifest format/dimensions preserve FP16 HDR revocation inputs |
+| `contour_field_pin.u32`, `contour_distance.f32` | Active-only projected field pins and native five-center rectangular-footprint slope budget D in parallax pixels |
+| `gaussian_weight.f32`, `gaussian_blend.f32` | Actual equivalent depth influence M and precise out-of-place minimum-slope-budget UI/Base proposal; names retained for compatibility |
+| `gaussian_vertical_conditioned.f32`, `gaussian_control.u32` | Bit-exact subtitle proposal copy under the compatibility name, and one-word conditioning decision |
 | `contour_identity.u32` | Active-only exact 32-word SCT5 source/crop/domain/clock identity with reserved words24..31 zero, with independent current-pin and RGB-snapshot validity |
 | `contour_source.rgba16f`, `ocr_probability.f32` | Active-only joined completed source display crop and verbatim detector probability snapshot |
 | `gpu_trace_ring.u32` | Optional raw diagnostic history of the last 300 accepted-root completions; available only when diagnostics was enabled before reproduction |
@@ -52,10 +55,10 @@ The core package contains:
 | `gpu_trace_contract.json` | Optional exact trace offsets, enums, receipt ABI, and shader provenance |
 
 Scalar `.f32` files are little-endian float32; `.u32`, `.rgba32f`, and `.rgba16f` contain raw
-little-endian uint32, float32 RGBA, and float16 RGBA respectively. Schema 49 accepts the canonical
+little-endian uint32, float32 RGBA, and float16 RGBA respectively. Schema 50 accepts the canonical
 inactive descriptor or the one current `subtitle-contours-v1` package. It binds the exact current generated Depth Coordinate V2
 identity, producer and renderer closures, OCR model provenance, entrypoints, the four existing artifact
-roles (OCR record, locator state, Base field, atomic final field), and all eleven contour roles with
+roles (OCR record, locator state, Base field, atomic final field), all eleven diagnostic contour roles, and both analytic-render tuple roles with
 typed dimensions, exact byte counts and SHA-256 hashes. The generated contract is the sole
 owner of those live identities and numeric policy values. The
 [Host SBS native subtitle contours and UI plane](../../docs/host-sbs.md#native-subtitle-contours-and-ui-plane) is the
@@ -68,30 +71,41 @@ owns their exact names, order and meaning. The tail is the GPU histogram result,
 recomputed by the dump writer; unavailable tail authority is canonical zero. This frame-statistics
 schema is separate from the shared `warp_map_contract` schema described below.
 
-Schema 49 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
+Schema 50 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
 production package uses one exact supported convex-2x high shape; halving both dimensions must
 recover an exact calibrated embedded DAV2 shape. The capture-time model provenance continues to authenticate that embedded DAV2
 identity and derived coarse calibration, while the public numeric artifacts remain high-resolution.
 A split coarse/high package, an arbitrary enlarged grid, or a high package without this exact
 half-shape relation is rejected rather than reinterpreted.
 
-## Atomic final field
+## Selected map and independent Final diagnostic
 
-The manifest's required `final_parallax` object binds one complete atomic field and the warp input.
-Depth infer publishes a new V2 Base and current subtitle observation, while authenticated reuse
-retains the complete depth/OCR/UIP4/mask/history/source/probability/final tuple.
-Optional OCR readiness determines current OCR versus current abstention on valid infer; it cannot
-advance subtitle state on reuse. Invalid publication fails closed.
-There is no second persistent display resource, serialized warp-depth copy, or temporal display
-recurrence. In every package, `shadow_final_parallax.f32` is authenticated once and named by both
-`final_parallax.artifact` and `final_parallax.warp_input_artifact`. The verifier replays the
-ordinary limiter and, when active, independently validates native support projection, native Gaussian q, actual M and blend,
-then the shared post-Gaussian vertical/horizontal limits into that one field. The source/probability snapshots belong to
-the original infer owner; they are not compared with the current presentation's `source.png` on reuse.
+The required `selected_map` object binds schema 1's Base inverse plus analytic UI glyph selector.
+Its required boolean `render_enabled` records the exact b3 permission for this draw independently
+of retained OCR/SCP authority; false permission selects Base even when the retained tuple is active.
+The combined map can be discontinuous; readers must never infer a continuous Final inverse or
+global monotonicity. `warp_map_contract` schema 3 names actual selected pre-clamp U, and
+`warp_mask.png` classifies the boundary from that same U. Registration metrics continue to use
+valid monotonic runs and report ambiguous/folded samples conservatively; the version change does
+not waive ordinary geometry or image-quality checks.
+
+The `final_parallax` object binds diagnostic schema 4. Its `warp_input_artifact` is null and its
+relation explicitly denies render authority. The verifier still replays the ordinary limiter and
+all existing native support/projection/distance/M/proposal/shared-horizontal-limit checks into
+`shadow_final_parallax.f32`. Active packages additionally authenticate native dense matte against
+the generated same-observation recipe, and SCP4 against current UIP4/OCR8 even if GPU trace is
+absent. Matte and condition sidecars reject unknown recipes or tuple bindings.
+
+Infer atomically publishes Base/state/matte/SCT5/SCP4/joined-source plus diagnostics; reuse retains
+the actual older owner. Source and probability snapshots belong to that infer owner and do not
+become current through a newer presentation. Exact native current source is preserved separately
+from `source.png`; only same-texel display conversion and FP16 roundtrip can revoke old matte during
+a draw. Preview equality cannot authenticate that decision. New empty OCR publishes zero matte
+and inactive SCP4 immediately. No extra observation wait is added.
 
 ## Diagnostic GPU completion trace
 
-Schema 49 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
+Schema 50 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
 depth roots, not source frames, presentation frames, busy drops, or every captured desktop update.
 Each 136-word (544-byte) record binds an exact trace ordinal, matched frame, analysis generation,
 analysis-domain tag, transaction token, analysis-source and live-field extents, the immutable
@@ -149,25 +163,39 @@ CPU map, readback, query, or synchronization and has no rendering authority.
 
 ## OCR8 and UIP4 records
 
+Coordinate schema 121/OCR 33/contour recipe 27 publishes only classified current subtitle pairs.
+Its schema-4 OCR8 buffer is 256 words:
+the original 208-word header/core/cover prefix plus a 48-word classifier history tail. Both producer
+and resolver descriptors bind the complete generated classifier policy. The tail's SCL1 identity
+binds its current source clock/frame/generation and source/crop/field/content/reference geometry,
+independent-entry counter, blank clock, trusted height/span, and 16 bounded position votes. A zero
+tail means no retained prior; abstention requires zero. Current empty OCR can retain a valid prior
+but publishes no covers and no protection. Prior bytes are never mask or geometry authority.
+Validators check serialized history identity and bounds; a single dump cannot replay the historical
+classification decisions that produced its vote counters. The authenticated producer owns those
+decisions. The local-line scratch buffer is temporary and is not a dump artifact.
+
 The generated `subtitle_ocr.ocr_record` contract owns OCR8's schema, tag, word counts, offsets,
 capacities, flags, and numeric detector/box policy values. The dump serializes exactly that fixed
 word array as little-endian uint32 values. Its frame, analysis generation, analysis-source extent,
-tensor-content geometry, projected ROI, paired core/cover records, topology metadata, and canonical
-zero tail must all agree with the atomic target's publication frame. That is the matched frame for
+tensor-content geometry, projected ROI, paired core/cover records, topology metadata, canonical
+unused slots and valid classifier history must all agree with the atomic target's publication frame. That is the matched frame for
 infer, and the trace-authenticated older tuple frame for whole-tuple reuse. See the
 [live OCR8 contract](../../docs/host-sbs.md#native-subtitle-contours-and-ui-plane) for producer semantics.
 
-Coordinate schema115/OCR semantic schema27 binds lower-quarter, approximately centered line
+The current OCR policy binds lower-quarter, approximately centered line
 eligibility with native-source horizontal adjacency before the existing eight-pair capacity selection. A line's tight union is only an
 eligibility witness; the record retains independent original core/cover pairs. The current reader
 authenticates this producer policy through the contract and source closure. It does not claim to
 independently reconstruct preselection geometry from retained pairs, because capacity selection
 can omit members of the original line.
 
-Ordinary paired covers also bind the canonical horizontal line-end search guard. Tight evidence
-and vertical cover expansion retain their existing semantics; all current cover consumers use the
-same producer-published rectangle. Its policy is authenticated with the coordinate contract and
-producer source closure, as defined by the live owner document.
+Ordinary paired covers bind the canonical four-producer-cell horizontal line-end guard and a
+vertical guard of half the tight detector height, added to DB expansion before coordinate mapping.
+The UI-plane probe, diagnostic RGB history and recipe 27 native glyph search use the whole
+producer-published cover. There is no second core-relative vertical clipping step. An expanded
+search cover grants no blanket pixel protection. These policies are authenticated with the
+coordinate contract and producer source closure, as defined by the live owner document.
 
 Both box counts describe the retained paired candidates, not the number discovered. The generated
 `subtitle_ocr.candidate_selection` policy retains at most eight pairs by tight-core area, with
@@ -177,16 +205,35 @@ does not change the fixed record layout or introduce an overflow flag or dropped
 The generated `subtitle_ocr.plane_state` contract owns the UIP4 schema/tag, 40-word layout
 and eight current slots. Every admitted valid OCR8 paired cover participates directly; there
 is no secondary component winner, ownership tracker, corner filter, pending state or box-count
-history reset. Covers remain in the exact current OCR8 record. The native search confirms RGB
-pixels over four genuine eligible observations. SCT5 preserves source/domain history without
+history reset. Covers remain in the exact current OCR8 record. The fixed-RGB history counts
+four genuine eligible observations for diagnostics; current palette/stroke or local dark-outline
+evidence admits support immediately. Positive count preserves duplicate admission without a
+four-count wait. This history is not a new stable temporal subtitle classifier. SCT5 preserves source/domain history without
 encoding OCR group identity; its reserved words24..31 are canonical zero.
 
 The independent UI controller probes the current cover union using its existing conflict
-histogram, source-time dwell and bounded rates. The applied plane is only in its 16-word tail.
-Gaussian max-union protection blends immutable Base toward that plane, followed by the shared
-vertical/horizontal limits. Mature protection uses confirmed pixels without a per-pixel fade or
-rectangular fallback. During the temporary warmup, current OCR covers additionally contribute to
-the Gaussian max union, as specified by UIP4 word22 below. Missing,
+histogram. Under the authenticated `current-authorized-clearance-floor-immediate-forward-current-release-exponential-source-time-empty-reset-v2`
+policy, that current histogram's entry-budget candidate is an immediate forward floor. Backward
+adaptation follows the current release-budget candidate with a 100 ms source-time exponential
+time constant and at most 250 ms integrated per observation, without a dwell or historical maximum.
+The applied plane is only in its 16-word tail. A genuine newer valid-empty observation clears
+invisible plane/requirement/probe state while retaining its accepted clock; invalid or repeated
+clocks cannot authorize that reset. The floor is budgeted cover evidence, not maximum-scene or
+all-glyph clearance. The adaptive known flag mask is `12`; retired flags `1`/`2` and relative
+words 6..11 are canonical zero. Relative word 2 and decoded `current_entry_requirement_level`
+describe the current entry requirement. Compatibility delay/dwell/rate metadata is zero in both
+directions, with `retreat_time_constant_ms=100`. Invalid source clocks or interrupted authority
+cannot spend missing time; duplicates and reuse hold the controller. Empty or unconditioned output remains exact
+Base, including original padding bits. Contour recipe 27 uses current glyph evidence within
+center-guided bounded ordinary search, retaining the full published ribbon search. Its horizontal
+minimum slope-budget interval and rectangular field-footprint completion are bound by the
+generated contour policy. Compatibility Gaussian names
+remain; M records equivalent depth influence and is not a color alpha. The legacy sigma divisor
+does not select a falloff in this recipe.
+The independent diagnostic minimum slope-budget interval projects immutable Base toward that plane only where required,
+with an explicit closed Base/UI endpoint clamp for FP32 roundoff, followed by the shared horizontal
+guard. The compatibility vertical field is an exact proposal copy. The live native matte uses current-evidence-supported pixels without a per-pixel
+fade or rectangular fallback. UIP4 word22 is canonical zero. Missing,
 collapsed or stale geometry preserves the controller plane/goal but clears granted current
 slots, timing authority and conditioning. A valid OCR8 record may still contain covers;
 those are not usable protection authority without the current geometry join.
@@ -231,9 +278,9 @@ The signed hard endpoint is in analysis-source U; it does not bypass the native 
 Older with-curve experiment artifacts retain their original geometry identity and mapping and
 cannot be relabeled as the linear candidate.
 
-All current ROI packages use `warp_map_contract` schema `2`.
-The map is the continuous 11-step inverse of the signed final field embedded into the full capture,
-with the same slope-limited outside-only collar for the sole pipeline. `warp_mask.png` red marks finite-source
+All current ROI packages use `warp_map_contract` schema `3`.
+The map is the actual selected Base inverse or analytic UI coordinate embedded into the full capture.
+Base retains its slope-limited outside-only collar. `warp_mask.png` red marks finite-source
 boundary extrapolation; green and blue are zero. There are no source-kind or visibility flags,
 static-rim samples, or synthetic interior fill paths. Nearby browser pixels may move within the
 collar; only samples beyond its bounded support must be at zero displacement.
@@ -243,7 +290,7 @@ foreground can project outside the video rectangle without being flattened at th
 Continuous sampling can stretch browser background into a retracted edge; it cannot recover source
 video pixels or a foreground outline cut off by the original image. Historical layered schema 3/4
 packages retain their original identities and must be verified using their frozen original source;
-they cannot be relabeled as the continuous schema 2 renderer.
+they cannot be relabeled as the current selected-map renderer.
 
 The deterministic ROI contain fit is planned on the embedded calibrated DAV2 grid. For a fused
 package, each half-open content-rectangle coordinate is then multiplied by exactly two; padding
@@ -276,24 +323,28 @@ The maintained reader:
 4. replays the schema-selected limiter from the candidate over the full tensor: serial float32 for
    lines up to 32 elements, otherwise conservative Q30 upper/lower envelopes and horizontal
    majorant with the authenticated 75/25 float32 share, using content width for both steps;
-5. authenticates `shadow_final_parallax.f32` once as both the atomic final field and the renderer's
-   warp input;
+5. authenticates `shadow_final_parallax.f32` as an independent protected-field diagnostic, and binds
+   the selected-map schema and exact boolean draw permission;
 6. validates ROI placement, authority-specific window identity, inverse-map geometry, and the exterior
    zero-plane evidence; and
 7. validates canonical inactive metadata, or the exact authenticated current-subtitle-publication/
    held-reuse OCR8/UIP4 model, shader, record, state, and artifact identities;
 8. replays the ordinary V2 chain into `shadow_base_final_parallax.f32` when UIP4 is active, then
-   validates exact contour-support bilinear projection and the independent native five-center
-   squared-distance oracle under its FP32 coordinate envelope, authenticates actual Gaussian M
-   and precise proposal arithmetic, then replays shared vertical75/25 and horizontalQ30 into
-   `shadow_final_parallax.f32`. Empty/invalid control must copy Base exactly, including nearest-content
-   padding; active padding M/proposal extend their nearest-content values. The actual vertical
-   intermediate is authenticated independently of original Base diagnostics; and
-9. when the optional GPU trace is available, authenticates all three hashes, the exact trace shader
+   validates exact contour-support bilinear projection and the independent native five-center rectangular-footprint
+   horizontal slope-budget oracle with exact rational Y-footprint membership and its FP32 X
+   arithmetic envelope, authenticates equivalent M and direct two-sided interval proposal,
+   verifies the exact compatibility copy, then replays shared horizontalQ30 into
+   `shadow_final_parallax.f32`. Empty/invalid control and whole unchanged rows must copy Base
+   exactly. Infinite local content budget publishes zero M and original Base, including padding;
+   finite active padding extends its nearest-content values. The compatibility intermediate
+   is authenticated independently of original Base diagnostics;
+9. replays the same-observation native matte recipe, authenticates separate SCP4 and tuple sidecars,
+   and validates exact native render-source layout and bytes without substituting preview equality; and
+10. when the optional GPU trace is available, authenticates all three hashes, the exact trace shader
    closure and ABI document, chronological wrap/commit structure, raw branch/OCR proof, matched
    analysis domain, and bit-for-bit decoded JSON. An unavailable trace remains valid optional state.
 
-Use `.f32` artifacts for quantitative work. Schema 49 does not package scalar/heat preview PNGs or
+Use `.f32` artifacts for quantitative work. Schema 50 does not package scalar/heat preview PNGs or
 per-field shape sidecars. The sole retained shape sidecar, `model_input_shape.json`, is calibrated
 preprocess authority rather than a preview description. On a fused capture it describes the sole
 high input; the embedded DAV2 calibration is derived from its exact half shape. Float dimensions live in
@@ -333,4 +384,20 @@ E:\ApolloDev\modelopt-py312\Scripts\python.exe -m unittest tools.sbsbench.test_d
 Score a capture set with `tools/sbsbench/sbsbench.py`; see [README.md](README.md) for the maintained
 evaluation commands and [METRICS.md](METRICS.md) for metric authority.
 
-UIP4 word22 packs remaining warmup observations0..4 in bits0..2 and the prior genuine any-core probability cue in bit3; only packed0..4 and8..12 are legal, and word23 is zero. During remaining>0 the authenticated Gaussian presentation additionally takes the current OCR-cover distance Gaussian max union. The native support and squared-distance files still describe confirmed pixels only. Readers authenticate the additional presentation term from current OCR/UIP4, including finite native units and exact interior weight1.
+UIP4 words22 and23 are canonical zero. The former provisional-cover countdown and cue latch grant
+no authority. Native support and slope-budget distance describe current cover pixels with valid RGB,
+all four finite unit-range bilinear probability contributors, and positive diagnostic count for
+duplicate admission. Detector probability above `0.2` and radius-two current native contrast above
+`0.08` select palette anchors on each paired core's exact 64-by-8 grid. Q16 color bins retain
+their brightest actual anchor with earliest-index ties. They are ordered by representative
+brightness, count and bin index; dimmer modes with matching normalized Q12 hue are pruned before the eight-mode
+cap. Probability is never a direct per-pixel bypass. A foreground pixel must match a current
+mode, have current contrast and pass the bounded color-coherent tangent test. A dark low-chroma
+outline instead needs current contrast and a contrasting palette-colored neighbor at one of eight
+fixed radius-six offsets; this is not mask dilation. Source and neighbor RGBA must be finite,
+RGB unit-range, alpha exactly one and inside the exact native crop; invalid or outside neighbors
+are ignored. Neighbors may lie outside the paired cover. The generated contract owns exact
+integer matching, brightness pruning and stroke bounds. This overlay-color/stroke hypothesis
+does not identify semantic dialogue or guarantee complete glyph alpha. The retained count-four
+feature bit is diagnostic. Readers recompute the current support rule and verify its five-center
+footprint, minimum slope budget, actual M/proposal and final guards without a whole-cover term.

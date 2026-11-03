@@ -1,13 +1,13 @@
-// Production Host SBS renderer for the authenticated Depth Coordinate V2 final field.
+// Production Host SBS renderer: bounded Base inverse plus native glyph UI-plane selection.
 //
 // The producer supplies a signed, one-eye displacement in source-U units whose horizontal slope
 // is strictly below one. Each eye map therefore has one inverse; an at-most-11-step fixed-point
-// solve is the complete visibility rule. The solve may stop only when the next source coordinate
+// solve supplies the ordinary scene source coordinate. The solve may stop only when the next source coordinate
 // has exactly the same IEEE-754 bits. Invalid or unauthenticated state renders the current color
 // frame through identity so a producer fault can never expose stale pixels or legacy geometry.
 
 Texture2D<float4> SourceColor : register(t0);
-Texture2D<float> FinalParallax : register(t1);
+Texture2D<float> BaseParallax : register(t1);
 StructuredBuffer<float4> ParallaxState : register(t2);
 SamplerState LinearSampler : register(s0);
 
@@ -88,7 +88,7 @@ float SampleVideoRoiParallax(
         VIDEO_ROI_MAX_HORIZONTAL_SLOPE * abs(source_x - projected_x) +
         vertical_collar_budget;
     float tensor_u = projected_x * tensor_u_scale + tensor_u_bias;
-    float roi_local_parallax = FinalParallax.SampleLevel(
+    float roi_local_parallax = BaseParallax.SampleLevel(
         LinearSampler,
         float2(tensor_u, tensor_v),
         0
@@ -109,7 +109,7 @@ float2 ReprojectFull(float2 destination_uv, float eye_sign) {
     float source_x = destination_uv.x;
     [unroll]
     for (int iteration = 0; iteration < 11; ++iteration) {
-        float next_source_x = destination_uv.x + eye_sign * FinalParallax.SampleLevel(
+        float next_source_x = destination_uv.x + eye_sign * BaseParallax.SampleLevel(
             LinearSampler,
             float2(source_x, destination_uv.y),
             0
@@ -152,7 +152,7 @@ float2 ReprojectVideoRoi(float2 destination_uv, float eye_sign, uint2 depth_size
         vertical_budget_per_source_v * abs(destination_uv.y - projected_y);
     float maximum_full_source_parallax =
         roi_extent.x * V2_DIRECT_CONTAINER_LIMIT;
-    // The authenticated final field is bounded by V2_DIRECT_CONTAINER_LIMIT. If even that largest
+    // The authenticated Base field is bounded by V2_DIRECT_CONTAINER_LIMIT. If even that largest
     // possible displacement cannot survive the destination's collar, the first inverse step is
     // exactly the destination again and every later step is identical. Skip all eleven fetches.
     // Equality also reduced to zero in the original soft-threshold rule.
@@ -203,7 +203,7 @@ float2 ReprojectIfAuthorized(float2 source_uv, float eye_sign) {
         } else if (VideoRoiRectValid()) {
             uint depth_width;
             uint depth_height;
-            FinalParallax.GetDimensions(depth_width, depth_height);
+            BaseParallax.GetDimensions(depth_width, depth_height);
             uint2 depth_size = uint2(depth_width, depth_height);
             if (VideoRoiContentValid(depth_size)) {
                 sample_uv = ReprojectVideoRoi(source_uv, eye_sign, depth_size);
@@ -212,6 +212,8 @@ float2 ReprojectIfAuthorized(float2 source_uv, float eye_sign) {
     }
     return sample_uv;
 }
+
+#include "include/host_sbs_subtitle_render.hlsl"
 
 float4 main_ps(PS_INPUT input) : SV_TARGET {
     float2 source_uv;
@@ -222,7 +224,7 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
 
     // Null/uninitialized buffers read as an invalid contract. Keep the exact current color frame
     // live while the producer starts or after it fails terminally.
-    float2 sample_uv = ReprojectIfAuthorized(source_uv, eye_sign);
+    float2 sample_uv = SelectSourceUV(source_uv, eye_sign);
     sample_uv.x = saturate(sample_uv.x);
     return SourceColor.Sample(LinearSampler, sample_uv);
 }

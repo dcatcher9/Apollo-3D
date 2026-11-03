@@ -104,17 +104,14 @@ namespace cuda_conditional_graph {
     selp.u32 %r29, 1, 0, %p21;
     xor.b32 %r30, %r23, %r28;
 
-    // PROP is not a consumable receipt. Invalidate its tag first, write the resolved record, and
-    // publish CBRG last. A valid request plus any malformed proposal produces an infer receipt,
-    // but only a valid preprocess-ready infer proposal may arm its OCR sibling.
+    // Stage the resolved record with an invalid tag. A valid request plus any malformed proposal
+    // still selects infer, but only a valid preprocess-ready proposal may arm OCR. The parent
+    // commit node publishes CBRG only after BOTH conditional siblings have completed.
     st.global.u32 [%rd3+24], 0;
     membar.gl;
     st.global.v4.u32 [%rd3], {%r22, %r30, %r9, %r10};
     st.global.v2.u32 [%rd3+16], {%r20, %r21};
     st.global.u32 [%rd3+28], %r28;
-    membar.gl;
-    mov.u32 %r24, 0x47524243;
-    st.global.u32 [%rd3+24], %r24;
     membar.gl;
 
     {
@@ -133,6 +130,84 @@ namespace cuda_conditional_graph {
     }
     ret;
 }
+// Ordinary parent kernel, not a device graph tail launch. The builder joins BOTH conditional
+// nodes before this runs; it authenticates the staged record and changes ONLY its magic word.
+.visible .entry commit_after_children(
+    .param .u64 commit_param_0,
+    .param .u64 commit_param_1,
+    .param .u32 commit_param_2
+)
+{
+    .reg .pred %p<32>;
+    .reg .b32 %r<32>;
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [commit_param_0];
+    ld.param.u64 %rd2, [commit_param_1];
+    ld.param.u32 %r31, [commit_param_2];
+    ld.global.v4.u32 {%r1, %r2, %r3, %r4}, [%rd1];
+    ld.global.v4.u32 {%r5, %r6, %r7, %r8}, [%rd1+16];
+    ld.global.v4.u32 {%r9, %r10, %r11, %r12}, [%rd2];
+    ld.global.v4.u32 {%r13, %r14, %r15, %r16}, [%rd2+16];
+
+    xor.b32 %r17, %r1, 0xd1ec15a5;
+    xor.b32 %r17, %r17, %r8;
+    xor.b32 %r18, %r3, 0xa3756c91;
+    xor.b32 %r19, %r4, 0x5c8a936e;
+    xor.b32 %r20, %r9, 0xa3756c91;
+    xor.b32 %r21, %r10, 0x5c8a936e;
+    xor.b32 %r26, %r14, 0x6f435257;
+    or.b32 %r22, %r9, %r10;
+    setp.eq.u32 %p1, %r11, %r20;
+    setp.eq.u32 %p2, %r12, %r21;
+    setp.eq.u32 %p3, %r13, 0x54535152;
+    setp.eq.u32 %p4, %r14, 0;
+    setp.eq.u32 %p20, %r14, 1;
+    setp.eq.u32 %p21, %r14, 2;
+    or.pred %p4, %p4, %p20;
+    or.pred %p4, %p4, %p21;
+    setp.eq.u32 %p18, %r14, 0;
+    selp.u32 %r27, 0, %r26, %p18;
+    setp.eq.u32 %p5, %r15, %r27;
+    setp.eq.u32 %p6, %r16, 0;
+    setp.ne.u32 %p23, %r22, 0;
+    and.pred %p7, %p1, %p2;
+    and.pred %p7, %p7, %p3;
+    and.pred %p7, %p7, %p4;
+    and.pred %p7, %p7, %p5;
+    and.pred %p7, %p7, %p6;
+    and.pred %p7, %p7, %p23;
+
+    setp.le.u32 %p8, %r1, 1;
+    setp.eq.u32 %p9, %r2, %r17;
+    setp.eq.u32 %p10, %r3, %r9;
+    setp.eq.u32 %p11, %r4, %r10;
+    setp.eq.u32 %p12, %r5, %r18;
+    setp.eq.u32 %p13, %r6, %r19;
+    setp.eq.u32 %p14, %r7, 0;
+    setp.eq.u32 %p15, %r8, 0;
+    setp.eq.u32 %p24, %r8, 0x52434f4f;
+    setp.eq.u32 %p25, %r1, 1;
+    setp.eq.u32 %p22, %r31, 1;
+    and.pred %p24, %p24, %p20;
+    and.pred %p24, %p24, %p25;
+    and.pred %p24, %p24, %p22;
+    or.pred %p15, %p15, %p24;
+    and.pred %p16, %p8, %p9;
+    and.pred %p16, %p16, %p10;
+    and.pred %p16, %p16, %p11;
+    and.pred %p16, %p16, %p12;
+    and.pred %p16, %p16, %p13;
+    and.pred %p16, %p16, %p14;
+    and.pred %p16, %p16, %p15;
+    and.pred %p17, %p7, %p16;
+    @!%p17 ret;
+    membar.gl;
+    mov.u32 %r24, 0x47524243;
+    st.global.u32 [%rd1+24], %r24;
+    membar.gl;
+    ret;
+}
+
 )ptx";
 
     constexpr std::size_t max_audit_depth = 64u;
@@ -840,6 +915,17 @@ namespace cuda_conditional_graph {
       return finish(false);
     }
 
+    CUfunction commit = nullptr;
+    output.cuda_result_ = cuda.cuModuleGetFunction(
+      &commit,
+      output.module_,
+      "commit_after_children"
+    );
+    if (output.cuda_result_ != CUDA_SUCCESS || !commit) {
+      output.failure_ = build_failure_e::commit_function_missing;
+      return finish(false);
+    }
+
     output.cuda_result_ = cuda.cuGraphCreate(&output.graph_, 0u);
     if (output.cuda_result_ != CUDA_SUCCESS) {
       output.failure_ = build_failure_e::graph_create_failed;
@@ -1111,6 +1197,35 @@ namespace cuda_conditional_graph {
           return finish(false);
         }
       }
+    }
+
+    // Both nodes exist even for mandatory-only or optional-unarmed launches. Depend on the
+    // conditional nodes themselves, so skipped bodies and either sibling completion order join.
+    // Diagnostic timing events retain their original per-branch dependencies and measured scope.
+    const std::array<CUgraphNode, 2u> commit_dependencies {
+      conditional_node,
+      optional_conditional_node
+    };
+    void *commit_args[] {&decision_record, &request_record, &optional_child_present};
+    CUDA_KERNEL_NODE_PARAMS commit_params {};
+    commit_params.func = commit;
+    commit_params.gridDimX = commit_params.gridDimY = commit_params.gridDimZ = 1u;
+    commit_params.blockDimX = commit_params.blockDimY = commit_params.blockDimZ = 1u;
+    commit_params.kernelParams = commit_args;
+    CUgraphNode commit_node = nullptr;
+    output.cuda_result_ = cuda.cuGraphAddKernelNode(
+      &commit_node,
+      output.graph_,
+      commit_dependencies.data(),
+      commit_dependencies.size(),
+      &commit_params
+    );
+    if (output.cuda_result_ != CUDA_SUCCESS || !commit_node) {
+      output.failure_ = build_failure_e::commit_node_add_failed;
+      if (output.cuda_result_ == CUDA_SUCCESS) {
+        output.cuda_result_ = CUDA_ERROR_INVALID_HANDLE;
+      }
+      return finish(false);
     }
 
     output.cuda_result_ = cuda.cuGraphInstantiateWithFlags(

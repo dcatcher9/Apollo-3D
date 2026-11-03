@@ -31,10 +31,9 @@ namespace models::host_sbs_subtitle_plane {
     const auto mask = words[v2::subtitle_plane_current_slot_mask_word];
     const auto resets = words[v2::subtitle_plane_history_reset_mask_word];
     const auto warmup = words[v2::subtitle_plane_warmup_word];
-    constexpr auto warmup_known_bits = v2::subtitle_plane_warmup_remaining_mask | v2::subtitle_plane_warmup_cue_bit;
     constexpr auto capacity_mask = (1u << v2::subtitle_plane_cover_capacity) - 1u;
-    if ((warmup & ~warmup_known_bits) != 0u ||
-        (warmup & v2::subtitle_plane_warmup_remaining_mask) > v2::subtitle_plane_warmup_observations || (resets & ~mask) != 0u || words[0u] != v2::subtitle_plane_state_schema || words[1u] != v2::subtitle_plane_state_tag ||
+    if (warmup != 0u || (resets & ~mask) != 0u ||
+        words[0u] != v2::subtitle_plane_state_schema || words[1u] != v2::subtitle_plane_state_tag ||
         (flags & ~v2::subtitle_plane_current_valid_flag) != 0u ||
         (mask & ~capacity_mask) != 0u || (mask & (mask + 1u)) != 0u ||
         (flags == 0u && mask != 0u) ||
@@ -43,9 +42,7 @@ namespace models::host_sbs_subtitle_plane {
       return false;
     }
     const auto *tail = words.data() + v2::subtitle_plane_adaptive_offset;
-    if ((resets != 0u && tail[15u] != 0u) ||
-        (warmup != 0u && (flags != v2::subtitle_plane_current_valid_flag || mask == 0u ||
-          tail[0u] != 1u || tail[15u] != 0u))) return false;
+    if (resets != 0u && tail[15u] != 0u) return false;
     if (tail[0u] == 0u) {
       return mask == 0u && std::all_of(tail, tail + v2::subtitle_plane_adaptive_word_count,
         [](auto value) { return value == 0u; });
@@ -62,21 +59,18 @@ namespace models::host_sbs_subtitle_plane {
     const auto controller_flags = tail[1u];
     const auto applied = std::bit_cast<float>(tail[3u]);
     const auto clock = join(tail + 4u);
-    const auto approach = join(tail + 6u);
-    const auto retreat = join(tail + 8u);
     const auto covered = static_cast<std::uint64_t>(tail[13u]);
     const auto conflicts = static_cast<std::uint64_t>(tail[14u]);
     const bool capped = conflicts * 5u > covered || conflicts * 50u > area;
-    return tail[0u] == 1u && (controller_flags & ~15u) == 0u && (controller_flags & 3u) != 3u &&
-      tail[2u] <= maximum_level && tail[10u] <= maximum_level && tail[11u] <= maximum_level &&
+    return tail[0u] == 1u && (controller_flags & ~v2::subtitle_plane_adaptive_known_flags) == 0u &&
+      tail[6u] == 0u && tail[7u] == 0u && tail[8u] == 0u && tail[9u] == 0u &&
+      tail[10u] == 0u && tail[11u] == 0u && tail[2u] <= maximum_level &&
       std::isfinite(display_budget) && display_budget > 0.0f &&
       tail[12u] == std::bit_cast<std::uint32_t>(display_budget) &&
       std::isfinite(applied) && applied >= 0.0f && applied <= display_budget &&
       covered <= area && conflicts <= covered && tail[15u] <= covered &&
       (((controller_flags & 8u) != 0u) == (clock != 0u)) &&
-      (((controller_flags & 1u) != 0u) == (approach != 0u)) &&
-      (((controller_flags & 2u) != 0u) == (retreat != 0u)) &&
-      approach <= clock && retreat <= clock && (((controller_flags & 4u) != 0u) == capped);
+      (((controller_flags & 4u) != 0u) == capped);
   }
 
   [[nodiscard]] inline bool condition_words_match_plane(

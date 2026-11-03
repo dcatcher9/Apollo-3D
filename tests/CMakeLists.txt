@@ -54,6 +54,25 @@ add_executable(${PROJECT_NAME}
         ${TEST_SOURCES}
         ${SUNSHINE_SOURCES})
 
+# Keep test provenance tied to the helper sources actually compiled into this
+# executable. Header edits must regenerate these pins before the fixtures rebuild.
+set(SUBTITLE_CBC_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_current_black_enclosure_gpu.h")
+set(SUBTITLE_OUTLINE_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_current_outline_support_closure_gpu.h")
+set(SUBTITLE_BASELINE_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_subtitle_inner_colour_gpu_global_validation.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${SUBTITLE_CBC_HELPER}" "${SUBTITLE_OUTLINE_HELPER}" "${SUBTITLE_BASELINE_HELPER}")
+file(SHA256 "${SUBTITLE_CBC_HELPER}" SUBTITLE_CBC_HELPER_SHA256)
+file(SHA256 "${SUBTITLE_OUTLINE_HELPER}" SUBTITLE_OUTLINE_HELPER_SHA256)
+file(SHA256 "${SUBTITLE_BASELINE_HELPER}" SUBTITLE_BASELINE_HELPER_SHA256)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/subtitle_helper_source_pins.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/subtitle_helper_source_pins.h"
+    @ONLY)
+set_property(SOURCE
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_host_sbs_current_black_enclosure_gpu.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_host_sbs_current_outline_support_closure_gpu.cpp"
+    APPEND PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
 # Copy files needed for config consistency tests to build directory
 # This ensures both CLI and CLion can access the same files relative to the test executable
 # Using configure_file ensures files are copied when they change between builds
