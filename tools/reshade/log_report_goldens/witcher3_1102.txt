@@ -1,0 +1,69 @@
+Game 3D readiness: witcher3.exe  23:26:08 to 23:35:12 (9m03s, exited)
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 5)
+[WARN] Depth: fresh from 23:26:44; 0.1% of later publications without depth; gaps outside export starts and resets
+         23:26:44-23:26:49
+[WARN] Depth at FG switches: 10 FG switches, 1 with depth lost
+         23:26:46.306 FG on: 2 Presents to fresh depth (46 ms), 1 mono, first no_retained_depth selection=inactive_views
+         23:27:51.202 FG off: 3 Presents to fresh depth (16 ms), 2 held (oldest 47 ms), first FG_successor_pending selection=no_current_nomination
+         23:28:02.168 FG on: 1 Present to fresh depth (0 ms)
+         23:31:12.350 FG off: 3 Presents to fresh depth (31 ms), 2 mono, first source_handoff selection=no_current_nomination (not streamed)
+         23:32:12.837 FG on: 1 Present to fresh depth (0 ms)
+         23:32:42.672 FG off: 4 Presents to fresh depth (31 ms), 3 held (oldest 31 ms), first FG_successor_pending selection=no_completed_snapshot
+         23:32:44.336 FG on: 1 Present to fresh depth (0 ms)
+         23:33:09.999 FG off: 3 Presents to fresh depth (15 ms), 2 mono, first no_retained_depth selection=no_completed_snapshot (not streamed)
+         23:33:39.558 FG on: 1 Present to fresh depth (0 ms)
+         23:34:06.838 FG off: 6 Presents to fresh depth (31 ms), 5 held (oldest 47 ms), first FG_successor_pending selection=no_current_nomination
+[INFO] FG-switch placement warm-up: 8 FG switches left the scene flat while depth was shown (the placement calibration restarts at a switch between the FG and SR sources; about 1 s is by design)
+         23:26:46.306 FG on: flat 23:26:49.060-23:26:50.081 (1.0 s with depth, projection waiting_for_depth_range)
+         23:27:51.202 FG off: flat 23:27:51.231-23:27:52.227 (1.0 s with depth, projection waiting_for_depth_range)
+         23:28:02.168 FG on: flat 23:28:03.315-23:28:04.318 (1.0 s with depth, projection waiting_for_depth_range)
+         23:31:12.350 FG off: flat 23:31:12.345-23:31:13.352 (0.6 s with depth, projection waiting_for_depth)
+         23:32:42.672 FG off: flat 23:32:42.707-23:32:43.713 (1.0 s with depth, projection waiting_for_depth_range)
+         23:32:44.336 FG on: flat 23:32:44.860-23:32:45.863 (1.0 s with depth, projection waiting_for_depth_range)
+         23:33:39.558 FG on: flat 23:33:39.780-23:33:40.776 (1.0 s with depth, projection waiting_for_depth_range)
+         23:34:06.838 FG off: flat 23:34:06.868-23:34:07.864 (1.0 s with depth, projection waiting_for_depth_range)
+[WARN] Placement flat: 3.0% of publications showed the colour frame with depth, 1.6% faded stereo back in; flat or fading windows outside FG switches and resets
+         23:27:14-23:27:19, projection waiting_for_depth_range 23:27:15-23:27:16 (1.0 s with depth, no switch, depth loss or export start before it)
+         23:27:59-23:28:04, projection waiting_for_depth_range 23:28:03-23:28:04 (1.0 s with depth, no switch, depth loss or export start before it)
+         23:30:39-23:30:44, projection waiting_for_depth_range 23:30:40-23:30:41 (1.0 s with depth, no switch, depth loss or export start before it)
+         23:31:09-23:32:11, projection waiting_for_depth_range 23:31:09-23:31:10 (1.0 s with depth, no switch, depth loss or export start before it)
+[INFO] Placement calibration: 1 flat run was a calibration with depth for at most 3 s
+         23:33:39.780-23:33:40.776 after frame generation switch
+[PASS] Capture coverage: 57759 covered (11107 observed, 46652 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[INFO] UI trust: 23:26:10 restored accepted UI sources ui_alpha:61:pq,ui_layer:28:pq
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 50974 Auto frames through the last of 4590 committed samples: 31768 detected, 19182 held, 24 without detection
+[PASS] UI protection: decided no mask (0) 51%, UI alpha (1) 49% of detection frames
+[PASS] UI full frame: 0 full-frame frames (6: 0, 8: 0; 0% of detection frames); H1 samples (8) read the scene hidden 0, ambiguous 0, visible 0, invalid or unmeasured 0; scene guard entered 0, released 0, refuted 0; depth not current on 522 detection frames
+[INFO] UI full alpha: 149 frames decided a whole-frame alpha and 0 an exact full change-set (6) (0.47% of detection frames)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 19182, none 0 (38% of Auto frames); 13 detection frames (0.04%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 32% of Auto frames had no mask; decided none: ambiguous 31%, no candidate 0.55%; without detection: no candidates 0.05%; sampled reasons with the refused candidate: ambiguous (current alpha) 27
+[INFO] UI trust events: earned 1, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 2, legacy entries discarded 0, forgotten 0; 0 selective layer samples earned nothing for colour without coverage (A1)
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[WARN] UI protection gaps: no usable UI mask for 108 s in 4 windows; HUD and menus took the scene's depth there
+         23:26:23-23:26:46 (23 s) FG off: no usable UI source: UI layer refused at its clear boundary (enhanced-barrier layout or simultaneous access)
+         23:27:54-23:28:02 (8 s) FG off: no usable UI source: UI layer refused at its clear boundary (enhanced-barrier layout or simultaneous access)
+         23:33:23-23:33:39 (16 s) FG off: no usable UI source: UI layer refused at its clear boundary (enhanced-barrier layout or simultaneous access)
+         23:34:09-23:35:10 (61 s) FG off: no usable UI source: UI layer refused at its clear boundary (enhanced-barrier layout or simultaneous access)
+[WARN] UI layer refused: clear-boundary copies refused for enhanced-barrier layout or simultaneous access (logged once and not counted: an add-on before the 11-03 contract); the UI layer recorded no copy all session, so it protected no UI: a game that draws its UI only into an offscreen layer had no UI source
+         23:26:18 enhanced-barrier layout or simultaneous access (one line for both reasons, logged once)
+[INFO] Hidden scene: H1 hidden scene (8) in 0 samples (pre-UI image: hudless 0, layer 0), entered 0, released 0, refuted 0; 0 of 88 samples measured
+[PASS] Observation losses: lifecycle 1
+[PASS] Queue order: 6 queues, 256 fences (53 settled), 820719 signals, 502890 waits; 21248 ordered verdicts, proofs inflight 10624; poisoned shared 4; refused poisoned 1526
+[WARN] Export: runtime_reset 7, not_foreground 3, no_consumer 1; routine pauses (the host, the game or the player) came more often than once per 10 s for a minute
+         23:30:45-23:31:14 9 routine pauses
+[WARN] Present hitches: 2 not explained by a reset, FG switch or overlay opening, worst 175.7 ms
+         23:31:12 render section (no step named, 113.7 ms of it named; the slowest Present of 23:31:02-23:31:12) 175.7 ms
+         23:31:09 stereo render 113.7 ms
+[INFO] Diagnostics: Diagnostics=0: no per-pass GPU timing (its lines are absent by design)
+[INFO] Game 3D cost: CPU 0.14 ms mean (175.7 max) over 50986 Presents; GPU timing off (Diagnostics=0)
+[INFO] Video memory: game local usage peaked at 9362 MiB; its budget was as low as 10471 MiB and its headroom as low as 1571 MiB; 0 ms over budget (no depth loss, hitch or Present gap under pressure)
+[INFO] Stream delivery: stream rate unknown (pass --host-log to judge it): the host took 80.6 new frames/s, the game offered 91.8/s
+[INFO] Frame generation: 23:26:20 off, 23:26:46 on, 23:27:51 off, 23:28:02 on, 23:31:12 off, 23:32:12 on, 23:32:42 off, 23:32:44 on, 23:33:09 off, 23:33:39 on, 23:34:06 off
+[INFO] Other log warnings: 2 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         23:35:10 WARN Reference count for ID3D12CommandQueue0 object 0000021173C08CF0 (0000020DB58ADFA0) is inconsistent (10).
+         23:35:11 WARN Add-ons are still loaded! Application may crash on exit.
+Overall: WARN (0 fail, 7 warn)
+Exit code: 0

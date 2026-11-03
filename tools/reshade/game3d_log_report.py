@@ -6,6 +6,11 @@ PASS/WARN/FAIL for each known failure signature, with the times to look at.
 It only reads existing log lines; it adds no diagnostics to the add-on.
 
     python tools/reshade/game3d_log_report.py <ReShade.log | game folder> [--host-log sunshine.log]
+        [--save-dir E:/ApolloDev/game3d-reports [--compare [summary.json]]]
+
+--save-dir keeps each report per executable with a JSON summary; --compare compares the session with that game's last
+saved session without a FAIL (or a given summary) and warns where a metric regressed past its threshold
+(COMPARE_RULES). Without them the output is unchanged.
 
 Exit code: 0 when nothing failed, 1 when a check failed, 2 when the log is unusable.
 """
@@ -13,6 +18,7 @@ Exit code: 0 when nothing failed, 1 when a check failed, 2 when the log is unusa
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -246,10 +252,14 @@ TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-
 # Since 10-07 the group ends with the longest time the layer went unrefreshed across skipped copies (skip_gap_ms,
 # ui_layer::skip_gap), and the line with its window's length; a runtime reset logs its last, shorter window. Older lines
 # cover the periodic 10 s (exporter.cpp) and have no gap. Since C12 the group also counts targets_dropped, the
-# qualifying clears the layer tracker dropped with all of its ui_layer::tracker_capacity (32) entries taken.
-LAYER_TIMING = re.compile(r'ui_layer=\{copies=(\d+) skipped=(\d+) offers=(\d+) '
-                          r'presents_since_copy=\{mean=([0-9.]+) max=(\d+)\}(?: skip_gap_ms=([0-9.]+))?'
-                          r'(?: targets_dropped=(\d+))?\}(?: window_ms=(\d+))?')
+# qualifying clears the layer tracker dropped with all of its ui_layer::tracker_capacity (32) entries taken. Since the
+# 11-03 layer-refusal contract the group also counts the clear-boundary copies refused (refused=, by reason in
+# refused_by={...}) and the admitted copies recorded with enhanced barriers (copies_enhanced=). The group is read field
+# by field (layer_group), so a field a later add-on adds anywhere in it leaves the known ones readable; a group without
+# copies, skipped, offers and presents_since_copy is no layer window, as before.
+LAYER_GROUP = ' ui_layer={'
+LAYER_FIELD = re.compile(r'(\w+)=(?:\{([^{}]*)\}|([^\s{}]+))')
+LAYER_REQUIRED = ('copies', 'skipped', 'offers')
 TIMING_WINDOW_S = 10.0
 WINDOW_MS = re.compile(r'\bwindow_ms=(\d+)')
 # The layer's recency gate (game3d_ui_layer.h max_clear_gap_ms): this long without a recorded copy, the layer is no
@@ -257,6 +267,20 @@ WINDOW_MS = re.compile(r'\bwindow_ms=(\d+)')
 LAYER_RECENCY_MS = 250.0
 # Logged once per ring when a copy is first skipped: a WARN before 10-07, INFO since. UI layer copies judges it.
 LAYER_SATURATED = 'Sunshine UI layer: every live copy is offered, held or still being read'
+# A cleared target whose clear-boundary copy the layer refused (game3d_ui_layer.cpp observe_clear: no legal copy of
+# its state exists, contract cell D12). From 10-24 (f45f1bb9) to the 11-03 contract one line logged it once for every
+# reason; since then the add-on logs one line per reason with what the player loses, and the timing line counts the
+# refusals by reason. UI layer refused reports both.
+LAYER_REFUSED = re.compile(r'Sunshine UI layer: clear-boundary copy refused \(([^)]*)\)(?:; (.*?))?'
+                           r'(?: \(logged once[^)]*\))?$')
+LAYER_REFUSED_ONCE = ('a cleared target is in an enhanced-barrier layout or allows simultaneous access; its '
+                      'clear-boundary copy is refused')
+LAYER_REFUSED_ONCE_REASON = 'enhanced_or_simultaneous'
+# How the report names each refusal reason (refused_by's keys); a key it does not know is named by its words.
+LAYER_REFUSAL_NAMES = {'simultaneous': 'simultaneous access', 'enhanced': 'enhanced-barrier layout',
+                       'not_render_target': 'not in the render-target state', 'no_state': 'no proven state',
+                       'other': 'another reason',
+                       LAYER_REFUSED_ONCE_REASON: 'enhanced-barrier layout or simultaneous access'}
 LOADED = re.compile(r"loaded from '.*' into '(.*)'")
 # ReShade tears its runtimes down when the game closes; some games (Unreal) end the process before ReShade logs its own
 # exit, so a teardown at the end of the log is a normal exit.
@@ -294,8 +318,9 @@ CORE_ABOUT_ADDON = re.compile(
     r'No add-on was registered by|Skipped loading add-on|Failed to create (?:back buffer render targets|resolve '
     r'texture|resolve shader resource view|copy pipeline|empty texture|ImGui))')
 # The add-on's own warnings that another check reports: its hitches (Present hitches), display scaling and the UI
-# layer's full ring (UI layer copies).
-OWNED_BENIGN = ('Game 3D hitch', 'display scaling limits the game', LAYER_SATURATED)
+# layer's full ring (UI layer copies) and its refused clear-boundary copies (UI layer refused).
+OWNED_BENIGN = ('Game 3D hitch', 'display scaling limits the game', LAYER_SATURATED,
+                'Sunshine UI layer: clear-boundary copy refused', LAYER_REFUSED_ONCE)
 # What tells two lines of one kind apart: quoted names (files, objects) and numbers (addresses, times, counts).
 LINE_KIND = re.compile(r"'[^']*'|\"[^\"]*\"|\b(?:0x)?[0-9A-Fa-f]*\d[0-9A-Fa-f]*\b")
 # Export pauses whose origin is the host, the game or the player rather than a fault (routine_export_pauses in
@@ -448,6 +473,34 @@ def counter_fields(text: str) -> dict[str, int]:
         elif value.isdigit() and key != 'runtime':
             values[key] = int(value)
     return values
+
+
+def layer_group(text: str) -> tuple[dict[str, str], dict[str, dict[str, str]], str | None] | None:
+    """A timing line's ui_layer={...} group as its plain fields, its nested groups (presents_since_copy, refused_by)
+    and the window_ms after it; None without a group holding copies, skipped, offers and presents_since_copy's mean
+    and max (no layer window, as on lines before 10-06)."""
+    start = text.find(LAYER_GROUP)
+    if start < 0:
+        return None
+    start += len(LAYER_GROUP)
+    depth, end = 1, start
+    while end < len(text) and depth:
+        depth += {'{': 1, '}': -1}.get(text[end], 0)
+        end += 1
+    if depth:
+        return None
+    fields: dict[str, str] = {}
+    groups: dict[str, dict[str, str]] = {}
+    for key, group, value in LAYER_FIELD.findall(text[start:end - 1]):
+        if value:
+            fields[key] = value
+        else:
+            groups[key] = {inner: number for inner, _, number in LAYER_FIELD.findall(group) if number}
+    since = groups.get('presents_since_copy', {})
+    if not all(fields.get(k, '').isdigit() for k in LAYER_REQUIRED) or not {'mean', 'max'} <= since.keys():
+        return None
+    window = WINDOW_MS.search(text, end)
+    return fields, groups, window.group(1) if window else None
 
 
 class Scene(NamedTuple):
@@ -628,13 +681,33 @@ class UISample(NamedTuple):
     def fg_label(self) -> str:
         return 'FG on' if self.fg else 'FG off'
 
-    def why_unprotected(self) -> str:
+    def why_unprotected(self, cause: str = '') -> str:
         """Each offered candidate, in draw order, and why it gave no mask, after the line's own FG state."""
-        return f'{self.fg_label()}: {self.why_body()}'
+        return f'{self.fg_label()}: {self.why_body(cause)}'
 
-    def why_body(self) -> str:
+    def whole_frame_presented(self) -> tuple[int, ...] | None:
+        """The offered candidates when they are only unaccepted presented alpha (Backbuffer or current alpha), each
+        valid and covering the whole frame (ui_selection::full, 90% or more): such alpha shows no UI shape and never
+        earns acceptance (A1 needs selective samples), so no usable UI source was offered. None otherwise."""
+        offered = tuple(c for c in range(len(ALPHA_BITS)) if self.offered(c))
+        if (not offered or self.candidates & ~sum(ALPHA_BITS) or not self.pixels
+                or any(c not in PRESENTED or self.is_accepted(c) or not self.valid(c)
+                       or self.alpha[c] * 10 < self.pixels * 9 for c in offered)):
+            return None
+        return offered
+
+    def why_body(self, cause: str = '') -> str:
+        """cause: why the session had no UI layer (layer_refusal_cause), named where no usable source was offered."""
         if self.availability == 'source_unavailable' or not self.candidates:
-            return 'no UI source offered'
+            return f'no usable UI source: {cause}' if cause else 'no UI source offered'
+        if (presented := self.whole_frame_presented()) is not None:
+            # Not the presented alpha's fault: it carries no UI shape whatever the game draws. The missing UI channel
+            # or layer is (W3 FG off 11-02: the layer refused at its clear boundary, current alpha 100% the only one).
+            if cause:
+                return f'no usable UI source: {cause}'
+            covers = ' and '.join(f'{ALPHA_NAMES[c]} covers {percent(self.alpha[c], self.pixels)}' for c in presented)
+            return (f'no usable UI source: no UI channel or UI layer was offered, and {covers} '
+                    '(whole frame, no UI shape)')
         blocking = self.blocking()
         parts = []
         for c in DRAW_ORDER:
@@ -881,6 +954,14 @@ class Session:
     # (time, count): timing windows whose layer tracker dropped qualifying clears with every entry taken.
     layer_targets_dropped: list[tuple] = field(default_factory=list)
     layer_saturated: list[float] = field(default_factory=list)
+    # Since the 11-03 contract: each timing window that counted refused clear-boundary copies (end, refused, refused
+    # by reason, copies recorded in it), the admitted copies recorded with enhanced barriers, and each refusal line
+    # (time, reason key, what the player loses; the line of 10-24 to 11-03 as LAYER_REFUSED_ONCE_REASON).
+    layer_refusals: list[tuple[float, int, dict[str, int], int]] = field(default_factory=list)
+    layer_copies_enhanced: int = 0
+    layer_refusal_lines: list[tuple[float, str, str]] = field(default_factory=list)
+    # Numbers the checks computed, for the saved summary and --compare (summary_metrics).
+    metrics: dict = field(default_factory=dict)
     # Export delivery counters: (t, runtime, generation, published, dropped, overwritten_unconsumed); and the
     # host's stream fps when a host log was read.
     delivery: list[tuple[float, str, int, int, int, int]] = field(default_factory=list)
@@ -1148,15 +1229,26 @@ def parse(lines) -> Session:
                                        float(found.group(3)), tuple(float(v) for v in worst.groups())))
             profile = GPU_PROFILE.search(text)
             s.timing_profile = profile.group(1) if profile else ''
-            if layer := LAYER_TIMING.search(text):
-                copies, skipped, offers, mean, peak, gap, dropped, window_ms = layer.groups()
+            if (layer := layer_group(text)) is not None:
+                fields, groups, window_ms = layer
+                copies, skipped, offers = (int(fields[k]) for k in LAYER_REQUIRED)
+                since = groups['presents_since_copy']
+                gap, dropped = fields.get('skip_gap_ms'), fields.get('targets_dropped')
                 if dropped and int(dropped):
                     s.layer_targets_dropped.append((t, int(dropped)))
                 s.layer_windows.append((t, int(window_ms) / 1000.0 if window_ms else TIMING_WINDOW_S,
-                                        int(found.group(1)), int(copies), int(skipped), int(offers), float(mean),
-                                        int(peak), float(gap) if gap is not None else None))
+                                        int(found.group(1)), copies, skipped, offers, float(since['mean']),
+                                        int(since['max']), float(gap) if gap is not None else None))
+                if refused := int(fields.get('refused', 0)):
+                    s.layer_refusals.append((t, refused, {k: int(v) for k, v in groups.get('refused_by', {}).items()
+                                                          if v.isdigit()}, copies))
+                s.layer_copies_enhanced += int(fields.get('copies_enhanced', 0))
         if LAYER_SATURATED in text:
             s.layer_saturated.append(t)
+        if found := LAYER_REFUSED.search(text):
+            s.layer_refusal_lines.append((t, found.group(1).strip(), (found.group(2) or '').strip()))
+        elif LAYER_REFUSED_ONCE in text:
+            s.layer_refusal_lines.append((t, LAYER_REFUSED_ONCE_REASON, ''))
         if found := DIAGNOSTICS.search(text):
             s.diagnostics.append((t, found.group(1) == 'on'))
     if s.last is not None:
@@ -1284,6 +1376,14 @@ def depth_gaps(s: Session, ranges: list[list[float]]) -> list[str]:
     return times
 
 
+def streamed_minutes(s: Session) -> float | None:
+    """The minutes the export streamed (from each generation to the next export inactive or the log's end), at least
+    one second; None when it never streamed."""
+    if not s.streamed or s.last is None:
+        return None
+    return max(sum((b if b is not None else s.last) - a for a, b in s.streamed) / 60.0, 1 / 60.0)
+
+
 def depth_losses(s: Session) -> str:
     """Every depth loss while the export streamed, by episode count and rate whatever the Depth check's interval gate:
     the logged episodes, the ones the add-on counted without logging them (suppressed_episodes: it logs at most four a
@@ -1292,8 +1392,7 @@ def depth_losses(s: Session) -> str:
     re-entry fade (Placement flat)."""
     logged = len(s.depth_episodes)
     total = logged + s.suppressed_episodes
-    minutes = max(sum((b if b is not None else s.last) - a for a, b in s.streamed) / 60.0, 1 / 60.0) \
-        if s.streamed and s.last is not None else None
+    minutes = streamed_minutes(s)
     missing_ms = sum(e.unavailable_ms or 0 for e in s.depth_episodes)
     parts = [f'{total} episode{"s" if total != 1 else ""}'
              + (f' ({s.suppressed_episodes} counted but not logged)' if s.suppressed_episodes else '')
@@ -1387,6 +1486,7 @@ def fg_switch_checks(s: Session, add, depth_from: float | None = None) -> None:
         times.append(f'{clock(t, True)} FG {"on" if mode else "off"}: ' + ('; '.join(parts) or 'no depth loss logged'))
     if not times:
         return
+    s.metrics['fg_switches'], s.metrics['fg_switches_depth_lost'] = len(times), lost
     add(Check('WARN' if lost else 'PASS', 'Depth at FG switches',
               f'{len(times)} FG switch{"es" if len(times) != 1 else ""}'
               + (f', {lost} with depth lost' if lost else ', no depth lost'), times))
@@ -1491,6 +1591,7 @@ def evaluate(s: Session) -> list[Check]:
         warm_up(s, runs, add)
         flat = sum(i.flat for i in after)
         fading = sum(i.fading for i in after)
+        s.metrics['placement_flat_share'] = flat / pub
         add(Check('WARN' if flats else 'PASS', 'Placement flat',
                   f'{100 * flat / pub:.1f}% of publications showed the colour frame with depth, '
                   f'{100 * fading / pub:.1f}% faded stereo back in'
@@ -1639,6 +1740,7 @@ def evaluate(s: Session) -> list[Check]:
 
     def named(what: str) -> str:
         return ' (depth-source flip step)' if what in DEPTH_FLIP_STEPS else ''
+    s.metrics['present_hitches'] = len(entries) + len(unnamed)
     if entries or unnamed:
         worst = sorted(entries + unnamed, key=lambda h: -h[2])[:3]
         add(Check('WARN', 'Present hitches', f'{len(entries) + len(unnamed)} not explained by a reset, FG switch or '
@@ -1911,6 +2013,7 @@ def ui_checks(s: Session, add) -> None:
             'forgotten': 'forgotten by Forget'}[change]))
     if not s.ui and s.counters is None:
         add(Check('INFO', 'UI protection', 'no UI protection samples'))
+        layer_refusal_checks(s, add)
         return
     # Inferred alpha (Backbuffer, current alpha and the UI layer) must never decide while an accepted declared UI
     # channel is offered (S1): that flattens scene as UI. Nor may an accepted alpha cover the whole frame while an
@@ -2040,6 +2143,7 @@ def ui_checks(s: Session, add) -> None:
                        refusals(s), short, short_text, s)
         held_none_checks(s, add)
         gap_checks(s, add)
+        layer_refusal_checks(s, add)
         scene_checks(s, add)
         return
     states = Counter(u.detection for u in s.ui)
@@ -2054,6 +2158,7 @@ def ui_checks(s: Session, add) -> None:
                  if handled and not disputes and not flattened and not contradicted else ''),
               (overrides + flattened + contradicted or disputes or handled or short)[:6]))
     gap_checks(s, add)
+    layer_refusal_checks(s, add)
     scene_checks(s, add)
 
 
@@ -2138,6 +2243,8 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
         unresolved = flattened and (sampled or not revoked)
     names = S2B_SOURCE_NAMES if s2b else SOURCE_NAMES
     sources = [(source, get(f'decided.{source}')) for source in names]
+    if s is not None and detected:
+        s.metrics['ui_layer_share'] = get('decided.10') / detected
     add(Check('FAIL' if overrides or unresolved else 'WARN' if disputes else 'PASS', 'UI protection',
               'decided ' + (', '.join(f'{names[k]} ({k}) {percent(n, detected)}' for k, n in sources if n)
                             or 'nothing') + ' of detection frames'
@@ -2255,6 +2362,8 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
     # Since S2a the sampled lines name each own decision's refused candidate (F1); the counters count reasons only.
     named = ', '.join(f'{reason.replace("_", " ")}' + (f' ({KIND_NAMES[kind]})' if kind in KIND_NAMES else '')
                       + f' {n}' for (reason, kind), n in refused.most_common(6))
+    if s is not None and auto:
+        s.metrics['ui_no_mask_share'] = sum(n for _, n in none + skipped + unheld) / auto
     add(Check('INFO', 'UI no mask',
               f'{percent(sum(n for _, n in none + skipped + unheld), auto)} of Auto frames had no mask'
               + (f'; decided none: {shares(none)}' if shares(none) else '')
@@ -2378,6 +2487,85 @@ def delivery_checks(s: Session, add) -> None:
                                   else ''),
               [f'{span(a, b)} ({b - a:.0f} s): {c / (b - a):.1f} of {g / (b - a):.1f} new frames/s'
                for a, b, c, g in long][:6]))
+
+
+def layer_refusal_key(reason: str) -> str:
+    """A refusal line's reason as its refused_by key: the line names the key ('simultaneous'); a phrase the report
+    names a key by ('simultaneous access') maps back to it, any other by its words joined with underscores."""
+    key = re.sub(r'[\s-]+', '_', reason.strip().lower())
+    if key in LAYER_REFUSAL_NAMES:
+        return key
+    return next((k for k, name in LAYER_REFUSAL_NAMES.items() if name == reason.strip().lower()), key)
+
+
+def layer_refusal_name(key: str) -> str:
+    return LAYER_REFUSAL_NAMES.get(key, key.replace('_', ' '))
+
+
+def layer_refusal_reasons(s: Session) -> list[tuple[str, int | None]]:
+    """Each reason the layer refused a clear-boundary copy for, the most counted first: its count over the timing
+    lines (refused_by; a refusal counted without a reason is 'other'), or None for a reason only a refusal line names
+    (the line of 10-24 to 11-03 counts nothing)."""
+    counted = Counter()
+    for _, total, by, _ in s.layer_refusals:
+        counted.update(by)
+        if total > sum(by.values()):
+            counted['other'] += total - sum(by.values())
+    reasons: list[tuple[str, int | None]] = [(k, n) for k, n in counted.most_common() if n]
+    for _, reason, _ in s.layer_refusal_lines:
+        key = layer_refusal_key(reason)
+        if all(key != k for k, _ in reasons):
+            reasons.append((key, None))
+    return reasons
+
+
+def layer_refusal_cause(s: Session) -> str:
+    """Why a session without a usable UI source had no UI layer, when the add-on refused one: 'UI layer refused at
+    its clear boundary (<reasons>)', or '' when it refused none."""
+    reasons = layer_refusal_reasons(s)
+    return ('UI layer refused at its clear boundary (' + ', '.join(layer_refusal_name(k) for k, _ in reasons) + ')'
+            if reasons else '')
+
+
+def layer_refusal_checks(s: Session, add) -> None:
+    """'UI layer refused' (WARN): the offscreen UI layer refused clear-boundary copies (game3d_ui_layer.cpp
+    observe_clear) because no legal copy of the cleared target's state was found: simultaneous access, an
+    enhanced-barrier layout, a state other than RENDER_TARGET or no proven state (the timing line's refused_by, since
+    the 11-03 contract; 10-24 to 11-03 one line logged once for the first two together and counted nothing). A refused
+    target is never tracked, so if it was the game's UI layer, the layer never protected UI: The Witcher 3 with FG off
+    (11-02) draws its UI only there, so every FG-off frame lost UI protection, which the UI protection gaps name as
+    the cause. 'UI layer enhanced copies' (INFO) counts the admitted copies recorded with enhanced barriers."""
+    copies = sum(w[3] for w in s.layer_windows)
+    if s.layer_copies_enhanced:
+        add(Check('INFO', 'UI layer enhanced copies',
+                  f'{s.layer_copies_enhanced} of {copies} layer copies were recorded with enhanced barriers (a clear '
+                  'in an enhanced render-target layout, copied from that layout and back)'))
+    reasons = layer_refusal_reasons(s)
+    if not reasons:
+        return
+    parts = []
+    if s.layer_refusals:
+        total = sum(n for _, n in reasons if n)
+        windows = len(s.layer_refusals)
+        parts.append(f'{total} clear-boundary {"copy" if total == 1 else "copies"} refused in {windows} timing '
+                     f'{"window" if windows == 1 else "windows"}: '
+                     + ', '.join(f'{layer_refusal_name(k)} {n}' for k, n in reasons if n))
+    if uncounted := [k for k, n in reasons if n is None]:
+        parts.append('clear-boundary copies refused for ' + ', '.join(layer_refusal_name(k) for k in uncounted)
+                     + (' (logged once and not counted: an add-on before the 11-03 contract)'
+                        if LAYER_REFUSED_ONCE_REASON in uncounted else ''))
+    beside = sum(c for *_, c in s.layer_refusals)
+    parts.append('the UI layer recorded no copy all session, so it protected no UI: a game that draws its UI only '
+                 'into an offscreen layer had no UI source' if not copies else
+                 f'the UI layer recorded no copy in the windows that refused, and {copies} elsewhere'
+                 if s.layer_refusals and not beside else
+                 f'the UI layer still recorded {copies} {"copy" if copies == 1 else "copies"} (of another target or '
+                 'other clears)')
+    times = [f'{clock(t)} {layer_refusal_name(layer_refusal_key(reason))}'
+             + (f': {loss}' if loss else ' (one line for both reasons, logged once)'
+                if reason == LAYER_REFUSED_ONCE_REASON else '')
+             for t, reason, loss in s.layer_refusal_lines]
+    add(Check('WARN', 'UI layer refused', '; '.join(parts), times[:6]))
 
 
 def layer_copy_checks(s: Session, add) -> None:
@@ -2600,13 +2788,14 @@ def unprotected_gaps(s: Session) -> tuple[list[Gap], float]:
     for u in s.ui:
         runtimes.setdefault(u.runtime, []).append(u)
     pieces, flat = [], 0.0
+    cause = layer_refusal_cause(s)
     for runtime, samples in runtimes.items():
         lost = depth_lost(s, runtime)
         last = ''
         for u, following in zip(samples, samples[1:] + [None]):
             if u.unprotected():
-                last = u.why_body()
-                reason = u.why_unprotected()
+                last = u.why_body(cause)
+                reason = u.why_unprotected(cause)
             elif last and (u.pending() or (u.mode == 'auto' and not u.rendered)):
                 reason = f'{u.fg_label()}: {u.detection if u.rendered else "not rendered"}; last sample: {last}'
             else:
@@ -2640,6 +2829,7 @@ def gap_checks(s: Session, add) -> None:
             f'({sum(g.end - g.start for g in brief):.1f} s)') if brief else ''
     lost = (f'; {flat:.1f} s without a mask while depth was lost (every frame flat by the output counters) not counted'
             if round(flat, 1) else '')
+    s.metrics['ui_gap_s'] = sum(g.end - g.start for g in listed)
     if not listed:
         add(Check('PASS', 'UI protection gaps', 'every streamed Auto frame had a UI mask or a UI channel showing no UI'
                   + (f' except {note}' if note else '') + lost))
@@ -2885,6 +3075,132 @@ def host_checks(path: Path, start: datetime, end: datetime,
     return checks
 
 
+def session_dates(log: Path, s: Session) -> tuple[datetime, datetime]:
+    """The session's start and end as dates: ReShade logs times without a date, so the log's last write dates the
+    session's last line (a line more than 5 minutes after the write is the day before)."""
+    written = datetime.fromtimestamp(log.stat().st_mtime)
+    end = datetime.combine(written.date(), datetime.min.time()) + timedelta(seconds=s.last % 86400)
+    if end > written + timedelta(minutes=5):
+        end -= timedelta(days=1)
+    return end - timedelta(seconds=s.last - s.first), end
+
+
+# Saved reports (--save-dir): one folder per executable, each session's report text and a JSON summary named by its
+# start, <exe>/<YYYYMMDD-HHMMSS>.txt and .json. The summary's schema version, read back by --compare.
+SUMMARY_SCHEMA = 1
+# --compare (tools/reshade/README.md, First run of a new game): each metric of the summary, how the report names it,
+# its bad direction (-1 a drop, +1 a rise) and the change in that direction that is a regression (WARN). Shares are
+# fractions (the threshold in percentage points of the session's own total); rates are per streamed minute, except
+# hitches, per minute of the session in which the add-on counts them. Each metric is the number its own check
+# reports: the UI protection gaps' listed seconds, the Depth losses' logged and counted episodes, Depth at FG
+# switches, Placement flat after depth started, and the Present hitches not explained by a reset, FG switch or
+# overlay opening. A metric missing on either side (no UI counters, no FG switch, no streamed export) is not compared.
+# W3 FG off 11-02 against 10-22: the UI layer share fell from 84% to 0% with its layer refused.
+COMPARE_RULES = (
+    ('ui_layer_share', 'UI layer share of detection frames', -1, 0.25),
+    ('ui_gap_s_per_min', 'UI protection gaps (s per streamed minute)', +1, 2.0),
+    ('ui_no_mask_share', 'UI no-mask share of Auto frames', +1, 0.10),
+    ('depth_losses_per_min', 'Depth-loss episodes per streamed minute', +1, 1.0),
+    ('fg_switch_loss_share', 'FG switches with depth lost', +1, 0.25),
+    ('placement_flat_share', 'Placement-flat share of publications', +1, 0.02),
+    ('present_hitches_per_min', 'Present hitches per session minute', +1, 0.5),
+)
+SHARE_METRICS = frozenset(('ui_layer_share', 'ui_no_mask_share', 'fg_switch_loss_share', 'placement_flat_share'))
+
+
+def summary_metrics(s: Session) -> dict:
+    """The numbers --compare reads: what the checks computed (s.metrics) and the rates derived from them."""
+    m = dict(s.metrics)
+    minutes = streamed_minutes(s)
+    session_min = max((s.last - s.first) / 60.0, 1 / 60.0) if s.first is not None else None
+    losses = len(s.depth_episodes) + s.suppressed_episodes
+    m.update({'streamed_min': minutes, 'session_min': session_min, 'depth_losses': losses,
+              'ui_layer_copies': sum(w[3] for w in s.layer_windows),
+              'ui_layer_refused': sum(r[1] for r in s.layer_refusals),
+              'ui_layer_refusal_reasons': [k for k, _ in layer_refusal_reasons(s)]})
+    if minutes:
+        m['depth_losses_per_min'] = losses / minutes
+        if 'ui_gap_s' in m:
+            m['ui_gap_s_per_min'] = m['ui_gap_s'] / minutes
+    if m.get('fg_switches'):
+        m['fg_switch_loss_share'] = m['fg_switches_depth_lost'] / m['fg_switches']
+    if session_min and 'present_hitches' in m:
+        m['present_hitches_per_min'] = m['present_hitches'] / session_min
+    return m
+
+
+def metric_text(key: str, value: float) -> str:
+    return percent(round(value * 1_000_000), 1_000_000) if key in SHARE_METRICS else f'{value:.1f}'
+
+
+def metric_change(key: str, delta: float) -> str:
+    return (f'{abs(delta) * 100:.1f} points' if key in SHARE_METRICS and abs(delta) < 0.1 else
+            f'{abs(delta) * 100:.0f} points' if key in SHARE_METRICS else f'{abs(delta):.1f}')
+
+
+def metric_context(key: str, m: dict) -> str:
+    """The counts behind a rate or share, where they help to read it."""
+    if key == 'ui_gap_s_per_min':
+        return f'{m["ui_gap_s"]:.0f} s in {m["streamed_min"]:.1f} min'
+    if key == 'depth_losses_per_min':
+        return f'{m["depth_losses"]} in {m["streamed_min"]:.1f} min'
+    if key == 'fg_switch_loss_share':
+        return f'{m["fg_switches_depth_lost"]} of {m["fg_switches"]}'
+    if key == 'present_hitches_per_min':
+        return f'{m["present_hitches"]} in {m["session_min"]:.1f} min'
+    return ''
+
+
+def compare_checks(new: dict, old: dict) -> list[Check]:
+    """One row per COMPARE_RULES metric: WARN when it moved at least its threshold in its bad direction, PASS when
+    it did not, INFO when either session lacks it."""
+    checks = []
+    for key, label, bad, threshold in COMPARE_RULES:
+        a, b = old.get(key), new.get(key)
+        name = f'Compared: {label}'
+        if a is None or b is None:
+            missing = ('neither session has it' if a is None and b is None else
+                       'the earlier session has none' if a is None else 'this session has none')
+            checks.append(Check('INFO', name, f'not compared ({missing})'))
+            continue
+        delta = b - a
+        context = (f' ({metric_context(key, old)} -> {metric_context(key, new)})'
+                   if metric_context(key, new) else '')
+        moved = '' if not round(delta, 6) else f'; {"up" if delta > 0 else "down"} {metric_change(key, delta)}'
+        regression = delta * bad >= threshold - 1e-9
+        checks.append(Check('WARN' if regression else 'PASS', name,
+                            f'{metric_text(key, a)} -> {metric_text(key, b)}{context}{moved}'
+                            + (f', a regression (its threshold: {"down" if bad < 0 else "up"} '
+                               f'{metric_change(key, threshold)})' if regression else '')))
+    return checks
+
+
+def report_folder(save_dir: Path, exe: str) -> Path:
+    return save_dir / (re.sub(r'[^\w.-]', '_', exe) or 'unknown')
+
+
+def load_summary(path: Path) -> dict | None:
+    try:
+        summary = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    return summary if isinstance(summary, dict) and summary.get('schema') == SUMMARY_SCHEMA else None
+
+
+def last_good(folder: Path, before: datetime) -> tuple[Path, dict] | None:
+    """The newest saved summary in folder of a session that started before this one and had no FAIL."""
+    found = []
+    for path in folder.glob('*.json') if folder.is_dir() else ():
+        summary = load_summary(path)
+        try:
+            start = datetime.fromisoformat(summary['start']) if summary else None
+        except (KeyError, TypeError, ValueError):
+            start = None
+        if start is not None and start < before and not summary.get('fails'):
+            found.append((start, path, summary))
+    return max(found, key=lambda f: f[0])[1:] if found else None
+
+
 def find_log(path: Path) -> Path:
     if path.is_file():
         return path
@@ -2898,7 +3214,15 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('log', type=Path, help="ReShade.log or the game's folder")
     parser.add_argument('--host-log', type=Path, help="Sunshine's log (for example E:/ApolloDev/config/sunshine.log)")
+    parser.add_argument('--save-dir', type=Path,
+                        help='keep this report in <dir>/<executable>/<session start>.txt with a JSON summary beside it '
+                             '(for example E:/ApolloDev/game3d-reports)')
+    parser.add_argument('--compare', nargs='?', const='', metavar='SUMMARY',
+                        help="compare with a saved session: a summary .json (or its .txt); without one, the newest "
+                             "session of the same executable in --save-dir that started earlier and had no FAIL")
     args = parser.parse_args(argv)
+    if args.compare == '' and not args.save_dir:
+        parser.error('--compare without a summary needs --save-dir')
     try:
         log = find_log(args.log)
         session = parse(log.read_text(encoding='utf-8', errors='replace').splitlines())
@@ -2908,6 +3232,11 @@ def main(argv=None) -> int:
     if session.first is None:
         print(f'{log}: no ReShade log lines')
         return 2
+    out: list[str] = []
+
+    def emit(text: str) -> None:
+        print(text)
+        out.append(text)
     running = not session.exited and time.time() - log.stat().st_mtime < 60
     duration = session.last - session.first
     # A runtime teardown at the very end is a normal exit whose process ended before ReShade logged its own.
@@ -2915,16 +3244,10 @@ def main(argv=None) -> int:
     state = ('still running' if running else 'exited' if session.exited else
              'exited (the process ended before ReShade logged its exit)' if torn_down else
              'ended without exiting (crash or kill?)')
-    print(f'Game 3D readiness: {session.exe or log}  {clock(session.first)} to {clock(session.last)} '
-          f'({int(duration // 60)}m{int(duration % 60):02}s, {state})')
-    end = None
+    emit(f'Game 3D readiness: {session.exe or log}  {clock(session.first)} to {clock(session.last)} '
+         f'({int(duration // 60)}m{int(duration % 60):02}s, {state})')
+    start, end = session_dates(log, session)
     if args.host_log:
-        # ReShade logs times without a date; the log's last write dates the session.
-        written = datetime.fromtimestamp(log.stat().st_mtime)
-        end = datetime.combine(written.date(), datetime.min.time()) + timedelta(seconds=session.last % 86400)
-        if end > written + timedelta(minutes=5):
-            end -= timedelta(days=1)
-        start = end - timedelta(seconds=duration)
         timeline = host_stream_fps(args.host_log, start, end)
         if timeline:
             # Host times on this log's clock; the last rate before the session is in effect at its start.
@@ -2932,18 +3255,58 @@ def main(argv=None) -> int:
             session.stream_fps_timeline = [(session.first + (when - start).total_seconds(), fps)
                                            for when, fps in timeline]
     checks = evaluate(session)
-    if end is not None:
-        checks += host_checks(args.host_log, end - timedelta(seconds=duration), end, gpu_transitions(session),
-                              game_memory(session))
+    if args.host_log:
+        checks += host_checks(args.host_log, start, end, gpu_transitions(session), game_memory(session))
     if not running and not session.exited and not torn_down:
         checks.append(Check('WARN', 'Session', 'the log ends without ReShade exiting or tearing its runtimes down'))
+    own_fails = sum(c.status == 'FAIL' for c in checks)
+    metrics = summary_metrics(session)
+    folder = report_folder(args.save_dir, session.exe) if args.save_dir else None
+    compared: list[Check] = []
+    header = ''
+    if args.compare is not None:
+        path = Path(args.compare) if args.compare else None
+        if path is None or path.is_dir():
+            found = last_good(folder if path is None else path, start)
+        else:
+            path = path.with_suffix('.json') if path.suffix == '.txt' else path
+            found = (path, summary) if (summary := load_summary(path)) else None
+        if found:
+            base_path, base = found
+            header = (f'Compared with the {base["start"].replace("T", " ")[:16]} session of {base.get("exe") or "?"} '
+                      f'(Overall {base.get("overall", "?")}): {base_path}')
+            compared = compare_checks(metrics, base.get('metrics', {}))
+        else:
+            compared = [Check('INFO', 'Compared', 'no saved session of ' + (session.exe or 'this executable')
+                              + (f' in {folder}' if path is None else f' at {path}')
+                              + ' that started earlier and had no FAIL')]
     for check in checks:
-        print(f'[{check.status:4}] {check.name}: {check.detail}')
+        emit(f'[{check.status:4}] {check.name}: {check.detail}')
         for when in check.times:
-            print(f'         {when}')
+            emit(f'         {when}')
+    if header:
+        emit(header)
+    for check in compared:
+        emit(f'[{check.status:4}] {check.name}: {check.detail}')
+    checks += compared
     fails = sum(c.status == 'FAIL' for c in checks)
     warns = sum(c.status == 'WARN' for c in checks)
-    print(f'Overall: {"FAIL" if fails else "WARN" if warns else "PASS"} ({fails} fail, {warns} warn)')
+    overall = 'FAIL' if fails else 'WARN' if warns else 'PASS'
+    emit(f'Overall: {overall} ({fails} fail, {warns} warn)')
+    if folder is not None:
+        stamp = start.strftime('%Y%m%d-%H%M%S')
+        summary = {'schema': SUMMARY_SCHEMA, 'exe': session.exe, 'log': str(log), 'start': start.isoformat(),
+                   'end': end.isoformat(), 'state': state, 'overall': overall, 'fails': own_fails, 'warns': warns,
+                   'metrics': metrics,
+                   'checks': [{'status': c.status, 'name': c.name, 'detail': c.detail, 'times': c.times}
+                              for c in checks]}
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f'{stamp}.txt').write_text('\n'.join(out) + '\n', encoding='utf-8')
+            (folder / f'{stamp}.json').write_text(json.dumps(summary, indent=1) + '\n', encoding='utf-8')
+        except OSError as error:
+            print(f'cannot save the report: {error}')
+            return 2
     return 1 if fails else 0
 
 

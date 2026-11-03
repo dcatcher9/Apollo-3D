@@ -698,7 +698,20 @@ headroom, and the time over budget, which with nothing visible at it warns of no
 
 Each `UI protection gaps` window lists its pieces with each line's own FG state; a line whose
 status sample was still pending (`checking` or `searching`), or an unrendered line, continues a run,
-labelled with that state after the last sample's reason.
+labelled with that state after the last sample's reason. A line that offered no candidate, or only
+unaccepted presented alpha (Backbuffer or current alpha) covering the whole frame (90% or more, which
+shows no UI shape and can never earn acceptance), reads `no usable UI source`: the missing UI channel
+or layer is the cause, not the presented alpha. When the offscreen UI layer refused clear-boundary
+copies in the session, that cause is named, `UI layer refused at its clear boundary (<reasons>)`
+(The Witcher 3 with FG off since 10-24: its layer's target allows simultaneous access or is in an
+enhanced-barrier layout, so the layer never copied and current alpha at 100% was the only candidate
+left). `UI layer refused` (WARN) sums those refusals: since the 11-03 contract by reason from the
+timing line's `ui_layer={... refused=<n> refused_by={simultaneous enhanced not_render_target no_state
+other}}` and with each once-per-reason `Sunshine UI layer: clear-boundary copy refused (<reason>);
+<what the player loses>` line; from 10-24 to 11-03 one line, logged once, named both reasons together
+and nothing was counted. It says whether the layer still recorded copies. `UI layer enhanced copies`
+(INFO) counts the admitted copies recorded with enhanced barriers (`copies_enhanced`). The timing
+line's layer group is read field by field, so a field added anywhere in it leaves the others readable.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
@@ -790,6 +803,36 @@ From `Sunshine SBS: export inactive` until the next `Sunshine SBS: generation` n
 streamed, and depth losses there are not counted. The stop's own `explicit_reuse_invalidation`
 follows its pause line; add-ons before 10-23 logged it just before, in the same millisecond, and
 the report counts that one with the pause too.
+
+To see what a build changed for one game, keep each report and compare a new session with that
+game's last good one:
+
+```powershell
+python tools\reshade\game3d_log_report.py "D:\Games\<game>" --save-dir E:\ApolloDev\game3d-reports --compare
+```
+
+`--save-dir` writes the printed report to `<dir>\<executable>\<session start>.txt` and a JSON
+summary (schema 1: the session's start and end, overall status, fail and warn counts, every check
+and the compared metrics) beside it. `--compare` without a value compares with the newest saved
+summary of the same executable whose session started earlier and had no FAIL; with a value, with
+that summary (`.json`, its `.txt`, or a folder to search). The report prints `Compared with the
+<date> session of <executable>`, then one row per metric, before the overall line. A metric that
+moved at least its threshold in its bad direction is a regression and warns; a metric either
+session lacks is INFO. The thresholds (`COMPARE_RULES`):
+
+| Metric | Regression |
+| --- | --- |
+| UI layer share of detection frames | down 25 points (W3 FG off: 84% on 10-22, 0% on 11-02) |
+| UI protection gaps, listed seconds per streamed minute | up 2.0 |
+| UI no-mask share of Auto frames | up 10 points |
+| Depth-loss episodes per streamed minute | up 1.0 |
+| FG switches with depth lost, of all FG switches | up 25 points |
+| Placement-flat share of publications | up 2 points |
+| Present hitches not explained, per session minute | up 0.5 |
+
+Without these options the output is unchanged. The golden test compares the saved Witcher 3 10-22
+session with its 11-02 session, which flags the UI layer share, the UI protection gaps and the
+no-mask share.
 
 A failing check is a bug report: fix the rule at its root (see
 [the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a

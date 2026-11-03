@@ -16,7 +16,7 @@ Game 3D readiness: Dead Space.exe  22:51:05 to 22:52:13 (1m07s, exited)
 [INFO] UI trust events: earned 0, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 0, legacy entries discarded 0, forgotten 0
 [PASS] UI holds without a decision: no window held most Auto frames without a decision
 [WARN] UI protection gaps: no usable UI mask for 44 s in 1 window; HUD and menus took the scene's depth there
-         22:51:29-22:52:13 (44 s) FG off: current alpha covers 100% (not accepted) (reason ambiguous: current alpha)
+         22:51:29-22:52:13 (44 s) FG off: no usable UI source: no UI channel or UI layer was offered, and current alpha covers 100% (whole frame, no UI shape)
 [INFO] Hidden scene: H1 hidden scene (8) in 0 samples (pre-UI image: hudless 0, layer 0), entered 0, released 0, refuted 0; 0 of 9 samples measured
 [PASS] Observation losses: lifecycle 1
 [WARN] Capture status: conflicting_state 1; 1 more while settling
