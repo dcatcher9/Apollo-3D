@@ -2069,9 +2069,13 @@ proof its claim selects,
 Generic's end-of-frame copy (`record_preserved` with the contract `generic_capture.inl` passes: the
 source's last proven state on the copy's queue, which the earlier list proved; each depth-stencil
 source is tracked from its creation, as ReShade's `init_resource` reports it), or the UI clear
-boundary (the barriers `game3d_ui_layer.cpp` records through ReShade where the capture owner's
-`legacy_render_target_copy` admits them, as the layer asks; the runtime layer runs the layer
-itself). The cells cover every legal state of every
+boundary (the copy `game3d_ui_layer.cpp` records on the basis the capture owner's
+`render_target_clear_copy` decides, as the layer asks: legacy `RENDER_TARGET` barriers through
+ReShade, or the owner's enhanced barriers from the clearing list's enhanced layout; D12's four
+targets, a legacy `RENDER_TARGET`, an enhanced `RENDER_TARGET` layout, and a simultaneous-access
+target its list transitions to `RENDER_TARGET` (all copied) or leaves in `COMMON` (refused,
+`no_state`, no barrier); a cell's refusal reason must be its target's; the runtime layer runs the
+layer itself). The cells cover every legal state of every
 allocation, each claim, each direct-list enhanced layout, every depth family typed and typeless with
 mips and planes, the shapes no input names, COMPUTE lists (each state and claim a compute list may
 use, and the compute-queue layouts, copied on that list and executed on a compute queue; S22, N7)
@@ -2185,16 +2189,22 @@ the writable view, or draws still bound at the end of frame, D32 and D32S8, each
 end-of-frame copy and judged by the depth the last native render consumed. The view is created in
 `DEPTH_WRITE` and never transitioned, so its creation proves that state at the end of the frame
 and at a stencil-only clear (D10b). The states an earlier executed list proves at the end of the
-frame are the device layer's, and so is the UI layer's clear boundary on an enhanced or
-simultaneous-access target (D12). Family
+frame are the device layer's, and so is the debug layer's check of the UI layer's clear-boundary
+barriers (D12). Family
 `ui` (2.14.1) tags a
 captured depth and a full-size UI input (UI colour and alpha, HUD-less colour, Backbuffer, UI alpha)
 at a tag call with the game's list, without a command list or as a local evaluate input (at a tag
 call also `ValidUntilPresent` and `ValidUntilEvaluate`, with its list recording a read state, a write
 state or none, U5), or draws
-an offscreen UI layer cleared every frame (a render target in `RENDER_TARGET`, or a
-simultaneous-access one whose copy the layer refuses, D12); a case is offered when Dump3D lists its input as
-available to UI detection. Their gaps are `ngx_runtime_rows`, `generic_runtime_rows` and
+an offscreen UI layer cleared every frame (D12: a render target in `RENDER_TARGET`; one an enhanced
+barrier on the clearing list puts in the `RENDER_TARGET` layout; a simultaneous-access one its list
+transitions to `RENDER_TARGET`; or a simultaneous-access one its clear promotes from `COMMON`, whose
+copy the layer refuses as `no_state`); a case is offered when Dump3D lists its input as
+available to UI detection. A layer case also judges its player effect through
+`SunshineUILayerTestLive`'s counters over the case: an offered layer must decide the UI mask (source
+10) after 2.5 s more of frames (acceptance, A1), an enhanced one must be copied with enhanced
+barriers (`copies_enhanced`), the transitioned simultaneous-access one with legacy barriers alone,
+and the refused one must be counted as `no_state` with no copy recorded. Their gaps are `ngx_runtime_rows`, `generic_runtime_rows` and
 `ui_runtime_rows`.
 
 The executable takes `--family` and the generator's `--list`, `--case` and `--shard`, and appends

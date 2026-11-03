@@ -76,9 +76,17 @@
 // Copies are allocated outside the tracker's lock and destroyed outside it
 // through a device alive meanwhile (presenting, recording or being
 // destroyed); a retired copy of another device is destroyed under it.
+namespace sunshine_streamline::depth_capture {
+  enum class clear_copy_refusal : std::uint8_t; // streamline_depth_capture.h
+}
+
 namespace sunshine_game3d::ui_layer {
   namespace api = reshade::api;
+  using clear_copy_refusal = sunshine_streamline::depth_capture::clear_copy_refusal;
   inline constexpr unsigned max_candidates = 3; // game3d_debug::ui_layer_count
+  // Every reason a qualifying clear's copy is refused (clear_copy_refusal
+  // but none; depth_capture::clear_copy_refusal_count).
+  inline constexpr unsigned refusal_reasons = 5;
   inline constexpr std::uint32_t confirm_clears = 3;
   inline constexpr std::uint64_t max_clear_gap_ms = 250;
 
@@ -576,12 +584,28 @@ namespace sunshine_game3d::ui_layer {
   // latest() offered a copy to with that copy's presents_since_copy (sum
   // and maximum), the longest skip gap (skip_gap, microseconds) and the
   // qualifying clears the tracker dropped with every entry taken
-  // (targets_dropped). The counters restart with each call.
+  // (targets_dropped); the qualifying D3D12 clears whose copy the capture
+  // owner refused, by reason (refused_by, indexed by clear_copy_refusal - 1:
+  // a refused target is never tracked, so it can never be the layer), and
+  // the recorded copies that left and restored an enhanced layout
+  // (copies_enhanced, of copies). The counters restart with each call.
   struct stats {
     std::uint64_t copies{}, skipped{}, offers{}, presents_since_sum{}, skip_gap_max_us{}, targets_dropped{};
     std::uint32_t presents_since_max{};
+    std::array<std::uint64_t, refusal_reasons> refused_by{};
+    std::uint64_t copies_enhanced{};
+    std::uint64_t refused() const {
+      std::uint64_t total{};
+      for (const auto value : refused_by) total += value;
+      return total;
+    }
   };
   stats take_stats();
+  // The reason of the newest qualifying clear whose copy the capture owner
+  // refused, while that clear was at most a second (the layer's demand
+  // window) before now_ms; none otherwise. Where no UI mask decides and no
+  // layer is offered, the panel names it as the cause.
+  clear_copy_refusal refused_at_clear(std::uint64_t now_ms);
   // The native observer's submission listener (native_observer::
   // set_submission_listener): after a native submission that ran a list
   // carrying a held live copy, offers a copy run on the presenting queue
@@ -636,6 +660,11 @@ namespace sunshine_game3d::ui_layer {
     // The offered copy (api::resource handle) and the live copies' format.
     std::uint64_t offered_copy{};
     std::uint32_t format{};
+    // Since the add-on loaded (take_stats does not restart them): the
+    // qualifying clears refused by reason (stats::refused_by), the recorded
+    // live copies and those recorded with enhanced barriers.
+    std::array<std::uint64_t, refusal_reasons> refused_by{};
+    std::uint64_t copies{}, copies_enhanced{};
   };
 
   // A renderer submission read the live copy capture_id (a direct binding or

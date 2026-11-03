@@ -322,17 +322,83 @@ namespace sunshine_streamline::depth_capture {
   // given, says whether that state lets the recording write source
   // (copy_state::writes). Call on the thread recording command.
   bool recorded_state(std::uint64_t command, const source_ref &source, bool *writing = nullptr);
-  // Whether the UI layer's clear-boundary copy (game3d_ui_layer.cpp
-  // record_into), which leaves and restores a render target's RENDER_TARGET
-  // state with legacy barriers, may run on command for resource (the
-  // contract matrix's D12). Not for a simultaneous-access target, which may
-  // still be in COMMON there, nor for one in an enhanced layout: the latest
-  // barrier on command's recording, or, when that names nothing, the
-  // enhanced-layout latch (proven_state.h; the target is watched from its
-  // first query). A legacy state on the recording must be RENDER_TARGET. With
-  // the capture owner inactive only the access flag decides. Call on the
-  // thread recording command.
-  bool legacy_render_target_copy(std::uint64_t command, std::uint64_t resource);
+  // Why the UI layer's clear-boundary copy of a target was refused (the
+  // contract matrix's D12), each named on the timing line (refused_by) and
+  // logged once:
+  // - simultaneous: a simultaneous-access target whose clearing list names a
+  //   state other than a legacy RENDER_TARGET (COMMON, which the clear only
+  //   promotes, or an enhanced barrier, which leaves such a texture in the
+  //   COMMON layout);
+  // - enhanced: a target in an enhanced layout with no legal enhanced copy (a
+  //   layout or access the clear's RENDER_TARGET does not name, an unproven
+  //   latched layout, or a list without ID3D12GraphicsCommandList7);
+  // - not_render_target: a legacy state on the clearing list other than
+  //   RENDER_TARGET (or a pending split, a blocked or unknown state);
+  // - no_state: a simultaneous-access target whose clearing list proves no
+  //   state (its clear may promote it from COMMON; a D3D12 legality ruling on
+  //   a copy without a proven state is open);
+  // - other: the target or list cannot be queried or identified.
+  enum class clear_copy_refusal : std::uint8_t { none, simultaneous, enhanced, not_render_target, no_state, other };
+  inline constexpr unsigned clear_copy_refusal_count = 5; // Every reason but none.
+  inline constexpr const char *name(clear_copy_refusal value) {
+    switch (value) {
+      case clear_copy_refusal::none: return "none";
+      case clear_copy_refusal::simultaneous: return "simultaneous";
+      case clear_copy_refusal::enhanced: return "enhanced";
+      case clear_copy_refusal::not_render_target: return "not_render_target";
+      case clear_copy_refusal::no_state: return "no_state";
+      default: return "other";
+    }
+  }
+  // What the reason means, for the log line and the panel.
+  inline constexpr const char *description(clear_copy_refusal value) {
+    switch (value) {
+      case clear_copy_refusal::simultaneous: return "simultaneous access, cleared from another state than RENDER_TARGET";
+      case clear_copy_refusal::enhanced: return "enhanced-barrier layout without a legal enhanced copy";
+      case clear_copy_refusal::not_render_target: return "not in RENDER_TARGET on its clearing list";
+      case clear_copy_refusal::no_state: return "simultaneous access, no state proven on its clearing list";
+      case clear_copy_refusal::none: return "";
+      default: return "target not identifiable";
+    }
+  }
+  // How the UI layer's clear-boundary copy (game3d_ui_layer.cpp record_into)
+  // may leave and restore the target's state on the clearing list (the
+  // contract matrix's D12), as a depth clear's copy does (copy_state::resolve
+  // with the clear's contract, RENDER_TARGET, as its claim):
+  // - a legacy RENDER_TARGET entry on the recording, or no entry and no
+  //   enhanced-layout latch (the clear proves RENDER_TARGET): the legacy
+  //   RENDER_TARGET <-> COPY_SOURCE barriers (enhanced false);
+  // - an enhanced barrier on the recording into the RENDER_TARGET layout, or,
+  //   where the recording names nothing, a latched target whose earlier list
+  //   proved that layout (D6): enhanced barriers from that exact layout and
+  //   access and back (clear_copy_barrier), which need the list's
+  //   ID3D12GraphicsCommandList7;
+  // - a simultaneous-access target only from a legacy RENDER_TARGET its
+  //   clearing list set explicitly: such a texture starts each
+  //   ExecuteCommandLists in COMMON and its clear may promote it there, so
+  //   neither the clear nor an earlier list proves its state.
+  // Anything else is refused with its reason. With the capture owner inactive
+  // the recording is not observed: a simultaneous-access target is no_state,
+  // any other copies legacy. A target is watched for the latch from its first
+  // query (proven_state.h). Call on the thread recording command.
+  struct clear_copy_basis {
+    clear_copy_refusal refused{clear_copy_refusal::other};
+    bool enhanced{};
+    std::uint32_t layout{}, access{};
+    bool admitted() const { return refused == clear_copy_refusal::none; }
+  };
+  clear_copy_basis render_target_clear_copy(std::uint64_t command, std::uint64_t resource);
+  // Records on command, for an admitted enhanced basis of resource, the
+  // enhanced barrier that takes resource from the basis's layout and access
+  // to the copy-source layout after all prior work (restore false), or back
+  // with every later command waiting for the copy (restore true):
+  // copy_state::layouts' copy barriers, as a depth copy from an enhanced
+  // layout records them, unobserved by the barrier hooks as every injected
+  // barrier. Call between the decision and the clear, on the thread
+  // recording command. False, with nothing recorded, for any other basis or
+  // a list without ID3D12GraphicsCommandList7 (never after the decision found
+  // it: QueryInterface's answer is fixed for an object's life).
+  bool clear_copy_barrier(const clear_copy_basis &basis, std::uint64_t command, std::uint64_t resource, bool restore);
   // Executions of game lists observed so far, on any queue: each
   // ExecuteCommandLists that submitted a list with a recording other than
   // ReShade's own immediate lists (DXGI's internal Present list has none). A

@@ -302,6 +302,59 @@ int main() try {
   chosen = copy_state::resolve(copy_state::select(proof::clear_contract, policy::source_contract), D3D12_RESOURCE_STATE_DEPTH_WRITE,
     earlier(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE), D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
   require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "a clear's DEPTH_WRITE agreed with another earlier layout");
+  // The UI layer's clear boundary (D12, render_target_clear_copy): the
+  // clear's RENDER_TARGET is its claim. An enhanced RENDER_TARGET layout on
+  // the recording is copied with enhanced barriers from that exact layout and
+  // access; a legacy RENDER_TARGET, or nothing on the recording, with legacy
+  // ones; any other layout or state, or a layout without access, is refused.
+  const auto clear_rule = copy_state::select(proof::clear_contract, policy::source_contract);
+  const auto render_target_layout = [&](std::uint32_t layout, std::uint32_t access) {
+    auto value = enhanced(layout, access != D3D12_BARRIER_ACCESS_NO_ACCESS);
+    value.access = access;
+    return value;
+  };
+  chosen = copy_state::resolve(clear_rule, D3D12_RESOURCE_STATE_RENDER_TARGET,
+    render_target_layout(D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET), D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+  require(chosen.admitted && chosen.enhanced && chosen.layout == D3D12_BARRIER_LAYOUT_RENDER_TARGET &&
+      chosen.access == D3D12_BARRIER_ACCESS_RENDER_TARGET && copy_state::list_basis(chosen, false),
+    "a clear's RENDER_TARGET was not copied from the enhanced RENDER_TARGET layout on its recording");
+  chosen = copy_state::resolve(clear_rule, D3D12_RESOURCE_STATE_RENDER_TARGET,
+    render_target_layout(D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_ACCESS_RENDER_TARGET), D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+  require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "a clear's RENDER_TARGET agreed with the COMMON layout");
+  chosen = copy_state::resolve(clear_rule, D3D12_RESOURCE_STATE_RENDER_TARGET,
+    render_target_layout(D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_NO_ACCESS), D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+  require(!chosen.admitted && chosen.result == capture::status::incomplete_state, "a clear's RENDER_TARGET was copied from NO_ACCESS");
+  chosen = copy_state::resolve(clear_rule, D3D12_RESOURCE_STATE_RENDER_TARGET, {true, true, false, D3D12_RESOURCE_STATE_RENDER_TARGET},
+    D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
+  require(chosen.admitted && !chosen.enhanced && chosen.state == D3D12_RESOURCE_STATE_RENDER_TARGET,
+    "a clear's RENDER_TARGET was not copied from the legacy RENDER_TARGET its recording set");
+  chosen = copy_state::resolve(clear_rule, D3D12_RESOURCE_STATE_RENDER_TARGET, {}, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+  require(chosen.admitted && !chosen.enhanced && chosen.state == D3D12_RESOURCE_STATE_RENDER_TARGET,
+    "a clear's RENDER_TARGET did not stand where its recording names nothing");
+  chosen = copy_state::resolve(clear_rule, D3D12_RESOURCE_STATE_RENDER_TARGET, {true, true, false, D3D12_RESOURCE_STATE_COMMON},
+    D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
+  require(!chosen.admitted && chosen.result == capture::status::conflicting_state, "a clear's RENDER_TARGET agreed with a recorded COMMON");
+  // The enhanced copy's barriers (record_impl and clear_copy_barrier): from
+  // the exact layout and access after all prior work, back with every later
+  // command waiting for the copy.
+  {
+    D3D12_TEXTURE_BARRIER barrier{};
+    layouts::leave_for_copy(barrier, nullptr, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
+    require(barrier.SyncBefore == D3D12_BARRIER_SYNC_ALL && barrier.SyncAfter == D3D12_BARRIER_SYNC_COPY &&
+        barrier.AccessBefore == D3D12_BARRIER_ACCESS_RENDER_TARGET && barrier.AccessAfter == D3D12_BARRIER_ACCESS_COPY_SOURCE &&
+        barrier.LayoutBefore == D3D12_BARRIER_LAYOUT_RENDER_TARGET && barrier.LayoutAfter == D3D12_BARRIER_LAYOUT_COPY_SOURCE &&
+        !barrier.Subresources.IndexOrFirstMipLevel && !barrier.Subresources.NumMipLevels && barrier.Flags == D3D12_TEXTURE_BARRIER_FLAG_NONE,
+      "the enhanced copy's leaving barrier changed");
+    layouts::restore_after_copy(barrier);
+    require(barrier.SyncBefore == D3D12_BARRIER_SYNC_COPY && barrier.SyncAfter == D3D12_BARRIER_SYNC_ALL &&
+        barrier.AccessBefore == D3D12_BARRIER_ACCESS_COPY_SOURCE && barrier.AccessAfter == D3D12_BARRIER_ACCESS_RENDER_TARGET &&
+        barrier.LayoutBefore == D3D12_BARRIER_LAYOUT_COPY_SOURCE && barrier.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+      "the enhanced copy's restoring barrier changed");
+    D3D12_TEXTURE_BARRIER common{};
+    layouts::leave_for_copy(common, nullptr, D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON, D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
+    require(common.LayoutAfter == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON && common.AccessAfter == D3D12_BARRIER_ACCESS_COPY_SOURCE,
+      "a common layout's copy changed its layout");
+  }
   // Whether a recorded state or layout writes the texture (S11's deferral).
   for (const std::uint32_t state : {D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
          D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RESOLVE_DEST})

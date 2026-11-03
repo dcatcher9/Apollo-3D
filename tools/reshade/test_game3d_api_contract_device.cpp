@@ -18,9 +18,13 @@
 //   source's last proven state on the copy's queue, which the earlier list
 //   proved (each source is tracked from its creation, as ReShade's
 //   init_resource reports a depth-stencil texture);
-// - the UI clear boundary: the three barriers game3d_ui_layer.cpp
-//   record_into records through ReShade's D3D12 backend, where the capture
-//   owner's legacy_render_target_copy admits them, as the layer asks. The
+// - the UI clear boundary: the copy game3d_ui_layer.cpp record_into records
+//   on the basis the capture owner's render_target_clear_copy decides, as
+//   the layer asks: the legacy RENDER_TARGET barriers through ReShade's D3D12
+//   backend, or the owner's own enhanced barriers (clear_copy_barrier) from
+//   the clearing list's enhanced layout; a refused cell records nothing, and
+//   its reason must be the one its target names (no_state for a
+//   simultaneous-access target whose clearing list names no state). The
 //   layer itself runs only through ReShade, in the runtime layer's UI
 //   family.
 // Every cell is executed alone, so a D3D12 debug-layer error names it.
@@ -540,6 +544,7 @@ namespace {
         out.boundary("UI clear boundary", format, rt, device_point::ui_clear, common, ui_clear_boundary::enhanced_render_target);
       }
       out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_common);
+      out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_render_target);
     }
     return std::move(out.cells);
   }
@@ -617,6 +622,8 @@ namespace {
     capture::record_diagnostic diagnostic;
     matrix::result actual;
     bool quarantined {}, debug_clean {true}, bytes_checked {}, bytes_exact {true};
+    // A UI clear boundary's refusal reason is the one its target names.
+    bool reason_named {true};
     std::string trouble;
     capture::preservation_ticket preserved;
     capture::diagnostic_ticket local;
@@ -1032,29 +1039,52 @@ namespace {
           }
         case device_point::ui_clear:
           {
-            // game3d_ui_layer.cpp record_into through ReShade's D3D12
-            // backend: the copy (kept shader-readable) to COPY_DEST, the
-            // target from RENDER_TARGET to COPY_SOURCE, CopyResource, and
-            // both back. The game first puts an enhanced target in the
-            // RENDER_TARGET layout.
+            // game3d_ui_layer.cpp record_into: the copy (kept
+            // shader-readable) to COPY_DEST, the target from RENDER_TARGET
+            // to COPY_SOURCE through ReShade's D3D12 backend or, on an
+            // enhanced basis, by the capture owner's enhanced barrier,
+            // CopyResource, and both back. The game first puts an enhanced
+            // target in the RENDER_TARGET layout, or a simultaneous-access
+            // one in RENDER_TARGET with a legacy transition.
             if (value.value.clear == ui_clear_boundary::enhanced_render_target) {
               enter_layout(list, resource, true, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
+            } else if (value.value.clear == ui_clear_boundary::simultaneous_render_target) {
+              transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, common, render_target);
             }
-            // The layer first asks the capture owner (D12).
-            if (!capture::legacy_render_target_copy(native(list), native(resource))) {
+            // The layer first asks the capture owner (D12); a refusal
+            // records nothing.
+            const auto basis = capture::render_target_clear_copy(native(list), native(resource));
+            const auto named = value.value.clear == ui_clear_boundary::simultaneous_common ? capture::clear_copy_refusal::no_state : capture::clear_copy_refusal::none;
+            if (basis.refused != named) {
+              out.reason_named = false;
+              out.trouble += std::string(" the clear-boundary copy's refusal was ") + capture::name(basis.refused) + ", not " + capture::name(named) + ";";
+            }
+            if (!basis.admitted()) {
               out.diagnostic.result = capture::status::unsupported_state;
               out.diagnostic.stage = capture::record_stage::unsupported_state;
               break;
             }
             out.ui_copy = destination(gpu.device.Get(), value.format, source_width, source_height);
+            if (basis.enhanced) {
+              require(capture::clear_copy_barrier(basis, native(list), native(resource), false), "The enhanced clear-boundary barrier was not recorded");
+            }
             transition_barrier(list, out.ui_copy.Get(), 0, ps, copy_dest);
-            transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, render_target, copy_source);
+            if (!basis.enhanced) {
+              transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, render_target, copy_source);
+            }
             list->CopyResource(out.ui_copy.Get(), resource);
-            transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, copy_source, render_target);
+            if (basis.enhanced) {
+              require(capture::clear_copy_barrier(basis, native(list), native(resource), true), "The enhanced clear-boundary restore was not recorded");
+            } else {
+              transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, copy_source, render_target);
+            }
             transition_barrier(list, out.ui_copy.Get(), 0, copy_dest, ps);
             out.diagnostic.result = capture::status::recorded;
             out.diagnostic.stage = capture::record_stage::recorded;
             out.diagnostic.copy_state = render_target;
+            out.diagnostic.enhanced_copy = basis.enhanced;
+            out.diagnostic.observed_layout = basis.layout;
+            out.diagnostic.observed_access = basis.access;
             admitted = true;
             break;
           }
@@ -1371,7 +1401,7 @@ int main(int argc, char **argv) {
         const auto &out = runs[i];
         read += out.bytes_checked;
         const auto expected = matrix::expect(value.value);
-        const bool satisfied = matrix::satisfies(expected, out.actual) && out.debug_clean && out.bytes_exact;
+        const bool satisfied = matrix::satisfies(expected, out.actual) && out.debug_clean && out.bytes_exact && out.reason_named;
         bool matched[std::size(gaps::device_rows)] {};
         const auto verdict = gaps::judge_each(gaps::device_rows, value.value, satisfied, {out.actual}, matched);
         if (const auto *what = verdicts.add(verdict, matched, satisfied)) {

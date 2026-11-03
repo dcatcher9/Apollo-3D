@@ -225,8 +225,10 @@ namespace sunshine_game3d::ui_layer {
       log_fenced = 1u << 0, log_unobserved = 1u << 1, log_mixed = 1u << 2, log_no_fence = 1u << 3,
       log_create_failed = 1u << 4, log_signal_failed = 1u << 5, log_fence_capacity = 1u << 6, log_census = 1u << 7,
       log_dropped = 1u << 15, // After log_census's eight bits.
-      log_layout_refused = 1u << 16,
+      log_refused = 1u << 16, // The first of refusal_reasons bits, one per clear_copy_refusal reason.
     };
+    static_assert(refusal_reasons == sunshine_streamline::depth_capture::clear_copy_refusal_count &&
+      (log_refused << (refusal_reasons - 1)) != 0, "one log bit per clear-boundary refusal reason");
 
     struct state_t {
       std::mutex mutex;
@@ -280,9 +282,21 @@ namespace sunshine_game3d::ui_layer {
       // exporter's lock).
       struct {
         std::atomic<std::uint64_t> copies{0}, skipped{0}, offers{0}, presents_since_sum{0}, skip_gap_max_us{0},
-          targets_dropped{0};
+          targets_dropped{0}, copies_enhanced{0};
         std::atomic<std::uint32_t> presents_since_max{0};
+        std::array<std::atomic<std::uint64_t>, refusal_reasons> refused_by{};
       } counts;
+      // The newest refused clear (refused_at_clear): its game clock and
+      // reason, written without the lock.
+      std::atomic<std::uint64_t> refused_ms{0};
+      std::atomic<std::uint8_t> refused_reason{0};
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      // SunshineUILayerTestLive's totals, which take_stats never restarts.
+      struct {
+        std::array<std::atomic<std::uint64_t>, refusal_reasons> refused_by{};
+        std::atomic<std::uint64_t> copies{0}, copies_enhanced{0};
+      } totals;
+#endif
     };
     // Deliberately leaked: clear events can arrive during process exit.
     state_t &state() {
@@ -614,14 +628,24 @@ namespace sunshine_game3d::ui_layer {
     // Records the target's previous-frame content into copy, an add-on texture
     // kept in shader_resource state between uses (live and census copies are
     // created in it), leaving copy shader-readable and the target as the clear
-    // needs it. A list executed again without a reset records the same
-    // transitions again, from the state the previous execution left.
-    void record_into(api::command_list *commands, api::resource target, api::resource copy) {
+    // needs it: from and back to RENDER_TARGET with legacy barriers, or, for
+    // an enhanced basis, from and back to its exact layout and access with
+    // enhanced ones (depth_capture::clear_copy_barrier). A list executed
+    // again without a reset records the same transitions again, from the
+    // state the previous execution left. False, with nothing recorded, when
+    // an enhanced basis's list has no Barrier after all.
+    bool record_into(api::command_list *commands, api::resource target, api::resource copy,
+        const sunshine_streamline::depth_capture::clear_copy_basis &basis) {
+      namespace capture = sunshine_streamline::depth_capture;
+      const auto native = commands->get_native();
+      if (basis.enhanced && !capture::clear_copy_barrier(basis, native, target.handle, false)) return false;
       commands->barrier(copy, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
-      commands->barrier(target, api::resource_usage::render_target, api::resource_usage::copy_source);
+      if (!basis.enhanced) commands->barrier(target, api::resource_usage::render_target, api::resource_usage::copy_source);
       commands->copy_resource(target, copy);
-      commands->barrier(target, api::resource_usage::copy_source, api::resource_usage::render_target);
+      if (basis.enhanced) capture::clear_copy_barrier(basis, native, target.handle, true);
+      else commands->barrier(target, api::resource_usage::copy_source, api::resource_usage::render_target);
       commands->barrier(copy, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
+      return true;
     }
 
     // A ring entry reserved under the lock whose copy the caller allocates
@@ -640,12 +664,13 @@ namespace sunshine_game3d::ui_layer {
     }
 
     // Requires the state lock. Records the target's previous-frame content
-    // into an allocated ring entry.
-    void record_live(state_t &s, api::command_list *commands, unsigned index, api::resource resource) {
+    // into an allocated ring entry (nothing when record_into records nothing).
+    void record_live(state_t &s, api::command_list *commands, unsigned index, api::resource resource,
+        const sunshine_streamline::depth_capture::clear_copy_basis &basis) {
       auto &live = s.live;
       auto &entry = live.ring[index];
+      if (!record_into(commands, resource, entry.copy, basis)) return;
       note_skip_gap(s, live.gap.record(steady_us()));
-      record_into(commands, resource, entry.copy);
       entry.capture_id = live.capture_id = ++s.next_capture_id;
       entry.tick = live.tick = sunshine_game3d::clock::game_now();
       // The Present count at the copy: it holds the previous Present's frame.
@@ -657,6 +682,11 @@ namespace sunshine_game3d::ui_layer {
       if (order_recorded(entry.order, list, commands->get_native(), s.presenting_queue)) live.newest = int(index);
       publish_watch(s);
       s.counts.copies.fetch_add(1, std::memory_order_relaxed);
+      if (basis.enhanced) s.counts.copies_enhanced.fetch_add(1, std::memory_order_relaxed);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      s.totals.copies.fetch_add(1, std::memory_order_relaxed);
+      if (basis.enhanced) s.totals.copies_enhanced.fetch_add(1, std::memory_order_relaxed);
+#endif
       s.holding.store(true, std::memory_order_relaxed);
     }
 
@@ -664,7 +694,7 @@ namespace sunshine_game3d::ui_layer {
     // into a ring entry, before the game's clear. An entry without a copy is
     // reserved instead and returned for allocation outside the lock.
     live_allocation capture_live(state_t &s, api::command_list *commands, api::device *device, api::resource resource,
-        const api::resource_desc &desc, api::format typed) {
+        const api::resource_desc &desc, api::format typed, const sunshine_streamline::depth_capture::clear_copy_basis &basis) {
       auto &live = s.live;
       const auto now = sunshine_game3d::clock::game_now();
       if (live.entries && (live.width != desc.texture.width || live.height != desc.texture.height || live.format != typed)) {
@@ -734,7 +764,7 @@ namespace sunshine_game3d::ui_layer {
             api::resource_usage::copy_dest | api::resource_usage::copy_source | api::resource_usage::shader_resource),
           typed};
       }
-      record_live(s, commands, unsigned(choice.index), resource);
+      record_live(s, commands, unsigned(choice.index), resource, basis);
       return {};
     }
 
@@ -743,7 +773,8 @@ namespace sunshine_game3d::ui_layer {
     // (the caller destroys the objects). A failed allocation leaves the entry
     // empty, to be allocated again when chosen.
     bool publish_live(state_t &s, api::command_list *commands, api::device *device, const live_allocation &plan,
-        api::resource copy, api::resource_view view, api::resource resource) {
+        api::resource copy, api::resource_view view, api::resource resource,
+        const sunshine_streamline::depth_capture::clear_copy_basis &basis) {
       auto &live = s.live;
       if (s.live_scope != plan.scope || device != s.device || unsigned(plan.index) >= live.entries) return false;
       auto &entry = live.ring[unsigned(plan.index)];
@@ -752,7 +783,7 @@ namespace sunshine_game3d::ui_layer {
       if (!copy.handle) return true;
       entry.copy = copy;
       entry.view = view;
-      record_live(s, commands, unsigned(plan.index), resource);
+      record_live(s, commands, unsigned(plan.index), resource, basis);
       return true;
     }
 
@@ -791,9 +822,10 @@ namespace sunshine_game3d::ui_layer {
     // lock (in shader_resource state, as live copies are) and records it into
     // the game's list, whose execution its queue order then follows (the live
     // copies' carriers, submission hook and queue fence); false when the
-    // census moved on (the caller destroys the copy).
+    // census moved on or record_into recorded nothing (the caller destroys
+    // the copy).
     bool publish_census(state_t &s, api::command_list *commands, const census_allocation &plan, api::resource copy,
-        api::resource resource) {
+        api::resource resource, const sunshine_streamline::depth_capture::clear_copy_basis &basis) {
       if (s.census_scope != plan.scope) return false;
       const auto e = std::find_if(s.census.begin(), s.census.end(), [&](const census_entry &value) {
         return value.c.source == plan.source && value.c.status == census_allocating;
@@ -803,8 +835,11 @@ namespace sunshine_game3d::ui_layer {
         e->c.status = "copy_allocation_failed";
         return true;
       }
+      if (!record_into(commands, resource, copy, basis)) {
+        e->c.status = "copy_not_recorded";
+        return false;
+      }
       e->c.copy = copy;
-      record_into(commands, resource, copy);
       // The Present count at the copy: it holds the previous Present's frame.
       e->frame = s.live.tracker.frame();
       e->d3d12 = commands->get_device()->get_api() == api::device_api::d3d12;
@@ -812,6 +847,30 @@ namespace sunshine_game3d::ui_layer {
       e->c.status = "recorded";
       publish_watch(s);
       return true;
+    }
+
+    // A qualifying D3D12 clear whose copy the capture owner refused: counted
+    // by reason for the timing line, stamped for the panel
+    // (refused_at_clear), and logged once per reason with what the player
+    // loses. A refused target is never tracked, so it is never the layer.
+    void refused(state_t &s, sunshine_streamline::depth_capture::clear_copy_refusal reason) {
+      namespace capture = sunshine_streamline::depth_capture;
+      const auto index = unsigned(reason) - 1u;
+      if (index >= refusal_reasons) return;
+      s.counts.refused_by[index].fetch_add(1, std::memory_order_relaxed);
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+      s.totals.refused_by[index].fetch_add(1, std::memory_order_relaxed);
+#endif
+      s.refused_reason.store(std::uint8_t(reason), std::memory_order_relaxed);
+      s.refused_ms.store(sunshine_game3d::clock::game_now(), std::memory_order_relaxed);
+      std::lock_guard<std::mutex> lock(s.mutex);
+      if (!first(s, log_refused << index)) return;
+      char message[512];
+      std::snprintf(message, sizeof(message),
+        "Sunshine UI layer: clear-boundary copy refused (%s); %s: the target cannot be the offscreen UI layer, so UI "
+        "protection gets no mask from it and, without another UI source, the HUD and menus take the scene's depth "
+        "(logged once per reason; the timing line counts refused_by)", capture::name(reason), capture::description(reason));
+      sunshine_log::message(reshade::log::level::info, message);
     }
 
     // One qualifying clear of a target (resource) through view, from
@@ -836,20 +895,21 @@ namespace sunshine_game3d::ui_layer {
         }
         // Clearing requires the render-target state on every API, so the
         // previous frame's layer can be copied here before the clear erases it.
-        // On D3D12 the copy's legacy RENDER_TARGET barriers need that legacy
-        // state: a target in an enhanced layout or with simultaneous access
-        // is no layer (the contract matrix's D12). The capture owner may take
-        // its own lock to decide, so this runs outside the layer's: a recording
-        // thread never waits for it while the Present thread waits for this
-        // one.
-        if (device->get_api() == api::device_api::d3d12 &&
-            !sunshine_streamline::depth_capture::legacy_render_target_copy(commands->get_native(), resource.handle)) {
-          std::lock_guard<std::mutex> lock(s.mutex);
-          if (first(s, log_layout_refused))
-            sunshine_log::message(reshade::log::level::info,
-              "Sunshine UI layer: a cleared target is in an enhanced-barrier layout or allows simultaneous access; "
-              "its clear-boundary copy is refused (logged once)");
-          return;
+        // On D3D12 the capture owner says how the copy leaves and restores
+        // that state on the clearing list (legacy RENDER_TARGET barriers, or
+        // enhanced ones from an enhanced layout), or refuses it with a reason,
+        // and a refused target is no layer (the contract matrix's D12). It may
+        // take its own lock to decide, so this runs outside the layer's: a
+        // recording thread never waits for it while the Present thread waits
+        // for this one.
+        namespace capture = sunshine_streamline::depth_capture;
+        capture::clear_copy_basis basis{capture::clear_copy_refusal::none};
+        if (device->get_api() == api::device_api::d3d12) {
+          basis = capture::render_target_clear_copy(commands->get_native(), resource.handle);
+          if (!basis.admitted()) {
+            refused(s, basis.refused);
+            return;
+          }
         }
         {
           std::lock_guard<std::mutex> lock(s.mutex);
@@ -858,7 +918,7 @@ namespace sunshine_game3d::ui_layer {
           const auto now = sunshine_game3d::clock::game_now();
           const auto dropped = s.live.tracker.dropped();
           if (s.live.tracker.clear(resource.handle, now) && demanded(s, now))
-            live = capture_live(s, commands, device, resource, desc, format);
+            live = capture_live(s, commands, device, resource, desc, format, basis);
           if (s.live.tracker.dropped() != dropped) {
             s.counts.targets_dropped.fetch_add(1, std::memory_order_relaxed);
             if (!(s.logged & log_dropped)) {
@@ -889,8 +949,8 @@ namespace sunshine_game3d::ui_layer {
         bool live_kept = live.index < 0, dump_kept = !dump.wanted;
         {
           std::lock_guard<std::mutex> lock(s.mutex);
-          if (live.index >= 0) live_kept = publish_live(s, commands, device, live, live_copy, live_view, resource);
-          if (dump.wanted) dump_kept = publish_census(s, commands, dump, dump_copy, resource);
+          if (live.index >= 0) live_kept = publish_live(s, commands, device, live, live_copy, live_view, resource, basis);
+          if (dump.wanted) dump_kept = publish_census(s, commands, dump, dump_copy, resource, basis);
         }
         // Objects of a scope that moved on meanwhile were never used.
         std::vector<retired> lost;
@@ -1090,7 +1150,17 @@ namespace sunshine_game3d::ui_layer {
     value.presents_since_max = c.presents_since_max.exchange(0, std::memory_order_relaxed);
     value.skip_gap_max_us = c.skip_gap_max_us.exchange(0, std::memory_order_relaxed);
     value.targets_dropped = c.targets_dropped.exchange(0, std::memory_order_relaxed);
+    value.copies_enhanced = c.copies_enhanced.exchange(0, std::memory_order_relaxed);
+    for (unsigned i = 0; i != refusal_reasons; ++i) value.refused_by[i] = c.refused_by[i].exchange(0, std::memory_order_relaxed);
     return value;
+  }
+
+  clear_copy_refusal refused_at_clear(std::uint64_t now_ms) {
+    const auto &s = state();
+    const auto stamp = s.refused_ms.load(std::memory_order_relaxed);
+    // A stamp after now, from another thread meanwhile, counts as now.
+    if (!stamp || (now_ms > stamp && now_ms - stamp > demand_window_ms)) return clear_copy_refusal::none;
+    return clear_copy_refusal(s.refused_reason.load(std::memory_order_relaxed));
   }
 
   const char *name(read_order value) {
@@ -1467,6 +1537,9 @@ extern "C" __declspec(dllexport) BOOL SunshineUILayerTestLive(sunshine_game3d::u
   out->capture_id = live.capture_id;
   out->presenting_queue = s.presenting_queue;
   out->format = static_cast<std::uint32_t>(live.format);
+  for (unsigned i = 0; i != refusal_reasons; ++i) out->refused_by[i] = s.totals.refused_by[i].load(std::memory_order_relaxed);
+  out->copies = s.totals.copies.load(std::memory_order_relaxed);
+  out->copies_enhanced = s.totals.copies_enhanced.load(std::memory_order_relaxed);
   for (unsigned i = 0; i != live.entries; ++i) {
     out->owing += live.ring[i].order.owed != 0;
     out->awaiting += live.ring[i].order.awaiting();

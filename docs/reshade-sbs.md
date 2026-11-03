@@ -181,7 +181,10 @@ Present reads the copy of the frame before it; see the layer cross-queue fence u
 (`ui_layer::skip_gap`, 0 without skips; time between clears more than 250 ms apart is left out),
 and, since C12, `targets_dropped`: qualifying clears the layer tracker dropped because all 32 of
 its entries were taken (see the offscreen UI layer below; `game3d_log_report` reports them as the
-INFO check `UI layer targets`). All
+INFO check `UI layer targets`), and, since 11-03, `refused=<n> refused_by={simultaneous enhanced
+not_render_target no_state other}`: qualifying D3D12 clears whose copy the capture owner refused, by
+reason, and `copies_enhanced`: the copies recorded with enhanced barriers (the offscreen UI layer
+below). All
 are zero while UI detection does not ask for the layer. Since 10-07 the line ends with `window_ms`, the
 window's length: 10 s for a periodic line, and shorter for the last window of a runtime reset or
 destruction, which logs its partial window instead of dropping it (before, a game's exit window, and
@@ -1150,16 +1153,40 @@ layer clear; before WP1b any rectangle qualified. A 2-bit alpha
 (R10G10B10A2) cannot hold blended coverage; with FG on The Witcher 3 also clears such a scene
 target, which otherwise became the active layer and claimed the whole frame. Clearing requires the render-target state on
 every API, so a target can be copied just before its clear: the copy shows the previous frame.
-On D3D12 that copy leaves and restores `RENDER_TARGET` with legacy barriers, so since Stage 3 fix 3
-the layer first asks the capture owner (`depth_capture::legacy_render_target_copy`, the contract
-matrix's D12). A target that allows simultaneous access (it may still be in `COMMON` there) is not
-a layer. Neither is one in an enhanced layout: by its latest barrier on the clear's recording (a
-legacy one must leave `RENDER_TARGET`) or, where that names nothing, by the enhanced-layout latch;
-the target is watched for the latch from its first clear. The layer asks outside its own lock,
-between its check that the clear qualifies and its copy (which checks again), because the capture
-owner may take its lock to answer: a recording thread never holds the layer's lock while it waits
-for the capture owner's. The layer logs `Sunshine UI layer: a cleared target is in an
-enhanced-barrier layout or allows simultaneous access; its clear-boundary copy is refused` once.
+On D3D12 the copy must leave and restore that state legally, so the layer first asks the capture
+owner how (`depth_capture::render_target_clear_copy`, the contract matrix's D12). Since 11-03 the
+owner answers as for a depth clear's copy: the clear's own contract, `RENDER_TARGET`, is the claim,
+checked against the target's latest barrier on the clearing list (`copy_state::resolve` with
+`clear_contract`):
+- a legacy `RENDER_TARGET` there, or nothing there and no enhanced-layout latch: the copy leaves and
+  restores `RENDER_TARGET` with legacy barriers, as before;
+- an enhanced barrier there into the `RENDER_TARGET` layout, or, where the list names nothing, a
+  latched target whose earlier list proved that layout (D6, as for depth): enhanced barriers from
+  exactly that layout and access to `COPY_SOURCE` and back (`copy_state::layouts::leave_for_copy`
+  and `restore_after_copy`, the barriers a depth copy from an enhanced layout records), on the
+  list's `ID3D12GraphicsCommandList7`;
+- a simultaneous-access target starts each `ExecuteCommandLists` in `COMMON` and its clear may
+  promote it from there, so only a legacy `RENDER_TARGET` its clearing list set explicitly proves
+  its state (copied with legacy barriers); neither the clear nor an earlier list does.
+Anything else is refused with a reason, and a refused target is never tracked, so it is never the
+layer: `simultaneous` (a simultaneous-access target cleared from another state than a legacy
+`RENDER_TARGET` its list set), `enhanced` (an enhanced layout or access the clear's `RENDER_TARGET`
+does not name, an unproven latched layout, or a list without `Barrier`), `not_render_target` (a
+legacy state, pending split or blocked state other than `RENDER_TARGET`), `no_state` (a
+simultaneous-access target its clearing list names nothing about: copying it would need a D3D12
+legality ruling that is still open, so the layer refuses it) and `other` (the target or list cannot
+be identified). The timing line counts them (`refused_by`) and the copies recorded with enhanced
+barriers (`copies_enhanced`); the layer logs `Sunshine UI layer: clear-boundary copy refused
+(<reason>); <what it means>: the target cannot be the offscreen UI layer, so UI protection gets no
+mask from it ...` once per reason, and the panel's UI protection line reads `No usable UI mask: UI
+layer refused at its clear (<reason>)` while no mask decides and no layer is offered within a second
+of a refusal. Before 11-03 (Stage 3 fix 3, 10-24) every simultaneous-access target and every target
+in an enhanced layout was refused, with one line logged once and nothing counted: The Witcher 3
+Remastered with frame generation off, whose only UI source is this layer, lost UI protection (the
+log report blamed the 100% current alpha left as the only candidate). The layer asks outside its
+own lock, between its check that the clear qualifies and its copy (which checks again), because the
+capture owner may take its lock to answer: a recording thread never holds the layer's lock while it
+waits for the capture owner's.
 Since C12 a clear is `ClearRenderTargetView` or, on D3D12, a render pass whose render-target entry
 begins with a CLEAR to exactly (0, 0, 0, 0): ReShade reports `begin_render_pass` before the native
 `BeginRenderPass`, outside any pass, where that target is in the render-target state the pass

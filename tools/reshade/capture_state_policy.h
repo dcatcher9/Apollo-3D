@@ -5,6 +5,7 @@
 
 #include <d3d12.h>
 #include <cstdint>
+#include <utility>
 
 // The one owner of how an injected copy chooses its source's pre-copy state.
 // Adapters say where their state claim comes from (state_proof); the capture
@@ -167,6 +168,28 @@ namespace sunshine_streamline::depth_capture::copy_state {
           layout == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON) return layout;
       return direct_queue(layout) ? D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE :
         compute_queue(layout) ? D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE : D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+    }
+    // Sets out (zero-initialized: subresource 0, the zero range being index
+    // form, and no flags) to the enhanced barrier a copy's source leaves its
+    // exact layout and access by for the copy, after all prior work. The depth
+    // copies (record_impl) and the UI layer's clear-boundary copy
+    // (clear_copy_barrier) both record it.
+    inline void leave_for_copy(D3D12_TEXTURE_BARRIER &out, ID3D12Resource *resource, std::uint32_t layout, std::uint32_t access) {
+      out.SyncBefore = D3D12_BARRIER_SYNC_ALL; out.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+      out.AccessBefore = static_cast<D3D12_BARRIER_ACCESS>(access);
+      out.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+      out.LayoutBefore = static_cast<D3D12_BARRIER_LAYOUT>(layout);
+      out.LayoutAfter = static_cast<D3D12_BARRIER_LAYOUT>(copy_source(layout));
+      out.pResource = resource;
+    }
+    // Turns leave_for_copy's barrier into the one back: the exact layout and
+    // access restored, and SyncAfter ALL makes every later command wait for
+    // the copy, the enhanced form of a legacy write boundary, so a later game
+    // write cannot overlap the read.
+    inline void restore_after_copy(D3D12_TEXTURE_BARRIER &barrier) {
+      std::swap(barrier.AccessBefore, barrier.AccessAfter);
+      std::swap(barrier.LayoutBefore, barrier.LayoutAfter);
+      barrier.SyncBefore = D3D12_BARRIER_SYNC_COPY; barrier.SyncAfter = D3D12_BARRIER_SYNC_ALL;
     }
   }
 

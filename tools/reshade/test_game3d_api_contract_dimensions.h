@@ -647,11 +647,17 @@ namespace game3d_contract {
     local
   };
 
+  // The UI layer's cleared target (D12): in its legacy RENDER_TARGET state
+  // from an earlier list; put in the RENDER_TARGET layout by an enhanced
+  // barrier on the clearing list; a simultaneous-access target in COMMON that
+  // the clear promotes (its clearing list names no state); or one its
+  // clearing list transitioned to RENDER_TARGET with a legacy barrier.
   enum class ui_clear_boundary {
     none,
     legacy_render_target,
     enhanced_render_target,
-    simultaneous_common
+    simultaneous_common,
+    simultaneous_render_target
   };
 
   // What a UI tag call's own list records of its input before the call
@@ -892,7 +898,7 @@ namespace game3d_contract {
               return !simultaneous && value.prior == D3D12_RESOURCE_STATE_RENDER_TARGET;
             case ui_clear_boundary::enhanced_render_target:
               return !simultaneous && value.prior == D3D12_RESOURCE_STATE_COMMON;
-            default:
+            default:  // simultaneous_common, simultaneous_render_target
               return simultaneous;
           }
       }

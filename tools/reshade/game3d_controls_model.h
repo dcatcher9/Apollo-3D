@@ -169,7 +169,13 @@ namespace sunshine_game3d {
     }
   }
 
-  inline std::string source_alpha_detection_text(const ui_qualification::status &source, const source_alpha_ui_decision &decision) {
+  // layer_refused: why the UI layer last refused a qualifying clear's copy
+  // within the last second (ui_layer::refused_at_clear,
+  // depth_capture::description), or null. Where no mask decided and no layer
+  // was offered, that refusal is the reason named: the layer is the source a
+  // game without UI tags relies on (The Witcher 3 with frame generation off).
+  inline std::string source_alpha_detection_text(const ui_qualification::status &source, const source_alpha_ui_decision &decision,
+      const char *layer_refused = nullptr) {
     if (const auto blocked = source_alpha_capture_block_text(source_alpha_capture_block_for(source.selected, decision.fg))) return blocked;
     if (!source.available) return "Finding a usable UI source; protection off";
     // A source edit can happen before the next rendered decision. Never label
@@ -178,6 +184,8 @@ namespace sunshine_game3d {
       return "Checking source quality";
     if (decision.coverage.enabled) return "UI source detected automatically";
     if (decision.coverage.state == alpha_auto_state::automatic_off) {
+      if (layer_refused && *layer_refused && !(decision.coverage.evidence.candidates & ui_detection::candidate::layer))
+        return std::string("No usable UI mask: UI layer refused at its clear (") + layer_refused + ")";
       const auto reason = ui_protection_reason_text(decision.coverage);
       return reason.empty() ? std::string("No usable UI mask detected") : "No usable UI mask (" + reason + ")";
     }

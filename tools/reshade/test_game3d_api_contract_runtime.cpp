@@ -730,9 +730,15 @@ namespace {
   // call with the game's list, without a command list (ValidUntilPresent),
   // or as a local evaluate input; or an offscreen UI layer cleared to
   // transparent every frame (D12): a render target in its legacy
-  // RENDER_TARGET state, or a simultaneous-access one that its clear promotes
-  // from COMMON, whose copy the layer refuses. The layer cleared in an
-  // enhanced layout is the device layer's. A tag call's input has a
+  // RENDER_TARGET state; one an enhanced barrier on the clearing list puts in
+  // the RENDER_TARGET layout (copied with enhanced barriers); a
+  // simultaneous-access one its clearing list transitions to RENDER_TARGET
+  // (copied with legacy barriers); or a simultaneous-access one that its
+  // clear promotes from COMMON, whose copy the layer refuses (no_state). A
+  // layer case also judges its player effect: an offered layer must decide
+  // the UI mask once accepted, an enhanced one be copied with enhanced
+  // barriers, and the refused one be counted by its reason with no copy
+  // recorded (SunshineUILayerTestLive). A tag call's input has a
   // lifecycle and what its list records of it before the call (U5): the
   // shader-read state it declares, COPY_DEST (a write state) after a
   // transition there, or nothing (it stays in COPY_DEST, which it declares).
@@ -757,8 +763,14 @@ namespace {
       {"ui_alpha", matrix::buffer_meaning::ui_alpha, 69},
       {"layer", matrix::buffer_meaning::other, 0},
       {"simultaneous_layer", matrix::buffer_meaning::other, 0},
+      {"enhanced_layer", matrix::buffer_meaning::other, 0},
+      {"simultaneous_rt_layer", matrix::buffer_meaning::other, 0},
     };
-    constexpr int layer = 4, simultaneous_layer = 5;
+    // The layer kinds, each one clear boundary.
+    constexpr int layer = 4;
+    constexpr matrix::ui_clear_boundary layer_clears[] {matrix::ui_clear_boundary::legacy_render_target, matrix::ui_clear_boundary::simultaneous_common,
+                                                        matrix::ui_clear_boundary::enhanced_render_target, matrix::ui_clear_boundary::simultaneous_render_target};
+    static_assert(layer + std::size(layer_clears) == std::size(kinds), "every kind from layer on is a layer kind");
     constexpr matrix::ui_capture captures[] {matrix::ui_capture::tag_call, matrix::ui_capture::no_command_list, matrix::ui_capture::local};
     constexpr matrix::lifecycle lives[] {matrix::lifecycle::only_valid_now, matrix::lifecycle::valid_until_present, matrix::lifecycle::valid_until_evaluate};
     constexpr matrix::ui_recorded recordings[] {matrix::ui_recorded::read_state, matrix::ui_recorded::write_state, matrix::ui_recorded::none};
@@ -768,8 +780,8 @@ namespace {
       matrix::ui_case out;
       out.version = version;
       out.how = captures[value[how]];
-      if (value[kind] == layer || value[kind] == simultaneous_layer) {
-        out.clear = value[kind] == layer ? matrix::ui_clear_boundary::legacy_render_target : matrix::ui_clear_boundary::simultaneous_common;
+      if (value[kind] >= layer) {
+        out.clear = layer_clears[value[kind] - layer];
         return out;
       }
       out.meaning = kinds[value[kind]].meaning;
@@ -781,7 +793,7 @@ namespace {
     // The layer is no tag: its one cell is the clear boundary. Only a tag
     // call's input has its own lifecycle and recording.
     bool legal(const generator::row &value) {
-      if ((value[kind] == layer || value[kind] == simultaneous_layer) && (value[how] > 0 || value[life] > 0 || value[recorded] > 0)) {
+      if (value[kind] >= layer && (value[how] > 0 || value[life] > 0 || value[recorded] > 0)) {
         return false;
       }
       if (value[how] > 0 && value[life] > 0) {
@@ -866,6 +878,15 @@ namespace {
     std::vector<refusals::record> refused;  // Distinct reasons for the case, oldest first.
     sample last;
     nlohmann::json candidates = nlohmann::json::array();  // UI: the Dump3D candidates.
+    // A layer case's player effect: the source the UI decision used once the
+    // offered layer had time to be accepted (-1: not judged), and the
+    // layer's own counters over the case (SunshineUILayerTestLive: clears
+    // refused by reason, copies, copies with enhanced barriers).
+    int layer_source {-1};
+    std::array<std::uint64_t, sunshine_game3d::ui_layer::refusal_reasons> layer_refused {};
+    std::uint64_t layer_copies {}, layer_copies_enhanced {};
+    bool layer_effect {true};  // The player effect matched the case.
+    std::string layer_trouble;
     // The continuity invariant's violations over the case's frame script
     // (test_game3d_continuity.h): its warm-up, stimulus and isolation.
     std::vector<game3d_continuity::violation> continuity;
@@ -971,6 +992,10 @@ namespace {
     // UI: how long the renderer's UI request has to take the case's input
     // before Dump3D lists what detection is offered.
     static constexpr std::uint64_t ui_settle_ms = 500;
+    // UI: how long an offered layer draws before its decision is judged: the
+    // span over which an inferred source earns acceptance (A1,
+    // alpha_trust_span_ms, 2 s) and a quarter second of samples beyond it.
+    static constexpr std::uint64_t ui_layer_decision_ms = 2500;
 
     action_t recalibrate {};
     gate_t nomination_gate {};
@@ -1154,6 +1179,12 @@ namespace {
     }
 
     void layout_barrier(D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_ACCESS access_before, D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_SYNC sync_after, D3D12_BARRIER_ACCESS access_after, D3D12_BARRIER_LAYOUT after) {
+      layout_barrier(case_target->resource.p, sync_before, access_before, before, sync_after, access_after, after);
+    }
+    void ui_layout_barrier(D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_ACCESS access_before, D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_SYNC sync_after, D3D12_BARRIER_ACCESS access_after, D3D12_BARRIER_LAYOUT after) {
+      layout_barrier(ui_input.p, sync_before, access_before, before, sync_after, access_after, after);
+    }
+    void layout_barrier(ID3D12Resource *resource, D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_ACCESS access_before, D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_SYNC sync_after, D3D12_BARRIER_ACCESS access_after, D3D12_BARRIER_LAYOUT after) {
       com_ptr<ID3D12GraphicsCommandList7> list7;
       checked(commands->QueryInterface(IID_PPV_ARGS(list7.put())), "The game's list lacks enhanced barriers");
       D3D12_TEXTURE_BARRIER value {};
@@ -1163,7 +1194,7 @@ namespace {
       value.AccessAfter = access_after;
       value.LayoutBefore = before;
       value.LayoutAfter = after;
-      value.pResource = case_target->resource.p;
+      value.pResource = resource;
       value.Subresources.IndexOrFirstMipLevel = UINT32_MAX;
       D3D12_BARRIER_GROUP group {};
       group.Type = D3D12_BARRIER_TYPE_TEXTURE;
@@ -1727,13 +1758,15 @@ namespace {
       desc.Format = layer ? DXGI_FORMAT_R8G8B8A8_UNORM : value.meaning == matrix::buffer_meaning::ui_alpha         ? DXGI_FORMAT_R8_UNORM :
                                                        value.meaning == matrix::buffer_meaning::ui_color_and_alpha ? DXGI_FORMAT_B8G8R8A8_UNORM :
                                                                                                                      backbuffers[0]->GetDesc().Format;
-      // A simultaneous-access layer starts each ExecuteCommandLists in COMMON.
-      const bool simultaneous = value.clear == matrix::ui_clear_boundary::simultaneous_common;
+      // A simultaneous-access layer starts each ExecuteCommandLists in COMMON;
+      // an enhanced one starts each frame in the COMMON layout.
+      const bool simultaneous = value.clear == matrix::ui_clear_boundary::simultaneous_common || value.clear == matrix::ui_clear_boundary::simultaneous_render_target;
       desc.Flags = !layer       ? D3D12_RESOURCE_FLAG_NONE :
                    simultaneous ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS :
                                   D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-      current.ui_state = !layer ? D3D12_RESOURCE_STATE_COPY_DEST : simultaneous ? D3D12_RESOURCE_STATE_COMMON :
-                                                                                  D3D12_RESOURCE_STATE_RENDER_TARGET;
+      current.ui_state = !layer                                                              ? D3D12_RESOURCE_STATE_COPY_DEST :
+                         simultaneous || value.clear == matrix::ui_clear_boundary::enhanced_render_target ? D3D12_RESOURCE_STATE_COMMON :
+                                                                                                            D3D12_RESOURCE_STATE_RENDER_TARGET;
       checked(game->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, current.ui_state, nullptr, IID_PPV_ARGS(ui_input.put())), "Create the case's UI input");
       // UI over a fifth of the frame: translucent marks on transparent black.
       const auto pixel_bytes = bytes_per_pixel(desc.Format);
@@ -1782,9 +1815,24 @@ namespace {
       to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
       if (value.clear != matrix::ui_clear_boundary::none) {
         // Through ReShade's command-list proxy, so its clear event fires. A
-        // simultaneous-access layer is promoted to RENDER_TARGET by the clear.
+        // simultaneous-access layer is promoted to RENDER_TARGET by the clear
+        // unless its list transitions it there first; an enhanced one is put
+        // in the RENDER_TARGET layout by an enhanced barrier on that list and
+        // ends the frame in the COMMON layout again.
+        const bool enhanced = value.clear == matrix::ui_clear_boundary::enhanced_render_target;
+        if (enhanced) {
+          ui_layout_barrier(D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+        } else if (value.clear == matrix::ui_clear_boundary::simultaneous_render_target) {
+          transition(commands.p, ui_input.p, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
         const float transparent[4] {};
         commands->ClearRenderTargetView(ui_heap->GetCPUDescriptorHandleForHeapStart(), transparent, 0, nullptr);
+        if (enhanced) {
+          ui_layout_barrier(D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_DEST);
+          commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+          ui_layout_barrier(D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_LAYOUT_COMMON);
+          return;
+        }
         transition(commands.p, ui_input.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
         commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
         transition(commands.p, ui_input.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1963,6 +2011,18 @@ namespace {
       out.decided.expected = matrix::expect(value);
       require(out.decided.expected.by != nullptr, "the oracle named no rule for a UI runtime cell");
       const auto started = start();
+      // The layer's counters before the case (they never restart).
+      using live_t = BOOL (*)(sunshine_game3d::ui_layer::test_live_state *);
+      const auto live_layer = reinterpret_cast<live_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineUILayerTestLive"));
+      const auto layer_counts = [&] {
+        sunshine_game3d::ui_layer::test_live_state counts {};
+        if (live_layer) {
+          live_layer(&counts);
+        }
+        return counts;
+      };
+      const auto before = layer_counts();
+      const bool layer_case = value.clear != matrix::ui_clear_boundary::none;
       run_script({name, 20000, [&] {
                     prepare_ui(value, ui_runtime::kinds[assignment[ui_runtime::kind]].type);
                   },
@@ -1980,6 +2040,15 @@ namespace {
                     }
                     dump_mailbox box(*this, 0x5549434f4e54ULL);
                     judge_ui_candidates(box.request("Production Dump3D did not list the UI case's candidates"));
+                    // An offered layer, once accepted (A1: valid selective
+                    // samples over alpha_trust_span_ms), decides the mask.
+                    if (layer_case && seen.offered) {
+                      for (const auto until = clock.now() + ui_layer_decision_ms; clock.now() < until;) {
+                        present_frame();
+                      }
+                      const auto decided = box.request("Production Dump3D did not complete the UI layer case's decision");
+                      seen.layer_source = decided.at("replay").at("source_alpha_auto").value("sampled_source", -1);
+                    }
                     render_tracked_depth = {};
                   },
                   [&] {
@@ -1987,15 +2056,59 @@ namespace {
                   }});
       stop(out, started);
       seen.continuity = script_violations;
+      if (layer_case) {
+        judge_layer_effect(value.clear, before, layer_counts());
+      }
       out.observed = seen;
       // A refusal (the layer's, D12; a tag's, U5) shows as no candidate, as
       // an ignored input does.
       const bool refused = matrix::permits(out.decided.expected, matrix::outcome_kind::refuse);
       out.actual.kind = seen.offered ? matrix::outcome_kind::offered : refused ? matrix::outcome_kind::refuse :
                                                                                  matrix::outcome_kind::ignored;
-      out.satisfied = matrix::permits(out.decided.expected, out.actual.kind) && seen.continuity.empty();
+      out.satisfied = matrix::permits(out.decided.expected, out.actual.kind) && seen.continuity.empty() && seen.layer_effect;
       out.verdict = gaps::judge_each(gaps::ui_runtime_rows, value, out.satisfied, {out.actual}, out.matched);
       return out;
+    }
+
+    // A layer case's player effect (D12): an offered layer decides the UI
+    // mask (source 10); an enhanced target's copies leave and restore its
+    // layout with enhanced barriers; a simultaneous-access target its list
+    // transitions is copied with legacy ones; and the one whose clear only
+    // promotes it is refused as no_state with no copy recorded, so no barrier
+    // either. counts: the layer's counters before and after the case.
+    void judge_layer_effect(matrix::ui_clear_boundary clear, const sunshine_game3d::ui_layer::test_live_state &was, const sunshine_game3d::ui_layer::test_live_state &now) {
+      using refusal = sunshine_streamline::depth_capture::clear_copy_refusal;
+      for (unsigned i = 0; i != sunshine_game3d::ui_layer::refusal_reasons; ++i) {
+        seen.layer_refused[i] = now.refused_by[i] - was.refused_by[i];
+      }
+      seen.layer_copies = now.copies - was.copies;
+      seen.layer_copies_enhanced = now.copies_enhanced - was.copies_enhanced;
+      std::uint64_t refused {};
+      for (const auto count : seen.layer_refused) {
+        refused += count;
+      }
+      const auto fail = [&](const char *why) {
+        seen.layer_effect = false;
+        seen.layer_trouble += std::string(" ") + why + ";";
+      };
+      if (clear == matrix::ui_clear_boundary::simultaneous_common) {
+        if (!seen.layer_refused[unsigned(refusal::no_state) - 1] || refused != seen.layer_refused[unsigned(refusal::no_state) - 1]) {
+          fail("the layer's refusal was not counted as no_state");
+        }
+        if (seen.layer_copies) {
+          fail("a refused layer recorded a copy");
+        }
+        return;
+      }
+      if (seen.layer_source != int(sunshine_game3d::ui_detection::source_layer)) {
+        fail("the offered layer did not decide the UI mask");
+      }
+      if (clear == matrix::ui_clear_boundary::enhanced_render_target && !seen.layer_copies_enhanced) {
+        fail("no layer copy left and restored the enhanced layout");
+      }
+      if (clear == matrix::ui_clear_boundary::simultaneous_render_target && (!seen.layer_copies || seen.layer_copies_enhanced || refused)) {
+        fail("the transitioned simultaneous-access layer was not copied with legacy barriers alone");
+      }
     }
   };
 
@@ -2015,6 +2128,9 @@ namespace {
     }
     if (!seen.candidates.empty()) {
       std::fprintf(stderr, "  UI candidates: %s\n", seen.candidates.dump().c_str());
+    }
+    if (seen.layer_source >= 0 || !seen.layer_effect) {
+      std::fprintf(stderr, "  UI layer: decided_source=%d refused_by=%llu/%llu/%llu/%llu/%llu copies=%llu copies_enhanced=%llu effect=%u%s\n", seen.layer_source, static_cast<unsigned long long>(seen.layer_refused[0]), static_cast<unsigned long long>(seen.layer_refused[1]), static_cast<unsigned long long>(seen.layer_refused[2]), static_cast<unsigned long long>(seen.layer_refused[3]), static_cast<unsigned long long>(seen.layer_refused[4]), static_cast<unsigned long long>(seen.layer_copies), static_cast<unsigned long long>(seen.layer_copies_enhanced), unsigned(seen.layer_effect), seen.layer_trouble.c_str());
     }
     for (const auto &violation : seen.continuity) {
       std::fprintf(stderr, "  continuity: %s\n", game3d_continuity::describe(violation).c_str());
@@ -2040,6 +2156,9 @@ namespace {
     observed["generated_new"] = seen.generated_new;
     observed["offered"] = seen.offered;
     observed["refused"] = refused;
+    if (seen.layer_source >= 0 || seen.layer_copies || seen.layer_trouble.size() || std::any_of(seen.layer_refused.begin(), seen.layer_refused.end(), [](std::uint64_t n) { return n != 0; })) {
+      observed["layer"] = {{"decided_source", seen.layer_source}, {"refused_by", seen.layer_refused}, {"copies", seen.layer_copies}, {"copies_enhanced", seen.layer_copies_enhanced}, {"effect", seen.layer_effect}};
+    }
     observed["continuity_violations"] = seen.continuity.size();
     line["evidence"] = {{"elapsed_ms", value.elapsed_ms}, {"presents", seen.presents}, {"judged", seen.judged}, {"fresh", seen.fresh}, {"generated", seen.generated}, {"held", seen.held}, {"first_fresh_ms", seen.first_fresh_ms}, {"nominated_at_call", seen.nominated_at_call}, {"shown", {{"width", seen.last.width}, {"height", seen.last.height}, {"reused", seen.last.reused}, {"fg_input", seen.last.frame_generation_input}}}};
     if (!seen.candidates.empty()) {

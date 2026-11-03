@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_controls_model.h"
 #include "presentation_scope.h"
+#include "streamline_depth_capture.h"
 
 #include <cstdio>
 #include <functional>
@@ -308,6 +309,23 @@ namespace {
       "A reason without a refused candidate was not named generically");
     // No reason read (fewer than 40 decision words): the plain text.
     check(text(ui_detection::frame_reason_decided, 0) == "No usable UI mask detected", "A missing reason was invented");
+    // A UI layer refused at its clear (D12) is the reason where no layer was
+    // offered (The Witcher 3 with FG off: current alpha alone, refused as
+    // ambiguous), never where the layer was offered and decided otherwise.
+    const auto refused_layer = [&](std::uint32_t candidates, const char *refusal) {
+      value.coverage.evidence.frame_reason = std::uint32_t(ui_no_mask::ambiguous);
+      value.coverage.evidence.refused = candidate::current;
+      value.coverage.evidence.candidates = candidates;
+      return source_alpha_detection_text(value.qualification, value, refusal);
+    };
+    namespace capture = sunshine_streamline::depth_capture;
+    check(refused_layer(candidate::current, capture::description(capture::clear_copy_refusal::no_state)) ==
+          "No usable UI mask: UI layer refused at its clear (simultaneous access, no state proven on its clearing list)" &&
+        refused_layer(candidate::current, nullptr) == "No usable UI mask (the current color alpha shows no UI or the whole frame)" &&
+        refused_layer(candidate::current | candidate::layer, capture::description(capture::clear_copy_refusal::enhanced)) ==
+          "No usable UI mask (the current color alpha shows no UI or the whole frame)",
+      "A UI layer refused at its clear was not named where it left no mask, or was named where the layer was offered");
+    value.coverage.evidence.candidates = 0;
     // A decided frame, a reused one included, names no reason.
     value.coverage.source_kind = 3;
     check(ui_protection_reason_text(value.coverage).empty(), "A decided sample named a no-mask reason");

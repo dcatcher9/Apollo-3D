@@ -836,12 +836,7 @@ namespace sunshine_streamline::depth_capture {
       D3D12_TEXTURE_BARRIER source_layout{};
       D3D12_BARRIER_GROUP source_group{};
       if (chosen.enhanced) {
-        source_layout.SyncBefore = D3D12_BARRIER_SYNC_ALL; source_layout.SyncAfter = D3D12_BARRIER_SYNC_COPY;
-        source_layout.AccessBefore = static_cast<D3D12_BARRIER_ACCESS>(chosen.access);
-        source_layout.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
-        source_layout.LayoutBefore = static_cast<D3D12_BARRIER_LAYOUT>(chosen.layout);
-        source_layout.LayoutAfter = static_cast<D3D12_BARRIER_LAYOUT>(copy_state::layouts::copy_source(chosen.layout));
-        source_layout.pResource = value.source->resource.p;
+        copy_state::layouts::leave_for_copy(source_layout, value.source->resource.p, chosen.layout, chosen.access);
         source_group.Type = D3D12_BARRIER_TYPE_TEXTURE; source_group.NumBarriers = 1; source_group.pTextureBarriers = &source_layout;
         list->ResourceBarrier(1, &transitions[1]);
         enhanced_list->Barrier(1, &source_group);
@@ -856,12 +851,9 @@ namespace sunshine_streamline::depth_capture {
       std::swap(transitions[0].Transition.StateBefore, transitions[0].Transition.StateAfter);
       std::swap(transitions[1].Transition.StateBefore, transitions[1].Transition.StateAfter);
       if (chosen.enhanced) {
-        // Restore the exact layout and access. SyncAfter ALL makes every later
-        // command wait for the copy: the enhanced form of the legacy write
-        // boundary below, so a later game write cannot overlap the read.
-        std::swap(source_layout.AccessBefore, source_layout.AccessAfter);
-        std::swap(source_layout.LayoutBefore, source_layout.LayoutAfter);
-        source_layout.SyncBefore = D3D12_BARRIER_SYNC_COPY; source_layout.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+        // Restore the exact layout and access; every later command waits for
+        // the copy (the enhanced form of the legacy write boundary below).
+        copy_state::layouts::restore_after_copy(source_layout);
         enhanced_list->Barrier(1, &source_group);
       } else if (before != D3D12_RESOURCE_STATE_COPY_SOURCE && !(before & write_states)) {
         // The asynchronous copy/reuse regression exposes partial later writes

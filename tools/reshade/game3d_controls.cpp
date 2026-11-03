@@ -23,6 +23,8 @@
 #include <string>
 #include "async_log.h" // After imgui.h and reshade.hpp, which emits the ImGui wrappers.
 #include "game3d_ui_input_provider.h"
+#include "game3d_ui_layer.h"
+#include "streamline_depth_capture.h"
 #include <unordered_map>
 #include "game3d_clock.h"
 
@@ -416,9 +418,13 @@ namespace sunshine_game3d {
     else if (too_large)
       ImGui::TextUnformatted((std::string("UI protection: ") + unsupported_resolution_ui_text).c_str());
     const bool dedicated_ui = source_alpha.dedicated_ui_active(data->values.ui_protection, data->values.enabled);
-    if (data->values.enabled && !too_large && data->values.ui_protection == source_alpha_mode::automatic)
-      ImGui::TextWrapped("UI protection: %s", source_alpha_detection_text(source, source_alpha).c_str());
-    else if (data->values.enabled && !too_large && data->values.ui_protection == source_alpha_mode::on)
+    if (data->values.enabled && !too_large && data->values.ui_protection == source_alpha_mode::automatic) {
+      // A UI layer refused at its clear is named where it leaves no mask.
+      const auto refused = sunshine_game3d::ui_layer::refused_at_clear(sunshine_game3d::clock::game_now());
+      const char *layer_refused = refused == sunshine_game3d::ui_layer::clear_copy_refusal::none ? nullptr :
+        sunshine_streamline::depth_capture::description(refused);
+      ImGui::TextWrapped("UI protection: %s", source_alpha_detection_text(source, source_alpha, layer_refused).c_str());
+    } else if (data->values.enabled && !too_large && data->values.ui_protection == source_alpha_mode::on)
       if (const auto blocked = source_alpha_capture_block_text(source_alpha_capture_block_for(source.selected, fg)))
         ImGui::TextWrapped("UI protection: %s", blocked);
     // Auto without a usable UI mask for a while: say what the user sees, and

@@ -6,9 +6,9 @@
 // executed-list state proof (aliasing, coverage, apply_executed), ReShade's
 // list and runtime-list events, Present observation, command-list
 // destruction, and the depth-texture lifecycle (creation, destruction, deferred
-// sources, depth clears, legacy render-target copies). Every global these
-// functions use stays in the shell in its original order; the shell's part
-// declarations name the ones shell code calls.
+// sources, depth clears, the UI layer's clear-boundary copies). Every global
+// these functions use stays in the shell in its original order; the shell's
+// part declarations name the ones shell code calls.
 namespace sunshine_streamline::depth_capture {
   SUNSHINE_CAPTURE_INTERNAL {
     command_storage::handle command(std::uint64_t native, std::uint64_t cookie, bool create) {
@@ -625,28 +625,81 @@ namespace sunshine_streamline::depth_capture {
       owner->clears.push_back({identity, ++owner->barrier_order});
     } catch (...) { invalidate(*owner, recording_loss::source_state_capacity); }
   }
-  bool legacy_render_target_copy(std::uint64_t native, std::uint64_t resource) {
+  clear_copy_basis render_target_clear_copy(std::uint64_t native, std::uint64_t resource) {
+    using refusal = clear_copy_refusal;
     com_ptr<ID3D12Resource> checked;
-    if (!query_native(resource, IID_ID3D12Resource, checked) ||
-        (checked->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) return false;
-    if (!requested.load()) return true;
-    const auto identity = retain_source_cookie(checked.p);
-    if (!identity) return false;
-    // No capture lock for the recording, exactly as barriers().
     com_ptr<ID3D12GraphicsCommandList> list;
-    if (query_native(native, IID_ID3D12GraphicsCommandList, list)) {
-      native = reinterpret_cast<std::uint64_t>(list.p);
-      auto owner = native_observer::states_ready(native) ?
-        command(native, native_observer::get_recording_cookie(native), false) : command_storage::handle{};
-      if (owner && owner->reported && !owner->closed && !owner->invalid)
-        if (const auto *entry = state(*owner, identity, false))
-          return !entry->enhanced && entry->known && !entry->blocked && !entry->pending_split &&
-            entry->value == D3D12_RESOURCE_STATE_RENDER_TARGET;
+    if (!query_native(resource, IID_ID3D12Resource, checked) || !query_native(native, IID_ID3D12GraphicsCommandList, list))
+      return {refusal::other};
+    const auto flags = checked->GetDesc().Flags;
+    // A simultaneous-access texture starts each ExecuteCommandLists in COMMON
+    // and its clear may promote it from there (MS Learn, Implicit State
+    // Transitions): only a state its clearing list set proves it, never the
+    // clear or an earlier list (it is never watched for the latch).
+    const bool simultaneous = (flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) != 0;
+    if (!requested.load()) return {simultaneous ? refusal::no_state : refusal::none};
+    const auto identity = retain_source_cookie(checked.p);
+    if (!identity) return {refusal::other};
+    native = reinterpret_cast<std::uint64_t>(list.p);
+    // No capture lock for the recording, exactly as barriers().
+    auto owner = native_observer::states_ready(native) ?
+      command(native, native_observer::get_recording_cookie(native), false) : command_storage::handle{};
+    const bool covered = owner && owner->reported && !owner->closed && !owner->invalid;
+    const auto *entry = covered ? state(*owner, identity, false) : nullptr;
+    if (!entry && simultaneous) return {refusal::no_state};
+    auto evidence = observation_of(entry);
+    if (!entry) {
+      // Where the recording names nothing, an enhanced barrier on an earlier
+      // executed list may have latched the target's layout (proven_state.h):
+      // that list's proof stands only as it does for a depth copy
+      // (record_impl): the hooks see this recording, which did not alias the
+      // target before the clear.
+      std::lock_guard lock(mutex);
+      forget_destroyed();
+      capture_observation.proven.watch(identity);
+      auto earlier = capture_observation.proven.latched(identity);
+      if (earlier.latched) {
+        if (!covered || owner->wildcard_alias || aliased_after(*owner, identity, 0)) earlier.proven = {};
+        const auto &proof = earlier.proven;
+        if (proof) evidence = {true, true, false, proof.value, false, proof.enhanced, proof.layout, proof.access};
+        evidence.earlier = true;
+      }
     }
-    std::lock_guard lock(mutex);
-    forget_destroyed();
-    capture_observation.proven.watch(identity);
-    return !capture_observation.proven.latched(identity).latched;
+    // The clear's own contract is the claim, checked against that evidence as
+    // a depth clear's DEPTH_WRITE is (copy_state::select, clear_contract).
+    const auto chosen = copy_state::resolve(
+      copy_state::select(sunshine_scene_depth::state_proof::clear_contract, texture_state_policy::source_contract),
+      D3D12_RESOURCE_STATE_RENDER_TARGET, evidence, flags);
+    const bool compute = list->GetType() == D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    if (!chosen.admitted || !copy_state::list_basis(chosen, compute)) {
+      if (simultaneous) return {refusal::simultaneous};
+      return {evidence.enhanced || evidence.earlier ? refusal::enhanced : entry ? refusal::not_render_target : refusal::other};
+    }
+    // Simultaneous access: only the legacy RENDER_TARGET its list set (an
+    // enhanced barrier leaves such a texture in the COMMON layout).
+    if (simultaneous && chosen.enhanced) return {refusal::simultaneous};
+    // An enhanced copy needs the list's Barrier (as record_impl's does).
+    if (chosen.enhanced) {
+      com_ptr<ID3D12GraphicsCommandList7> enhanced_list;
+      if (!query_native(native, IID_ID3D12GraphicsCommandList7, enhanced_list)) return {refusal::enhanced};
+    }
+    return {refusal::none, chosen.enhanced, chosen.layout, chosen.access};
+  }
+  bool clear_copy_barrier(const clear_copy_basis &basis, std::uint64_t native, std::uint64_t resource, bool restore) {
+    // QueryInterface's answer is fixed for an object's life, so the list the
+    // decision found with a Barrier still has it.
+    com_ptr<ID3D12GraphicsCommandList7> list;
+    com_ptr<ID3D12Resource> target;
+    if (!basis.admitted() || !basis.enhanced || !query_native(native, IID_ID3D12GraphicsCommandList7, list) ||
+        !query_native(resource, IID_ID3D12Resource, target)) return false;
+    D3D12_TEXTURE_BARRIER barrier{};
+    copy_state::layouts::leave_for_copy(barrier, target.p, basis.layout, basis.access);
+    if (restore) copy_state::layouts::restore_after_copy(barrier);
+    D3D12_BARRIER_GROUP group{};
+    group.Type = D3D12_BARRIER_TYPE_TEXTURE; group.NumBarriers = 1; group.pTextureBarriers = &barrier;
+    native_observer::suppression_scope suppress;
+    list->Barrier(1, &group);
+    return true;
   }
 #ifdef SUNSHINE_STREAMLINE_PROBE_TEST
   // Test view only (streamline_depth_capture_test_access.h); no shipping
