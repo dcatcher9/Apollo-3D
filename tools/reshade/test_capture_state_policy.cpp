@@ -355,6 +355,71 @@ int main() try {
     require(common.LayoutAfter == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON && common.AccessAfter == D3D12_BARRIER_ACCESS_COPY_SOURCE,
       "a common layout's copy changed its layout");
   }
+  // The clear-boundary decision (copy_state::clear_copy) and the reason it
+  // names for each refusal (clear_copy_refusal): what the recording names,
+  // whether the hooks observe it, a discarded content, a latched layout and
+  // the list type. The device layer runs every legal one on a real list
+  // (test_game3d_api_contract_device.cpp, UI clear boundary).
+  {
+    using refusal = capture::clear_copy_refusal;
+    constexpr std::uint32_t target = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    constexpr std::uint32_t shared = target | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+    const copy_state::observation nothing{}, legacy_target{true, true, false, D3D12_RESOURCE_STATE_RENDER_TARGET},
+      legacy_common{true, true, false, D3D12_RESOURCE_STATE_COMMON},
+      legacy_read{true, true, false, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
+      blocked{true, false, true, D3D12_RESOURCE_STATE_RENDER_TARGET};
+    const auto target_layout = render_target_layout(D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
+    const auto facts = [&](bool simultaneous, bool observed, const copy_state::observation &entry, bool discarded = false,
+                           bool latched = false, bool compute = false) {
+      copy_state::clear_facts out;
+      out.simultaneous = simultaneous;
+      out.flags = simultaneous ? shared : target;
+      out.observed = observed;
+      out.entry = entry;
+      out.discarded = discarded;
+      out.latched = latched;
+      out.compute = compute;
+      return out;
+    };
+    struct clear_row {
+      copy_state::clear_facts facts;
+      refusal named;
+      bool enhanced;
+      const char *what;
+    };
+    for (const auto &row : {
+           clear_row{facts(false, true, legacy_target), refusal::none, false, "a legacy RENDER_TARGET on the list"},
+           clear_row{facts(false, true, nothing), refusal::none, false, "nothing on an observed list"},
+           clear_row{facts(false, false, nothing), refusal::none, false, "nothing on an unobserved list (the clear proves RENDER_TARGET)"},
+           clear_row{facts(false, true, target_layout), refusal::none, true, "the enhanced RENDER_TARGET layout on the list"},
+           clear_row{facts(true, true, legacy_target), refusal::none, false, "a simultaneous-access target its list set to RENDER_TARGET"},
+           clear_row{facts(true, true, legacy_common), refusal::simultaneous, false, "a simultaneous-access target its list set to COMMON"},
+           clear_row{facts(true, true, render_target_layout(D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_ACCESS_RENDER_TARGET)),
+             refusal::simultaneous, false, "a simultaneous-access target in the COMMON layout"},
+           clear_row{facts(true, true, target_layout), refusal::simultaneous, false, "a simultaneous-access target in an enhanced layout"},
+           clear_row{facts(true, true, nothing), refusal::no_state, false, "a simultaneous-access target its observed list names nothing about"},
+           clear_row{facts(true, false, nothing), refusal::unobserved, false, "a simultaneous-access target on an unobserved list"},
+           clear_row{facts(false, true, nothing, false, true), refusal::latched, false, "a latched layout with nothing on the list"},
+           clear_row{facts(false, false, nothing, false, true), refusal::unobserved, false, "a latched layout on an unobserved list"},
+           clear_row{facts(false, true, target_layout, true), refusal::discarded, false, "a discarded enhanced RENDER_TARGET layout"},
+           clear_row{facts(false, true, legacy_target, true), refusal::discarded, false, "a legacy RENDER_TARGET after a discard"},
+           clear_row{facts(true, true, legacy_target, true), refusal::discarded, false, "a simultaneous-access target after a discard"},
+           clear_row{facts(false, true, render_target_layout(D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE)),
+             refusal::enhanced, false, "another enhanced layout"},
+           clear_row{facts(false, true, render_target_layout(D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_NO_ACCESS)),
+             refusal::enhanced, false, "the RENDER_TARGET layout without access"},
+           clear_row{facts(false, true, target_layout, false, false, true), refusal::enhanced, false,
+             "the RENDER_TARGET layout on a compute list"},
+           clear_row{facts(false, true, legacy_read), refusal::not_render_target, false, "another legacy state"},
+           clear_row{facts(false, true, blocked), refusal::not_render_target, false, "a blocked legacy state"},
+         }) {
+      const auto basis = copy_state::clear_copy(row.facts);
+      require(basis.refused == row.named && basis.admitted() == (row.named == refusal::none) && basis.enhanced == row.enhanced &&
+          (!row.enhanced || (basis.layout == D3D12_BARRIER_LAYOUT_RENDER_TARGET && basis.access == D3D12_BARRIER_ACCESS_RENDER_TARGET)),
+        (std::string(row.what) + ": the clear-boundary decision was " + capture::name(basis.refused) + ", not " +
+          capture::name(row.named)).c_str());
+    }
+  }
   // Whether a recorded state or layout writes the texture (S11's deferral).
   for (const std::uint32_t state : {D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
          D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RESOLVE_DEST})

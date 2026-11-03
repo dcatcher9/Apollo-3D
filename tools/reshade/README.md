@@ -2114,11 +2114,15 @@ source's last proven state on the copy's queue, which the earlier list proved; e
 source is tracked from its creation, as ReShade's `init_resource` reports it), or the UI clear
 boundary (the copy `game3d_ui_layer.cpp` records on the basis the capture owner's
 `render_target_clear_copy` decides, as the layer asks: legacy `RENDER_TARGET` barriers through
-ReShade, or the owner's enhanced barriers from the clearing list's enhanced layout; D12's four
-targets, a legacy `RENDER_TARGET`, an enhanced `RENDER_TARGET` layout, and a simultaneous-access
-target its list transitions to `RENDER_TARGET` (all copied) or leaves in `COMMON` (refused,
-`no_state`, no barrier); a cell's refusal reason must be its target's; the runtime layer runs the
-layer itself). The cells cover every legal state of every
+ReShade, or the owner's enhanced barriers from the clearing list's enhanced layout; D12's targets,
+a legacy `RENDER_TARGET`, an enhanced `RENDER_TARGET` layout, and a simultaneous-access target its
+list transitions to `RENDER_TARGET` (all copied), and each legal refusal with no barrier: a
+simultaneous-access target its list leaves in `COMMON` (`no_state`) or transitions back to `COMMON`
+(`simultaneous`) or one on a recording the hooks lost (`unobserved`), an enhanced barrier into
+`RENDER_TARGET` from `UNDEFINED` or with the `DISCARD` flag (`discarded`), and a layout an earlier
+executed list latched after the layer first asked (`latched`); a cell's refusal reason must be its
+target's, and `test_capture_state_policy.cpp` names the reasons only an illegal clear reaches; the
+runtime layer runs the layer itself). The cells cover every legal state of every
 allocation, each claim, each direct-list enhanced layout, every depth family typed and typeless with
 mips and planes, the shapes no input names, COMPUTE lists (each state and claim a compute list may
 use, and the compute-queue layouts, copied on that list and executed on a compute queue; S22, N7)

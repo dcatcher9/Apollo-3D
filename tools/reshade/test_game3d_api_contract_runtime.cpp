@@ -2130,7 +2130,13 @@ namespace {
       std::fprintf(stderr, "  UI candidates: %s\n", seen.candidates.dump().c_str());
     }
     if (seen.layer_source >= 0 || !seen.layer_effect) {
-      std::fprintf(stderr, "  UI layer: decided_source=%d refused_by=%llu/%llu/%llu/%llu/%llu copies=%llu copies_enhanced=%llu effect=%u%s\n", seen.layer_source, static_cast<unsigned long long>(seen.layer_refused[0]), static_cast<unsigned long long>(seen.layer_refused[1]), static_cast<unsigned long long>(seen.layer_refused[2]), static_cast<unsigned long long>(seen.layer_refused[3]), static_cast<unsigned long long>(seen.layer_refused[4]), static_cast<unsigned long long>(seen.layer_copies), static_cast<unsigned long long>(seen.layer_copies_enhanced), unsigned(seen.layer_effect), seen.layer_trouble.c_str());
+      std::string refused_by;
+      for (unsigned i = 0; i != sunshine_game3d::ui_layer::refusal_reasons; ++i) {
+        if (seen.layer_refused[i]) {
+          refused_by += std::string(refused_by.empty() ? "" : ",") + sunshine_streamline::depth_capture::name(sunshine_streamline::depth_capture::clear_copy_refusal(i + 1)) + "=" + std::to_string(seen.layer_refused[i]);
+        }
+      }
+      std::fprintf(stderr, "  UI layer: decided_source=%d refused_by={%s} copies=%llu copies_enhanced=%llu effect=%u%s\n", seen.layer_source, refused_by.c_str(), static_cast<unsigned long long>(seen.layer_copies), static_cast<unsigned long long>(seen.layer_copies_enhanced), unsigned(seen.layer_effect), seen.layer_trouble.c_str());
     }
     for (const auto &violation : seen.continuity) {
       std::fprintf(stderr, "  continuity: %s\n", game3d_continuity::describe(violation).c_str());

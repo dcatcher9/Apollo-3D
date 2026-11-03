@@ -23,8 +23,11 @@
 //   the layer asks: the legacy RENDER_TARGET barriers through ReShade's D3D12
 //   backend, or the owner's own enhanced barriers (clear_copy_barrier) from
 //   the clearing list's enhanced layout; a refused cell records nothing, and
-//   its reason must be the one its target names (no_state for a
-//   simultaneous-access target whose clearing list names no state). The
+//   its reason must be the one its target names (named_refusal: no_state for
+//   a simultaneous-access target whose clearing list names no state,
+//   simultaneous for one it names in COMMON, unobserved for a recording the
+//   barrier hooks lost, discarded for a content-discarding enhanced barrier,
+//   latched for a layout an earlier list latched). The
 //   layer itself runs only through ReShade, in the runtime layer's UI
 //   family.
 // Every cell is executed alone, so a D3D12 debug-layer error names it.
@@ -545,6 +548,13 @@ namespace {
       }
       out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_common);
       out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_render_target);
+      out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_named_common);
+      out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_unobserved);
+      if (enhanced_barriers) {
+        out.boundary("UI clear boundary", format, rt, device_point::ui_clear, common, ui_clear_boundary::enhanced_undefined);
+        out.boundary("UI clear boundary", format, rt, device_point::ui_clear, common, ui_clear_boundary::enhanced_discard);
+        out.boundary("UI clear boundary", format, rt, device_point::ui_clear, common, ui_clear_boundary::latched_render_target);
+      }
     }
     return std::move(out.cells);
   }
@@ -561,7 +571,7 @@ namespace {
 
   // One enhanced texture barrier on all subresources, or on the index form of
   // subresource 0.
-  void texture_barrier(ID3D12GraphicsCommandList *list, ID3D12Resource *resource, bool whole, D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_SYNC sync_after, std::uint32_t access_before, std::uint32_t access_after, std::uint32_t layout_before, std::uint32_t layout_after) {
+  void texture_barrier(ID3D12GraphicsCommandList *list, ID3D12Resource *resource, bool whole, D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_SYNC sync_after, std::uint32_t access_before, std::uint32_t access_after, std::uint32_t layout_before, std::uint32_t layout_after, D3D12_TEXTURE_BARRIER_FLAGS flags = D3D12_TEXTURE_BARRIER_FLAG_NONE) {
     ComPtr<ID3D12GraphicsCommandList7> list7;
     check(list->QueryInterface(IID_PPV_ARGS(&list7)), "enhanced barrier list");
     D3D12_TEXTURE_BARRIER value {};
@@ -573,6 +583,7 @@ namespace {
     value.LayoutAfter = D3D12_BARRIER_LAYOUT(layout_after);
     value.pResource = resource;
     value.Subresources.IndexOrFirstMipLevel = whole ? UINT32_MAX : 0;
+    value.Flags = flags;
     D3D12_BARRIER_GROUP group {};
     group.Type = D3D12_BARRIER_TYPE_TEXTURE;
     group.NumBarriers = 1;
@@ -587,6 +598,27 @@ namespace {
   void enter_layout(ID3D12GraphicsCommandList *list, ID3D12Resource *resource, bool whole, std::uint32_t layout, std::uint32_t access) {
     const auto sync = access == D3D12_BARRIER_ACCESS_NO_ACCESS ? D3D12_BARRIER_SYNC_NONE : D3D12_BARRIER_SYNC_ALL;
     texture_barrier(list, resource, whole, D3D12_BARRIER_SYNC_ALL, sync, D3D12_BARRIER_ACCESS_COMMON, access, D3D12_BARRIER_LAYOUT_COMMON, layout);
+  }
+
+  // The refusal the capture owner must name for a UI clear boundary's target
+  // (none: the copy is admitted).
+  capture::clear_copy_refusal named_refusal(ui_clear_boundary clear) {
+    using refusal = capture::clear_copy_refusal;
+    switch (clear) {
+      case ui_clear_boundary::simultaneous_common:
+        return refusal::no_state;
+      case ui_clear_boundary::simultaneous_named_common:
+        return refusal::simultaneous;
+      case ui_clear_boundary::simultaneous_unobserved:
+        return refusal::unobserved;
+      case ui_clear_boundary::enhanced_undefined:
+      case ui_clear_boundary::enhanced_discard:
+        return refusal::discarded;
+      case ui_clear_boundary::latched_render_target:
+        return refusal::latched;
+      default:
+        return refusal::none;
+    }
   }
 
   // A split into layout with access, begun from a copy layout: the runtime
@@ -880,6 +912,13 @@ namespace {
         if (source.seen == evidence::earlier_list_enhanced) {
           enter_layout(list, resource, true, source.layout, source.access);
         }
+        // A latched UI target: the layer asks for it at an earlier clear
+        // (watched from then on, though this list names its COMMON state),
+        // then this executed list's enhanced barrier latches its layout.
+        if (value.clear == ui_clear_boundary::latched_render_target) {
+          capture::render_target_clear_copy(native(list), native(resource));
+          enter_layout(list, resource, true, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
+        }
       }
       gpu.submit();
       gpu.wait();
@@ -1044,17 +1083,35 @@ namespace {
             // to COPY_SOURCE through ReShade's D3D12 backend or, on an
             // enhanced basis, by the capture owner's enhanced barrier,
             // CopyResource, and both back. The game first puts an enhanced
-            // target in the RENDER_TARGET layout, or a simultaneous-access
-            // one in RENDER_TARGET with a legacy transition.
-            if (value.value.clear == ui_clear_boundary::enhanced_render_target) {
+            // target in the RENDER_TARGET layout (keeping or discarding its
+            // content), or a simultaneous-access one in RENDER_TARGET with a
+            // legacy transition (and back to COMMON, which the clear
+            // promotes).
+            const auto clear = value.value.clear;
+            if (clear == ui_clear_boundary::enhanced_render_target) {
               enter_layout(list, resource, true, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
-            } else if (value.value.clear == ui_clear_boundary::simultaneous_render_target) {
+            } else if (clear == ui_clear_boundary::enhanced_undefined) {
+              texture_barrier(list, resource, true, D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
+            } else if (clear == ui_clear_boundary::enhanced_discard) {
+              texture_barrier(list, resource, true, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_TEXTURE_BARRIER_FLAG_DISCARD);
+            } else if (clear == ui_clear_boundary::simultaneous_render_target || clear == ui_clear_boundary::simultaneous_unobserved) {
               transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, common, render_target);
+            } else if (clear == ui_clear_boundary::simultaneous_named_common) {
+              transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, common, render_target);
+              transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, render_target, common);
+            }
+            if (clear == ui_clear_boundary::simultaneous_unobserved) {
+              // The barrier hooks lose this recording, as when its state
+              // table cannot grow (recording_loss::source_state_capacity):
+              // nothing it recorded is evidence any more.
+              auto owner = capture::command(native(list), sunshine_streamline::native_observer::get_recording_cookie(native(list)), false);
+              require(bool(owner), "The clearing list's recording was not observed before it was lost");
+              capture::invalidate(*owner, capture::recording_loss::source_state_capacity);
             }
             // The layer first asks the capture owner (D12); a refusal
             // records nothing.
             const auto basis = capture::render_target_clear_copy(native(list), native(resource));
-            const auto named = value.value.clear == ui_clear_boundary::simultaneous_common ? capture::clear_copy_refusal::no_state : capture::clear_copy_refusal::none;
+            const auto named = named_refusal(clear);
             if (basis.refused != named) {
               out.reason_named = false;
               out.trouble += std::string(" the clear-boundary copy's refusal was ") + capture::name(basis.refused) + ", not " + capture::name(named) + ";";

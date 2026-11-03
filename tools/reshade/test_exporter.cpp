@@ -1917,7 +1917,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       require(line.rfind("Sunshine Game 3D timing: presents=4 cpu_ms={mean=0.200 max=0.500}", 0) == 0 &&
           line.find(" ui_layer={copies=") != std::string::npos &&
           line.find(" skip_gap_ms=0.0 targets_dropped=0 refused=0 refused_by={simultaneous=0 enhanced=0 not_render_target=0 "
-                    "no_state=0 other=0} copies_enhanced=0}" + tail) != std::string::npos &&
+                    "no_state=0 unobserved=0 discarded=0 latched=0 other=0} copies_enhanced=0}" + tail) != std::string::npos &&
           line.size() > tail.size() &&
           line.compare(line.size() - tail.size(), tail.size(), tail) == 0,
         "The timing line did not end with its window's length after the UI layer group, its skip gap, dropped targets, "

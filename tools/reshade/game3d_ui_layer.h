@@ -86,7 +86,7 @@ namespace sunshine_game3d::ui_layer {
   inline constexpr unsigned max_candidates = 3; // game3d_debug::ui_layer_count
   // Every reason a qualifying clear's copy is refused (clear_copy_refusal
   // but none; depth_capture::clear_copy_refusal_count).
-  inline constexpr unsigned refusal_reasons = 5;
+  inline constexpr unsigned refusal_reasons = 8;
   inline constexpr std::uint32_t confirm_clears = 3;
   inline constexpr std::uint64_t max_clear_gap_ms = 250;
 

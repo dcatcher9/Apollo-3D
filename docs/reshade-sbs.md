@@ -182,9 +182,9 @@ Present reads the copy of the frame before it; see the layer cross-queue fence u
 and, since C12, `targets_dropped`: qualifying clears the layer tracker dropped because all 32 of
 its entries were taken (see the offscreen UI layer below; `game3d_log_report` reports them as the
 INFO check `UI layer targets`), and, since 11-03, `refused=<n> refused_by={simultaneous enhanced
-not_render_target no_state other}`: qualifying D3D12 clears whose copy the capture owner refused, by
-reason, and `copies_enhanced`: the copies recorded with enhanced barriers (the offscreen UI layer
-below). All
+not_render_target no_state unobserved discarded latched other}`: qualifying D3D12 clears whose copy
+the capture owner refused, by reason, and `copies_enhanced`: the copies recorded with enhanced
+barriers (the offscreen UI layer below). All
 are zero while UI detection does not ask for the layer. Since 10-07 the line ends with `window_ms`, the
 window's length: 10 s for a periodic line, and shorter for the last window of a runtime reset or
 destruction, which logs its partial window instead of dropping it (before, a game's exit window, and
@@ -1156,31 +1156,40 @@ every API, so a target can be copied just before its clear: the copy shows the p
 On D3D12 the copy must leave and restore that state legally, so the layer first asks the capture
 owner how (`depth_capture::render_target_clear_copy`, the contract matrix's D12). Since 11-03 the
 owner answers as for a depth clear's copy: the clear's own contract, `RENDER_TARGET`, is the claim,
-checked against the target's latest barrier on the clearing list (`copy_state::resolve` with
-`clear_contract`):
+checked against the target's latest barrier on the clearing list (`copy_state::clear_copy`, which
+resolves it with `clear_contract`):
 - a legacy `RENDER_TARGET` there, or nothing there and no enhanced-layout latch: the copy leaves and
   restores `RENDER_TARGET` with legacy barriers, as before;
-- an enhanced barrier there into the `RENDER_TARGET` layout, or, where the list names nothing, a
-  latched target whose earlier list proved that layout (D6, as for depth): enhanced barriers from
-  exactly that layout and access to `COPY_SOURCE` and back (`copy_state::layouts::leave_for_copy`
-  and `restore_after_copy`, the barriers a depth copy from an enhanced layout records), on the
-  list's `ID3D12GraphicsCommandList7`;
+- an enhanced barrier there into the `RENDER_TARGET` layout that kept the content: enhanced
+  barriers from exactly that layout and access to `COPY_SOURCE` and back
+  (`copy_state::layouts::leave_for_copy` and `restore_after_copy`, the barriers a depth copy from an
+  enhanced layout records), on the list's `ID3D12GraphicsCommandList7`;
 - a simultaneous-access target starts each `ExecuteCommandLists` in `COMMON` and its clear may
-  promote it from there, so only a legacy `RENDER_TARGET` its clearing list set explicitly proves
-  its state (copied with legacy barriers); neither the clear nor an earlier list does.
+  promote it from there, so only a legacy `RENDER_TARGET` its observed clearing list set explicitly
+  proves its state (copied with legacy barriers); neither the clear nor an earlier list does.
 Anything else is refused with a reason, and a refused target is never tracked, so it is never the
-layer: `simultaneous` (a simultaneous-access target cleared from another state than a legacy
-`RENDER_TARGET` its list set), `enhanced` (an enhanced layout or access the clear's `RENDER_TARGET`
-does not name, an unproven latched layout, or a list without `Barrier`), `not_render_target` (a
-legacy state, pending split or blocked state other than `RENDER_TARGET`), `no_state` (a
-simultaneous-access target its clearing list names nothing about: copying it would need a D3D12
-legality ruling that is still open, so the layer refuses it) and `other` (the target or list cannot
-be identified). The timing line counts them (`refused_by`) and the copies recorded with enhanced
-barriers (`copies_enhanced`); the layer logs `Sunshine UI layer: clear-boundary copy refused
-(<reason>); <what it means>: the target cannot be the offscreen UI layer, so UI protection gets no
-mask from it ...` once per reason, and the panel's UI protection line reads `No usable UI mask: UI
-layer refused at its clear (<reason>)` while no mask decides and no layer is offered within a second
-of a refusal. Before 11-03 (Stage 3 fix 3, 10-24) every simultaneous-access target and every target
+layer: `simultaneous` (a simultaneous-access target cleared from another state its list set than a
+legacy `RENDER_TARGET`), `enhanced` (an enhanced layout or access the clear's `RENDER_TARGET` does
+not name, or a list without `Barrier`), `not_render_target` (a legacy state, pending split or
+blocked state other than `RENDER_TARGET`), `no_state` (a simultaneous-access target its observed
+clearing list names nothing about: copying it would need a D3D12 legality ruling that is still
+open, so the layer refuses it), `unobserved` (the barrier hooks do not observe the clearing list:
+the capture owner is inactive, the list's hooks are not ready, or its recording is unreported,
+closed or invalid; it is named where the decision needs the list, for a simultaneous-access or a
+latched target, so better observer coverage, not a ruling, would decide it), `discarded` (an
+enhanced barrier on the clearing list discarded the content, from `UNDEFINED` or with the
+`DISCARD` flag, so the previous frame's layer is undefined), `latched` (the clearing list names
+nothing and an earlier executed list's enhanced barrier latched the layout: refused, as before
+11-03, until the owner rules on copying from that list's proof as a depth copy does, D6) and
+`other` (the target or list cannot be identified). Every non-simultaneous target is watched for the
+latch from its first clear, whatever that clear's list names. The timing line counts them
+(`refused_by`) and the copies recorded with enhanced barriers (`copies_enhanced`); the layer logs
+`Sunshine UI layer: clear-boundary copy refused (<reason>); <what it means>: the target cannot be
+the offscreen UI layer, so UI protection gets no mask from it ...` once per reason. While no mask
+decides and no layer is offered within a second of a refusal, the panel's UI protection line names
+it: `No usable UI mask: a cleared target was refused as the UI layer (<what it means>)` when only
+presented alpha (current colour or Backbuffer) was offered, and the same words after the usual
+no-mask reason when another source was offered too. Before 11-03 (Stage 3 fix 3, 10-24) every simultaneous-access target and every target
 in an enhanced layout was refused, with one line logged once and nothing counted: The Witcher 3
 Remastered with frame generation off, whose only UI source is this layer, lost UI protection (the
 log report blamed the 100% current alpha left as the only candidate). The layer asks outside its

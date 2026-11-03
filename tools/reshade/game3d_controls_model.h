@@ -172,8 +172,12 @@ namespace sunshine_game3d {
   // layer_refused: why the UI layer last refused a qualifying clear's copy
   // within the last second (ui_layer::refused_at_clear,
   // depth_capture::description), or null. Where no mask decided and no layer
-  // was offered, that refusal is the reason named: the layer is the source a
-  // game without UI tags relies on (The Witcher 3 with frame generation off).
+  // was offered, that refused target may be the layer a game without UI tags
+  // draws its UI to (The Witcher 3 with frame generation off): it is named
+  // instead of the reason when only presented alpha (current color or
+  // Backbuffer) was offered, which shows no UI shape without the layer, and
+  // after the reason otherwise. Any full-size transparent-black clear
+  // qualifies (ui_layer::qualifies), so it is named as a cleared target.
   inline std::string source_alpha_detection_text(const ui_qualification::status &source, const source_alpha_ui_decision &decision,
       const char *layer_refused = nullptr) {
     if (const auto blocked = source_alpha_capture_block_text(source_alpha_capture_block_for(source.selected, decision.fg))) return blocked;
@@ -184,10 +188,16 @@ namespace sunshine_game3d {
       return "Checking source quality";
     if (decision.coverage.enabled) return "UI source detected automatically";
     if (decision.coverage.state == alpha_auto_state::automatic_off) {
-      if (layer_refused && *layer_refused && !(decision.coverage.evidence.candidates & ui_detection::candidate::layer))
-        return std::string("No usable UI mask: UI layer refused at its clear (") + layer_refused + ")";
       const auto reason = ui_protection_reason_text(decision.coverage);
-      return reason.empty() ? std::string("No usable UI mask detected") : "No usable UI mask (" + reason + ")";
+      auto text = reason.empty() ? std::string("No usable UI mask detected") : "No usable UI mask (" + reason + ")";
+      const auto candidates = decision.coverage.evidence.candidates;
+      if (layer_refused && *layer_refused && !(candidates & ui_detection::candidate::layer)) {
+        const auto refused = std::string("a cleared target was refused as the UI layer (") + layer_refused + ")";
+        if (!(candidates & ~(ui_detection::candidate::current | ui_detection::candidate::backbuffer)))
+          return "No usable UI mask: " + refused;
+        text += "; " + refused;
+      }
+      return text;
     }
     return "Checking source quality";
   }

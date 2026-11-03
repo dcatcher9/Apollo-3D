@@ -406,4 +406,58 @@ namespace sunshine_streamline::depth_capture::copy_state {
       return reject(status::unsupported_state, record_stage::unsupported_state);
     return out;
   }
+
+  // What the capture owner knows of a UI layer clear-boundary copy's target
+  // on the clearing list (render_target_clear_copy gathers it):
+  // simultaneous: the target allows simultaneous access (flags, its
+  //   resource flags, are passed on to resolve);
+  // observed: the barrier hooks observe the clearing list's recording (the
+  //   capture owner active, the list's hooks ready, the recording reported,
+  //   open and valid), so entry, or its absence, is evidence;
+  // entry: the recording's latest barrier on the target (present false: none);
+  // discarded: an enhanced barrier on the recording discarded the target's
+  //   content (LayoutBefore UNDEFINED or the DISCARD flag);
+  // latched: with no entry, an earlier executed list's enhanced barrier
+  //   latched the target's layout (proven_state.h; never asked for a
+  //   simultaneous-access target, which is never watched);
+  // compute: the clearing list is a COMPUTE list (list_basis).
+  struct clear_facts {
+    bool simultaneous{};
+    std::uint32_t flags{};
+    bool observed{};
+    observation entry{};
+    bool discarded{}, latched{}, compute{};
+  };
+
+  // The UI layer clear-boundary copy's basis (streamline_depth_capture.h,
+  // clear_copy_basis; the contract matrix's D12): the clear's RENDER_TARGET
+  // is the claim, resolved against the entry as a depth clear's DEPTH_WRITE
+  // is (clear_contract). A refusal names its reason (clear_copy_refusal); an
+  // enhanced basis still needs the list's ID3D12GraphicsCommandList7, which
+  // the caller checks (refused as enhanced without it).
+  constexpr clear_copy_basis clear_copy(const clear_facts &facts) {
+    using refusal = clear_copy_refusal;
+    if (!facts.entry.present) {
+      // A simultaneous-access texture's state is proven only by its clearing
+      // list (it starts each ExecuteCommandLists in COMMON, which its clear
+      // may promote): an observed list naming nothing proves none, an
+      // unobserved one is unknown.
+      if (facts.simultaneous) return {facts.observed ? refusal::no_state : refusal::unobserved};
+      // A latched layout is the enhanced barriers' (Enhanced Barriers, legacy
+      // interop), so the clear's legacy RENDER_TARGET is no basis for it.
+      if (facts.latched) return {facts.observed ? refusal::latched : refusal::unobserved};
+    } else if (facts.discarded) {
+      return {refusal::discarded};
+    }
+    const auto chosen = resolve(select(sunshine_scene_depth::state_proof::clear_contract, texture_state_policy::source_contract),
+      D3D12_RESOURCE_STATE_RENDER_TARGET, facts.entry, facts.flags);
+    if (!chosen.admitted || !list_basis(chosen, facts.compute)) {
+      if (facts.simultaneous) return {refusal::simultaneous};
+      return {facts.entry.enhanced ? refusal::enhanced : facts.entry.present ? refusal::not_render_target : refusal::other};
+    }
+    // Simultaneous access: only the legacy RENDER_TARGET its list set (an
+    // enhanced barrier leaves such a texture in the COMMON layout).
+    if (facts.simultaneous && chosen.enhanced) return {refusal::simultaneous};
+    return {refusal::none, chosen.enhanced, chosen.layout, chosen.access};
+  }
 }

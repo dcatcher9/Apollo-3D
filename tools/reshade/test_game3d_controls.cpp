@@ -309,9 +309,11 @@ namespace {
       "A reason without a refused candidate was not named generically");
     // No reason read (fewer than 40 decision words): the plain text.
     check(text(ui_detection::frame_reason_decided, 0) == "No usable UI mask detected", "A missing reason was invented");
-    // A UI layer refused at its clear (D12) is the reason where no layer was
-    // offered (The Witcher 3 with FG off: current alpha alone, refused as
-    // ambiguous), never where the layer was offered and decided otherwise.
+    // A cleared target refused at its clear (D12) is the reason where only
+    // presented alpha was offered (The Witcher 3 with FG off: current alpha
+    // alone, refused as ambiguous), follows the reason where another source
+    // was offered too (a HUD-less image or a UI tag), and is never named where
+    // the layer was offered and decided otherwise.
     const auto refused_layer = [&](std::uint32_t candidates, const char *refusal) {
       value.coverage.evidence.frame_reason = std::uint32_t(ui_no_mask::ambiguous);
       value.coverage.evidence.refused = candidate::current;
@@ -319,12 +321,21 @@ namespace {
       return source_alpha_detection_text(value.qualification, value, refusal);
     };
     namespace capture = sunshine_streamline::depth_capture;
-    check(refused_layer(candidate::current, capture::description(capture::clear_copy_refusal::no_state)) ==
-          "No usable UI mask: UI layer refused at its clear (simultaneous access, no state proven on its clearing list)" &&
+    const auto no_state = capture::description(capture::clear_copy_refusal::no_state);
+    check(refused_layer(candidate::current, no_state) ==
+          "No usable UI mask: a cleared target was refused as the UI layer (simultaneous access, no state proven on its clearing list)" &&
+        refused_layer(candidate::current | candidate::backbuffer, no_state) ==
+          "No usable UI mask: a cleared target was refused as the UI layer (simultaneous access, no state proven on its clearing list)" &&
         refused_layer(candidate::current, nullptr) == "No usable UI mask (the current color alpha shows no UI or the whole frame)" &&
         refused_layer(candidate::current | candidate::layer, capture::description(capture::clear_copy_refusal::enhanced)) ==
           "No usable UI mask (the current color alpha shows no UI or the whole frame)",
-      "A UI layer refused at its clear was not named where it left no mask, or was named where the layer was offered");
+      "A refused cleared target was not named where only presented alpha was left, or was named where the layer was offered");
+    for (const auto other : {candidate::current | candidate::hudless | candidate::exact, candidate::current | candidate::ui_alpha}) {
+      check(refused_layer(other, no_state) ==
+            "No usable UI mask (the current color alpha shows no UI or the whole frame); a cleared target was refused as the UI "
+            "layer (simultaneous access, no state proven on its clearing list)",
+        "A refused cleared target replaced the reason where a HUD-less image or a UI tag was offered");
+    }
     value.coverage.evidence.candidates = 0;
     // A decided frame, a reused one included, names no reason.
     value.coverage.source_kind = 3;

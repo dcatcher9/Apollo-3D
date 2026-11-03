@@ -167,11 +167,12 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     // enhanced barriers.
     const auto layer = sunshine_game3d::ui_layer::take_stats();
     using refusal = sunshine_streamline::depth_capture::clear_copy_refusal;
+    static_assert(sunshine_game3d::ui_layer::refusal_reasons == 8, "the timing line names every refusal reason");
     const auto refused = [&](refusal value) {
       return static_cast<unsigned long long>(layer.refused_by[unsigned(value) - 1u]);
     };
     std::snprintf(message, sizeof(message),
-      "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u ui_layer={copies=%llu skipped=%llu offers=%llu presents_since_copy={mean=%.2f max=%u} skip_gap_ms=%.1f targets_dropped=%llu refused=%llu refused_by={simultaneous=%llu enhanced=%llu not_render_target=%llu no_state=%llu other=%llu} copies_enhanced=%llu} window_ms=%llu",
+      "Sunshine Game 3D timing: presents=%llu cpu_ms={mean=%.3f max=%.3f} cpu_worst_ms={setup=%.3f depth=%.3f ui=%.3f render=%.3f export=%.3f} gpu_frames=%u gpu_ms mean/max={total=%.3f/%.3f inputs=%.3f/%.3f source=%.3f/%.3f detection=%.3f/%.3f linearize=%.3f/%.3f candidate=%.3f/%.3f vertical=%.3f/%.3f horizontal=%.3f/%.3f eyes=%.3f/%.3f pack=%.3f/%.3f} gpu_profile=%s dropped_fence_pending=%u dropped_unresolved=%u incomplete=%u ui_layer={copies=%llu skipped=%llu offers=%llu presents_since_copy={mean=%.2f max=%u} skip_gap_ms=%.1f targets_dropped=%llu refused=%llu refused_by={simultaneous=%llu enhanced=%llu not_render_target=%llu no_state=%llu unobserved=%llu discarded=%llu latched=%llu other=%llu} copies_enhanced=%llu} window_ms=%llu",
       static_cast<unsigned long long>(timing.presents),
       timing.presents ? timing.cpu_sum_ms / double(timing.presents) : 0.0, timing.cpu_max_ms,
       timing.worst[0], timing.worst[1], timing.worst[2], timing.worst[3], timing.worst[4], gpu.frames,
@@ -186,7 +187,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       layer.offers ? double(layer.presents_since_sum) / double(layer.offers) : 0.0, layer.presents_since_max,
       double(layer.skip_gap_max_us) / 1000.0, static_cast<unsigned long long>(layer.targets_dropped),
       static_cast<unsigned long long>(layer.refused()), refused(refusal::simultaneous), refused(refusal::enhanced),
-      refused(refusal::not_render_target), refused(refusal::no_state), refused(refusal::other),
+      refused(refusal::not_render_target), refused(refusal::no_state), refused(refusal::unobserved),
+      refused(refusal::discarded), refused(refusal::latched), refused(refusal::other),
       static_cast<unsigned long long>(layer.copies_enhanced),
       static_cast<unsigned long long>(now >= timing.start ? now - timing.start : 0));
     timing = {};

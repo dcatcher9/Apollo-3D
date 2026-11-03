@@ -324,7 +324,8 @@ namespace sunshine_streamline::native_observer {
                 range.NumArraySlices != 0 && range.NumPlanes != 0);
             textures.data()[at++] = {barrier.pResource, static_cast<std::uint32_t>(barrier.LayoutAfter), first,
               static_cast<std::uint32_t>(barrier.AccessAfter), static_cast<std::uint32_t>(barrier.SyncBefore),
-              static_cast<std::uint32_t>(barrier.SyncAfter)};
+              static_cast<std::uint32_t>(barrier.SyncAfter),
+              barrier.LayoutBefore == D3D12_BARRIER_LAYOUT_UNDEFINED || (barrier.Flags & D3D12_TEXTURE_BARRIER_FLAG_DISCARD) != 0};
           }
         }
       }

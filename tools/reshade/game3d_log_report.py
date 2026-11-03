@@ -279,7 +279,8 @@ LAYER_REFUSED_ONCE_REASON = 'enhanced_or_simultaneous'
 # How the report names each refusal reason (refused_by's keys); a key it does not know is named by its words.
 LAYER_REFUSAL_NAMES = {'simultaneous': 'simultaneous access', 'enhanced': 'enhanced-barrier layout',
                        'not_render_target': 'not in the render-target state', 'no_state': 'no proven state',
-                       'other': 'another reason',
+                       'unobserved': 'clearing list not observed', 'discarded': 'content discarded by its barrier',
+                       'latched': 'enhanced layout latched by an earlier list', 'other': 'another reason',
                        LAYER_REFUSED_ONCE_REASON: 'enhanced-barrier layout or simultaneous access'}
 LOADED = re.compile(r"loaded from '.*' into '(.*)'")
 # ReShade tears its runtimes down when the game closes; some games (Unreal) end the process before ReShade logs its own

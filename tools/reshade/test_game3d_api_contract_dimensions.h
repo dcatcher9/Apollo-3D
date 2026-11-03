@@ -651,13 +651,30 @@ namespace game3d_contract {
   // from an earlier list; put in the RENDER_TARGET layout by an enhanced
   // barrier on the clearing list; a simultaneous-access target in COMMON that
   // the clear promotes (its clearing list names no state); or one its
-  // clearing list transitioned to RENDER_TARGET with a legacy barrier.
+  // clearing list transitioned to RENDER_TARGET with a legacy barrier. Then
+  // each other legal refusal the capture owner names (clear_copy_refusal): a
+  // simultaneous-access target its clearing list transitioned back to
+  // COMMON, which the clear promotes (simultaneous); one its list
+  // transitioned to RENDER_TARGET on a recording the barrier hooks lost
+  // (unobserved); an enhanced barrier into the RENDER_TARGET layout on the
+  // clearing list that discards the content, from UNDEFINED or with the
+  // DISCARD flag (discarded); and a target an earlier executed list's
+  // enhanced barrier put in the RENDER_TARGET layout after the layer first
+  // asked for it, with nothing on the clearing list (latched). A
+  // not_render_target or enhanced refusal follows only a clear D3D12 forbids
+  // (the clear needs RENDER_TARGET), so it has no legal cell; the CPU test of
+  // copy_state::clear_copy (test_capture_state_policy.cpp) names them.
   enum class ui_clear_boundary {
     none,
     legacy_render_target,
     enhanced_render_target,
     simultaneous_common,
-    simultaneous_render_target
+    simultaneous_render_target,
+    simultaneous_named_common,
+    simultaneous_unobserved,
+    enhanced_undefined,
+    enhanced_discard,
+    latched_render_target
   };
 
   // What a UI tag call's own list records of its input before the call
@@ -897,8 +914,12 @@ namespace game3d_contract {
             case ui_clear_boundary::legacy_render_target:
               return !simultaneous && value.prior == D3D12_RESOURCE_STATE_RENDER_TARGET;
             case ui_clear_boundary::enhanced_render_target:
+            case ui_clear_boundary::enhanced_undefined:
+            case ui_clear_boundary::enhanced_discard:
+            case ui_clear_boundary::latched_render_target:
+              // An enhanced barrier from the legacy COMMON state (legacy interop).
               return !simultaneous && value.prior == D3D12_RESOURCE_STATE_COMMON;
-            default:  // simultaneous_common, simultaneous_render_target
+            default:  // The simultaneous-access kinds.
               return simultaneous;
           }
       }

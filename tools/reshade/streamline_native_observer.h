@@ -20,11 +20,15 @@ namespace sunshine_streamline::native_observer {
   // range includes subresource 0 (mip 0, array slice 0, plane 0), with its
   // access afterwards and both sync scopes (raw D3D12_BARRIER_ACCESS/SYNC).
   // A SyncAfter of SPLIT begins a split barrier; a SyncBefore of SPLIT ends it.
+  // discards: the barrier leaves the content undefined (LayoutBefore
+  // UNDEFINED or D3D12_TEXTURE_BARRIER_FLAG_DISCARD; MS Learn, Enhanced
+  // Barriers).
   struct enhanced_texture {
     ID3D12Resource *resource{};
     std::uint32_t layout_after{};
     bool first_subresource{};
     std::uint32_t access_after{}, sync_before{}, sync_after{};
+    bool discards{};
   };
   struct callbacks {
     // All callbacks are synchronous. Neither arrays nor native objects are
