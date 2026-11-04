@@ -294,8 +294,9 @@ LAYER_REFUSED_ONCE_REASON = 'enhanced_or_simultaneous'
 # How the report names each refusal reason (refused_by's keys); a key it does not know is named by its words.
 LAYER_REFUSAL_NAMES = {'simultaneous': 'simultaneous access', 'enhanced': 'enhanced-barrier layout',
                        'not_render_target': 'not in the render-target state', 'no_state': 'no proven state',
-                       'unobserved': 'clearing list not observed', 'discarded': 'content discarded by its barrier',
+                       'unobserved': 'clearing list not observed', 'discarded': 'content discarded or aliased',
                        'latched': 'enhanced layout latched by an earlier list', 'other': 'another reason',
+                       'interop': 'named by an enhanced barrier', 'unproven': 'first clear deferred',
                        LAYER_REFUSED_ONCE_REASON: 'enhanced-barrier layout or simultaneous access'}
 LOADED = re.compile(r"loaded from '.*' into '(.*)'")
 # ReShade tears its runtimes down when the game closes; some games (Unreal) end the process before ReShade logs its own
@@ -2582,8 +2583,11 @@ def layer_refusal_checks(s: Session, add) -> None:
     (11-02) draws its UI only there, so every FG-off frame lost UI protection, which the UI protection gaps name as
     the cause. 'UI layer enhanced copies' (INFO) counts the admitted copies recorded with enhanced barriers, and
     'UI layer promoted copies' (INFO, since option 2 of 11-03) those of a simultaneous-access target its clearing
-    list named no state for, copied from the implicit promotion its barrier-free clear relies on."""
+    list named no state for, copied from the implicit promotion its barrier-free clear relies on, with the first
+    clears option 2 deferred until their recording closed (refused_by unproven: one per such target); a session whose
+    only refusals are those deferrals and whose layer recorded copies has no 'UI layer refused'."""
     copies = sum(w[3] for w in s.layer_windows)
+    deferred = sum(by.get('unproven', 0) for _, _, by, _ in s.layer_refusals)
     if s.layer_copies_enhanced:
         add(Check('INFO', 'UI layer enhanced copies',
                   f'{s.layer_copies_enhanced} of {copies} layer copies were recorded with enhanced barriers (a clear '
@@ -2592,9 +2596,11 @@ def layer_refusal_checks(s: Session, add) -> None:
         add(Check('INFO', 'UI layer promoted copies',
                   f'{s.layer_copies_promoted} of {copies} layer copies were of a simultaneous-access target its '
                   'clearing list named no state for, copied from RENDER_TARGET, where its barrier-free clear promotes '
-                  'it (option 2, owner ruling 11-03; The Witcher 3 with FG off)'))
+                  'it (option 2, owner ruling 11-03; The Witcher 3 with FG off)'
+                  + (f'; {deferred} first {"clear" if deferred == 1 else "clears"} deferred until a whole observed '
+                     'recording showed no enhanced barrier on the target (unproven)' if deferred else '')))
     reasons = layer_refusal_reasons(s)
-    if not reasons:
+    if not reasons or (copies and all(k == 'unproven' for k, _ in reasons)):
         return
     parts = []
     if s.layer_refusals:

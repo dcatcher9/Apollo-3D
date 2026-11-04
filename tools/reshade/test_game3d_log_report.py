@@ -3013,6 +3013,20 @@ class LayerRefusal(unittest.TestCase):
                           'named no state for, copied from RENDER_TARGET, where its barrier-free clear promotes it '
                           '(option 2, owner ruling 11-03; The Witcher 3 with FG off)'))
         self.assertNotIn('UI layer refused', checks)
+        # Option 2's deferred first clears (unproven, one per target until its first recording closed) are named
+        # there and warn of nothing while the layer records copies; with no copy all session they are the refusal.
+        deferring = layer.replace('refused=0 refused_by={simultaneous=0',
+                                  'refused=1 refused_by={unproven=1 simultaneous=0')
+        session = report.parse(BASE + [timing('10:00:10', deferring)])
+        checks = {c.name: c for c in report.evaluate(session)}
+        self.assertTrue(checks['UI layer promoted copies'].detail.endswith(
+            '; 1 first clear deferred until a whole observed recording showed no enhanced barrier on the target '
+            '(unproven)'))
+        self.assertNotIn('UI layer refused', checks)
+        stuck = deferring.replace('copies=12', 'copies=0').replace('copies_promoted=12', 'copies_promoted=0')
+        checks = {c.name: c for c in report.evaluate(report.parse(BASE + [timing('10:00:10', stuck)]))}
+        self.assertEqual(checks['UI layer refused'].status, 'WARN')
+        self.assertIn('first clear deferred 1', checks['UI layer refused'].detail)
         # Before option 2 the group has no such field: no row.
         older = report.parse(BASE + [timing('10:00:10', layer.replace(' copies_promoted=12', ''))])
         self.assertEqual(older.layer_copies_promoted, 0)
