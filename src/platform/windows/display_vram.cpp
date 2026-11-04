@@ -44,6 +44,7 @@
 #include "src/game_source_tracker.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/host_sbs_drawn_source_order.h"
+#include "src/host_sbs_packed_presentation_clock.h"
 #include "host_sbs_actual_converter_probe.h"
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -427,8 +428,51 @@ namespace platf::dxgi {
     return compile_shader(file, "main", "cs_5_0");
   }
 
+  struct selected_matte_programs_t {
+    models::current_outline_runtime::pixel_programs_t pixel;
+    models::selected_glyph_push_pull_runtime_v1::programs_t background;
+    models::subtitle_selected_matte_research_configuration_t configuration;
+    std::string error;
+    std::string background_error;
+    bool ready = false;
+  };
+
+  // Configuration creates device objects and loads authenticated CPU bytecode only. It must
+  // never dispatch, bind, or otherwise use the shared immediate context from a build worker.
+  selected_matte_programs_t prepare_selected_matte_programs(
+    models::video_depth_estimator &estimator,
+    ID3D11Device *device,
+    const models::subtitle_selected_matte_research_configuration_t &configuration
+  ) {
+    selected_matte_programs_t result;
+    result.configuration = configuration;
+    if (!result.pixel.load(device,
+                           configuration.completed_shader_root,
+                           configuration.completed_source_closure_sha256,
+                           configuration.queued_shader_root,
+                           configuration.queued_source_closure_sha256,
+                           result.error) ||
+        !estimator.configure_subtitle_selected_matte_research(configuration, result.error)) {
+      return result;
+    }
+    result.ready = true;
+    if (configuration.current_outline) {
+      // An optional repair background never controls selected glyph or depth availability.
+      (void) result.background.load(
+        device, std::filesystem::path(configuration.current_outline_shader_root) / "background",
+        result.background_error
+      );
+    }
+    return result;
+  }
+
+  struct depth_pipeline_build_result_t {
+    std::unique_ptr<models::video_depth_estimator> estimator;
+    selected_matte_programs_t selected_matte;
+  };
+
   using depth_estimator_build_task_t =
-    std::packaged_task<std::unique_ptr<models::video_depth_estimator>()>;
+    std::packaged_task<depth_pipeline_build_result_t()>;
 
   // Keep abandoned per-device estimator builds/results alive without blocking a presentation
   // session teardown. The shared process-lifetime worker service joins them together with async
@@ -465,15 +509,16 @@ namespace platf::dxgi {
   // A ready-but-unconsumed future owns its estimator result. Move that shared state to a worker so
   // abandoning a local/encode device never runs the estimator destructor on its owner thread.
   void retire_depth_estimator_build(
-    std::future<std::unique_ptr<models::video_depth_estimator>> build
+    std::future<depth_pipeline_build_result_t> build
   ) {
     if (!build.valid()) {
       return;
     }
     std::packaged_task<void()> worker([build = std::move(build)]() mutable {
       try {
-        auto estimator = build.get();
-        estimator.reset();
+        auto pipeline = build.get();
+        pipeline.estimator.reset();
+        // The prepared device programs are destroyed on this same retirement worker.
       } catch (const std::exception &e) {
         BOOST_LOG(warning) << "Retired Host SBS pipeline build failed: "sv << e.what();
       } catch (...) {
@@ -1136,6 +1181,9 @@ namespace platf::dxgi {
                                            models::input_color_space::srgb;
           const auto current_source_timestamp = img_base.frame_timestamp;
           const auto current_content_timestamp = img_base.content_timestamp;
+          // Observe a changed source before any completion wait. An old, exactly unchanged
+          // packed image must not charge its static lifetime to this first changed delivery.
+          matched_presentation_cache.observe_current_source(current_source_timestamp, gamma_now);
           const auto &current_ddup_damage = img.ddup_damage;
           // Each lineage copy advances its own transitive proof. Repeated same-token queries
           // are constant-time, so a cross-slot memo would only leave another copy's anchor stale.
@@ -1579,7 +1627,9 @@ namespace platf::dxgi {
                   input_color_space,
                   depth_authority_reprocess_pending,
                   producer_terminal,
-                  subtitle_context.generation()
+                  subtitle_context.generation(),
+                  {current_root_authority_generation, current_region_authority_generation,
+                   current_browser_authority_epoch, current_interactive_move_size}
                 ),
             }
           );
@@ -1785,7 +1835,8 @@ namespace platf::dxgi {
                 const auto optional_work = models::select_depth_optional_work_mode(
                   matched_candidate_slot->observed_interactive_move_size,
                   snapshot_debug_inputs,
-                  matched_candidate_slot->subtitle_context_eligible
+                  matched_candidate_slot->subtitle_context_eligible ||
+                    matched_candidate_slot->subtitle_context_suppression_eligible
                 );
                 const bool authorize_gpu_undecided =
                   dedup_gate_open &&
@@ -2395,6 +2446,8 @@ namespace platf::dxgi {
           }
           const auto repeat_source_age =
             matched_presentation_cache.source_age(repeat_now);
+          const auto repeat_hold_age =
+            matched_presentation_cache.hold_age(current_source_timestamp, repeat_now);
           const bool output_source_unchanged =
             matched_presentation_cache.source_matches(current_source_timestamp);
           // Packed-presentation retention is deliberately weaker than reusable V2 lineage: it
@@ -2408,7 +2461,9 @@ namespace platf::dxgi {
               input_color_space,
               depth_authority_reprocess_pending,
               producer_terminal,
-              subtitle_context.generation()
+              subtitle_context.generation(),
+              {authority_generation(live_window_authority), authority_generation(live_foreground_region),
+               live_browser_authority_epoch, interactive_move_size_observed}
             );
           // Recheck source/domain after queueing and before binding the ticket. ComPtr only
           // preserves allocation lifetime; pending slot ownership protects the submitted bytes.
@@ -2459,7 +2514,7 @@ namespace platf::dxgi {
                                                matched_render_slot != nullptr,
                                                matched_presentation_cache.has_fresh_pixels(),
                                                packed_presentation_route_matches,
-                                               repeat_source_age,
+                                               repeat_hold_age,
                                                output_source_unchanged
                                              );
           converted_content_timestamp =
@@ -2478,23 +2533,12 @@ namespace platf::dxgi {
           const bool queued_geometry_selected=queued_draw_selected || pending_current_colour_selected;
           const auto *queued_geometry=pending_current_colour_selected?&*pending_colour_geometry:queued_draw_selected?&*queued_draw:nullptr;
           auto *queued_geometry_slot=pending_current_colour_selected?pending_colour_source_slot:queued_source_slot;
-          const bool v2_repeat_timed_out =
+          const bool v2_repeat_age_expired =
             stale_v2_completion ||
             (host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
              !matched_render_slot && matched_presentation_cache.has_fresh_pixels() &&
              !output_source_unchanged &&
-             repeat_source_age > models::host_sbs_v2_max_matched_repeat_age);
-          if (v2_repeat_timed_out && !matched_presentation_cache.timeout_active()) {
-            matched_presentation_cache.mark_timeout();
-            BOOST_LOG(error)
-              << "Host SBS packed presentation continuity exhausted after "sv
-              << models::host_sbs_v2_max_matched_repeat_age.count()
-              << " ms for a changed source; rendering live current-frame flat identity until "sv
-                 "depth recovers."sv;
-          } else if (!v2_repeat_timed_out && matched_presentation_cache.timeout_active() && matched_render_slot) {
-            matched_presentation_cache.clear_timeout();
-            BOOST_LOG(info) << "Host SBS V2 depth completion recovered; stereo warp resumed."sv;
-          }
+             repeat_hold_age > models::host_sbs_v2_max_matched_repeat_age);
           const bool v2_renderer_selected =
             host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2;
           const bool v2_renderer_failed_flat =
@@ -2664,7 +2708,9 @@ namespace platf::dxgi {
             ID3D11ShaderResourceView *selected_original_legacy=dump_warp_inputs[3];
             bool selected_unpredicated=true;
             if(selected_matte_ready){Microsoft::WRL::ComPtr<ID3D11Predicate> p;BOOL value=FALSE;device_ctx->GetPredication(&p,&value);selected_unpredicated=!p;}
-            const bool selected_supported=selected_matte_ready&&v2_draw_selected&&!pending_current_colour_selected&&
+            const bool selected_supported=selected_matte_ready&&
+              (queued_geometry_selected ? selected_matte_queued_ps != nullptr : selected_matte_completed_ps != nullptr)&&
+              v2_draw_selected&&!pending_current_colour_selected&&
               (selected_matte_current_outline||(!render_input_is_linear&&!output_is_hdr&&format!=DXGI_FORMAT_P010))&&selected_unpredicated;
             if(selected_supported){
               auto *m=queued_geometry_selected?queued_geometry->research_selected_matte.Get():est.research_selected_matte.Get();
@@ -2959,7 +3005,14 @@ namespace platf::dxgi {
                 queued_refined_geometry,
                 queued_geometry->field_width,
                 queued_geometry->field_height,
-                queued_geometry_slot->subtitle_context_generation
+                queued_geometry_slot->subtitle_context_generation,
+                subtitle_constants.enabled != 0u,
+                {queued_geometry_slot->observed_root_authority_generation,
+                 queued_geometry_slot->observed_region_authority_generation,
+                 queued_geometry_slot->observed_browser_authority_epoch,
+                 queued_geometry_slot->observed_interactive_move_size},
+                current_source_timestamp,
+                gamma_now
               );
               matched_presentation_cache.set_pixel_source_frame_id(pixel_source_frame_id);
             } else if (!queued_attempt_failed_flat && models::host_sbs_packed_output_can_enter_presentation_cache(matched_render_slot != nullptr, v2_live_warp_selected)) {
@@ -2983,7 +3036,14 @@ namespace platf::dxgi {
                 est.refined_live_geometry_active,
                 est.field_width,
                 est.field_height,
-                matched_render_slot->subtitle_context_generation
+                matched_render_slot->subtitle_context_generation,
+                subtitle_constants.enabled != 0u,
+                {matched_render_slot->observed_root_authority_generation,
+                 matched_render_slot->observed_region_authority_generation,
+                 matched_render_slot->observed_browser_authority_epoch,
+                 matched_render_slot->observed_interactive_move_size},
+                current_source_timestamp,
+                gamma_now
               );
               matched_presentation_cache.set_pixel_source_frame_id(pixel_source_frame_id);
             } else {
@@ -2991,6 +3051,27 @@ namespace platf::dxgi {
               // completely separate from semantic depth/OCR/DDup publication authority.
               matched_presentation_cache.invalidate();
             }
+          }
+
+          // Observe the successfully recorded output, after a queued recorder failure may have
+          // selected current flat and invalidated packed pixels. Invalidation retains the log
+          // latch; the saved age decision must not be lost with that pixel cache.
+          using presentation_clock_t = detail::host_sbs_packed_presentation_clock_t;
+          const auto presentation_output = repeat_matched_output ? presentation_clock_t::output_e::packed :
+                                           queued_attempt_failed_flat ? presentation_clock_t::output_e::flat :
+                                           v2_live_warp_selected ? presentation_clock_t::output_e::completed :
+                                           queued_geometry_selected ? presentation_clock_t::output_e::queued :
+                                                                      presentation_clock_t::output_e::flat;
+          const auto presentation_timeout =
+            matched_presentation_cache.observe_timeout(v2_repeat_age_expired, presentation_output);
+          if (presentation_timeout == presentation_clock_t::timeout_event_e::expired) {
+            BOOST_LOG(error)
+              << "Host SBS packed presentation continuity exhausted after "sv
+              << models::host_sbs_v2_max_matched_repeat_age.count()
+              << " ms for a changed source; rendering live current-frame flat identity until "sv
+                 "depth recovers."sv;
+          } else if (presentation_timeout == presentation_clock_t::timeout_event_e::recovered) {
+            BOOST_LOG(info) << "Host SBS V2 depth completion recovered; stereo warp resumed."sv;
           }
 
           if (probe_observer.record) {
@@ -3643,24 +3724,18 @@ namespace platf::dxgi {
       if (depth_estimator_build.valid()) {
         if (depth_estimator_build.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
           try {
-            depth_estimator = depth_estimator_build.get();
+            auto pipeline = depth_estimator_build.get();
+            depth_estimator = std::move(pipeline.estimator);
             if (depth_estimator) {
               depth_estimator->set_telemetry_performance(sbs_telemetry_performance);
               if (!probe_context) {
-                namespace outline=models::current_outline_runtime;
-                const auto root=std::filesystem::path(SUNSHINE_SHADERS_DIR)/"current_outline";
-                models::subtitle_selected_matte_research_configuration_t cfg;
-                cfg.current_outline=true;cfg.current_outline_shader_root=root.string();
-                cfg.selector_shader_root=outline::selector_root(root).string();
-                cfg.selector_source_closure_sha256=std::string(outline::selector_closure);
-                cfg.completed_shader_root=outline::completed_root(root).string();
-                cfg.completed_source_closure_sha256=std::string(outline::completed_closure);
-                cfg.queued_shader_root=outline::queued_root(root).string();
-                cfg.queued_source_closure_sha256=std::string(outline::queued_closure);
-                std::string error;
-                if (!configure_selected_matte_for_instance(cfg,error))
-                  BOOST_LOG(warning)<<"Subtitle outline initialization unavailable: "<<error;
-                else BOOST_LOG(info)<<"Current subtitle glyph and black-outline protection active.";
+                if (!pipeline.selected_matte.ready) {
+                  BOOST_LOG(warning) << "Subtitle outline initialization unavailable: "
+                                     << pipeline.selected_matte.error;
+                } else {
+                  adopt_selected_matte_programs(std::move(pipeline.selected_matte));
+                  BOOST_LOG(info) << "Current subtitle glyph and black-outline protection active.";
+                }
               }
               // Isolated source-stage activation only; no new user config/UI. Qualification
               // enables this constant in a separate explicit patch before any input submission.
@@ -3721,17 +3796,40 @@ namespace platf::dxgi {
                       << "\" in the background (streaming flat until ready)..."sv;
       Microsoft::WRL::ComPtr<ID3D11Device> dev(device.get());
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx(device_ctx.get());
+      const bool prepare_live_outline = !probe_context;
       depth_estimator_build_task_t build_task([dev = std::move(dev),
                                                ctx = std::move(ctx),
                                                active,
-                                               sbs_cfg]() mutable {
-        return std::make_unique<models::video_depth_estimator>(
-          std::move(dev),
+                                               sbs_cfg,
+                                               prepare_live_outline]() mutable {
+        depth_pipeline_build_result_t result;
+        result.estimator = std::make_unique<models::video_depth_estimator>(
+          dev,
           std::move(ctx),
           std::filesystem::path(SUNSHINE_ASSETS_DIR),
           sbs_cfg,
           active
         );
+        if (prepare_live_outline && result.estimator->is_valid() &&
+            !result.estimator->has_terminal_failure()) {
+          namespace outline = models::current_outline_runtime;
+          const auto root = std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline";
+          models::subtitle_selected_matte_research_configuration_t configuration;
+          configuration.current_outline = true;
+          configuration.current_outline_shader_root = root.string();
+          configuration.selector_shader_root = outline::selector_root(root).string();
+          configuration.selector_source_closure_sha256 = std::string(outline::selector_closure);
+          configuration.completed_shader_root = outline::completed_root(root).string();
+          configuration.completed_source_closure_sha256 = std::string(outline::completed_closure);
+          if constexpr (queued_live_candidate_enabled) {
+            configuration.queued_shader_root = outline::queued_root(root).string();
+            configuration.queued_source_closure_sha256 = std::string(outline::queued_closure);
+          }
+          result.selected_matte = prepare_selected_matte_programs(
+            *result.estimator, dev.Get(), configuration
+          );
+        }
+        return result;
       });
       depth_estimator_build = build_task.get_future();
       auto pipeline_ready_event = sbs_depth_pipeline_ready_event;
@@ -4147,6 +4245,7 @@ namespace platf::dxgi {
         frame_id_ = 0u;
         pixel_source_frame_id_ = 0u;
         source_at_ = {};
+        presentation_clock_.invalidate();
         source_timestamp_.reset();
         content_timestamp_.reset();
         input_region_ = {};
@@ -4154,11 +4253,13 @@ namespace platf::dxgi {
         refined_live_geometry_active_ = false;
         field_width_ = 0;
         field_height_ = 0;
+        positioned_subtitles_ = false;
+        presentation_authority_ = {};
       }
 
       void reset() noexcept {
         invalidate();
-        timeout_active_ = false;
+        presentation_clock_.reset();
       }
 
       void publish(
@@ -4171,14 +4272,19 @@ namespace platf::dxgi {
         const bool presented_refined_live_geometry_active,
         const int presented_field_width,
         const int presented_field_height,
-        const std::uint64_t subtitle_context_generation
+        const std::uint64_t subtitle_context_generation,
+        const bool positioned_subtitles,
+        const models::host_subtitle_context::presentation_authority_t presentation_authority,
+        const std::optional<std::chrono::steady_clock::time_point> &current_source_timestamp,
+        const std::chrono::steady_clock::time_point current_source_observed_at
       ) noexcept {
-        // A recovered matched completion clears timeout_active at its existing policy site.
+        // The selected completed draw reports recovery independently of pixel publication.
         valid_ = true;
         frame_id_ = presented_frame_id;
         pixel_source_frame_id_ = presented_frame_id;
         source_at_ = presented_at;
         source_timestamp_ = presented_source_timestamp;
+        observe_current_source(current_source_timestamp, current_source_observed_at);
         content_timestamp_ = presented_content_timestamp;
         input_region_ = presented_input_region;
         color_space_ = presented_color_space;
@@ -4186,6 +4292,8 @@ namespace platf::dxgi {
         field_width_ = presented_field_width;
         field_height_ = presented_field_height;
         subtitle_context_generation_ = subtitle_context_generation;
+        positioned_subtitles_ = positioned_subtitles;
+        presentation_authority_ = presentation_authority;
       }
 
       [[nodiscard]] bool has_fresh_pixels() const noexcept {
@@ -4219,19 +4327,38 @@ namespace platf::dxgi {
         return source_timestamp_ && source && *source_timestamp_ == *source;
       }
 
+      void observe_current_source(
+        const std::optional<std::chrono::steady_clock::time_point> &source,
+        const std::chrono::steady_clock::time_point observed_at
+      ) noexcept {
+        if (valid_) {
+          presentation_clock_.observe_source(source_timestamp_, source, observed_at);
+        }
+      }
+
+      [[nodiscard]] std::chrono::steady_clock::duration hold_age(
+        const std::optional<std::chrono::steady_clock::time_point> &source,
+        const std::chrono::steady_clock::time_point now
+      ) const noexcept {
+        return presentation_clock_.hold_age(source_age(now), source_timestamp_, source, now);
+      }
+
       [[nodiscard]] bool route_matches(
         const UINT source_width,
         const UINT source_height,
         const models::input_color_space color_space,
         const bool reprocess_pending,
         const bool producer_terminal,
-        const std::uint64_t subtitle_context_generation
+        const std::uint64_t subtitle_context_generation,
+        const models::host_subtitle_context::presentation_authority_t presentation_authority
       ) const noexcept {
         return valid_ && input_region_.valid() &&
                input_region_.source_width == source_width &&
                input_region_.source_height == source_height &&
                color_space_ == color_space && !reprocess_pending && !producer_terminal &&
-               subtitle_context_generation_ == subtitle_context_generation;
+               subtitle_context_generation_ == subtitle_context_generation &&
+               presentation_authority_.permits_packed_repeat(
+                 presentation_authority, input_region_.is_video_region() || positioned_subtitles_);
       }
 
       [[nodiscard]] const std::optional<std::chrono::steady_clock::time_point> &
@@ -4239,20 +4366,19 @@ namespace platf::dxgi {
         return content_timestamp_;
       }
 
-      [[nodiscard]] bool timeout_active() const noexcept {
-        return timeout_active_;
-      }
-
-      void mark_timeout() noexcept {
-        timeout_active_ = true;
-      }
-
-      void clear_timeout() noexcept {
-        timeout_active_ = false;
+      detail::host_sbs_packed_presentation_clock_t::timeout_event_e observe_timeout(
+        const bool age_expired,
+        const detail::host_sbs_packed_presentation_clock_t::output_e output
+      ) noexcept {
+        return presentation_clock_.observe_timeout(age_expired, output);
       }
 
       [[nodiscard]] bool is_video_region() const noexcept {
         return valid_ && input_region_.is_video_region();
+      }
+
+      [[nodiscard]] bool has_positioned_subtitles() const noexcept {
+        return valid_ && positioned_subtitles_;
       }
 
       [[nodiscard]] bool has_authority(
@@ -4281,8 +4407,10 @@ namespace platf::dxgi {
       bool refined_live_geometry_active_ = false;
       int field_width_ = 0;
       int field_height_ = 0;
-      bool timeout_active_ = false;
+      detail::host_sbs_packed_presentation_clock_t presentation_clock_;
       std::uint64_t subtitle_context_generation_ = 0u;
+      bool positioned_subtitles_ = false;
+      models::host_subtitle_context::presentation_authority_t presentation_authority_;
     };
 
     struct matched_frame_slot_t {
@@ -4320,6 +4448,9 @@ namespace platf::dxgi {
       bool observed_interactive_move_size = false;
       std::uint64_t subtitle_context_generation = 0u;
       bool subtitle_context_eligible = false;
+      // Semantic retention during a freshly verified modal loop permits no positioned glyph
+      // authority. Keep it separate from the normal per-frame eligibility used by rendering.
+      bool subtitle_context_suppression_eligible = false;
       std::uint64_t probe_instance = 0u;
       // CPU-owned submission class authenticates matched completion metadata. The exact final
       // publication receipt independently reports the actual infer/reuse branch and depth owner.
@@ -4539,6 +4670,7 @@ namespace platf::dxgi {
       destination.observed_interactive_move_size = source.observed_interactive_move_size;
       destination.subtitle_context_generation = source.subtitle_context_generation;
       destination.subtitle_context_eligible = source.subtitle_context_eligible;
+      destination.subtitle_context_suppression_eligible = source.subtitle_context_suppression_eligible;
       destination.probe_instance = source.probe_instance;
       destination.gpu_undecided_transaction = source.gpu_undecided_transaction;
       destination.pending = false;
@@ -4548,25 +4680,25 @@ namespace platf::dxgi {
     // Explicit SDR source-only research activation. Other renderer forms retain literal legacy.
     bool configure_selected_matte_for_instance(const models::subtitle_selected_matte_research_configuration_t &cfg,std::string &error) {
       if(!depth_estimator||selected_matte_ready||(!cfg.current_outline&&sbs_frame_sequence!=0u)){error="Selected matte requires prepared device before first input";return false;}
-      namespace cache=models::host_sbs_shader_cache;
-      const std::array specs{cache::shader_spec{"sbs_reprojection_v2_live_ps.hlsl","main_ps","ps_5_0"}};
-      const auto completed=cache::snapshot_sources(cfg.completed_shader_root,specs),queued=cache::snapshot_sources(cfg.queued_shader_root,specs);
-      if(!completed||!queued||cache::source_closure_sha256(completed)!=cfg.completed_source_closure_sha256||cache::source_closure_sha256(queued)!=cfg.queued_source_closure_sha256){error="Selected matte renderer source mismatch";return false;}
-      const auto ccode=cache::get(completed,specs[0]),qcode=cache::get(queued,specs[0]);
-      ps_t::pointer c=nullptr,q=nullptr;
-      if(!ccode||!qcode||FAILED(device->CreatePixelShader(ccode->data(),ccode->size(),nullptr,&c))){error="Selected matte completed renderer unavailable";return false;}
-      ps_t cp{c};
-      if(FAILED(device->CreatePixelShader(qcode->data(),qcode->size(),nullptr,&q))){error="Selected matte queued renderer unavailable";return false;}
-      ps_t qp{q};
-      if(!depth_estimator->configure_subtitle_selected_matte_research(cfg,error))return false;
-      selected_matte_completed_ps=std::move(cp);selected_matte_queued_ps=std::move(qp);selected_matte_current_outline=cfg.current_outline;selected_matte_ready=true;
-      selected_matte_completed_closure=cfg.completed_source_closure_sha256;selected_matte_queued_closure=cfg.queued_source_closure_sha256;
-      if(cfg.current_outline) {
-        std::string background_error;
-        if(!selected_background_programs.load(device.get(),std::filesystem::path(cfg.current_outline_shader_root)/"background",background_error))
-          BOOST_LOG(warning)<<"Host SBS current background unavailable; preserving selected subtitle route: "<<background_error;
-      }
+      auto programs = prepare_selected_matte_programs(*depth_estimator, device.get(), cfg);
+      if (!programs.ready) {error = programs.error;return false;}
+      adopt_selected_matte_programs(std::move(programs));
+      error.clear();
       return true;
+    }
+
+    void adopt_selected_matte_programs(selected_matte_programs_t programs) {
+      selected_matte_completed_ps.reset(programs.pixel.take_completed());
+      selected_matte_queued_ps.reset(programs.pixel.take_queued());
+      selected_background_programs = std::move(programs.background);
+      selected_matte_current_outline = programs.configuration.current_outline;
+      selected_matte_completed_closure = std::move(programs.configuration.completed_source_closure_sha256);
+      selected_matte_queued_closure = std::move(programs.configuration.queued_source_closure_sha256);
+      selected_matte_ready = selected_matte_completed_ps != nullptr;
+      if (!programs.background_error.empty()) {
+        BOOST_LOG(warning) << "Host SBS current background unavailable; preserving selected subtitle route: "
+                           << programs.background_error;
+      }
     }
 
     models::host_sbs_temporal_source_bridge::counters_t temporal_source_bridge_counters_for_evaluation() const noexcept {
@@ -5095,7 +5227,7 @@ namespace platf::dxgi {
       if (
         matched_presentation_cache.has_authority(
           models::depth_analysis_authority_e::chromium_video
-        )
+        ) || matched_presentation_cache.has_positioned_subtitles()
       ) {
         clear_cached_roi_output();
       }
@@ -5121,7 +5253,9 @@ namespace platf::dxgi {
     }
 
     void clear_cached_roi_output() noexcept {
-      if (!matched_presentation_cache.is_video_region()) {
+      // Full-capture depth may still have rendered positioned subtitle treatment. Its packed
+      // pixels must leave with the old window authority even while semantic memory survives.
+      if (!matched_presentation_cache.is_video_region() && !matched_presentation_cache.has_positioned_subtitles()) {
         return;
       }
       matched_presentation_cache.reset();
@@ -5137,7 +5271,7 @@ namespace platf::dxgi {
           subtitle_context.update({});
         } else {
           subtitle_context.update({models::host_subtitle_context::kind_e::registered_video_player,
-            probe_context->instance, GetCurrentProcessId(), probe_context->instance, 0u});
+            probe_context->instance, GetCurrentProcessId()});
         }
         // Deliberately no actual USER32/browser/player claim. Only this labelled fixture
         // instance uses the synthetic scheduling domain; source/receipt authority stays real.
@@ -5333,12 +5467,13 @@ namespace platf::dxgi {
       const auto now = std::chrono::steady_clock::now();
       const bool foreground_region_present = static_cast<bool>(live_foreground_region);
       const auto admission = subtitle_context_policy::evaluate(
-        live_window_authority ? &*live_window_authority : nullptr,
+        foreground.status == foreground_window::status_e::interactive_move_size ? &foreground :
+          live_window_authority ? &*live_window_authority : nullptr,
         foreground_region_present, foreground_mapping, browser.get(),
         live_browser_authority ? live_browser_authority_epoch : 0u,
         {output.DesktopCoordinates.left, output.DesktopCoordinates.top,
          output.DesktopCoordinates.right, output.DesktopCoordinates.bottom},
-        source.Width, source.Height, content_timestamp, now);
+        source.Width, source.Height, content_timestamp, now, subtitle_context.key());
       const bool foreground_usable = admission.foreground_usable;
       const bool browser_identity_matches = admission.browser_identity_matches;
       const bool browser_usable = admission.browser_usable;
@@ -5352,8 +5487,7 @@ namespace platf::dxgi {
         next = admission.browser_key;
       } else if (admission.registered_player_candidate && video_player_registry &&
                  video_player_registry->contains_process(foreground.process_id)) {
-        next = {kind_e::registered_video_player, foreground.window, foreground.process_id,
-                foreground.generation, 0u};
+        next = {kind_e::registered_video_player, foreground.window, foreground.process_id};
       }
       if (subtitle_context.update(next)) {
         // Revoke even full-source completions and already-packed output. The generation survives
@@ -5986,8 +6120,8 @@ namespace platf::dxgi {
       slot.content_timestamp = content_timestamp;
       slot.inference_content_timestamp = content_timestamp;
       slot.inference_ddup_damage = std::move(ddup_damage);
-      // Production uses source age to bound V2 output repetition; this is no longer diagnostics-
-      // only metadata. The aggregate age counters below remain gated by diagnostics_enabled.
+      // Source age bounds older matched completions. Packed-pixel continuity separately excludes
+      // exact-static time before its first changed source. Age diagnostics remain opt-in.
       slot.captured_at = captured_at;
       slot.window_region.reset();
       slot.window_region_observer_status = "not-observed";
@@ -6137,6 +6271,8 @@ namespace platf::dxgi {
       slot.observed_browser_authority_epoch = copied_authority.browser_authority_epoch;
       slot.observed_interactive_move_size = interactive_move_size_observed;
       slot.subtitle_context_generation = subtitle_context.generation();
+      slot.subtitle_context_suppression_eligible =
+        slot.observed_interactive_move_size && subtitle_context.eligible();
       slot.probe_instance = probe_context ? probe_context->instance : 0u;
       slot.subtitle_context_eligible = probe_context ?
         subtitle_context.eligible() && source_desc.Width == probe_context->width && source_desc.Height == probe_context->height :
@@ -7269,7 +7405,7 @@ namespace platf::dxgi {
     // The per-device D3D estimator is built on a background thread and borrows the startup-warmed
     // TensorRT context. The process-lifetime tracked worker service owns and joins the worker; the
     // task itself captures owning D3D references, so retiring this future during teardown is safe.
-    std::future<std::unique_ptr<models::video_depth_estimator>> depth_estimator_build;
+    std::future<depth_pipeline_build_result_t> depth_estimator_build;
     unsigned engine_poll_counter = 0;  ///< Rate-limits the startup model-preparation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable Host SBS settings for this device.

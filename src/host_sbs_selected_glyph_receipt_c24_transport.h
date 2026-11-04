@@ -2,6 +2,7 @@
 // GPU byte transport only. This does not prove UI presence, freshness, completion, or opacity.
 // Receipt C24 remains joined independently by the unchanged BG owner to SCT/state/b3/RGB.
 #ifdef _WIN32
+#include "host_sbs_selected_matte_receipt.h"
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -9,6 +10,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 namespace models::selected_glyph_receipt_c24_transport_v1 {
+namespace receipt_abi=selected_matte_receipt_v1;
 class resources_t {
  using MicrosoftComDevice=Microsoft::WRL::ComPtr<ID3D11Device>;
  MicrosoftComDevice device_;
@@ -27,7 +29,7 @@ public:
  bool ensure(ID3D11Device*device,std::string&error){
   issued_=false;error.clear();if(!device){error="Receipt C24 device absent";return false;}
   if(device_.Get()==device&&constants_)return true;
-  D3D11_BUFFER_DESC d{};d.ByteWidth=96u;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+  D3D11_BUFFER_DESC d{};d.ByteWidth=receipt_abi::contour_byte_count;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
   Microsoft::WRL::ComPtr<ID3D11Buffer>next;
   if(FAILED(device->CreateBuffer(&d,nullptr,&next))){error="Receipt C24 owned constant allocation failed";return false;}
   device_=device;constants_=std::move(next);source_.Reset();source_buffer_.Reset();context_.Reset();return true;
@@ -42,15 +44,15 @@ public:
   D3D11_SHADER_RESOURCE_VIEW_DESC s{};selected_receipt->GetDesc(&s);Microsoft::WRL::ComPtr<ID3D11Resource>resource;selected_receipt->GetResource(&resource);
   Microsoft::WRL::ComPtr<ID3D11Buffer>buffer;if(FAILED(resource.As(&buffer))){error="Receipt C24 source is not buffer";return false;}
   D3D11_BUFFER_DESC b{};buffer->GetDesc(&b);
-  if(s.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER||s.Format!=DXGI_FORMAT_UNKNOWN||s.Buffer.FirstElement!=0u||s.Buffer.NumElements!=64u||
-     b.ByteWidth!=256u||b.StructureByteStride!=4u||(b.BindFlags&D3D11_BIND_SHADER_RESOURCE)==0u||
+  if(s.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER||s.Format!=DXGI_FORMAT_UNKNOWN||s.Buffer.FirstElement!=0u||s.Buffer.NumElements!=receipt_abi::word_count||
+     b.ByteWidth!=receipt_abi::byte_count||b.StructureByteStride!=receipt_abi::word_bytes||(b.BindFlags&D3D11_BIND_SHADER_RESOURCE)==0u||
      (b.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)==0u||b.CPUAccessFlags!=0u||
      (b.Usage!=D3D11_USAGE_DEFAULT&&b.Usage!=D3D11_USAGE_IMMUTABLE)||serial_==std::numeric_limits<std::uint64_t>::max()){
    error="Receipt C24 exact structured64 source unavailable";return false;
   }
   // All coordinates are bytes. Source words4..27 map to the WHOLE 96-byte destination.
   // Copy ordering and object lifetime remain on this same serialized immediate draw context.
-  const D3D11_BOX box{16u,0u,0u,112u,1u,1u};
+  const D3D11_BOX box{static_cast<UINT>(receipt_abi::contour_byte_offset),0u,0u,static_cast<UINT>(receipt_abi::contour_byte_end),1u,1u};
   context->CopySubresourceRegion(constants_.Get(),0u,0u,0u,0u,buffer.Get(),0u,&box);
   ++serial_;source_=selected_receipt;source_buffer_=buffer;context_=context;issued_=true;return true;
  }

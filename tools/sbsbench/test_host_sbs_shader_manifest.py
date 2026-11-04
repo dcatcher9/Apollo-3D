@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import copy
 import json
+import os
 import sys
+import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -164,6 +168,36 @@ class HostSbsShaderManifestTests(unittest.TestCase):
             if group is not guard:
                 self.assertNotIn("host_sbs_subtitle_matte_guard", group["specs"])
 
+    def test_optional_current_mask_holes_do_not_change_the_mandatory_producer(self):
+        manifest = generator.load_manifest()
+        holes = generator.closure_group(manifest, "current_mask_holes")
+        entries = ("clear_main", "capture_unit_main", "prepare_holes_main", "freeze_final_main",
+                   "init_main", "union_main", "reduce_main", "publish_main", "counter_main")
+        self.assertEqual(tuple(generator.group_specs(manifest, "current_mask_holes")), tuple(
+            ("current_outline/hole/host_sbs_current_mask_holes_cs.hlsl", entry, "cs_5_0")
+            for entry in entries
+        ))
+        for group in manifest["groups"]:
+            if group is not holes:
+                self.assertTrue(set(holes["specs"]).isdisjoint(group["specs"]))
+        original = json.loads(generator.DVC_MANIFEST.read_text(encoding="utf-8"))
+        projected = json.loads(generator.render_dvc_manifest(manifest, json.dumps(original)))
+        self.assertEqual(original["shader_implementation"], projected["shader_implementation"])
+
+    def test_optional_stroke_coverage_has_separate_specs_and_preserves_producer_identity(self):
+        manifest = generator.load_manifest()
+        coverage = generator.closure_group(manifest, "current_stroke_coverage")
+        self.assertEqual(tuple(generator.group_specs(manifest, "current_stroke_coverage")), tuple(
+            ("current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl", entry, "cs_5_0")
+            for entry in ("clear_offers_main", "prepare_main", "support_main")
+        ))
+        for group in manifest["groups"]:
+            if group is not coverage:
+                self.assertTrue(set(coverage["specs"]).isdisjoint(group["specs"]))
+        original = json.loads(generator.DVC_MANIFEST.read_text(encoding="utf-8"))
+        projected = json.loads(generator.render_dvc_manifest(manifest, json.dumps(original)))
+        self.assertEqual(original["shader_implementation"], projected["shader_implementation"])
+
     def test_order_or_pin_change_requires_closure_refresh(self):
         manifest = generator.load_manifest()
         reordered = copy.deepcopy(manifest)
@@ -180,6 +214,88 @@ class HostSbsShaderManifestTests(unittest.TestCase):
         ] = "0" * 64
         with self.assertRaisesRegex(ValueError, "source closure pin is stale"):
             generator.validate_group_pins(stale_pin)
+
+
+class HostSbsShaderManifestWriteTests(unittest.TestCase):
+    def test_identical_refresh_preserves_mtime_and_exact_utf8_lf_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "view.h"
+            rendered = "// caf\u00e9\n#define VALUE 1\n"
+            path.write_bytes(rendered.encode("utf-8"))
+            os.utime(path, ns=(1600000000000000000, 1600000000000000000))
+            before = path.stat().st_mtime_ns
+            self.assertTrue(generator._write_or_check(path, rendered, False))
+            self.assertTrue(generator._write_or_check(path, rendered, False))
+            self.assertTrue(generator._write_or_check(path, rendered, True))
+            self.assertEqual(path.stat().st_mtime_ns, before)
+            self.assertEqual(path.read_bytes(), rendered.encode("utf-8"))
+
+    def test_changed_and_missing_outputs_write_exact_utf8_lf_bytes(self):
+        rendered = "// caf\u00e9\n#define VALUE 2\n"
+        for initial in (None, b"old\r\n", rendered.replace("\n", "\r\n").encode("utf-8")):
+            with self.subTest(initial=initial), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "nested" / "view.h"
+                if initial is not None:
+                    path.parent.mkdir()
+                    path.write_bytes(initial)
+                    os.utime(path, ns=(1600000000000000000, 1600000000000000000))
+                self.assertTrue(generator._write_or_check(path, rendered, False))
+                self.assertEqual(path.read_bytes(), rendered.encode("utf-8"))
+
+    def test_check_mode_preserves_bytes_mtime_and_newline_tolerance(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch("sys.stderr"):
+            root = Path(temporary)
+            path = root / "view.h"
+            path.write_bytes(b"old\r\n")
+            os.utime(path, ns=(1600000000000000000, 1600000000000000000))
+            before = path.stat().st_mtime_ns
+            self.assertFalse(generator._write_or_check(path, "expected\n", True))
+            self.assertEqual(path.read_bytes(), b"old\r\n")
+            self.assertEqual(path.stat().st_mtime_ns, before)
+            self.assertFalse(generator._write_or_check(root / "missing" / "view.h", "expected\n", True))
+            self.assertFalse((root / "missing").exists())
+            # Check mode has always compared decoded universal-newline text.
+            self.assertTrue(generator._write_or_check(path, "old\n", True))
+            self.assertEqual(path.stat().st_mtime_ns, before)
+
+    def test_full_manifest_pin_refresh_preserves_all_identical_output_mtimes(self):
+        original = generator.load_manifest()
+        loader = generator.load_manifest
+        documentation = generator.DOC_TARGET.read_text(encoding="utf-8")
+        dvc = generator.DVC_MANIFEST.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as patches:
+            root = Path(temporary)
+            paths = {name: root / name for name in (
+                "MANIFEST", "CPP_TARGET", "PYTHON_TARGET", "DOC_TARGET", "DVC_MANIFEST")}
+            paths["MANIFEST"].write_text(
+                json.dumps(original, indent=2, ensure_ascii=True) + "\n", encoding="utf-8", newline="\n")
+            paths["DOC_TARGET"].write_text(documentation, encoding="utf-8", newline="\n")
+            paths["DVC_MANIFEST"].write_text(dvc, encoding="utf-8", newline="\n")
+            for name, path in paths.items():
+                patches.enter_context(mock.patch.object(generator, name, path))
+            patches.enter_context(mock.patch.object(
+                generator, "load_manifest", side_effect=lambda: loader(paths["MANIFEST"])))
+            # This IO regression uses the supplied authenticated pins; source-closure validation
+            # has independent tests and must not make this test refresh active repository pins.
+            pins = {group["name"]: group["source_closure_sha256"] for group in original["groups"]}
+            patches.enter_context(mock.patch.object(generator, "computed_group_pins", return_value=pins))
+            self.assertTrue(generator.generate(False, True))
+            expected = {path: path.read_bytes() for path in paths.values()}
+            for path in paths.values():
+                os.utime(path, ns=(1600000000000000000, 1600000000000000000))
+            before = {path: path.stat().st_mtime_ns for path in paths.values()}
+            self.assertTrue(generator.generate(False, True))
+            self.assertTrue(generator.generate(True, False))
+            for path in paths.values():
+                self.assertEqual(path.read_bytes(), expected[path])
+                self.assertEqual(path.stat().st_mtime_ns, before[path])
+            cpp = paths["CPP_TARGET"]
+            cpp.write_bytes(b"stale\r\n")
+            os.utime(cpp, ns=(1600000000000000000, 1600000000000000000))
+            with mock.patch("sys.stderr"):
+                self.assertFalse(generator.generate(True, False))
+            self.assertEqual(cpp.read_bytes(), b"stale\r\n")
+            self.assertEqual(cpp.stat().st_mtime_ns, before[cpp])
 
 
 if __name__ == "__main__":

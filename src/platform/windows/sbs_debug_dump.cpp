@@ -304,6 +304,11 @@ namespace platf::sbs_debug {
             {"target", "cs_5_0"},
           },
           {
+            {"source_file", "host_sbs_subtitle_contour_cs.hlsl"},
+            {"entrypoint", "history_identity_main"},
+            {"target", "cs_5_0"},
+          },
+          {
             {"source_file", "host_sbs_subtitle_contour_distance_cs.hlsl"},
             {"entrypoint", "horizontal_main"},
             {"target", "cs_5_0"},
@@ -475,7 +480,7 @@ namespace platf::sbs_debug {
         completed.depth_input_region.source_width,
         completed.depth_input_region.source_height,
         completed.depth_input_region.left, completed.depth_input_region.top,
-        completed.depth_input_region.authority == models::depth_analysis_authority_e::chromium_video
+        completed.depth_input_region.is_video_region()
       );
       if (!reference || crop_height == 0u ||
           history(0u) != subtitle_ocr_classifier_history_tag ||

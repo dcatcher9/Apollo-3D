@@ -1,3 +1,4 @@
+#include "current_stroke_math_shared.hlsl"
 // Independent current Inside graph runs before Raw; its final OR remains after publication.
 // Existing classifier/components are unchanged. Only local cached anchors reuse its current bits.
 cbuffer ActualContourCB : register(b0) {
@@ -64,11 +65,11 @@ bool FrameReadyRW(){
 }
 uint3 Unpack(uint v){return uint3(v&255u,(v>>8u)&255u,(v>>16u)&255u);}
 uint BoxDistance(uint3 q,uint3 low,uint3 high){
-    int3 below=max(int3(low)-int3(q),0),above=max(int3(q)-int3(high),0);
-    int3 d=max(below,above);return(uint)max(d.r,max(d.g,d.b));
+    return StrokeBoxDistance(q,low,high);
 }
 bool UnitReady(uint unit){
     if(unit>=8u)return false;uint u=UB(unit),bank=384u+16u*unit;
+    if(CBCMeta[bank+1u]==4u)return false; // Opaque Raw4CC is not an Inside/style model.
     if(CBCMeta[u]!=1u||CBCMeta[u+1u]!=1u||CBCMeta[u+29u]!=1u||CBCMeta[bank+2u]!=1u)return false;
     uint masks=Models.Load(int3(0u,unit,0)),allMask=masks&255u,mask=(masks>>8u)&255u;
     if((masks&0xffff0000u)!=0u||(mask&~allMask)!=0u||mask==0u||(CBCMeta[86u]&(1u<<unit))==0u)return false;
@@ -95,8 +96,7 @@ void Classify(float3 rgb,uint unit,out bool barrier,out uint dF){
         uint3 low=Unpack(Models.Load(int3(1u+2u*mode,unit,0))),high=Unpack(Models.Load(int3(2u+2u*mode,unit,0)));
         dF=min(dF,BoxDistance(code,low,high));
     }
-    bool physical=max(rgb.r,max(rgb.g,rgb.b))<=1.0f/255.0f||all(code>=kl)&&all(code<=kh);
-    barrier=physical||dK<=dF;
+    barrier=StrokeBlackLikeDecision(rgb,code,kl,kh,dK,dF);
 }
 [numthreads(1,1,1)]
 void prepare_unit_main(uint3 g:SV_GroupID){

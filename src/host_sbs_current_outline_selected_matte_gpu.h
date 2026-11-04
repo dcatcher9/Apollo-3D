@@ -1,5 +1,7 @@
 #pragma once
 #ifdef _WIN32
+  #include "host_sbs_selected_matte_receipt.h"
+  #include "host_sbs_compute_program_lease.h"
   #include <array>
   #include <cstdint>
   #include <d3d11.h>
@@ -8,12 +10,15 @@
   #include <utility>
   #include <wrl/client.h>
 
-// EXTERNAL PRIVATE recipe5 selected algorithm2 DRAFT, not runtime activation. Queue success is not GPU readiness, UI presence or EMPTY.
+// Production current-outline selector and explicitly requested algorithm1 experiment support.
+// Queue success is not GPU readiness, UI presence or EMPTY.
 // Caller owns the exact source/SCT/root publication and keeps all resources unbound outside
 // these CS slots. AddRef retains storage, not immutable contents; normal publication leases apply.
 namespace models::research_current_outline_selected_matte_v2 {
   using Microsoft::WRL::ComPtr;
-  inline constexpr std::uint32_t tag = 0x31534d53u, schema = 1u, algorithm = 2u;
+  namespace receipt_abi = selected_matte_receipt_v1;
+  inline constexpr std::uint32_t tag = receipt_abi::tag, schema = receipt_abi::schema,
+                                 algorithm = receipt_abi::current_outline_algorithm;
   enum class postprocess_mode_e : std::uint32_t {
     authorized = 1u,
     direct_force = 2u,
@@ -56,6 +61,7 @@ namespace models::research_current_outline_selected_matte_v2 {
     ComPtr<ID3D11UnorderedAccessView> native_args_uav_;
     UINT width_ = 0u, height_ = 0u;
     bool initialize_ = true;
+    host_sbs_compute_program_lease::group_t<1u> select_program_lease_, prepare_program_lease_;
 
     bool child(ID3D11DeviceChild *x) const {
       if (!x) {
@@ -174,11 +180,11 @@ namespace models::research_current_outline_selected_matte_v2 {
         return false;
       }
       D3D11_BUFFER_DESC bd {};
-      bd.ByteWidth = 256;
+      bd.ByteWidth = receipt_abi::byte_count;
       bd.Usage = D3D11_USAGE_DEFAULT;
       bd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
       bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-      bd.StructureByteStride = 4;
+      bd.StructureByteStride = receipt_abi::word_bytes;
       if (FAILED(d->CreateBuffer(&bd, nullptr, &n.receipt_)) || FAILED(d->CreateShaderResourceView(n.receipt_.Get(), nullptr, &n.receipt_srv_)) || FAILED(d->CreateUnorderedAccessView(n.receipt_.Get(), nullptr, &n.receipt_uav_))) {
         error = "Selected matte receipt allocation";
         return false;
@@ -219,7 +225,7 @@ namespace models::research_current_outline_selected_matte_v2 {
 
     bool queue(ID3D11DeviceContext *c, const program_t &program, const inputs_t &i, std::string &error) {
       error.clear();
-      if (!c || c->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !child(program.select) || (i.current_outline_requested && !child(program.prepare)) || !child(i.current_cb96) || !child(i.actual_root_args) || !child(i.legacy_matte) || !child(i.sct) || (!i.current_outline_requested && !child(i.root)) || !matte_) {
+      if (!c || c->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !select_program_lease_.acquire(device_.Get(), {program.select}) || (i.current_outline_requested && !prepare_program_lease_.acquire(device_.Get(), {program.prepare})) || !child(i.current_cb96) || !child(i.actual_root_args) || !child(i.legacy_matte) || !child(i.sct) || (!i.current_outline_requested && !child(i.root)) || !matte_) {
         error = "Selected matte required operands/context";
         return false;
       }
@@ -244,7 +250,7 @@ namespace models::research_current_outline_selected_matte_v2 {
       }
       D3D11_BUFFER_DESC bd {};
       i.current_cb96->GetDesc(&bd);
-      if (bd.ByteWidth != 96u || (bd.BindFlags & D3D11_BIND_CONSTANT_BUFFER) == 0u) {
+      if (bd.ByteWidth != receipt_abi::contour_byte_count || (bd.BindFlags & D3D11_BIND_CONSTANT_BUFFER) == 0u) {
         error = "Selected matte CB96";
         return false;
       }

@@ -40,6 +40,7 @@ struct request_t {
       0u; // Actual pending function result1/2/4, never guessed from root80.
   UINT expected_work =
       0u; // Actual pending work0/1/2. Never relabel non-OOCR work as1.
+  const current_outline_stage_observer::observer_t *stage_observer = nullptr;
 };
 
 struct current_operands_t {
@@ -94,9 +95,30 @@ class resources_t {
   std::array<ComPtr<ID3D11ComputeShader>, 52u> shader_lease_;
   // Optional all-or-none cache programs do not change the mandatory52 contract.
   std::array<ComPtr<ID3D11ComputeShader>, 3u> stability_shader_lease_;
+  std::array<ComPtr<ID3D11ComputeShader>, 9u> hole_shader_lease_;
+  std::array<ComPtr<ID3D11ComputeShader>, 3u> coverage_shader_lease_;
   UINT width_ = 0u, full_height_ = 0u, crop_top_ = 0u, band_height_ = 0u;
   std::uint64_t sequence_ = 0u, owner_epoch_ = 0u;
   bool ready_ = false, recorded_ = true, all_stages_issued_ = false;
+  bool program_validated_ = false;
+
+  bool matches_program(const program_t &p) const noexcept {
+    if (!program_validated_) return false;
+    UINT at = 0u;
+    const auto append = [&](const auto &group) {
+      for (auto *shader : group) if (at >= shader_lease_.size() || shader != shader_lease_[at++].Get()) return false;
+      return true;
+    };
+    if (!append(std::array{p.source.prepare, p.source.copy, p.source.finalize, p.source.envelope}) ||
+        !append(p.colour) || !append(p.components) || !append(p.outline.enclosure.shaders) ||
+        !append(p.outline.enclosure.roi_graph) || !append(p.outline.shaders) ||
+        !append(p.outline.roi_graph) || !append(p.outline.band_shaders) || !append(p.outline.inside_shaders) ||
+        at != shader_lease_.size()) return false;
+    for (UINT i = 0u; i < stability_shader_lease_.size(); ++i) if (p.outline.stability_shaders[i] != stability_shader_lease_[i].Get()) return false;
+    for (UINT i = 0u; i < hole_shader_lease_.size(); ++i) if (p.outline.hole_shaders[i] != hole_shader_lease_[i].Get()) return false;
+    for (UINT i = 0u; i < coverage_shader_lease_.size(); ++i) if (p.outline.coverage_shaders[i] != coverage_shader_lease_[i].Get()) return false;
+    return true;
+  }
 
   bool same_device(ID3D11DeviceChild *child) const {
     if (!child || !device_)
@@ -151,7 +173,11 @@ class resources_t {
                  const request_t &r,
                  std::array<ComPtr<ID3D11ComputeShader>, 52u> &shaders,
                  std::array<ComPtr<ID3D11ComputeShader>, 3u> &stability_shaders,
+                 std::array<ComPtr<ID3D11ComputeShader>, 9u> &hole_shaders,
+                 std::array<ComPtr<ID3D11ComputeShader>, 3u> &coverage_shaders,
+                 bool &reused_program,
                  std::string &error) const {
+    reused_program = false;
     if (!ready_ || !same_device(context) ||
         context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE ||
         (r.postprocess_mode != 1u && r.postprocess_mode != 2u &&
@@ -185,6 +211,9 @@ class resources_t {
       error = "Composition current P/S/OCR/UIP/legacy shape or format mismatch";
       return false;
     }
+    // Only immutable shader/device facts are reused. Every request, resource
+    // descriptor, context and source identity check above still runs each call.
+    if (matches_program(p)) { reused_program = true;return true; }
     UINT count = 0u;
     auto add = [&](ID3D11ComputeShader *s) {
       if (!same_device(s) || count >= shaders.size())
@@ -241,6 +270,14 @@ class resources_t {
       error = "Composition shader bundle shape mismatch";
       return false;
     }
+    bool holes_available = true;
+    for (auto *shader : p.outline.hole_shaders) holes_available = holes_available && same_device(shader);
+    if (holes_available)
+      for (UINT i = 0u; i < hole_shaders.size(); ++i) hole_shaders[i] = p.outline.hole_shaders[i];
+    bool coverage_available = true;
+    for (auto *shader : p.outline.coverage_shaders) coverage_available = coverage_available && same_device(shader);
+    if (coverage_available)
+      for (UINT i = 0u; i < coverage_shaders.size(); ++i) coverage_shaders[i] = p.outline.coverage_shaders[i];
     bool stability_available = true;
     for (auto *s : p.outline.stability_shaders)
       stability_available = stability_available && same_device(s);
@@ -294,6 +331,15 @@ public:
     return f2_.parent_diagnostics();
   }
 
+  // Caller owns the serialized immediate interval after retiring old publication consumers.
+  // Keep owner epoch/sequence and temporal clock high-water while revoking subtitle authority.
+  bool invalidate_subtitle_history(ID3D11DeviceContext *context) {
+    if (!f2_.invalidate_subtitle_history(context)) return false;
+    all_stages_issued_ = false;
+    current_ = {};
+    return true;
+  }
+
   bool ensure(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top,
               UINT band_height, std::string &error) {
     error.clear();
@@ -336,7 +382,10 @@ public:
     all_stages_issued_ = false;
     std::array<ComPtr<ID3D11ComputeShader>, 52u> shaders;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> stability_shaders;
-    if (!preflight(context, p, r, shaders, stability_shaders, error))
+    std::array<ComPtr<ID3D11ComputeShader>, 9u> hole_shaders;
+    std::array<ComPtr<ID3D11ComputeShader>, 3u> coverage_shaders;
+    bool reused_program = false;
+    if (!preflight(context, p, r, shaders, stability_shaders, hole_shaders, coverage_shaders, reused_program, error))
       return false;
     if (sequence_ == std::numeric_limits<std::uint64_t>::max()) {
       error = "Composition host sequence exhausted";
@@ -347,21 +396,28 @@ public:
     // Resources remain mutable: caller may not start another queue/ensure/write
     // before selector consumption.
     current_ = retain(context, r);
-    shader_lease_ = std::move(shaders);
-    stability_shader_lease_ = std::move(stability_shaders);
+    if (!reused_program) {
+      shader_lease_ = std::move(shaders);
+      stability_shader_lease_ = std::move(stability_shaders);
+      hole_shader_lease_ = std::move(hole_shaders);
+      coverage_shader_lease_ = std::move(coverage_shaders);
+      program_validated_ = true;
+    }
     const auto source_request = current_.source_request();
-    if (!source_.queue(context, p.source, source_request, error))
+    if (!source_.queue_current(context, p.source, source_request,
+                               current_.actual_uip40.Get(), error))
       return false;
-    if (!source_.queue_uip_envelope(context, p.source,
-                                    current_.actual_uip40.Get(), source_request,
-                                    error))
-      return false;
+    if (r.stage_observer) r.stage_observer->mark(context, current_outline_stage_observer::stage_e::source5_end);
     const auto v = source_.views();
     f2::program_t program;
     program.shaders = p.outline.shaders;
     program.roi_graph = p.outline.roi_graph;
     program.band_shaders = p.outline.band_shaders;
     program.inside_shaders = p.outline.inside_shaders;
+    program.coverage_diagnostics = p.outline.coverage_diagnostics;
+    program.stage_observer = r.stage_observer;
+    for (UINT i = 0u; i < program.hole_shaders.size(); ++i) program.hole_shaders[i] = hole_shader_lease_[i].Get();
+    for (UINT i = 0u; i < program.coverage_shaders.size(); ++i) program.coverage_shaders[i] = coverage_shader_lease_[i].Get();
     for (UINT i = 0u; i < program.stability_shaders.size(); ++i)
       program.stability_shaders[i] = stability_shader_lease_[i].Get();
     program.enclosure.shaders = p.outline.enclosure.shaders;

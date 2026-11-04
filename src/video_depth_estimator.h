@@ -1393,6 +1393,10 @@ namespace models {
   struct subtitle_selected_matte_diagnostic_views_t {
     std::uint64_t model_frame=0u,model_observation_us=0u;
     bool pending_queued=false,baseline_current=false,temporal_commands=false,source_certificate_valid=false;
+    bool current_outline_hole_program_ready=false; // Shader availability only, never GPU execution proof.
+    bool current_outline_coverage_program_ready=false; // Shader availability only, never GPU execution proof.
+    std::uint64_t current_outline_cbc_recordings=0u,current_outline_cbc_replays=0u,current_outline_cbc_allocations=0u;
+    std::uint64_t current_outline_f2_recordings=0u,current_outline_f2_replays=0u,current_outline_f2_allocations=0u;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_matte,selected_receipt;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> baseline_body,baseline_matte,numeric_proof,current_probability,current_support;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> temporal_matte,temporal_receipt,frame256;

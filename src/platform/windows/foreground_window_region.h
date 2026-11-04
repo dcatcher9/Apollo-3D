@@ -84,7 +84,9 @@ namespace platf::foreground_window {
    *
    * Positive snapshots have a monotonically changing, nonzero generation. `geometry_valid_since`
    * is preserved only while the exact positive status, identity, monitor, and geometry remain
-   * unchanged. Invalid observations break continuity and carry zero authority fields.
+   * unchanged. Invalid observations break continuity and carry zero geometry authority fields.
+   * A freshly verified native move/size advisory retains only root HWND/process identity, so an
+   * existing semantic subtitle context can be suppressed without retaining a positioned ROI.
    */
   struct snapshot_t {
     status_e status {status_e::no_foreground};

@@ -370,7 +370,7 @@ namespace models {
     constexpr bool operator==(const subtitle_ocr_line_reference_t &) const = default;
   };
 
-  /** Use a video ROI when present; otherwise preserve full-screen center and lower quarter. */
+  /** Use the selected picture ROI when present; otherwise retain the full-capture reference. */
   inline constexpr std::optional<subtitle_ocr_line_reference_t> subtitle_ocr_line_reference(
     const std::uint32_t analysis_width,
     const std::uint32_t analysis_height,
@@ -378,7 +378,7 @@ namespace models {
     const std::uint32_t capture_height,
     const std::uint32_t analysis_left,
     const std::uint32_t analysis_top,
-    const bool video_roi
+    const bool analysis_roi
   ) noexcept {
     constexpr auto maximum_extent = depth_coordinate_v2::subtitle_contour_source_max_extent;
     if (analysis_width == 0u || analysis_height == 0u ||
@@ -388,8 +388,8 @@ namespace models {
         static_cast<std::uint64_t>(analysis_top) + analysis_height > capture_height) {
       return std::nullopt;
     }
-    const auto reference_width = video_roi ? analysis_width : capture_width;
-    const auto reference_height = video_roi ? analysis_height : capture_height;
+    const auto reference_width = analysis_roi ? analysis_width : capture_width;
+    const auto reference_height = analysis_roi ? analysis_height : capture_height;
     if (reference_width > maximum_extent) {
       return std::nullopt;
     }
@@ -398,11 +398,11 @@ namespace models {
         depth_coordinate_v2::subtitle_ocr_line_search_bottom_height_numerator,
       depth_coordinate_v2::subtitle_ocr_line_search_bottom_height_denominator
     );
-    const auto center_twice = video_roi ? static_cast<std::int64_t>(analysis_width) :
+    const auto center_twice = analysis_roi ? static_cast<std::int64_t>(analysis_width) :
       static_cast<std::int64_t>(capture_width) - 2 * static_cast<std::int64_t>(analysis_left);
     const auto search_top = static_cast<std::int64_t>(reference_height) -
       static_cast<std::int64_t>(lower_height) -
-      (video_roi ? 0 : static_cast<std::int64_t>(analysis_top));
+      (analysis_roi ? 0 : static_cast<std::int64_t>(analysis_top));
     if (center_twice < std::numeric_limits<std::int32_t>::min() ||
         center_twice > std::numeric_limits<std::int32_t>::max() ||
         search_top < std::numeric_limits<std::int32_t>::min() ||
