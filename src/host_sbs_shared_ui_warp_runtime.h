@@ -49,8 +49,11 @@ namespace models::host_sbs_shared_ui_warp {
   // Preparation only creates device objects from one immutable authenticated source snapshot.
   // It never uses the immediate context and can run on the tracked pipeline-build worker.
   class programs_t {
-    std::array<ComPtr<ID3D11ComputeShader>, 4u> compute_;
-    std::array<ComPtr<ID3D11PixelShader>, 2u> pixels_;
+    struct route_t {
+      std::array<ComPtr<ID3D11ComputeShader>, 2u> compute;
+      ComPtr<ID3D11PixelShader> pixel;
+    };
+    std::array<route_t, 2u> routes_;
     std::array<ComPtr<ID3D11PixelShader>, 6u> diagnostics_;
 
   public:
@@ -67,8 +70,8 @@ namespace models::host_sbs_shared_ui_warp {
           for (std::size_t stage = 0u; stage < 3u; ++stage) {
             const auto code = cache::get(source, specs[route * 3u + stage]);
             if (!code || code->empty() || (stage < 2u ?
-                FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &next.compute_[route * 2u + stage])) :
-                FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &next.pixels_[route])))) {
+                FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &next.routes_[route].compute[stage])) :
+                FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &next.routes_[route].pixel)))) {
               error = "Shared UI warp shader creation failed";
               return false;
             }
@@ -83,11 +86,19 @@ namespace models::host_sbs_shared_ui_warp {
     }
 
     bool load_diagnostics(ID3D11Device *device, const std::filesystem::path &root, std::string &error) {
-      if (std::all_of(diagnostics_.begin(), diagnostics_.end(), [](const auto &shader) { return bool(shader); })) return true;
       error.clear();
+      // Diagnostics belong to the same device as the retained production programs.
+      // Their immutable authenticated objects can then be reused without re-reading source.
+      ComPtr<ID3D11Device> program_device;
+      if (routes_[0].pixel) routes_[0].pixel->GetDevice(&program_device);
+      if (!device || program_device.Get() != device) {
+        error = "Shared UI warp diagnostic device does not match its production programs";
+        return false;
+      }
+      if (std::all_of(diagnostics_.begin(), diagnostics_.end(), [](const auto &shader) { return bool(shader); })) return true;
       try {
         const auto source = cache::snapshot_sources(root, diagnostic_specs);
-        if (!device || !source || cache::source_closure_sha256(source) != diagnostic_closure) {
+        if (!source || cache::source_closure_sha256(source) != diagnostic_closure) {
           error = "Shared UI warp diagnostic source mismatch";
           return false;
         }
@@ -107,10 +118,11 @@ namespace models::host_sbs_shared_ui_warp {
       }
     }
 
-    [[nodiscard]] bool ready() const noexcept { return pixels_[0] && pixels_[1]; }
+    [[nodiscard]] bool ready() const noexcept { return routes_[0].pixel && routes_[1].pixel; }
     [[nodiscard]] program_t program(bool queued = false) const noexcept {
       const auto route = queued ? 1u : 0u;
-      return {compute_[route * 2u].Get(), compute_[route * 2u + 1u].Get(), pixels_[route].Get(), queued};
+      const auto &shaders = routes_[route];
+      return {shaders.compute[0].Get(), shaders.compute[1].Get(), shaders.pixel.Get(), queued};
     }
     [[nodiscard]] ID3D11PixelShader *mapping(bool queued = false) const noexcept { return diagnostics_[queued ? 3u : 0u].Get(); }
     [[nodiscard]] ID3D11PixelShader *coverage(bool queued = false) const noexcept { return diagnostics_[queued ? 4u : 1u].Get(); }
@@ -227,9 +239,11 @@ namespace models::host_sbs_shared_ui_warp {
     bool ensure(ID3D11Device *device, const std::array<UINT, 4u> &shape, std::string &error) {
       issued_ = false;
       error.clear();
+      // The rows plane needs one extra texel for the selected-receipt header.
       if (!device || shape[0] < 8u || shape[0] > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
           shape[1] == 0u || shape[1] > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
-          shape[2] >= shape[1] || shape[3] == 0u || shape[3] > shape[1] - shape[2]) {
+          shape[2] >= shape[1] || shape[3] == 0u || shape[3] > shape[1] - shape[2] ||
+          shape[3] >= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
         error = "Shared UI warp native source domain unavailable"; return false;
       }
       if (device_.Get() == device && shape_ == shape && geometry_) return true;

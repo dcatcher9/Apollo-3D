@@ -978,3 +978,47 @@ tests and contract drift checks pass. The ordinary three-clip paired evaluation 
 and preserves all 576 PNG/F32 payloads byte-for-byte. Every evaluation stage uses the exact
 AGENTS.md Python runtime and package fingerprint. The final receipt binds the merged commit,
 source files, optimized binary, runtime assets, validation outputs and live launcher.
+
+### P16 shared-warp review and cleanup
+
+The review preserves the shared pin shader, ordered source pins, calibration, G1 mask policy
+and original RGB sampling. It fixes three diagnostic/resource edge cases:
+
+- Reject a native band whose extra row-header texel exceeds the D3D11 texture limit before
+  allocating either large plane. Such a band previously failed later during row allocation.
+- Keep cached diagnostic shaders on the production programs' device. Null, foreign and
+  unprepared devices are rejected, and a successful cached load clears an earlier error.
+- Reject duplicate/nonobject dump evidence, malformed artifact maps, boolean source-identity
+  aliases and noncanonical invalid-content map sentinels with controlled validation errors.
+
+Primary shader handles now belong to explicit completed/queued records. Live conversion removes
+retired repair ownership and discarded background-observer queries, builds its draw request in
+one place, batches diagnostic binding reads, and shares the map/boundary draw loop. Historical
+dump fields retain their explicit unavailable values. The reader returns its authenticated map
+snapshot rather than reading and hashing the full packed map a second time. Qualification builds
+its padded native shape directly. These changes add no new image rule or temporal state.
+
+The optimized build passes 106 native tests, including the 48-case controlled renderer matrix,
+with eight optional/input skips in the broad group. The saved producer/draw paths run separately
+with the same fresh test executable. All 960 Python tests complete with 13 declared skips.
+Regression coverage includes oversized rows, foreign/null diagnostic devices, cached error
+clearing, and restoration of nonempty retired PS bindings. The fixture now compares exact prior
+binding state rather than assuming those slots start empty; its own b4 cleanup remains separate
+from the production scope's restoration check.
+
+Against validated master `ef353481`, all 24 authored-clock selected stereo outputs and literal
+masks are byte-identical. The three saved HDR replays preserve all 24 colour crops and 36 pin
+diagnostics. The ordinary three-clip evaluation is screen-neutral with all 576 PNG/F32 payloads
+byte-identical. Every numeric stage uses the same AGENTS.md interpreter and fingerprint.
+
+The actual converter smoke again observes correct shared bindings on its two captioned sources
+and zero selected pixels on the authored empty source, without background repair. Its source
+clocks come from native steady time, so it is wiring evidence rather than a matched pixel A/B.
+The empty source's temporal Base and RGB differ between runs with different clocks; those
+diagnostics remain recorded. An initial cross-clock pixel comparison is preserved separately.
+The deterministic authored-clock qualification supplies strict pixel parity instead.
+
+Evidence is outside Git under `E:\ApolloDev\shared-warp-cleanup-20261104`. Earlier fixture/setup
+attempts remain distinct from the final checks. Existing scene deformation, row transitions,
+inactive-mask preparation and occasional expensive cold fallback-shader compilation remain
+limitations; this cleanup establishes no live FPS or additional physical-headset acceptance.

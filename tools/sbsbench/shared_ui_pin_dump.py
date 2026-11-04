@@ -67,40 +67,61 @@ def _read(root: Path, manifest: dict[str, Any], name: str) -> bytes:
     return payload
 
 
-def verify(root: Any, manifest: dict[str, Any]) -> dict[str, Any]:
-    """Authenticate same-draw fields/maps; optional missing diagnostics remain explicit."""
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"actual draw evidence contains duplicate field: {key}")
+        result[key] = value
+    return result
+
+
+def _same_source_word(value: Any, expected: Any) -> bool:
+    return type(value) is int and type(expected) is int and 0 < value < (1 << 64) and value == expected
+
+
+def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+    """Return the summary and its already authenticated map snapshot, when available."""
     attribution = validate_attribution(manifest)
     if not attribution["shared_pin_selected"]:
-        return {**attribution, "actual_map_verified": False}
+        return {**attribution, "actual_map_verified": False}, None
     root = Path(root)
     descriptor = manifest["artifacts"].get(EVIDENCE, {})
+    if not isinstance(descriptor, dict):
+        raise ValueError("actual draw evidence descriptor must be an object")
     if descriptor.get("available") is not True:
         return {**attribution, "actual_map_verified": False,
-                "unavailable_reason": "optional actual draw evidence is unavailable"}
+                "unavailable_reason": "optional actual draw evidence is unavailable"}, None
     try:
-        evidence = json.loads(_read(root, manifest, EVIDENCE))
+        evidence = json.loads(_read(root, manifest, EVIDENCE), object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("actual draw evidence is invalid JSON") from error
+    if not isinstance(evidence, dict):
+        raise ValueError("actual draw evidence must be a JSON object")
     if evidence.get("captured") is False:
         return {**attribution, "actual_map_verified": False,
-                "unavailable_reason": "actual draw binding observation was unavailable"}
+                "unavailable_reason": "actual draw binding observation was unavailable"}, None
     shared = evidence.get("shared_pin")
     if (not isinstance(shared, dict) or shared.get("selected") is not True or
             evidence.get("captured") is not True or
             shared.get("source_closure_sha256") != attribution["source_closure_sha256"] or
             evidence.get("pixel_shader_closure") != attribution["source_closure_sha256"] or
-            evidence.get("model_frame") != manifest.get("matched_frame_id") or
-            evidence.get("observation_us") != manifest.get("matched_observation_timestamp_us") or
+            not _same_source_word(evidence.get("model_frame"), manifest.get("matched_frame_id")) or
+            not _same_source_word(evidence.get("observation_us"), manifest.get("matched_observation_timestamp_us")) or
             shared.get("map_artifact") != ARTIFACTS[4] or
             shared.get("boundary_artifact") != ARTIFACTS[5] or
-            shared.get("map_layout") != "packed-output row-major float32-le RGBA: sourceU,sourceV,pinnedRow,contentValid" or
+            shared.get("map_layout") != (
+                "packed-output row-major float32-le RGBA: sourceU,sourceV,pinnedRow,contentValid") or
             shared.get("boundary_layout") != "packed-output row-major float32-le RGBA: finiteSourceBoundary,0,0,1"):
         raise ValueError("shared pin evidence does not identify its exact draw and source")
+    evidence_artifacts = evidence.get("artifacts")
+    if not isinstance(evidence_artifacts, dict):
+        raise ValueError("actual draw evidence artifacts must be an object")
     payloads = {}
     missing = []
     for name in ARTIFACTS:
         descriptor = manifest["artifacts"].get(name)
-        if not isinstance(descriptor, dict) or descriptor != evidence.get("artifacts", {}).get(name):
+        if not isinstance(descriptor, dict) or descriptor != evidence_artifacts.get(name):
             raise ValueError(f"{name} evidence/manifest descriptor mismatch")
         if descriptor.get("available") is True:
             payloads[name] = _read(root, manifest, name)
@@ -108,7 +129,7 @@ def verify(root: Any, manifest: dict[str, Any]) -> dict[str, Any]:
             missing.append(name)
     if missing:
         return {**attribution, "actual_map_verified": False,
-                "unavailable_reason": "optional shared readbacks unavailable", "missing": missing}
+                "unavailable_reason": "optional shared readbacks unavailable", "missing": missing}, None
 
     import numpy as np
 
@@ -117,9 +138,11 @@ def verify(root: Any, manifest: dict[str, Any]) -> dict[str, Any]:
     width, height, top, band = struct.unpack("<4I", payloads[ARTIFACTS[3]])
     source = manifest["dimensions"]["source"]
     packed = manifest["dimensions"]["packed_sbs"]
+    source_shape = shared.get("source_shape")
     if (width != source["width"] or height != source["height"] or
             width == 0 or height == 0 or band == 0 or top >= height or band > height - top or
-            shared.get("source_shape") != [width, height, top, band]):
+            not isinstance(source_shape, list) or any(type(word) is not int for word in source_shape) or
+            source_shape != [width, height, top, band]):
         raise ValueError("shared pin b6/source shape disagrees")
     shapes = ((width, band, 41, 4), (width, band, 41, 4),
               (1, band + 1, 42, 4), None,
@@ -130,7 +153,8 @@ def verify(root: Any, manifest: dict[str, Any]) -> dict[str, Any]:
             continue
         w, h, fmt, stride = shape
         desc = manifest["artifacts"][name].get("texture", {})
-        if (desc.get("width") != w or desc.get("height") != h or desc.get("format_value") != fmt or
+        if (not isinstance(desc, dict) or desc.get("width") != w or desc.get("height") != h or
+                desc.get("format_value") != fmt or
                 len(payloads[name]) != w * h * stride):
             raise ValueError(f"{name} exact texture layout disagrees")
     weights = np.frombuffer(payloads[ARTIFACTS[0]], dtype="<f4").reshape(band, width)
@@ -150,6 +174,9 @@ def verify(root: Any, manifest: dict[str, Any]) -> dict[str, Any]:
             np.any(boundary[..., 1:3] != 0) or np.any(boundary[..., 3] != 1)):
         raise ValueError("shared pin map/boundary contains noncanonical channels")
     valid = mapping[..., 3] == 1
+    if any(np.any(mapping[..., channel] != expected, where=~valid)
+           for channel, expected in enumerate((-1.0, -1.0, 0.0))):
+        raise ValueError("shared pin invalid content map must use its canonical sentinel")
     expected_boundary = valid & ((mapping[..., 0] < 0) | (mapping[..., 0] > 1))
     if (not np.array_equal(boundary[..., 0].astype(bool), expected_boundary) or
             np.any(mapping[..., 1][valid] < 0) or np.any(mapping[..., 1][valid] > 1)):
@@ -161,14 +188,17 @@ def verify(root: Any, manifest: dict[str, Any]) -> dict[str, Any]:
             "pinned_native_rows": int(np.count_nonzero(rows[:-1])),
             "selected_receipt_authorized": bool(rows[-1]),
             "legacy_map_has_render_authority": False,
-            "pin_scan_replayed_on_cpu": False}
+            "pin_scan_replayed_on_cpu": False}, mapping
+
+
+def verify(root: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Authenticate same-draw fields/maps; optional missing diagnostics remain explicit."""
+    return _verify(root, manifest)[0]
 
 
 def load_actual_map(root: Any, manifest: dict[str, Any]) -> Any:
     """Return the authenticated actual source-U map for shared-warp numeric analysis."""
-    summary = verify(root, manifest)
+    summary, mapping = _verify(root, manifest)
     if not summary.get("actual_map_verified"):
         raise ValueError("shared warp has no complete authenticated actual-map readback")
-    import numpy as np
-    payload = _read(Path(root), manifest, ARTIFACTS[4])
-    return np.frombuffer(payload, dtype="<f4").reshape(summary["height"], summary["width"], 4)[..., 0].copy()
+    return mapping[..., 0].copy()

@@ -50,6 +50,7 @@ class HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageColourReference_Te
 class HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageBalancedDrawCost_Test;
 class HostSbsV2LiveWarpGpuTest_ActualCurrentExactGlyphErasureColourReference_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
+class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
 
 namespace {
@@ -155,6 +156,7 @@ namespace {
     friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageBalancedDrawCost_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentExactGlyphErasureColourReference_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
   public:
     bool initialize(
@@ -1002,8 +1004,11 @@ namespace {
       bool submitted = false;
       recorder_flat_fallback_used = false;
       ComPtr<ID3D11Buffer> previous_background_constants;
+      std::array<ComPtr<ID3D11ShaderResourceView>, 2u> previous_background_resources;
       if (current_outline_completed) {
         context->PSGetConstantBuffers(4u, 1u, previous_background_constants.GetAddressOf());
+        context->PSGetShaderResources(9u, 1u, &previous_background_resources[0u]);
+        context->PSGetShaderResources(11u, 1u, &previous_background_resources[1u]);
       }
       {
         models::research_queued_render_guard_v1::scoped_binding_t guard;
@@ -1118,11 +1123,12 @@ namespace {
           error = "completed current-outline draw leaked selected receipt/legacy bindings";
           return false;
         }
-        for (UINT slot : {9u, 11u}) {
+        constexpr std::array<UINT, 2u> background_slots {9u, 11u};
+        for (std::size_t index = 0u; index < background_slots.size(); ++index) {
           ComPtr<ID3D11ShaderResourceView> resource;
-          context->PSGetShaderResources(slot, 1u, &resource);
-          if (resource) {
-            error = "completed current-outline draw leaked background bindings";
+          context->PSGetShaderResources(background_slots[index], 1u, &resource);
+          if (resource.Get() != previous_background_resources[index].Get()) {
+            error = "completed current-outline draw did not restore background bindings";
             return false;
           }
         }
@@ -6055,6 +6061,10 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejec
   fixture.context->CSSetUnorderedAccessViews(0u, 3u, old_uavs, nullptr);
   fixture.context->CSSetSamplers(0u, 1u, &old_sampler);fixture.context->CSSetShader(old_shader, nullptr, 0u);
   fixture.context->PSSetShaderResources(12u, 3u, old_pixel);fixture.context->PSSetConstantBuffers(6u, 1u, &old_buffer);
+  auto *old_background = sentinel_srv.Get();
+  fixture.context->PSSetShaderResources(9u, 1u, &old_background);
+  fixture.context->PSSetShaderResources(11u, 1u, &old_background);
+  fixture.context->PSSetConstantBuffers(4u, 1u, &old_buffer);
   std::vector<std::byte> output;
   ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
     source.data(), base, base, state, {}, output, error, 0u, 0u, {}, &subtitle, nullptr, true, &operands)) << error;
@@ -6074,11 +6084,41 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejec
   }
   EXPECT_EQ(restored_sampler.Get(), old_sampler);EXPECT_EQ(restored_shader.Get(), old_shader);
   EXPECT_EQ(restored_pixel_constant, old_buffer);if(restored_pixel_constant)restored_pixel_constant->Release();
+  ComPtr<ID3D11ShaderResourceView> restored_background, restored_proof;
+  fixture.context->PSGetShaderResources(9u, 1u, &restored_background);
+  fixture.context->PSGetShaderResources(11u, 1u, &restored_proof);
+  EXPECT_EQ(restored_background.Get(), old_background);
+  EXPECT_EQ(restored_proof.Get(), old_background);
+  // render() verifies b4 restoration at scope exit before clearing its draw constants.
   shared::request_t missing;
   EXPECT_FALSE(fixture.production_shared_ui_pin_owner.queue(fixture.context.Get(),
     fixture.production_shared_ui_pin_programs.program(), missing, error));
   EXPECT_FALSE(fixture.production_shared_ui_pin_owner.matches(fixture.context.Get(), missing));
   EXPECT_FALSE(fixture.production_shared_ui_pin_owner.views().field);
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice) {
+  namespace shared = models::host_sbs_shared_ui_warp;
+  live_v2_warp_fixture_t fixture;
+  std::string error;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  shared::resources_t owner;
+  EXPECT_FALSE(owner.ensure(fixture.device.Get(), {8u, 16384u, 0u, 16384u}, error));
+  EXPECT_EQ(error, "Shared UI warp native source domain unavailable");
+  EXPECT_FALSE(owner.views().field);
+
+  shared::programs_t programs;
+  ASSERT_TRUE(programs.load(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
+  ASSERT_TRUE(programs.load_diagnostics(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
+  EXPECT_FALSE(programs.load_diagnostics(nullptr, SUNSHINE_SHADERS_DIR, error));
+  EXPECT_FALSE(error.empty());
+  ComPtr<ID3D11Device> foreign_device;
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0u, nullptr, 0u,
+    D3D11_SDK_VERSION, foreign_device.GetAddressOf(), nullptr, nullptr)));
+  EXPECT_FALSE(programs.load_diagnostics(foreign_device.Get(), SUNSHINE_SHADERS_DIR, error));
+  error = "previous diagnostic failure";
+  ASSERT_TRUE(programs.load_diagnostics(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
+  EXPECT_TRUE(error.empty());
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw) {

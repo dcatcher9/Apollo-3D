@@ -55,7 +55,6 @@
 #include "src/host_sbs_pending_current_colour_lane.h"
 #include "src/host_sbs_selected_matte_gpu.h"
 #include "src/host_sbs_current_outline_runtime_programs.h"
-#include "src/host_sbs_selected_glyph_push_pull_runtime.h"
 #include "src/host_sbs_shared_ui_warp_runtime.h"
 #include "src/host_sbs_resolution.h"
 #include "src/host_sbs_shader_cache.h"
@@ -2773,207 +2772,195 @@ namespace platf::dxgi {
             };
             // One fresh pin field uses the current actual draw source. The immutable draw
             // keeps the selected receipt/current RGB checks and performs no RGB reconstruction.
-            namespace current_bg=models::selected_glyph_push_pull_bg_gpu_v1;
-            namespace shared_warp=models::host_sbs_shared_ui_warp;
-            current_bg::views_t current_background;
-            current_bg::request_t current_background_request;
-            bool current_background_joined=false;
+            namespace shared_warp = models::host_sbs_shared_ui_warp;
             shared_warp::views_t current_shared_warp;
-            shared_warp::request_t shared_request;
-            bool shared_warp_selected=false;
-            actual_converter_probe_v1::background_draw_t current_background_observed;
+            bool shared_warp_selected = false;
             actual_converter_probe_v1::shared_warp_draw_t current_shared_observed;
-            const models::push_pull_current_draw_lease_v1::lease_t::key_t current_colour_key{
-              frame_id, draw_source_slot?draw_source_slot->frame_id:0u,
-              draw_source_slot?static_cast<std::uint64_t>(draw_source_slot->captured_at.time_since_epoch().count()):0u,
-              static_cast<std::uint64_t>(subtitle_constants.color_mode)
+            // Preparation and the pre-Draw observer derive the same literal request from
+            // the recorder command, rather than maintaining a second copy of its operands.
+            const auto shared_request_for_draw = [&] {
+              shared_warp::request_t request;
+              std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
+              request.draw_srvs[7u] = selected_receipt;
+              request.draw_srvs[8u] = selected_original_legacy;
+              request.geometry_constants = draw_command.geometry_constants;
+              request.subtitle_constants = draw_command.subtitle_constants;
+              request.sampler = draw_command.sampler;
+              request.queued = draw_command.queued_guard_override;
+              request.queued_guard_constants = draw_command.queued_guard_constants;
+              request.queued_guard_transaction = draw_command.queued_guard_transaction;
+              return request;
             };
-            if(selected_draw&&selected_matte_current_outline&&subtitle_constants.enabled==1u&&selected_shared_warp_programs.ready()) {
+            if (selected_draw && selected_matte_current_outline && subtitle_constants.enabled == 1u && selected_shared_warp_programs.ready()) {
               Microsoft::WRL::ComPtr<ID3D11Resource> matte_resource;
               Microsoft::WRL::ComPtr<ID3D11Texture2D> matte_texture;
               dump_warp_inputs[3]->GetResource(&matte_resource);
               Microsoft::WRL::ComPtr<ID3D11Resource> colour_resource;
               Microsoft::WRL::ComPtr<ID3D11Texture2D> colour_texture;
               dump_warp_inputs[0]->GetResource(&colour_resource);
-              D3D11_TEXTURE2D_DESC matte_desc{};
-              D3D11_TEXTURE2D_DESC colour_desc{};
+              D3D11_TEXTURE2D_DESC matte_desc {};
+              D3D11_TEXTURE2D_DESC colour_desc {};
               std::string shared_error;
-              if(SUCCEEDED(matte_resource.As(&matte_texture))&&SUCCEEDED(colour_resource.As(&colour_texture))) {
+              if (SUCCEEDED(matte_resource.As(&matte_texture)) && SUCCEEDED(colour_resource.As(&colour_texture))) {
                 matte_texture->GetDesc(&matte_desc);
                 colour_texture->GetDesc(&colour_desc);
-                if(matte_desc.Width==subtitle_constants.source_width&&matte_desc.Height>0u&&
-                   matte_desc.Height<=subtitle_constants.source_height&&
-                   subtitle_constants.source_top<=colour_desc.Height&&
-                   subtitle_constants.source_height<=colour_desc.Height-subtitle_constants.source_top) {
-                  const UINT band_top=subtitle_constants.source_top+subtitle_constants.source_height-matte_desc.Height;
-                  const UINT band_end=subtitle_constants.source_top+subtitle_constants.source_height;
-                  const UINT padded_top=band_top>0u?band_top-1u:0u;
-                  const std::array<UINT,4u> shape{colour_desc.Width,colour_desc.Height,padded_top,
-                    std::min(colour_desc.Height,band_end+1u)-padded_top};
-                  std::copy(draw_command.shader_resources.begin(),draw_command.shader_resources.end(),shared_request.draw_srvs.begin());
-                  shared_request.draw_srvs[7u]=selected_receipt;shared_request.draw_srvs[8u]=selected_original_legacy;
-                  shared_request.geometry_constants=draw_command.geometry_constants;
-                  shared_request.subtitle_constants=draw_command.subtitle_constants;
-                  shared_request.sampler=draw_command.sampler;
-                  shared_request.queued=queued_geometry_selected;
-                  shared_request.queued_guard_constants=draw_command.queued_guard_constants;
-                  shared_request.queued_guard_transaction=draw_command.queued_guard_transaction;
-                  const auto program=selected_shared_warp_programs.program(queued_geometry_selected);
-                  if(selected_shared_warp.ensure(device.get(),shape,shared_error)&&
-                     selected_shared_warp.queue(device_ctx.get(),program,shared_request,shared_error)&&
-                     selected_shared_warp.matches(device_ctx.get(),shared_request)) {
-                    current_shared_warp=selected_shared_warp.views();
-                    shared_warp_selected=true;
-                    draw_command.pixel_shader=program.pixel;
+                if (matte_desc.Width == subtitle_constants.source_width && matte_desc.Height > 0u && matte_desc.Height <= subtitle_constants.source_height && subtitle_constants.source_top <= colour_desc.Height && subtitle_constants.source_height <= colour_desc.Height - subtitle_constants.source_top) {
+                  const UINT band_top = subtitle_constants.source_top + subtitle_constants.source_height - matte_desc.Height;
+                  const UINT band_end = subtitle_constants.source_top + subtitle_constants.source_height;
+                  const UINT padded_top = band_top > 0u ? band_top - 1u : 0u;
+                  const std::array<UINT, 4u> shape {colour_desc.Width, colour_desc.Height, padded_top, std::min(colour_desc.Height, band_end + 1u) - padded_top};
+                  const auto request = shared_request_for_draw();
+                  const auto program = selected_shared_warp_programs.program(queued_geometry_selected);
+                  if (selected_shared_warp.ensure(device.get(), shape, shared_error) && selected_shared_warp.queue(device_ctx.get(), program, request, shared_error) && selected_shared_warp.matches(device_ctx.get(), request)) {
+                    current_shared_warp = selected_shared_warp.views();
+                    shared_warp_selected = true;
+                    draw_command.pixel_shader = program.pixel;
                   }
                 }
               }
             }
-            bool draw_recorded=false;
+            bool draw_recorded = false;
             {
               models::research_pending_current_colour_v1::scoped_negative_t negative;
-              const bool bound=!pending_current_colour_selected || negative.bind(device_ctx.get(),pending_colour_lane.negative_expected(),pending_colour_lane.negative_receipt(),pending_colour_lane.current_constants().Get(),pending_colour_lane.current_snapshot().receipt.Get());
+              const bool bound = !pending_current_colour_selected || negative.bind(device_ctx.get(), pending_colour_lane.negative_expected(), pending_colour_lane.negative_receipt(), pending_colour_lane.current_constants().Get(), pending_colour_lane.current_snapshot().receipt.Get());
               models::research_selected_matte_v1::scoped_receipt_t selected_scope;
               models::research_current_outline_selected_matte_v2::scoped_receipt_t outline_scope;
-              const bool selected_bound=!selected_draw || (selected_matte_current_outline ?
-                outline_scope.bind(device_ctx.get(),selected_receipt,selected_original_legacy) :
-                selected_scope.bind(device_ctx.get(),selected_receipt));
+              const bool selected_bound = !selected_draw || (selected_matte_current_outline ?
+                                                               outline_scope.bind(device_ctx.get(), selected_receipt, selected_original_legacy) :
+                                                               selected_scope.bind(device_ctx.get(), selected_receipt));
               shared_warp::scoped_binding_t shared_scope;
-              const bool background_bound=!selected_draw||!selected_matte_current_outline||
-                shared_scope.bind(device_ctx.get(),shared_warp_selected?&current_shared_warp:nullptr);
-              if(probe_observer.record&&selected_draw&&selected_matte_current_outline) {
-                current_background_observed.role_matched=current_background_joined;
-                current_background_observed.bound=background_bound&&current_background_joined;
-                device_ctx->PSGetShaderResources(9u,1u,current_background_observed.field.GetAddressOf());
-                device_ctx->PSGetShaderResources(11u,1u,current_background_observed.proof.GetAddressOf());
-                device_ctx->PSGetConstantBuffers(4u,1u,current_background_observed.expected.GetAddressOf());
-                Microsoft::WRL::ComPtr<ID3D11Resource> actual_colour;
-                draw_command.shader_resources[0]->GetResource(&actual_colour);
-                current_background_observed.actual_role_pointers={
-                  reinterpret_cast<std::uintptr_t>(draw_command.shader_resources[0]),reinterpret_cast<std::uintptr_t>(actual_colour.Get()),
-                  reinterpret_cast<std::uintptr_t>(draw_command.shader_resources[3]),reinterpret_cast<std::uintptr_t>(selected_receipt),
-                  reinterpret_cast<std::uintptr_t>(draw_command.shader_resources[4]),reinterpret_cast<std::uintptr_t>(draw_command.shader_resources[6]),
-                  reinterpret_cast<std::uintptr_t>(device_ctx.get())};
-              }
+              const bool shared_bound = !selected_draw || !selected_matte_current_outline ||
+                                        shared_scope.bind(device_ctx.get(), shared_warp_selected ? &current_shared_warp : nullptr);
               auto observe_dump_bindings = [&](ID3D11DeviceContext *observed_context) noexcept {
-                if (!dump_actual_draw&&!(probe_observer.record&&shared_warp_selected)) return;
+                if (!dump_actual_draw && !(probe_observer.record && shared_warp_selected)) {
+                  return;
+                }
                 try {
+                  // Observe AFTER the recorder binds its operands, while receipt and pin scopes
+                  // still exist, BEFORE Draw and recorder cleanup. Strong references survive restoration; maybe_dump below
+                  // issues their GPU copies before the next conversion can reuse these buffers.
+                  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 15u> actual;
+                  ID3D11ShaderResourceView *raw[15] {};
+                  observed_context->PSGetShaderResources(0u, 15u, raw);
+                  for (std::size_t i = 0u; i < actual.size(); ++i) {
+                    actual[i].Attach(raw[i]);
+                  }
+                  Microsoft::WRL::ComPtr<ID3D11PixelShader> actual_shader;
+                  observed_context->PSGetShader(actual_shader.GetAddressOf(), nullptr, nullptr);
+                  std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, 5u> constants;
+                  ID3D11Buffer *raw_constants[5] {};
+                  observed_context->PSGetConstantBuffers(2u, 5u, raw_constants);
+                  for (std::size_t i = 0u; i < constants.size(); ++i) {
+                    constants[i].Attach(raw_constants[i]);
+                  }
+                  if (probe_observer.record && shared_warp_selected) {
+                    auto &s = current_shared_observed;
+                    s.selected = actual_shader.Get() == draw_command.pixel_shader;
+                    s.queued = queued_geometry_selected;
+                    s.serial = current_shared_warp.serial;
+                    s.shape = current_shared_warp.shape;
+                    s.source_closure = shared_warp::closure;
+                    s.pixel_shader_address = reinterpret_cast<std::uintptr_t>(actual_shader.Get());
+                    s.weights = actual[12];
+                    s.field = actual[13];
+                    s.rows = actual[14];
+                    s.geometry = constants[4];
+                    s.no_background = !actual[9] && !actual[11] && !constants[2];
+                    const auto request = shared_request_for_draw();
+                    s.role_matched = selected_shared_warp.matches(observed_context, request);
+                    bool bindings = s.selected && s.role_matched && s.no_background &&
+                                    constants[0].Get() == request.geometry_constants && constants[1].Get() == request.subtitle_constants &&
+                                    s.weights.Get() == current_shared_warp.weights.Get() && s.field.Get() == current_shared_warp.field.Get() &&
+                                    s.rows.Get() == current_shared_warp.rows.Get() && s.geometry.Get() == current_shared_warp.geometry.Get();
+                    for (std::size_t i = 0u; i < request.draw_srvs.size(); ++i) {
+                      bindings = bindings && actual[i].Get() == request.draw_srvs[i];
+                    }
+                    if (queued_geometry_selected) {
+                      bindings = bindings && constants[3].Get() == request.queued_guard_constants && actual[10].Get() == request.queued_guard_transaction;
+                    }
+                    s.bindings_observed = bindings;
+                  }
+                  if (!dump_actual_draw) {
+                    return;
+                  }
+                  auto &e = *dump_actual_draw;
 
-                // Observe AFTER the recorder binds its operands, while t7/t8 and BG scopes
-                // still exist, BEFORE Draw and recorder cleanup. Strong references survive restoration; maybe_dump below
-                // issues their GPU copies before the next conversion can reuse these buffers.
-                std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 15u> actual;
-                ID3D11ShaderResourceView *raw[15] {};
-                observed_context->PSGetShaderResources(0u, 15u, raw);
-                for (std::size_t i=0u;i<actual.size();++i) actual[i].Attach(raw[i]);
-                Microsoft::WRL::ComPtr<ID3D11PixelShader> actual_shader;
-                observed_context->PSGetShader(actual_shader.GetAddressOf(),nullptr,nullptr);
-                if(probe_observer.record&&shared_warp_selected) {
-                  auto &s=current_shared_observed;
-                  s.selected=actual_shader.Get()==draw_command.pixel_shader;
-                  s.queued=queued_geometry_selected;
-                  s.serial=current_shared_warp.serial;s.shape=current_shared_warp.shape;
-                  s.source_closure=shared_warp::closure;
-                  s.pixel_shader_address=reinterpret_cast<std::uintptr_t>(actual_shader.Get());
-                  s.weights=actual[12];s.field=actual[13];s.rows=actual[14];
-                  Microsoft::WRL::ComPtr<ID3D11Buffer> geometry,subtitle,background,guard;
-                  observed_context->PSGetConstantBuffers(2u,1u,geometry.GetAddressOf());
-                  observed_context->PSGetConstantBuffers(3u,1u,subtitle.GetAddressOf());
-                  observed_context->PSGetConstantBuffers(4u,1u,background.GetAddressOf());
-                  observed_context->PSGetConstantBuffers(5u,1u,guard.GetAddressOf());
-                  observed_context->PSGetConstantBuffers(6u,1u,s.geometry.GetAddressOf());
-                  s.no_background=!actual[9]&&!actual[11]&&!background;
-                  auto request=shared_request;
-                  std::copy(draw_command.shader_resources.begin(),draw_command.shader_resources.end(),request.draw_srvs.begin());
-                  request.draw_srvs[7u]=selected_receipt;request.draw_srvs[8u]=selected_original_legacy;
-                  request.geometry_constants=draw_command.geometry_constants;
-                  request.subtitle_constants=draw_command.subtitle_constants;
-                  request.sampler=draw_command.sampler;
-                  s.role_matched=selected_shared_warp.matches(observed_context,request);
-                  bool bindings=s.selected&&s.role_matched&&s.no_background&&
-                    geometry.Get()==request.geometry_constants&&subtitle.Get()==request.subtitle_constants&&
-                    s.weights.Get()==current_shared_warp.weights.Get()&&s.field.Get()==current_shared_warp.field.Get()&&
-                    s.rows.Get()==current_shared_warp.rows.Get()&&s.geometry.Get()==current_shared_warp.geometry.Get();
-                  for(std::size_t i=0u;i<request.draw_srvs.size();++i)bindings=bindings&&actual[i].Get()==request.draw_srvs[i];
-                  if(queued_geometry_selected)bindings=bindings&&guard.Get()==request.queued_guard_constants&&actual[10].Get()==request.queued_guard_transaction;
-                  s.bindings_observed=bindings;
-                }
-                if(!dump_actual_draw)return;
-                auto &e=*dump_actual_draw;
+                  e.conversion_frame = frame_id;
+                  e.model_frame = draw_source_slot ? draw_source_slot->frame_id : 0u;
+                  e.observation_us = draw_source_slot ? host_sbs_observation_timestamp_us(draw_source_slot->captured_at) : 0u;
+                  e.selected_shader = selected_draw && actual_shader.Get() == draw_command.pixel_shader;
+                  e.queued_geometry = queued_geometry_selected;
+                  e.shared_pin_selected = e.selected_shader && shared_warp_selected;
+                  e.pixel_shader_address = reinterpret_cast<std::uintptr_t>(actual_shader.Get());
+                  if (e.shared_pin_selected) {
+                    e.program = "shared-ui-pin-v1";
+                    e.pixel_shader_closure = shared_warp::closure;
+                  } else if (e.selected_shader) {
+                    e.program = selected_matte_current_outline ? "current-outline-selected" : "research-selected";
+                    e.pixel_shader_closure = queued_geometry_selected ? selected_matte_queued_closure : selected_matte_completed_closure;
+                  } else if (actual_shader.Get() == sbs_reprojection_v2_live_ps.get()) {
+                    e.program = "ordinary-v2";
+                    e.pixel_shader_closure = sbs_reprojection_v2_live_source_closure_sha256;
+                  } else if (actual_shader.Get() == sbs_flat_identity_ps.get()) {
+                    e.program = "flat-identity";
+                  } else {
+                    e.program = "other-observed-draw";
+                  }
+                  e.matte = actual[3];
+                  e.selected_receipt = actual[7];
+                  e.legacy_matte = actual[8];
+                  e.background = actual[9];
+                  e.background_proof = actual[11];
+                  if (e.shared_pin_selected) {
+                    e.shared_pin_weights = actual[12];
+                    e.shared_pin_field = actual[13];
+                    e.shared_pin_rows = actual[14];
+                    e.shared_pin_geometry = constants[4];
+                    e.shared_pin_source_closure = shared_warp::closure;
+                  }
+                  e.geometry_constants = constants[0];
+                  e.subtitle_constants = constants[1];
+                  e.expected = constants[2];
+                  // Retired repair ownership fields retain their unavailable defaults. Actual
+                  // legacy slots above remain observed so diagnostics cannot invent absence.
+                  e.owner_serial = e.shared_pin_selected ? current_shared_warp.serial : 0u;
+                  e.colour_key = {frame_id, draw_source_slot ? draw_source_slot->frame_id : 0u, draw_source_slot ? static_cast<std::uint64_t>(draw_source_slot->captured_at.time_since_epoch().count()) : 0u, static_cast<std::uint64_t>(subtitle_constants.color_mode)};
+                  e.analysis_source_rect = {subtitle_constants.source_left, subtitle_constants.source_top, subtitle_constants.source_width, subtitle_constants.source_height};
+                  e.analysis_shape = e.shared_pin_selected ? current_shared_warp.shape : std::array<std::uint32_t, 4u> {};
+                  e.context_address = reinterpret_cast<std::uintptr_t>(observed_context);
+                  Microsoft::WRL::ComPtr<ID3D11Resource> source_resource;
+                  if (actual[0]) {
+                    actual[0]->GetResource(&source_resource);
+                  }
+                  e.actual_role_pointers = {reinterpret_cast<std::uintptr_t>(actual[0].Get()), reinterpret_cast<std::uintptr_t>(source_resource.Get()), reinterpret_cast<std::uintptr_t>(actual[3].Get()), reinterpret_cast<std::uintptr_t>(actual[7].Get()), reinterpret_cast<std::uintptr_t>(actual[4].Get()), reinterpret_cast<std::uintptr_t>(actual[6].Get()), e.context_address};
 
-                e.conversion_frame=frame_id; e.model_frame=draw_source_slot?draw_source_slot->frame_id:0u;
-                e.observation_us=draw_source_slot?host_sbs_observation_timestamp_us(draw_source_slot->captured_at):0u;
-                e.selected_shader=selected_draw&&actual_shader.Get()==draw_command.pixel_shader;
-                e.queued_geometry=queued_geometry_selected;
-                e.shared_pin_selected=e.selected_shader&&shared_warp_selected;
-                e.program=e.shared_pin_selected?"shared-ui-pin-v1":e.selected_shader?(selected_matte_current_outline?"current-outline-selected":"research-selected"):
-                  actual_shader.Get()==sbs_reprojection_v2_live_ps.get()?"ordinary-v2":
-                  actual_shader.Get()==sbs_flat_identity_ps.get()?"flat-identity":"other-observed-draw";
-                e.pixel_shader_address=reinterpret_cast<std::uintptr_t>(actual_shader.Get());
-                if(e.shared_pin_selected)e.pixel_shader_closure=shared_warp::closure;
-                else if(e.selected_shader)e.pixel_shader_closure=queued_geometry_selected?selected_matte_queued_closure:selected_matte_completed_closure;
-                else if(actual_shader.Get()==sbs_reprojection_v2_live_ps.get())e.pixel_shader_closure=sbs_reprojection_v2_live_source_closure_sha256;
-                e.matte=actual[3]; e.selected_receipt=actual[7]; e.legacy_matte=actual[8];
-                e.background=actual[9]; e.background_proof=actual[11];
-                if(e.shared_pin_selected) {
-                  e.shared_pin_weights=actual[12];e.shared_pin_field=actual[13];e.shared_pin_rows=actual[14];
-                  observed_context->PSGetConstantBuffers(6u,1u,e.shared_pin_geometry.GetAddressOf());
-                  e.shared_pin_source_closure=shared_warp::closure;
-                }
-                observed_context->PSGetConstantBuffers(2u,1u,e.geometry_constants.GetAddressOf());
-                observed_context->PSGetConstantBuffers(3u,1u,e.subtitle_constants.GetAddressOf());
-                observed_context->PSGetConstantBuffers(4u,1u,e.expected.GetAddressOf());
-                e.source_c24=current_background_observed.source_c24;
-                e.background_queue_issued=current_background_observed.queue_issued;
-                e.background_role_matched=current_background_joined;
-                e.background_bound=current_background_joined&&e.background&&e.background_proof&&e.expected;
-                e.owner_serial=e.shared_pin_selected?current_shared_warp.serial:current_background_observed.owner_serial;
-                e.transport_serial=current_background_observed.transport_serial;
-                e.colour_key=current_colour_key;
-                e.analysis_source_rect={subtitle_constants.source_left,subtitle_constants.source_top,
-                  subtitle_constants.source_width,subtitle_constants.source_height};
-                e.analysis_shape=e.shared_pin_selected?current_shared_warp.shape:current_background_request.analysis_shape;
-                e.context_address=reinterpret_cast<std::uintptr_t>(observed_context);
-                Microsoft::WRL::ComPtr<ID3D11Resource> source_resource;
-                if(actual[0])actual[0]->GetResource(&source_resource);
-                e.actual_role_pointers={reinterpret_cast<std::uintptr_t>(actual[0].Get()),reinterpret_cast<std::uintptr_t>(source_resource.Get()),
-                  reinterpret_cast<std::uintptr_t>(actual[3].Get()),reinterpret_cast<std::uintptr_t>(actual[7].Get()),
-                  reinterpret_cast<std::uintptr_t>(actual[4].Get()),reinterpret_cast<std::uintptr_t>(actual[6].Get()),e.context_address};
-
-                e.captured=true; e.unavailable_reason.clear();
+                  e.captured = true;
+                  e.unavailable_reason.clear();
                 } catch (...) {
-                  current_shared_observed.bindings_observed=false;
-                  if(dump_actual_draw) {
+                  current_shared_observed.bindings_observed = false;
+                  if (dump_actual_draw) {
                     dump_actual_draw->release_resources();
-                    dump_actual_draw->captured=false;
+                    dump_actual_draw->captured = false;
                   }
                 }
               };
-              if (snapshot_debug_inputs||(probe_observer.record&&shared_warp_selected)) {
-                using observer_t=decltype(observe_dump_bindings);
-                draw_command.bound_draw_observer_state=&observe_dump_bindings;
-                draw_command.observe_bound_draw=+[](void *state,ID3D11DeviceContext *context) noexcept {
+              if (snapshot_debug_inputs || (probe_observer.record && shared_warp_selected)) {
+                using observer_t = decltype(observe_dump_bindings);
+                draw_command.bound_draw_observer_state = &observe_dump_bindings;
+                draw_command.observe_bound_draw = +[](void *state, ID3D11DeviceContext *context) noexcept {
                   (*static_cast<observer_t *>(state))(context);
                 };
               }
-              draw_recorded=bound && selected_bound && background_bound && record_host_sbs_v2_draw(device_ctx.get(),draw_command);
+              draw_recorded = bound && selected_bound && shared_bound && record_host_sbs_v2_draw(device_ctx.get(), draw_command);
               // A queued failure can reuse draw_command for flat fallback below, after this
               // stack observer has expired. Never let that later draw call a dangling state.
-              draw_command.observe_bound_draw=nullptr;
-              draw_command.bound_draw_observer_state=nullptr;
-              if(probe_observer.record&&draw_recorded&&selected_draw&&selected_matte_current_outline) {
-                Microsoft::WRL::ComPtr<ID3D11PixelShader> actual_shader;
-                device_ctx->PSGetShader(actual_shader.GetAddressOf(),nullptr,nullptr);
-                current_background_observed.pixel_shader_address=reinterpret_cast<std::uintptr_t>(actual_shader.Get());
-                current_background_observed.ps_observed_after_draw=actual_shader.Get()==draw_command.pixel_shader;
-                current_background_observed.pixel_shader_closure=shared_warp_selected?std::string(shared_warp::closure):queued_geometry_selected?selected_matte_queued_closure:selected_matte_completed_closure;
-              }
-              if(draw_recorded&&shared_warp_selected&&dump_actual_draw&&dump_actual_draw->captured) {
+              draw_command.observe_bound_draw = nullptr;
+              draw_command.bound_draw_observer_state = nullptr;
+              if (draw_recorded && shared_warp_selected && dump_actual_draw && dump_actual_draw->captured) {
                 // Requested-only diagnostics reuse this exact field/header/receipt before the
                 // owner can be queued again. They do not allocate or run on ordinary draws.
-                (void) render_shared_ui_debug_geometry(draw_command,*dump_actual_draw);
+                (void) render_shared_ui_debug_geometry(draw_command, *dump_actual_draw);
               }
-
             }
             if (!draw_recorded) {
               if (!queued_geometry_selected) {
@@ -3042,7 +3029,6 @@ namespace platf::dxgi {
               // Literal operands of the actual successful normal-recorder command, not a
               // post-hoc choice from the result views. Recorder source is frozen separately.
               e.selected_draw=selected_draw&&!queued_attempt_failed_flat;
-              if(e.selected_draw&&current_background_observed.colour_key[0]==frame_id)e.background=current_background_observed;
               if(e.selected_draw&&shared_warp_selected)e.shared_warp=current_shared_observed;
               if(e.selected_draw){e.selected_views[2]=draw_command.shader_resources[3];Microsoft::WRL::ComPtr<ID3D11Resource> r;selected_receipt->GetResource(&r);e.actual_draw_selected_receipt_address=reinterpret_cast<std::uintptr_t>(r.Get());}
               emit_converter_probe(std::move(e),draw_source_slot,queued_attempt_failed_flat ? nullptr:&est,
@@ -6521,30 +6507,43 @@ namespace platf::dxgi {
       sbs_debug::actual_draw_evidence &evidence
     ) {
       std::string error;
-      if(!evidence.shared_pin_selected||!sbs_intermediate_texture||
-         !selected_shared_warp_programs.load_diagnostics(device.get(),selected_shared_warp_root,error)) return false;
-      D3D11_TEXTURE2D_DESC desc{};sbs_intermediate_texture->GetDesc(&desc);
-      desc.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;desc.Usage=D3D11_USAGE_DEFAULT;
-      desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;desc.CPUAccessFlags=desc.MiscFlags=0u;
-      std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2u> textures;
-      std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>,2u> targets;
-      std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,2u> views;
-      for(std::size_t i=0u;i<textures.size();++i) {
-        if(FAILED(device->CreateTexture2D(&desc,nullptr,&textures[i]))||
-           FAILED(device->CreateRenderTargetView(textures[i].Get(),nullptr,&targets[i]))||
-           FAILED(device->CreateShaderResourceView(textures[i].Get(),nullptr,&views[i])))return false;
+      if (!evidence.shared_pin_selected || !sbs_intermediate_texture || !selected_shared_warp_programs.load_diagnostics(device.get(), selected_shared_warp_root, error)) {
+        return false;
       }
-      auto draw=actual_draw;
-      draw.render_target_count=1u;draw.render_targets[1]=nullptr;
-      draw.bound_draw_observer_state=nullptr;draw.observe_bound_draw=nullptr;
-      device_ctx->OMSetBlendState(blend_disable.get(),nullptr,0xFFFFFFFFu);
-      draw.render_targets[0]=targets[0].Get();
-      draw.pixel_shader=selected_shared_warp_programs.mapping(actual_draw.queued_guard_override);
-      if(!record_host_sbs_v2_draw(device_ctx.get(),draw))return false;
-      draw.render_targets[0]=targets[1].Get();
-      draw.pixel_shader=selected_shared_warp_programs.boundary(actual_draw.queued_guard_override);
-      if(!record_host_sbs_v2_draw(device_ctx.get(),draw))return false;
-      evidence.shared_pin_mapping=views[0];evidence.shared_pin_boundary=views[1];return true;
+      D3D11_TEXTURE2D_DESC desc {};
+      sbs_intermediate_texture->GetDesc(&desc);
+      desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      desc.CPUAccessFlags = desc.MiscFlags = 0u;
+      std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, 2u> textures;
+      std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>, 2u> targets;
+      std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2u> views;
+      for (std::size_t i = 0u; i < textures.size(); ++i) {
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &textures[i])) || FAILED(device->CreateRenderTargetView(textures[i].Get(), nullptr, &targets[i])) || FAILED(device->CreateShaderResourceView(textures[i].Get(), nullptr, &views[i]))) {
+          return false;
+        }
+      }
+      auto draw = actual_draw;
+      draw.render_target_count = 1u;
+      draw.render_targets[1] = nullptr;
+      draw.bound_draw_observer_state = nullptr;
+      draw.observe_bound_draw = nullptr;
+      device_ctx->OMSetBlendState(blend_disable.get(), nullptr, 0xFFFFFFFFu);
+      const std::array<ID3D11PixelShader *, 2u> shaders {
+        selected_shared_warp_programs.mapping(actual_draw.queued_guard_override),
+        selected_shared_warp_programs.boundary(actual_draw.queued_guard_override)
+      };
+      for (std::size_t i = 0u; i < targets.size(); ++i) {
+        draw.render_targets[0] = targets[i].Get();
+        draw.pixel_shader = shaders[i];
+        if (!record_host_sbs_v2_draw(device_ctx.get(), draw)) {
+          return false;
+        }
+      }
+      evidence.shared_pin_mapping = views[0];
+      evidence.shared_pin_boundary = views[1];
+      return true;
     }
 
     bool render_sbs_debug_geometry(

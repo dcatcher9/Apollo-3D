@@ -220,10 +220,9 @@ namespace sbs_bench::current_outline_qualification {
       const UINT width = result.input_region.width(), height = result.input_region.height();
       const UINT band = models::subtitle_ocr_source_crop_height(width, height);
       const UINT band_top = height - band;
-      const std::array<UINT, 4u> shape {width, height, band_top > 0u ? band_top - 1u : 0u, 0u};
-      auto padded_shape = shape;
-      padded_shape[3u] = height - shape[2u];
-      if (!shared_warp_.ensure(device_.Get(), padded_shape, error)) {
+      const UINT padded_top = band_top > 0u ? band_top - 1u : 0u;
+      const std::array<UINT, 4u> shape {width, height, padded_top, height - padded_top};
+      if (!shared_warp_.ensure(device_.Get(), shape, error)) {
         return false;
       }
       shared_warp::request_t request;

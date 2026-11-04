@@ -72,8 +72,9 @@ class SharedUiPinDumpTests(unittest.TestCase):
         self.manifest["artifacts"][name] = descriptor
         self.evidence["artifacts"][name] = copy.deepcopy(descriptor)
 
-    def seal(self):
-        payload = json.dumps(self.evidence).encode()
+    def seal(self, payload=None):
+        if payload is None:
+            payload = json.dumps(self.evidence).encode()
         (self.root / pin.EVIDENCE).write_bytes(payload)
         self.manifest["artifacts"][pin.EVIDENCE] = {
             "available": True, "sha256": hashlib.sha256(payload).hexdigest()}
@@ -122,6 +123,64 @@ class SharedUiPinDumpTests(unittest.TestCase):
         self.seal()
         with self.assertRaisesRegex(ValueError, "finite-source boundary disagree"):
             pin.verify(self.root, self.manifest)
+
+    def test_evidence_requires_one_unambiguous_json_object(self):
+        duplicate = b'{"captured":false,' + json.dumps(self.evidence).encode()[1:]
+        for payload in (b"[]", b"null", duplicate):
+            with self.subTest(payload=payload[:30]):
+                self.seal(payload)
+                with self.assertRaisesRegex(ValueError, "object|duplicate"):
+                    pin.verify(self.root, self.manifest)
+
+    def test_source_identity_and_shape_reject_boolean_aliases(self):
+        for field, manifest_field in (("model_frame", "matched_frame_id"),
+                                      ("observation_us", "matched_observation_timestamp_us")):
+            with self.subTest(field=field):
+                manifest = copy.deepcopy(self.manifest)
+                manifest[manifest_field] = 1
+                previous = self.evidence[field]
+                self.evidence[field] = True
+                self.seal()
+                manifest["artifacts"][pin.EVIDENCE] = self.manifest["artifacts"][pin.EVIDENCE]
+                try:
+                    with self.assertRaisesRegex(ValueError, "exact draw and source"):
+                        pin.verify(self.root, manifest)
+                finally:
+                    self.evidence[field] = previous
+        self.evidence["shared_pin"]["source_shape"][2] = True
+        self.seal()
+        with self.assertRaisesRegex(ValueError, "source shape"):
+            pin.verify(self.root, self.manifest)
+
+    def test_invalid_content_map_uses_canonical_sentinel(self):
+        name = pin.ARTIFACTS[4]
+        values = np.frombuffer((self.root / name).read_bytes(), dtype="<f4").copy()
+        values[:4] = (0, 0, 1, 0)
+        self.save(name, values.tobytes(), (16, 4, 2))
+        self.seal()
+        with self.assertRaisesRegex(ValueError, "invalid content"):
+            pin.verify(self.root, self.manifest)
+
+    def test_malformed_descriptors_report_validation_errors(self):
+        previous = self.manifest["artifacts"][pin.EVIDENCE]
+        self.manifest["artifacts"][pin.EVIDENCE] = []
+        with self.assertRaisesRegex(ValueError, "descriptor must be an object"):
+            pin.verify(self.root, self.manifest)
+        self.manifest["artifacts"][pin.EVIDENCE] = previous
+        name = pin.ARTIFACTS[4]
+        self.manifest["artifacts"][name]["texture"] = None
+        self.evidence["artifacts"][name]["texture"] = None
+        self.seal()
+        with self.assertRaisesRegex(ValueError, "exact texture layout"):
+            pin.verify(self.root, self.manifest)
+
+    def test_evidence_artifact_map_must_be_an_object(self):
+        for artifacts in (None, []):
+            with self.subTest(artifacts=artifacts):
+                self.evidence["artifacts"] = artifacts
+                self.seal()
+                with self.assertRaisesRegex(ValueError, "artifacts must be an object"):
+                    pin.verify(self.root, self.manifest)
 
     def test_optional_readback_failure_never_substitutes_legacy_map(self):
         name = pin.ARTIFACTS[4]
