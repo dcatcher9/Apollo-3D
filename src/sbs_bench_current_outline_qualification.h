@@ -4,17 +4,18 @@
 #ifdef _WIN32
   #include "host_sbs_current_outline_runtime_programs.h"
   #include "host_sbs_resolution.h"
-  #include "host_sbs_selected_glyph_push_pull_runtime.h"
+  #include "host_sbs_shared_ui_warp_runtime.h"
   #include "platform/windows/host_sbs_v2_renderer.h"
   #include "video_depth_estimator.h"
 
+  #include <cstddef>
   #include <cstring>
+  #include <vector>
 
 namespace sbs_bench::current_outline_qualification {
   using Microsoft::WRL::ComPtr;
   namespace runtime = models::current_outline_runtime;
-  namespace bg = models::selected_glyph_push_pull_bg_gpu_v1;
-  namespace bg_runtime = models::selected_glyph_push_pull_runtime_v1;
+  namespace shared_warp = models::host_sbs_shared_ui_warp;
 
   struct producer_stage_spec_t {
     std::size_t slot;
@@ -72,21 +73,19 @@ namespace sbs_bench::current_outline_qualification {
     models::selected_matte_receipt_v1::contour_identity_t contour {};
     std::array<std::uint32_t, 6u> condition {};
     models::depth_coordinate_v2::state_words_t state {};
-    std::array<std::uint32_t, 96u> background {};
-    std::array<std::uint32_t, 16u> background_expected {};
     std::array<std::uint32_t, 8u> subtitle_constants {};
-    std::uint64_t background_serial = 0u;
+    std::array<UINT, 4u> shared_warp_shape {};
+    std::vector<std::uint32_t> shared_warp_rows;
+    std::uint32_t shared_warp_selected_receipt_header = 0u;
+    std::uint64_t shared_warp_serial = 0u;
     bool bindings_observed = false;
   };
 
   /** Keeps actual production owners alive through the exact serialized file-fed draw. */
   class draw_t {
     ComPtr<ID3D11Device> device_;
-    ComPtr<ID3D11PixelShader> completed_;
-    bg_runtime::programs_t background_programs_;
-    models::selected_glyph_receipt_c24_transport_v1::resources_t contour_transport_;
-    bg::resources_t background_;
-    models::push_pull_current_draw_lease_v1::lease_t background_lease_;
+    shared_warp::programs_t programs_;
+    shared_warp::resources_t shared_warp_;
 
     template<std::size_t N>
     bool read_words(ID3D11DeviceContext *context, ID3D11Buffer *source, std::array<std::uint32_t, N> &words) const {
@@ -126,10 +125,39 @@ namespace sbs_bench::current_outline_qualification {
       return SUCCEEDED(resource.As(&buffer)) && read_words(context, buffer.Get(), words);
     }
 
+    bool read_rows(ID3D11DeviceContext *context, const shared_warp::views_t &views, evidence_t &evidence) const {
+      ComPtr<ID3D11Resource> resource;
+      ComPtr<ID3D11Texture2D> texture, staging;
+      if (!views.rows) return false;
+      views.rows->GetResource(&resource);
+      if (FAILED(resource.As(&texture))) return false;
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+      if (desc.Width != 1u || desc.Height != views.shape[3u] + 1u || desc.Format != DXGI_FORMAT_R32_UINT) return false;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.BindFlags = desc.MiscFlags = 0u;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      if (FAILED(device_->CreateTexture2D(&desc, nullptr, &staging))) return false;
+      context->CopyResource(staging.Get(), texture.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+      evidence.shared_warp_rows.resize(views.shape[3u]);
+      for (UINT row = 0u; row <= views.shape[3u]; ++row) {
+        std::uint32_t value;
+        std::memcpy(&value, static_cast<const std::byte *>(mapped.pData) + row * mapped.RowPitch, sizeof(value));
+        if (row == views.shape[3u]) evidence.shared_warp_selected_receipt_header = value;
+        else evidence.shared_warp_rows[row] = value;
+      }
+      context->Unmap(staging.Get(), 0u);
+      evidence.shared_warp_shape = views.shape;
+      evidence.shared_warp_serial = views.serial;
+      return true;
+    }
+
     struct observer_t {
       ID3D11PixelShader *pixel = nullptr;
-      std::array<ID3D11ShaderResourceView *, 12u> resources {};
-      ID3D11Buffer *geometry = nullptr, *subtitle = nullptr, *background = nullptr;
+      std::array<ID3D11ShaderResourceView *, 15u> resources {};
+      ID3D11Buffer *geometry = nullptr, *subtitle = nullptr, *shared_geometry = nullptr;
       bool matched = false;
 
       static void observe(void *opaque, ID3D11DeviceContext *context) noexcept {
@@ -137,18 +165,19 @@ namespace sbs_bench::current_outline_qualification {
         ComPtr<ID3D11PixelShader> pixel;
         context->PSGetShader(&pixel, nullptr, nullptr);
         expected.matched = pixel.Get() == expected.pixel;
-        ID3D11ShaderResourceView *actual[12u] {};
-        context->PSGetShaderResources(0u, 12u, actual);
+        ID3D11ShaderResourceView *actual[15u] {};
+        context->PSGetShaderResources(0u, 15u, actual);
         for (std::size_t i = 0u; i < expected.resources.size(); ++i) {
           expected.matched = expected.matched && actual[i] == expected.resources[i];
           if (actual[i]) {
             actual[i]->Release();
           }
         }
-        ID3D11Buffer *constants[3u] {};
-        context->PSGetConstantBuffers(2u, 3u, constants);
+        ID3D11Buffer *constants[5u] {};
+        context->PSGetConstantBuffers(2u, 5u, constants);
         expected.matched = expected.matched && constants[0u] == expected.geometry &&
-                           constants[1u] == expected.subtitle && constants[2u] == expected.background;
+                           constants[1u] == expected.subtitle && constants[2u] == nullptr &&
+                           constants[4u] == expected.shared_geometry;
         for (auto *constant : constants) {
           if (constant) {
             constant->Release();
@@ -161,11 +190,9 @@ namespace sbs_bench::current_outline_qualification {
     bool prepare(ID3D11Device *device, models::video_depth_estimator &estimator, const std::filesystem::path &shader_root, std::string &error) {
       device_ = device;
       const auto root = shader_root / "current_outline";
-      runtime::pixel_programs_t pixels;
-      if (!pixels.load(device, runtime::completed_root(root), runtime::completed_closure, {}, {}, error) || !background_programs_.load(device, root / "background", error)) {
+      if (!programs_.load(device, shader_root, error)) {
         return false;
       }
-      completed_.Attach(pixels.take_completed());
       models::subtitle_selected_matte_research_configuration_t config;
       config.current_outline = true;
       config.current_outline_shader_root = root.string();
@@ -185,58 +212,54 @@ namespace sbs_bench::current_outline_qualification {
       auto draw = ordinary;
       draw.render_targets = {output, nullptr};
       draw.render_target_count = 1u;
-      draw.pixel_shader = completed_.Get();
+      const auto program = programs_.program();
+      draw.pixel_shader = program.pixel;
       auto *legacy = ordinary.shader_resources[3u];
       auto *receipt = result.research_selected_matte_receipt.Get();
       draw.shader_resources[3u] = result.research_selected_matte.Get();
-      if (!contour_transport_.ensure(device_.Get(), error) || !contour_transport_.queue(context, receipt, error) || !background_.ensure(device_.Get(), result.input_region.width(), models::subtitle_ocr_source_crop_height(result.input_region.width(), result.input_region.height()), error)) {
+      const UINT width = result.input_region.width(), height = result.input_region.height();
+      const UINT band = models::subtitle_ocr_source_crop_height(width, height);
+      const UINT band_top = height - band;
+      const std::array<UINT, 4u> shape {width, height, band_top > 0u ? band_top - 1u : 0u, 0u};
+      auto padded_shape = shape;
+      padded_shape[3u] = height - shape[2u];
+      if (!shared_warp_.ensure(device_.Get(), padded_shape, error)) {
         return false;
       }
-      bg::request_t request;
+      shared_warp::request_t request;
       std::copy(draw.shader_resources.begin(), draw.shader_resources.end(), request.draw_srvs.begin());
       request.draw_srvs[7u] = receipt;
-      request.actual_contour_constants96 = contour_transport_.constants();
-      request.actual_subtitle_render_constants32 = draw.subtitle_constants;
-      const auto band = models::subtitle_ocr_source_crop_height(result.input_region.width(), result.input_region.height());
-      request.analysis_shape = {result.input_region.width(), result.input_region.height(), result.input_region.height() - band, band};
-      if (!background_.queue(context, background_programs_.program(), request, error)) {
+      request.draw_srvs[8u] = legacy;
+      request.geometry_constants = draw.geometry_constants;
+      request.subtitle_constants = draw.subtitle_constants;
+      request.sampler = draw.sampler;
+      if (!shared_warp_.queue(context, program, request, error) || !shared_warp_.matches(context, request)) {
         return false;
       }
-      const auto views = background_.views();
-      const models::push_pull_current_draw_lease_v1::lease_t::key_t color_key {
-        result.completed_frame_id,
-        result.publication.observation_timestamp_us,
-        result.publication.publication_sequence,
-        static_cast<std::uint64_t>(result.color_space)
-      };
-      background_lease_.capture(context, request, color_key, views.draw_serial);
-      if (!background_lease_.matches(context, request, color_key, views.draw_serial)) {
-        error = "current-outline qualification lost its exact draw-role lease";
-        return false;
-      }
+      const auto views = shared_warp_.views();
       observer_t observer;
       observer.pixel = draw.pixel_shader;
       std::copy(draw.shader_resources.begin(), draw.shader_resources.end(), observer.resources.begin());
       observer.resources[7u] = receipt;
       observer.resources[8u] = legacy;
-      observer.resources[9u] = views.background.Get();
-      observer.resources[11u] = views.proof.Get();
+      observer.resources[12u] = views.weights.Get();
+      observer.resources[13u] = views.field.Get();
+      observer.resources[14u] = views.rows.Get();
       observer.geometry = draw.geometry_constants;
       observer.subtitle = draw.subtitle_constants;
-      observer.background = views.expected_constants.Get();
+      observer.shared_geometry = views.geometry.Get();
       draw.bound_draw_observer_state = &observer;
       draw.observe_bound_draw = &observer_t::observe;
       {
         models::research_current_outline_selected_matte_v2::scoped_receipt_t selected;
-        bg_runtime::scoped_background_t background;
-        if (!selected.bind(context, receipt, legacy) || !background.bind(context, &views) || !platf::dxgi::record_host_sbs_v2_draw(context, draw) || !observer.matched) {
-          error = "current-outline qualification did not observe exact selected/BG draw bindings";
+        shared_warp::scoped_binding_t shared;
+        if (!selected.bind(context, receipt, legacy) || !shared.bind(context, &views) || !platf::dxgi::record_host_sbs_v2_draw(context, draw) || !observer.matched) {
+          error = "current-outline qualification did not observe exact selected/shared-warp draw bindings";
           return false;
         }
       }
       evidence.bindings_observed = observer.matched;
-      evidence.background_serial = views.draw_serial;
-      if (!read_words(context, receipt, evidence.selected) || !read_words(context, result.subtitle_contour_identity.Get(), evidence.contour) || !read_words(context, result.subtitle_condition_params.Get(), evidence.condition) || !read_words(context, result.shadow_state.Get(), evidence.state) || !read_words(context, views.proof.Get(), evidence.background) || !read_words(context, views.expected_constants.Get(), evidence.background_expected) || !read_words(context, draw.subtitle_constants, evidence.subtitle_constants)) {
+      if (!read_words(context, receipt, evidence.selected) || !read_words(context, result.subtitle_contour_identity.Get(), evidence.contour) || !read_words(context, result.subtitle_condition_params.Get(), evidence.condition) || !read_words(context, result.shadow_state.Get(), evidence.state) || !read_words(context, draw.subtitle_constants, evidence.subtitle_constants) || !read_rows(context, views, evidence)) {
         error = "current-outline qualification cannot read its exact post-draw evidence";
         return false;
       }

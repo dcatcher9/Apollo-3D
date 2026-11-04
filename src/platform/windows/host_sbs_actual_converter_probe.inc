@@ -63,7 +63,16 @@ namespace actual_converter_probe_v1 {
         {"selected_draw",e.selected_draw},{"selected_baseline_current",e.selected_baseline_current},{"selected_temporal_commands",e.selected_temporal_commands},{"selected_source_certificate_valid",e.selected_source_certificate_valid},{"actual_draw_selected_receipt_address",e.actual_draw_selected_receipt_address},
         {"background",{{"queue_issued",e.background.queue_issued},{"role_matched",e.background.role_matched},{"bound",e.background.bound},{"ps_observed_after_draw",e.background.ps_observed_after_draw},
           {"owner_serial",e.background.owner_serial},{"transport_serial",e.background.transport_serial},{"context_address",e.background.context_address},{"pixel_shader_address",e.background.pixel_shader_address},
-          {"colour_key",e.background.colour_key},{"actual_role_pointers",e.background.actual_role_pointers},{"analysis_shape",e.background.analysis_shape},{"pixel_shader_closure",e.background.pixel_shader_closure}}}};
+          {"colour_key",e.background.colour_key},{"actual_role_pointers",e.background.actual_role_pointers},{"analysis_shape",e.background.analysis_shape},{"pixel_shader_closure",e.background.pixel_shader_closure}}},
+        {"shared_warp",{{"selected",e.shared_warp.selected},{"queued",e.shared_warp.queued},
+          {"role_matched",e.shared_warp.role_matched},{"bindings_observed",e.shared_warp.bindings_observed},
+          {"no_background",e.shared_warp.no_background},{"serial",e.shared_warp.serial},
+          {"pixel_shader_address",e.shared_warp.pixel_shader_address},{"shape",e.shared_warp.shape},
+          {"source_closure",e.shared_warp.source_closure},
+          {"weights_address",reinterpret_cast<std::uintptr_t>(e.shared_warp.weights.Get())},
+          {"field_address",reinterpret_cast<std::uintptr_t>(e.shared_warp.field.Get())},
+          {"rows_address",reinterpret_cast<std::uintptr_t>(e.shared_warp.rows.Get())},
+          {"geometry_address",reinterpret_cast<std::uintptr_t>(e.shared_warp.geometry.Get())}}}};
     }
     struct fixture_display_t final : display_vram_t {
       bool declared_hdr=false;

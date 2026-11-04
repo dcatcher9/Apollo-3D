@@ -72,6 +72,7 @@ SELECTED_RENDER_HELPER_MIRRORS = (
 )
 CURRENT_OUTLINE_RUNTIME_HEADER = ROOT / "src" / "host_sbs_current_outline_runtime_programs.h"
 CURRENT_BACKGROUND_RUNTIME_HEADER = ROOT / "src" / "host_sbs_selected_glyph_push_pull_runtime.h"
+CURRENT_SHARED_UI_WARP_RUNTIME_HEADER = ROOT / "src" / "host_sbs_shared_ui_warp_runtime.h"
 CURRENT_OUTLINE_RUNTIME_ROOTS = {
     name: ("outline" if name == "stability" else "hole" if name == "coverage" else name)
     for name in ("source5", "colour", "components", "enclosure", "roi", "outline", "stability",
@@ -2296,6 +2297,38 @@ def _write_current_background_runtime_pin(
     return _write_or_check(header, source, check)
 
 
+def shared_ui_warp_runtime_closures(
+        shader_root: Path = SHADER_ROOT,
+        header: Path = CURRENT_SHARED_UI_WARP_RUNTIME_HEADER) -> dict[str, str]:
+    """Calculate the two confined Host adapters from their one runtime specification owner."""
+    source = header.read_text(encoding="utf-8")
+    result = {}
+    for name, array_name in (("closure", "specs"), ("diagnostic_closure", "diagnostic_specs")):
+        array = re.search(
+            rf"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+{array_name}\s*\{{\{{(.*?)\}}\}};",
+            source, re.DOTALL)
+        if array is None:
+            raise ValueError(f"shared UI warp {array_name} is missing")
+        specs = tuple(re.findall(r'\{"([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\}', array[2]))
+        if len(specs) != int(array[1]):
+            raise ValueError(f"shared UI warp {array_name} specification is malformed")
+        result[name] = shader_source_closure_sha256(
+            shader_root, specs, shader_compile_flags=SHADER_COMPILE_FLAGS)
+    return result
+
+
+def _write_shared_ui_warp_runtime_pin(
+        check: bool, shader_root: Path = SHADER_ROOT,
+        header: Path = CURRENT_SHARED_UI_WARP_RUNTIME_HEADER) -> bool:
+    source = header.read_text(encoding="utf-8")
+    for name, digest in shared_ui_warp_runtime_closures(shader_root, header).items():
+        pattern = rf'(inline constexpr std::string_view {name}\s*=\s*")[0-9a-f]{{64}}(";)'
+        if len(re.findall(pattern, source)) != 1:
+            raise ValueError(f"shared UI warp {name} pin is missing or duplicated")
+        source = re.sub(pattern, rf'\g<1>{digest}\g<2>', source)
+    return _write_or_check(header, source, check)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -2347,6 +2380,7 @@ def main(argv: list[str] | None = None) -> int:
         _write_hlsl_outputs(first_hlsl, first_ocr_assertions, False)
         _write_current_outline_runtime_pins(False)
         _write_current_background_runtime_pin(False)
+        _write_shared_ui_warp_runtime_pin(False)
         if not shader_manifest_generator.generate(False, True):
             raise RuntimeError("could not refresh the named Host SBS shader closures")
         # generate() rewrites the closure manifest in this same process. Refresh the mutable
@@ -2374,6 +2408,7 @@ def main(argv: list[str] | None = None) -> int:
         render_hlsl(contract), render_hlsl_ocr_assertions(), args.check)
     valid &= _write_current_outline_runtime_pins(True)
     valid &= _write_current_background_runtime_pin(True)
+    valid &= _write_shared_ui_warp_runtime_pin(True)
     try:
         validate_renderer_source_closure_pins()
     except ValueError as exc:

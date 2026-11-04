@@ -339,6 +339,79 @@ class CurrentOutlineMaskEvidenceTests(unittest.TestCase):
         self.assertEqual(result["selected_current_frames"], 1)
         self.assertEqual(result["producer_stage_current_frames"], 1)
 
+    def upgrade_to_schema4(self):
+        self.upgrade_to_schema3()
+        self.document["schema"] = 4
+        self.document.pop("background_source_closure_sha256")
+        self.document.update(qualification.expected_closures(4))
+        for frame in self.document["frames"]:
+            serial = frame.pop("background_serial")
+            frame.pop("background_proof")
+            frame.pop("background_expected")
+            width, height, top, _ = frame["selected_receipt"][4:8]
+            first = max(0, top - 1)
+            rows = [0] * (height - first)
+            rows[1] = 1
+            frame["shared_warp"] = {"renderer": "shared-ui-pin-band", "shape": [width, height, first, len(rows)],
+                                    "draw_serial": serial, "selected_receipt_header": 1, "active_rows": rows}
+
+    def test_schema4_shared_warp_preserves_scores_and_reports_actual_route(self):
+        before = self.score()["aggregate"]
+        self.upgrade_to_schema4()
+        report = self.score()
+        self.assertEqual(report["aggregate"], before)
+        self.assertEqual(report["qualification"]["shared_warp_frames"], 2)
+        self.assertEqual(report["qualification"]["shared_warp_active_frames"], 2)
+        self.assertEqual(report["qualification"]["background_valid_frames"], 0)
+        self.assertTrue(report["qualification"]["producer_stage_evidence_available"])
+
+    def test_schema4_rejects_wrong_owner_shape_authority_and_legacy_fields(self):
+        self.upgrade_to_schema4()
+        original = copy.deepcopy(self.document)
+        changes = {
+            "renderer": lambda d: d["frames"][0]["shared_warp"].update(renderer="push-pull-background"),
+            "closure": lambda d: d.update(shared_warp_source_closure_sha256="0" * 64),
+            "width": lambda d: d["frames"][0]["shared_warp"]["shape"].__setitem__(0, 959),
+            "top": lambda d: d["frames"][0]["shared_warp"]["shape"].__setitem__(2, 380),
+            "row extent": lambda d: d["frames"][0]["shared_warp"]["active_rows"].pop(),
+            "row flag": lambda d: d["frames"][0]["shared_warp"]["active_rows"].__setitem__(1, 2),
+            "boolean row": lambda d: d["frames"][0]["shared_warp"]["active_rows"].__setitem__(1, True),
+            "border authority": lambda d: d["frames"][0]["shared_warp"]["active_rows"].__setitem__(0, 1),
+            "selected header": lambda d: d["frames"][0]["shared_warp"].update(selected_receipt_header=0),
+            "boolean header": lambda d: d["frames"][0]["shared_warp"].update(selected_receipt_header=True),
+            "stale serial": lambda d: d["frames"][1]["shared_warp"].update(draw_serial=1),
+            "missing bindings": lambda d: d["frames"][0].update(bindings_observed=False),
+            "legacy proof": lambda d: d["frames"][0].update(background_proof=[0] * 96),
+            "unknown owner": lambda d: d["frames"][0]["shared_warp"].update(source_frame=1),
+        }
+        for label, mutate in changes.items():
+            with self.subTest(label=label):
+                self.document = copy.deepcopy(original)
+                mutate(self.document)
+                with self.assertRaises(ValueError):
+                    self.score()
+
+    def test_schema4_empty_and_unavailable_rows_cannot_pin(self):
+        self.upgrade_to_schema4()
+        empty, unavailable = self.document["frames"]
+        empty["contour_identity"][2] = empty["selected_receipt"][30] = 0
+        empty["condition_params"][2:] = [0] * 4
+        empty["shared_warp"]["active_rows"] = [0] * len(empty["shared_warp"]["active_rows"])
+        unavailable["selected_receipt"][2:4] = [1, 1]
+        unavailable["selected_receipt"][28:60] = [0] * 32
+        unavailable["shared_warp"]["selected_receipt_header"] = 0
+        unavailable["shared_warp"]["active_rows"] = [0] * len(unavailable["shared_warp"]["active_rows"])
+        result = self.score()["qualification"]
+        self.assertEqual(result["selected_current_frames"], 1)
+        self.assertEqual(result["shared_warp_frames"], 2)
+        self.assertEqual(result["shared_warp_active_frames"], 0)
+        for frame in (empty, unavailable):
+            with self.subTest(source=frame["source_file"]):
+                frame["shared_warp"]["active_rows"][1] = 1
+                with self.assertRaisesRegex(ValueError, "inactive shared warp"):
+                    self.score()
+                frame["shared_warp"]["active_rows"][1] = 0
+
 
 if __name__ == "__main__":
     unittest.main()

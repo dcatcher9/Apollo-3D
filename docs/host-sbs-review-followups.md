@@ -925,3 +925,56 @@ common pin implementation and private adapter make a shared solution testable wi
 copies of its algorithm. A future two-axis pin band could bound the visible row transitions,
 but would spread deformation further and needs independent false-positive, ROI and scene-edge
 qualification before either product adopts it.
+
+### P15 production shared UI warp
+
+The subsequent explicit product decision selects the shared warp despite P14's mixed quality
+result, superseding its recommendation to retain the Host default. This is an adoption decision,
+not a reinterpretation of the measured background regressions as improvements.
+
+Host selected rendering uses the same `include/ui_pin_band_shared.hlsl` owner as Game 3D. The
+production adapter builds a native full-width subtitle band from authorised Base, including its
+ROI embedding, applies current-RGB-revoked native mask contributors, pins the horizontal band,
+and samples original SDR/HDR colour once through the existing bounded inverse. It prepares no
+subtitle RGB repair background on the successful shared route. Mask detection, original outline
+style, SCP plane policy and retained inference ownership remain unchanged. The queued wrapper
+keeps its independent exact-source guard. Empty/revoked subtitle inputs preserve Base; unavailable
+shared preparation and invalid selected receipts retain the literal legacy fallback.
+
+The actual shared draw is identified in qualification and dump evidence with its draw-owned
+field, weights, rows/header and geometry, separately from the retained legacy analytic diagnostic
+map. The prior background implementation remains available to historical comparison fixtures;
+its storage and proofs do not grant shared-warp authority.
+
+The established limitation remains: horizontal pinning deforms nearby scene geometry and does
+not preserve a vertical shear bound at UI-row transitions. No two-axis redesign or synthetic
+outline is included. The P14 source-matched quality and performance evidence remains unchanged;
+finite timing results establish no live FPS or headset-latency gain.
+Eligible draws with an inactive plane or empty mask still incur native-band preparation; this
+adoption does not establish a speedup for every frame without captions.
+
+Production integration evidence is kept outside Git under
+`E:\ApolloDev\host-shared-warp-production-20261104`, including the authenticated pre-change
+control, build and regression results, selected-renderer qualification and final launcher seal.
+
+The optimized production build passes the 53-test renderer/ownership group (45 pass, eight
+external-input skips) and all 58 native dump tests. The enabled shared matrix compares production
+and independent preparation across 48 colour, ROI, displacement and fractional-sampling cases,
+including current-colour and stale-receipt rejection, empty-row reuse, state restoration, and
+queued guards revoked after preparation. The three saved HDR tuples run through a fresh producer
+and matching draw binary; all 24 colour crops and 36 pin diagnostics match accepted P14 payloads
+exactly. An initial draw attempt correctly rejects a producer from the preceding binary; it is
+preserved separately rather than waived.
+
+The schema-4 actual selected qualification passes all 24 frames, with 17 active pin frames and
+zero repair backgrounds. The actual `display_vram` HDR smoke observes the shared program and
+exact pre-Draw bindings on both captioned sources (64,278 and 64,134 selected pixels), followed
+by zero selected pixels on the authored empty source. Its native pin owner advances per draw and
+no repair background is queued or bound. These are wiring and ownership checks, not headset or
+clean-background quality acceptance.
+
+All 955 Python evaluator/reader tests pass with 13 declared skips; six shared-owner generator
+tests and contract drift checks pass. The ordinary three-clip paired evaluation is screen-neutral
+and preserves all 576 PNG/F32 payloads byte-for-byte. Every evaluation stage uses the exact
+AGENTS.md Python runtime and package fingerprint. The final receipt binds the merged commit,
+source files, optimized binary, runtime assets, validation outputs and live launcher.

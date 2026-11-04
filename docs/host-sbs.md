@@ -38,7 +38,7 @@ flowchart LR
     CONTAINER["Independent signed displacement bound"]
     VERTICAL["75/25 vertical envelope share"]
     ROW["Horizontal majorant"]
-    PLANE["Native glyph matte and analytic UI selector"]
+    PLANE["Native glyph matte and shared UI pin band"]
     INVERSE["At-most-11-step exact-settle inverse"]
     COLOR["One native linear-color sample"]
     ENCODE["Packed SBS and NVENC"]
@@ -46,21 +46,25 @@ flowchart LR
     CAPTURE --> MATCH --> DOMAIN --> PREPROCESS --> DAV2
     REGION -. optional authority .-> MATCH
     DAV2 --> CUT --> CAMERA
-    DAV2 --> CAMERA --> CURVE --> CONTAINER --> VERTICAL --> ROW --> INVERSE --> PLANE
+    DAV2 --> CAMERA --> CURVE --> CONTAINER --> VERTICAL --> ROW --> PLANE --> INVERSE
     CAPTURE -. current-ready infer work .-> OCR --> OCRPLANE
     CAPTURE -. authenticated current abstention .-> OCRPLANE
     CUT --> OCRPLANE --> PLANE
     CAPTURE --> COLOR
-    PLANE --> COLOR --> ENCODE
+    INVERSE --> COLOR --> ENCODE
 ```
 
-The selected live map uses the ordinary immutable Base inverse and an analytic constant UI plane.
-The native glyph matte selects UI when either candidate's actual bilinear color footprint contains
-an authorized glyph contributor; all other pixels use Base. Each Base map keeps its existing
-slope and fixed-point inverse contract, and the UI plane has zero slope. Their discrete selector
-can be discontinuous: the combined map has no continuous-Final or global monotonicity contract.
-The protected Final field remains an independently authenticated diagnostic. Reuse retains Base,
-ParallaxState, native matte, SCT5, SCP4, the joined source snapshot, and diagnostics as one tuple.
+The selected production map pins current native glyph contributors to the constant UI plane in
+one displacement field, using the same horizontal pin-band implementation as Game 3D. Each draw
+rebuilds this field from immutable Base and the retained mask after current-colour revocation.
+One inverse samples original native colour; no subtitle background RGB is reconstructed. Empty
+rows retain the exact ordinary Base inverse. The pin pass preserves the horizontal slope bound;
+it does not promise a vertical bound at UI-row transitions. Nearby scene geometry can deform and
+horizontal row transitions can remain visible. The older analytic glyph selector remains the
+literal fallback when shared preparation is unavailable or selected-receipt authority fails.
+Protected Final remains an independently authenticated diagnostic, not this draw's pin field.
+Reuse retains Base, ParallaxState, native matte, SCT5, SCP4, joined source snapshot, and diagnostics
+as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 ## Authenticated production contract
 
@@ -259,7 +263,8 @@ nearby browser deformation for a smooth transition. It does not reconstruct vide
 the original crop or recover the silhouette of an already-cropped object. A cropped foreground can
 still have conflicting framing cues; neither continuous depth nor a smoother browser sample proves
 comfortable out-of-screen projection. The [dump map contract](../tools/sbsbench/DUMP_FORMAT.md#analysis-domains-and-window-provenance)
-records the actual selected Base inverse or analytic UI coordinate and its finite-source boundary mask.
+records source coordinates and their finite-source boundary mask, with shared-warp draw evidence
+identified separately from the retained analytic diagnostic map.
 
 The canonical current pipeline retains the existing limiter, joined depth/OCR observation and
 atomic publication. A policy change must be evaluated with exact source clocks, authenticated
@@ -333,7 +338,7 @@ reacquire the camera.
 
 ### Native subtitle contours and UI plane
 
-Live streaming uses `current_outline/completed/sbs_reprojection_v2_live_ps.hlsl`. Its seven common
+Live streaming and conversion use `host_sbs_shared_ui_warp.hlsl` and its queued wrapper. Their seven common
 operands are rendered native color, ordinary Base, ParallaxState, the selected native `R32_UINT`
 matte, joined display-sRGB `RGBA16F` source crop, six-word SCP4, and 32-word SCT5. A 64-word selected
 receipt at t7 authenticates the current-outline mask; t8 retains the original legacy mask for
@@ -341,7 +346,29 @@ literal fallback when that receipt is unavailable or invalid. Separate 32-byte P
 enabled/color mode, exact analysis-domain generation, and the integer analysis-source rectangle
 inside rendered color. Existing 48-byte b2 geometry is unchanged.
 Missing or invalid subtitle inputs preserve authorized Base; invalid Base authorization retains
-the existing flat fallback.
+the existing flat fallback. Shared preparation adds a native full-width subtitle band, authorised
+weights, row/header storage and draw geometry. These resources belong to the current immutable
+draw only, are unbound between compute and sampling, and are rebuilt before reuse. The queued
+wrapper retains the exact-source GPU guard independently of subtitle authorisation.
+`src/host_sbs_shared_ui_warp_runtime.h` owns the ordered completed/queued production and diagnostic
+shader specifications. The depth-contract generator checks both source-closure pins, including
+the common pin owner; this changes no estimator state schema or calibration.
+
+Field construction uses explicit FP32 interpolation of Base, including the existing continuous
+ROI embedding. Hardware-filtered coarse-to-native construction is not equivalent: quantised
+filter fractions can exceed the horizontal slope bound. The common owner
+`include/ui_pin_band_shared.hlsl` pins surviving native contributors and a one-pixel horizontal
+collar, then spreads the bounded transition through each affected row. The field uses native
+pixel centres and the existing ROI width conversion for SCP4. Both positive vertical bilinear
+contributors are considered when choosing between a pin row and the exact Base inverse.
+The inverse retains the at-most-eleven-step, exact-bit-settle rule and original SDR/HDR sample.
+No generated outline, new matte support, RGB erasure or RGB reconstruction is introduced.
+
+This changes the tradeoff around incomplete masks: original strokes and their surroundings move
+together, avoiding the former repaired-background tears, while scene edges near subtitles can
+bend. UI-row boundaries do not retain Base's two-axis smoothness guarantee. The measured comparison
+and the explicit adoption decision are recorded in the
+[review follow-up](host-sbs-review-followups.md#p15-production-shared-ui-warp).
 
 The legacy matte remains an independently validated fallback and the ordinary evaluator's mask.
 It has its own schema 1 recipe, separate from SCT5's diagnostic contour recipe 27. Starting
@@ -353,7 +380,7 @@ joined display pixel. The operation adds no probability threshold, field-pitch d
 wait, or source observation. The collar is a bounded antialias/outline completion compromise;
 false positive scene support can also expand by that bound.
 
-Without an authorized repair background, each eye's BaseUV uses the existing at-most-eleven-step
+The retained analytic fallback computes each eye's BaseUV with the existing at-most-eleven-step
 inverse. UIUV has unchanged V and
 `destination_source_u + eye_sign * SCP_target * (analysis_width / full_capture_width)` for U.
 The integer width ratio is exact ROI authority; full-source uses one. Query both candidates after
@@ -366,7 +393,7 @@ or new support comes from this comparison. Select UIUV when either candidate foo
 surviving contributor, otherwise BaseUV; take one native bilinear color sample at the selected UV.
 Color output keeps its native SDR/HDR path.
 
-The live completed shader also supports an optional GPU push/pull repair background at t9, its
+The historical completed comparison shader also supports an optional GPU push/pull repair background at t9, its
 96-word proof at t11, and the immutable draw-lease constants at b4. The actual color, selected mask,
 receipt, SCT5, render constants, source rectangle and retained lease must match the current draw.
 An unavailable or invalid background preserves the original selected-mask sampling above; it
@@ -378,7 +405,7 @@ the original hardware sample, and the existing selected-sample alpha behavior is
 This RGB composition can mix Base and UI coordinates; a diagnostic candidate map is not a single
 source-coordinate owner for that mixed color.
 
-Repair seed exclusion and erasure are separate decisions. The current background initializer
+Repair seed exclusion and erasure are separate decisions. The retained background initializer
 excludes a native 3x3 raw-matte neighbourhood from clean seeds and erases a native 3x3
 current-ink neighbourhood. Consequently, an unmarked pixel next to admitted ink can receive
 reconstructed Base RGB. A fixed-mask GPU probe confirms that this erasure contributes to the
@@ -400,7 +427,7 @@ Temporary work suppression and ineligible context disable the compositor for tha
 
 The following contour/D/M/proposal/conditioned-Final rules remain independently validated diagnostics.
 They explain the old field conditioner; their field pins and distance budgets do not supply live
-matte membership, and protected Final is not the analytic renderer's warp input.
+matte membership, and protected Final is not the production renderer's warp input.
 
 
 Live subtitle detection and protection run only in Host AI 3D with authenticated video context.
@@ -586,7 +613,10 @@ authenticates the current abstention without granting subtitle geometry or prote
 exact Base. A malformed source/field policy cannot acquire this identity publication.
 
 Every reuse leaves OCR crop/TensorRT/postprocess/plane/condition work dormant and holds the complete
-depth/cut/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Reprojection selects ordinary Base or analytic UI from that retained tuple; exact current native RGB can only revoke matte contributors. Once the joined root has submitted work, any asynchronous CUDA error
+depth/cut/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Reprojection builds
+the shared pin field from that retained tuple; exact current native RGB can only revoke matte
+contributors. The literal analytic selector remains its unavailable-preparation fallback. Once
+the joined root has submitted work, any asynchronous CUDA error
 fails the whole estimator closed because a later API call may surface an earlier context-wide launch
 fault. OCR does not run for source frames dropped while the previous observation is busy.
 
@@ -1694,7 +1724,8 @@ accept malformed or cross-scene state. Infer/force publishes the complete diagno
 reuse and adaptive reuse hold depth, OCR, UIP4, support, history, source/probability, q, M, blend,
 vertical field, control and Final together with Base, matte, SCT5 and SCP4. Invalid Base publication
 fails closed to flat SBS. Joined RGB retains the inference owner's snapshot for pointwise revocation;
-every rendered draw samples the current capture through the selected Base or analytic UI map.
+every rendered draw samples the current capture through the shared pin field or its authorised
+Base/legacy fallback.
 Contour history belongs to that same joined observation. It adds no independent inference clock,
 row lease, onset accumulator, signature, overlay model, or GST/OGR/ORS dependency.
 
@@ -2038,7 +2069,7 @@ writes the complete conditioned Final diagnostic from immutable Base together wi
 A reuse receipt copies previous normalized depth through the swapped output target and preserves
 normalization, cut, camera, model-input history, DAV2/V2 Base, OCR8, UIP4, condition parameters and
 the conditioned Final diagnostic, native matte, SCT5 and joined source byte-for-byte. Native USER32
-suppression produces no OCR/UIP4 observation and disables the analytic compositor for that draw.
+suppression produces no OCR/UIP4 observation and disables subtitle pinning for that draw.
 A failure to publish the complete joined tuple is
 terminal and produces no nominal completion. Optional OCR readiness remains independently checked,
 but depth and subtitle advance or hold as one coherent transaction.

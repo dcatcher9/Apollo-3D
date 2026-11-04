@@ -56,6 +56,7 @@
 #include "src/host_sbs_selected_matte_gpu.h"
 #include "src/host_sbs_current_outline_runtime_programs.h"
 #include "src/host_sbs_selected_glyph_push_pull_runtime.h"
+#include "src/host_sbs_shared_ui_warp_runtime.h"
 #include "src/host_sbs_resolution.h"
 #include "src/host_sbs_shader_cache.h"
 #include "src/host_sbs_subtitle_render.h"
@@ -430,10 +431,10 @@ namespace platf::dxgi {
 
   struct selected_matte_programs_t {
     models::current_outline_runtime::pixel_programs_t pixel;
-    models::selected_glyph_push_pull_runtime_v1::programs_t background;
+    models::host_sbs_shared_ui_warp::programs_t shared_warp;
     models::subtitle_selected_matte_research_configuration_t configuration;
     std::string error;
-    std::string background_error;
+    std::string shared_warp_error;
     bool ready = false;
   };
 
@@ -457,10 +458,11 @@ namespace platf::dxgi {
     }
     result.ready = true;
     if (configuration.current_outline) {
-      // An optional repair background never controls selected glyph or depth availability.
-      (void) result.background.load(
-        device, std::filesystem::path(configuration.current_outline_shader_root) / "background",
-        result.background_error
+      // Shared preparation failure preserves the authenticated literal source selector.
+      // Native source availability and ordinary depth never depend on subtitle preparation.
+      (void) result.shared_warp.load(
+        device, std::filesystem::path(configuration.current_outline_shader_root).parent_path(),
+        result.shared_warp_error
       );
     }
     return result;
@@ -2769,52 +2771,60 @@ namespace platf::dxgi {
               .queued_guard_constants = queued_geometry_selected ? queued_render_guard_cbuffer.get() : nullptr,
               .queued_guard_transaction = queued_geometry_selected ? queued_geometry->transaction_raw.Get() : nullptr,
             };
-            // Reconstruct only the current actual draw source; no estimator raw-source read.
+            // One fresh pin field uses the current actual draw source. The immutable draw
+            // keeps the selected receipt/current RGB checks and performs no RGB reconstruction.
             namespace current_bg=models::selected_glyph_push_pull_bg_gpu_v1;
+            namespace shared_warp=models::host_sbs_shared_ui_warp;
             current_bg::views_t current_background;
             current_bg::request_t current_background_request;
             bool current_background_joined=false;
+            shared_warp::views_t current_shared_warp;
+            shared_warp::request_t shared_request;
+            bool shared_warp_selected=false;
             actual_converter_probe_v1::background_draw_t current_background_observed;
+            actual_converter_probe_v1::shared_warp_draw_t current_shared_observed;
             const models::push_pull_current_draw_lease_v1::lease_t::key_t current_colour_key{
               frame_id, draw_source_slot?draw_source_slot->frame_id:0u,
               draw_source_slot?static_cast<std::uint64_t>(draw_source_slot->captured_at.time_since_epoch().count()):0u,
               static_cast<std::uint64_t>(subtitle_constants.color_mode)
             };
-            if(selected_draw&&selected_matte_current_outline&&selected_background_programs.ready()) {
+            if(selected_draw&&selected_matte_current_outline&&subtitle_constants.enabled==1u&&selected_shared_warp_programs.ready()) {
               Microsoft::WRL::ComPtr<ID3D11Resource> matte_resource;
               Microsoft::WRL::ComPtr<ID3D11Texture2D> matte_texture;
               dump_warp_inputs[3]->GetResource(&matte_resource);
+              Microsoft::WRL::ComPtr<ID3D11Resource> colour_resource;
+              Microsoft::WRL::ComPtr<ID3D11Texture2D> colour_texture;
+              dump_warp_inputs[0]->GetResource(&colour_resource);
               D3D11_TEXTURE2D_DESC matte_desc{};
-              std::string background_error;
-              if(SUCCEEDED(matte_resource.As(&matte_texture))) {
+              D3D11_TEXTURE2D_DESC colour_desc{};
+              std::string shared_error;
+              if(SUCCEEDED(matte_resource.As(&matte_texture))&&SUCCEEDED(colour_resource.As(&colour_texture))) {
                 matte_texture->GetDesc(&matte_desc);
+                colour_texture->GetDesc(&colour_desc);
                 if(matte_desc.Width==subtitle_constants.source_width&&matte_desc.Height>0u&&
                    matte_desc.Height<=subtitle_constants.source_height&&
-                   selected_background_receipt.ensure(device.get(),background_error)&&
-                   selected_background_receipt.queue(device_ctx.get(),selected_receipt,background_error)&&
-                   selected_background.ensure(device.get(),matte_desc.Width,matte_desc.Height,background_error)) {
-                  for(UINT i=0u;i<7u;++i)current_background_request.draw_srvs[i]=draw_command.shader_resources[i];
-                  current_background_request.draw_srvs[7]=selected_receipt;
-                  current_background_request.actual_contour_constants96=selected_background_receipt.constants();
-                  current_background_request.actual_subtitle_render_constants32=draw_command.subtitle_constants;
-                  current_background_request.analysis_shape={subtitle_constants.source_width,subtitle_constants.source_height,
-                    subtitle_constants.source_height-matte_desc.Height,matte_desc.Height};
-                  if(selected_background.queue(device_ctx.get(),selected_background_programs.program(),current_background_request,background_error)) {
-                    current_background=selected_background.views();
-                    current_background_observed.queue_issued=true;
-                    current_background_observed.owner_serial=current_background.draw_serial;
-                    current_background_observed.transport_serial=selected_background_receipt.copy_serial();
-                    current_background_observed.source_c24=selected_background_receipt.constants();
-                    current_background_observed.colour_key=current_colour_key;
-                    current_background_observed.analysis_shape=current_background_request.analysis_shape;
-                    current_background_observed.context_address=reinterpret_cast<std::uintptr_t>(device_ctx.get());
-                    selected_background_lease.capture(device_ctx.get(),current_background_request,current_colour_key,current_background.draw_serial);
-                    // Re-read the exact operands that are about to be passed to the recorder.
-                    auto actual_draw=current_background_request;
-                    for(UINT i=0u;i<7u;++i)actual_draw.draw_srvs[i]=draw_command.shader_resources[i];
-                    actual_draw.draw_srvs[7]=selected_receipt;
-                    actual_draw.actual_subtitle_render_constants32=draw_command.subtitle_constants;
-                    current_background_joined=selected_background_lease.matches(device_ctx.get(),actual_draw,current_colour_key,selected_background.views().draw_serial);
+                   subtitle_constants.source_top<=colour_desc.Height&&
+                   subtitle_constants.source_height<=colour_desc.Height-subtitle_constants.source_top) {
+                  const UINT band_top=subtitle_constants.source_top+subtitle_constants.source_height-matte_desc.Height;
+                  const UINT band_end=subtitle_constants.source_top+subtitle_constants.source_height;
+                  const UINT padded_top=band_top>0u?band_top-1u:0u;
+                  const std::array<UINT,4u> shape{colour_desc.Width,colour_desc.Height,padded_top,
+                    std::min(colour_desc.Height,band_end+1u)-padded_top};
+                  std::copy(draw_command.shader_resources.begin(),draw_command.shader_resources.end(),shared_request.draw_srvs.begin());
+                  shared_request.draw_srvs[7u]=selected_receipt;shared_request.draw_srvs[8u]=selected_original_legacy;
+                  shared_request.geometry_constants=draw_command.geometry_constants;
+                  shared_request.subtitle_constants=draw_command.subtitle_constants;
+                  shared_request.sampler=draw_command.sampler;
+                  shared_request.queued=queued_geometry_selected;
+                  shared_request.queued_guard_constants=draw_command.queued_guard_constants;
+                  shared_request.queued_guard_transaction=draw_command.queued_guard_transaction;
+                  const auto program=selected_shared_warp_programs.program(queued_geometry_selected);
+                  if(selected_shared_warp.ensure(device.get(),shape,shared_error)&&
+                     selected_shared_warp.queue(device_ctx.get(),program,shared_request,shared_error)&&
+                     selected_shared_warp.matches(device_ctx.get(),shared_request)) {
+                    current_shared_warp=selected_shared_warp.views();
+                    shared_warp_selected=true;
+                    draw_command.pixel_shader=program.pixel;
                   }
                 }
               }
@@ -2828,9 +2838,9 @@ namespace platf::dxgi {
               const bool selected_bound=!selected_draw || (selected_matte_current_outline ?
                 outline_scope.bind(device_ctx.get(),selected_receipt,selected_original_legacy) :
                 selected_scope.bind(device_ctx.get(),selected_receipt));
-              models::selected_glyph_push_pull_runtime_v1::scoped_background_t background_scope;
+              shared_warp::scoped_binding_t shared_scope;
               const bool background_bound=!selected_draw||!selected_matte_current_outline||
-                background_scope.bind(device_ctx.get(),current_background_joined?&current_background:nullptr);
+                shared_scope.bind(device_ctx.get(),shared_warp_selected?&current_shared_warp:nullptr);
               if(probe_observer.record&&selected_draw&&selected_matte_current_outline) {
                 current_background_observed.role_matched=current_background_joined;
                 current_background_observed.bound=background_bound&&current_background_joined;
@@ -2846,32 +2856,70 @@ namespace platf::dxgi {
                   reinterpret_cast<std::uintptr_t>(device_ctx.get())};
               }
               auto observe_dump_bindings = [&](ID3D11DeviceContext *observed_context) noexcept {
-                if (!dump_actual_draw) return;
+                if (!dump_actual_draw&&!(probe_observer.record&&shared_warp_selected)) return;
                 try {
 
                 // Observe AFTER the recorder binds its operands, while t7/t8 and BG scopes
                 // still exist, BEFORE Draw and recorder cleanup. Strong references survive restoration; maybe_dump below
                 // issues their GPU copies before the next conversion can reuse these buffers.
-                std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 12u> actual;
-                ID3D11ShaderResourceView *raw[12] {};
-                observed_context->PSGetShaderResources(0u, 12u, raw);
+                std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 15u> actual;
+                ID3D11ShaderResourceView *raw[15] {};
+                observed_context->PSGetShaderResources(0u, 15u, raw);
                 for (std::size_t i=0u;i<actual.size();++i) actual[i].Attach(raw[i]);
                 Microsoft::WRL::ComPtr<ID3D11PixelShader> actual_shader;
                 observed_context->PSGetShader(actual_shader.GetAddressOf(),nullptr,nullptr);
+                if(probe_observer.record&&shared_warp_selected) {
+                  auto &s=current_shared_observed;
+                  s.selected=actual_shader.Get()==draw_command.pixel_shader;
+                  s.queued=queued_geometry_selected;
+                  s.serial=current_shared_warp.serial;s.shape=current_shared_warp.shape;
+                  s.source_closure=shared_warp::closure;
+                  s.pixel_shader_address=reinterpret_cast<std::uintptr_t>(actual_shader.Get());
+                  s.weights=actual[12];s.field=actual[13];s.rows=actual[14];
+                  Microsoft::WRL::ComPtr<ID3D11Buffer> geometry,subtitle,background,guard;
+                  observed_context->PSGetConstantBuffers(2u,1u,geometry.GetAddressOf());
+                  observed_context->PSGetConstantBuffers(3u,1u,subtitle.GetAddressOf());
+                  observed_context->PSGetConstantBuffers(4u,1u,background.GetAddressOf());
+                  observed_context->PSGetConstantBuffers(5u,1u,guard.GetAddressOf());
+                  observed_context->PSGetConstantBuffers(6u,1u,s.geometry.GetAddressOf());
+                  s.no_background=!actual[9]&&!actual[11]&&!background;
+                  auto request=shared_request;
+                  std::copy(draw_command.shader_resources.begin(),draw_command.shader_resources.end(),request.draw_srvs.begin());
+                  request.draw_srvs[7u]=selected_receipt;request.draw_srvs[8u]=selected_original_legacy;
+                  request.geometry_constants=draw_command.geometry_constants;
+                  request.subtitle_constants=draw_command.subtitle_constants;
+                  request.sampler=draw_command.sampler;
+                  s.role_matched=selected_shared_warp.matches(observed_context,request);
+                  bool bindings=s.selected&&s.role_matched&&s.no_background&&
+                    geometry.Get()==request.geometry_constants&&subtitle.Get()==request.subtitle_constants&&
+                    s.weights.Get()==current_shared_warp.weights.Get()&&s.field.Get()==current_shared_warp.field.Get()&&
+                    s.rows.Get()==current_shared_warp.rows.Get()&&s.geometry.Get()==current_shared_warp.geometry.Get();
+                  for(std::size_t i=0u;i<request.draw_srvs.size();++i)bindings=bindings&&actual[i].Get()==request.draw_srvs[i];
+                  if(queued_geometry_selected)bindings=bindings&&guard.Get()==request.queued_guard_constants&&actual[10].Get()==request.queued_guard_transaction;
+                  s.bindings_observed=bindings;
+                }
+                if(!dump_actual_draw)return;
                 auto &e=*dump_actual_draw;
 
                 e.conversion_frame=frame_id; e.model_frame=draw_source_slot?draw_source_slot->frame_id:0u;
                 e.observation_us=draw_source_slot?host_sbs_observation_timestamp_us(draw_source_slot->captured_at):0u;
                 e.selected_shader=selected_draw&&actual_shader.Get()==draw_command.pixel_shader;
                 e.queued_geometry=queued_geometry_selected;
-                e.program=e.selected_shader?(selected_matte_current_outline?"current-outline-selected":"research-selected"):
+                e.shared_pin_selected=e.selected_shader&&shared_warp_selected;
+                e.program=e.shared_pin_selected?"shared-ui-pin-v1":e.selected_shader?(selected_matte_current_outline?"current-outline-selected":"research-selected"):
                   actual_shader.Get()==sbs_reprojection_v2_live_ps.get()?"ordinary-v2":
                   actual_shader.Get()==sbs_flat_identity_ps.get()?"flat-identity":"other-observed-draw";
                 e.pixel_shader_address=reinterpret_cast<std::uintptr_t>(actual_shader.Get());
-                if(e.selected_shader)e.pixel_shader_closure=queued_geometry_selected?selected_matte_queued_closure:selected_matte_completed_closure;
+                if(e.shared_pin_selected)e.pixel_shader_closure=shared_warp::closure;
+                else if(e.selected_shader)e.pixel_shader_closure=queued_geometry_selected?selected_matte_queued_closure:selected_matte_completed_closure;
                 else if(actual_shader.Get()==sbs_reprojection_v2_live_ps.get())e.pixel_shader_closure=sbs_reprojection_v2_live_source_closure_sha256;
                 e.matte=actual[3]; e.selected_receipt=actual[7]; e.legacy_matte=actual[8];
                 e.background=actual[9]; e.background_proof=actual[11];
+                if(e.shared_pin_selected) {
+                  e.shared_pin_weights=actual[12];e.shared_pin_field=actual[13];e.shared_pin_rows=actual[14];
+                  observed_context->PSGetConstantBuffers(6u,1u,e.shared_pin_geometry.GetAddressOf());
+                  e.shared_pin_source_closure=shared_warp::closure;
+                }
                 observed_context->PSGetConstantBuffers(2u,1u,e.geometry_constants.GetAddressOf());
                 observed_context->PSGetConstantBuffers(3u,1u,e.subtitle_constants.GetAddressOf());
                 observed_context->PSGetConstantBuffers(4u,1u,e.expected.GetAddressOf());
@@ -2879,12 +2927,12 @@ namespace platf::dxgi {
                 e.background_queue_issued=current_background_observed.queue_issued;
                 e.background_role_matched=current_background_joined;
                 e.background_bound=current_background_joined&&e.background&&e.background_proof&&e.expected;
-                e.owner_serial=current_background_observed.owner_serial;
+                e.owner_serial=e.shared_pin_selected?current_shared_warp.serial:current_background_observed.owner_serial;
                 e.transport_serial=current_background_observed.transport_serial;
                 e.colour_key=current_colour_key;
                 e.analysis_source_rect={subtitle_constants.source_left,subtitle_constants.source_top,
                   subtitle_constants.source_width,subtitle_constants.source_height};
-                e.analysis_shape=current_background_request.analysis_shape;
+                e.analysis_shape=e.shared_pin_selected?current_shared_warp.shape:current_background_request.analysis_shape;
                 e.context_address=reinterpret_cast<std::uintptr_t>(observed_context);
                 Microsoft::WRL::ComPtr<ID3D11Resource> source_resource;
                 if(actual[0])actual[0]->GetResource(&source_resource);
@@ -2894,11 +2942,14 @@ namespace platf::dxgi {
 
                 e.captured=true; e.unavailable_reason.clear();
                 } catch (...) {
-                  dump_actual_draw->release_resources();
-                  dump_actual_draw->captured=false;
+                  current_shared_observed.bindings_observed=false;
+                  if(dump_actual_draw) {
+                    dump_actual_draw->release_resources();
+                    dump_actual_draw->captured=false;
+                  }
                 }
               };
-              if (snapshot_debug_inputs) {
+              if (snapshot_debug_inputs||(probe_observer.record&&shared_warp_selected)) {
                 using observer_t=decltype(observe_dump_bindings);
                 draw_command.bound_draw_observer_state=&observe_dump_bindings;
                 draw_command.observe_bound_draw=+[](void *state,ID3D11DeviceContext *context) noexcept {
@@ -2915,7 +2966,12 @@ namespace platf::dxgi {
                 device_ctx->PSGetShader(actual_shader.GetAddressOf(),nullptr,nullptr);
                 current_background_observed.pixel_shader_address=reinterpret_cast<std::uintptr_t>(actual_shader.Get());
                 current_background_observed.ps_observed_after_draw=actual_shader.Get()==draw_command.pixel_shader;
-                current_background_observed.pixel_shader_closure=queued_geometry_selected?selected_matte_queued_closure:selected_matte_completed_closure;
+                current_background_observed.pixel_shader_closure=shared_warp_selected?std::string(shared_warp::closure):queued_geometry_selected?selected_matte_queued_closure:selected_matte_completed_closure;
+              }
+              if(draw_recorded&&shared_warp_selected&&dump_actual_draw&&dump_actual_draw->captured) {
+                // Requested-only diagnostics reuse this exact field/header/receipt before the
+                // owner can be queued again. They do not allocate or run on ordinary draws.
+                (void) render_shared_ui_debug_geometry(draw_command,*dump_actual_draw);
               }
 
             }
@@ -2987,6 +3043,7 @@ namespace platf::dxgi {
               // post-hoc choice from the result views. Recorder source is frozen separately.
               e.selected_draw=selected_draw&&!queued_attempt_failed_flat;
               if(e.selected_draw&&current_background_observed.colour_key[0]==frame_id)e.background=current_background_observed;
+              if(e.selected_draw&&shared_warp_selected)e.shared_warp=current_shared_observed;
               if(e.selected_draw){e.selected_views[2]=draw_command.shader_resources[3];Microsoft::WRL::ComPtr<ID3D11Resource> r;selected_receipt->GetResource(&r);e.actual_draw_selected_receipt_address=reinterpret_cast<std::uintptr_t>(r.Get());}
               emit_converter_probe(std::move(e),draw_source_slot,queued_attempt_failed_flat ? nullptr:&est,
                 queued_geometry_selected && !queued_attempt_failed_flat ? queued_geometry:nullptr,
@@ -4690,14 +4747,15 @@ namespace platf::dxgi {
     void adopt_selected_matte_programs(selected_matte_programs_t programs) {
       selected_matte_completed_ps.reset(programs.pixel.take_completed());
       selected_matte_queued_ps.reset(programs.pixel.take_queued());
-      selected_background_programs = std::move(programs.background);
+      selected_shared_warp_programs = std::move(programs.shared_warp);
+      selected_shared_warp_root = std::filesystem::path(programs.configuration.current_outline_shader_root).parent_path();
       selected_matte_current_outline = programs.configuration.current_outline;
       selected_matte_completed_closure = std::move(programs.configuration.completed_source_closure_sha256);
       selected_matte_queued_closure = std::move(programs.configuration.queued_source_closure_sha256);
       selected_matte_ready = selected_matte_completed_ps != nullptr;
-      if (!programs.background_error.empty()) {
-        BOOST_LOG(warning) << "Host SBS current background unavailable; preserving selected subtitle route: "
-                           << programs.background_error;
+      if (!programs.shared_warp_error.empty()) {
+        BOOST_LOG(warning) << "Host SBS shared UI warp unavailable; preserving literal subtitle selector: "
+                           << programs.shared_warp_error;
       }
     }
 
@@ -6458,6 +6516,37 @@ namespace platf::dxgi {
       return true;
     }
 
+    bool render_shared_ui_debug_geometry(
+      const host_sbs_v2_draw_command_t &actual_draw,
+      sbs_debug::actual_draw_evidence &evidence
+    ) {
+      std::string error;
+      if(!evidence.shared_pin_selected||!sbs_intermediate_texture||
+         !selected_shared_warp_programs.load_diagnostics(device.get(),selected_shared_warp_root,error)) return false;
+      D3D11_TEXTURE2D_DESC desc{};sbs_intermediate_texture->GetDesc(&desc);
+      desc.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;desc.Usage=D3D11_USAGE_DEFAULT;
+      desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;desc.CPUAccessFlags=desc.MiscFlags=0u;
+      std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2u> textures;
+      std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>,2u> targets;
+      std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,2u> views;
+      for(std::size_t i=0u;i<textures.size();++i) {
+        if(FAILED(device->CreateTexture2D(&desc,nullptr,&textures[i]))||
+           FAILED(device->CreateRenderTargetView(textures[i].Get(),nullptr,&targets[i]))||
+           FAILED(device->CreateShaderResourceView(textures[i].Get(),nullptr,&views[i])))return false;
+      }
+      auto draw=actual_draw;
+      draw.render_target_count=1u;draw.render_targets[1]=nullptr;
+      draw.bound_draw_observer_state=nullptr;draw.observe_bound_draw=nullptr;
+      device_ctx->OMSetBlendState(blend_disable.get(),nullptr,0xFFFFFFFFu);
+      draw.render_targets[0]=targets[0].Get();
+      draw.pixel_shader=selected_shared_warp_programs.mapping(actual_draw.queued_guard_override);
+      if(!record_host_sbs_v2_draw(device_ctx.get(),draw))return false;
+      draw.render_targets[0]=targets[1].Get();
+      draw.pixel_shader=selected_shared_warp_programs.boundary(actual_draw.queued_guard_override);
+      if(!record_host_sbs_v2_draw(device_ctx.get(),draw))return false;
+      evidence.shared_pin_mapping=views[0];evidence.shared_pin_boundary=views[1];return true;
+    }
+
     bool render_sbs_debug_geometry(
       const std::array<ID3D11ShaderResourceView *, 7u> &inputs,
       ID3D11Buffer *constants,
@@ -6623,7 +6712,7 @@ namespace platf::dxgi {
       sbs_packed_resample_pq_ps.reset();
       cursor_scissor_raster.Reset();
       sbs_reprojection_v2_live_ps.reset();
-      selected_background={};selected_background_receipt={};selected_background_lease={};
+      selected_shared_warp={};
       queued_live_ready = false;
       queued_render_guard_cbuffer.reset();
       sbs_reprojection_v2_queued_ps.reset();
@@ -7475,10 +7564,9 @@ namespace platf::dxgi {
     bool selected_matte_current_outline = false;
     ps_t selected_matte_completed_ps,selected_matte_queued_ps;
     std::string selected_matte_completed_closure,selected_matte_queued_closure;
-    models::selected_glyph_push_pull_runtime_v1::programs_t selected_background_programs;
-    models::selected_glyph_push_pull_bg_gpu_v1::resources_t selected_background;
-    models::selected_glyph_receipt_c24_transport_v1::resources_t selected_background_receipt;
-    models::push_pull_current_draw_lease_v1::lease_t selected_background_lease;
+    models::host_sbs_shared_ui_warp::programs_t selected_shared_warp_programs;
+    models::host_sbs_shared_ui_warp::resources_t selected_shared_warp;
+    std::filesystem::path selected_shared_warp_root;
     buf_t queued_render_guard_cbuffer;
     ps_t sbs_reprojection_v2_queued_ps;
     detail::host_sbs_drawn_source_order_t drawn_source_order;

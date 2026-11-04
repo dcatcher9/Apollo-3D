@@ -42,20 +42,27 @@ namespace platf::sbs_debug {
   struct actual_draw_evidence {
     bool requested = false, captured = false, selected_shader = false, queued_geometry = false;
     bool background_queue_issued = false, background_role_matched = false, background_bound = false;
+    bool shared_pin_selected = false;
     std::uint64_t conversion_frame = 0, model_frame = 0, observation_us = 0;
     std::uint64_t owner_serial = 0, transport_serial = 0, context_address = 0, pixel_shader_address = 0;
     std::array<std::uint64_t, 4> colour_key {};
     std::array<std::uint64_t, 7> actual_role_pointers {};
     std::array<std::uint32_t, 4> analysis_source_rect {}, analysis_shape {};
     std::string program = "not-observed", pixel_shader_closure;
+    std::string shared_pin_source_closure;
     std::string unavailable_reason = "no successful attributable draw";
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> matte, legacy_matte, background;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_receipt, background_proof;
     Microsoft::WRL::ComPtr<ID3D11Buffer> expected, source_c24, geometry_constants, subtitle_constants;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shared_pin_weights, shared_pin_field, shared_pin_rows;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shared_pin_mapping, shared_pin_boundary;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> shared_pin_geometry;
 
     void release_resources() noexcept {
       matte.Reset(); legacy_matte.Reset(); background.Reset(); selected_receipt.Reset(); background_proof.Reset();
       expected.Reset(); source_c24.Reset(); geometry_constants.Reset(); subtitle_constants.Reset();
+      shared_pin_weights.Reset(); shared_pin_field.Reset(); shared_pin_rows.Reset();
+      shared_pin_mapping.Reset(); shared_pin_boundary.Reset(); shared_pin_geometry.Reset();
     }
   };
 

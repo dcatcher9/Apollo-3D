@@ -1,12 +1,16 @@
-// PRIVATE comparison adapter. The pin band itself is the exact shared Game 3D pass.
+// Production Host adapter. The pin band itself is the exact shared Game 3D pass.
 // Original source/Base/SCP/SCT/matte/receipt operands remain unchanged. No RGB fill.
 #define main_ps BaselineCompletedMainPs
 #define background_diagnostic_ps BaselineCompletedDiagnosticPs
+#if defined(HOST_SBS_SHARED_PIN_QUEUED)
+#include "current_outline/queued/sbs_reprojection_v2_live_ps.hlsl"
+#else
 #include "current_outline/completed/sbs_reprojection_v2_live_ps.hlsl"
+#endif
 #undef main_ps
 #undef background_diagnostic_ps
 
-cbuffer SharedPinGeometry : register(b5) {
+cbuffer SharedPinGeometry : register(b6) {
     uint4 PinSourceShape; // full width, full height, native band top, native band height
 };
 Texture2D<float> SharedPinWeights : register(t12);
@@ -91,6 +95,8 @@ bool SharedPinRowContributes(float source_v) {
     return fraction > 0.0f && b >= first && b < end && SharedPinRows.Load(int3(0,b-first,0)) != 0u;
 }
 float2 SharedPinSourceUV(float2 destination_uv, float eye_sign) {
+    // The queued transaction/state remains a draw-time gate as well as a preparation gate.
+    if (!WarpAuthorized()) return destination_uv;
     if (SharedPinRows.Load(int3(0,PinSourceShape.w,0)) == 0u) return SelectSourceUV(destination_uv,eye_sign);
     // Empty rows and missing/stale/revoked masks retain the exact original Base inverse.
     if (!SharedPinRowContributes(destination_uv.y)) return ReprojectIfAuthorized(destination_uv,eye_sign);
@@ -109,7 +115,8 @@ float4 shared_pin_main_ps(PS_INPUT input) : SV_TARGET {
     if (native_y <= (float)PinSourceShape.z-1.0f || native_y >= (float)(PinSourceShape.z+PinSourceShape.w))
         return BackgroundOriginalSample(ReprojectIfAuthorized(uv,eye_sign));
     // Preserve the production literal legacy selector when selected receipt authority fails.
-    if (SharedPinRows.Load(int3(0,PinSourceShape.w,0)) == 0u) return BaselineCompletedMainPs(input);
+    if (SharedPinRows.Load(int3(0,PinSourceShape.w,0)) == 0u)
+        return BackgroundOriginalSample(SelectSourceUV(uv,eye_sign));
     return BackgroundOriginalSample(SharedPinSourceUV(uv,eye_sign));
 }
 float4 shared_pin_mapping_ps(PS_INPUT input) : SV_TARGET {
@@ -117,6 +124,12 @@ float4 shared_pin_mapping_ps(PS_INPUT input) : SV_TARGET {
     if (!PackedToSource(input.TexCoord,uv,eye_sign)) return float4(-1,-1,0,0);
     float2 source_uv = SharedPinSourceUV(uv,eye_sign);
     return float4(source_uv,SharedPinRowContributes(uv.y)?1.0f:0.0f,1.0f);
+}
+float4 shared_pin_boundary_ps(PS_INPUT input) : SV_TARGET {
+    float2 uv; float eye_sign;
+    if (!PackedToSource(input.TexCoord,uv,eye_sign)) return float4(0.0f,0.0f,0.0f,1.0f);
+    float2 source_uv = SharedPinSourceUV(uv,eye_sign);
+    return float4(source_uv.x < 0.0f || source_uv.x > 1.0f ? 1.0f : 0.0f,0.0f,0.0f,1.0f);
 }
 float4 shared_pin_coverage_ps(PS_INPUT input) : SV_TARGET {
     float2 uv; float eye_sign;

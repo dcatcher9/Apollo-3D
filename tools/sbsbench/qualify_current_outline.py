@@ -111,21 +111,26 @@ def source_frames(directory):
     return [path for _, path in found]
 
 
-def expected_closures():
+def expected_closures(schema=1):
     # The C++ role/spec lists remain the owner. Check their source pins through the normal
     # generator rather than trusting a digest supplied by a qualification document.
     _require(generator._write_current_outline_runtime_pins(True), "current-outline source pins are stale")
-    _require(generator._write_current_background_runtime_pin(True), "background source pin is stale")
+    if schema >= 4:
+        _require(generator._write_shared_ui_warp_runtime_pin(True), "shared warp source pin is stale")
+    else:
+        _require(generator._write_current_background_runtime_pin(True), "background source pin is stale")
     source = generator.CURRENT_OUTLINE_RUNTIME_HEADER.read_text(encoding="utf-8")
     result = {}
     for name in ("completed", "selector"):
         match = re.search(rf'inline constexpr std::string_view {name}_closure="([0-9a-f]{{64}})";', source)
         _require(match is not None, f"native {name} closure is absent")
         result[f"{name}_source_closure_sha256"] = match[1]
-    background = generator.CURRENT_BACKGROUND_RUNTIME_HEADER.read_text(encoding="utf-8")
-    match = re.search(r'inline constexpr std::string_view closure="([0-9a-f]{64})";', background)
-    _require(match is not None, "native background closure is absent")
-    result["background_source_closure_sha256"] = match[1]
+    header = (generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER if schema >= 4
+              else generator.CURRENT_BACKGROUND_RUNTIME_HEADER)
+    source = header.read_text(encoding="utf-8")
+    match = re.search(r'inline constexpr std::string_view closure\s*=\s*"([0-9a-f]{64})";', source)
+    _require(match is not None, "native renderer closure is absent")
+    result["shared_warp_source_closure_sha256" if schema >= 4 else "background_source_closure_sha256"] = match[1]
     return result
 
 
@@ -198,22 +203,45 @@ def validate_producer_stages(frame, output):
     return True
 
 
+def validate_shared_warp(frame, width, height, crop):
+    """Check the owned native pin band; row flags remain pointwise-current GPU evidence."""
+    shared = frame["shared_warp"]
+    _closed(shared, {"renderer", "shape", "draw_serial", "selected_receipt_header", "active_rows"}, "shared warp")
+    _require(shared["renderer"] == "shared-ui-pin-band", "shared warp renderer differs")
+    band_top = height - crop
+    top = max(0, band_top - 1)
+    shape = [width, height, top, height - top]
+    _require(_words(shared["shape"], 4, "shared warp shape") == shape,
+             "shared warp native source/band shape differs")
+    serial = _uint(shared["draw_serial"], "shared warp draw serial", positive=True)
+    header = _uint(shared["selected_receipt_header"], "shared warp selected receipt header", 1)
+    selected_current = frame["selected_receipt"][2:4] == [3, 0]
+    _require(header == int(selected_current), "shared warp selected receipt authority differs")
+    rows = _words(shared["active_rows"], shape[3], "shared warp active rows")
+    _require(all(value in {0, 1} for value in rows), "shared warp row flags are not binary")
+    active = bool(header and frame["contour_identity"][2] == 1 and frame["condition_params"][4] == 2)
+    _require(active or not any(rows), "inactive shared warp grants pin authority")
+    _require(top == band_top or rows[0] == 0, "shared warp border row grants glyph authority")
+    return serial, int(any(rows))
+
+
 def _validate_frame(frame, ordinal, source, clock, output, scale, schema):
     fields = {
         "observation_ordinal", "source_file", "source_file_id", "source_snapshot_sha256", "source_size",
         "output_file", "output_sha256", "output_size", "completed_frame_id", "observation_timestamp_us",
-        "transaction_token", "analysis_generation", "bindings_observed", "background_serial",
+        "transaction_token", "analysis_generation", "bindings_observed",
         "selected_receipt", "contour_identity", "condition_params", "parallax_state", "subtitle_constants",
-        "background_proof", "background_expected", "publication_receipt",
+        "publication_receipt",
     }
+    fields.update({"shared_warp"} if schema >= 4 else {"background_serial", "background_proof", "background_expected"})
     if schema >= 2:
         fields.add("selected_mask")
-    if schema == 3:
+    if schema >= 3:
         fields.add("producer_stages")
         fields.add("hole_program_ready")
         fields.add("coverage_program_ready")
     _closed(frame, fields, "qualified frame")
-    if schema == 3:
+    if schema >= 3:
         _require(frame["hole_program_ready"] is True, "current mask-hole programs were unavailable")
         _require(frame["coverage_program_ready"] is True, "current stroke-coverage programs were unavailable")
     source_id = FRAME_NAME.fullmatch(source.name)[1]
@@ -227,7 +255,7 @@ def _validate_frame(frame, ordinal, source, clock, output, scale, schema):
              "qualified clock or full-source analysis generation differs")
     _require(frame["bindings_observed"] is True, "actual selected draw bindings were not observed")
     token = _uint(frame["transaction_token"], "transaction token", positive=True)
-    serial = _uint(frame["background_serial"], "background serial", positive=True)
+    serial = None if schema >= 4 else _uint(frame["background_serial"], "background serial", positive=True)
     with Image.open(source) as image:
         _require(image.format == "PNG", "source snapshot is not PNG")
         image.load()
@@ -250,8 +278,8 @@ def _validate_frame(frame, ordinal, source, clock, output, scale, schema):
     contour = _words(frame["contour_identity"], 32, "contour identity")
     condition = _words(frame["condition_params"], 6, "condition parameters")
     render = _words(frame["subtitle_constants"], 8, "subtitle constants")
-    proof = _words(frame["background_proof"], 96, "background proof")
-    expected = _words(frame["background_expected"], 16, "background lease")
+    proof = None if schema >= 4 else _words(frame["background_proof"], 96, "background proof")
+    expected = None if schema >= 4 else _words(frame["background_expected"], 16, "background lease")
     values = dump_contract.validate_parallax_state_words(frame["parallax_state"], raw_coordinate_scale=scale)
     state_clock = values["gain_last_observation_low"] | values["gain_last_observation_high"] << 32
     _require(state_clock == clock, "ParallaxState belongs to a different owner clock")
@@ -293,25 +321,28 @@ def _validate_frame(frame, ordinal, source, clock, output, scale, schema):
     _require((condition[4] == 0 and condition[2:] == [0] * 4) or
              (condition[4] == ocr.condition_param_fully_active_value and condition[2] > 0),
              "condition parameters are not canonical active/inactive data")
-    _require(proof[:2] == [0x31504742, 1] and proof[2] in {0, 1, 2} and proof[3] <= 31 and
-             proof[4:20] == expected and proof[62:64] == [1, 0] and proof[83:] == [0] * 13 and
-             _join(expected, 0) == serial and all(_join(expected, offset) for offset in range(0, 16, 2)),
-             "background proof/immutable lease is invalid")
-    if proof[2] in {1, 2}:
-        _require(selected[2:4] == [3, 0] and proof[3] == 0 and proof[20:52] == contour and
-                 proof[52:60] == render and _join(proof, 60) == token and
-                 proof[64:72] == [width, height, width, crop, height - crop, 0, 0, 0] and
-                 proof[77] == width * crop, "background proof source/owner join differs")
-        if proof[2] == 1:
-            _require(contour[2] == 1 and condition[2] > 0 and condition[4] == 2 and
-                     proof[80] == proof[77] and proof[81] == 1 and
-                     all(value <= proof[77] for value in proof[72:77] + proof[82:83]),
-                     "background proof did not seal its complete current native field")
-        else:
-            _require(contour[2] == 0 and condition[2:5] == [0, 0, 0] and proof[80:83] == [0, 0, 0],
-                     "empty background disposition grants pixels")
+    if schema >= 4:
+        serial, rendered_active = validate_shared_warp(frame, width, height, crop)
     else:
-        _require(proof[3] != 0, "unavailable background disposition has no rejection reason")
+        _require(proof[:2] == [0x31504742, 1] and proof[2] in {0, 1, 2} and proof[3] <= 31 and
+                 proof[4:20] == expected and proof[62:64] == [1, 0] and proof[83:] == [0] * 13 and
+                 _join(expected, 0) == serial and all(_join(expected, offset) for offset in range(0, 16, 2)),
+                 "background proof/immutable lease is invalid")
+        if proof[2] in {1, 2}:
+            _require(selected[2:4] == [3, 0] and proof[3] == 0 and proof[20:52] == contour and
+                     proof[52:60] == render and _join(proof, 60) == token and
+                     proof[64:72] == [width, height, width, crop, height - crop, 0, 0, 0] and
+                     proof[77] == width * crop, "background proof source/owner join differs")
+            if proof[2] == 1:
+                _require(contour[2] == 1 and condition[2] > 0 and condition[4] == 2 and
+                         proof[80] == proof[77] and proof[81] == 1 and
+                         all(value <= proof[77] for value in proof[72:77] + proof[82:83]),
+                         "background proof did not seal its complete current native field")
+            else:
+                _require(contour[2] == 0 and condition[2:5] == [0, 0, 0] and proof[80:83] == [0, 0, 0],
+                         "empty background disposition grants pixels")
+        else:
+            _require(proof[3] != 0, "unavailable background disposition has no rejection reason")
 
     publication = frame["publication_receipt"]
     _closed(publication, {"estimator_generation", "publication_sequence", "domain_tag", "expected_work", "depth",
@@ -326,8 +357,8 @@ def _validate_frame(frame, ordinal, source, clock, output, scale, schema):
              publication["depth_owner_frame_id"] == ordinal and publication["depth_owner_timestamp_us"] == clock and
              publication["subtitle"] == publication["expected_work"] and publication["subtitle_frame_id"] == ordinal and
              publication["subtitle_domain_tag"] == domain, "publication receipt is stale, suppressed or not inferred")
-    stage_current = validate_producer_stages(frame, output) if schema == 3 else False
-    return generation, sequence, serial, selected[2], proof[2], stage_current
+    stage_current = validate_producer_stages(frame, output) if schema >= 3 else False
+    return generation, sequence, serial, selected[2], (rendered_active if schema >= 4 else proof[2]), stage_current
 
 
 def validate_qualification(directory, frames_directory, executable, timeline=None):
@@ -338,14 +369,16 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
     root_fields = {"schema", "status", "role", "ordinary_metric_artifacts", "live_capture", "scheduling_authority",
                        "source_transfer", "frame_count", "executable_sha256", "coordinate_contract_schema",
                        "coordinate_contract_sha256", "producer_source_closure_sha256", "completed_source_closure_sha256",
-                       "selector_source_closure_sha256", "background_source_closure_sha256", "observation_timeline",
+                       "selector_source_closure_sha256", "observation_timeline",
                        "model", "model_url", "onnx_sha256", "raw_coordinate_scale", "frames"}
-    if isinstance(document, dict) and document.get("schema") == 3:
+    root_fields.add("shared_warp_source_closure_sha256" if isinstance(document, dict) and
+                    document.get("schema") == 4 else "background_source_closure_sha256")
+    if isinstance(document, dict) and document.get("schema") in {3, 4}:
         root_fields.add("composition_source_closures")
         root_fields.add("hole_program_ready")
         root_fields.add("coverage_program_ready")
     _closed(document, root_fields, "qualification manifest")
-    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3} and
+    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4} and
              document["status"] == "COMPLETE" and document["role"] == ROLE and
              document["ordinary_metric_artifacts"] == "unchanged-legacy-native-matte-renderer" and
              document["live_capture"] is False and document["source_transfer"] == "encoded-srgb" and
@@ -356,9 +389,9 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
              document["coordinate_contract_sha256"] == coordinate.CONTRACT_CANONICAL_SHA256 and
              document["producer_source_closure_sha256"] == coordinate.SHADER_IMPLEMENTATION.source_closure_sha256,
              "coordinate/producer contract differs")
-    for key, digest in expected_closures().items():
+    for key, digest in expected_closures(document["schema"]).items():
         _require(document[key] == digest, f"{key} differs from current native sources")
-    if document["schema"] == 3:
+    if document["schema"] >= 3:
         _require(document["hole_program_ready"] is True, "current mask-hole programs were unavailable")
         _require(document["coverage_program_ready"] is True, "current stroke-coverage programs were unavailable")
         _require(document["composition_source_closures"] == expected_composition_closures(),
@@ -392,16 +425,18 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
         masks = {frame["selected_mask"]["file"] for frame in document["frames"]}
         actual_masks = {path.relative_to(output).as_posix() for path in (output / "current-outline").glob("selected_matte_*.u32")}
         _require(masks == actual_masks, "selected mask frame set differs")
-    if document["schema"] == 3:
+    if document["schema"] >= 3:
         stages = {binding["file"] for frame in document["frames"] for binding in frame["producer_stages"]["buffers"].values()}
         actual_stages = {path.relative_to(output).as_posix() for path in (output / "current-outline/producer-stages").rglob("*")
                          if path.is_file()}
         _require(stages == actual_stages, "producer stage artifact coverage differs")
     return {"schema": 1, "status": "PASS", "frame_count": len(outcomes),
             "selected_current_frames": sum(item[3] == 3 for item in outcomes),
-            "background_valid_frames": sum(item[4] == 1 for item in outcomes),
+            "background_valid_frames": sum(item[4] == 1 for item in outcomes) if document["schema"] < 4 else 0,
+            "shared_warp_frames": len(outcomes) if document["schema"] >= 4 else 0,
+            "shared_warp_active_frames": sum(item[4] == 1 for item in outcomes) if document["schema"] >= 4 else 0,
             "scope": ROLE, "selected_mask_evidence_available": document["schema"] >= 2,
-            "producer_stage_evidence_available": document["schema"] == 3,
+            "producer_stage_evidence_available": document["schema"] >= 3,
             "producer_stage_current_frames": sum(item[5] for item in outcomes),
             "ordinary_metrics_qualify_selected_composite": False}
 

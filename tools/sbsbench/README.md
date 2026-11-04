@@ -86,9 +86,9 @@ selectors are rejected before launch.
 ## Actual selected compositor qualification
 
 Ordinary `run_eval.py` metric images retain the legacy native matte compositor. They do not
-qualify the live completed current-outline pixel shader or its optional push-pull background.
+qualify the live completed current-outline shared warp.
 Use the separate bounded qualification command to exercise those actual production programs,
-selected receipt, background owner/proof, immutable draw-role lease, and shared draw recorder:
+selected receipt, native pin-band owner and shared draw recorder:
 
 ```powershell
 & $SbsbenchPython tools/sbsbench/qualify_current_outline.py `
@@ -109,11 +109,12 @@ binds explicit source clocks; otherwise `--fps NUM/DEN` authors a 30/1 cadence b
 
 Selected stereo images live separately in `current-outline/sbs_<id>.png`. The atomic
 `current_outline_qualification.json` binds each exact source snapshot, observation clock,
-publication receipt, selected/SCT/SCP/ParallaxState words, draw b3, background proof and lease,
-output digest, executable and current source-closure pins. A pre-Draw observer verifies the
-actual shader, t0..t11 and b2/b3/b4 bindings. The Python reader independently validates those
+publication receipt, selected/SCT/SCP/ParallaxState words, draw b3, native pin-band shape,
+per-draw serial, literal GPU row/header flags, output digest, executable and current source-closure
+pins. A pre-Draw observer verifies the actual shader, t0..t14 and b2/b3/b6 bindings, including
+the absence of background RGB/proof bindings. The Python reader independently validates those
 joins and rejects stale owners, corrupt hashes, unknown fields and incomplete frame coverage.
-It reports selected-current and valid-background frame counts, including explicit unavailable
+It reports selected-current, shared-warp and active-pin frame counts, including explicit unavailable
 fallbacks. This file-fed full-source check establishes renderer wiring and provenance; it does
 not establish live capture eligibility, window-region behavior, visual quality or live timing.
 Ordinary metric PNGs, schemas and scores remain separate.
@@ -147,7 +148,7 @@ rates per second. Missing masks or truth yield null scores, and every zero denom
 null rather than an invented perfect result. These diagnostics have no release quality gate and
 do not establish final stereo RGB retention, recovered alpha, capture eligibility or live timing.
 
-The current native manifest is schema3. Each observation additionally binds three small producer
+The current native manifest is schema4. Each observation retains schema3's three small producer
 snapshots under `current-outline/producer-stages/frame_<id>/`: `cbc_meta.u32` (512 words),
 `raw_meta.u32` (512 words), and `f2_data.u32` (68,608 words). These are exact existing GPU buffer
 contents, about 272 KiB per observation, copied after the completed selected draw. The observer
@@ -162,7 +163,11 @@ positive kind3 selector's existing current headers, embedded C24, source envelop
 token joins. It does not invent a physical-black model-bank proof or require a KNOWN model.
 Fallback bytes remain diagnostic and do not become current producer authority. These mutable
 aliases establish no rendering authority and do not alter mask scores. Schema1/2 reading remains
-supported, with producer-stage evidence unavailable there.
+supported, with producer-stage evidence unavailable there. Schema1--3 preserve their historical
+background proof/lease requirements. Schema4 replaces those fields and the background source pin
+with the shared warp's current source closure and an explicit `shared-ui-pin-band` draw record.
+Its native row flags may grant pin support only with current selected receipt, SCT and SCP authority;
+they do not prove semantic glyph completeness or a clean hidden background.
 
 ## Subtitle diagnostics
 

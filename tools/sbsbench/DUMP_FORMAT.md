@@ -34,7 +34,7 @@ The core package contains:
 | `shadow_base_final_parallax.f32` | Required in active UIP4 packages; ordinary post-limiter field before subtitle conditioning |
 | `shadow_final_parallax.f32` | Protected conditioned model-domain diagnostic; no live renderer authority |
 | `shadow_state.json`, `shadow_frame_stats.json` | Typed V2 state and current-frame statistics |
-| `warp_map.f32` | Actual selected pre-saturation source-U map (Base inverse or analytic UI); dimensions, layout, validity, clamp, and derivation semantics live in manifest `warp_map_contract`; required for ROI packages |
+| `warp_map.f32` | Legacy analytic selected pre-saturation source-U diagnostic; dimensions, layout, validity, clamp, and derivation semantics live in manifest `warp_map_contract`; required for ROI packages. Shared-warp packages explicitly deny it actual-render authority. |
 | `warp_mask.png` | Authenticated finite-source boundary evidence; required with `warp_map.f32` for ROI packages |
 | `window_region.json` | Required semantic observation for ROI packages |
 | `sbs.png` | Packed stereo preview |
@@ -81,6 +81,7 @@ half-shape relation is rejected rather than reinterpreted.
 ## Selected map and independent Final diagnostic
 
 The required `selected_map` object binds schema 1's Base inverse plus analytic UI glyph selector.
+For a shared-warp draw it describes the retained independent diagnostic, not the rendered map.
 Its required boolean `render_enabled` records the exact b3 permission for this draw independently
 of retained OCR/SCP authority; false permission selects Base even when the retained tuple is active.
 The combined map can be discontinuous; readers must never infer a continuous Final inverse or
@@ -102,6 +103,43 @@ become current through a newer presentation. Exact native current source is pres
 from `source.png`; only same-texel display conversion and FP16 roundtrip can revoke old matte during
 a draw. Preview equality cannot authenticate that decision. New empty OCR publishes zero matte
 and inactive SCP4 immediately. No extra observation wait is added.
+
+### Actual shared UI warp observation
+
+Schema 50 adds an optional `renderer.actual_draw_renderer` extension. Older packages without it
+retain their original analytic attribution. A `shared-ui-pin-v1` value binds the production shared
+shader closure and `actual_draw_evidence.json`; `mapping_artifacts_match_selected_renderer` is
+false, and the legacy `warp_map.f32` is explicitly an independent diagnostic. Its geometry-chain
+and ROI exterior checks remain useful but cannot score or explain the actual shared render.
+
+The actual recorder observes PS bindings immediately before Draw. Requested dumps stage these
+additional immutable operands on that same immediate context, before the next draw can overwrite
+them. The existing completion event and bounded CPU collection apply; normal streaming performs
+no diagnostic readback or additional queue wait.
+
+| Artifact | Observed role |
+|---|---|
+| `actual_shared_pin_weights.f32` | t12, authorized current native binary pin weights |
+| `actual_shared_pin_field.f32` | t13, actual native band after the shared pin scan |
+| `actual_shared_pin_rows.u32` | t14, one row flag per native band row, then one selected-receipt header word |
+| `actual_shared_pin_geometry.u32` | b6, four uint32 words: full-source width/height, native band top/height |
+| `actual_shared_pin_map.rgba32f` | Dump-only invocation of the actual shared inverse, packed-output RGBA: pre-clamp source U, source V, contributing pin row, content-valid bit |
+| `actual_shared_pin_boundary.rgba32f` | Same inverse's finite-source boundary, RGBA: boundary bit, zero, zero, one |
+
+Fields and weights are `R32_FLOAT` at full-source width by native band height. Rows are
+`R32_UINT`, width one by band-height-plus-one. Map and boundary are `RGBA32F` at the exact packed
+output dimensions. Invalid content map pixels carry `(-1,-1,0,0)`; boundary pixels always have
+alpha one. The row header records selected-receipt validity for that immutable draw; it does not
+replace state/SCT/SCP/source/colour authorization. Every diagnostic has its own availability,
+byte count, layout and SHA-256. Optional staging failure is recorded as unavailable and never
+authorizes substitution of the legacy map.
+
+`shared_ui_pin_dump.verify` joins the manifest, observed draw identity/clock/closure, all readback
+hashes, shapes, binary weights and row flags, and actual map/boundary channels. Its
+`load_actual_map` returns the authenticated shared source-U plane for numeric inspection and
+rejects incomplete readbacks. It does not implement a CPU pin-scan replica or claim missing
+background truth. `replay_depth_mapping_v2.py` remains a fresh raw-depth experiment, not an exact
+replay of this captured compositor; its capture summary retains the shared-renderer attribution.
 
 ## Diagnostic GPU completion trace
 

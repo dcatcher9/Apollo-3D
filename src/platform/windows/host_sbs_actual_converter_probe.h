@@ -56,6 +56,14 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     std::array<std::uint32_t,4> analysis_shape{};
     std::string pixel_shader_closure;
   };
+  struct shared_warp_draw_t {
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> weights, field, rows;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> geometry;
+    bool selected=false,queued=false,role_matched=false,bindings_observed=false,no_background=false;
+    std::uint64_t serial=0u,pixel_shader_address=0u;
+    std::array<std::uint32_t,4u> shape{};
+    std::string source_closure;
+  };
   struct event_t {
     event_e kind {};
     std::uint64_t conversion = 0, model_frame = 0, observation_us = 0;
@@ -105,6 +113,7 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     std::uint64_t actual_draw_selected_receipt_address=0u;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> packed;
     background_draw_t background;
+    shared_warp_draw_t shared_warp;
   };
   struct observer_t {
     void *state = nullptr;

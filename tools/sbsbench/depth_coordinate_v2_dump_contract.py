@@ -18,11 +18,13 @@ try:
     from . import generate_depth_coordinate_v2_contract as generator
     from . import host_sbs_shader_manifest as shader_manifest
     from . import prod_zipdepth_convex2x as convex2x_contract
+    from . import shared_ui_pin_dump
 except ImportError:  # Direct script/module loading from tools/sbsbench.
     import depth_coordinate_v2_contract as coordinate_contract  # type: ignore
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
     import host_sbs_shader_manifest as shader_manifest  # type: ignore
     import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
+    import shared_ui_pin_dump  # type: ignore
 
 
 DUMP_MANIFEST_SCHEMA = 50
@@ -2658,10 +2660,11 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         raise ValueError("active UIP4 subtitle conditioning requires selected V2 geometry")
     requested = renderer.get("parallax_v2_render_requested")
     mapping_matches = renderer.get("mapping_artifacts_match_selected_renderer")
+    actual_renderer = shared_ui_pin_dump.validate_attribution(document)
     if (not isinstance(requested, bool) or
             not isinstance(mapping_matches, bool) or
             (selected and not requested) or
-            mapping_matches != warp_map["available"]):
+            mapping_matches != (warp_map["available"] and not actual_renderer["shared_pin_selected"])):
         raise ValueError("dump_manifest.json has invalid V2 renderer request attribution")
 
     expected_position = ('ordinary Base inverse + optional analytic UI glyph selector + depth_input_region embedding' if input_mode == "window-region" else 'ordinary Base inverse + optional analytic UI glyph selector') if selected else None
@@ -2911,6 +2914,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "active": active,
         "rendered_output_selected": selected,
         "mapping_artifacts_match_selected_renderer": mapping_matches,
+        "actual_draw_renderer": actual_renderer,
         "position_field": expected_position,
         "subtitle_render_enabled": selected_map["render_enabled"],
         "vertical_majorant_available": active,
@@ -5171,6 +5175,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         "width": width,
         "height": height,
         "texels": width * height,
+        "actual_draw_shared_pin": shared_ui_pin_dump.verify(dump_dir, manifest),
         "chain_fields_verified": list(geometry_chain_fields),
         "depth_input_region_verified": True,
         "depth_input_region": input_region,

@@ -57,6 +57,21 @@ PRODUCTION_SOURCE_PROFILE_CASES = (
 
 
 class DepthCoordinateV2DumpContractTests(unittest.TestCase):
+    def test_shared_warp_attribution_keeps_legacy_maps_diagnostic(self):
+        import shared_ui_pin_dump as pin
+        changed = copy.deepcopy(self.manifest)
+        closure = "a" * 64
+        changed["renderer"]["actual_draw_renderer"] = {
+            "kind": pin.KIND, "source_closure_sha256": closure,
+            "legacy_mapping_role": pin.LEGACY_ROLE, "evidence_artifact": pin.EVIDENCE}
+        with mock.patch.object(pin, "_expected_closure", return_value=closure):
+            summary = dump_contract.validate_v2_dump_manifest_document(changed)
+            self.assertTrue(summary["actual_draw_renderer"]["shared_pin_selected"])
+            self.assertFalse(summary["mapping_artifacts_match_selected_renderer"])
+            changed["renderer"]["mapping_artifacts_match_selected_renderer"] = True
+            with self.assertRaisesRegex(ValueError, "legacy analytic map"):
+                dump_contract.validate_v2_dump_manifest_document(changed)
+
     def test_live_dump_resolver_lists_the_canonical_producer_stages(self):
         source = (REPO / "src/platform/windows/sbs_debug_dump.cpp").read_text()
         resolver = source.split("nlohmann::json subtitle_plane_resolver_contract_json(", 1)[1]

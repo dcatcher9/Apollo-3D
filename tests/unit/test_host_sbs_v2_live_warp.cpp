@@ -27,6 +27,7 @@
   #include <src/host_sbs_current_outline_runtime_programs.h>
   #include <src/host_sbs_queued_render_guard.h>
   #include <src/host_sbs_selected_glyph_push_pull_runtime.h>
+  #include <src/host_sbs_shared_ui_warp_runtime.h>
   #include <src/host_sbs_shader_cache.h>
   #include <src/host_sbs_subtitle_render.h>
   #include <src/host_sbs_v2_geometry.h>
@@ -48,6 +49,8 @@ class HostSbsV2LiveWarpGpuTest_ActualV5PushPullBackgroundColourReference_Test;
 class HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageColourReference_Test;
 class HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageBalancedDrawCost_Test;
 class HostSbsV2LiveWarpGpuTest_ActualCurrentExactGlyphErasureColourReference_Test;
+class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
+class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -136,6 +139,9 @@ namespace {
     bool experimental_background = false;
     saved_background_inputs_t *background_diagnostic_output = nullptr;
     bool shared_ui_pin = false;
+    bool production_shared_ui_pin = false;
+    bool production_shared_ui_pin_queued = false;
+    ID3D11ShaderResourceView *shared_ui_pin_draw_guard_override = nullptr;
     bool shared_ui_pin_resample_only = false;
     shared_ui_pin_diagnostics_t *shared_ui_pin_diagnostic_output = nullptr;
     double *render_gpu_ms = nullptr;
@@ -148,6 +154,8 @@ namespace {
     friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageColourReference_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageBalancedDrawCost_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentExactGlyphErasureColourReference_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
   public:
     bool initialize(
       std::string &error,
@@ -755,16 +763,22 @@ namespace {
         ID3D11Buffer *direct_constants[] = {direct_constants_buffer.Get()};
         context->PSSetConstantBuffers(4, 1, direct_constants);
       }
-      const bool shared_pin = outline && outline->shared_ui_pin;
-      if (shared_pin && (!current_outline_completed || !subtitle || !shared_ui_pin_ps[0] || !shared_ui_pin_ps[1])) {
+      const bool production_shared_pin = outline && outline->production_shared_ui_pin;
+      const bool shared_pin = outline && (outline->shared_ui_pin || production_shared_pin);
+      if (shared_pin && (!current_outline_completed || !subtitle ||
+          (!production_shared_pin && (!shared_ui_pin_ps[0] || !shared_ui_pin_ps[1])))) {
         error = "shared UI pin route needs a configured actual completed tuple";
         return false;
       }
-      const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
+      if (production_shared_pin && !production_shared_ui_pin_programs.ready() &&
+          !production_shared_ui_pin_programs.load(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
+      const bool production_queued_pin = production_shared_pin && outline->production_shared_ui_pin_queued;
+      platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {output_rtv.Get(), nullptr},
         .render_target_count = 1u,
         .vertex_shader = vertex_shader.Get(),
-        .pixel_shader = shared_pin ? shared_ui_pin_ps[0].Get() : pixel_shader.Get(),
+        .pixel_shader = production_shared_pin ? production_shared_ui_pin_programs.program(production_queued_pin).pixel :
+                        shared_pin ? shared_ui_pin_ps[0].Get() : pixel_shader.Get(),
         .viewport = viewport,
         .sampler = sampler.Get(),
         .shader_resources = {
@@ -796,6 +810,7 @@ namespace {
         ComPtr<ID3D11UnorderedAccessView> uav;
       };
       pin_plane_t pin_field, pin_weights, pin_rows;
+      models::host_sbs_shared_ui_warp::views_t production_pin_views;
       ComPtr<ID3D11Buffer> pin_geometry;
       std::array<UINT,4u> pin_shape {};
       ComPtr<ID3D11Query> timing_disjoint,timing_start,timing_end;
@@ -820,6 +835,33 @@ namespace {
         }
         pin_shape={source_width,source_height,crop_top>0u?crop_top-1u:0u,0u};
         pin_shape[3u]=std::min(source_height,crop_end+1u)-pin_shape[2u];
+        if (production_shared_pin) {
+          namespace shared = models::host_sbs_shared_ui_warp;
+          shared::request_t request;
+          std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
+          request.draw_srvs[7u] = selected_receipt_srv.Get();request.draw_srvs[8u] = matte_srv.Get();
+          request.geometry_constants = geometry_buffer.Get();request.subtitle_constants = subtitle_buffer.Get();
+          request.sampler = sampler.Get();
+          request.queued = production_queued_pin;
+          request.queued_guard_constants = production_queued_pin ? private_guard_cb.Get() : nullptr;
+          request.queued_guard_transaction = production_queued_pin ? private_guard_srv.Get() : nullptr;
+          if (!production_shared_ui_pin_owner.ensure(device.Get(), pin_shape, error)) return false;
+          begin_timing();
+          if (!production_shared_ui_pin_owner.queue(context.Get(), production_shared_ui_pin_programs.program(production_queued_pin), request, error) ||
+              !production_shared_ui_pin_owner.matches(context.Get(), request)) return false;
+          // Explicit test-only mutation after the pin field has been issued. The queued PS
+          // must authenticate its actual draw guard rather than trust the preparation header.
+          if (outline->shared_ui_pin_draw_guard_override)
+            draw_command.queued_guard_transaction = outline->shared_ui_pin_draw_guard_override;
+          production_pin_views = production_shared_ui_pin_owner.views();
+          const auto retain = [](ID3D11ShaderResourceView *view, pin_plane_t &plane) {
+            ComPtr<ID3D11Resource> resource;view->GetResource(&resource);plane.srv = view;
+            return SUCCEEDED(resource.As(&plane.texture));
+          };
+          if (!retain(production_pin_views.field.Get(), pin_field) || !retain(production_pin_views.weights.Get(), pin_weights) ||
+              !retain(production_pin_views.rows.Get(), pin_rows)) return false;
+          pin_geometry = production_pin_views.geometry;
+        } else {
         const auto plane=[&](UINT w,UINT h,DXGI_FORMAT format,pin_plane_t &p) {
           D3D11_TEXTURE2D_DESC d {};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=1u;
           d.Format=format;d.SampleDesc.Count=1u;d.Usage=D3D11_USAGE_DEFAULT;
@@ -844,7 +886,7 @@ namespace {
         ID3D11Buffer *b2=geometry_buffer.Get(),*b3=subtitle_buffer.Get(),*b5=pin_geometry.Get();
         ID3D11SamplerState *linear=sampler.Get();
         ID3D11UnorderedAccessView *uavs[3] {pin_field.uav.Get(),pin_weights.uav.Get(),pin_rows.uav.Get()};
-        context->CSSetConstantBuffers(2u,1u,&b2);context->CSSetConstantBuffers(3u,1u,&b3);context->CSSetConstantBuffers(5u,1u,&b5);
+        context->CSSetConstantBuffers(2u,1u,&b2);context->CSSetConstantBuffers(3u,1u,&b3);context->CSSetConstantBuffers(6u,1u,&b5);
         context->CSSetSamplers(0u,1u,&linear);context->CSSetShaderResources(0u,15u,srvs);
         context->CSSetUnorderedAccessViews(0u,3u,uavs,nullptr);context->CSSetShader(shared_ui_pin_cs[0].Get(),nullptr,0u);
         context->Dispatch((source_width+15u)/16u,(pin_shape[3u]+15u)/16u,1u);
@@ -857,10 +899,11 @@ namespace {
         }
         ID3D11ShaderResourceView *null_srvs[15] {};context->CSSetShaderResources(0u,15u,null_srvs);
         ID3D11Buffer *null_cb=nullptr;ID3D11SamplerState *null_sampler=nullptr;
-        context->CSSetConstantBuffers(2u,1u,&null_cb);context->CSSetConstantBuffers(3u,1u,&null_cb);context->CSSetConstantBuffers(5u,1u,&null_cb);
+        context->CSSetConstantBuffers(2u,1u,&null_cb);context->CSSetConstantBuffers(3u,1u,&null_cb);context->CSSetConstantBuffers(6u,1u,&null_cb);
         context->CSSetSamplers(0u,1u,&null_sampler);context->CSSetShader(nullptr,nullptr,0u);
         ID3D11ShaderResourceView *pin_srvs[3] {pin_weights.srv.Get(),pin_field.srv.Get(),pin_rows.srv.Get()};
-        context->PSSetShaderResources(12u,3u,pin_srvs);context->PSSetConstantBuffers(5u,1u,&b5);
+        context->PSSetShaderResources(12u,3u,pin_srvs);context->PSSetConstantBuffers(6u,1u,&b5);
+        }
       } else if (current_outline_completed && subtitle && outline && outline->saved_background) {
         const auto &saved = *outline->saved_background;
         if (saved.pixels.size() != subtitle->matte.size() || outline->background_requested ||
@@ -978,6 +1021,8 @@ namespace {
           error = "production current-background scope rejected draw operands";
           return false;
         }
+        models::host_sbs_shared_ui_warp::scoped_binding_t pin_scope;
+        if (production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) return false;
         submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
       }
       if (!submitted && use_recorder_guard_scope && recorder_flat_fallback_ps) {
@@ -1029,13 +1074,15 @@ namespace {
         auto command=draw_command;command.pixel_shader=shared_ui_pin_ps[1u].Get();command.render_targets[0u]=map_rtv.Get();
         models::research_current_outline_selected_matte_v2::scoped_receipt_t coverage_scope;
         if (!coverage_scope.bind(context.Get(),selected_receipt_srv.Get(),matte_srv.Get())) return false;
+        models::host_sbs_shared_ui_warp::scoped_binding_t pin_scope;
+        if (production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) return false;
         if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.mapping_rgba32f)) return false;
         command.pixel_shader=shared_ui_pin_ps[2u].Get();
         if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.ui_coverage_rgba32f)) return false;
       }
-      if (shared_pin) {
+      if (shared_pin && !production_shared_pin) {
         ID3D11ShaderResourceView *null_srvs[3] {};context->PSSetShaderResources(12u,3u,null_srvs);
-        ID3D11Buffer *null_cb=nullptr;context->PSSetConstantBuffers(5u,1u,&null_cb);
+        ID3D11Buffer *null_cb=nullptr;context->PSSetConstantBuffers(6u,1u,&null_cb);
       }
       ID3D11Buffer *null_constants = nullptr;
       context->PSSetConstantBuffers(4u, 1u, &null_constants);
@@ -1813,6 +1860,8 @@ namespace {
     std::array<ComPtr<ID3D11PixelShader>,3u> shared_ui_pin_ps;
     std::filesystem::path shared_ui_pin_root;
     std::string shared_ui_pin_closure;
+    models::host_sbs_shared_ui_warp::programs_t production_shared_ui_pin_programs;
+    models::host_sbs_shared_ui_warp::resources_t production_shared_ui_pin_owner;
     bool private_guard_configured = false;
     bool use_recorder_guard_scope = false;
     ComPtr<ID3D11PixelShader> recorder_flat_fallback_ps;
@@ -5853,9 +5902,13 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinAuthoredStressComparison) {
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinPreservesNativeGlyphAndAuthorityAcrossColourRoiAndFractionalSampling) {
-  const auto *root=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_ROOT"),*pin=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_PIN");
-  if(!root || !*root)GTEST_SKIP()<<"No shared UI pin comparison program selected";
-  ASSERT_TRUE(pin && *pin);live_v2_warp_fixture_t fixture;std::string error;
+  const auto *external_root=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_ROOT"),*external_pin=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_PIN");
+  const std::filesystem::path root=external_root&&*external_root?external_root:SUNSHINE_SHADERS_DIR;
+  const auto source=models::host_sbs_shader_cache::snapshot_sources(root,live_v2_warp_fixture_t::shared_ui_pin_specs);
+  ASSERT_TRUE(source);
+  const std::string pin=external_root&&*external_root?(external_pin?external_pin:""):
+    models::host_sbs_shader_cache::source_closure_sha256(source);
+  ASSERT_EQ(pin.size(),64u);live_v2_warp_fixture_t fixture;std::string error;
   ASSERT_TRUE(fixture.initialize(error,warp_shader_e::current_outline_completed,false,true))<<error;
   ASSERT_TRUE(fixture.configure_shared_ui_pin(root,pin,error))<<error;
   constexpr UINT W=128u,H=32u,FW=24u,FH=10u;const auto state=make_live_state(true,true);
@@ -5876,8 +5929,17 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinPreservesNativeGlyphAndAuthorityAcross
     }
     const std::vector<float> base(FW*FH,sign*1.25f/float(aw));auto operands=make_current_outline_inputs(ui);
     operands.shared_ui_pin=true;shared_ui_pin_diagnostics_t diagnostic;operands.shared_ui_pin_diagnostic_output=&diagnostic;
-    std::vector<std::byte> actual,constant_ui,base_output,revoked;
+    std::vector<std::byte> actual,production,constant_ui,base_output,revoked;
     ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},actual,error,FW,FH,geometry,&ui,nullptr,true,&operands))<<error;
+    auto production_operands=operands;production_operands.production_shared_ui_pin=true;
+    shared_ui_pin_diagnostics_t production_diagnostic;production_operands.shared_ui_pin_diagnostic_output=&production_diagnostic;
+    ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},production,error,FW,FH,geometry,&ui,nullptr,true,&production_operands))<<error;
+    EXPECT_EQ(production,actual)<<"Production owner must preserve the qualified shared warp pixels";
+    EXPECT_EQ(production_diagnostic.shape,diagnostic.shape);
+    EXPECT_EQ(production_diagnostic.field,diagnostic.field);
+    EXPECT_EQ(production_diagnostic.authorized_weights,diagnostic.authorized_weights);
+    EXPECT_EQ(production_diagnostic.active_rows,diagnostic.active_rows);
+    EXPECT_EQ(production_diagnostic.selected_receipt_header,diagnostic.selected_receipt_header);
     auto disabled=ui;disabled.constants.enabled=0u;auto flat_geometry=geometry;flat_geometry.video_roi_active=0.0f;
     const float full_plane=(shift/float(aw))*(float(aw)/float(W));const std::vector<float> constant(FW*FH,full_plane);
     auto ordinary=make_current_outline_inputs(disabled);
@@ -5895,8 +5957,196 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinPreservesNativeGlyphAndAuthorityAcross
     operands.shared_ui_pin_diagnostic_output=nullptr;
     ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},revoked,error,FW,FH,geometry,&bad,nullptr,true,&operands))<<error;
     EXPECT_EQ(revoked,base_output)<<"All current glyph RGB was revoked";
+    production_operands.shared_ui_pin_diagnostic_output=nullptr;
+    ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},production,error,FW,FH,geometry,&bad,nullptr,true,&production_operands))<<error;
+    EXPECT_EQ(production,base_output)<<"Production owner must recheck current glyph RGB";
   }
   EXPECT_TRUE(fixture.shared_ui_pin_source_unchanged());
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRetainsAuthorityAndClearsReusedRows) {
+  constexpr UINT width = 128u, height = 32u, field_width = 24u, field_height = 10u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(field_width * field_height, -1.25f / width);
+  std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});
+  auto ui = make_subtitle_inputs(width, height, state, 2.5f / width, field_width, field_height);
+  for (const UINT x : {56u, 64u}) {
+    const auto pixel = 15u * width + x;
+    source[pixel] = ui.snapshot[pixel] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  }
+  ui.matte[15u * width + 56u] = 1u;
+  auto selected = make_current_outline_inputs(ui);
+  selected.matte.assign(width * height, 0u);
+  selected.matte[15u * width + 64u] = 1u;
+  selected.production_shared_ui_pin = true;
+  std::string error;
+  live_v2_warp_fixture_t fixture;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  const auto render = [&](const subtitle_inputs_t &subtitle, const current_outline_inputs_t &operands) {
+    std::vector<std::byte> output;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+      source.data(), base, base, state, {}, output, error, field_width, field_height, {}, &subtitle,
+      nullptr, true, &operands)) << error;
+    return output;
+  };
+  const auto current = render(ui, selected);
+  auto disabled = ui;disabled.constants.enabled = 0u;
+  auto baseline = selected;baseline.production_shared_ui_pin = false;
+  const auto base_output = render(disabled, baseline);
+  ASSERT_NE(current, base_output);
+  for (const auto *fault : {"empty", "stale SCT", "inactive SCP", "changed RGB", "stale receipt"}) {
+    SCOPED_TRACE(fault);
+    auto changed = ui;
+    auto operands = selected;
+    if (std::string_view(fault) == "empty") operands.matte.assign(width * height, 0u);
+    else if (std::string_view(fault) == "stale SCT") changed.identity[20u] ^= 1u;
+    else if (std::string_view(fault) == "inactive SCP") changed.condition[2u] = changed.condition[4u] = changed.condition[5u] = 0u;
+    else if (std::string_view(fault) == "changed RGB") {
+      for (auto &pixel : changed.snapshot) pixel = {0u, 0u, 0u, 0x3c00u};
+    } else operands.receipt[63u] = 1u;
+    const auto actual = render(changed, operands);
+    if (std::string_view(fault) == "stale receipt") {
+      operands.production_shared_ui_pin = false;
+      const auto legacy = render(changed, operands);
+      EXPECT_EQ(actual, legacy) << "Receipt rejection must retain the literal original legacy selector";
+      EXPECT_NE(actual, base_output) << "This fault must actually exercise positive original M";
+    } else EXPECT_EQ(actual, base_output);
+    EXPECT_EQ(render(ui, selected), current) << "A rejected/empty draw must not poison a later current draw";
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs) {
+  namespace shared = models::host_sbs_shared_ui_warp;
+  live_v2_warp_fixture_t fixture;
+  std::string error;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(fixture.production_shared_ui_pin_programs.load(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
+  constexpr UINT width = 128u, height = 16u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(width * height, -1.0f / width);
+  auto subtitle = make_subtitle_inputs(width, height, state, 2.5f / width);
+  subtitle.matte[8u * width + 64u] = 1u;
+  subtitle.snapshot[8u * width + 64u] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});
+  source[8u * width + 64u] = subtitle.snapshot[8u * width + 64u];
+  auto operands = make_current_outline_inputs(subtitle);operands.production_shared_ui_pin = true;
+
+  ComPtr<ID3D11Texture2D> sentinel_texture, sentinel_uav_texture;
+  ComPtr<ID3D11ShaderResourceView> sentinel_srv;
+  ASSERT_TRUE(fixture.create_immutable_texture_srv(DXGI_FORMAT_R32_FLOAT, width, height, 4u,
+    base.data(), sentinel_texture, sentinel_srv));
+  D3D11_TEXTURE2D_DESC texture_desc {};
+  sentinel_texture->GetDesc(&texture_desc);
+  texture_desc.Usage = D3D11_USAGE_DEFAULT;texture_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+  ComPtr<ID3D11UnorderedAccessView> sentinel_uav;
+  ASSERT_TRUE(SUCCEEDED(fixture.device->CreateTexture2D(&texture_desc, nullptr, &sentinel_uav_texture)));
+  ASSERT_TRUE(SUCCEEDED(fixture.device->CreateUnorderedAccessView(sentinel_uav_texture.Get(), nullptr, &sentinel_uav)));
+  D3D11_BUFFER_DESC desc {};desc.ByteWidth = 48u;desc.Usage = D3D11_USAGE_DEFAULT;desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  ComPtr<ID3D11Buffer> sentinel_constants;
+  ASSERT_TRUE(SUCCEEDED(fixture.device->CreateBuffer(&desc, nullptr, &sentinel_constants)));
+  std::array<ID3D11ShaderResourceView *, 15u> old_srvs;old_srvs.fill(sentinel_srv.Get());
+  std::array<ID3D11Buffer *, 7u> old_constants;old_constants.fill(sentinel_constants.Get());
+  ID3D11UnorderedAccessView *old_uavs[3] {sentinel_uav.Get(), nullptr, nullptr};
+  ID3D11ShaderResourceView *old_pixel[3] {sentinel_srv.Get(), sentinel_srv.Get(), sentinel_srv.Get()};
+  auto *old_buffer = sentinel_constants.Get();auto *old_sampler = fixture.sampler.Get();
+  auto *old_shader = fixture.production_shared_ui_pin_programs.program().initialize;
+  fixture.context->CSSetShaderResources(0u, 15u, old_srvs.data());
+  fixture.context->CSSetConstantBuffers(0u, 7u, old_constants.data());
+  fixture.context->CSSetUnorderedAccessViews(0u, 3u, old_uavs, nullptr);
+  fixture.context->CSSetSamplers(0u, 1u, &old_sampler);fixture.context->CSSetShader(old_shader, nullptr, 0u);
+  fixture.context->PSSetShaderResources(12u, 3u, old_pixel);fixture.context->PSSetConstantBuffers(6u, 1u, &old_buffer);
+  std::vector<std::byte> output;
+  ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+    source.data(), base, base, state, {}, output, error, 0u, 0u, {}, &subtitle, nullptr, true, &operands)) << error;
+  ID3D11ShaderResourceView *restored_srvs[15] {}, *restored_pixel[3] {};
+  ID3D11Buffer *restored_constants[7] {}, *restored_pixel_constant = nullptr;
+  ID3D11UnorderedAccessView *restored_uavs[3] {};
+  ComPtr<ID3D11SamplerState> restored_sampler;ComPtr<ID3D11ComputeShader> restored_shader;
+  fixture.context->CSGetShaderResources(0u, 15u, restored_srvs);fixture.context->CSGetConstantBuffers(0u, 7u, restored_constants);
+  fixture.context->CSGetUnorderedAccessViews(0u, 3u, restored_uavs);fixture.context->CSGetSamplers(0u, 1u, &restored_sampler);
+  fixture.context->CSGetShader(&restored_shader, nullptr, nullptr);fixture.context->PSGetShaderResources(12u, 3u, restored_pixel);
+  fixture.context->PSGetConstantBuffers(6u, 1u, &restored_pixel_constant);
+  for (UINT i = 0u; i < 15u; ++i) {EXPECT_EQ(restored_srvs[i], old_srvs[i]);if(restored_srvs[i])restored_srvs[i]->Release();}
+  for (UINT i = 0u; i < 7u; ++i) {EXPECT_EQ(restored_constants[i], old_constants[i]);if(restored_constants[i])restored_constants[i]->Release();}
+  for (UINT i = 0u; i < 3u; ++i) {
+    EXPECT_EQ(restored_uavs[i], old_uavs[i]);if(restored_uavs[i])restored_uavs[i]->Release();
+    EXPECT_EQ(restored_pixel[i], old_pixel[i]);if(restored_pixel[i])restored_pixel[i]->Release();
+  }
+  EXPECT_EQ(restored_sampler.Get(), old_sampler);EXPECT_EQ(restored_shader.Get(), old_shader);
+  EXPECT_EQ(restored_pixel_constant, old_buffer);if(restored_pixel_constant)restored_pixel_constant->Release();
+  shared::request_t missing;
+  EXPECT_FALSE(fixture.production_shared_ui_pin_owner.queue(fixture.context.Get(),
+    fixture.production_shared_ui_pin_programs.program(), missing, error));
+  EXPECT_FALSE(fixture.production_shared_ui_pin_owner.matches(fixture.context.Get(), missing));
+  EXPECT_FALSE(fixture.production_shared_ui_pin_owner.views().field);
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw) {
+  namespace guard = models::research_queued_render_guard_v1;
+  namespace v2 = models::depth_coordinate_v2;
+  constexpr UINT width = 128u, height = 16u;
+  const auto state = make_live_state(true, true);
+  const std::uint64_t clock = std::uint64_t(state[v2::gain_last_observation_low]) |
+                              (std::uint64_t(state[v2::gain_last_observation_high]) << 32u);
+  const std::uint64_t token = 71ull | (9ull << 32u);
+  const auto expected = guard::make_expected(token, 1u, clock);
+  auto ui = make_subtitle_inputs(width, height, state, 2.5f / width);
+  ui.matte[8u * width + 64u] = 1u;
+  ui.snapshot[8u * width + 64u] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  auto selected = make_current_outline_inputs(ui);selected.production_shared_ui_pin = true;
+  std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});
+  source[8u * width + 64u] = ui.snapshot[8u * width + 64u];
+  const std::vector<float> base(width * height, -1.25f / width);
+  std::string error;
+  live_v2_warp_fixture_t fixture, flat;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main)) << error;
+  const auto packet_for = [&](const guard::expected_t &e) {
+    std::vector<std::uint32_t> packet(64u);
+    packet[0] = 1u;packet[1] = 1u ^ 0xd1ec15a5u ^ 0x52434f4fu;
+    packet[2] = e.root[0];packet[3] = e.root[1];
+    packet[4] = e.root[0] ^ 0xa3756c91u;packet[5] = e.root[1] ^ 0x5c8a936eu;
+    packet[6] = 0x47524243u;packet[7] = 0x52434f4fu;
+    std::copy_n(packet.begin() + 2u, 4u, packet.begin() + 8u);
+    packet[12] = 0x54535152u;packet[13] = e.root[2];packet[14] = e.root[3];
+    packet[20] = packet[21] = packet[22] = packet[26] = 1u;
+    packet[24] = (width + 15u) / 16u;packet[25] = (height + 15u) / 16u;
+    return packet;
+  };
+  const auto good = packet_for(expected);
+  const auto configure = [&](const guard::expected_t &owner, const std::vector<std::uint32_t> &packet) {
+    // Reuse only the fixture's raw packet/CB materialization. The selected PS is the actual
+    // authenticated shared runtime program, not this ordinary completed helper.
+    return fixture.configure_private_guard(
+      std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline" / "completed",
+      std::string(models::current_outline_runtime::completed_closure), &owner, &packet, error);
+  };
+  const auto render = [&](live_v2_warp_fixture_t &renderer, const current_outline_inputs_t *operands) {
+    std::vector<std::byte> pixels;
+    EXPECT_TRUE(renderer.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+      source.data(), base, base, state, {}, pixels, error, 0u, 0u, {}, &ui, nullptr, true, operands)) << error;
+    return pixels;
+  };
+  const auto completed = render(fixture, &selected), identity = render(flat, nullptr);
+  ASSERT_NE(completed, identity);
+  fixture.use_recorder_guard_scope = true;
+  selected.production_shared_ui_pin_queued = true;
+  ASSERT_TRUE(configure(expected, good)) << error;
+  EXPECT_EQ(render(fixture, &selected), completed);
+  auto bad = good;bad[6u] = 0u;
+  ASSERT_TRUE(configure(expected, bad)) << error;
+  const auto bad_draw_packet = fixture.private_guard_srv;
+  EXPECT_EQ(render(fixture, &selected), identity) << "A rejected prepare guard must produce current flat pixels";
+  ASSERT_TRUE(configure(expected, good)) << error;
+  selected.shared_ui_pin_draw_guard_override = bad_draw_packet.Get();
+  EXPECT_EQ(render(fixture, &selected), identity) << "Revocation after preparation must reject the issued pin field";
+  selected.shared_ui_pin_draw_guard_override = nullptr;
+  auto stale_clock = expected;stale_clock.observation[0u] ^= 1u;
+  ASSERT_TRUE(configure(stale_clock, good)) << error;
+  EXPECT_EQ(render(fixture, &selected), identity);
+  ASSERT_TRUE(configure(expected, good)) << error;
+  EXPECT_EQ(render(fixture, &selected), completed) << "Rejected guards must not poison a later current queued draw";
+  EXPECT_TRUE(fixture.private_guard_slots_clear());
 }
 
 // Opt-in external two-sided32 selector experiment, independent of production qualification.

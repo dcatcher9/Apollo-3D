@@ -1,6 +1,6 @@
 # SBS 3D status and roadmap
 
-Latest subtitle work: the [execution and ownership cleanup](host-sbs-review-followups.md#p13-subtitle-execution-and-ownership-cleanup) preserves G1 output, removes repeated work and production diagnostic storage, and uses the validated master build through `E:\ApolloDev\run-dev.cmd`. Timing variation does not establish an FPS gain; the rejected background-constant experiment is preserved separately.
+Latest subtitle work adopts the [shared Game 3D pin-band warp](host-sbs-review-followups.md#p15-production-shared-ui-warp) for Host rendering. Original RGB moves through one conditioned field instead of subtitle background reconstruction. G1 mask detection is unchanged. This deliberately accepts nearby scene deformation and possible UI-row transitions in exchange for retaining original strokes with incomplete masks; the preceding comparison has no universal quality winner. The validated build uses `E:\ApolloDev\run-dev.cmd`. No live FPS or headset acceptance is claimed.
 
 The current subtitle policy is Generic Outline G1
 [original stroke coverage](host-sbs.md#original-stroke-coverage). It uses observed reference
