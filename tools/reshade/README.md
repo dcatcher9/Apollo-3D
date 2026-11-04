@@ -477,7 +477,8 @@ live quality issue. See the [jitter contract](../../docs/reshade-sbs.md#depth-ji
 
 Every game so far broke on an assumption that held in the games before it: Resident Evil
 Requiem aliases heap memory every frame, sends a camera without frame identity and offers a
-presented alpha that is not UI; The Witcher 3 moves command lists to per-object method tables and
+presented alpha that is not UI; The Witcher 3 moves command lists to per-object method tables (the
+execution hook writes the barrier hooks into them since 11-03: `Sunshine 3D barrier coverage`) and
 requests each frame token about 30 times. A first run therefore covers the paths those differences
 reach, and the report below names each known failure signature:
 
@@ -1663,9 +1664,11 @@ center, which the GPU copy shows (a runtime that applied the resuming CLEAR woul
 captured over the whole scene: before 11-01 the add-on took the resuming CLEAR for an erase, and
 the quarter drawn after it narrowed the crop, and with that observation dropped
 altogether (4b3f9cee) the case was mono, since the CLEAR was the frame's only proof of the
-depth's state after the suspending list (the proven-state table counts one of the two lists as
-uncovered on about every Present, which unproves every state; why is not traced, as both are
-DIRECT lists of one device: an [open gap](../../docs/reshade-sbs.md#selecting-scene-depth)). The other cases
+depth's state after the suspending list (until 11-03 the proven-state table counted that list as
+uncovered on about every Present, which unproved every state: D3D12Core 10.0.26300 moves it to
+another module table at its suspending pass, which the hooks did not know; the case now requires
+no uncovered execution after its warm-up, read through `SunshineDepthTestUncoveredExecutions`,
+a [closed gap](../../docs/reshade-sbs.md#selecting-scene-depth)). The other cases
 cover complementary rotation becoming concurrent rendering (with A current on every Present, its
 peers B and C, drawn on every Present too, must hold their own end-of-frame copies on fewer than
 three quarters of those Presents, A on all of them: until 11-01 every member was copied on every
@@ -2133,7 +2136,8 @@ ReShade, or the owner's enhanced barriers from the clearing list's enhanced layo
 a legacy `RENDER_TARGET`, an enhanced `RENDER_TARGET` layout, and a simultaneous-access target its
 list transitions to `RENDER_TARGET` (all copied), and each legal refusal with no barrier: a
 simultaneous-access target its list leaves in `COMMON` (`no_state`) or transitions back to `COMMON`
-(`simultaneous`) or one on a recording the hooks lost (`unobserved`), an enhanced barrier into
+(`simultaneous`) or one on a recording the hooks lost (`unobserved`; a clearing list in its own
+method table is `reshade_diagnostic_texture_capture_test`'s `moved_table_clear_boundary`), an enhanced barrier into
 `RENDER_TARGET` from `UNDEFINED` or with the `DISCARD` flag (`discarded`), and a layout an earlier
 executed list latched after the layer first asked (`latched`); a cell's refusal reason must be its
 target's, and `test_capture_state_policy.cpp` names the reasons only an illegal clear reaches; the
@@ -3724,7 +3728,17 @@ serial is 30 there); each Present establishes any selected copy, as
   the reader and then the producer, two direct queues), and never name the compute queue. The debug layer stays clean (a refused cell's reader reads nothing, as its read
   would race the render). It skips (77) without the debug layer.
 - `reshade_streamline_native_observer` ([`test_streamline_native_observer.cpp`](test_streamline_native_observer.cpp))
-  also runs the order family's hooks on COM-shaped fixtures: the method table; Signal and Wait
+  covers dispatch coverage (`states_coverage`, 11-03): a list in its own heap table (as D3D12Core
+  1.619 moves it) gets both module barrier hooks written in at its execution, reusing them, and is
+  stamped with its recording cookie, so only a later recording is covered; a third party's restore
+  uncovers it until the next execution writes the hook again; a list whose copied table holds the
+  hooks is covered only once stamped; twenty such lists are each covered from their first execution
+  (no cache, no rate limit); a list without a recording cookie is never written into; a module table
+  first seen at an execution (as D3D12Core 10.0.26300 after a suspending pass) is discovered and
+  covers once installed; a registered hook lost inside a suppressed callback is retired at once and
+  invalidated at the next `install_pending`; a per-object CommandList7 table is neither registered
+  nor refused at discovery; and the coverage line names each uncovered table class once, then the
+  written count. It also runs the order family's hooks on COM-shaped fixtures: the method table; Signal and Wait
   discovered by `observe_queue`; a fence recorded only once its CPU Signal slot is installed and
   every verdict refused while it is pending (with no capture evidence revoked); a real edge; a
   suppressed `ExecuteCommandLists` taking its own ticket; the quiet bit for two threads on one
@@ -3781,6 +3795,14 @@ serial is 30 there); each Present establishes any selected copy, as
   Generic's copy) and `enhanced_layout_latch` (a depth clear after an enhanced barrier, and a later
   clear-only list, prove the `DEPTH_STENCIL_WRITE` layout, so the end-of-frame copy uses enhanced
   barriers under the debug layer; a destroyed latched texture is forgotten with its latch).
+  Its `moved_table_clear_boundary` (11-03) is The Witcher 3's layout: after its first Reset a list
+  is moved to a heap table holding the runtime's own functions (copied before any hook): the
+  recording that straddles the move is unobserved at the UI layer's clear decision and its
+  execution counts uncovered (unproving a tracked depth); every later recording is observed: a
+  simultaneous-access target its list transitions to `RENDER_TARGET` is admitted for the legacy
+  copy (recorded, with the clear, clean under the debug layer) and the depth stays proven, one it
+  leaves in `COMMON` is refused as `no_state`; a recording during which the runtime's function is
+  put back is unobserved and uncovered, and the next one observed again.
   Its `dlssg_compute_list_capture` checks DLSS-G's copy on its own COMPUTE list under the debug
   layer (N7): a depth-stencil depth observed in `NON_PIXEL_SHADER_RESOURCE` there is copied there
   with exact bytes into storage resting in COMMON, unobserved it is refused as `missing_state`, a

@@ -1173,10 +1173,19 @@ legacy `RENDER_TARGET`), `enhanced` (an enhanced layout or access the clear's `R
 not name, or a list without `Barrier`), `not_render_target` (a legacy state, pending split or
 blocked state other than `RENDER_TARGET`), `no_state` (a simultaneous-access target its observed
 clearing list names nothing about: copying it would need a D3D12 legality ruling that is still
-open, so the layer refuses it), `unobserved` (the barrier hooks do not observe the clearing list:
-the capture owner is inactive, the list's hooks are not ready, or its recording is unreported,
-closed or invalid; it is named where the decision needs the list, for a simultaneous-access or a
-latched target, so better observer coverage, not a ruling, would decide it), `discarded` (an
+open, so the layer refuses it), `unobserved` (the barrier hooks did not observe the clearing list's
+whole recording: the capture owner is inactive, the list's barrier methods dispatch through no hook
+for this recording (a module table whose hooks are not installed yet, the recording during which a
+runtime moved the list to its own method table, or one during which a third party replaced a hook;
+[native command observation](#streamline-depth-selection)), or its recording is unreported, closed
+or invalid; it is named where the decision needs the list, for a simultaneous-access or a latched
+target. Until 11-03 every recording of The Witcher 3 was unobserved, since D3D12Core 1.619 moves
+each list to its own method table: its FG-off layer refused every clear, about one per Present, and
+was never copied. The execution hook now writes the hooks into such a table, so a clearing list is
+observed from its second execution on wherever the runtime keeps that table across Reset (not yet
+confirmed live in The Witcher 3; the `Sunshine 3D barrier coverage: written=` count tells): the
+layer is then copied where that list transitions the target to `RENDER_TARGET`, and refused as
+`no_state` where the game relies on the clear's promotion, which the open ruling decides), `discarded` (an
 enhanced barrier on the clearing list discarded the content, from `UNDEFINED` or with the
 `DISCARD` flag, so the previous frame's layer is undefined), `latched` (the clearing list names
 nothing and an earlier executed list's enhanced barrier latched the layout: refused, as before
@@ -4163,8 +4172,11 @@ started:
 - `proven tracked=T unobserved={unrecorded=.. unreported=.. invalidated=.. missed_reset=..
   uncovered=..} changed_copies=C`: the textures the table holds (tracked or watched), the executed
   lists that left every texture unproven by why the hooks did not observe them (no recording state,
-  not reported by ReShade's lifecycle, invalidated, Reset without that lifecycle, method table not
-  covered), and the copies discarded at execution.
+  not reported by ReShade's lifecycle, invalidated, Reset without that lifecycle, barrier methods no
+  hook covered for the whole recording: `native_observer::states_coverage`, judged per recording
+  since 11-03), and the copies discarded at execution. Before 11-03 the last was judged per method
+  table with a cache of 8 tables and at most 16 new checks a second; every list of The Witcher 3 (its
+  own table) and the alternating fixture's suspending list (another module table) counted.
 - `latched=L[ latch_lost] earlier_layout={copied=A refused=B}`: the held textures latched to
   enhanced layouts (`latch_lost` once the record of forgotten latched textures overflowed), and the
   copies of a latched source whose recording named nothing, copied from its `SHADER_RESOURCE` proof
@@ -5551,7 +5563,36 @@ invalidates evidence once instead of on every call. QueryInterface refusals are 
 not remembered. D3D12Core 1.619 (the Agility SDK bundled with The Witcher 3) moves each command
 list to a per-object method table inside the object (offset 0x5c8) at its first Reset, so no
 method of such a list can be hooked through a shared slot; the Windows 10.0.26100 D3D12Core keeps
-module tables, and lists created through Streamline's proxies keep the proxy's module table.
+module tables, and lists created through Streamline's proxies keep the proxy's module table. The
+Windows 10.0.26300 D3D12Core moves a list that recorded a suspending render pass to another module
+table until its next Reset (FIX probe, 11-03).
+
+Whether the hooks saw a recording's barriers is judged per recording, from what the barrier slots
+of the table the list dispatches through hold (`native_observer::states_coverage`, never cached,
+taking no lock; since 11-03). A list is covered when each slot (ResourceBarrier, and CommandList7
+Barrier where its object has it) is a registered module slot that still holds the hook (as before;
+a lost one is retired for good and revokes evidence, delivered at the next poll when the loss is
+found inside the suppressed submission callback, where it was dropped before), or holds one of the
+hooks in the list's own table. The execution hook writes the hooks there: for each executed list a
+recording cookie names, a table outside every module image in plain read-write memory gets the
+module hook that forwards to the function the slot held (a dispatch-only hook where no module hook
+does, at most eight hooks a method in all), and the list is stamped with the recording cookie it
+holds after the write (private data). Only a recording with a greater cookie, which began after the
+write, is covered: the recording during which the runtime moved the list, and one during which a
+third party put the runtime's function back, stay uncovered (fail safe), and the next execution
+writes the hook again. A module table first seen at an execution (26300's suspended-pass table) is
+discovered there and covers once installed. Discovery neither registers nor refuses a table outside
+every image (refusing one per list revoked evidence for each). The one verdict serves the
+executed-list proof (Generic's end-of-frame copy), the UI layer's clear-boundary copy and a capture
+at an API call (`recording_observed`), each asking with the pointer it holds: a Streamline proxy's
+table (record_impl in The Witcher 3) is covered by its own module hook, which barriers Streamline,
+NGX or another add-on record beneath it bypass (a known gap of that proxy-level verdict, as before).
+`Sunshine 3D barrier coverage: a list no barrier hook covered: table=<address>(<module>+<offset> |
+object-owned, object+<offset>) ResourceBarrier=<function>(<module>+<offset>) Barrier=...` names the
+first uncovered list of each method table once (every object-owned table one class), and
+`Sunshine 3D barrier coverage: written=N` (at most every 10 s while it changes) counts the hooks
+written into lists' own tables: about one per list where the runtime keeps that table across
+Reset, one per execution where it rebuilds it (then every recording stays uncovered, as before).
 
 Command-list work is split by job. ReShade reports every command list it wraps (create, Reset,
 Close, submission, render pass, destroy) from its own proxy, whose dispatch no runtime can
@@ -5560,8 +5601,9 @@ a recording, Close ends it, and a list is covered while it is open outside a ren
 next Reset, so a native Reset that bypassed ReShade never readmits an old recording. Lists ReShade
 never reported are not covered, except the runtime's own list described below. Wrappers resolve to the native lifecycle through a private-data
 tag, which proxies forward. Command lists hook only ResourceBarrier and, where supported,
-CommandList7 Barrier: they supply observed resource states when they see the list. Otherwise
-(refused or moved tables) the capture uses the state the game declared on its tag. ReShade's own
+CommandList7 Barrier: they supply observed resource states when they see the whole recording.
+Otherwise (refused tables, or the recording a runtime moved the list to its own table during) the
+capture uses the state the game declared on its tag. ReShade's own
 `barrier` event cannot replace these hooks: it reports a transition for the whole resource without
 its subresource (Dead Space transitions the stencil plane of its R32G8X24 depth separately), drops
 split flags, and reports an aliasing barrier as a completed transition of its "after" resource.
@@ -6821,18 +6863,16 @@ transfer lineage and the cleared gate, as a `DISCARD` at a pass's start does. Un
 ending access was not read, and the copy of such a frame read undefined depth. Vulkan's
 `DONT_CARE` store is not judged, as its load is not (the draw-statistics picker).
 
-Open gap (11-01, cause not traced): in the alternating fixture's `--resume-pass` case the
-proven-state table counts one of the two lists of the frame's one `ExecuteCommandLists` call as
-`uncovered` on about every Present (in each run of the case, before and after the fix), and an
-uncovered list unproves every state. Both are DIRECT lists of the same device, hooked at creation,
-so their method-table verdict (`states_covered`) should match; whether a per-list method table,
-`states_covered`'s limit of 16 new checks a second or the enhanced-barrier probe
-(`native_observer::states_ready`) gives the second verdict is not known. The case passes because the
-resuming pass's `CLEAR` proves `DEPTH_WRITE` after the uncovered list; a game that records the
-passes before its end of frame in several lists of one type, with no such proof after the last one,
-would have its end-of-frame copies refused (`end_of_frame_refused` with `last=missing_state`): held
-within the source age, then mono (fail-safe). Tracing it needs a run that logs each list's first
-method-table word and `states_ready`'s result at the first uncovered verdict.
+Closed gap (11-01, traced and fixed 11-03): in the alternating fixture's `--resume-pass` case the
+proven-state table counted the list that suspends the pass as `uncovered` on about every Present,
+which unproved every state. The Windows 10.0.26300 D3D12Core moves a list that records a
+suspending render pass to another module table until its next Reset (a probe on this machine:
+`D3D12Core.dll+0x305830` to `+0x306b00`, the same ResourceBarrier and Barrier functions), and the
+hooks knew only the table the list had at its creation. The execution hook now discovers the table
+an executed list dispatches through, and the case requires no uncovered execution after its
+warm-up. A game that records the passes before its end of frame in several lists, one of them in a
+table no hook covers, still has those executions uncovered (end-of-frame copies refused, held
+within the source age, then mono: fail safe); the coverage line names such a table.
 
 A Present on which no current copy can be shown holds the last good depth, as the API providers
 do: it shows the capture the runtime showed on its previous Present again, as reused depth, for
