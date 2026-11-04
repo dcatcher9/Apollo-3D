@@ -679,7 +679,9 @@ namespace game3d_contract {
   // game's real clear: a target's first such clear, followed on its list by
   // the game's enhanced barrier on it (simultaneous_unproven: deferred, the
   // pattern a copy would make fail validation, id 1351); one an enhanced
-  // barrier of an earlier recording named (simultaneous_interop); and one an
+  // barrier of an earlier recording named (simultaneous_interop: its
+  // decision alone, since the game's own barrier-free clear after that
+  // enhanced barrier fails validation); and one an
   // aliasing barrier with no resource precedes on the clearing list, which
   // may have activated it (simultaneous_aliased: discarded). And the lost
   // recording whose list transitioned the target to RENDER_TARGET, cleared it

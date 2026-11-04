@@ -2167,8 +2167,9 @@ lost-recording cell starts as a fresh session's, `native_observer::forget_enhanc
 each admitting cell's target is proven by the layer's deferred first clear on its earlier list).
 Its refusals record the game's own work without a copy and must leave no message either: a
 target's first clear (`unproven`) and one an earlier recording's enhanced barrier named
-(`interop`), each followed by the game's clear and its enhanced barrier on the target, and one
-after an aliasing barrier naming no resource (`discarded`). After the cells, three negative
+(`interop`; its decision alone, since the game's own barrier-free clear after that enhanced barrier
+fails validation), the first followed by the game's clear and its enhanced barrier on the target, and
+one after an aliasing barrier naming no resource (`discarded`). After the cells, three negative
 controls must each be flagged as `D3D12_MESSAGE_ID_RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH` (527),
 so validation was live: `COMMON` named for a target its clear promoted on the same list (at the
 barrier), and `RENDER_TARGET` named for a simultaneous-access target an earlier list of the call

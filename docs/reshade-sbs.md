@@ -1206,9 +1206,13 @@ resolves it with `clear_contract`):
   real clear after the copy, a target an earlier clear on the clearing list or an earlier list of
   the same call promoted, the lost recording with and without an earlier enhanced barrier on the
   process, and the lost recording whose list named `COMMON` explicitly before the copy (the
-  review's probe F), each of a target an earlier recording proved; a target's deferred first clear
-  and one an earlier recording's enhanced barrier named, each followed by the game's clear and its
-  enhanced barrier on the target (no message of any severity without the copy); beside negative
+  review's probe F), each of a target an earlier recording proved; a target's deferred first clear,
+  followed by the game's clear and its enhanced barrier on the target (no message of any severity
+  without the copy), and the decision alone for one an earlier recording's enhanced barrier named
+  (the debug layer tracks the COMMON layout that barrier left across `ExecuteCommandLists` calls, so
+  the game's own barrier-free clear of it in a later call fails validation: a game that names its
+  layer in an enhanced barrier after the clear is legal only in the layer's first frame, which the
+  deferral covers); beside negative
   controls (a wrong `BeforeState` at the barrier and at `ExecuteCommandLists`, and the copy before
   that clear and enhanced barrier, error 1351) that must be flagged.
 Anything else is refused with a reason, and a refused target is never tracked, so it is never the
@@ -5666,11 +5670,14 @@ stamp of this list would show. A module table first seen at an execution (26300'
 table) is discovered there and covers once installed. Discovery neither registers nor refuses a
 table outside every image (refusing one per list revoked evidence for each). Since the option 2
 review (11-03) the verdict spans the recording: the capture owner reads the dispatch at each of a
-recording's lifecycle events (its start at creation or Reset, each render pass's begin and end,
-where a runtime moves a list between tables, and its Close), and one the hooks do not cover marks a
+recording's lifecycle events (its start at creation or Reset, each render pass's begin, which
+ReShade reports before the native call, and its Close), and one the hooks do not cover marks a
 dispatch gap, so a recording that began or passed through a table no hook covers (a third party's
 replacement in its module table before a suspending pass moved it to a hooked one) is unobserved
-and uncovered whatever table it executes from; a closed reported recording with a gap leaves the
+and uncovered whatever table it executes from. A pass's end is not sampled: ReShade reports it
+inside the pass, where D3D12Core dispatches through a table of its own, and no barrier may be
+recorded inside a render pass (the touched-test hold of 11-03 found every recording with a render
+pass uncovered when it was); a closed reported recording with a gap leaves the
 process's enhanced-barrier use unknown. The execution hook's verdict travels with each executed
 list's identity (`command_identity::covered`), so the executed-list proof reads no table again
 under the capture lock, and the hook's reads call each live list directly (no checked memory read

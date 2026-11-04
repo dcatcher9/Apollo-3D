@@ -527,8 +527,13 @@ namespace sunshine_streamline::depth_capture {
     // may have missed barriers it recorded in that table (a third party's
     // replacement in its module table, a runtime's per-object table no hook
     // was written into), whatever table it executes from. Sampled where a
-    // recording opens (created, reset), at each render pass's begin and end
-    // (where a runtime moves a list between tables) and at Close. At Close
+    // recording opens (created, reset), at each render pass's begin (ReShade
+    // reports it before the native BeginRenderPass, outside the pass) and at
+    // Close, never at a pass's end: ReShade reports that inside the pass,
+    // where D3D12Core dispatches through a table of its own (no barrier may be
+    // recorded in a render pass, so none is missed there; a table a
+    // suspending pass moved the list to is sampled at the next begin or at
+    // Close). At Close
     // the recording is complete: a gap on a reported, valid one leaves the
     // process's enhanced-barrier use unknown, and each simultaneous-access
     // target it deferred (option 2: unproven) is proven unless an enhanced
@@ -567,7 +572,7 @@ namespace sunshine_streamline::depth_capture {
         case list_event::reset: reset(native, cookie, S_OK, true); break;
         case list_event::closed: close(native, cookie, S_OK); break;
         case list_event::pass_begin: render_pass(native, cookie, true); break;
-        case list_event::pass_end: render_pass(native, cookie, false); break;
+        case list_event::pass_end: render_pass(native, cookie, false); return;
         default: return;
       }
       // The recording the event left open (created and reset open a new one).

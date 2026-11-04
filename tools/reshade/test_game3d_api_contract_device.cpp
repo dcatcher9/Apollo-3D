@@ -34,11 +34,13 @@
 //   its clear named it in no enhanced barrier: its option-2 cells also record
 //   the game's real clear after the copy and must leave no D3D12 message of
 //   any severity. Option 2's refusals record the game's own work without a
-//   copy and must leave none either: a target's first such clear (unproven)
-//   and one an earlier recording's enhanced barrier named (interop), each
+//   copy and must leave none either: a target's first such clear (unproven),
 //   followed on the clearing list by the game's enhanced barrier on it (legal
 //   for the game alone, a validation error after the copy), and one after an
-//   aliasing barrier with no resource (discarded). The layer itself runs only
+//   aliasing barrier with no resource (discarded); one an earlier recording's
+//   clear and enhanced barrier named (interop) records its decision alone (a
+//   barrier-free clear after it fails validation for the game alone). The
+//   layer itself runs only
 //   through ReShade, in the runtime layer's UI family. After the cells,
 //   negative controls prove validation live: a wrong BeforeState at a
 //   barrier and at ExecuteCommandLists must each be flagged, and so must the
@@ -826,11 +828,11 @@ namespace {
            clear == ui_clear_boundary::simultaneous_unobserved_unmixed || clear == ui_clear_boundary::simultaneous_unobserved_named_common;
   }
 
-  // Option 2's legality cells, admitting or refusing, which must leave no
-  // D3D12 message of any severity.
+  // Option 2's legality cells, admitting or refusing with the game's work
+  // after the boundary, which must leave no D3D12 message of any severity
+  // (the interop cell records its decision alone: no error is its check).
   bool option2_cell(ui_clear_boundary clear) {
-    return option2_admitting(clear) || clear == ui_clear_boundary::simultaneous_unproven || clear == ui_clear_boundary::simultaneous_interop ||
-           clear == ui_clear_boundary::simultaneous_aliased;
+    return option2_admitting(clear) || clear == ui_clear_boundary::simultaneous_unproven || clear == ui_clear_boundary::simultaneous_aliased;
   }
 
   struct device_matrix {
@@ -1348,11 +1350,17 @@ namespace {
                                  clear == ui_clear_boundary::simultaneous_unobserved_unmixed ||
                                  clear == ui_clear_boundary::simultaneous_unobserved_named_common;
             // Option 2's refusals record the game's own clear after the
-            // refused boundary (and, for the interop pattern, its enhanced
-            // barrier on the target after it).
-            const bool interop_pattern = clear == ui_clear_boundary::simultaneous_unproven || clear == ui_clear_boundary::simultaneous_interop;
+            // refused boundary (and, for the first one, its enhanced barrier
+            // on the target after it). The interop cell records its decision
+            // alone: after the earlier recording's enhanced barrier the
+            // debug layer tracks the target's COMMON layout across
+            // ExecuteCommandLists calls, which grants no RENDER_TARGET
+            // access, so the game's own barrier-free clear there fails
+            // validation without any copy.
+            const bool interop_pattern = clear == ui_clear_boundary::simultaneous_unproven;
             const bool refused_clear = interop_pattern || clear == ui_clear_boundary::simultaneous_aliased;
-            const auto view = option2 || refused_clear ? render_target_view(resource) : D3D12_CPU_DESCRIPTOR_HANDLE {};
+            const bool interop_view = clear == ui_clear_boundary::simultaneous_interop;
+            const auto view = option2 || refused_clear || interop_view ? render_target_view(resource) : D3D12_CPU_DESCRIPTOR_HANDLE {};
             const float transparent[4] {};
             if (clear == ui_clear_boundary::simultaneous_interop) {
               earlier_interop(out, resource, view);
