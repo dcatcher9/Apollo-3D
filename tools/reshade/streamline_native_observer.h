@@ -14,6 +14,14 @@ struct ID3D12Resource;
 namespace sunshine_streamline::native_observer {
   struct command_identity {
     std::uint64_t native_command{}, recording_cookie{};
+    // The execution hook's verdict (cover, after the native call; false where
+    // it judged nothing): whether the barrier hooks saw every barrier the
+    // executed recording made through the table its list dispatches through
+    // now (states_dispatch: hooked, or patched with a stamp older than that
+    // recording); for a list without a recording cookie, whether installed
+    // module hooks cover its table. The capture owner's executed-list proof
+    // takes it as is (no second read of the list's table).
+    bool covered{};
   };
   // One texture barrier of an enhanced Barrier call: the texture, its layout
   // afterwards (D3D12_BARRIER_LAYOUT) and whether the barrier's subresource
@@ -89,7 +97,8 @@ namespace sunshine_streamline::native_observer {
   // ResourceBarrier and (CL7) enhanced Barrier are hooked on command lists:
   // their lifecycle comes from ReShade's events. A list whose method table
   // lies outside every module image (a runtime's per-object table) is neither
-  // discovered nor refused here: the execution hook covers it (dispatch).
+  // discovered nor refused here: the execution hook covers it where the table
+  // is the list's own (dispatch).
   // Every executed list a recording cookie names is also observed by the
   // execution hook: a runtime can move a list to another module table
   // mid-recording (D3D12Core 10.0.26300 after a suspending render pass).
@@ -104,14 +113,24 @@ namespace sunshine_streamline::native_observer {
   // - hooked: each slot is a module-table slot the observer registered and
   //   installed, and still holds that hook (a registered slot that lost its
   //   hook is retired for good, as before);
-  // - patched: at least one slot lies elsewhere (the list's own table) and
-  //   holds one of the observer's installed hooks, the others hooked or
-  //   patched. The execution hook writes the hook into such a table
-  //   (an executed list a recording cookie names), then stamps the list with
-  //   its recording cookie read after the write (after): a recording whose
-  //   cookie is greater began after the write, so every barrier it records
-  //   reaches the hook. A patched list without that stamp is none;
-  // - none: any slot dispatches elsewhere.
+  // - patched: at least one slot lies in the list's own table (a table
+  //   inside the list object, within its first 64 KiB: D3D12Core 1.619's at
+  //   object+0x5c8, which no other list shares) and holds one of the
+  //   observer's installed hooks, the others hooked or patched. The
+  //   execution hook writes the hook into such a table (an executed list a
+  //   recording cookie names), then stamps the list with its recording
+  //   cookie read after the write (after): a recording whose cookie is
+  //   greater began after the write, so every barrier it records reaches the
+  //   hook. A patched list without that stamp is none;
+  // - none: any slot dispatches elsewhere, or lies in a table outside every
+  //   module image that is not the list's own (one several lists may share,
+  //   such as a hooking library's shadow table: one list's stamp cannot speak
+  //   for a write another list's execution made there).
+  // A call reads the table as it is at that moment: the capture owner reads
+  // it at each lifecycle event of a recording (one that dispatched past the
+  // hooks at any of them is not observed, whatever table it executes from)
+  // and at a decision on the recording. Live objects only (a list the caller
+  // holds a reference to): its methods are called directly.
   enum class dispatch : std::uint8_t { none, hooked, patched };
   struct states_dispatch {
     dispatch kind{dispatch::none};
@@ -134,13 +153,19 @@ namespace sunshine_streamline::native_observer {
   //   when that recording began (its own table before the hook was written
   //   into it, or a table first seen at that execution), one without a cookie
   //   whose table no installed module hook covers, or an executed object that
-  //   is no graphics list; once found, it stays unknown;
+  //   is no graphics list; or the capture owner found a closed recording that
+  //   dispatched past the hooks at one of its lifecycle events
+  //   (note_dispatch_gap); once found, it stays unknown;
   // - unused: neither.
   // Calls a recording made before the hooks covering its module table were
   // installed (one straddling the installation), and calls of lists no
   // execution hook ran, are not seen.
   enum class enhanced_use : std::uint8_t { unused, used, unknown };
   enhanced_use enhanced_barrier_use();
+  // A recording that dispatched past the barrier hooks at one of its
+  // lifecycle events (the capture owner's dispatch gap): enhanced_barrier_use
+  // is unknown from then on.
+  void note_dispatch_gap();
   bool queue_ready(std::uint64_t queue);
   counters counts();
   // The first list judged uncovered (note_uncovered) of each class of method
@@ -266,5 +291,9 @@ namespace sunshine_streamline::native_observer {
   // Forgets enhanced_barrier_use's evidence (a Barrier call seen, a list
   // whose recording the hooks may have missed), as a fresh session's.
   void forget_enhanced_barrier_use();
+  // A real D3D12 list's own table a fixture placed outside the list object
+  // (it cannot place one inside a runtime's object): taken as that list's
+  // own, as one inside it would be. Null forgets it.
+  void own_table_for_testing(std::uint64_t object, const void *table);
 #endif
 }

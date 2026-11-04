@@ -30,12 +30,20 @@
 //   barrier, latched for a layout an earlier list latched). A
 //   simultaneous-access target whose clearing list names no state, or whose
 //   lost recording shares no process with an enhanced barrier, is copied
-//   from RENDER_TARGET (option 2): its option-2 cells also record the game's
-//   real clear after the copy and must leave no D3D12 message of any
-//   severity. The layer itself runs only through ReShade, in the runtime
-//   layer's UI family. After the cells, negative controls prove validation
-//   live: a wrong BeforeState at a barrier and at ExecuteCommandLists must
-//   each be flagged (validation_controls).
+//   from RENDER_TARGET (option 2) once an earlier whole observed recording of
+//   its clear named it in no enhanced barrier: its option-2 cells also record
+//   the game's real clear after the copy and must leave no D3D12 message of
+//   any severity. Option 2's refusals record the game's own work without a
+//   copy and must leave none either: a target's first such clear (unproven)
+//   and one an earlier recording's enhanced barrier named (interop), each
+//   followed on the clearing list by the game's enhanced barrier on it (legal
+//   for the game alone, a validation error after the copy), and one after an
+//   aliasing barrier with no resource (discarded). The layer itself runs only
+//   through ReShade, in the runtime layer's UI family. After the cells,
+//   negative controls prove validation live: a wrong BeforeState at a
+//   barrier and at ExecuteCommandLists must each be flagged, and so must the
+//   copy's legacy barriers before the clear and that enhanced barrier
+//   (validation_controls).
 // Every cell is executed alone, so a D3D12 debug-layer error names it.
 //
 // A cell meets the oracle by its kind, refusal class (depth_refusal.h's class
@@ -563,8 +571,14 @@ namespace {
       }
       // Option 2's legality cells (owner ruling 11-03).
       for (const auto clear : {ui_clear_boundary::simultaneous_cleared, ui_clear_boundary::simultaneous_promoted,
-                               ui_clear_boundary::simultaneous_promoted_earlier_list, ui_clear_boundary::simultaneous_unobserved_unmixed}) {
+                               ui_clear_boundary::simultaneous_promoted_earlier_list, ui_clear_boundary::simultaneous_unobserved_unmixed,
+                               ui_clear_boundary::simultaneous_aliased, ui_clear_boundary::simultaneous_unobserved_named_common}) {
         out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, clear);
+      }
+      // Its refusals before a later enhanced barrier in the clearing list.
+      if (enhanced_barriers) {
+        out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_unproven);
+        out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_interop);
       }
     }
     return std::move(out.cells);
@@ -602,6 +616,22 @@ namespace {
     list7->Barrier(1, &group);
   }
 
+  // The game's enhanced barrier on a simultaneous-access target after its
+  // barrier-free clear, on the same list: from the clear's RENDER_TARGET
+  // access to a shader read, in the COMMON layout such a texture keeps. Legal
+  // for the game alone; after option 2's legacy copy before the clear the
+  // debug layer flags it (1351: a texture legacy barriers touched must be in
+  // COMMON before an enhanced barrier).
+  void later_enhanced_barrier(ID3D12GraphicsCommandList *list, ID3D12Resource *resource) {
+    texture_barrier(list, resource, true, D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_COMMON);
+  }
+
+  // The debug layer's message 1351 (legacy states must be transitioned to
+  // COMMON before switching to enhanced barriers), past the IDs MinGW's
+  // d3d12sdklayers.h names.
+  constexpr auto interop_message = D3D12_MESSAGE_ID(1351);
+
   // From the legacy COMMON state into layout with access (NO_ACCESS syncs
   // nothing). The legacy state is the COMMON layout with ACCESS_COMMON, and
   // a barrier on a list may follow other access in its ExecuteCommandLists
@@ -625,6 +655,12 @@ namespace {
         return refusal::discarded;
       case ui_clear_boundary::latched_render_target:
         return refusal::latched;
+      case ui_clear_boundary::simultaneous_unproven:
+        return refusal::unproven;
+      case ui_clear_boundary::simultaneous_interop:
+        return refusal::interop;
+      case ui_clear_boundary::simultaneous_aliased:
+        return refusal::discarded;
       default:
         return refusal::none;
     }
@@ -782,12 +818,19 @@ namespace {
     return out;
   }
 
-  // Option 2's legality cells (owner ruling 11-03), which must leave no
-  // D3D12 message of any severity.
-  bool option2_cell(ui_clear_boundary clear) {
+  // Option 2's admitting cells (owner ruling 11-03), whose target an earlier
+  // whole observed recording of its clear proves first.
+  bool option2_admitting(ui_clear_boundary clear) {
     return clear == ui_clear_boundary::simultaneous_common || clear == ui_clear_boundary::simultaneous_cleared ||
            clear == ui_clear_boundary::simultaneous_promoted || clear == ui_clear_boundary::simultaneous_promoted_earlier_list ||
-           clear == ui_clear_boundary::simultaneous_unobserved_unmixed;
+           clear == ui_clear_boundary::simultaneous_unobserved_unmixed || clear == ui_clear_boundary::simultaneous_unobserved_named_common;
+  }
+
+  // Option 2's legality cells, admitting or refusing, which must leave no
+  // D3D12 message of any severity.
+  bool option2_cell(ui_clear_boundary clear) {
+    return option2_admitting(clear) || clear == ui_clear_boundary::simultaneous_unproven || clear == ui_clear_boundary::simultaneous_interop ||
+           clear == ui_clear_boundary::simultaneous_aliased;
   }
 
   struct device_matrix {
@@ -864,9 +907,13 @@ namespace {
     // clear promoted to RENDER_TARGET on the same list) and at
     // ExecuteCommandLists (RENDER_TARGET named for a simultaneous-access
     // target an earlier list of the call left in COPY_SOURCE, and for a
-    // non-simultaneous one left in COMMON). The controls flagged.
+    // non-simultaneous one left in COMMON); and it flags option 2's legacy
+    // copy barriers before a barrier-free clear followed on the same list by
+    // the game's enhanced barrier on the target as 1351 (interop_message) at
+    // that barrier: the pattern the unproven and interop refusals keep legal.
+    // The controls flagged.
     unsigned validation_controls() {
-      const auto flagged = [&] {
+      const auto flagged = [&](D3D12_MESSAGE_ID id = D3D12_MESSAGE_ID_RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH) {
         bool found {};
         for (UINT64 i = 0; i != gpu.debug_messages->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
           SIZE_T size {};
@@ -874,7 +921,7 @@ namespace {
           std::vector<unsigned char> storage(size);
           auto *message = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
           check(gpu.debug_messages->GetMessage(i, message, &size), "debug message");
-          found = found || message->ID == D3D12_MESSAGE_ID_RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH;
+          found = found || message->ID == id;
         }
         gpu.debug_messages->ClearStoredMessages();
         return unsigned(found);
@@ -915,7 +962,48 @@ namespace {
         gpu.reset();
         count += flagged();
       }
+      if (enhanced_barriers_supported()) {
+        const auto target = layer_target(true);
+        transition_barrier(list, target.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, render_target, copy_source);
+        transition_barrier(list, target.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, copy_source, render_target);
+        list->ClearRenderTargetView(render_target_view(target.Get()), transparent, 0, nullptr);
+        later_enhanced_barrier(list, target.Get());
+        check(close_list(list), "interop control close");
+        gpu.reset();
+        count += flagged(interop_message);
+      }
       return count;
+    }
+
+    // Whether the device takes enhanced barriers (D3D12_OPTIONS12).
+    bool enhanced_barriers_supported() const {
+      D3D12_FEATURE_DATA_D3D12_OPTIONS12 options {};
+      return SUCCEEDED(gpu.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &options, sizeof(options))) && options.EnhancedBarriersSupported;
+    }
+
+    // An earlier executed recording of the interop cell's target, as the
+    // game's previous frame: the layer's deferred first clear (unproven), the
+    // game's barrier-free clear and its enhanced barrier on the target after
+    // it, which marks the target interop for good.
+    void earlier_interop(run &out, ID3D12Resource *resource, D3D12_CPU_DESCRIPTOR_HANDLE view) {
+      auto *list = earlier_direct.list.Get();
+      const auto first = capture::render_target_clear_copy(native(list), native(resource));
+      if (first.refused != capture::clear_copy_refusal::unproven) {
+        out.reason_named = false;
+        out.trouble += std::string(" the earlier recording's first clear was ") + capture::name(first.refused) + ", not unproven;";
+      }
+      const float transparent[4] {};
+      list->ClearRenderTargetView(view, transparent, 0, nullptr);
+      later_enhanced_barrier(list, resource);
+      check(close_list(list), "earlier interop close");
+      execute(gpu.queue.Get(), list);
+      gpu.wait();
+      earlier_direct.reset();
+      const auto errors = debug_errors(gpu, true);
+      if (!errors.empty()) {
+        out.debug_clean = false;
+        out.trouble += " D3D12 at the earlier interop recording: " + errors + ";";
+      }
     }
 
     D3D12_RESOURCE_DESC description(const cell &value) const {
@@ -1067,6 +1155,12 @@ namespace {
         // A split the cell ends begins on its earlier_list (record).
         if (source.seen == evidence::earlier_list_enhanced) {
           enter_layout(list, resource, true, source.layout, source.access);
+        }
+        // Option 2's admitting targets: the layer's deferred first clear
+        // (unproven) on this whole observed recording, which names them in no
+        // enhanced barrier, proves them at its Close.
+        if (option2_admitting(value.clear)) {
+          capture::render_target_clear_copy(native(list), native(resource));
         }
         // A latched UI target: the layer asks for it at an earlier clear
         // (watched from then on, though this list names its COMMON state),
@@ -1251,13 +1345,28 @@ namespace {
             // copy then reads those bytes).
             const bool option2 = clear == ui_clear_boundary::simultaneous_cleared || clear == ui_clear_boundary::simultaneous_promoted ||
                                  clear == ui_clear_boundary::simultaneous_promoted_earlier_list ||
-                                 clear == ui_clear_boundary::simultaneous_unobserved_unmixed;
-            const auto view = option2 ? render_target_view(resource) : D3D12_CPU_DESCRIPTOR_HANDLE {};
+                                 clear == ui_clear_boundary::simultaneous_unobserved_unmixed ||
+                                 clear == ui_clear_boundary::simultaneous_unobserved_named_common;
+            // Option 2's refusals record the game's own clear after the
+            // refused boundary (and, for the interop pattern, its enhanced
+            // barrier on the target after it).
+            const bool interop_pattern = clear == ui_clear_boundary::simultaneous_unproven || clear == ui_clear_boundary::simultaneous_interop;
+            const bool refused_clear = interop_pattern || clear == ui_clear_boundary::simultaneous_aliased;
+            const auto view = option2 || refused_clear ? render_target_view(resource) : D3D12_CPU_DESCRIPTOR_HANDLE {};
             const float transparent[4] {};
+            if (clear == ui_clear_boundary::simultaneous_interop) {
+              earlier_interop(out, resource, view);
+            } else if (clear == ui_clear_boundary::simultaneous_aliased) {
+              D3D12_RESOURCE_BARRIER alias {};
+              alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+              list->ResourceBarrier(1, &alias);
+            }
             // A lost recording's copy rests on the process's enhanced-barrier
             // use: each such cell starts as a fresh session's, and the refused
             // one has an earlier executed list record an enhanced barrier.
-            const bool lost = clear == ui_clear_boundary::simultaneous_unobserved || clear == ui_clear_boundary::simultaneous_unobserved_unmixed;
+            const bool named_common = clear == ui_clear_boundary::simultaneous_unobserved_named_common;
+            const bool lost = clear == ui_clear_boundary::simultaneous_unobserved || clear == ui_clear_boundary::simultaneous_unobserved_unmixed ||
+                              named_common;
             if (lost) {
               sunshine_streamline::native_observer::forget_enhanced_barrier_use();
               if (clear == ui_clear_boundary::simultaneous_unobserved) {
@@ -1269,8 +1378,15 @@ namespace {
             } else if (clear == ui_clear_boundary::simultaneous_promoted_earlier_list) {
               earlier.list->ClearRenderTargetView(view, transparent, 0, nullptr);
             }
-            out.expect_cleared = clear == ui_clear_boundary::simultaneous_promoted || clear == ui_clear_boundary::simultaneous_promoted_earlier_list;
-            if (clear == ui_clear_boundary::enhanced_render_target) {
+            out.expect_cleared = clear == ui_clear_boundary::simultaneous_promoted || clear == ui_clear_boundary::simultaneous_promoted_earlier_list ||
+                                 named_common;
+            if (named_common) {
+              // The game's explicit RENDER_TARGET, its clear, and its explicit
+              // COMMON before the layer's next clear boundary.
+              transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, common, render_target);
+              list->ClearRenderTargetView(view, transparent, 0, nullptr);
+              transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, render_target, common);
+            } else if (clear == ui_clear_boundary::enhanced_render_target) {
               enter_layout(list, resource, true, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
             } else if (clear == ui_clear_boundary::enhanced_undefined) {
               texture_barrier(list, resource, true, D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
@@ -1299,6 +1415,12 @@ namespace {
               out.trouble += std::string(" the clear-boundary copy's refusal was ") + capture::name(basis.refused) + ", not " + capture::name(named) + ";";
             }
             if (!basis.admitted()) {
+              if (refused_clear) {
+                list->ClearRenderTargetView(view, transparent, 0, nullptr);
+                if (interop_pattern) {
+                  later_enhanced_barrier(list, resource);
+                }
+              }
               out.diagnostic.result = capture::status::unsupported_state;
               out.diagnostic.stage = capture::record_stage::unsupported_state;
               break;
@@ -1665,11 +1787,13 @@ int main(int argc, char **argv) {
     // validation flags a wrong BeforeState (the negative controls).
     if (debug_layer && (!only || std::strcmp(only, "UI clear boundary") == 0)) {
       const auto flagged = device.validation_controls();
-      if (flagged != 3) {
-        std::fprintf(stderr, "FAIL: %u of the 3 negative controls' wrong BeforeState were flagged by the D3D12 debug layer\n", flagged);
+      const unsigned controls = device.enhanced_barriers_supported() ? 4 : 3;
+      if (flagged != controls) {
+        std::fprintf(stderr, "FAIL: %u of the %u negative controls were flagged by the D3D12 debug layer\n", flagged, controls);
         return 1;
       }
-      std::printf("PASS D3D12 validation live: 3 negative controls flagged (a wrong BeforeState at the barrier and at ExecuteCommandLists, id 527)\n");
+      std::printf("PASS D3D12 validation live: %u negative controls flagged (a wrong BeforeState at the barrier and at ExecuteCommandLists, id 527%s)\n",
+                  controls, controls == 4 ? "; option 2's copy before a clear and a later enhanced barrier on its target, id 1351" : "");
     }
     verdicts.finish(gaps::device_rows, "device", !only);
     std::printf("PASS API contract device matrix: %zu legal cells (", cells.size());

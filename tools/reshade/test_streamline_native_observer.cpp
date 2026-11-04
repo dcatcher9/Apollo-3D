@@ -1084,20 +1084,30 @@ namespace {
       "record's through a reset inside its read; at most 8 queues");
   }
 }
+  // A list whose method table lies inside its own object (as D3D12Core 1.619
+  // builds one at object+0x5c8 at a list's first Reset): the only table
+  // outside every module image the observer writes into and covers through.
+  struct owned_list {
+    object list{};
+    std::array<void *, enhanced_slot + 1> table{};
+  };
   // Dispatch coverage (states_coverage, the execution hook's cover): a list
-  // whose method table is its own (heap memory, as D3D12Core 1.619 moves each
-  // list at its first Reset) or another module table (as D3D12Core 10.0.26300
-  // after a suspending render pass). commands[0]'s static table is hooked and
-  // queue is a hooked queue; pristine holds the list methods before any hook.
+  // whose method table is its own (inside its object, as D3D12Core 1.619 moves
+  // each list at its first Reset), one outside it (a table several lists may
+  // share) or another module table (as D3D12Core 10.0.26300 after a
+  // suspending render pass). commands[0]'s static table is hooked and queue
+  // is a hooked queue; pristine holds the list methods before any hook.
   void dispatch_cases(object &queue, const std::array<void *, enhanced_slot + 1> &pristine) {
-    const auto heap_list = [&](std::vector<void *> &table, object &list, std::uint64_t cookie) {
-      table.assign(pristine.begin(), pristine.end());
-      list.vtable = table.data(); list.kind = object_kind::command; list.extended = true;
+    const auto own_list = [&](owned_list &value, std::uint64_t cookie) {
+      value.table = pristine;
+      auto &list = value.list;
+      list.vtable = value.table.data(); list.kind = object_kind::command; list.extended = true;
       list.cookie = cookie; list.cookie_present = true;
     };
-    std::vector<void *> own_table;
-    object own{};
-    heap_list(own_table, own, 500);
+    owned_list own_value{};
+    auto &own = own_value.list;
+    auto &own_table = own_value.table;
+    own_list(own_value, 500);
     observer::forget_enhanced_barrier_use();
     const auto before = observer::counts();
     const auto invalid_before = invalidations;
@@ -1112,6 +1122,11 @@ namespace {
         !observer::states_ready(address(own)) && invalidations == invalid_before,
       "the execution hook did not write both barrier hooks into the list's own table (reusing the module hooks) and stamp "
       "its recording cookie, or changed evidence");
+    // The execution hook's verdict travels with the identity
+    // (command_identity::covered): the recording no hook covered until the
+    // write is not covered.
+    require(observed_commands.size() == 1 && observed_commands[0].native_command == address(own) && !observed_commands[0].covered,
+      "the submission of a recording no hook covered until its execution carried a covered verdict");
     // That recording dispatched past every hook until the write: a Barrier
     // call of it may have gone unseen (enhanced_barrier_use).
     require(observer::enhanced_barrier_use() == observer::enhanced_use::unknown,
@@ -1132,8 +1147,16 @@ namespace {
     // Its execution: every barrier of that recording reached the hooks.
     observer::forget_enhanced_barrier_use();
     submit(queue, 1, &own_pointer);
-    require(observer::enhanced_barrier_use() == observer::enhanced_use::unused && observer::counts().written == before.written + 2,
-      "a recording after its list's stamp left the process's enhanced-barrier use unknown, or wrote a hook again");
+    require(observer::enhanced_barrier_use() == observer::enhanced_use::unused && observer::counts().written == before.written + 2 &&
+        observed_commands.size() == 1 && observed_commands[0].covered,
+      "a recording after its list's stamp left the process's enhanced-barrier use unknown, wrote a hook again, or was not "
+      "submitted as covered");
+    // The capture owner found a recording that dispatched past the hooks at
+    // one of its lifecycle events: the process's use is unknown from then on.
+    observer::note_dispatch_gap();
+    require(observer::enhanced_barrier_use() == observer::enhanced_use::unknown,
+      "a recording's dispatch gap left the process's enhanced-barrier use known");
+    observer::forget_enhanced_barrier_use();
     // A third party puts the runtime's function back: the list is uncovered
     // (its own table's slot is no registered slot: no evidence is revoked
     // here; its recordings are judged uncovered) until its next execution
@@ -1145,10 +1168,12 @@ namespace {
     coverage = observer::states_coverage(address(own));
     require(observer::counts().written == before.written + 3 && coverage.kind == observer::dispatch::patched && coverage.after == 501,
       "a lost hook in a list's own table was not written again, or its stamp was not renewed");
-    // A list never stamped is not covered by a table that holds the hooks
-    // (one copied from a hooked table): its first execution stamps it.
-    std::vector<void *> copied_table(own_table);
-    object copied{}; copied.vtable = copied_table.data(); copied.kind = object_kind::command; copied.extended = true;
+    // A list never stamped is not covered by its own table that holds the
+    // hooks (one copied from a hooked table): its first execution stamps it.
+    owned_list copied_value{};
+    auto &copied = copied_value.list;
+    copied_value.table = own_table;
+    copied.vtable = copied_value.table.data(); copied.kind = object_kind::command; copied.extended = true;
     copied.cookie = 600;
     require(observer::states_coverage(address(copied)).kind == observer::dispatch::none,
       "an unstamped list counted as covered by hooks a copied table held");
@@ -1157,23 +1182,46 @@ namespace {
     coverage = observer::states_coverage(address(copied));
     require(observer::counts().written == before.written + 3 && coverage.kind == observer::dispatch::patched && coverage.after == 600,
       "a copied table's list was not stamped at its execution");
+    // A table outside the list object (a hooking library's shadow table, a
+    // heap table lists may share) is no list's own: another list's execution
+    // could write it, or a third party restore it during this list's
+    // recording, which this list's stamp would not show. It is never written
+    // into and never covers, whether it holds the runtime's functions or the
+    // observer's hooks.
+    std::vector<void *> shared_table(pristine.begin(), pristine.end());
+    object shared_a{}, shared_b{};
+    for (auto *value : {&shared_a, &shared_b}) {
+      value->vtable = shared_table.data(); value->kind = object_kind::command; value->extended = true; value->cookie_present = true;
+    }
+    shared_a.cookie = 650; shared_b.cookie = 651;
+    std::array<void *, 2> shared_pointers{&shared_a, &shared_b};
+    submit(queue, 2, shared_pointers.data());
+    require(observer::counts().written == before.written + 3 && shared_table[barrier_slot] == pristine[barrier_slot] &&
+        observer::states_coverage(address(shared_a)).kind == observer::dispatch::none && !shared_a.stamp_present &&
+        observed_commands.size() == 2 && !observed_commands[0].covered && !observed_commands[1].covered,
+      "a table outside the list object was written into, stamped or covered");
+    shared_table.assign(own_table.begin(), own_table.end());
+    submit(queue, 2, shared_pointers.data());
+    require(observer::counts().written == before.written + 3 && observer::states_coverage(address(shared_b)).kind == observer::dispatch::none &&
+        !shared_b.stamp_present && !observed_commands[0].covered && !observed_commands[1].covered,
+      "a table outside the list object holding the observer's hooks covered a list or was stamped");
     // More lists than any cache or rate limit had (16 a second): every one
     // is covered from its first execution; one hook per method serves them.
-    std::array<std::vector<void *>, 20> tables;
-    std::array<object, 20> many{};
+    std::array<owned_list, 20> many_values{};
     std::array<void *, 20> pointers{};
-    for (unsigned i = 0; i != many.size(); ++i) { heap_list(tables[i], many[i], 700 + i); pointers[i] = &many[i]; }
-    submit(queue, static_cast<UINT>(many.size()), pointers.data());
-    bool all = observer::counts().targets == before.targets && observer::counts().written == before.written + 3 + 2 * many.size();
-    for (unsigned i = 0; i != many.size(); ++i) {
-      coverage = observer::states_coverage(address(many[i]));
+    for (unsigned i = 0; i != many_values.size(); ++i) { own_list(many_values[i], 700 + i); pointers[i] = &many_values[i].list; }
+    submit(queue, static_cast<UINT>(many_values.size()), pointers.data());
+    bool all = observer::counts().targets == before.targets && observer::counts().written == before.written + 3 + 2 * many_values.size();
+    for (unsigned i = 0; i != many_values.size(); ++i) {
+      coverage = observer::states_coverage(address(many_values[i].list));
       all = all && coverage.kind == observer::dispatch::patched && coverage.after == 700 + i;
     }
     require(all, "twenty lists with their own tables were not each covered from their first execution");
     // A list without a recording cookie is never written into.
-    std::vector<void *> plain_table;
-    object plain{};
-    heap_list(plain_table, plain, 0);
+    owned_list plain_value{};
+    auto &plain = plain_value.list;
+    auto &plain_table = plain_value.table;
+    own_list(plain_value, 0);
     plain.cookie_present = false;
     void *plain_pointer = &plain;
     observer::forget_enhanced_barrier_use();
@@ -1182,8 +1230,10 @@ namespace {
       "a list without a recording cookie had a hook written into its table");
     require(observer::enhanced_barrier_use() == observer::enhanced_use::unknown,
       "a list without a recording cookie whose table no hook covers left the process's enhanced-barrier use known");
-    std::puts("PASS dispatch: a list's own table gets the module hooks at its execution and covers only recordings after its stamp; "
-      "a lost hook uncovers it until it is written again; a copied table needs a stamp; twenty lists, no limit; no cookie, no write");
+    std::puts("PASS dispatch: a list's own table (inside its object) gets the module hooks at its execution and covers only "
+      "recordings after its stamp, each submission carrying that verdict; a lost hook uncovers it until it is written again; a "
+      "copied table needs a stamp; a table outside the object is never written or covering; twenty lists, no limit; no cookie, "
+      "no write; a dispatch gap leaves enhanced-barrier use unknown");
 
     // A module table a list moves to mid-recording (D3D12Core 10.0.26300
     // after a suspending render pass) is discovered at the list's execution
@@ -1224,6 +1274,28 @@ namespace {
     moved_table[barrier_slot] = moved_hook;
     require(observer::states_coverage(address(moved)).kind == observer::dispatch::none && invalidations == invalid_suppressed + 1,
       "restoring a retired module hook revived coverage");
+    // A list's own table holding the hook of that retired slot (a table that
+    // reused its index before the retirement) forwards to its original but is
+    // no longer eligible: its next execution replaces it by an installed hook
+    // forwarding to the same original, a fresh write stamped as one.
+    owned_list reused_value{};
+    auto &reused = reused_value.list;
+    reused_value.table = own_table;
+    reused_value.table[barrier_slot] = moved_hook;
+    reused.vtable = reused_value.table.data(); reused.kind = object_kind::command; reused.extended = true; reused.cookie = 900;
+    const auto written_reused = observer::counts().written;
+    require(observer::states_coverage(address(reused)).kind == observer::dispatch::none,
+      "a list's own table holding a retired slot's hook counted as covered");
+    void *reused_pointer = &reused;
+    submit(queue, 1, &reused_pointer);
+    coverage = observer::states_coverage(address(reused));
+    require(observer::counts().written == written_reused + 1 && reused_value.table[barrier_slot] != moved_hook &&
+        coverage.kind == observer::dispatch::patched && coverage.after == 900 && !observed_commands[0].covered,
+      "a list's own table holding a retired slot's hook was not written again with an installed hook");
+    reused.cookie = 901;
+    submit(queue, 1, &reused_pointer);
+    require(observed_commands.size() == 1 && observed_commands[0].covered,
+      "the recording after a retired slot's hook was replaced was not covered");
     // The coverage diagnostic: the first uncovered list of each method table
     // (every object-owned table one class), then the count of written hooks.
     char line[512];
@@ -1246,7 +1318,8 @@ namespace {
     require(!observer::coverage_line(now + 1, line, sizeof(line)) && observer::coverage_line(now + 10000, line, sizeof(line)) &&
         std::string(line).find("written=") != std::string::npos, "the written-hook count was not logged once per 10 s window");
     std::puts("PASS dispatch: a module table first seen at execution is discovered and covers once installed; a hook lost "
-      "under suppression is invalidated at the next install_pending; the coverage diagnostic names each table class once");
+      "under suppression is invalidated at the next install_pending; an own table holding a retired slot's hook is written "
+      "again; the coverage diagnostic names each table class once");
     std::puts("PASS enhanced-barrier use: any Barrier call through a hook marks it used; an executed recording no hook covered "
       "since it began (its own table before the write, no cookie and no hooked module table) leaves it unknown; covered "
       "recordings and a cookie-less list in a hooked module table keep it unused");

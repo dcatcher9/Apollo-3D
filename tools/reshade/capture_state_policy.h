@@ -422,17 +422,39 @@ namespace sunshine_streamline::depth_capture::copy_state {
   //   simultaneous-access target, which is never watched);
   // compute: the clearing list is a COMPUTE list (list_basis);
   // unmixed: asked only for a simultaneous-access target on an unobserved
-  //   list: no enhanced barrier can share the clearing list's
-  //   ExecuteCommandLists. The hooks saw every barrier that list's recording
-  //   made (its barrier methods dispatched through them since it began and no
-  //   coverage change came between) and no list of the process recorded one
-  //   (native_observer::enhanced_barrier_use: unused).
+  //   list (its recording reported and open, but invalidated by a loss of its
+  //   own): the hooks saw every barrier that recording made (its barrier
+  //   methods dispatched through them at each of its lifecycle events and now,
+  //   and no coverage change came between) and no list of the process
+  //   recorded an enhanced barrier (native_observer::enhanced_barrier_use:
+  //   unused). It adds no legality a game the debug layer passes needs (an
+  //   enhanced barrier on the target on an earlier or later list of the same
+  //   call fails validation for the game alone); it keeps the unobserved path
+  //   to sessions the hooks fully cover until the owner rules otherwise;
+  // aliased: an aliasing barrier on the clearing list's recording named the
+  //   target, or named no resource (any placed or reserved one), before the
+  //   clear: it may have activated the target, whose clear is then its
+  //   required initialization, so the content the copy would read before it
+  //   is undefined (MS Learn, CreatePlacedResource, Notes on the required
+  //   resource initialization);
+  // interop: a hooked enhanced barrier has named the simultaneous-access
+  //   target, on any list (sticky): its legacy copy before a barrier-free
+  //   clear makes that clear's promotion a legacy state, and a later enhanced
+  //   barrier on the target in the same list then fails validation (the
+  //   debug layer's 1351: legacy states must be transitioned to COMMON before
+  //   switching to enhanced barriers), though the game alone passes;
+  // proven: a whole observed recording that cleared the simultaneous-access
+  //   target with nothing on its list closed with no enhanced barrier naming
+  //   it (the capture owner's promotion table): the first clear of a target is
+  //   deferred until its recording shows whether the game names it in an
+  //   enhanced barrier after the clear.
   struct clear_facts {
     bool simultaneous{};
     std::uint32_t flags{};
     bool observed{};
     observation entry{};
     bool discarded{}, latched{}, compute{}, unmixed{};
+    bool aliased{}, interop{}, proven{};
   };
 
   // The UI layer clear-boundary copy's basis (streamline_depth_capture.h,
@@ -443,6 +465,9 @@ namespace sunshine_streamline::depth_capture::copy_state {
   // the caller checks (refused as enhanced without it).
   constexpr clear_copy_basis clear_copy(const clear_facts &facts) {
     using refusal = clear_copy_refusal;
+    // The content an activating aliasing barrier left is undefined, whatever
+    // state the list names.
+    if (facts.aliased) return {refusal::discarded};
     if (!facts.entry.present) {
       // A simultaneous-access texture with nothing on its clearing list
       // (option 2, owner ruling 11-03): it starts each ExecuteCommandLists in
@@ -452,15 +477,18 @@ namespace sunshine_streamline::depth_capture::copy_state {
       // is a legal BeforeState in both (MS Learn, Implicit State
       // Transitions: COMMON or any promotable state; COMMON is not, once
       // promoted), so the legacy RENDER_TARGET <-> COPY_SOURCE copy is legal
-      // wherever that clear is (promoted, never enhanced: the clear itself
-      // fails validation after the add-on's enhanced barriers). An observed
-      // list naming nothing qualifies; an unobserved one only unmixed
-      // (Enhanced Barriers, legacy interop: an earlier enhanced barrier of
-      // the same call must be flushed before a legacy one). A COMPUTE list
-      // holds no RENDER_TARGET, so it never clears one.
+      // where that clear is, except before a later enhanced barrier on the
+      // target in the same list (interop): never for a target an enhanced
+      // barrier named, nor before one whole observed recording of its clear
+      // showed none (proven; promoted, never enhanced: the clear itself fails
+      // validation after the add-on's enhanced barriers). An observed list
+      // naming nothing qualifies; an unobserved one only unmixed. A COMPUTE
+      // list holds no RENDER_TARGET, so it never clears one.
       if (facts.simultaneous) {
-        if (!facts.compute && (facts.observed || facts.unmixed)) return {refusal::none, false, 0, 0, true};
-        return {facts.observed ? refusal::no_state : refusal::unobserved};
+        if (facts.compute || !(facts.observed || facts.unmixed)) return {facts.observed ? refusal::no_state : refusal::unobserved};
+        if (facts.interop) return {refusal::interop};
+        if (!facts.proven) return {refusal::unproven};
+        return {refusal::none, false, 0, 0, true};
       }
       // A latched layout is the enhanced barriers' (Enhanced Barriers, legacy
       // interop), so the clear's legacy RENDER_TARGET is no basis for it.

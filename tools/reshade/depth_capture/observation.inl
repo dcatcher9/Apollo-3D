@@ -126,7 +126,11 @@ namespace sunshine_streamline::depth_capture {
               if (owner->aliases.capacity() == 0) owner->aliases.reserve(8);
               owner->aliases.push_back({identity, order});
               owner->aliases_sorted = false;
-            } catch (...) { invalidate(*owner, recording_loss::source_state_capacity); }
+            } catch (...) {
+              // A mark it cannot keep may name any placed or reserved resource.
+              owner->wildcard_alias = order;
+              invalidate(*owner, recording_loss::source_state_capacity);
+            }
           }
           continue;
         }
@@ -239,6 +243,48 @@ namespace sunshine_streamline::depth_capture {
         default: return std::nullopt;
       }
     }
+    // Option 2's promotion table (observation_state::promotions): what it
+    // knows of a target, and its marks.
+    struct promotion_view {
+      bool known{}, proven{}, interop{};
+    };
+    promotion_view promotion(std::uint64_t identity) {
+      promotion_view out;
+      if (!identity || !capture_observation.promotion_count.load(std::memory_order_acquire)) return out;
+      AcquireSRWLockShared(&capture_observation.promotion_lock);
+      for (const auto &entry : capture_observation.promotions)
+        if (entry.identity == identity) { out = {true, entry.proven, entry.interop}; break; }
+      ReleaseSRWLockShared(&capture_observation.promotion_lock);
+      return out;
+    }
+    // candidate: a target's first deferred clear adds it (no change for a
+    // known one); proven: unless an enhanced barrier named it; interop: for
+    // good. Only candidate adds an entry.
+    enum class promotion_mark { candidate, proven, interop };
+    void mark_promotion(std::uint64_t identity, promotion_mark mark) {
+      if (!identity) return;
+      if (mark != promotion_mark::candidate) {
+        // The barrier hooks' path: no exclusive lock where nothing changes.
+        const auto known = promotion(identity);
+        if (!known.known || known.interop || (mark == promotion_mark::proven && known.proven)) return;
+      }
+      auto &table = capture_observation.promotions;
+      AcquireSRWLockExclusive(&capture_observation.promotion_lock);
+      auto entry = std::find_if(table.begin(), table.end(), [&](const promotion_entry &value) { return value.identity == identity; });
+      if (entry == table.end() && mark == promotion_mark::candidate) {
+        entry = table.begin() + capture_observation.promotion_next;
+        capture_observation.promotion_next = (capture_observation.promotion_next + 1) % promotion_limit;
+        if (!entry->identity)
+          capture_observation.promotion_count.store(capture_observation.promotion_count.load(std::memory_order_relaxed) + 1,
+            std::memory_order_release);
+        *entry = {identity};
+      }
+      if (entry != table.end()) {
+        if (mark == promotion_mark::interop) { entry->interop = true; entry->proven = false; }
+        else if (mark == promotion_mark::proven && !entry->interop) entry->proven = true;
+      }
+      ReleaseSRWLockExclusive(&capture_observation.promotion_lock);
+    }
     // An enhanced texture barrier that includes subresource 0 sets that
     // texture's layout and access on this recording; other subresources (a
     // stencil plane) keep subresource 0's. The copy then leaves and restores
@@ -252,6 +298,12 @@ namespace sunshine_streamline::depth_capture {
         const native_observer::enhanced_texture *textures) {
       if (count && !capture_observation.enhanced_barriers_seen.load(std::memory_order_relaxed))
         capture_observation.enhanced_barriers_seen.store(true, std::memory_order_relaxed);
+      // An option-2 target any hooked enhanced barrier names, on any
+      // recording (observed or not) and any subresource, is never copied from
+      // its implicit promotion again (interop).
+      if (capture_observation.promotion_count.load(std::memory_order_acquire))
+        for (unsigned i = 0; i != count; ++i)
+          if (textures[i].resource) mark_promotion(source_cookie(textures[i].resource), promotion_mark::interop);
       // No capture lock, exactly as barriers().
       auto owner = command(native, cookie, true);
       if (!owner) return;
@@ -320,18 +372,26 @@ namespace sunshine_streamline::depth_capture {
       });
       owner.aliases_sorted = true;
     }
-    // Whether the barrier hooks saw every barrier owner (the recording its
-    // list holds) recorded, from how the list's barrier methods dispatch
-    // (native_observer::states_coverage, read by the caller, outside the
-    // capture lock unless suppressed: a lost hook found there invalidates
-    // evidence): through hooks the observer installed in a module table, or
-    // through hooks it wrote into the list's own table before this recording
-    // began (its cookie is greater than the list's stamp). The one verdict of
-    // the executed-list proof (apply_executed), the UI layer's clear-boundary
-    // copy and a capture at an API call; asked per recording, never cached.
-    bool recording_observed(const command_state &owner, const native_observer::states_dispatch &dispatch) {
+    // Whether one sample of how the list's barrier methods dispatch
+    // (native_observer::states_coverage, read by the caller outside the
+    // capture lock: a lost hook found there invalidates evidence) covers the
+    // recording owner: hooks the observer installed in a module table, or
+    // hooks it wrote into the list's own table before this recording began
+    // (its cookie is greater than the list's stamp).
+    bool dispatch_covers(const command_state &owner, const native_observer::states_dispatch &dispatch) {
       return dispatch.kind == native_observer::dispatch::hooked ||
         (dispatch.kind == native_observer::dispatch::patched && owner.cookie > dispatch.after);
+    }
+    // Whether the barrier hooks saw every barrier owner (the recording its
+    // list holds) recorded so far: its sample now covers it, and so did each
+    // of its lifecycle events' (no dispatch gap: a recording that began in a
+    // table no hook covers, or passed through one, is not observed whatever
+    // table it is in now). The verdict of the UI layer's clear-boundary copy
+    // and a capture at an API call; the executed-list proof (apply_executed)
+    // takes the execution hook's sample (command_identity::covered) with the
+    // gap. Asked per recording, never cached.
+    bool recording_observed(const command_state &owner, const native_observer::states_dispatch &dispatch) {
+      return !owner.dispatch_gap && dispatch_covers(owner, dispatch);
     }
     // Requires mutex. A copy recorded from its source's proven state
     // (record_impl) is checked when its recording is executed: the proof must
@@ -352,9 +412,10 @@ namespace sunshine_streamline::depth_capture {
     // submission order (proven_state.h): copies from a proven state are
     // checked before their list's own barriers apply. A list the barrier
     // hooks did not fully observe (not reported by ReShade's lifecycle, Reset
-    // without it, invalidated, or not recording_observed) may have changed
-    // any texture: none stays proven (an uncovered one is named once per
-    // method table, native_observer::note_uncovered). Otherwise every held texture
+    // without it, invalidated, not covered by the execution hook's verdict,
+    // or with a dispatch gap) may have changed any texture: none stays proven
+    // (an uncovered one is named once per method table,
+    // native_observer::note_uncovered). Otherwise every held texture
     // its barriers named takes the state its last barrier left it in, on this
     // queue, unless an aliasing barrier followed (any placed or reserved
     // resource for one naming neither), a split is still open or a barrier
@@ -366,21 +427,20 @@ namespace sunshine_streamline::depth_capture {
         verify_proven_copies(queue, values[n].recording_cookie);
         if (!capture_observation.proven.size()) continue;
         const auto native = values[n].native_command;
-        // Inside the submission callback (suppressed): a lost hook found here
-        // invalidates evidence at the next install_pending.
-        const auto dispatch = native_observer::states_coverage(native);
+        // The execution hook's verdict on the table the list dispatches
+        // through now (it retired a lost module hook there, outside this
+        // lock), read once per execution.
+        const bool covered = values[n].covered;
         // A list that never had a recording state, while hooks the observer
         // installed in a module table cover its methods, recorded no barrier
         // through them (the first would have given it one): DXGI's internal
         // Present list. It changes no texture's state. (A list's own table is
         // covered only from a recording's stamp, which such a list lacks.)
-        if (!values[n].recording_cookie && native && native_observer::recording_cookie_absent(native) &&
-            dispatch.kind == native_observer::dispatch::hooked)
-          continue;
+        if (!values[n].recording_cookie && native && native_observer::recording_cookie_absent(native) && covered) continue;
         auto owner = command(native, values[n].recording_cookie, false);
         auto &c = capture_observation.proven_counters;
         auto *unobserved = !owner ? &c.unrecorded : !owner->reported ? &c.unreported : owner->invalid ? &c.invalidated :
-          owner->missed_reset ? &c.missed_reset : !recording_observed(*owner, dispatch) ? &c.uncovered : nullptr;
+          owner->missed_reset ? &c.missed_reset : !covered || owner->dispatch_gap ? &c.uncovered : nullptr;
         if (unobserved) {
           if (unobserved == &c.uncovered) native_observer::note_uncovered(native);
           capture_observation.proven.unprove_all();
@@ -459,11 +519,40 @@ namespace sunshine_streamline::depth_capture {
       for (auto &value : capture_observation.runtime_lists) if (value == native) value = 0;
       ReleaseSRWLockExclusive(&capture_observation.runtime_lock);
     }
+    // A lifecycle event's sample of how the recording's barrier methods
+    // dispatch (states_coverage, read before the event's own work and the
+    // capture lock): one the hooks do not cover (none, or the list's own
+    // table stamped at or after this recording began) marks a gap on it, so
+    // it is never observed (recording_observed, apply_executed): the hooks
+    // may have missed barriers it recorded in that table (a third party's
+    // replacement in its module table, a runtime's per-object table no hook
+    // was written into), whatever table it executes from. Sampled where a
+    // recording opens (created, reset), at each render pass's begin and end
+    // (where a runtime moves a list between tables) and at Close. At Close
+    // the recording is complete: a gap on a reported, valid one leaves the
+    // process's enhanced-barrier use unknown, and each simultaneous-access
+    // target it deferred (option 2: unproven) is proven unless an enhanced
+    // barrier named it, where the hooks saw all of it.
+    void sample_dispatch(std::uint64_t native, std::uint64_t cookie, list_event event, const native_observer::states_dispatch &dispatch) {
+      auto owner = command(native, cookie, false);
+      if (!owner) return;
+      if (!dispatch_covers(*owner, dispatch)) owner->dispatch_gap = true;
+      if (event != list_event::closed) return;
+      if (owner->dispatch_gap && owner->reported && !owner->invalid) native_observer::note_dispatch_gap();
+      const bool whole = owner->reported && !owner->invalid && !owner->missed_reset && !owner->dispatch_gap;
+      for (const auto identity : owner->promotion_clears) {
+        if (!whole) break;
+        const auto *entry = state(*owner, identity, false);
+        if (!entry || !entry->enhanced_named) mark_promotion(identity, promotion_mark::proven);
+      }
+      owner->promotion_clears.clear();
+    }
     // ReShade's lifecycle is the only source of a list's recording. created: a
     // recording opens (a new list's first, or a registered runtime list's
     // current one); reset: the previous one ends and the next opens. native is
     // the list object itself, whose private data holds its recording.
     void lifecycle_recording(std::uint64_t native, list_event event) {
+      const auto dispatch = native_observer::states_coverage(native);
       const auto cookie = native_observer::get_recording_cookie(native);
       switch (event) {
         case list_event::created:
@@ -479,8 +568,11 @@ namespace sunshine_streamline::depth_capture {
         case list_event::closed: close(native, cookie, S_OK); break;
         case list_event::pass_begin: render_pass(native, cookie, true); break;
         case list_event::pass_end: render_pass(native, cookie, false); break;
-        default: break;
+        default: return;
       }
+      // The recording the event left open (created and reset open a new one).
+      const bool opened = event == list_event::created || event == list_event::reset;
+      sample_dispatch(native, opened ? native_observer::get_recording_cookie(native) : cookie, event, dispatch);
     }
   }
   void observe_list_event(std::uint64_t native, list_event event) {
@@ -647,18 +739,32 @@ namespace sunshine_streamline::depth_capture {
     const auto dispatch = native_observer::states_coverage(native);
     auto owner = dispatch.kind != native_observer::dispatch::none ?
       command(native, native_observer::get_recording_cookie(native), false) : command_storage::handle{};
-    facts.observed = owner && owner->reported && !owner->closed && !owner->invalid && recording_observed(*owner, dispatch);
-    // A simultaneous-access target on an unobserved list (option 2): its
-    // barriers all reached the hooks (its dispatch covers it, and no
-    // coverage change came between: one would have changed the generation)
-    // and the process recorded no enhanced barrier the hooks could miss.
+    // This recording's own payload: reported and open (a closed one is a
+    // Reset ReShade did not report, whose payload is an earlier recording's).
+    const bool tracked = owner && owner->reported && !owner->closed;
+    facts.observed = tracked && !owner->invalid && recording_observed(*owner, dispatch);
+    // A simultaneous-access target on an unobserved list (option 2): a
+    // recording invalidated by a loss of its own whose barriers all reached
+    // the hooks (its dispatch covered it at each of its lifecycle events and
+    // now, and no coverage change came between: one would have changed the
+    // generation), while the process recorded no enhanced barrier the hooks
+    // could miss.
     if (facts.simultaneous && !facts.observed)
-      facts.unmixed = owner && recording_observed(*owner, dispatch) &&
+      facts.unmixed = tracked && recording_observed(*owner, dispatch) &&
         owner->observation_generation == capture_observation.command_generation.load() &&
         native_observer::enhanced_barrier_use() == native_observer::enhanced_use::unused;
+    // An aliasing barrier the hooks marked on this recording before the clear
+    // that named the target, or no resource (aliased_after on an open
+    // recording reads only this thread's marks).
+    facts.aliased = tracked && (owner->wildcard_alias || aliased_after(*owner, identity, 0));
     const auto *entry = facts.observed ? state(*owner, identity, false) : nullptr;
     facts.entry = observation_of(entry);
     facts.discarded = entry && entry->discarded;
+    if (facts.simultaneous && !entry) {
+      const auto known = promotion(identity);
+      facts.proven = known.proven;
+      facts.interop = known.interop;
+    }
     if (!facts.simultaneous) {
       // Watched for the enhanced-layout latch from its first query, whatever
       // its clearing list names (proven_state.h): where a later recording
@@ -670,6 +776,16 @@ namespace sunshine_streamline::depth_capture {
       facts.latched = !entry && capture_observation.proven.latched(identity).latched;
     }
     const auto basis = copy_state::clear_copy(facts);
+    // A target's deferred first clear on an observed recording: judged at that
+    // recording's Close (sample_dispatch). One the recording cannot keep
+    // stays unproven.
+    if (basis.refused == clear_copy_refusal::unproven && facts.observed) {
+      mark_promotion(identity, promotion_mark::candidate);
+      try {
+        if (owner->promotion_clears.capacity() == 0) owner->promotion_clears.reserve(4);
+        owner->promotion_clears.push_back(identity);
+      } catch (...) {}
+    }
     // An enhanced copy needs the list's Barrier (as record_impl's does).
     if (basis.enhanced) {
       com_ptr<ID3D12GraphicsCommandList7> enhanced_list;

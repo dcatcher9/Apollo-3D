@@ -2488,9 +2488,14 @@ namespace {
   // legacy barriers where the clearing list transitioned the target to
   // RENDER_TARGET, and from RENDER_TARGET where it named nothing and the
   // barrier-free clear promotes it: option 2, The Witcher 3's FG-off
-  // layer), and one
-  // during which a third party put the runtime's function back is
-  // unobserved again until the next execution writes the hook again.
+  // layer, once one whole observed recording of such a clear closed without
+  // an enhanced barrier on it), and one during which a third party put the
+  // runtime's function back is unobserved again until the next execution
+  // writes the hook again; so is one that began in a table no hook covers
+  // and dispatches through the hooked table again before its execution (a
+  // dispatch gap). The runtime's object cannot hold a table of the test's,
+  // so the copied table is registered as the list's own (the observer takes
+  // only a table inside the list object as one).
   void moved_table_clear_boundary(fixture &gpu) {
     if (!gpu.pristine_list[80]) {
       std::puts("SKIP moved-table clear boundary: the list's own object has no CommandList7 table to copy");
@@ -2517,7 +2522,11 @@ namespace {
     void **const module_table = *object;
     std::vector<void *> own(gpu.pristine_list.begin(), gpu.pristine_list.end());
     *object = own.data();
-    struct restore_vtable { void ***object; void **table; ~restore_vtable() { *object = table; } } restore{object, module_table};
+    observer::own_table_for_testing(native(list.Get()), own.data());
+    struct restore_vtable {
+      void ***object; void **table;
+      ~restore_vtable() { *object = table; observer::own_table_for_testing(0, nullptr); }
+    } restore{object, module_table};
     // A depth texture the executed-list proof holds (its DEPTH_WRITE stays
     // proven only while every list executed on the queue is observed), and
     // the UI layer's target: simultaneous access, in COMMON.
@@ -2585,8 +2594,16 @@ namespace {
         proven.value == D3D12_RESOURCE_STATE_DEPTH_WRITE,
       "the execution of a list observed through its own table unproved the depth or counted as uncovered");
     // A clearing list that names nothing of the target, whose barrier-free
-    // clear promotes it from COMMON: copied from RENDER_TARGET with legacy
-    // barriers (option 2, owner ruling 11-03), legal under the debug layer.
+    // clear promotes it from COMMON: its first such clear is deferred until
+    // its recording closes without an enhanced barrier naming the target
+    // (unproven), then copied from RENDER_TARGET with legacy barriers (option
+    // 2, owner ruling 11-03), legal under the debug layer.
+    restart();
+    basis = decide();
+    require(!basis.admitted() && basis.refused == capture::clear_copy_refusal::unproven,
+      "the first barrier-free clear of the simultaneous target was not deferred as unproven");
+    clear();
+    run();
     restart();
     basis = decide();
     require(basis.admitted() && !basis.enhanced && basis.promoted,
@@ -2616,15 +2633,34 @@ namespace {
     clear();
     run();
     require(uncovered() == first_uncovered + 2, "the recording after the hook was written again counted as uncovered");
+    // A recording that begins in a table no hook covers (the runtime's
+    // functions at its Reset, as a runtime that rebuilt the table there would
+    // leave them) and dispatches through the hooked table again before its
+    // clear and its execution: the hooks may have missed what it recorded
+    // meanwhile, so it is unobserved and its execution counts as uncovered,
+    // though the table it executes from holds the hooks and an older stamp.
+    std::vector<void *> unhooked(gpu.pristine_list.begin(), gpu.pristine_list.end());
+    *object = unhooked.data();
+    restart();
+    *object = own.data();
+    transition(list.Get(), target.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    basis = decide();
+    require(!basis.admitted() && basis.refused == capture::clear_copy_refusal::unobserved,
+      "a recording that began in a table no hook covered was observed once it dispatched through the hooked table again");
+    clear();
+    run();
+    require(uncovered() == first_uncovered + 3,
+      "the execution of a recording that began in a table no hook covered was not counted uncovered");
     gpu.check_debug_errors();
     restart();
     check(close_list(list.Get()), "moved-table final close");
     capture::resource_destroyed(sunshine_native_identity::resource_cookie(depth.Get()));
     destroyed(list.Get());
     capture::command_destroyed(native(list.Get()));
-    std::puts("PASS moved method table (D3D12Core 1.619's per-object table): the recording that straddles the move and one whose "
-      "table lost the hook are unobserved and uncovered; every recording after an execution wrote the hooks is observed: "
-      "a transitioned simultaneous UI target is copied with legacy barriers, an untransitioned one from its promotion");
+    std::puts("PASS moved method table (D3D12Core 1.619's per-object table): the recording that straddles the move, one whose "
+      "table lost the hook and one that began in a table no hook covers are unobserved and uncovered; every recording after "
+      "an execution wrote the hooks is observed: a transitioned simultaneous UI target is copied with legacy barriers, an "
+      "untransitioned one from its promotion after its first clear's recording closed without an enhanced barrier on it");
   }
 
   void immediate_consumer_without_list_hooks(fixture &gpu) {

@@ -854,7 +854,10 @@ namespace sunshine_game3d::ui_layer {
     // A qualifying D3D12 clear whose copy the capture owner refused: counted
     // by reason for the timing line, stamped for the panel
     // (refused_at_clear), and logged once per reason with what the player
-    // loses. A refused target is never tracked, so it is never the layer.
+    // loses. A refused target is never tracked, so it is never the layer. An
+    // unproven one is a deferred first clear (option 2): logged once as such,
+    // since the target is copied from its next clear on once its recording
+    // closes without an enhanced barrier on it.
     void refused(state_t &s, sunshine_streamline::depth_capture::clear_copy_refusal reason) {
       namespace capture = sunshine_streamline::depth_capture;
       const auto index = unsigned(reason) - 1u;
@@ -868,6 +871,15 @@ namespace sunshine_game3d::ui_layer {
       std::lock_guard<std::mutex> lock(s.mutex);
       if (!first(s, log_refused << index)) return;
       char message[512];
+      if (reason == capture::clear_copy_refusal::unproven) {
+        std::snprintf(message, sizeof(message),
+          "Sunshine UI layer: clear-boundary copy deferred (unproven); %s: a simultaneous-access target is copied from "
+          "its implicit promotion only once one whole observed recording of its clear named it in no enhanced barrier, "
+          "until then it is not the offscreen UI layer (logged once; the timing line counts refused_by)",
+          capture::description(reason));
+        sunshine_log::message(reshade::log::level::info, message);
+        return;
+      }
       std::snprintf(message, sizeof(message),
         "Sunshine UI layer: clear-boundary copy refused (%s); %s: the target cannot be the offscreen UI layer, so UI "
         "protection gets no mask from it and, without another UI source, the HUD and menus take the scene's depth "

@@ -133,11 +133,22 @@ namespace sunshine_streamline::depth_capture {
       // A copy recorded on it takes copy-out storage unless it last ran on
       // the queue that reads depth (U-C1b, record_impl).
       std::uint64_t executed_queue{};
+      // A lifecycle event of this recording found its barrier methods
+      // dispatching past the hooks (sample_dispatch): the hooks may have
+      // missed some of its barriers, whatever table it executes from, so it is
+      // never observed (recording_observed, apply_executed).
+      bool dispatch_gap{};
+      // Simultaneous-access targets whose UI layer clear-boundary copy this
+      // recording deferred (clear_copy_refusal::unproven), judged at its
+      // Close (sample_dispatch).
+      std::vector<std::uint64_t> promotion_clears;
       void restart(std::uint64_t next_cookie, std::uint64_t generation) noexcept {
         states.clear();
         aliases.clear();
         aliases_sorted = false;
         clears.clear();
+        promotion_clears.clear();
+        dispatch_gap = false;
         cookie = next_cookie; observation_generation = generation;
         native_barrier_calls = native_transition_count = last_barrier_command = 0;
         barrier_order = wildcard_alias = 0;
@@ -451,7 +462,13 @@ namespace sunshine_streamline::depth_capture {
       return !clock && !entries[0].queue && !entries[0].newest && !count && !lock.Ptr;
     }());
 
-    constexpr unsigned proven_limit = 128;
+    constexpr unsigned proven_limit = 128, promotion_limit = 32;
+    // An option-2 target of the UI layer's clear-boundary copy
+    // (observation_state::promotions).
+    struct promotion_entry {
+      std::uint64_t identity{};
+      bool proven{}, interop{};
+    };
     // Entirely constant-initialized and trivially destructible. Its sole object
     // stays at proven's shell position; command_generation retains initial value1.
     struct observation_state {
@@ -481,6 +498,22 @@ namespace sunshine_streamline::depth_capture {
       SRWLOCK runtime_lock = SRWLOCK_INIT;
       std::array<std::uint64_t, 8> runtime_lists{}; // Guarded by runtime_lock.
       std::atomic<bool> runtime_lists_known{};
+      // Option 2's simultaneous-access UI layer targets by identity
+      // (copy_state::clear_facts proven and interop), guarded by
+      // promotion_lock, never the capture lock (an enhanced barrier hook marks
+      // interop on its recording thread): added at a target's first deferred
+      // clear (render_target_clear_copy), proven at the Close of a whole
+      // observed recording that cleared it with nothing on its list where no
+      // enhanced barrier named it, and marked interop for good by any hooked
+      // enhanced barrier naming it. A new target takes the oldest entry once
+      // all promotion_limit are used (promotion_next): the target replaced is
+      // deferred again, and a later enhanced barrier of its next recording
+      // marks it again before any copy of it. promotion_count: the entries
+      // used, read without the lock to skip the table while it is empty.
+      SRWLOCK promotion_lock = SRWLOCK_INIT;
+      std::array<promotion_entry, promotion_limit> promotions{};
+      unsigned promotion_next{};
+      std::atomic<unsigned> promotion_count{};
     };
     static_assert(std::is_trivially_destructible_v<observation_state>);
     static_assert([] { observation_state value; (void)value; return true; }());

@@ -344,25 +344,36 @@ namespace sunshine_streamline::depth_capture {
   //   legal clear). Until option 2 (owner ruling 11-03) every such target was
   //   refused; on a DIRECT list it is now copied (promoted, below);
   // - unobserved: the barrier hooks do not observe the clearing list's
-  //   recording (the capture owner inactive, the list's hooks not ready, its
-  //   recording not reported, closed or invalid), where the decision needs
-  //   it: a simultaneous-access target where an enhanced barrier could share
-  //   the clearing list's ExecuteCommandLists (the process recorded one, or
-  //   the hooks may have missed some: native_observer::enhanced_barrier_use,
-  //   or the list's own recording straddled a coverage change or dispatched
-  //   past them), or one an earlier list latched into an enhanced layout;
+  //   recording (the capture owner inactive, the list's hooks not ready at
+  //   one of its lifecycle events or now, its recording not reported, closed
+  //   or invalid), where the decision needs it: a simultaneous-access target,
+  //   unless its reported recording was invalidated by a loss of its own while
+  //   the hooks saw all of it and the process recorded no enhanced barrier
+  //   (copy_state::clear_facts unmixed: native_observer::enhanced_barrier_use),
+  //   or one an earlier list latched into an enhanced layout;
   // - discarded: an enhanced barrier on the clearing list discarded the
-  //   target's content (LayoutBefore UNDEFINED or the DISCARD flag), so the
-  //   previous frame's layer the copy would read is undefined;
+  //   target's content (LayoutBefore UNDEFINED or the DISCARD flag), or an
+  //   aliasing barrier there named it (or no resource) before the clear and
+  //   may have activated it, so the previous frame's layer the copy would read
+  //   is undefined;
   // - latched: the clearing list names nothing and an earlier executed list's
   //   enhanced barrier latched the target's layout (proven_state.h): refused,
   //   as before 11-03, until the owner rules on copying from that list's
   //   proof as a depth copy does (D6);
-  // - other: the target or list cannot be queried or identified.
+  // - other: the target or list cannot be queried or identified;
+  // - interop: a simultaneous-access target with nothing on its clearing list
+  //   that a hooked enhanced barrier has named (on any list, for good): the
+  //   copy's legacy barriers before its barrier-free clear would make a later
+  //   enhanced barrier on it in the same list fail validation (legacy interop,
+  //   the debug layer's 1351), where the game alone passes;
+  // - unproven: such a target before one whole observed recording of its
+  //   clear closed with no enhanced barrier naming it: its first clear is
+  //   deferred (the copy follows from the next clear on), never copied before
+  //   the game showed whether it names the target after the clear.
   enum class clear_copy_refusal : std::uint8_t {
-    none, simultaneous, enhanced, not_render_target, no_state, unobserved, discarded, latched, other
+    none, simultaneous, enhanced, not_render_target, no_state, unobserved, discarded, latched, other, interop, unproven
   };
-  inline constexpr unsigned clear_copy_refusal_count = 8; // Every reason but none.
+  inline constexpr unsigned clear_copy_refusal_count = 10; // Every reason but none.
   inline constexpr const char *name(clear_copy_refusal value) {
     switch (value) {
       case clear_copy_refusal::none: return "none";
@@ -373,6 +384,8 @@ namespace sunshine_streamline::depth_capture {
       case clear_copy_refusal::unobserved: return "unobserved";
       case clear_copy_refusal::discarded: return "discarded";
       case clear_copy_refusal::latched: return "latched";
+      case clear_copy_refusal::interop: return "interop";
+      case clear_copy_refusal::unproven: return "unproven";
       default: return "other";
     }
   }
@@ -384,8 +397,10 @@ namespace sunshine_streamline::depth_capture {
       case clear_copy_refusal::not_render_target: return "not in RENDER_TARGET on its clearing list";
       case clear_copy_refusal::no_state: return "simultaneous access, no state proven on its clearing list";
       case clear_copy_refusal::unobserved: return "its clearing list's barriers were not observed";
-      case clear_copy_refusal::discarded: return "its clearing list's enhanced barrier discarded the content";
+      case clear_copy_refusal::discarded: return "its content is undefined before the clear (discarded, or aliased on its clearing list)";
       case clear_copy_refusal::latched: return "enhanced-barrier layout latched by an earlier list, none on its clearing list";
+      case clear_copy_refusal::interop: return "simultaneous access, named by an enhanced barrier (a legacy copy would break legacy/enhanced interop)";
+      case clear_copy_refusal::unproven: return "simultaneous access, no whole observed recording of its clear yet without an enhanced barrier on it";
       case clear_copy_refusal::none: return "";
       default: return "target not identifiable";
     }
@@ -409,12 +424,16 @@ namespace sunshine_streamline::depth_capture {
   //   ExecuteCommandLists in COMMON and is in COMMON or, promoted by an
   //   earlier access of the same call, in RENDER_TARGET where its clear
   //   needs RENDER_TARGET, and RENDER_TARGET is a legal BeforeState from
-  //   both. An unobserved clearing list qualifies only where no enhanced
-  //   barrier can share its ExecuteCommandLists (copy_state::clear_facts
-  //   unmixed).
-  // Anything else is refused with its reason (clear_copy_refusal). A target
-  // is watched for the latch from its first query (proven_state.h). Call on
-  // the thread recording command.
+  //   both. Only a target no hooked enhanced barrier named (interop) and one
+  //   whole observed recording of its clear closed without one naming it
+  //   (proven; a deferred clear's recording is judged at its Close): a later
+  //   enhanced barrier on it in the clearing list would fail validation after
+  //   the copy. An unobserved clearing list qualifies only unmixed
+  //   (copy_state::clear_facts).
+  // Anything else is refused with its reason (clear_copy_refusal); so is any
+  // target an aliasing barrier on the clearing list may have activated
+  // (discarded). A target is watched for the latch from its first query
+  // (proven_state.h). Call on the thread recording command.
   struct clear_copy_basis {
     clear_copy_refusal refused{clear_copy_refusal::other};
     bool enhanced{};

@@ -735,11 +735,12 @@ namespace {
   // simultaneous-access one its clearing list transitions to RENDER_TARGET
   // (copied with legacy barriers); or a simultaneous-access one that its
   // clear promotes from COMMON, as The Witcher 3's FG-off layer (copied
-  // from RENDER_TARGET with legacy barriers, option 2: copies_promoted). A
-  // layer case also judges its player effect: an offered layer must decide
-  // the UI mask once accepted, an enhanced one be copied with enhanced
-  // barriers, the promoted one counted as promoted, and none be refused
-  // (SunshineUILayerTestLive). A tag call's input has a
+  // from RENDER_TARGET with legacy barriers, option 2: copies_promoted, after
+  // its first clear was deferred until that recording closed). A layer case
+  // also judges its player effect: an offered layer must decide the UI mask
+  // once accepted, an enhanced one be copied with enhanced barriers, the
+  // promoted one counted as promoted, and none be refused but the promoted
+  // one's deferred first clear (SunshineUILayerTestLive). A tag call's input has a
   // lifecycle and what its list records of it before the call (U5): the
   // shader-read state it declares, COPY_DEST (a write state) after a
   // transition there, or nothing (it stays in COPY_DEST, which it declares).
@@ -2076,9 +2077,10 @@ namespace {
     // layout with enhanced barriers; a simultaneous-access target its list
     // transitions is copied with legacy ones; and the one whose clear only
     // promotes it (The Witcher 3's FG-off layer) is copied with legacy ones
-    // from its promotion, each copy counted as promoted (option 2); no layer
-    // case is refused. counts: the layer's counters before and after the
-    // case.
+    // from its promotion, each copy counted as promoted (option 2), its first
+    // clear deferred (unproven: the case's new target) until that recording
+    // closed with no enhanced barrier on it; no layer case is refused
+    // otherwise. counts: the layer's counters before and after the case.
     void judge_layer_effect(matrix::ui_clear_boundary clear, const sunshine_game3d::ui_layer::test_live_state &was, const sunshine_game3d::ui_layer::test_live_state &now) {
       for (unsigned i = 0; i != sunshine_game3d::ui_layer::refusal_reasons; ++i) {
         seen.layer_refused[i] = now.refused_by[i] - was.refused_by[i];
@@ -2094,8 +2096,13 @@ namespace {
         seen.layer_effect = false;
         seen.layer_trouble += std::string(" ") + why + ";";
       };
-      if (refused) {
+      const bool promoted = clear == matrix::ui_clear_boundary::simultaneous_common;
+      const auto deferred = seen.layer_refused[unsigned(sunshine_streamline::depth_capture::clear_copy_refusal::unproven) - 1u];
+      if (refused != (promoted ? deferred : 0)) {
         fail("a layer's clear-boundary copy was refused");
+      }
+      if (promoted && !deferred) {
+        fail("the promoted layer's first clear was not deferred until its recording closed");
       }
       if (clear == matrix::ui_clear_boundary::simultaneous_common && (!seen.layer_copies || seen.layer_copies_promoted != seen.layer_copies || seen.layer_copies_enhanced)) {
         fail("the promoted simultaneous-access layer was not copied with legacy barriers from its promotion alone");

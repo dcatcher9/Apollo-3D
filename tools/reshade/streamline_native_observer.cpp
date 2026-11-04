@@ -306,14 +306,15 @@ namespace sunshine_streamline::native_observer {
       // Each executed list a recording cookie names, in the table it now
       // dispatches through: a module slot first seen is discovered, and an
       // object-owned table gets the hook (cover), before the owner judges
-      // this execution (which began before any write here). A list whose
+      // this execution (which began before any write here) from the verdict
+      // each identity now carries (command_identity::covered). A list whose
       // recording the barrier hooks may have missed part of leaves the
       // process's enhanced-barrier use unknown (enhanced_barrier_use).
       for (UINT i = 0; i != count; ++i) {
-        const auto &identity = identities.data()[i];
-        const bool seen = identity.recording_cookie ? cover(identity.native_command, identity.recording_cookie) :
+        auto &identity = identities.data()[i];
+        identity.covered = identity.recording_cookie ? cover(identity.native_command, identity.recording_cookie) :
           cookieless_covered(identity.native_command);
-        if (!seen && !barrier_blind.load(std::memory_order_relaxed)) barrier_blind.store(true, std::memory_order_relaxed);
+        if (!identity.covered && !barrier_blind.load(std::memory_order_relaxed)) barrier_blind.store(true, std::memory_order_relaxed);
       }
       notify(submitted_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
       listen(reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
@@ -420,6 +421,7 @@ namespace sunshine_streamline::native_observer {
     }
 #ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
     std::atomic<std::uint64_t> slot_reads{};
+    std::atomic<std::uintptr_t> test_own_object{}, test_own_table{};
 #endif
     bool read_slot_address(std::uint64_t object, unsigned kind, void **&address) {
 #ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
@@ -448,6 +450,17 @@ namespace sunshine_streamline::native_observer {
         if (discover) report_refusal();
         return nullptr;
       }
+      return result;
+    }
+    // The exact interface of a live list the caller holds a reference to (an
+    // executed list inside its ExecuteCommandLists, ReShade's native list at
+    // a list event or a call recorded on it): its QueryInterface is called
+    // directly, without required_interface's checked reads (a system call
+    // each, three per list).
+    template<class Interface> Interface *live_interface(std::uint64_t address, REFIID iid) {
+      auto *object = reinterpret_cast<ID3D12Object *>(address);
+      Interface *result{};
+      if (FAILED(object->lpVtbl->QueryInterface(object, iid, reinterpret_cast<void **>(&result)))) return nullptr;
       return result;
     }
     void observe(std::uint64_t object, method value) {
@@ -553,23 +566,46 @@ namespace sunshine_streamline::native_observer {
       if (a == dispatch::none || b == dispatch::none) return dispatch::none;
       return a == dispatch::patched || b == dispatch::patched ? dispatch::patched : dispatch::hooked;
     }
-    // How one barrier slot of object (kind's interface) dispatches now. A
-    // registered, installed module slot that no longer holds its hook is
-    // retired for good (missed calls cannot be recovered by a later restore)
-    // and invalidates evidence; inside a suppressed callback that
-    // invalidation is delivered at the next install_pending.
-    dispatch slot_dispatch(std::uint64_t object, unsigned kind) {
-      void *current{};
-      auto **const address = live_slot(object, kind, current);
-      if (!address) return dispatch::none;
-      const int index = hook_index(kind, current);
-      if (index >= 0) return targets[kind][index].location.address == address ? dispatch::hooked : dispatch::patched;
+    // Whether kind's slot at address lies in the object's own method table:
+    // a table inside the object itself, within its first 64 KiB (D3D12Core
+    // 1.619 builds it at object+0x5c8). No other list shares such a table,
+    // so the list's dispatch stamp speaks for every write into it. A table
+    // elsewhere outside every image (a hooking library's shadow table, a
+    // heap table several lists share) may be rewritten by another list's
+    // execution or restored by a third party during this list's recording,
+    // which no stamp of this list would show: it is never written and never
+    // covers (none).
+    constexpr std::uintptr_t own_table_extent = 0x10000;
+    bool owned_table(std::uint64_t object, unsigned kind, void **address) {
+      const auto slot = reinterpret_cast<std::uintptr_t>(address);
+      const auto table = slot - vtable_slots[kind] * sizeof(void *);
+#ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
+      if (object && object == test_own_object.load() && table == test_own_table.load()) return true;
+#endif
+      return table > object && slot < object + own_table_extent;
+    }
+    // A registered, installed module slot at address that no longer holds
+    // its hook is retired for good (missed calls cannot be recovered by a
+    // later restore) and invalidates evidence; inside a suppressed callback
+    // that invalidation is delivered at the next install_pending.
+    void retire_lost(unsigned kind, void **address) {
       for (auto &slot : targets[kind]) {
         if (slot.status.load(std::memory_order_acquire) != state::installed || slot.location.address != address) continue;
         auto expected = state::installed;
         if (slot.status.compare_exchange_strong(expected, state::rejected, std::memory_order_acq_rel)) { ++rejected; coverage_changed(kind); }
         break;
       }
+    }
+    // How one barrier slot of object (kind's interface) dispatches now.
+    dispatch slot_dispatch(std::uint64_t object, unsigned kind) {
+      void *current{};
+      auto **const address = live_slot(object, kind, current);
+      if (!address) return dispatch::none;
+      const int index = hook_index(kind, current);
+      if (index >= 0)
+        return targets[kind][index].location.address == address ? dispatch::hooked :
+          owned_table(object, kind, address) ? dispatch::patched : dispatch::none;
+      retire_lost(kind, address);
       return dispatch::none;
     }
     // The CommandList7 Barrier slot where the object supports it; an object
@@ -620,16 +656,34 @@ namespace sunshine_streamline::native_observer {
       ReleaseSRWLockExclusive(&targets_lock);
       return index;
     }
-    // Write a hook into an object-owned table slot that dispatches to
-    // current: only a committed plain read-write page outside every image (a
-    // runtime's per-object table; never a page whose protection would have to
-    // change), and only to a function in a loaded image that is not ours.
+    // The index of kind's detour value whose slot is no longer installed (a
+    // module slot retired once a third party replaced its hook), or -1.
+    int retired_index(unsigned kind, const void *value) {
+      for (unsigned i = 0; i != target_limit; ++i)
+        if (detours[kind][i] == value && targets[kind][i].status.load(std::memory_order_acquire) != state::installed)
+          return static_cast<int>(i);
+      return -1;
+    }
+    // Write a hook into the list's own table slot (owned_table) that
+    // dispatches to current: only a committed plain read-write private page
+    // (a runtime's per-object table; never a page whose protection would have
+    // to change), and only to a function in a loaded image that is not ours.
+    // A detour of ours left there by a slot since retired (a module slot whose
+    // hook a third party replaced, whose index this table reused) forwards to
+    // that slot's original but is no longer eligible: it is replaced by a hook
+    // that forwards to the same original (a fresh write, stamped as one).
     bool write_hook(unsigned kind, void **address, void *current) {
       MEMORY_BASIC_INFORMATION memory{};
       if (VirtualQuery(address, &memory, sizeof(memory)) != sizeof(memory) || memory.State != MEM_COMMIT ||
-          memory.Type == MEM_IMAGE || memory.Protect != PAGE_READWRITE) return false;
-      if (our_detour(current) || !sunshine_native_vtable::detail::image(current, true)) return false;
-      const int index = dispatch_target(kind, current);
+          memory.Type != MEM_PRIVATE || memory.Protect != PAGE_READWRITE) return false;
+      void *forward = current;
+      if (our_detour(current)) {
+        const int retired = retired_index(kind, current);
+        forward = retired < 0 ? nullptr : targets[kind][retired].original.load(std::memory_order_acquire);
+        if (!forward) return false;
+      }
+      if (!sunshine_native_vtable::detail::image(forward, true)) return false;
+      const int index = dispatch_target(kind, forward);
       if (index < 0) return false;
       if (InterlockedCompareExchangePointer(reinterpret_cast<void *volatile *>(address), detours[kind][index], current) != current)
         return false;
@@ -646,11 +700,20 @@ namespace sunshine_streamline::native_observer {
       auto **const address = live_slot(object, kind, current);
       if (!address) return {};
       const int index = hook_index(kind, current);
-      if (index >= 0) return {targets[kind][index].location.address == address ? dispatch::hooked : dispatch::patched};
-      // A module table first seen here: discovered, installed by the next
-      // install_pending (which invalidates the recordings it straddles).
-      if (sunshine_native_vtable::detail::image(address, false)) { observe(object, value); return {}; }
-      if (!write_hook(kind, address, current)) return {};
+      if (index >= 0)
+        return {targets[kind][index].location.address == address ? dispatch::hooked :
+          owned_table(object, kind, address) ? dispatch::patched : dispatch::none};
+      // A module table: a registered slot that lost its hook is retired (as
+      // slot_dispatch does; the owner's proof takes this verdict); one first
+      // seen here is discovered, installed by the next install_pending (which
+      // invalidates the recordings it straddles).
+      if (sunshine_native_vtable::detail::image(address, false)) {
+        retire_lost(kind, address);
+        observe(object, value);
+        return {};
+      }
+      // Any other table that is not the list's own is never written.
+      if (!owned_table(object, kind, address) || !write_hook(kind, address, current)) return {};
       return {dispatch::patched, true};
     }
     // An executed list (cover in execute_detour): the slots of the table it
@@ -662,7 +725,7 @@ namespace sunshine_streamline::native_observer {
     // own table before that recording began (enhanced_barrier_use).
     bool cover(std::uint64_t command, std::uint64_t cookie) {
       const restore_error incoming{GetLastError()};
-      auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
+      auto *object = live_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList);
       if (!object) return false;
       const auto normalized = reinterpret_cast<std::uintptr_t>(object);
       const auto barriers = cover_slot(normalized, method::barriers);
@@ -694,7 +757,7 @@ namespace sunshine_streamline::native_observer {
     // exemption of DXGI's internal Present list requires).
     bool cookieless_covered(std::uint64_t command) {
       const restore_error incoming{GetLastError()};
-      auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
+      auto *object = live_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList);
       if (!object) return false;
       const auto normalized = reinterpret_cast<std::uintptr_t>(object);
       const bool covered = combine(slot_dispatch(normalized, static_cast<unsigned>(method::barriers)), enhanced_dispatch(normalized)) ==
@@ -811,9 +874,9 @@ namespace sunshine_streamline::native_observer {
     object->lpVtbl->Release(object);
   }
   states_dispatch states_coverage(std::uint64_t command) {
-    if (!enabled()) return {};
+    if (!enabled() || !command) return {};
     const restore_error incoming{GetLastError()};
-    auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
+    auto *object = live_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList);
     if (!object) return {};
     const auto normalized = reinterpret_cast<std::uintptr_t>(object);
     states_dispatch result{slot_dispatch(normalized, static_cast<unsigned>(method::barriers))};
@@ -827,6 +890,9 @@ namespace sunshine_streamline::native_observer {
     if (enhanced_used.load(std::memory_order_relaxed)) return enhanced_use::used;
     if (!enabled() || barrier_blind.load(std::memory_order_relaxed)) return enhanced_use::unknown;
     return enhanced_use::unused;
+  }
+  void note_dispatch_gap() {
+    if (!barrier_blind.load(std::memory_order_relaxed)) barrier_blind.store(true, std::memory_order_relaxed);
   }
   void note_uncovered(std::uint64_t command) {
     if (sunshine_addon_lifetime::stopping() || !command) return;
@@ -975,6 +1041,10 @@ namespace sunshine_streamline::native_observer {
 #ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
   std::uint64_t slot_reads_for_testing() { return slot_reads.load(); }
   void forget_enhanced_barrier_use() { enhanced_used = false; barrier_blind = false; }
+  void own_table_for_testing(std::uint64_t object, const void *table) {
+    test_own_object = table ? object : 0;
+    test_own_table = reinterpret_cast<std::uintptr_t>(table);
+  }
   void reset_after_hooks_removed() {
     shutdown();
     bool restored = true;

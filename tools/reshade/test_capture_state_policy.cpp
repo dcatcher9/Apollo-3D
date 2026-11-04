@@ -357,12 +357,15 @@ int main() try {
   }
   // The clear-boundary decision (copy_state::clear_copy) and the reason it
   // names for each refusal (clear_copy_refusal): what the recording names,
-  // whether the hooks observe it, a discarded content, a latched layout, the
-  // list type and, for a simultaneous-access target on an unobserved list,
-  // whether an enhanced barrier could share its ExecuteCommandLists
-  // (unmixed). A simultaneous-access target with nothing on its list is
-  // copied from its implicit promotion (option 2, promoted). The device
-  // layer runs every legal one on a real list
+  // whether the hooks observe it, a discarded content, an aliasing barrier
+  // that may have activated the target (aliased: discarded), a latched
+  // layout, the list type and, for a simultaneous-access target on an
+  // unobserved list, whether an enhanced barrier could share its
+  // ExecuteCommandLists (unmixed). A simultaneous-access target with nothing
+  // on its list is copied from its implicit promotion (option 2, promoted)
+  // once a whole observed recording of its clear showed no enhanced barrier
+  // on it (proven; before: unproven) and never once one named it (interop).
+  // The device layer runs every legal one on a real list
   // (test_game3d_api_contract_device.cpp, UI clear boundary).
   {
     using refusal = capture::clear_copy_refusal;
@@ -373,8 +376,11 @@ int main() try {
       legacy_read{true, true, false, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
       blocked{true, false, true, D3D12_RESOURCE_STATE_RENDER_TARGET};
     const auto target_layout = render_target_layout(D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
+    // proven (a whole observed recording of the target's clear named it in
+    // no enhanced barrier) unless a row says otherwise.
     const auto facts = [&](bool simultaneous, bool observed, const copy_state::observation &entry, bool discarded = false,
-                           bool latched = false, bool compute = false, bool unmixed = false) {
+                           bool latched = false, bool compute = false, bool unmixed = false, bool proven = true,
+                           bool interop = false, bool aliased = false) {
       copy_state::clear_facts out;
       out.simultaneous = simultaneous;
       out.flags = simultaneous ? shared : target;
@@ -384,6 +390,9 @@ int main() try {
       out.latched = latched;
       out.compute = compute;
       out.unmixed = unmixed;
+      out.proven = proven;
+      out.interop = interop;
+      out.aliased = aliased;
       return out;
     };
     struct clear_row {
@@ -431,6 +440,38 @@ int main() try {
              "the RENDER_TARGET layout on a compute list"},
            clear_row{facts(false, true, legacy_read), refusal::not_render_target, false, "another legacy state"},
            clear_row{facts(false, true, blocked), refusal::not_render_target, false, "a blocked legacy state"},
+           // Option 2 waits for one whole observed recording of the target's
+           // clear (unproven), and never copies a target an enhanced barrier
+           // named (interop): the copy would make a later enhanced barrier on
+           // it in the clearing list fail validation.
+           clear_row{facts(true, true, nothing, false, false, false, false, false), refusal::unproven, false,
+             "a simultaneous-access target its observed list names nothing about, before its clear was proven"},
+           clear_row{facts(true, true, nothing, false, false, false, false, true, true), refusal::interop, false,
+             "a simultaneous-access target its observed list names nothing about, that an enhanced barrier named"},
+           clear_row{facts(true, true, nothing, false, false, false, false, false, true), refusal::interop, false,
+             "an unproven simultaneous-access target an enhanced barrier named"},
+           clear_row{facts(true, false, nothing, false, false, false, true, false), refusal::unproven, false,
+             "an unproven simultaneous-access target on an unobserved unmixed list"},
+           clear_row{facts(true, false, nothing, false, false, false, true, true, true), refusal::interop, false,
+             "a simultaneous-access target an enhanced barrier named, on an unobserved unmixed list"},
+           clear_row{facts(true, false, nothing, false, false, false, false, true, true), refusal::unobserved, false,
+             "a simultaneous-access target an enhanced barrier named, on an unobserved list"},
+           clear_row{facts(true, true, nothing, false, false, true, false, true, true), refusal::no_state, false,
+             "a simultaneous-access target an enhanced barrier named, on an observed COMPUTE list"},
+           clear_row{facts(true, true, legacy_target, false, false, false, false, false, true), refusal::none, false,
+             "a simultaneous-access target its list set to RENDER_TARGET (interop and proven concern promotion alone)"},
+           // An aliasing barrier on the clearing list that may have activated
+           // the target: its content is undefined, whatever the list names.
+           clear_row{facts(false, true, legacy_target, false, false, false, false, true, false, true), refusal::discarded, false,
+             "a legacy RENDER_TARGET after an aliasing barrier"},
+           clear_row{facts(false, true, nothing, false, false, false, false, true, false, true), refusal::discarded, false,
+             "nothing on an observed list after an aliasing barrier"},
+           clear_row{facts(false, true, target_layout, false, false, false, false, true, false, true), refusal::discarded, false,
+             "the enhanced RENDER_TARGET layout after an aliasing barrier"},
+           clear_row{facts(true, true, nothing, false, false, false, false, true, false, true), refusal::discarded, false,
+             "a proven simultaneous-access target after an aliasing barrier"},
+           clear_row{facts(true, false, nothing, false, false, false, true, true, false, true), refusal::discarded, false,
+             "a simultaneous-access target on an unobserved unmixed list after an aliasing barrier"},
          }) {
       const auto basis = copy_state::clear_copy(row.facts);
       require(basis.refused == row.named && basis.admitted() == (row.named == refusal::none) && basis.enhanced == row.enhanced &&

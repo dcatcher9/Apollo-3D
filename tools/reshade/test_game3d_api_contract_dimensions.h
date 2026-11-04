@@ -673,7 +673,19 @@ namespace game3d_contract {
   // ExecuteCommandLists call promoted (simultaneous_promoted_earlier_list);
   // and the lost recording of simultaneous_unobserved where no list of the
   // process recorded an enhanced barrier (simultaneous_unobserved_unmixed,
-  // copied).
+  // copied). Each admitting option-2 cell's target was first cleared on an
+  // earlier whole observed recording that named it in no enhanced barrier
+  // (the layer's deferred first clear). Option 2's refusals, each with the
+  // game's real clear: a target's first such clear, followed on its list by
+  // the game's enhanced barrier on it (simultaneous_unproven: deferred, the
+  // pattern a copy would make fail validation, id 1351); one an enhanced
+  // barrier of an earlier recording named (simultaneous_interop); and one an
+  // aliasing barrier with no resource precedes on the clearing list, which
+  // may have activated it (simultaneous_aliased: discarded). And the lost
+  // recording whose list transitioned the target to RENDER_TARGET, cleared it
+  // and transitioned it back to COMMON before the copy, which an unobserved
+  // list cannot show (simultaneous_unobserved_named_common: copied from
+  // RENDER_TARGET, a legal BeforeState in COMMON).
   enum class ui_clear_boundary {
     none,
     legacy_render_target,
@@ -688,7 +700,11 @@ namespace game3d_contract {
     simultaneous_cleared,
     simultaneous_promoted,
     simultaneous_promoted_earlier_list,
-    simultaneous_unobserved_unmixed
+    simultaneous_unobserved_unmixed,
+    simultaneous_unproven,
+    simultaneous_interop,
+    simultaneous_aliased,
+    simultaneous_unobserved_named_common
   };
 
   // What a UI tag call's own list records of its input before the call
