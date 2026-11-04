@@ -1590,13 +1590,17 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
             in Windows. Currently, NVIDIA drivers may freeze in encoder when HAGS is enabled, realtime priority is used
             and VRAM utilization is close to maximum. Disabling this option lowers the priority to high, sidestepping
             the freeze at the cost of reduced capture performance when the GPU is heavily loaded.
+            Capture and encoder devices boost their GPU context priority relative to this process policy, so
+            disabling realtime also governs those contexts.
             This option applies to Sunshine 3D's native NVENC path. A log line such as
             `NvEnc: frame ... exceeded the 100 ms completion wait; ... input_producer=done_by_...ms` while streaming
             a DX12 game with frame generation is consistent with that freeze: the encoder's input was ready by the
             first check, which comes only after 100 ms, so the delay was in the encoder or earlier upstream work.
             `pending_at_...ms` or `done_at_...ms` instead show upstream GPU work still running; the encoder's
             250 ms budget then starts when that work completes (2 s at most), so such a stall delays one picture
-            rather than rebuilding the encoder. Since 10-22 these lines end with
+            rather than rebuilding the encoder. At the deadline, one nonblocking completion-event check preserves
+            a picture that finished while the waiting thread was descheduled; an unfinished picture still times out
+            within the same budget. Since 10-22 these lines end with
             `host_vram_mib={local=usage/budget nonlocal=usage}`, the host process's video memory on the encoder's
             adapter in MiB: local usage at or near its budget is the pressure this freeze needs. Disable this option
             to test it. If stalls remain, `nvenc_split_encode` isolates split-frame encoding.

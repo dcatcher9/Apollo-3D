@@ -1180,15 +1180,13 @@ namespace platf::dxgi {
         return -1;
       }
 
-      status = dxgi->SetGPUThreadPriority(0x4000001E);
+      // Keep the boost relative to the process policy selected above. Absolute
+      // priority 30 is non-yielding hard realtime and bypasses the HAGS workaround.
+      status = dxgi->SetGPUThreadPriority(7);
       if (FAILED(status)) {
-        BOOST_LOG(info) << "Failed to request absoloute capture GPU thread priority. Trying relative priority.";
-        status = dxgi->SetGPUThreadPriority(7);
-        if (FAILED(status)) {
-          BOOST_LOG(warning) << "Failed to request relative capture GPU thread priority. Please run application as administrator for optimal performance.";
-        } else {
-          BOOST_LOG(info) << "Relative capture GPU thread priority request success.";
-        }
+        BOOST_LOG(warning) << "Failed to request relative capture GPU thread priority. Please run application as administrator for optimal performance.";
+      } else {
+        BOOST_LOG(info) << "Capture GPU context uses relative priority 7; process scheduling policy retained.";
       }
     }
 

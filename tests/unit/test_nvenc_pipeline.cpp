@@ -704,7 +704,7 @@ TEST(NvencPipelineTest, OldestPictureTimeoutBlocksSubmissionAndAdmissionUntilTea
   probe.complete(1);
   // Picture 1 never completes within the 250 ms budget (100 ms + 6 x 25 ms of fake time).
   EXPECT_TRUE(probe.retrieve_frame().data.empty());
-  EXPECT_EQ(only(probe.operations(), {"timeout-", "ready-"}), (std::vector<std::string> {"timeout-0", "timeout-0", "timeout-0", "timeout-0", "timeout-0", "timeout-0", "timeout-0"}));
+  EXPECT_EQ(only(probe.operations(), {"timeout-", "ready-"}), (std::vector<std::string> {"timeout-0", "timeout-0", "timeout-0", "timeout-0", "timeout-0", "timeout-0", "timeout-0", "timeout-0"}));
   EXPECT_EQ(probe.frames_in_flight(), 2u);
   EXPECT_FALSE(probe.submit_frame(3, false));
   EXPECT_TRUE(probe.retrieve_frame().data.empty());
@@ -745,7 +745,7 @@ TEST(NvencPipelineTest, LateInputExtendsOnlyItsOwnPicturesBudget) {
   silent.complete(0, 12);
   EXPECT_TRUE(silent.retrieve_frame().data.empty());
   const auto silent_ops = silent.operations();
-  EXPECT_EQ(std::count(silent_ops.begin(), silent_ops.end(), "timeout-0"), 7);
+  EXPECT_EQ(std::count(silent_ops.begin(), silent_ops.end(), "timeout-0"), 8);  // Includes the zero-time deadline poll.
 }
 
 TEST(NvencPipelineTest, InvalidationWaitsForNoPictureInFlightAndMarksTheNextSubmitted) {

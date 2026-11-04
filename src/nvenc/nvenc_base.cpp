@@ -966,6 +966,12 @@ namespace nvenc {
         }
       }
     }
+    // A timed wait may return before this thread gets scheduled again. Its completion event
+    // can be signaled meanwhile, including after the last grace slice: do not rebuild an encoder
+    // whose picture is already complete. This poll adds no wait to either timeout budget.
+    if (result.status == nvenc_event_wait_status::timeout && !device_removed(result)) {
+      result = wait_for_async_event(slot.completion_event, 0);
+    }
     if (result.status == nvenc_event_wait_status::ready) {
       if (soft_timeout) {
         const auto elapsed = elapsed_ms();
