@@ -716,8 +716,17 @@ refused_by={simultaneous enhanced not_render_target no_state unobserved discarde
 and with each once-per-reason `Sunshine UI layer: clear-boundary copy refused (<reason>); <what it
 means>: <what the player loses>` line; from 10-24 to 11-03 one line, logged once, named both
 reasons together and nothing was counted. It says whether the layer still recorded copies. `UI layer enhanced copies`
-(INFO) counts the admitted copies recorded with enhanced barriers (`copies_enhanced`). The timing
-line's layer group is read field by field, so a field added anywhere in it leaves the others readable.
+(INFO) counts the admitted copies recorded with enhanced barriers (`copies_enhanced`), and `UI layer
+promoted copies` (INFO, since option 2 of 11-03) those of a simultaneous-access target its clearing
+list named no state for, copied from the promotion its barrier-free clear relies on
+(`copies_promoted`). The timing line's layer group is read field by field, so a field added
+anywhere in it leaves the others readable. `Barrier coverage` (since 11-03) reads the native
+observer's `Sunshine 3D barrier coverage` lines: each method-table class no barrier hook covered
+(a list's own table by its offset from the object, or a module table, and the modules its
+`ResourceBarrier` and `Barrier` slots dispatch into) and the count of hooks written into lists'
+own tables (`written=`). It is INFO, or WARN when that count grew in 6 or more of its 10 s lines by
+100 or more: the runtime rebuilds those tables (likely at each Reset), so the written hooks do not
+last and their lists stay unobserved.
 
 The depth and flat checks decide from the periodic `Sunshine SBS output` counters, then name
 the add-on's own evidence for each window. A depth gap lists each `Sunshine depth readiness`
@@ -2135,13 +2144,25 @@ boundary (the copy `game3d_ui_layer.cpp` records on the basis the capture owner'
 ReShade, or the owner's enhanced barriers from the clearing list's enhanced layout; D12's targets,
 a legacy `RENDER_TARGET`, an enhanced `RENDER_TARGET` layout, and a simultaneous-access target its
 list transitions to `RENDER_TARGET` (all copied), and each legal refusal with no barrier: a
-simultaneous-access target its list leaves in `COMMON` (`no_state`) or transitions back to `COMMON`
-(`simultaneous`) or one on a recording the hooks lost (`unobserved`; a clearing list in its own
-method table is `reshade_diagnostic_texture_capture_test`'s `moved_table_clear_boundary`), an enhanced barrier into
+simultaneous-access target its list transitions back to `COMMON` (`simultaneous`) or one on a
+recording the hooks lost after an earlier executed list of the process recorded an enhanced barrier
+(`unobserved`; a clearing list in its own method table is
+`reshade_diagnostic_texture_capture_test`'s `moved_table_clear_boundary`), an enhanced barrier into
 `RENDER_TARGET` from `UNDEFINED` or with the `DISCARD` flag (`discarded`), and a layout an earlier
 executed list latched after the layer first asked (`latched`); a cell's refusal reason must be its
 target's, and `test_capture_state_policy.cpp` names the reasons only an illegal clear reaches; the
-runtime layer runs the layer itself). The cells cover every legal state of every
+runtime layer runs the layer itself). Option 2 (owner ruling 11-03) copies a simultaneous-access
+target its list leaves in `COMMON` from `RENDER_TARGET` with legacy barriers, and its legality
+cells each record the game's real clear after the copy and must leave no D3D12 message of any
+severity, under the debug layer and `--gpu-validation`: the target in `COMMON`, promoted to
+`RENDER_TARGET` by an earlier clear on the clearing list, or by an earlier list of the same
+`ExecuteCommandLists` call (both copy the cleared bytes), and the lost recording where no list of
+the process recorded an enhanced barrier (each lost-recording cell starts as a fresh session's,
+`native_observer::forget_enhanced_barrier_use`). After the cells, three negative controls must each
+be flagged as `D3D12_MESSAGE_ID_RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH` (527), so validation was
+live: `COMMON` named for a target its clear promoted on the same list (at the barrier), and
+`RENDER_TARGET` named for a simultaneous-access target an earlier list of the call left in
+`COPY_SOURCE` and for a non-simultaneous one in `COMMON` (at `ExecuteCommandLists`). The cells cover every legal state of every
 allocation, each claim, each direct-list enhanced layout, every depth family typed and typeless with
 mips and planes, the shapes no input names, COMPUTE lists (each state and claim a compute list may
 use, and the compute-queue layouts, copied on that list and executed on a compute queue; S22, N7)
@@ -2264,13 +2285,14 @@ call also `ValidUntilPresent` and `ValidUntilEvaluate`, with its list recording 
 state or none, U5), or draws
 an offscreen UI layer cleared every frame (D12: a render target in `RENDER_TARGET`; one an enhanced
 barrier on the clearing list puts in the `RENDER_TARGET` layout; a simultaneous-access one its list
-transitions to `RENDER_TARGET`; or a simultaneous-access one its clear promotes from `COMMON`, whose
-copy the layer refuses as `no_state`); a case is offered when Dump3D lists its input as
+transitions to `RENDER_TARGET`; or a simultaneous-access one its clear promotes from `COMMON`, The
+Witcher 3's FG-off layer, copied from `RENDER_TARGET` since option 2); a case is offered when Dump3D lists its input as
 available to UI detection. A layer case also judges its player effect through
 `SunshineUILayerTestLive`'s counters over the case: an offered layer must decide the UI mask (source
 10) after 2.5 s more of frames (acceptance, A1), an enhanced one must be copied with enhanced
 barriers (`copies_enhanced`), the transitioned simultaneous-access one with legacy barriers alone,
-and the refused one must be counted as `no_state` with no copy recorded. Their gaps are `ngx_runtime_rows`, `generic_runtime_rows` and
+the promoted one with every copy counted as `copies_promoted`, and no layer case may be refused.
+Their gaps are `ngx_runtime_rows`, `generic_runtime_rows` and
 `ui_runtime_rows`.
 
 The executable takes `--family` and the generator's `--list`, `--case` and `--shard`, and appends
@@ -3738,7 +3760,11 @@ serial is 30 there); each Present establishes any selected copy, as
   covers once installed; a registered hook lost inside a suppressed callback is retired at once and
   invalidated at the next `install_pending`; a per-object CommandList7 table is neither registered
   nor refused at discovery; and the coverage line names each uncovered table class once, then the
-  written count. It also runs the order family's hooks on COM-shaped fixtures: the method table; Signal and Wait
+  written count. Its enhanced-barrier use rows (`enhanced_barrier_use`, option 2 of 11-03): a fresh
+  session's is `unused`, any `Barrier` call through a hook (a global barrier alone too) makes it
+  `used`, an executed recording no hook covered since it began (its own table before the write, a
+  list without a cookie and no hooked module table) makes it `unknown`, while a recording after its
+  list's stamp and a cookie-less list in a hooked module table keep it `unused`. It also runs the order family's hooks on COM-shaped fixtures: the method table; Signal and Wait
   discovered by `observe_queue`; a fence recorded only once its CPU Signal slot is installed and
   every verdict refused while it is pending (with no capture evidence revoked); a real edge; a
   suppressed `ExecuteCommandLists` taking its own ticket; the quiet bit for two threads on one
@@ -3801,7 +3827,8 @@ serial is 30 there); each Present establishes any selected copy, as
   execution counts uncovered (unproving a tracked depth); every later recording is observed: a
   simultaneous-access target its list transitions to `RENDER_TARGET` is admitted for the legacy
   copy (recorded, with the clear, clean under the debug layer) and the depth stays proven, one it
-  leaves in `COMMON` is refused as `no_state`; a recording during which the runtime's function is
+  leaves in `COMMON` is copied from its promotion (option 2, `promoted`; recorded with the clear,
+  clean under the debug layer); a recording during which the runtime's function is
   put back is unobserved and uncovered, and the next one observed again.
   Its `dlssg_compute_list_capture` checks DLSS-G's copy on its own COMPUTE list under the debug
   layer (N7): a depth-stencil depth observed in `NON_PIXEL_SHADER_RESOURCE` there is copied there
