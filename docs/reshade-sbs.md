@@ -182,8 +182,10 @@ Present reads the copy of the frame before it; see the layer cross-queue fence u
 and, since C12, `targets_dropped`: qualifying clears the layer tracker dropped because all 32 of
 its entries were taken (see the offscreen UI layer below; `game3d_log_report` reports them as the
 INFO check `UI layer targets`), and, since 11-03, `refused=<n> refused_by={simultaneous enhanced
-not_render_target no_state unobserved discarded latched other}`: qualifying D3D12 clears whose copy
-the capture owner refused, by reason, and `copies_enhanced`: the copies recorded with enhanced
+not_render_target no_state unobserved discarded latched interop unproven other}`: qualifying D3D12
+clears whose copy the capture owner refused, by reason (`interop` and `unproven` since the option 2
+review of 11-03; `unproven` counts first clears deferred until their recording closed), and
+`copies_enhanced`: the copies recorded with enhanced
 barriers, and, since option 2 (11-03), `copies_promoted`: the copies of a simultaneous-access target
 its clearing list named no state for (the offscreen UI layer below). All
 are zero while UI detection does not ask for the layer. Since 10-07 the line ends with `window_ms`, the
@@ -1177,36 +1179,57 @@ resolves it with `clear_contract`):
   decay), in `RENDER_TARGET`; `RENDER_TARGET` is a legal `BeforeState` from both (MS Learn, Implicit
   State Transitions, Performance implications: `COMMON` or any promotable state for a resource in
   the common state), while naming `COMMON` is illegal once it was promoted (error 527). The
-  sequence is legal wherever the game's own clear is. Its enhanced form is never used: the add-on's
-  enhanced barriers before the clear make the game's barrier-free clear fail validation (error
-  1334), and after a legacy promotion the spec forbids them. An observed clearing list qualifies;
-  an unobserved one only where no enhanced barrier can share its `ExecuteCommandLists`
-  (`copy_state::clear_facts::unmixed`; Enhanced Barriers, legacy interop: accesses after an
-  enhanced barrier must be flushed by a barrier before a legacy one): the hooks saw every barrier
-  its own recording made (its barrier methods dispatched through them since it began, and no
-  coverage change came between) and no list of the process recorded an enhanced barrier
+  sequence is legal where the game's own clear is, except before a later enhanced barrier on the
+  target in the same list: once the copy's legacy barriers touched the target, the clear's
+  promotion counts as a legacy state, and the debug layer flags that enhanced barrier (error 1351:
+  legacy states must be transitioned to `COMMON` before switching to enhanced barriers), though the
+  game alone passes (the option 2 review's probe, 11-03, with either restore state). So the copy is
+  made only for a target no enhanced barrier the hooks saw has ever named, on any list
+  (`copy_state::clear_facts::interop`, sticky for the session), and only once one whole observed
+  recording that cleared it with nothing on its list closed with no enhanced barrier naming it
+  (`proven`): the first such clear of each target is deferred (`unproven`), and its recording is
+  judged at its Close, so a game that names the target after its clear every frame never gets a
+  copy. Its enhanced form is never used: the add-on's enhanced barriers before the clear make the
+  game's barrier-free clear fail validation (error 1334), and after a legacy promotion the spec
+  forbids them. An observed clearing list qualifies; an unobserved one only `unmixed`: its reported
+  recording was invalidated by a loss of its own while the hooks saw all of it (its barrier methods
+  dispatched through them at each of its lifecycle events and at the clear, and no coverage change
+  came between) and no list of the process recorded an enhanced barrier
   (`native_observer::enhanced_barrier_use`: `unused`; any `Barrier` call through one of the
   observer's hooks makes it `used`, and an executed list whose recording the hooks may have missed
-  part of, or an inactive observer, makes it `unknown`, both for the rest of the session). The
-  contract matrix's device layer (D12) records it on real lists under the debug layer and
-  GPU-based validation: the game's real clear after the copy, a target an earlier clear on the
-  clearing list or an earlier list of the same call promoted, and the lost recording with and
-  without an earlier enhanced barrier on the process, beside negative controls (a wrong
-  `BeforeState` at the barrier and at `ExecuteCommandLists`) that must be flagged.
+  part of, a closed recording that dispatched past them, or an inactive observer, makes it
+  `unknown`, both for the rest of the session). That process-wide rule adds no legality a game the
+  debug layer passes needs (an enhanced barrier on the target on an earlier or a later list of the
+  same call fails validation for the game alone, errors 1334 and 1350); it keeps the unobserved
+  path to fully covered sessions until the owner rules otherwise. The contract matrix's device
+  layer (D12) records it on real lists under the debug layer and GPU-based validation: the game's
+  real clear after the copy, a target an earlier clear on the clearing list or an earlier list of
+  the same call promoted, the lost recording with and without an earlier enhanced barrier on the
+  process, and the lost recording whose list named `COMMON` explicitly before the copy (the
+  review's probe F), each of a target an earlier recording proved; a target's deferred first clear
+  and one an earlier recording's enhanced barrier named, each followed by the game's clear and its
+  enhanced barrier on the target (no message of any severity without the copy); beside negative
+  controls (a wrong `BeforeState` at the barrier and at `ExecuteCommandLists`, and the copy before
+  that clear and enhanced barrier, error 1351) that must be flagged.
 Anything else is refused with a reason, and a refused target is never tracked, so it is never the
 layer: `simultaneous` (a simultaneous-access target cleared from another state its list set than a
-legacy `RENDER_TARGET`), `enhanced` (an enhanced layout or access the clear's `RENDER_TARGET` does
+legacy `RENDER_TARGET`), `interop` (a simultaneous-access target with nothing on its clearing list
+that an enhanced barrier named, above), `unproven` (such a target's first clear, deferred until its
+recording closes; it logs `Sunshine UI layer: clear-boundary copy deferred (unproven); ...` once,
+and the log report counts it without a warning while the layer still records copies), `enhanced`
+(an enhanced layout or access the clear's `RENDER_TARGET` does
 not name, or a list without `Barrier`), `not_render_target` (a legacy state, pending split or
 blocked state other than `RENDER_TARGET`), `no_state` (a simultaneous-access target its observed
 COMPUTE clearing list names nothing about: a compute list holds no `RENDER_TARGET`, so it never
 clears one; until option 2 every simultaneous-access target its observed list named nothing about),
 `unobserved` (the barrier hooks did not observe the clearing list's
 whole recording: the capture owner is inactive, the list's barrier methods dispatch through no hook
-for this recording (a module table whose hooks are not installed yet, the recording during which a
-runtime moved the list to its own method table, or one during which a third party replaced a hook;
+for this recording at its clear or at one of its lifecycle events (a module table whose hooks are
+not installed yet, the recording during which a runtime moved the list to its own method table, one
+during which a third party replaced a hook, or one that began in a table no hook covers;
 [native command observation](#streamline-depth-selection)), or its recording is unreported, closed
 or invalid; it is named where the decision needs the list, for a latched target or a
-simultaneous-access one where an enhanced barrier could share its `ExecuteCommandLists`, as above.
+simultaneous-access one outside the unobserved path's `unmixed` case, as above.
 Until 11-03 every recording of The Witcher 3 was unobserved, since D3D12Core 1.619 moves
 each list to its own method table: its FG-off layer refused every clear, about one per Present, and
 was never copied. The execution hook now writes the hooks into such a table, so a clearing list is
@@ -1214,12 +1237,16 @@ observed from its second execution on wherever the runtime keeps that table acro
 confirmed live in The Witcher 3; the `Sunshine 3D barrier coverage: written=` count tells, which
 `game3d_log_report` reports as `Barrier coverage`): the layer is then copied, where that list
 transitions the target to `RENDER_TARGET` or, since option 2, where the game relies on the clear's
-promotion (`copies_promoted` about once per Present). Where the runtime rebuilds that table at each
-Reset, every W3 recording still dispatches past the hooks, so the observer cannot vouch that no
-`Barrier` call shares a clearing list's `ExecuteCommandLists` and the layer stays refused as
-`unobserved`), `discarded` (an
+promotion (`copies_promoted` about once per Present, after one `unproven` first clear), unless The
+Witcher 3 names its layer in an enhanced barrier (then `interop`, the only legal answer). Where the
+runtime rebuilds that table at each Reset, every W3 recording still dispatches past the hooks and
+the layer stays refused as `unobserved`), `discarded` (an
 enhanced barrier on the clearing list discarded the content, from `UNDEFINED` or with the
-`DISCARD` flag, so the previous frame's layer is undefined), `latched` (the clearing list names
+`DISCARD` flag, or an aliasing barrier there before the clear named the target or no resource and
+may have activated it, whose clear is then its required initialization (MS Learn,
+CreatePlacedResource, Notes on the required resource initialization), so the previous frame's layer
+is undefined; a wildcard aliasing barrier refuses a committed target too, which no aliasing can
+reach), `latched` (the clearing list names
 nothing and an earlier executed list's enhanced barrier latched the layout: refused, as before
 11-03, until the owner rules on copying from that list's proof as a depth copy does, D6) and
 `other` (the target or list cannot be identified). Every non-simultaneous target is watched for the
@@ -1238,18 +1265,23 @@ log report blamed the 100% current alpha left as the only candidate). The layer 
 own lock, between its check that the clear qualifies and its copy (which checks again), because the
 capture owner may take its lock to answer: a recording thread never holds the layer's lock while it
 waits for the capture owner's.
-Option 2's limits: it trusts that no enhanced barrier left another write access on the target
-pending earlier in the same `ExecuteCommandLists`. For an observed clearing list an unobserved
-earlier list of the same call is not ruled out (the ruling accepts it: the debug layer already
-flags a game's barrier-free clear after its own enhanced barrier on such a texture, error 1334).
-For an unobserved one the process-wide `enhanced_barrier_use` is a session-wide predictor, not a
-proof about that call: it cannot see `Barrier` calls a recording made before the hooks covering
-its module table were installed, nor those of lists no execution hook ran, and a first enhanced
-barrier recorded on another thread while an admitted copy's list records is caught only for the
-copies after it. A simultaneous-access target its observed list names in `COMMON` stays refused
-(`simultaneous`): the same documentation admits it, but no cell has validated it; an unobserved
-clearing list cannot show that it named `COMMON`, so there the legacy copy from `RENDER_TARGET` rests on
-that documentation alone (no device cell records an explicit `COMMON` before the copy yet).
+Option 2's limits (residual risk the owner's ruling names: legacy and enhanced barriers on one
+target within one `ExecuteCommandLists`). The reachable mix is a later enhanced barrier on the
+target in the clearing list itself, which the clear's pre-call decision cannot see: `interop` and
+`proven` predict it from the game's earlier recordings, so a game whose pattern changes after the
+recording that proved a target (it names the target after its clear only in some frames) gets one
+recording flagged by the debug layer (error 1351) before its first such barrier marks the target
+`interop`; so does a recording whose later enhanced barriers dispatch past the hooks after the
+clear's decision. Mixes across lists of one call (an enhanced barrier on the target on an earlier
+or a later list) fail validation for the game alone (errors 1334 and 1350), so the copy makes no
+legal game illegal there. An aliasing barrier that activates the target is seen only on an observed
+or reported recording of the clearing list: one on another list of an earlier
+`ExecuteCommandLists` call (the advanced model needs none within a call) or on a recording the
+hooks do not track goes unseen, and the copy then reads undefined memory (validation does not flag
+it). A simultaneous-access target its observed list names in `COMMON` stays refused
+(`simultaneous`): the same documentation admits it, but no cell has validated it on an observed
+list; an unobserved clearing list cannot show that it named `COMMON`, which its device cell (the
+review's probe F) records.
 Since C12 a clear is `ClearRenderTargetView` or, on D3D12, a render pass whose render-target entry
 begins with a CLEAR to exactly (0, 0, 0, 0): ReShade reports `begin_render_pass` before the native
 `BeginRenderPass`, outside any pass, where that target is in the render-target state the pass
@@ -5618,16 +5650,31 @@ taking no lock; since 11-03). A list is covered when each slot (ResourceBarrier,
 Barrier where its object has it) is a registered module slot that still holds the hook (as before;
 a lost one is retired for good and revokes evidence, delivered at the next poll when the loss is
 found inside the suppressed submission callback, where it was dropped before), or holds one of the
-hooks in the list's own table. The execution hook writes the hooks there: for each executed list a
-recording cookie names, a table outside every module image in plain read-write memory gets the
-module hook that forwards to the function the slot held (a dispatch-only hook where no module hook
-does, at most eight hooks a method in all), and the list is stamped with the recording cookie it
+hooks in the list's own table: a table inside the list object itself, within its first 64 KiB
+(D3D12Core 1.619's at object+0x5c8), which no other list shares. The execution hook writes the hooks
+there: for each executed list a recording cookie names, such a table on a private read-write page
+gets the module hook that forwards to the function the slot held (a dispatch-only hook where no
+module hook does, at most eight hooks a method in all; a hook of ours that a since-retired module
+slot left there is replaced the same way), and the list is stamped with the recording cookie it
 holds after the write (private data). Only a recording with a greater cookie, which began after the
 write, is covered: the recording during which the runtime moved the list, and one during which a
 third party put the runtime's function back, stay uncovered (fail safe), and the next execution
-writes the hook again. A module table first seen at an execution (26300's suspended-pass table) is
-discovered there and covers once installed. Discovery neither registers nor refuses a table outside
-every image (refusing one per list revoked evidence for each). The one verdict serves the
+writes the hook again. Any other table outside every module image (a hooking library's shadow
+table, a heap table several lists may share) is never written and never covers: another list's
+execution could write it, or a third party restore it, during this list's recording, which no
+stamp of this list would show. A module table first seen at an execution (26300's suspended-pass
+table) is discovered there and covers once installed. Discovery neither registers nor refuses a
+table outside every image (refusing one per list revoked evidence for each). Since the option 2
+review (11-03) the verdict spans the recording: the capture owner reads the dispatch at each of a
+recording's lifecycle events (its start at creation or Reset, each render pass's begin and end,
+where a runtime moves a list between tables, and its Close), and one the hooks do not cover marks a
+dispatch gap, so a recording that began or passed through a table no hook covers (a third party's
+replacement in its module table before a suspending pass moved it to a hooked one) is unobserved
+and uncovered whatever table it executes from; a closed reported recording with a gap leaves the
+process's enhanced-barrier use unknown. The execution hook's verdict travels with each executed
+list's identity (`command_identity::covered`), so the executed-list proof reads no table again
+under the capture lock, and the hook's reads call each live list directly (no checked memory read
+per list). The verdict serves the
 executed-list proof (Generic's end-of-frame copy), the UI layer's clear-boundary copy and a capture
 at an API call (`recording_observed`), each asking with the pointer it holds: a Streamline proxy's
 table (record_impl in The Witcher 3) is covered by its own module hook, which barriers Streamline,
