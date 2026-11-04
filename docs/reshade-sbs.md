@@ -1247,7 +1247,9 @@ proof about that call: it cannot see `Barrier` calls a recording made before the
 its module table were installed, nor those of lists no execution hook ran, and a first enhanced
 barrier recorded on another thread while an admitted copy's list records is caught only for the
 copies after it. A simultaneous-access target its observed list names in `COMMON` stays refused
-(`simultaneous`): the same documentation admits it, but no cell has validated it.
+(`simultaneous`): the same documentation admits it, but no cell has validated it; an unobserved
+clearing list cannot show that it named `COMMON`, so there the legacy copy from `RENDER_TARGET` rests on
+that documentation alone (no device cell records an explicit `COMMON` before the copy yet).
 Since C12 a clear is `ClearRenderTargetView` or, on D3D12, a render pass whose render-target entry
 begins with a CLEAR to exactly (0, 0, 0, 0): ReShade reports `begin_render_pass` before the native
 `BeginRenderPass`, outside any pass, where that target is in the render-target state the pass
