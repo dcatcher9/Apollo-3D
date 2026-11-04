@@ -838,11 +838,15 @@ namespace {
     }
 
     // An earlier executed list of the process records an enhanced barrier
-    // (on a texture of its own), which a lost clearing recording's copy
-    // must then refuse (native_observer::enhanced_barrier_use: used).
+    // (into the RENDER_TARGET layout of a texture of its own, which it then
+    // clears: a list of barriers alone is the debug layer's warning 1356),
+    // which a lost clearing recording's copy must then refuse
+    // (native_observer::enhanced_barrier_use: used).
     void earlier_enhanced_barrier(run &out) {
       const auto other = layer_target(false);
-      enter_layout(earlier_direct.list.Get(), other.Get(), true, D3D12_BARRIER_LAYOUT_COPY_SOURCE, D3D12_BARRIER_ACCESS_COPY_SOURCE);
+      const float transparent[4] {};
+      enter_layout(earlier_direct.list.Get(), other.Get(), true, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
+      earlier_direct.list->ClearRenderTargetView(render_target_view(other.Get()), transparent, 0, nullptr);
       check(close_list(earlier_direct.list.Get()), "earlier enhanced barrier close");
       execute(gpu.queue.Get(), earlier_direct.list.Get());
       gpu.wait();
