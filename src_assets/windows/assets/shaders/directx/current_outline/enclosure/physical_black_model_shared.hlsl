@@ -10,7 +10,7 @@ uint3 PhysicalRGB8(float3 c) {
 }
 bool PhysicalModelWordsValid(uint4 a,uint4 b,uint4 c,uint4 d) {
     uint known=a.z,status=a.w,n=b.x,prototype=b.y,votes=b.z,xs=b.w,px=c.x;
-    if(a.x!=PHYSICAL_MODEL_TAG||(a.y!=1u&&a.y!=2u&&a.y!=3u)||known>1u||n>512u||votes>n||xs>64u||px>xs||xs>n||
+    if(a.x!=PHYSICAL_MODEL_TAG||(a.y!=1u&&a.y!=2u&&a.y!=3u&&a.y!=4u)||known>1u||n>512u||votes>n||xs>64u||px>xs||xs>n||
        (prototype&0xff000000u)!=0u||d.y!=512u||d.z!=0u||d.w!=0u)return false;
     if(known==0u) {
         if(a.y!=1u)return false;
@@ -27,10 +27,16 @@ bool PhysicalModelWordsValid(uint4 a,uint4 b,uint4 c,uint4 d) {
     }
     uint count=c.y,cut=c.z,low=c.w,high=d.x;
     uint3 p=PhysicalUnpack(prototype),lo=PhysicalUnpack(low),hi=PhysicalUnpack(high);
-    if(a.y==3u) {
+    if(a.y==3u||a.y==4u) {
+        // K4 is published only by completed CBC qualification: every original
+        // BODY peer is enclosed and no candidate/literal-black touches its true
+        // cover/native boundary. Its authority is opaque black in a current
+        // own Raw4CC, never foreground/style, AA, closure, Inside or a cache.
+        // It is never an upstream palette record.
         uint literalPeak=max(p.r,max(p.g,p.b));
         if(status!=1u||n<2u||xs<2u||px!=xs||votes!=n||count!=n||
-           low!=prototype||high!=prototype||literalPeak>1u||cut!=literalPeak)return false;
+           low!=prototype||high!=prototype||cut!=literalPeak||
+           (a.y==3u?literalPeak>1u:literalPeak<=1u))return false;
     } else if(a.y==1u) {
     if(status!=1u||n==0u||xs==0u||px<2u||2u*votes<=n||2u*px<=xs||count==0u||count>=n||
        count<votes||cut>=255u||(low&0xff000000u)!=0u||(high&0xff000000u)!=0u||

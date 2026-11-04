@@ -27,8 +27,10 @@ namespace models::joined_completion_gate_benchmark {
     std::uint32_t callback_entry_timeout_ms = 30000;
     std::uint32_t callback_safety_timeout_ms = 500;
     bool valid() const noexcept {
+      // The explicit packed-continuity regression crosses its 250 ms presentation cap with a
+      // 350 ms gate. This private allowance stays below the independent 500 ms callback fuse.
       return !enabled || ((placement == placement_e::after_interop_unmaps || placement == placement_e::before_interop_unmaps) && target_frame_id != 0 && hold_after_callback_enter_ms > 0 &&
-        hold_after_callback_enter_ms <= 250 && callback_entry_timeout_ms > 0 &&
+        hold_after_callback_enter_ms <= 400 && callback_entry_timeout_ms > 0 &&
         callback_entry_timeout_ms <= 30000 && callback_safety_timeout_ms > hold_after_callback_enter_ms &&
         callback_safety_timeout_ms <= 500);
     }

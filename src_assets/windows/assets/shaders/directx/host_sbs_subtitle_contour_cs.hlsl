@@ -1219,3 +1219,25 @@ void history_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV
             HistoryIdentityWrite[word] = words == HISTORY_WORDS && word_stride == 4u ? HistoryWord(word, valid) : 0u;
     }
 }
+
+// A CPU-completed force observation has already written every staged native feature. Publish
+// the same SCT5 identity without copying that band, then let the owner exchange the two textures.
+// Receipt-gated roots retain history_main: their zero-group reuse must preserve both owners.
+[numthreads(16, 16, 1)]
+void history_identity_main(uint3 group_id : SV_GroupID, uint group_index : SV_GroupIndex) {
+    // Keep the authenticated field-grid indirect ABI. Only its first group needs to validate
+    // the current publication and write the small identity; all lanes agree before the barrier.
+    if (any(group_id != uint3(0u, 0u, 0u))) return;
+    PrepareCurrentGate(group_index);
+    uint width, height, native_width, native_height, words, word_stride, next_w, next_h;
+    HistoryFeaturesWrite.GetDimensions(width, height);
+    NextFeaturesRead.GetDimensions(next_w, next_h);
+    CurrentSupportRead.GetDimensions(native_width, native_height);
+    HistoryIdentityWrite.GetDimensions(words, word_stride);
+    bool valid = SnapshotGate != 0u && width == contour_source.x && height == contour_source.w &&
+        native_width == width && native_height == height && next_w == width && next_h == height &&
+        words == HISTORY_WORDS && word_stride == 4u;
+    [loop]
+    for (uint word = group_index; word < words; word += 16u * 16u)
+        HistoryIdentityWrite[word] = words == HISTORY_WORDS && word_stride == 4u ? HistoryWord(word, valid) : 0u;
+}

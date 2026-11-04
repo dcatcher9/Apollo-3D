@@ -1088,6 +1088,38 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "classifier history"):
             decode(abstaining)
 
+    def test_classifier_reference_uses_the_authorized_picture_domain(self):
+        local_reference = {
+            "center_twice_source": 1920, "width_source": 1920,
+            "search_top_source": 810,
+        }
+        screen_reference = {
+            "center_twice_source": 3640, "width_source": 3840,
+            "search_top_source": 1520,
+        }
+        for authority in ("chromium-video", "foreground-client"):
+            with self.subTest(authority=authority):
+                region = {
+                    "source_width": 3840, "source_height": 2160,
+                    "inference_rect": (100, 100, 2020, 1180),
+                    "authorization": {"authority_kind": authority},
+                }
+                dump_contract._validate_subtitle_classifier_reference(
+                    local_reference, 1920, 1080, region)
+                with self.assertRaisesRegex(ValueError, "picture/capture domain"):
+                    dump_contract._validate_subtitle_classifier_reference(
+                        screen_reference, 1920, 1080, region)
+        full_region = {
+            "source_width": 3840, "source_height": 2160,
+            "inference_rect": (0, 0, 3840, 2160), "authorization": None,
+        }
+        dump_contract._validate_subtitle_classifier_reference(
+            {"center_twice_source": 3840, "width_source": 3840,
+             "search_top_source": 1620}, 3840, 2160, full_region)
+        with self.assertRaisesRegex(ValueError, "picture/capture domain"):
+            dump_contract._validate_subtitle_classifier_reference(
+                local_reference, 3840, 2160, full_region)
+
     def test_current_ocr8_record_validates_exact_identity_boxes_and_empty_authority(self):
         decoded = dump_contract.validate_subtitle_ocr_record(
             self._pack_uint32_words(self._valid_ocr_record_words()),

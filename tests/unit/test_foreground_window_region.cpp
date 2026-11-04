@@ -693,10 +693,14 @@ namespace {
     const auto moving = tracker.update(foreground::detail::classify(raw, start + 10ms));
     EXPECT_EQ(moving.status, foreground::status_e::interactive_move_size);
     EXPECT_EQ(moving.generation, 0u);
-    EXPECT_EQ(moving.window, 0u);
-    EXPECT_EQ(moving.process_id, 0u);
+    EXPECT_EQ(moving.window, raw.window);
+    EXPECT_EQ(moving.process_id, raw.process_id);
     EXPECT_EQ(moving.monitor, 0u);
     EXPECT_FALSE(moving.client_screen_rect.valid());
+    EXPECT_FALSE(moving.content_screen_rect.valid());
+    EXPECT_FALSE(moving.frame_screen_rect.valid());
+    EXPECT_EQ(moving.geometry_valid_since, std::chrono::steady_clock::time_point {});
+    EXPECT_FALSE(foreground::usable_for_content(moving, start + 10ms, start + 10ms));
     EXPECT_FALSE(foreground::carries_geometry(moving.status));
 
     raw.gui_in_move_size = false;

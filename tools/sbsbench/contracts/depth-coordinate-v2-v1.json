@@ -1,5 +1,5 @@
 {
-  "schema": 125,
+  "schema": 127,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -7,7 +7,7 @@
     "binding": "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3"
   },
   "subtitle_ocr": {
-    "schema": 37,
+    "schema": 38,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44",
@@ -176,7 +176,7 @@
       "line_search_bottom_height_denominator": 4,
       "line_search_region": "lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1",
       "line_group_policy": "local-column-island-row-components-true-piece-bounds-fixed-span-ordinary-aggregation-then-centered-native-line-union-before-classified-capacity-v3",
-      "line_center_reference": "video-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v1",
+      "line_center_reference": "chromium-video-or-foreground-client-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v2",
       "line_center_reference_params": "ocr-resolve-prefix20-then-source-clock-low-high-domain-reset-reserved-96bytes-v2",
       "ribbon_join_gap_cells": 12,
       "ribbon_structural_gap_min_cells": 3,
@@ -522,6 +522,11 @@
         "source_target": "cs_5_0"
       },
       {
+        "source_file": "host_sbs_subtitle_contour_cs.hlsl",
+        "source_entrypoint": "history_identity_main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "host_sbs_subtitle_contour_distance_cs.hlsl",
         "source_entrypoint": "horizontal_main",
         "source_target": "cs_5_0"
@@ -547,7 +552,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "7ab5a59ec1a60b8d7764897df95ab28dde5f612b38dabdedc8f8be66541e476c"
+    "source_closure_sha256": "10bde01f74c90532a705986fdc175bf95d291889f52e49175bf60578c320e2d3"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

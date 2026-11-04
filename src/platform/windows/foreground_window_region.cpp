@@ -842,6 +842,8 @@ namespace platf::foreground_window {
       geometry_valid_since_ = {};
       return {
         .status = observation.status,
+        .window = observation.status == status_e::interactive_move_size ? observation.window : 0u,
+        .process_id = observation.status == status_e::interactive_move_size ? observation.process_id : 0u,
         .observed_at = observation.observed_at,
       };
     }

@@ -246,7 +246,8 @@ namespace {
         cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "dense_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "project_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "history_main", "cs_5_0"},
-        cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "snapshot_main", "cs_5_0"}
+        cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "snapshot_main", "cs_5_0"},
+        cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "history_identity_main", "cs_5_0"}
       };
       const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, specs);
       for (std::size_t pass = 0u; pass < specs.size(); ++pass) {
@@ -561,7 +562,8 @@ namespace {
 
     bool run(bool zero_groups = false,
              ID3D11ShaderResourceView *baseline_support = nullptr,
-             ID3D11ShaderResourceView *eligibility = nullptr) {
+             ID3D11ShaderResourceView *eligibility = nullptr,
+             bool receipt_gated = false) {
       unbind();
       if (!upload()) {
         return false;
@@ -603,18 +605,24 @@ namespace {
       context_->CSSetUnorderedAccessViews(1u, 1u, field_.uav.GetAddressOf(), nullptr);
       context_->DispatchIndirect(indirect_.Get(), 0u);
       context_->CSSetUnorderedAccessViews(1u, 1u, &null_uav, nullptr);
-      // Consume previous RGB/context before current history becomes UAV output.
+      // Match the production owner boundary. Zero groups model a receipt-gated reuse, which
+      // cannot exchange owners; an opaque infer uses the same copy path even with nonzero work.
+      const bool swap_feature_history = !force_copy_history_ && !receipt_gated && !zero_groups;
+      const auto completed_features = zero_groups ? features_.texture : next_features_.texture;
       const std::array<ID3D11ShaderResourceView *, 2u> null_previous {};
       context_->CSSetShaderResources(6u, null_previous.size(), null_previous.data());
       context_->CSSetShaderResources(11u, 1u, next_features_.srv.GetAddressOf());
       const std::array<ID3D11UnorderedAccessView *, 2u> history_outputs {features_.uav.Get(), identity_.uav.Get()};
-      context_->CSSetShader(shaders_[3u].Get(), nullptr, 0u);
+      context_->CSSetShader(shaders_[swap_feature_history ? 5u : 3u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(2u, history_outputs.size(), history_outputs.data(), nullptr);
       context_->DispatchIndirect(indirect_.Get(), 0u);
       const std::array<ID3D11UnorderedAccessView *, 2u> null_outputs {};
       context_->CSSetUnorderedAccessViews(2u, null_outputs.size(), null_outputs.data(), nullptr);
       ID3D11ShaderResourceView *null_next = nullptr;
       context_->CSSetShaderResources(11u, 1u, &null_next);
+      if (swap_feature_history) {
+        std::swap(features_, next_features_);
+      }
       const std::array<ID3D11UnorderedAccessView *, 2u> evidence_outputs {completed_display_.uav.Get(), completed_probability_.uav.Get()};
       context_->CSSetShader(shaders_[4u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(4u, evidence_outputs.size(), evidence_outputs.data(), nullptr);
@@ -624,7 +632,7 @@ namespace {
              read_texture(device_.Get(), context_.Get(), matte_.texture.Get(), result_.matte) &&
              read_texture(device_.Get(), context_.Get(), field_.texture.Get(), result_.field) &&
              read_texture(device_.Get(), context_.Get(), features_.texture.Get(), result_.features) &&
-             read_texture(device_.Get(), context_.Get(), next_features_.texture.Get(), result_.next_features) &&
+             read_texture(device_.Get(), context_.Get(), completed_features.Get(), result_.next_features) &&
              read_texture(device_.Get(), context_.Get(), completed_display_.texture.Get(), result_.source) &&
              read_buffer(device_.Get(), context_.Get(), identity_.buffer.Get(), result_.identity) &&
              read_buffer(device_.Get(), context_.Get(), completed_probability_.buffer.Get(), result_.probability_bits);
@@ -964,7 +972,7 @@ namespace {
     void expect_count(std::size_t point, std::uint32_t count) {
       EXPECT_EQ(result_.features[point][3u], feature_code(count));
       EXPECT_EQ(result_.next_features, result_.features)
-        << "persistent history is an exact copy of staged next features, never an aliased neighbor update";
+        << "published history is the exact staged result, never an aliased neighbor update";
     }
 
     void expect_flat_patch(uint4_t rect, std::uint32_t count, pixel_t anchor) {
@@ -1077,7 +1085,8 @@ namespace {
 
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
-    std::array<ComPtr<ID3D11ComputeShader>, 5u> shaders_;
+    std::array<ComPtr<ID3D11ComputeShader>, 6u> shaders_;
+    bool force_copy_history_ = false;
     ComPtr<ID3D11ComputeShader> probability_probe_;
     ComPtr<ID3D11Buffer> contour_cb_, geometry_cb_, indirect_;
     texture_t display_, support_, matte_, field_, features_, next_features_, completed_display_;
@@ -3658,6 +3667,117 @@ namespace {
     ASSERT_TRUE(run(true));
     expect_tuple_equal(held);
     EXPECT_EQ(result_.next_features, held.next_features);
+  }
+
+  TEST_F(HostSbsSubtitleContourGpuTest, IdentityPublicationPingPongMatchesFullCopyAcrossObservationBoundaries) {
+    // Both sides execute the production temporal/dense/project/history/snapshot shaders. The
+    // reference retains the original full-band history copy; no CPU feature/count oracle is used.
+    for (const auto extent : {uint4_t {160u, 90u, 0u, 0u}, uint4_t {1057u, 595u, 0u, 0u}}) {
+      SCOPED_TRACE(extent[0u]);
+      std::vector<snapshot_t> copied;
+      for (std::uint32_t mode = 0u; mode < 2u; ++mode) {
+        SCOPED_TRACE(mode);
+        force_copy_history_ = mode == 0u;
+        ASSERT_TRUE(resize(extent[0u], extent[1u]));
+        for (std::uint32_t step = 0u; step < 20u; ++step) {
+          SCOPED_TRACE(step);
+          if (step == 18u) content_ = {7u, 9u, field_w_ - 11u, field_h_ - 13u};
+          std::uint64_t frame = step + 1u;
+          std::uint64_t clock = 1000001u + step * 100000u;
+          if (step == 4u) {
+            frame = 4u;
+            clock = 1300001u;  // Exact duplicate retains its fixed anchor/count.
+          } else if (step == 5u) {
+            clock = 1300001u;  // A newer frame without a newer clock cannot advance.
+          } else if (step == 6u) {
+            clock = 1100001u;  // Regressed clocks restart the diagnostic correspondence.
+          }
+          make_authority(frame, clock, step == 12u, step >= 11u ? 8u : 7u, step >= 10u ? 4u : 3u);
+          clear_scene();
+          paint_glyph_point(60u, step == 4u ? .71875f : .75f);
+          if (step == 8u) without_current_authority(true);
+          if (step == 13u) geometry_words_[v2::camera_center_integrity_bits] ^= 1u;
+          if (step == 15u) pixels_[point_index()][3u] = 0.f;
+          if (step == 16u) without_current_authority();
+          if (step == 17u) {
+            // The quiescent semantic-context boundary clears both owners, regardless of
+            // their current orientation. It does not depend on the next observation's mode.
+            unbind();
+            const UINT zero[4] {};
+            const float zeros[4] {};
+            context_->ClearUnorderedAccessViewUint(identity_.uav.Get(), zero);
+            context_->ClearUnorderedAccessViewFloat(features_.uav.Get(), zeros);
+            context_->ClearUnorderedAccessViewFloat(next_features_.uav.Get(), zeros);
+          }
+          const auto previous_owner = features_.texture;
+          const auto staged_owner = next_features_.texture;
+          ASSERT_TRUE(run());
+          EXPECT_EQ(features_.texture.Get(), mode == 0u ? previous_owner.Get() : staged_owner.Get());
+          EXPECT_EQ(next_features_.texture.Get(), mode == 0u ? staged_owner.Get() : previous_owner.Get());
+          if (step < 4u) expect_count(point_index(), step + 1u);
+          if (mode == 0u) {
+            copied.push_back(result_);
+          } else {
+            ASSERT_EQ(copied.size(), 20u);
+            expect_tuple_equal(copied[step]);
+            EXPECT_EQ(result_.matte, copied[step].matte);
+            EXPECT_EQ(result_.next_features, copied[step].next_features);
+          }
+        }
+      }
+    }
+  }
+
+  TEST_F(HostSbsSubtitleContourGpuTest, OpaqueInferAndPoisonedZeroGroupReuseKeepFeatureOwnersUntilForceObservation) {
+    paint_glyph_point();
+    const auto first_owner = features_.texture;
+    const auto first_staging = next_features_.texture;
+    ASSERT_TRUE(observe(1u));
+    expect_count(point_index(), 1u);
+    ASSERT_EQ(features_.texture.Get(), first_staging.Get());
+    ASSERT_EQ(next_features_.texture.Get(), first_owner.Get());
+
+    make_authority(2u, 1100001u);
+    const auto opaque_owner = features_.texture;
+    const auto opaque_staging = next_features_.texture;
+    ASSERT_TRUE(run(false, nullptr, nullptr, true));
+    expect_count(point_index(), 2u);
+    EXPECT_EQ(features_.texture.Get(), opaque_owner.Get());
+    EXPECT_EQ(next_features_.texture.Get(), opaque_staging.Get());
+    const auto held = result_;
+
+    // Poison only the inactive owner. A zero-group transaction must neither consume it nor
+    // change which allocation the completed history view identifies.
+    const float poison[4] {.9375f, .8125f, .6875f, feature_code(4u)};
+    unbind();
+    context_->ClearUnorderedAccessViewFloat(next_features_.uav.Get(), poison);
+    std::vector<pixel_t> inactive_before, inactive_after;
+    ASSERT_TRUE(read_texture(device_.Get(), context_.Get(), next_features_.texture.Get(), inactive_before));
+    make_authority(99u, 9900001u, true, 123u, 55u);
+    clear_scene(.95f);
+    geometry_words_[v2::camera_center_integrity_bits] ^= 1u;
+    ASSERT_TRUE(run(true, nullptr, nullptr, true));
+    expect_tuple_equal(held);
+    EXPECT_EQ(result_.matte, held.matte);
+    EXPECT_EQ(features_.texture.Get(), opaque_owner.Get());
+    EXPECT_EQ(next_features_.texture.Get(), opaque_staging.Get());
+    ASSERT_TRUE(read_texture(device_.Get(), context_.Get(), next_features_.texture.Get(), inactive_after));
+    EXPECT_EQ(inactive_after, inactive_before);
+
+    // Resume with a genuine force observation. It must overwrite every poisoned staging
+    // pixel before swapping, then an opaque infer must continue from that new fixed anchor.
+    make_authority(3u, 1200001u);
+    clear_scene();
+    paint_glyph_point();
+    ASSERT_TRUE(run());
+    expect_count(point_index(), 3u);
+    EXPECT_EQ(features_.texture.Get(), opaque_staging.Get());
+    EXPECT_EQ(next_features_.texture.Get(), opaque_owner.Get());
+    make_authority(4u, 1300001u);
+    ASSERT_TRUE(run(false, nullptr, nullptr, true));
+    expect_count(point_index(), 4u);
+    EXPECT_EQ(features_.texture.Get(), opaque_staging.Get());
+    EXPECT_EQ(next_features_.texture.Get(), opaque_owner.Get());
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, LargeNativeFlatPatchKeepsHistoryWhileOnlyCurrentEdgesSeedSupport) {

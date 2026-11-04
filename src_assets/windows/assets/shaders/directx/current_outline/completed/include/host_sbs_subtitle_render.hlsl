@@ -140,8 +140,7 @@ bool GlyphBilinearFootprint(float2 candidate_uv, uint2 source_size, bool use_sel
     return false;
 }
 
-float2 SelectSourceUV(float2 destination_uv, float eye_sign) {
-    float2 base_uv = ReprojectIfAuthorized(destination_uv, eye_sign);
+float2 SelectSourceUVFromBase(float2 destination_uv, float eye_sign, float2 base_uv) {
     if (subtitle_render_control.x != 1u) return base_uv;
     // This early band rejection may only withdraw selection. Full identity validation still
     // follows for every potentially contributing row; malformed/unbound inputs remain Base.
@@ -160,6 +159,10 @@ float2 SelectSourceUV(float2 destination_uv, float eye_sign) {
     float2 ui_uv = float2(destination_uv.x + eye_sign * plane, destination_uv.y);
     return GlyphBilinearFootprint(base_uv,source_size,use_selected) ||
            GlyphBilinearFootprint(ui_uv,source_size,use_selected) ? ui_uv : base_uv;
+}
+
+float2 SelectSourceUV(float2 destination_uv, float eye_sign) {
+    return SelectSourceUVFromBase(destination_uv,eye_sign,ReprojectIfAuthorized(destination_uv,eye_sign));
 }
 
 
@@ -195,8 +198,8 @@ cbuffer CurrentBackgroundDrawLease : register(b4) { uint4 BackgroundExpected[4];
 float4 BackgroundOriginalSample(float2 uv) {
     uv.x=saturate(uv.x);return SourceColor.Sample(LinearSampler,uv);
 }
-float4 BackgroundOldSelectedSample(float2 uv,float eye_sign) {
-    return BackgroundOriginalSample(SelectSourceUV(uv,eye_sign));
+float4 BackgroundOldSelectedSample(float2 uv,float eye_sign,float2 base_uv) {
+    return BackgroundOriginalSample(SelectSourceUVFromBase(uv,eye_sign,base_uv));
 }
 bool CurrentBackgroundAuthorized(out uint2 source_size) {
     source_size=0u;
@@ -252,9 +255,9 @@ float4 SelectPushPullColour(float2 source_uv,float eye_sign,out float4 stats) {
     float crop_top=(float)subtitle_render_source.y+(float)ContourIdentity[10u];
     if(native_y<=crop_top-1.0f||native_y>=crop_top+(float)crop_height){stats.z=0.0f;return BackgroundOriginalSample(base_uv);}
     uint2 source_size;
-    if(!CurrentBackgroundAuthorized(source_size))return BackgroundOldSelectedSample(source_uv,eye_sign);
+    if(!CurrentBackgroundAuthorized(source_size))return BackgroundOldSelectedSample(source_uv,eye_sign,base_uv);
     uint2 checked_size;float plane;
-    if(!SubtitleRenderAuthorized(checked_size,plane,true))return BackgroundOldSelectedSample(source_uv,eye_sign);
+    if(!SubtitleRenderAuthorized(checked_size,plane,true))return BackgroundOldSelectedSample(source_uv,eye_sign,base_uv);
     float2 ui_uv=float2(source_uv.x+eye_sign*plane,source_uv.y);stats.y=saturate(ui_uv.x);
     // Only marked native taps belong to the UI layer. Unmarked taps must not carry
     // the shifted UI background into a fractional glyph footprint.
@@ -286,13 +289,13 @@ float4 SelectPushPullColour(float2 source_uv,float eye_sign,out float4 stats) {
         if(wx<=0.0f||wy<=0.0f)continue;
         int2 pixel=clamp(low+int2(x,y),int2(0,0),last);
         float3 replacement=0.0f;bool erased=false;
-        if(!LoadCurrentBackground(pixel,replacement,erased))return BackgroundOldSelectedSample(source_uv,eye_sign);
+        if(!LoadCurrentBackground(pixel,replacement,erased))return BackgroundOldSelectedSample(source_uv,eye_sign,base_uv);
         float3 rgb=SourceColor.Load(int3(pixel,0)).rgb;
         // Explicit branch: the out-RGB helper is never allowed to overwrite a clear texel.
         if(erased){rgb=replacement;any_erased=true;}
         // An ordinary nonfinite tap must not contaminate a mixed repaired footprint. A finite
         // A1 replacement remains usable even when that erased texel's original raw was nonfinite.
-        if(any(!isfinite(rgb)))return BackgroundOldSelectedSample(source_uv,eye_sign);
+        if(any(!isfinite(rgb)))return BackgroundOldSelectedSample(source_uv,eye_sign,base_uv);
         reconstructed+=(wx*wy)*rgb;
     }
     if(!any_erased) {
@@ -300,13 +303,13 @@ float4 SelectPushPullColour(float2 source_uv,float eye_sign,out float4 stats) {
         // A fractional UI layer still needs the exact clear Base sample underneath.
         reconstructed=BackgroundOriginalSample(base_uv).rgb;
     }
-    if(any(!isfinite(reconstructed)))return BackgroundOldSelectedSample(source_uv,eye_sign);
+    if(any(!isfinite(reconstructed)))return BackgroundOldSelectedSample(source_uv,eye_sign,base_uv);
     if(ui_any) {
         // A=coverage and P=marked native RGB already premultiplied by its bilinear
         // weight. Using A*Sample(original,UI) would wrongly include unmarked UI RGB
         // and apply A a second time to the marked tap weights.
         float3 composite=ui_premultiplied+(1.0f-saturate(ui_coverage))*reconstructed;
-        if(any(!isfinite(composite)))return BackgroundOldSelectedSample(source_uv,eye_sign);
+        if(any(!isfinite(composite)))return BackgroundOldSelectedSample(source_uv,eye_sign,base_uv);
         // The old any-positive UI branch owned alpha even at fractional coverage.
         // RGB-only compositing preserves that alpha contract; unmarked UI RGB is
         // never part of the composite.

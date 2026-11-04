@@ -1,5 +1,6 @@
 #pragma once
 #ifdef _WIN32
+  #include "host_sbs_selected_matte_receipt.h"
   #include <array>
   #include <cstdint>
   #include <d3d11.h>
@@ -12,7 +13,9 @@
 // these CS slots. AddRef retains storage, not immutable contents; normal publication leases apply.
 namespace models::research_selected_matte_v1 {
   using Microsoft::WRL::ComPtr;
-  inline constexpr std::uint32_t tag = 0x31534d53u, schema = 1u, algorithm = 1u;
+  namespace receipt_abi = selected_matte_receipt_v1;
+  inline constexpr std::uint32_t tag = receipt_abi::tag, schema = receipt_abi::schema,
+                                 algorithm = receipt_abi::legacy_algorithm;
   enum class postprocess_mode_e : std::uint32_t {
     authorized = 1u,
     direct_force = 2u,
@@ -150,11 +153,11 @@ namespace models::research_selected_matte_v1 {
         return false;
       }
       D3D11_BUFFER_DESC bd {};
-      bd.ByteWidth = 256;
+      bd.ByteWidth = receipt_abi::byte_count;
       bd.Usage = D3D11_USAGE_DEFAULT;
       bd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
       bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-      bd.StructureByteStride = 4;
+      bd.StructureByteStride = receipt_abi::word_bytes;
       if (FAILED(d->CreateBuffer(&bd, nullptr, &n.receipt_)) || FAILED(d->CreateShaderResourceView(n.receipt_.Get(), nullptr, &n.receipt_srv_)) || FAILED(d->CreateUnorderedAccessView(n.receipt_.Get(), nullptr, &n.receipt_uav_))) {
         error = "Selected matte receipt allocation";
         return false;
@@ -210,7 +213,7 @@ namespace models::research_selected_matte_v1 {
       }
       D3D11_BUFFER_DESC bd {};
       i.current_cb96->GetDesc(&bd);
-      if (bd.ByteWidth != 96u || (bd.BindFlags & D3D11_BIND_CONSTANT_BUFFER) == 0u) {
+      if (bd.ByteWidth != receipt_abi::contour_byte_count || (bd.BindFlags & D3D11_BIND_CONSTANT_BUFFER) == 0u) {
         error = "Selected matte CB96";
         return false;
       }

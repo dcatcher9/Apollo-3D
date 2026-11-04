@@ -56,6 +56,8 @@ EXPECTED_GROUP_NAMES = (
     "subtitle_inner_components_research",
     "subtitle_matte_guard_research",
     "parallax_v2_queued_renderer",
+    "current_mask_holes",
+    "current_stroke_coverage",
 )
 ANY_INCLUDE = re.compile(rb"^\s*#\s*include\b")
 QUOTED_INCLUDE = re.compile(rb'^\s*#\s*include\s*"([^"]+)"')
@@ -542,15 +544,25 @@ def render_dvc_manifest(manifest: dict[str, Any], current: str) -> str:
     return json.dumps(contract, indent=2, ensure_ascii=True) + "\n"
 
 
+def _write_utf8_if_changed(path: Path, rendered: str) -> None:
+    expected = rendered.encode("utf-8")
+    try:
+        if path.read_bytes() == expected:
+            return
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(expected)
+
+
 def _write_or_check(path: Path, rendered: str, check: bool) -> bool:
-    current = path.read_text(encoding="utf-8") if path.exists() else None
-    if current == rendered:
-        return True
     if check:
+        current = path.read_text(encoding="utf-8") if path.exists() else None
+        if current == rendered:
+            return True
         print(f"stale generated Host SBS shader manifest view: {path}", file=sys.stderr)
         return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(rendered, encoding="utf-8", newline="\n")
+    _write_utf8_if_changed(path, rendered)
     return True
 
 
@@ -558,11 +570,7 @@ def _update_pins(manifest: dict[str, Any]) -> None:
     computed = computed_group_pins(manifest)
     for group in manifest["groups"]:
         group["source_closure_sha256"] = computed[group["name"]]
-    MANIFEST.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=True) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    _write_utf8_if_changed(MANIFEST, json.dumps(manifest, indent=2, ensure_ascii=True) + "\n")
 
 
 def generate(check: bool, update_pins: bool) -> bool:

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <src/host_sbs_adaptive_submission.h>
 #include <src/host_subtitle_context.h>
 
 #include <array>
@@ -12,15 +13,16 @@ namespace {
       .kind = context::kind_e::browser_video,
       .window = 100u,
       .process_id = 200u,
-      .foreground_generation = 3u,
-      .browser_epoch = 4u,
+      .document_id = 3,
+      .video_id = 4,
     };
   }
 
   constexpr context::key_t video_player() {
     auto key = browser_video();
     key.kind = context::kind_e::registered_video_player;
-    key.browser_epoch = 0u;
+    key.document_id = 0;
+    key.video_id = 0;
     return key;
   }
 
@@ -61,7 +63,7 @@ namespace {
     EXPECT_FALSE(tracker.eligible());
     const auto disabled_generation = tracker.generation();
     disabled.window++;
-    disabled.browser_epoch++;
+    disabled.video_id++;
     EXPECT_FALSE(tracker.update(disabled));
     EXPECT_EQ(tracker.generation(), disabled_generation);
   }
@@ -72,11 +74,11 @@ namespace {
     ++window_changed.window;
     auto process_changed = original;
     ++process_changed.process_id;
-    auto foreground_changed = original;
-    ++foreground_changed.foreground_generation;
-    auto browser_changed = original;
-    ++browser_changed.browser_epoch;
-    for (const auto changed : std::array {window_changed, process_changed, foreground_changed, browser_changed}) {
+    auto document_changed = original;
+    ++document_changed.document_id;
+    auto video_changed = original;
+    ++video_changed.video_id;
+    for (const auto changed : std::array {window_changed, process_changed, document_changed, video_changed}) {
       context::tracker_t tracker;
       ASSERT_TRUE(tracker.update(original));
       const auto submitted_generation = tracker.generation();
@@ -123,11 +125,9 @@ namespace {
       missing_window.window = 0u;
       auto missing_process = valid;
       missing_process.process_id = 0u;
-      auto missing_foreground = valid;
-      missing_foreground.foreground_generation = 0u;
       auto unknown_kind = valid;
       unknown_kind.kind = static_cast<context::kind_e>(255u);
-      for (const auto malformed : std::array {missing_window, missing_process, missing_foreground, unknown_kind}) {
+      for (const auto malformed : std::array {missing_window, missing_process, unknown_kind}) {
         context::tracker_t tracker;
         ASSERT_TRUE(tracker.update(valid));
         EXPECT_TRUE(tracker.update(malformed));
@@ -136,22 +136,66 @@ namespace {
         EXPECT_FALSE(tracker.update({}));
       }
     }
-    auto missing_browser_epoch = browser_video();
-    missing_browser_epoch.browser_epoch = 0u;
-    context::tracker_t tracker;
-    EXPECT_FALSE(tracker.update(missing_browser_epoch));
-    EXPECT_FALSE(tracker.eligible());
+    auto missing_document = browser_video();
+    missing_document.document_id = 0;
+    auto missing_video = browser_video();
+    missing_video.video_id = 0;
+    for (const auto malformed : std::array {missing_document, missing_video}) {
+      context::tracker_t tracker;
+      EXPECT_FALSE(tracker.update(malformed));
+      EXPECT_FALSE(tracker.eligible());
+    }
   }
 
-  TEST(HostSubtitleContextTest, NativePlayerIgnoresBrowserEpoch) {
+  TEST(HostSubtitleContextTest, NativePlayerIgnoresBrowserIdentity) {
     context::tracker_t tracker;
     ASSERT_TRUE(tracker.update(video_player()));
     const auto player_generation = tracker.generation();
     auto unrelated_browser_change = video_player();
-    unrelated_browser_change.browser_epoch = 99u;
+    unrelated_browser_change.document_id = -99;
+    unrelated_browser_change.video_id = -100;
     EXPECT_FALSE(tracker.update(unrelated_browser_change));
     EXPECT_EQ(tracker.generation(), player_generation);
     EXPECT_TRUE(tracker.eligible());
+  }
+
+  TEST(HostSubtitleContextTest, SignedBrowserIdentityIsPreserved) {
+    auto video = browser_video();
+    video.document_id = -35710;
+    video.video_id = -35868;
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(video));
+    EXPECT_TRUE(tracker.eligible());
+    const auto generation = tracker.generation();
+    EXPECT_FALSE(tracker.update(video));
+    EXPECT_TRUE(tracker.matches(generation));
+    video.video_id--;
+    EXPECT_TRUE(tracker.update(video));
+    EXPECT_FALSE(tracker.matches(generation));
+  }
+
+  TEST(HostSubtitleContextTest, PackedSubtitlePresentationCannotCrossGeometryOrModalTransitions) {
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(browser_video()));
+    const auto semantic_generation = tracker.generation();
+    const context::presentation_authority_t packed {5u, 6u, 7u, false};
+    EXPECT_TRUE(packed.permits_packed_repeat(packed, true));
+    for (const auto current : std::array {
+           context::presentation_authority_t {8u, 6u, 7u, false},
+           context::presentation_authority_t {5u, 8u, 7u, false},
+           context::presentation_authority_t {5u, 6u, 8u, false},
+           context::presentation_authority_t {0u, 0u, 8u, true},
+         }) {
+      // Semantic video memory survives, but old positioned packed pixels lose repeat authority
+      // even if the captured RGB/source timestamp is unchanged or inference remains pending.
+      EXPECT_FALSE(tracker.update(browser_video()));
+      EXPECT_TRUE(tracker.matches(semantic_generation));
+      EXPECT_FALSE(packed.permits_packed_repeat(current, true));
+      EXPECT_TRUE(packed.permits_packed_repeat(current, false));
+    }
+    const context::presentation_authority_t modal {0u, 0u, 8u, true};
+    EXPECT_TRUE(modal.permits_packed_repeat(modal, true));
+    EXPECT_FALSE(modal.permits_packed_repeat(packed, true));
   }
 }  // namespace
 
@@ -185,11 +229,25 @@ namespace {
       .received_at = now - 100ms, .geometry_valid_since = now - 1s,
     };
 
-    policy::evaluation_t evaluate(const std::uint64_t epoch = 4u) {
+    policy::evaluation_t evaluate(
+      const std::uint64_t epoch = 4u,
+      const context::key_t previous_context = {}
+    ) {
       const auto client_mapping = foreground::map_to_capture(root, target);
       return policy::evaluate(&root, static_cast<bool>(client_mapping), client_mapping, &browser, epoch,
         {target.screen_rect.left, target.screen_rect.top, target.screen_rect.right, target.screen_rect.bottom},
-        target.width, target.height, content, now);
+        target.width, target.height, content, now, previous_context);
+    }
+
+    void begin_modal_move() {
+      root.status = foreground::status_e::interactive_move_size;
+      root.generation = 0u;
+      root.monitor = 0u;
+      root.monitor_screen_rect = {};
+      root.client_screen_rect = {};
+      root.content_screen_rect = {};
+      root.frame_screen_rect = {};
+      root.geometry_valid_since = {};
     }
 
     void expect_disabled() {
@@ -219,7 +277,7 @@ namespace {
     ASSERT_TRUE(tracker.update(result.browser_key));
     EXPECT_TRUE(tracker.eligible());
     EXPECT_EQ(tracker.kind(), context::kind_e::browser_video);
-    EXPECT_EQ(result.browser_key, (context::key_t {context::kind_e::browser_video, 0x100u, 42u, 5u, 4u}));
+    EXPECT_EQ(result.browser_key, (context::key_t {context::kind_e::browser_video, 0x100u, 42u, 7, 8}));
   }
 
   TEST_F(BrowserSubtitleContextPolicyTest, ContainedClientKeepsSameBrowserKeyAndNativeFallback) {
@@ -239,6 +297,47 @@ namespace {
       {0, 0, 1920, 1080}, 1920, 1080, content, now);
     EXPECT_TRUE(clipped_native.foreground_usable);
     EXPECT_FALSE(clipped_native.registered_player_candidate);
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, CausalGeometryRunsKeepSemanticVideoContext) {
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(evaluate().browser_key));
+    const auto accepted_generation = tracker.generation();
+    root.generation++;
+    root.client_screen_rect.left += 20;
+    root.client_screen_rect.right += 20;
+    root.frame_screen_rect.left += 20;
+    root.frame_screen_rect.right += 20;
+    root.geometry_valid_since = now - 10ms;
+    browser.generation++;
+    browser.screen_rect.left += 20;
+    browser.screen_rect.right += 20;
+    browser.geometry_valid_since = now - 10ms;
+    EXPECT_FALSE(tracker.update(evaluate(5u).browser_key));
+    EXPECT_TRUE(tracker.matches(accepted_generation));
+    // A resized analysis domain still has its independent depth-history reset. Its causal
+    // geometry run alone does not change which semantic video owns the subtitle context.
+    root.generation++;
+    root.client_screen_rect.right -= 100;
+    root.frame_screen_rect.right -= 100;
+    browser.generation++;
+    browser.screen_rect.right -= 100;
+    browser.screen_rect.bottom -= 50;
+    EXPECT_FALSE(tracker.update(evaluate(6u).browser_key));
+    EXPECT_TRUE(tracker.matches(accepted_generation));
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, SemanticVideoChangesRevokeContextEvenWithSameGeometryEpoch) {
+    for (const bool change_document : {false, true}) {
+      context::tracker_t tracker;
+      ASSERT_TRUE(tracker.update(evaluate().browser_key));
+      const auto accepted_generation = tracker.generation();
+      if (change_document) browser.document_id++;
+      else browser.video_id++;
+      ASSERT_TRUE(tracker.update(evaluate().browser_key));
+      EXPECT_TRUE(tracker.eligible());
+      EXPECT_FALSE(tracker.matches(accepted_generation));
+    }
   }
 
   TEST_F(BrowserSubtitleContextPolicyTest, OutsideVideoAndInvalidCaptureStayDisabled) {
@@ -288,6 +387,113 @@ namespace {
     expect_disabled();
     content.reset();
     expect_disabled();
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, ModalMoveRetainsFreshBrowserIdentityWithoutGeometryAuthority) {
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(evaluate().browser_key));
+    const auto accepted_generation = tracker.generation();
+    const auto previous = tracker.key();
+    begin_modal_move();
+    // A current heartbeat may report the video's new position before the captured pixels.
+    // Retention uses only its fresh semantic identity, never that unproven rectangle.
+    browser.screen_rect.left += 30;
+    browser.screen_rect.right += 30;
+    browser.geometry_valid_since = now;
+    const auto retained = evaluate(0u, previous);
+    EXPECT_TRUE(retained.retained_for_interactive_move_size);
+    EXPECT_FALSE(retained.foreground_usable);
+    EXPECT_FALSE(retained.foreground_target_usable);
+    EXPECT_FALSE(retained.mapping_attempted);
+    EXPECT_FALSE(retained.registered_player_candidate);
+    EXPECT_EQ(retained.browser_key, previous);
+    EXPECT_EQ(evaluate(99u, previous).browser_key, previous);
+    EXPECT_FALSE(tracker.update(retained.browser_key));
+    EXPECT_TRUE(tracker.matches(accepted_generation));
+    EXPECT_EQ(models::select_depth_optional_work_mode(true, false, retained.retained_for_interactive_move_size),
+      models::depth_optional_work_mode_e::suppress_subtitle);
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, ModalMoveCannotAdmitAnUnseenContextOrReviveLostAuthority) {
+    const auto previous = evaluate().browser_key;
+    begin_modal_move();
+    EXPECT_FALSE(evaluate(0u).retained_for_interactive_move_size);
+    EXPECT_EQ(evaluate(0u).browser_key.kind, context::kind_e::disabled);
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(previous));
+    const auto accepted_generation = tracker.generation();
+    browser.received_at = now - 2501ms;
+    ASSERT_TRUE(tracker.update(evaluate(0u, tracker.key()).browser_key));
+    EXPECT_FALSE(tracker.matches(accepted_generation));
+    browser.received_at = now;
+    EXPECT_FALSE(evaluate(0u, tracker.key()).retained_for_interactive_move_size);
+    EXPECT_EQ(evaluate(0u, tracker.key()).browser_key.kind, context::kind_e::disabled);
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, ModalMoveRejectsStaleReplacedOrUnavailableBrowserAuthority) {
+    const auto previous = evaluate().browser_key;
+    begin_modal_move();
+    const auto original_root = root;
+    const auto original_browser = browser;
+    const auto expect_lost = [&]() {
+      for (const auto geometry_epoch : {0u, 99u}) {
+        const auto rejected = evaluate(geometry_epoch, previous);
+        EXPECT_FALSE(rejected.retained_for_interactive_move_size);
+        EXPECT_EQ(rejected.browser_key.kind, context::kind_e::disabled);
+        EXPECT_FALSE(rejected.registered_player_candidate);
+      }
+    };
+    root.observed_at = now - 251ms;
+    expect_lost();
+    root.observed_at = now + 1ms;
+    expect_lost();
+    root = original_root;
+    root.window++;
+    expect_lost();
+    root = original_root;
+    root.process_id++;
+    expect_lost();
+    root = original_root;
+    browser.document_id++;
+    expect_lost();
+    browser = original_browser;
+    browser.video_id++;
+    expect_lost();
+    browser = original_browser;
+    browser.status = dom::status_e::stopped;
+    expect_lost();
+    browser = original_browser;
+    browser.received_at = now - 2501ms;
+    expect_lost();
+    browser.received_at = now + 1ms;
+    expect_lost();
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, ModalNativePlayerRequiresAnExistingMatchingRegisteredContext) {
+    root.client_screen_rect.left = 100;
+    root.frame_screen_rect.left = 90;
+    context::tracker_t tracker;
+    const context::key_t player {context::kind_e::registered_video_player, root.window, root.process_id};
+    ASSERT_TRUE(tracker.update(player));
+    const auto accepted_generation = tracker.generation();
+    begin_modal_move();
+    const auto retained = evaluate(0u, tracker.key());
+    EXPECT_TRUE(retained.registered_player_candidate);
+    EXPECT_TRUE(retained.retained_for_interactive_move_size);
+    EXPECT_FALSE(retained.mapping_attempted);
+    EXPECT_FALSE(tracker.update(player));
+    EXPECT_TRUE(tracker.matches(accepted_generation));
+    EXPECT_FALSE(evaluate(0u).registered_player_candidate);
+    root.process_id++;
+    EXPECT_FALSE(evaluate(0u, tracker.key()).registered_player_candidate);
+    root.process_id--;
+    root.observed_at = now - 251ms;
+    EXPECT_FALSE(evaluate(0u, tracker.key()).registered_player_candidate);
+    root.observed_at = now - 1ms;
+    // Loss of current registry membership still makes the caller select hard disable.
+    EXPECT_TRUE(tracker.update({}));
+    EXPECT_FALSE(evaluate(0u, tracker.key()).registered_player_candidate);
+    EXPECT_FALSE(tracker.matches(accepted_generation));
   }
 
   TEST_F(BrowserSubtitleContextPolicyTest, FullscreenClaimStillRequiresWholeCapture) {

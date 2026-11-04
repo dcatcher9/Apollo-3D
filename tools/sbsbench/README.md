@@ -83,6 +83,89 @@ long-form temporal behavior. Native raw/field/cache replay uses its own existing
 Host SBS has one adaptive zero/scale and subtitle UI-plane pipeline; the former experiment/mode
 selectors are rejected before launch.
 
+## Actual selected compositor qualification
+
+Ordinary `run_eval.py` metric images retain the legacy native matte compositor. They do not
+qualify the live completed current-outline pixel shader or its optional push-pull background.
+Use the separate bounded qualification command to exercise those actual production programs,
+selected receipt, background owner/proof, immutable draw-role lease, and shared draw recorder:
+
+```powershell
+& $SbsbenchPython tools/sbsbench/qualify_current_outline.py `
+  --frames tools/sbsbench/clips/subtitle_cjk_highres_transitions `
+  --out cmake-build-relwithdebinfo/sbs_eval/current-outline-qualification
+
+# Independently recheck the saved evidence against the current sources and native binary.
+& $SbsbenchPython tools/sbsbench/qualify_current_outline.py --validate-only `
+  --frames tools/sbsbench/clips/subtitle_cjk_highres_transitions `
+  --out cmake-build-relwithdebinfo/sbs_eval/current-outline-qualification
+```
+
+Build first and retain the build/test DLL `PATH` documented in [AGENTS.md](../../AGENTS.md).
+The launcher directly runs `sunshine.exe --sbs-bench --current-outline-qualification`; it does
+not rebuild. `--build-dir` selects another existing native build. Inputs must be 1..64 immutable
+SDR PNGs named `frame_<id>.png`, and output must be absent or empty. `--observation-timeline`
+binds explicit source clocks; otherwise `--fps NUM/DEN` authors a 30/1 cadence by default.
+
+Selected stereo images live separately in `current-outline/sbs_<id>.png`. The atomic
+`current_outline_qualification.json` binds each exact source snapshot, observation clock,
+publication receipt, selected/SCT/SCP/ParallaxState words, draw b3, background proof and lease,
+output digest, executable and current source-closure pins. A pre-Draw observer verifies the
+actual shader, t0..t11 and b2/b3/b4 bindings. The Python reader independently validates those
+joins and rejects stale owners, corrupt hashes, unknown fields and incomplete frame coverage.
+It reports selected-current and valid-background frame counts, including explicit unavailable
+fallbacks. This file-fed full-source check establishes renderer wiring and provenance; it does
+not establish live capture eligibility, window-region behavior, visual quality or live timing.
+Ordinary metric PNGs, schemas and scores remain separate.
+
+Schema2 added a binding for
+`current-outline/selected_matte_<id>.u32`, the exact post-draw selected t3 input in little-endian
+binary R32_UINT form, with its native source rectangle and dimensions. The independent reader
+still accepts schema1 captures; they provide no literal-mask score evidence. The launcher writes
+`current_outline_mask_scores.json` automatically. To independently regenerate that diagnostic:
+
+```powershell
+& $SbsbenchPython tools/sbsbench/current_outline_mask_metrics.py `
+  --frames tools/sbsbench/clips/subtitle_cjk_highres_transitions `
+  --out cmake-build-relwithdebinfo/sbs_eval/current-outline-qualification
+```
+
+When optional `gt_subtitle_overlay_mask` exists, its exact frame set must match the source PNGs.
+Each truth image must be a source-sized 8-bit L PNG containing only 0/255. Declared tight-mask or
+sanitizer requirements in `meta.json` are enforced; required missing truth is rejected. The report
+binds current `meta.json` and tight-mask hashes, source snapshots, native qualification manifest,
+executable, authored observation timeline, reader/scorer implementations and numeric runtime.
+The literal crop occupies its source rectangle directly; source pixels outside that crop have
+zero selected protection. Full-source truth is never cropped to improve recall.
+
+Diagnostic precision, recall and IoU come from source-pixel confusion counts; aggregate ratios
+use pooled counts. Empty truth frames add their false-protected pixel count. Consecutive
+matched-size frames also measure mask toggles
+only where all three source RGB codes and the truth bit are unchanged; overall, glyph and
+background denominators are reported separately. These are fractions of eligible pixels, not
+rates per second. Missing masks or truth yield null scores, and every zero denominator yields
+null rather than an invented perfect result. These diagnostics have no release quality gate and
+do not establish final stereo RGB retention, recovered alpha, capture eligibility or live timing.
+
+The current native manifest is schema3. Each observation additionally binds three small producer
+snapshots under `current-outline/producer-stages/frame_<id>/`: `cbc_meta.u32` (512 words),
+`raw_meta.u32` (512 words), and `f2_data.u32` (68,608 words). These are exact existing GPU buffer
+contents, about 272 KiB per observation, copied after the completed selected draw. The observer
+must return that same selected-M/receipt pair and completed frame/clock, with `pending_queued=false`.
+Native descriptor checks require full same-device buffers: structured CBC/Raw views have stride
+four and unknown format; F2 is a stride-zero RAW BUFFEREX view with R32_TYPELESS format. Subranges,
+oversized underlying buffers and role/type mismatches are rejected before the diagnostic copies.
+
+Schema3 records symbolic buffer roles, source owner, whole-view shapes, file hashes and the exact
+current composition source-closure pins. The reader verifies complete artifact coverage and the
+positive kind3 selector's existing current headers, embedded C24, source envelope and transaction
+token joins. It does not invent a physical-black model-bank proof or require a KNOWN model.
+Fallback bytes remain diagnostic and do not become current producer authority. These mutable
+aliases establish no rendering authority and do not alter mask scores. Schema1/2 reading remains
+supported, with producer-stage evidence unavailable there.
+
+## Subtitle diagnostics
+
 For bounded subtitle research, ordinary evaluation can use
 `--subtitle-plane-diagnostics --subtitle-plane-diagnostic-frames 61-78,111-121,143-146`
 with an explicit observation timeline. The ordered, disjoint ranges select one-based input
