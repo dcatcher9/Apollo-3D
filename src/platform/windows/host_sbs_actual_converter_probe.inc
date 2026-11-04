@@ -190,10 +190,12 @@ namespace actual_converter_probe_v1 {
     records.pending_arrival=pending_arrival;records.selected_enabled=r.selected_matte.has_value();
     records.selected_outline=r.selected_matte&&r.selected_matte->current_outline;records.background_enabled=r.background_observer;
     json result,adapter_entries=json::array(),selected_adapter=nullptr,capture_device_adapter=nullptr,converter_device_adapter=nullptr;bool created=false,released_before_readback=false;
-    const auto root=r.output/(pending_arrival?"trajectory2-pending-C":"trajectory1-B-parity")/"actual-converter-rgb-probe-v1";
+    const auto root=r.packed_continuity?r.output/"actual-converter-packed-continuity-v1":
+      r.output/(pending_arrival?"trajectory2-pending-C":"trajectory1-B-parity")/"actual-converter-rgb-probe-v1";
     const auto release=[&](){if(est)est->release_joined_completion_gate_for_benchmark();release_after_draw_query.store(true);if(releaser.joinable()){releaser.request_stop();releaser.join();}};
     try {
       require(r.enabled,"Probe not enabled");require(!std::filesystem::exists(root),"Probe refuses overwrite");
+      require(!r.packed_continuity||(!r.queued&&!r.hdr_input&&!pending_arrival&&!r.pending_current_colour.enabled),"Packed continuity regression requires the ordinary SDR converter");
       const UINT w=r.frames[0].width,h=r.frames[0].height;
       require(w&&h&&w<=5120u&&h<=5120u,"Invalid source extent");
       require(!r.hdr_input||(!r.queued&&r.selected_matte&&r.selected_matte->current_outline),"HDR fixture requires explicit ordinary current-outline route");
@@ -249,8 +251,9 @@ namespace actual_converter_probe_v1 {
       if(r.temporal_source_bridge){std::string setup_error;require(converter.configure_temporal_source_bridge_for_instance(*r.temporal_source_bridge,setup_error),("Temporal source bridge pre-input setup: "+setup_error).c_str());}
       if(r.selected_matte){std::string setup_error;require(converter.configure_selected_matte_for_instance(*r.selected_matte,setup_error),("Selected matte pre-input setup: "+setup_error).c_str());}
       if(r.queued)require(converter.initialize_queued_renderer_for_instance(true),"Per-instance queued resources unavailable");
-      models::joined_completion_gate_benchmark::configuration_t gate;gate.enabled=true;gate.placement=models::joined_completion_gate_benchmark::placement_e::before_interop_unmaps;
-      gate.target_frame_id=3;gate.hold_after_callback_enter_ms=120;gate.callback_safety_timeout_ms=500;
+      models::joined_completion_gate_benchmark::configuration_t gate;gate.enabled=true;
+      gate.placement=r.packed_continuity?models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps:models::joined_completion_gate_benchmark::placement_e::before_interop_unmaps;
+      gate.target_frame_id=3;gate.hold_after_callback_enter_ms=r.packed_continuity?350u:120u;gate.callback_safety_timeout_ms=500;
       require(est->configure_joined_completion_gate_for_benchmark(gate),"Pre-input gate configuration failed");
       D3D11_TEXTURE2D_DESC td{};td.Width=2*w;td.Height=h;td.MipLevels=1;td.ArraySize=1;td.Format=r.hdr_input?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_B8G8R8A8_UNORM;td.SampleDesc.Count=1;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
       hr(converter.device->CreateTexture2D(&td,nullptr,&target),"RGB target failed");hr(converter.device->CreateRenderTargetView(target.Get(),nullptr,&target_rtv),"RGB target RTV failed");
@@ -268,7 +271,7 @@ namespace actual_converter_probe_v1 {
       stamp(0);convert(0);wait_ready();convert(0); // exact same img/source/content identity on retry
       const auto *a=records.last_draw();require(a&&a->publication_current&&!a->queued&&a->publication.frame_id==1&&converter.sbs_frame_sequence==2,"A/ACK protocol unavailable; no invented ordinal");
       require(std::none_of(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto &s){return s.pending;}),"A retry unexpectedly enqueued; target3 unavailable");
-      {
+      if(!r.packed_continuity) {
         // convert() has released its encoder-side keyed lease. Reacquire that SAME
         // prepared A context before the initial diagnostic reads its shared SRV.
         const auto a_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[0]).id);
@@ -280,6 +283,165 @@ namespace actual_converter_probe_v1 {
         converter.device_ctx->Flush(); // submit every shared read BEFORE ReleaseSync(0)
       }
       const auto a_publication=a->publication;
+      if(r.packed_continuity) {
+        const auto a_pixel_source_frame=a->actual_draw_pixel_source;
+        const auto a_source_stamp=a->source_stamp_ticks;
+        require(a_pixel_source_frame!=0u&&a_source_stamp==a->current_source_stamp_ticks,
+          "A actual RGB draw/source identity unavailable");
+        // Only source arrival and the real joined-event gate are controlled. Every output below
+        // comes from convert_rgb(), its actual observer, and ordered copies of its RGB target.
+        require(r.frames[0].bgra!=r.frames[1].bgra,"A and B must have distinct authenticated source bytes");
+        std::array<stage_t,5> outputs;
+        for(auto &out:outputs)out.prepare(converter.device.get(),target.Get());
+        ComPtr<ID3D11Texture2D> flat_reference;
+        ComPtr<ID3D11RenderTargetView> flat_reference_rtv;
+        hr(converter.device->CreateTexture2D(&td,nullptr,&flat_reference),"Independent flat reference target failed");
+        hr(converter.device->CreateRenderTargetView(flat_reference.Get(),nullptr,&flat_reference_rtv),"Independent flat reference RTV failed");
+        require(outputs[0].copy(converter.device_ctx.get(),target.Get()),"Actual A target copy failed");
+        converter.device_ctx->Flush();
+        const auto idle_begin=clock_t::now();
+        std::this_thread::sleep_until(idle_begin+std::chrono::milliseconds(300));
+        const auto idle_end=clock_t::now();
+        const auto last_outcome=[&](std::uint64_t conversion) {
+          for(std::size_t i=records.count;i>0;--i) {
+            const auto &e=records.events[i-1u];
+            if(e.conversion==conversion&&(e.kind==event_e::packed_repeat||e.kind==event_e::convert_end))return e;
+          }
+          throw std::runtime_error("Actual converter outcome missing");
+        };
+        const auto real_pending=[&]() {
+          const auto pending=est->try_finish_pending_depth_nonblocking(models::input_color_space::srgb,false);
+          const auto held=est->joined_completion_gate_status_for_benchmark();
+          require(!pending.ready&&held&&held->queued&&held->callback_entered&&!held->released&&
+            !held->cancelled&&!held->callback_timed_out&&!held->callback_entry_timed_out&&
+            held->configuration.placement==models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps&&
+            held->configuration.hold_after_callback_enter_ms==350u&&held->configuration.callback_safety_timeout_ms==500u&&
+            held->last_actual_event_query==CUDA_ERROR_NOT_READY&&held->actual_not_ready_queries>0u,
+            "B is not an actually queried held root; no manufactured pending result");
+          require(std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),
+            [](const auto &s){return s.pending&&s.frame_id==3u;})==1,"Held B lost its sole pending slot");
+          return *held;
+        };
+        stamp(1);
+        const auto b_begin=clock_t::now();
+        convert(1);
+        const auto before=last_outcome(3u);
+        const json first_checks{{"repeat",before.repeat},{"not_flat",!before.flat},{"not_queued",!before.queued},
+          {"packed_valid",before.packed_valid},{"route_matches",before.route_matches},{"changed_source",!before.source_matches},
+          {"actual_A_pixel_source_matches",before.pixel_source_frame==a_pixel_source_frame},
+          {"actual_A_source_stamp_matches",before.pixel_source_stamp_ticks==a_source_stamp},
+          {"raw_A_age_exceeds_cap",before.packed_age_us>250000},
+          {"literal_B_source_matches",before.current_source_stamp_ticks==images[1]->frame_timestamp->time_since_epoch().count()}};
+        result["first_changed_diagnostics"]={{"A_model_publication",pub(a_publication)},
+          {"A_actual_RGB_pixel_source",a_pixel_source_frame},{"A_actual_source_stamp_ticks",a_source_stamp},
+          {"actual_before_cap",event_json(before)},{"checks",first_checks}};
+        const auto first_error="First changed delivery after static A did not actually repeat packed A: "+first_checks.dump();
+        require(std::all_of(first_checks.begin(),first_checks.end(),[](const auto &check){return check.template get<bool>();}),
+          first_error.c_str());
+        require(clock_t::now()-b_begin<std::chrono::milliseconds(250),"Before-cap observation exceeded the live continuity bound");
+        const auto b_admission=std::find_if(records.events.begin(),records.events.begin()+records.count,
+          [](const auto &e){return e.kind==event_e::admission&&e.conversion==3u;});
+        require(b_admission!=records.events.begin()+records.count&&b_admission->model_frame==3u&&
+          b_admission->force_infer&&!b_admission->gpu_undecided&&
+          b_admission->optional_work==static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary),
+          "B did not take the actual ordinary force-infer admission branch");
+        require(outputs[1].copy(converter.device_ctx.get(),target.Get()),"Actual before-cap packed target copy failed");
+        converter.device_ctx->Flush();
+        const auto entered_deadline=clock_t::now()+std::chrono::milliseconds(100);
+        for(;;) {
+          const auto status=est->joined_completion_gate_status_for_benchmark();
+          require(status&&!status->released&&clock_t::now()<entered_deadline,"No bounded held B callback window");
+          if(status->callback_entered)break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const auto held_before=real_pending();
+        std::this_thread::sleep_until(b_begin+std::chrono::milliseconds(280));
+        convert(1); // The literal same B source; no new capture stamp or new root.
+        const auto after=last_outcome(4u);
+        const auto held_after=real_pending();
+        require(after.flat&&!after.repeat&&!after.queued&&!after.packed_valid&&after.current_input&&
+          after.views[0].Get()==after.current_input.Get()&&
+          after.current_source_stamp_ticks==before.current_source_stamp_ticks&&
+          after.slot_frames==before.slot_frames&&after.slot_observations==before.slot_observations&&
+          after.slot_source_addresses==before.slot_source_addresses&&
+          after.host_event_us-before.host_event_us>250000,
+          "After-cap converter output was not actual current-flat B while B remained held");
+        require(outputs[2].copy(converter.device_ctx.get(),target.Get()),"Actual after-cap flat target copy failed");
+        // Independent GPU reference uses the production flat PS and recorder. It never writes
+        // the converter target, chooses a converter route, or substitutes CPU-authored pixels.
+        const auto b_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[1]).id);
+        require(b_context!=converter.img_ctx_map.end()&&b_context->second.encoder_mutex&&
+          b_context->second.encoder_input_res.get()==after.current_input.Get(),"Actual B shared source identity unavailable");
+        {
+          texture_lock_helper source_lease(b_context->second.encoder_mutex.get());
+          require(source_lease.lock(),"Independent B flat reference shared-source lease failed");
+          host_sbs_v2_draw_command_t reference {
+            .render_targets={flat_reference_rtv.Get(),nullptr},
+            .vertex_shader=converter.sbs_reprojection_vs.get(),
+            .pixel_shader=converter.sbs_flat_identity_ps.get(),
+            .viewport=converter.sbs_viewport,
+            .sampler=converter.sampler_linear.get(),
+            .shader_resources={after.current_input.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr},
+            .geometry_constants=after.buffers[0].Get(),
+          };
+          require(record_host_sbs_v2_draw(converter.device_ctx.get(),reference),"Independent production flat reference draw failed");
+          require(outputs[4].copy(converter.device_ctx.get(),flat_reference.Get()),"Independent flat reference target copy failed");
+          converter.device_ctx->Flush(); // Submit shared reads before releasing their keyed lease.
+        }
+        // The independent timer releases 350 ms after real callback entry, even on render failure.
+        wait_ready();
+        const auto released=est->joined_completion_gate_status_for_benchmark();
+        require(released&&released->released&&released->callback_exited&&!released->cancelled&&
+          !released->callback_timed_out&&!released->callback_entry_timed_out,
+          "B release did not follow the independent bounded gate timer");
+        convert(1);
+        const auto recovered=last_outcome(5u);
+        require(!recovered.flat&&!recovered.repeat&&!recovered.queued&&recovered.publication_current&&
+          recovered.publication.frame_id==3u&&recovered.source_stamp_ticks==before.current_source_stamp_ticks&&
+          recovered.current_source_stamp_ticks==before.current_source_stamp_ticks&&recovered.pending_slots==0u&&
+          recovered.query_observed&&recovered.literal_last_query_result==CUDA_SUCCESS&&
+          recovered.literal_ready_count>0u&&recovered.gate_released,
+          "Exact held B did not genuinely ACK and recover without restamping/resubmission");
+        require(std::count_if(records.events.begin(),records.events.begin()+records.count,
+          [](const auto &e){return e.kind==event_e::admission;})==2,
+          "Static/pending/recovery deliveries unexpectedly admitted another root");
+        require(outputs[3].copy(converter.device_ctx.get(),target.Get()),"Actual recovered B target copy failed");
+        for(auto &out:outputs) {
+          out.read(converter.device_ctx.get());
+          require(out.read_complete_us>=released->released_wall_us,"Target readback preceded real B release");
+        }
+        require(outputs[0].bytes==outputs[1].bytes,"Actual packed-before-cap RGB differs from retained actual A RGB");
+        require(outputs[2].bytes==outputs[4].bytes,"Actual after-cap RGB differs from independent production flat B GPU draw");
+        require(outputs[0].bytes!=outputs[4].bytes,"A and flat B render identically; fixture cannot distinguish the source");
+        constexpr std::array<const char *,5> output_names{{"matched-A.bgra8","packed-A-before-cap.bgra8","current-flat-B-after-cap.bgra8","recovered-B.bgra8","independent-flat-B-reference.bgra8"}};
+        json artifacts=json::array(),trace=json::array();
+        for(std::size_t i=0;i<outputs.size();++i) {
+          const auto path=root/output_names[i];std::ofstream file(path,std::ios::binary);
+          file.write(outputs[i].bytes.data(),static_cast<std::streamsize>(outputs[i].bytes.size()));file.flush();
+          require(file.good(),"Continuity output artifact write failed");file.close();
+          auto artifact=binding(path);artifact["role"]=output_names[i];
+          artifact["copy_issued_us"]=outputs[i].copy_issued_us;artifact["read_complete_us"]=outputs[i].read_complete_us;
+          artifacts.push_back(artifact);
+        }
+        for(std::size_t i=0;i<records.count;++i)trace.push_back(event_json(records.events[i]));
+        write_json(root/"result.json",{{"schema",1},{"status","PASS_FUNCTIONAL_ACTUAL_CONVERTER_PACKED_CONTINUITY_ONLY"},
+          {"context_scope","synthetic-video-scheduling-only; not actual Win32 eligibility"},
+          {"source_inputs",sources},{"unused_third_source_not_admitted",true},
+          {"static_idle_us",std::chrono::duration_cast<std::chrono::microseconds>(idle_end-idle_begin).count()},
+          {"A_publication",pub(a_publication)},{"A_actual_RGB_pixel_source",a_pixel_source_frame},
+          {"first_changed_diagnostics",result.at("first_changed_diagnostics")},
+          {"before_cap",event_json(before)},{"after_cap",event_json(after)},
+          {"recovered",event_json(recovered)},{"gate_before_cap",gate_json(held_before)},
+          {"gate_after_cap",gate_json(held_after)},{"gate_released",gate_json(released)},
+          {"gate_configuration",{{"placement",static_cast<UINT>(held_after.configuration.placement)},
+            {"hold_ms",held_after.configuration.hold_after_callback_enter_ms},{"callback_safety_ms",held_after.configuration.callback_safety_timeout_ms}}},
+          {"selected_adapter",selected_adapter},{"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},
+          {"target_width",2u*w},{"target_height",h},{"target_format",static_cast<UINT>(td.Format)},
+          {"outputs",artifacts},{"trace",trace},{"readbacks_only_after_release",true},
+          {"no_CPU_warp_or_fabricated_completion_or_output_substitution",true},
+          {"live_classification_encoder_presenter_latency_or_FPS_qualified",false}});
+        converter.depth_estimator.reset();est=nullptr;return 0;
+      }
       // All diagnostic staging/textures/CPU vectors now exist. No Map/hash/JSON until release.
       records.armed=r.queued?1:-1;
       releaser=std::jthread([&](std::stop_token stop){const auto hard_deadline=clock_t::now()+std::chrono::milliseconds(500);while(!stop.stop_requested()){
@@ -371,7 +533,7 @@ namespace actual_converter_probe_v1 {
       converter.depth_estimator.reset();est=nullptr;return 0;
     } catch(const std::exception &e) {
       error=e.what();release();converter.probe_observer={};converter.probe_context=nullptr;
-      if(created)try{json trace=json::array();for(std::size_t i=0;i<records.count;++i)trace.push_back(event_json(records.events[i]));write_json(root/"failure.json",{{"schema",1},{"status","UNAVAILABLE_OR_FAILED_NO_QUALIFICATION"},{"error",error},{"gate",est?gate_json(est->joined_completion_gate_status_for_benchmark()):json(nullptr)},{"partial_observer_events",trace},{"timeout_forced_release",timeout_forced_release.load()},{"enumerated_adapters",adapter_entries},{"selected_adapter",selected_adapter},{"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},{"no_generated_success",true}});}catch(...){}
+      if(created)try{json trace=json::array();for(std::size_t i=0;i<records.count;++i)trace.push_back(event_json(records.events[i]));write_json(root/"failure.json",{{"schema",1},{"status","UNAVAILABLE_OR_FAILED_NO_QUALIFICATION"},{"error",error},{"gate",est?gate_json(est->joined_completion_gate_status_for_benchmark()):json(nullptr)},{"partial_observer_events",trace},{"phase_diagnostics",result},{"timeout_forced_release",timeout_forced_release.load()},{"enumerated_adapters",adapter_entries},{"selected_adapter",selected_adapter},{"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},{"no_generated_success",true}});}catch(...){}
       return 7;
     }
   }

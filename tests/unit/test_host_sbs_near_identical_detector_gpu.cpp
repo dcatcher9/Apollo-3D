@@ -461,6 +461,8 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
                std::string_view {"subtitle_contour_project_cs"}},
     std::pair {std::string_view {"host_sbs_subtitle_contour_history"},
                std::string_view {"subtitle_contour_history_cs"}},
+    std::pair {std::string_view {"host_sbs_subtitle_contour_history_identity"},
+               std::string_view {"subtitle_contour_history_identity_cs"}},
     std::pair {std::string_view {"host_sbs_subtitle_contour_horizontal"},
                std::string_view {"subtitle_contour_horizontal_cs"}},
     std::pair {std::string_view {"host_sbs_subtitle_contour_vertical"},

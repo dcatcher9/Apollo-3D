@@ -22,6 +22,7 @@ namespace platf::dxgi::actual_converter_probe_v1 {
   };
   struct request_t {
     bool enabled = false, queued = false;
+    bool packed_continuity = false; // Explicit idle/held-root/expiry regression; default scheduler unchanged.
     bool background_observer = false; // Explicit V7 HDR qualification only; no default readbacks.
     bool hdr_input = false; // Explicit three-PFM current-outline probe only; default SDR unchanged.
     bool explicit_adapter = false; // Private probe plan binding for SDR or HDR; absent SDR keeps its legacy default.

@@ -18,15 +18,20 @@
   #include <d3dcompiler.h>
   #include <filesystem>
   #include <fstream>
+  #include <iterator>
   #include <limits>
+  #include <map>
   #include <nlohmann/json.hpp>
   #include <src/crypto.h>
   #include <src/depth_coordinate_v2.h>
+  #include <src/host_sbs_current_outline_runtime_programs.h>
   #include <src/host_sbs_queued_render_guard.h>
+  #include <src/host_sbs_selected_glyph_push_pull_runtime.h>
   #include <src/host_sbs_shader_cache.h>
   #include <src/host_sbs_subtitle_render.h>
   #include <src/host_sbs_v2_geometry.h>
   #include <src/platform/windows/host_sbs_v2_renderer.h>
+  #include "subtitle_helper_source_pins.h"
   #include <sstream>
   #include <stdexcept>
   #include <string>
@@ -84,6 +89,7 @@ namespace {
 
   enum class warp_shader_e {
     live_main,
+    current_outline_completed,
     live_mapping,
     live_mask,
     direct_main,
@@ -101,6 +107,24 @@ namespace {
     std::array<std::uint32_t, 32u> identity {};
   };
 
+  struct saved_background_inputs_t {
+    std::vector<rgba32f_t> pixels;
+    std::array<std::uint32_t, 96u> proof {};
+    std::array<std::uint32_t, 16u> expected {};
+  };
+
+  struct current_outline_inputs_t {
+    std::vector<std::uint32_t> matte;
+    std::array<std::uint32_t, 64u> receipt {};
+    bool background_requested = false;
+    bool stale_background_proof = false;
+    // Test-only literal observed draw operands. No authority is inferred from their presence.
+    const saved_background_inputs_t *saved_background = nullptr;
+    // Opt-in causal probe only. Neither field changes ordinary test/render routes.
+    bool experimental_background = false;
+    saved_background_inputs_t *background_diagnostic_output = nullptr;
+  };
+
   class live_v2_warp_fixture_t {
     friend class ::HostSbsV2LiveWarpGpuTest_QueuedRenderRecorderScopeMatchesLegacyOrIndependentFlat_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_ActualV5BackgroundRepairColourReference_Test;
@@ -113,7 +137,9 @@ namespace {
       std::string &error,
       const warp_shader_e shader = warp_shader_e::live_main,
       const bool fixed_eleven_reference = false,
-      const bool hardware = false
+      const bool hardware = false,
+      const std::filesystem::path &completed_reference_root = {},
+      const std::string_view completed_reference_closure = {}
     ) {
       if (const auto *cache_root = std::getenv("SUNSHINE_TEST_HOST_SBS_SHADER_CACHE")) {
         models::host_sbs_shader_cache::configure_persistent_cache(cache_root);
@@ -124,6 +150,7 @@ namespace {
       direct_replay =
         shader == warp_shader_e::direct_main ||
         shader == warp_shader_e::direct_mapping;
+      current_outline_completed = shader == warp_shader_e::current_outline_completed;
       constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
       D3D_FEATURE_LEVEL actual {};
       auto status = D3D11CreateDevice(
@@ -168,6 +195,28 @@ namespace {
           error = flat_errors ?
                     static_cast<const char *>(flat_errors->GetBufferPointer()) :
                     "could not create the independent flat-SBS pixel shader";
+          return false;
+        }
+      } else if (current_outline_completed) {
+        namespace runtime = models::current_outline_runtime;
+        namespace cache = models::host_sbs_shader_cache;
+        // An optional external frozen source group is used only for before/after actual-PS
+        // parity. It must carry its independently recorded pre-change closure identity.
+        const auto completed_root = completed_reference_root.empty() ?
+                                      runtime::completed_root(shader_root / "current_outline") :
+                                      completed_reference_root;
+        const auto expected = completed_reference_root.empty() ? runtime::completed_closure : completed_reference_closure;
+        const auto sources = cache::snapshot_sources(
+          completed_root,
+          runtime::completed_specs
+        );
+        if (!sources || expected.size() != 64u || cache::source_closure_sha256(sources) != expected) {
+          error = "current-outline completed renderer source closure does not match its authenticated pin";
+          return false;
+        }
+        const auto code = cache::get(sources, runtime::completed_specs.front());
+        if (!code || FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &pixel_shader))) {
+          error = "could not create the production current-outline completed pixel shader";
           return false;
         }
       } else if (shader == warp_shader_e::live_main && !fixed_eleven_reference) {
@@ -386,6 +435,40 @@ namespace {
       return true;
     }
 
+    // Test-only six-CS program. Production programs_t keeps its compiled closure check.
+    bool configure_experimental_background(const std::filesystem::path &root, const std::string &closure, std::string &error) {
+      namespace cache = models::host_sbs_shader_cache;
+      namespace runtime = models::selected_glyph_push_pull_runtime_v1;
+      if (!device || !context || closure.size() != 64u ||
+          !std::all_of(closure.begin(), closure.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) {
+        error = "experimental background requires initialized fixture and exact lowercase closure";
+        return false;
+      }
+      const auto sources = cache::snapshot_sources(root, runtime::specs);
+      if (!sources || cache::source_closure_sha256(sources) != closure) {
+        error = "experimental background source closure mismatch";
+        return false;
+      }
+      std::array<ComPtr<ID3D11ComputeShader>, 6u> next;
+      for (std::size_t i = 0u; i < next.size(); ++i) {
+        const auto code = cache::get(sources, runtime::specs[i]);
+        if (!code || code->empty() || FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, next[i].GetAddressOf()))) {
+          error = "experimental background shader creation failed";
+          return false;
+        }
+      }
+      experimental_background_shaders = std::move(next);
+      experimental_background_root = root;
+      experimental_background_closure = closure;
+      return true;
+    }
+
+    bool experimental_background_source_unchanged() const {
+      const auto sources = models::host_sbs_shader_cache::snapshot_sources(
+        experimental_background_root, models::selected_glyph_push_pull_runtime_v1::specs);
+      return sources && models::host_sbs_shader_cache::source_closure_sha256(sources) == experimental_background_closure;
+    }
+
     bool private_guard_slots_clear() const {
       ID3D11Buffer *cb = nullptr;
       ID3D11ShaderResourceView *srv = nullptr;
@@ -418,7 +501,8 @@ namespace {
       const host_sbs_v2_geometry_t &geometry = host_sbs_v2_geometry_t {},
       const subtitle_inputs_t *subtitle = nullptr,
       ComPtr<ID3D11Texture2D> *gpu_output = nullptr,
-      const bool readback_output = true
+      const bool readback_output = true,
+      const current_outline_inputs_t *outline = nullptr
     ) {
       const UINT resolved_depth_width = depth_width == 0u ? source_width : depth_width;
       const UINT resolved_depth_height = depth_height == 0u ? source_height : depth_height;
@@ -508,9 +592,10 @@ namespace {
         return false;
       }
 
-      ComPtr<ID3D11Texture2D> matte_texture, snapshot_texture;
+      ComPtr<ID3D11Texture2D> matte_texture, snapshot_texture, selected_matte_texture;
       ComPtr<ID3D11ShaderResourceView> matte_srv, snapshot_srv, condition_srv, identity_srv;
-      ComPtr<ID3D11Buffer> subtitle_buffer, condition_buffer, identity_buffer;
+      ComPtr<ID3D11ShaderResourceView> selected_matte_srv, selected_receipt_srv;
+      ComPtr<ID3D11Buffer> subtitle_buffer, condition_buffer, identity_buffer, selected_receipt_buffer;
       if (subtitle) {
         if (subtitle->matte.size() != static_cast<std::size_t>(subtitle->width) * subtitle->height ||
             subtitle->snapshot.size() != subtitle->matte.size() ||
@@ -545,6 +630,15 @@ namespace {
             FAILED(device->CreateBuffer(&desc, &initial, &subtitle_buffer))) {
           error = "could not create glyph owner/plane/constants operands";
           return false;
+        }
+        if (current_outline_completed) {
+          const std::array<std::uint32_t, 64u> unavailable_receipt {};
+          const auto &selected = outline ? outline->matte : subtitle->matte;
+          const auto &receipt = outline ? outline->receipt : unavailable_receipt;
+          if (selected.size() != subtitle->matte.size() || !create_immutable_texture_srv(DXGI_FORMAT_R32_UINT, subtitle->width, subtitle->height, sizeof(std::uint32_t), selected.data(), selected_matte_texture, selected_matte_srv) || !words_srv(receipt, selected_receipt_buffer, selected_receipt_srv)) {
+            error = "could not create selected current-outline matte/receipt operands";
+            return false;
+          }
         }
       }
 
@@ -622,7 +716,7 @@ namespace {
           color_srv.Get(),
           parallax_srv.Get(),
           state_srv.Get(),
-          matte_srv.Get(),
+          current_outline_completed ? selected_matte_srv.Get() : matte_srv.Get(),
           snapshot_srv.Get(),
           condition_srv.Get(),
           identity_srv.Get(),
@@ -633,12 +727,126 @@ namespace {
         .queued_guard_constants = use_recorder_guard_scope ? private_guard_cb.Get() : nullptr,
         .queued_guard_transaction = use_recorder_guard_scope ? private_guard_srv.Get() : nullptr,
       };
+      namespace background = models::selected_glyph_push_pull_bg_gpu_v1;
+      namespace background_runtime = models::selected_glyph_push_pull_runtime_v1;
+      models::selected_glyph_receipt_c24_transport_v1::resources_t contour_transport;
+      background::resources_t background_owner;
+      background::views_t background_views;
+      ComPtr<ID3D11Buffer> stale_background_buffer;
+      ComPtr<ID3D11Texture2D> saved_background_texture;
+      ComPtr<ID3D11Buffer> saved_background_proof;
+      if (current_outline_completed && subtitle && outline && outline->saved_background) {
+        const auto &saved = *outline->saved_background;
+        if (saved.pixels.size() != subtitle->matte.size() || outline->background_requested ||
+            outline->stale_background_proof ||
+            !create_immutable_texture_srv(DXGI_FORMAT_R32G32B32A32_FLOAT, subtitle->width, subtitle->height,
+              sizeof(rgba32f_t), saved.pixels.data(), saved_background_texture, background_views.background)) {
+          error = "invalid literal saved background replay operands";
+          return false;
+        }
+        D3D11_BUFFER_DESC desc {};
+        desc.ByteWidth = sizeof(saved.proof);desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        desc.StructureByteStride = sizeof(std::uint32_t);
+        D3D11_SUBRESOURCE_DATA initial {saved.proof.data(), 0u, 0u};
+        if (FAILED(device->CreateBuffer(&desc, &initial, &saved_background_proof)) ||
+            FAILED(device->CreateShaderResourceView(saved_background_proof.Get(), nullptr, &background_views.proof))) {
+          error = "saved background proof allocation failed";
+          return false;
+        }
+        desc.ByteWidth = sizeof(saved.expected);desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        desc.MiscFlags = desc.StructureByteStride = 0u;initial.pSysMem = saved.expected.data();
+        if (FAILED(device->CreateBuffer(&desc, &initial, &background_views.expected_constants))) {
+          error = "saved background expected lease allocation failed";
+          return false;
+        }
+      } else if (current_outline_completed && subtitle && outline && outline->background_requested) {
+        if (outline->experimental_background) {
+          if (!std::all_of(experimental_background_shaders.begin(), experimental_background_shaders.end(), [](const auto &shader) { return bool(shader); })) {
+            error = "experimental background was requested without pinned six-CS program";
+            return false;
+          }
+        } else if (!background_programs.ready() && !background_programs.load(device.Get(), std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline" / "background", error)) {
+          return false;
+        }
+        if (!contour_transport.ensure(device.Get(), error) || !contour_transport.queue(context.Get(), selected_receipt_srv.Get(), error) || !background_owner.ensure(device.Get(), subtitle->width, subtitle->height, error)) {
+          return false;
+        }
+        background::request_t request;
+        std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
+        request.draw_srvs[7u] = selected_receipt_srv.Get();
+        request.actual_contour_constants96 = contour_transport.constants();
+        request.actual_subtitle_render_constants32 = subtitle_buffer.Get();
+        std::copy_n(subtitle->identity.begin() + 8u, 4u, request.analysis_shape.begin());
+        const auto program = outline->experimental_background ? background::program_t {
+          experimental_background_shaders[0].Get(), experimental_background_shaders[1].Get(), experimental_background_shaders[2].Get(),
+          experimental_background_shaders[3].Get(), experimental_background_shaders[4].Get(), experimental_background_shaders[5].Get()
+        } : background_programs.program();
+        if (!background_owner.queue(context.Get(), program, request, error)) {
+          return false;
+        }
+        background_views = background_owner.views();
+        if (outline->stale_background_proof) {
+          // Test-only corruption after the actual GPU owner publishes its proof. Its immutable
+          // expected lease remains untouched, so the real PS must reject the mismatched token.
+          ComPtr<ID3D11Resource> resource;
+          ComPtr<ID3D11Buffer> proof, staging;
+          background_views.proof->GetResource(&resource);
+          if (FAILED(resource.As(&proof))) {
+            return false;
+          }
+          D3D11_BUFFER_DESC desc {};
+          proof->GetDesc(&desc);
+          desc.Usage = D3D11_USAGE_STAGING;
+          desc.BindFlags = desc.MiscFlags = desc.StructureByteStride = 0u;
+          desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+          if (FAILED(device->CreateBuffer(&desc, nullptr, &staging))) {
+            return false;
+          }
+          context->CopyResource(staging.Get(), proof.Get());
+          D3D11_MAPPED_SUBRESOURCE mapped {};
+          if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) {
+            return false;
+          }
+          std::array<std::uint32_t, background::proof_words> words {};
+          std::memcpy(words.data(), mapped.pData, sizeof(words));
+          context->Unmap(staging.Get(), 0u);
+          if (words[2u] != 1u || words[3u] != 0u) {
+            error = "actual background producer did not publish a valid proof before fault injection";
+            return false;
+          }
+          words[60u] ^= 1u;
+          desc.Usage = D3D11_USAGE_IMMUTABLE;
+          desc.CPUAccessFlags = 0u;
+          desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+          desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+          desc.StructureByteStride = sizeof(std::uint32_t);
+          const D3D11_SUBRESOURCE_DATA initial {words.data(), 0u, 0u};
+          if (FAILED(device->CreateBuffer(&desc, &initial, &stale_background_buffer)) || FAILED(device->CreateShaderResourceView(stale_background_buffer.Get(), nullptr, background_views.proof.ReleaseAndGetAddressOf()))) {
+            return false;
+          }
+        }
+      }
       bool submitted = false;
       recorder_flat_fallback_used = false;
+      ComPtr<ID3D11Buffer> previous_background_constants;
+      if (current_outline_completed) {
+        context->PSGetConstantBuffers(4u, 1u, previous_background_constants.GetAddressOf());
+      }
       {
         models::research_queued_render_guard_v1::scoped_binding_t guard;
         if (private_guard_configured && !use_recorder_guard_scope && !guard.bind(context.Get(), private_guard_cb.Get(), private_guard_srv.Get())) {
           error = "private queued guard binding rejected";
+          return false;
+        }
+        models::research_current_outline_selected_matte_v2::scoped_receipt_t selected_scope;
+        if (current_outline_completed && subtitle && !selected_scope.bind(context.Get(), selected_receipt_srv.Get(), matte_srv.Get())) {
+          error = "production selected-matte receipt scope rejected draw operands";
+          return false;
+        }
+        background_runtime::scoped_background_t background_scope;
+        if (current_outline_completed && !background_scope.bind(context.Get(), background_views.background ? &background_views : nullptr)) {
+          error = "production current-background scope rejected draw operands";
           return false;
         }
         submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
@@ -658,6 +866,14 @@ namespace {
         submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), fallback);
         context->SetPredication(previous_predicate.Get(), previous_predicate_value);
         recorder_flat_fallback_used = submitted;
+      }
+      if (current_outline_completed) {
+        ComPtr<ID3D11Buffer> restored_background_constants;
+        context->PSGetConstantBuffers(4u, 1u, restored_background_constants.GetAddressOf());
+        if (restored_background_constants.Get() != previous_background_constants.Get()) {
+          error = "completed current-outline draw did not restore background b4 before fixture cleanup";
+          return false;
+        }
       }
       ID3D11Buffer *null_constants = nullptr;
       context->PSSetConstantBuffers(4u, 1u, &null_constants);
@@ -680,8 +896,76 @@ namespace {
         error = "shared renderer left native subtitle resources or b3 bound";
         return false;
       }
+      if (current_outline_completed) {
+        std::array<ID3D11ShaderResourceView *, 2u> private_resources {};
+        context->PSGetShaderResources(7u, static_cast<UINT>(private_resources.size()), private_resources.data());
+        for (auto *resource : private_resources) {
+          unbound = unbound && resource == nullptr;
+          if (resource) {
+            resource->Release();
+          }
+        }
+        if (!unbound) {
+          error = "completed current-outline draw leaked selected receipt/legacy bindings";
+          return false;
+        }
+        for (UINT slot : {9u, 11u}) {
+          ComPtr<ID3D11ShaderResourceView> resource;
+          context->PSGetShaderResources(slot, 1u, &resource);
+          if (resource) {
+            error = "completed current-outline draw leaked background bindings";
+            return false;
+          }
+        }
+      }
 
       if (gpu_output) *gpu_output = output_texture;
+      if (outline && outline->background_diagnostic_output) {
+        auto &diagnostic = *outline->background_diagnostic_output;
+        diagnostic = {};
+        if (!background_views.background || !background_views.proof || !background_views.expected_constants || !subtitle) {
+          error = "background diagnostic requested without actual owned output";
+          return false;
+        }
+        ComPtr<ID3D11Resource> resource;
+        ComPtr<ID3D11Texture2D> texture, staging_texture;
+        background_views.background->GetResource(&resource);
+        if (FAILED(resource.As(&texture))) return false;
+        D3D11_TEXTURE2D_DESC desc {};texture->GetDesc(&desc);
+        if (desc.Width != subtitle->width || desc.Height != subtitle->height || desc.Format != DXGI_FORMAT_R32G32B32A32_FLOAT ||
+            desc.MipLevels != 1u || desc.ArraySize != 1u || desc.SampleDesc.Count != 1u) {
+          error = "background diagnostic native texture shape mismatch";
+          return false;
+        }
+        desc.Usage = D3D11_USAGE_STAGING;desc.BindFlags = desc.MiscFlags = 0u;desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging_texture))) return false;
+        context->CopyResource(staging_texture.Get(), texture.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped {};
+        if (FAILED(context->Map(staging_texture.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+        diagnostic.pixels.resize(std::size_t(desc.Width) * desc.Height);
+        for (UINT y = 0u; y < desc.Height; ++y) std::memcpy(diagnostic.pixels.data() + std::size_t(y) * desc.Width,
+          static_cast<const std::byte *>(mapped.pData) + std::size_t(y) * mapped.RowPitch, std::size_t(desc.Width) * sizeof(rgba32f_t));
+        context->Unmap(staging_texture.Get(), 0u);
+        const auto buffer_readback = [&](ID3D11Buffer *buffer, auto &values) {
+          D3D11_BUFFER_DESC d {};buffer->GetDesc(&d);
+          if (d.ByteWidth != sizeof(values)) return false;
+          d.Usage = D3D11_USAGE_STAGING;d.BindFlags = d.MiscFlags = d.StructureByteStride = 0u;d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+          ComPtr<ID3D11Buffer> staging;
+          if (FAILED(device->CreateBuffer(&d, nullptr, &staging))) return false;
+          context->CopyResource(staging.Get(), buffer);
+          D3D11_MAPPED_SUBRESOURCE m {};
+          if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &m))) return false;
+          std::memcpy(values.data(), m.pData, sizeof(values));context->Unmap(staging.Get(), 0u);return true;
+        };
+        ComPtr<ID3D11Buffer> proof;
+        background_views.proof->GetResource(resource.ReleaseAndGetAddressOf());
+        if (FAILED(resource.As(&proof)) || !buffer_readback(proof.Get(), diagnostic.proof) ||
+            !buffer_readback(background_views.expected_constants.Get(), diagnostic.expected)) return false;
+        if (diagnostic.proof[0u] != 0x31504742u || diagnostic.proof[1u] != 1u || diagnostic.proof[2u] != 1u || diagnostic.proof[3u] != 0u) {
+          error = "causal background diagnostic requires a valid completed GPU proof";
+          return false;
+        }
+      }
       if (!readback_output) { packed_output.clear(); return true; }
 
       auto staging_desc = output_desc;
@@ -1345,6 +1629,11 @@ namespace {
     ComPtr<ID3D11SamplerState> sampler;
     bool mapping_output = false;
     bool direct_replay = false;
+    bool current_outline_completed = false;
+    models::selected_glyph_push_pull_runtime_v1::programs_t background_programs;
+    std::array<ComPtr<ID3D11ComputeShader>, 6u> experimental_background_shaders;
+    std::filesystem::path experimental_background_root;
+    std::string experimental_background_closure;
     bool private_guard_configured = false;
     bool use_recorder_guard_scope = false;
     ComPtr<ID3D11PixelShader> recorder_flat_fallback_ps;
@@ -1526,6 +1815,27 @@ namespace {
     id[21] = state[v2::gain_last_observation_high];
     id[22] = v2::subtitle_contour_recipe;
     id[23] = 1u;
+    return input;
+  }
+
+  current_outline_inputs_t make_current_outline_inputs(const subtitle_inputs_t &subtitle) {
+    // This is the published selector ABI consumed by the production completed PS, not a
+    // substitute renderer. The compute-selector producer has separate executable coverage.
+    current_outline_inputs_t input;
+    input.matte = subtitle.matte;
+    auto &receipt = input.receipt;
+    receipt[0u] = models::research_current_outline_selected_matte_v2::tag;
+    receipt[1u] = models::research_current_outline_selected_matte_v2::schema;
+    receipt[2u] = 3u;
+    std::copy_n(subtitle.identity.begin() + 8u, 12u, receipt.begin() + 4u);
+    std::copy_n(subtitle.identity.begin() + 4u, 4u, receipt.begin() + 16u);
+    std::copy_n(subtitle.identity.begin() + 20u, 2u, receipt.begin() + 20u);
+    receipt[24u] = 1u;
+    receipt[25u] = models::depth_coordinate_v2::subtitle_contour_recipe;
+    std::copy(subtitle.identity.begin(), subtitle.identity.end(), receipt.begin() + 28u);
+    receipt[60u] = 71u;
+    receipt[61u] = 9u;
+    receipt[62u] = models::research_current_outline_selected_matte_v2::algorithm;
     return input;
   }
 
@@ -3817,6 +4127,723 @@ TEST(HostSbsV2LiveWarpGpuTest, NativeGlyphRgbRevocationUsesSdrLinearAndHdrDispla
   }
 }
 
+TEST(HostSbsV2LiveWarpGpuTest, CompletedCurrentOutlineDrawSelectsCurrentMaskAndSignedUiCandidates) {
+  constexpr UINT width = 128u, height = 4u, row = 2u, current_x = 64u, legacy_x = 96u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(width * height, -2.0f / width);
+  std::vector<rgba32f_t> source(width * height, {0.0f, 0.0f, 0.0f, 1.0f});
+  source[row * width + current_x] = source[row * width + legacy_x] = {1.0f, 1.0f, 1.0f, 1.0f};
+  std::string error;
+  live_v2_warp_fixture_t completed, legacy;
+  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(legacy.initialize(error)) << error;
+  const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *subtitle, const current_outline_inputs_t *outline = nullptr) {
+    std::vector<std::byte> output;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t), width, height, source.data(), base, base, state, {}, output, error, 0u, 0u, {}, subtitle, nullptr, true, outline)) << error;
+    return output;
+  };
+  const auto base_pixels = render(legacy, nullptr);
+  for (const float shift : {2.0f, 2.5f}) {
+    SCOPED_TRACE(shift);
+    auto subtitle = make_subtitle_inputs(width, height, state, shift / width);
+    subtitle.matte[row * width + legacy_x] = 1u;
+    subtitle.snapshot[row * width + current_x] = subtitle.snapshot[row * width + legacy_x] =
+      {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+    auto outline = make_current_outline_inputs(subtitle);
+    outline.matte.assign(width * height, 0u);
+    outline.matte[row * width + current_x] = 1u;
+    auto current_reference = subtitle;
+    current_reference.matte = outline.matte;
+    const auto expected = render(legacy, &current_reference);
+    const auto original = render(legacy, &subtitle);
+    const auto actual = render(completed, &subtitle, &outline);
+    ASSERT_NE(expected, base_pixels) << "The fixture must exercise an actual UI selection";
+    ASSERT_NE(expected, original) << "The selected and original legacy masks must be distinguishable";
+    EXPECT_EQ(actual, expected) << "The production completed PS must consume current t3, not original t8";
+    ASSERT_EQ(actual.size(), static_cast<std::size_t>(width) * height * 2u * sizeof(rgba32f_t));
+    const auto pixels = unpack_rgba32f(actual);
+    for (UINT eye = 0u; eye < 2u; ++eye) {
+      const auto at = [&](UINT x) {
+        return row * width * 2u + eye * width + x;
+      };
+      const UINT first = eye == 0u ? 66u : (shift == 2.0f ? 62u : 61u);
+      const UINT last = eye == 0u && shift != 2.0f ? 67u : (eye == 0u ? 66u : 62u);
+      for (UINT x = first; x <= last; ++x) {
+        EXPECT_NEAR(pixels[at(x)].r, shift == 2.0f ? 1.0f : 0.5f, 2.0e-6f) << "eye=" << eye;
+      }
+      EXPECT_EQ(pixels[at(eye == 0u ? 62u : 66u)].r, 0.0f) << "Base glyph ghost must select UI too";
+      EXPECT_EQ(pixels[at(eye == 0u ? 94u : 98u)].r, 1.0f) << "Original-only glyph remains ordinary Base";
+    }
+    // An unavailable selected receipt executes the exact original legacy GPU route.
+    EXPECT_EQ(render(completed, &subtitle), original);
+    for (const UINT word : {0u, 1u, 3u, 4u, 16u, 20u, 22u, 23u, 24u, 25u, 26u, 28u, 62u, 63u}) {
+      SCOPED_TRACE(word);
+      auto stale = outline;
+      stale.receipt[word] ^= word == 22u ? 2u : 1u;
+      EXPECT_EQ(render(completed, &subtitle, &stale), original);
+    }
+    auto wrong_kind = outline;
+    wrong_kind.receipt[2u] = 1u;  // Algorithm2 requires current kind3, never a baseline kind.
+    EXPECT_EQ(render(completed, &subtitle, &wrong_kind), original);
+    auto missing_token = outline;
+    missing_token.receipt[60u] = missing_token.receipt[61u] = 0u;
+    EXPECT_EQ(render(completed, &subtitle, &missing_token), original);
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, CompletedCurrentOutlineDrawRejectsStaleOwnersAndRevokesChangedRgb) {
+  namespace v2 = models::depth_coordinate_v2;
+  constexpr UINT width = 128u, height = 4u, row = 2u, glyph_x = 64u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(width * height, -2.0f / width);
+  std::vector<rgba32f_t> source(width * height, {0.0f, 0.0f, 0.0f, 1.0f});
+  source[row * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
+  auto original = make_subtitle_inputs(width, height, state, 2.0f / width);
+  original.snapshot[row * width + glyph_x] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  auto original_outline = make_current_outline_inputs(original);
+  original_outline.matte[row * width + glyph_x] = 1u;
+  std::string error;
+  live_v2_warp_fixture_t completed, legacy, flat;
+  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(legacy.initialize(error)) << error;
+  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main)) << error;
+  const auto render = [&](live_v2_warp_fixture_t &fixture, const auto &owner, const subtitle_inputs_t *subtitle, const current_outline_inputs_t *outline = nullptr) {
+    std::vector<std::byte> output;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t), width, height, source.data(), base, base, owner, {}, output, error, 0u, 0u, {}, subtitle, nullptr, true, outline)) << error;
+    return output;
+  };
+  const auto base_pixels = render(legacy, state, nullptr);
+  const auto selected_pixels = render(completed, state, &original, &original_outline);
+  ASSERT_NE(selected_pixels, base_pixels);
+  for (UINT fault = 0u; fault < 11u; ++fault) {
+    SCOPED_TRACE(fault);
+    auto subtitle = original;
+    auto outline = original_outline;
+    switch (fault) {
+      case 0u:
+        subtitle.constants.enabled = 0u;
+        break;
+      case 1u:
+        subtitle.condition[4u] = 0u;
+        break;
+      case 2u:
+        subtitle.condition[2u] = 0u;
+        break;
+      case 3u:
+        subtitle.identity[3u] ^= 1u;
+        break;
+      case 4u:
+        subtitle.constants.analysis_generation_low ^= 1u;
+        break;
+      case 5u:
+        subtitle.identity[20u] ^= 1u;
+        break;
+      case 6u:
+        subtitle.snapshot[row * width + glyph_x].a = 0u;
+        break;
+      case 7u:
+        subtitle.identity[22u] ^= 1u;
+        break;
+      case 8u:
+        subtitle.identity[24u] = 1u;
+        break;
+      case 9u:
+        subtitle.condition[5u] = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());
+        break;
+      case 10u:
+        outline.matte.assign(width * height, 0u);
+        break;
+    }
+    // Bind a receipt that exactly mirrors the malformed current tuple as well. Receipt equality
+    // must never bypass the independent SCT/SCP/clock checks in the real completed pixel shader.
+    const auto mask = outline.matte;
+    outline = make_current_outline_inputs(subtitle);
+    outline.matte = mask;
+    EXPECT_EQ(render(completed, state, &subtitle, &outline), base_pixels);
+  }
+  source[row * width + glyph_x] = {0.2f, 0.0f, 0.0f, 1.0f};
+  EXPECT_EQ(render(completed, state, &original, &original_outline), render(legacy, state, nullptr))
+    << "A valid retained mask cannot retain a glyph whose current native color disagrees";
+  source[row * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
+  EXPECT_EQ(render(completed, state, &original, &original_outline), selected_pixels);
+  auto unauthenticated = state;
+  unauthenticated[v2::renderer_authorization_bits] ^= 1u;
+  EXPECT_EQ(render(completed, unauthenticated, &original, &original_outline), render(flat, unauthenticated, nullptr));
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, CompletedCurrentOutlineDrawUsesRoiScaleAndSdrLinearHdrSnapshots) {
+  constexpr UINT width = 128u, height = 16u, field_width = 16u, field_height = 4u;
+  constexpr UINT glyph_x = 64u, glyph_y = 10u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(field_width * field_height, 0.0f);
+  host_sbs_v2_geometry_t geometry {
+    .video_roi_active = 1.0f,
+    .video_roi_left = 0.25f,
+    .video_roi_top = 0.25f,
+    .video_roi_right = 0.75f,
+    .video_roi_bottom = 0.75f,
+    .tensor_content_right = field_width,
+    .tensor_content_bottom = field_height,
+  };
+  std::string error;
+  live_v2_warp_fixture_t completed, legacy;
+  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(legacy.initialize(error)) << error;
+  for (UINT mode = 0u; mode < 3u; ++mode) {
+    SCOPED_TRACE(mode);
+    auto subtitle = make_subtitle_inputs(64u, 8u, state, 2.0f / 64u, field_width, field_height);
+    subtitle.constants.color_mode = mode;
+    subtitle.constants.source_left = 32u;
+    subtitle.constants.source_top = 4u;
+    subtitle.height = 4u;
+    subtitle.identity[10u] = 4u;
+    subtitle.identity[11u] = 4u;
+    subtitle.matte.resize(64u * 4u);
+    subtitle.snapshot.resize(64u * 4u);
+    const auto native_index = (glyph_y - 8u) * 64u + (glyph_x - 32u);
+    const std::uint16_t native = mode == 2u ? 0x3c00u : 0x3800u;
+    const std::uint16_t display = mode == 0u ? 0x3800u : 0x39e2u;
+    subtitle.snapshot[native_index] = {display, display, display, 0x3c00u};
+    auto outline = make_current_outline_inputs(subtitle);
+    outline.matte[native_index] = 1u;
+    auto reference = subtitle;
+    reference.matte = outline.matte;
+    std::vector<rgba16_bits_t> source(width * height, {0u, 0u, 0u, 0x3c00u});
+    source[glyph_y * width + glyph_x] = {native, native, native, 0x3c00u};
+    const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *ui, const current_outline_inputs_t *selected = nullptr) {
+      std::vector<std::byte> output;
+      EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base, state, {}, output, error, field_width, field_height, geometry, ui, nullptr, true, selected)) << error;
+      return output;
+    };
+    const auto actual = render(completed, &subtitle, &outline);
+    EXPECT_EQ(actual, render(legacy, &reference));
+    ASSERT_NE(actual, render(legacy, nullptr));
+    ASSERT_EQ(actual.size(), static_cast<std::size_t>(width) * height * 2u * sizeof(rgba16_bits_t));
+    const auto pixels = unpack_rgba16(actual);
+    for (UINT eye = 0u; eye < 2u; ++eye) {
+      const auto moved_x = eye == 0u ? 66u : 62u;
+      EXPECT_EQ(pixels[glyph_y * width * 2u + eye * width + moved_x], source[glyph_y * width + glyph_x]);
+      EXPECT_EQ(pixels[glyph_y * width * 2u + eye * width + glyph_x].r, 0u);
+    }
+    const std::uint16_t changed = mode == 2u ? 0x3800u : 0x3400u;
+    source[glyph_y * width + glyph_x] = {changed, changed, changed, 0x3c00u};
+    EXPECT_EQ(render(completed, &subtitle, &outline), render(legacy, nullptr));
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, CompletedCurrentOutlineDrawUsesGpuBackgroundAndRejectsStaleProof) {
+  constexpr UINT width = 128u, height = 4u, row = 2u, glyph_x = 64u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(width * height, -2.0f / width);
+  std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});  // .25
+  source[row * width + glyph_x] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};  // marked white
+  source[row * width + glyph_x + 1u] = {0x3a00u, 0x3a00u, 0x3a00u, 0x3c00u};  // unmarked .75
+  auto subtitle = make_subtitle_inputs(width, height, state, 2.5f / width);
+  subtitle.snapshot[row * width + glyph_x] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  auto outline = make_current_outline_inputs(subtitle);
+  outline.matte[row * width + glyph_x] = 1u;
+  std::string error;
+  live_v2_warp_fixture_t completed;
+  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  const auto render = [&](const current_outline_inputs_t &selected) {
+    std::vector<std::byte> output;
+    EXPECT_TRUE(completed.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base, state, {}, output, error, 0u, 0u, {}, &subtitle, nullptr, true, &selected)) << error;
+    return output;
+  };
+  const auto no_background = render(outline);
+  outline.background_requested = true;
+  const auto actual = render(outline);
+  ASSERT_NE(actual, no_background) << "The fixture must exercise the current background branch";
+  ASSERT_EQ(actual.size(), static_cast<std::size_t>(width) * height * 2u * sizeof(rgba16_bits_t));
+  const auto pixels = unpack_rgba16(actual);
+  for (UINT eye = 0u; eye < 2u; ++eye) {
+    const auto at = [&](UINT x) {
+      return row * width * 2u + eye * width + x;
+    };
+    const UINT first = eye == 0u ? 66u : 61u;
+    // Only marked white contributes to UI; the .75 unmarked UI tap must not enter the blend.
+    // The real push/pull owner reconstructs the uniform .25 background from its clear seeds.
+    EXPECT_EQ(pixels[at(first)].r, 0x3900u);  // .5 * 1 + .5 * .25 = .625
+    EXPECT_EQ(pixels[at(first + 1u)].r, 0x3900u);
+    EXPECT_EQ(pixels[at(eye == 0u ? 63u : 67u)].r, 0x3400u) << "erase1 neighbor uses current repaired Base";
+  }
+  outline.stale_background_proof = true;
+  EXPECT_EQ(render(outline), no_background) << "A stale BG owner must use the exact qualified no-BG GPU route";
+}
+
+TEST(HostSbsV2LiveWarpSourceTest, CurrentOutlineFallbackForwardsTheOriginalBaseInverse) {
+  for (const auto *role : {"completed", "queued"}) {
+    SCOPED_TRACE(role);
+    const auto path = std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline" / role / "include" / "host_sbs_subtitle_render.hlsl";
+    std::ifstream file(path, std::ios::binary);
+    ASSERT_TRUE(file);
+    const std::string source {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    const auto selector = source.find("float2 SelectSourceUVFromBase(");
+    const auto wrapper = source.find("float2 SelectSourceUV(", selector);
+    const auto fallback = source.find("float4 BackgroundOldSelectedSample(", wrapper);
+    const auto background_gate = source.find("bool CurrentBackgroundAuthorized(", fallback);
+    const auto colour = source.find("float4 SelectPushPullColour(", background_gate);
+    ASSERT_NE(selector, std::string::npos);
+    ASSERT_NE(wrapper, std::string::npos);
+    ASSERT_NE(fallback, std::string::npos);
+    ASSERT_NE(background_gate, std::string::npos);
+    ASSERT_NE(colour, std::string::npos);
+    EXPECT_EQ(source.substr(selector, wrapper - selector).find("ReprojectIfAuthorized("), std::string::npos);
+    EXPECT_NE(source.substr(wrapper, fallback - wrapper).find("ReprojectIfAuthorized(destination_uv,eye_sign)"), std::string::npos);
+    const auto fallback_body = source.substr(fallback, background_gate - fallback);
+    EXPECT_NE(fallback_body.find("SelectSourceUVFromBase(uv,eye_sign,base_uv)"), std::string::npos);
+    EXPECT_EQ(fallback_body.find("ReprojectIfAuthorized("), std::string::npos);
+    EXPECT_EQ(fallback_body.find("SelectSourceUV("), std::string::npos);
+    const auto colour_body = source.substr(colour);
+    const auto inverse = colour_body.find("base_uv=ReprojectIfAuthorized(source_uv,eye_sign)");
+    ASSERT_NE(inverse, std::string::npos);
+    const auto inverse_call = colour_body.find("ReprojectIfAuthorized(", inverse);
+    EXPECT_EQ(colour_body.find("ReprojectIfAuthorized(", inverse_call + 1u), std::string::npos);
+    std::size_t next = 0u;
+    bool found_fallback = false;
+    while ((next = colour_body.find("return BackgroundOldSelectedSample(", next)) != std::string::npos) {
+      found_fallback = true;
+      const auto end = colour_body.find(';', next);
+      ASSERT_NE(end, std::string::npos);
+      EXPECT_EQ(colour_body.substr(next, end - next), "return BackgroundOldSelectedSample(source_uv,eye_sign,base_uv)");
+      next = end + 1u;
+    }
+    EXPECT_TRUE(found_fallback);
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, CompletedFallbackMatchesPriorShaderAcrossSignedRoiTransfers) {
+  constexpr UINT width = 128u, height = 16u, field_width = 16u, field_height = 4u;
+  constexpr UINT glyph_x = 64u, glyph_y = 10u;
+  const auto state = make_live_state(true, true);
+  std::string error;
+  live_v2_warp_fixture_t completed, legacy, prior;
+  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(legacy.initialize(error)) << error;
+  const auto *reference_root = std::getenv("SUNSHINE_TEST_HOST_SBS_COMPLETED_REFERENCE_ROOT");
+  const auto *reference_closure = std::getenv("SUNSHINE_TEST_HOST_SBS_COMPLETED_REFERENCE_CLOSURE");
+  const bool compare_prior = reference_root && *reference_root;
+  ASSERT_EQ(compare_prior, reference_closure && *reference_closure);
+  if (compare_prior) {
+    ASSERT_TRUE(prior.initialize(error, warp_shader_e::current_outline_completed, false, false, std::filesystem::path(reference_root), reference_closure)) << error;
+  }
+  for (const bool roi : {false, true}) {
+    SCOPED_TRACE(roi);
+    const UINT analysis_width = roi ? 64u : width;
+    const UINT analysis_height = roi ? 8u : height;
+    host_sbs_v2_geometry_t geometry;
+    if (roi) {
+      geometry.video_roi_active = 1.0f;
+      geometry.video_roi_left = geometry.video_roi_top = 0.25f;
+      geometry.video_roi_right = geometry.video_roi_bottom = 0.75f;
+      geometry.tensor_content_right = field_width;
+      geometry.tensor_content_bottom = field_height;
+    }
+    for (const float sign : {-1.0f, 1.0f}) {
+      SCOPED_TRACE(sign);
+      std::vector<float> base(field_width * field_height);
+      for (UINT y = 0u; y < field_height; ++y) {
+        for (UINT x = 0u; x < field_width; ++x) {
+          base[y * field_width + x] = sign * (1.25f + 0.5f * float(x) / float(field_width - 1u) + 0.125f * float(y)) / float(analysis_width);
+        }
+      }
+      for (const float shift : {2.0f, 2.5f}) {
+        SCOPED_TRACE(shift);
+        for (UINT mode = 0u; mode < 3u; ++mode) {
+          SCOPED_TRACE(mode);
+          auto subtitle = make_subtitle_inputs(analysis_width, analysis_height, state, shift / float(analysis_width), field_width, field_height);
+          subtitle.constants.color_mode = mode;
+          subtitle.constants.source_left = roi ? 32u : 0u;
+          subtitle.constants.source_top = roi ? 4u : 0u;
+          const auto index = (glyph_y - subtitle.constants.source_top) * analysis_width + glyph_x - subtitle.constants.source_left;
+          subtitle.matte[index] = 1u;
+          const std::uint16_t native = mode == 2u ? 0x3c00u : 0x3800u;
+          const std::uint16_t display = mode == 0u ? 0x3800u : 0x39e2u;
+          subtitle.snapshot[index] = {display, display, display, 0x3c00u};
+          auto outline = make_current_outline_inputs(subtitle);
+          std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});
+          source[glyph_y * width + glyph_x] = {native, native, native, 0x3c00u};
+          const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *ui, const current_outline_inputs_t *selected) {
+            std::vector<std::byte> output;
+            EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base, state, {}, output, error, field_width, field_height, geometry, ui, nullptr, true, selected)) << error;
+            return output;
+          };
+          const auto ordinary = render(legacy, &subtitle, nullptr);
+          ASSERT_NE(ordinary, render(legacy, nullptr, nullptr)) << "The edge case must select its glyph plane";
+          for (const bool stale_background : {false, true}) {
+            SCOPED_TRACE(stale_background);
+            outline.background_requested = stale_background;
+            outline.stale_background_proof = stale_background;
+            const auto actual = render(completed, &subtitle, &outline);
+            EXPECT_EQ(actual, ordinary) << "Missing/stale BG retains the actual ordinary GPU selector";
+            if (compare_prior) {
+              EXPECT_EQ(actual, render(prior, &subtitle, &outline)) << "Frozen pre-change actual completed PS parity";
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Actual completed renderer replay of a bound live HDR tuple. References execute GPU shaders;
+// cropped RGB is evidence, never a CPU inverse, segmentation oracle or release-quality score.
+TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
+  const auto *input_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_OUTLINE_CASES");
+  if (!input_env || !*input_env) GTEST_SKIP() << "No saved-current HDR specification selected";
+  const auto *output_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_DRAW_OUTPUT");
+  ASSERT_TRUE(output_env && *output_env);
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+  using json = nlohmann::json;
+  const auto require = [](bool valid, const std::string &message) {
+    if (!valid) throw std::runtime_error(message);
+  };
+  const auto read = [&](const fs::path &path) {
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    require(bool(stream) && stream.tellg() >= 0, "Cannot read saved-current draw operand");
+    std::vector<char> bytes(static_cast<std::size_t>(stream.tellg()));stream.seekg(0);
+    stream.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));require(bool(stream), "Incomplete saved-current draw operand");
+    return bytes;
+  };
+  const auto sha256 = [](const auto &bytes) {
+    const auto hash = crypto::hash(std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()));
+    constexpr char digits[] = "0123456789abcdef";std::string result;
+    for (auto byte : hash) {result.push_back(digits[byte >> 4u]);result.push_back(digits[byte & 15u]);}
+    return result;
+  };
+  try {
+    const fs::path input(input_env), output(output_env);
+    const auto specification_bytes = read(input);
+    const auto spec = json::parse(specification_bytes.begin(), specification_bytes.end());
+    require(spec.at("schema") == 1u && (spec.at("driver") == "hardware" || spec.at("driver") == "warp"), "Saved-current draw schema/driver");
+    require(!fs::exists(output) || (fs::is_directory(output) && fs::is_empty(output)), "Saved-current draw output must be new or empty");
+    const auto &cases = spec.at("cases");require(cases.is_array() && !cases.empty() && cases.size() <= 8u, "Saved-current draw case count");
+    fs::create_directories(output);
+    const bool hardware = spec.at("driver") == "hardware";
+    live_v2_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed, false, hardware)) << error;
+    std::array<wchar_t, 32768u> exe_path {};
+    const auto exe_size = GetModuleFileNameW(nullptr, exe_path.data(), DWORD(exe_path.size()));
+    require(exe_size > 0u && exe_size < exe_path.size(), "Cannot locate current draw replay executable");
+    const fs::path executable(std::wstring(exe_path.data(), exe_size));
+    const auto executable_bytes = read(executable);
+    const auto fixture_path = fs::path(SUNSHINE_SOURCE_DIR) / "tests/unit/test_host_sbs_v2_live_warp.cpp";
+    const auto fixture_bytes = read(fixture_path);
+    json report {{"schema", 1u}, {"driver", spec.at("driver")}, {"adapter", fixture.adapter_identity()},
+      {"input_specification", {{"path", input.string()}, {"sha256", sha256(specification_bytes)}}},
+      {"test_executable", {{"path", executable.string()}, {"sha256", sha256(executable_bytes)}}},
+      {"fixture_source", {{"path", fixture_path.string()}, {"sha256", sha256(fixture_bytes)}}},
+      {"completed_shader_closure", models::current_outline_runtime::completed_closure},
+      {"background_shader_closure", models::selected_glyph_push_pull_runtime_v1::closure},
+      {"scope", "Literal saved native-HDR production completed pixel shader inputs, shared draw recorder and selected/background scopes"},
+      {"pixel_route_map", "not exported; colour crops and whole-output hashes only"},
+      {"quality_claim", false}, {"performance_claim", false}, {"cases", json::array()}};
+    const auto read_binding = [&](const json &binding) {
+      const auto bytes = read(binding.at("path").get<std::string>());
+      require(binding.at("byte_count") == bytes.size() && binding.at("sha256") == sha256(bytes), "Candidate draw binding drift");
+      return bytes;
+    };
+    const auto *candidate_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_DRAW_CANDIDATE_CASES");
+    const bool has_candidate = candidate_env && *candidate_env;
+    std::vector<char> candidate_specification_bytes, candidate_producer_bytes;
+    json candidate_specification, candidate_producer;
+    json fixture_f2_binding;
+    if (has_candidate) {
+      candidate_specification_bytes = read(candidate_env);
+      candidate_specification = json::parse(candidate_specification_bytes.begin(), candidate_specification_bytes.end());
+      require(candidate_specification.at("schema") == 1u && candidate_specification.at("cases").is_array() &&
+        candidate_specification.at("cases").size() == cases.size(), "Candidate draw specification schema/cases");
+      candidate_producer_bytes = read_binding(candidate_specification.at("producer_report"));
+      candidate_producer = json::parse(candidate_producer_bytes.begin(), candidate_producer_bytes.end());
+      require(candidate_producer.at("schema") == 1u && candidate_producer.at("driver") == spec.at("driver"), "Candidate producer schema/driver");
+      require(candidate_producer.at("test_executable").at("sha256") == sha256(executable_bytes), "Candidate producer and draw must use the same test executable");
+      namespace runtime = models::current_outline_runtime;
+      const bool compiled_hole_ready = candidate_producer.at("hole_policy").at("production_program_ready").get<bool>();
+      const bool compiled_coverage_ready = candidate_producer.at("coverage_policy").at("production_program_ready").get<bool>();
+      require(candidate_producer.at("coverage_policy").at("compiled_source_closure") == runtime::coverage_closure,
+        "Candidate coverage source inventory mismatch");
+      require(candidate_producer.at("hole_policy").at("compiled_source_closure") == runtime::hole_closure &&
+        candidate_producer.at("hole_policy").at("compiled_helper_pin") == subtitle_test_source_pins::current_mask_holes,
+        "Candidate hole source/helper inventory mismatch");
+      const std::array<std::pair<const char *, std::string_view>, 11u> compiled_closures {{
+        {"source5", runtime::source5_closure}, {"colour", runtime::colour_closure}, {"components", runtime::components_closure},
+        {"enclosure", runtime::enclosure_closure}, {"roi", runtime::roi_closure}, {"outline", runtime::outline_closure},
+        {"inside", runtime::inside_closure}, {"selector", runtime::selector_closure}, {"stability", runtime::stability_closure},
+        {"hole", compiled_hole_ready ? runtime::hole_closure : std::string_view()},
+        {"coverage", compiled_coverage_ready ? runtime::coverage_closure : std::string_view()}}};
+      const bool fixture_f2 = candidate_producer.value("prototype_not_production_qualified", false);
+      json expected_compiled = json::object();for (const auto &[name, closure] : compiled_closures) expected_compiled[name] = closure;
+      if (fixture_f2) {
+        const auto *opt_in = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_OUTLINE_FIXTURE_F2");
+        require(opt_in && std::string_view(opt_in) == "1", "Prototype F2 draw requires explicit fixture opt-in");
+        require(candidate_producer.at("compiled_production_closures") == expected_compiled &&
+          candidate_producer.at("effective_composition_closures") == candidate_producer.at("closures") &&
+          candidate_producer.at("closures").size() == compiled_closures.size(), "Prototype F2 compiled/effective inventory mismatch");
+        const auto &override = candidate_producer.at("fixture_f2_override");
+        require(override.at("compiled_outline_helper_pin") == subtitle_test_source_pins::current_outline_support, "Prototype F2 helper ABI mismatch");
+        fixture_f2_binding = json::object();
+        const auto check_group = [&](const char *name, const char *root_env, const char *pin_env, const auto &specs) {
+          const auto *root = std::getenv(root_env), *pin = std::getenv(pin_env);
+          require(root && *root && pin && *pin, "Prototype F2 requires actual external root and pin");
+          const auto sources = models::host_sbs_shader_cache::snapshot_sources(root, specs);
+          require(sources && models::host_sbs_shader_cache::source_closure_sha256(sources) == pin &&
+            candidate_producer.at("closures").at(name) == pin && override.at(std::string(name) + "_closure") == pin &&
+            fs::weakly_canonical(root) == fs::weakly_canonical(override.at(std::string(name) + "_root").get<std::string>()), "Prototype F2 source/root/closure mismatch");
+          fixture_f2_binding[name] = {{"root", root}, {"source_closure_sha256", pin}};
+        };
+        check_group("outline", "SUNSHINE_TEST_OUTLINE_CLOSURE_SHADER_ROOT", "SUNSHINE_TEST_OUTLINE_CLOSURE_SHADER_PIN", runtime::outline_specs);
+        check_group("stability", "SUNSHINE_TEST_BLACK_STABILITY_SHADER_ROOT", "SUNSHINE_TEST_BLACK_STABILITY_SHADER_PIN", runtime::stability_specs);
+        if (!candidate_producer.at("closures").at("hole").get<std::string>().empty())
+          check_group("hole", "SUNSHINE_TEST_CURRENT_HOLE_SHADER_ROOT", "SUNSHINE_TEST_CURRENT_HOLE_SHADER_PIN", runtime::hole_specs);
+        if (!candidate_producer.at("closures").at("coverage").get<std::string>().empty())
+          check_group("coverage", "SUNSHINE_TEST_STROKE_COVERAGE_SHADER_ROOT", "SUNSHINE_TEST_STROKE_COVERAGE_SHADER_PIN", runtime::coverage_specs);
+        report["prototype_not_production_qualified"] = true;
+        report["effective_producer_closures"] = candidate_producer.at("closures");
+        report["compiled_production_closures"] = expected_compiled;
+        report["fixture_f2_source_bindings"] = fixture_f2_binding;
+      }
+      for (const auto &[name, expected] : compiled_closures) {
+        if (fixture_f2 && (std::string_view(name) == "outline" || std::string_view(name) == "stability" ||
+                           std::string_view(name) == "hole" || std::string_view(name) == "coverage")) continue;
+        require(candidate_producer.at("closures").at(name) == expected, "Candidate producer runtime closure mismatch");
+      }
+      report["candidate_input_specification"] = {{"path", candidate_env}, {"sha256", sha256(candidate_specification_bytes)}};
+      report["candidate_producer_report"] = candidate_specification.at("producer_report");
+    }
+    const auto *experimental_bg_root = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_BG_SHADER_ROOT");
+    const auto *experimental_bg_pin = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_BG_SHADER_PIN");
+    const bool has_experimental_bg = experimental_bg_root && *experimental_bg_root;
+    require(has_experimental_bg == bool(experimental_bg_pin && *experimental_bg_pin), "Experimental BG requires both external root and exact closure pin");
+    if (has_experimental_bg) {
+      require(has_candidate, "Experimental BG requires a bound current producer mask/receipt");
+      ASSERT_TRUE(fixture.configure_experimental_background(experimental_bg_root, experimental_bg_pin, error)) << error;
+      report["experimental_background"] = {{"root", experimental_bg_root}, {"source_closure_sha256", experimental_bg_pin},
+        {"route", "candidate_own_only_background"}, {"not_production_qualified", true},
+        {"intended_causal_change", "Erase only current own M; retain original rawNear BG-seed exclusion"},
+        {"scope", "Pinned external six-CS experiment; completed PS, producer M/receipt and all six ordinary routes remain unchanged"}};
+    }
+    for (std::size_t index = 0u; index < cases.size(); ++index) {
+      const auto &entry = cases.at(index);SCOPED_TRACE(entry.at("name").get<std::string>());
+      const auto source_shape = entry.at("source").get<std::array<UINT, 2u>>();
+      const auto field = entry.at("field").get<std::array<UINT, 2u>>();
+      const auto shape = entry.at("analysis_shape").get<std::array<UINT, 4u>>();
+      const UINT width = source_shape[0], height = source_shape[1];
+      require(width > 0u && width <= 8192u && height > 0u && height <= 16384u &&
+        field[0] > 0u && field[0] <= 5120u && field[1] > 0u && field[1] <= 5120u &&
+        shape[0] > 0u && shape[0] <= 5120u && shape[1] > shape[2] && shape[1] <= 5120u &&
+        shape[3] == shape[1] - shape[2], "Saved-current draw extents");
+      const std::size_t native_pixels = std::size_t(shape[0]) * shape[3];
+      std::map<std::string, std::vector<char>> imported;
+      json bindings = json::object();
+      const auto operand = [&](const char *key, std::size_t size) {
+        const auto &binding = entry.at("artifacts").at(key);
+        const auto bytes = read(binding.at("path").get<std::string>());
+        require(bytes.size() == size && binding.at("byte_count") == size && binding.at("sha256") == sha256(bytes), std::string("Saved-current draw binding: ") + key);
+        imported.emplace(key, bytes);bindings[key] = binding;return bytes;
+      };
+      const auto object = [&]<typename T>(const char *key, T &target) {
+        const auto bytes = operand(key, sizeof(target));std::memcpy(&target, bytes.data(), bytes.size());
+      };
+      const auto vector = [&]<typename T>(const char *key, std::size_t count) {
+        const auto bytes = operand(key, count * sizeof(T));std::vector<T> values(count);
+        std::memcpy(values.data(), bytes.data(), bytes.size());return values;
+      };
+      const auto source = vector.template operator()<rgba16_bits_t>("source_rgba16f", std::size_t(width) * height);
+      const auto base = vector.template operator()<float>("base", std::size_t(field[0]) * field[1]);
+      models::depth_coordinate_v2::state_words_t state {};
+      host_sbs_v2_geometry_t geometry;
+      subtitle_inputs_t subtitle;
+      current_outline_inputs_t outline;
+      saved_background_inputs_t background;
+      object("state", state);object("geometry", geometry);object("subtitle_constants", subtitle.constants);
+      object("condition", subtitle.condition);object("current_sct", subtitle.identity);object("selected_receipt", outline.receipt);
+      object("background_proof", background.proof);object("background_expected", background.expected);
+      std::array<std::uint32_t, 24u> contour_constants {};
+      object("constants", contour_constants);
+      subtitle.width = shape[0];subtitle.height = shape[3];
+      subtitle.matte = vector.template operator()<std::uint32_t>("legacy_matte", native_pixels);
+      subtitle.snapshot = vector.template operator()<rgba16_bits_t>("display_snapshot", native_pixels);
+      outline.matte = vector.template operator()<std::uint32_t>("expected_selected_matte", native_pixels);
+      background.pixels = vector.template operator()<rgba32f_t>("background", native_pixels);
+      const auto bound_provenance = [&](const char *key) {
+        const auto &binding = entry.at("provenance").at(key);
+        const auto bytes = read(binding.at("path").get<std::string>());
+        require(binding.at("byte_count") == bytes.size() && binding.at("sha256") == sha256(bytes), "Saved-current draw provenance binding");
+        imported.emplace(key, bytes);bindings[key] = binding;
+        return json::parse(bytes.begin(), bytes.end());
+      };
+      const auto state_document = bound_provenance("typed_state_json");
+      const auto actual_draw = bound_provenance("actual_draw_evidence");
+      const float raw_scale = state_document.at("constants").at("raw_coordinate_scale").get<float>();
+      require(actual_draw.at("pixel_shader_closure") == models::current_outline_runtime::completed_closure &&
+        actual_draw.at("program") == "current-outline-selected", "Saved-current draw completed program identity");
+      require(subtitle.constants.color_mode == 2u && subtitle.constants.enabled == 1u &&
+        subtitle.constants.source_width == shape[0] && subtitle.constants.source_height == shape[1] &&
+        subtitle.identity[10u] == shape[2] && subtitle.identity[11u] == shape[3] &&
+        subtitle.constants.source_left <= width && shape[0] <= width - subtitle.constants.source_left &&
+        subtitle.constants.source_top <= height && shape[1] <= height - subtitle.constants.source_top, "Saved-current HDR draw geometry");
+      require(v2::parallax_state_words_are_authenticated(state, raw_scale, v2::adaptive_policy_id) &&
+        state[v2::renderer_authorization_bits] == v2::contract_tag, "Saved-current draw state authorization");
+      require(std::all_of(base.begin(), base.end(), [](float x) {return std::isfinite(x) && std::abs(x) <= v2::direct_container_limit;}), "Saved-current draw Base values");
+      for (const auto *mask : {&subtitle.matte, &outline.matte}) require(std::all_of(mask->begin(), mask->end(), [](auto x) {return x <= 1u;}), "Saved-current draw binary mask");
+      require(outline.receipt[0u] == 0x31534d53u && outline.receipt[1u] == 1u && outline.receipt[2u] == 3u &&
+        outline.receipt[3u] == 0u && outline.receipt[62u] == 2u && outline.receipt[63u] == 0u &&
+        std::equal(contour_constants.begin(), contour_constants.end(), outline.receipt.begin() + 4u) &&
+        std::equal(subtitle.identity.begin(), subtitle.identity.end(), outline.receipt.begin() + 28u), "Saved-current draw selected owner");
+      current_outline_inputs_t candidate_outline;
+      json candidate_binding;
+      if (has_candidate) {
+        const auto &mapping = candidate_specification.at("cases").at(index);
+        require(mapping.at("name") == entry.at("name"), "Candidate draw case order/name mismatch");
+        const auto producer_index = mapping.at("producer_case_index").get<std::size_t>();
+        require(producer_index < candidate_producer.at("cases").size(), "Candidate producer case index");
+        const auto &produced = candidate_producer.at("cases").at(producer_index);
+        require(produced.at("name") == entry.at("name") && produced.at("current_outline_authorized") == true &&
+          produced.at("model_frame") == entry.at("model_frame") && produced.at("observation_us") == entry.at("observation_us") &&
+          produced.at("analysis_generation") == entry.at("analysis_generation") && produced.at("token") == entry.at("token"), "Candidate producer current identity");
+        // Bind every model input as well as the output. These bytes never become substitute PS
+        // inputs; they establish that the candidate mask came from this exact saved current case.
+        constexpr std::array<const char *, 11u> producer_input_names {"source_rgba16f", "display_snapshot", "probability", "support",
+          "ocr_record", "current_uip", "current_sct", "constants", "root_arguments", "legacy_matte", "expected_selected_matte"};
+        require(produced.at("input_bindings").is_object() && produced.at("input_bindings").size() == producer_input_names.size(), "Candidate producer input coverage");
+        for (const auto *name : producer_input_names) {
+          const auto &binding = produced.at("input_bindings").at(name);
+          const auto &original = entry.at("artifacts").at(name);
+          require(binding.at("sha256") == original.at("sha256") && binding.at("byte_count") == original.at("byte_count"), "Candidate producer input differs from frozen tuple");
+          const auto bytes = read_binding(binding);
+          const auto key = std::string("candidate_producer_input:") + name;imported.emplace(key, bytes);bindings[key] = binding;
+        }
+        for (const auto &[key, artifact] : std::array<std::pair<const char *, const char *>, 2u> {{
+          {"selected_matte", "selected_M.u32"}, {"selected_receipt", "selected_receipt.u32"}}}) {
+          const auto &binding = mapping.at(key), &actual = produced.at("artifacts").at(artifact);
+          require(binding.at("sha256") == actual.at("sha256") && binding.at("byte_count") == actual.at("byte_count"), "Candidate mask/receipt not joined to producer output");
+          const auto bytes = read_binding(binding);
+          const auto input_key = std::string("candidate_") + key;imported.emplace(input_key, bytes);bindings[input_key] = binding;
+          if (std::string_view(key) == "selected_matte") {
+            require(bytes.size() == native_pixels * 4u, "Candidate native matte size");
+            candidate_outline.matte.resize(native_pixels);std::memcpy(candidate_outline.matte.data(), bytes.data(), bytes.size());
+          } else {
+            require(bytes.size() == sizeof(candidate_outline.receipt), "Candidate selected receipt size");
+            std::memcpy(candidate_outline.receipt.data(), bytes.data(), bytes.size());
+          }
+        }
+        require(std::all_of(candidate_outline.matte.begin(), candidate_outline.matte.end(), [](auto x) {return x <= 1u;}), "Candidate matte is not literal binary");
+        const auto candidate_count = std::count(candidate_outline.matte.begin(), candidate_outline.matte.end(), 1u);
+        require(produced.at("actual_selected_pixels") == candidate_count, "Candidate producer matte count mismatch");
+        require(candidate_outline.receipt[0u] == 0x31534d53u && candidate_outline.receipt[1u] == 1u &&
+          candidate_outline.receipt[2u] == 3u && candidate_outline.receipt[3u] == 0u &&
+          candidate_outline.receipt[62u] == 2u && candidate_outline.receipt[63u] == 0u &&
+          candidate_outline.receipt[60u] == outline.receipt[60u] && candidate_outline.receipt[61u] == outline.receipt[61u] &&
+          std::equal(contour_constants.begin(), contour_constants.end(), candidate_outline.receipt.begin() + 4u) &&
+          std::equal(subtitle.identity.begin(), subtitle.identity.end(), candidate_outline.receipt.begin() + 28u), "Candidate selected current receipt");
+        candidate_outline.background_requested = true;
+        candidate_binding = {{"producer_report", candidate_specification.at("producer_report")}, {"producer_case_index", producer_index},
+          {"selected_matte", mapping.at("selected_matte")}, {"selected_receipt", mapping.at("selected_receipt")},
+          {"background_policy", "New GPU background owner for actual candidate M; captured old background is never bound"}};
+      }
+      const auto expected = outline.matte;
+      UINT left = width, top = height, right = 0u, bottom = 0u;
+      for (UINT y = 0u; y < shape[3]; ++y) for (UINT x = 0u; x < shape[0]; ++x) if (expected[std::size_t(y) * shape[0] + x]) {
+        const UINT fx = subtitle.constants.source_left + x, fy = subtitle.constants.source_top + shape[2] + y;
+        left = std::min(left, fx);top = std::min(top, fy);right = std::max(right, fx + 1u);bottom = std::max(bottom, fy + 1u);
+      }
+      require(left < right && top < bottom && right <= width && bottom <= height, "Saved-current caption crop");
+      left = left > 128u ? left - 128u : 0u;top = top > 32u ? top - 32u : 0u;
+      right = std::min(width, right + 128u);bottom = std::min(height, bottom + 32u);
+      const auto case_output = output / ("case_" + std::to_string(index));fs::create_directory(case_output);
+      json result {{"name", entry.at("name")}, {"crop_ltrb", {left, top, right, bottom}}, {"crop_layout", "eye-major RGBA16F tightly packed"},
+        {"input_bindings", bindings}, {"routes", json::object()}};
+      if (has_candidate) result["candidate"] = candidate_binding;
+      std::vector<std::byte> captured;
+      std::vector<std::string> routes {"captured", "regenerated_background", "no_background", "base", "ui_reference"};
+      if (has_candidate) routes.emplace_back("candidate_regenerated_background");
+      if (has_experimental_bg) routes.emplace_back("candidate_own_only_background");
+      for (const auto &route : routes) {
+        auto render_subtitle = subtitle;auto render_outline = outline;auto render_geometry = geometry;
+        auto render_base = base;
+        if (route == "captured") render_outline.saved_background = &background;
+        if (route == "regenerated_background") render_outline.background_requested = true;
+        if (route == "candidate_regenerated_background") render_outline = candidate_outline;
+        saved_background_inputs_t actual_background;
+        if (route == "candidate_own_only_background") {
+          render_outline = candidate_outline;
+          render_outline.experimental_background = true;
+        }
+        const bool capture_background = has_experimental_bg &&
+          (route == "candidate_regenerated_background" || route == "candidate_own_only_background");
+        if (capture_background) render_outline.background_diagnostic_output = &actual_background;
+        if (route == "base" || route == "ui_reference") render_subtitle.constants.enabled = 0u;
+        if (route == "ui_reference") {
+          const float target = std::bit_cast<float>(subtitle.condition[5u]) * (float(shape[0]) / float(width));
+          require(std::isfinite(target) && target >= 0.0f && target <= v2::direct_container_limit, "Saved-current UI reference target");
+          std::fill(render_base.begin(), render_base.end(), target);render_geometry.video_roi_active = 0.0f;
+        }
+        std::vector<std::byte> pixels;
+        ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+          source.data(), render_base, render_base, state, {}, pixels, error, field[0], field[1], render_geometry,
+          &render_subtitle, nullptr, true, &render_outline)) << route << ": " << error;
+        ASSERT_EQ(pixels.size(), std::size_t(width) * height * 2u * sizeof(rgba16_bits_t));
+        if (route == "captured") captured = pixels;
+        if (route == "regenerated_background") result["captured_vs_regenerated_background_bitexact"] = pixels == captured;
+        if (route == "no_background") result["captured_differs_from_no_background"] = pixels != captured;
+        const std::size_t row_bytes = std::size_t(right - left) * sizeof(rgba16_bits_t);
+        std::vector<std::byte> crop(row_bytes * (bottom - top) * 2u);
+        for (UINT eye = 0u; eye < 2u; ++eye) for (UINT y = top; y < bottom; ++y) {
+          const auto src = (std::size_t(y) * width * 2u + eye * width + left) * sizeof(rgba16_bits_t);
+          const auto dst = (std::size_t(eye) * (bottom - top) + y - top) * row_bytes;
+          std::memcpy(crop.data() + dst, pixels.data() + src, row_bytes);
+        }
+        const auto path = case_output / (route + ".rgba16f");
+        std::ofstream stream(path, std::ios::binary);stream.write(reinterpret_cast<const char *>(crop.data()), static_cast<std::streamsize>(crop.size()));
+        require(bool(stream), "Cannot write saved-current draw crop");
+        result["routes"][route] = {{"whole_output_sha256", sha256(pixels)}, {"crop", {{"path", path.string()}, {"byte_count", crop.size()}, {"sha256", sha256(crop)}}}};
+        if (capture_background) {
+          require(actual_background.pixels.size() == native_pixels, "Actual diagnostic BG dimensions");
+          const auto artifact = [&](const char *suffix, const void *data, std::size_t size) {
+            const auto destination = case_output / (route + suffix);
+            std::vector<char> bytes(size);std::memcpy(bytes.data(), data, size);
+            std::ofstream saved(destination, std::ios::binary);
+            saved.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));saved.close();
+            require(bool(saved), "Cannot write actual GPU BG diagnostic");
+            return json {{"path", destination.string()}, {"byte_count", bytes.size()}, {"sha256", sha256(bytes)}};
+          };
+          result["routes"][route]["actual_background"] = {
+            {"pixels", artifact(".background.rgba32f", actual_background.pixels.data(), actual_background.pixels.size() * sizeof(rgba32f_t))},
+            {"proof", artifact(".background-proof.u32", actual_background.proof.data(), sizeof(actual_background.proof))},
+            {"expected", artifact(".background-expected.u32", actual_background.expected.data(), sizeof(actual_background.expected))},
+            {"native_shape", {shape[0], shape[3]}}, {"selected_matte", candidate_binding.at("selected_matte")},
+            {"selected_receipt", candidate_binding.at("selected_receipt")},
+            {"shader_closure", route == "candidate_own_only_background" ? std::string(experimental_bg_pin) : std::string(models::selected_glyph_push_pull_runtime_v1::closure)},
+            {"not_production_qualified", route == "candidate_own_only_background"}};
+        }
+      }
+      if (entry.contains("provenance")) result["provenance"] = entry.at("provenance");
+      for (const auto &[key, bytes] : imported) require(read(bindings.at(key).at("path").get<std::string>()) == bytes, "Saved-current draw input changed during replay");
+      report["cases"].push_back(std::move(result));
+    }
+    require(read(input) == specification_bytes && read(executable) == executable_bytes && read(fixture_path) == fixture_bytes, "Saved-current draw implementation/specification changed");
+    if (has_candidate) {
+      require(read(candidate_env) == candidate_specification_bytes &&
+        read_binding(candidate_specification.at("producer_report")) == candidate_producer_bytes, "Candidate draw specification/producer report changed");
+    }
+    if (has_experimental_bg) require(fixture.experimental_background_source_unchanged(), "Experimental BG source changed during replay");
+    if (!fixture_f2_binding.is_null()) {
+      const auto unchanged = [&](const char *name, const auto &specs) {
+        const auto &binding = fixture_f2_binding.at(name);
+        const auto sources = models::host_sbs_shader_cache::snapshot_sources(binding.at("root").get<std::string>(), specs);
+        require(sources && models::host_sbs_shader_cache::source_closure_sha256(sources) == binding.at("source_closure_sha256").get<std::string>(), "Prototype F2 source changed during draw replay");
+      };
+      unchanged("outline", models::current_outline_runtime::outline_specs);
+      unchanged("stability", models::current_outline_runtime::stability_specs);
+      if (fixture_f2_binding.contains("hole")) unchanged("hole", models::current_outline_runtime::hole_specs);
+    }
+    std::ofstream stream(output / "report.json", std::ios::binary);stream << report.dump(2);require(bool(stream), "Cannot write saved-current draw report");
+  } catch (const std::exception &failure) {
+    FAIL() << failure.what();
+  }
+}
 
 // Opt-in evidence replay. The imported state and seven operands are literal saved bytes;
 // unlike the small fixtures above, this path never seals or fabricates a camera/owner state.

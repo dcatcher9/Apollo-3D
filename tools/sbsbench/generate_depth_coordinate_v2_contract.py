@@ -33,6 +33,50 @@ HLSL_OCR_ASSERT_TARGET = (
     ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx" /
     "include" / "depth_coordinate_v2_ocr_assert.generated.hlsl"
 )
+# Current-outline snapshots compile with their own include directories. They consume the same
+# authenticated contract as the root producer and must change before closure pins are refreshed.
+SHADER_ROOT = HLSL_TARGET.parent.parent
+HLSL_TARGETS = (
+    HLSL_TARGET,
+    *(SHADER_ROOT / "current_outline" / variant / "include" / HLSL_TARGET.name
+      for variant in ("colour", "completed", "enclosure", "queued")),
+)
+HLSL_OCR_ASSERT_TARGETS = (
+    HLSL_OCR_ASSERT_TARGET,
+    *(SHADER_ROOT / "current_outline" / variant / "include" / HLSL_OCR_ASSERT_TARGET.name
+      for variant in ("colour", "enclosure")),
+)
+# CBC owns the physical-black model predicates. Each independently authenticated shader group
+# must keep includes inside its own root, so F2 consumes a byte-identical generated mirror rather
+# than a second editable algorithm or an include escaping to the CBC group. Materialize the
+# mirror before refreshing any closure, and reject drift during ordinary contract checks.
+PHYSICAL_BLACK_MODEL_SOURCE = SHADER_ROOT / "current_outline" / "enclosure" / "physical_black_model_shared.hlsl"
+PHYSICAL_BLACK_MODEL_MIRRORS = (
+    SHADER_ROOT / "current_outline" / "outline" / PHYSICAL_BLACK_MODEL_SOURCE.name,
+    SHADER_ROOT / "current_outline" / "hole" / PHYSICAL_BLACK_MODEL_SOURCE.name,
+)
+CURRENT_STROKE_MATH_SOURCE = SHADER_ROOT / "current_outline" / "inside" / "current_stroke_math_shared.hlsl"
+CURRENT_STROKE_MATH_TARGETS = tuple(
+    SHADER_ROOT / "current_outline" / variant / CURRENT_STROKE_MATH_SOURCE.name
+    for variant in ("outline", "hole")
+)
+CBC_UNIT_STATE_SOURCE = SHADER_ROOT / "current_outline" / "outline" / "cbc_unit_state_shared.hlsl"
+CBC_UNIT_STATE_MIRRORS = (
+    SHADER_ROOT / "current_outline" / "hole" / CBC_UNIT_STATE_SOURCE.name,
+)
+# Completed rendering owns the common selector/fallback helper. The queued probe compiles it
+# under its own SELECTED_MATTE_QUEUED macro and confined include root, with no editable fork.
+SELECTED_RENDER_HELPER_SOURCE = SHADER_ROOT / "current_outline" / "completed" / "include" / "host_sbs_subtitle_render.hlsl"
+SELECTED_RENDER_HELPER_MIRRORS = (
+    SHADER_ROOT / "current_outline" / "queued" / "include" / SELECTED_RENDER_HELPER_SOURCE.name,
+)
+CURRENT_OUTLINE_RUNTIME_HEADER = ROOT / "src" / "host_sbs_current_outline_runtime_programs.h"
+CURRENT_BACKGROUND_RUNTIME_HEADER = ROOT / "src" / "host_sbs_selected_glyph_push_pull_runtime.h"
+CURRENT_OUTLINE_RUNTIME_ROOTS = {
+    name: ("outline" if name == "stability" else "hole" if name == "coverage" else name)
+    for name in ("source5", "colour", "components", "enclosure", "roi", "outline", "stability",
+                 "inside", "selector", "completed", "queued", "hole", "coverage")
+}
 # Lines of LIMITER_SERIAL_MAX_LINES cells or fewer keep the serial float recurrence. Longer
 # lines are scanned in LIMITER_LINE_CHUNKS Q30 chunks, LIMITER_GROUP_LINES adjacent lines per
 # group, so neighboring threads read and write neighboring texels.
@@ -109,7 +153,7 @@ CANONICAL_FINAL_PARALLAX = {'schema': 4,
  'reuse_policy': 'reuse-holds-complete-base-state-matte-sct-scp-source-and-diagnostics-tuple',
  'invalid_policy': 'fail-closed-flat',
  'current_rgb_policy': 'bounded-matched-color-reuse-current-draw-can-only-revoke-matte'}
-CANONICAL_SUBTITLE_OCR = {'schema': 37,
+CANONICAL_SUBTITLE_OCR = {'schema': 38,
  'logical_model': 'ppocrv6_tiny_det_modelopt_fp16',
  'asset_path': 'models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx',
  'artifact_onnx_sha256': '169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44',
@@ -174,7 +218,7 @@ CANONICAL_SUBTITLE_OCR = {'schema': 37,
                   'line_search_bottom_height_denominator': 4,
                   'line_search_region': 'lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1',
                   'line_group_policy': 'local-column-island-row-components-true-piece-bounds-fixed-span-ordinary-aggregation-then-centered-native-line-union-before-classified-capacity-v3',
-                  'line_center_reference': 'video-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v1',
+                  'line_center_reference': 'chromium-video-or-foreground-client-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v2',
                   'line_center_reference_params': 'ocr-resolve-prefix20-then-source-clock-low-high-domain-reset-reserved-96bytes-v2',
                   'ribbon_join_gap_cells': 12,
                   'ribbon_structural_gap_min_cells': 3,
@@ -2158,9 +2202,98 @@ def _write_or_check(path: Path, expected: str, check: bool) -> bool:
             print(f"stale generated contract: {path}", file=sys.stderr)
             return False
         return True
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(expected, encoding="utf-8", newline="\n")
+    shader_manifest_generator._write_utf8_if_changed(path, expected)
     return True
+
+
+def _write_hlsl_outputs(hlsl: str, ocr_assertions: str, check: bool) -> bool:
+    valid = True
+    for target in HLSL_TARGETS:
+        valid &= _write_or_check(target, hlsl, check)
+    for target in HLSL_OCR_ASSERT_TARGETS:
+        valid &= _write_or_check(target, ocr_assertions, check)
+    return valid
+
+
+def _write_byte_mirrors(source: Path, targets: tuple[Path, ...], check: bool, label: str) -> bool:
+    expected = source.read_bytes()
+    valid = True
+    for target in targets:
+        current = target.read_bytes() if target.exists() else None
+        if current == expected:
+            continue
+        if check:
+            print(f"stale {label} mirror: {target}", file=sys.stderr)
+            valid = False
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(expected)
+    return valid
+
+
+def _write_physical_black_model_mirrors(check: bool) -> bool:
+    return _write_byte_mirrors(
+        PHYSICAL_BLACK_MODEL_SOURCE, PHYSICAL_BLACK_MODEL_MIRRORS, check, "physical-black model")
+
+
+def _write_cbc_unit_state_mirrors(check: bool) -> bool:
+    return _write_byte_mirrors(
+        CBC_UNIT_STATE_SOURCE, CBC_UNIT_STATE_MIRRORS, check, "CBC unit-state")
+
+
+def _write_current_stroke_math_mirrors(check: bool) -> bool:
+    return _write_byte_mirrors(
+        CURRENT_STROKE_MATH_SOURCE, CURRENT_STROKE_MATH_TARGETS, check, "current stroke math")
+
+
+def _write_selected_render_helper_mirrors(check: bool) -> bool:
+    return _write_byte_mirrors(
+        SELECTED_RENDER_HELPER_SOURCE, SELECTED_RENDER_HELPER_MIRRORS, check, "selected-render helper")
+
+
+def _write_current_outline_runtime_pins(
+        check: bool, shader_root: Path = SHADER_ROOT,
+        header: Path = CURRENT_OUTLINE_RUNTIME_HEADER) -> bool:
+    source = header.read_text(encoding="utf-8")
+    arrays = re.findall(
+        r"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+(\w+)_specs\s*"
+        r"\{\{(.*?)\}\};", source, re.DOTALL)
+    pins = re.findall(r'inline constexpr std::string_view (\w+)_closure="([0-9a-f]{64})";', source)
+    if (len(arrays) != len(CURRENT_OUTLINE_RUNTIME_ROOTS) or
+            {name for _, name, _ in arrays} != set(CURRENT_OUTLINE_RUNTIME_ROOTS) or
+            len(pins) != len(CURRENT_OUTLINE_RUNTIME_ROOTS) or
+            {name for name, _ in pins} != set(CURRENT_OUTLINE_RUNTIME_ROOTS)):
+        raise ValueError("current-outline runtime shader groups and pins are incomplete")
+    for count, name, body in arrays:
+        specs = tuple(re.findall(r'cache::shader_spec\{"([^"]+)","([^"]+)","([^"]+)"\}', body))
+        if len(specs) != int(count):
+            raise ValueError(f"current-outline runtime {name} shader specification is malformed")
+        digest = shader_source_closure_sha256(
+            shader_root / "current_outline" / CURRENT_OUTLINE_RUNTIME_ROOTS[name], specs,
+            shader_compile_flags=SHADER_COMPILE_FLAGS)
+        source = re.sub(
+            rf'(inline constexpr std::string_view {name}_closure=")[0-9a-f]{{64}}(";)',
+            rf'\g<1>{digest}\g<2>', source)
+    return _write_or_check(header, source, check)
+
+
+def _write_current_background_runtime_pin(
+        check: bool, shader_root: Path = SHADER_ROOT,
+        header: Path = CURRENT_BACKGROUND_RUNTIME_HEADER) -> bool:
+    source = header.read_text(encoding="utf-8")
+    array = re.search(
+        r"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+specs\s*\{\{(.*?)\}\};",
+        source, re.DOTALL)
+    pin = re.search(r'inline constexpr std::string_view closure="[0-9a-f]{64}";', source)
+    if array is None or pin is None:
+        raise ValueError("current background runtime shader group or pin is missing")
+    specs = tuple(re.findall(r'\{"([^"]+)","([^"]+)","([^"]+)"\}', array[2]))
+    if len(specs) != int(array[1]):
+        raise ValueError("current background runtime shader specification is malformed")
+    digest = shader_source_closure_sha256(
+        shader_root / "current_outline" / "background", specs, shader_compile_flags=SHADER_COMPILE_FLAGS)
+    source = source[:pin.start()] + f'inline constexpr std::string_view closure="{digest}";' + source[pin.end():]
+    return _write_or_check(header, source, check)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2180,6 +2313,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.check and args.refresh_shader_identity:
         parser.error("--check and --refresh-shader-identity are mutually exclusive")
+    mirrors_valid = _write_physical_black_model_mirrors(args.check)
+    mirrors_valid &= _write_cbc_unit_state_mirrors(args.check)
+    mirrors_valid &= _write_current_stroke_math_mirrors(args.check)
+    mirrors_valid &= _write_selected_render_helper_mirrors(args.check)
+    if not mirrors_valid:
+        return 1
     if args.refresh_shader_identity:
         # First discard any hand-edited shader projection. The named closure manifest owns every
         # ordered root and pin; the DVC JSON stores only its generated semantic projection. Do not
@@ -2194,7 +2333,7 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError(
                 f"could not read the DVC manifest for shader projection: {exc}"
             ) from exc
-        args.manifest.write_text(projected, encoding="utf-8", newline="\n")
+        shader_manifest_generator._write_utf8_if_changed(args.manifest, projected)
         contract = load_contract(
             args.manifest,
             verify_shader_source_closure=False,
@@ -2205,8 +2344,9 @@ def main(argv: list[str] | None = None) -> int:
         # the manifest generator then reprojects producer/preprocess identity into DVC.
         first_hlsl = render_hlsl(contract)
         first_ocr_assertions = render_hlsl_ocr_assertions()
-        _write_or_check(HLSL_TARGET, first_hlsl, False)
-        _write_or_check(HLSL_OCR_ASSERT_TARGET, first_ocr_assertions, False)
+        _write_hlsl_outputs(first_hlsl, first_ocr_assertions, False)
+        _write_current_outline_runtime_pins(False)
+        _write_current_background_runtime_pin(False)
         if not shader_manifest_generator.generate(False, True):
             raise RuntimeError("could not refresh the named Host SBS shader closures")
         # generate() rewrites the closure manifest in this same process. Refresh the mutable
@@ -2220,9 +2360,7 @@ def main(argv: list[str] | None = None) -> int:
             refreshed_projection = shader_manifest_generator.render_dvc_manifest(
                 refreshed_manifest, args.manifest.read_text(encoding="utf-8")
             )
-            args.manifest.write_text(
-                refreshed_projection, encoding="utf-8", newline="\n"
-            )
+            shader_manifest_generator._write_utf8_if_changed(args.manifest, refreshed_projection)
         contract = load_contract(args.manifest)
         second_hlsl = render_hlsl(contract)
         second_ocr_assertions = render_hlsl_ocr_assertions()
@@ -2232,9 +2370,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         contract = load_contract(args.manifest)
     valid = _write_or_check(CPP_TARGET, render_cpp(contract), args.check)
-    valid &= _write_or_check(HLSL_TARGET, render_hlsl(contract), args.check)
-    valid &= _write_or_check(
-        HLSL_OCR_ASSERT_TARGET, render_hlsl_ocr_assertions(), args.check)
+    valid &= _write_hlsl_outputs(
+        render_hlsl(contract), render_hlsl_ocr_assertions(), args.check)
+    valid &= _write_current_outline_runtime_pins(True)
+    valid &= _write_current_background_runtime_pin(True)
     try:
         validate_renderer_source_closure_pins()
     except ValueError as exc:

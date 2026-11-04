@@ -4,5 +4,9 @@
 namespace subtitle_test_source_pins {
   constexpr char current_black_enclosure[] = "@SUBTITLE_CBC_HELPER_SHA256@";
   constexpr char current_outline_support[] = "@SUBTITLE_OUTLINE_HELPER_SHA256@";
+  constexpr char current_mask_holes[] = "@SUBTITLE_HOLE_HELPER_SHA256@";
+  constexpr char display_snapshot_rgb8[] = "@SUBTITLE_DISPLAY_RGB8_HELPER_SHA256@";
+  constexpr char compute_program_lease[] = "@SUBTITLE_PROGRAM_LEASE_SHA256@";
+  constexpr char current_outline_stage_observer[] = "@SUBTITLE_STAGE_OBSERVER_SHA256@";
   constexpr char global_colour_validation[] = "@SUBTITLE_BASELINE_HELPER_SHA256@";
 }

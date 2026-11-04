@@ -1470,7 +1470,7 @@ namespace {
         ASSERT_EQ(rectangle[3u] - rectangle[1u], source[1u]);
         const auto expected_reference = models::subtitle_ocr_line_reference(
           source[0u], source[1u], capture[0u], capture[1u], rectangle[0u], rectangle[1u],
-          authority == "chromium-video");
+          authority != "full-source");
         ASSERT_TRUE(expected_reference.has_value());
         ASSERT_EQ(expected_reference->center_twice_source, reference[0u]);
         ASSERT_EQ(expected_reference->width, static_cast<std::uint32_t>(reference[1u]));
@@ -1938,7 +1938,8 @@ namespace {
   }
 
   void expect_retained_native_pairs(const std::vector<std::uint32_t> &record,
-                                    const std::vector<ocr_native_pair_t> &pairs) {
+                                    const std::vector<ocr_native_pair_t> &pairs,
+                                    const std::uint64_t frame_id = 40u) {
     ASSERT_EQ(record.size(), v2::subtitle_ocr_record_word_count);
     ASSERT_LE(pairs.size(), v2::subtitle_ocr_final_box_capacity);
     EXPECT_EQ(record[0u], v2::subtitle_ocr_record_schema);
@@ -1946,8 +1947,8 @@ namespace {
     EXPECT_EQ(record[2u], 1u);
     EXPECT_EQ(record[3u], pairs.size());
     EXPECT_EQ(record[4u], pairs.size());
-    EXPECT_EQ(record[5u], 40u);
-    EXPECT_EQ(record[6u], 0u);
+    EXPECT_EQ(record[5u], static_cast<std::uint32_t>(frame_id));
+    EXPECT_EQ(record[6u], static_cast<std::uint32_t>(frame_id >> 32u));
     EXPECT_EQ(record[7u], 77u);
     EXPECT_EQ(record[8u], 0u);
     EXPECT_EQ(record[9u], source_width);
@@ -2041,6 +2042,63 @@ namespace {
       clock += 100'000u;
     }
     return classifier_history(fixture.record())[3u] == 3u;
+  }
+
+  TEST(HostSbsOcrGpuTest, LeftAlignedMultilineRequiresEachCurrentLineToMeetExistingCenterPolicy) {
+    // All three independent horizontal lines span the reference center at detector X480.
+    // Their common left edge alone cannot authorize a multiline union: the shorter two
+    // midpoints, X440 and X460, exceed the current two-percent midpoint tolerance.
+    const std::vector<ocr_candidate_patch_t> left_aligned {
+      {{300u, 70u, 660u, 85u}},
+      {{300u, 100u, 580u, 115u}},
+      {{300u, 130u, 620u, 145u}},
+    };
+    const std::vector<ocr_candidate_patch_t> centered {
+      left_aligned.front(),
+      {{340u, 100u, 620u, 115u}},
+      {{320u, 130u, 640u, 145u}},
+    };
+    ocr_warp_fixture_t single_fixture, left_fixture, centered_fixture;
+    std::string error;
+    ASSERT_TRUE(single_fixture.initialize(error, false, true, false)) << error;
+    ASSERT_TRUE(left_fixture.initialize(error, false, true, false)) << error;
+    ASSERT_TRUE(centered_fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> single(ocr_pixels, 0.0f), left(ocr_pixels, 0.0f), aligned(ocr_pixels, 0.0f);
+    paint_candidate_patches(single, {left_aligned.front()});
+    paint_candidate_patches(left, left_aligned);
+    paint_candidate_patches(aligned, centered);
+    ASSERT_TRUE(observe_classifier(single_fixture, single, 40u, 1'000'000u));
+    ASSERT_EQ(single_fixture.record()[4u], 1u);
+    const auto single_pair = read_native_pair(single_fixture.record(), 0u);
+    const auto single_history = classifier_history(single_fixture.record());
+    ASSERT_TRUE(observe_classifier(left_fixture, left, 40u, 1'000'000u));
+    expect_retained_native_pairs(left_fixture.record(), {single_pair});
+    // Rejected short rows neither borrow a centered stack nor teach layout locations.
+    EXPECT_EQ(classifier_history(left_fixture.record()), single_history);
+
+    std::vector<ocr_native_pair_t> expected_centered;
+    ASSERT_TRUE(capture_native_pairs(single_fixture, centered, expected_centered));
+    ASSERT_EQ(expected_centered.size(), 3u);
+    ASSERT_TRUE(observe_classifier(centered_fixture, aligned, 40u, 1'000'000u));
+    expect_retained_native_pairs(centered_fixture.record(), expected_centered);
+    for (const auto &pair : expected_centered) {
+      EXPECT_EQ(pair[5u], 0u);
+    }
+    const auto centered_history = classifier_history(centered_fixture.record());
+
+    // This is current geometric admission, with no retained cover or death grace.
+    // An authoritative blank clears both layouts immediately and retains only layout memory.
+    const std::vector<float> empty(ocr_pixels, 0.0f);
+    for (auto *fixture : {&left_fixture, &centered_fixture}) {
+      const auto before = fixture == &left_fixture ? single_history : centered_history;
+      ASSERT_TRUE(observe_classifier(*fixture, empty, 41u, 1'033'333u));
+      expect_retained_native_pairs(fixture->record(), {}, 41u);
+      const auto after = classifier_history(fixture->record());
+      EXPECT_EQ(after[3u], before[3u]);
+      for (std::size_t word = 27u; word < before.size(); ++word) {
+        EXPECT_EQ(after[word], before[word]);
+      }
+    }
   }
 
   TEST(HostSbsOcrGpuTest, CurrentBracketedStackRecoversAsymmetricMiddleWithoutTeaching) {
@@ -2600,7 +2658,7 @@ namespace {
     paint_rectangle(cue, 240u, 100u, 720u, 115u);
     ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1000000u));
     ASSERT_EQ(classifier_history(fixture.record())[3u], 1u);
-    // Same analysis pixels and generation, but a foreground-client fallback uses the full
+    // Same analysis pixels and generation, but an explicit capture reference uses the full
     // screen's center/lower quarter. A learned video-local location cannot cross that change.
     ASSERT_TRUE(fixture.run_boxes(empty, 2u, 77u, source_width, source_height,
       field_width, field_height, source_crop_top, source_crop_height, roi_top, roi_bottom,
@@ -3184,7 +3242,7 @@ namespace {
     paint_rectangle(screen_centered, 80u, 85u, 240u, 100u);
     ASSERT_TRUE(fixture.run_boxes(screen_centered, 40u, 77u));
     expect_retained_native_pairs(fixture.record(), {});
-    // A 1920-wide foreground-client analysis at x1600 in a 3840-wide screen sees the true
+    // A diagnostic 1920-wide analysis at x1600 in a 3840-wide screen sees the true
     // screen center at local native x 320, or detector x 160, rather than its own local center.
     ASSERT_TRUE(fixture.run_boxes_in_screen(screen_centered, 40u, 77u, 3840u, 1600u));
     ASSERT_EQ(fixture.record()[3u], 1u);
@@ -3197,6 +3255,47 @@ namespace {
     ASSERT_EQ(fixture.record()[3u], 1u);
     ASSERT_TRUE(fixture.run_boxes_in_screen(roi_centered, 40u, 77u, 3840u, 1600u));
     expect_retained_native_pairs(fixture.record(), {});
+  }
+
+  TEST(HostSbsOcrGpuTest, NativePlayerRoiKeepsCenteredCaptionsAwayFromCaptureCenter) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> probability(ocr_pixels, 0.0f);
+    paint_rectangle(probability, 400u, 85u, 560u, 100u);
+    constexpr std::array<std::array<std::uint32_t, 2u>, 3u> positions {{
+      {100u, 100u}, {1800u, 800u}, {1920u, 1080u},
+    }};
+    for (const auto position : positions) {
+      SCOPED_TRACE(std::to_string(position[0u]) + "/" + std::to_string(position[1u]));
+      const models::depth_input_region_t region {
+        .source_width = 3840u,
+        .source_height = 2160u,
+        .left = position[0u],
+        .top = position[1u],
+        .right = position[0u] + source_width,
+        .bottom = position[1u] + source_height,
+        .tensor_content = {0u, 0u, field_width, field_height},
+        .analysis_generation = 77u,
+        .authority = models::depth_analysis_authority_e::foreground_client,
+      };
+      ASSERT_TRUE(region.valid());
+      const auto reference = models::subtitle_ocr_line_reference(
+        region.width(), region.height(), region.source_width, region.source_height,
+        region.left, region.top, region.is_video_region());
+      ASSERT_TRUE(reference);
+      ASSERT_TRUE(fixture.run_boxes(probability, 40u, 77u, source_width, source_height,
+        field_width, field_height, source_crop_top, source_crop_height,
+        roi_top, roi_bottom, {}, reference->center_twice_source, reference->width,
+        reference->search_top_source));
+      EXPECT_EQ(fixture.record()[2u], 1u);
+      ASSERT_EQ(fixture.record()[3u], 1u);
+      EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+        default_ocr_box(400u, 85u, 560u, 100u));
+    }
+    // Under the former whole-capture reference, this same native caption was discarded.
+    ASSERT_TRUE(fixture.run_boxes_in_screen(probability, 41u, 77u, 3840u, 100u, 2160u, 100u));
+    expect_retained_native_pairs(fixture.record(), {}, 41u);
   }
 
   TEST(HostSbsOcrGpuTest, LineCenterIsIndependentOfTensorPaddingAndValidatesReferenceWidth) {
@@ -3268,7 +3367,7 @@ namespace {
       content));
     EXPECT_EQ(fixture.record()[2u], 1u);
     EXPECT_EQ(fixture.record()[3u], 0u);
-    // A foreground client at (210,1700), size 1500x400, fits a 1920x2160 screen. The screen's
+    // A diagnostic crop at (210,1700), size 1500x400, fits a 1920x2160 screen. The screen's
     // bottom-quarter start is 80 pixels above this client, so signed searchTop=-80 is valid.
     ASSERT_TRUE(fixture.run_boxes(probability, 40u, 77u, cropped_w, cropped_h,
       field_width, field_height, crop_top, crop_h, cropped_roi_top, cropped_roi_bottom,

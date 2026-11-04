@@ -21,6 +21,10 @@ StructuredBuffer<uint> RawMeta : register(t11);
 globallycoherent RWByteAddressBuffer Data : register(u0);
 RWTexture2D<uint> V3M : register(u1); // Packed ownership/AA/closure temp until final binary publication.
 globallycoherent RWTexture2D<uint> PassableCache : register(u2);
+// Current own Raw-root witness scratch. Canonical second-graph init clears the
+// borrowed mode-final texture over EVERY ROI pixel before this unit's reduction.
+// Entry5 only accumulates; ordered entry6 consumes before any next-unit reuse.
+globallycoherent RWTexture2D<uint> RawComponentWitness : register(u3);
 Texture2D<uint> Code1M : register(t12);
 // PRIVATE BBSC1 extension. These optional views never grant current calibration authority.
 Texture2D<uint> StabilityImageRead : register(t13); // RGB24 | SelectedLOW8, one committed epoch
@@ -48,6 +52,10 @@ uint SelectedForegroundBits(uint word) { return (word>>8u)&255u; }
 uint SelectedGeometryAt(int2 p) { return SelectedGeometryBits(SelectedBits.Load(int3(p,0))); }
 #include "physical_black_model_shared.hlsl"
 #include "cbc_unit_state_shared.hlsl"
+#include "current_stroke_math_shared.hlsl"
+// CBC-only exact singleton: local opaque Raw4CC authority, with no permission
+// to infer foreground, nonblack geometry, antialiasing or retained evidence.
+bool OpaqueBlackOnly(uint unit) { return CBCMeta[PhysicalModelBank(unit)+1u]==4u; }
 uint R(uint word) { return Data.Load(word*4u); }
 void W(uint word,uint value) { Data.Store(word*4u,value); }
 // Internal per-unit word36: fresh Rawbegin clears it, and calibration resets it.
@@ -108,7 +116,8 @@ bool AnyPhysicalBlack(int2 p,uint3 code) {
     if(max(code.r,max(code.g,code.b))<=1u)return true;
     uint cover=CoverBits.Load(int3(p,0));
     [unroll]for(uint unit=0u;unit<8u;++unit)
-        if((cover&(1u<<unit))!=0u&&HasAdoptedPhysicalRefinement(unit)&&PhysicalBlackCode(code,unit))return true;
+        if((cover&(1u<<unit))!=0u&&!OpaqueBlackOnly(unit)&&
+           HasAdoptedPhysicalRefinement(unit)&&PhysicalBlackCode(code,unit))return true;
     return false;
 }
 bool GraphReady() {
@@ -316,7 +325,10 @@ bool SeedAt(int2 p) {
 static const uint PRIVATE_CACHED_BLACK_OFFER=16384u,PRIVATE_LOCAL_CONFLICT_BLACK_OFFER=32768u;
 static const uint PRIVATE_OFFER_MASK=PRIVATE_CACHED_BLACK_OFFER|PRIVATE_LOCAL_CONFLICT_BLACK_OFFER;
 static const uint PRIVATE_AA_HISTORY_OFFER=1u<<24u;
-static const uint PRIVATE_PUBLISH_STRIP_MASK=PRIVATE_OFFER_MASK|PRIVATE_AA_HISTORY_OFFER;
+// Current own-unit known/adopted opaque Raw4CC only. This separate bit cannot
+// become ordinary AA/cache construction or borrow shared UNKNOWN_RAW/BAND evidence.
+static const uint PRIVATE_OPAQUE_BLACK_OFFER=1u<<25u;
+static const uint PRIVATE_PUBLISH_STRIP_MASK=PRIVATE_OFFER_MASK|PRIVATE_AA_HISTORY_OFFER|PRIVATE_OPAQUE_BLACK_OFFER;
 static const uint STABILITY_AA_OLD_STRONG_PLAN=153u;
 // Independent lifetimes: intact strong reference versus old global-reuse permission.
 static const uint STABILITY_LEGACY_GLOBAL_VALID=152u,UNIT_CACHED_T_DONORS=37u;
@@ -432,7 +444,7 @@ bool StabilityCompleteKnown(){
     uint mask;if(!InputReady()||!StabilityCurrentUnits(mask))return false;
     [unroll]for(uint u=0u;u<8u;++u)if((mask&(1u<<u))!=0u){
         uint b=U(u),k=PhysicalModelBank(u),r=128u+32u*u;
-        if(CBCMeta[k+2u]!=1u||!HasAdoptedPhysicalRefinement(u)||
+        if(OpaqueBlackOnly(u)||CBCMeta[k+2u]!=1u||!HasAdoptedPhysicalRefinement(u)||
            RawMeta[r]!=1u||RawMeta[r+1u]!=1u||R(b+14u)!=1u||!CurrentWidthMayReplaceRaw(u)||
            R(b+8u)==0u)return false;
     }
@@ -440,6 +452,7 @@ bool StabilityCompleteKnown(){
 }
 bool StabilityOfferUnit(uint unit,out uint t){
     t=0u;if(unit>=8u||!StabilityHeaderROShape()||!StabilityImageROShape())return false;
+    if(OpaqueBlackOnly(unit))return false;
     if(!StabilityFramePlanRO()||SR(5u)!=1u||SR(STABILITY_LEGACY_GLOBAL_VALID)!=1u||!StabilityScopeRO())return false;
     uint mask;if(!StabilityCurrentUnits(mask)||SR(4u)!=mask||(mask&(1u<<unit))==0u)return false;
     uint b=U(unit),r=128u+32u*unit;
@@ -451,6 +464,7 @@ bool StabilityOfferUnit(uint unit,out uint t){
 // It only reuses an actually committed strong t, never derives a new extent.
 bool StabilityStrongReferenceUnit(uint unit,out uint t){
     t=0u;if(unit>=8u||!StabilityHeaderROShape()||!StabilityImageROShape())return false;
+    if(OpaqueBlackOnly(unit))return false;
     if(!StabilityFramePlanRO()||SR(2u)!=1u||!StabilityScopeRO())return false;
     uint mask;if(!StabilityCurrentUnits(mask)||SR(4u)!=mask||(mask&(1u<<unit))==0u)return false;
     uint b=U(unit),r=128u+32u*unit;
@@ -555,6 +569,7 @@ bool StabilityAAHistoryOffer(uint2 q){
     }
     uint owners=CoverBits.Load(int3(center,0))&SW(4u)&255u;
     [unroll]for(uint unit=0u;unit<8u;++unit)if((owners&(1u<<unit))!=0u){
+        if(OpaqueBlackOnly(unit))continue;
         uint ru=128u+32u*unit,bit=1u<<unit;
         if(CBCMeta[ru]!=1u||CBCMeta[ru+1u]!=1u||!HasAdoptedPhysicalRefinement(unit)||
            CBCMeta[PhysicalModelBank(unit)+2u]!=1u||RawMeta[ru]!=1u||RawMeta[ru+1u]!=1u||R(U(unit)+14u)!=1u)continue;
@@ -765,7 +780,7 @@ void private_cache_begin_main(uint3 g:SV_GroupID){
     SS(7u,authorizedCurrent?1u:0u);SS(100u,0u);SS(101u,0u);SS(102u,0u);SS(103u,reasons);SS(147u,0u);
     SS(148u,freshAdvance?1u:0u);SS(149u,exactDuplicate?1u:0u);
     SS(STABILITY_AA_OLD_STRONG_PLAN,wasValid&&authorizedCurrent&&scope&&SW(4u)==mask&&StabilityAAHistoryShape()?1u:0u);
-    SS(105u,PRIVATE_PUBLISH_STRIP_MASK);SS(106u,65535u|PRIVATE_AA_HISTORY_OFFER);
+    SS(105u,PRIVATE_PUBLISH_STRIP_MASK);SS(106u,65535u|PRIVATE_AA_HISTORY_OFFER|PRIVATE_OPAQUE_BLACK_OFFER);
     // Fresh valid EMPTY advances LastSeen too. Duplicates and stale tuples never advance it.
     if(freshAdvance){
         [unroll]for(uint j=0u;j<24u;++j)SS(44u+j,CBWord(j));
@@ -837,6 +852,11 @@ void private_cache_commit_main(uint3 g:SV_GroupID){
 [numthreads(16,16,1)]
 void grow_tile_main(uint3 group:SV_GroupID,uint3 tid:SV_GroupThreadID,uint lane:SV_GroupIndex,uint3 d:SV_DispatchThreadID) {
     bool input=InputReady()&&Hook.x<8u,known=false,cached=false,localConflict=false;uint t=1u,cacheT=0u;
+    // Raw's own black4CC does not exist yet at this stage. K4 may not replace
+    // that proof with a BAND/N8 envelope or an old width/snapshot offer.
+    // Keep every lane in the shared work/barriers: FXC treats resource-backed
+    // readiness as varying even when the serialized owner keeps it immutable.
+    if(input&&OpaqueBlackOnly(Hook.x))input=false;
     uint2 origin=0u,end=0u;
     if(input){uint cu=U(Hook.x);t=R(cu+11u);known=CurrentWidthAvailable(Hook.x);
         cached=!known&&StabilityOfferUnit(Hook.x,cacheT);
@@ -1000,6 +1020,7 @@ bool CertCode1Collar(int2 q,uint geometryCandidates) {
     [loop]for(uint unit=0u;unit<8u;++unit) {
         uint bit=1u<<unit,u=(128u+32u*unit);
         if((owners&bit)==0u||CBCMeta[u]!=1u||CBCMeta[u+1u]!=1u||!CertValid(q,bit))continue;
+        if(OpaqueBlackOnly(unit))continue;
         // ParentValid already validated every evaluated immutable model record.
         uint bank=PhysicalModelBank(unit);uint3 low=0u,high=1u;
         bool knownBlack=CBCMeta[bank+2u]==1u;
@@ -1035,6 +1056,10 @@ bool FinalBodyAuthority(int2 q,uint selectedWord) {
         bool oldBody=(legacy&bit)!=0u,fg=(foreground&bit)!=0u;
         if(!oldBody&&!fg)continue;
         uint cu=U(unit),bank=PhysicalModelBank(unit);
+        if(OpaqueBlackOnly(unit)) {
+            if(oldBody)return true; // Keep the original independently admitted BODY only.
+            continue;
+        }
         // Unknown black OR unadopted CBC topology retains the old BODY fallback.
         // A known colour model alone does not prove an available glyph boundary.
         // Only adopted current physical refinement may demote exterior LOW8;
@@ -1091,6 +1116,7 @@ void publish_final_main(uint3 d:SV_DispatchThreadID) {
     bool publicationInputsValid=dataShapeValid&&RawMeta[2u]==1u&&RawMeta[3u]==0u&&R(3u)==0u;
     uint privatePackedWord=publicationInputsValid?V3M[d.xy]:0u;
     uint packedProtectionEvidence=privatePackedWord&~PRIVATE_PUBLISH_STRIP_MASK;
+    bool opaqueCurrentBlack=publicationInputsValid&&(privatePackedWord&PRIVATE_OPAQUE_BLACK_OFFER)!=0u;
     bool retainedAA=publicationInputsValid&&(privatePackedWord&PRIVATE_AA_HISTORY_OFFER)!=0u&&StabilityAAHistoryPlan();
     bool privateCachedBlack=publicationInputsValid&&(
         ((privatePackedWord&PRIVATE_CACHED_BLACK_OFFER)!=0u&&StabilityOfferAcceptedRW())||
@@ -1151,6 +1177,9 @@ void publish_final_main(uint3 d:SV_DispatchThreadID) {
             InterlockedAdd(StabilityHeaderWrite[uint2(147u,0u)],covered,written);
         }
     }
+    // Keep the current opaque Raw offer out of AA decisions, observer exemptions
+    // and snapshot/history construction above. It joins positive protection only now.
+    if(opaqueCurrentBlack)publishedProtection=1u;
     V3M[d.xy]=publishedProtection;
     if(publicationInputsValid){uint ignored;
         if((packedProtectionEvidence&OLD_AA)!=0u)Data.InterlockedAdd(67u*4u,1u,ignored);
@@ -1215,6 +1244,63 @@ bool RawSelected(int2 p) {
     if(!ValidPoint(p)||!Black(p)||(!OwnBand(p)&&Code1M.Load(int3(p,0))==0u))return false;
     return RawAppendMember(p);
 }
+// Called only for a validated current own-unit Raw member. The existing known
+// style width bounds the search; no BODY-seeded interior can supply background.
+// Black traversal cannot jump to a different physical component, including a
+// diagonal neighbour. First nonblack ends that ray whether it is usable or not.
+bool OpaqueRawHasBackgroundWitness(int2 p) {
+    if(OpaqueBlackOnly(Hook.x)||!CurrentWidthMayReplaceRaw(Hook.x)||
+       BlackModelWord(PhysicalModelBank(Hook.x)+2u)!=1u||!HasAdoptedPhysicalRefinement(Hook.x))return false;
+    if(!ValidPoint(p)||!Black(p))return false;
+    if(!RawAppendMember(p))return false;
+    uint extent=R(U(Hook.x)+11u); // CurrentWidthMayReplaceRaw proved KNOWN1..16.
+    uint root=FindStable((uint)p.y*Shape.x+(uint)p.x+1u);
+    if(root==0u)return false;
+    const int2 directions[8]={int2(-1,-1),int2(0,-1),int2(1,-1),int2(-1,0),
+                             int2(1,0),int2(-1,1),int2(0,1),int2(1,1)};
+    [unroll]for(uint ray=0u;ray<8u;++ray) {
+        [loop]for(uint distance=1u;distance<=extent;++distance) {
+            int2 q=p+(int)distance*directions[ray];
+            if(!ValidPoint(q)||GlobalBody.Load(int3(q,0))!=0u)break;
+            if(!Black(q)) {
+                if(CachedAABackground(q,true))return true;
+                break;
+            }
+            if(Passable.Load(int3(q,0))!=1u)break;
+            if(FindStable((uint)q.y*Shape.x+(uint)q.x+1u)!=root)break;
+        }
+    }
+    return false;
+}
+// One bit in dead mode-final scratch, indexed by the ACTUAL current Raw root.
+// This is private opaque permission, never a mathematical RootFlags bit, BAND,
+// AA donor, closure certificate or retained/history construction evidence.
+static const uint RAW_COMPONENT_BACKGROUND_WITNESS=1u;
+// Separate private first-source-root reduction; index cells may alias Raw roots.
+static const uint SOURCE_ROOT_ENVELOPE_WITNESS=2u;
+static const uint CURRENT_ROOT_WITNESS_ALLOWED_MASK=RAW_COMPONENT_BACKGROUND_WITNESS|SOURCE_ROOT_ENVELOPE_WITNESS;
+bool RawComponentWitnessShapeKnown() {
+    uint w,h;RawComponentWitness.GetDimensions(w,h);
+    return all(uint2(w,h)==Shape.xy);
+}
+bool OpaqueRawRootPixel(int2 p,out uint2 rootPixel) {
+    rootPixel=0u;
+    if(!RawAppendMember(p))return false;
+    uint root=FindStable((uint)p.y*Shape.x+(uint)p.x+1u);
+    if(root==0u)return false;
+    rootPixel=uint2((root-1u)%Shape.x,(root-1u)/Shape.x);
+    if(!OwnCover(int2(rootPixel))){Fault(F_GRAPH);return false;}
+    return true;
+}
+bool OpaqueRawComponentHasBackgroundWitness(int2 p) {
+    if(OpaqueBlackOnly(Hook.x)||!CurrentWidthMayReplaceRaw(Hook.x)||
+       BlackModelWord(PhysicalModelBank(Hook.x)+2u)!=1u||!HasAdoptedPhysicalRefinement(Hook.x))return false;
+    if(!ValidPoint(p)||!Black(p))return false;
+    uint2 rootPixel;if(!OpaqueRawRootPixel(p,rootPixel))return false;
+    uint witnesses=RawComponentWitness[rootPixel];
+    return (witnesses&~CURRENT_ROOT_WITNESS_ALLOWED_MASK)==0u&&
+           (witnesses&RAW_COMPONENT_BACKGROUND_WITNESS)!=0u;
+}
 // Grow has completed the current unit's LOW8 BAND before aggregation. All
 // aggregate writes are atomic ORs to OTHER bits; never write a BAND bit here.
 // In particular MEASURED_RIM/AA/closure cannot seed this one-hop certificate.
@@ -1243,30 +1329,13 @@ bool IntervalVisible(uint3 q,uint3 r) {
 // All endpoints are doubled RGB8 cells. Nonnegative rational cross-products
 // are <=510*510; negative numerators are handled before conversion to uint.
 bool ConstrainBackgroundFraction(int coefficient,int rhs,inout uint ln,inout uint ld,inout uint un,inout uint ud) {
-    if(coefficient>0) {
-        if(rhs>0) {
-            uint n=(uint)rhs,d=(uint)coefficient;
-            if(n*ld>ln*d){ln=n;ld=d;}
-        }
-    } else if(coefficient<0) {
-        if(rhs>0)return false;
-        uint n=(uint)(-rhs),d=(uint)(-coefficient);
-        if(n*ud<un*d){un=n;ud=d;}
-    } else if(rhs>0)return false;
-    return ln*ud<=un*ld;
+    return StrokeConstrainBackgroundFraction(coefficient,rhs,ln,ld,un,ud);
 }
 bool KnownBlackBoxIntervalVisible(uint3 q,uint3 r,uint3 blackLow,uint3 blackHigh) {
     uint3 qlo=2u*q-(uint3)(q>0u),qhi=min(uint3(510u,510u,510u),2u*q+1u);
     uint3 rlo=2u*r-(uint3)(r>0u),rhi=min(uint3(510u,510u,510u),2u*r+1u);
     uint3 blo=2u*blackLow-(uint3)(blackLow>0u),bhi=min(uint3(510u,510u,510u),2u*blackHigh+1u);
-    uint ln=0u,ld=1u,un=1u,ud=1u;
-    [unroll]for(uint c=0u;c<3u;++c) {
-        // q belongs to the interval b+s*(r-b), for one common s across RGB.
-        if(!ConstrainBackgroundFraction((int)rhi[c]-(int)bhi[c],(int)qlo[c]-(int)bhi[c],ln,ld,un,ud))return false;
-        if(!ConstrainBackgroundFraction((int)blo[c]-(int)rlo[c],(int)blo[c]-(int)qhi[c],ln,ld,un,ud))return false;
-    }
-    // Preserve the original ALL-feasible-alpha>=5/255 visibility policy.
-    return ln*ud<=un*ld&&un*255u<=ud*250u;
+    return StrokeRgbIntervalVisibleCells(qlo,qhi,blo,bhi,(int3)rlo,(int3)rhi);
 }
 // Portable exact SM5 32x32->64 multiply, identical arithmetic to the
 // existing CurrentWideProduct. FXC/SM5 has no umulExtended intrinsic.
@@ -1294,8 +1363,8 @@ bool ConstrainLumaFraction(int coefficient,int rhs,inout uint ln,inout uint ld,i
     } else if(rhs>0)return false;
     return AAProductsLE(ln,ud,un,ld);
 }
-uint3 AAHalfLow(uint3 v) { return 2u*v-(uint3)(v>0u); }
-uint3 AAHalfHigh(uint3 v) { return min(uint3(510u,510u,510u),2u*v+1u); }
+uint3 AAHalfLow(uint3 v) { return StrokeHalfLow(v); }
+uint3 AAHalfHigh(uint3 v) { return StrokeHalfHigh(v); }
 uint AALuma709(uint3 v) { return v.r*2126u+v.g*7152u+v.b*722u; }
 bool KnownBlackLumaVisible(uint3 q,uint3 r,uint3 blackLow,uint3 blackHigh) {
     // Exact canonical-RGB-derived BT709 bounds, NOT recovered decoder planes.
@@ -1327,6 +1396,85 @@ bool KnownChromaSubtractionVisible(uint3 q,uint3 r,uint3 blackLow,uint3 blackHig
     if(!KnownBlackLumaVisible(q,r,blackLow,blackHigh))return false;
     return true;
 }
+// EXTERNAL P10 whole-root withdrawal hypothesis. Exact original grow envelope:
+// SeedAt's3x3 LOW|Inner support plus known(t-1) grow equals distance<=t.
+// BODY/HIGH can preserve their own recipient, but cannot manufacture this root bit.
+bool ExactCurrentOriginalEnvelope(int2 q,uint extent) {
+    if(!OwnCover(q))return false;
+    if(SeedAt(q))return true;
+    uint bit=1u<<Hook.x;
+    [loop]for(int dy=-(int)extent;dy<=(int)extent;++dy) {
+        [loop]for(int dx=-(int)extent;dx<=(int)extent;++dx) {
+            if(abs(dx)<=1&&abs(dy)<=1)continue;
+            int2 p=q+int2(dx,dy);
+            if(!OwnCover(p))continue;
+            if(InnerEligible.Load(int3(p,0))==1u)return true;
+            if((SelectedGeometryAt(p)&bit)!=0u)return true;
+        }
+    }
+    return false;
+}
+// CALL ONLY from the ordered closure dispatch after this current unit's entire
+// aggregate reduction. Absence of bit2 is not authority during its accumulation.
+bool CurrentKnownClosedRecipientAllowed(int2 q) {
+    if(!CurrentWidthAvailable(Hook.x))return true;
+    uint ru=128u+32u*Hook.x;
+    // Without an issued current Raw graph, no completed absence is available.
+    // Preserve the old policy rather than borrow stale scratch from another unit.
+    if(RawMeta[ru]!=1u||RawMeta[ru+1u]!=1u)return true;
+    if(!OwnCover(q))return false;
+    uint bit=1u<<Hook.x,selected=SelectedBits.Load(int3(q,0));
+    if(GlobalBody.Load(int3(q,0))!=0u)return true;
+    if((selected&(bit|(bit<<8u)))!=0u)return true;
+    if(InnerEligible.Load(int3(q,0))==1u)return true;
+    uint tag=PassableCache[(uint2)q];
+    if((tag&ENCLOSED)==0u)return true;
+    uint root=tag&ROOT_MASK;
+    if(root==0u)return false;
+    uint2 rootPixel;uint rootTag;
+    if(!CacheRootValid(root,true,rootPixel,rootTag))return false;
+    uint witnesses=RawComponentWitness[rootPixel];
+    return (witnesses&~CURRENT_ROOT_WITNESS_ALLOWED_MASK)==0u&&
+           (witnesses&SOURCE_ROOT_ENVELOPE_WITNESS)!=0u;
+}
+
+// EXTERNAL P10 B4: preserve a PREVIOUSLY possible AA offer when its original
+// physical-black donor independently reaches current EXTERIOR background.
+// Same bounded pointwise C2 eligibility, traversal and first-nonblack stop.
+// A closed unseeded recipient cannot serve as this exterior witness.
+bool OpaqueRawHasExteriorBackgroundWitness(int2 p) {
+    if(OpaqueBlackOnly(Hook.x)||!CurrentWidthMayReplaceRaw(Hook.x)||
+       BlackModelWord(PhysicalModelBank(Hook.x)+2u)!=1u||!HasAdoptedPhysicalRefinement(Hook.x))return false;
+    if(!ValidPoint(p)||!Black(p))return false;
+    if(!RawAppendMember(p))return false;
+    uint extent=R(U(Hook.x)+11u);
+    uint root=FindStable((uint)p.y*Shape.x+(uint)p.x+1u);
+    if(root==0u)return false;
+    const int2 directions[8]={int2(-1,-1),int2(0,-1),int2(1,-1),int2(-1,0),
+                             int2(1,0),int2(-1,1),int2(0,1),int2(1,1)};
+    [loop]for(uint ray=0u;ray<8u;++ray) {
+        [loop]for(uint distance=1u;distance<=extent;++distance) {
+            int2 q=p+(int)distance*directions[ray];
+            if(!ValidPoint(q)||GlobalBody.Load(int3(q,0))!=0u)break;
+            if(!Black(q)) {
+                if(CachedAABackground(q,true)) {
+                    if((PassableCache[(uint2)q]&ENCLOSED)==0u)return true;
+                }
+                break;
+            }
+            if(Passable.Load(int3(q,0))!=1u)break;
+            if(FindStable((uint)q.y*Shape.x+(uint)q.x+1u)!=root)break;
+        }
+    }
+    return false;
+}
+// Only AA recipients use this exception. Closure still uses the strict whole
+// source-root guard. No newly offered M/AA or component witness qualifies p.
+bool CurrentKnownClosedAARecipientAllowed(int2 q,int2 donor) {
+    if(CurrentKnownClosedRecipientAllowed(q))return true;
+    return OpaqueRawHasExteriorBackgroundWitness(donor);
+}
+
 // Current-only geometric gap fill, separate from the original unrolled colour rays.
 // Four forward directions visit each unordered black bracket once; newly added AA
 // never qualifies as a BAND or current RawSelected donor.
@@ -1338,11 +1486,93 @@ void CurrentBlackGapRays(int2 p,uint cu) {
         if(!RawSelected(r))continue;
         uint3 qc=RGB8(q);
         if(AnyPhysicalBlack(q,qc)||GlobalBody.Load(int3(q,0))!=0u)continue;
+        if(!CurrentKnownClosedAARecipientAllowed(q,p))continue;
         // New geometric candidate/acceptance, not an old colour-interval success.
         uint ignored;Data.InterlockedAdd((cu+30u)*4u,1u,ignored);
         InterlockedOr(V3M[(uint2)q],SUPPORT_AA|OLD_AA,ignored);
         Data.InterlockedAdd((cu+31u)*4u,1u,ignored);
         Data.InterlockedAdd((cu+32u)*4u,1u,ignored);
+    }
+}
+// Separate one-pixel gap experiment. Caller proves the EXACT pointwise C2
+// background witness and p outside measured BAND. Component-wide opaque offers
+// never grant this permission. The opposite endpoint must be original measured
+// BAND and RawSelected in the SAME immutable current own-unit Raw4CC.
+void ObservedRawToMeasuredBandGapRays(int2 p,uint cu) {
+    uint root=FindStable((uint)p.y*Shape.x+(uint)p.x+1u);
+    if(root==0u)return;
+    [loop]for(int dy=-1;dy<=1;++dy)[loop]for(int dx=-1;dx<=1;++dx)if(dx!=0||dy!=0) {
+        int2 dir=int2(dx,dy),q=p+dir,r=p+2*dir;
+        if(!ValidPoint(q)||!ValidPoint(r))continue;
+        if(!OwnBand(r))continue;
+        if(!RawSelected(r))continue;
+        // RawSelected proved r is an accepted current Raw member before this
+        // side-effecting graph query. No HLSL short-circuit assumption is used.
+        uint oppositeRoot=FindStable((uint)r.y*Shape.x+(uint)r.x+1u);
+        if(oppositeRoot==0u||oppositeRoot!=root)continue;
+        uint3 qc=RGB8(q);
+        if(AnyPhysicalBlack(q,qc)||GlobalBody.Load(int3(q,0))!=0u)continue;
+        if(!CachedAABackground(q,true))continue;
+        if(!CurrentKnownClosedAARecipientAllowed(q,p))continue;
+        // Ordinary AA only: normal current observer/history admission still runs.
+        // No OLD_AA bit, independent-foreground exemption or recursive donor.
+        uint ignored;Data.InterlockedAdd((cu+30u)*4u,1u,ignored);
+        InterlockedOr(V3M[(uint2)q],SUPPORT_AA,ignored);
+        Data.InterlockedAdd((cu+31u)*4u,1u,ignored);
+        Data.InterlockedAdd((cu+33u)*4u,1u,ignored);
+    }
+}
+// PRIVATE NEW EXPERIMENT: the short-gap cap3 and KNOWN-width-minus-one
+// coupling are explicit candidate policy, not derived from a canonical radius.
+// Keep the existing one-pixel helper and its behavior independently unchanged.
+static const uint POINTWISE_RAW_SHORT_GAP_MAX_NONBLACK_PIXELS=3u;
+bool ShortGapCurrentBackgroundPoint(int2 q,int2 donor,out uint backgroundTag) {
+    backgroundTag=0u;
+    if(!ValidPoint(q))return false;
+    uint3 qc=RGB8(q);
+    if(AnyPhysicalBlack(q,qc)||GlobalBody.Load(int3(q,0))!=0u)return false;
+    if(!CachedAABackground(q,true))return false;
+    if(!CurrentKnownClosedAARecipientAllowed(q,donor))return false;
+    // Root identity/enclosure are immutable here; mutable BAD_RIM is excluded.
+    backgroundTag=PassableCache[(uint2)q]&(ROOT_MASK|ENCLOSED);
+    return true;
+}
+void ObservedRawToMeasuredBandShortGapRays(int2 p,uint cu) {
+    // Caller proves ONLY p's exact pointwise C2 witness and p outside BAND.
+    // Component-wide opaque offers and existing AA/M never supply a donor.
+    if(!CurrentWidthMayReplaceRaw(Hook.x))return;
+    uint thickness=R(U(Hook.x)+11u);
+    if(thickness<=2u)return;
+    uint maximumGap=min(POINTWISE_RAW_SHORT_GAP_MAX_NONBLACK_PIXELS,thickness-1u);
+    uint root=FindStable((uint)p.y*Shape.x+(uint)p.x+1u);
+    if(root==0u)return;
+    [loop]for(int dy=-1;dy<=1;++dy)[loop]for(int dx=-1;dx<=1;++dx)if(dx!=0||dy!=0) {
+        int2 dir=int2(dx,dy);
+        [loop]for(uint gap=2u;gap<=maximumGap;++gap) {
+            int2 r=p+(int)(gap+1u)*dir;
+            if(!ValidPoint(r))continue;
+            if(!OwnBand(r))continue;
+            if(!RawSelected(r))continue;
+            uint oppositeRoot=FindStable((uint)r.y*Shape.x+(uint)r.x+1u);
+            if(oppositeRoot==0u||oppositeRoot!=root)continue;
+            bool allCurrent=true;uint sharedBackgroundTag=0u;
+            [loop]for(uint step=1u;step<=gap;++step) {
+                int2 q=p+(int)step*dir;uint backgroundTag;
+                // A separate call/branch avoids assuming HLSL short-circuits
+                // side-effecting cache checks. Validate ALL points before ORs.
+                if(!ShortGapCurrentBackgroundPoint(q,p,backgroundTag)){allCurrent=false;break;}
+                if(step==1u)sharedBackgroundTag=backgroundTag;
+                else if(backgroundTag!=sharedBackgroundTag){allCurrent=false;break;}
+            }
+            if(!allCurrent)continue;
+            uint ignored;Data.InterlockedAdd((cu+30u)*4u,gap,ignored);
+            [loop]for(uint writeStep=1u;writeStep<=gap;++writeStep) {
+                int2 q=p+(int)writeStep*dir;
+                InterlockedOr(V3M[(uint2)q],SUPPORT_AA,ignored);
+            }
+            Data.InterlockedAdd((cu+31u)*4u,gap,ignored);
+            Data.InterlockedAdd((cu+33u)*4u,gap,ignored);
+        }
     }
 }
 void OuterRays(int2 p,bool physicalBand,bool rawSelectedDonor) {
@@ -1354,12 +1584,13 @@ void OuterRays(int2 p,bool physicalBand,bool rawSelectedDonor) {
     if(knownBlack){blackLow=PhysicalUnpack(BlackModelWord(bank+11u));blackHigh=PhysicalUnpack(BlackModelWord(bank+12u));blackPrototype=PhysicalUnpack(BlackModelWord(bank+5u));}
     [branch]if(knownBlack&&physicalBand&&rawSelectedDonor&&HasAdoptedPhysicalRefinement(Hook.x))
         CurrentBlackGapRays(p,cu);
-    [unroll]for(int dy=-1;dy<=1;++dy)[unroll]for(int dx=-1;dx<=1;++dx)if(dx!=0||dy!=0) {
+    [loop]for(int dy=-1;dy<=1;++dy)[loop]for(int dx=-1;dx<=1;++dx)if(dx!=0||dy!=0) {
         int2 dir=int2(dx,dy),q=p+dir,r=p+2*dir;
         if(!ValidPoint(q)||!ValidPoint(r)||!CachedAABackground(q,knownBlack)||!CachedAABackground(r,knownBlack))continue;
         uint3 qc=RGB8(q),rc=RGB8(r);
         if(AnyPhysicalBlack(q,qc)||AnyPhysicalBlack(r,rc))continue;
         if(GlobalBody.Load(int3(q,0))!=0u||GlobalBody.Load(int3(r,0))!=0u)continue;
+        if(!CurrentKnownClosedAARecipientAllowed(q,p))continue;
         // Global exclusion: every raw/band addition is physical black under
         // one potentially eligible current unit, even a future interleaved unit.
         // Code1M plus globalAny exclude pre-AA/pre-closure global V3 only;
@@ -1398,6 +1629,25 @@ void aggregate_support_main(uint3 d:SV_DispatchThreadID) {
     // Parent/RootFlags. Unissued units must never consult an older graph.
     if(RawMeta[ru]!=1u||RawMeta[ru+1u]!=1u)return;
     if(!GraphReady()){W(cu+13u,ST_FAULT);return;}
+    if(OpaqueBlackOnly(Hook.x)) {
+        // The second graph is THIS unit's current physical-black4CC. Neither
+        // the global RawM bitmap nor Code1 carries this membership authority.
+        if(ValidPoint(int2(p))&&Black(int2(p))&&RawAppendMember(int2(p))) {
+            uint ignored;InterlockedOr(V3M[p],PRIVATE_OPAQUE_BLACK_OFFER,ignored);
+        }
+        return;
+    }
+    if(!RawComponentWitnessShapeKnown()){Fault(F_SHAPE);return;}
+    // Preserve the exact local C2 witness and its width bound for AA donors.
+    // Component-wide opaque permission is consumed only in the NEXT dispatch;
+    // no thread may publish based on another group's unfinished accumulation.
+    bool observedOpaqueRaw=OpaqueRawHasBackgroundWitness(int2(p));
+    if(observedOpaqueRaw) {
+        uint ignored;InterlockedOr(V3M[p],PRIVATE_OPAQUE_BLACK_OFFER,ignored);
+        uint2 rootPixel;
+        if(OpaqueRawRootPixel(int2(p),rootPixel))
+            InterlockedOr(RawComponentWitness[rootPixel],RAW_COMPONENT_BACKGROUND_WITNESS,ignored);
+    }
     if(Code1M.Load(int3(p,0))!=0u&&SelectedGeometryAt(p)==0u&&
        ValidPoint(int2(p))&&InnerEligible.Load(int3(p,0))==1u) {
         uint ignored;InterlockedOr(V3M[p],CERTIFIED_COLLAR,ignored);
@@ -1416,12 +1666,16 @@ void aggregate_support_main(uint3 d:SV_DispatchThreadID) {
     if(measuredRim)InterlockedOr(V3M[p],MEASURED_RIM,ignored);
     if(band)Data.InterlockedAdd((cu+35u)*4u,1u,ignored);
     if(selected)Data.InterlockedAdd((cu+34u)*4u,1u,ignored);
-    // Existing raw-donor selection and AA markers stay unchanged; corrected donors
-    // enter once, and do not masquerade as original measured BAND bits.
-    if((band||selected||measuredRim)&&ValidPoint(int2(p))&&Black(int2(p)))OuterRays(int2(p),band,selected);
     uint tag=PassableCache[p],root=tag&ROOT_MASK;
     if(root==0u||(tag&ENCLOSED)==0u)return;
     uint2 rp;uint rt;if(!CacheRootValid(root,true,rp,rt))return;
+    // Current closed source-root reduction. Pure original LOW|Inner envelope;
+    // independent BODY/HIGH fastpaths do not create a whole-root witness.
+    if(CurrentWidthAvailable(Hook.x)) {
+        if(ExactCurrentOriginalEnvelope(int2(p),R(cu+11u))) {
+            uint ignored;InterlockedOr(RawComponentWitness[rp],SOURCE_ROOT_ENVELOPE_WITNESS,ignored);
+        }
+    }
     bool bad=!ValidPoint(int2(p))||NativeEdge(int2(p))||TrueCoverEdge(int2(p));
     const int2 dirs[4]={int2(1,0),int2(-1,0),int2(0,1),int2(0,-1)};
     [unroll]for(uint k=0u;k<4u;++k) {
@@ -1441,7 +1695,38 @@ void aggregate_support_main(uint3 d:SV_DispatchThreadID) {
 [numthreads(16,16,1)]
 void publish_closure_main(uint3 d:SV_DispatchThreadID) {
     uint2 p;if(d.z!=0u||!InputReady()||!ROI(d.xy,p))return;
-    uint cu=U(Hook.x);if(!CurrentWidthAvailable(Hook.x))return;
+    if(OpaqueBlackOnly(Hook.x))return;
+    uint cu=U(Hook.x);
+    if(!RawComponentWitnessShapeKnown()){Fault(F_SHAPE);return;}
+    uint ru=128u+32u*Hook.x;
+    if(RawMeta[ru]==1u&&RawMeta[ru+1u]==1u) {
+        if(!GraphReady()){W(cu+13u,ST_FAULT);return;}
+        // Aggregate has completed for THIS unit. Deep black joins may reuse an
+        // independent background witness from the SAME accepted current Raw4CC.
+        // Separate counters have no such witness. No AA or other support is born.
+        if(OpaqueRawComponentHasBackgroundWitness(int2(p))) {
+            uint ignored;InterlockedOr(V3M[p],PRIVATE_OPAQUE_BLACK_OFFER,ignored);
+        }
+        // Ordered after every source-root reduction write. Recompute the exact
+        // current-unit immutable donors; never borrow global packed proof bits.
+        if(CurrentWidthAvailable(Hook.x)) {
+            bool band=OwnBand(int2(p)),selected=RawSelected(int2(p));
+            bool measuredRim=AdjacentMeasuredRawRim(int2(p),band);
+            bool observedOpaqueRaw=OpaqueRawHasBackgroundWitness(int2(p));
+            if(observedOpaqueRaw&&!band) {
+                ObservedRawToMeasuredBandGapRays(int2(p),cu); // Existing one-pixel behavior stays exact.
+                ObservedRawToMeasuredBandShortGapRays(int2(p),cu);
+            }
+            // The additional donor has its own current Raw/background proof. It does
+            // not widen shared RawSelected/Support, acquire measured BAND, or seed the
+            // original measured-band gap/closure/cache paths. The isolated gap
+            // helpers above are separate ordinary-AA paths. Existing OuterRays colour
+            // and background guards stay unchanged.
+            if((band||selected||measuredRim||observedOpaqueRaw)&&ValidPoint(int2(p))&&Black(int2(p)))
+                OuterRays(int2(p),band,selected||observedOpaqueRaw);
+        }
+    }
+    if(!CurrentWidthAvailable(Hook.x))return;
     uint tag=PassableCache[p],root=tag&ROOT_MASK;
     if(root==0u||(tag&ENCLOSED)==0u)return;
     uint2 rp;uint rt;if(!CacheRootValid(root,true,rp,rt))return;
@@ -1450,5 +1735,10 @@ void publish_closure_main(uint3 d:SV_DispatchThreadID) {
         Data.InterlockedAdd((cu+25u)*4u,1u,ignored);
         Data.InterlockedAdd((cu+(accepted?26u:27u))*4u,1u,ignored);
     }
-    if(accepted){InterlockedOr(V3M[p],CLOSURE,ignored);Data.InterlockedAdd((cu+28u)*4u,1u,ignored);}
+    if(accepted) {
+        // Root acceptance/counts stay unchanged; count only actual pixel writes.
+        if(CurrentKnownClosedRecipientAllowed(int2(p))) {
+            InterlockedOr(V3M[p],CLOSURE,ignored);Data.InterlockedAdd((cu+28u)*4u,1u,ignored);
+        }
+    }
 }

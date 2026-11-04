@@ -4,6 +4,7 @@
  */
 
 #include "host_sbs_shader_cache.h"
+#include "host_sbs_shader_cache_flights.h"
 
 #include "crypto.h"
 #include "logging.h"
@@ -34,6 +35,68 @@
 #endif
 
 namespace models::host_sbs_shader_cache {
+  namespace detail {
+    struct bytecode_cache_t::entry_t {
+      std::promise<bytecode_t> promise;
+      std::shared_future<bytecode_t> future = promise.get_future().share();
+    };
+
+    void bytecode_cache_t::erase_if_current(const key_t &key, const std::shared_ptr<entry_t> &entry) {
+      std::lock_guard lock(mutex_);
+      const auto found = entries_.find(key);
+      if (found != entries_.end() && found->second == entry) {
+        entries_.erase(found);
+      }
+    }
+
+    bytecode_t bytecode_cache_t::get(
+      const key_t &key,
+      const std::function<bytecode_t()> &resolve,
+      const std::function<void()> &on_hit
+    ) {
+      std::shared_ptr<entry_t> entry;
+      bool producer = false;
+      {
+        std::lock_guard lock(mutex_);
+        const auto found = entries_.find(key);
+        if (found != entries_.end()) {
+          entry = found->second;
+        } else {
+          entry = std::make_shared<entry_t>();
+          entries_.emplace(key, entry);
+          producer = true;
+        }
+      }
+      if (!producer) {
+        if (on_hit) {
+          on_hit();
+        }
+        return entry->future.get();
+      }
+
+      try {
+        auto bytecode = resolve();
+        if (!bytecode) {
+          erase_if_current(key, entry);
+        }
+        entry->promise.set_value(bytecode);
+        return bytecode;
+      } catch (...) {
+        const auto error = std::current_exception();
+        // An older producer may complete after clear() and a replacement. Revoke only its
+        // own map entry, while settling every caller that retained the old shared state.
+        erase_if_current(key, entry);
+        entry->promise.set_exception(error);
+        std::rethrow_exception(error);
+      }
+    }
+
+    void bytecode_cache_t::clear() {
+      std::lock_guard lock(mutex_);
+      entries_.clear();
+    }
+  }  // namespace detail
+
   struct owned_shader_spec {
     std::string filename;
     std::string entrypoint;
@@ -234,17 +297,8 @@ namespace models::host_sbs_shader_cache {
       }
     };
 
-    using cache_key = std::tuple<
-      std::filesystem::path,
-      std::string,
-      std::string,
-      std::string,
-      std::string
-    >;
-    using cache_future = std::shared_future<bytecode_t>;
-
     std::mutex cache_mutex;
-    std::map<cache_key, cache_future> cache;
+    detail::bytecode_cache_t cache;
     std::filesystem::path persistent_cache_directory;
     std::atomic<std::uint64_t> memory_hit_count {0u};
     std::atomic<std::uint64_t> persistent_hit_count {0u};
@@ -659,7 +713,7 @@ namespace models::host_sbs_shader_cache {
         << spec.filename;
       return {};
     }
-    const cache_key key {
+    const detail::bytecode_cache_t::key_t key {
       sources->root,
       sources->closure_sha256,
       selected->filename,
@@ -667,46 +721,43 @@ namespace models::host_sbs_shader_cache {
       selected->target,
     };
 
-    cache_future future;
-    std::shared_ptr<std::promise<bytecode_t>> producer;
+    bool produced = false;
     std::filesystem::path artifact_path;
-    {
-      std::lock_guard lock(cache_mutex);
-      if (const auto found = cache.find(key); found != cache.end()) {
-        future = found->second;
-        memory_hit_count.fetch_add(1u, std::memory_order_relaxed);
-      } else {
-        producer = std::make_shared<std::promise<bytecode_t>>();
-        future = producer->get_future().share();
-        cache.emplace(key, future);
-        artifact_path = persistent_artifact_path(
-          persistent_cache_directory, *sources, *selected);
-      }
-    }
-
-    if (producer) {
-      auto bytecode = load_persistent_artifact(artifact_path, *selected);
-      if (!bytecode) {
-        compile_count.fetch_add(1u, std::memory_order_relaxed);
-        bytecode = compile(*sources, *selected);
-      }
-      producer->set_value(bytecode);
-      if (bytecode) {
-        try {
-          store_persistent_artifact(artifact_path, bytecode);
-        } catch (const std::exception &error) {
-          BOOST_LOG(warning)
-            << "Could not persist Host SBS shader bytecode: " << error.what();
+    const auto bytecode = cache.get(
+      key,
+      [&] {
+        produced = true;
+        // Path/hash/configuration copies can throw too. They belong to the same guarded
+        // producer as disk loading and compilation, after publication of its shared state.
+        {
+          std::lock_guard lock(cache_mutex);
+          artifact_path = persistent_artifact_path(
+            persistent_cache_directory, *sources, *selected);
         }
+        auto code = load_persistent_artifact(artifact_path, *selected);
+        if (!code) {
+          compile_count.fetch_add(1u, std::memory_order_relaxed);
+          code = compile(*sources, *selected);
+        }
+        return code;
+      },
+      [] {
+        memory_hit_count.fetch_add(1u, std::memory_order_relaxed);
       }
-      if (!bytecode) {
-        // A transient source/install problem may be repaired without restarting the process.
-        std::lock_guard lock(cache_mutex);
-        cache.erase(key);
+    );
+    if (produced && bytecode) {
+      // The shared bytecode has already succeeded. Best-effort persistence cannot turn this
+      // caller into a failure while attached callers have received the successful value.
+      try {
+        store_persistent_artifact(artifact_path, bytecode);
+      } catch (const std::exception &error) {
+        BOOST_LOG(warning)
+          << "Could not persist Host SBS shader bytecode: " << error.what();
+      } catch (...) {
+        BOOST_LOG(warning) << "Could not persist Host SBS shader bytecode: unknown error";
       }
-      return bytecode;
     }
-    return future.get();
+    return bytecode;
   }
 
   static bool prewarm_shader_set(
@@ -724,8 +775,9 @@ namespace models::host_sbs_shader_cache {
     return true;
   }
 
-  // Preserve the authenticated production startup order. Diagnostic, trace, dump-only, and
-  // optional P010 shaders intentionally remain lazy and independent of host startup success.
+  // Preserve the shared producer/arbitration startup order. The live current-outline device
+  // programs prepare separately on its tracked build worker. Diagnostic, trace, dump-only, and
+  // optional P010 shaders remain lazy and independent of host startup success.
   static constexpr std::array production_prewarm_sets {
     std::span<const shader_spec> {parallax_v2_producer_specs},
     std::span<const shader_spec> {near_identical_detector_specs},
@@ -745,14 +797,14 @@ namespace models::host_sbs_shader_cache {
       prewarmed_shader_count += specs.size();
     }
     BOOST_LOG(info)
-      << "Prewarmed the complete Host SBS V2 shader set ("
+      << "Prewarmed the shared Host SBS V2 producer and renderer shader set ("
       << prewarmed_shader_count
       << " production shaders"
       << "; persistent_hits="
       << cache_statistics().persistent_hits - statistics_before.persistent_hits
       << ", compiled="
       << cache_statistics().compiled - statistics_before.compiled
-      << "; experimental/test and dump-only shaders remain lazy).";
+      << "; live current-outline device programs prepare separately; diagnostics remain lazy).";
     if (all_compiled) {
       prune_persistent_artifacts();
     }

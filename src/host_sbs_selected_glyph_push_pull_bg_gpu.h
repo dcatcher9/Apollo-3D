@@ -1,6 +1,8 @@
 #pragma once
-// PRIVATE ONE push/pull+erase1 prototype. No runtime activation or new protection mask.
+// Optional production selected-glyph push/pull repair. It grants no new protection-mask authority.
 #ifdef _WIN32
+#include "host_sbs_selected_matte_receipt.h"
+#include "host_sbs_compute_program_lease.h"
 #include <array>
 #include <cstdint>
 #include <limits>
@@ -9,6 +11,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 namespace models::selected_glyph_push_pull_bg_gpu_v1 {
+namespace receipt_abi=selected_matte_receipt_v1;
 using Microsoft::WRL::ComPtr;
 inline constexpr UINT proof_words=96u,expected_words=16u,maximum_levels=16u;
 struct program_t { ID3D11ComputeShader *prepare=nullptr,*init=nullptr,*down=nullptr,*coarse=nullptr,*pull=nullptr,*seal=nullptr; };
@@ -24,6 +27,7 @@ struct views_t {
  std::uint64_t draw_serial=0;
 };
 class resources_t {
+ host_sbs_compute_program_lease::group_t<6u> program_lease_;
  ComPtr<ID3D11Device> device_;
  ComPtr<ID3D11Texture2D> background_;
  ComPtr<ID3D11ShaderResourceView> background_srv_,proof_srv_;
@@ -131,10 +135,10 @@ class resources_t {
   D3D11_BUFFER_DESC d{};d.ByteWidth=bytes;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=bind;d.MiscFlags=misc;d.StructureByteStride=stride;return SUCCEEDED(device_->CreateBuffer(&d,nullptr,b.GetAddressOf()));
  }
  bool check(const request_t&r,std::array<UINT,16u>&lease,ID3D11DeviceContext*c,std::string&error) {
-  if(!constant(r.actual_contour_constants96,96u)||!constant(r.actual_subtitle_render_constants32,32u)||r.analysis_shape[0]!=width_||r.analysis_shape[3]!=band_height_||r.analysis_shape[1]==0u||r.analysis_shape[1]>5120u||r.analysis_shape[2]>=r.analysis_shape[1]||r.analysis_shape[3]!=r.analysis_shape[1]-r.analysis_shape[2]) {error="BG actual CB or shape unavailable";return false;}
+  if(!constant(r.actual_contour_constants96,receipt_abi::contour_byte_count)||!constant(r.actual_subtitle_render_constants32,32u)||r.analysis_shape[0]!=width_||r.analysis_shape[3]!=band_height_||r.analysis_shape[1]==0u||r.analysis_shape[1]>5120u||r.analysis_shape[2]>=r.analysis_shape[1]||r.analysis_shape[3]!=r.analysis_shape[1]-r.analysis_shape[2]) {error="BG actual CB or shape unavailable";return false;}
   std::array<ComPtr<ID3D11Resource>,8u> actual;
   for(UINT i=0;i<8u;++i) {if(!same_device(r.draw_srvs[i])){error="BG draw input absent/foreign";return false;}r.draw_srvs[i]->GetResource(&actual[i]);if(actual[i].Get()==background_.Get()||actual[i].Get()==pool_.Get()||actual[i].Get()==proof_.Get()||actual[i].Get()==args_.Get()||actual[i].Get()==constants_.Get()||actual[i].Get()==expected_.Get()){error="BG writable input alias";return false;}}
-  if(!structured(r.draw_srvs[2],4u,16u,true)||!structured(r.draw_srvs[5],6u,4u)||!structured(r.draw_srvs[6],32u,4u)||!structured(r.draw_srvs[7],64u,4u)){error="BG typed structured inputs unavailable";return false;}
+  if(!structured(r.draw_srvs[2],4u,16u,true)||!structured(r.draw_srvs[5],6u,4u)||!structured(r.draw_srvs[6],32u,4u)||!structured(r.draw_srvs[7],receipt_abi::word_count,receipt_abi::word_bytes)){error="BG typed structured inputs unavailable";return false;}
   for(UINT i:{0u,1u,3u,4u}) {D3D11_TEXTURE2D_DESC d{};D3D11_SHADER_RESOURCE_VIEW_DESC s{};ComPtr<ID3D11Resource>a;if(!texture(r.draw_srvs[i],d,s,a)){error="BG exact texture input unavailable";return false;}
    if(i==0u) {if(s.Format!=DXGI_FORMAT_R16G16B16A16_FLOAT&&s.Format!=DXGI_FORMAT_R8G8B8A8_UNORM&&s.Format!=DXGI_FORMAT_B8G8R8A8_UNORM&&s.Format!=DXGI_FORMAT_B8G8R8X8_UNORM){error="BG native working source format unsupported";return false;}}
    if(i==1u&&s.Format!=DXGI_FORMAT_R32_FLOAT){error="BG Base format unavailable";return false;}
@@ -165,7 +169,7 @@ public:
  // BG/proof may be bound only at reserved PS9/11 or saved CS slots, never elsewhere.
  bool queue(ID3D11DeviceContext*c,const program_t&p,const request_t&r,std::string&error) {
   issued_=false;
-  error.clear();if(!pool_||!context_ok(c)||!same_device(p.prepare)||!same_device(p.init)||!same_device(p.down)||!same_device(p.coarse)||!same_device(p.pull)||!same_device(p.seal)){error="BG program/context unavailable";return false;}
+  error.clear();if(!pool_||!context_ok(c)||!program_lease_.acquire(device_.Get(),{p.prepare,p.init,p.down,p.coarse,p.pull,p.seal})){error="BG program/context unavailable";return false;}
   constants_t cb{};if(!check(r,cb.lease,c,error))return false;cb.shape=r.analysis_shape;cb.pool={mips_[0][0],mips_[0][1],pool_cells_,levels_};cb.mips=mips_;
   saved_t saved(c);saved_t::unbind(c);
   c->UpdateSubresource(expected_.Get(),0u,nullptr,cb.lease.data(),0u,0u);

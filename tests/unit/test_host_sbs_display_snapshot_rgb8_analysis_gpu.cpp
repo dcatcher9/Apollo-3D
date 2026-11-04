@@ -2,6 +2,7 @@
 // Synthetic typed final/SCT/CB/UIP inputs are fixture stimuli, never model-completion certificates.
 #include <gtest/gtest.h>
 #ifdef _WIN32
+#include "subtitle_helper_source_pins.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -23,7 +24,7 @@ namespace {
 namespace cg=models::display_snapshot_rgb8_analysis_gpu_v1;
 namespace cache=models::host_sbs_shader_cache;
 using Microsoft::WRL::ComPtr;using json=nlohmann::json;using bytes=std::vector<std::uint8_t>;
-constexpr const char *helper_pin="20f4b925cd82a7890d9d8f16f7f9bea6c9ccc2a359cda7c14f3a65f0af4f829f";
+constexpr const char *helper_pin=subtitle_test_source_pins::display_snapshot_rgb8;
 constexpr const char *producer_pin="291ec723c8259b864e9889bbb8c9fd8b182da6795bd272a0fa97d8edae29f8bb";
 constexpr const char *producer_freeze_pin="a00dae08ecb4f54a22f88edbb62f0dc686c037a9e8777aa801d66529625408a0";
 struct tex_t {ComPtr<ID3D11Texture2D> texture;ComPtr<ID3D11ShaderResourceView> srv;ComPtr<ID3D11UnorderedAccessView> uav;};
@@ -134,6 +135,92 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, AllCodesBothRootModesAllTransfersAndEm
 }
 TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectAndQueuedSourceOutputsIdentical) {
  author();queue();envelope();auto r=reference_band(),b=readView(owner.views().analysis_band.Get(),8),p=readView(owner.views().source_proof.Get()),e=readView(owner.views().uip_envelope.Get());roots[20]=roots[21]=roots[22]=0;upload();queue();envelope();EXPECT_EQ(reference_band(),r);EXPECT_EQ(readView(owner.views().analysis_band.Get(),8),b);EXPECT_EQ(readView(owner.views().source_proof.Get()),p);EXPECT_EQ(readView(owner.views().uip_envelope.Get()),e);auto row=snapshot("direct-identical","positive");row["compared_queued_reference"]=save("queued-reference.bin",r);row["compared_queued_analysis"]=save("queued-analysis.bin",b);row["compared_queued_proof"]=save("queued-proof.bin",p);row["compared_queued_envelope"]=save("queued-envelope.bin",e);row["envelope"]=save("direct-envelope.bin",readView(owner.views().uip_envelope.Get()));report["observations"].back()=row;
+}
+TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, CombinedCurrentQueueMatchesSeparateCaptureAndEnvelope) {
+ author();
+ cg::resources_t combined;
+ ASSERT_TRUE(combined.ensure(device.Get(),W,H,crop,B,error))<<error;
+ // Source5's upper carrier rows are intentionally unwritten. Compare only the
+ // actual native band, plus the whole proof/envelope, on independently owned outputs.
+ const auto capture=[&](cg::resources_t &source){
+  const auto v=source.views();ComPtr<ID3D11Resource>r;v.reference_rgb8->GetResource(&r);
+  auto band=texture(W,B,DXGI_FORMAT_R8G8B8A8_UNORM,false);
+  const D3D11_BOX box{0u,crop,0u,W,H,1u};
+  context->CopySubresourceRegion(band.texture.Get(),0u,0u,0u,0u,r.Get(),0u,&box);
+  return std::array<bytes,4>{read(band.texture.Get()),readView(v.analysis_band.Get(),8),
+    readView(v.source_proof.Get()),readView(v.uip_envelope.Get())};
+ };
+ const std::array<const char *,4> names{"reference-band","analysis-band","proof","envelope"};
+ report["combined_queue_comparisons"]=json::array();
+ const auto compare=[&](const std::string &label,const std::array<bytes,4> &expected,const std::array<bytes,4> &actual){
+  json row{{"name",label},{"expected",json::object()},{"actual",json::object()}};
+  for(UINT i=0u;i<names.size();++i){
+   row["expected"][names[i]]=save(label+"-separate-"+names[i]+".bin",expected[i]);
+   row["actual"][names[i]]=save(label+"-combined-"+names[i]+".bin",actual[i]);
+   EXPECT_EQ(actual[i],expected[i])<<label<<":"<<names[i];
+  }
+  report["combined_queue_comparisons"].push_back(row);
+ };
+ // Unrelated caller state must survive both successful and rejected atomic calls.
+ std::array<buf_t,16> state_srvs;std::array<buf_t,8> state_uavs;
+ std::array<ComPtr<ID3D11Buffer>,3> state_cbs;
+ std::array<ID3D11ShaderResourceView*,16> ss{};
+ std::array<ID3D11UnorderedAccessView*,8> uu{};
+ std::array<ID3D11Buffer*,3> bb{};
+ for(UINT i=0u;i<ss.size();++i){state_srvs[i]=buffer(4);ss[i]=state_srvs[i].srv.Get();}
+ for(UINT i=0u;i<uu.size();++i){state_uavs[i]=buffer(4,false,false,true);uu[i]=state_uavs[i].uav.Get();}
+ for(UINT i=0u;i<bb.size();++i){state_cbs[i]=constants(std::array<UINT,4>{0x61700000u+i,0u,0u,0u});bb[i]=state_cbs[i].Get();}
+ const auto bind_state=[&](){
+  context->CSSetShaderResources(0u,16u,ss.data());context->CSSetUnorderedAccessViews(0u,8u,uu.data(),nullptr);
+  context->CSSetConstantBuffers(0u,3u,bb.data());context->CSSetShader(shaders[1].Get(),nullptr,0u);
+ };
+ const auto check_state=[&](){
+  std::array<ID3D11ShaderResourceView*,16> s{};std::array<ID3D11UnorderedAccessView*,8> u{};std::array<ID3D11Buffer*,3> b{};
+  context->CSGetShaderResources(0u,16u,s.data());context->CSGetUnorderedAccessViews(0u,8u,u.data());context->CSGetConstantBuffers(0u,3u,b.data());
+  for(UINT i=0u;i<s.size();++i){EXPECT_EQ(s[i],ss[i]);if(s[i])s[i]->Release();}
+  for(UINT i=0u;i<u.size();++i){EXPECT_EQ(u[i],uu[i]);if(u[i])u[i]->Release();}
+  for(UINT i=0u;i<b.size();++i){EXPECT_EQ(b[i],bb[i]);if(b[i])b[i]->Release();}
+  ComPtr<ID3D11ComputeShader> shader;UINT instances=0u;context->CSGetShader(&shader,nullptr,&instances);
+  EXPECT_EQ(shader.Get(),shaders[1].Get());EXPECT_EQ(instances,0u);
+ };
+ queue();envelope();check_outputs();prefix();
+ const auto first=capture(owner);
+ bind_state();ASSERT_TRUE(combined.queue_current(context.Get(),program,request,uip.srv.Get(),error))<<error;check_state();
+ compare("sdr-queued-active",first,capture(combined));
+ EXPECT_EQ(read(combined.views().final_root_mirror.Get()),pack(roots));
+ EXPECT_EQ(read(combined.views().request_constants.Get()),read(owner.views().request_constants.Get()));
+
+ // A different real input tuple makes accidental capture-before-UIP-validation
+ // observable in both pixels and proof. An invalid descriptor must submit nothing.
+ author(2u,true,true,0x1000000a9ull,0xe00000000000a901ull);
+ auto short_uip=buffer(39u);
+ for(auto *bad_uip:std::array<ID3D11ShaderResourceView*,2>{nullptr,short_uip.srv.Get()}){
+  bind_state();EXPECT_FALSE(combined.queue_current(context.Get(),program,request,bad_uip,error));check_state();
+  const auto held=capture(combined);
+  for(UINT i=0u;i<first.size();++i)EXPECT_EQ(held[i],first[i])<<"early UIP rejection:"<<names[i];
+ }
+ queue();envelope();check_outputs();prefix();
+ const auto second=capture(owner);
+ ASSERT_NE(second[0u],first[0u]);ASSERT_NE(second[2u],first[2u]);
+ bind_state();ASSERT_TRUE(combined.queue_current(context.Get(),program,request,uip.srv.Get(),error))<<error;check_state();
+ compare("hdr-metadata-direct-empty",second,capture(combined));
+
+ D3D11_QUERY_DESC desc{};desc.Query=D3D11_QUERY_OCCLUSION_PREDICATE;
+ ComPtr<ID3D11Predicate> predicate;hr(device->CreatePredicate(&desc,&predicate));
+ bind_state();context->SetPredication(predicate.Get(),FALSE);
+ EXPECT_FALSE(combined.queue_current(context.Get(),program,request,uip.srv.Get(),error));check_state();
+ ComPtr<ID3D11Predicate> actual_predicate;BOOL predicate_value=TRUE;
+ context->GetPredication(&actual_predicate,&predicate_value);
+ EXPECT_EQ(actual_predicate.Get(),predicate.Get());EXPECT_FALSE(predicate_value);
+ context->SetPredication(nullptr,FALSE);
+ const auto after_rejection=capture(combined);
+ for(UINT i=0u;i<second.size();++i)EXPECT_EQ(after_rejection[i],second[i]);
+
+ roots[60u]=0u;upload();
+ bind_state();ASSERT_TRUE(combined.queue_current(context.Get(),program,request,uip.srv.Get(),error))<<error;check_state();
+ compare("root0-held",second,capture(combined));
+ report["combined_CS_state_restored"]={{"SRV",16},{"UAV",8},{"CB",3},{"shader",true},{"predication",true}};
+ report["combined_early_UIP_rejections"]=2u;
 }
 TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, MalformedRoot80ShapesRevokeSourceOnly) {
  author();queue();auto good=roots;UINT n=0;for(auto g:{std::array<UINT,4>{1,0,1,0},std::array<UINT,4>{0,1,1,0},std::array<UINT,4>{1,1,0,0},std::array<UINT,4>{1,1,1,1},std::array<UINT,4>{2,1,1,0},std::array<UINT,4>{0,0,0,1}}){roots=good;std::copy(g.begin(),g.end(),roots.begin()+20);upload();queue();auto p=words(readView(owner.views().source_proof.Get()));EXPECT_EQ(p[0],0u);EXPECT_EQ(p[3],0u);EXPECT_EQ(p[33],0u);EXPECT_EQ(p[34],0u);EXPECT_EQ(p[35],0u);EXPECT_EQ(p[38],3u);snapshot("bad80-"+std::to_string(n++),"join_reject");}

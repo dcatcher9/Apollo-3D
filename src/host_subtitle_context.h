@@ -31,10 +31,29 @@ namespace models::host_subtitle_context {
     kind_e kind = kind_e::disabled;
     std::uint64_t window = 0u;
     std::uint32_t process_id = 0u;
-    std::uint64_t foreground_generation = 0u;
-    std::uint64_t browser_epoch = 0u;
+    // Geometry runs are authenticated separately by the matched-frame owner. Moving the same
+    // video must not create a new semantic context merely because its rectangle changed.
+    std::int32_t document_id = 0;
+    std::int32_t video_id = 0;
 
     [[nodiscard]] constexpr bool operator==(const key_t &) const = default;
+  };
+
+  /** Positioned presentation authority is separate from the retained semantic video identity. */
+  struct presentation_authority_t {
+    std::uint64_t foreground_generation = 0u;
+    std::uint64_t region_generation = 0u;
+    std::uint64_t browser_epoch = 0u;
+    bool interactive_move_size = false;
+
+    [[nodiscard]] constexpr bool operator==(const presentation_authority_t &) const = default;
+
+    [[nodiscard]] constexpr bool permits_packed_repeat(
+      const presentation_authority_t &current,
+      const bool positioned_output
+    ) const noexcept {
+      return !positioned_output || *this == current;
+    }
   };
 
   /** Each context transition revokes previous submissions, including video/desktop/video ABA. */
@@ -64,6 +83,10 @@ namespace models::host_subtitle_context {
       return key_.kind;
     }
 
+    [[nodiscard]] constexpr key_t key() const noexcept {
+      return key_;
+    }
+
     /** Generation identity also applies to disabled publications; zero is never authenticated. */
     [[nodiscard]] constexpr bool matches(const std::uint64_t submitted_generation) const noexcept {
       return submitted_generation != 0u && submitted_generation == generation_;
@@ -71,14 +94,15 @@ namespace models::host_subtitle_context {
 
   private:
     [[nodiscard]] static constexpr key_t canonicalize(key_t candidate) noexcept {
-      if (candidate.window == 0u || candidate.process_id == 0u || candidate.foreground_generation == 0u) {
+      if (candidate.window == 0u || candidate.process_id == 0u) {
         return {};
       }
       switch (candidate.kind) {
         case kind_e::browser_video:
-          return candidate.browser_epoch != 0u ? candidate : key_t {};
+          return candidate.document_id != 0 && candidate.video_id != 0 ? candidate : key_t {};
         case kind_e::registered_video_player:
-          candidate.browser_epoch = 0u;
+          candidate.document_id = 0;
+          candidate.video_id = 0;
           return candidate;
         case kind_e::disabled:
         default:

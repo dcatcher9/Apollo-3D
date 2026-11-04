@@ -5,6 +5,9 @@
 // authority remains with the separate current-outline selector.
 #ifdef _WIN32
   #include "host_sbs_current_black_ring_gpu.h"
+  #include "host_sbs_current_mask_holes_gpu.h"
+  #include "host_sbs_compute_program_lease.h"
+  #include "host_sbs_current_outline_stage_observer.h"
 
   #include <algorithm>
   #include <array>
@@ -27,6 +30,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
   inline constexpr const char *profile_measurement = "BODY_to_last_physical_black_end_distance_j_minus_1";
   namespace enclosure = host_sbs_current_black_enclosure_gpu_v1;
   namespace baseline = enclosure::baseline;
+  namespace holes = host_sbs_current_mask_holes_gpu;
 
   struct program_t {
     enclosure::program_t enclosure;
@@ -36,10 +40,14 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     std::array<ID3D11ComputeShader *, 3u> roi_graph {};
     // prepare-profiles, profile, calibrate, grow-tile, final-publish, support-reduce, closure-publish.
     std::array<ID3D11ComputeShader *, 7u> band_shaders {};
+    // Optional all-or-none current-mask completion after the original final mask.
+    holes::programs_t hole_shaders {};
+    holes::coverage_programs_t coverage_shaders {};
     // Early current Inside: prepare, combined init, publish; final OR remains late.
     std::array<ID3D11ComputeShader *, 4u> inside_shaders {};
     // PRIVATE BBSC1 optional all-or-none begin/validate/commit.
     std::array<ID3D11ComputeShader *, 3u> stability_shaders {};
+    bool coverage_diagnostics = false;
     // TEST-ONLY output destinations. Never detector inputs. Default null costs no copies/planes.
     ID3D11Texture2D *packed_temp_snapshot = nullptr;
     ID3D11Texture2D *passable_cache_snapshot = nullptr;
@@ -47,6 +55,8 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     ID3D11Texture2D *pre_inside_final_snapshot = nullptr;
     ID3D11Buffer *raw_parent_snapshot = nullptr;
     ID3D11Buffer *raw_flags_snapshot = nullptr;
+    // CPU submission observer only; never recorded or included in the cache signature.
+    const current_outline_stage_observer::observer_t *stage_observer = nullptr;
   };
 
   struct mutable_views_t {
@@ -77,7 +87,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       ID3D11DeviceContext *c;
       std::array<ComPtr<ID3D11ShaderResourceView>, 16u> s;
       std::array<ComPtr<ID3D11UnorderedAccessView>, 8u> u;
-      std::array<ComPtr<ID3D11Buffer>, 3u> b;
+      std::array<ComPtr<ID3D11Buffer>, 4u> b;
       ComPtr<ID3D11ComputeShader> shader;
       std::array<ComPtr<ID3D11ClassInstance>, 256u> instances;
       UINT count = 256u;
@@ -86,12 +96,12 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
           c(context) {
         std::array<ID3D11ShaderResourceView *, 16u> ss {};
         std::array<ID3D11UnorderedAccessView *, 8u> uu {};
-        std::array<ID3D11Buffer *, 3u> bb {};
+        std::array<ID3D11Buffer *, 4u> bb {};
         std::array<ID3D11ClassInstance *, 256u> ii {};
         ID3D11ComputeShader *cs = nullptr;
         c->CSGetShaderResources(0u, 16u, ss.data());
         c->CSGetUnorderedAccessViews(0u, 8u, uu.data());
-        c->CSGetConstantBuffers(0u, 3u, bb.data());
+        c->CSGetConstantBuffers(0u, 4u, bb.data());
         c->CSGetShader(&cs, ii.data(), &count);
         shader.Attach(cs);
         for (UINT n = 0; n < 16u; ++n) {
@@ -100,7 +110,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         for (UINT n = 0; n < 8u; ++n) {
           u[n].Attach(uu[n]);
         }
-        for (UINT n = 0; n < 3u; ++n) {
+        for (UINT n = 0; n < 4u; ++n) {
           b[n].Attach(bb[n]);
         }
         for (UINT n = 0; n < count; ++n) {
@@ -115,7 +125,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         unbind(c);
         std::array<ID3D11ShaderResourceView *, 16u> ss {};
         std::array<ID3D11UnorderedAccessView *, 8u> uu {};
-        std::array<ID3D11Buffer *, 3u> bb {};
+        std::array<ID3D11Buffer *, 4u> bb {};
         std::array<ID3D11ClassInstance *, 256u> ii {};
         for (UINT n = 0; n < 16u; ++n) {
           ss[n] = s[n].Get();
@@ -123,7 +133,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         for (UINT n = 0; n < 8u; ++n) {
           uu[n] = u[n].Get();
         }
-        for (UINT n = 0; n < 3u; ++n) {
+        for (UINT n = 0; n < 4u; ++n) {
           bb[n] = b[n].Get();
         }
         for (UINT n = 0; n < count; ++n) {
@@ -131,16 +141,16 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         }
         c->CSSetUnorderedAccessViews(0u, 8u, uu.data(), nullptr);
         c->CSSetShaderResources(0u, 16u, ss.data());
-        c->CSSetConstantBuffers(0u, 3u, bb.data());
+        c->CSSetConstantBuffers(0u, 4u, bb.data());
         c->CSSetShader(shader.Get(), count ? ii.data() : nullptr, count);
       }
     };
 
     struct signature_t {
-      std::array<ComPtr<IUnknown>, 112u> values;
+      std::array<ComPtr<IUnknown>, 160u> values;
       UINT count = 0u, root_offset = 0u;
 
-      bool matches(const std::array<IUnknown *, 112u> &v, UINT n, UINT offset) const noexcept {
+      bool matches(const std::array<IUnknown *, 160u> &v, UINT n, UINT offset) const noexcept {
         if (n > values.size() || count != n || root_offset != offset) {
           return false;
         }
@@ -152,7 +162,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         return true;
       }
 
-      bool retain(const std::array<IUnknown *, 112u> &v, UINT n, UINT offset) {
+      bool retain(const std::array<IUnknown *, 160u> &v, UINT n, UINT offset) {
         if (n > values.size()) return false;
         *this = signature_t {};
         count = n;
@@ -170,6 +180,14 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     resources_t &operator=(const resources_t &) = delete;
     resources_t(resources_t &&) = default;
     resources_t &operator=(resources_t &&) = default;
+
+    [[nodiscard]] ID3D11ShaderResourceView *mask_hole_proof() const noexcept { return holes_.proof(); }
+    [[nodiscard]] ID3D11ShaderResourceView *mask_hole_parents() const noexcept { return holes_.parents(); }
+    [[nodiscard]] ID3D11ShaderResourceView *mask_hole_flags() const noexcept { return holes_.flags(); }
+    [[nodiscard]] bool mask_holes_enabled() const noexcept { return holes_enabled_; }
+    [[nodiscard]] bool stroke_coverage_diagnostics_enabled() const noexcept { return holes_.coverage_diagnostics_enabled(); }
+    [[nodiscard]] bool stroke_coverage_enabled() const noexcept { return coverage_enabled_; }
+    [[nodiscard]] ID3D11ShaderResourceView *stroke_coverage_offers() const noexcept { return holes_.coverage_offers(); }
 
     void set_recorded_execution(bool enabled) noexcept {
       recorded_ = enabled;
@@ -225,6 +243,44 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       return {width_, height_, enclosure_views_.body, colour_first_.srv, profile_data_.srv, root_cache_.srv, hook_cb_, unit_args_.resource, native_args_, inside_bits_.srv, enclosure_views_.family_models, inside_args_.resource, stability_image_.srv, stability_header_.srv};
     }
 
+    // The serialized caller must retire the preceding publication's consumers first. Revoke
+    // semantic-context authority without dropping allocations, source pixels or clock high-water.
+    bool invalidate_subtitle_history(ID3D11DeviceContext *context) {
+      if (!stability_header_.resource && !weak_aa_state_.resource) {
+        last_enabled_ = false;
+        return true;
+      }
+      if (!context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !same_device(context)) {
+        return false;
+      }
+      const UINT zero = 0u;
+      const UINT invalid_tuple = std::numeric_limits<UINT>::max();
+      if (stability_header_.resource) {
+        // Strong-valid, transient offers/plans and legacy-global/AA permission only.
+        // LastSeen frame56/57, clock60/61 and seen107 deliberately survive.
+        for (UINT word : {2u, 5u, 7u, 102u, 148u, 149u, 152u, 153u}) {
+          const D3D11_BOX box {word, 0u, 0u, word + 1u, 1u, 1u};
+          context->UpdateSubresource(stability_header_.resource.Get(), 0u, &box, &zero, sizeof(zero), 0u);
+        }
+        // Saved CB19 is reserved zero in every valid tuple. Break duplicate matching while
+        // retaining the independent material-clock guard used to reject stale observations.
+        const D3D11_BOX box {63u, 0u, 0u, 64u, 1u, 1u};
+        context->UpdateSubresource(stability_header_.resource.Get(), 0u, &box, &invalid_tuple, sizeof(invalid_tuple), 0u);
+      }
+      if (weak_aa_state_.resource) {
+        // Revoke the RGB anchor, current plan, episode and qualifications. Preserve seen11,
+        // frame28/29, clock32/33 and every source/history pixel below the header.
+        for (UINT word : {2u, 4u, 5u, 6u, 232u, 233u, 234u, 235u}) {
+          const D3D11_BOX box {word * 4u, 0u, 0u, (word + 1u) * 4u, 1u, 1u};
+          context->UpdateSubresource(weak_aa_state_.resource.Get(), 0u, &box, &zero, 0u, 0u);
+        }
+        const D3D11_BOX box {35u * 4u, 0u, 0u, 36u * 4u, 1u, 1u};
+        context->UpdateSubresource(weak_aa_state_.resource.Get(), 0u, &box, &invalid_tuple, 0u, 0u);
+      }
+      last_enabled_ = false;
+      return true;
+    }
+
     bool ensure(ID3D11Device *device, UINT width, UINT height, std::string &error) {
       error.clear();
       constexpr UINT maximum = depth_coordinate_v2::subtitle_contour_source_max_extent;
@@ -277,26 +333,21 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       if (!ready_ || !context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !same_device(context)) {
         return fail(error, "Enabled outline-support-closure requires prepared immediate same-device owner.");
       }
-      for (auto *s : program->shaders) {
-        if (!same_device(s)) {
-          return fail(error, "Missing/wrong-device outline-support-closure shader.");
-        }
-      }
-      for (auto *s : program->roi_graph) {
-        if (!same_device(s)) {
-          return fail(error, "Missing/wrong-device outline-support-closure graph shader.");
-        }
-      }
-      for (auto *s : program->band_shaders) {
-        if (!same_device(s)) {
-          return fail(error, "Missing/wrong-device outline-support band shader.");
-        }
-      }
-      for (auto *shader : program->inside_shaders) {
-        if (!same_device(shader)) return fail(error, "Missing/wrong-device independent Inside shader.");
-      }
-      stability_enabled_ = true;
-      for (auto *shader : program->stability_shaders) stability_enabled_ = stability_enabled_ && same_device(shader);
+      if (!raw_program_lease_.acquire(device_.Get(), program->shaders)) return fail(error, "Missing/wrong-device outline-support-closure shader.");
+      if (!roi_program_lease_.acquire(device_.Get(), program->roi_graph)) return fail(error, "Missing/wrong-device outline-support-closure graph shader.");
+      if (!band_program_lease_.acquire(device_.Get(), program->band_shaders)) return fail(error, "Missing/wrong-device outline-support band shader.");
+      if (!inside_program_lease_.acquire(device_.Get(), program->inside_shaders)) return fail(error, "Missing/wrong-device independent Inside shader.");
+      holes_enabled_ = hole_program_lease_.acquire(device_.Get(), program->hole_shaders);
+      try {
+        std::string optional_error;
+        if (holes_enabled_ && !holes_.ensure(device_.Get(), width_, height_, optional_error)) holes_enabled_ = false;
+      } catch (const std::exception &) { holes_enabled_ = false; }
+      coverage_enabled_ = holes_enabled_ && coverage_program_lease_.acquire(device_.Get(), program->coverage_shaders);
+      try {
+        std::string optional_error;
+        if (coverage_enabled_ && !holes_.ensure_coverage(optional_error, program->coverage_diagnostics)) coverage_enabled_ = false;
+      } catch (const std::exception &) { coverage_enabled_ = false; }
+      stability_enabled_ = stability_program_lease_.acquire(device_.Get(), program->stability_shaders);
       stability_enabled_ = stability_enabled_ && stability_source_format(rgb);
       try { if (stability_enabled_ && !ensure_stability()) stability_enabled_ = false; }
       catch (const std::exception &) { stability_enabled_ = false; } // Optional allocation cannot revoke old output.
@@ -321,14 +372,16 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         invalidate_weak_aa();
         return false;
       }
+      if (program->stage_observer) program->stage_observer->mark(context, current_outline_stage_observer::stage_e::cbc_end);
       if (!recorded_) {
         const saved_cs_t saved {context};
         emit(context, constants96, rgb, ocr, root, root_offset, *program);
         ++diagnostics_.direct_emissions;
         last_enabled_ = true;
+        if (program->stage_observer) program->stage_observer->mark(context, current_outline_stage_observer::stage_e::f2_end);
         return true;
       }
-      std::array<IUnknown *, 112u> objects {};
+      std::array<IUnknown *, 160u> objects {};
       UINT count = 0u;
       if (!signature_objects(objects, count, constants96, rgb, ocr, root, *program)) {
         return fail(error, "Inside owner recorded signature exceeds checked capacity112.");
@@ -355,6 +408,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       context->ExecuteCommandList(commands_.Get(), TRUE);
       ++diagnostics_.replays;
       last_enabled_ = true;
+      if (program->stage_observer) program->stage_observer->mark(context, current_outline_stage_observer::stage_e::f2_end);
       return true;
     }
 
@@ -577,6 +631,16 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         error = "Could not allocate outline-support-closure constants.";
         return false;
       }
+      for (UINT unit = 0u; unit < unit_constants_.size(); ++unit) {
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = 16u;desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        const std::array<UINT, 4u> value{unit, 0u, 0u, 0u};
+        const D3D11_SUBRESOURCE_DATA data{value.data(), 0u, 0u};
+        if (FAILED(device_->CreateBuffer(&desc, &data, &unit_constants_[unit]))) {
+          error = "Could not allocate immutable outline unit constants.";return false;
+        }
+      }
       d = {};
       d.ByteWidth = 12u;
       d.Usage = D3D11_USAGE_DEFAULT;
@@ -590,7 +654,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       return true;
     }
 
-    bool signature_objects(std::array<IUnknown *, 112u> &objects, UINT &count, ID3D11Buffer *cb, ID3D11ShaderResourceView *rgb, ID3D11ShaderResourceView *ocr, ID3D11Buffer *root, const program_t &p) const {
+    bool signature_objects(std::array<IUnknown *, 160u> &objects, UINT &count, ID3D11Buffer *cb, ID3D11ShaderResourceView *rgb, ID3D11ShaderResourceView *ocr, ID3D11Buffer *root, const program_t &p) const {
       bool valid = true;
       auto add = [&](IUnknown *o) {
         if (count >= objects.size()) { valid = false;return; }
@@ -607,6 +671,10 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       }
       for (auto *s : p.inside_shaders) add(s);
       for (auto *s : p.stability_shaders) add(s);
+      for (auto *shader : p.hole_shaders) add(shader);
+      for (auto *shader : p.coverage_shaders) add(shader);
+      add(holes_enabled_ ? holes_.proof() : nullptr);
+      holes_.signature_objects(add);
       add(stability_image_.resource.Get());add(stability_image_.srv.Get());add(stability_image_.uav.Get());
       add(stability_header_.resource.Get());add(stability_header_.srv.Get());add(stability_header_.uav.Get());
       add(stability_aa_history_.resource.Get());add(stability_aa_history_.srv.Get());add(stability_aa_history_.uav.Get());
@@ -638,6 +706,9 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       add(meta_.uav.Get());
       add(unit_args_.uav.Get());
       add(hook_cb_.Get());
+      // This immutable private bank is replaced only with the complete owner.
+      // The command list itself retains every bound unit buffer.
+      add(unit_constants_[0u].Get());
       add(shape_cb_.Get());
       add(native_args_.Get());
       add(unit_args_.resource.Get());
@@ -653,10 +724,10 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       unbind(c);
       const D3D11_BOX gate {root_offset, 0u, 0u, root_offset + 4u, 1u, 1u};
       c->CopySubresourceRegion(native_args_.Get(), 0u, 8u, 0u, 0u, root, 0u, &gate);
-      ID3D11Buffer *bc[3] {cb, hook_cb_.Get(), shape_cb_.Get()};
+      ID3D11Buffer *bc[3] {cb, unit_constants_[0u].Get(), shape_cb_.Get()};
       const std::array<ID3D11ShaderResourceView *, 10u> inputs {rgb, enclosure_views_.all_body_bits.Get(), enclosure_views_.selected_bits.Get(), enclosure_views_.cover_bits.Get(), enclosure_views_.receipt.Get(), scratch_.eligible.Get(), scratch_.parent.Get(), scratch_.root_flags.Get(), inner_.srv.Get(), enclosure_views_.matte.Get()};
       auto stage = [&](UINT entry, const std::array<ID3D11UnorderedAccessView *, 8u> &out, ID3D11Buffer *args, UINT offset) {
-        unbind(c);
+        // emit() enters unbound; every stage/graph leaves these slots unbound.
         auto in = inputs;
         if (out[1]) {
           in[5] = nullptr;
@@ -672,7 +743,6 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         unbind(c);
       };
       auto band_stage = [&](UINT entry, ID3D11Buffer *args, UINT offset) {
-        unbind(c);
         std::array<ID3D11ShaderResourceView *, 16u> in {rgb, ocr, enclosure_views_.selected_bits.Get(), enclosure_views_.body.Get(), enclosure_views_.cover_bits.Get(), enclosure_views_.receipt.Get(), scratch_.parent.Get(), scratch_.root_flags.Get(), scratch_.eligible.Get(), inner_.srv.Get(), matte_.srv.Get(), meta_.srv.Get(), enclosure_views_.matte.Get(), stability_enabled_ ? stability_image_.srv.Get() : nullptr, stability_enabled_ ? stability_header_.srv.Get() : nullptr, inside_bits_.srv.Get()};
         std::array<ID3D11UnorderedAccessView *, 8u> out {};
         out[0] = profile_data_.uav.Get();
@@ -681,6 +751,11 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         }
         if (entry >= 5u) {
           out[2] = root_cache_.uav.Get();
+          // The second Raw graph already cleared mode-final over this full ROI.
+          // Aggregate stores current-root background witnesses; ordered closure
+          // consumes them before the next unit reinitializes the same scratch.
+          // No mode-final SRV is bound in this stage.
+          out[3] = scratch_uavs_[7].Get();
         }
         // Final publication observes current Inside read-only through t15.
         if (entry == 4u && stability_enabled_) {
@@ -697,7 +772,6 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       };
       auto cache_stage = [&](UINT entry,ID3D11Buffer *args,UINT offset) {
         if (!stability_enabled_) return;
-        unbind(c);
         const std::array<ID3D11ShaderResourceView *,15u> in {rgb,ocr,enclosure_views_.selected_bits.Get(),
           enclosure_views_.body.Get(),enclosure_views_.cover_bits.Get(),enclosure_views_.receipt.Get(),
           scratch_.parent.Get(),scratch_.root_flags.Get(),scratch_.eligible.Get(),inner_.srv.Get(),matte_.srv.Get(),
@@ -709,6 +783,16 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         c->CSSetConstantBuffers(0u,3u,bc);c->CSSetShaderResources(0u,15u,in.data());
         c->CSSetUnorderedAccessViews(0u,8u,out.data(),nullptr);
         c->CSSetShader(p.stability_shaders[entry],nullptr,0u);c->DispatchIndirect(args,offset);unbind(c);
+      };
+      auto hole_views = [&]() {
+        holes::inputs_t in;
+        in.rgb = rgb; in.ocr = ocr; in.selected = enclosure_views_.selected_bits.Get();
+        in.cover = enclosure_views_.cover_bits.Get(); in.cbc = enclosure_views_.receipt.Get();
+        in.raw_meta = meta_.srv.Get(); in.raw_parent = scratch_.parent.Get(); in.raw_flags = scratch_.root_flags.Get();
+        in.raw_passable = scratch_.eligible.Get(); in.inner = inner_.srv.Get(); in.raw_witness = scratch_.mode_final.Get();
+        in.old_final = colour_first_.srv.Get(); in.raw_m = matte_.srv.Get(); in.code1 = enclosure_views_.matte.Get();
+        in.models = enclosure_views_.family_models.Get(); in.final_m = colour_first_.uav.Get(); in.data = profile_data_.uav.Get();
+        return in;
       };
       constexpr std::array<UINT, 4u> zero {};
       std::array<ID3D11UnorderedAccessView *, 8u> u {};
@@ -724,8 +808,9 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       u[6] = matte_.uav.Get();
       stage(1u, u, native_args_.Get(), 0u);
       band_stage(0u, root, root_offset);
+      if (holes_enabled_) holes_.begin(c, p.hole_shaders, cb, shape_cb_.Get(), hole_views(), native_args_.Get());
+      if (coverage_enabled_) holes_.begin_coverage(c, p.coverage_shaders, cb, shape_cb_.Get(), hole_views(), native_args_.Get());
       auto inside_stage = [&](UINT entry, ID3D11Buffer *args) {
-        unbind(c);
         std::array<ID3D11ShaderResourceView *, 15u> in {
           rgb, enclosure_views_.all_body_bits.Get(), nullptr, enclosure_views_.cover_bits.Get(),
           enclosure_views_.receipt.Get(), scratch_.eligible.Get(), scratch_.parent.Get(), scratch_.root_flags.Get(),
@@ -754,14 +839,12 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         unbind(c);
       };
       for (UINT slot = 0u; slot < 8u; ++slot) {
-        const std::array<UINT, 4u> hook {slot, 0u, 0u, 0u};
-        c->UpdateSubresource(hook_cb_.Get(), 0u, nullptr, hook.data(), 0u, 0u);
+        bc[1u] = unit_constants_[slot].Get();
         // Prevent stale dispatch when root0 skips prepare. Legacy64B args stay untouched.
         c->ClearUnorderedAccessViewUint(inside_args_.uav.Get(), zero.data());
         inside_stage(0u, root);
         inside_stage(1u, inside_args_.resource.Get());
-        unbind(c);
-        ID3D11Buffer *constants[3] {shape_cb_.Get(), hook_cb_.Get(), nullptr};
+        ID3D11Buffer *constants[3] {shape_cb_.Get(), bc[1u], nullptr};
         const std::array<ID3D11ShaderResourceView *, 5u> graph_in {
           scratch_.eligible.Get(), scratch_.seeds.Get(), scratch_.domain_tag.Get(),
           scratch_.cover_clip.Get(), enclosure_views_.receipt.Get()
@@ -780,8 +863,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         inside_stage(2u, inside_args_.resource.Get());
       }
       auto component_graph = [&]() {
-        unbind(c);
-        ID3D11Buffer *constants[3] {shape_cb_.Get(), hook_cb_.Get(), nullptr};
+        ID3D11Buffer *constants[3] {shape_cb_.Get(), bc[1u], nullptr};
         const std::array<ID3D11ShaderResourceView *, 5u> in {
           scratch_.eligible.Get(),
           scratch_.seeds.Get(),
@@ -804,8 +886,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         unbind(c);
       };
       for (UINT slot = 0u; slot < 8u; ++slot) {
-        const std::array<UINT, 4u> hook {slot, 0u, 0u, 0u};
-        c->UpdateSubresource(hook_cb_.Get(), 0u, nullptr, hook.data(), 0u, 0u);
+        bc[1u] = unit_constants_[slot].Get();
         c->ClearUnorderedAccessViewUint(unit_args_.uav.Get(), zero.data());
         u.fill(nullptr);
         u[0] = meta_.uav.Get();
@@ -843,6 +924,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         stage(6u, u, unit_args_.resource.Get(), 0u);
         band_stage(5u, unit_args_.resource.Get(), 0u);
         band_stage(6u, unit_args_.resource.Get(), 0u);
+        if (holes_enabled_) holes_.capture_unit(c, slot, p.hole_shaders, cb, shape_cb_.Get(), hole_views(), unit_args_.resource.Get());
       }
       u.fill(nullptr);
       u[0] = meta_.uav.Get();
@@ -866,6 +948,8 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       if (p.raw_parent_snapshot) c->CopyResource(p.raw_parent_snapshot, raw_parent_resource_.Get());
       if (p.raw_flags_snapshot) c->CopyResource(p.raw_flags_snapshot, raw_flags_resource_.Get());
       inside_stage(3u, native_args_.Get());
+      if (holes_enabled_) holes_.finish(c, p.hole_shaders, cb, shape_cb_.Get(), hole_views(), root, root_offset, native_args_.Get(),
+                                       p.coverage_shaders, coverage_enabled_);
       unbind(c);
     }
 
@@ -881,9 +965,18 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     texture_t stability_image_,stability_header_,stability_aa_history_;
     bool stability_enabled_=false,stability_needs_reset_=true;
     bool weak_aa_enabled_=false;
+    holes::resources_t holes_;
+    bool holes_enabled_ = false;
+    bool coverage_enabled_ = false;
     buffer_t weak_aa_state_;
     buffer_t meta_, unit_args_, profile_data_, inside_args_;
     ComPtr<ID3D11Buffer> hook_cb_, shape_cb_, native_args_;
+    std::array<ComPtr<ID3D11Buffer>, 8u> unit_constants_;
+    host_sbs_compute_program_lease::group_t<8u> raw_program_lease_;
+    host_sbs_compute_program_lease::group_t<3u> roi_program_lease_, stability_program_lease_, coverage_program_lease_;
+    host_sbs_compute_program_lease::group_t<7u> band_program_lease_;
+    host_sbs_compute_program_lease::group_t<4u> inside_program_lease_;
+    host_sbs_compute_program_lease::group_t<9u> hole_program_lease_;
     ComPtr<ID3D11DeviceContext> deferred_;
     ComPtr<ID3D11CommandList> commands_;
     signature_t signature_;

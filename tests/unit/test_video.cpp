@@ -20,6 +20,7 @@
 #include <src/generated/sbs_adaptive_state_contract.h>
 #include <src/host_sbs_shader_cache.h>
 #include <src/host_sbs_subtitle_plane.h>
+#include <src/host_subtitle_context.h>
 #include <src/model_manager.h>
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
@@ -1535,6 +1536,19 @@ TEST(ParallaxV2RendererTest, OpaqueRenderedHitBridgesOnePendingTimeout) {
   ));
 }
 
+TEST(ParallaxV2RendererTest, ProtectedFullSourcePackedPixelsRequireCurrentWindowRoute) {
+  const models::host_subtitle_context::presentation_authority_t protected_fullscreen {5u, 5u, 7u, false};
+  const models::host_subtitle_context::presentation_authority_t current_modal {0u, 0u, 8u, true};
+  // An unchanged source bypasses the usual repeat age, but cannot preserve a pre-move
+  // positioned subtitle composite while its semantic owner remains the same.
+  for (const auto positioned_output : {false, true}) {
+    EXPECT_EQ(models::host_sbs_should_repeat_packed_presentation(
+      models::host_sbs_renderer_e::parallax_v2, false, true,
+      protected_fullscreen.permits_packed_repeat(current_modal, positioned_output),
+      std::chrono::hours {1}, true), !positioned_output);
+  }
+}
+
 TEST(ParallaxV2RendererTest, SubtitleEligibilityRestrictsDumpToEligibleVideoContexts) {
   using models::depth_optional_work_allows_gpu_undecided;
   using models::depth_optional_work_mode_e;
@@ -3028,11 +3042,12 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     models::depth_optional_work_mode_e optional_work;
     std::uint64_t subtitle_context_generation;
   };
-  constexpr std::array<follower_case_t, 4u> followers {{
+  constexpr std::array<follower_case_t, 5u> followers {{
     {1280u, 720u, models::depth_optional_work_mode_e::ordinary, 0u},
     {1920u, 1080u, models::depth_optional_work_mode_e::ordinary, 0u},
     {1280u, 720u, models::depth_optional_work_mode_e::ordinary, 1u},
     {1280u, 720u, models::depth_optional_work_mode_e::disable_subtitle, 0u},
+    {1280u, 720u, models::depth_optional_work_mode_e::suppress_subtitle, 0u},
   }};
   for (const auto &test_case : followers) {
     const bool defer_context_admission = test_case.subtitle_context_generation != 0u ||
@@ -3067,7 +3082,8 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     ASSERT_TRUE(completed_n.completed_frame_valid);
     ASSERT_EQ(completed_n.completed_frame_id, frame_n);
     ASSERT_EQ(completed_n.inference_enqueued, !defer_context_admission);
-    ASSERT_EQ(completed_n.subtitle_ocr_inference_enqueued, !defer_context_admission);
+    ASSERT_EQ(completed_n.subtitle_ocr_inference_enqueued,
+      !defer_context_admission && test_case.optional_work == models::depth_optional_work_mode_e::ordinary);
     ASSERT_FALSE(completed_n.gpu_undecided_transaction_enqueued);
     ASSERT_FALSE(completed_n.subtitle_work_suppressed);
     ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(completed_n));
@@ -3157,15 +3173,31 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     ASSERT_TRUE(completed_follower.completed_frame_valid);
     EXPECT_EQ(completed_follower.completed_frame_id, frame_n + 1u);
     EXPECT_EQ(completed_follower.subtitle_work_suppressed,
-      test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle);
+      models::depth_optional_work_suppresses_subtitle(test_case.optional_work));
     EXPECT_FALSE(estimator.publication_is_current(completed_n.publication));
     if (test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle) {
       tuple_t disabled;
       ASSERT_TRUE(read_tuple(completed_follower, disabled));
+      for (const auto index : {0u, 4u, 5u, 14u}) {
+        SCOPED_TRACE(names[index]);
+        EXPECT_EQ(disabled[index].width, 1u);
+        EXPECT_EQ(disabled[index].height, 1u);
+      }
       for (const auto index : {14u, 15u}) {
         SCOPED_TRACE(names[index]);
         EXPECT_TRUE(std::all_of(disabled[index].bytes.begin(), disabled[index].bytes.end(),
           [](std::uint8_t value) { return value == 0u; }));
+      }
+    }
+    if (test_case.optional_work == models::depth_optional_work_mode_e::suppress_subtitle) {
+      tuple_t suppressed;
+      ASSERT_TRUE(read_tuple(completed_follower, suppressed));
+      // No subtitle observation occurred: native backing and its retained pixels survive.
+      for (const auto index : {0u, 3u, 4u, 5u, 6u, 14u, 15u}) {
+        SCOPED_TRACE(names[index]);
+        EXPECT_EQ(suppressed[index].width, before[index].width);
+        EXPECT_EQ(suppressed[index].height, before[index].height);
+        EXPECT_EQ(suppressed[index].bytes, before[index].bytes);
       }
     }
     EXPECT_FALSE(estimator.has_terminal_failure());
@@ -6889,30 +6921,44 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   EXPECT_NE(selection.find("const bool cached_geometry_render_allowed"), std::string::npos);
   EXPECT_NE(selection.find("host_sbs_cached_geometry_render_allowed"), std::string::npos);
 
-  // Route/dump/reprocess/terminal revocation, early-completion retirement/revalidation, and every
-  // asynchronous completion owner keep the singleton-alias reset matrix in the pre-render
-  // selection path. The two retired synchronous-recovery branches no longer contribute resets.
-  std::size_t resets = 0u;
-  for (std::size_t offset = 0u;
-       (offset = selection.find("latest_v2_lineage.reset();", offset)) != std::string::npos;
-       ++offset) {
-    ++resets;
+  // Each transition that can revoke or rewrite the singleton resources must clear the borrowed
+  // lineage before the branch continues. A total reset count could miss one of these boundaries
+  // while counting an unrelated new reset, and would reject additional safe revocation paths.
+  const auto expect_reset_between = [](const std::string &source, const char *boundary, const char *begin_anchor, const char *end_anchor) {
+    SCOPED_TRACE(boundary);
+    const auto begin = source.find(begin_anchor);
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find(end_anchor, begin + std::string_view {begin_anchor}.size());
+    ASSERT_NE(end, std::string::npos);
+    const auto reset = source.find("latest_v2_lineage.reset();", begin);
+    ASSERT_NE(reset, std::string::npos);
+    EXPECT_LT(reset, end) << "Revocation must precede the branch's next ownership action.";
+  };
+
+  struct boundary_t {
+    const char *name, *begin, *end;
+  };
+
+  const boundary_t selection_boundaries[] {
+    {"lost window/video authority", "!window_region_authorized_for_render(*matched_render_slot)", "matched_render_slot = nullptr;"},
+    {"early ready completion or producer failure", "if (polled.ready) {", "depth_completion_poll_pending = false;"},
+    {"route/dump/reprocess/terminal revocation", "if (detail::host_sbs_latest_v2_lineage_reset_required(", "const bool cached_geometry_render_allowed"},
+    {"unchanged pending input completes", "unchanged_content_submission_suppressed = true;", "depth_completion_poll_pending = false;"},
+    {"authority changes during matched copy", "completion_finalized_before_admission && matched_render_slot &&\n                !matched_route_matches_current(", "matched_render_slot = nullptr;"},
+    {"admission revokes an early publication", "!depth_estimator->publication_is_current(est.publication)", "completion_finalized_before_admission = false;"},
+    {"ordinary asynchronous completion", "est.completed_frame_valid &&\n                  !completion_finalized_before_admission", "matched_render_slot = find_pending_matched_slot(est.completed_frame_id);"},
+    {"invalid adaptive submission class", "models::gpu_adaptive_submission_class_e::invalid", "if (force_infer_transaction_enqueued) {"},
+    {"missing force-infer capture causality", "!matched_candidate_slot->inference_content_timestamp ||", "// The forced full-source submission has retired the old ROI authority."},
+    {"queued continuation may rewrite singleton fields", "depth_estimator->queue_pending_same_source_gpu_continuation_for_evaluation(", "matched_render_slot = nullptr;"},
+    {"current-frame completion no longer pending", "detail::host_sbs_same_frame_completion_e::keep_pending\n", "depth_completion_poll_pending = false;"},
+  };
+  for (const auto &boundary : selection_boundaries) {
+    expect_reset_between(selection, boundary.name, boundary.begin, boundary.end);
   }
-  EXPECT_EQ(resets, 8u);
   EXPECT_EQ(display.find("reusable_v2"), std::string::npos);
 
-  const auto fail_flat = display.find("void fail_depth_pipeline_flat()");
-  const auto init_output = display.find("int init_output(");
-  ASSERT_NE(fail_flat, std::string::npos);
-  ASSERT_NE(init_output, std::string::npos);
-  EXPECT_NE(
-    display.find("latest_v2_lineage.reset();", fail_flat),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display.find("latest_v2_lineage.reset();", init_output),
-    std::string::npos
-  );
+  expect_reset_between(display, "terminal pipeline failure", "void fail_depth_pipeline_flat()", "matched_presentation_cache.reset();");
+  expect_reset_between(display, "output/session initialization", "int init_output(", "matched_presentation_cache.reset();");
 }
 
 TEST(DirectxShaderSourceTest, HostSbsCompletionBindsTheEstimatorGridToTheSubmittedDomain) {
@@ -7092,16 +7138,45 @@ TEST(DirectxShaderSourceTest, Convex2xRoiRendererUsesTheAuthenticatedFieldConten
   ASSERT_FALSE(display.empty());
   ASSERT_FALSE(dump.empty());
 
-  EXPECT_NE(
-    display.find(
-      "v2_live_warp_selected ? &est.input_region : nullptr,\n"
-      "                  v2_live_warp_selected ? &est.field_content : nullptr"
-    ),
-    std::string::npos
+  const auto convert_begin = display.find("    int convert(");
+  const auto convert_end = display.find("    bool set_stream_gamma(", convert_begin);
+  ASSERT_NE(convert_begin, std::string::npos);
+  ASSERT_NE(convert_end, std::string::npos);
+  const auto convert = display.substr(convert_begin, convert_end - convert_begin);
+  const auto selected_domain = convert.find(
+    "const bool v2_draw_selected = v2_live_warp_selected || queued_geometry_selected;"
   );
+  const auto draw_begin = convert.find("const auto *draw_source_slot =");
+  const auto draw_end = convert.find("dump_subtitle_constants =", draw_begin);
+  ASSERT_NE(selected_domain, std::string::npos);
+  ASSERT_NE(draw_begin, std::string::npos);
+  ASSERT_NE(draw_end, std::string::npos);
+  EXPECT_LT(selected_domain, draw_begin);
+  const auto draw = convert.substr(draw_begin, draw_end - draw_begin);
+  // Completed and queued fields have separate owners. Their realized source rectangle and
+  // field content must follow the same selected owner into the renderer constants.
+  const auto region = draw.find(
+    "const auto *draw_region = queued_geometry_selected ? &queued_geometry->input_region : &est.input_region;"
+  );
+  const auto content = draw.find(
+    "const auto *draw_content = queued_geometry_selected ? &queued_geometry->field_content : &est.field_content;"
+  );
+  const auto bind = draw.find("if (!update_sbs_constant_buffer(");
+  ASSERT_NE(region, std::string::npos);
+  ASSERT_NE(content, std::string::npos);
+  ASSERT_NE(bind, std::string::npos);
+  EXPECT_LT(region, bind);
+  EXPECT_LT(content, bind);
+  const auto bind_end = draw.find("ID3D11Buffer *sbs_constants =", bind);
+  ASSERT_NE(bind_end, std::string::npos);
+  const auto binding = draw.substr(bind, bind_end - bind);
+  EXPECT_NE(binding.find("v2_draw_selected ? draw_region : nullptr,\n"
+                         "                  v2_draw_selected ? draw_content : nullptr"),
+            std::string::npos);
   const auto update_begin = display.find("    bool update_sbs_constant_buffer(");
   const auto update_end = display.find(
-    "    std::uint32_t next_sbs_telemetry_sequence()", update_begin
+    "    bool update_sbs_subtitle_constant_buffer(",
+    update_begin
   );
   ASSERT_NE(update_begin, std::string::npos);
   ASSERT_NE(update_end, std::string::npos);
@@ -7110,8 +7185,12 @@ TEST(DirectxShaderSourceTest, Convex2xRoiRendererUsesTheAuthenticatedFieldConten
     update.find("const models::depth_tensor_content_rect_t *field_content"),
     std::string::npos
   );
+  EXPECT_NE(update.find("input_region && input_region->is_video_region() && input_region->valid()"), std::string::npos);
   EXPECT_NE(update.find("const auto &renderer_content = field_content ?"), std::string::npos);
+  EXPECT_NE(update.find("if (!renderer_content.valid())"), std::string::npos);
   EXPECT_NE(update.find("geometry.tensor_content_left = renderer_content.left"), std::string::npos);
+  EXPECT_NE(update.find("geometry.tensor_content_top = renderer_content.top"), std::string::npos);
+  EXPECT_NE(update.find("geometry.tensor_content_right = renderer_content.right"), std::string::npos);
   EXPECT_NE(update.find("geometry.tensor_content_bottom = renderer_content.bottom"), std::string::npos);
 
   EXPECT_EQ(
@@ -7340,6 +7419,30 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
     "host_sbs_should_repeat_packed_presentation("
   );
   ASSERT_NE(selection, std::string::npos);
+  const auto selection_end = display.find(");", selection);
+  ASSERT_NE(selection_end, std::string::npos);
+  const auto selection_body = display.substr(selection, selection_end - selection);
+  EXPECT_NE(selection_body.find("repeat_hold_age"), std::string::npos);
+  EXPECT_EQ(selection_body.find("repeat_source_age"), std::string::npos);
+  const auto source_observation = display.find(
+    "matched_presentation_cache.observe_current_source(current_source_timestamp, gamma_now)"
+  );
+  ASSERT_NE(source_observation, std::string::npos);
+  const auto early_completion_poll = display.find("auto polled = prior_poll_plan->eligible");
+  ASSERT_NE(early_completion_poll, std::string::npos);
+  EXPECT_LT(source_observation, early_completion_poll);
+  const auto timeout_observation = display.find(
+    "matched_presentation_cache.observe_timeout(v2_repeat_age_expired, presentation_output)"
+  );
+  const auto recorder_failure = display.find("if (!draw_recorded)");
+  ASSERT_NE(timeout_observation, std::string::npos);
+  ASSERT_NE(recorder_failure, std::string::npos);
+  EXPECT_LT(recorder_failure, timeout_observation);
+  const auto output_classification = display.rfind("const auto presentation_output =", timeout_observation);
+  ASSERT_NE(output_classification, std::string::npos);
+  EXPECT_NE(display.substr(output_classification, timeout_observation - output_classification).find(
+              "queued_attempt_failed_flat ? presentation_clock_t::output_e::flat"),
+            std::string::npos);
   const auto route_gate = display.rfind(
     "const bool packed_presentation_route_matches =",
     selection
@@ -7353,6 +7456,10 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
          "input_color_space",
          "depth_authority_reprocess_pending",
          "producer_terminal",
+         "authority_generation(live_window_authority)",
+         "authority_generation(live_foreground_region)",
+         "live_browser_authority_epoch",
+         "interactive_move_size_observed",
        }) {
     EXPECT_NE(route_body.find(required_gate), std::string::npos) << required_gate;
   }
@@ -7371,11 +7478,19 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
          "bool has_fresh_pixels() const noexcept",
          "source_age(",
          "bool route_matches(",
+         "presentation_authority_.permits_packed_repeat(",
+         "bool has_positioned_subtitles() const noexcept",
          "private:",
        }) {
     EXPECT_NE(cache_body.find(operation), std::string::npos) << operation;
   }
   EXPECT_NE(cache_body.find("std::chrono::steady_clock::duration::max()"),
+            std::string::npos);
+  EXPECT_NE(cache_body.find("presentation_clock_.invalidate()"), std::string::npos);
+  EXPECT_NE(cache_body.find("presentation_clock_.reset()"), std::string::npos);
+  EXPECT_NE(cache_body.find("observe_current_source(current_source_timestamp, current_source_observed_at)"),
+            std::string::npos);
+  EXPECT_NE(cache_body.find("presentation_clock_.hold_age(source_age(now), source_timestamp_, source, now)"),
             std::string::npos);
   for (const auto *private_access : {
          "matched_presentation_cache.valid_",

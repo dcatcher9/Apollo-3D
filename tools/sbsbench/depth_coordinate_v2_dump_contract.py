@@ -4221,6 +4221,28 @@ def validate_subtitle_contour_tuple(
     }
 
 
+def _validate_subtitle_classifier_reference(
+        reference: Dict[str, int], source_width: int, source_height: int,
+        input_region: Dict[str, Any]) -> None:
+    authorization = input_region.get("authorization") or {}
+    picture_roi = authorization.get("authority_kind") in {
+        "chromium-video", "foreground-client"}
+    if picture_roi:
+        reference_width, reference_height = source_width, source_height
+        left, top = 0, 0
+    else:
+        reference_width = input_region["source_width"]
+        reference_height = input_region["source_height"]
+        left, top = input_region["inference_rect"][:2]
+    expected_reference = {
+        "center_twice_source": reference_width - 2 * left,
+        "width_source": reference_width,
+        "search_top_source": reference_height - (reference_height + 3) // 4 - top,
+    }
+    if reference != expected_reference:
+        raise ValueError("subtitle classifier history reference differs from the authenticated picture/capture domain")
+
+
 def _verify_subtitle_conditioning_artifacts(
         dump_dir: Any, manifest: Dict[str, Any], *, matched_frame_id: int,
         analysis_generation: int, source_width: int, source_height: int,
@@ -4276,22 +4298,8 @@ def _verify_subtitle_conditioning_artifacts(
             classifier_history["observation_timestamp_us"] != publication_timestamp):
         raise ValueError("subtitle classifier history clock differs from its current OCR owner")
     if classifier_history["initialized"] and input_region is not None:
-        authorization = input_region.get("authorization") or {}
-        video_reference = authorization.get("authority_kind") == "chromium-video"
-        if video_reference:
-            reference_width, reference_height = source_width, source_height
-            left, top = 0, 0
-        else:
-            reference_width = input_region["source_width"]
-            reference_height = input_region["source_height"]
-            left, top = input_region["inference_rect"][:2]
-        expected_reference = {
-            "center_twice_source": reference_width - 2 * left,
-            "width_source": reference_width,
-            "search_top_source": reference_height - (reference_height + 3) // 4 - top,
-        }
-        if classifier_history["reference"] != expected_reference:
-            raise ValueError("subtitle classifier history reference differs from the authenticated video/screen domain")
+        _validate_subtitle_classifier_reference(
+            classifier_history["reference"], source_width, source_height, input_region)
     plane = validate_subtitle_plane_state(
         plane_payload, ocr_record=ocr, matched_frame_id=evidence_frame_id,
         analysis_generation=analysis_generation, source_width=source_width, source_height=source_height,

@@ -1,5 +1,144 @@
 # SBS 3D status and roadmap
 
+Latest subtitle work: the [execution and ownership cleanup](host-sbs-review-followups.md#p13-subtitle-execution-and-ownership-cleanup) preserves G1 output, removes repeated work and production diagnostic storage, and uses the validated master build through `E:\ApolloDev\run-dev.cmd`. Timing variation does not establish an FPS gain; the rejected background-constant experiment is preserved separately.
+
+The current subtitle policy is Generic Outline G1
+[original stroke coverage](host-sbs.md#original-stroke-coverage). It uses observed reference
+colours and adjacent unmasked observations to limit background extrapolation. Original RGB/style,
+physical K and Raw remain unchanged; no outline is generated. The 52-case authored and selected
+screen adds two declared ink pixels, zero background pixels and withdraws none against C7v2.
+The earlier generic variants' three background admissions remain rejected results in the
+[P12 validation record](host-sbs-review-followups.md#p12-generic-original-stroke-coverage).
+
+All 70 development attempts remain counted: twelve ink gains in the broader set,
+four in the earlier AA set, zero new background protection, and unchanged existing 38 masks.
+Six dark-field cases fail their predeclared K-model prerequisite and remain unqualified.
+The saved replay preserves the newest dump's thirty-pixel repair and adds one pixel in the
+first dump without independent alpha truth. Configured producer/completed-PS checks pass;
+ordinary 72 is neutral with all 504 artifact pairs byte-identical. These finite results do not
+establish unseen-style, live XR or performance acceptance. C7v2 remains a preserved fallback.
+The separate launcher `E:\ApolloDev\run-generic-outline.cmd` passes its artifact check and uses
+its own configuration; packaging and checks did not launch a host.
+
+The C7v2 [current mask completion](host-sbs.md#current-mask-completion) checkpoint
+selects exactly the thirty recorded missing-mask pixels in the latest saved dump, with no
+withdrawals; the first two saved masks remain unchanged. Original RGB/style is preserved and no
+outline is generated. The C5 and B4 packages remain preserved fallbacks. The separate shared-style
+redesign below is still unimplemented.
+
+C7v2's fixed authored-28/selected-24 screen passes with one added declared ink pixel, zero new
+background protection and zero withdrawals; all 38 existing authored masks remain B4-exact.
+Actual saved-source execution and final-binary completed-PS proof pass, as do the focused native
+77-pass/two-optional-skip group and Python discovery with 940 tests/thirteen skips. The rejected
+first C7 attempt's 26 new background pixels and the unqualified sixteen-case challenge remain
+explicit in the [finite validation record](host-sbs-review-followups.md#p11-c7v2-current-mask-completion-candidate).
+Fresh ordinary legacy-matte screening also passes `screen_neutral` with all 504 artifact pairs
+byte-exact. The separate manual launcher `E:\ApolloDev\run-last-dump-repair.cmd` passes its
+artifact check; packaging did not launch a host. These finite results do not establish broad alpha,
+live XR or FPS acceptance.
+
+The rule rethink keeps the current implementation experimental. The 28-case development screen
+contains no successful new C5 short-gap offers, so its pass is not active precision evidence for
+that addition. The next direction uses qualified inner-text support plus an outline-width
+estimate from easy same-style regions to detect original outlines in difficult regions. Original
+source RGB and style are preserved; no outline is generated or removed, as specified in the
+[unimplemented redesign](host-sbs.md#proposed-shared-width-original-outline-detection-unimplemented).
+Current BODY and OCR maps cannot independently establish glyph membership. Fresh held-out and active
+positive/negative coverage are required before replacing the current path.
+
+The first width-constrained admission experiment is rejected: it reduces authored background
+false protection but loses faint-gradient caption pixels and withdraws 556 selected pixels from
+the newest saved C5 capture. A separate fixed-mask GPU probe confirms that background erasure
+also contributes to the bright tears; narrowing erasure leaves fringes and ghosts. Both results,
+the known-red counterexamples and corrected replay identities are tracked in the
+[shared-width experiment](host-sbs-review-followups.md#shared-width-admission-experiment).
+The published C5 package remains preserved as a fallback.
+
+A full native-mask census additionally confirms 15 enclosed gaps/30 unmarked pixels in the newest
+saved C5 caption. Twenty-five are already inside the known width; all fail the learned black-colour
+box and receive no packed support. The earlier two-crop check missed these other locations.
+The [current-mask diagnosis](host-sbs-review-followups.md#enclosed-gaps-in-the-current-c5-mask)
+separates this detector omission from background erasure and from rejected B's withdrawals.
+
+The integrated B4 counter correction removes 108 false protections from 12 authored O-counter
+cases. Its 28 authored precision masks, 24 selected-sequence masks and three saved masks remain
+identical to C5; the ordinary paired comparison is neutral. It leaves the original stroke-mask
+holes unresolved and is separate from the rejected hole-fill experiments. The
+[B4 validation record](host-sbs-review-followups.md#p10-b4-counter-recipient-correction) records
+the remaining errors and finite scope. The published C5 launcher remains preserved.
+
+Historical C5 finite headless gates passed: native 67 tests (65 passes/two explicit optional skips),
+Python 938 tests with 13 skips, selected-compositor 24 frames, strict authored 28 cases, actual
+three-source producer/pixel-shader replay, fresh ordinary 72 frames/504 byte-exact pairs and the
+actual-converter packed-continuity regression. Its bounded short-gap policy is owned by
+[Host SBS](host-sbs.md#subtitle-classification-before-protection); exact receipts are in the
+[review follow-up](host-sbs-review-followups.md#current-known-black-candidate-follow-up).
+Actual M gains against C4 are 1/0/284 with no withdrawals. Six previously sampled mask gaps and
+seven small HDR reference differences remain; source topology is not complete-alpha truth.
+Historical C2/C3/C4 results remain distinct. Live XR and FPS acceptance remain open, and the long
+first cold shader compile does not establish improved latency.
+
+The earlier Review Fixes C2 checkpoint has finite HDR and authored-precision evidence under the
+[canonical geometry policy](host-sbs.md#subtitle-classification-before-protection). Its three cold
+HDR replays add respectively 0, 25 and 3,048 selected pixels without withdrawals or upstream
+BODY/CBC/Raw changes. Three selected nonblack fringe witnesses match the independent UI reference
+in both GPU-rendered eyes. The first dump remains unchanged and visible thin AA fringe remains;
+this is not a claim that all captured caption issues are fixed. All masks in the fixed authored-28
+cohort match the pre-policy control exactly. C1's fourteen new background pixels remain a rejected
+experiment, not a waived precision result.
+
+A subsequent C3 headless candidate adds component-only opaque protection under the
+[canonical current-root policy](host-sbs.md#subtitle-classification-before-protection).
+Against C2 it adds 14 protected pixels in the third saved HDR replay, none in the first two, and
+withdraws none; all 14 match the independent UI reference in both actual GPU-rendered eyes.
+Its fixed authored-28 comparison adds two glyph pixels with zero new background protection or
+withdrawals. The first dump and visible thin-AA residual remain. The
+[review follow-up](host-sbs-review-followups.md#current-known-black-candidate-follow-up) records
+these finite gates separately from the published C2 launcher and C2 validation checkpoints.
+
+A separate C4 one-pixel ordinary-AA experiment passes the strict fixed authored-28 precision
+gate against C2: two added glyph pixels, zero added background protection and zero withdrawals.
+The two glyph additions were already present in C3. Three actual saved-source producer and
+pixel-shader replays pass; selected-mask counts change by +0, +1 and +285 against C3. The
+24-frame selected-compositor counts match C2. The preserved C4 fallback passes native 67 tests (65 passes/two optional skips) and fresh
+72-frame/504-pair ordinary screening. Current source topology supplies no independent fill authority for the 418
+saved residual candidates, so endpoint geometry is not a complete-alpha guarantee. The first
+dump and visible thin-AA residual remain; live XR and FPS acceptance remain open.
+
+The ordinary 72-frame gate now passes with matching source, model, engine, configuration,
+timelines and numeric runtime. All 504 actual artifact pairs are byte-exact and metrics/labels
+are unchanged, yielding `screen_neutral`. Independent review checks all 1,744 bound files;
+`ordinary-candidate2-parity.json` has SHA-256
+`f484690460622f36cf3974f103dbe7a02c7c8d25dbb41698bbd104fb50bfd9e4` under
+`E:\ApolloDev\host-subtitle-review-pass7-20261102`. The incomplete unscoped attempt is preserved
+and excluded. Fresh full evaluation and scoring pass the ordinary legacy-matte screening; the
+independent parity audit authenticates that completed report without scoring it again. These
+checks do not qualify live selected-compositor behavior or FPS. The packed-presentation clock
+repair also passes its actual-converter idle/pending/expiry/recovery regression. The final native
+suite completes 65 tests with 63 passes and two explicit optional skips, including both new
+authored regressions. Authentic pre-fix shaders fail the positive lobe/AA test at its four expected
+protection checks; rejected C1 shaders fail the closed-counter regression. Python discovery
+passes 938 tests with 13 skips. Live Galaxy XR acceptance and uncontended performance measurement
+remain open.
+
+A headless review continuation adds a qualified opaque-colour tier for uniform nonliteral
+outlines. The upstream palette stays UNKNOWN. Completed CBC may issue private version 4 only
+after every original normal BODY peer is enclosed and nonblack, with no candidate/literal-black
+pixel on the true cover or native boundary. It preserves original BODY and current own-unit
+opaque Raw4CC support; foreground/style, AA, nonblack closure/collar, N8, Inside and cache/history
+roles remain outside this tier. A private offer joins final M after ordinary AA/history decisions,
+preserving independent contributions from other owners. Existing version-1/2/3 rules and invalid
+Raw fallback remain unchanged. No resource, dispatch or confirmation wait is added.
+
+The actual 24-frame selected-compositor qualification passes with all 24 current receipts,
+21 valid-background and three authenticated empty-background dispositions. Aggregate native masks
+contain 153,796 true-positive pixels, 23,625 false-positive pixels and zero false-negative pixels:
+all 92,092 previously omitted authored opaque-outline pixels are recovered. The inherited
+road-marking admission remains open. These authored file-fed results do not establish real-video
+typography/HDR coverage, final RGB quality or playback speed.
+The separate Review127 package remains frozen for the user's live test; Galaxy XR acceptance and
+uncontended performance measurement remain pending.
+
 The Build154 candidate separates bracket validity and same-unit BAND checks from
 `RawSelected` graph evaluation. Rejected brackets therefore skip the redundant graph query;
 pixel classification, publication and confirmation cadence are unchanged. All 1,120 native
@@ -1143,6 +1282,12 @@ The acceptance metric is final SBS readiness and presentation continuity, not th
 event time or a promised reuse percentage.
 
 ### Subtitle maintenance and player controls
+
+The November 2 subtitle review is tracked in
+[Host SBS review follow-ups](host-sbs-review-followups.md), including original confidence labels,
+priority repairs, rejected findings, and the ordinary evaluator's live-composite coverage gap.
+Geometry-sensitive subtitle identity, missing-detector failure isolation and native-player caption
+references are qualified there separately from interactive move/size and glyph-quality work.
 
 The subtitle ownership and command-emission maintenance preserves every numeric artifact in
 39 finite native GPU cases. Queued diagnostic ownership, explicit selector moves and the shared

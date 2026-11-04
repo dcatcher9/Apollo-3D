@@ -301,7 +301,8 @@ void unit_meta_main(uint3 g:SV_GroupID) {
     uint4 b=uint4(Palette[52u],Palette[53u],Palette[54u],Palette[55u]);
     uint4 c=uint4(Palette[56u],Palette[57u],Palette[58u],Palette[59u]);
     uint4 d=uint4(Palette[60u],Palette[61u],Palette[62u],Palette[63u]);
-    if(!PhysicalModelWordsValid(a,b,c,d)){Fault(F_PALETTE);return;}
+    // K4 belongs only to completed CBC publication, never to an upstream palette.
+    if(a.y==4u||!PhysicalModelWordsValid(a,b,c,d)){Fault(F_PALETTE);return;}
     Store4(bank,a);Store4(bank+4u,b);Store4(bank+8u,c);Store4(bank+12u,d);
     if(!CaptureFamilies(Hook.x,PhysicalUnpack(c.w),PhysicalUnpack(d.x),a.z==1u))return;
     uint4 cover=Rect(12u),core=Rect(16u),search=Rect(8u);
@@ -649,14 +650,52 @@ void clear_scratch_main(uint3 d:SV_DispatchThreadID) {
     UnitBitsWrite[d.xy]=0u;CoverBitsWrite[d.xy]=0u;SelectedBitsWrite[d.xy]=0u;StageAux[d.xy]=0u;
 }
 
-// Uncertain black colour cannot authorize topology refinement. The uniform
-// literal-black case has independently observed majority support.
+// A provisional exact singleton does not change the palette, its original
+// BODY, or the published physical model. Unit+2 is private phase state only:
+// bit1 marks preparation; bit0 records any true-cover/native-boundary black;
+// bit2 rejects OriginalBODY that is itself in the candidate black partition.
+static const uint UNIFORM_BLACK_PREPARED=2u,UNIFORM_BLACK_BOUNDARY=1u,UNIFORM_BLACK_BODY=4u;
+bool UniformBlackCandidate(uint unit) {
+    uint s=PhysicalModelBank(unit);
+    if(Meta[s+1u]!=1u||Meta[s+2u]!=0u||Meta[s+3u]!=5u)return false;
+    uint n=Meta[s+4u],prototype=Meta[s+5u],xs=Meta[s+7u];
+    uint3 p=PhysicalUnpack(prototype);
+    return Meta[s]==PHYSICAL_MODEL_TAG&&n>=2u&&n<=512u&&Meta[s+6u]==n&&
+        xs>=2u&&xs<=64u&&xs<=n&&Meta[s+8u]==xs&&(prototype&0xff000000u)==0u&&
+        max(p.r,max(p.g,p.b))>1u&&
+        all(uint4(Meta[s+9u],Meta[s+10u],Meta[s+11u],Meta[s+12u])==0u)&&
+        Meta[s+13u]==512u&&Meta[s+14u]==0u&&Meta[s+15u]==0u;
+}
+bool PartitionBlackRGB(float3 rgb,uint unit,bool provisional) {
+    if(!provisional)return PhysicalBlackRGB(rgb,unit);
+    // Preserve the physical predicate's literal union. The exact candidate is
+    // only a partition hypothesis until every original BODY peer is enclosed.
+    return max(rgb.r,max(rgb.g,rgb.b))<=1.0f/255.0f||
+        all(PhysicalRGB8(rgb)==PhysicalUnpack(Meta[PhysicalModelBank(unit)+5u]));
+}
+bool UniformBlackQualified(uint unit) {
+    if(!UniformBlackCandidate(unit))return false;
+    uint u=UB(unit);
+    return Meta[3u]==0u&&Meta[9u]==1u&&Meta[4u]==1u&&Meta[5u]==1u&&
+        Meta[u+1u]==1u&&Meta[u+29u]==1u&&Meta[u+2u]==UNIFORM_BLACK_PREPARED&&
+        Meta[u+4u]>0u&&Meta[u+30u]==Meta[u+4u]&&Meta[u+3u]==Meta[u+30u];
+}
+bool TrueCoverBoundary(uint2 p,uint bit) {
+    if(p.x==0u||p.y==0u||p.x+1u==PShape.x||p.y+1u==PShape.y)return true;
+    return (AllCoverBits.Load(int3(p+uint2(1u,0u),0))&bit)==0u||
+        (AllCoverBits.Load(int3(p-uint2(1u,0u),0))&bit)==0u||
+        (AllCoverBits.Load(int3(p+uint2(0u,1u),0))&bit)==0u||
+        (AllCoverBits.Load(int3(p-uint2(0u,1u),0))&bit)==0u;
+}
+// Known/literal behavior stays unchanged. An exact nonliteral singleton can
+// run the existing graph provisionally, without granting refinement authority.
 bool BlackRefinementReady(uint unit) {
     uint s=PhysicalModelBank(unit);
     if(Meta[s+2u]==1u)return true;
     uint3 p=PhysicalUnpack(Meta[s+5u]);
-    return Meta[s+3u]==5u&&max(p.r,max(p.g,p.b))<=1u&&
-        2u*Meta[s+6u]>Meta[s+4u]&&Meta[s+8u]>=2u&&2u*Meta[s+8u]>Meta[s+7u];
+    return (Meta[s+3u]==5u&&max(p.r,max(p.g,p.b))<=1u&&
+        2u*Meta[s+6u]>Meta[s+4u]&&Meta[s+8u]>=2u&&2u*Meta[s+8u]>Meta[s+7u])||
+        UniformBlackCandidate(unit);
 }
 
 [numthreads(1,1,1)]
@@ -664,11 +703,13 @@ void prepare_unit_main(uint3 g:SV_GroupID) {
     if(any(g)||!MetaShape()||Hook.x>=8u)return;
     uint bytes;UnitArgs.GetDimensions(bytes);if(bytes!=64u){Fault(F_SHAPE);return;}
     UnitArgs.Store4(0u,0u);UnitArgs.Store4(16u,0u);UnitArgs.Store4(32u,0u);UnitArgs.Store4(48u,0u);
-    uint u=UB(Hook.x);uint4 clip=uint4(Meta[u+24u],Meta[u+25u],Meta[u+26u],Meta[u+27u]);
+    uint u=UB(Hook.x);Store(u+2u,0u);
+    uint4 clip=uint4(Meta[u+24u],Meta[u+25u],Meta[u+26u],Meta[u+27u]);
     if(Meta[u]==0u||Meta[u+4u]==0u)return;
     if(any(clip.xy>=clip.zw)||any(clip.zw>PShape.xy)){Fault(F_SHAPE);return;}
     uint2 groups=(clip.zw-clip.xy+15u)/16u;
     bool ready=Meta[3u]==0u&&Meta[9u]==1u&&Meta[4u]==1u&&Meta[5u]==1u&&Meta[u+1u]==1u&&BlackRefinementReady(Hook.x);
+    if(ready&&UniformBlackCandidate(Hook.x))Store(u+2u,UNIFORM_BLACK_PREPARED);
     Store(u+29u,ready?1u:0u);
     UnitArgs.Store4(0u,uint4(groups,ready?1u:0u,0u));
     UnitArgs.Store4(16u,uint4(groups,1u,0u));
@@ -683,7 +724,14 @@ void emit_exterior_main(uint3 d:SV_DispatchThreadID) {
     bool cover=(AllCoverBits.Load(int3(p,0))&bit)!=0u;
     bool body=AllBodyHasNormalGeometry(AllBodyBits.Load(int3(p,0)),bit);
     float3 rgb=CurrentRGB.Load(int3(p,0)).rgb;
-    bool passable=cover&&(!PhysicalBlackRGB(rgb,Hook.x)||body);
+    bool provisional=(Meta[u+2u]&UNIFORM_BLACK_PREPARED)!=0u;
+    bool black=PartitionBlackRGB(rgb,Hook.x,provisional);
+    bool passable=cover&&(!black||body);
+    // This deliberately rejects the whole candidate if ANY black component
+    // reaches the true domain edge, including a disconnected background peer.
+    if(provisional&&cover&&black&&TrueCoverBoundary(p,bit)) {
+        uint ignored;InterlockedOr(Meta[u+2u],UNIFORM_BLACK_BOUNDARY,ignored);
+    }
     int4 r=int4(Meta[u+12u],Meta[u+13u],Meta[u+14u],Meta[u+15u]);
     bool border=(int)p.x==r.x||(int)p.x==r.z-1||(int)p.y==r.y||(int)p.y==r.w-1;
     UnitBitsWrite[p]=passable?1u:0u;CoverBitsWrite[p]=passable&&border?1u:0u;
@@ -725,6 +773,10 @@ void count_enclosed_main(uint3 d:SV_DispatchThreadID) {
     if(Meta[u+29u]!=1u)return;
     uint word=AllBodyBits.Load(int3(p,0));
     bool normal=AllBodyHasNormalGeometry(word,bit),restored=AllBodyHasRestoredGeometry(word,bit);
+    if(normal&&(Meta[u+2u]&UNIFORM_BLACK_PREPARED)!=0u&&
+       PartitionBlackRGB(CurrentRGB.Load(int3(p,0)).rgb,Hook.x,true)) {
+        uint ignored;InterlockedOr(Meta[u+2u],UNIFORM_BLACK_BODY,ignored);
+    }
     bool enclosed=ModeBody.Load(int3(p,0))==0u;
     if(enclosed) {
         uint ignored;
@@ -741,7 +793,13 @@ void select_unit_main(uint3 d:SV_DispatchThreadID) {
     bool inside=PixelFromROI(d.xy,p);if(!inside)return;
     uint u=UB(Hook.x),bit=1u<<Hook.x;
     bool format=Meta[4u]==1u&&Meta[5u]==1u;
-    bool ready=Meta[3u]==0u&&Meta[9u]==1u&&format&&Meta[u+1u]==1u&&Meta[u+29u]==1u;
+    // A missing preparation marker must not let an exact singleton take the
+    // ordinary known-model route through otherwise nonzero graph counters.
+    bool provisional=(Meta[u+2u]&UNIFORM_BLACK_PREPARED)!=0u||UniformBlackCandidate(Hook.x);
+    bool qualified=provisional&&UniformBlackQualified(Hook.x);
+    bool ready=Meta[3u]==0u&&Meta[9u]==1u&&format&&Meta[u+1u]==1u&&Meta[u+29u]==1u&&
+        (!provisional||qualified);
+    bool knownBlack=Meta[PhysicalModelBank(Hook.x)+2u]==1u||qualified;
     bool refine=ready&&Meta[u+3u]>0u,normalRefine=ready&&Meta[u+30u]>0u;
     if(all(d.xy==0u)) {
         uint status=Meta[3u]!=0u?5u:!format?4u:Meta[u+1u]==0u?3u:refine?1u:2u;
@@ -752,17 +810,19 @@ void select_unit_main(uint3 d:SV_DispatchThreadID) {
     bool normal=AllBodyHasNormalGeometry(word,bit),oldPending=AllBodyHasRestoredGeometry(word,bit);
     bool newPending=SelectedHasUnseededOffer(SelectedBitsWrite[p],bit);
     bool exterior=ModeBody.Load(int3(p,0))!=0u;
-    bool physical=ready&&Meta[PhysicalModelBank(Hook.x)+2u]==1u&&
-        !PhysicalBlackRGB(CurrentRGB.Load(int3(p,0)).rgb,Hook.x)&&!exterior;
+    bool physical=ready&&knownBlack&&
+        !PartitionBlackRGB(CurrentRGB.Load(int3(p,0)).rgb,Hook.x,provisional)&&!exterior;
     bool oldKeep=oldPending&&physical,newKeep=false;
     [branch]if(newPending&&physical&&Meta[u+31u]!=0u)newKeep=UnseededPhysicalSourceAvailable(p);
     bool keep=normal&&(!normalRefine||SelectedHasGeometry(SelectedBitsWrite[p],bit)||!exterior);
-    if(normal&&normalRefine&&!exterior&&AllBodyHasStylePotential(word,bit)) {
+    if(!provisional&&normal&&normalRefine&&!exterior&&AllBodyHasStylePotential(word,bit)) {
         uint ignored;InterlockedOr(SelectedBitsWrite[p],foregroundBit,ignored);
     }
+    // A provisional K4 partition does not grant a new foreground/style role.
+    // Preserve only HIGH evidence already supplied independently upstream.
     [branch]if(normal&&ready&&!exterior&&Meta[PhysicalModelBank(Hook.x)+2u]==1u&&
                !SelectedHasForeground(SelectedBitsWrite[p],bit)) {
-        if(!PhysicalBlackRGB(CurrentRGB.Load(int3(p,0)).rgb,Hook.x)) {
+        if(!PartitionBlackRGB(CurrentRGB.Load(int3(p,0)).rgb,Hook.x,provisional)) {
             uint ignored;InterlockedOr(SelectedBitsWrite[p],foregroundBit,ignored);
         }
     }
@@ -809,6 +869,26 @@ void publish_main(uint3 d:SV_DispatchThreadID) {
     }
     CandidateBody[d.xy]=body;CandidateM[d.xy]=matte;
     if(all(d.xy==0u)) {
+        // All selectors have completed. No other thread in this publication
+        // reads the model bank, so K4 cannot be observed partially by a consumer.
+        [unroll]for(uint unit=0u;unit<8u;++unit) {
+            uint u=UB(unit),s=PhysicalModelBank(unit);
+            if((Meta[u+2u]&UNIFORM_BLACK_PREPARED)!=0u||UniformBlackCandidate(unit)) {
+                bool promote=valid&&UniformBlackQualified(unit)&&Meta[u+6u]==1u&&
+                    (Meta[7u]&(1u<<unit))!=0u;
+                if(promote) {
+                    uint n=Meta[s+4u],prototype=Meta[s+5u];uint3 p=PhysicalUnpack(prototype);
+                    Store(s+1u,4u);Store(s+2u,1u);Store(s+3u,1u);
+                    Store(s+9u,n);Store(s+10u,max(p.r,max(p.g,p.b)));
+                    Store(s+11u,prototype);Store(s+12u,prototype);
+                } else {
+                    // A valid geometric rejection publishes the same UNKNOWN
+                    // bank/readiness/counts as the original skipped graph.
+                    Store(u+29u,0u);Store(u+3u,0u);Store(u+30u,0u);
+                }
+            }
+            Store(u+2u,0u);
+        }
         // Every select has completed; clear phase availability before CBC512 publication.
         [unroll]for(uint unit=0u;unit<8u;++unit)Store(UB(unit)+31u,0u);
         Store(2u,valid?1u:0u);Store(10u,!valid?0u:(Meta[7u]|Meta[87u])!=0u?2u:1u);

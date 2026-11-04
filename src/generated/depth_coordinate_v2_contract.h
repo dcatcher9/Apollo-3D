@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 125u;
-  inline constexpr std::uint32_t contract_tag = 0x41F6E047u;
-  inline constexpr std::string_view contract_canonical_sha256 = "9f880740eeef58299845a23542cd8dbff63bb2066d4f7f3b4c393207a34f350d";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "41f6e047e28b97251b83881fdbb30d0aaa9befa9c7cd9b00185ef92358c732d2";
+  inline constexpr std::uint32_t contract_schema = 127u;
+  inline constexpr std::uint32_t contract_tag = 0x2B6FE941u;
+  inline constexpr std::string_view contract_canonical_sha256 = "b3768340a2953943fce4173ba84d07f6bd6d22e2a4004dcb34b3294238058c8a";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "2b6fe94121f5c8d36b7498a9cc4a5d918c2a68e0cb0feb54258f741f66e41586";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -40,7 +40,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t subtitle_glyph_matte_collar_radius_squared = 10u;
   inline constexpr std::string_view subtitle_geometry_authority = "native-glyph-matte-selects-analytic-ui-otherwise-ordinary-base-inverse-v1";
   inline constexpr std::string_view subtitle_ui_plane_policy = "current-clearance-goal-first-visible-immediate-symmetric-source-time-exponential-native-slew-empty-reset-v3";
-  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 37u;
+  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 38u;
   inline constexpr std::uint32_t subtitle_contour_schema = 5u;
   inline constexpr std::uint32_t subtitle_contour_recipe = 27u;
   inline constexpr std::uint32_t subtitle_contour_history_tag = 894714707u;
@@ -192,7 +192,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t subtitle_ocr_line_search_bottom_height_denominator = 4u;
   inline constexpr std::string_view subtitle_ocr_line_search_region = "lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1";
   inline constexpr std::string_view subtitle_ocr_line_group_policy = "local-column-island-row-components-true-piece-bounds-fixed-span-ordinary-aggregation-then-centered-native-line-union-before-classified-capacity-v3";
-  inline constexpr std::string_view subtitle_ocr_line_center_reference = "video-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v1";
+  inline constexpr std::string_view subtitle_ocr_line_center_reference = "chromium-video-or-foreground-client-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v2";
   inline constexpr std::string_view subtitle_ocr_line_center_reference_params = "ocr-resolve-prefix20-then-source-clock-low-high-domain-reset-reserved-96bytes-v2";
   inline constexpr std::uint32_t subtitle_ocr_ribbon_join_gap_cells = 12u;
   inline constexpr std::uint32_t subtitle_ocr_ribbon_structural_gap_min_cells = 3u;

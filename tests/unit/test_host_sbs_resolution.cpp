@@ -373,7 +373,7 @@ TEST(HostSbsResolutionTest, FullscreenSubtitleLineReferencesAgreeWithVideoRoi) {
   EXPECT_EQ(*screen, (models::subtitle_ocr_line_reference_t {1920, 1920u, 810}));
 }
 
-TEST(HostSbsResolutionTest, ForegroundSubtitleReferencePreservesTranslatedScreenCoordinates) {
+TEST(HostSbsResolutionTest, CaptureSubtitleReferencePreservesTranslatedScreenCoordinates) {
   const auto reference = models::subtitle_ocr_line_reference(
     2536u, 1427u, 3840u, 2160u, 277u, 415u, false
   );
@@ -387,13 +387,26 @@ TEST(HostSbsResolutionTest, ForegroundSubtitleReferencePreservesTranslatedScreen
   EXPECT_EQ(*negative, (models::subtitle_ocr_line_reference_t {-2160, 3840u, -380}));
 }
 
-TEST(HostSbsResolutionTest, SubtitleLineReferenceDoesNotRecenterWindowOutsideScreenLowerQuarter) {
+TEST(HostSbsResolutionTest, CaptureSubtitleReferenceDoesNotRecenterOutsideAnalysisCrop) {
   const auto reference = models::subtitle_ocr_line_reference(
     100u, 100u, 3840u, 2160u, 100u, 100u, false
   );
   ASSERT_TRUE(reference);
   EXPECT_EQ(*reference, (models::subtitle_ocr_line_reference_t {3640, 3840u, 1520}));
   EXPECT_GT(reference->search_top_source, 100);
+}
+
+TEST(HostSbsResolutionTest, PictureRoiSubtitleReferenceFollowsAnOffCenterNativeWindow) {
+  constexpr std::array<std::array<std::uint32_t, 2u>, 3u> positions {{
+    {100u, 100u}, {1800u, 800u}, {1920u, 1080u},
+  }};
+  for (const auto position : positions) {
+    const auto reference = models::subtitle_ocr_line_reference(
+      1920u, 1080u, 3840u, 2160u, position[0u], position[1u], true
+    );
+    ASSERT_TRUE(reference);
+    EXPECT_EQ(*reference, (models::subtitle_ocr_line_reference_t {1920, 1920u, 810}));
+  }
 }
 
 TEST(HostSbsResolutionTest, SubtitleLineReferenceRoundsQuarterHeightUpForOddNativeHeight) {
