@@ -36,6 +36,7 @@
   #include <stdexcept>
   #include <string>
   #include <string_view>
+  #include <type_traits>
   #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
   #include <utility>
   #include <vector>
@@ -113,6 +114,17 @@ namespace {
     std::array<std::uint32_t, 16u> expected {};
   };
 
+  struct shared_ui_pin_diagnostics_t {
+    std::array<UINT, 4u> shape {}; // full W/H, band top/height
+    std::vector<float> field;
+    std::vector<float> authorized_weights;
+    std::vector<std::uint32_t> active_rows;
+    bool selected_receipt_authorized = false;
+    std::array<std::uint32_t,1u> selected_receipt_header {};
+    std::vector<std::byte> mapping_rgba32f;
+    std::vector<std::byte> ui_coverage_rgba32f;
+  };
+
   struct current_outline_inputs_t {
     std::vector<std::uint32_t> matte;
     std::array<std::uint32_t, 64u> receipt {};
@@ -123,6 +135,10 @@ namespace {
     // Opt-in causal probe only. Neither field changes ordinary test/render routes.
     bool experimental_background = false;
     saved_background_inputs_t *background_diagnostic_output = nullptr;
+    bool shared_ui_pin = false;
+    bool shared_ui_pin_resample_only = false;
+    shared_ui_pin_diagnostics_t *shared_ui_pin_diagnostic_output = nullptr;
+    double *render_gpu_ms = nullptr;
   };
 
   class live_v2_warp_fixture_t {
@@ -469,6 +485,40 @@ namespace {
       return sources && models::host_sbs_shader_cache::source_closure_sha256(sources) == experimental_background_closure;
     }
 
+    static constexpr std::array<models::host_sbs_shader_cache::shader_spec, 5u> shared_ui_pin_specs {{
+      {"host_sbs_shared_ui_warp.hlsl", "initialize_main", "cs_5_0"},
+      {"host_sbs_shared_ui_warp.hlsl", "SunshineApplyUICS", "cs_5_0"},
+      {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
+      {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
+      {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
+    }};
+
+    bool configure_shared_ui_pin(const std::filesystem::path &root, const std::string &closure, std::string &error) {
+      const auto sources = models::host_sbs_shader_cache::snapshot_sources(root, shared_ui_pin_specs);
+      if (!device || !sources || closure.size() != 64u || models::host_sbs_shader_cache::source_closure_sha256(sources) != closure) {
+        error = "shared UI pin experiment requires initialized fixture and exact pinned source closure";
+        return false;
+      }
+      std::array<ComPtr<ID3D11ComputeShader>, 2u> cs;
+      std::array<ComPtr<ID3D11PixelShader>, 3u> ps;
+      for (std::size_t i=0u;i<shared_ui_pin_specs.size();++i) {
+        const auto code = models::host_sbs_shader_cache::get(sources,shared_ui_pin_specs[i]);
+        if (!code || (i<2u ? FAILED(device->CreateComputeShader(code->data(),code->size(),nullptr,&cs[i])) :
+                            FAILED(device->CreatePixelShader(code->data(),code->size(),nullptr,&ps[i-2u])))) {
+          error = "shared UI pin experimental shader creation failed";
+          return false;
+        }
+      }
+      shared_ui_pin_cs = std::move(cs);shared_ui_pin_ps = std::move(ps);
+      shared_ui_pin_root = root;shared_ui_pin_closure = closure;
+      return true;
+    }
+
+    bool shared_ui_pin_source_unchanged() const {
+      const auto sources = models::host_sbs_shader_cache::snapshot_sources(shared_ui_pin_root,shared_ui_pin_specs);
+      return sources && models::host_sbs_shader_cache::source_closure_sha256(sources) == shared_ui_pin_closure;
+    }
+
     bool private_guard_slots_clear() const {
       ID3D11Buffer *cb = nullptr;
       ID3D11ShaderResourceView *srv = nullptr;
@@ -705,11 +755,16 @@ namespace {
         ID3D11Buffer *direct_constants[] = {direct_constants_buffer.Get()};
         context->PSSetConstantBuffers(4, 1, direct_constants);
       }
+      const bool shared_pin = outline && outline->shared_ui_pin;
+      if (shared_pin && (!current_outline_completed || !subtitle || !shared_ui_pin_ps[0] || !shared_ui_pin_ps[1])) {
+        error = "shared UI pin route needs a configured actual completed tuple";
+        return false;
+      }
       const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {output_rtv.Get(), nullptr},
         .render_target_count = 1u,
         .vertex_shader = vertex_shader.Get(),
-        .pixel_shader = pixel_shader.Get(),
+        .pixel_shader = shared_pin ? shared_ui_pin_ps[0].Get() : pixel_shader.Get(),
         .viewport = viewport,
         .sampler = sampler.Get(),
         .shader_resources = {
@@ -735,7 +790,78 @@ namespace {
       ComPtr<ID3D11Buffer> stale_background_buffer;
       ComPtr<ID3D11Texture2D> saved_background_texture;
       ComPtr<ID3D11Buffer> saved_background_proof;
-      if (current_outline_completed && subtitle && outline && outline->saved_background) {
+      struct pin_plane_t {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        ComPtr<ID3D11UnorderedAccessView> uav;
+      };
+      pin_plane_t pin_field, pin_weights, pin_rows;
+      ComPtr<ID3D11Buffer> pin_geometry;
+      std::array<UINT,4u> pin_shape {};
+      ComPtr<ID3D11Query> timing_disjoint,timing_start,timing_end;
+      if (outline && outline->render_gpu_ms) {
+        *outline->render_gpu_ms = -1.0;
+        D3D11_QUERY_DESC query {D3D11_QUERY_TIMESTAMP_DISJOINT,0u};
+        if (FAILED(device->CreateQuery(&query,&timing_disjoint))) return false;
+        query.Query=D3D11_QUERY_TIMESTAMP;
+        if (FAILED(device->CreateQuery(&query,&timing_start)) || FAILED(device->CreateQuery(&query,&timing_end))) return false;
+      }
+      bool timing_started=false;
+      const auto begin_timing=[&]() {
+        if (timing_disjoint && !timing_started) {
+          context->Begin(timing_disjoint.Get());context->End(timing_start.Get());timing_started=true;
+        }
+      };
+      if (shared_pin) {
+        const UINT crop_top=subtitle->constants.source_top+subtitle->identity[10u];
+        const UINT crop_end=std::min(source_height,crop_top+subtitle->height);
+        if (crop_top>=source_height || crop_end<=crop_top) {
+          error="shared UI pin native band is outside source";return false;
+        }
+        pin_shape={source_width,source_height,crop_top>0u?crop_top-1u:0u,0u};
+        pin_shape[3u]=std::min(source_height,crop_end+1u)-pin_shape[2u];
+        const auto plane=[&](UINT w,UINT h,DXGI_FORMAT format,pin_plane_t &p) {
+          D3D11_TEXTURE2D_DESC d {};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=1u;
+          d.Format=format;d.SampleDesc.Count=1u;d.Usage=D3D11_USAGE_DEFAULT;
+          d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+          return SUCCEEDED(device->CreateTexture2D(&d,nullptr,&p.texture)) &&
+            SUCCEEDED(device->CreateShaderResourceView(p.texture.Get(),nullptr,&p.srv)) &&
+            SUCCEEDED(device->CreateUnorderedAccessView(p.texture.Get(),nullptr,&p.uav));
+        };
+        if (!plane(source_width,pin_shape[3u],DXGI_FORMAT_R32_FLOAT,pin_field) ||
+            !plane(source_width,pin_shape[3u],DXGI_FORMAT_R32_FLOAT,pin_weights) ||
+            !plane(1u,pin_shape[3u]+1u,DXGI_FORMAT_R32_UINT,pin_rows)) {
+          error="shared UI pin native planes unavailable";return false;
+        }
+        D3D11_BUFFER_DESC d {};d.ByteWidth=sizeof(pin_shape);d.Usage=D3D11_USAGE_IMMUTABLE;d.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA initial {pin_shape.data(),0u,0u};
+        if (FAILED(device->CreateBuffer(&d,&initial,&pin_geometry))) return false;
+        begin_timing();
+        const UINT clear[4] {};context->ClearUnorderedAccessViewUint(pin_rows.uav.Get(),clear);
+        ID3D11ShaderResourceView *srvs[15] {color_srv.Get(),parallax_srv.Get(),state_srv.Get(),selected_matte_srv.Get(),
+          snapshot_srv.Get(),condition_srv.Get(),identity_srv.Get(),selected_receipt_srv.Get(),matte_srv.Get(),
+          nullptr,nullptr,nullptr,nullptr,nullptr,nullptr};
+        ID3D11Buffer *b2=geometry_buffer.Get(),*b3=subtitle_buffer.Get(),*b5=pin_geometry.Get();
+        ID3D11SamplerState *linear=sampler.Get();
+        ID3D11UnorderedAccessView *uavs[3] {pin_field.uav.Get(),pin_weights.uav.Get(),pin_rows.uav.Get()};
+        context->CSSetConstantBuffers(2u,1u,&b2);context->CSSetConstantBuffers(3u,1u,&b3);context->CSSetConstantBuffers(5u,1u,&b5);
+        context->CSSetSamplers(0u,1u,&linear);context->CSSetShaderResources(0u,15u,srvs);
+        context->CSSetUnorderedAccessViews(0u,3u,uavs,nullptr);context->CSSetShader(shared_ui_pin_cs[0].Get(),nullptr,0u);
+        context->Dispatch((source_width+15u)/16u,(pin_shape[3u]+15u)/16u,1u);
+        ID3D11UnorderedAccessView *null_uavs[3] {};context->CSSetUnorderedAccessViews(0u,3u,null_uavs,nullptr);
+        if (!outline->shared_ui_pin_resample_only) {
+          srvs[12u]=pin_weights.srv.Get();context->CSSetShaderResources(0u,15u,srvs);
+          uavs[1u]=uavs[2u]=nullptr;context->CSSetUnorderedAccessViews(0u,3u,uavs,nullptr);
+          context->CSSetShader(shared_ui_pin_cs[1].Get(),nullptr,0u);context->Dispatch((pin_shape[3u]+7u)/8u,1u,1u);
+          context->CSSetUnorderedAccessViews(0u,3u,null_uavs,nullptr);
+        }
+        ID3D11ShaderResourceView *null_srvs[15] {};context->CSSetShaderResources(0u,15u,null_srvs);
+        ID3D11Buffer *null_cb=nullptr;ID3D11SamplerState *null_sampler=nullptr;
+        context->CSSetConstantBuffers(2u,1u,&null_cb);context->CSSetConstantBuffers(3u,1u,&null_cb);context->CSSetConstantBuffers(5u,1u,&null_cb);
+        context->CSSetSamplers(0u,1u,&null_sampler);context->CSSetShader(nullptr,nullptr,0u);
+        ID3D11ShaderResourceView *pin_srvs[3] {pin_weights.srv.Get(),pin_field.srv.Get(),pin_rows.srv.Get()};
+        context->PSSetShaderResources(12u,3u,pin_srvs);context->PSSetConstantBuffers(5u,1u,&b5);
+      } else if (current_outline_completed && subtitle && outline && outline->saved_background) {
         const auto &saved = *outline->saved_background;
         if (saved.pixels.size() != subtitle->matte.size() || outline->background_requested ||
             outline->stale_background_proof ||
@@ -769,9 +895,11 @@ namespace {
         } else if (!background_programs.ready() && !background_programs.load(device.Get(), std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline" / "background", error)) {
           return false;
         }
-        if (!contour_transport.ensure(device.Get(), error) || !contour_transport.queue(context.Get(), selected_receipt_srv.Get(), error) || !background_owner.ensure(device.Get(), subtitle->width, subtitle->height, error)) {
+        if (!contour_transport.ensure(device.Get(), error) || !background_owner.ensure(device.Get(), subtitle->width, subtitle->height, error)) {
           return false;
         }
+        begin_timing();
+        if (!contour_transport.queue(context.Get(),selected_receipt_srv.Get(),error)) return false;
         background::request_t request;
         std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
         request.draw_srvs[7u] = selected_receipt_srv.Get();
@@ -827,6 +955,7 @@ namespace {
           }
         }
       }
+      begin_timing();
       bool submitted = false;
       recorder_flat_fallback_used = false;
       ComPtr<ID3D11Buffer> previous_background_constants;
@@ -874,6 +1003,39 @@ namespace {
           error = "completed current-outline draw did not restore background b4 before fixture cleanup";
           return false;
         }
+      }
+      if (timing_disjoint) {
+        context->End(timing_end.Get());context->End(timing_disjoint.Get());
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint {};UINT64 start=0u,end=0u;
+        while (context->GetData(timing_disjoint.Get(),&disjoint,sizeof(disjoint),0u)==S_FALSE) Sleep(1u);
+        while (context->GetData(timing_start.Get(),&start,sizeof(start),0u)==S_FALSE) Sleep(1u);
+        while (context->GetData(timing_end.Get(),&end,sizeof(end),0u)==S_FALSE) Sleep(1u);
+        if (disjoint.Disjoint || disjoint.Frequency==0u || end<start) {error="shared comparison GPU timestamp invalid";return false;}
+        *outline->render_gpu_ms=double(end-start)*1000.0/double(disjoint.Frequency);
+      }
+      if (shared_pin && outline->shared_ui_pin_diagnostic_output) {
+        auto &out=*outline->shared_ui_pin_diagnostic_output;out={};out.shape=pin_shape;
+        std::vector<std::byte> bytes;
+        if (!read_diagnostic_texture(pin_field.texture.Get(),4u,bytes)) return false;
+        out.field.resize(bytes.size()/4u);std::memcpy(out.field.data(),bytes.data(),bytes.size());
+        if (!read_diagnostic_texture(pin_weights.texture.Get(),4u,bytes)) return false;
+        out.authorized_weights.resize(bytes.size()/4u);std::memcpy(out.authorized_weights.data(),bytes.data(),bytes.size());
+        if (!read_diagnostic_texture(pin_rows.texture.Get(),4u,bytes)) return false;
+        out.active_rows.resize(bytes.size()/4u);std::memcpy(out.active_rows.data(),bytes.data(),bytes.size());
+        out.selected_receipt_header[0u]=out.active_rows.back();out.selected_receipt_authorized=out.active_rows.back()!=0u;out.active_rows.pop_back();
+        D3D11_TEXTURE2D_DESC d=output_desc;d.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+        ComPtr<ID3D11Texture2D> map;ComPtr<ID3D11RenderTargetView> map_rtv;
+        if (FAILED(device->CreateTexture2D(&d,nullptr,&map)) || FAILED(device->CreateRenderTargetView(map.Get(),nullptr,&map_rtv))) return false;
+        auto command=draw_command;command.pixel_shader=shared_ui_pin_ps[1u].Get();command.render_targets[0u]=map_rtv.Get();
+        models::research_current_outline_selected_matte_v2::scoped_receipt_t coverage_scope;
+        if (!coverage_scope.bind(context.Get(),selected_receipt_srv.Get(),matte_srv.Get())) return false;
+        if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.mapping_rgba32f)) return false;
+        command.pixel_shader=shared_ui_pin_ps[2u].Get();
+        if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.ui_coverage_rgba32f)) return false;
+      }
+      if (shared_pin) {
+        ID3D11ShaderResourceView *null_srvs[3] {};context->PSSetShaderResources(12u,3u,null_srvs);
+        ID3D11Buffer *null_cb=nullptr;context->PSSetConstantBuffers(5u,1u,&null_cb);
       }
       ID3D11Buffer *null_constants = nullptr;
       context->PSSetConstantBuffers(4u, 1u, &null_constants);
@@ -996,6 +1158,19 @@ namespace {
       }
       context->Unmap(staging.Get(), 0);
       return true;
+    }
+
+    bool read_diagnostic_texture(ID3D11Texture2D *texture, UINT bytes_per_pixel, std::vector<std::byte> &bytes) {
+      D3D11_TEXTURE2D_DESC d {};texture->GetDesc(&d);
+      d.Usage=D3D11_USAGE_STAGING;d.BindFlags=d.MiscFlags=0u;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+      ComPtr<ID3D11Texture2D> staging;
+      if (FAILED(device->CreateTexture2D(&d,nullptr,&staging))) return false;
+      context->CopyResource(staging.Get(),texture);D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(context->Map(staging.Get(),0u,D3D11_MAP_READ,0u,&mapped))) return false;
+      const auto row=std::size_t(d.Width)*bytes_per_pixel;bytes.resize(row*d.Height);
+      for (UINT y=0u;y<d.Height;++y) std::memcpy(bytes.data()+std::size_t(y)*row,
+        static_cast<const std::byte *>(mapped.pData)+std::size_t(y)*mapped.RowPitch,row);
+      context->Unmap(staging.Get(),0u);return true;
     }
 
     struct private_layer_output_t {
@@ -1634,6 +1809,10 @@ namespace {
     std::array<ComPtr<ID3D11ComputeShader>, 6u> experimental_background_shaders;
     std::filesystem::path experimental_background_root;
     std::string experimental_background_closure;
+    std::array<ComPtr<ID3D11ComputeShader>,2u> shared_ui_pin_cs;
+    std::array<ComPtr<ID3D11PixelShader>,3u> shared_ui_pin_ps;
+    std::filesystem::path shared_ui_pin_root;
+    std::string shared_ui_pin_closure;
     bool private_guard_configured = false;
     bool use_recorder_guard_scope = false;
     ComPtr<ID3D11PixelShader> recorder_flat_fallback_ps;
@@ -4624,6 +4803,17 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
         {"intended_causal_change", "Erase only current own M; retain original rawNear BG-seed exclusion"},
         {"scope", "Pinned external six-CS experiment; completed PS, producer M/receipt and all six ordinary routes remain unchanged"}};
     }
+    const auto *shared_pin_root=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_ROOT");
+    const auto *shared_pin_pin=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_PIN");
+    const bool has_shared_pin=shared_pin_root && *shared_pin_root;
+    require(has_shared_pin==bool(shared_pin_pin && *shared_pin_pin),"Shared UI pin requires root and exact closure pin");
+    if (has_shared_pin) {
+      ASSERT_TRUE(fixture.configure_shared_ui_pin(shared_pin_root,shared_pin_pin,error)) << error;
+      report["shared_ui_pin_experiment"]={{"root",shared_pin_root},{"source_closure_sha256",shared_pin_pin},
+        {"not_production_qualified",true},{"mask_policy","Same selected M, receipt and pointwise current-RGB gate as matched current compositor"},
+        {"field_policy","Native whole-source-width subtitle band; shared Game 3D pin CS; exact original Base inverse on rows without positive bilinear active-row contribution"},
+        {"resample_control","Same current M and initialized native h, with shared pin dispatch omitted"}};
+    }
     for (std::size_t index = 0u; index < cases.size(); ++index) {
       const auto &entry = cases.at(index);SCOPED_TRACE(entry.at("name").get<std::string>());
       const auto source_shape = entry.at("source").get<std::array<UINT, 2u>>();
@@ -4760,12 +4950,23 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
       std::vector<std::string> routes {"captured", "regenerated_background", "no_background", "base", "ui_reference"};
       if (has_candidate) routes.emplace_back("candidate_regenerated_background");
       if (has_experimental_bg) routes.emplace_back("candidate_own_only_background");
+      if (has_shared_pin) {routes.emplace_back("shared_ui_pin");routes.emplace_back("shared_ui_pin_resample_only");}
       for (const auto &route : routes) {
         auto render_subtitle = subtitle;auto render_outline = outline;auto render_geometry = geometry;
         auto render_base = base;
         if (route == "captured") render_outline.saved_background = &background;
         if (route == "regenerated_background") render_outline.background_requested = true;
         if (route == "candidate_regenerated_background") render_outline = candidate_outline;
+        shared_ui_pin_diagnostics_t pin_diagnostic;
+        const bool pin_route=route=="shared_ui_pin" || route=="shared_ui_pin_resample_only";
+        if (pin_route) {
+          if (has_candidate) render_outline=candidate_outline;
+          render_outline.background_requested=false;render_outline.shared_ui_pin=true;
+          render_outline.shared_ui_pin_resample_only=route=="shared_ui_pin_resample_only";
+          render_outline.shared_ui_pin_diagnostic_output=&pin_diagnostic;
+        }
+        double gpu_ms=-1.0;
+        if (has_shared_pin) render_outline.render_gpu_ms=&gpu_ms;
         saved_background_inputs_t actual_background;
         if (route == "candidate_own_only_background") {
           render_outline = candidate_outline;
@@ -4799,6 +5000,34 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
         std::ofstream stream(path, std::ios::binary);stream.write(reinterpret_cast<const char *>(crop.data()), static_cast<std::streamsize>(crop.size()));
         require(bool(stream), "Cannot write saved-current draw crop");
         result["routes"][route] = {{"whole_output_sha256", sha256(pixels)}, {"crop", {{"path", path.string()}, {"byte_count", crop.size()}, {"sha256", sha256(crop)}}}};
+        if (has_shared_pin) result["routes"][route]["prepare_and_draw_gpu_ms"]=gpu_ms;
+        if (pin_route) {
+          const auto artifact=[&](const std::string &suffix,const void *data,std::size_t size) {
+            const auto destination=case_output/(route+suffix);std::vector<char> bytes(size);std::memcpy(bytes.data(),data,size);
+            std::ofstream stream(destination,std::ios::binary);stream.write(bytes.data(),static_cast<std::streamsize>(bytes.size()));stream.close();
+            require(bool(stream),"Cannot write shared UI pin diagnostic");
+            return json{{"path",destination.string()},{"byte_count",bytes.size()},{"sha256",sha256(bytes)}};
+          };
+          const auto crop_float4=[&](const std::vector<std::byte> &whole) {
+            require(whole.size()==std::size_t(width)*height*2u*16u,"Shared UI pin GPU diagnostic shape");
+            const auto row=std::size_t(right-left)*16u;std::vector<std::byte> cropped(row*(bottom-top)*2u);
+            for(UINT eye=0u;eye<2u;++eye)for(UINT y=top;y<bottom;++y)std::memcpy(cropped.data()+(std::size_t(eye)*(bottom-top)+y-top)*row,
+              whole.data()+(std::size_t(y)*width*2u+eye*width+left)*16u,row);
+            return cropped;
+          };
+          const auto mapping=crop_float4(pin_diagnostic.mapping_rgba32f),coverage=crop_float4(pin_diagnostic.ui_coverage_rgba32f);
+          result["routes"][route]["shared_ui_pin"]={{"shape",pin_diagnostic.shape},
+            {"field",artifact(".native-field.f32",pin_diagnostic.field.data(),pin_diagnostic.field.size()*4u)},
+            {"authorized_weights",artifact(".authorized-weights.f32",pin_diagnostic.authorized_weights.data(),pin_diagnostic.authorized_weights.size()*4u)},
+            {"active_rows",artifact(".active-rows.u32",pin_diagnostic.active_rows.data(),pin_diagnostic.active_rows.size()*4u)},
+            {"selected_receipt_authorized",pin_diagnostic.selected_receipt_authorized},
+            {"row_header_schema",1u},{"row_header",artifact(".row-header.u32",pin_diagnostic.selected_receipt_header.data(),sizeof(pin_diagnostic.selected_receipt_header))},
+            {"mapping_crop",artifact(".mapping-crop.rgba32f",mapping.data(),mapping.size())},
+            {"ui_coverage_crop",artifact(".ui-coverage-crop.rgba32f",coverage.data(),coverage.size())},
+            {"mapping_layout","eye-major cropped RGBA32F: unsaturated sourceU,V, active-row route, valid"},
+            {"coverage_layout","eye-major cropped RGBA32F: actual GPU current selected-M bilinear UI coverage, full-coverage flag,0,1"},
+            {"native_plane_bytes",std::uint64_t(pin_diagnostic.field.size())*8u+(std::uint64_t(pin_diagnostic.active_rows.size())+1u)*4u}};
+        }
         if (capture_background) {
           require(actual_background.pixels.size() == native_pixels, "Actual diagnostic BG dimensions");
           const auto artifact = [&](const char *suffix, const void *data, std::size_t size) {
@@ -4819,6 +5048,22 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
             {"not_production_qualified", route == "candidate_own_only_background"}};
         }
       }
+      if (has_shared_pin) {
+        const auto *samples_env=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_PERF_SAMPLES");
+        const UINT samples=samples_env?static_cast<UINT>(std::stoul(samples_env)):0u;
+        require(samples<=64u,"Shared UI pin perf sample cap");
+        json timings={{"current_bg",json::array()},{"shared_ui_pin",json::array()}};
+        for(UINT sample=0u;sample<samples+2u && samples>0u;++sample)for(UINT order=0u;order<2u;++order) {
+          const bool pin=((sample+order)&1u)!=0u;auto selected=has_candidate?candidate_outline:outline;
+          selected.background_requested=!pin;selected.shared_ui_pin=pin;
+          double elapsed=-1.0;selected.render_gpu_ms=&elapsed;std::vector<std::byte> ignored;
+          ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,sizeof(rgba16_bits_t),width,height,source.data(),base,base,state,{},
+            ignored,error,field[0],field[1],geometry,&subtitle,nullptr,false,&selected)) << error;
+          if(sample>=2u)timings[pin?"shared_ui_pin":"current_bg"].push_back(elapsed);
+        }
+        result["balanced_gpu_timing"]={{"samples_per_route",samples},{"warmup_rounds",2u},{"ms",timings},
+          {"scope","Hardware GPU timestamp interval for native preparation plus completed draw; excludes shader compilation/resource creation, diagnostic draws/copies/readbacks; fresh fixture resources per call, not production retained-resource CPU cost"}};
+      }
       if (entry.contains("provenance")) result["provenance"] = entry.at("provenance");
       for (const auto &[key, bytes] : imported) require(read(bindings.at(key).at("path").get<std::string>()) == bytes, "Saved-current draw input changed during replay");
       report["cases"].push_back(std::move(result));
@@ -4829,6 +5074,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
         read_binding(candidate_specification.at("producer_report")) == candidate_producer_bytes, "Candidate draw specification/producer report changed");
     }
     if (has_experimental_bg) require(fixture.experimental_background_source_unchanged(), "Experimental BG source changed during replay");
+    if (has_shared_pin) require(fixture.shared_ui_pin_source_unchanged(),"Shared UI pin source changed during replay");
     if (!fixture_f2_binding.is_null()) {
       const auto unchanged = [&](const char *name, const auto &specs) {
         const auto &binding = fixture_f2_binding.at(name);
@@ -5445,6 +5691,213 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
   }
 }
 
+
+// Independent authored layers exercise renderer differences, not OCR or mask-estimator quality.
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinAuthoredStressComparison) {
+  const auto *cases_env=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_STRESS_CASES");
+  if(!cases_env || !*cases_env)GTEST_SKIP()<<"No shared UI pin authored stress specification selected";
+  const auto *output_env=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_STRESS_OUTPUT");
+  const auto *shader_root=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_ROOT");
+  const auto *shader_pin=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_PIN");
+  const auto *reference_env=std::getenv("SUNSHINE_TEST_PRIVATE_LAYER_REPLAY_CASES");
+  ASSERT_TRUE(output_env && shader_root && shader_pin && reference_env);
+  namespace fs=std::filesystem;using json=nlohmann::json;
+  try {
+    const auto require=[](bool pass,const std::string &message){if(!pass)throw std::runtime_error(message);};
+    const auto read=[&](const fs::path &path){
+      std::ifstream stream(path,std::ios::binary|std::ios::ate);require(bool(stream)&&stream.tellg()>=0,"Cannot read authored stress operand");
+      std::vector<std::byte> bytes(static_cast<std::size_t>(stream.tellg()));stream.seekg(0);
+      stream.read(reinterpret_cast<char *>(bytes.data()),static_cast<std::streamsize>(bytes.size()));require(bool(stream),"Incomplete authored stress operand");return bytes;
+    };
+    const auto sha=[](const auto &bytes){
+      const auto hash=crypto::hash(std::string_view(reinterpret_cast<const char *>(bytes.data()),bytes.size()));
+      constexpr char digits[]="0123456789abcdef";std::string value;
+      for(auto b:hash){value.push_back(digits[b>>4u]);value.push_back(digits[b&15u]);}return value;
+    };
+    const auto specification_bytes=read(cases_env),reference_bytes=read(reference_env);
+    const auto spec=json::parse(std::string_view(reinterpret_cast<const char *>(specification_bytes.data()),specification_bytes.size()));
+    const auto reference_spec=json::parse(std::string_view(reinterpret_cast<const char *>(reference_bytes.data()),reference_bytes.size()));
+    require(spec.at("schema")==1u && spec.at("driver")=="hardware" && spec.at("cases").size()>=1u && spec.at("cases").size()<=16u,"Authored stress schema/driver/case count");
+    const fs::path output(output_env);require(!fs::exists(output)||(fs::is_directory(output)&&fs::is_empty(output)),"Authored stress output must be new or empty");fs::create_directories(output);
+    live_v2_warp_fixture_t fixture;std::string error;
+    ASSERT_TRUE(fixture.initialize(error,warp_shader_e::current_outline_completed,false,true))<<error;
+    ASSERT_TRUE(fixture.configure_shared_ui_pin(shader_root,shader_pin,error))<<error;
+    json report={{"schema",1u},{"driver","hardware"},{"adapter",fixture.adapter_identity()},
+      {"input_specification",{{"path",cases_env},{"sha256",sha(specification_bytes)}}},
+      {"reference_specification",{{"path",reference_env},{"sha256",sha(reference_bytes)}}},
+      {"shared_ui_pin_source_closure_sha256",shader_pin},
+      {"scope","Authored fixed-mask current BG versus shared Game 3D pin, with independent actual-GPU known-layer reference; no OCR or live qualification"},
+      {"cases",json::array()}};
+    for(std::size_t index=0u;index<spec.at("cases").size();++index) {
+      const auto &entry=spec.at("cases").at(index);SCOPED_TRACE(entry.at("name").get<std::string>());
+      const auto shape=entry.at("source").get<std::array<UINT,2u>>(),field=entry.at("field").get<std::array<UINT,2u>>();
+      const auto rect=entry.at("analysis_rect").get<std::array<UINT,4u>>();const UINT width=shape[0u],height=shape[1u];
+      require(width>=32u&&height>=2u&&width<=5120u&&height<=5120u&&rect[2u]>0u&&rect[3u]>0u&&rect[0u]+rect[2u]<=width&&rect[1u]+rect[3u]<=height,"Authored stress geometry");
+      const auto crop=entry.value("native_crop",std::array<UINT,3u>{rect[2u],0u,rect[3u]});
+      require(crop[0u]==rect[2u]&&crop[2u]>0u&&crop[1u]<=rect[3u]&&crop[2u]<=rect[3u]-crop[1u],"Authored native crop facts");
+      json bindings=json::object();
+      const auto load=[&]<typename T>(const char *name,std::size_t count){
+        const auto &binding=entry.at(name);const auto bytes=read(binding.at("path").get<std::string>());
+        require(bytes.size()==count*sizeof(T)&&binding.at("byte_count")==bytes.size()&&binding.at("sha256")==sha(bytes),std::string("Authored stress binding: ")+name);
+        bindings[name]=binding;std::vector<T> values(count);std::memcpy(values.data(),bytes.data(),bytes.size());return values;
+      };
+      const auto source=load.template operator()<bgra8_t>("source_bgra8",std::size_t(width)*height);
+      const auto background=load.template operator()<bgra8_t>("background_bgra8",source.size());
+      const auto foreground=load.template operator()<std::array<std::uint8_t,4u>>("foreground_rgba8",source.size());
+      const auto body=load.template operator()<std::uint8_t>("effective_body_alpha_u8",source.size());
+      const auto base=load.template operator()<float>("base",std::size_t(field[0u])*field[1u]);
+      auto state=make_live_state(true,true);
+      const float target=entry.contains("ui_local_target_bits")?std::bit_cast<float>(entry.at("ui_local_target_bits").get<std::uint32_t>()):entry.at("ui_local_target").get<float>();
+      auto subtitle=make_subtitle_inputs(rect[2u],rect[3u],state,target,field[0u],field[1u]);
+      subtitle.constants.source_left=rect[0u];subtitle.constants.source_top=rect[1u];subtitle.identity[4u]=static_cast<UINT>(index+1u);
+      subtitle.width=crop[0u];subtitle.height=crop[2u];subtitle.identity[10u]=crop[1u];subtitle.identity[11u]=crop[2u];
+      if(entry.contains("content_rect")) {
+        const auto content=entry.at("content_rect").get<std::array<UINT,4u>>();std::copy(content.begin(),content.end(),subtitle.identity.begin()+16u);
+      }
+      if(entry.contains("field_rows")) {
+        const auto rows=entry.at("field_rows").get<std::array<UINT,2u>>();std::copy(rows.begin(),rows.end(),subtitle.identity.begin()+14u);
+      }
+      subtitle.matte=load.template operator()<std::uint32_t>("matte",std::size_t(crop[0u])*crop[2u]);
+      subtitle.snapshot=load.template operator()<rgba16_bits_t>("snapshot",subtitle.matte.size());
+      host_sbs_v2_geometry_t geometry;const auto scale=entry.at("content_scale").get<std::array<float,2u>>();
+      geometry.content_scale_x=scale[0u];geometry.content_scale_y=scale[1u];
+      if(entry.at("roi").get<bool>()) {
+        geometry.video_roi_active=1.0f;geometry.video_roi_left=float(rect[0u])/width;geometry.video_roi_top=float(rect[1u])/height;
+        geometry.video_roi_right=float(rect[0u]+rect[2u])/width;geometry.video_roi_bottom=float(rect[1u]+rect[3u])/height;
+        geometry.tensor_content_left=0u;geometry.tensor_content_top=0u;geometry.tensor_content_right=field[0u];geometry.tensor_content_bottom=field[1u];
+      }
+      if(entry.contains("geometry")) {
+        const auto bytes=load.template operator()<std::byte>("geometry",sizeof(geometry));std::memcpy(&geometry,bytes.data(),sizeof(geometry));
+      }
+      auto selected=make_current_outline_inputs(subtitle);
+      const auto folder=output/("case_"+std::to_string(index));fs::create_directory(folder);
+      const auto save=[&](const std::string &name,const void *data,std::size_t size){
+        std::vector<std::byte> bytes(size);std::memcpy(bytes.data(),data,size);const auto path=folder/name;
+        std::ofstream stream(path,std::ios::binary);stream.write(reinterpret_cast<const char *>(bytes.data()),static_cast<std::streamsize>(size));stream.close();require(bool(stream),"Cannot save authored stress artifact");
+        return json{{"path",path.string()},{"byte_count",size},{"sha256",sha(bytes)}};
+      };
+      const auto save_vector=[&](const std::string &name,const auto &values){return save(name,values.data(),values.size()*sizeof(typename std::decay_t<decltype(values)>::value_type));};
+      bindings["state"]=save("state.u32",state.data(),sizeof(state));bindings["geometry"]=save("geometry.b2",&geometry,sizeof(geometry));
+      bindings["subtitle_constants"]=save("subtitle.b3",&subtitle.constants,sizeof(subtitle.constants));
+      bindings["condition"]=save("condition.u32",subtitle.condition.data(),sizeof(subtitle.condition));
+      bindings["identity"]=save("identity.u32",subtitle.identity.data(),sizeof(subtitle.identity));
+      bindings["comparison_selected_matte"]=bindings.at("matte");
+      bindings["comparison_selected_receipt"]=save("selected_receipt.u32",selected.receipt.data(),sizeof(selected.receipt));
+      json result={{"name",entry.at("name")},{"source",shape},{"field",field},{"packed",{width*2u,height}},
+        {"input_bindings",bindings},{"authored_parameters",entry},{"routes",json::object()},
+        {"comparison_preparation","Current SCT/SCP/receipt explicitly authored by fixture; all renderer operands common, no current-producer claim"}};
+      if(entry.contains("original_input_bindings"))result["original_input_bindings"]=entry.at("original_input_bindings");
+      for(const auto *route:{"current_bg","shared_ui_pin","shared_ui_pin_resample_only","base_composite"}) {
+        const bool pin=std::string_view(route)=="shared_ui_pin"||std::string_view(route)=="shared_ui_pin_resample_only";
+        auto operands=selected;auto ui=subtitle;operands.background_requested=std::string_view(route)=="current_bg";operands.shared_ui_pin=pin;
+        operands.shared_ui_pin_resample_only=std::string_view(route)=="shared_ui_pin_resample_only";
+        if(std::string_view(route)=="base_composite")ui.constants.enabled=0u;
+        shared_ui_pin_diagnostics_t diagnostic;if(pin)operands.shared_ui_pin_diagnostic_output=&diagnostic;
+        double elapsed=-1.0;operands.render_gpu_ms=&elapsed;std::vector<std::byte> pixels;
+        ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM,4u,width,height,source.data(),base,base,state,{},pixels,error,
+          field[0u],field[1u],geometry,&ui,nullptr,true,&operands))<<route<<": "<<error;
+        result["routes"][route]={{"color",save_vector(std::string(route)+".bgra8",pixels)},{"prepare_and_draw_gpu_ms",elapsed}};
+        if(pin)result["routes"][route]["shared_ui_pin"]={{"shape",diagnostic.shape},
+          {"field",save_vector(std::string(route)+".field.f32",diagnostic.field)},
+          {"authorized_weights",save_vector(std::string(route)+".weights.f32",diagnostic.authorized_weights)},
+          {"active_rows",save_vector(std::string(route)+".rows.u32",diagnostic.active_rows)},
+          {"selected_receipt_authorized",diagnostic.selected_receipt_authorized},
+          {"row_header_schema",1u},{"row_header",save_vector(std::string(route)+".row-header.u32",diagnostic.selected_receipt_header)},
+          {"mapping",save_vector(std::string(route)+".mapping.rgba32f",diagnostic.mapping_rgba32f)},
+          {"ui_coverage",save_vector(std::string(route)+".coverage.rgba32f",diagnostic.ui_coverage_rgba32f)}};
+      }
+      live_v2_warp_fixture_t::private_layer_output_t layered;
+      ASSERT_TRUE(fixture.render_private_layer_reference(width,height,background,foreground,body,base,state,field[0u],field[1u],geometry,subtitle,
+        reference_spec.at("private_layer_shader_root").get<std::string>(),reference_spec.at("private_layer_source_closure_sha256").get<std::string>(),layered,error))<<error;
+      UINT maximum=0u;for(std::size_t pixel=0u;pixel<source.size();++pixel)for(UINT channel=0u;channel<3u;++channel) {
+        const auto expected=channel==0u?source[pixel].r:channel==1u?source[pixel].g:source[pixel].b;
+        maximum=std::max(maximum,UINT(std::abs(int(std::to_integer<unsigned int>(layered.reconstructed_rgba8[pixel*4u+channel]))-int(expected))));
+      }
+      result["reference"]={{"reconstructed_source",save_vector("reference_source.rgba8",layered.reconstructed_rgba8)},
+        {"base_background",save_vector("reference_base_background.bgra8",layered.base_background_bgra8)},
+        {"layered_color",save_vector("reference_layered.rgba8",layered.reference_rgba8)},
+        {"ui_foreground_premultiplied",save_vector("reference_foreground.rgba32f",layered.shifted_foreground_rgba32f)},
+        {"ui_effective_body_alpha",save_vector("reference_body.f32",layered.shifted_body_alpha_f32)},
+        {"identity_max_rgb8_error",maximum},{"predeclared_identity_tolerance_rgb8",1u},{"authored_layer_identity_pass",maximum<=1u}};
+      EXPECT_LE(maximum,1u)<<"Author layers must reconstruct source independently";
+      // Invalid authority, explicit empty M, and current-RGB revocation must retain exact Base.
+      if(index==0u) {
+        json adversaries=json::array();
+        for(const auto *kind:{"empty","stale_sct","revoked_rgb","stale_receipt"}) {
+          auto ui=subtitle;auto operands=selected;operands.shared_ui_pin=true;
+          if(std::string_view(kind)=="empty")std::fill(operands.matte.begin(),operands.matte.end(),0u);
+          if(std::string_view(kind)=="stale_sct")ui.identity[20u]^=1u;
+          if(std::string_view(kind)=="revoked_rgb")for(auto &pixel:ui.snapshot)pixel={0u,0x3c00u,0x3c00u,0x3c00u};
+          if(std::string_view(kind)=="stale_receipt")operands.receipt[28u+20u]^=1u;
+          std::vector<std::byte> actual,expected;
+          ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM,4u,width,height,source.data(),base,base,state,{},actual,error,
+            field[0u],field[1u],geometry,&ui,nullptr,true,&operands))<<kind<<": "<<error;
+          // Receipt failure keeps literal legacy selection; other refusals keep Base.
+          operands.shared_ui_pin=false;operands.background_requested=false;
+          if(std::string_view(kind)!="stale_receipt")ui.constants.enabled=0u;
+          ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM,4u,width,height,source.data(),base,base,state,{},expected,error,
+            field[0u],field[1u],geometry,&ui,nullptr,true,&operands))<<error;
+          EXPECT_EQ(actual,expected)<<kind;adversaries.push_back({{"kind",kind},{"actual_sha256",sha(actual)},{"reference_sha256",sha(expected)},{"bitexact",actual==expected}});
+        }
+        result["authority_adversaries"]=adversaries;
+      }
+      for(const auto &[key,binding]:bindings.items())if(entry.contains(key)) {
+        const auto bytes=read(binding.at("path").get<std::string>());
+        require(bytes.size()==binding.at("byte_count").get<std::size_t>()&&sha(bytes)==binding.at("sha256").get<std::string>(),"Authored stress input changed during run");
+      }
+      const auto text=result.dump(2);save("metadata.json",text.data(),text.size());report["cases"].push_back(std::move(result));
+    }
+    require(read(cases_env)==specification_bytes&&read(reference_env)==reference_bytes&&fixture.shared_ui_pin_source_unchanged(),"Authored stress source/specification drift");
+    const auto text=report.dump(2);std::ofstream stream(output/"report.json",std::ios::binary);stream<<text;require(bool(stream),"Cannot save authored stress report");
+  }catch(const std::exception &failure){FAIL()<<failure.what();}
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinPreservesNativeGlyphAndAuthorityAcrossColourRoiAndFractionalSampling) {
+  const auto *root=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_ROOT"),*pin=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_PIN");
+  if(!root || !*root)GTEST_SKIP()<<"No shared UI pin comparison program selected";
+  ASSERT_TRUE(pin && *pin);live_v2_warp_fixture_t fixture;std::string error;
+  ASSERT_TRUE(fixture.initialize(error,warp_shader_e::current_outline_completed,false,true))<<error;
+  ASSERT_TRUE(fixture.configure_shared_ui_pin(root,pin,error))<<error;
+  constexpr UINT W=128u,H=32u,FW=24u,FH=10u;const auto state=make_live_state(true,true);
+  for(bool roi:{false,true})for(float sign:{-1.0f,1.0f})for(float shift:{2.0f,2.5f})for(UINT mode:{0u,1u,2u})for(float scale_y:{1.0f,0.8125f}) {
+    SCOPED_TRACE(std::to_string(roi)+"/"+std::to_string(sign)+"/"+std::to_string(shift)+"/"+std::to_string(mode)+"/"+std::to_string(scale_y));
+    const UINT aw=roi?64u:W,ah=roi?16u:H,left=roi?32u:0u,top=roi?8u:0u;
+    auto ui=make_subtitle_inputs(aw,ah,state,shift/float(aw),FW,FH);ui.constants.color_mode=mode;
+    ui.constants.source_left=left;ui.constants.source_top=top;
+    host_sbs_v2_geometry_t geometry;geometry.content_scale_y=scale_y;
+    if(roi){geometry.video_roi_active=1.0f;geometry.video_roi_left=geometry.video_roi_top=0.25f;
+      geometry.video_roi_right=geometry.video_roi_bottom=0.75f;geometry.tensor_content_right=FW;geometry.tensor_content_bottom=FH;}
+    std::vector<rgba16_bits_t> source(W*H,{0x3400u,0x3400u,0x3400u,0x3c00u});
+    const std::uint16_t raw=mode==2u?0x3c00u:0x3800u,display=mode==0u?0x3800u:0x39e2u;
+    const UINT first_y=mode==0u?0u:mode==2u?ah-7u:ah/2u-3u;
+    for(UINT y=first_y;y<first_y+7u;++y)for(UINT x=aw/2u-4u;x<aw/2u+5u;++x) {
+      ui.matte[std::size_t(y)*aw+x]=1u;ui.snapshot[std::size_t(y)*aw+x]={display,display,display,0x3c00u};
+      source[std::size_t(y+top)*W+x+left]={raw,raw,raw,0x3c00u};
+    }
+    const std::vector<float> base(FW*FH,sign*1.25f/float(aw));auto operands=make_current_outline_inputs(ui);
+    operands.shared_ui_pin=true;shared_ui_pin_diagnostics_t diagnostic;operands.shared_ui_pin_diagnostic_output=&diagnostic;
+    std::vector<std::byte> actual,constant_ui,base_output,revoked;
+    ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},actual,error,FW,FH,geometry,&ui,nullptr,true,&operands))<<error;
+    auto disabled=ui;disabled.constants.enabled=0u;auto flat_geometry=geometry;flat_geometry.video_roi_active=0.0f;
+    const float full_plane=(shift/float(aw))*(float(aw)/float(W));const std::vector<float> constant(FW*FH,full_plane);
+    auto ordinary=make_current_outline_inputs(disabled);
+    ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),constant,constant,state,{},constant_ui,error,FW,FH,flat_geometry,&disabled,nullptr,true,&ordinary))<<error;
+    ASSERT_EQ(diagnostic.ui_coverage_rgba32f.size(),std::size_t(W)*H*2u*16u);
+    const auto coverage=unpack_rgba32f(diagnostic.ui_coverage_rgba32f);std::size_t full=0u;
+    for(std::size_t i=0u;i<coverage.size();++i)if(coverage[i].g==1.0f) {
+      ++full;EXPECT_EQ(std::memcmp(actual.data()+i*8u,constant_ui.data()+i*8u,8u),0)<<"Full marked footprint must retain exact rigid native sample at pixel "<<i;
+    }
+    EXPECT_GT(full,0u);EXPECT_TRUE(diagnostic.selected_receipt_authorized);
+    for(UINT y=0u;y<diagnostic.shape[3u];++y)for(UINT x=1u;x<W;++x)
+      EXPECT_LE(std::abs(double(diagnostic.field[std::size_t(y)*W+x])-double(diagnostic.field[std::size_t(y)*W+x-1u]))*W,0.50001);
+    ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},base_output,error,FW,FH,geometry,&disabled,nullptr,true,&ordinary))<<error;
+    auto bad=ui;for(auto &pixel:bad.snapshot)pixel={0u,0x3c00u,0x3c00u,0x3c00u};
+    operands.shared_ui_pin_diagnostic_output=nullptr;
+    ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},revoked,error,FW,FH,geometry,&bad,nullptr,true,&operands))<<error;
+    EXPECT_EQ(revoked,base_output)<<"All current glyph RGB was revoked";
+  }
+  EXPECT_TRUE(fixture.shared_ui_pin_source_unchanged());
+}
 
 // Opt-in external two-sided32 selector experiment, independent of production qualification.
 TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteTwoSidedSelectorReplay) {

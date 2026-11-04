@@ -2783,6 +2783,11 @@ remains available for replay: a 16-by-16 tile pass and a 256-thread reduction re
 into one R32 float on the rendering queue. Its crop/jitter mapping matches the scene candidate;
 every covered valid pixel contributes, and empty coverage retains the submitted floor. These
 resources are overwritten on each mode-2 render, with no CPU readback or additional queue wait.
+
+The UI pin scan and arithmetic have one [shared shader owner](../src_assets/windows/assets/shaders/directx/include/ui_pin_band_shared.hlsl).
+The embedded `game3d_native.hlsl` carries a generated copy so its compiler remains self-contained.
+`tools/reshade/generate_ui_pin_band.py` updates that copy; CMake rejects drift before embedding it.
+
 **UI pin band.** After the existing horizontal conditioning, `SunshineApplyUICS` pins the
 conditioned field `h` toward the UI plane `pUI`. A texel `u` with finite positive mask alpha `a`
 pins with weight `w(u) = saturate(8 * a)` (`SUNSHINE_UI_SOFT_PIN_GAIN`), exactly for alpha at or

@@ -850,3 +850,78 @@ in `final-master-validation-v1.json`. `E:\ApolloDev\run-dev.cmd` selects that va
 RelWithDebInfo package. The earlier direct G1 launcher remains a preserved fallback.
 Finite parity preserves the existing limitations and failed diagnostic cases; it establishes no
 new dark-scene, tint, left-aligned multiline, semantic-alpha or physical-headset acceptance.
+
+
+### P14 shared Game 3D pin-band comparison
+
+The native-mask comparison tests the existing completed Host compositor against Game 3D's
+single conditioned-field warp. Both routes receive the same original colour, Base, source
+rectangle, render geometry, current native M, source snapshot, SCP target, SCT and selected
+receipt. Neither route gets additional alpha or background evidence. The existing eighteen
+saved-renderer routes remain independently checked against the authenticated G1 control.
+
+The pin-band scan and arithmetic now have one owner,
+`src_assets/windows/assets/shaders/directx/include/ui_pin_band_shared.hlsl`. Game 3D retains a
+generated, configure-checked copy for its self-contained embedded compiler. All 258 optimized
+SM5 binaries across eighteen Game 3D configurations are byte-identical before and after this
+extraction. The private Host adapter includes that same owner; it is not selected by production
+streaming or conversion.
+
+The adapter constructs a native-resolution field over the subtitle band, applies the shared
+pin pass, and samples original source RGB through one inverse. It performs no background RGB
+reconstruction. Empty rows preserve the original Base inverse; both positive bilinear row
+contributors are considered for fractional vertical sampling. Current RGB revocation and the
+literal legacy fallback remain separate from field construction. A fresh GPU-owned header
+records selected-receipt validity for that immutable draw only.
+
+An initial native-field construction failed the horizontal slope check: hardware-filtered
+coarse-to-native sampling produced approximately 0.50386 native pixels per adjacent texel in
+both the unpinned and pinned fields. That attempt is preserved as a failed diagnostic. Explicit
+FP32 interpolation in the native-field initializer restores the bound within the predeclared
+FP32 roundoff allowance. The accepted comparison retains the original checks and an unpinned
+resampling control.
+The main production warp is unchanged.
+
+The finite quality result does not justify replacing the current Host default:
+
+- In ten authored stress cases, both methods reproduce opaque inner body exactly in nine.
+  Body antialiasing is exact wherever that cohort exists in those cases. The shared warp better
+  preserves the deliberately omitted stroke patch in the tenth.
+  Its local clean-background error is worse in nine cases and tied in one. A thin-diagonal case
+  rises from about 2.97 to 7.10 RGB8 mean error; a checkerboard rises from 13.19 to 26.43.
+  A fractional-vertical outline case also worsens. Native proof images show the scene deformation
+  and horizontal row transitions rather than treating fewer changed pixels as better quality.
+- Four independent known-layer cases give the complementary result: both methods have identical
+  inner-body errors, while the shared warp reduces decoration error in all four, substantially
+  on the white, colour and black cases. Local background results are mixed. These fixed older
+  masks deliberately test renderer robustness; they do not measure current G1 detection recall.
+  Their old captured state fails current authentication and is never relabelled. A separate,
+  explicitly authored current fixture context preserves their original pixel/Base/M/geometry
+  bytes and numeric plane target for both routes.
+- Three real HDR tuples use the actual current G1 producer masks. Full marked UI footprints
+  preserve the same rigid source sample in both methods. The shared warp avoids some fractional
+  repair fringes, but can deform nearby scene edges. These dumps have no clean-background truth.
+
+The shared adapter uses about 15.0 MiB of logical native-band working storage on the saved
+3840-wide cases, versus about 66.45 MiB for the current push/pull owner, excluding common inputs,
+diagnostic outputs and driver overhead. Balanced warm preparation-plus-draw timestamps are a
+private component comparison. They include submission gaps and fresh fixture resources; the
+test executable is coverage-instrumented. They establish no live FPS or headset-latency gain.
+
+The optimized native test build passes the separately selected saved-input comparisons and the
+48 colour/ROI/signed-displacement/fractional-sampling combinations. The renderer regression
+group runs 33 tests: 25 pass and eight external-input tests explicitly skip; the relevant saved
+input paths run separately. Six generator/drift tests pass. All Python evaluation and scoring
+uses the single machine interpreter and numeric fingerprint from AGENTS.md.
+
+Evidence is outside Git under `E:\ApolloDev\host-game-ui-warp-comparison-20261104`.
+`final-comparison-summary-v1.json` binds the final strict quality reports, proof images,
+performance samples and frozen analysis code; `final-validation-v1.json` binds the source,
+native executable, regression checks and unchanged live launcher. Initial compilation/setup
+failures and the rejected field construction remain distinct from accepted evidence.
+
+Keep the current Host renderer as the default under the preserve-or-improve requirement. The
+common pin implementation and private adapter make a shared solution testable without separate
+copies of its algorithm. A future two-axis pin band could bound the visible row transitions,
+but would spread deformation further and needs independent false-positive, ROI and scene-edge
+qualification before either product adopts it.

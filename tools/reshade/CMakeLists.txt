@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 project(SunshineReShadeSBS LANGUAGES CXX)
 
 find_package(nlohmann_json 3.11 CONFIG REQUIRED)
+include("${CMAKE_CURRENT_SOURCE_DIR}/check_ui_pin_band.cmake")
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/game3d_native.hlsl" GAME3D_HLSL)
 # C++ raw string literals use normalized source newlines even in a CRLF checkout.
 # Fingerprint the embedded shader, rather than the checkout's line-ending choice.
@@ -207,6 +208,7 @@ endif()
 
 option(SUNSHINE_SBS_RUNTIME_TESTS "Build a distinct TEST ONLY add-on with controlled foreground observation" OFF)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/game3d_native.hlsl")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SHARED_UI_PIN_OWNER}")
 configure_file(game3d_shader_source.h.in "${CMAKE_CURRENT_BINARY_DIR}/game3d_shader_source.h" @ONLY)
 
 # The add-on's production sources, listed once (README, Test builds). A view
@@ -416,11 +418,11 @@ if(BUILD_TESTING)
   add_test(NAME reshade_clock_domains COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
     "-DTEST_ADDON_SOURCES=${sunshine_test_addon_source_list}" -P "${CMAKE_CURRENT_SOURCE_DIR}/check_clock_domains.cmake")
   set_tests_properties(reshade_clock_domains PROPERTIES TIMEOUT 60)
-  # The first-run report's checks and its goldens over saved game logs (log_report_goldens). They need
+  # First-run report checks/goldens and shared pin-band generation checks need
   # only a Python 3 interpreter and are not registered without one.
   find_package(Python3 3.9 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
-    foreach(report_test IN ITEMS game3d_log_report game3d_log_report_golden)
+    foreach(report_test IN ITEMS game3d_log_report game3d_log_report_golden generate_ui_pin_band)
       add_test(NAME reshade_${report_test} COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/test_${report_test}.py")
       set_tests_properties(reshade_${report_test} PROPERTIES TIMEOUT 60 ENVIRONMENT PYTHONUTF8=1)
     endforeach()
