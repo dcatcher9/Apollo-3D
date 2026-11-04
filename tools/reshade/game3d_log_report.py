@@ -269,6 +269,19 @@ WINDOW_MS = re.compile(r'\bwindow_ms=(\d+)')
 LAYER_RECENCY_MS = 250.0
 # Logged once per ring when a copy is first skipped: a WARN before 10-07, INFO since. UI layer copies judges it.
 LAYER_SATURATED = 'Sunshine UI layer: every live copy is offered, held or still being read'
+# The native observer's barrier coverage diagnostic (since 11-03, streamline_native_observer.cpp coverage_line): once
+# per method-table class, the first list no barrier hook covered, its table (a module image's, or the list's own,
+# object-owned one, by its offset from the object) and where its ResourceBarrier and Barrier slots dispatch; then, at
+# most every 10 s while it changes, the count of hooks written into lists' own tables (written=: about one per list
+# where the runtime keeps that table across Reset, one per execution where it rebuilds it). Barrier coverage reports
+# both.
+COVERAGE_UNCOVERED = re.compile(r'Sunshine 3D barrier coverage: a list no barrier hook covered: table=(.+?) '
+                                r'ResourceBarrier=(\S+) Barrier=(\S+);')
+COVERAGE_WRITTEN = re.compile(r'Sunshine 3D barrier coverage: written=(\d+)')
+# A written count that grew in this many of its lines (at most one per 10 s), by at least this many hooks after the
+# first, is a runtime rebuilding lists' own tables: lists created during loading settle within a few lines.
+COVERAGE_REWRITE_LINES = 6
+COVERAGE_REWRITE_GROWTH = 100
 # A cleared target whose clear-boundary copy the layer refused (game3d_ui_layer.cpp observe_clear: no legal copy of
 # its state exists, contract cell D12). From 10-24 (f45f1bb9) to the 11-03 contract one line logged it once for every
 # reason; since then the add-on logs one line per reason with what the player loses, and the timing line counts the
@@ -964,7 +977,14 @@ class Session:
     layer_refusals: list[tuple[float, int, dict[str, int], int]] = field(default_factory=list)
     layer_counts_refusals: bool = False  # Some timing line's layer group has refused= (the 11-03 contract).
     layer_copies_enhanced: int = 0
+    # Since option 2 (11-03): the admitted copies of a simultaneous-access target its clearing list named no state
+    # for, recorded from its implicit promotion (copies_promoted=).
+    layer_copies_promoted: int = 0
     layer_refusal_lines: list[tuple[float, str, str]] = field(default_factory=list)
+    # The barrier coverage lines (since 11-03): each uncovered method-table class (time, table, ResourceBarrier's and
+    # Barrier's dispatch) and each written count (time, count).
+    coverage_uncovered: list[tuple[float, str, str, str]] = field(default_factory=list)
+    coverage_written: list[tuple[float, int]] = field(default_factory=list)
     # Numbers the checks computed, for the saved summary and --compare (summary_metrics).
     metrics: dict = field(default_factory=dict)
     # Export delivery counters: (t, runtime, generation, published, dropped, overwritten_unconsumed); and the
@@ -1249,8 +1269,13 @@ def parse(lines) -> Session:
                     s.layer_refusals.append((t, refused, {k: int(v) for k, v in groups.get('refused_by', {}).items()
                                                           if v.isdigit()}, copies))
                 s.layer_copies_enhanced += int(fields.get('copies_enhanced', 0))
+                s.layer_copies_promoted += int(fields.get('copies_promoted', 0))
         if LAYER_SATURATED in text:
             s.layer_saturated.append(t)
+        if found := COVERAGE_UNCOVERED.search(text):
+            s.coverage_uncovered.append((t, found.group(1), found.group(2), found.group(3)))
+        elif found := COVERAGE_WRITTEN.search(text):
+            s.coverage_written.append((t, int(found.group(1))))
         if found := LAYER_REFUSED.search(text):
             s.layer_refusal_lines.append((t, found.group(1).strip(), (found.group(2) or '').strip()))
         elif LAYER_REFUSED_ONCE in text:
@@ -1674,6 +1699,7 @@ def evaluate(s: Session) -> list[Check]:
     queue_order_checks(s, add)
     second_signaller_checks(s, add)
     capture_lock_checks(s, add)
+    coverage_checks(s, add)
     if s.render_sizes:
         # Dynamic resolution keeps depth (since 10-23): a render-size change of one source is no depth gap. Before,
         # each change was a 'depth_shape_changed' loss (Assassin's Creed Shadows with FG on: 125-438 ms, six in 6 s).
@@ -2554,12 +2580,19 @@ def layer_refusal_checks(s: Session, add) -> None:
     the 11-03 contract; 10-24 to 11-03 one line logged once for the first two together and counted nothing). A refused
     target is never tracked, so if it was the game's UI layer, the layer never protected UI: The Witcher 3 with FG off
     (11-02) draws its UI only there, so every FG-off frame lost UI protection, which the UI protection gaps name as
-    the cause. 'UI layer enhanced copies' (INFO) counts the admitted copies recorded with enhanced barriers."""
+    the cause. 'UI layer enhanced copies' (INFO) counts the admitted copies recorded with enhanced barriers, and
+    'UI layer promoted copies' (INFO, since option 2 of 11-03) those of a simultaneous-access target its clearing
+    list named no state for, copied from the implicit promotion its barrier-free clear relies on."""
     copies = sum(w[3] for w in s.layer_windows)
     if s.layer_copies_enhanced:
         add(Check('INFO', 'UI layer enhanced copies',
                   f'{s.layer_copies_enhanced} of {copies} layer copies were recorded with enhanced barriers (a clear '
                   'in an enhanced render-target layout, copied from that layout and back)'))
+    if s.layer_copies_promoted:
+        add(Check('INFO', 'UI layer promoted copies',
+                  f'{s.layer_copies_promoted} of {copies} layer copies were of a simultaneous-access target its '
+                  'clearing list named no state for, copied from RENDER_TARGET, where its barrier-free clear promotes '
+                  'it (option 2, owner ruling 11-03; The Witcher 3 with FG off)'))
     reasons = layer_refusal_reasons(s)
     if not reasons:
         return
@@ -2586,6 +2619,51 @@ def layer_refusal_checks(s: Session, add) -> None:
                 if reason == LAYER_REFUSED_ONCE_REASON else '')
              for t, reason, loss in s.layer_refusal_lines]
     add(Check('WARN', 'UI layer refused', '; '.join(parts), times[:6]))
+
+
+def coverage_class(table: str, barrier: str, enhanced: str) -> str:
+    """One uncovered method-table class of a barrier coverage line, in words: the table (a list's own, by its offset
+    from the object, or a module's) and the modules its ResourceBarrier and Barrier slots dispatch into."""
+    def module(value: str) -> str:
+        found = re.search(r'\(([^()+]+)', value)
+        return found.group(1) if found else value
+    own = re.search(r'object([+-]\d+)', table)
+    where = (f"a list's own table (object{own.group(1)})" if 'object-owned' in table and own else
+             "a list's own table" if 'object-owned' in table else
+             'module table ' + (re.search(r'\((.+)\)$', table) or re.search(r'(.*)', table)).group(1))
+    return (f'{where}, ResourceBarrier in {module(barrier)}'
+            + (', no Barrier' if enhanced == 'none' else f', Barrier in {module(enhanced)}'))
+
+
+def coverage_checks(s: Session, add) -> None:
+    """'Barrier coverage' (since 11-03): the native observer's barrier hooks did not cover some list's recording (its
+    executions count as uncovered and unprove every held state; a UI layer clear on it is unobserved): each such
+    method-table class once, and the hooks the execution hook wrote into lists' own tables (written=). INFO, or WARN
+    when those writes did not last: the count grew in COVERAGE_REWRITE_LINES or more of its lines (each logged at
+    most every 10 s, only while it changes) by COVERAGE_REWRITE_GROWTH or more, as a runtime that rebuilds those
+    tables at each Reset gives (one write per execution). Their lists then stay unobserved: the open owner question
+    of a Reset-time rewrite (The Witcher 3's D3D12Core 1.619 moves each list to its own table at its first Reset)."""
+    if not s.coverage_uncovered and not s.coverage_written:
+        return
+    parts, status = [], 'INFO'
+    if s.coverage_uncovered:
+        parts.append('lists no barrier hook covered (their executions count as uncovered): '
+                     + '; '.join(coverage_class(*row[1:]) for row in s.coverage_uncovered))
+    if s.coverage_written:
+        first, total = s.coverage_written[0][1], s.coverage_written[-1][1]
+        lines = len(s.coverage_written)
+        parts.append(f"{total} hooks written into lists' own method tables at their execution")
+        if lines >= COVERAGE_REWRITE_LINES and total - first >= COVERAGE_REWRITE_GROWTH:
+            status = 'WARN'
+            parts.append(f'the count grew in {lines} of its 10 s lines ({first} to {total}): the runtime rebuilds '
+                         'those tables, so the written hooks do not last and their lists stay unobserved')
+        else:
+            parts.append(f'the count settled after {lines} {"line" if lines == 1 else "lines"}: those tables keep '
+                         'the hooks, so their lists are observed from their second execution on')
+    times = ([f'{clock(t)} {coverage_class(table, barrier, enhanced)}'
+              for t, table, barrier, enhanced in s.coverage_uncovered]
+             + [f'{clock(t)} written={n}' for t, n in s.coverage_written])
+    add(Check(status, 'Barrier coverage', '; '.join(parts), times[:6]))
 
 
 def layer_copy_checks(s: Session, add) -> None:

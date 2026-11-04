@@ -2999,6 +2999,70 @@ class LayerRefusal(unittest.TestCase):
                          'UI layer still recorded 12 copies (of another target or other clears)')
         self.assertEqual(checks['UI layer enhanced copies'].status, 'INFO')
 
+    def test_promoted_layer_copies_are_counted(self):
+        # Option 2 (11-03): a simultaneous-access layer its clearing list names no state for is copied from its
+        # implicit promotion; the timing line counts those copies (copies_promoted=), anywhere in the group.
+        layer = ('copies=12 skipped=0 offers=9 presents_since_copy={mean=1.50 max=4} skip_gap_ms=0.0 '
+                 'targets_dropped=0 refused=0 refused_by={simultaneous=0 no_state=0 unobserved=0} copies_enhanced=0 '
+                 'copies_promoted=12')
+        session = report.parse(BASE + [timing('10:00:10', layer), timing('10:00:20', layer.replace('=12', '=8'))])
+        self.assertEqual((session.layer_copies_promoted, session.layer_copies_enhanced), (20, 0))
+        checks = {c.name: c for c in report.evaluate(session)}
+        self.assertEqual((checks['UI layer promoted copies'].status, checks['UI layer promoted copies'].detail),
+                         ('INFO', '20 of 20 layer copies were of a simultaneous-access target its clearing list '
+                          'named no state for, copied from RENDER_TARGET, where its barrier-free clear promotes it '
+                          '(option 2, owner ruling 11-03; The Witcher 3 with FG off)'))
+        self.assertNotIn('UI layer refused', checks)
+        # Before option 2 the group has no such field: no row.
+        older = report.parse(BASE + [timing('10:00:10', layer.replace(' copies_promoted=12', ''))])
+        self.assertEqual(older.layer_copies_promoted, 0)
+        self.assertNotIn('UI layer promoted copies', {c.name for c in report.evaluate(older)})
+
+    def test_barrier_coverage_lines(self):
+        # The native observer's coverage diagnostic (11-03): each uncovered method-table class once, then the
+        # count of hooks written into lists' own tables, at most every 10 s while it changes.
+        own = ('[Sunshine 3D] Sunshine 3D barrier coverage: a list no barrier hook covered: '
+               'table=000001F2A3B4C5C8(object-owned, object+1480) '
+               'ResourceBarrier=00007FFA12345678(D3D12Core.dll+0x1a2b30) '
+               'Barrier=00007FFA12345700(D3D12Core.dll+0x1a2bb0); its executions count as uncovered; logged once per '
+               'method table (object-owned tables once)')
+        moved = ('[Sunshine 3D] Sunshine 3D barrier coverage: a list no barrier hook covered: '
+                 'table=00007FFA10306B00(D3D12Core.dll+0x306b00) '
+                 'ResourceBarrier=00007FFA12345678(D3D12Core.dll+0x1a2b30) '
+                 'Barrier=none; its executions count as uncovered; logged once per method table (object-owned '
+                 'tables once)')
+
+        def written(t, n):
+            return line(t, f'[Sunshine 3D] Sunshine 3D barrier coverage: written={n} (hooks written into lists\' own '
+                           'method tables at their execution: about one per list where the runtime keeps that table '
+                           'across Reset, one per execution where it rebuilds it)')
+
+        session = report.parse(BASE + [line('10:00:05', own), line('10:00:06', moved), written('10:00:07', 40),
+                                       written('10:00:17', 46)])
+        self.assertEqual([row[1:] for row in session.coverage_uncovered],
+                         [('000001F2A3B4C5C8(object-owned, object+1480)', '00007FFA12345678(D3D12Core.dll+0x1a2b30)',
+                           '00007FFA12345700(D3D12Core.dll+0x1a2bb0)'),
+                          ('00007FFA10306B00(D3D12Core.dll+0x306b00)', '00007FFA12345678(D3D12Core.dll+0x1a2b30)',
+                           'none')])
+        self.assertEqual(session.coverage_written, [(36007.0, 40), (36017.0, 46)])
+        check = {c.name: c for c in report.evaluate(session)}['Barrier coverage']
+        self.assertEqual((check.status, check.detail), (
+            'INFO', "lists no barrier hook covered (their executions count as uncovered): a list's own table "
+            '(object+1480), ResourceBarrier in D3D12Core.dll, Barrier in D3D12Core.dll; module table '
+            "D3D12Core.dll+0x306b00, ResourceBarrier in D3D12Core.dll, no Barrier; 46 hooks written into lists' own "
+            'method tables at their execution; the count settled after 2 lines: those tables keep the hooks, so '
+            'their lists are observed from their second execution on'))
+        self.assertEqual(check.times[2:], ['10:00:07 written=40', '10:00:17 written=46'])
+        # A count that keeps growing: the runtime rebuilds those tables, the written hooks do not last.
+        growing = [written(f'10:0{m}:00', 100 + 300 * m) for m in range(1, 7)]
+        check = {c.name: c for c in report.evaluate(report.parse(BASE + [line('10:00:05', own)] + growing))}
+        self.assertEqual(check['Barrier coverage'].status, 'WARN')
+        self.assertTrue(check['Barrier coverage'].detail.endswith(
+            'the count grew in 6 of its 10 s lines (400 to 1900): the runtime rebuilds those tables, so the written '
+            'hooks do not last and their lists stay unobserved'), check['Barrier coverage'].detail)
+        # Without coverage lines (an add-on before 11-03, or every list covered): no row.
+        self.assertNotIn('Barrier coverage', run(BASE))
+
     def test_refusal_line_reasons(self):
         # The key before the add-on's '; <description>' or a ': <description>' inside the brackets, a ')' in the
         # description included.
