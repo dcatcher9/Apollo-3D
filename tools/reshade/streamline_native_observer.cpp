@@ -85,6 +85,10 @@ namespace sunshine_streamline::native_observer {
     // found there, where notify drops every notification): delivered at the
     // next install_pending, so no loss is ever dropped.
     std::atomic<bool> invalidation_pending{};
+    // enhanced_barrier_use's evidence, sticky: a Barrier call entered a
+    // Barrier hook; an executed list's recording may have recorded barriers
+    // past the hooks.
+    std::atomic<bool> enhanced_used{}, barrier_blind{};
     thread_local unsigned suppression_depth{};
     thread_local unsigned own_flush_depth{};
     struct invocation;
@@ -234,7 +238,8 @@ namespace sunshine_streamline::native_observer {
     }
 
     // Defined after the slot helpers below.
-    void cover(std::uint64_t command);
+    bool cover(std::uint64_t command, std::uint64_t cookie);
+    bool cookieless_covered(std::uint64_t command);
     bool order_on();
     bool own_signal(ID3D12Fence *fence);
     void order_enter(invocation &call, ID3D12CommandQueue *queue, bool blocking);
@@ -301,14 +306,22 @@ namespace sunshine_streamline::native_observer {
       // Each executed list a recording cookie names, in the table it now
       // dispatches through: a module slot first seen is discovered, and an
       // object-owned table gets the hook (cover), before the owner judges
-      // this execution (which began before any write here).
-      for (UINT i = 0; i != count; ++i)
-        if (identities.data()[i].recording_cookie) cover(identities.data()[i].native_command);
+      // this execution (which began before any write here). A list whose
+      // recording the barrier hooks may have missed part of leaves the
+      // process's enhanced-barrier use unknown (enhanced_barrier_use).
+      for (UINT i = 0; i != count; ++i) {
+        const auto &identity = identities.data()[i];
+        const bool seen = identity.recording_cookie ? cover(identity.native_command, identity.recording_cookie) :
+          cookieless_covered(identity.native_command);
+        if (!seen && !barrier_blind.load(std::memory_order_relaxed)) barrier_blind.store(true, std::memory_order_relaxed);
+      }
       notify(submitted_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
       listen(reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
     }
     template<unsigned Index> void STDMETHODCALLTYPE enhanced_detour(ID3D12GraphicsCommandList7 *command, UINT32 count, const D3D12_BARRIER_GROUP *groups) {
       const DWORD incoming = GetLastError();
+      // Any call, whatever it names (enhanced_barrier_use).
+      if (!enhanced_used.load(std::memory_order_relaxed)) enhanced_used.store(true, std::memory_order_relaxed);
       auto &slot = targets[static_cast<unsigned>(method::enhanced)][Index];
       invocation call(method::enhanced, slot.status.load(std::memory_order_acquire));
       restore_error outgoing{incoming}; // Restore after snapshot storage is freed.
@@ -643,11 +656,14 @@ namespace sunshine_streamline::native_observer {
     // An executed list (cover in execute_detour): the slots of the table it
     // dispatches through now. A list patched now, or patched without a stamp,
     // is stamped with the recording cookie it holds after every write: only
-    // a recording that begins later (a greater cookie) is covered.
-    void cover(std::uint64_t command) {
+    // a recording that begins later (a greater cookie) is covered. Whether
+    // the hooks saw every barrier of the executed recording (cookie) before
+    // any write here: its slots hold module hooks, or hooks written into its
+    // own table before that recording began (enhanced_barrier_use).
+    bool cover(std::uint64_t command, std::uint64_t cookie) {
       const restore_error incoming{GetLastError()};
       auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
-      if (!object) return;
+      if (!object) return false;
       const auto normalized = reinterpret_cast<std::uintptr_t>(object);
       const auto barriers = cover_slot(normalized, method::barriers);
       slot_cover enhanced{dispatch::hooked};
@@ -659,11 +675,32 @@ namespace sunshine_streamline::native_observer {
         version7->lpVtbl->Release(version7);
       } else if (result7 != E_NOINTERFACE) enhanced = {};
       std::uint64_t after{};
-      if (combine(barriers.kind, enhanced.kind) == dispatch::patched && (barriers.wrote || enhanced.wrote || !dispatch_stamp(normalized, after))) {
-        after = get_recording_cookie(normalized);
-        if (after) object->lpVtbl->SetPrivateData(object, dispatch_guid, sizeof(after), &after);
+      const auto kind = combine(barriers.kind, enhanced.kind);
+      bool covered = kind == dispatch::hooked;
+      if (kind == dispatch::patched) {
+        const bool stamped = !barriers.wrote && !enhanced.wrote && dispatch_stamp(normalized, after);
+        covered = stamped && cookie > after;
+        if (!stamped) {
+          after = get_recording_cookie(normalized);
+          if (after) object->lpVtbl->SetPrivateData(object, dispatch_guid, sizeof(after), &after);
+        }
       }
       object->lpVtbl->Release(object);
+      return covered;
+    }
+    // An executed list without a recording cookie made no call through a
+    // hook (the first would have given it one): its barriers were all seen
+    // only where installed module hooks cover its table (as apply_executed's
+    // exemption of DXGI's internal Present list requires).
+    bool cookieless_covered(std::uint64_t command) {
+      const restore_error incoming{GetLastError()};
+      auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
+      if (!object) return false;
+      const auto normalized = reinterpret_cast<std::uintptr_t>(object);
+      const bool covered = combine(slot_dispatch(normalized, static_cast<unsigned>(method::barriers)), enhanced_dispatch(normalized)) ==
+        dispatch::hooked;
+      object->lpVtbl->Release(object);
+      return covered;
     }
 
     // The uncovered-dispatch diagnostic (note_uncovered, coverage_line).
@@ -786,6 +823,11 @@ namespace sunshine_streamline::native_observer {
     return result;
   }
   bool states_ready(std::uint64_t command) { return states_coverage(command).kind == dispatch::hooked; }
+  enhanced_use enhanced_barrier_use() {
+    if (enhanced_used.load(std::memory_order_relaxed)) return enhanced_use::used;
+    if (!enabled() || barrier_blind.load(std::memory_order_relaxed)) return enhanced_use::unknown;
+    return enhanced_use::unused;
+  }
   void note_uncovered(std::uint64_t command) {
     if (sunshine_addon_lifetime::stopping() || !command) return;
     const restore_error incoming{GetLastError()};
@@ -932,6 +974,7 @@ namespace sunshine_streamline::native_observer {
 
 #ifdef SUNSHINE_STREAMLINE_NATIVE_OBSERVER_TEST
   std::uint64_t slot_reads_for_testing() { return slot_reads.load(); }
+  void forget_enhanced_barrier_use() { enhanced_used = false; barrier_blind = false; }
   void reset_after_hooks_removed() {
     shutdown();
     bool restored = true;
@@ -962,6 +1005,7 @@ namespace sunshine_streamline::native_observer {
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = slot_reads = 0;
     barrier_overflow = submission_overflow = discovery_contention = written = 0;
     invalidation_pending = false;
+    forget_enhanced_barrier_use();
     uncovered::reports = {}; uncovered::count = uncovered::read = 0;
     uncovered::logged_written = uncovered::logged_at = 0;
     barrier_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;

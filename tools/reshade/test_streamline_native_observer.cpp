@@ -1098,6 +1098,7 @@ namespace {
     std::vector<void *> own_table;
     object own{};
     heap_list(own_table, own, 500);
+    observer::forget_enhanced_barrier_use();
     const auto before = observer::counts();
     const auto invalid_before = invalidations;
     require(observer::states_coverage(address(own)).kind == observer::dispatch::none && !observer::states_ready(address(own)),
@@ -1111,6 +1112,10 @@ namespace {
         !observer::states_ready(address(own)) && invalidations == invalid_before,
       "the execution hook did not write both barrier hooks into the list's own table (reusing the module hooks) and stamp "
       "its recording cookie, or changed evidence");
+    // That recording dispatched past every hook until the write: a Barrier
+    // call of it may have gone unseen (enhanced_barrier_use).
+    require(observer::enhanced_barrier_use() == observer::enhanced_use::unknown,
+      "a recording no hook covered until its execution left the process's enhanced-barrier use known");
     // The stamp's cookie: the executed recording began before the write; one
     // with a greater cookie (its Reset came later) is covered.
     const auto events_before = barrier_events;
@@ -1124,6 +1129,11 @@ namespace {
     require(barrier_events == events_before + 1 && observed_command == address(own) && observed_cookie == 501 &&
         observed_barrier.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET,
       "a barrier through the list's own table did not reach the observer once with its recording");
+    // Its execution: every barrier of that recording reached the hooks.
+    observer::forget_enhanced_barrier_use();
+    submit(queue, 1, &own_pointer);
+    require(observer::enhanced_barrier_use() == observer::enhanced_use::unused && observer::counts().written == before.written + 2,
+      "a recording after its list's stamp left the process's enhanced-barrier use unknown, or wrote a hook again");
     // A third party puts the runtime's function back: the list is uncovered
     // (its own table's slot is no registered slot: no evidence is revoked
     // here; its recordings are judged uncovered) until its next execution
@@ -1166,9 +1176,12 @@ namespace {
     heap_list(plain_table, plain, 0);
     plain.cookie_present = false;
     void *plain_pointer = &plain;
+    observer::forget_enhanced_barrier_use();
     submit(queue, 1, &plain_pointer);
     require(plain_table[barrier_slot] == pristine[barrier_slot] && observer::states_coverage(address(plain)).kind == observer::dispatch::none,
       "a list without a recording cookie had a hook written into its table");
+    require(observer::enhanced_barrier_use() == observer::enhanced_use::unknown,
+      "a list without a recording cookie whose table no hook covers left the process's enhanced-barrier use known");
     std::puts("PASS dispatch: a list's own table gets the module hooks at its execution and covers only recordings after its stamp; "
       "a lost hook uncovers it until it is written again; a copied table needs a stamp; twenty lists, no limit; no cookie, no write");
 
@@ -1187,6 +1200,14 @@ namespace {
       "a module table first seen at execution was not discovered, or was written before installation");
     require(observer::install_pending() && observer::states_coverage(address(moved)).kind == observer::dispatch::hooked &&
         observer::states_ready(address(moved)), "a module table discovered at execution did not cover the list once installed");
+    // A list without a recording cookie in that hooked module table recorded
+    // no barrier past the hooks (the first would have given it a cookie).
+    observer::forget_enhanced_barrier_use();
+    object bare{}; bare.vtable = moved_table.data(); bare.kind = object_kind::command; bare.extended = true;
+    void *bare_pointer = &bare;
+    submit(queue, 1, &bare_pointer);
+    require(observer::enhanced_barrier_use() == observer::enhanced_use::unused,
+      "a list without a recording cookie in a hooked module table left the process's enhanced-barrier use unknown");
     // That registered slot loses its hook while a callback is suppressed (the
     // owner's submission callback): the loss is retired at once and its
     // invalidation, suppressed there, is delivered by the next install_pending.
@@ -1226,6 +1247,9 @@ namespace {
         std::string(line).find("written=") != std::string::npos, "the written-hook count was not logged once per 10 s window");
     std::puts("PASS dispatch: a module table first seen at execution is discovered and covers once installed; a hook lost "
       "under suppression is invalidated at the next install_pending; the coverage diagnostic names each table class once");
+    std::puts("PASS enhanced-barrier use: any Barrier call through a hook marks it used; an executed recording no hook covered "
+      "since it began (its own table before the write, no cookie and no hooked module table) leaves it unknown; covered "
+      "recordings and a cookie-less list in a hooked module table keep it unused");
   }
 
 int main() {
@@ -1372,22 +1396,30 @@ int main() {
     D3D12_BARRIER_GROUP groups[2]{};
     groups[0].Type = D3D12_BARRIER_TYPE_GLOBAL; groups[0].NumBarriers = 1; groups[0].pGlobalBarriers = &global_barrier;
     groups[1].Type = D3D12_BARRIER_TYPE_TEXTURE; groups[1].NumBarriers = 1; groups[1].pTextureBarriers = &texture_barrier;
+    // Any Barrier call through a hook, a global one alone too, marks the
+    // process's enhanced-barrier use (enhanced_barrier_use).
+    observer::forget_enhanced_barrier_use();
+    require(observer::enhanced_barrier_use() == observer::enhanced_use::unused, "a fresh session's enhanced-barrier use was not unused");
+    SetLastError(incoming_error);
+    enhanced(&commands[0], 1, groups);
+    require(observer::enhanced_barrier_use() == observer::enhanced_use::used && enhanced_reports == 0,
+      "a global-only Barrier call did not mark the process's enhanced-barrier use, or reported a texture");
     SetLastError(incoming_error);
     enhanced(&commands[0], 2, groups);
     require(GetLastError() == outgoing_error && enhanced_reports == 1 && observed_texture_count == 1 &&
-        observed_texture == texture_barrier.pResource && original_enhanced == 1 && observed_cookie == 9999 &&
+        observed_texture == texture_barrier.pResource && original_enhanced == 2 && observed_cookie == 9999 &&
         observed_layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ && observed_first_subresource &&
         observed_access == D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ && observed_sync_before == D3D12_BARRIER_SYNC_ALL &&
         observed_sync_after == D3D12_BARRIER_SYNC_SPLIT,
       "enhanced Barrier did not report exactly its named texture, layout, access, sync and subresource range");
     SetLastError(incoming_error);
     enhanced(&commands[0], 1, groups);
-    require(enhanced_reports == 1 && original_enhanced == 2, "a global-only enhanced Barrier reported a texture");
+    require(enhanced_reports == 1 && original_enhanced == 3, "a global-only enhanced Barrier reported a texture");
     // An unreadable barrier array cannot name its textures: fail closed.
     const auto unreadable_before = invalidations;
     SetLastError(incoming_error);
     enhanced(&commands[0], 1, reinterpret_cast<const D3D12_BARRIER_GROUP *>(1));
-    require(invalidations == unreadable_before + 1 && enhanced_reports == 1 && original_enhanced == 3,
+    require(invalidations == unreadable_before + 1 && enhanced_reports == 1 && original_enhanced == 4,
       "an unreadable enhanced Barrier did not fail closed or was not forwarded");
     {
       // D3D12Core can return CommandList7 as a per-object interface whose

@@ -648,6 +648,14 @@ namespace sunshine_streamline::depth_capture {
     auto owner = dispatch.kind != native_observer::dispatch::none ?
       command(native, native_observer::get_recording_cookie(native), false) : command_storage::handle{};
     facts.observed = owner && owner->reported && !owner->closed && !owner->invalid && recording_observed(*owner, dispatch);
+    // A simultaneous-access target on an unobserved list (option 2): its
+    // barriers all reached the hooks (its dispatch covers it, and no
+    // coverage change came between: one would have changed the generation)
+    // and the process recorded no enhanced barrier the hooks could miss.
+    if (facts.simultaneous && !facts.observed)
+      facts.unmixed = owner && recording_observed(*owner, dispatch) &&
+        owner->observation_generation == capture_observation.command_generation.load() &&
+        native_observer::enhanced_barrier_use() == native_observer::enhanced_use::unused;
     const auto *entry = facts.observed ? state(*owner, identity, false) : nullptr;
     facts.entry = observation_of(entry);
     facts.discarded = entry && entry->discarded;

@@ -282,7 +282,7 @@ namespace sunshine_game3d::ui_layer {
       // exporter's lock).
       struct {
         std::atomic<std::uint64_t> copies{0}, skipped{0}, offers{0}, presents_since_sum{0}, skip_gap_max_us{0},
-          targets_dropped{0}, copies_enhanced{0};
+          targets_dropped{0}, copies_enhanced{0}, copies_promoted{0};
         std::atomic<std::uint32_t> presents_since_max{0};
         std::array<std::atomic<std::uint64_t>, refusal_reasons> refused_by{};
       } counts;
@@ -294,7 +294,7 @@ namespace sunshine_game3d::ui_layer {
       // SunshineUILayerTestLive's totals, which take_stats never restarts.
       struct {
         std::array<std::atomic<std::uint64_t>, refusal_reasons> refused_by{};
-        std::atomic<std::uint64_t> copies{0}, copies_enhanced{0};
+        std::atomic<std::uint64_t> copies{0}, copies_enhanced{0}, copies_promoted{0};
       } totals;
 #endif
     };
@@ -683,9 +683,11 @@ namespace sunshine_game3d::ui_layer {
       publish_watch(s);
       s.counts.copies.fetch_add(1, std::memory_order_relaxed);
       if (basis.enhanced) s.counts.copies_enhanced.fetch_add(1, std::memory_order_relaxed);
+      if (basis.promoted) s.counts.copies_promoted.fetch_add(1, std::memory_order_relaxed);
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
       s.totals.copies.fetch_add(1, std::memory_order_relaxed);
       if (basis.enhanced) s.totals.copies_enhanced.fetch_add(1, std::memory_order_relaxed);
+      if (basis.promoted) s.totals.copies_promoted.fetch_add(1, std::memory_order_relaxed);
 #endif
       s.holding.store(true, std::memory_order_relaxed);
     }
@@ -1151,6 +1153,7 @@ namespace sunshine_game3d::ui_layer {
     value.skip_gap_max_us = c.skip_gap_max_us.exchange(0, std::memory_order_relaxed);
     value.targets_dropped = c.targets_dropped.exchange(0, std::memory_order_relaxed);
     value.copies_enhanced = c.copies_enhanced.exchange(0, std::memory_order_relaxed);
+    value.copies_promoted = c.copies_promoted.exchange(0, std::memory_order_relaxed);
     for (unsigned i = 0; i != refusal_reasons; ++i) value.refused_by[i] = c.refused_by[i].exchange(0, std::memory_order_relaxed);
     return value;
   }
@@ -1540,6 +1543,7 @@ extern "C" __declspec(dllexport) BOOL SunshineUILayerTestLive(sunshine_game3d::u
   for (unsigned i = 0; i != refusal_reasons; ++i) out->refused_by[i] = s.totals.refused_by[i].load(std::memory_order_relaxed);
   out->copies = s.totals.copies.load(std::memory_order_relaxed);
   out->copies_enhanced = s.totals.copies_enhanced.load(std::memory_order_relaxed);
+  out->copies_promoted = s.totals.copies_promoted.load(std::memory_order_relaxed);
   for (unsigned i = 0; i != live.entries; ++i) {
     out->owing += live.ring[i].order.owed != 0;
     out->awaiting += live.ring[i].order.awaiting();

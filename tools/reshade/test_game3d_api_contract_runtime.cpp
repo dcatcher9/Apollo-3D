@@ -734,11 +734,12 @@ namespace {
   // the RENDER_TARGET layout (copied with enhanced barriers); a
   // simultaneous-access one its clearing list transitions to RENDER_TARGET
   // (copied with legacy barriers); or a simultaneous-access one that its
-  // clear promotes from COMMON, whose copy the layer refuses (no_state). A
+  // clear promotes from COMMON, as The Witcher 3's FG-off layer (copied
+  // from RENDER_TARGET with legacy barriers, option 2: copies_promoted). A
   // layer case also judges its player effect: an offered layer must decide
   // the UI mask once accepted, an enhanced one be copied with enhanced
-  // barriers, and the refused one be counted by its reason with no copy
-  // recorded (SunshineUILayerTestLive). A tag call's input has a
+  // barriers, the promoted one counted as promoted, and none be refused
+  // (SunshineUILayerTestLive). A tag call's input has a
   // lifecycle and what its list records of it before the call (U5): the
   // shader-read state it declares, COPY_DEST (a write state) after a
   // transition there, or nothing (it stays in COPY_DEST, which it declares).
@@ -884,7 +885,7 @@ namespace {
     // refused by reason, copies, copies with enhanced barriers).
     int layer_source {-1};
     std::array<std::uint64_t, sunshine_game3d::ui_layer::refusal_reasons> layer_refused {};
-    std::uint64_t layer_copies {}, layer_copies_enhanced {};
+    std::uint64_t layer_copies {}, layer_copies_enhanced {}, layer_copies_promoted {};
     bool layer_effect {true};  // The player effect matched the case.
     std::string layer_trouble;
     // The continuity invariant's violations over the case's frame script
@@ -2074,15 +2075,17 @@ namespace {
     // mask (source 10); an enhanced target's copies leave and restore its
     // layout with enhanced barriers; a simultaneous-access target its list
     // transitions is copied with legacy ones; and the one whose clear only
-    // promotes it is refused as no_state with no copy recorded, so no barrier
-    // either. counts: the layer's counters before and after the case.
+    // promotes it (The Witcher 3's FG-off layer) is copied with legacy ones
+    // from its promotion, each copy counted as promoted (option 2); no layer
+    // case is refused. counts: the layer's counters before and after the
+    // case.
     void judge_layer_effect(matrix::ui_clear_boundary clear, const sunshine_game3d::ui_layer::test_live_state &was, const sunshine_game3d::ui_layer::test_live_state &now) {
-      using refusal = sunshine_streamline::depth_capture::clear_copy_refusal;
       for (unsigned i = 0; i != sunshine_game3d::ui_layer::refusal_reasons; ++i) {
         seen.layer_refused[i] = now.refused_by[i] - was.refused_by[i];
       }
       seen.layer_copies = now.copies - was.copies;
       seen.layer_copies_enhanced = now.copies_enhanced - was.copies_enhanced;
+      seen.layer_copies_promoted = now.copies_promoted - was.copies_promoted;
       std::uint64_t refused {};
       for (const auto count : seen.layer_refused) {
         refused += count;
@@ -2091,14 +2094,14 @@ namespace {
         seen.layer_effect = false;
         seen.layer_trouble += std::string(" ") + why + ";";
       };
-      if (clear == matrix::ui_clear_boundary::simultaneous_common) {
-        if (!seen.layer_refused[unsigned(refusal::no_state) - 1] || refused != seen.layer_refused[unsigned(refusal::no_state) - 1]) {
-          fail("the layer's refusal was not counted as no_state");
-        }
-        if (seen.layer_copies) {
-          fail("a refused layer recorded a copy");
-        }
-        return;
+      if (refused) {
+        fail("a layer's clear-boundary copy was refused");
+      }
+      if (clear == matrix::ui_clear_boundary::simultaneous_common && (!seen.layer_copies || seen.layer_copies_promoted != seen.layer_copies || seen.layer_copies_enhanced)) {
+        fail("the promoted simultaneous-access layer was not copied with legacy barriers from its promotion alone");
+      }
+      if (clear != matrix::ui_clear_boundary::simultaneous_common && seen.layer_copies_promoted) {
+        fail("a layer whose clearing list proves its state counted a promoted copy");
       }
       if (seen.layer_source != int(sunshine_game3d::ui_detection::source_layer)) {
         fail("the offered layer did not decide the UI mask");
@@ -2136,7 +2139,7 @@ namespace {
           refused_by += std::string(refused_by.empty() ? "" : ",") + sunshine_streamline::depth_capture::name(sunshine_streamline::depth_capture::clear_copy_refusal(i + 1)) + "=" + std::to_string(seen.layer_refused[i]);
         }
       }
-      std::fprintf(stderr, "  UI layer: decided_source=%d refused_by={%s} copies=%llu copies_enhanced=%llu effect=%u%s\n", seen.layer_source, refused_by.c_str(), static_cast<unsigned long long>(seen.layer_copies), static_cast<unsigned long long>(seen.layer_copies_enhanced), unsigned(seen.layer_effect), seen.layer_trouble.c_str());
+      std::fprintf(stderr, "  UI layer: decided_source=%d refused_by={%s} copies=%llu copies_enhanced=%llu copies_promoted=%llu effect=%u%s\n", seen.layer_source, refused_by.c_str(), static_cast<unsigned long long>(seen.layer_copies), static_cast<unsigned long long>(seen.layer_copies_enhanced), static_cast<unsigned long long>(seen.layer_copies_promoted), unsigned(seen.layer_effect), seen.layer_trouble.c_str());
     }
     for (const auto &violation : seen.continuity) {
       std::fprintf(stderr, "  continuity: %s\n", game3d_continuity::describe(violation).c_str());
@@ -2163,7 +2166,7 @@ namespace {
     observed["offered"] = seen.offered;
     observed["refused"] = refused;
     if (seen.layer_source >= 0 || seen.layer_copies || seen.layer_trouble.size() || std::any_of(seen.layer_refused.begin(), seen.layer_refused.end(), [](std::uint64_t n) { return n != 0; })) {
-      observed["layer"] = {{"decided_source", seen.layer_source}, {"refused_by", seen.layer_refused}, {"copies", seen.layer_copies}, {"copies_enhanced", seen.layer_copies_enhanced}, {"effect", seen.layer_effect}};
+      observed["layer"] = {{"decided_source", seen.layer_source}, {"refused_by", seen.layer_refused}, {"copies", seen.layer_copies}, {"copies_enhanced", seen.layer_copies_enhanced}, {"copies_promoted", seen.layer_copies_promoted}, {"effect", seen.layer_effect}};
     }
     observed["continuity_violations"] = seen.continuity.size();
     line["evidence"] = {{"elapsed_ms", value.elapsed_ms}, {"presents", seen.presents}, {"judged", seen.judged}, {"fresh", seen.fresh}, {"generated", seen.generated}, {"held", seen.held}, {"first_fresh_ms", seen.first_fresh_ms}, {"nominated_at_call", seen.nominated_at_call}, {"shown", {{"width", seen.last.width}, {"height", seen.last.height}, {"reused", seen.last.reused}, {"fg_input", seen.last.frame_generation_input}}}};

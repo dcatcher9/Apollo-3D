@@ -340,14 +340,17 @@ namespace sunshine_streamline::depth_capture {
   // - not_render_target: a legacy state on the clearing list other than
   //   RENDER_TARGET (or a pending split, a blocked or unknown state);
   // - no_state: a simultaneous-access target whose observed clearing list
-  //   names no state (its clear may promote it from COMMON; a D3D12 legality
-  //   ruling on a copy without a proven state is open);
+  //   names no state, on a COMPUTE list (which holds no RENDER_TARGET, so no
+  //   legal clear). Until option 2 (owner ruling 11-03) every such target was
+  //   refused; on a DIRECT list it is now copied (promoted, below);
   // - unobserved: the barrier hooks do not observe the clearing list's
   //   recording (the capture owner inactive, the list's hooks not ready, its
   //   recording not reported, closed or invalid), where the decision needs
-  //   it: a simultaneous-access target, or one an earlier list latched into
-  //   an enhanced layout. Observer coverage, not a D3D12 ruling, would decide
-  //   such a copy;
+  //   it: a simultaneous-access target where an enhanced barrier could share
+  //   the clearing list's ExecuteCommandLists (the process recorded one, or
+  //   the hooks may have missed some: native_observer::enhanced_barrier_use,
+  //   or the list's own recording straddled a coverage change or dispatched
+  //   past them), or one an earlier list latched into an enhanced layout;
   // - discarded: an enhanced barrier on the clearing list discarded the
   //   target's content (LayoutBefore UNDEFINED or the DISCARD flag), so the
   //   previous frame's layer the copy would read is undefined;
@@ -399,10 +402,16 @@ namespace sunshine_streamline::depth_capture {
   //   kept the content: enhanced barriers from that exact layout and access
   //   and back (clear_copy_barrier), which need the list's
   //   ID3D12GraphicsCommandList7;
-  // - a simultaneous-access target only from a legacy RENDER_TARGET its
-  //   observed clearing list set explicitly: such a texture starts each
-  //   ExecuteCommandLists in COMMON and its clear may promote it there, so
-  //   neither the clear nor an earlier list proves its state.
+  // - a simultaneous-access target from a legacy RENDER_TARGET its observed
+  //   clearing list set explicitly (legacy barriers); or, with nothing on
+  //   that list (option 2, owner ruling 11-03), the same legacy barriers from
+  //   RENDER_TARGET (promoted): such a texture starts each
+  //   ExecuteCommandLists in COMMON and is in COMMON or, promoted by an
+  //   earlier access of the same call, in RENDER_TARGET where its clear
+  //   needs RENDER_TARGET, and RENDER_TARGET is a legal BeforeState from
+  //   both. An unobserved clearing list qualifies only where no enhanced
+  //   barrier can share its ExecuteCommandLists (copy_state::clear_facts
+  //   unmixed).
   // Anything else is refused with its reason (clear_copy_refusal). A target
   // is watched for the latch from its first query (proven_state.h). Call on
   // the thread recording command.
@@ -410,6 +419,9 @@ namespace sunshine_streamline::depth_capture {
     clear_copy_refusal refused{clear_copy_refusal::other};
     bool enhanced{};
     std::uint32_t layout{}, access{};
+    // Option 2: no state proven on the clearing list; the copy relies on
+    // the target's implicit promotion (the timing line's copies_promoted).
+    bool promoted{};
     constexpr bool admitted() const { return refused == clear_copy_refusal::none; }
   };
   clear_copy_basis render_target_clear_copy(std::uint64_t command, std::uint64_t resource);

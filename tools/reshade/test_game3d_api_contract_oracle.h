@@ -106,7 +106,7 @@ namespace game3d_contract {
     inline constexpr rule D10 {"D10", "A Generic boundary with no proven state (end of frame, or a clear that does not clear subresource 0's depth): REFUSE, or HOLD the earlier frame", "docs/reshade-sbs.md, Rules for new game behaviour 3 (fail safe); nothing names the state at Present, and a clear names none for a subresource its flags do not clear"};
     inline constexpr rule D10b {"D10b", "The same boundary with nothing on the copy's recording, after the source's creation, the last barrier of an executed list on the copy's queue, or a depth clear (D11) after that barrier put it in a state nothing since may have changed: CAPTURE from that state", "MS Learn, Using Resource Barriers to Synchronize Resource States: a resource keeps the state its creation or its latest transition barrier gave it, and only command lists executed on a queue are ordered on it; Implicit State Transitions: a depth-stencil texture is never promoted or decayed; D3D12_RESOURCE_STATES DEPTH_WRITE (D11's citation) for a clear"};
     inline constexpr rule D11 {"D11", "ClearDepthStencilView with D3D12_CLEAR_FLAG_DEPTH on a DSV of subresource 0, or BeginRenderPass with a depth CLEAR, after no enhanced or pending barrier on the recording (D4, D5 and D6 decide those first): CAPTURE from DEPTH_WRITE", "MS Learn D3D12_RESOURCE_STATES, DEPTH_WRITE: 'You should use it for ClearDepthStencilView when the flags (see D3D12_CLEAR_FLAGS) indicate a given subresource should be cleared (otherwise the subresource state doesn't matter)'"};
-    inline constexpr rule D12 {"D12", "UI clear boundary: on legacy RENDER_TARGET: CAPTURE with legacy barriers; on the RENDER_TARGET layout an enhanced barrier on the clearing list set, keeping the content: CAPTURE with enhanced barriers from exactly that layout and access and back; on a SIMULTANEOUS target its observed clearing list transitioned to RENDER_TARGET: CAPTURE with legacy barriers; otherwise REFUSE state_unprovable with its reason and no barrier: a SIMULTANEOUS target whose clearing list names no state or COMMON (promoted by the clear), or whose clearing list the barrier hooks do not observe; an enhanced barrier on the clearing list that discards the content (from UNDEFINED or with the DISCARD flag); a layout an earlier executed list's enhanced barrier latched, with nothing on the clearing list", "MS Learn D3D12_RESOURCE_STATES: ClearRenderTargetView requires RENDER_TARGET; Enhanced Barriers legacy interop: no legacy barrier on a texture in an enhanced layout, and Barrier validation: LayoutBefore must match the layout; Enhanced Barriers, D3D12_BARRIER_LAYOUT_UNDEFINED and D3D12_TEXTURE_BARRIER_FLAG_DISCARD: the content is not preserved; Implicit State Transitions: a simultaneous-access texture starts each ExecuteCommandLists in COMMON and is promoted by its first access, while an explicit transition on the list sets its state; owner go 11-03 (UI layer copy, options 1b, 1c, 2; a latched layout stays refused until a ruling)"};
+    inline constexpr rule D12 {"D12", "UI clear boundary: on legacy RENDER_TARGET: CAPTURE with legacy barriers; on the RENDER_TARGET layout an enhanced barrier on the clearing list set, keeping the content: CAPTURE with enhanced barriers from exactly that layout and access and back; on a SIMULTANEOUS target its observed clearing list transitioned to RENDER_TARGET: CAPTURE with legacy barriers; on a SIMULTANEOUS target whose clearing list names no state (in COMMON, or promoted to RENDER_TARGET by an earlier access of the same ExecuteCommandLists: option 2), observed, or unobserved where no list of the process recorded an enhanced barrier: CAPTURE with legacy barriers from RENDER_TARGET; otherwise REFUSE state_unprovable with its reason and no barrier: a SIMULTANEOUS target whose clearing list names COMMON (promoted by the clear), or whose clearing list the barrier hooks do not observe after an enhanced barrier on the process; an enhanced barrier on the clearing list that discards the content (from UNDEFINED or with the DISCARD flag); a layout an earlier executed list's enhanced barrier latched, with nothing on the clearing list", "MS Learn D3D12_RESOURCE_STATES: ClearRenderTargetView requires RENDER_TARGET; Enhanced Barriers legacy interop: no legacy barrier on a texture in an enhanced layout, and Barrier validation: LayoutBefore must match the layout; Enhanced Barriers, D3D12_BARRIER_LAYOUT_UNDEFINED and D3D12_TEXTURE_BARRIER_FLAG_DISCARD: the content is not preserved; Implicit State Transitions: a simultaneous-access texture starts each ExecuteCommandLists in COMMON and is promoted by its first access, while an explicit transition on the list sets its state; Implicit State Transitions, Performance implications: for a resource in the common state, COMMON or any promotable state is a legal BeforeState; Enhanced Barriers, legacy interop: accesses after an enhanced barrier must be flushed before a legacy barrier on the same texture; owner go 11-03 (UI layer copy, options 1b, 1c, 2; option 2 ruled 11-03 on the condition that the debug layer and GPU-based validation pass; a latched layout stays refused until a ruling)"};
 
     inline constexpr rule N1 {"N1", "Super Resolution's Depth via SetD3d12Resource, Use.HW.Depth 0 or 1, subrect valid: CAPTURE from the observed state, otherwise the SDK contract's NON_PIXEL_SHADER_RESOURCE", "DLSS Programming Guide 3.4, Resource States (docs/reshade-sbs.md, NGX evaluation): every D3D12 input 'must be in state D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE'"};
     inline constexpr rule N1b {"N1b", "Ray Reconstruction or another feature, Depth otherwise valid: CAPTURE from an observed state; with none REFUSE state_unprovable", "Among the cited sources only the DLSS (Super Resolution) Programming Guide 3.4 states an input state; nvsdk_ngx_helpers_dlssd_d3d.h (RR) states none, and the DLSS-RR Integration Guide (SWE-DLSS-001-PGRF, an addendum to the DLSS guide) has no resource-state section and extends only the DLSS guide's evaluation call, 5.4 (decided in Stage 3 batch B)"};
@@ -1094,8 +1094,12 @@ namespace game3d_contract {
       case ui_clear_boundary::legacy_render_target:
       case ui_clear_boundary::enhanced_render_target:
       case ui_clear_boundary::simultaneous_render_target:
-        return plain(rules::D12, outcome_kind::offered);
       case ui_clear_boundary::simultaneous_common:
+      case ui_clear_boundary::simultaneous_cleared:
+      case ui_clear_boundary::simultaneous_promoted:
+      case ui_clear_boundary::simultaneous_promoted_earlier_list:
+      case ui_clear_boundary::simultaneous_unobserved_unmixed:
+        return plain(rules::D12, outcome_kind::offered);
       case ui_clear_boundary::simultaneous_named_common:
       case ui_clear_boundary::simultaneous_unobserved:
       case ui_clear_boundary::enhanced_undefined:
@@ -1171,6 +1175,11 @@ namespace game3d_contract {
         switch (value.clear) {
           case ui_clear_boundary::legacy_render_target:
           case ui_clear_boundary::simultaneous_render_target:
+          case ui_clear_boundary::simultaneous_common:
+          case ui_clear_boundary::simultaneous_cleared:
+          case ui_clear_boundary::simultaneous_promoted:
+          case ui_clear_boundary::simultaneous_promoted_earlier_list:
+          case ui_clear_boundary::simultaneous_unobserved_unmixed:
             return capture(rules::D12, legacy(D3D12_RESOURCE_STATE_RENDER_TARGET));
           case ui_clear_boundary::enhanced_render_target:
             return capture(rules::D12, enhanced(D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET));
@@ -1604,7 +1613,10 @@ namespace game3d_contract {
     static_assert(decides(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::legacy_render_target)), rules::D12, outcome_kind::offered));
     static_assert(decides(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::enhanced_render_target)), rules::D12, outcome_kind::offered));
     static_assert(decides(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::simultaneous_render_target)), rules::D12, outcome_kind::offered));
-    static_assert(refuses(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::simultaneous_common)), rules::D12, refusal::state_unprovable));
+    static_assert(decides(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::simultaneous_common)), rules::D12, outcome_kind::offered));
+    static_assert(decides(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::simultaneous_unobserved_unmixed)), rules::D12, outcome_kind::offered));
+    static_assert(refuses(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::simultaneous_unobserved)), rules::D12, refusal::state_unprovable));
+    static_assert(refuses(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::simultaneous_named_common)), rules::D12, refusal::state_unprovable));
     static_assert(refuses(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::enhanced_undefined)), rules::D12, refusal::state_unprovable));
     static_assert(refuses(expect(with(ui_case {}, &ui_case::clear, ui_clear_boundary::latched_render_target)), rules::D12, refusal::state_unprovable));
 

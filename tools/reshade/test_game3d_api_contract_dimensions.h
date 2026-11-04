@@ -650,20 +650,30 @@ namespace game3d_contract {
   // The UI layer's cleared target (D12): in its legacy RENDER_TARGET state
   // from an earlier list; put in the RENDER_TARGET layout by an enhanced
   // barrier on the clearing list; a simultaneous-access target in COMMON that
-  // the clear promotes (its clearing list names no state); or one its
-  // clearing list transitioned to RENDER_TARGET with a legacy barrier. Then
-  // each other legal refusal the capture owner names (clear_copy_refusal): a
-  // simultaneous-access target its clearing list transitioned back to
-  // COMMON, which the clear promotes (simultaneous); one its list
-  // transitioned to RENDER_TARGET on a recording the barrier hooks lost
-  // (unobserved); an enhanced barrier into the RENDER_TARGET layout on the
-  // clearing list that discards the content, from UNDEFINED or with the
-  // DISCARD flag (discarded); and a target an earlier executed list's
-  // enhanced barrier put in the RENDER_TARGET layout after the layer first
-  // asked for it, with nothing on the clearing list (latched). A
-  // not_render_target or enhanced refusal follows only a clear D3D12 forbids
-  // (the clear needs RENDER_TARGET), so it has no legal cell; the CPU test of
-  // copy_state::clear_copy (test_capture_state_policy.cpp) names them.
+  // the clear promotes (its clearing list names no state: option 2, copied
+  // from RENDER_TARGET); or one its clearing list transitioned to
+  // RENDER_TARGET with a legacy barrier. Then each other legal refusal the
+  // capture owner names (clear_copy_refusal): a simultaneous-access target
+  // its clearing list transitioned back to COMMON, which the clear promotes
+  // (simultaneous); one its list transitioned to RENDER_TARGET on a
+  // recording the barrier hooks lost, after an earlier executed list of the
+  // process recorded an enhanced barrier (unobserved); an enhanced barrier
+  // into the RENDER_TARGET layout on the clearing list that discards the
+  // content, from UNDEFINED or with the DISCARD flag (discarded); and a
+  // target an earlier executed list's enhanced barrier put in the
+  // RENDER_TARGET layout after the layer first asked for it, with nothing on
+  // the clearing list (latched). A not_render_target or enhanced refusal
+  // follows only a clear D3D12 forbids (the clear needs RENDER_TARGET), so it
+  // has no legal cell; the CPU test of copy_state::clear_copy
+  // (test_capture_state_policy.cpp) names them. Option 2's legality cells
+  // (owner ruling 11-03), each with the game's real clear after the copy: a
+  // simultaneous-access target in COMMON (simultaneous_cleared); one the
+  // clearing list's own earlier clear promoted to RENDER_TARGET
+  // (simultaneous_promoted); one an earlier list of the same
+  // ExecuteCommandLists call promoted (simultaneous_promoted_earlier_list);
+  // and the lost recording of simultaneous_unobserved where no list of the
+  // process recorded an enhanced barrier (simultaneous_unobserved_unmixed,
+  // copied).
   enum class ui_clear_boundary {
     none,
     legacy_render_target,
@@ -674,7 +684,11 @@ namespace game3d_contract {
     simultaneous_unobserved,
     enhanced_undefined,
     enhanced_discard,
-    latched_render_target
+    latched_render_target,
+    simultaneous_cleared,
+    simultaneous_promoted,
+    simultaneous_promoted_earlier_list,
+    simultaneous_unobserved_unmixed
   };
 
   // What a UI tag call's own list records of its input before the call

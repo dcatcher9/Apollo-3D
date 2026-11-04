@@ -420,13 +420,19 @@ namespace sunshine_streamline::depth_capture::copy_state {
   // latched: with no entry, an earlier executed list's enhanced barrier
   //   latched the target's layout (proven_state.h; never asked for a
   //   simultaneous-access target, which is never watched);
-  // compute: the clearing list is a COMPUTE list (list_basis).
+  // compute: the clearing list is a COMPUTE list (list_basis);
+  // unmixed: asked only for a simultaneous-access target on an unobserved
+  //   list: no enhanced barrier can share the clearing list's
+  //   ExecuteCommandLists. The hooks saw every barrier that list's recording
+  //   made (its barrier methods dispatched through them since it began and no
+  //   coverage change came between) and no list of the process recorded one
+  //   (native_observer::enhanced_barrier_use: unused).
   struct clear_facts {
     bool simultaneous{};
     std::uint32_t flags{};
     bool observed{};
     observation entry{};
-    bool discarded{}, latched{}, compute{};
+    bool discarded{}, latched{}, compute{}, unmixed{};
   };
 
   // The UI layer clear-boundary copy's basis (streamline_depth_capture.h,
@@ -438,11 +444,24 @@ namespace sunshine_streamline::depth_capture::copy_state {
   constexpr clear_copy_basis clear_copy(const clear_facts &facts) {
     using refusal = clear_copy_refusal;
     if (!facts.entry.present) {
-      // A simultaneous-access texture's state is proven only by its clearing
-      // list (it starts each ExecuteCommandLists in COMMON, which its clear
-      // may promote): an observed list naming nothing proves none, an
-      // unobserved one is unknown.
-      if (facts.simultaneous) return {facts.observed ? refusal::no_state : refusal::unobserved};
+      // A simultaneous-access texture with nothing on its clearing list
+      // (option 2, owner ruling 11-03): it starts each ExecuteCommandLists in
+      // COMMON, and the game's barrier-free clear needs RENDER_TARGET, so at
+      // the copy (before that clear) it is in COMMON, or in RENDER_TARGET
+      // where an earlier access of the same call promoted it. RENDER_TARGET
+      // is a legal BeforeState in both (MS Learn, Implicit State
+      // Transitions: COMMON or any promotable state; COMMON is not, once
+      // promoted), so the legacy RENDER_TARGET <-> COPY_SOURCE copy is legal
+      // wherever that clear is (promoted, never enhanced: the clear itself
+      // fails validation after the add-on's enhanced barriers). An observed
+      // list naming nothing qualifies; an unobserved one only unmixed
+      // (Enhanced Barriers, legacy interop: an earlier enhanced barrier of
+      // the same call must be flushed before a legacy one). A COMPUTE list
+      // holds no RENDER_TARGET, so it never clears one.
+      if (facts.simultaneous) {
+        if (!facts.compute && (facts.observed || facts.unmixed)) return {refusal::none, false, 0, 0, true};
+        return {facts.observed ? refusal::no_state : refusal::unobserved};
+      }
       // A latched layout is the enhanced barriers' (Enhanced Barriers, legacy
       // interop), so the clear's legacy RENDER_TARGET is no basis for it.
       if (facts.latched) return {facts.observed ? refusal::latched : refusal::unobserved};

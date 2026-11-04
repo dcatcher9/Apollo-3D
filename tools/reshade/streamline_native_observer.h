@@ -120,6 +120,27 @@ namespace sunshine_streamline::native_observer {
   states_dispatch states_coverage(std::uint64_t command);
   // states_coverage(command).kind == dispatch::hooked.
   bool states_ready(std::uint64_t command);
+  // Whether any list of the process may have recorded an enhanced barrier
+  // (ID3D12GraphicsCommandList7::Barrier) since the add-on loaded: the UI
+  // layer's clear-boundary copy of a simultaneous-access target on a list the
+  // hooks did not observe needs none (copy_state::clear_copy, the contract
+  // matrix's D12: legacy and enhanced barriers on one texture within one
+  // ExecuteCommandLists need the enhanced accesses flushed first).
+  // - used: a Barrier call entered one of the observer's Barrier hooks (any
+  //   barrier group; the add-on's own and a suppressed or inactive call too);
+  // - unknown: the observer is not active, or the execution hook ran a list
+  //   whose recording its barrier hooks may have missed part of: a list with
+  //   a recording cookie whose barrier slots held no hook of the observer's
+  //   when that recording began (its own table before the hook was written
+  //   into it, or a table first seen at that execution), one without a cookie
+  //   whose table no installed module hook covers, or an executed object that
+  //   is no graphics list; once found, it stays unknown;
+  // - unused: neither.
+  // Calls a recording made before the hooks covering its module table were
+  // installed (one straddling the installation), and calls of lists no
+  // execution hook ran, are not seen.
+  enum class enhanced_use : std::uint8_t { unused, used, unknown };
+  enhanced_use enhanced_barrier_use();
   bool queue_ready(std::uint64_t queue);
   counters counts();
   // The first list judged uncovered (note_uncovered) of each class of method
@@ -242,5 +263,8 @@ namespace sunshine_streamline::native_observer {
   void reset_after_hooks_removed();
   // Vtable slot addresses read so far (a checked read each).
   std::uint64_t slot_reads_for_testing();
+  // Forgets enhanced_barrier_use's evidence (a Barrier call seen, a list
+  // whose recording the hooks may have missed), as a fresh session's.
+  void forget_enhanced_barrier_use();
 #endif
 }

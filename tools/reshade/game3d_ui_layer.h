@@ -588,12 +588,15 @@ namespace sunshine_game3d::ui_layer {
   // owner refused, by reason (refused_by, indexed by clear_copy_refusal - 1:
   // a refused target is never tracked, so it can never be the layer), and
   // the recorded copies that left and restored an enhanced layout
-  // (copies_enhanced, of copies). The counters restart with each call.
+  // (copies_enhanced, of copies) and those of a simultaneous-access target
+  // its clearing list named no state for, from its implicit promotion
+  // (copies_promoted, of copies: option 2, clear_copy_basis::promoted). The
+  // counters restart with each call.
   struct stats {
     std::uint64_t copies{}, skipped{}, offers{}, presents_since_sum{}, skip_gap_max_us{}, targets_dropped{};
     std::uint32_t presents_since_max{};
     std::array<std::uint64_t, refusal_reasons> refused_by{};
-    std::uint64_t copies_enhanced{};
+    std::uint64_t copies_enhanced{}, copies_promoted{};
     std::uint64_t refused() const {
       std::uint64_t total{};
       for (const auto value : refused_by) total += value;
@@ -662,9 +665,10 @@ namespace sunshine_game3d::ui_layer {
     std::uint32_t format{};
     // Since the add-on loaded (take_stats does not restart them): the
     // qualifying clears refused by reason (stats::refused_by), the recorded
-    // live copies and those recorded with enhanced barriers.
+    // live copies, those recorded with enhanced barriers and those from an
+    // implicit promotion (stats::copies_promoted).
     std::array<std::uint64_t, refusal_reasons> refused_by{};
-    std::uint64_t copies{}, copies_enhanced{};
+    std::uint64_t copies{}, copies_enhanced{}, copies_promoted{};
   };
 
   // A renderer submission read the live copy capture_id (a direct binding or

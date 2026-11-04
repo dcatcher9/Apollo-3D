@@ -23,13 +23,19 @@
 //   the layer asks: the legacy RENDER_TARGET barriers through ReShade's D3D12
 //   backend, or the owner's own enhanced barriers (clear_copy_barrier) from
 //   the clearing list's enhanced layout; a refused cell records nothing, and
-//   its reason must be the one its target names (named_refusal: no_state for
-//   a simultaneous-access target whose clearing list names no state,
-//   simultaneous for one it names in COMMON, unobserved for a recording the
-//   barrier hooks lost, discarded for a content-discarding enhanced barrier,
-//   latched for a layout an earlier list latched). The
-//   layer itself runs only through ReShade, in the runtime layer's UI
-//   family.
+//   its reason must be the one its target names (named_refusal: simultaneous
+//   for a simultaneous-access target its clearing list names in COMMON,
+//   unobserved for a recording the barrier hooks lost after an enhanced
+//   barrier of the process, discarded for a content-discarding enhanced
+//   barrier, latched for a layout an earlier list latched). A
+//   simultaneous-access target whose clearing list names no state, or whose
+//   lost recording shares no process with an enhanced barrier, is copied
+//   from RENDER_TARGET (option 2): its option-2 cells also record the game's
+//   real clear after the copy and must leave no D3D12 message of any
+//   severity. The layer itself runs only through ReShade, in the runtime
+//   layer's UI family. After the cells, negative controls prove validation
+//   live: a wrong BeforeState at a barrier and at ExecuteCommandLists must
+//   each be flagged (validation_controls).
 // Every cell is executed alone, so a D3D12 debug-layer error names it.
 //
 // A cell meets the oracle by its kind, refusal class (depth_refusal.h's class
@@ -549,11 +555,16 @@ namespace {
       out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_common);
       out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_render_target);
       out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_named_common);
-      out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_unobserved);
       if (enhanced_barriers) {
+        out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, ui_clear_boundary::simultaneous_unobserved);
         out.boundary("UI clear boundary", format, rt, device_point::ui_clear, common, ui_clear_boundary::enhanced_undefined);
         out.boundary("UI clear boundary", format, rt, device_point::ui_clear, common, ui_clear_boundary::enhanced_discard);
         out.boundary("UI clear boundary", format, rt, device_point::ui_clear, common, ui_clear_boundary::latched_render_target);
+      }
+      // Option 2's legality cells (owner ruling 11-03).
+      for (const auto clear : {ui_clear_boundary::simultaneous_cleared, ui_clear_boundary::simultaneous_promoted,
+                               ui_clear_boundary::simultaneous_promoted_earlier_list, ui_clear_boundary::simultaneous_unobserved_unmixed}) {
+        out.boundary("UI clear boundary", format, rt | simultaneous, device_point::ui_clear, common, clear);
       }
     }
     return std::move(out.cells);
@@ -605,8 +616,6 @@ namespace {
   capture::clear_copy_refusal named_refusal(ui_clear_boundary clear) {
     using refusal = capture::clear_copy_refusal;
     switch (clear) {
-      case ui_clear_boundary::simultaneous_common:
-        return refusal::no_state;
       case ui_clear_boundary::simultaneous_named_common:
         return refusal::simultaneous;
       case ui_clear_boundary::simultaneous_unobserved:
@@ -656,6 +665,9 @@ namespace {
     bool quarantined {}, debug_clean {true}, bytes_checked {}, bytes_exact {true};
     // A UI clear boundary's refusal reason is the one its target names.
     bool reason_named {true};
+    // An option-2 cell whose target an earlier access promoted copies that
+    // access's content, the clear value (0, 0, 0, 0), not the source pattern.
+    bool expect_cleared {};
     std::string trouble;
     capture::preservation_ticket preserved;
     capture::diagnostic_ticket local;
@@ -745,8 +757,9 @@ namespace {
     }
   };
 
-  // The D3D12 debug layer's errors since the last call, which it clears.
-  std::string debug_errors(fixture &gpu) {
+  // The D3D12 debug layer's errors since the last call (every message, with
+  // its severity and ID, for all), which it clears.
+  std::string debug_errors(fixture &gpu, bool all = false) {
     std::string out;
     if (!gpu.debug_messages) {
       return out;
@@ -760,10 +773,21 @@ namespace {
       if (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR || message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION) {
         out += out.empty() ? "" : " | ";
         out += message->pDescription;
+      } else if (all) {
+        out += out.empty() ? "" : " | ";
+        out += "severity " + std::to_string(unsigned(message->Severity)) + " id " + std::to_string(unsigned(message->ID)) + ": " + message->pDescription;
       }
     }
     gpu.debug_messages->ClearStoredMessages();
     return out;
+  }
+
+  // Option 2's legality cells (owner ruling 11-03), which must leave no
+  // D3D12 message of any severity.
+  bool option2_cell(ui_clear_boundary clear) {
+    return clear == ui_clear_boundary::simultaneous_common || clear == ui_clear_boundary::simultaneous_cleared ||
+           clear == ui_clear_boundary::simultaneous_promoted || clear == ui_clear_boundary::simultaneous_promoted_earlier_list ||
+           clear == ui_clear_boundary::simultaneous_unobserved_unmixed;
   }
 
   struct device_matrix {
@@ -772,13 +796,123 @@ namespace {
     consumer_fixture consumer;
     earlier_list earlier_direct, earlier_compute;
     std::uint64_t sequence {};
+    // The render-target view the UI clear boundary's real clears use (one
+    // at a time: a clear reads its descriptor when recorded).
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
 
     explicit device_matrix(fixture &value):
         gpu(value),
         compute(value),
         consumer(value),
         earlier_direct(value, D3D12_COMMAND_LIST_TYPE_DIRECT),
-        earlier_compute(value, D3D12_COMMAND_LIST_TYPE_COMPUTE) {}
+        earlier_compute(value, D3D12_COMMAND_LIST_TYPE_COMPUTE) {
+      D3D12_DESCRIPTOR_HEAP_DESC desc {};
+      desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+      desc.NumDescriptors = 1;
+      check(gpu.device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&rtv_heap)), "render-target view heap");
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE render_target_view(ID3D12Resource *resource) {
+      const auto view = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+      gpu.device->CreateRenderTargetView(resource, nullptr, view);
+      return view;
+    }
+
+    // A render target of the UI clear boundary's own (the negative controls
+    // and an earlier enhanced barrier's texture), created in COMMON with
+    // transparent black as its optimized clear value.
+    ComPtr<ID3D12Resource> layer_target(bool shared) {
+      D3D12_RESOURCE_DESC desc {};
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      desc.Width = source_width;
+      desc.Height = source_height;
+      desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+      desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      desc.Flags = D3D12_RESOURCE_FLAGS(rt | (shared ? simultaneous : 0u));
+      D3D12_CLEAR_VALUE transparent {};
+      transparent.Format = desc.Format;
+      const auto properties = heap(D3D12_HEAP_TYPE_DEFAULT);
+      ComPtr<ID3D12Resource> out;
+      check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, &transparent, IID_PPV_ARGS(&out)), "UI clear boundary render target");
+      return out;
+    }
+
+    // An earlier executed list of the process records an enhanced barrier
+    // (on a texture of its own), which a lost clearing recording's copy
+    // must then refuse (native_observer::enhanced_barrier_use: used).
+    void earlier_enhanced_barrier(run &out) {
+      const auto other = layer_target(false);
+      enter_layout(earlier_direct.list.Get(), other.Get(), true, D3D12_BARRIER_LAYOUT_COPY_SOURCE, D3D12_BARRIER_ACCESS_COPY_SOURCE);
+      check(close_list(earlier_direct.list.Get()), "earlier enhanced barrier close");
+      execute(gpu.queue.Get(), earlier_direct.list.Get());
+      gpu.wait();
+      earlier_direct.reset();
+      const auto errors = debug_errors(gpu, true);
+      if (!errors.empty()) {
+        out.debug_clean = false;
+        out.trouble += " D3D12 at the earlier enhanced barrier: " + errors + ";";
+      }
+    }
+
+    // Negative controls (validation live): the debug layer flags a wrong
+    // BeforeState as D3D12_MESSAGE_ID_RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH
+    // at the barrier (COMMON named for a simultaneous-access target its
+    // clear promoted to RENDER_TARGET on the same list) and at
+    // ExecuteCommandLists (RENDER_TARGET named for a simultaneous-access
+    // target an earlier list of the call left in COPY_SOURCE, and for a
+    // non-simultaneous one left in COMMON). The controls flagged.
+    unsigned validation_controls() {
+      const auto flagged = [&] {
+        bool found {};
+        for (UINT64 i = 0; i != gpu.debug_messages->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
+          SIZE_T size {};
+          check(gpu.debug_messages->GetMessage(i, nullptr, &size), "debug message size");
+          std::vector<unsigned char> storage(size);
+          auto *message = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
+          check(gpu.debug_messages->GetMessage(i, message, &size), "debug message");
+          found = found || message->ID == D3D12_MESSAGE_ID_RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH;
+        }
+        gpu.debug_messages->ClearStoredMessages();
+        return unsigned(found);
+      };
+      debug_errors(gpu);
+      const float transparent[4] {};
+      auto *list = gpu.list.Get();
+      auto *first = earlier_direct.list.Get();
+      unsigned count {};
+      {
+        const auto target = layer_target(true);
+        list->ClearRenderTargetView(render_target_view(target.Get()), transparent, 0, nullptr);
+        transition_barrier(list, target.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, common, copy_source);
+        check(close_list(list), "control close");
+        gpu.reset();
+        count += flagged();
+      }
+      {
+        const auto target = layer_target(true);
+        transition_barrier(first, target.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, common, copy_source);
+        transition_barrier(list, target.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, render_target, copy_source);
+        transition_barrier(list, target.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, copy_source, render_target);
+        check(close_list(first), "control earlier close");
+        check(close_list(list), "control close");
+        ID3D12CommandList *lists[] {first, list};
+        gpu.queue->ExecuteCommandLists(2, lists);
+        gpu.wait();
+        earlier_direct.reset();
+        gpu.reset();
+        count += flagged();
+      }
+      {
+        const auto target = layer_target(false);
+        transition_barrier(list, target.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, render_target, copy_source);
+        transition_barrier(list, target.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, copy_source, render_target);
+        gpu.submit();
+        gpu.wait();
+        gpu.reset();
+        count += flagged();
+      }
+      return count;
+    }
 
     D3D12_RESOURCE_DESC description(const cell &value) const {
       const auto &source = value.value.state.resource;
@@ -829,6 +963,19 @@ namespace {
       }
     }
 
+    // Whether subresource 0's plane 0 holds transparent black (every byte
+    // zero), as an option-2 cell's earlier clear left it.
+    static bool cleared(const cell &value, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint, const unsigned char *base) {
+      const auto bytes = std::size_t(texel_bytes(kind_of(value.format))) * source_width;
+      for (unsigned y = 0; y != source_height; ++y) {
+        const auto *row = base + footprint.Offset + std::size_t(y) * footprint.Footprint.RowPitch;
+        if (std::any_of(row, row + bytes, [](unsigned char byte) { return byte != 0; })) {
+          return false;
+        }
+      }
+      return true;
+    }
+
     static bool matches(const cell &value, unsigned index, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint, const unsigned char *base) {
       const auto kind = kind_of(value.format);
       unsigned char expected[8] {};
@@ -856,7 +1003,12 @@ namespace {
         source.initial = shape != resource_shape::msaa ? copy_dest : (descs[i].Flags & ds) ? depth_write :
                                                                                              render_target;
         const auto properties = heap(D3D12_HEAP_TYPE_DEFAULT);
-        check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &descs[i], D3D12_RESOURCE_STATES(source.initial), nullptr, IID_PPV_ARGS(&source.resource)), "cell source");
+        // A UI clear boundary's target is cleared to transparent black (the
+        // option-2 cells record that clear), its optimized clear value.
+        D3D12_CLEAR_VALUE transparent {};
+        transparent.Format = descs[i].Format;
+        const bool cleared = batch[i]->value.point == device_point::ui_clear;
+        check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &descs[i], D3D12_RESOURCE_STATES(source.initial), cleared ? &transparent : nullptr, IID_PPV_ARGS(&source.resource)), "cell source");
         // depth_addon.cpp on_init_resource tracks a depth-stencil texture's
         // state from its creation.
         if (descs[i].Flags & ds) {
@@ -1088,19 +1240,45 @@ namespace {
             // legacy transition (and back to COMMON, which the clear
             // promotes).
             const auto clear = value.value.clear;
+            // Option 2's cells: the game's real clear follows the copy, and
+            // one promotes the target to RENDER_TARGET first, by an earlier
+            // clear on this list or on an earlier list of the same
+            // ExecuteCommandLists call (both clear to transparent black, the
+            // copy then reads those bytes).
+            const bool option2 = clear == ui_clear_boundary::simultaneous_cleared || clear == ui_clear_boundary::simultaneous_promoted ||
+                                 clear == ui_clear_boundary::simultaneous_promoted_earlier_list ||
+                                 clear == ui_clear_boundary::simultaneous_unobserved_unmixed;
+            const auto view = option2 ? render_target_view(resource) : D3D12_CPU_DESCRIPTOR_HANDLE {};
+            const float transparent[4] {};
+            // A lost recording's copy rests on the process's enhanced-barrier
+            // use: each such cell starts as a fresh session's, and the refused
+            // one has an earlier executed list record an enhanced barrier.
+            const bool lost = clear == ui_clear_boundary::simultaneous_unobserved || clear == ui_clear_boundary::simultaneous_unobserved_unmixed;
+            if (lost) {
+              sunshine_streamline::native_observer::forget_enhanced_barrier_use();
+              if (clear == ui_clear_boundary::simultaneous_unobserved) {
+                earlier_enhanced_barrier(out);
+              }
+            }
+            if (clear == ui_clear_boundary::simultaneous_promoted) {
+              list->ClearRenderTargetView(view, transparent, 0, nullptr);
+            } else if (clear == ui_clear_boundary::simultaneous_promoted_earlier_list) {
+              earlier.list->ClearRenderTargetView(view, transparent, 0, nullptr);
+            }
+            out.expect_cleared = clear == ui_clear_boundary::simultaneous_promoted || clear == ui_clear_boundary::simultaneous_promoted_earlier_list;
             if (clear == ui_clear_boundary::enhanced_render_target) {
               enter_layout(list, resource, true, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_BARRIER_ACCESS_RENDER_TARGET);
             } else if (clear == ui_clear_boundary::enhanced_undefined) {
               texture_barrier(list, resource, true, D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_LAYOUT_RENDER_TARGET);
             } else if (clear == ui_clear_boundary::enhanced_discard) {
               texture_barrier(list, resource, true, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_RENDER_TARGET, D3D12_TEXTURE_BARRIER_FLAG_DISCARD);
-            } else if (clear == ui_clear_boundary::simultaneous_render_target || clear == ui_clear_boundary::simultaneous_unobserved) {
+            } else if (clear == ui_clear_boundary::simultaneous_render_target || lost) {
               transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, common, render_target);
             } else if (clear == ui_clear_boundary::simultaneous_named_common) {
               transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, common, render_target);
               transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, render_target, common);
             }
-            if (clear == ui_clear_boundary::simultaneous_unobserved) {
+            if (lost) {
               // The barrier hooks lose this recording, as when its state
               // table cannot grow (recording_loss::source_state_capacity):
               // nothing it recorded is evidence any more.
@@ -1136,6 +1314,10 @@ namespace {
               transition_barrier(list, resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, copy_source, render_target);
             }
             transition_barrier(list, out.ui_copy.Get(), 0, copy_dest, ps);
+            // The game's clear, which the layer copied the target before.
+            if (option2) {
+              list->ClearRenderTargetView(view, transparent, 0, nullptr);
+            }
             out.diagnostic.result = capture::status::recorded;
             out.diagnostic.stage = capture::record_stage::recorded;
             out.diagnostic.copy_state = render_target;
@@ -1179,14 +1361,15 @@ namespace {
 
       // Execute alone (after its earlier list, in one call), or discard a
       // copy from an unproven state.
+      const bool with_earlier = split_ended || value.value.clear == ui_clear_boundary::simultaneous_promoted_earlier_list;
       check(close_list(list), on_compute ? "compute close" : "copy close");
-      if (split_ended) {
+      if (with_earlier) {
         check(close_list(earlier.list.Get()), "earlier close");
       }
       if (!out.quarantined) {
         ID3D12CommandList *lists[] {earlier.list.Get(), list};
         auto &queue = on_compute ? compute.queue : gpu.queue;
-        queue->ExecuteCommandLists(split_ended ? 2 : 1, split_ended ? lists : lists + 1);
+        queue->ExecuteCommandLists(with_earlier ? 2 : 1, with_earlier ? lists : lists + 1);
         if (on_compute) {
           compute.wait();
         } else {
@@ -1198,11 +1381,12 @@ namespace {
       } else {
         gpu.reset();
       }
-      if (split_ended) {
+      if (with_earlier) {
         earlier.reset();
       }
       if (!out.quarantined) {
-        const auto errors = debug_errors(gpu);
+        // Option 2's cells leave no message of any severity.
+        const auto errors = debug_errors(gpu, option2_cell(value.value.clear));
         if (!errors.empty()) {
           out.debug_clean = false;
           out.trouble += " D3D12: " + errors + ";";
@@ -1268,7 +1452,8 @@ namespace {
         auto &out = runs[entry.index];
         unsigned char *mapped {};
         check(entry.bytes->bytes->Map(0, nullptr, reinterpret_cast<void **>(&mapped)), "cell readback map");
-        const bool exact = matches(*batch[entry.index], unsigned(batch[entry.index] - first), entry.bytes->footprint, mapped);
+        const bool exact = out.expect_cleared ? cleared(*batch[entry.index], entry.bytes->footprint, mapped) :
+                                                matches(*batch[entry.index], unsigned(batch[entry.index] - first), entry.bytes->footprint, mapped);
         D3D12_RANGE none {};
         entry.bytes->bytes->Unmap(0, &none);
         if (!exact) {
@@ -1471,6 +1656,16 @@ int main(int argc, char **argv) {
       }
       sources.clear();
       capture::poll();
+    }
+    // The option-2 cells' clean validation means something only while
+    // validation flags a wrong BeforeState (the negative controls).
+    if (debug_layer && (!only || std::strcmp(only, "UI clear boundary") == 0)) {
+      const auto flagged = device.validation_controls();
+      if (flagged != 3) {
+        std::fprintf(stderr, "FAIL: %u of the 3 negative controls' wrong BeforeState were flagged by the D3D12 debug layer\n", flagged);
+        return 1;
+      }
+      std::printf("PASS D3D12 validation live: 3 negative controls flagged (a wrong BeforeState at the barrier and at ExecuteCommandLists, id 527)\n");
     }
     verdicts.finish(gaps::device_rows, "device", !only);
     std::printf("PASS API contract device matrix: %zu legal cells (", cells.size());

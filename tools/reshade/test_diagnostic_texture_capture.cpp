@@ -2486,7 +2486,9 @@ namespace {
   // hooks into that table and stamps the list: the recording that straddled
   // the move stays unobserved, every later one is observed (copied with
   // legacy barriers where the clearing list transitioned the target to
-  // RENDER_TARGET, refused as no_state where it named nothing), and one
+  // RENDER_TARGET, and from RENDER_TARGET where it named nothing and the
+  // barrier-free clear promotes it: option 2, The Witcher 3's FG-off
+  // layer), and one
   // during which a third party put the runtime's function back is
   // unobserved again until the next execution writes the hook again.
   void moved_table_clear_boundary(fixture &gpu) {
@@ -2582,12 +2584,14 @@ namespace {
     require(uncovered() == first_uncovered + 1 && capture::last_proven_state(native(depth.Get()), queue, proven) &&
         proven.value == D3D12_RESOURCE_STATE_DEPTH_WRITE,
       "the execution of a list observed through its own table unproved the depth or counted as uncovered");
-    // A clearing list that names nothing of the target: the precise reason
-    // that remains (owner option 2 decides it), not unobserved.
+    // A clearing list that names nothing of the target, whose barrier-free
+    // clear promotes it from COMMON: copied from RENDER_TARGET with legacy
+    // barriers (option 2, owner ruling 11-03), legal under the debug layer.
     restart();
     basis = decide();
-    require(!basis.admitted() && basis.refused == capture::clear_copy_refusal::no_state,
-      "an observed clearing list that names nothing of the simultaneous target was not refused as no_state");
+    require(basis.admitted() && !basis.enhanced && basis.promoted,
+      "an observed clearing list that names nothing of the simultaneous target did not admit the copy from its promotion");
+    copied();
     clear();
     run();
     // A third party puts the runtime's function back during a recording:
@@ -2620,7 +2624,7 @@ namespace {
     capture::command_destroyed(native(list.Get()));
     std::puts("PASS moved method table (D3D12Core 1.619's per-object table): the recording that straddles the move and one whose "
       "table lost the hook are unobserved and uncovered; every recording after an execution wrote the hooks is observed: "
-      "a transitioned simultaneous UI target is copied with legacy barriers, an untransitioned one refused as no_state");
+      "a transitioned simultaneous UI target is copied with legacy barriers, an untransitioned one from its promotion");
   }
 
   void immediate_consumer_without_list_hooks(fixture &gpu) {
