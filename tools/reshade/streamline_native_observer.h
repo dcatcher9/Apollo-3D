@@ -54,6 +54,11 @@ namespace sunshine_streamline::native_observer {
     // Overflow now means snapshot allocation/size failure, never exceeding
     // the inline fast path. Valid large batches are observed in full.
     std::uint64_t barrier_overflow{}, submission_overflow{}, discovery_contention{};
+    // Hooks written into lists' own (object-owned) method tables at their
+    // execution (see states_dispatch). A runtime that keeps such a table
+    // across Reset needs one per list; one that rebuilds it at each Reset
+    // needs one per execution.
+    std::uint64_t written{};
   };
 
   // Owner serializes install_pending calls. Initialize only while owner
@@ -76,20 +81,57 @@ namespace sunshine_streamline::native_observer {
   // unrelated interfaces are rejected before reading any D3D12 method offsets.
   // Discovery retains module-owned vtable slots and their original code. It
   // never installs hooks from a lifecycle callback. Each method has at most
-  // eight native vtable slots. Deferred installation replaces only the exact
+  // eight hooks (module slots and object-owned dispatch together). Deferred
+  // installation replaces only the exact
   // authenticated slot; shared code used by other interfaces is untouched. Optional CL4/CL7
   // methods are discovered only through successful QueryInterface; readiness
   // requires coverage of every interface supported by the live object. Only
   // ResourceBarrier and (CL7) enhanced Barrier are hooked on command lists:
-  // their lifecycle comes from ReShade's events.
+  // their lifecycle comes from ReShade's events. A list whose method table
+  // lies outside every module image (a runtime's per-object table) is neither
+  // discovered nor refused here: the execution hook covers it (dispatch).
+  // Every executed list a recording cookie names is also observed by the
+  // execution hook: a runtime can move a list to another module table
+  // mid-recording (D3D12Core 10.0.26300 after a suspending render pass).
   void observe_command(std::uint64_t command);
   void observe_queue(std::uint64_t queue);
+  // Also delivers an invalidation that a coverage change raised inside a
+  // suppressed callback (where notifications are suppressed).
   bool install_pending();
-  // The list's resource states are observed: its barrier (and, if supported,
-  // enhanced Barrier) hooks are installed.
+  // How the list's barrier methods (ResourceBarrier and, where its object
+  // supports CommandList7, Barrier) dispatch, read from the slots of its
+  // current method table, never waiting for a lock:
+  // - hooked: each slot is a module-table slot the observer registered and
+  //   installed, and still holds that hook (a registered slot that lost its
+  //   hook is retired for good, as before);
+  // - patched: at least one slot lies elsewhere (the list's own table) and
+  //   holds one of the observer's installed hooks, the others hooked or
+  //   patched. The execution hook writes the hook into such a table
+  //   (an executed list a recording cookie names), then stamps the list with
+  //   its recording cookie read after the write (after): a recording whose
+  //   cookie is greater began after the write, so every barrier it records
+  //   reaches the hook. A patched list without that stamp is none;
+  // - none: any slot dispatches elsewhere.
+  enum class dispatch : std::uint8_t { none, hooked, patched };
+  struct states_dispatch {
+    dispatch kind{dispatch::none};
+    std::uint64_t after{};
+  };
+  states_dispatch states_coverage(std::uint64_t command);
+  // states_coverage(command).kind == dispatch::hooked.
   bool states_ready(std::uint64_t command);
   bool queue_ready(std::uint64_t queue);
   counters counts();
+  // The first list judged uncovered (note_uncovered) of each class of method
+  // table (each module table; every object-owned table is one class), at most
+  // 8 per process: its table (in a module image or not, and its offset from
+  // the object) and where its barrier slots dispatch. note_uncovered only
+  // reads memory (no loader call, so callers may hold their locks);
+  // coverage_line formats one pending report (module names), else, at most
+  // every 10 s while it changes, the count of hooks written into lists' own
+  // tables (counters::written); it never waits.
+  void note_uncovered(std::uint64_t command);
+  bool coverage_line(std::uint64_t now_ms, char *out, std::size_t size);
 
   // Live ID3D12Object-compatible COM objects only. The private-data GUID is local
   // to this addon. Proxies that forward Get/SetPrivateData share the native cookie.

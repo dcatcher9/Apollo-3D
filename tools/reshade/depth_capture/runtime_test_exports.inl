@@ -8,6 +8,14 @@
     if (reset) reset_capture_lock_values();
     return TRUE;
   }
+  // The executed-list proof's uncovered count (proven_counts().uncovered):
+  // executions of reported, valid recordings whose barrier methods no hook
+  // covered (the alternating fixture's --resume-pass case).
+  extern "C" __declspec(dllexport) BOOL SunshineDepthTestUncoveredExecutions(std::uint64_t *out) {
+    if (!out) return FALSE;
+    *out = capture_observation.proven_counters.uncovered.load(std::memory_order_relaxed);
+    return TRUE;
+  }
   namespace {
     // One Present of an earlier frame landing inside the next nominated copy's
     // call, between its input's read and the copy (record_impl).

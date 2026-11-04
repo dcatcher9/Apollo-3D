@@ -199,14 +199,19 @@ namespace sunshine_streamline::depth_capture {
     // Capture admissions by ReShade's lifecycle view: covered (open, outside a
     // render pass) or not, with what the lifecycle saw instead.
     std::uint64_t covered{}, unknown{}, closed{}, pass{};
-    // Of covered: the barrier hooks observed the list's states, or the game's
-    // declared state applied (refused or moved method tables).
+    // Of covered: the barrier hooks observed the recording's states, or the
+    // game's declared state applied (barrier methods no hook covers for the
+    // whole recording: native_observer::states_coverage).
     std::uint64_t states_observed{}, states_declared{};
   };
   list_coverage_counts list_coverage();
   // These counts as one log line, at most every 5 s and only after they
   // changed; false when there is nothing to log.
   bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size);
+  // The barrier hooks' coverage diagnostic (native_observer::coverage_line):
+  // the first uncovered list of each method table, once, then the count of
+  // hooks written into lists' own tables at most every 10 s while it changes.
+  bool barrier_coverage_report(std::uint64_t now_ms, char *out, std::size_t size);
   // One log line naming each safety bound of the capture owner (its queue
   // places, source table and snapshot pools) that refused a capture since the
   // last line, each once per session; false when no bound is newly hit.

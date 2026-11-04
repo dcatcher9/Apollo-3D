@@ -448,8 +448,10 @@ namespace sunshine_streamline::depth_capture {
     native = reinterpret_cast<std::uint64_t>(checked.p);
     if (diagnostic) diagnostic->command = native;
     observe_command(native);
-    // The barrier hooks supply the list's resource states only when they see it.
-    const bool states_observed = native_observer::states_ready(native);
+    // The barrier hooks supply the list's resource states only when they see
+    // the whole recording (recording_observed, judged with it under the lock
+    // from how its barrier methods dispatch now).
+    const auto dispatch = native_observer::states_coverage(native);
     // A proven state holds for a queue whose executions the hooks report. It
     // supplies a last_proven proof, and checks the declaration of a copy
     // deferred to its frame's Present (input::present_queue) as an
@@ -457,9 +459,9 @@ namespace sunshine_streamline::depth_capture {
     com_ptr<ID3D12CommandQueue> present_queue;
     if (!proven_queue && query_native(value.present_queue, IID_ID3D12CommandQueue, present_queue))
       proven_queue = reinterpret_cast<std::uint64_t>(present_queue.p); // As the submission hook reports it.
-    const bool proven_basis_allowed = (value.proof == sunshine_scene_depth::state_proof::last_proven ||
-        (value.present_queue && value.proof == sunshine_scene_depth::state_proof::declared)) && states_observed &&
-      proven_queue && native_observer::queue_ready(proven_queue);
+    const bool proven_proof_allowed = (value.proof == sunshine_scene_depth::state_proof::last_proven ||
+        (value.present_queue && value.proof == sunshine_scene_depth::state_proof::declared)) &&
+      dispatch.kind != native_observer::dispatch::none && proven_queue && native_observer::queue_ready(proven_queue);
     auto *list = checked.p;
     const auto command_type = list->GetType();
     if (diagnostic) diagnostic->command_type = command_type;
@@ -519,6 +521,8 @@ namespace sunshine_streamline::depth_capture {
       if (!source_lifetime_current(value, current_generation))
         return reject(status::unsupported_lifetime, record_stage::source_lifetime);
       auto owner = command(native, cookie, true);
+      const bool states_observed = owner && recording_observed(*owner, dispatch);
+      const bool proven_basis_allowed = proven_proof_allowed && states_observed;
       // ReShade's lifecycle decides coverage: the recording is open outside a
       // render pass.
       const auto view = lifecycle_view(owner ? &*owner : nullptr);

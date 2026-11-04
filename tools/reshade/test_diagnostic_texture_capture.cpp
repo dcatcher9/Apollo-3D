@@ -89,6 +89,12 @@ namespace {
     ComPtr<ID3D11Device1> host1;
     ComPtr<ID3D11DeviceContext> context;
     std::uint64_t completion{};
+    // A DIRECT list's methods through ID3D12GraphicsCommandList7::Barrier
+    // (slot 80) before the observer installs any hook (empty without
+    // CommandList7 on the list's own object): a runtime's per-object table as
+    // D3D12Core 1.619 builds it holds these, none of the observer's hooks
+    // (moved_table_clear_boundary).
+    std::array<void *, 81> pristine_list{};
     // gpu_validation: the debug layer's GPU-based validation, which checks
     // every subresource's layout/state at execution.
     explicit fixture(bool gpu_validation = false) {
@@ -127,6 +133,13 @@ namespace {
       capture::initialize(true);
       capture::observe_queue(native(queue.Get())); capture::observe_queue(native(foreign_queue.Get()));
       created(list.Get());
+      {
+        ComPtr<ID3D12GraphicsCommandList7> version7;
+        if (SUCCEEDED(list.As(&version7)) && static_cast<void *>(version7.Get()) == static_cast<void *>(list.Get())) {
+          const auto *const table = *reinterpret_cast<void *const *const *>(list.Get());
+          std::copy(table, table + pristine_list.size(), pristine_list.begin());
+        }
+      }
       capture::observe_command(native(list.Get())); capture::poll();
       require(observer::states_ready(native(list.Get())) && observer::queue_ready(native(queue.Get())), "native observer not ready");
       check(close_list(list.Get()), "initial close");
@@ -2463,11 +2476,159 @@ namespace {
     std::puts("PASS local same-queue pending GPU copy: strict shared/foreign rejection, exact R10 bytes, no wait, fixed consumer/destination and fence retirement");
   }
 
+  // The Witcher 3 layout (D3D12Core 1.619, FG off): the runtime moves each
+  // list to a method table inside the object at its first Reset, holding its
+  // own functions and none of the observer's module-table hooks. The UI
+  // layer asks the capture owner at the clear of a simultaneous-access target
+  // (render_target_clear_copy): until 11-03 every such recording was
+  // unobserved, so the layer was never copied, and each execution unproved
+  // every state (uncovered). The execution hook now writes the observer's
+  // hooks into that table and stamps the list: the recording that straddled
+  // the move stays unobserved, every later one is observed (copied with
+  // legacy barriers where the clearing list transitioned the target to
+  // RENDER_TARGET, refused as no_state where it named nothing), and one
+  // during which a third party put the runtime's function back is
+  // unobserved again until the next execution writes the hook again.
+  void moved_table_clear_boundary(fixture &gpu) {
+    if (!gpu.pristine_list[80]) {
+      std::puts("SKIP moved-table clear boundary: the list's own object has no CommandList7 table to copy");
+      return;
+    }
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    ComPtr<ID3D12CommandAllocator> allocator, spare;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "moved-table allocator");
+    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&spare)), "moved-table spare allocator");
+    check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list)),
+      "moved-table list");
+    created(list.Get());
+    capture::observe_command(native(list.Get())); capture::poll();
+    check(close_list(list.Get()), "moved-table initial close");
+    const auto restart = [&] {
+      check(spare->Reset(), "moved-table allocator reset");
+      check(reset_list(list.Get(), spare.Get()), "moved-table list reset");
+      std::swap(allocator, spare);
+    };
+    // The first Reset moves the list to its own table.
+    restart();
+    auto **object = reinterpret_cast<void ***>(list.Get());
+    void **const module_table = *object;
+    std::vector<void *> own(gpu.pristine_list.begin(), gpu.pristine_list.end());
+    *object = own.data();
+    struct restore_vtable { void ***object; void **table; ~restore_vtable() { *object = table; } } restore{object, module_table};
+    // A depth texture the executed-list proof holds (its DEPTH_WRITE stays
+    // proven only while every list executed on the queue is observed), and
+    // the UI layer's target: simultaneous access, in COMMON.
+    D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = 64; desc.Height = 48; desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R32_TYPELESS; desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    const auto properties = heap(D3D12_HEAP_TYPE_DEFAULT);
+    ComPtr<ID3D12Resource> depth, target, copy;
+    check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+      nullptr, IID_PPV_ARGS(&depth)), "moved-table depth");
+    capture::resource_created(native(depth.Get()), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+    D3D12_CLEAR_VALUE transparent{}; transparent.Format = desc.Format;
+    check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+      &transparent, IID_PPV_ARGS(&target)), "moved-table UI target");
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    check(gpu.device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+      nullptr, IID_PPV_ARGS(&copy)), "moved-table UI copy");
+    ComPtr<ID3D12DescriptorHeap> views;
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap_desc.NumDescriptors = 1;
+    check(gpu.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&views)), "moved-table RTV heap");
+    gpu.device->CreateRenderTargetView(target.Get(), nullptr, views->GetCPUDescriptorHandleForHeapStart());
+    const auto queue = native(gpu.queue.Get());
+    const auto decide = [&] { return capture::render_target_clear_copy(native(list.Get()), native(target.Get())); };
+    const auto clear = [&] {
+      const float zero[4]{};
+      list->ClearRenderTargetView(views->GetCPUDescriptorHandleForHeapStart(), zero, 0, nullptr);
+    };
+    // The UI layer's legacy copy at the clear (game3d_ui_layer.cpp
+    // record_into), then the game's clear.
+    const auto copied = [&] {
+      transition(list.Get(), copy.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+      transition(list.Get(), target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      list->CopyResource(copy.Get(), target.Get());
+      transition(list.Get(), target.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      transition(list.Get(), copy.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    };
+    const auto run = [&] { check(close_list(list.Get()), "moved-table close"); execute(gpu.queue.Get(), list.Get()); gpu.wait(); };
+    const auto uncovered = [] { return capture::proven_counts().uncovered; };
+    capture::proven_state proven;
+    // The recording that straddled the move: unobserved; its execution
+    // counts as uncovered and unproves the depth.
+    const auto first_uncovered = uncovered();
+    transition(list.Get(), target.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    auto basis = decide();
+    require(!basis.admitted() && basis.refused == capture::clear_copy_refusal::unobserved,
+      "a clearing list that moved to its own table before any hook reached it was not refused as unobserved");
+    clear();
+    run();
+    require(uncovered() == first_uncovered + 1 && !capture::last_proven_state(native(depth.Get()), queue, proven),
+      "the execution of a list no hook covered was not counted uncovered");
+    capture::resource_created(native(depth.Get()), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    // Every later recording is observed: the transitioned target is copied
+    // with legacy barriers (option 1c), the depth stays proven.
+    restart();
+    transition(list.Get(), target.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    basis = decide();
+    require(basis.admitted() && !basis.enhanced && basis.refused == capture::clear_copy_refusal::none,
+      "a clearing list in its own table, observed since its first execution, did not admit the legacy copy");
+    copied();
+    clear();
+    run();
+    require(uncovered() == first_uncovered + 1 && capture::last_proven_state(native(depth.Get()), queue, proven) &&
+        proven.value == D3D12_RESOURCE_STATE_DEPTH_WRITE,
+      "the execution of a list observed through its own table unproved the depth or counted as uncovered");
+    // A clearing list that names nothing of the target: the precise reason
+    // that remains (owner option 2 decides it), not unobserved.
+    restart();
+    basis = decide();
+    require(!basis.admitted() && basis.refused == capture::clear_copy_refusal::no_state,
+      "an observed clearing list that names nothing of the simultaneous target was not refused as no_state");
+    clear();
+    run();
+    // A third party puts the runtime's function back during a recording:
+    // unobserved (its earlier barriers no longer prove anything), counted
+    // uncovered at its execution, which writes the hook again.
+    restart();
+    own[26] = gpu.pristine_list[26];
+    transition(list.Get(), target.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    basis = decide();
+    require(!basis.admitted() && basis.refused == capture::clear_copy_refusal::unobserved,
+      "a clearing list whose own table lost the hook was not refused as unobserved");
+    clear();
+    run();
+    require(uncovered() == first_uncovered + 2 && own[26] != gpu.pristine_list[26],
+      "a list whose own table lost the hook was not counted uncovered, or its execution did not write the hook again");
+    capture::resource_created(native(depth.Get()), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    restart();
+    transition(list.Get(), target.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    basis = decide();
+    require(basis.admitted() && !basis.enhanced, "the recording after the hook was written again was not observed");
+    copied();
+    clear();
+    run();
+    require(uncovered() == first_uncovered + 2, "the recording after the hook was written again counted as uncovered");
+    gpu.check_debug_errors();
+    restart();
+    check(close_list(list.Get()), "moved-table final close");
+    capture::resource_destroyed(sunshine_native_identity::resource_cookie(depth.Get()));
+    destroyed(list.Get());
+    capture::command_destroyed(native(list.Get()));
+    std::puts("PASS moved method table (D3D12Core 1.619's per-object table): the recording that straddles the move and one whose "
+      "table lost the hook are unobserved and uncovered; every recording after an execution wrote the hooks is observed: "
+      "a transitioned simultaneous UI target is copied with legacy barriers, an untransitioned one refused as no_state");
+  }
+
   void immediate_consumer_without_list_hooks(fixture &gpu) {
     // A runtime's immediate list is never reported by ReShade's lifecycle, and
-    // D3D12Core 1.619 can move it to a per-object method table that is never
-    // hooked. Its observed submission and the queue fence retire the read, and
-    // nothing is released before that GPU work.
+    // D3D12Core 1.619 can move it to a per-object method table, which the
+    // execution hook writes no hook into (it has no recording cookie). Its
+    // observed submission and the queue fence retire the read, and nothing is
+    // released before that GPU work.
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;
     check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "immediate allocator");
@@ -2479,10 +2640,10 @@ namespace {
     std::vector<void *> swapped(original, original + list7_methods);
     *object = swapped.data();
     struct restore_vtable { void ***object; void **table; ~restore_vtable() { *object = table; } } restore{object, original};
-    // The first sighting reports the refused slots once, revoking recordings
-    // open at that moment. Later recordings and captures persist.
+    // Its sighting registers and refuses nothing (a per-object table is no
+    // slot to share); recordings and captures persist.
     capture::observe_command(native(list.Get())); capture::poll();
-    check(close_list(gpu.list.Get()), "close recording open during refusal"); gpu.reset();
+    check(close_list(gpu.list.Get()), "close the recording open at its sighting"); gpu.reset();
     texture_case image(gpu, DXGI_FORMAT_R10G10B10A2_UNORM, 4);
     auto target = destination(gpu.device.Get(), DXGI_FORMAT_R10G10B10A2_UNORM);
     auto local = capture::record_local_texture(native(gpu.list.Get()), image.input);
@@ -2644,8 +2805,10 @@ namespace {
       capture::observe_list_event(list_native, event::destroyed);
     }
 
-    // A list whose native table cannot be hooked (as after a D3D12Core 1.619
-    // Reset) is covered by ReShade's lifecycle with its declared state.
+    // A list in a table of its own (as after a D3D12Core 1.619 Reset) that no
+    // execution has written the hooks into (copied from the hooked table, so
+    // it holds them, but unstamped) is covered by ReShade's lifecycle with its
+    // declared state.
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> refused;
     check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "unhookable allocator");
@@ -2659,8 +2822,8 @@ namespace {
     struct restore_vtable { void ***object; void **table; ~restore_vtable() { *object = table; } } restore{object, original};
     const auto unhookable = native(refused.Get());
     capture::observe_list_event(unhookable, event::created);
-    // The first sighting of a refused table revokes recordings open then; the
-    // next recording (ReShade's Reset) is admitted.
+    // Its sighting registers and refuses nothing; the next recording
+    // (ReShade's Reset) is admitted.
     record(unhookable);
     capture::observe_list_event(unhookable, event::reset);
     last = capture::list_coverage();
@@ -2673,7 +2836,7 @@ namespace {
     capture::observe_list_event(unhookable, event::destroyed);
     require(!record(unhookable), "an unhookable list unknown to ReShade admitted a capture");
     check(refused->Close(), "unhookable list close");
-    check(close_list(gpu.list.Get()), "close recording open during refusal"); gpu.reset();
+    check(close_list(gpu.list.Get()), "close the recording open at its sighting"); gpu.reset();
     gpu.check_debug_errors();
     std::puts("PASS list lifecycle coverage: ReShade's created/Reset/Close/submit/render pass decide admission, unreported lists are rejected, a registered runtime list follows its submissions, an unhookable list uses its declared state");
   }
@@ -3706,6 +3869,7 @@ int main(int argc, char **argv) {
     depth_format_and_mips(gpu);
     local_same_queue_ordered_capture(gpu);
     immediate_consumer_without_list_hooks(gpu);
+    moved_table_clear_boundary(gpu);
     list_lifecycle_coverage(gpu);
     enhanced_barrier_capture(gpu);
     enhanced_layout_latch(gpu);

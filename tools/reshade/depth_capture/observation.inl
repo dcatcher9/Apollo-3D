@@ -320,24 +320,18 @@ namespace sunshine_streamline::depth_capture {
       });
       owner.aliases_sorted = true;
     }
-    // Requires mutex. Whether the barrier hooks saw every barrier the list
-    // recorded: its method table is hooked (states_ready). A list being
-    // executed is alive, so its table pointer is a plain read; the answer is
-    // remembered per table until coverage changes (command_generation), and
-    // at most 16 new tables a second are checked (beyond that a list counts
-    // as unobserved). Inside the submission callback, where a lost hook's
-    // invalidation is suppressed like any nested notification.
-    bool states_covered(std::uint64_t native) {
-      const auto table = *reinterpret_cast<const std::uintptr_t *>(native);
-      const auto generation = capture_observation.command_generation.load();
-      for (const auto &entry : covered_tables)
-        if (entry.table == table && entry.generation == generation) return entry.covered;
-      const auto now = sunshine_game3d::clock::game_now();
-      if (now - coverage_window >= 1000) { coverage_window = now; coverage_checks = 0; }
-      if (++coverage_checks > 16) return false;
-      const bool covered = native_observer::states_ready(native);
-      covered_tables[covered_next++ % covered_tables.size()] = {table, generation, covered};
-      return covered;
+    // Whether the barrier hooks saw every barrier owner (the recording its
+    // list holds) recorded, from how the list's barrier methods dispatch
+    // (native_observer::states_coverage, read by the caller, outside the
+    // capture lock unless suppressed: a lost hook found there invalidates
+    // evidence): through hooks the observer installed in a module table, or
+    // through hooks it wrote into the list's own table before this recording
+    // began (its cookie is greater than the list's stamp). The one verdict of
+    // the executed-list proof (apply_executed), the UI layer's clear-boundary
+    // copy and a capture at an API call; asked per recording, never cached.
+    bool recording_observed(const command_state &owner, const native_observer::states_dispatch &dispatch) {
+      return dispatch.kind == native_observer::dispatch::hooked ||
+        (dispatch.kind == native_observer::dispatch::patched && owner.cookie > dispatch.after);
     }
     // Requires mutex. A copy recorded from its source's proven state
     // (record_impl) is checked when its recording is executed: the proof must
@@ -358,8 +352,9 @@ namespace sunshine_streamline::depth_capture {
     // submission order (proven_state.h): copies from a proven state are
     // checked before their list's own barriers apply. A list the barrier
     // hooks did not fully observe (not reported by ReShade's lifecycle, Reset
-    // without it, invalidated, or of an unhooked method table) may have
-    // changed any texture: none stays proven. Otherwise every held texture
+    // without it, invalidated, or not recording_observed) may have changed
+    // any texture: none stays proven (an uncovered one is named once per
+    // method table, native_observer::note_uncovered). Otherwise every held texture
     // its barriers named takes the state its last barrier left it in, on this
     // queue, unless an aliasing barrier followed (any placed or reserved
     // resource for one naming neither), a split is still open or a barrier
@@ -371,17 +366,23 @@ namespace sunshine_streamline::depth_capture {
         verify_proven_copies(queue, values[n].recording_cookie);
         if (!capture_observation.proven.size()) continue;
         const auto native = values[n].native_command;
-        // A list that never had a recording state, while the hooks cover its
-        // method table, recorded no barrier through them (the first would
-        // have given it one): DXGI's internal Present list. It changes no
-        // texture's state.
-        if (!values[n].recording_cookie && native && native_observer::recording_cookie_absent(native) && states_covered(native))
+        // Inside the submission callback (suppressed): a lost hook found here
+        // invalidates evidence at the next install_pending.
+        const auto dispatch = native_observer::states_coverage(native);
+        // A list that never had a recording state, while hooks the observer
+        // installed in a module table cover its methods, recorded no barrier
+        // through them (the first would have given it one): DXGI's internal
+        // Present list. It changes no texture's state. (A list's own table is
+        // covered only from a recording's stamp, which such a list lacks.)
+        if (!values[n].recording_cookie && native && native_observer::recording_cookie_absent(native) &&
+            dispatch.kind == native_observer::dispatch::hooked)
           continue;
         auto owner = command(native, values[n].recording_cookie, false);
         auto &c = capture_observation.proven_counters;
         auto *unobserved = !owner ? &c.unrecorded : !owner->reported ? &c.unreported : owner->invalid ? &c.invalidated :
-          owner->missed_reset ? &c.missed_reset : !states_covered(native) ? &c.uncovered : nullptr;
+          owner->missed_reset ? &c.missed_reset : !recording_observed(*owner, dispatch) ? &c.uncovered : nullptr;
         if (unobserved) {
+          if (unobserved == &c.uncovered) native_observer::note_uncovered(native);
           capture_observation.proven.unprove_all();
           unobserved->fetch_add(1, std::memory_order_relaxed);
           continue;
@@ -574,11 +575,12 @@ namespace sunshine_streamline::depth_capture {
     com_ptr<ID3D12GraphicsCommandList> checked;
     if (!query_native(native_command, IID_ID3D12GraphicsCommandList, checked)) return false;
     const auto native = reinterpret_cast<std::uint64_t>(checked.p);
-    if (!native_observer::states_ready(native)) return false;
+    const auto dispatch = native_observer::states_coverage(native);
+    if (dispatch.kind == native_observer::dispatch::none) return false;
     const auto cookie = native_observer::get_recording_cookie(native);
     std::lock_guard lock(mutex);
     auto owner = command(native, cookie, false);
-    const auto *entry = owner && !owner->invalid ? state(*owner, source->cookie, false) : nullptr;
+    const auto *entry = owner && !owner->invalid && recording_observed(*owner, dispatch) ? state(*owner, source->cookie, false) : nullptr;
     if (entry && writing) *writing = copy_state::writes(observation_of(entry));
     return entry != nullptr;
   }
@@ -642,9 +644,10 @@ namespace sunshine_streamline::depth_capture {
     if (!identity) return {clear_copy_refusal::other};
     native = reinterpret_cast<std::uint64_t>(list.p);
     // No capture lock for the recording, exactly as barriers().
-    auto owner = native_observer::states_ready(native) ?
+    const auto dispatch = native_observer::states_coverage(native);
+    auto owner = dispatch.kind != native_observer::dispatch::none ?
       command(native, native_observer::get_recording_cookie(native), false) : command_storage::handle{};
-    facts.observed = owner && owner->reported && !owner->closed && !owner->invalid;
+    facts.observed = owner && owner->reported && !owner->closed && !owner->invalid && recording_observed(*owner, dispatch);
     const auto *entry = facts.observed ? state(*owner, identity, false) : nullptr;
     facts.entry = observation_of(entry);
     facts.discarded = entry && entry->discarded;

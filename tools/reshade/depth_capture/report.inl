@@ -54,6 +54,10 @@ namespace sunshine_streamline::depth_capture {
     return true;
   }
 
+  bool barrier_coverage_report(std::uint64_t now_ms, char *out, std::size_t size) {
+    return requested.load() && native_observer::coverage_line(now_ms, out, size);
+  }
+
   bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size) {
     static std::atomic<std::uint64_t> next_log{}, logged_admissions{};
     auto next = next_log.load(std::memory_order_relaxed);

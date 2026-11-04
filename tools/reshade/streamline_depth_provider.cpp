@@ -456,6 +456,11 @@ namespace sunshine_streamline::provider {
       char text[256];
       if (depth_capture::list_coverage_report(sunshine_game3d::clock::game_now(), text, sizeof(text)))
         sunshine_log::message(reshade::log::level::info, text);
+      // Where an uncovered list's barrier methods dispatch, once per method
+      // table, and the hooks written into lists' own tables.
+      char coverage[512];
+      if (depth_capture::barrier_coverage_report(sunshine_game3d::clock::game_now(), coverage, sizeof(coverage)))
+        sunshine_log::message(reshade::log::level::info, coverage);
       // A safety bound of the capture owner that refused a capture, once each.
       char bound[384];
       if (depth_capture::capacity_report(bound, sizeof(bound)))

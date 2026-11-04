@@ -975,18 +975,35 @@ float4 ps(float4 p:SV_Position):SV_Target{return float4(1,0,1,1);}
     // depth, this frame's raw center (pixels(): the GPU's depth, so a runtime
     // that applied the resuming CLEAR fails there), captured over the whole
     // scene (the quarter drawn after the resume does not restart the crop).
+    // The list that suspends the pass moves to another method table at its
+    // suspending pass (D3D12Core 10.0.26300: a module table its creation never
+    // showed) until its next Reset. Until 11-03 the barrier hooks never
+    // covered that table, so each of its executions counted as uncovered and
+    // unproved every state; the execution hook now discovers it, and once its
+    // hooks are installed (during the warm-up) no execution is uncovered.
     void check_resume_pass(){
       set_mode(cadence::resume_pass);
+      using uncovered_t=BOOL(*)(std::uint64_t *);
+      const auto uncovered_executions=reinterpret_cast<uncovered_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),"SunshineDepthTestUncoveredExecutions"));
+      require(uncovered_executions!=nullptr,"The test add-on lacks SunshineDepthTestUncoveredExecutions");
       const auto started=clock.now();unsigned consecutive=0;
       while(consecutive<20 && clock.now()-started<15000){tick("resume-pass");if(full())++consecutive;else consecutive=0;}
       require(consecutive>=20,"A scene drawn in a suspended render pass never reached full stereo");
+      std::uint64_t uncovered_before{},uncovered_after{};
+      require(uncovered_executions(&uncovered_before),"The uncovered executions were not readable");
       for(unsigned i=0;i<120;++i){
         tick("resume-pass");
         require(full(),"A Present whose scene a suspended render pass drew lost its current depth at the pass that resumed it");
         require(captured.x==0 && captured.y==0 && captured.active_width==scene->width && captured.active_height==scene->height,
           "The CLEAR of the pass that resumed the scene's pass restarted the capture crop at the quarter drawn after it");
       }
-      std::printf("PASS resume-pass: 120 Presents whose scene a suspending render pass drew, resumed by a pass whose CLEAR applies nothing, full stereo on their own current depth\n");
+      require(uncovered_executions(&uncovered_after),"The uncovered executions were not readable");
+      if(uncovered_after!=uncovered_before){
+        std::fprintf(stderr,"FAIL resume-pass: %llu of the 120 Presents' executions were uncovered (each unproves every state)\n",
+          static_cast<unsigned long long>(uncovered_after-uncovered_before));
+        require(false,"An execution of the frame's lists counted as uncovered: a list whose barrier methods no hook covered");
+      }
+      std::printf("PASS resume-pass: 120 Presents whose scene a suspending render pass drew, resumed by a pass whose CLEAR applies nothing, full stereo on their own current depth; no execution uncovered\n");
     }
     // A new full-view scene starts in another allocation (a cutscene, photo
     // mode or 3D menu) and the old one is left untouched: first a half-size

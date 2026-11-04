@@ -51,6 +51,10 @@ namespace sunshine_streamline::native_observer {
     // A fence ReShade signalled in the add-on's flush of its immediate list
     // (own_flush_scope): ReShade's own, which no game queue waits on.
     constexpr GUID own_fence_guid{0x52a0c4e7, 0x93d1, 0x4b6f, {0x8e, 0x15, 0x2c, 0x71, 0xa9, 0x0d, 0x36, 0xf8}};
+    // A list whose own (object-owned) method table the execution hook wrote a
+    // hook into: the recording cookie it held right after the write
+    // (states_dispatch::after). Plain bytes, as the recording cookie.
+    constexpr GUID dispatch_guid{0x1f6b9e3d, 0x47a2, 0x4c58, {0xb0, 0x6e, 0x93, 0x2d, 0x7c, 0x15, 0xa8, 0x4f}};
     enum class state { empty, pending, installed, rejected };
     struct target {
       sunshine_native_vtable::slot location;
@@ -76,7 +80,11 @@ namespace sunshine_streamline::native_observer {
     std::atomic<decltype(callbacks::associate_recording)> associate_recording_callback{};
     std::atomic<submission_listener> listener_callback{};
     std::atomic<std::uint64_t> calls{}, observed{}, unreadable{}, dropped{}, installed{}, rejected{}, nested{}, suppressed{};
-    std::atomic<std::uint64_t> barrier_overflow{}, submission_overflow{}, discovery_contention{};
+    std::atomic<std::uint64_t> barrier_overflow{}, submission_overflow{}, discovery_contention{}, written{};
+    // An invalidation raised inside a suppressed callback (a coverage change
+    // found there, where notify drops every notification): delivered at the
+    // next install_pending, so no loss is ever dropped.
+    std::atomic<bool> invalidation_pending{};
     thread_local unsigned suppression_depth{};
     thread_local unsigned own_flush_depth{};
     struct invocation;
@@ -207,7 +215,11 @@ namespace sunshine_streamline::native_observer {
       suppression_scope scope;
       listener(queue, count, commands);
     }
-    void invalidate() noexcept { notify(invalidated_callback.load(std::memory_order_acquire)); }
+    void invalidate() noexcept {
+      const auto callback = invalidated_callback.load(std::memory_order_acquire);
+      if (callback && suppression_depth && enabled()) { invalidation_pending.store(true, std::memory_order_release); return; }
+      notify(callback);
+    }
     void drop(bool unreadable_input) noexcept {
       if (unreadable_input) ++unreadable;
       else ++dropped;
@@ -222,6 +234,7 @@ namespace sunshine_streamline::native_observer {
     }
 
     // Defined after the slot helpers below.
+    void cover(std::uint64_t command);
     bool order_on();
     bool own_signal(ID3D12Fence *fence);
     void order_enter(invocation &call, ID3D12CommandQueue *queue, bool blocking);
@@ -285,6 +298,12 @@ namespace sunshine_streamline::native_observer {
       order::last_execute = call.ticket ? position{call.order_queue, call.ticket, order_quiet(call)} : position{};
       if (!call.notify()) return;
       if (!complete) { if (!allocated) ++submission_overflow; drop(allocated); return; }
+      // Each executed list a recording cookie names, in the table it now
+      // dispatches through: a module slot first seen is discovered, and an
+      // object-owned table gets the hook (cover), before the owner judges
+      // this execution (which began before any write here).
+      for (UINT i = 0; i != count; ++i)
+        if (identities.data()[i].recording_cookie) cover(identities.data()[i].native_command);
       notify(submitted_callback.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
       listen(reinterpret_cast<std::uintptr_t>(queue), count, identities.data());
     }
@@ -429,6 +448,11 @@ namespace sunshine_streamline::native_observer {
       const bool seen = find(kind, address) != nullptr || refused_before(kind, key);
       ReleaseSRWLockShared(&targets_lock);
       if (seen) return;
+      // A table outside every module image (a runtime's per-object table,
+      // one per list) is no slot to share or remember: the execution hook
+      // covers it (cover). Refusing it would revoke evidence for every list.
+      if (kind == static_cast<unsigned>(method::barriers) || kind == static_cast<unsigned>(method::enhanced))
+        if (!sunshine_native_vtable::detail::image(address, false)) return;
       sunshine_native_vtable::slot location;
       if (!sunshine_native_vtable::discover(object, vtable_slots[kind], location)) { refuse(kind, key); return; }
       if (!TryAcquireSRWLockExclusive(&targets_lock)) { sunshine_native_vtable::release(location); ++discovery_contention; lost(kind, false); return; }
@@ -482,6 +506,194 @@ namespace sunshine_streamline::native_observer {
       }
       if (discover && ((FAILED(result7) && result7 != E_NOINTERFACE) || (SUCCEEDED(result7) && !version7))) invalidate();
       return complete;
+    }
+
+    // -- Dispatch coverage (states_coverage): judged by the value each barrier
+    // slot of the list's current method table holds, so a list a runtime
+    // moved to another table (its own, or another module table) is judged by
+    // the table it uses. Lock-free: detours never change, and a hook's
+    // location and original are written before its status publishes it.
+    int hook_index(unsigned kind, const void *value) {
+      for (unsigned i = 0; i != target_limit; ++i)
+        if (detours[kind][i] == value && targets[kind][i].status.load(std::memory_order_acquire) == state::installed)
+          return static_cast<int>(i);
+      return -1;
+    }
+    bool our_detour(const void *value) {
+      for (const auto &row : detours)
+        for (const auto *entry : row)
+          if (entry == value) return true;
+      return false;
+    }
+    // The slot of kind's method in the live object's current table, and what
+    // it holds: plain reads (no system call per executed list), valid because
+    // the caller holds a reference to the object through the exact interface
+    // QueryInterface returned, whose table has that method.
+    void **live_slot(std::uint64_t object, unsigned kind, void *&current) {
+      const auto table = *reinterpret_cast<void **const volatile *>(object);
+      if (!table) return nullptr;
+      auto **address = table + vtable_slots[kind];
+      current = *reinterpret_cast<void *const volatile *>(address);
+      return address;
+    }
+    dispatch combine(dispatch a, dispatch b) {
+      if (a == dispatch::none || b == dispatch::none) return dispatch::none;
+      return a == dispatch::patched || b == dispatch::patched ? dispatch::patched : dispatch::hooked;
+    }
+    // How one barrier slot of object (kind's interface) dispatches now. A
+    // registered, installed module slot that no longer holds its hook is
+    // retired for good (missed calls cannot be recovered by a later restore)
+    // and invalidates evidence; inside a suppressed callback that
+    // invalidation is delivered at the next install_pending.
+    dispatch slot_dispatch(std::uint64_t object, unsigned kind) {
+      void *current{};
+      auto **const address = live_slot(object, kind, current);
+      if (!address) return dispatch::none;
+      const int index = hook_index(kind, current);
+      if (index >= 0) return targets[kind][index].location.address == address ? dispatch::hooked : dispatch::patched;
+      for (auto &slot : targets[kind]) {
+        if (slot.status.load(std::memory_order_acquire) != state::installed || slot.location.address != address) continue;
+        auto expected = state::installed;
+        if (slot.status.compare_exchange_strong(expected, state::rejected, std::memory_order_acq_rel)) { ++rejected; coverage_changed(kind); }
+        break;
+      }
+      return dispatch::none;
+    }
+    // The CommandList7 Barrier slot where the object supports it; an object
+    // without CommandList7 has no such method (hooked: neutral in combine).
+    dispatch enhanced_dispatch(std::uint64_t command) {
+      auto *object = reinterpret_cast<ID3D12Object *>(command);
+      ID3D12GraphicsCommandList7 *version7{};
+      const HRESULT result7 = object->lpVtbl->QueryInterface(object, IID_ID3D12GraphicsCommandList7, reinterpret_cast<void **>(&version7));
+      if (result7 == E_NOINTERFACE) return dispatch::hooked;
+      if (FAILED(result7) || !version7) return dispatch::none;
+      const auto value = slot_dispatch(reinterpret_cast<std::uintptr_t>(version7), static_cast<unsigned>(method::enhanced));
+      version7->lpVtbl->Release(version7);
+      return value;
+    }
+    bool dispatch_stamp(std::uint64_t command, std::uint64_t &after) {
+      auto *object = reinterpret_cast<ID3D12Object *>(command);
+      UINT size = sizeof(after);
+      return SUCCEEDED(object->lpVtbl->GetPrivateData(object, dispatch_guid, &size, &after)) && size == sizeof(after);
+    }
+    // The hook that forwards to value (a function in a loaded module image):
+    // an installed hook whose original it is (a module slot's, whose table the
+    // runtime copied), else a new dispatch-only hook of its own (no slot; its
+    // code module pinned for process life), at most target_limit a method.
+    int dispatch_target(unsigned kind, void *value) {
+      for (unsigned i = 0; i != target_limit; ++i)
+        if (targets[kind][i].status.load(std::memory_order_acquire) == state::installed &&
+            targets[kind][i].original.load(std::memory_order_acquire) == value) return static_cast<int>(i);
+      if (!TryAcquireSRWLockExclusive(&targets_lock)) { ++discovery_contention; return -1; }
+      int index = -1;
+      for (unsigned i = 0; i != target_counts[kind] && index < 0; ++i)
+        if (targets[kind][i].status.load(std::memory_order_acquire) == state::installed &&
+            targets[kind][i].original.load(std::memory_order_acquire) == value) index = static_cast<int>(i);
+      if (index < 0 && target_counts[kind] != target_limit) {
+        const auto next = target_counts[kind];
+        HMODULE code{};
+        if (sunshine_native_vtable::detail::retain(value, code) && sunshine_native_vtable::detail::pin(value, code) &&
+            sunshine_native_vtable::detail::pin(detours[kind][next])) {
+          auto &slot = targets[kind][next];
+          slot.location = {};
+          slot.location.original = value; slot.location.code_owner = code;
+          slot.original.store(value, std::memory_order_release);
+          slot.status.store(state::installed, std::memory_order_release);
+          target_counts[kind] = next + 1;
+          ++installed;
+          index = static_cast<int>(next);
+        } else if (code) FreeLibrary(code);
+      }
+      ReleaseSRWLockExclusive(&targets_lock);
+      return index;
+    }
+    // Write a hook into an object-owned table slot that dispatches to
+    // current: only a committed plain read-write page outside every image (a
+    // runtime's per-object table; never a page whose protection would have to
+    // change), and only to a function in a loaded image that is not ours.
+    bool write_hook(unsigned kind, void **address, void *current) {
+      MEMORY_BASIC_INFORMATION memory{};
+      if (VirtualQuery(address, &memory, sizeof(memory)) != sizeof(memory) || memory.State != MEM_COMMIT ||
+          memory.Type == MEM_IMAGE || memory.Protect != PAGE_READWRITE) return false;
+      if (our_detour(current) || !sunshine_native_vtable::detail::image(current, true)) return false;
+      const int index = dispatch_target(kind, current);
+      if (index < 0) return false;
+      if (InterlockedCompareExchangePointer(reinterpret_cast<void *volatile *>(address), detours[kind][index], current) != current)
+        return false;
+      ++written;
+      return true;
+    }
+    struct slot_cover {
+      dispatch kind{dispatch::none};
+      bool wrote{};
+    };
+    slot_cover cover_slot(std::uint64_t object, method value) {
+      const auto kind = static_cast<unsigned>(value);
+      void *current{};
+      auto **const address = live_slot(object, kind, current);
+      if (!address) return {};
+      const int index = hook_index(kind, current);
+      if (index >= 0) return {targets[kind][index].location.address == address ? dispatch::hooked : dispatch::patched};
+      // A module table first seen here: discovered, installed by the next
+      // install_pending (which invalidates the recordings it straddles).
+      if (sunshine_native_vtable::detail::image(address, false)) { observe(object, value); return {}; }
+      if (!write_hook(kind, address, current)) return {};
+      return {dispatch::patched, true};
+    }
+    // An executed list (cover in execute_detour): the slots of the table it
+    // dispatches through now. A list patched now, or patched without a stamp,
+    // is stamped with the recording cookie it holds after every write: only
+    // a recording that begins later (a greater cookie) is covered.
+    void cover(std::uint64_t command) {
+      const restore_error incoming{GetLastError()};
+      auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
+      if (!object) return;
+      const auto normalized = reinterpret_cast<std::uintptr_t>(object);
+      const auto barriers = cover_slot(normalized, method::barriers);
+      slot_cover enhanced{dispatch::hooked};
+      auto *raw = reinterpret_cast<ID3D12Object *>(normalized);
+      ID3D12GraphicsCommandList7 *version7{};
+      const HRESULT result7 = raw->lpVtbl->QueryInterface(raw, IID_ID3D12GraphicsCommandList7, reinterpret_cast<void **>(&version7));
+      if (SUCCEEDED(result7) && version7) {
+        enhanced = cover_slot(reinterpret_cast<std::uintptr_t>(version7), method::enhanced);
+        version7->lpVtbl->Release(version7);
+      } else if (result7 != E_NOINTERFACE) enhanced = {};
+      std::uint64_t after{};
+      if (combine(barriers.kind, enhanced.kind) == dispatch::patched && (barriers.wrote || enhanced.wrote || !dispatch_stamp(normalized, after))) {
+        after = get_recording_cookie(normalized);
+        if (after) object->lpVtbl->SetPrivateData(object, dispatch_guid, sizeof(after), &after);
+      }
+      object->lpVtbl->Release(object);
+    }
+
+    // The uncovered-dispatch diagnostic (note_uncovered, coverage_line).
+    namespace uncovered {
+      constexpr unsigned limit = 8;
+      struct report {
+        std::uintptr_t key{}, object{}, table{};
+        bool image{}, version7{};
+        void *barrier{}, *enhanced{};
+      };
+      std::array<report, limit> reports{};
+      unsigned count{}, read{};
+      // coverage_line's count of written hooks: the last logged, and when.
+      std::uint64_t logged_written{}, logged_at{};
+      SRWLOCK lock = SRWLOCK_INIT;
+    }
+    // The module and offset of address ("none" outside every module).
+    void describe(const void *address, char *out, std::size_t size) {
+      HMODULE module{};
+      char path[MAX_PATH]{};
+      if (!address || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCSTR>(address), &module) || !GetModuleFileNameA(module, path, MAX_PATH)) {
+        std::snprintf(out, size, "%p(none)", address);
+        return;
+      }
+      const char *name = path;
+      for (const char *at = path; *at; ++at)
+        if (*at == '\\' || *at == '/') name = at + 1;
+      std::snprintf(out, size, "%p(%s+0x%llx)", address, name,
+        static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(address) - reinterpret_cast<std::uintptr_t>(module)));
     }
 
     bool order_on();
@@ -561,15 +773,75 @@ namespace sunshine_streamline::native_observer {
     }
     object->lpVtbl->Release(object);
   }
-  bool states_ready(std::uint64_t command) {
-    if (!enabled()) return false;
+  states_dispatch states_coverage(std::uint64_t command) {
+    if (!enabled()) return {};
     const restore_error incoming{GetLastError()};
     auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
-    if (!object) return false;
+    if (!object) return {};
     const auto normalized = reinterpret_cast<std::uintptr_t>(object);
-    const bool result = ready(normalized, method::barriers) && enhanced_coverage(normalized, false);
+    states_dispatch result{slot_dispatch(normalized, static_cast<unsigned>(method::barriers))};
+    if (result.kind != dispatch::none) result.kind = combine(result.kind, enhanced_dispatch(normalized));
+    if (result.kind == dispatch::patched && !dispatch_stamp(normalized, result.after)) result = {};
     object->lpVtbl->Release(object);
     return result;
+  }
+  bool states_ready(std::uint64_t command) { return states_coverage(command).kind == dispatch::hooked; }
+  void note_uncovered(std::uint64_t command) {
+    if (sunshine_addon_lifetime::stopping() || !command) return;
+    const restore_error incoming{GetLastError()};
+    auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
+    if (!object) return;
+    uncovered::report value;
+    value.object = reinterpret_cast<std::uintptr_t>(object);
+    void **slot{};
+    if (read(object, &value.table, sizeof(value.table)) && read_slot_address(value.object, static_cast<unsigned>(method::barriers), slot))
+      read(slot, &value.barrier, sizeof(value.barrier));
+    value.image = value.table && sunshine_native_vtable::detail::image(reinterpret_cast<const void *>(value.table), false);
+    auto *raw = reinterpret_cast<ID3D12Object *>(object);
+    ID3D12GraphicsCommandList7 *version7{};
+    if (SUCCEEDED(raw->lpVtbl->QueryInterface(raw, IID_ID3D12GraphicsCommandList7, reinterpret_cast<void **>(&version7))) && version7) {
+      value.version7 = true;
+      void **enhanced{};
+      if (read_slot_address(reinterpret_cast<std::uintptr_t>(version7), static_cast<unsigned>(method::enhanced), enhanced))
+        read(enhanced, &value.enhanced, sizeof(value.enhanced));
+      version7->lpVtbl->Release(version7);
+    }
+    object->lpVtbl->Release(object);
+    // Every object-owned table is one class (one table per list).
+    value.key = value.image ? value.table : 0;
+    if (!TryAcquireSRWLockExclusive(&uncovered::lock)) return;
+    bool known = false;
+    for (unsigned i = 0; i != uncovered::count && !known; ++i) known = uncovered::reports[i].key == value.key;
+    if (!known && uncovered::count != uncovered::limit) uncovered::reports[uncovered::count++] = value;
+    ReleaseSRWLockExclusive(&uncovered::lock);
+  }
+  bool coverage_line(std::uint64_t now_ms, char *out, std::size_t size) {
+    if (!size || !TryAcquireSRWLockExclusive(&uncovered::lock)) return false;
+    const bool pending = uncovered::read != uncovered::count;
+    const auto value = pending ? uncovered::reports[uncovered::read++] : uncovered::report{};
+    bool count_due = false;
+    const auto total = written.load(std::memory_order_relaxed);
+    if (!pending && total != uncovered::logged_written && (!uncovered::logged_at || now_ms - uncovered::logged_at >= 10000)) {
+      uncovered::logged_written = total; uncovered::logged_at = now_ms; count_due = true;
+    }
+    ReleaseSRWLockExclusive(&uncovered::lock);
+    if (count_due) {
+      std::snprintf(out, size, "Sunshine 3D barrier coverage: written=%llu (hooks written into lists' own method tables "
+        "at their execution: about one per list where the runtime keeps that table across Reset, one per execution "
+        "where it rebuilds it)", static_cast<unsigned long long>(total));
+      return true;
+    }
+    if (!pending) return false;
+    char table[160], barrier[160], enhanced[160];
+    if (value.image) describe(reinterpret_cast<const void *>(value.table), table, sizeof(table));
+    else std::snprintf(table, sizeof(table), "%p(object-owned, object%+lld)", reinterpret_cast<const void *>(value.table),
+      static_cast<long long>(value.table - value.object));
+    describe(value.barrier, barrier, sizeof(barrier));
+    if (value.version7) describe(value.enhanced, enhanced, sizeof(enhanced));
+    else std::snprintf(enhanced, sizeof(enhanced), "none");
+    std::snprintf(out, size, "Sunshine 3D barrier coverage: a list no barrier hook covered: table=%s ResourceBarrier=%s Barrier=%s; "
+      "its executions count as uncovered; logged once per method table (object-owned tables once)", table, barrier, enhanced);
+    return true;
   }
   bool queue_ready(std::uint64_t queue) {
     if (!enabled()) return false;
@@ -585,6 +857,7 @@ namespace sunshine_streamline::native_observer {
     const restore_error incoming{GetLastError()};
     // Caller serializes deferred installation outside event/loader callbacks.
     // The shared helper serializes page-protection changes across observers.
+    if (!suppression_depth && invalidation_pending.exchange(false, std::memory_order_acq_rel)) invalidate();
     verify_order_slots();
     std::array<std::array<unsigned, 2>, method_count * target_limit> pending{};
     unsigned count{}, state_count{}, order_count{};
@@ -641,7 +914,7 @@ namespace sunshine_streamline::native_observer {
   }
   counters counts() {
     counters result{calls.load(), observed.load(), unreadable.load(), dropped.load(), 0, installed.load(), rejected.load(), nested.load(), suppressed.load(),
-      barrier_overflow.load(), submission_overflow.load(), discovery_contention.load()};
+      barrier_overflow.load(), submission_overflow.load(), discovery_contention.load(), written.load()};
     if (TryAcquireSRWLockShared(&targets_lock)) {
       for (const auto count : target_counts) result.targets += count;
       ReleaseSRWLockShared(&targets_lock);
@@ -687,7 +960,10 @@ namespace sunshine_streamline::native_observer {
     order::reported = {}; order::report_count = order::report_read = 0;
     for (auto &value : order::refused) value = 0;
     calls = observed = unreadable = dropped = installed = rejected = nested = suppressed = slot_reads = 0;
-    barrier_overflow = submission_overflow = discovery_contention = 0;
+    barrier_overflow = submission_overflow = discovery_contention = written = 0;
+    invalidation_pending = false;
+    uncovered::reports = {}; uncovered::count = uncovered::read = 0;
+    uncovered::logged_written = uncovered::logged_at = 0;
     barrier_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;
     enhanced_textures_callback = nullptr; associate_recording_callback = nullptr; listener_callback = nullptr;
   }

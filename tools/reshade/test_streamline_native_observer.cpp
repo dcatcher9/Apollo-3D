@@ -53,7 +53,14 @@ namespace {
     unsigned references{1};
     bool cookie_present{true};
     object *enhanced{};
+    // The observer's dispatch stamp (its own private-data GUID,
+    // dispatch_stamp_guid): the recording cookie a list held after a hook was
+    // written into its own table.
+    std::uint64_t stamp{};
+    bool stamp_present{};
   };
+  // streamline_native_observer.cpp's dispatch_guid (a white-box constant).
+  constexpr GUID dispatch_stamp_guid{0x1f6b9e3d, 0x47a2, 0x4c58, {0xb0, 0x6e, 0x93, 0x2d, 0x7c, 0x15, 0xa8, 0x4f}};
 #if defined(__GNUC__) && defined(__x86_64__)
   static_assert(offsetof(object, forwarded) == 16);
   // Streamline 1.1.1 uses exactly this ABI-transparent slot-9 forwarding thunk
@@ -243,19 +250,29 @@ namespace {
     SetLastError(outgoing_error);
     return S_FALSE;
   }
-  NOINLINE HRESULT STDMETHODCALLTYPE get_data(ID3D12Object *native, REFGUID, UINT *size, void *output) {
+  NOINLINE HRESULT STDMETHODCALLTYPE get_data(ID3D12Object *native, REFGUID guid, UINT *size, void *output) {
     auto *value = reinterpret_cast<object *>(native);
     if (value->forwarded) value = value->forwarded;
     if (!size || *size != sizeof(value->cookie) || !output) return E_INVALIDARG;
+    if (IsEqualGUID(guid, dispatch_stamp_guid)) {
+      if (!value->stamp_present) return DXGI_ERROR_NOT_FOUND;
+      std::memcpy(output, &value->stamp, sizeof(value->stamp));
+      return S_OK;
+    }
     if (!value->cookie_present) { SetLastError(0xbadf00d); return DXGI_ERROR_NOT_FOUND; }
     std::memcpy(output, &value->cookie, sizeof(value->cookie));
     SetLastError(0xbadf00d);
     return S_OK;
   }
-  NOINLINE HRESULT STDMETHODCALLTYPE set_data(ID3D12Object *native, REFGUID, UINT size, const void *input) {
+  NOINLINE HRESULT STDMETHODCALLTYPE set_data(ID3D12Object *native, REFGUID guid, UINT size, const void *input) {
     auto *value = reinterpret_cast<object *>(native);
     if (value->forwarded) value = value->forwarded;
     if (size != sizeof(value->cookie) || !input) return E_INVALIDARG;
+    if (IsEqualGUID(guid, dispatch_stamp_guid)) {
+      std::memcpy(&value->stamp, input, sizeof(value->stamp));
+      value->stamp_present = true;
+      return S_OK;
+    }
     std::memcpy(&value->cookie, input, sizeof(value->cookie));
     value->cookie_present = true;
     SetLastError(0xbadf00d);
@@ -1067,6 +1084,150 @@ namespace {
       "record's through a reset inside its read; at most 8 queues");
   }
 }
+  // Dispatch coverage (states_coverage, the execution hook's cover): a list
+  // whose method table is its own (heap memory, as D3D12Core 1.619 moves each
+  // list at its first Reset) or another module table (as D3D12Core 10.0.26300
+  // after a suspending render pass). commands[0]'s static table is hooked and
+  // queue is a hooked queue; pristine holds the list methods before any hook.
+  void dispatch_cases(object &queue, const std::array<void *, enhanced_slot + 1> &pristine) {
+    const auto heap_list = [&](std::vector<void *> &table, object &list, std::uint64_t cookie) {
+      table.assign(pristine.begin(), pristine.end());
+      list.vtable = table.data(); list.kind = object_kind::command; list.extended = true;
+      list.cookie = cookie; list.cookie_present = true;
+    };
+    std::vector<void *> own_table;
+    object own{};
+    heap_list(own_table, own, 500);
+    const auto before = observer::counts();
+    const auto invalid_before = invalidations;
+    require(observer::states_coverage(address(own)).kind == observer::dispatch::none && !observer::states_ready(address(own)),
+      "a list's own table no hook was written into counted as covered");
+    void *own_pointer = &own;
+    submit(queue, 1, &own_pointer);
+    auto coverage = observer::states_coverage(address(own));
+    require(observer::counts().written == before.written + 2 && observer::counts().targets == before.targets &&
+        own_table[barrier_slot] != pristine[barrier_slot] && own_table[enhanced_slot] != pristine[enhanced_slot] &&
+        coverage.kind == observer::dispatch::patched && coverage.after == 500 && own.stamp_present && own.stamp == 500 &&
+        !observer::states_ready(address(own)) && invalidations == invalid_before,
+      "the execution hook did not write both barrier hooks into the list's own table (reusing the module hooks) and stamp "
+      "its recording cookie, or changed evidence");
+    // The stamp's cookie: the executed recording began before the write; one
+    // with a greater cookie (its Reset came later) is covered.
+    const auto events_before = barrier_events;
+    D3D12_RESOURCE_BARRIER transition{};
+    transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    transition.Transition.pResource = reinterpret_cast<ID3D12Resource *>(std::uintptr_t{0x4567});
+    transition.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    transition.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    own.cookie = 501; // As ReShade's reset event would.
+    barrier(own, 1, &transition);
+    require(barrier_events == events_before + 1 && observed_command == address(own) && observed_cookie == 501 &&
+        observed_barrier.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET,
+      "a barrier through the list's own table did not reach the observer once with its recording");
+    // A third party puts the runtime's function back: the list is uncovered
+    // (its own table's slot is no registered slot: no evidence is revoked
+    // here; its recordings are judged uncovered) until its next execution
+    // writes the hook again and stamps the cookie it holds then.
+    own_table[barrier_slot] = pristine[barrier_slot];
+    require(observer::states_coverage(address(own)).kind == observer::dispatch::none && invalidations == invalid_before,
+      "a list's own table that lost its hook still counted as covered");
+    submit(queue, 1, &own_pointer);
+    coverage = observer::states_coverage(address(own));
+    require(observer::counts().written == before.written + 3 && coverage.kind == observer::dispatch::patched && coverage.after == 501,
+      "a lost hook in a list's own table was not written again, or its stamp was not renewed");
+    // A list never stamped is not covered by a table that holds the hooks
+    // (one copied from a hooked table): its first execution stamps it.
+    std::vector<void *> copied_table(own_table);
+    object copied{}; copied.vtable = copied_table.data(); copied.kind = object_kind::command; copied.extended = true;
+    copied.cookie = 600;
+    require(observer::states_coverage(address(copied)).kind == observer::dispatch::none,
+      "an unstamped list counted as covered by hooks a copied table held");
+    void *copied_pointer = &copied;
+    submit(queue, 1, &copied_pointer);
+    coverage = observer::states_coverage(address(copied));
+    require(observer::counts().written == before.written + 3 && coverage.kind == observer::dispatch::patched && coverage.after == 600,
+      "a copied table's list was not stamped at its execution");
+    // More lists than any cache or rate limit had (16 a second): every one
+    // is covered from its first execution; one hook per method serves them.
+    std::array<std::vector<void *>, 20> tables;
+    std::array<object, 20> many{};
+    std::array<void *, 20> pointers{};
+    for (unsigned i = 0; i != many.size(); ++i) { heap_list(tables[i], many[i], 700 + i); pointers[i] = &many[i]; }
+    submit(queue, static_cast<UINT>(many.size()), pointers.data());
+    bool all = observer::counts().targets == before.targets && observer::counts().written == before.written + 3 + 2 * many.size();
+    for (unsigned i = 0; i != many.size(); ++i) {
+      coverage = observer::states_coverage(address(many[i]));
+      all = all && coverage.kind == observer::dispatch::patched && coverage.after == 700 + i;
+    }
+    require(all, "twenty lists with their own tables were not each covered from their first execution");
+    // A list without a recording cookie is never written into.
+    std::vector<void *> plain_table;
+    object plain{};
+    heap_list(plain_table, plain, 0);
+    plain.cookie_present = false;
+    void *plain_pointer = &plain;
+    submit(queue, 1, &plain_pointer);
+    require(plain_table[barrier_slot] == pristine[barrier_slot] && observer::states_coverage(address(plain)).kind == observer::dispatch::none,
+      "a list without a recording cookie had a hook written into its table");
+    std::puts("PASS dispatch: a list's own table gets the module hooks at its execution and covers only recordings after its stamp; "
+      "a lost hook uncovers it until it is written again; a copied table needs a stamp; twenty lists, no limit; no cookie, no write");
+
+    // A module table a list moves to mid-recording (D3D12Core 10.0.26300
+    // after a suspending render pass) is discovered at the list's execution
+    // and covers it once installed.
+    static std::array<void *, enhanced_slot + 1> moved_table{};
+    moved_table = pristine;
+    object moved{}; moved.vtable = moved_table.data(); moved.kind = object_kind::command; moved.extended = true; moved.cookie = 800;
+    void *moved_pointer = &moved;
+    const auto targets_before = observer::counts().targets;
+    require(observer::states_coverage(address(moved)).kind == observer::dispatch::none, "an undiscovered module table counted as covered");
+    submit(queue, 1, &moved_pointer);
+    require(observer::counts().targets == targets_before + 2 && moved_table[barrier_slot] == pristine[barrier_slot] &&
+        observer::states_coverage(address(moved)).kind == observer::dispatch::none,
+      "a module table first seen at execution was not discovered, or was written before installation");
+    require(observer::install_pending() && observer::states_coverage(address(moved)).kind == observer::dispatch::hooked &&
+        observer::states_ready(address(moved)), "a module table discovered at execution did not cover the list once installed");
+    // That registered slot loses its hook while a callback is suppressed (the
+    // owner's submission callback): the loss is retired at once and its
+    // invalidation, suppressed there, is delivered by the next install_pending.
+    const auto invalid_suppressed = invalidations;
+    const auto moved_hook = moved_table[barrier_slot];
+    moved_table[barrier_slot] = pristine[barrier_slot];
+    {
+      observer::suppression_scope scope;
+      require(observer::states_coverage(address(moved)).kind == observer::dispatch::none && invalidations == invalid_suppressed,
+        "a lost module hook stayed covered, or its invalidation escaped suppression");
+    }
+    observer::install_pending();
+    require(invalidations == invalid_suppressed + 1, "a module hook lost inside a suppressed callback was never invalidated");
+    moved_table[barrier_slot] = moved_hook;
+    require(observer::states_coverage(address(moved)).kind == observer::dispatch::none && invalidations == invalid_suppressed + 1,
+      "restoring a retired module hook revived coverage");
+    // The coverage diagnostic: the first uncovered list of each method table
+    // (every object-owned table one class), then the count of written hooks.
+    char line[512];
+    std::uint64_t now = 1000000;
+    while (observer::coverage_line(now, line, sizeof(line))) {} // Drain earlier lines; the count line logs at now.
+    own_table[barrier_slot] = pristine[barrier_slot];
+    plain_table[barrier_slot] = pristine[barrier_slot];
+    observer::note_uncovered(address(own));
+    observer::note_uncovered(address(plain));
+    observer::note_uncovered(address(moved));
+    now += 1;
+    const bool first = observer::coverage_line(now, line, sizeof(line));
+    const std::string own_line = first ? line : "";
+    const bool second = observer::coverage_line(now, line, sizeof(line));
+    const std::string moved_line = second ? line : "";
+    require(first && own_line.find("(object-owned, object") != std::string::npos && own_line.find("ResourceBarrier=") != std::string::npos &&
+        second && moved_line.find("(object-owned, object") == std::string::npos && !observer::coverage_line(now, line, sizeof(line)),
+      "the coverage diagnostic did not name each uncovered table class once");
+    submit(queue, 1, &own_pointer);
+    require(!observer::coverage_line(now + 1, line, sizeof(line)) && observer::coverage_line(now + 10000, line, sizeof(line)) &&
+        std::string(line).find("written=") != std::string::npos, "the written-hook count was not logged once per 10 s window");
+    std::puts("PASS dispatch: a module table first seen at execution is discovered and covers once installed; a hook lost "
+      "under suppression is invalidated at the next install_pending; the coverage diagnostic names each table class once");
+  }
+
 int main() {
   bool minhook = false;
   try {
@@ -1101,6 +1262,7 @@ int main() {
     observer::set_active(false);
     static std::array<std::array<void *, enhanced_slot + 1>, 2> command_tables{};
     std::array<object, 2> commands{};
+    std::array<void *, enhanced_slot + 1> pristine_command{};
     for (unsigned i = 0; i != commands.size(); ++i) {
       command_tables[i][0] = reinterpret_cast<void *>(query); command_tables[i][1] = reinterpret_cast<void *>(add_ref);
       command_tables[i][2] = reinterpret_cast<void *>(release);
@@ -1115,6 +1277,7 @@ int main() {
       commands[i].vtable = command_tables[i].data();
       commands[i].kind = object_kind::command;
     }
+    pristine_command = command_tables[0];
     commands[1].forwarded = &commands[0];
     static std::array<std::array<void *, execute_slot + 1>, 10> queue_tables{};
     std::array<object, 10> queues{};
@@ -1228,17 +1391,22 @@ int main() {
       "an unreadable enhanced Barrier did not fail closed or was not forwarded");
     {
       // D3D12Core can return CommandList7 as a per-object interface whose
-      // table lives in heap memory. That slot is refused once, and the list's
-      // states stay unobserved (its declared state applies).
+      // table lives in heap memory. Discovery neither registers nor refuses
+      // such a slot (refusing every per-object table would revoke evidence
+      // for each list); until the execution hook writes a hook into it, the
+      // list's states stay unobserved (its declared state applies).
       std::vector<void *> heap_table(commands[0].vtable, commands[0].vtable + enhanced_slot + 1);
+      heap_table[enhanced_slot] = reinterpret_cast<void *>(original_enhanced_barrier);
       object torn_off{}; torn_off.vtable = heap_table.data(); torn_off.kind = object_kind::command;
       object split{}; split.vtable = commands[0].vtable; split.kind = object_kind::command;
       split.extended = true; split.enhanced = &torn_off; split.cookie = 9999;
       const auto invalid_before = invalidations;
+      const auto targets_before = observer::counts().targets;
       for (unsigned repeat = 0; repeat != 3; ++repeat) observer::observe_command(address(split));
-      require(invalidations == invalid_before + 1 && !observer::states_ready(address(split)) &&
+      require(invalidations == invalid_before && observer::counts().targets == targets_before &&
+          !observer::states_ready(address(split)) && observer::states_coverage(address(split)).kind == observer::dispatch::none &&
           split.references == 1 && torn_off.references == 1,
-        "per-object CommandList7 table was not refused once, reported observed states, or leaked references");
+        "per-object CommandList7 table was refused, registered, reported observed states, or leaked references");
     }
     // Render passes are ReShade lifecycle events too: forwarded, never hooked.
     SetLastError(incoming_error);
@@ -1372,6 +1540,7 @@ int main() {
     sunshine_addon_lifetime::detaching.store(false, std::memory_order_release);
     require(detach_ok, "process detach observed late native completion or changed cached original forwarding");
     std::puts("PASS process-detach fence preserves cached native forwarding and suppresses in-flight completion callbacks");
+    dispatch_cases(queues[0], pristine_command);
 #if defined(__GNUC__) && defined(__x86_64__)
     // Reset target banks while every fixture is still alive, so this regression
     // is independent of the bounded-capacity tests above.

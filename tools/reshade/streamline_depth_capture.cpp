@@ -253,6 +253,7 @@ namespace sunshine_streamline::depth_capture {
     copy_state::observation observation_of(const source_state *observed);
     state_basis copy_basis(const source_state *observed, const copy_state::decision &chosen);
     bool aliased_after(const command_state &owner, std::uint64_t source, std::uint32_t order);
+    bool recording_observed(const command_state &owner, const native_observer::states_dispatch &dispatch);
     void apply_executed(std::uint64_t queue, std::uint32_t count, const native_observer::command_identity *values);
     queue_state *known_queue(std::uint64_t native);
     queue_state *queue(std::uint64_t native);
@@ -374,11 +375,6 @@ namespace sunshine_streamline::depth_capture {
     // The shared source age bounds nomination, completed-snapshot admission and
     // liveness alike (freshness.h).
     using sunshine_freshness::within_source_age;
-    // states_covered's answers per method table (depth_capture/observation.inl).
-    struct covered_table { std::uintptr_t table{}; std::uint64_t generation{}; bool covered{}; };
-    std::array<covered_table, 8> covered_tables{};
-    unsigned covered_next{}, coverage_checks{};
-    std::uint64_t coverage_window{};
     // The capture owner's safety bounds that refused work (capacity_report),
     // one bit each, set without the lock.
     enum capacity_bound : unsigned { queue_places = 1, source_table = 2, snapshot_pool = 4, auxiliary_pool = 8 };
