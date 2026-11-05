@@ -178,6 +178,28 @@ namespace platf::open3d {
              actual.firmware_version == previous.firmware_version &&
              actual.values == configured_values(previous, settings);
     }
+
+    bool quiesce_with_io(const parameters_t &expected, const quiesce_io_t &io) {
+      if (!supported_parameters(expected) || !limits::finite_close_protocol(expected.values[0]) ||
+          expected.values[14] != 0 || expected.values[16] != 1 ||
+          !io.now || !io.cancelled || !io.finish_signal || !io.read_parameters || !io.wait_until || io.cancelled()) {
+        return false;
+      }
+      const auto deadline = io.now() + transaction_timeout;
+      if (!io.finish_signal(deadline) || io.cancelled() || io.now() >= deadline) {
+        return false;
+      }
+      const auto actual = io.read_parameters(deadline);
+      if (!actual || io.cancelled() || io.now() >= deadline ||
+          actual->firmware_version != expected.firmware_version || actual->values != expected.values) {
+        return false;
+      }
+      // Firmware command9 invokes its trigger synchronously before the following command0 can
+      // report parameters/OK. With unchanged PC serial/averaging-off settings, no new trigger
+      // source remains; only comparator/IR work behind that processing barrier must expire.
+      const auto drained_at = io.now() + limits::startup_settle;
+      return io.wait_until(drained_at) && !io.cancelled() && io.now() >= drained_at;
+    }
   }  // namespace detail
 
   struct emitter_t::impl_t {
@@ -188,6 +210,7 @@ namespace platf::open3d {
     OVERLAPPED signal_io {};
     std::array<char, 4> signal_bytes {};
     bool signal_pending = false;
+    std::optional<detail::parameters_t> configured_parameters;
 
     bool transfer(bool write, void *bytes, DWORD length, DWORD &transferred, std::chrono::steady_clock::time_point deadline) {
       OVERLAPPED io {};
@@ -229,10 +252,9 @@ namespace platf::open3d {
       return completed;
     }
 
-    bool transaction(std::string command, std::vector<std::string> &response) {
+    bool transaction(std::string command, std::vector<std::string> &response, std::chrono::steady_clock::time_point deadline) {
       response.clear();
       command += '\n';
-      const auto deadline = std::chrono::steady_clock::now() + transaction_timeout;
       DWORD written = 0;
       if (!transfer(true, command.data(), static_cast<DWORD>(command.size()), written, deadline) || written != command.size()) {
         return false;
@@ -271,9 +293,13 @@ namespace platf::open3d {
       return false;
     }
 
-    std::optional<detail::parameters_t> read_parameters() {
+    bool transaction(std::string command, std::vector<std::string> &response) {
+      return transaction(std::move(command), response, std::chrono::steady_clock::now() + transaction_timeout);
+    }
+
+    std::optional<detail::parameters_t> read_parameters(std::chrono::steady_clock::time_point deadline) {
       std::vector<std::string> response;
-      if (!transaction("0", response)) {
+      if (!transaction("0", response, deadline)) {
         return std::nullopt;
       }
       for (const auto &line : response) {
@@ -284,11 +310,11 @@ namespace platf::open3d {
       return std::nullopt;
     }
 
-    bool settle() const {
-      // Resetting firmware averaging does not cancel already scheduled OPEN/CLOSE comparators.
-      // Let both wrap horizons plus the bounded IR-send drain margin elapse before a first new
-      // trigger, especially when changing protocol while the previous profile was still active.
-      const auto until = std::chrono::steady_clock::now() + limits::startup_settle;
+    std::optional<detail::parameters_t> read_parameters() {
+      return read_parameters(std::chrono::steady_clock::now() + transaction_timeout);
+    }
+
+    bool wait_until(std::chrono::steady_clock::time_point until) const {
       while (!closing.load()) {
         const auto remaining = until - std::chrono::steady_clock::now();
         if (remaining <= std::chrono::steady_clock::duration::zero()) {
@@ -299,8 +325,57 @@ namespace platf::open3d {
       return false;
     }
 
+    bool settle() const {
+      // Resetting firmware averaging does not cancel already scheduled OPEN/CLOSE comparators.
+      // Let both wrap horizons plus the bounded IR-send drain margin elapse before a first new
+      // trigger, especially when changing protocol while the previous profile was still active.
+      return wait_until(std::chrono::steady_clock::now() + limits::startup_settle);
+    }
+
+    bool finish_signal(std::chrono::steady_clock::time_point deadline) {
+      const auto handle = port.load();
+      while (!closing.load() && std::chrono::steady_clock::now() < deadline) {
+        if (signal_pending) {
+          DWORD count = 0;
+          if (GetOverlappedResult(handle, &signal_io, &count, FALSE)) {
+            if (count != signal_bytes.size()) {
+              return false;
+            }
+            signal_pending = false;
+          } else if (GetLastError() != ERROR_IO_INCOMPLETE) {
+            return false;
+          }
+        }
+        DWORD errors = 0;
+        COMSTAT state {};
+        if (!ClearCommError(handle, &errors, &state) || errors) {
+          return false;
+        }
+        if (!signal_pending && state.cbOutQue == 0) {
+          return true;
+        }
+        const auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining <= std::chrono::steady_clock::duration::zero()) {
+          break;
+        }
+        if (signal_pending) {
+          const auto wait = std::min(50ms, std::chrono::ceil<std::chrono::milliseconds>(remaining));
+          const auto result = WaitForSingleObject(signal_io.hEvent, static_cast<DWORD>(wait.count()));
+          if (result != WAIT_OBJECT_0 && result != WAIT_TIMEOUT) {
+            return false;
+          }
+        } else {
+          // A completed host write can still be queued in the serial driver. Wait only within
+          // the shared barrier deadline; FlushFileBuffers would introduce an unbounded wait.
+          std::this_thread::sleep_for(std::min(remaining, std::chrono::duration_cast<std::chrono::steady_clock::duration>(5ms)));
+        }
+      }
+      return false;
+    }
+
     void close_locked() {
       ready.store(false);
+      configured_parameters.reset();
       const auto handle = port.load();
       if (handle != INVALID_HANDLE_VALUE) {
         CancelIoEx(handle, nullptr);
@@ -417,8 +492,32 @@ namespace platf::open3d {
       impl_->close_locked();
       return false;
     }
+    impl_->configured_parameters = *actual;
     impl_->ready.store(true);
     BOOST_LOG(info) << "Open3DOLED emitter ready on " << normalized << ", firmware " << actual->firmware_version << " (volatile PC serial mode).";
+    return true;
+  }
+
+  bool emitter_t::quiesce(std::stop_token stop) {
+    std::lock_guard lock(impl_->mutex);
+    const bool was_ready = impl_->ready.exchange(false);
+    std::stop_callback cancel(stop, [this]() {
+      impl_->closing.store(true);
+    });
+    const detail::quiesce_io_t io {
+      .now = []() { return std::chrono::steady_clock::now(); },
+      .cancelled = [this]() { return impl_->closing.load(); },
+      .finish_signal = [this](auto deadline) { return impl_->finish_signal(deadline); },
+      .read_parameters = [this](auto deadline) { return impl_->read_parameters(deadline); },
+      .wait_until = [this](auto until) { return impl_->wait_until(until); },
+    };
+    if (!was_ready || !impl_->configured_parameters ||
+        !detail::quiesce_with_io(*impl_->configured_parameters, io) || impl_->closing.load()) {
+      impl_->closing.store(true);
+      impl_->close_locked();
+      return false;
+    }
+    impl_->ready.store(true);
     return true;
   }
 

@@ -9289,10 +9289,14 @@ namespace platf::dxgi {
         // without a disjoint HRESULT. Establish twelve consecutive intervals before any IR.
         constexpr unsigned acquisition_samples = 13;
         constexpr std::int64_t cadence_tolerance_us = 100;
-        detail::shutter_feedback_tracker_t feedback_tracker {
-          static_cast<unsigned>(eye_repeats), config.target_refresh_millihz, qpc_frequency.QuadPart,
-          host_age_budget_us, cadence_tolerance_us, acquisition_samples,
+        const auto make_feedback_tracker = [&]() {
+          return detail::shutter_feedback_tracker_t {
+            static_cast<unsigned>(eye_repeats), config.target_refresh_millihz, qpc_frequency.QuadPart,
+            host_age_budget_us, cadence_tolerance_us, acquisition_samples,
+          };
         };
+        auto feedback_tracker = make_feedback_tracker();
+        detail::shutter_recovery_budget_t recovery_budget;
         const auto acquisition_wait = std::chrono::milliseconds {
           std::clamp<std::int64_t>((static_cast<std::int64_t>(*emitter_eye_period) * 3 + 999) / 1000, 25, 250)
         };
@@ -9342,7 +9346,63 @@ namespace platf::dxgi {
         ID3D11Texture2D *pair = nullptr;
         const auto first_pair_deadline = std::chrono::steady_clock::now() + 5s;
         bool has_displayed = false;
+        bool recovering_clock = false;
         std::optional<std::uint32_t> previous_displayed_refresh;
+        const auto recovery_context_valid = [&]() {
+          if (stopped() || shutter_frames.failed() || !config.shutter_recovery_allowed ||
+              !config.shutter_recovery_allowed() || platf::display_change_epoch() != display_epoch_at_open) {
+            return false;
+          }
+          const auto source = query_local_presenter_display_identity(source_name_wide);
+          const auto target = query_local_presenter_display_identity(target_display_name_wide);
+          DXGI_OUTPUT_DESC output {};
+          Microsoft::WRL::ComPtr<IDXGIOutput6> output6;
+          DXGI_OUTPUT_DESC1 color {};
+          if (!source || !target || source->device_path != source_identity_at_start->device_path ||
+              target->device_path != target_identity_at_start->device_path ||
+              !local_presenter_identity_is_coherent(config.live_target, *source, *target, config.target_adapter_id) ||
+              FAILED(target_output->GetDesc(&output)) || output.Monitor != target_output_desc.Monitor ||
+              !EqualRect(&output.DesktopCoordinates, &target_output_desc.DesktopCoordinates) ||
+              FAILED(target_output.As(&output6)) || FAILED(output6->GetDesc1(&color)) ||
+              color.ColorSpace != target_desc1.ColorSpace || color.BitsPerColor != target_desc1.BitsPerColor ||
+              FAILED(shutter_device->GetDeviceRemovedReason())) {
+            return false;
+          }
+          return !stopped();
+        };
+        const auto recover_clock = [&](std::string_view reason) {
+          if (!recovery_context_valid()) {
+            BOOST_LOG(warning) << "Local shutter clock recovery rejected a changed display, device or desktop context."sv;
+            return false;
+          }
+          if (!recovery_budget.begin(std::chrono::steady_clock::now())) {
+            BOOST_LOG(warning) << "Local shutter clock recovery exhausted its two attempts per ten seconds."sv;
+            return false;
+          }
+          BOOST_LOG(warning) << "Local shutter clock lost; holding presentation while the emitter drains: "sv << reason;
+          // Present1 may have displayed the new eye even when its metadata was rejected. Freeze
+          // ALL image submissions here, rather than repainting the previous confirmed eye while
+          // an old USB write or finite OPEN/CLOSE timer may still be active.
+          if (!emitter.quiesce(emitter_setup_stop.get_token())) {
+            BOOST_LOG(warning) << "Local shutter clock recovery could not verify a quiet USB emitter."sv;
+            return false;
+          }
+          if (!recovery_context_valid()) {
+            BOOST_LOG(warning) << "Local shutter clock recovery context changed while the emitter drained."sv;
+            return false;
+          }
+          // A failed armed tracker is sticky. Only a successful same-handle FIFO barrier and
+          // firmware drain authorize a wholly new clock; never repair IDs or infer eye parity.
+          feedback_tracker = make_feedback_tracker();
+          eye_clock = detail::shutter_presentation_clock_t {static_cast<unsigned>(eye_repeats)};
+          has_displayed = false;
+          recovering_clock = true;
+          previous_displayed_refresh.reset();
+          acquisition_presents = 0;
+          acquisition_deadline = std::chrono::steady_clock::now() + detail::shutter_recovery_budget_t::acquisition_timeout;
+          BOOST_LOG(info) << "Local shutter emitter quiet; reacquiring an unsignalled left-eye clock without changing the desktop."sv;
+          return true;
+        };
         while (!stopped()) {
           if (!emitter.healthy() || shutter_frames.failed()) {
             fail("USB emitter or shared stereo packet became unavailable");
@@ -9364,7 +9424,7 @@ namespace platf::dxgi {
           const bool acquiring = !feedback_tracker.armed();
           if (acquiring) {
             if (!acquisition_deadline) {
-              acquisition_deadline = std::chrono::steady_clock::now() + 2s;
+              acquisition_deadline = std::chrono::steady_clock::now() + detail::shutter_recovery_budget_t::acquisition_timeout;
             }
             if (std::chrono::steady_clock::now() >= *acquisition_deadline) {
               BOOST_LOG(error) << "Local shutter clock acquisition expired: presents="sv << acquisition_presents
@@ -9487,13 +9547,29 @@ namespace platf::dxgi {
           }
           if (acquiring) {
             ++acquisition_presents;
+            if (recovering_clock && confirmation.status != detail::shutter_feedback_wait_status_e::displayed &&
+                !detail::shutter_feedback_is_timing_interruption(confirmation)) {
+              log_feedback_failure();
+              fail("presentation feedback failed while reacquiring the shutter clock");
+              break;
+            }
             if (confirmation.status != detail::shutter_feedback_wait_status_e::displayed || feedback_disjoint) {
               // A timeout's last raw sample is diagnostic data, never display authorization.
               feedback_tracker.observe(requested_present, detail::shutter_feedback_t {}, confirmation_qpc);
             }
             if (confirmation.status == detail::shutter_feedback_wait_status_e::displayed &&
-                feedback_tracker.observe(requested_present, confirmation.feedback, confirmation_qpc) == detail::shutter_feedback_tracker_status_e::ready &&
-                feedback_tracker.arm()) {
+                feedback_tracker.observe(requested_present, confirmation.feedback, confirmation_qpc) == detail::shutter_feedback_tracker_status_e::ready) {
+              if (recovering_clock && !recovery_context_valid()) {
+                if (!stopped()) {
+                  fail("the display or Windows desktop changed while reacquiring the shutter clock");
+                }
+                break;
+              }
+              if (!feedback_tracker.arm()) {
+                fail("the acquired shutter clock could not be armed");
+                break;
+              }
+              recovering_clock = false;
               BOOST_LOG(info) << "Local shutter monitor clock acquired: unsignalled_presents="sv << acquisition_presents
                               << " stable_intervals="sv << acquisition_samples - 1
                               << " host_age_budget_us="sv << host_age_budget_us
@@ -9505,23 +9581,51 @@ namespace platf::dxgi {
           }
           if (confirmation.status != detail::shutter_feedback_wait_status_e::displayed) {
             log_feedback_failure();
+            if (detail::shutter_feedback_is_timing_interruption(confirmation) &&
+                recover_clock("presentation feedback interrupted"sv)) {
+              continue;
+            }
+            if (stopped()) {
+              break;
+            }
             fail("DXGI scanout feedback is unavailable, late, or invalid on this display configuration; returning to 2D");
             break;
           }
           if (feedback_tracker.observe(requested_present, confirmation.feedback, confirmation_qpc) != detail::shutter_feedback_tracker_status_e::accepted) {
             log_feedback_failure();
+            if (recover_clock("displayed-eye identity, cadence or freshness changed"sv)) {
+              continue;
+            }
+            if (stopped()) {
+              break;
+            }
             fail("the displayed eye lost its acquired refresh clock or arrived too late for the shutter window");
             break;
           }
           if (!eye_clock.observe_displayed(confirmation.feedback.refresh_count)) {
             log_feedback_failure();
+            if (recover_clock("eye scanout cadence interrupted"sv)) {
+              continue;
+            }
+            if (stopped()) {
+              break;
+            }
             fail("DXGI could not prove an uninterrupted eye scanout cadence; restart after checking display timing");
             break;
           }
           previous_displayed_refresh = confirmation.feedback.refresh_count;
           if (!feedback_tracker.fresh_for_emit(qpc_now())) {
             log_feedback_failure();
+            if (recover_clock("displayed eye expired before the USB command"sv)) {
+              continue;
+            }
+            if (stopped()) {
+              break;
+            }
             fail("the displayed eye became too old before its USB shutter command");
+            break;
+          }
+          if (stopped()) {
             break;
           }
           if (!emitter.signal(left_eye)) {

@@ -4177,6 +4177,16 @@ namespace ar_glasses {
         presenter_config.frame_sequential = monitor_surface_;
         presenter_config.monitor_config = config::video.local_monitor;
         if (monitor_surface_) {
+          presenter_config.shutter_recovery_allowed = [target = live_target_]() {
+            RECT rect {};
+            {
+              std::lock_guard lock(target->mutex);
+              rect = target->rect;
+            }
+            return monitor_requested() && query_monitor_desktop_block_reason(
+              desktop_object_name(GetThreadDesktop(GetCurrentThreadId())), rect
+            ).empty();
+          };
           presenter_config.on_failure = [](std::string reason) {
             std::lock_guard lock(physical_monitor_error_mutex);
             if (physical_monitor_requested.load()) {

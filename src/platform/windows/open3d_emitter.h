@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -137,6 +138,19 @@ namespace platf::open3d {
     bool quiesce_matches(const parameters_t &actual, const parameters_t &previous);
     std::optional<std::string> configuration_command(const parameters_t &current, const settings_t &settings);
     bool configuration_matches(const parameters_t &actual, const parameters_t &previous, const settings_t &settings);
+
+    // The query is a FIFO firmware-processing barrier behind the last complete eye command.
+    // It must only read parameters; it may not purge, reopen, or change the current profile.
+    struct quiesce_io_t {
+      using clock = std::chrono::steady_clock;
+      std::function<clock::time_point()> now;
+      std::function<bool()> cancelled;
+      std::function<bool(clock::time_point)> finish_signal;
+      std::function<std::optional<parameters_t>(clock::time_point)> read_parameters;
+      std::function<bool(clock::time_point)> wait_until;
+    };
+
+    bool quiesce_with_io(const parameters_t &expected, const quiesce_io_t &io);
   }  // namespace detail
 
   /** An explicitly selected Open3DOLED COM port. Configuration is volatile, never saved to EEPROM.
@@ -144,8 +158,11 @@ namespace platf::open3d {
    * period before allowing eye signals. Only protocols with separate OPEN/CLOSE tokens are used.
    * signal() never waits: at most one overlapped write can be outstanding. A busy or failed write
    * invalidates the connection so presentation cannot silently keep running out of sync.
-   * close() cancels outstanding serial I/O and releases the port. connect/close are control-thread
-   * operations; the presentation thread owns signal().
+   * quiesce() stops new signals, finishes the last write, verifies an unchanged firmware profile
+   * behind it, and waits for its finite IR work to expire. It keeps the same COM handle and is
+   * cancellable; a failed/cancelled barrier closes the connection and cannot authorize a restart.
+   * close() cancels outstanding serial I/O and releases the port. The presentation owner calls
+   * connect/quiesce/signal; a control thread may close/cancel that owner during teardown.
    */
   class emitter_t {
   public:
@@ -155,6 +172,7 @@ namespace platf::open3d {
     emitter_t &operator=(const emitter_t &) = delete;
 
     bool connect(const settings_t &settings, std::stop_token stop = {});
+    bool quiesce(std::stop_token stop = {});
     bool signal(bool left_eye);
     bool healthy() const;
     void close();

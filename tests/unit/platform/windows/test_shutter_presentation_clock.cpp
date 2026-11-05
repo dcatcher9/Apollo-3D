@@ -6,6 +6,31 @@
 
 using platf::dxgi::detail::shutter_presentation_clock_t;
 
+TEST(ShutterRecoveryBudget, AllowsTwoTransientLossesButBoundsARepeatedFailureLoop) {
+  using budget_t = platf::dxgi::detail::shutter_recovery_budget_t;
+  using namespace std::chrono_literals;
+  budget_t budget;
+  const budget_t::clock::time_point start {};
+  EXPECT_TRUE(budget.begin(start));
+  EXPECT_TRUE(budget.begin(start + 500ms));
+  EXPECT_FALSE(budget.begin(start + 9999ms));
+  EXPECT_TRUE(budget.begin(start + 10s));
+  // Expiring the first attempt does not expire the newer second attempt.
+  EXPECT_FALSE(budget.begin(start + 10499ms));
+  EXPECT_TRUE(budget.begin(start + 10500ms));
+}
+
+TEST(ShutterRecoveryBudget, ClockRegressionCannotResetTheFailureLimit) {
+  using budget_t = platf::dxgi::detail::shutter_recovery_budget_t;
+  using namespace std::chrono_literals;
+  budget_t budget;
+  const auto start = budget_t::clock::time_point {} + 10s;
+  EXPECT_TRUE(budget.begin(start));
+  EXPECT_FALSE(budget.begin(start - 1ms));
+  EXPECT_TRUE(budget.begin(start));
+  EXPECT_FALSE(budget.begin(start));
+}
+
 TEST(ShutterPresentationClock, HoldsOneStereoPairThroughRepeatedEyeScanouts) {
   shutter_presentation_clock_t clock(2);
   EXPECT_TRUE(clock.starts_pair());
@@ -212,6 +237,25 @@ TEST(ShutterPresentFeedback, UnsupportedFeedbackRetainsTheRawFailureWithoutPubli
   EXPECT_EQ(result.queries, 1u);
   EXPECT_EQ(result.flushes, 0u);
   EXPECT_EQ(result.waits, 0u);
+}
+
+TEST(ShutterPresentFeedback, OnlyTimeoutOrRawDisjointCanEnterQuietClockRecovery) {
+  using status_e = shutter::shutter_feedback_wait_status_e;
+  shutter::shutter_feedback_wait_result_t result {status_e::timeout};
+  EXPECT_TRUE(shutter::shutter_feedback_is_timing_interruption(result));
+  result.status = status_e::unsupported;
+  result.feedback.status = shutter::shutter_feedback_status_e::disjoint;
+  EXPECT_TRUE(shutter::shutter_feedback_is_timing_interruption(result));
+  // A newer ID and an unsupported HRESULT share the wait status; neither is a disjoint clock.
+  for (const auto raw : {shutter::shutter_feedback_status_e::available, shutter::shutter_feedback_status_e::unsupported}) {
+    result.feedback.status = raw;
+    EXPECT_FALSE(shutter::shutter_feedback_is_timing_interruption(result));
+  }
+  result.feedback.status = shutter::shutter_feedback_status_e::disjoint;
+  for (const auto status : {status_e::displayed, status_e::cancelled, status_e::flush_failed, status_e::wait_failed}) {
+    result.status = status;
+    EXPECT_FALSE(shutter::shutter_feedback_is_timing_interruption(result));
+  }
 }
 
 TEST(ShutterPresentFeedback, CancellationInterruptsSubframeWaitAndAvoidsAnyFurtherQuery) {

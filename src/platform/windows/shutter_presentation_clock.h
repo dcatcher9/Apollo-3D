@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -9,6 +10,34 @@
 #include <optional>
 
 namespace platf::dxgi::detail {
+  // A transient path change may be reacquired with the emitter quiet. Repeated losses must
+  // still return to 2D instead of keeping the desktop indefinitely in a dark recovery loop.
+  class shutter_recovery_budget_t {
+  public:
+    using clock = std::chrono::steady_clock;
+    static constexpr auto acquisition_timeout = std::chrono::seconds {2};
+    static constexpr auto retry_window = std::chrono::seconds {10};
+
+    bool begin(clock::time_point now) noexcept {
+      if (count_ && now < attempts_[count_ - 1]) {
+        return false;
+      }
+      if (count_ == attempts_.size()) {
+        if (now - attempts_.front() < retry_window) {
+          return false;
+        }
+        attempts_.front() = attempts_.back();
+        --count_;
+      }
+      attempts_[count_++] = now;
+      return true;
+    }
+
+  private:
+    std::array<clock::time_point, 2> attempts_ {};
+    std::size_t count_ = 0;
+  };
+
   enum class shutter_feedback_status_e {
     available,
     disjoint,
@@ -196,6 +225,12 @@ namespace platf::dxgi::detail {
     std::uint32_t flushes = 0;
     std::uint32_t waits = 0;
   };
+
+  inline bool shutter_feedback_is_timing_interruption(const shutter_feedback_wait_result_t &result) noexcept {
+    return result.status == shutter_feedback_wait_status_e::timeout ||
+           (result.status == shutter_feedback_wait_status_e::unsupported &&
+             result.feedback.status == shutter_feedback_status_e::disjoint);
+  }
 
   struct shutter_feedback_wait_io_t {
     using clock = std::chrono::steady_clock;

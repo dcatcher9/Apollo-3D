@@ -10,6 +10,54 @@ namespace {
 
   constexpr std::string_view parameters = "parameters 20,6,500,7000,30,7500,10,128,0,1,1,0,0,0,32,1,8333,0";
 
+  struct quiesce_fixture_t {
+    using clock = detail::quiesce_io_t::clock;
+    detail::parameters_t expected = detail::parse_parameters(
+      "parameters 22,6,500,2000,30,7500,10,128,0,0,0,0,0,0,32,0,0,1,42,99"
+    ).value();
+    std::optional<detail::parameters_t> actual = expected;
+    clock::time_point now {};
+    std::vector<std::string> steps;
+    clock::time_point finish_deadline {}, query_deadline {}, drain_deadline {};
+    clock::duration finish_elapsed = std::chrono::milliseconds {100};
+    clock::duration query_elapsed = std::chrono::milliseconds {200};
+    bool cancelled = false;
+    int cancel_after_step = -1;
+    bool finish_ok = true;
+    bool wait_ok = true;
+    bool complete_drain = true;
+
+    detail::quiesce_io_t io() {
+      return {
+        .now = [this]() { return now; },
+        .cancelled = [this]() { return cancelled; },
+        .finish_signal = [this](auto deadline) {
+          steps.emplace_back("finish_signal");
+          finish_deadline = deadline;
+          now += finish_elapsed;
+          cancelled |= cancel_after_step == 1;
+          return finish_ok;
+        },
+        .read_parameters = [this](auto deadline) {
+          steps.emplace_back("query0");
+          query_deadline = deadline;
+          now += query_elapsed;
+          cancelled |= cancel_after_step == 2;
+          return actual;
+        },
+        .wait_until = [this](auto deadline) {
+          steps.emplace_back("finite_drain");
+          drain_deadline = deadline;
+          if (complete_drain) {
+            now = deadline;
+          }
+          cancelled |= cancel_after_step == 3;
+          return wait_ok;
+        },
+      };
+    }
+  };
+
   TEST(Open3DEmitter, RestrictsDeviceAccessToExplicitComPorts) {
     EXPECT_EQ(detail::normalize_port("com12"), "COM12");
     EXPECT_EQ(detail::normalize_port(R"(\\.\COM123)"), "COM123");
@@ -288,6 +336,92 @@ namespace {
     EXPECT_FALSE(emitter.healthy());
     EXPECT_FALSE(emitter.signal(true));
     emitter.close();
+  }
+
+  TEST(Open3DEmitter, QuiescentBarrierFinishesTheEyeThenVerifiesReadbackBeforeFiniteDrain) {
+    quiesce_fixture_t fixture;
+    const auto original = fixture.expected;
+    EXPECT_TRUE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+    EXPECT_EQ(fixture.steps, (std::vector<std::string> {"finish_signal", "query0", "finite_drain"}));
+    EXPECT_EQ(fixture.finish_deadline, fixture.query_deadline);
+    EXPECT_EQ(fixture.finish_deadline, quiesce_fixture_t::clock::time_point {} + std::chrono::milliseconds {1500});
+    EXPECT_EQ(fixture.drain_deadline, quiesce_fixture_t::clock::time_point {} + fixture.finish_elapsed +
+                                      fixture.query_elapsed + limits::startup_settle);
+    EXPECT_EQ(fixture.expected.firmware_version, original.firmware_version);
+    EXPECT_EQ(fixture.expected.values, original.values);  // Includes unknown newer-firmware fields.
+  }
+
+  TEST(Open3DEmitter, QuiescentBarrierNeverReadsAfterAnIncompleteEyeOrDrainsAfterMissingReadback) {
+    quiesce_fixture_t fixture;
+    fixture.finish_ok = false;
+    EXPECT_FALSE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+    EXPECT_EQ(fixture.steps, (std::vector<std::string> {"finish_signal"}));
+    fixture = {};
+    fixture.actual.reset();
+    EXPECT_FALSE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+    EXPECT_EQ(fixture.steps, (std::vector<std::string> {"finish_signal", "query0"}));
+  }
+
+  TEST(Open3DEmitter, QuiescentBarrierRejectsAnyFirmwareOrParameterChange) {
+    for (const int changed_field : {-1, 0, 1, 2, 3, 14, 16, 18}) {
+      SCOPED_TRACE(changed_field);
+      quiesce_fixture_t fixture;
+      if (changed_field < 0) {
+        ++fixture.actual->firmware_version;
+      } else {
+        ++fixture.actual->values[changed_field];
+      }
+      EXPECT_FALSE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+      EXPECT_EQ(fixture.steps, (std::vector<std::string> {"finish_signal", "query0"}));
+    }
+  }
+
+  TEST(Open3DEmitter, QuiescentBarrierHonorsCancellationAtEveryPhaseWithoutAuthorizingRestart) {
+    for (const int phase : {0, 1, 2, 3}) {
+      SCOPED_TRACE(phase);
+      quiesce_fixture_t fixture;
+      fixture.cancelled = phase == 0;
+      fixture.cancel_after_step = phase;
+      EXPECT_FALSE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+      EXPECT_EQ(fixture.steps.size(), static_cast<std::size_t>(phase));
+    }
+  }
+
+  TEST(Open3DEmitter, QuiescentBarrierUsesOneDeadlineForPendingWriteAndFirmwareReceipt) {
+    quiesce_fixture_t fixture;
+    fixture.finish_elapsed = std::chrono::milliseconds {1500};
+    EXPECT_FALSE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+    EXPECT_EQ(fixture.steps, (std::vector<std::string> {"finish_signal"}));
+    fixture = {};
+    fixture.query_elapsed = std::chrono::milliseconds {1400};
+    EXPECT_FALSE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+    EXPECT_EQ(fixture.steps, (std::vector<std::string> {"finish_signal", "query0"}));
+    fixture = {};
+    fixture.query_elapsed = std::chrono::milliseconds {1399};
+    EXPECT_TRUE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+    EXPECT_EQ(fixture.finish_deadline, fixture.query_deadline);
+  }
+
+  TEST(Open3DEmitter, QuiescentBarrierRequiresTheWholeFiniteDrainEvenIfWaitReportsSuccess) {
+    quiesce_fixture_t fixture;
+    fixture.complete_drain = false;
+    EXPECT_FALSE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+    fixture = {};
+    fixture.wait_ok = false;
+    EXPECT_FALSE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+  }
+
+  TEST(Open3DEmitter, QuiescentBarrierCannotCertifyAnAutonomousOrUnsupportedPriorProfile) {
+    for (const auto [field, value] : std::array {std::pair {0, 3}, std::pair {14, 1}, std::pair {16, 0}}) {
+      quiesce_fixture_t fixture;
+      fixture.expected.values[field] = value;
+      EXPECT_FALSE(detail::quiesce_with_io(fixture.expected, fixture.io()));
+      EXPECT_TRUE(fixture.steps.empty());
+    }
+    emitter_t emitter;
+    EXPECT_FALSE(emitter.quiesce());  // An unopened emitter must not access any COM device.
+    EXPECT_FALSE(emitter.healthy());
+    EXPECT_FALSE(emitter.signal(true));
   }
 }  // namespace
 

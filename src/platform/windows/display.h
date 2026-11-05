@@ -1227,6 +1227,9 @@ namespace platf::dxgi {
     // native-size eye per scanout, driven independently from capture/conversion.
     bool frame_sequential = false;
     std::function<void(std::string)> on_failure;
+    // The session owner checks its security/desktop policy before and after a quiet clock
+    // recovery. An absent check cannot authorize recovery of a shutter presentation.
+    std::function<bool()> shutter_recovery_allowed;
     config::video_t::local_monitor_t monitor_config {};
     std::shared_ptr<::video::capture_backend_failover_t> capture_failover;
 
