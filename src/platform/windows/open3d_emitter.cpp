@@ -329,7 +329,9 @@ namespace platf::open3d {
   bool emitter_t::connect(const settings_t &settings, std::stop_token stop) {
     close();
     if (!detail::valid_settings(settings)) {
-      BOOST_LOG(error) << "Open3DOLED emitter settings or COM port are invalid.";
+      if (!stop.stop_requested()) {
+        BOOST_LOG(error) << "Open3DOLED emitter settings or COM port are invalid.";
+      }
       return false;
     }
     std::lock_guard lock(impl_->mutex);
@@ -344,7 +346,9 @@ namespace platf::open3d {
     const auto path = std::string {R"(\\.\)"} + normalized;
     const auto handle = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
-      BOOST_LOG(error) << "Could not open Open3DOLED emitter on " << normalized << ": " << GetLastError();
+      if (!stop.stop_requested() && !impl_->closing.load()) {
+        BOOST_LOG(error) << "Could not open Open3DOLED emitter on " << normalized << ": " << GetLastError();
+      }
       return false;
     }
     impl_->port.store(handle);
@@ -382,7 +386,9 @@ namespace platf::open3d {
     const auto quiet_command = previous ? detail::quiesce_command(*previous) : std::nullopt;
     std::vector<std::string> response;
     if (!impl_->signal_io.hEvent || !quiet_command || !impl_->transaction(*quiet_command, response)) {
-      BOOST_LOG(error) << "Open3DOLED emitter could not enter a quiescent PC serial state on " << normalized;
+      if (!stop.stop_requested() && !impl_->closing.load()) {
+        BOOST_LOG(error) << "Open3DOLED emitter could not enter a quiescent PC serial state on " << normalized;
+      }
       impl_->close_locked();
       return false;
     }
@@ -393,13 +399,17 @@ namespace platf::open3d {
     }
     const auto command = detail::configuration_command(*quiet, settings);
     if (!command || !impl_->transaction(*command, response)) {
-      BOOST_LOG(error) << "Open3DOLED emitter did not acknowledge a supported PC serial configuration on " << normalized;
+      if (!stop.stop_requested() && !impl_->closing.load()) {
+        BOOST_LOG(error) << "Open3DOLED emitter did not acknowledge a supported PC serial configuration on " << normalized;
+      }
       impl_->close_locked();
       return false;
     }
     const auto actual = impl_->read_parameters();
     if (!actual || !detail::configuration_matches(*actual, *quiet, settings) || impl_->closing.load()) {
-      BOOST_LOG(error) << "Open3DOLED emitter configuration readback failed on " << normalized;
+      if (!stop.stop_requested() && !impl_->closing.load()) {
+        BOOST_LOG(error) << "Open3DOLED emitter configuration readback failed on " << normalized;
+      }
       impl_->close_locked();
       return false;
     }

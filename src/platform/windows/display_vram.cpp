@@ -8890,6 +8890,29 @@ namespace platf::dxgi {
         BOOST_LOG(error) << "Local shutter monitor could not create its independent presentation device: "sv << util::log_hex(status);
         return local_presenter_result_e::error;
       }
+      // Give the independent eye-copy/present device the same relative GPU priority as
+      // capture/conversion, preserving the existing process scheduling policy.
+      Microsoft::WRL::ComPtr<IDXGIDevice> shutter_dxgi;
+      auto priority_result = shutter_device.As(&shutter_dxgi);
+      if (SUCCEEDED(priority_result)) {
+        priority_result = shutter_dxgi->SetGPUThreadPriority(7);
+      }
+      if (FAILED(priority_result)) {
+        BOOST_LOG(warning) << "Local shutter monitor could not request relative GPU priority 7: "sv
+                           << util::log_hex(priority_result) << "; scanout validation remains required."sv;
+      } else {
+        INT actual_priority = 0;
+        const auto readback_result = shutter_dxgi->GetGPUThreadPriority(&actual_priority);
+        if (FAILED(readback_result)) {
+          BOOST_LOG(warning) << "Local shutter monitor could not verify its relative GPU priority: "sv
+                             << util::log_hex(readback_result) << '.';
+        } else if (actual_priority != 7) {
+          BOOST_LOG(warning) << "Local shutter monitor GPU priority readback: requested=7 actual="sv
+                             << actual_priority << " result="sv << util::log_hex(readback_result) << '.';
+        } else {
+          BOOST_LOG(info) << "Local shutter presentation GPU context uses relative priority 7; process scheduling policy retained."sv;
+        }
+      }
     }
     ID3D11Device *presentation_device = config.frame_sequential ? shutter_device.Get() : converter.device.get();
 
