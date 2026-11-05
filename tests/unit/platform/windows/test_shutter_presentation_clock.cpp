@@ -1,6 +1,7 @@
 #include "src/platform/windows/shutter_presentation_clock.h"
 
 #include <gtest/gtest.h>
+#include <limits>
 #include <vector>
 
 using platf::dxgi::detail::shutter_presentation_clock_t;
@@ -241,4 +242,203 @@ TEST(ShutterPresentFeedback, FailedFlushOrTimerDoesNotAuthorizeAnEye) {
     return false;
   };
   EXPECT_EQ(shutter::await_shutter_present(io, probe.present_id, false).status, shutter::shutter_feedback_wait_status_e::wait_failed);
+}
+
+namespace {
+  using tracker_status = shutter::shutter_feedback_tracker_status_e;
+  using tracker_t = shutter::shutter_feedback_tracker_t;
+  constexpr std::int64_t tracker_frequency = 12000000;
+  constexpr std::int64_t tracker_refresh_ticks = 100000;
+  constexpr std::int64_t tracker_origin = 10000000;
+
+  shutter::shutter_feedback_t tracker_feedback(
+    std::uint32_t id,
+    std::uint32_t refresh,
+    std::int64_t present_qpc,
+    std::int32_t refresh_offset = 0
+  ) {
+    return {shutter::shutter_feedback_status_e::available, id, refresh,
+      refresh - static_cast<std::uint32_t>(refresh_offset),
+      present_qpc - refresh_offset * tracker_refresh_ticks, 0};
+  }
+
+  void acquire_tracker(tracker_t &tracker, unsigned repeats = 1) {
+    ASSERT_EQ(tracker.observe(10, tracker_feedback(10, 1000, tracker_origin), tracker_origin + 1200), tracker_status::acquiring);
+    const auto next_qpc = tracker_origin + repeats * tracker_refresh_ticks;
+    ASSERT_EQ(tracker.observe(11, tracker_feedback(11, 1000 + repeats, next_qpc), next_qpc + 1200), tracker_status::ready);
+    ASSERT_TRUE(tracker.arm());
+  }
+}  // namespace
+
+TEST(ShutterFeedbackTracker, RequiresTwelveMeasuredIntervalsAndExplicitArmingBeforeAnEye) {
+  tracker_t tracker(1, 120000, tracker_frequency, 2000, 100);
+  for (unsigned frame = 0; frame < 13; ++frame) {
+    const auto present = tracker_origin + frame * tracker_refresh_ticks;
+    EXPECT_EQ(tracker.observe(100 + frame, tracker_feedback(100 + frame, 1000 + frame, present), present + 1200),
+      frame == 12 ? tracker_status::ready : tracker_status::acquiring);
+    EXPECT_FALSE(tracker.fresh_for_emit(present + 1200));
+    if (frame < 12) { EXPECT_FALSE(tracker.arm()); }
+  }
+  ASSERT_TRUE(tracker.arm());
+  EXPECT_FALSE(tracker.arm());
+  const auto accepted_boundary = tracker.last_present_qpc();
+  EXPECT_TRUE(tracker.fresh_for_emit(*accepted_boundary + 1200));
+  EXPECT_TRUE(tracker.fresh_for_emit(*accepted_boundary + 2400));
+  EXPECT_EQ(tracker.last_present_qpc(), accepted_boundary);
+  EXPECT_EQ(tracker.streak(), 13u);
+  const auto first_eye = tracker_origin + 13 * tracker_refresh_ticks;
+  EXPECT_EQ(tracker.observe(113, tracker_feedback(113, 1013, first_eye), first_eye + 1200), tracker_status::accepted);
+}
+
+TEST(ShutterFeedbackTracker, ColdStallsDisjointAndCounterEpochChangesRequireANewStableSequence) {
+  tracker_t tracker(1, 120000, tracker_frequency, 2000, 100);
+  ASSERT_EQ(tracker.observe(1, tracker_feedback(1, 100, tracker_origin), tracker_origin + 1200), tracker_status::acquiring);
+  ASSERT_EQ(tracker.observe(2, tracker_feedback(2, 101, tracker_origin + tracker_refresh_ticks), tracker_origin + tracker_refresh_ticks + 1200), tracker_status::acquiring);
+  EXPECT_EQ(tracker.observe(3, tracker_feedback(2, 101, tracker_origin + tracker_refresh_ticks), tracker_origin + 2 * tracker_refresh_ticks), tracker_status::acquiring);
+  EXPECT_EQ(tracker.streak(), 0u);
+  EXPECT_FALSE(tracker.last_present_qpc());
+  EXPECT_EQ(tracker.observe(3, {shutter::shutter_feedback_status_e::disjoint}, tracker_origin + 2 * tracker_refresh_ticks), tracker_status::acquiring);
+
+  for (unsigned frame = 0; frame < 4; ++frame) {
+    const auto present = tracker_origin + (frame + 3) * tracker_refresh_ticks;
+    tracker.observe(4 + frame, tracker_feedback(4 + frame, 1000 + frame, present), present + 1200);
+  }
+  ASSERT_EQ(tracker.streak(), 4u);
+  // A new refresh counter domain with an otherwise fresh exact ID starts at one, not five.
+  for (unsigned frame = 0; frame < 13; ++frame) {
+    const auto present = tracker_origin + (frame + 7) * tracker_refresh_ticks;
+    EXPECT_EQ(tracker.observe(8 + frame, tracker_feedback(8 + frame, 500 + frame, present), present + 1200),
+      frame == 12 ? tracker_status::ready : tracker_status::acquiring);
+    EXPECT_EQ(tracker.streak(), frame + 1);
+  }
+  EXPECT_TRUE(tracker.arm());
+}
+
+TEST(ShutterFeedbackTracker, ValidButSkippedIdsOrWrongPhysicalCadenceCannotAccumulateColdSamples) {
+  tracker_t tracker(1, 120000, tracker_frequency, 2000, 100);
+  tracker.observe(1, tracker_feedback(1, 100, tracker_origin), tracker_origin + 1200);
+  const auto second = tracker_origin + tracker_refresh_ticks;
+  tracker.observe(3, tracker_feedback(3, 101, second), second + 1200);
+  EXPECT_EQ(tracker.streak(), 1u);
+  // Counts increment once, but a 60 Hz clock is not a 120 Hz scanout interval.
+  const auto third = second + 2 * tracker_refresh_ticks;
+  tracker.observe(4, tracker_feedback(4, 102, third), third + 1200);
+  EXPECT_EQ(tracker.streak(), 1u);
+  const auto fourth = third + tracker_refresh_ticks;
+  tracker.observe(5, tracker_feedback(5, 103, fourth), fourth + 1200);
+  EXPECT_EQ(tracker.streak(), 2u);
+}
+
+TEST(ShutterFeedbackTracker, RepeatedEyesAndBothCounterWrapsPreserveExactContinuity) {
+  for (unsigned repeats : {1u, 2u, 3u, 4u}) {
+    SCOPED_TRACE(repeats);
+    tracker_t tracker(repeats, 120000, tracker_frequency, 2000, 100, 2);
+    const auto first_refresh = UINT32_MAX - repeats + 1;
+    EXPECT_EQ(tracker.observe(UINT32_MAX, tracker_feedback(UINT32_MAX, first_refresh, tracker_origin), tracker_origin + 1200), tracker_status::acquiring);
+    const auto second = tracker_origin + repeats * tracker_refresh_ticks;
+    EXPECT_EQ(tracker.observe(0, tracker_feedback(0, 0, second), second + 1200), tracker_status::ready);
+    ASSERT_TRUE(tracker.arm());
+    const auto third = second + repeats * tracker_refresh_ticks;
+    EXPECT_EQ(tracker.observe(1, tracker_feedback(1, repeats, third), third + 1200), tracker_status::accepted);
+  }
+}
+
+TEST(ShutterFeedbackTracker, SignedSyncOffsetsReconstructTheAcceptedPresentRatherThanTheNewerSyncSample) {
+  tracker_t tracker(2, 120000, tracker_frequency, 10000, 100, 2);
+  const auto first = tracker_origin;
+  // The sync sample was one physical refresh earlier than this present.
+  EXPECT_EQ(tracker.observe(1, tracker_feedback(1, 100, first, 1), first + 1200), tracker_status::acquiring);
+  EXPECT_EQ(tracker.last_present_qpc(), first);
+  const auto second = first + 2 * tracker_refresh_ticks;
+  // The sync sample is newer, so the accepted present is older by one physical refresh.
+  EXPECT_EQ(tracker.observe(2, tracker_feedback(2, 102, second, -1), second + tracker_refresh_ticks + 1200), tracker_status::ready);
+  ASSERT_TRUE(tracker.arm());
+  EXPECT_TRUE(tracker.fresh_for_emit(second + 120000));  // Exactly 10000 us from PRESENT.
+  EXPECT_FALSE(tracker.fresh_for_emit(second + 120001));
+  EXPECT_TRUE(tracker.failed());
+  EXPECT_EQ(tracker.last_present_qpc(), second);
+}
+
+TEST(ShutterFeedbackTracker, CallerBudgetAcceptsItsBoundaryAndRejectsDelayBeforeEmitterWithoutAdvancingPhase) {
+  tracker_t tracker(1, 120000, tracker_frequency, 180, 100, 2);
+  acquire_tracker(tracker);
+  const auto boundary = *tracker.last_present_qpc();
+  EXPECT_TRUE(tracker.fresh_for_emit(boundary + 180 * 12));
+  EXPECT_EQ(tracker.streak(), 2u);
+  EXPECT_FALSE(tracker.fresh_for_emit(boundary + 180 * 12 + 1));
+  EXPECT_TRUE(tracker.failed());
+  EXPECT_FALSE(tracker.arm());
+  const auto next = boundary + tracker_refresh_ticks;
+  EXPECT_EQ(tracker.observe(12, tracker_feedback(12, 1002, next), next + 1200), tracker_status::rejected);
+}
+
+TEST(ShutterFeedbackTracker, EveryArmedFeedbackViolationLatchesInsteadOfReacquiringOrRearming) {
+  enum class fault { missing, disjoint, unsupported, wrong_id, skipped_refresh, wrong_cadence, zero_qpc, future_present, future_sync, stale, oversized_offset, offset_min };
+  for (auto error : {fault::missing, fault::disjoint, fault::unsupported, fault::wrong_id, fault::skipped_refresh, fault::wrong_cadence,
+         fault::zero_qpc, fault::future_present, fault::future_sync, fault::stale, fault::oversized_offset, fault::offset_min}) {
+    SCOPED_TRACE(static_cast<int>(error));
+    tracker_t tracker(1, 120000, tracker_frequency, 2000, 100, 2);
+    acquire_tracker(tracker);
+    const auto next = tracker_origin + 2 * tracker_refresh_ticks;
+    auto feedback = tracker_feedback(12, 1002, next);
+    auto query = next + 1200;
+    switch (error) {
+      case fault::missing: feedback.present_count = 11; break;
+      case fault::disjoint: feedback.status = shutter::shutter_feedback_status_e::disjoint; break;
+      case fault::unsupported: feedback.status = shutter::shutter_feedback_status_e::unsupported; break;
+      case fault::wrong_id: feedback.present_count = 13; break;
+      case fault::skipped_refresh: ++feedback.refresh_count; ++feedback.sync_refresh_count; break;
+      case fault::wrong_cadence: feedback.sync_qpc += tracker_refresh_ticks; query += tracker_refresh_ticks; break;
+      case fault::zero_qpc: feedback.sync_qpc = 0; break;
+      case fault::future_present: query = next - 1; break;
+      case fault::future_sync: feedback.sync_qpc += tracker_refresh_ticks; ++feedback.sync_refresh_count; break;
+      case fault::stale: query = next + 24001; break;
+      case fault::oversized_offset: feedback.sync_refresh_count -= 2; break;
+      case fault::offset_min: feedback.sync_refresh_count = feedback.refresh_count + 0x80000000u; break;
+    }
+    EXPECT_EQ(tracker.observe(12, feedback, query), tracker_status::rejected);
+    EXPECT_TRUE(tracker.failed());
+    EXPECT_FALSE(tracker.arm());
+    EXPECT_FALSE(tracker.fresh_for_emit(next));
+    EXPECT_EQ(tracker.observe(12, tracker_feedback(12, 1002, next), next + 1200), tracker_status::rejected);
+  }
+}
+
+TEST(ShutterFeedbackTracker, InvalidPoliciesAndExtremeArithmeticNeverAuthorizeASequence) {
+  for (tracker_t tracker : {
+         tracker_t(0, 120000, tracker_frequency, 2000, 100), tracker_t(5, 120000, tracker_frequency, 2000, 100),
+         tracker_t(1, 0, tracker_frequency, 2000, 100), tracker_t(1, 120000, 0, 2000, 100),
+         tracker_t(1, 120000, tracker_frequency, -1, 100), tracker_t(1, 120000, tracker_frequency, 2000, -1),
+         tracker_t(1, 120000, tracker_frequency, 2000, 100, 0),
+         tracker_t(4, 1, std::numeric_limits<std::int64_t>::max(), 2000, 100)}) {
+    EXPECT_EQ(tracker.observe(1, tracker_feedback(1, 1, tracker_origin), tracker_origin), tracker_status::rejected);
+    EXPECT_FALSE(tracker.arm());
+  }
+  tracker_t tracker(1, 120000, tracker_frequency, 2000, 100);
+  auto overflow = tracker_feedback(1, 100, tracker_origin);
+  overflow.sync_qpc = std::numeric_limits<std::int64_t>::max() - 1;
+  --overflow.sync_refresh_count;
+  EXPECT_EQ(tracker.observe(1, overflow, std::numeric_limits<std::int64_t>::max()), tracker_status::acquiring);
+  EXPECT_EQ(tracker.streak(), 0u);
+  auto underflow = tracker_feedback(1, 100, tracker_origin);
+  underflow.sync_qpc = 1;
+  ++underflow.sync_refresh_count;
+  EXPECT_EQ(tracker.observe(1, underflow, tracker_origin), tracker_status::acquiring);
+  EXPECT_EQ(tracker.streak(), 0u);
+}
+
+TEST(ShutterFeedbackTracker, FractionalQpcRefreshShiftRoundsOnceAndKeepsTheMeasuredBoundary) {
+  tracker_t tracker(1, 120000, 10000001, 2000, 1, 2);
+  auto first = tracker_feedback(1, 100, tracker_origin);
+  first.sync_qpc = tracker_origin - 83333;
+  --first.sync_refresh_count;
+  EXPECT_EQ(tracker.observe(1, first, tracker_origin + 1000), tracker_status::acquiring);
+  EXPECT_EQ(tracker.last_present_qpc(), tracker_origin);
+  auto second = first;
+  second.present_count = 2;
+  ++second.refresh_count;
+  ++second.sync_refresh_count;
+  second.sync_qpc += 83334;
+  EXPECT_EQ(tracker.observe(2, second, tracker_origin + 83334 + 1000), tracker_status::ready);
+  EXPECT_EQ(tracker.last_present_qpc(), tracker_origin + 83334);
 }

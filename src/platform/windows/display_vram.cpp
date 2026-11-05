@@ -9102,6 +9102,16 @@ namespace platf::dxgi {
           .flip_eyes = config.monitor_config.flip_eyes,
           .target_frametime_us = *emitter_eye_period,
         };
+        const auto emitter_limits = platf::open3d::timing_limits(emitter_settings.protocol, emitter_settings.signal_spacing_us);
+        const auto host_age_budget_us = emitter_limits ?
+                                          static_cast<std::int64_t>(*emitter_eye_period) - emitter_settings.frame_delay_us -
+                                            emitter_settings.frame_duration_us - emitter_settings.signal_spacing_us -
+                                            emitter_limits->min_period_tail_base_us :
+                                          0;
+        if (host_age_budget_us <= 0) {
+          fail("the shutter profile leaves no time for current-eye presentation feedback");
+          return;
+        }
         if (!emitter.connect(emitter_settings, emitter_setup_stop.get_token())) {
           if (!stopped()) {
             fail("could not configure and verify the selected USB emitter");
@@ -9115,8 +9125,25 @@ namespace platf::dxgi {
           return counter.QuadPart;
         };
         LARGE_INTEGER qpc_frequency {};
-        QueryPerformanceFrequency(&qpc_frequency);
+        if (!QueryPerformanceFrequency(&qpc_frequency) || qpc_frequency.QuadPart <= 0) {
+          fail("the Windows presentation clock is unavailable");
+          return;
+        }
+        // Cold DWM/MPO transitions can publish stale IDs or switch refresh-counter domains
+        // without a disjoint HRESULT. Establish twelve consecutive intervals before any IR.
+        constexpr unsigned acquisition_samples = 13;
+        constexpr std::int64_t cadence_tolerance_us = 100;
+        detail::shutter_feedback_tracker_t feedback_tracker {
+          static_cast<unsigned>(eye_repeats), config.target_refresh_millihz, qpc_frequency.QuadPart,
+          host_age_budget_us, cadence_tolerance_us, acquisition_samples,
+        };
+        const auto acquisition_wait = std::chrono::milliseconds {
+          std::clamp<std::int64_t>((static_cast<std::int64_t>(*emitter_eye_period) * 3 + 999) / 1000, 25, 250)
+        };
+        std::optional<std::chrono::steady_clock::time_point> acquisition_deadline;
+        unsigned acquisition_presents = 0;
         std::optional<detail::shutter_feedback_t> first_feedback;
+        bool feedback_disjoint = false;
         HRESULT flush_result = S_FALSE;
         std::int64_t flush_start_qpc = 0;
         std::int64_t flush_end_qpc = 0;
@@ -9138,6 +9165,7 @@ namespace platf::dxgi {
               statistics.SyncQPCTime.QuadPart,
               static_cast<std::int32_t>(queried),
             };
+            feedback_disjoint |= feedback.status == detail::shutter_feedback_status_e::disjoint;
             if (!first_feedback) {
               first_feedback = feedback;
             }
@@ -9156,6 +9184,7 @@ namespace platf::dxgi {
           },
         };
         ID3D11Texture2D *pair = nullptr;
+        const auto first_pair_deadline = std::chrono::steady_clock::now() + 5s;
         bool has_displayed = false;
         std::optional<std::uint32_t> previous_displayed_refresh;
         while (!stopped()) {
@@ -9165,14 +9194,42 @@ namespace platf::dxgi {
           }
           // The current packet stays keyed-locked through both eyes, including all repeated
           // refreshes. Publishing another capture can never change the second eye of this pair.
-          if (eye_clock.starts_pair()) {
+          if (!pair || (has_displayed && eye_clock.starts_pair())) {
             pair = shutter_frames.acquire_pair();
           }
           if (!pair) {
+            if (std::chrono::steady_clock::now() >= first_pair_deadline) {
+              fail("no stereo frame became available for monitor startup");
+              break;
+            }
             std::this_thread::sleep_for(1ms);
             continue;
           }
-          const auto latency = WaitForSingleObject(frame_latency_waitable, 50);
+          const bool acquiring = !feedback_tracker.armed();
+          if (acquiring) {
+            if (!acquisition_deadline) {
+              acquisition_deadline = std::chrono::steady_clock::now() + 2s;
+            }
+            if (std::chrono::steady_clock::now() >= *acquisition_deadline) {
+              BOOST_LOG(error) << "Local shutter clock acquisition expired: presents="sv << acquisition_presents
+                               << " stable_samples="sv << feedback_tracker.streak() << '.';
+              fail("DXGI could not establish a stable monitor clock before starting the glasses; returning to 2D");
+              break;
+            }
+          }
+          const auto slot_deadline = std::min(
+            std::chrono::steady_clock::now() + std::max(50ms, acquisition_wait),
+            acquiring ? *acquisition_deadline : std::chrono::steady_clock::time_point::max()
+          );
+          DWORD latency = WAIT_TIMEOUT;
+          while (!stopped() && std::chrono::steady_clock::now() < slot_deadline) {
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(slot_deadline - std::chrono::steady_clock::now());
+            latency = WaitForSingleObject(frame_latency_waitable,
+              static_cast<DWORD>(std::clamp<std::int64_t>(remaining.count(), 1, 50)));
+            if (latency != WAIT_TIMEOUT) {
+              break;
+            }
+          }
           if (latency != WAIT_OBJECT_0) {
             if (!stopped()) {
               fail("the physical output did not admit a bounded presentation slot");
@@ -9184,6 +9241,7 @@ namespace platf::dxgi {
           const D3D11_BOX eye_box {left, 0, 0, left + static_cast<UINT>(output_width), static_cast<UINT>(output_height), 1};
           shutter_context->CopySubresourceRegion(backbuffer.Get(), 0, 0, 0, 0, pair, 0, &eye_box);
           first_feedback.reset();
+          feedback_disjoint = false;
           flush_result = S_FALSE;
           flush_start_qpc = flush_end_qpc = 0;
           UINT before_present_count = 0;
@@ -9206,7 +9264,11 @@ namespace platf::dxgi {
             fail("DXGI could not identify the submitted eye frame");
             break;
           }
-          const auto confirmation = detail::await_shutter_present(feedback_io, requested_present, !has_displayed);
+          const auto feedback_timeout = acquiring ?
+                                          std::min(acquisition_wait, std::max(0ms,
+                                            std::chrono::duration_cast<std::chrono::milliseconds>(*acquisition_deadline - std::chrono::steady_clock::now()))) :
+                                          250ms;
+          const auto confirmation = detail::await_shutter_present(feedback_io, requested_present, acquiring, feedback_timeout);
           const auto confirmation_qpc = qpc_now();
           const auto log_feedback_failure = [&]() {
             const auto first = first_feedback.value_or(detail::shutter_feedback_t {});
@@ -9230,6 +9292,8 @@ namespace platf::dxgi {
                              << " qpc_frequency="sv << qpc_frequency.QuadPart
                              << " present_start_qpc="sv << present_start_qpc << " present_end_qpc="sv << present_end_qpc
                              << " confirmation_qpc="sv << confirmation_qpc
+                             << " acquiring="sv << acquiring << " stable_samples="sv << feedback_tracker.streak()
+                             << " host_age_budget_us="sv << host_age_budget_us
                              << " flush_hr="sv << util::log_hex(flush_result)
                              << " flush_start_qpc="sv << flush_start_qpc << " flush_end_qpc="sv << flush_end_qpc << '.';
 
@@ -9263,9 +9327,32 @@ namespace platf::dxgi {
           if (confirmation.status == detail::shutter_feedback_wait_status_e::cancelled) {
             break;
           }
+          if (acquiring) {
+            ++acquisition_presents;
+            if (confirmation.status != detail::shutter_feedback_wait_status_e::displayed || feedback_disjoint) {
+              // A timeout's last raw sample is diagnostic data, never display authorization.
+              feedback_tracker.observe(requested_present, detail::shutter_feedback_t {}, confirmation_qpc);
+            }
+            if (confirmation.status == detail::shutter_feedback_wait_status_e::displayed &&
+                feedback_tracker.observe(requested_present, confirmation.feedback, confirmation_qpc) == detail::shutter_feedback_tracker_status_e::ready &&
+                feedback_tracker.arm()) {
+              BOOST_LOG(info) << "Local shutter monitor clock acquired: unsignalled_presents="sv << acquisition_presents
+                              << " stable_intervals="sv << acquisition_samples - 1
+                              << " host_age_budget_us="sv << host_age_budget_us
+                              << " cadence_tolerance_us="sv << cadence_tolerance_us << '.';
+            }
+            // Hold the same left image and immutable pair while acquiring. The first eye must
+            // then continue this exact clock; startup never sends an emitter eye command.
+            continue;
+          }
           if (confirmation.status != detail::shutter_feedback_wait_status_e::displayed) {
             log_feedback_failure();
             fail("DXGI scanout feedback is unavailable, late, or invalid on this display configuration; returning to 2D");
+            break;
+          }
+          if (feedback_tracker.observe(requested_present, confirmation.feedback, confirmation_qpc) != detail::shutter_feedback_tracker_status_e::accepted) {
+            log_feedback_failure();
+            fail("the displayed eye lost its acquired refresh clock or arrived too late for the shutter window");
             break;
           }
           if (!eye_clock.observe_displayed(confirmation.feedback.refresh_count)) {
@@ -9274,6 +9361,11 @@ namespace platf::dxgi {
             break;
           }
           previous_displayed_refresh = confirmation.feedback.refresh_count;
+          if (!feedback_tracker.fresh_for_emit(qpc_now())) {
+            log_feedback_failure();
+            fail("the displayed eye became too old before its USB shutter command");
+            break;
+          }
           if (!emitter.signal(left_eye)) {
             fail("the USB emitter missed an eye boundary");
             break;

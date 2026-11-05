@@ -84,6 +84,19 @@ refresh/repetition combinations do not wrap a 16-bit filter value. Serial work i
 emitter connection or sync write stops the presentation attempt rather than continuing without
 synchronization.
 
+Before sending the first eye command, the presenter holds one left-eye image while acquiring the
+selected output's clock. It requires 13 consecutive exact present identities, 12 uninterrupted
+refresh intervals, and QPC intervals within 100 µs of the selected fixed refresh and repeat count.
+Cold timeouts and counter-domain changes restart acquisition within a two-second budget; the
+per-present wait scales with the eye interval. Waiting for the first stereo packet has a separate
+five-second limit. No eye commands are sent during this startup phase.
+
+Once armed, a missing frame, counter discontinuity, or invalid timestamp stops presentation. Each
+confirmed frame must also be recent enough for the configured delay, duration, spacing, and
+protocol close margin to fit the remaining eye interval. Freshness is checked again immediately
+before the USB command. These checks bound known host lateness; USB delivery time and panel
+response still require calibration with the physical kit.
+
 The presenter retains one stereo tuple for its complete left/right cycle. Host AI 3D and Game 3D
 keep their existing source, frame-attribution, fallback, HDR, and geometry rules. Monitor mode,
 device identity, and emitter configuration belong to this output surface; they do not alter those
