@@ -173,17 +173,37 @@ namespace config {
     return name == "virtual_display_only"sv;
   }
 
+  template<class It>
+  It find_inline_comment(It begin, It end) {
+    bool quoted = false;
+    bool escaped = false;
+    for (auto pos = begin; pos != end; ++pos) {
+      if (quoted && escaped) {
+        escaped = false;
+      } else if (quoted && *pos == '\\') {
+        escaped = true;
+      } else if (*pos == '"') {
+        quoted = !quoted;
+      } else if (!quoted && *pos == '#' && (pos == begin || whitespace(*(pos - 1)))) {
+        return pos;
+      }
+    }
+    return end;
+  }
+
   std::string to_string(const char *begin, const char *end) {
     std::string result;
-
-    KITTY_WHILE_LOOP(auto pos = begin, pos != end, {
-      auto comment = std::find(pos, end, '#');
-      auto endl = std::find_if(comment, end, endline);
-
-      result.append(pos, comment);
-
+    auto pos = begin;
+    while (pos != end) {
+      const auto endl = std::find_if(pos, end, endline);
+      result.append(pos, find_inline_comment(pos, endl));
       pos = endl;
-    })
+      // Keep list elements separated even when an entire comment line was removed. Scalar
+      // ranges already end before the inline comment; this pass must use the same hash policy.
+      while (pos != end && endline(*pos)) {
+        result.push_back(*pos++);
+      }
+    }
 
     return result;
   }
@@ -211,12 +231,9 @@ namespace config {
     parse_option(::std::string_view::const_iterator begin, ::std::string_view::const_iterator end) {
     begin = std::find_if_not(begin, end, whitespace);
     auto endl = std::find_if(begin, end, endline);
-    // Inline comments: '#' starts a comment at line start or when preceded by whitespace,
-    // so `key = value  # note` works while values containing '#' (URLs, fragments) survive.
-    auto endc = std::find(begin, endl, '#');
-    while (endc != endl && endc != begin && !whitespace(*(endc - 1))) {
-      endc = std::find(endc + 1, endl, '#');
-    }
+    // Only an unquoted '#' at line start/after whitespace begins a comment. The value-copy
+    // pass below shares this policy, including quoted JSON strings in multiline lists.
+    auto endc = find_inline_comment(begin, endl);
     endc = std::find_if(std::make_reverse_iterator(endc), std::make_reverse_iterator(begin), std::not_fn(whitespace)).base();
 
     auto eq = std::find(begin, endc, '=');
