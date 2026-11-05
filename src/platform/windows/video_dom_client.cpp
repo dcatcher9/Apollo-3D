@@ -6,6 +6,7 @@
 #include "video_dom_client.h"
 
 #include "misc.h"
+#include "src/logging.h"
 #include "src/platform/common.h"
 
 #include <algorithm>
@@ -409,6 +410,9 @@ namespace platf::video_dom {
 
       void publish(const status_e status) {
         std::lock_guard lock {publish_mutex_};
+        if (status == status_e::starting) {
+          logged_helper_failures_ = 0u;
+        }
         auto snapshot = std::make_shared<snapshot_t>();
         snapshot->status = status;
         snapshot->generation = generation_.fetch_add(
@@ -418,6 +422,36 @@ namespace platf::video_dom {
                                1;
         snapshot->received_at = std::chrono::steady_clock::now();
         snapshot_.store(std::move(snapshot), std::memory_order_release);
+        warn_helper_failure(status);
+      }
+
+      // Publication can begin in a disabled subtitle context, so tracker admission logs cannot
+      // diagnose a missing helper. Report each infrastructure failure once per worker lifetime;
+      // automatic retries and alternating helper heartbeats never repeat the same warning.
+      // Called under publish_mutex_, after the fail-closed snapshot has already been stored.
+      void warn_helper_failure(const status_e status) noexcept {
+        std::uint32_t bit = 0u;
+        switch (status) {
+          case status_e::helper_missing: bit = 1u << 0u; break;
+          case status_e::launch_failed: bit = 1u << 1u; break;
+          case status_e::helper_exited: bit = 1u << 2u; break;
+          case status_e::protocol_error: bit = 1u << 3u; break;
+          case status_e::stale: bit = 1u << 4u; break;
+          case status_e::unavailable: bit = 1u << 5u; break;
+          default: return;
+        }
+        if ((logged_helper_failures_ & bit) != 0u) {
+          return;
+        }
+        logged_helper_failures_ |= bit;
+        try {
+          BOOST_LOG(warning) << "Chromium video-DOM helper unavailable (" << status_name(status)
+                             << "); browser video authority remains disabled while the client retries."
+                             << (status == status_e::helper_missing ?
+                                   " Expected tools/video-dom-info.exe beside the host executable." : "");
+        } catch (...) {
+          // Diagnostics must not change helper publication or worker recovery.
+        }
       }
 
       void publish_noexcept(const status_e status) noexcept {
@@ -451,6 +485,7 @@ namespace platf::video_dom {
           received_at
         );
         snapshot_.store(std::move(snapshot), std::memory_order_release);
+        warn_helper_failure(record.status);
       }
 
       void run(const std::stop_token stop) noexcept {
@@ -593,6 +628,7 @@ namespace platf::video_dom {
 
       mutable std::mutex lifecycle_mutex_;
       mutable std::mutex publish_mutex_;
+      std::uint32_t logged_helper_failures_ {}; // Guarded by publish_mutex_.
       detail::lifecycle_t lifecycle_;
       std::jthread worker_;
       std::atomic<std::uint64_t> generation_ {};
