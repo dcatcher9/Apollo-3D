@@ -2,7 +2,8 @@
 """Run/validate file-fed actual completed current-outline compositor sidecars.
 
 This is a renderer qualification, not an extension of ordinary metric or live-capture authority.
-The native harness retains its legacy sbs_* metric images and writes the selected draw separately.
+The native harness writes ordinary Base metric images and selected shared draws separately.
+Historical schemas retain their original ordinary-renderer label and never qualify current policy.
 """
 from __future__ import annotations
 
@@ -397,9 +398,10 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
     if type(schema) is int and schema >= 6:
         root_fields.add("foreground_edge_program_ready")
     _closed(document, root_fields, "qualification manifest")
-    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4, 5, 6} and
+    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4, 5, 6, 7} and
              document["status"] == "COMPLETE" and document["role"] == ROLE and
-             document["ordinary_metric_artifacts"] == "unchanged-legacy-native-matte-renderer" and
+             document["ordinary_metric_artifacts"] == ("authenticated-ordinary-base-renderer-v1" if schema == 7 else
+                                                        "unchanged-legacy-native-matte-renderer") and
              document["live_capture"] is False and document["source_transfer"] == "encoded-srgb" and
              document["scheduling_authority"] == "ordered-authored-full-source-observations",
              "qualification scope/version is unsupported")
@@ -452,7 +454,7 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
                          if path.is_file()}
         _require(stages == actual_stages, "producer stage artifact coverage differs")
     return {"schema": 1, "status": "PASS", "frame_count": len(outcomes),
-            "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] == 6,
+            "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] == 7,
             "selected_current_frames": sum(item[3] == 3 for item in outcomes),
             "background_valid_frames": sum(item[4] == 1 for item in outcomes) if document["schema"] < 4 else 0,
             "shared_warp_frames": len(outcomes) if document["schema"] >= 4 else 0,

@@ -323,24 +323,24 @@ namespace models::research_current_outline_selected_matte_v2 {
                 std::is_nothrow_move_constructible_v<resources_t> &&
                 std::is_nothrow_move_assignable_v<resources_t>);
 
-  // Two private readonly PS slots7/8; normal recorder owns literal t0..6/b2/b3. Scope ends
+  // One private readonly PS slot7; normal recorder owns literal t0..6/b2/b3. Scope ends
   // before any next estimator mutation. No readback, predicate change or completed-authority grant.
   class scoped_receipt_t {
     ID3D11DeviceContext *context_=nullptr;
-    std::array<ComPtr<ID3D11ShaderResourceView>,2> previous_;
+    ComPtr<ID3D11ShaderResourceView> previous_;
   public:
     scoped_receipt_t()=default;scoped_receipt_t(const scoped_receipt_t&)=delete;
     scoped_receipt_t&operator=(const scoped_receipt_t&)=delete;
-    bool bind(ID3D11DeviceContext*c,ID3D11ShaderResourceView*receipt,ID3D11ShaderResourceView*original_legacy) {
-      if(!c||!receipt||!original_legacy||c->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
-      ComPtr<ID3D11Device>a,b,d;c->GetDevice(&a);receipt->GetDevice(&b);original_legacy->GetDevice(&d);
-      if(a.Get()!=b.Get()||a.Get()!=d.Get())return false;
+    bool bind(ID3D11DeviceContext*c,ID3D11ShaderResourceView*receipt) {
+      if(!c||!receipt||c->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
+      ComPtr<ID3D11Device>a,b;c->GetDevice(&a);receipt->GetDevice(&b);
+      if(a.Get()!=b.Get())return false;
       ComPtr<ID3D11Predicate>p;BOOL v=FALSE;c->GetPredication(&p,&v);if(p)return false;
-      ID3D11ShaderResourceView*old[2]{};c->PSGetShaderResources(7,2,old);
-      for(UINT i=0;i<2;++i)previous_[i].Attach(old[i]);
-      context_=c;ID3D11ShaderResourceView*next[2]{receipt,original_legacy};c->PSSetShaderResources(7,2,next);return true;
+      ID3D11ShaderResourceView*old=nullptr;c->PSGetShaderResources(7,1,&old);
+      previous_.Attach(old);
+      context_=c;c->PSSetShaderResources(7,1,&receipt);return true;
     }
-    ~scoped_receipt_t(){if(context_){ID3D11ShaderResourceView*p[2]{previous_[0].Get(),previous_[1].Get()};context_->PSSetShaderResources(7,2,p);}}
+    ~scoped_receipt_t(){if(context_){auto*p=previous_.Get();context_->PSSetShaderResources(7,1,&p);}}
   };
 } // namespace models::research_current_outline_selected_matte_v2
 #endif

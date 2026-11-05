@@ -2058,9 +2058,9 @@ namespace sbs_bench {
                                       const scene_cache_metadata &metadata,
                                       std::string_view status,
                                       std::size_t processed_count) {
-      // Schema 3: offline conversion caches the authenticated Depth Coordinate V2 geometry and
-      // pins both halves of the path: the producer closure and the exact live renderer closure.
-      // The "depth" section carries the SIGNED one-eye final-parallax field (source-U units,
+      // Diagnostic scene cache schema 5 pins the producer and ordinary Base renderer closures.
+      // Production follow conversion uses shared subtitles and does not write/replay this cache.
+      // The "depth" section carries the SIGNED one-eye Base-parallax field (source-U units,
       // |value| <= the direct representation limit), and "state" carries the complete ParallaxState the
       // live renderer authenticates per pixel. Legacy pop/subject/adaptive knobs are gone; the
       // renderer identity and producer closure make the geometry provenance explicit.
@@ -4654,11 +4654,18 @@ namespace sbs_bench {
       }
     }
     current_outline_qualification::draw_t current_outline_draw;
-    if (o.current_outline_qualification) {
+    bool current_outline_draw_ready = false;
+    bool follow_subtitle_fallback_logged = false;
+    if (o.follow || o.current_outline_qualification) {
       std::string qualification_error;
-      if (!estimator || !current_outline_draw.prepare(dev.Get(), *estimator, fs::path(SUNSHINE_SHADERS_DIR), qualification_error)) {
-        BOOST_LOG(error) << "sbs-bench: current-outline qualification setup failed: " << qualification_error;
-        return 5;
+      current_outline_draw_ready = estimator && current_outline_draw.prepare(dev.Get(), *estimator, fs::path(SUNSHINE_SHADERS_DIR), qualification_error);
+      if (!current_outline_draw_ready) {
+        if (o.current_outline_qualification) {
+          BOOST_LOG(error) << "sbs-bench: current-outline qualification setup failed: " << qualification_error;
+          return 5;
+        }
+        BOOST_LOG(warning) << "sbs-bench: shared subtitles unavailable; follow conversion retains ordinary Base: " << qualification_error;
+        follow_subtitle_fallback_logged = true;
       }
     }
 
@@ -6764,14 +6771,14 @@ namespace sbs_bench {
         continue;
       }
 
-      // Composite (mirrors display_vram::convert()'s SBS block): probe reprojection.
+      // Composite the ordinary Base diagnostic. Selected shared output is recorded separately.
       const auto comp_t0 = std::chrono::steady_clock::now();
       const bool time_warp = warp_disjoint && warp_start && warp_end;
       if (time_warp) {
         ctx->Begin(warp_disjoint.Get());
         ctx->End(warp_start.Get());
       }
-      // Live conversion and cache replay bind ordinary Base plus the joined glyph tuple.
+      // Ordinary evaluation and cache replay use Base; the retained glyph tuple is diagnostic.
       // Direct replay binds its uploaded encoded field with the
       // estimator's cut-compat state.
       ID3D11ShaderResourceView *warp_depth =
@@ -6791,8 +6798,11 @@ namespace sbs_bench {
         .source_left = 0u, .source_top = 0u,
         .source_width = frame_width, .source_height = frame_height,
       };
-      const auto subtitle_render_cb = const_buffer(dev.Get(), subtitle_render);
-      if (!subtitle_render_cb) return 6;
+      Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_render_cb;
+      if (current_outline_draw_ready) {
+        subtitle_render_cb = const_buffer(dev.Get(), subtitle_render);
+        if (!subtitle_render_cb && o.current_outline_qualification) return 6;
+      }
       const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {sbs_rtv.Get(), nullptr},
         .render_target_count = 1u,
@@ -6804,15 +6814,21 @@ namespace sbs_bench {
           in_srv.Get(),
           warp_depth,
           warp_state,
-          est.subtitle_glyph_matte.Get(),
-          est.subtitle_contour_source.Get(),
-          est.subtitle_condition_params.Get(),
-          est.subtitle_contour_identity.Get(),
+          nullptr, nullptr, nullptr, nullptr,
         },
         .geometry_constants = cb,
-        .subtitle_constants = subtitle_render_cb.Get(),
+        .subtitle_constants = nullptr,
       };
-      if (!platf::dxgi::record_host_sbs_v2_draw(ctx.Get(), draw_command)) {
+      bool follow_shared_draw = false;
+      if (o.follow && current_outline_draw_ready && subtitle_render_cb) {
+        std::string shared_error;
+        follow_shared_draw = current_outline_draw.record(ctx.Get(), draw_command, sbs_rtv.Get(), est, subtitle_render_cb.Get(), nullptr, shared_error);
+        if (!follow_shared_draw && !follow_subtitle_fallback_logged) {
+          BOOST_LOG(warning) << "sbs-bench: follow subtitle authority unavailable; retaining ordinary Base: " << shared_error;
+          follow_subtitle_fallback_logged = true;
+        }
+      }
+      if (!follow_shared_draw && !platf::dxgi::record_host_sbs_v2_draw(ctx.Get(), draw_command)) {
         BOOST_LOG(error) << "sbs-bench: production V2 draw operands are incomplete";
         return 6;
       }
@@ -6887,7 +6903,7 @@ namespace sbs_bench {
         }
         current_outline_qualification::evidence_t evidence;
         std::string qualification_error;
-        if (!current_outline_draw.record(ctx.Get(), draw_command, qualified_sbs_rtv.Get(), est, evidence, qualification_error)) {
+        if (!current_outline_draw.record(ctx.Get(), draw_command, qualified_sbs_rtv.Get(), est, subtitle_render_cb.Get(), &evidence, qualification_error)) {
           BOOST_LOG(error) << "sbs-bench: selected-compositor draw qualification failed: " << qualification_error;
           return 6;
         }
@@ -7542,7 +7558,7 @@ namespace sbs_bench {
                                        std::string {};
       const auto copied_timeline = fs::path(o.out) / "current-outline" / "observation.timeline";
       fs::copy_file(o.observation_timeline, copied_timeline, fs::copy_options::none, ec);
-      if (ec || executable_digest.empty() || qualified_composite_frames.size() != completed_frame_count || sha256_file_hex(copied_timeline) != observation_timeline_sha256 || !est.raw_model_provenance || !publish_json_atomically(fs::path(o.out) / "current_outline_qualification.json", {{"schema", 6u}, {"status", "COMPLETE"}, {"role", "file-fed-actual-completed-current-outline-compositor"}, {"ordinary_metric_artifacts", "unchanged-legacy-native-matte-renderer"}, {"live_capture", false}, {"scheduling_authority", "ordered-authored-full-source-observations"}, {"source_transfer", "encoded-srgb"}, {"frame_count", completed_frame_count}, {"executable_sha256", executable_digest}, {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema}, {"coordinate_contract_sha256", models::depth_coordinate_v2::contract_canonical_sha256}, {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256}, {"selector_source_closure_sha256", models::current_outline_runtime::selector_closure}, {"shared_warp_source_closure_sha256", models::host_sbs_shared_ui_warp::closure}, {"composition_source_closures", {{"source5", models::current_outline_runtime::source5_closure}, {"colour", models::current_outline_runtime::colour_closure}, {"components", models::current_outline_runtime::components_closure}, {"enclosure", models::current_outline_runtime::enclosure_closure}, {"roi", models::current_outline_runtime::roi_closure}, {"outline", models::current_outline_runtime::outline_closure}, {"inside", models::current_outline_runtime::inside_closure}, {"selector", models::current_outline_runtime::selector_closure}, {"stability", models::current_outline_runtime::stability_closure}, {"hole", models::current_outline_runtime::hole_closure}, {"coverage", models::current_outline_runtime::coverage_closure}, {"foreground_edge", models::current_outline_runtime::foreground_edge_closure}}}, {"hole_program_ready", qualified_hole_program_ready}, {"coverage_program_ready", qualified_coverage_program_ready}, {"foreground_edge_program_ready", qualified_foreground_edge_program_ready}, {"observation_timeline", {"current-outline/observation.timeline", observation_timeline_sha256}}, {"model", est.raw_model_provenance->depth_model}, {"model_url", est.raw_model_provenance->depth_model_url}, {"onnx_sha256", est.raw_model_provenance->onnx_sha256}, {"raw_coordinate_scale", est.parallax_v2_raw_coordinate_scale}, {"frames", qualified_composite_frames}})) {
+      if (ec || executable_digest.empty() || qualified_composite_frames.size() != completed_frame_count || sha256_file_hex(copied_timeline) != observation_timeline_sha256 || !est.raw_model_provenance || !publish_json_atomically(fs::path(o.out) / "current_outline_qualification.json", {{"schema", 7u}, {"status", "COMPLETE"}, {"role", "file-fed-actual-completed-current-outline-compositor"}, {"ordinary_metric_artifacts", "authenticated-ordinary-base-renderer-v1"}, {"live_capture", false}, {"scheduling_authority", "ordered-authored-full-source-observations"}, {"source_transfer", "encoded-srgb"}, {"frame_count", completed_frame_count}, {"executable_sha256", executable_digest}, {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema}, {"coordinate_contract_sha256", models::depth_coordinate_v2::contract_canonical_sha256}, {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256}, {"selector_source_closure_sha256", models::current_outline_runtime::selector_closure}, {"shared_warp_source_closure_sha256", models::host_sbs_shared_ui_warp::closure}, {"composition_source_closures", {{"source5", models::current_outline_runtime::source5_closure}, {"colour", models::current_outline_runtime::colour_closure}, {"components", models::current_outline_runtime::components_closure}, {"enclosure", models::current_outline_runtime::enclosure_closure}, {"roi", models::current_outline_runtime::roi_closure}, {"outline", models::current_outline_runtime::outline_closure}, {"inside", models::current_outline_runtime::inside_closure}, {"selector", models::current_outline_runtime::selector_closure}, {"stability", models::current_outline_runtime::stability_closure}, {"hole", models::current_outline_runtime::hole_closure}, {"coverage", models::current_outline_runtime::coverage_closure}, {"foreground_edge", models::current_outline_runtime::foreground_edge_closure}}}, {"hole_program_ready", qualified_hole_program_ready}, {"coverage_program_ready", qualified_coverage_program_ready}, {"foreground_edge_program_ready", qualified_foreground_edge_program_ready}, {"observation_timeline", {"current-outline/observation.timeline", observation_timeline_sha256}}, {"model", est.raw_model_provenance->depth_model}, {"model_url", est.raw_model_provenance->depth_model_url}, {"onnx_sha256", est.raw_model_provenance->onnx_sha256}, {"raw_coordinate_scale", est.parallax_v2_raw_coordinate_scale}, {"frames", qualified_composite_frames}})) {
         BOOST_LOG(error) << "sbs-bench: cannot publish complete selected-compositor qualification";
         return 8;
       }

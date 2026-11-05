@@ -51,7 +51,7 @@ namespace platf::sbs_debug {
     std::string program = "not-observed", pixel_shader_closure;
     std::string shared_pin_source_closure;
     std::string unavailable_reason = "no successful attributable draw";
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> matte, legacy_matte, background;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> matte, background;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_receipt, background_proof;
     Microsoft::WRL::ComPtr<ID3D11Buffer> expected, source_c24, geometry_constants, subtitle_constants;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shared_pin_weights, shared_pin_field, shared_pin_rows;
@@ -59,7 +59,7 @@ namespace platf::sbs_debug {
     Microsoft::WRL::ComPtr<ID3D11Buffer> shared_pin_geometry;
 
     void release_resources() noexcept {
-      matte.Reset(); legacy_matte.Reset(); background.Reset(); selected_receipt.Reset(); background_proof.Reset();
+      matte.Reset(); background.Reset(); selected_receipt.Reset(); background_proof.Reset();
       expected.Reset(); source_c24.Reset(); geometry_constants.Reset(); subtitle_constants.Reset();
       shared_pin_weights.Reset(); shared_pin_field.Reset(); shared_pin_rows.Reset();
       shared_pin_mapping.Reset(); shared_pin_boundary.Reset(); shared_pin_geometry.Reset();
@@ -209,17 +209,19 @@ namespace platf::sbs_debug {
    *
    * model_input and raw_depth are immutable estimator snapshots. warp_depth is a non-owning alias
    * used only to prove that production V2 consumed ordinary Base (or its unconditioned Final alias); it is never
-   * staged or serialized separately. That single authenticated final artifact is full-source-U in
-   * ordinary mode and ROI-local-U in window-region mode. ROI renderer authority is the pair of
-   * that ROI-local field and depth_input_region's scale/outside-collar embedding. The
+   * staged or serialized separately. Ordinary geometry authority is immutable Base plus the
+   * depth_input_region scale/outside-collar embedding for ROI-local source-U. The separately
+   * protected Final field never supplies ordinary render authority. The
    * adaptive_state/depth_frame_state pair is optional comparison-only evidence from the retained
    * scene-cut bridge; it never authorizes a dump or controls live geometry. The immutable V2
    * candidate feeds shadow_vertical_majorant (the exact upper-envelope diagnostic) and
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
    * shadow_base_final_parallax. When OCR8 and UIP4 are active, the compact publication record,
    * current UI-plane state, and exact native contour support condition that Base into shadow_final_parallax;
-   * empty current authority copies Base bit for bit. That field remains an independently authenticated diagnostic. Live rendering selects the ordinary Base inverse or analytic UI plane using the native glyph matte and SCP4. In
-   * ROI mode it remains crop-local and is not by itself a full-source position field.
+   * empty current authority copies Base bit for bit. That field remains an independently
+   * authenticated diagnostic. Live subtitles use a separately prepared shared pin field; missing
+   * subtitle authority preserves ordinary Base. In ROI mode the diagnostic field remains
+   * crop-local and is not by itself a full-source position field.
    * shadow_coordinate is allocated and written only for this explicit
    * dump; it is never a live resource. V2 supplies an exact fixed-point inverse warp_map when its
    * matching dump-only

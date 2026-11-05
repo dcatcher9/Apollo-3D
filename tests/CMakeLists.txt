@@ -129,6 +129,10 @@ target_link_libraries(${PROJECT_NAME}
         ${SUNSHINE_EXTERNAL_LIBRARIES}
         gtest
         ${PLATFORM_LIBRARIES})
+if(WIN32)
+    # D3DReflect's interface GUID is provided by the Windows GUID library on MinGW.
+    target_link_libraries(${PROJECT_NAME} dxguid)
+endif()
 target_compile_definitions(${PROJECT_NAME} PUBLIC ${SUNSHINE_DEFINITIONS} ${TEST_DEFINITIONS})
 add_library(game3d_reshade_version_fixture SHARED fixtures/game3d_reshade_version.rc)
 set_target_properties(game3d_reshade_version_fixture PROPERTIES LINKER_LANGUAGE CXX)

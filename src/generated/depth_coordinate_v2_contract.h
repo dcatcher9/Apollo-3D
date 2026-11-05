@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 127u;
-  inline constexpr std::uint32_t contract_tag = 0x2B6FE941u;
-  inline constexpr std::string_view contract_canonical_sha256 = "dc007fd6ab26b4a5acd0809d7a2e9e9a65b56b4efd94f287bbb7297a5f7d3e85";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "2b6fe94121f5c8d36b7498a9cc4a5d918c2a68e0cb0feb54258f741f66e41586";
+  inline constexpr std::uint32_t contract_schema = 128u;
+  inline constexpr std::uint32_t contract_tag = 0x4D680D18u;
+  inline constexpr std::string_view contract_canonical_sha256 = "6eb37c930253ff3f5d114cb3ab5e41af392772c212ccf8e4eaa4130bb095022a";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "4d680d180a4c9525388b7afa353c440c9cb29cbc54d4cdfac10ff31b8fdf51ec";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -30,7 +30,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::string_view final_parallax_reuse_policy = "reuse-holds-complete-base-state-matte-sct-scp-source-and-diagnostics-tuple";
   inline constexpr std::string_view final_parallax_invalid_policy = "fail-closed-flat";
   inline constexpr std::string_view final_parallax_current_rgb_policy = "bounded-matched-color-reuse-current-draw-can-only-revoke-matte";
-  inline constexpr std::string_view selected_map_contract_json = "{\"schema\":1,\"authority\":\"base-inverse-plus-analytic-ui-glyph-selector-v1\",\"base_inverse\":\"at-most-11-step-contractive-fixed-point-on-ordinary-base-with-existing-roi-embedding\",\"ui_source_u\":\"destination-source-u-plus-eye-sign-times-scp-target-times-analysis-width-over-full-source-width\",\"ui_source_v\":\"unchanged-source-v\",\"selector\":\"ui-if-either-base-or-ui-bilinear-color-footprint-has-any-surviving-native-glyph-contributor-otherwise-base\",\"contributor_policy\":\"saturate-u-then-clamp-finite-image-indices-positive-bilinear-weights-only\",\"current_rgb_revocation\":\"same-native-texel-display-srgb-fp16-roundtrip-linf-at-most-contour-history-rgb-distance-no-new-support\",\"combined_map\":\"potentially-discontinuous-selected-map-no-monotonicity-or-final-field-inverse-claim\",\"sample_policy\":\"one-native-bilinear-color-sample-at-selected-uv\",\"invalid_subtitle_policy\":\"preserve-authorized-base\",\"empty_policy\":\"joined-new-empty-matte-zero-scp-inactive-immediate-base-no-added-frame-delay\"}";
+  inline constexpr std::string_view selected_map_contract_json = "{\"schema\":2,\"authority\":\"authenticated-ordinary-base-inverse-v2\",\"base_inverse\":\"at-most-11-step-contractive-fixed-point-on-ordinary-base-with-existing-roi-embedding\",\"sample_policy\":\"one-native-bilinear-color-sample-at-authenticated-base-uv\",\"subtitle_policy\":\"ordinary-renderers-have-no-subtitle-selector\",\"shared_map\":\"separate-authenticated-same-draw-native-shared-pin-field-and-inverse-not-this-base-diagnostic\",\"invalid_subtitle_policy\":\"preserve-authorized-base-with-subtitle-permission-disabled\",\"invalid_depth_policy\":\"independent-flat-identity-renderer\",\"empty_policy\":\"joined-new-empty-matte-zero-scp-inactive-immediate-base-no-added-frame-delay\"}";
   inline constexpr std::string_view subtitle_glyph_matte_policy_json = "{\"schema\":1,\"source\":\"same-joined-native-current-support-and-display-rgba16f-v1\",\"steps\":3,\"rgb_distance\":0.12,\"brightness_split\":0.4,\"collar_radius_source_pixels\":3,\"collar_radius_squared\":10,\"body_policy\":\"three-synchronous-eight-neighbor-valid-rgba-rgb-geodesic-steps-same-peak-brightness-class-v1\",\"collar_policy\":\"37-native-offsets-dx-dy-within-three-and-squared-distance-at-most-ten-v1\",\"empty_policy\":\"same-current-authority-zero-without-delay\",\"history_policy\":\"no-new-history-or-observation-wait\",\"field_policy\":\"no-field-pitch-or-distance-budget-dilation\",\"format\":\"R32_UINT-literal-zero-or-one\"}";
   inline constexpr std::uint32_t subtitle_glyph_matte_schema = 1u;
   inline constexpr std::uint32_t subtitle_glyph_matte_steps = 3u;
@@ -38,7 +38,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr float subtitle_glyph_matte_brightness_split = 0.4f;
   inline constexpr std::uint32_t subtitle_glyph_matte_collar_radius_source_pixels = 3u;
   inline constexpr std::uint32_t subtitle_glyph_matte_collar_radius_squared = 10u;
-  inline constexpr std::string_view subtitle_geometry_authority = "native-glyph-matte-selects-analytic-ui-otherwise-ordinary-base-inverse-v1";
+  inline constexpr std::string_view subtitle_geometry_authority = "current-native-glyph-authorized-shared-ui-pin-field-with-ordinary-base-on-subtitle-failure-and-independent-flat-on-invalid-depth-v2";
   inline constexpr std::string_view subtitle_ui_plane_policy = "current-clearance-goal-first-visible-immediate-symmetric-source-time-exponential-native-slew-empty-reset-v3";
   inline constexpr std::uint32_t subtitle_ocr_contract_schema = 38u;
   inline constexpr std::uint32_t subtitle_contour_schema = 5u;

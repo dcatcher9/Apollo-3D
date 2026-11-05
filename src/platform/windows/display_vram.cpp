@@ -2655,8 +2655,8 @@ namespace platf::dxgi {
             models::host_sbs_subtitle_render_constants_t subtitle_constants;
             if (v2_draw_selected) {
               const bool complete_ui = queued_geometry_selected ?
-                                         queued_geometry->glyph_matte && queued_geometry->display_band && queued_geometry->condition_params && queued_geometry->contour_identity :
-                                         !est.subtitle_work_suppressed && est.subtitle_glyph_matte && est.subtitle_contour_source &&
+                                         queued_geometry->display_band && queued_geometry->condition_params && queued_geometry->contour_identity :
+                                         !est.subtitle_work_suppressed && est.subtitle_contour_source &&
                                            est.subtitle_condition_params && est.subtitle_contour_identity;
               subtitle_constants.enabled = draw_source_slot->subtitle_context_eligible &&
                                                subtitle_context.matches(draw_source_slot->subtitle_context_generation) &&
@@ -2681,8 +2681,7 @@ namespace platf::dxgi {
               warp_depth,
               queued_geometry_selected ? queued_geometry->state.Get() : v2_live_warp_selected ? est.shadow_state.Get() :
                                                                                         nullptr,
-              queued_geometry_selected ? queued_geometry->glyph_matte.Get() : v2_live_warp_selected ? est.subtitle_glyph_matte.Get() :
-                                                                                              nullptr,
+              nullptr, // Only a selected shared draw binds a native render mask below.
               queued_geometry_selected ? queued_geometry->display_band.Get() : v2_live_warp_selected ? est.subtitle_contour_source.Get() :
                                                                                                nullptr,
               queued_geometry_selected ? queued_geometry->condition_params.Get() : v2_live_warp_selected ? est.subtitle_condition_params.Get() :
@@ -2694,7 +2693,6 @@ namespace platf::dxgi {
             // Current-outline selected rendering uses only the authenticated
             // shared warp. Pending current-colour research is not this route.
             ID3D11ShaderResourceView *selected_receipt=nullptr;
-            ID3D11ShaderResourceView *selected_original_legacy=dump_warp_inputs[3];
             bool selected_unpredicated=true;
             if(selected_matte_ready){Microsoft::WRL::ComPtr<ID3D11Predicate> p;BOOL value=FALSE;device_ctx->GetPredication(&p,&value);selected_unpredicated=!p;}
             const bool selected_supported=selected_matte_ready&&
@@ -2770,7 +2768,6 @@ namespace platf::dxgi {
               shared_warp::request_t request;
               std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
               request.draw_srvs[7u] = selected_receipt;
-              request.draw_srvs[8u] = selected_original_legacy;
               request.geometry_constants = draw_command.geometry_constants;
               request.subtitle_constants = draw_command.subtitle_constants;
               request.sampler = draw_command.sampler;
@@ -2809,12 +2806,11 @@ namespace platf::dxgi {
             }
             if (!shared_warp_selected) {
               // Shared programs being ready does not guarantee THIS frame's
-              // preparation. Keep the original legacy M bound for the ABI,
-              // but disable its old subtitle UI permission: this draw uses
-              // only ordinary authenticated Base geometry and current RGB.
+              // preparation. This draw uses ordinary authenticated Base geometry
+              // and current RGB, with no native render mask or subtitle permission.
               // Finalize before receipt scopes, recorder binding and evidence.
-              dump_warp_inputs[3u] = selected_original_legacy;
-              draw_command.shader_resources[3u] = selected_original_legacy;
+              dump_warp_inputs[3u] = nullptr;
+              draw_command.shader_resources[3u] = nullptr;
               draw_command.pixel_shader = ordinary_pixel_shader;
               selected_receipt = nullptr;
               selected_draw = false;
@@ -2829,7 +2825,7 @@ namespace platf::dxgi {
               models::research_pending_current_colour_v1::scoped_negative_t negative;
               const bool bound = !pending_current_colour_selected || negative.bind(device_ctx.get(), pending_colour_lane.negative_expected(), pending_colour_lane.negative_receipt(), pending_colour_lane.current_constants().Get(), pending_colour_lane.current_snapshot().receipt.Get());
               models::research_current_outline_selected_matte_v2::scoped_receipt_t outline_scope;
-              const bool selected_bound = !selected_draw || outline_scope.bind(device_ctx.get(), selected_receipt, selected_original_legacy);
+              const bool selected_bound = !selected_draw || outline_scope.bind(device_ctx.get(), selected_receipt);
               shared_warp::scoped_binding_t shared_scope;
               const bool shared_bound = !selected_draw ||
                                         shared_scope.bind(device_ctx.get(), shared_warp_selected ? &current_shared_warp : nullptr);
@@ -2907,7 +2903,6 @@ namespace platf::dxgi {
                   }
                   e.matte = actual[3];
                   e.selected_receipt = actual[7];
-                  e.legacy_matte = actual[8];
                   e.background = actual[9];
                   e.background_proof = actual[11];
                   if (e.shared_pin_selected) {
@@ -2920,8 +2915,8 @@ namespace platf::dxgi {
                   e.geometry_constants = constants[0];
                   e.subtitle_constants = constants[1];
                   e.expected = constants[2];
-                  // Retired repair ownership fields retain their unavailable defaults. Actual
-                  // legacy slots above remain observed so diagnostics cannot invent absence.
+                  // Retired repair ownership fields retain their unavailable defaults. The
+                  // unused repair slots above remain observed so diagnostics cannot invent absence.
                   e.owner_serial = e.shared_pin_selected ? current_shared_warp.serial : 0u;
                   e.colour_key = {frame_id, draw_source_slot ? draw_source_slot->frame_id : 0u, draw_source_slot ? static_cast<std::uint64_t>(draw_source_slot->captured_at.time_since_epoch().count()) : 0u, static_cast<std::uint64_t>(subtitle_constants.color_mode)};
                   e.analysis_source_rect = {subtitle_constants.source_left, subtitle_constants.source_top, subtitle_constants.source_width, subtitle_constants.source_height};

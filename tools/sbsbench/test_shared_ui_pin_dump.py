@@ -89,6 +89,60 @@ class SharedUiPinDumpTests(unittest.TestCase):
     def test_legacy_packages_keep_their_original_attribution(self):
         self.assertFalse(pin.verify(self.root, {"renderer": {}})["shared_pin_selected"])
 
+    def current_attribution(self):
+        self.manifest["schema"] = 51
+        self.manifest["renderer"]["actual_draw_renderer"] = {
+            "schema": 2, "kind": pin.KIND, "source_closure_sha256": self.closure,
+            "mapping_role": pin.SHARED_ROLE, "evidence_artifact": pin.EVIDENCE}
+        self.evidence["schema"] = 2
+        self.evidence["binding_roles"] = {"t3": "actual_draw_M.u32"}
+        self.seal()
+
+    def test_current_shared_draw_has_versioned_base_diagnostic_attribution(self):
+        self.current_attribution()
+        summary = pin.verify(self.root, self.manifest)
+        self.assertTrue(summary["actual_map_verified"])
+        self.assertEqual(summary["evidence_schema"], 2)
+
+    def test_current_ordinary_base_cannot_be_relabelled_as_legacy_fallback(self):
+        self.current_attribution()
+        value = self.manifest["renderer"]["actual_draw_renderer"]
+        value.update(kind="ordinary-base-v1", source_closure_sha256="", mapping_role=pin.BASE_ROLE)
+        summary = pin.verify(self.root, self.manifest)
+        self.assertEqual(summary["kind"], "ordinary-base-v1")
+        self.assertFalse(summary["shared_pin_selected"])
+        self.assertFalse(summary["actual_map_verified"])
+        value["kind"] = "legacy-analytic-v1"
+        with self.assertRaisesRegex(ValueError, "unknown source or map"):
+            pin.verify(self.root, self.manifest)
+
+    def test_current_dump_requires_versioned_renderer_and_evidence(self):
+        historical = copy.deepcopy(self.manifest)
+        historical["schema"] = 51
+        with self.assertRaisesRegex(ValueError, "unknown schema"):
+            pin.verify(self.root, historical)
+        self.current_attribution()
+        for schema in (None, True, 1, 3):
+            with self.subTest(schema=schema):
+                self.evidence["schema"] = schema
+                self.seal()
+                with self.assertRaisesRegex(ValueError, "evidence schema"):
+                    pin.verify(self.root, self.manifest)
+
+    def test_current_evidence_rejects_retired_t8_role_and_artifact(self):
+        self.current_attribution()
+        self.evidence["binding_roles"]["t8"] = "actual_original_legacy_M.u32"
+        self.seal()
+        with self.assertRaisesRegex(ValueError, "retired legacy t8"):
+            pin.verify(self.root, self.manifest)
+        self.evidence["binding_roles"].pop("t8")
+        for container in (self.evidence["artifacts"], self.manifest["artifacts"]):
+            container["actual_original_legacy_M.u32"] = {"available": False}
+            self.seal()
+            with self.assertRaisesRegex(ValueError, "retired legacy t8"):
+                pin.verify(self.root, self.manifest)
+            container.pop("actual_original_legacy_M.u32")
+
     def test_shared_renderer_cannot_claim_legacy_map(self):
         self.manifest["renderer"]["mapping_artifacts_match_selected_renderer"] = True
         with self.assertRaisesRegex(ValueError, "legacy analytic map"):

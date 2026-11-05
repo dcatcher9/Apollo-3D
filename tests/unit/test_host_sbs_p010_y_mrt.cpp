@@ -1077,7 +1077,7 @@ TEST(HostSbsP010YMrtGpuTest, MatchesEstablishedFp16ThenPqLumaPathBitForBit) {
   }
 }
 
-TEST(HostSbsP010YMrtGpuTest, ActiveNativeGlyphSelectionMatchesPackedRgbAndLuma) {
+TEST(HostSbsP010YMrtGpuTest, SubtitleBindingsLeaveOrdinaryPackedRgbAndLumaUnchanged) {
   constexpr UINT width = 128u, height = 4u, depth_width = 16u, depth_height = 4u;
   std::vector<rgba16_bits_t> source(width * height, {0u, 0u, 0u, 0x3c00u});
   source[(height / 2u) * width + width / 2u] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
@@ -1092,11 +1092,15 @@ TEST(HostSbsP010YMrtGpuTest, ActiveNativeGlyphSelectionMatchesPackedRgbAndLuma) 
     reference_rgb, mrt_rgb, reference_y, mrt_y, error, false, nullptr, true)) << error;
   EXPECT_EQ(reference_rgb, mrt_rgb);
   EXPECT_EQ(reference_y, mrt_y);
-  const auto left_glyph = (height / 2u) * width * 2u + 66u;
-  const auto right_glyph = (height / 2u) * width * 2u + width + 62u;
-  ASSERT_LT(right_glyph, mrt_rgb.size());
-  EXPECT_EQ(mrt_rgb[left_glyph], source[(height / 2u) * width + width / 2u]);
-  EXPECT_EQ(mrt_rgb[right_glyph], source[(height / 2u) * width + width / 2u]);
+  std::vector<rgba16_bits_t> base_rgb, base_mrt_rgb;
+  std::vector<std::uint16_t> base_y, base_mrt_y;
+  ASSERT_TRUE(fixture.compare_paths(width, height, source, depth_width, depth_height,
+    base, make_authenticated_state(), {}, {video::colorspace_e::bt2020, false, 10u},
+    base_rgb, base_mrt_rgb, base_y, base_mrt_y, error)) << error;
+  EXPECT_EQ(reference_rgb, base_rgb);
+  EXPECT_EQ(mrt_rgb, base_mrt_rgb);
+  EXPECT_EQ(reference_y, base_y);
+  EXPECT_EQ(mrt_y, base_mrt_y);
 }
 
 TEST(HostSbsP010YMrtGpuTest, ActualP010YPlaneMatchesAtProductionPackedWidth) {

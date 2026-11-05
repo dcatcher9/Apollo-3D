@@ -27,7 +27,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import shared_ui_pin_dump  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 50
+DUMP_MANIFEST_SCHEMA = 51
 GPU_TRACE_RING_SCHEMA = 5
 GPU_TRACE_CONTRACT_SCHEMA = 6
 GPU_TRACE_DECODED_SCHEMA = 7
@@ -2398,7 +2398,7 @@ def _validate_final_parallax_manifest(document: Dict[str, Any]) -> Dict[str, Any
         "reuse_policy": contract.reuse_policy,
         "invalid_policy": contract.invalid_policy,
         "current_rgb_policy": contract.current_rgb_policy,
-        "warp_relation": "independent diagnostic; selected map consumes Base and the joined analytic glyph tuple",
+        "warp_relation": "independent diagnostic; ordinary mapping consumes immutable Base only",
     }
     if final != expected:
         raise ValueError("dump_manifest.json has an invalid final-parallax contract")
@@ -2451,10 +2451,9 @@ def _validate_warp_map_manifest(
     expected_validity = {
         "content": "derive from content_scale_x/content_scale_y and packed output coordinate",
         "inverse": (
-            "selected pre-clamp U from crop-local Base inverse with depth_input_region "
-            "embedding or analytic UI plane via native glyph matte"
+            "pre-clamp U from crop-local ordinary Base inverse with depth_input_region embedding"
             if required else
-            "selected pre-clamp U from ordinary Base inverse or analytic UI plane via native glyph matte"),
+            "pre-clamp U from ordinary Base inverse"),
         "mask": ("warp_mask.png red marks finite-source boundary extrapolation; V2 has no "
                  "internal owner or synthetic-fill path"),
     }
@@ -2561,6 +2560,8 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if not all(isinstance(value, dict) for value in
                (renderer, shadow, artifacts, dimensions)):
         raise ValueError("dump_manifest.json is missing its V2 geometry objects")
+    if "actual_original_legacy_M.u32" in artifacts:
+        raise ValueError("dump_manifest.json advertises retired render-only legacy t8 mask")
 
     preview_contract = document.get("float_previews")
     if preview_contract != {
@@ -2643,7 +2644,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             type(selected_map.get("render_enabled")) is not bool or
             {name: value for name, value in selected_map.items() if name != "render_enabled"} !=
             coordinate_contract.SELECTED_MAP):
-        raise ValueError("dump_manifest.json has an invalid analytic selected-map contract")
+        raise ValueError("dump_manifest.json has an invalid ordinary Base selected-map contract")
     final_parallax = _validate_final_parallax_manifest(document)
     warp_map = _validate_warp_map_manifest(
         document, artifacts, dimensions, input_mode,
@@ -2669,15 +2670,15 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             mapping_matches != (warp_map["available"] and not actual_renderer["shared_pin_selected"])):
         raise ValueError("dump_manifest.json has invalid V2 renderer request attribution")
 
-    expected_position = ('ordinary Base inverse + optional analytic UI glyph selector + depth_input_region embedding' if input_mode == "window-region" else 'ordinary Base inverse + optional analytic UI glyph selector') if selected else None
+    expected_position = ('ordinary Base inverse + depth_input_region embedding' if input_mode == "window-region" else 'ordinary Base inverse') if selected else None
     expected_authority = (
-        ("authenticated Base inverse plus analytic UI glyph selector and depth-input-region embedding"
+        ("authenticated ordinary Base inverse with depth-input-region embedding"
          if input_mode == "window-region" else
-         "authenticated-base-inverse-plus-analytic-ui-glyph-selector")
+         "authenticated-ordinary-base-inverse")
         if selected else None
     )
     expected_inverse = (
-        "at-most-11-step Base inverse plus analytic UI glyph selection; selected map may be discontinuous; no synthetic fill"
+        "at-most-11-step authenticated Base inverse; no subtitle selector or synthetic fill"
         if selected else None
     )
     expected_coordinate_role = (
@@ -2710,7 +2711,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "feeds the row majorant"
         if selected else None
     )
-    expected_final_role = 'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering' if selected else None
+    expected_final_role = 'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; shared pin field alone adds subtitle displacement' if selected else None
     expected_collar_defocus = ({
         "enabled": False,
         "role": ("disabled after live hand-boundary halo regression; live color uses one "
@@ -4623,8 +4624,8 @@ def _replay_subtitle_horizontal_conditioner(proposal: Any, original_base: Any, c
 
 def _verify_roi_exterior_zero_warp_map(
         dump_dir: Any, manifest: Dict[str, Any], input_region: Dict[str, Any],
-        final_parallax: Any, ui_target: float = 0.0) -> Dict[str, Any]:
-    """Prove exact-zero exterior samples from the selected full-source inverse map."""
+        final_parallax: Any) -> Dict[str, Any]:
+    """Prove exact-zero exterior samples from the ordinary Base inverse map."""
 
     import hashlib
     import os
@@ -4746,7 +4747,7 @@ def _verify_roi_exterior_zero_warp_map(
     ).astype(np.float32)
     maximum_embedded_magnitude = np.float32(
         np.float32(input_region["full_source_parallax_scale"]) *
-        np.float32(max(float(np.max(np.abs(final_parallax))), float(ui_target))))
+        np.float32(np.max(np.abs(final_parallax))))
     horizontal_slope = np.float32(
         input_region["horizontal_slope_source_u_per_source_u"])
     vertical_slope = np.float32(
@@ -4931,8 +4932,8 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
          ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
          recurrences recomputed from ``candidate``; the native Gaussian proposal and shared limiter chain
          exactly reproduce the independent protected Final diagnostic;
-      4. native matte, SCP4, joined source and exact rendered source authenticate the analytic
-         selected-map tuple independently of the diagnostic Final field.
+      4. native matte, SCP4, joined source and exact rendered source authenticate the retained
+         subtitle tuple independently of the ordinary Base map and diagnostic Final field.
 
     Returns a summary dict on success; raises ``ValueError`` on the first violation.
     """
@@ -5170,7 +5171,6 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
             manifest,
             input_region,
             fields["shadow_base_final_parallax"] if subtitle_live else fields["shadow_final_parallax"],
-            subtitle_summary["target"] if subtitle_live and subtitle_summary["active_level"] == 2 else 0.0,
         )
 
     return {

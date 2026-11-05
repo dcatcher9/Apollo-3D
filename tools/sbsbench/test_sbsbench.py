@@ -1980,7 +1980,9 @@ class EvalContractTests(unittest.TestCase):
         with open(live_shader_path, encoding="utf-8") as fh:
             live_shader = fh.read()
         self.assertIn("Texture2D<float> BaseParallax : register(t1);", live_shader)
-        self.assertIn('include/host_sbs_subtitle_render.hlsl', live_shader)
+        self.assertNotIn('include/host_sbs_subtitle_render.hlsl', live_shader)
+        self.assertNotIn('SelectSourceUV', live_shader)
+        self.assertIn('float2 sample_uv = ReprojectIfAuthorized(source_uv, eye_sign);', live_shader)
         self.assertNotIn("pop_strength", live_shader)
         self.assertNotIn("adaptive_ratio", live_shader)
 

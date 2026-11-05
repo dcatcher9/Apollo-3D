@@ -1,8 +1,8 @@
-// EXTERNAL PREPARED TEST: not compiled or executed.
-// Exact existing GPU fixture extraction; no CPU warp or model inference.
+// Authored presentation trajectories rendered through the production shared warp.
+// The explicit selected receipts test the consumer ABI; they are not producer evidence.
 /**
- * @file tests/unit/test_host_sbs_v2_live_warp.cpp
- * @brief Executable D3D11-WARP checks for the authenticated Host SBS V2 live renderer.
+ * @file tests/unit/test_host_sbs_subtitle_present_trajectory_gpu.cpp
+ * @brief Actual shared-warp RGB revocation and bounded packed-presentation checks.
  */
 #include <tests/tests_common.h>
 #include <src/video_depth_estimator.h>
@@ -37,6 +37,8 @@
 #include <src/host_sbs_shader_cache.h>
 #include <src/host_sbs_v2_geometry.h>
 #include <src/host_sbs_subtitle_render.h>
+#include <src/host_sbs_current_outline_selected_matte_gpu.h>
+#include <src/host_sbs_shared_ui_warp_runtime.h>
 #include <src/platform/windows/host_sbs_v2_renderer.h>
 #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
 
@@ -106,6 +108,7 @@ namespace {
       const bool fixed_eleven_reference = false,
       const bool hardware = false
     ) {
+      shared_subtitle_route = shader == warp_shader_e::live_main && !fixed_eleven_reference;
       mapping_output =
         shader == warp_shader_e::live_mapping ||
         shader == warp_shader_e::direct_mapping;
@@ -297,6 +300,7 @@ namespace {
         return false;
       }
 
+      if (shared_subtitle_route && !shared_programs.load(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
       return true;
     }
 
@@ -421,7 +425,8 @@ namespace {
 
       ComPtr<ID3D11Texture2D> matte_texture, snapshot_texture;
       ComPtr<ID3D11ShaderResourceView> matte_srv, snapshot_srv, condition_srv, identity_srv;
-      ComPtr<ID3D11Buffer> subtitle_buffer, condition_buffer, identity_buffer;
+      ComPtr<ID3D11Buffer> subtitle_buffer, condition_buffer, identity_buffer, receipt_buffer;
+      ComPtr<ID3D11ShaderResourceView> receipt_srv;
       if (subtitle) {
         if (subtitle->matte.size() != static_cast<std::size_t>(subtitle->width) * subtitle->height ||
             subtitle->snapshot.size() != subtitle->matte.size() ||
@@ -456,6 +461,22 @@ namespace {
             FAILED(device->CreateBuffer(&desc, &initial, &subtitle_buffer))) {
           error = "could not create glyph owner/plane/constants operands";
           return false;
+        }
+        if (shared_subtitle_route) {
+          // Authored current selector receipt, mirroring this fixture's complete SCT.
+          // The actual shared shader remains responsible for clock, geometry and RGB revocation.
+          namespace selected = models::research_current_outline_selected_matte_v2;
+          std::array<std::uint32_t, 64u> receipt {};
+          receipt[0u] = selected::tag;receipt[1u] = selected::schema;receipt[2u] = 3u;
+          std::copy_n(subtitle->identity.begin() + 8u, 12u, receipt.begin() + 4u);
+          std::copy_n(subtitle->identity.begin() + 4u, 4u, receipt.begin() + 16u);
+          std::copy_n(subtitle->identity.begin() + 20u, 2u, receipt.begin() + 20u);
+          receipt[24u] = 1u;receipt[25u] = models::depth_coordinate_v2::subtitle_contour_recipe;
+          std::copy(subtitle->identity.begin(), subtitle->identity.end(), receipt.begin() + 28u);
+          receipt[60u] = 71u;receipt[61u] = 9u;receipt[62u] = selected::algorithm;
+          if (!words_srv(receipt, receipt_buffer, receipt_srv)) {
+            error = "could not create authored current selected-mask receipt";return false;
+          }
         }
       }
 
@@ -521,11 +542,12 @@ namespace {
         ID3D11Buffer *direct_constants[] = {direct_constants_buffer.Get()};
         context->PSSetConstantBuffers(4, 1, direct_constants);
       }
+      const bool shared_draw = shared_subtitle_route && subtitle;
       const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {output_rtv.Get(), nullptr},
         .render_target_count = 1u,
         .vertex_shader = vertex_shader.Get(),
-        .pixel_shader = pixel_shader.Get(),
+        .pixel_shader = shared_draw ? shared_programs.program().pixel : pixel_shader.Get(),
         .viewport = viewport,
         .sampler = sampler.Get(),
         .shader_resources = {
@@ -540,7 +562,35 @@ namespace {
         .geometry_constants = geometry_buffer.Get(),
         .subtitle_constants = subtitle_buffer.Get(),
       };
-      const bool submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
+      models::host_sbs_shared_ui_warp::views_t shared_views;
+      if (shared_draw) {
+        const UINT crop_top = subtitle->constants.source_top + subtitle->identity[10u];
+        if (crop_top >= source_height || subtitle->height > source_height - crop_top) {
+          error = "trajectory shared native crop is outside the current source";return false;
+        }
+        const UINT band_top = crop_top > 0u ? crop_top - 1u : 0u;
+        const UINT band_end = std::min(source_height, crop_top + subtitle->height + 1u);
+        namespace shared = models::host_sbs_shared_ui_warp;
+        shared::request_t request;
+        std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
+        request.draw_srvs[7u] = receipt_srv.Get();
+        request.geometry_constants = geometry_buffer.Get();request.subtitle_constants = subtitle_buffer.Get();
+        request.sampler = sampler.Get();
+        if (!shared_owner.ensure(device.Get(), {source_width, source_height, band_top, band_end - band_top}, error) ||
+            !shared_owner.queue(context.Get(), shared_programs.program(), request, error) ||
+            !shared_owner.matches(context.Get(), request)) return false;
+        shared_views = shared_owner.views();
+      }
+      bool submitted = false;
+      {
+        models::research_current_outline_selected_matte_v2::scoped_receipt_t receipt_scope;
+        models::host_sbs_shared_ui_warp::scoped_binding_t shared_scope;
+        if (shared_draw && (!receipt_scope.bind(context.Get(), receipt_srv.Get()) ||
+            !shared_scope.bind(context.Get(), &shared_views))) {
+          error = "trajectory shared draw operand binding failed";return false;
+        }
+        submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
+      }
       ID3D11Buffer *null_constants = nullptr;
       context->PSSetConstantBuffers(4u, 1u, &null_constants);
       if (!submitted) {
@@ -628,6 +678,9 @@ namespace {
     ComPtr<ID3D11VertexShader> vertex_shader;
     ComPtr<ID3D11PixelShader> pixel_shader;
     ComPtr<ID3D11SamplerState> sampler;
+    bool shared_subtitle_route = false;
+    models::host_sbs_shared_ui_warp::programs_t shared_programs;
+    models::host_sbs_shared_ui_warp::resources_t shared_owner;
     bool mapping_output = false;
     bool direct_replay = false;
   };
@@ -751,7 +804,7 @@ TEST(HostSbsSubtitlePresentTrajectoryGpuTest, HeldTupleUsesActualCurrentBAndEmpt
   std::vector<std::byte> a_ui, a_base, b_held, b_base, empty_held, empty_base;
   ASSERT_TRUE(t.draw(t.a, &t.subtitle_a, a_ui)) << t.error;
   ASSERT_TRUE(t.draw(t.a, nullptr, a_base)) << t.error;
-  ASSERT_NE(a_ui, a_base) << "A must actually exercise native UI selection.";
+  ASSERT_NE(a_ui, a_base) << "A must actually exercise current shared UI pinning.";
   ASSERT_GT(gpu_white_pixels(a_ui), 0u);
   ASSERT_TRUE(t.draw(t.b, &t.subtitle_a, b_held)) << t.error;
   ASSERT_TRUE(t.draw(t.b, nullptr, b_base)) << t.error;
@@ -759,7 +812,7 @@ TEST(HostSbsSubtitlePresentTrajectoryGpuTest, HeldTupleUsesActualCurrentBAndEmpt
   EXPECT_EQ(gpu_white_pixels(b_held), 0u);
   ASSERT_TRUE(t.draw(t.empty, &t.subtitle_a, empty_held)) << t.error;
   ASSERT_TRUE(t.draw(t.empty, nullptr, empty_base)) << t.error;
-  EXPECT_EQ(empty_held, empty_base) << "Current empty RGB revokes old A at the real pixel shader.";
+  EXPECT_EQ(empty_held, empty_base) << "Current empty RGB revokes old A at the actual shared pin shader.";
   EXPECT_EQ(gpu_white_pixels(empty_held), 0u);
   EXPECT_EQ(t.subtitle_a.identity, identity_before);
   EXPECT_EQ(t.subtitle_a.matte, matte_before);

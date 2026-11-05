@@ -548,16 +548,19 @@ TEST(OfflineSbsWireContractTest, SceneCacheRejectsUnknownAndOverflowGeometry) {
   );
 }
 
-TEST(OfflineSbsWireContractTest, SceneCacheRequiresCompleteGlyphRenderDependencies) {
+TEST(OfflineSbsWireContractTest, SceneCacheRequiresCompleteRetainedGlyphTuple) {
   const auto valid = offline_sbs::wire::to_json(scene_cache());
-  EXPECT_EQ(valid.at("schema"), 4u);
+  EXPECT_EQ(valid.at("schema"), 5u);
+  EXPECT_EQ(valid.at("subtitle_tuple").at("schema"), 1u);
+  EXPECT_EQ(valid.at("subtitle_tuple").at("renderer"), "ordinary-base-inverse-renderer-v1");
   EXPECT_EQ(valid.at("depth").at("semantics"), "depth-coordinate-v2-signed-base-parallax-source-u");
-  for (unsigned mutation = 0u; mutation < 4u; ++mutation) {
+  for (unsigned mutation = 0u; mutation < 5u; ++mutation) {
     auto invalid = valid;
-    if (mutation == 0u) invalid["schema"] = 3u;
+    if (mutation == 0u) invalid["schema"] = 4u;
     if (mutation == 1u) invalid.erase("subtitle_tuple");
     if (mutation == 2u) invalid["subtitle_tuple"]["payload_suffixes"].erase(3u);
     if (mutation == 3u) invalid["subtitle_tuple"]["renderer"] = "final-field-only";
+    if (mutation == 4u) invalid["subtitle_tuple"]["renderer"] = "base-inverse-and-analytic-ui-glyph-selector";
     EXPECT_THROW(offline_sbs::wire::parse_scene_cache_contract(invalid),
                  offline_sbs::wire::contract_error) << mutation;
   }

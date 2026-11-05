@@ -130,17 +130,14 @@ EXPECTED_SHADER_IMPLEMENTATION_KEYS = {
 EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
-CANONICAL_SELECTED_MAP = {'schema': 1,
- 'authority': 'base-inverse-plus-analytic-ui-glyph-selector-v1',
+CANONICAL_SELECTED_MAP = {'schema': 2,
+ 'authority': 'authenticated-ordinary-base-inverse-v2',
  'base_inverse': 'at-most-11-step-contractive-fixed-point-on-ordinary-base-with-existing-roi-embedding',
- 'ui_source_u': 'destination-source-u-plus-eye-sign-times-scp-target-times-analysis-width-over-full-source-width',
- 'ui_source_v': 'unchanged-source-v',
- 'selector': 'ui-if-either-base-or-ui-bilinear-color-footprint-has-any-surviving-native-glyph-contributor-otherwise-base',
- 'contributor_policy': 'saturate-u-then-clamp-finite-image-indices-positive-bilinear-weights-only',
- 'current_rgb_revocation': 'same-native-texel-display-srgb-fp16-roundtrip-linf-at-most-contour-history-rgb-distance-no-new-support',
- 'combined_map': 'potentially-discontinuous-selected-map-no-monotonicity-or-final-field-inverse-claim',
- 'sample_policy': 'one-native-bilinear-color-sample-at-selected-uv',
- 'invalid_subtitle_policy': 'preserve-authorized-base',
+ 'sample_policy': 'one-native-bilinear-color-sample-at-authenticated-base-uv',
+ 'subtitle_policy': 'ordinary-renderers-have-no-subtitle-selector',
+ 'shared_map': 'separate-authenticated-same-draw-native-shared-pin-field-and-inverse-not-this-base-diagnostic',
+ 'invalid_subtitle_policy': 'preserve-authorized-base-with-subtitle-permission-disabled',
+ 'invalid_depth_policy': 'independent-flat-identity-renderer',
  'empty_policy': 'joined-new-empty-matte-zero-scp-inactive-immediate-base-no-added-frame-delay'}
 CANONICAL_FINAL_PARALLAX = {'schema': 4,
  'authority': 'authenticated-subtitle-conditioned-r32f-diagnostic-only',
@@ -250,7 +247,7 @@ CANONICAL_SUBTITLE_OCR = {'schema': 38,
                       'fully_active_value': 2,
                       'target_word': 5,
                       'tag': 877675347},
- 'geometry_authority': 'native-glyph-matte-selects-analytic-ui-otherwise-ordinary-base-inverse-v1',
+ 'geometry_authority': 'current-native-glyph-authorized-shared-ui-pin-field-with-ordinary-base-on-subtitle-failure-and-independent-flat-on-invalid-depth-v2',
  'ui_plane_policy': 'current-clearance-goal-first-visible-immediate-symmetric-source-time-exponential-native-slew-empty-reset-v3',
  'contour_policy': {'schema': 5,
                     'recipe': 27,
@@ -614,7 +611,7 @@ def validate_contract(
         if type(contract["subtitle_ocr"]["contour_policy"][name]) is not int:
             raise ValueError("subtitle_ocr.contour_policy layout words must be exact integers")
     if contract.get("selected_map") != CANONICAL_SELECTED_MAP:
-        raise ValueError("selected_map must exactly match the authenticated analytic glyph selector")
+        raise ValueError("selected_map must exactly match the ordinary authenticated Base inverse")
     if contract.get("final_parallax") != CANONICAL_FINAL_PARALLAX:
         raise ValueError(
             "final_parallax must exactly match the authenticated direct-render contract")

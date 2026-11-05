@@ -936,9 +936,10 @@ Strong detector probability plus native contrast selects palette anchors; it is 
 per-pixel protection bypass. Mode matching, bounded color-coherent tangents and fixed outline
 neighbors reject some unrelated scene edges without adding a frame confirmation wait. Positive
 diagnostic count preserves duplicate admission. Supported pixels seed the bounded same-frame native
-matte. Actual rendering selects the analytic UI source only at glyph or vacated-glyph footprints;
-other background samples use the ordinary Base mapping. The former interval extension and
-horizontal guard remain independently checked diagnostics, not the rendered subtitle mask.
+matte. Actual rendering uses one shared pin field over the current native glyphs and surrounding
+scene; ordinary Base remains the fallback when subtitle preparation or authority is unavailable.
+The analytic subtitle selector is removed. The former interval extension and horizontal guard
+remain independently checked diagnostics, not the rendered subtitle mask.
 Ordinary scene depth retains both axis guards.
 The plane's current clearance goal uses the existing cover-histogram conflict budgets; it is not
 an instantaneous continuation floor, the maximum scene depth, a guarantee of clearance for every

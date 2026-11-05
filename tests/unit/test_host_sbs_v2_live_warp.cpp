@@ -16,6 +16,7 @@
   #include <cstring>
   #include <d3d11.h>
   #include <d3dcompiler.h>
+  #include <d3d11shader.h>
   #include <filesystem>
   #include <fstream>
   #include <iterator>
@@ -89,6 +90,8 @@ namespace {
   enum class warp_shader_e {
     live_main,
     selected_outline,
+    selected_outline_mapping,
+    selected_outline_boundary,
     live_mapping,
     live_mask,
     direct_main,
@@ -151,11 +154,14 @@ namespace {
       }
       mapping_output =
         shader == warp_shader_e::live_mapping ||
-        shader == warp_shader_e::direct_mapping;
+        shader == warp_shader_e::direct_mapping ||
+        shader == warp_shader_e::selected_outline_mapping;
       direct_replay =
         shader == warp_shader_e::direct_main ||
         shader == warp_shader_e::direct_mapping;
-      selected_outline = shader == warp_shader_e::selected_outline;
+      selected_outline = shader == warp_shader_e::selected_outline ||
+        shader == warp_shader_e::selected_outline_mapping || shader == warp_shader_e::selected_outline_boundary;
+      shared_boundary_output = shader == warp_shader_e::selected_outline_boundary;
       constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
       D3D_FEATURE_LEVEL actual {};
       auto status = D3D11CreateDevice(
@@ -468,8 +474,7 @@ namespace {
       const bool readback_output = true,
       const current_outline_inputs_t *outline = nullptr
     ) {
-      // Even an absent selected receipt goes through the current shared program. It
-      // cannot fall back to the ordinary renderer's legacy subtitle selector.
+      // An absent selected receipt retains the shared renderer's ordinary Base path.
       current_outline_inputs_t unavailable_outline;
       if (selected_outline && subtitle && !outline) {
         unavailable_outline.matte = subtitle->matte;
@@ -687,11 +692,16 @@ namespace {
       if (production_shared_pin && !production_shared_ui_pin_programs.ready() &&
           !production_shared_ui_pin_programs.load(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
       const bool production_queued_pin = production_shared_pin && outline && outline->production_shared_ui_pin_queued;
+      if (production_shared_pin && (mapping_output || shared_boundary_output) &&
+          !production_shared_ui_pin_programs.load_diagnostics(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
       platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {output_rtv.Get(), nullptr},
         .render_target_count = 1u,
         .vertex_shader = vertex_shader.Get(),
-        .pixel_shader = production_shared_pin ? production_shared_ui_pin_programs.program(production_queued_pin).pixel :
+        .pixel_shader = production_shared_pin ?
+                        shared_boundary_output ? production_shared_ui_pin_programs.boundary(production_queued_pin) :
+                        mapping_output ? production_shared_ui_pin_programs.mapping(production_queued_pin) :
+                        production_shared_ui_pin_programs.program(production_queued_pin).pixel :
                         shared_pin ? shared_ui_pin_ps[0].Get() : pixel_shader.Get(),
         .viewport = viewport,
         .sampler = sampler.Get(),
@@ -745,7 +755,7 @@ namespace {
           namespace shared = models::host_sbs_shared_ui_warp;
           shared::request_t request;
           std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
-          request.draw_srvs[7u] = selected_receipt_srv.Get();request.draw_srvs[8u] = matte_srv.Get();
+          request.draw_srvs[7u] = selected_receipt_srv.Get();
           request.geometry_constants = geometry_buffer.Get();request.subtitle_constants = subtitle_buffer.Get();
           request.sampler = sampler.Get();
           request.queued = production_queued_pin;
@@ -827,7 +837,7 @@ namespace {
           return false;
         }
         models::research_current_outline_selected_matte_v2::scoped_receipt_t selected_scope;
-        if (selected_outline && subtitle && !selected_scope.bind(context.Get(), selected_receipt_srv.Get(), matte_srv.Get())) {
+        if (selected_outline && subtitle && !selected_scope.bind(context.Get(), selected_receipt_srv.Get())) {
           error = "production selected-matte receipt scope rejected draw operands";
           return false;
         }
@@ -874,7 +884,7 @@ namespace {
           shared_ui_pin_ps[1u].Get();
         command.render_targets[0u]=map_rtv.Get();
         models::research_current_outline_selected_matte_v2::scoped_receipt_t coverage_scope;
-        if (!coverage_scope.bind(context.Get(),selected_receipt_srv.Get(),matte_srv.Get())) {error="shared UI pin diagnostic receipt binding failed";return false;}
+        if (!coverage_scope.bind(context.Get(),selected_receipt_srv.Get())) {error="shared UI pin diagnostic receipt binding failed";return false;}
         models::host_sbs_shared_ui_warp::scoped_binding_t pin_scope;
         if (production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) {error="production shared UI pin diagnostic binding failed";return false;}
         if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.mapping_rgba32f)) {error="shared UI pin mapping diagnostic draw/readback failed";return false;}
@@ -908,7 +918,7 @@ namespace {
         return false;
       }
       if (selected_outline) {
-        std::array<ID3D11ShaderResourceView *, 2u> private_resources {};
+        std::array<ID3D11ShaderResourceView *, 1u> private_resources {};
         context->PSGetShaderResources(7u, static_cast<UINT>(private_resources.size()), private_resources.data());
         for (auto *resource : private_resources) {
           unbound = unbound && resource == nullptr;
@@ -917,7 +927,7 @@ namespace {
           }
         }
         if (!unbound) {
-          error = "shared warp leaked selected receipt/legacy bindings";
+          error = "shared warp leaked its selected receipt binding";
           return false;
         }
         constexpr std::array<UINT, 2u> auxiliary_slots {9u, 11u};
@@ -1609,6 +1619,7 @@ namespace {
     bool mapping_output = false;
     bool direct_replay = false;
     bool selected_outline = false;
+    bool shared_boundary_output = false;
     std::array<ComPtr<ID3D11ComputeShader>,2u> shared_ui_pin_cs;
     std::array<ComPtr<ID3D11PixelShader>,3u> shared_ui_pin_ps;
     std::filesystem::path shared_ui_pin_root;
@@ -3583,14 +3594,47 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
   EXPECT_EQ(roi_resinfo, 1u);
   EXPECT_EQ(full_source_resinfo, 0u);
   EXPECT_EQ(source_resinfo, 0u);
-  // Inspect the actual production Base branch, which ends before native glyph selection and
-  // its display/HDR RGB validation. Those later operations are covered by the selector tests;
-  // they do not belong to the inverse's arithmetic or field-query budget.
+  // Inspect the ordinary Base inverse. Current-glyph authority and display/HDR
+  // revocation belong to the separately tested shared subtitle renderer.
   EXPECT_LE(base_divisions, 8u);
   EXPECT_GE(full_base_samples, 1u);
   EXPECT_LE(full_base_samples, 11u);
   EXPECT_GE(roi_base_samples, 1u);
   EXPECT_LE(roi_base_samples, 11u);
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, OrdinaryShaderBytecodeHasNoSubtitleBindings) {
+  namespace fs = std::filesystem;
+  for (const auto &[file, entry] : {
+         std::pair {"sbs_reprojection_v2_live_ps.hlsl", "main_ps"},
+         std::pair {"sbs_reprojection_v2_queued_ps.hlsl", "main_ps"},
+         std::pair {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps"},
+         std::pair {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps"},
+         std::pair {"sbs_reprojection_v2_p010_y_ps.hlsl", "main_p010_y_ps"},
+       }) {
+    SCOPED_TRACE(std::string(file) + ":" + entry);
+    ComPtr<ID3DBlob> bytecode, errors;
+    const auto status = D3DCompileFromFile((fs::path(SUNSHINE_SHADERS_DIR) / file).c_str(),
+      nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, entry, "ps_5_0",
+      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0u, &bytecode, &errors);
+    ASSERT_TRUE(SUCCEEDED(status) && bytecode) << (errors ?
+      static_cast<const char *>(errors->GetBufferPointer()) : "ordinary shader compile failed");
+    ComPtr<ID3D11ShaderReflection> reflection;
+    ASSERT_TRUE(SUCCEEDED(D3DReflect(bytecode->GetBufferPointer(), bytecode->GetBufferSize(),
+      IID_ID3D11ShaderReflection, reinterpret_cast<void **>(reflection.GetAddressOf()))));
+    D3D11_SHADER_DESC desc {};
+    ASSERT_TRUE(SUCCEEDED(reflection->GetDesc(&desc)));
+    for (UINT i = 0u; i < desc.BoundResources; ++i) {
+      D3D11_SHADER_INPUT_BIND_DESC resource {};
+      ASSERT_TRUE(SUCCEEDED(reflection->GetResourceBindingDesc(i, &resource)));
+      if (resource.Type == D3D_SIT_CBUFFER) {
+        EXPECT_NE(resource.BindPoint, 3u) << resource.Name;
+      } else if (resource.Type != D3D_SIT_SAMPLER) {
+        // Queued transaction authentication at t10 is independent of subtitles.
+        EXPECT_TRUE(resource.BindPoint < 3u || resource.BindPoint == 10u) << resource.Name;
+      }
+    }
+  }
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {
@@ -3628,67 +3672,36 @@ TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {
 }
 
 
-TEST(HostSbsV2LiveWarpGpuTest, NativeGlyphUnionMovesCaptionAndErasesBaseGhostWithoutOffGlyphWarp) {
+TEST(HostSbsV2LiveWarpGpuTest, OrdinaryRendererUsesBaseWithValidSubtitleInputs) {
   constexpr UINT width = 128u, height = 4u, row = 2u, glyph_x = 64u;
   const auto state = make_live_state(true, true);
-  const std::array<float, 4> clear {};
   const std::vector<float> base(width * height, -2.0f / width);
   std::vector<rgba32f_t> source(width * height, {0.0f, 0.0f, 0.0f, 1.0f});
   source[row * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
   std::string error;
-  live_v2_warp_fixture_t color, mapping;
+  live_v2_warp_fixture_t color, mapping, flat;
   ASSERT_TRUE(color.initialize(error)) << error;
   ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping)) << error;
+  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main)) << error;
   const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *subtitle) {
     std::vector<std::byte> output;
     EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t),
-      width, height, source.data(), base, base, state, clear, output, error,
+      width, height, source.data(), base, base, state, {}, output, error,
       0u, 0u, {}, subtitle)) << error;
     return output;
   };
-  const auto base_map_bytes = render(mapping, nullptr);
-  ASSERT_EQ(base_map_bytes.size(), width * height * 2u * sizeof(float));
-  std::vector<float> base_map(width * height * 2u);
-  std::memcpy(base_map.data(), base_map_bytes.data(), base_map_bytes.size());
+  const auto base_color = render(color, nullptr), base_map = render(mapping, nullptr);
+  EXPECT_NE(base_color, render(flat, nullptr)) << "Usable Base depth must survive without subtitle rendering";
   for (const float shift : {2.0f, 2.5f}) {
     auto subtitle = make_subtitle_inputs(width, height, state, shift / width);
     subtitle.matte[row * width + glyph_x] = 1u;
     subtitle.snapshot[row * width + glyph_x] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
-    const auto output = unpack_rgba32f(render(color, &subtitle));
-    const auto map_bytes = render(mapping, &subtitle);
-    ASSERT_EQ(map_bytes.size(), base_map_bytes.size());
-    std::vector<float> map(base_map.size());
-    std::memcpy(map.data(), map_bytes.data(), map_bytes.size());
-    ASSERT_EQ(output.size(), map.size());
-    for (UINT eye = 0u; eye < 2u; ++eye) {
-      const float eye_sign = eye == 0u ? -1.0f : 1.0f;
-      const UINT ghost_x = eye == 0u ? 62u : 66u;
-      const UINT first_ui_x = eye == 0u ? 66u : (shift == 2.0f ? 62u : 61u);
-      const UINT last_ui_x = eye == 0u ? (shift == 2.0f ? 66u : 67u) : 62u;
-      const auto index = [&](UINT x, UINT y) { return y * width * 2u + eye * width + x; };
-      EXPECT_EQ(output[index(ghost_x, row)].r, 0.0f) << "Base glyph ghost, eye=" << eye;
-      for (UINT x = first_ui_x; x <= last_ui_x; ++x) {
-        EXPECT_NEAR(output[index(x, row)].r, shift == 2.0f ? 1.0f : 0.5f, 2.0e-6f);
-      }
-      for (UINT y = 0u; y < height; ++y) {
-        for (UINT x = 0u; x < width; ++x) {
-          const bool selected = y == row &&
-            (x == ghost_x || (x >= first_ui_x && x <= last_ui_x));
-          const auto i = index(x, y);
-          if (selected) {
-            const float expected = (static_cast<float>(x) + 0.5f + eye_sign * shift) / width;
-            EXPECT_FLOAT_EQ(map[i], expected) << "eye=" << eye << ", x=" << x;
-          } else {
-            EXPECT_EQ(std::bit_cast<std::uint32_t>(map[i]), std::bit_cast<std::uint32_t>(base_map[i]))
-              << "Off-glyph source changed, eye=" << eye << ", x=" << x << ", y=" << y;
-          }
-        }
-      }
-    }
+    EXPECT_EQ(render(color, &subtitle), base_color);
+    EXPECT_EQ(render(mapping, &subtitle), base_map);
   }
 }
 
-TEST(HostSbsV2LiveWarpGpuTest, GlyphAbsenceAndInvalidTupleImmediatelyUseGpuBaseReference) {
+TEST(HostSbsV2LiveWarpGpuTest, OrdinaryRendererIgnoresInvalidSubtitleInputs) {
   constexpr UINT width = 128u, height = 4u, row = 2u, glyph_x = 64u;
   const auto state = make_live_state(true, true);
   const std::array<float, 4> clear {};
@@ -3732,11 +3745,11 @@ TEST(HostSbsV2LiveWarpGpuTest, GlyphAbsenceAndInvalidTupleImmediatelyUseGpuBaseR
   }
 }
 
-TEST(HostSbsV2LiveWarpGpuTest, GlyphUiPlaneUsesRoiWidthAndNativeBottomCropCoordinates) {
+TEST(HostSbsV2LiveWarpGpuTest, OrdinaryRoiRendererIgnoresSubtitleCropAndPlane) {
   constexpr UINT width = 128u, height = 16u, field_width = 16u, field_height = 4u;
   constexpr UINT glyph_x = 64u, glyph_y = 10u;
   const auto state = make_live_state(true, true);
-  const std::vector<float> base(field_width * field_height, 0.0f);
+  const std::vector<float> base(field_width * field_height, 0.025f);
   std::vector<rgba32f_t> source(width * height, {0.0f, 0.0f, 0.0f, 1.0f});
   source[glyph_y * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
   host_sbs_v2_geometry_t geometry {
@@ -3760,29 +3773,18 @@ TEST(HostSbsV2LiveWarpGpuTest, GlyphUiPlaneUsesRoiWidthAndNativeBottomCropCoordi
   live_v2_warp_fixture_t color, mapping;
   ASSERT_TRUE(color.initialize(error)) << error;
   ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping)) << error;
-  const auto render = [&](live_v2_warp_fixture_t &fixture) {
+  const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *input) {
     std::vector<std::byte> bytes;
     EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t),
       width, height, source.data(), base, base, state, {}, bytes, error,
-      field_width, field_height, geometry, &subtitle)) << error;
+      field_width, field_height, geometry, input)) << error;
     return bytes;
   };
-  const auto output = unpack_rgba32f(render(color));
-  const auto map_bytes = render(mapping);
-  std::vector<float> map(width * height * 2u);
-  ASSERT_EQ(map_bytes.size(), map.size() * sizeof(float));
-  std::memcpy(map.data(), map_bytes.data(), map_bytes.size());
-  for (UINT eye = 0u; eye < 2u; ++eye) {
-    const UINT moved_x = eye == 0u ? 66u : 62u;
-    const auto i = glyph_y * width * 2u + eye * width + moved_x;
-    ASSERT_LT(i, output.size());
-    EXPECT_FLOAT_EQ(output[i].r, 1.0f);
-    EXPECT_FLOAT_EQ(map[i], (glyph_x + 0.5f) / width);
-    EXPECT_FLOAT_EQ(output[glyph_y * width * 2u + eye * width + glyph_x].r, 0.0f);
-  }
+  EXPECT_EQ(render(color, &subtitle), render(color, nullptr));
+  EXPECT_EQ(render(mapping, &subtitle), render(mapping, nullptr));
 }
 
-TEST(HostSbsV2LiveWarpGpuTest, NativeGlyphRgbRevocationUsesSdrLinearAndHdrDisplayHalfSnapshot) {
+TEST(HostSbsV2LiveWarpGpuTest, OrdinaryRendererIgnoresSubtitleSnapshotsInEveryColourMode) {
   constexpr UINT width = 128u, height = 2u, glyph_x = 64u, row = 1u;
   const auto state = make_live_state(true, true);
   const std::vector<float> base(width * height, -2.0f / width);
@@ -3805,11 +3807,10 @@ TEST(HostSbsV2LiveWarpGpuTest, NativeGlyphRgbRevocationUsesSdrLinearAndHdrDispla
     ASSERT_TRUE(warp.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t),
       width, height, source.data(), base, base, state, {}, bytes, error,
       0u, 0u, {}, &subtitle)) << error;
-    const auto output = unpack_rgba16(bytes);
-    for (UINT eye = 0u; eye < 2u; ++eye) {
-      const UINT moved_x = eye == 0u ? 66u : 62u;
-      EXPECT_EQ(output[row * width * 2u + eye * width + moved_x], source[row * width + glyph_x]);
-    }
+    std::vector<std::byte> baseline;
+    ASSERT_TRUE(warp.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t),
+      width, height, source.data(), base, base, state, {}, baseline, error)) << error;
+    EXPECT_EQ(bytes, baseline);
   }
 }
 
@@ -4200,8 +4201,8 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
   }
 }
 
-// Opt-in evidence replay. The imported state and seven operands are literal saved bytes;
-// unlike the small fixtures above, this path never seals or fabricates a camera/owner state.
+// Opt-in schema-2 shared replay. All producer/source/receipt operands are literal saved bytes;
+// historical schema-1 analytic evidence remains tied to its frozen executable.
 TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
   const auto *cases_env = std::getenv("SUNSHINE_TEST_GLYPH_TUPLE_REPLAY_CASES");
   if (!cases_env || !*cases_env) GTEST_SKIP() << "No saved glyph tuple specification selected";
@@ -4244,15 +4245,15 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
             "Replay output must be a new or empty directory");
     const auto specification_bytes = read_bytes(cases_path);
     const auto specification = json::parse(specification_bytes.begin(), specification_bytes.end());
-    require(specification.at("schema") == 1 && specification.at("driver") == "hardware",
-            "Saved glyph tuple evidence requires schema 1 and hardware D3D11");
+    require(specification.at("schema") == 2 && specification.at("driver") == "hardware",
+            "Current shared glyph replay requires schema 2 and hardware D3D11; schema-1 analytic evidence needs its frozen executable");
     const auto &cases = specification.at("cases");
     require(cases.is_array() && !cases.empty() && cases.size() <= 64u, "Replay requires 1..64 cases");
     std::string error;
     live_v2_warp_fixture_t color, mapping, mask;
-    ASSERT_TRUE(color.initialize(error, warp_shader_e::live_main, false, true)) << error;
-    ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping, false, true)) << error;
-    ASSERT_TRUE(mask.initialize(error, warp_shader_e::live_mask, false, true)) << error;
+    ASSERT_TRUE(color.initialize(error, warp_shader_e::selected_outline, false, true)) << error;
+    ASSERT_TRUE(mapping.initialize(error, warp_shader_e::selected_outline_mapping, false, true)) << error;
+    ASSERT_TRUE(mask.initialize(error, warp_shader_e::selected_outline_boundary, false, true)) << error;
     const auto adapter = color.adapter_identity();
     require(mapping.adapter_identity() == adapter && mask.adapter_identity() == adapter,
             "Reference routes selected different adapters");
@@ -4266,7 +4267,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
     const fs::path fixture_path = fs::path(SUNSHINE_SOURCE_DIR) / "tests/unit/test_host_sbs_v2_live_warp.cpp";
     const auto fixture_bytes = read_bytes(fixture_path);
     fs::create_directories(output_root);
-    json report {{"schema", 1}, {"driver", "hardware"}, {"adapter", adapter},
+    json report {{"schema", 2}, {"driver", "hardware"}, {"adapter", adapter},
       {"test_executable_path", fs::path(executable_path.data()).string()},
       {"test_executable_sha256", executable_sha256},
       {"fixture_source_path", fixture_path.string()},
@@ -4277,11 +4278,13 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
       {"coordinate_contract_sha256", v2::contract_canonical_sha256},
       {"live_renderer_source_closure_sha256", cache::parallax_v2_live_renderer_source_closure_sha256},
       {"live_diagnostic_source_closure_sha256", cache::parallax_v2_live_diagnostic_source_closure_sha256},
-      {"scope", "Literal saved seven-SRV tuple, production D3D11 shaders and shared recorder; no CPU inverse or color warp"},
+      {"shared_renderer_source_closure_sha256", models::host_sbs_shared_ui_warp::closure},
+      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shared_ui_warp::diagnostic_closure},
+      {"scope", "Literal saved current matte/receipt and source tuple, actual shared D3D11 renderer; no CPU inverse or color warp"},
       {"route_definitions", {
         {"base", "Saved Base/state/b2 and all saved subtitle resources; only b3.enabled set to zero"},
         {"ui", "Constant GPU field at SCPtarget*(analysis_width/full_width); saved state and PackedToSource content scales; ROI Base embedding disabled; b3.enabled zero"},
-        {"selected", "All seven saved operands and both saved b2/b3 constant buffers, unchanged"}}},
+        {"selected", "Actual shared warp with the supplied selected matte/receipt and unchanged source/Base/state/b2/b3"}}},
       {"cases", json::array()}};
     for (std::size_t case_index = 0u; case_index < cases.size(); ++case_index) {
       const auto &entry = cases[case_index];
@@ -4363,6 +4366,13 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
       subtitle.height = id[11];
       subtitle.matte = load_vector.template operator()<std::uint32_t>("matte", std::size_t(subtitle.width) * subtitle.height);
       subtitle.snapshot = load_vector.template operator()<rgba16_bits_t>("snapshot", subtitle.matte.size());
+      current_outline_inputs_t selected;
+      selected.matte = load_vector.template operator()<std::uint32_t>("selected_matte", subtitle.matte.size());
+      load_object("selected_receipt", selected.receipt);
+      require(std::all_of(selected.matte.begin(), selected.matte.end(), [](auto value) { return value <= 1u; }),
+              "Saved selected matte is not literal binary R32_UINT");
+      for (const auto *key : {"expected_selected_color", "expected_selected_map", "expected_selected_mask"})
+        require(!entry.contains(key), "Historical analytic golden keys cannot qualify the current shared renderer");
       require(std::all_of(subtitle.matte.begin(), subtitle.matte.end(), [](auto value) { return value <= 1u; }),
               "Saved matte is not literal binary R32_UINT");
       const float target = std::bit_cast<float>(scp[5]);
@@ -4375,6 +4385,8 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
               "Saved SCP activity/target disagrees with SCT");
       require(active || std::all_of(subtitle.matte.begin(), subtitle.matte.end(), [](auto value) { return value == 0u; }),
               "Inactive saved tuple retains a positive glyph matte");
+      require(active || std::all_of(selected.matte.begin(), selected.matte.end(), [](auto value) { return value == 0u; }),
+              "Inactive saved tuple retains a positive selected matte");
       if (geometry.video_roi_active == 1.0f) {
         require(geometry.tensor_content_left == id[16] && geometry.tensor_content_top == id[17] &&
                 geometry.tensor_content_right == id[18] && geometry.tensor_content_bottom == id[19],
@@ -4420,20 +4432,24 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
           const bool is_map = std::string_view(kind) == "map";
           auto &fixture = is_map ? mapping : std::string_view(kind) == "mask" ? mask : color;
           std::vector<std::byte> output;
+          shared_ui_pin_diagnostics_t diagnostic;
+          selected.shared_ui_pin_diagnostic_output = is_selected ? &diagnostic : nullptr;
           ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM, sizeof(bgra8_t), width, height,
             source.data(), field, field, state, {}, output, error, field_width, field_height,
-            render_geometry, render_subtitle)) << route << '/' << kind << ": " << error;
+            render_geometry, render_subtitle, nullptr, true, &selected)) << route << '/' << kind << ": " << error;
+          if (is_selected) require(diagnostic.selected_receipt_authorized,
+            "Saved current shared replay has an invalid selected receipt");
           const auto path = case_dir / (std::string(route) + "_" + kind + (is_map ? ".f32" : ".bgra8"));
           write_bytes(path, output.data(), output.size());
           const auto hash = sha256(output.data(), output.size());
           result["routes"][route][kind] = {{"path", path.string()}, {"sha256", hash}, {"byte_count", output.size()}};
-          const std::string expected_key = std::string("expected_selected_") + kind;
+          const std::string expected_key = std::string("expected_shared_") + kind;
           if (is_selected && entry.contains(expected_key)) {
             const auto expected = operand(expected_key.c_str(), output.size());
             const auto expected_hash = sha256(expected.data(), expected.size());
             result["routes"][route][kind]["expected_sha256"] = expected_hash;
             result["routes"][route][kind]["expected_bitexact"] = hash == expected_hash;
-            EXPECT_EQ(hash, expected_hash) << "Saved actual harness " << kind << " differs from selected replay";
+            EXPECT_EQ(hash, expected_hash) << "Saved actual shared renderer " << kind << " differs from selected replay";
           }
         }
       }
@@ -4543,15 +4559,15 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
             "Replay output must be a new or empty directory");
     const auto specification_bytes = read_bytes(cases_path);
     const auto specification = json::parse(specification_bytes.begin(), specification_bytes.end());
-    require(specification.at("schema") == 1 && (specification.at("driver") == "hardware" || specification.at("driver") == "warp"),
-            "Private layered replay requires schema 1 and an explicit hardware/warp driver");
+    require(specification.at("schema") == 2 && (specification.at("driver") == "hardware" || specification.at("driver") == "warp"),
+            "Current shared layered replay requires schema 2 and an explicit hardware/warp driver; schema-1 evidence needs its frozen executable");
     const auto &cases = specification.at("cases");
     require(cases.is_array() && !cases.empty() && cases.size() <= 8u, "Private replay requires 1..8 matched cases");
     std::string error;
     const bool hardware = specification.at("driver") == "hardware";
     live_v2_warp_fixture_t color, mapping;
-    ASSERT_TRUE(color.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
-    ASSERT_TRUE(mapping.initialize(error, warp_shader_e::live_mapping, false, hardware)) << error;
+    ASSERT_TRUE(color.initialize(error, warp_shader_e::selected_outline, false, hardware)) << error;
+    ASSERT_TRUE(mapping.initialize(error, warp_shader_e::selected_outline_mapping, false, hardware)) << error;
     const auto adapter = color.adapter_identity();
     require(mapping.adapter_identity() == adapter,
             "Reference routes selected different adapters");
@@ -4565,7 +4581,7 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
     const fs::path fixture_path = fs::path(SUNSHINE_SOURCE_DIR) / "tests/unit/test_host_sbs_v2_live_warp.cpp";
     const auto fixture_bytes = read_bytes(fixture_path);
     fs::create_directories(output_root);
-    json report {{"schema", 1}, {"driver", specification.at("driver")}, {"adapter", adapter},
+    json report {{"schema", 2}, {"driver", specification.at("driver")}, {"adapter", adapter},
       {"test_executable_path", fs::path(executable_path.data()).string()},
       {"test_executable_sha256", executable_sha256},
       {"fixture_source_path", fixture_path.string()},
@@ -4576,8 +4592,10 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
       {"coordinate_contract_sha256", v2::contract_canonical_sha256},
       {"live_renderer_source_closure_sha256", cache::parallax_v2_live_renderer_source_closure_sha256},
       {"live_diagnostic_source_closure_sha256", cache::parallax_v2_live_diagnostic_source_closure_sha256},
-      {"scope", "PRIVATE saved-input old/new native-M rendering with unchanged production PS; authored known-layer GPU reference; no live/producer qualification"},
+      {"scope", "PRIVATE saved-input old/new native-M rendering through the actual shared warp; supplied receipt is context for counterfactual masks; authored GPU layer reference; no live/producer qualification"},
       {"production_tuple_claim_for_candidate", false},
+      {"shared_renderer_source_closure_sha256", models::host_sbs_shared_ui_warp::closure},
+      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shared_ui_warp::diagnostic_closure},
       {"private_layer_shader_root", specification.at("private_layer_shader_root")},
       {"private_layer_source_closure_sha256", specification.at("private_layer_source_closure_sha256")},
       {"cases", json::array()}};
@@ -4661,6 +4679,10 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
       subtitle.height = id[11];
       subtitle.matte = load_vector.template operator()<std::uint32_t>("matte", std::size_t(subtitle.width) * subtitle.height);
       subtitle.snapshot = load_vector.template operator()<rgba16_bits_t>("snapshot", subtitle.matte.size());
+      current_outline_inputs_t selected;
+      load_object("selected_receipt", selected.receipt);
+      for (const auto *key : {"expected_selected_color", "expected_selected_map"})
+        require(!entry.contains(key), "Historical analytic golden keys cannot qualify current shared mask experiments");
       require(std::all_of(subtitle.matte.begin(), subtitle.matte.end(), [](auto value) { return value <= 1u; }),
               "Saved matte is not literal binary R32_UINT");
       const float target = std::bit_cast<float>(scp[5]);
@@ -4736,21 +4758,26 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
         const bool candidate_route = std::string_view(route) == "candidate_matte";
         const bool old_route = std::string_view(route) == "old_matte";
         const auto *render_subtitle = candidate_route ? &candidate_subtitle : old_route ? &subtitle : &disabled_subtitle;
+        auto operands = selected;operands.matte = render_subtitle->matte;
         for (const auto kind : {"map", "color"}) {
           const bool is_map = std::string_view(kind) == "map";
           auto &fixture = is_map ? mapping : color;
           std::vector<std::byte> output;
+          shared_ui_pin_diagnostics_t diagnostic;
+          operands.shared_ui_pin_diagnostic_output = &diagnostic;
           ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM, sizeof(bgra8_t), width, height,
             source.data(), base, base, state, {}, output, error, field_width, field_height,
-            geometry, render_subtitle)) << route << '/' << kind << ": " << error;
+            geometry, render_subtitle, nullptr, true, &operands)) << route << '/' << kind << ": " << error;
+          require(diagnostic.selected_receipt_authorized,
+            "Private shared mask replay needs a valid common context receipt");
           const auto filename = std::string(route) + "_" + kind + (is_map ? ".f32" : ".bgra8");
           result["routes"][route][kind] = save(filename, output);
-          const std::string expected_key = std::string("expected_selected_") + kind;
+          const std::string expected_key = std::string("expected_shared_") + kind;
           if (old_route && entry.contains(expected_key)) {
             const auto expected = operand(expected_key.c_str(), output.size());
             const auto expected_hash = sha256(expected.data(), expected.size());
             result["routes"][route][kind]["expected_bitexact"] = sha256(output.data(), output.size()) == expected_hash;
-            EXPECT_EQ(sha256(output.data(), output.size()), expected_hash) << "Baseline replay differs from actual harness output";
+            EXPECT_EQ(sha256(output.data(), output.size()), expected_hash) << "Baseline shared replay differs from its supplied current shared output";
           }
         }
       }

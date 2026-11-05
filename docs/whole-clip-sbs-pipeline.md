@@ -28,6 +28,11 @@ harness once on its GPU thread. Conversion uses `--artifacts conversion`; Analyz
 `--artifacts adaptive`. Every source frame runs one authenticated TensorRT update and consumes its
 source-derived observation timestamp. All D3D/TensorRT work stays on this single owner.
 
+Follow conversion prepares the same current-glyph shared subtitle warp used by live rendering.
+Each valid shared draw samples the original source once; unavailable subtitle programs or
+authority retain authenticated ordinary Base. Optional subtitles never disable usable depth.
+Production follow draws add no qualification observer or diagnostic readback.
+
 Production frame transport is `bounded-raw-memory-v1`, defined in `src/offline_frame_transport.h`.
 Each immutable frame carries schema, sequence, exact PTS and rational time base, width, height,
 and pixel format. Payload size, ordering, and geometry are checked before use. Moving a frame
@@ -128,6 +133,11 @@ Video additionally verifies compressed video, muxed streams, timing, HDR/color, 
 and complete output before publication. Success requires exactly one scheduled/enqueued TensorRT
 update per source frame, selected-input/full-frame scope, the live V2 renderer, complete immutable
 SBS publication, and zero cache/replay use.
+
+The separate evaluator scene-cache contract is version 5 and labels its renderer
+`ordinary-base-inverse-renderer-v1`. It retains the unchanged schema-1 six-payload tuple for
+authenticated diagnostics and replay, without an analytic subtitle selector. Current readers
+reject older cache versions and analytic renderer labels; retained evidence is never retagged.
 
 ## Job ownership and recovery
 

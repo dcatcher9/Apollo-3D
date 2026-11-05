@@ -146,6 +146,8 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
         """Authored ABI bytes only; program readiness does not assert GPU execution."""
         document = copy.deepcopy(self.document)
         document["schema"] = schema
+        if schema >= 7:
+            document["ordinary_metric_artifacts"] = "authenticated-ordinary-base-renderer-v1"
         for key in ("completed_source_closure_sha256", "background_source_closure_sha256"):
             document.pop(key, None)
         document.update(qualification.expected_closures(schema))
@@ -222,8 +224,48 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
         self.assertIn("foreground_edge", document["composition_source_closures"])
         result = self.validate(document)
         self.assertEqual(result["renderer_schema"], 6)
+        self.assertFalse(result["renderer_policy_current"])
+        self.assertEqual(result["producer_stage_current_frames"], 2)
+
+    def test_schema7_qualifies_shared_output_with_separate_ordinary_base_metrics(self):
+        document = self.document_for_schema(7)
+        result = self.validate(document)
+        self.assertEqual(result["renderer_schema"], 7)
         self.assertTrue(result["renderer_policy_current"])
         self.assertEqual(result["producer_stage_current_frames"], 2)
+        self.assertEqual(result["shared_warp_frames"], 2)
+        self.assertFalse(result["ordinary_metrics_qualify_selected_composite"])
+        self.assertEqual(document["ordinary_metric_artifacts"], "authenticated-ordinary-base-renderer-v1")
+
+    def test_ordinary_metric_semantics_cannot_cross_qualification_versions(self):
+        for schema in range(1, 8):
+            with self.subTest(schema=schema):
+                document = self.document_for_schema(schema)
+                document["ordinary_metric_artifacts"] = ("unchanged-legacy-native-matte-renderer" if schema == 7
+                                                         else "authenticated-ordinary-base-renderer-v1")
+                with self.assertRaisesRegex(ValueError, "scope/version"):
+                    self.validate(document)
+
+    def test_schema7_retains_foreground_edge_source_and_readiness_guards(self):
+        document = self.document_for_schema(7)
+        for index in (None, 0, 1):
+            for value in (False, 0, 1, None, "missing"):
+                with self.subTest(frame=index, value=value):
+                    changed = copy.deepcopy(document)
+                    owner = changed if index is None else changed["frames"][index]
+                    if value == "missing":
+                        owner.pop("foreground_edge_program_ready")
+                    else:
+                        owner["foreground_edge_program_ready"] = value
+                    with self.assertRaisesRegex(ValueError, "unknown or missing|foreground-edge"):
+                        self.validate(changed)
+        for change in (lambda roles: roles.pop("foreground_edge"),
+                       lambda roles: roles.update(foreground_edge="0" * 64),
+                       lambda roles: roles.update(unexpected="0" * 64)):
+            changed = copy.deepcopy(document)
+            change(changed["composition_source_closures"])
+            with self.assertRaisesRegex(ValueError, "composition source closures"):
+                self.validate(changed)
 
     def test_schema6_rejects_missing_false_or_nonboolean_readiness_at_root_and_each_frame(self):
         document = self.document_for_schema(6)

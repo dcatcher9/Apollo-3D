@@ -111,19 +111,23 @@ Selected stereo images live separately in `current-outline/sbs_<id>.png`. The at
 `current_outline_qualification.json` binds each exact source snapshot, observation clock,
 publication receipt, selected/SCT/SCP/ParallaxState words, draw b3, native pin-band shape,
 per-draw serial, literal GPU row/header flags, output digest, executable and current source-closure
-pins. A pre-Draw observer verifies the actual shader, t0..t14 and b2/b3/b6 bindings, including
-the absence of background RGB/proof bindings. The Python reader independently validates those
+pins. A pre-Draw observer verifies the actual shader, consumed t0..t7/t12..t14 and b2/b3/b6
+bindings, including the absence of background RGB/proof bindings. The unused t8 alias no longer
+participates in rendering or binding acceptance. The Python reader independently validates those
 joins and rejects stale owners, corrupt hashes, unknown fields and incomplete frame coverage.
 It reports selected-current, shared-warp and active-pin frame counts, including explicit unavailable
 fallbacks. This file-fed full-source check establishes renderer wiring and provenance; it does
 not establish live capture eligibility, window-region behavior, visual quality or live timing.
 Ordinary metric PNGs, schemas and scores remain separate.
 
-Qualification schema6 also binds the foreground-edge compute closure and requires its shader
-availability at the root and every frame. Availability is not evidence of GPU execution. The
-shared renderer has no retired completed-pixel-shader field. Schemas1–5 remain read-only formats
-and never qualify the current rendering policy; source, coordinate-contract and executable
-checks still apply.
+Qualification schema7 records `authenticated-ordinary-base-renderer-v1` for the ordinary metric
+artifacts, which now use only authenticated Base without an analytic subtitle selector. Selected
+shared output remains separate. Schema7 retains all twelve composition closures and requires
+foreground-edge shader availability at the root and every frame. Availability is not evidence of
+GPU execution. The shared renderer has no retired completed-pixel-shader field. Schemas1–6 remain
+read-only formats and never qualify the current rendering policy. Their original ordinary metric
+label is preserved; source, coordinate-contract and executable checks still apply, so older
+captures require their authenticated frozen contract/source reader. No captured evidence is retagged.
 
 Schema2 added a binding for
 `current-outline/selected_matte_<id>.u32`, the exact post-draw selected t3 input in little-endian
@@ -319,7 +323,7 @@ unrecognized historical options fail argument parsing.
 The current dump reader accepts the authenticated OCR8 record, 40-word UIP4 source/controller state and
 complete joined native contour tuple as live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
-The current coordinate contract is schema 120/OCR 32/contour recipe 27. UIP4 remains 40 words and
+The current coordinate contract is schema 128/OCR 38/contour recipe 27. UIP4 remains 40 words and
 OCR8 remains 256 words. The UI plane keeps its immediate current entry floor, uses a 100 ms
 source-time exponential response toward the current release candidate, and clears invisible
 controller history on a genuinely newer valid-empty observation. Duplicate clocks and whole-tuple

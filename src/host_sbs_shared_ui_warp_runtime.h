@@ -29,7 +29,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp_queued.hlsl", "SunshineApplyUICS", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view closure = "5c8552579b5625989ebbb35ae0f9ba87c65f12e4119e5806afe5ab72511f6f64";
+  inline constexpr std::string_view closure = "45c7734374da5fdf404210bf22e9e43a9e3d28c5acae103fdde49b6912edf581";
   inline constexpr std::array<cache::shader_spec, 6u> diagnostic_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
@@ -38,7 +38,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view diagnostic_closure = "94404c56fcf016b776e2e488a7e16c8928eb5251a5952622375e4a2a511d2a55";
+  inline constexpr std::string_view diagnostic_closure = "6737cc7568c64ae4828bd5d4247a09f3cf0ef4c8e3625f4bb9b5259e7c918856";
 
   struct program_t {
     ID3D11ComputeShader *initialize = nullptr, *pin = nullptr;
@@ -130,7 +130,7 @@ namespace models::host_sbs_shared_ui_warp {
   };
 
   struct request_t {
-    std::array<ID3D11ShaderResourceView *, 9u> draw_srvs {}; // literal t0..8, including selected receipt and original M
+    std::array<ID3D11ShaderResourceView *, 8u> draw_srvs {}; // literal t0..7, including the selected mask receipt
     ID3D11Buffer *geometry_constants = nullptr, *subtitle_constants = nullptr;
     ID3D11SamplerState *sampler = nullptr;
     ID3D11Buffer *queued_guard_constants = nullptr;
@@ -156,7 +156,7 @@ namespace models::host_sbs_shared_ui_warp {
     ComPtr<ID3D11Buffer> geometry_;
     std::array<UINT, 4u> shape_ {};
     host_sbs_compute_program_lease::group_t<2u> programs_;
-    std::array<ComPtr<ID3D11ShaderResourceView>, 9u> inputs_;
+    std::array<ComPtr<ID3D11ShaderResourceView>, 8u> inputs_;
     ComPtr<ID3D11Buffer> draw_geometry_, draw_subtitle_, guard_;
     ComPtr<ID3D11ShaderResourceView> transaction_;
     ComPtr<ID3D11SamplerState> sampler_;

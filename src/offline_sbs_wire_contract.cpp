@@ -992,7 +992,7 @@ namespace offline_sbs::wire {
         {"schema", 1}, {"commit_file_pattern", "frame_%010d.tuple.json"},
         {"payload_suffixes", {".depth.r32f", ".state.u32", ".glyph.u32", ".source.rgba16f", ".sct.u32", ".scp.u32"}},
         {"commit", "sha256-and-byte-count-of-all-six-payloads"},
-        {"renderer", "base-inverse-and-analytic-ui-glyph-selector"},
+        {"renderer", "ordinary-base-inverse-renderer-v1"},
       }},
       {"render_config", {
         {"model", value.render.model},
@@ -1187,7 +1187,7 @@ namespace offline_sbs::wire {
           {"schema", 1}, {"commit_file_pattern", "frame_%010d.tuple.json"},
           {"payload_suffixes", {".depth.r32f", ".state.u32", ".glyph.u32", ".source.rgba16f", ".sct.u32", ".scp.u32"}},
           {"commit", "sha256-and-byte-count-of-all-six-payloads"},
-          {"renderer", "base-inverse-and-analytic-ui-glyph-selector"}} ||
+          {"renderer", "ordinary-base-inverse-renderer-v1"}} ||
         render.at("renderer") != "depth-coordinate-v2-live-signed-parallax" ||
         render.at("producer_source_closure_sha256") != models::depth_coordinate_v2::shader_source_closure_sha256 ||
         render.at("renderer_source_closure_sha256") != models::host_sbs_shader_cache::parallax_v2_live_renderer_source_closure_sha256 ||

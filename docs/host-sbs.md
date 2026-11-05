@@ -70,8 +70,8 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 127/tag `0x2B6FE941`, canonical SHA-256
-`dc007fd6ab26b4a5acd0809d7a2e9e9a65b56b4efd94f287bbb7297a5f7d3e85`. It binds the
+schema 128/tag `0x4D680D18`, canonical SHA-256
+`6eb37c930253ff3f5d114cb3ab5e41af392772c212ccf8e4eaa4130bb095022a`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -82,20 +82,20 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 29 | `0101ba86546749b03a43e40cf62f3e08f38580bc9f6d329b51d805a5e6e8b984` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `1ed356a5904c324842a493f14758ed04d8b05bad9e9ca03375ef8a534dee4a9c` |
-| `near_identical_detector` | 4 | `ba5f8ca3ca402a7fff876e974c0775c28e5391ddc5841aa423d3b2d328295831` |
-| `gpu_trace` | 1 | `783a932493b2060c26735dc8bb14fcc785c6c2451b830f7d730e57437383ec08` |
-| `parallax_v2_live_renderer` | 2 | `fc12a023a3b930001d746622aecf5ceac11604aea033d9da0914ccaa845689b0` |
-| `parallax_v2_p010_y` | 1 | `52c9752f0c9759a41c2e0f767fee1369b1e0c34be2f92f8c40a9c5b3ff6fe89a` |
+| `parallax_v2_producer` | 29 | `5e696c8a07548c511d84784465f48852584a6e30ab1c61e1e6f4da1baa7c6f7d` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `d9093985c554b6bdc061feef167fbe021bc7e7efd2a7e5e465392f841419921e` |
+| `near_identical_detector` | 4 | `62525b3d742f13cf38d32ed0483479102a0d7882143fe744fce791589cf7dbc7` |
+| `gpu_trace` | 1 | `98b4cd91dc15853b1c5426cba1922b287d8ba63b11bdd2648e2568f2dd95491a` |
+| `parallax_v2_live_renderer` | 2 | `74b7d6d982be2041b48b09890578d1433f749047d2d6d5239a0b3e3029cb1ca9` |
+| `parallax_v2_p010_y` | 1 | `1aaccba3f74a09e059da73252bba143b763f237833267b54e3939d68bc2441a8` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `113dee041c3cbb0cf14b09bb31bfa1843f2eeb6faf280c93af9a33fea6246210` |
-| `subtitle_cohort_prototype_research` | 3 | `13827867460a6e47543a95244536d3b27a5a9c7583eab19c880ad2237c5a3b84` |
-| `subtitle_cohort_research` | 4 | `b01a1b250e23fc43a6cc3126745335577a9d808e6c27abe310d5a3227d42a909` |
-| `subtitle_inner_colour_research` | 5 | `9aa49deee394a05395a7d685a34648c8a41bbd200fd6d3ebe1d9c0fafec27cd5` |
+| `parallax_v2_live_diagnostic` | 2 | `48bd9cc18ca5a551121c347493681ef647c3c6629decf944d6f5680d7673980d` |
+| `subtitle_cohort_prototype_research` | 3 | `00de07d754cbb2f771d6cea756b378fcbaae043f3422fdc9877e49eed8775c2c` |
+| `subtitle_cohort_research` | 4 | `87525f08edf471d3ad0ecb555f6370043ebf7af08cf955d1bde47724752554c0` |
+| `subtitle_inner_colour_research` | 5 | `1d2ebce7a347866db6c66e02dab96d1df4f53dbf5f7576a73433682b5979587c` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
-| `subtitle_matte_guard_research` | 1 | `e47e00b30cffdba1e7c7a85b7348f798cfc8025c670c12eb355e1b5fc30549fa` |
-| `parallax_v2_queued_renderer` | 1 | `1058907ac7dca7cc73ee5beb20d318e8ab760a36e7b7503bbe2a8d69d7a23d52` |
+| `subtitle_matte_guard_research` | 1 | `d8aec7ce8e6a73dfe44f4254c87c7c98b7501d67d99acf28496e8ea1874b722d` |
+| `parallax_v2_queued_renderer` | 1 | `83678aa1cef29e33c9aa11e54895ca30e14115393ac2024392316a7353acdc84` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
 | `current_foreground_edge` | 1 | `36e2de5b0337270fee63b6e2afb2c3c49f144dd150bdf23ba61460019ab34dcd` |
@@ -348,8 +348,8 @@ reacquire the camera.
 Live streaming and conversion use `host_sbs_shared_ui_warp.hlsl` and its queued wrapper. Their seven common
 operands are rendered native color, ordinary Base, ParallaxState, the selected native `R32_UINT`
 matte, joined display-sRGB `RGBA16F` source crop, six-word SCP4, and 32-word SCT5. A 64-word selected
-receipt at t7 authenticates the current-outline mask; t8 retains the original legacy binding for
-ABI and diagnostic continuity, without granting a second subtitle map. Separate 32-byte PS b3 binds
+receipt at t7 authenticates the current-outline mask. The unused render-only legacy mask at t8
+is removed; mask construction and its internal fallbacks retain their own inputs. Separate 32-byte PS b3 binds
 enabled/color mode, exact analysis-domain generation, and the integer analysis-source rectangle
 inside rendered color. Existing 48-byte b2 geometry is unchanged.
 Missing or invalid subtitle inputs preserve authorized Base; invalid Base authorization retains
@@ -377,7 +377,8 @@ bend. UI-row boundaries do not retain Base's two-axis smoothness guarantee. The 
 and the explicit adoption decision are recorded in the
 [review follow-up](host-sbs-review-followups.md#p15-production-shared-ui-warp).
 
-The legacy matte remains an independently validated fallback and the ordinary evaluator's mask.
+The original dense matte remains an independently validated mask-construction fallback and
+diagnostic. It is not a render fallback and ordinary evaluator images use only Base.
 It has its own schema 1 recipe, separate from SCT5's diagnostic contour recipe 27. Starting
 from literal current native support, three synchronous eight-neighbor steps admit finite valid
 joined RGB only when neighbor L-infinity distance is at most `0.12` and both pixels have the same
@@ -387,40 +388,15 @@ joined display pixel. The operation adds no probability threshold, field-pitch d
 wait, or source observation. The collar is a bounded antialias/outline completion compromise;
 false positive scene support can also expand by that bound.
 
-The retained analytic fallback computes each eye's BaseUV with the existing at-most-eleven-step
-inverse. UIUV has unchanged V and
-`destination_source_u + eye_sign * SCP_target * (analysis_width / full_capture_width)` for U.
-The integer width ratio is exact ROI authority; full-source uses one. Query both candidates after
-the same U saturation and finite-image clamp used for color. Only source texels with nonzero
-bilinear color weight contribute. Convert each full-source texel index to the exact native
-analysis-source/bottom-crop index. A literal matte one survives only when its joined snapshot is
-valid and current native color converts through the existing display-sRGB policy and FP16
-roundtrip within the contour RGB-distance bound `0.08` at that identical texel. No neighbor search
-or new support comes from this comparison. Select UIUV when either candidate footprint has a
-surviving contributor, otherwise BaseUV; take one native bilinear color sample at the selected UV.
-Color output keeps its native SDR/HDR path.
+Ordinary live, queued, P010 and diagnostic renderers use the authenticated Base inverse directly.
+They contain no analytic subtitle branch and consume no legacy t8 mask. Shared preparation or
+selected-mask validation failure disables subtitle permission while preserving usable Base depth;
+it does not invoke an older subtitle warp. The independent flat renderer remains for invalid or
+unavailable depth. Valid shared rendering retains current-texel RGB revocation and its existing
+selected receipt, SCT5, SCP4 and source authorization.
 
-The historical completed comparison shader also supports an optional GPU push/pull repair background at t9, its
-96-word proof at t11, and the immutable draw-lease constants at b4. The actual color, selected mask,
-receipt, SCT5, render constants, source rectangle and retained lease must match the current draw.
-An unavailable or invalid background preserves the original selected-mask sampling above; it
-cannot disable selected glyphs or grant new mask authority. With valid repair data, erased Base
-taps use the reconstructed background. Fractional UI coverage composites only marked native glyph
-taps, premultiplied by their actual bilinear weights, over the remaining repaired Base coverage.
-Unmarked UI taps cannot contribute shifted background color. Fully marked UI footprints retain
-the original hardware sample, and the existing selected-sample alpha behavior is preserved.
-This RGB composition can mix Base and UI coordinates; a diagnostic candidate map is not a single
-source-coordinate owner for that mixed color.
-
-Repair seed exclusion and erasure are separate decisions. The retained background initializer
-excludes a native 3x3 raw-matte neighbourhood from clean seeds and erases a native 3x3
-current-ink neighbourhood. Consequently, an unmarked pixel next to admitted ink can receive
-reconstructed Base RGB. A fixed-mask GPU probe confirms that this erasure contributes to the
-bright tears in the saved HDR captions. Restricting erasure to marked pixels reduces those tears
-but leaves fringes and ghosts; it is not a qualified replacement. The
-[review experiment](host-sbs-review-followups.md#shared-width-admission-experiment) records the
-mask-independent evidence. Neither a valid repair lease nor a finite reconstruction proves
-clean-background accuracy.
+The removed analytic selector and RGB-repair experiments remain documented in the
+[historical review](host-sbs-review-followups.md#p15-production-shared-ui-warp).
 
 SCT5 must bind the retained state's owner observation clock and cut epoch, the b3 analysis
 generation, exact source/crop/field/content shape and current recipe, with valid bits exactly one
@@ -1761,7 +1737,7 @@ reuse and adaptive reuse hold depth, OCR, UIP4, support, history, source/probabi
 vertical field, control and Final together with Base, matte, SCT5 and SCP4. Invalid Base publication
 fails closed to flat SBS. Joined RGB retains the inference owner's snapshot for pointwise revocation;
 every rendered draw samples the current capture through the shared pin field or its authorised
-Base/legacy fallback.
+ordinary Base fallback.
 Contour history belongs to that same joined observation. It adds no independent inference clock,
 row lease, onset accumulator, signature, overlay model, or GST/OGR/ORS dependency.
 
@@ -2264,7 +2240,7 @@ Transitions before acceptance require force-infer; after acceptance, neither the
 nor a late receipt can establish authority on the new route.
 
 Model preparation, shader compilation, and the live renderer are fail-closed. Shared producer,
-arbitration and legacy-renderer bytecode is prewarmed at process startup. Live current-outline
+arbitration and ordinary Base-renderer bytecode is prewarmed at process startup. Live current-outline
 compute and shared-warp device programs prepare on the tracked per-device background build
 worker before its future becomes ready; the encode thread only adopts the prepared handles.
 There is no separate literal selected-matte pixel shader or preparation task. Per-frame shared
@@ -2274,21 +2250,22 @@ authorization; it contains no analytic subtitle inverse or background reconstruc
 probes still require their authenticated shared source, and optional cache/background program-preparation failures cannot
 disable the completed glyph route or a valid depth producer. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-50 dump preserves ordinary Base, the protected Final diagnostic, native matte, SCT5,
+schema-51 dump preserves ordinary Base, the protected Final diagnostic, native matte, SCT5,
 SCP4, joined source snapshot and exact rendered native source bytes with ordered D3D11 copies
 and one terminal event. Submission performs no GPU-to-CPU wait or synchronous Map. Later callbacks
 poll with `DONOTFLUSH`, collect with `DO_NOT_WAIT`, and publish only a complete immutable tuple.
 The live warp SRV is Base. Field-only inactive fixtures can explicitly use their unconditioned
 Final alias. The reader independently validates the old Final diagnostic recurrence and the new
-same-observation matte transform/SCP4. `warp_map.f32` records actual selected pre-saturation U;
-its boundary mask follows that selected U. `source.png` remains a preview; exact `render_source.bin`
+same-observation matte transform/SCP4. `warp_map.f32` records ordinary Base pre-saturation U;
+its boundary mask follows that same U. Actual shared draws export their separate same-draw pin map. `source.png` remains a preview;
+exact `render_source.bin`
 preserves native SDR/HDR color for pointwise revocation audits. The required boolean
 `selected_map.render_enabled` records exact b3 draw permission separately from retained OCR/SCP
 authority. Live and whole-clip rendering share
-the selected-map policy. Offline scene-cache schema 4 commits Base/state/matte/SCT/SCP/source as one
+the shared subtitle policy. Offline scene-cache schema 5 commits Base/state/matte/SCT/SCP/source as one
 hashed six-payload tuple through a per-frame atomic `.tuple.json` record; partial tuples fail closed.
 
-The schema-50 root `matched_observation_timestamp_us` records the completed source transaction's
+The schema-51 root `matched_observation_timestamp_us` records the completed source transaction's
 clock. A fresh publication must bind that clock to the full sealed geometry state before UI
 conditioning can be verified. Conditional reuse retains an older geometry/UI owner; the authenticated
 GPU trace must identify that owner's original observation, whose clock remains in the retained

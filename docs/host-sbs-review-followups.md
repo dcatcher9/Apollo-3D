@@ -1122,3 +1122,37 @@ comes from the fourteen native renderer cases. The external actual-main integrat
 Packaged qualification and the requested combined live build are tracked separately from these
 development measurements. Live headset acceptance remains pending; shader availability by itself
 proves neither execution nor a visible gain.
+
+### P20 ordinary Base rendering and render-binding cleanup
+
+Ordinary live, queued and diagnostic shaders now call the canonical Base inverse directly.
+The analytic subtitle shader include is removed. Shared current-glyph pinning and current-RGB
+revocation retain their existing equations. Missing shared preparation or invalid selected
+authority preserves ordinary Base with subtitle permission disabled; unavailable or invalid depth
+retains the independent flat renderer. Render-only t8 leases, receipt backup and dump evidence are
+removed. Raw and original masks still used by construction and maintained diagnostics remain.
+
+Follow conversion now records the actual shared draw, with ordinary Base fallback. Its normal
+path records one SBS draw and performs no qualification observer or diagnostic readback. Ordinary
+evaluation and retained scene-cache replay use Base. Coordinate contract 128, selected-map 2,
+Dump 3D 51, actual-draw evidence 2, qualification 7 and scene-cache contract 5 explicitly describe
+these roles; the six-payload tuple format remains 1. Historical captures are not retagged.
+
+On the same nine source sequences and clocks, all 54 actual selected RGBA images and selected
+masks are byte-identical to the preceding e3495a54 build. The six-frame follow conversion also
+matches the new selected qualification output exactly. The evidence is in
+`E:\ApolloDev\cln1\runs\cleanup-main54-v1\comparison.json` (SHA256
+`013a2427b7a13bfdcb3908a04a3f8f0d29bd7ba524614925b98efb15fa68997b`) and
+`follow-latin-v1/comparison.json` (SHA256
+`226769c105ec6889933c0ab970c2480b331a5f0cd6bcf97cffaf1c17eb5cf297`).
+The evaluator suite passes 975 tests with 13 platform skips. Native gates pass 305 mandatory
+tests; six external replay diagnostics have no supplied inputs and are explicitly skipped.
+These are functional and finite output-parity checks, not live FPS or headset-comfort evidence.
+
+The first live package omitted `video-dom-info.exe`, leaving browser subtitle admission disabled
+despite resident OCR. The corrected immutable package and subsequent publication checks require
+that helper; bounded helper failures are logged independently of context transitions. A separate
+physical-display fix preserves the last verified recovery target when a retained virtual display
+returns beside only part of the physical desktop. Three simulated CCD regressions cover partial
+wake, delayed availability and deliberate user disable. The driver's virtual-display reactivation
+and physical settling still require live validation.

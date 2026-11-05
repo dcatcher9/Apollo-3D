@@ -171,6 +171,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Reviewed producer-body refresh for the integer-pixel clearance search; the
             # separately asserted public tag, layout and timing semantics remain unchanged.
             127: "dc007fd6ab26b4a5acd0809d7a2e9e9a65b56b4efd94f287bbb7297a5f7d3e85",
+            # Ordinary rendering now has only authenticated Base; the analytic selector is retired.
+            128: "6eb37c930253ff3f5d114cb3ab5e41af392772c212ccf8e4eaa4130bb095022a",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -178,14 +180,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x2B6FE941)
+        self.assertEqual(generator.contract_tag(contract), 0x4D680D18)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "2b6fe94121f5c8d36b7498a9cc4a5d918c2a68e0cb0feb54258f741f66e41586",
+            "4d680d180a4c9525388b7afa353c440c9cb29cbc54d4cdfac10ff31b8fdf51ec",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "0101ba86546749b03a43e40cf62f3e08f38580bc9f6d329b51d805a5e6e8b984",
+            "5e696c8a07548c511d84784465f48852584a6e30ab1c61e1e6f4da1baa7c6f7d",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -196,6 +198,22 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             f'contract_canonical_sha256 = "{python_contract.CONTRACT_CANONICAL_SHA256}"',
             generator.render_cpp(contract),
         )
+
+    def test_ordinary_base_contract_cannot_reintroduce_the_analytic_selector(self):
+        contract = generator.load_contract()
+        self.assertEqual(contract["selected_map"]["schema"], 2)
+        self.assertNotIn("selector", contract["selected_map"])
+        self.assertEqual(contract["selected_map"]["invalid_depth_policy"],
+                         "independent-flat-identity-renderer")
+        for change in ({"schema": 1}, {"selector": "legacy-ui-footprint-selector"},
+                       {"sample_policy": "sample-at-selected-ui-or-base-coordinate"}):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                altered = copy.deepcopy(contract)
+                altered["selected_map"].update(change)
+                path = Path(temporary) / "contract.json"
+                path.write_text(json.dumps(altered), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "ordinary authenticated Base inverse"):
+                    generator.load_contract(path, verify_shader_source_closure=False)
 
     def test_manifest_pins_every_cross_language_layout(self):
         contract = generator.load_contract()
@@ -454,7 +472,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 127u',
+                'contract_schema = 128u',
                 'final_parallax_contract_schema = 4u',
                 'final_parallax_authority = '
                 '"authenticated-subtitle-conditioned-r32f-diagnostic-only"',
@@ -554,7 +572,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 127u',
+                '#define V2_CONTRACT_SCHEMA 128u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS 28u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG 1u',
                 '#define V2_SUBTITLE_CONTOUR_RECIPE 27u',

@@ -1085,20 +1085,30 @@ namespace platf::sbs_debug {
       std::size_t row_bytes = 0;
     };
 
-    // Preserve the original nine artifact names/order; append optional shared-warp operands.
-    constexpr std::array<const char *, 15u> actual_draw_artifacts {{
-      "actual_draw_M.u32", "actual_original_legacy_M.u32", "actual_background.rgba32f",
+    // Schema 2 records only maintained bindings; the unused legacy t8 mask is retired.
+    constexpr std::array<const char *, 14u> actual_draw_artifacts {{
+      "actual_draw_M.u32", "actual_background.rgba32f",
       "actual_selected_receipt.u32", "actual_background_proof.u32", "actual_background_expected.u32",
       "actual_source_C24.u32", "actual_geometry_constants.u32", "actual_subtitle_constants.u32",
       "actual_shared_pin_weights.f32", "actual_shared_pin_field.f32", "actual_shared_pin_rows.u32",
       "actual_shared_pin_geometry.u32", "actual_shared_pin_map.rgba32f", "actual_shared_pin_boundary.rgba32f",
     }};
     constexpr bool actual_draw_is_texture(std::size_t index) {
-      return index < 3u || (index >= 9u && index <= 11u) || index >= 13u;
+      return index < 2u || (index >= 8u && index <= 10u) || index >= 12u;
     }
     constexpr std::size_t actual_draw_storage_index(std::size_t index) {
-      return index < 3u ? index : index < 9u ? index - 3u : index < 12u ? index - 6u : index == 12u ? 6u : index - 7u;
+      return index < 2u ? index : index < 8u ? index - 2u : index < 11u ? index - 6u : index == 11u ? 6u : index - 7u;
     }
+    static_assert([] {
+      std::array<bool, 7u> textures {}, buffers {};
+      for (std::size_t index = 0u; index < actual_draw_artifacts.size(); ++index) {
+        const auto storage = actual_draw_storage_index(index);
+        auto &slots = actual_draw_is_texture(index) ? textures : buffers;
+        if (storage >= slots.size() || slots[storage]) return false;
+        slots[storage] = true;
+      }
+      return true;
+    }());
 
     /**
      * CPU-owned copy of one authenticated render pair. D3D11 resources are read while the
@@ -1152,7 +1162,7 @@ namespace platf::sbs_debug {
       texture_snapshot warp_map;
       bool warp_mask_available = false;
       texture_snapshot warp_mask;
-      std::array<texture_snapshot, 8u> actual_draw_textures;
+      std::array<texture_snapshot, 7u> actual_draw_textures;
       std::array<std::vector<std::uint8_t>, 7u> actual_draw_buffers;
       std::array<bool, actual_draw_artifacts.size()> actual_draw_available {};
       std::array<std::string, actual_draw_artifacts.size()> actual_draw_unavailable;
@@ -1279,7 +1289,7 @@ namespace platf::sbs_debug {
       staged_texture warp_mask;
       staged_buffer depth_frame_state;
       staged_buffer adaptive_state;
-      std::array<staged_texture, 8u> actual_draw_textures;
+      std::array<staged_texture, 7u> actual_draw_textures;
       std::array<staged_buffer, 7u> actual_draw_buffers;
       std::size_t actual_draw_collection_index = 0u;
 
@@ -2653,9 +2663,9 @@ namespace platf::sbs_debug {
       const auto &c24 = job.actual_draw_buffers[3];
       const bool c24_comparable = c24.size() == 96u && receipt.size() == 256u;
       const nlohmann::json metadata {
-        {"diagnostic_only", true}, {"captured", e.captured},
+        {"schema", 2u}, {"diagnostic_only", true}, {"captured", e.captured},
         {"unavailable_reason", e.unavailable_reason},
-        {"observation_point", "PSGet bindings inside recorder immediately before Draw and cleanup, inside selected/shared/background scopes"},
+        {"observation_point", "PSGet bindings inside recorder immediately before Draw and cleanup, inside selected/shared scopes"},
         {"snapshot_order", "same immediate-context conversion; copies precede terminal dump event and next live reuse"},
         {"conversion_frame", e.conversion_frame}, {"model_frame", e.model_frame}, {"observation_us", e.observation_us},
         {"program", e.program}, {"selected_shader", e.selected_shader}, {"queued_geometry", e.queued_geometry},
@@ -2668,15 +2678,13 @@ namespace platf::sbs_debug {
           {"map_artifact", "actual_shared_pin_map.rgba32f"}, {"boundary_artifact", "actual_shared_pin_boundary.rgba32f"},
           {"map_layout", "packed-output row-major float32-le RGBA: sourceU,sourceV,pinnedRow,contentValid"},
           {"boundary_layout", "packed-output row-major float32-le RGBA: finiteSourceBoundary,0,0,1"},
-          {"map_authority", "same-draw shared-field inverse before native source clamp; legacy warp_map.f32 remains a separate analytic diagnostic"},
+          {"map_authority", "same-draw shared-field inverse before native source clamp; warp_map.f32 remains a separate ordinary Base diagnostic"},
           {"replay", "native field, current authorized weights, rows/header and exact b6 are literal GPU readbacks; no CPU pin-field replica"},
         }},
-        {"fallback_policy", e.shared_pin_selected ?
-          "Invalid selected receipt delegates to original legacy M t8; empty or revoked pin rows preserve Base. Shared warp reconstructs no RGB. Binding flags alone do not establish GPU authorization." :
-          "Invalid selected receipt delegates to original legacy M t8; unavailable BG delegates to old selected behavior. Binding flags alone do not establish GPU authorization."},
-        {"legacy_compatibility_artifact", "subtitle_glyph_matte.u32 remains the published legacy matte; actual_draw_M.u32 is observed t3, actual_original_legacy_M.u32 is observed t8"},
+        {"fallback_policy", "Unavailable shared preparation or invalid selected authority preserves authenticated ordinary Base with subtitle permission disabled; empty or revoked pin rows also preserve Base. Independent flat rendering is reserved for invalid or unavailable depth. Binding flags alone do not establish GPU authorization."},
+        {"published_matte_artifact", "subtitle_glyph_matte.u32 remains an independent mask-construction diagnostic; actual_draw_M.u32 is observed t3"},
         {"binding_roles", {{"t3", "actual_draw_M.u32"}, {"t7", "actual_selected_receipt.u32"},
-          {"t8", "actual_original_legacy_M.u32"}, {"t9", "actual_background.rgba32f"},
+          {"t9", "actual_background.rgba32f"},
           {"t11", "actual_background_proof.u32"}, {"b4", "actual_background_expected.u32"},
           {"t12", "actual_shared_pin_weights.f32"}, {"t13", "actual_shared_pin_field.f32"},
           {"t14", "actual_shared_pin_rows.u32"}, {"b6", "actual_shared_pin_geometry.u32"}}},
@@ -2698,7 +2706,7 @@ namespace platf::sbs_debug {
       const auto digest = written ? models::file_sha256_hex(path) : std::string {};
       const bool available = written && !digest.empty();
       auto descriptor = hashed_artifact_description(available, false,
-        "actual draw binding observation", "Optional literal selected/shared/BG evidence; does not replace tuple authentication.", digest);
+        "actual draw binding observation", "Optional schema-2 literal selected/shared bindings; does not replace tuple authentication.", digest);
       descriptor["unavailable_reason"] = available ? "" : "optional metadata write/hash failed";
       artifacts["actual_draw_evidence.json"] = std::move(descriptor);
     }
@@ -5591,8 +5599,8 @@ namespace platf::sbs_debug {
             {"validity", {
               {"content", "derive from content_scale_x/content_scale_y and packed output coordinate"},
               {"inverse", video_region ?
-                "selected pre-clamp U from crop-local Base inverse with depth_input_region embedding or analytic UI plane via native glyph matte" :
-                "selected pre-clamp U from ordinary Base inverse or analytic UI plane via native glyph matte"},
+                "pre-clamp U from crop-local ordinary Base inverse with depth_input_region embedding" :
+                "pre-clamp U from ordinary Base inverse"},
               {"mask", "warp_mask.png red marks finite-source boundary extrapolation; V2 has no internal owner or synthetic-fill path"},
             }},
             {"live_sample_source_u_normalized", "clamp(raw_reproject_source_u_normalized, 0, 1)"},
@@ -5607,7 +5615,7 @@ namespace platf::sbs_debug {
         auto selected_map = nlohmann::json::parse(models::depth_coordinate_v2::selected_map_contract_json);
         selected_map["render_enabled"] = completed.subtitle_render_enabled;
         nlohmann::json manifest {
-          {"schema", 50},
+          {"schema", 51},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -5628,23 +5636,24 @@ namespace platf::sbs_debug {
           }},
           {"renderer", {
                          {"authority", video_region ?
-                           "authenticated Base inverse plus analytic UI glyph selector and depth-input-region embedding" :
-                           "authenticated-base-inverse-plus-analytic-ui-glyph-selector"},
+                           "authenticated ordinary Base inverse with depth-input-region embedding" :
+                           "authenticated-ordinary-base-inverse"},
                          {"parallax_v2_render_requested", true},
                          {"parallax_v2_render_selected", true},
                          {"mapping_artifacts_match_selected_renderer", !completed.actual_draw.shared_pin_selected && warp_map_available && warp_mask_available},
                          {"actual_draw_renderer", {
-                           {"kind", completed.actual_draw.shared_pin_selected ? "shared-ui-pin-v1" : "legacy-analytic-v1"},
+                           {"schema", 2u},
+                           {"kind", completed.actual_draw.shared_pin_selected ? "shared-ui-pin-v1" : "ordinary-base-v1"},
                            {"source_closure_sha256", completed.actual_draw.shared_pin_selected ? completed.actual_draw.shared_pin_source_closure : std::string {}},
-                           {"legacy_mapping_role", completed.actual_draw.shared_pin_selected ? "independent analytic diagnostic; does not describe rendered shared warp" : "selected analytic renderer diagnostic"},
+                           {"mapping_role", completed.actual_draw.shared_pin_selected ? "independent Base diagnostic; does not describe rendered shared warp" : "authenticated Base inverse diagnostic"},
                            {"evidence_artifact", "actual_draw_evidence.json"},
                          }},
-                         {"parallax_v2_position_field", video_region ? "ordinary Base inverse + optional analytic UI glyph selector + depth_input_region embedding" : "ordinary Base inverse + optional analytic UI glyph selector"},
+                         {"parallax_v2_position_field", video_region ? "ordinary Base inverse + depth_input_region embedding" : "ordinary Base inverse"},
                          {"parallax_v2_coordinate_role", "shadow_coordinate is diagnostic only; it has no renderer authority"},
                          {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= max_vertical_shear/content_width; diagnostic evidence only"},
                          {"parallax_v2_vertical_conditioned_role", "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and feeds the row majorant"},
-                         {"parallax_v2_conditioner_role", "ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering"},
-                         {"parallax_v2_inverse", "at-most-11-step Base inverse plus analytic UI glyph selection; selected map may be discontinuous; no synthetic fill"},
+                         {"parallax_v2_conditioner_role", "ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; shared pin field alone adds subtitle displacement"},
+                         {"parallax_v2_inverse", "at-most-11-step authenticated Base inverse; no subtitle selector or synthetic fill"},
                          {"collar_defocus", nlohmann::json {
                               {"enabled", false},
                               {"role", "disabled after live hand-boundary halo regression; live color uses one linear sample at the inverse-warped coordinate"},
@@ -5689,7 +5698,7 @@ namespace platf::sbs_debug {
             {"current_rgb_policy", std::string {
               models::depth_coordinate_v2::final_parallax_current_rgb_policy
             }},
-            {"warp_relation", "independent diagnostic; selected map consumes Base and the joined analytic glyph tuple"},
+            {"warp_relation", "independent diagnostic; ordinary mapping consumes immutable Base only"},
           }},
           {"normalization", adaptive_available ?
              nlohmann::json {
@@ -5830,8 +5839,8 @@ namespace platf::sbs_debug {
              << "parallax_v2_render_selected=true\n"
              << "renderer_authority="
              << (video_region ?
-                   "authenticated Base inverse plus analytic UI glyph selector and depth-input-region embedding" :
-                   "authenticated-base-inverse-plus-analytic-ui-glyph-selector")
+                   "authenticated ordinary Base inverse with depth-input-region embedding" :
+                   "authenticated-ordinary-base-inverse")
              << '\n'
              << "final_parallax_warp_relation=independent-diagnostic-no-render-authority\n"
              << "collar_defocus_enabled=false\n"
@@ -6970,12 +6979,12 @@ namespace platf::sbs_debug {
 
       if (completed.actual_draw.requested) {
         const auto &e = completed.actual_draw;
-        const std::array<ID3D11ShaderResourceView *, 8u> textures {
-          e.matte.Get(), e.legacy_matte.Get(), e.background.Get(),
+        const std::array<ID3D11ShaderResourceView *, 7u> textures {
+          e.matte.Get(), e.background.Get(),
           e.shared_pin_weights.Get(), e.shared_pin_field.Get(), e.shared_pin_rows.Get(),
           e.shared_pin_mapping.Get(), e.shared_pin_boundary.Get()
         };
-        const std::array<std::size_t, 8u> texture_artifacts {0u, 1u, 2u, 9u, 10u, 11u, 13u, 14u};
+        const std::array<std::size_t, 7u> texture_artifacts {0u, 1u, 8u, 9u, 10u, 12u, 13u};
         for (std::size_t i = 0u; i < textures.size(); ++i) {
           const auto artifact = texture_artifacts[i];
           job.actual_draw_available[artifact] = e.captured && textures[i] &&
@@ -6986,15 +6995,15 @@ namespace platf::sbs_debug {
         const std::array<ID3D11ShaderResourceView *, 2u> records {e.selected_receipt.Get(), e.background_proof.Get()};
         const std::array<std::size_t, 2u> record_words {64u, 96u};
         for (std::size_t i = 0u; i < records.size(); ++i) {
-          job.actual_draw_available[3u + i] = e.captured && records[i] &&
+          job.actual_draw_available[2u + i] = e.captured && records[i] &&
             stage_exact_scalar_buffer(device, ctx, records[i], record_words[i], pending->actual_draw_buffers[i]);
-          if (!job.actual_draw_available[3u + i]) job.actual_draw_unavailable[3u + i] = !e.captured ? e.unavailable_reason :
+          if (!job.actual_draw_available[2u + i]) job.actual_draw_unavailable[2u + i] = !e.captured ? e.unavailable_reason :
             !records[i] ? "not bound by observed draw" : "optional structured-buffer layout/staging failed";
         }
         const std::array<ID3D11Buffer *, 5u> constants {e.expected.Get(), e.source_c24.Get(), e.geometry_constants.Get(), e.subtitle_constants.Get(), e.shared_pin_geometry.Get()};
         const std::array<UINT, 5u> constant_bytes {64u, 96u, 48u, 32u, 16u};
         for (std::size_t i = 0u; i < constants.size(); ++i) {
-          const auto artifact = i < 4u ? 5u + i : 12u;
+          const auto artifact = i < 4u ? 4u + i : 11u;
           job.actual_draw_available[artifact] = e.captured && constants[i] &&
             stage_exact_constants(device, ctx, constants[i], constant_bytes[i], pending->actual_draw_buffers[2u + i]);
           if (!job.actual_draw_available[artifact]) job.actual_draw_unavailable[artifact] = !e.captured ? e.unavailable_reason :
