@@ -18,6 +18,17 @@
 
 namespace platf {
   namespace monitor_desktop_detail {
+    bool is_security_surface(std::wstring_view window_class, std::wstring_view process_image) {
+      const auto same_name = [](std::wstring_view left, std::wstring_view right) {
+        return left.size() == right.size() && std::equal(left.begin(), left.end(), right.begin(), [](wchar_t a, wchar_t b) {
+          return std::towlower(a) == std::towlower(b);
+        });
+      };
+      const auto separator = process_image.find_last_of(L"\\/");
+      const auto process_name = process_image.substr(separator == std::wstring_view::npos ? 0 : separator + 1);
+      return same_name(window_class, L"LockScreenInputOcclusionFrame") || same_name(process_name, L"LockApp.exe");
+    }
+
     bool valid_rect(RECT rect) {
       const auto width = static_cast<std::int64_t>(rect.right) - rect.left;
       const auto height = static_cast<std::int64_t>(rect.bottom) - rect.top;
@@ -140,6 +151,31 @@ namespace platf {
       bool move_posted = false;
     };
 
+    bool security_surface_window(HWND hwnd, std::wstring_view known_class = {}) {
+      std::array<wchar_t, 256> name {};
+      if (known_class.empty() && GetClassNameW(hwnd, name.data(), static_cast<int>(name.size()))) {
+        known_class = name.data();
+      }
+      if (monitor_desktop_detail::is_security_surface(known_class, {})) {
+        return true;
+      }
+      DWORD pid = 0;
+      if (!GetWindowThreadProcessId(hwnd, &pid)) {
+        return false;
+      }
+      const auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      if (!process) {
+        return false;
+      }
+      std::array<wchar_t, 1024> image {};
+      DWORD length = static_cast<DWORD>(image.size());
+      const bool queried = QueryFullProcessImageNameW(process, 0, image.data(), &length);
+      CloseHandle(process);
+      // A failed image query alone must not blacklist ordinary games or UWP applications.
+      // The explicit lock-screen class above remains excluded independently of process access.
+      return queried && monitor_desktop_detail::is_security_surface(known_class, {image.data(), length});
+    }
+
     bool eligible_window(HWND hwnd) {
       if (!IsWindow(hwnd) || !IsWindowVisible(hwnd) || hwnd == GetShellWindow() || hwnd == GetDesktopWindow() || GetAncestor(hwnd, GA_ROOT) != hwnd) {
         return false;
@@ -167,7 +203,8 @@ namespace platf {
       }
       // Normal application windows and borderless/fullscreen applications have a title or an
       // explicit app-window style. This leaves untitled shell overlays and menus in place.
-      return (style & WS_CAPTION) || (extended_style & WS_EX_APPWINDOW) || GetWindowTextLengthW(hwnd) > 0;
+      const bool application = (style & WS_CAPTION) || (extended_style & WS_EX_APPWINDOW) || GetWindowTextLengthW(hwnd) > 0;
+      return application && !security_surface_window(hwnd, class_name);
     }
 
     std::optional<POINT> workspace_offset(HWND hwnd, RECT screen_rect) {
@@ -248,11 +285,13 @@ namespace platf {
         return false;
       }
       const auto placement = monitor_desktop_detail::placement_for_move(window.placement, translated(normal_rect, *destination_workspace, true), window.minimized, window.visible);
-      return placement && SetWindowPlacement(window.hwnd, &*placement);
+      return placement && !security_surface_window(window.hwnd) && SetWindowPlacement(window.hwnd, &*placement);
     }
 
     void retain_foreground(HWND foreground) {
-      if (foreground && IsWindow(foreground) && GetForegroundWindow() != foreground) {
+      const auto current = GetForegroundWindow();
+      if (foreground && IsWindow(foreground) && current != foreground && !security_surface_window(foreground) &&
+          (!current || !security_surface_window(current))) {
         SetForegroundWindow(foreground);
       }
     }
@@ -386,6 +425,9 @@ namespace platf {
     }
 
     window_t *retain(const window_t &window) {
+      if (security_surface_window(window.hwnd)) {
+        return nullptr;
+      }
       const auto previous = std::find_if(windows.begin(), windows.end(), [&](const auto &entry) {
         return entry.hwnd == window.hwnd;
       });
@@ -406,6 +448,21 @@ namespace platf {
       }
       windows.push_back(window);
       return &windows.back();
+    }
+
+    void discard_security_windows() {
+      const auto discard = [&](const window_t &window) {
+        if (!same_identity(window) || !security_surface_window(window.hwnd)) {
+          return false;
+        }
+        if (GetPropW(window.hwnd, property.c_str()) == token()) {
+          RemovePropW(window.hwnd, property.c_str());
+        }
+        return true;
+      };
+      // Previously tagged/frozen entries are not permission to replay a security surface.
+      std::erase_if(windows, discard);
+      std::erase_if(restoring, discard);
     }
 
     void release_properties() {
@@ -486,6 +543,7 @@ namespace platf {
     impl_->active = true;  // Keep failure cleanup responsible for every partially moved window.
     impl_->restore_prepared = false;
     impl_->restoring.clear();
+    impl_->discard_security_windows();
     const HWND foreground = GetForegroundWindow();
     bool success = true;
     std::vector<window_t> moving;
@@ -630,6 +688,7 @@ namespace platf {
     if (!dpi.active()) {
       return;
     }
+    impl_->discard_security_windows();
     impl_->restoring.clear();
     const bool enumerated = EnumWindows([](HWND hwnd, LPARAM parameter) -> BOOL {
       auto &self = *reinterpret_cast<impl_t *>(parameter);
@@ -693,6 +752,7 @@ namespace platf {
       return false;
     }
     const HWND foreground = GetForegroundWindow();
+    impl_->discard_security_windows();
     bool success = true;
     std::vector<window_t> moving;
     for (const auto &window : impl_->restoring) {

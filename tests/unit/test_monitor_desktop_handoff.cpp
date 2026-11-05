@@ -8,6 +8,29 @@
 namespace {
   using namespace platf::monitor_desktop_detail;
 
+  TEST(MonitorDesktopHandoff, KnownLockScreenClassIsExcludedEvenWhenItsProcessCannotBeQueried) {
+    EXPECT_TRUE(is_security_surface(L"LockScreenInputOcclusionFrame", L"explorer.exe"));
+    EXPECT_TRUE(is_security_surface(L"lockscreeninputocclusionframe", L"EXPLORER.EXE"));
+    EXPECT_TRUE(is_security_surface(L"LockScreenInputOcclusionFrame", {}));
+  }
+
+  TEST(MonitorDesktopHandoff, LockAppOwnerIsExcludedForAnyWindowClass) {
+    EXPECT_TRUE(is_security_surface(L"Windows.UI.Core.CoreWindow", L"LockApp.exe"));
+    EXPECT_TRUE(is_security_surface(L"ApplicationFrameWindow", L"LOCKAPP.EXE"));
+    EXPECT_TRUE(is_security_surface(L"", L"C:\\Windows\\SystemApps\\LockApp_cw5n1h2txyewy\\LockApp.exe"));
+  }
+
+  TEST(MonitorDesktopHandoff, OrdinaryExplorerUwpAndGamesAreNotBlanketExcluded) {
+    EXPECT_FALSE(is_security_surface(L"CabinetWClass", L"explorer.exe"));
+    EXPECT_FALSE(is_security_surface(L"Windows.UI.Core.CoreWindow", L"CalculatorApp.exe"));
+    EXPECT_FALSE(is_security_surface(L"ApplicationFrameWindow", L"ApplicationFrameHost.exe"));
+    EXPECT_FALSE(is_security_surface(L"UnrealWindow", L"ExampleGame.exe"));
+    EXPECT_FALSE(is_security_surface(L"ApplicationFrameWindow", L"explorer.exe"));
+    EXPECT_FALSE(is_security_surface(L"UnrealWindow", {})); // An unreadable process name is not a security identity.
+    EXPECT_FALSE(is_security_surface(L"", L"MyLockApp.exe"));
+    EXPECT_FALSE(is_security_surface(L"LockScreenInputOcclusionFrameHelper", L"explorer.exe"));
+  }
+
   void expect_rect(const std::optional<RECT> &actual, RECT expected) {
     ASSERT_TRUE(actual);
     EXPECT_EQ(actual->left, expected.left);

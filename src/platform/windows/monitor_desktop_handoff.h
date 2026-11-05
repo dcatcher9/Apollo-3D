@@ -2,10 +2,13 @@
 
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <windows.h>
 
 namespace platf {
   namespace monitor_desktop_detail {
+    // Exact known security identities; ordinary Explorer and UWP application windows remain valid.
+    bool is_security_surface(std::wstring_view window_class, std::wstring_view process_image);
     bool valid_rect(RECT rect);
     bool contains(RECT rect, POINT point);
     bool contains_center(RECT monitor, RECT window);
