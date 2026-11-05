@@ -198,7 +198,186 @@ namespace {
       );
     }
   };
+
+  struct source_color_probe_t {
+    using color_t = ar_glasses::detail::local_source_color_t;
+    std::optional<color_t> measured = color_t {{3840, 2160, 120000}, false};
+    std::chrono::milliseconds elapsed {};
+    std::chrono::milliseconds visible_after {};
+    unsigned queries = 0;
+    unsigned mode_sets = 0;
+    unsigned color_sets = 0;
+    bool accept_mode = true;
+    bool accept_color = true;
+    bool enable_hdr_resets_mode_once = false;
+    bool enable_hdr_always_resets_mode = false;
+    bool mode_resets_hdr = false;
+    bool physical_sink_active = true;
+    bool cancelled = false;
+    bool cancel_on_query = false;
+    bool cancel_on_mode = false;
+    bool cancel_on_color = false;
+    bool cancel_on_wait = false;
+
+    bool settle(bool hdr, std::chrono::milliseconds timeout = 5s) {
+      return ar_glasses::detail::settle_local_source_color_for_test(
+        3840,
+        2160,
+        120000,
+        hdr,
+        timeout,
+        [&]() -> std::optional<color_t> {
+          ++queries;
+          cancelled = cancelled || cancel_on_query;
+          return elapsed >= visible_after ? measured : std::nullopt;
+        },
+        [&]() {
+          ++mode_sets;
+          if (accept_mode && measured) {
+            measured->mode = {3840, 2160, 120000};
+            if (mode_resets_hdr) {
+              measured->hdr = false;
+            }
+          }
+          cancelled = cancelled || cancel_on_mode;
+        },
+        [&](bool enabled) {
+          ++color_sets;
+          if (accept_color && measured) {
+            measured->hdr = enabled;
+            if (enabled && (enable_hdr_resets_mode_once || enable_hdr_always_resets_mode)) {
+              measured->mode = {1920, 1080, 60000};
+              physical_sink_active = false;
+              enable_hdr_resets_mode_once = false;
+            }
+          }
+          cancelled = cancelled || cancel_on_color;
+        },
+        [&](std::chrono::milliseconds delay) {
+          elapsed += delay;
+          cancelled = cancelled || cancel_on_wait;
+        },
+        [&]() {
+          return std::chrono::steady_clock::time_point {} + elapsed;
+        },
+        [&]() {
+          return cancelled;
+        }
+      );
+    }
+  };
 }  // namespace
+
+TEST(LocalMonitorSourceColor, RepairsTheObservedHdrModeResetBeforeOwnerRestoresInactiveTv) {
+  source_color_probe_t probe;
+  probe.enable_hdr_resets_mode_once = true;
+  EXPECT_TRUE(probe.settle(true, 15s));
+  ASSERT_TRUE(probe.measured);
+  EXPECT_EQ(probe.measured->mode.width, 3840);
+  EXPECT_EQ(probe.measured->mode.height, 2160);
+  EXPECT_EQ(probe.measured->mode.refresh_millihz, 120000);
+  EXPECT_EQ(probe.measured->hdr, true);
+  EXPECT_EQ(probe.mode_sets, 1u);
+  EXPECT_EQ(probe.color_sets, 1u);
+  EXPECT_EQ(probe.elapsed, 500ms);
+  // This source-only phase deliberately leaves scanout restoration to the outer owner
+  // transaction, whose result must pass the final physical contract before desktop handoff.
+  EXPECT_FALSE(probe.physical_sink_active);
+}
+
+TEST(LocalMonitorSourceColor, RequiresRequestedCadenceEvenWhenRasterAndHdrAlreadyMatch) {
+  source_color_probe_t probe;
+  probe.measured = source_color_probe_t::color_t {{3840, 2160, 60000}, true};
+  EXPECT_TRUE(probe.settle(true));
+  EXPECT_EQ(probe.mode_sets, 1u);
+  EXPECT_EQ(probe.color_sets, 0u);
+}
+
+TEST(LocalMonitorSourceColor, RepairsColorAgainIfTheNativeModeSetterResetsHdr) {
+  source_color_probe_t probe;
+  probe.measured = source_color_probe_t::color_t {{1920, 1080, 60000}, true};
+  probe.mode_resets_hdr = true;
+  EXPECT_TRUE(probe.settle(true));
+  EXPECT_EQ(probe.mode_sets, 1u);
+  EXPECT_EQ(probe.color_sets, 1u);
+  EXPECT_EQ(probe.measured->hdr, true);
+}
+
+TEST(LocalMonitorSourceColor, WaitsForAuthoritativeSourceAndStableColorObservations) {
+  source_color_probe_t probe;
+  probe.visible_after = 2s;
+  probe.measured->hdr = true;
+  EXPECT_TRUE(probe.settle(true));
+  EXPECT_EQ(probe.elapsed, 2400ms);
+  EXPECT_EQ(probe.mode_sets, 0u);
+  EXPECT_EQ(probe.color_sets, 0u);
+}
+
+TEST(LocalMonitorSourceColor, UnknownIdentityOrColorCannotCertifyOrReceiveColorSetters) {
+  source_color_probe_t missing;
+  missing.measured.reset();
+  EXPECT_FALSE(missing.settle(true));
+  EXPECT_EQ(missing.mode_sets, 0u);
+  EXPECT_EQ(missing.color_sets, 0u);
+  EXPECT_EQ(missing.elapsed, 5s);
+
+  source_color_probe_t unknown_hdr;
+  unknown_hdr.measured->hdr.reset();
+  EXPECT_FALSE(unknown_hdr.settle(true));
+  EXPECT_EQ(unknown_hdr.mode_sets, 0u);
+  EXPECT_EQ(unknown_hdr.color_sets, 0u);
+}
+
+TEST(LocalMonitorSourceColor, RejectedHdrFailsWithinTheDeadlineWithoutAnSdrFallback) {
+  source_color_probe_t probe;
+  probe.accept_color = false;
+  EXPECT_FALSE(probe.settle(true));
+  EXPECT_EQ(probe.mode_sets, 0u);
+  EXPECT_EQ(probe.color_sets, 3u);
+  EXPECT_EQ(probe.measured->hdr, false);
+  EXPECT_EQ(probe.elapsed, 5s);
+}
+
+TEST(LocalMonitorSourceColor, RepeatedModeAndColorResetsCannotRetryIndefinitely) {
+  source_color_probe_t probe;
+  probe.enable_hdr_always_resets_mode = true;
+  probe.mode_resets_hdr = true;
+  EXPECT_FALSE(probe.settle(true));
+  EXPECT_EQ(probe.mode_sets, 3u);
+  EXPECT_EQ(probe.color_sets, 3u);
+  EXPECT_EQ(probe.elapsed, 5s);
+}
+
+TEST(LocalMonitorSourceColor, CancellationStopsQueriesSettersAndThePublicationWait) {
+  source_color_probe_t before_query;
+  before_query.cancelled = true;
+  EXPECT_FALSE(before_query.settle(true));
+  EXPECT_EQ(before_query.queries, 0u);
+
+  source_color_probe_t during_query;
+  during_query.cancel_on_query = true;
+  EXPECT_FALSE(during_query.settle(true));
+  EXPECT_EQ(during_query.color_sets, 0u);
+
+  source_color_probe_t during_mode;
+  during_mode.measured->mode.refresh_millihz = 60000;
+  during_mode.cancel_on_mode = true;
+  EXPECT_FALSE(during_mode.settle(true));
+  EXPECT_EQ(during_mode.mode_sets, 1u);
+  EXPECT_EQ(during_mode.color_sets, 0u);
+  EXPECT_EQ(during_mode.elapsed, 0ms);
+
+  source_color_probe_t during_color;
+  during_color.cancel_on_color = true;
+  EXPECT_FALSE(during_color.settle(true));
+  EXPECT_EQ(during_color.color_sets, 1u);
+  EXPECT_EQ(during_color.elapsed, 0ms);
+
+  source_color_probe_t during_wait;
+  during_wait.cancel_on_wait = true;
+  EXPECT_FALSE(during_wait.settle(true));
+  EXPECT_EQ(during_wait.elapsed, 50ms);
+}
 
 TEST(LocalMonitorBootstrap, RepairsRememberedArGeometryBeforeRequiringNativeReadback) {
   source_mode_probe_t probe;

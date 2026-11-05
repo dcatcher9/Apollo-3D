@@ -1684,6 +1684,77 @@ namespace ar_glasses {
       RECT rect {};
     };
 
+    struct source_color_state_t {
+      resolved_virtual_display_t display;
+      std::optional<bool> hdr;
+    };
+
+    template<class Query, class SetMode, class SetColor, class Wait, class Now>
+    bool settle_source_color_with_io(
+      int width,
+      int height,
+      int refresh_millihz,
+      bool expected_hdr,
+      std::chrono::milliseconds timeout,
+      Query query,
+      SetMode set_mode,
+      SetColor set_color,
+      Wait wait,
+      Now now,
+      const std::function<bool()> &cancelled
+    ) {
+      const auto deadline = now() + timeout;
+      auto next_mode_set = now();
+      auto next_color_set = now();
+      auto next_stable_observation = now();
+      int mode_attempts = 0;
+      int color_attempts = 0;
+      int stable_observations = 0;
+      // In addition to the clock deadline, retain a finite query bound for injected I/O.
+      const auto max_polls = timeout / 50ms + 1;
+      for (std::int64_t poll = 0; poll < max_polls && !cancelled() && now() < deadline; ++poll) {
+        const auto source = query();
+        if (cancelled() || now() >= deadline) {
+          return false;
+        }
+        const bool native_mode = source &&
+                                 source->display.rect.right - source->display.rect.left == width &&
+                                 source->display.rect.bottom - source->display.rect.top == height &&
+                                 source_refresh_matches(source->display.refresh_millihz, refresh_millihz);
+        if (!native_mode) {
+          stable_observations = 0;
+          next_stable_observation = now();
+          // HDR may restore Windows' remembered raster/rate. Only an exact owned identity may
+          // receive a mode setter, and color is retried only after its native cadence is proven.
+          if (source && mode_attempts < 3 && now() >= next_mode_set) {
+            set_mode(source->display);
+            ++mode_attempts;
+            next_mode_set = now() + 1s;
+          }
+        } else if (source->hdr && *source->hdr == expected_hdr) {
+          if (now() >= next_stable_observation) {
+            next_stable_observation = now() + 200ms;
+            if (++stable_observations >= 3) {
+              return !cancelled();
+            }
+          }
+        } else {
+          stable_observations = 0;
+          next_stable_observation = now();
+          if (source->hdr && color_attempts < 3 && now() >= next_color_set) {
+            set_color(source->display, expected_hdr);
+            ++color_attempts;
+            next_color_set = now() + 1s;
+          }
+        }
+        if (cancelled() || now() >= deadline) {
+          return false;
+        }
+        wait(50ms);
+      }
+      return false;
+    }
+
     enum class virtual_display_presence_e {
       indeterminate,
       absent,
@@ -3007,6 +3078,18 @@ namespace ar_glasses {
                             << " bits per color."sv;
           }
 
+          if (monitor_surface_) {
+            if (!configure_monitor_source_hdr(active_target.refresh_millihz, requested_target_hdr, true, cancelled)) {
+              return false;
+            }
+            virtual_hdr_active_ = requested_target_hdr;
+            // Advanced Color may temporarily deactivate the still-connected physical sink.
+            // Return only after the exact source is ready, allowing this transaction's final
+            // owner promotion to restore scanout. Validate the physical contract after promotion,
+            // before activating desktop handoff or opening any presenter/emitter resources.
+            return !cancelled();
+          }
+
           bool virtual_hdr_active = false;
           auto source_binding = virtual_display_binding();
           if (!configure_virtual_display_hdr(
@@ -3361,6 +3444,18 @@ namespace ar_glasses {
             original_target_rect_ = *rebased_original;
           }
 
+          if (monitor_surface_) {
+            const bool desired_hdr = target.hdr.known && target.hdr.active;
+            if (!configure_monitor_source_hdr(target.refresh_millihz, desired_hdr, false, cancelled)) {
+              return false;
+            }
+            virtual_hdr_active_ = desired_hdr;
+            presentation_target = target;
+            // The owner applies the coherent source/sink topology after this callback. Its
+            // physical result is checked by the shared final contract before handoff resumes.
+            return !cancelled();
+          }
+
           if (!refresh_virtual_display_reference()) {
             BOOST_LOG(warning) << "The local AR virtual desktop could not be resolved after the physical mode change; preserving it for a later topology retry."sv;
             return false;
@@ -3689,6 +3784,72 @@ namespace ar_glasses {
         return true;
       }
 
+      bool configure_monitor_source_hdr(
+        int requested_millihz,
+        bool expected_hdr,
+        bool reset_before_enable,
+        const std::function<bool()> &cancelled
+      ) {
+        auto settle = [&](bool hdr, std::chrono::milliseconds timeout) {
+          return settle_source_color_with_io(
+            source_width_,
+            source_height_,
+            requested_millihz,
+            hdr,
+            timeout,
+            [&]() -> std::optional<source_color_state_t> {
+              // The learned PnP path remains authoritative while Advanced Color restores a
+              // remembered mode or renumbers the active route. Final geometry is checked below.
+              const auto source = refresh_virtual_display_reference(false);
+              if (!source) {
+                return std::nullopt;
+              }
+              return source_color_state_t {
+                *source,
+                VDISPLAY::queryDisplayHDR(source->identity.AdapterLuid, source->identity.TargetId),
+              };
+            },
+            [&](const resolved_virtual_display_t &source) {
+              BOOST_LOG(info) << "Local monitor color transition: repairing owned source mode "sv
+                              << (source.rect.right - source.rect.left) << 'x'
+                              << (source.rect.bottom - source.rect.top) << '@'
+                              << (source.refresh_millihz / 1000.0) << " -> "sv
+                              << source_width_ << 'x' << source_height_ << '@'
+                              << (requested_millihz / 1000.0) << '.';
+              VDISPLAY::changeDisplaySettings(source.gdi_name.c_str(), source_width_, source_height_, requested_millihz, false);
+            },
+            [&](const resolved_virtual_display_t &source, bool enabled) {
+              BOOST_LOG(info) << "Local monitor color transition: requesting owned source HDR="sv << enabled << '.';
+              VDISPLAY::setDisplayHDR(source.identity.AdapterLuid, source.identity.TargetId, enabled);
+            },
+            [](std::chrono::milliseconds delay) {
+              std::this_thread::sleep_for(delay);
+            },
+            []() {
+              return std::chrono::steady_clock::now();
+            },
+            cancelled
+          );
+        };
+        // Preserve the initial IddCx SDR-then-HDR workaround. Subsequent mode/color changes
+        // converge directly so an already coherent HDR source need not toggle through SDR.
+        if ((reset_before_enable && expected_hdr && !settle(false, 5s)) || !settle(expected_hdr, expected_hdr ? 15s : 5s)) {
+          BOOST_LOG(error) << "Local monitor source could not establish its requested native cadence and HDR="sv
+                           << expected_hdr << "; stopping before desktop handoff."sv;
+          return false;
+        }
+        const auto source = refresh_virtual_display_reference();
+        const auto hdr = source ? VDISPLAY::queryDisplayHDR(source->identity.AdapterLuid, source->identity.TargetId) : std::nullopt;
+        if (cancelled() || !source || !source_refresh_matches(source->refresh_millihz, requested_millihz) || !hdr || *hdr != expected_hdr) {
+          return false;
+        }
+        virtual_display_.update_mode(source_width_, source_height_, static_cast<std::uint32_t>(source->refresh_millihz));
+        BOOST_LOG(info) << "Local monitor source color mode: "sv
+                        << (expected_hdr ? "HDR linear scRGB"sv : "SDR Rec.709"sv)
+                        << " at verified "sv << (source->refresh_millihz / 1000.0) << " Hz."sv;
+        return true;
+      }
+
       bool establish_native_source_mode(int requested_millihz, const std::function<bool()> &cancelled) {
         const bool established = establish_source_mode_with_io(
           source_width_,
@@ -3773,7 +3934,7 @@ namespace ar_glasses {
         }
         const auto binding = virtual_display_binding();
         const auto source = binding.identity ? resolve_virtual_display(*binding.identity, binding.device_path, binding.display_name, nullptr, source_width_, source_height_) : std::nullopt;
-        if (!source || source->refresh_millihz <= 0) {
+        if (!source || source->refresh_millihz <= 0 || (monitor_surface_ && !source_refresh_matches(source->refresh_millihz, actual.refresh_millihz))) {
           return false;
         }
         BOOST_LOG(info) << "Local AR verified refresh: source="sv << (source->refresh_millihz / 1000.0)
@@ -4880,6 +5041,50 @@ namespace ar_glasses {
       },
       [&](const resolved_virtual_display_t &) {
         apply();
+      },
+      wait,
+      now,
+      cancelled
+    );
+  }
+
+  bool detail::settle_local_source_color_for_test(
+    int width,
+    int height,
+    int refresh_millihz,
+    bool expected_hdr,
+    std::chrono::milliseconds timeout,
+    const std::function<std::optional<local_source_color_t>()> &query,
+    const std::function<void()> &set_mode,
+    const std::function<void(bool)> &set_color,
+    const std::function<void(std::chrono::milliseconds)> &wait,
+    const std::function<std::chrono::steady_clock::time_point()> &now,
+    const std::function<bool()> &cancelled
+  ) {
+    return settle_source_color_with_io(
+      width,
+      height,
+      refresh_millihz,
+      expected_hdr,
+      timeout,
+      [&]() -> std::optional<source_color_state_t> {
+        const auto source = query();
+        if (!source) {
+          return std::nullopt;
+        }
+        return source_color_state_t {
+          resolved_virtual_display_t {
+            .refresh_millihz = source->mode.refresh_millihz,
+            .rect = {0, 0, source->mode.width, source->mode.height},
+          },
+          source->hdr,
+        };
+      },
+      [&](const resolved_virtual_display_t &) {
+        set_mode();
+      },
+      [&](const resolved_virtual_display_t &, bool hdr) {
+        set_color(hdr);
       },
       wait,
       now,

@@ -3675,6 +3675,59 @@ TEST(PrimaryDisplayMonitorReplacement, ConnectedInactiveSecondary4kTvUsesRecorde
   expect_positions(fake.current, {{L"TV", -3840, 0}, {L"UltraGear", 0, 0}, {L"virtual", 5120, 0}});
 }
 
+TEST(PrimaryDisplayMonitorReplacement, InactiveTvRecoveryPreservesConvergedSourceHdrInsteadOfThePriorSdrJournal) {
+  fake_io_t fake;
+  secondary_tv_baseline(fake);
+  const auto primary_color = *fake.current.colors[named_index(fake.current, L"UltraGear")];
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"TV", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+  const auto &prior = *fake.journal->exclusive_topology;
+  ASSERT_FALSE(prior.colors[named_index(prior, L"virtual")]->hdr_user_enabled);
+
+  // An HDR toggle can deactivate the TV and reload the private source's old mode. The color
+  // callback repairs that exact source to native HDR before the owner reconciles the topology.
+  fake.current = make_snapshot({{L"UltraGear", 0, 0}, {L"virtual", -3840, 0}});
+  set_display_mode(fake.current, L"UltraGear", 5120, 2160, 165);
+  set_display_mode(fake.current, L"virtual", 3840, 2160, 120);
+  fake.current.colors[named_index(fake.current, L"UltraGear")] = primary_color;
+  auto &source_color = *fake.current.colors[named_index(fake.current, L"virtual")];
+  source_color.advanced_color_enabled = source_color.hdr_user_enabled = source_color.advanced_color_active = true;
+  source_color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  source_color.bits_per_color_channel = 10;
+  // Exercise explicit color restoration too: a topology apply may reset every output to SDR.
+  fake.reset_colors_on_apply = true;
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", -3840, 0}, {L"UltraGear", 0, 0}, {L"TV", 5120, 0}});
+  for (const auto identity : {L"virtual", L"TV", L"UltraGear"}) {
+    SCOPED_TRACE(identity);
+    const auto index = named_index(fake.current, identity);
+    const auto &path = fake.current.paths[index];
+    const auto &mode = fake.current.modes[path.sourceInfo.sourceModeInfoIdx].sourceMode;
+    const bool primary = std::wstring_view(identity) == L"UltraGear";
+    EXPECT_EQ(mode.width, primary ? 5120u : 3840u);
+    EXPECT_EQ(mode.height, 2160u);
+    EXPECT_EQ(path.targetInfo.refreshRate.Numerator, primary ? 165u : 120u);
+    EXPECT_EQ(path.targetInfo.refreshRate.Denominator, 1u);
+    ASSERT_TRUE(fake.current.colors[index]);
+    const auto &color = *fake.current.colors[index];
+    EXPECT_EQ(color.hdr_user_enabled, !primary);
+    EXPECT_FALSE(color.wcg_user_enabled);
+    EXPECT_EQ(color.advanced_color_enabled, !primary);
+    EXPECT_EQ(color.advanced_color_active, !primary);
+    EXPECT_EQ(color.active_mode, primary ? DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR : DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR);
+    // Link bit depth is reported by the driver, not set by the Advanced Color API. Keep the
+    // ordinary SDR fixture at its native 8-bit baseline rather than inventing a 10-bit restore.
+    EXPECT_EQ(color.bits_per_color_channel, primary ? primary_color.bits_per_color_channel : std::wstring_view(identity) == L"TV" ? 12u : 10u);
+  }
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+  const auto &converged = *fake.journal->exclusive_topology;
+  EXPECT_TRUE(converged.colors[named_index(converged, L"virtual")]->hdr_user_enabled);
+}
+
 TEST(PrimaryDisplayMonitorReplacement, InactiveSecondaryTvWithoutConnectedRouteCannotApplyReplacement) {
   fake_io_t fake;
   secondary_tv_baseline(fake);
