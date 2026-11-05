@@ -1015,25 +1015,25 @@ scanout; other monitors stay usable. See
 
 | Default | Description |
 |---|---|
-| `6` | Glasses IR protocol, `0`–`6`. `6` is Panasonic custom firmware. |
+| `6` | Finite-window IR protocol: NVIDIA 3D Vision (`2`), Sony (`4`), Panasonic (`5`), or Panasonic custom firmware (`6`). |
 
 ### local_monitor_frame_delay_us
 
 | Default | Description |
 |---|---|
-| `500` | Delay from frame sync to the shutter window, `0`–`65000` microseconds. |
+| `500` | Delay from frame sync to the shutter window. Minimum `150` µs for protocol `2`, `100` µs for `4`/`5`/`6`; maximum `32767` µs. Delay plus duration must fit the emitter timer and selected eye interval. |
 
 ### local_monitor_frame_duration_us
 
 | Default | Description |
 |---|---|
-| `2000` | Shutter-open duration, `1`–`65000` microseconds. |
+| `2000` | Shutter-open duration. Minimum is configured IR spacing plus `300` µs for protocol `2`, `640` µs for `4`, or `320` µs for `5`/`6`; maximum `32767` µs. Leave room for the IR pulse and scheduling margin. |
 
 ### local_monitor_signal_spacing_us
 
 | Default | Description |
 |---|---|
-| `30` | IR signal spacing, `0`–`65000` microseconds. |
+| `30` | IR signal spacing. Minimum `30` µs; maximum `882` µs for protocol `2`, `483` µs for `4`, or `803` µs for `5`/`6`. The longest token plus spacing must fit the pulse timer. |
 
 ### local_monitor_flip_eyes
 
@@ -1046,6 +1046,13 @@ scanout; other monitors stay usable. See
 | Default | Description |
 |---|---|
 | `1` | Consecutive physical refreshes assigned to each eye, `1`–`4`. |
+
+The combined delay and duration must not exceed `32767` µs. At the actual monitor refresh, both
+that combined shutter window and the duration plus close-pulse margin must fit the eye interval
+(physical refresh period multiplied by `local_monitor_eye_repeats`). The UI receives protocol
+limits from the native emitter implementation; the driver validates the actual target again.
+The conservative `30` µs spacing floor leaves room for the firmware's greater-than-`5` µs gap-arm
+lead and measured `17` µs service overhead.
 
 ## Network
 

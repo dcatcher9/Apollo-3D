@@ -1,19 +1,26 @@
 <script setup>
 import {computed, inject, ref} from 'vue'
-import {settingEnabled, validateLocalMonitorConfig} from '../localMonitorConfig'
+import {rememberLocalMonitorDevices, rememberLocalMonitorTimingLimits, settingEnabled, validLocalMonitorTimingLimits, validateLocalMonitorConfig} from '../localMonitorConfig'
 import LocalMonitorSession from '../../LocalMonitorSession.vue'
 
 const props = defineProps({config: {type: Object, required: true}, settingsChanged: {type: Boolean, default: false}})
 const $t = inject('i18n').t
 const devices = ref([])
 const ports = ref([])
+const timingProfiles = ref([])
 const session = ref(null)
 
 const enabled = computed(() => settingEnabled(props.config.local_monitor_enabled))
 const flipEyes = computed(() => settingEnabled(props.config.local_monitor_flip_eyes))
 const selectedDevice = computed(() => devices.value.find(device => device.id === props.config.local_monitor_display_id))
 const missingDevice = computed(() => props.config.local_monitor_display_id && !selectedDevice.value)
-const validation = computed(() => validateLocalMonitorConfig(props.config))
+const timing = computed(() => timingProfiles.value.find(profile => Number(profile.protocol) === Number(props.config.local_monitor_ir_protocol) && validLocalMonitorTimingLimits(profile)))
+const minimumDuration = computed(() => {
+  if (!timing.value) return 1
+  const spacing = Number(props.config.local_monitor_signal_spacing_us)
+  return timing.value.min_duration_base_us + (Number.isInteger(spacing) && spacing >= timing.value.min_signal_spacing_us && spacing <= timing.value.max_signal_spacing_us ? spacing : timing.value.min_signal_spacing_us)
+})
+const validation = computed(() => validateLocalMonitorConfig(props.config, selectedDevice.value?.refresh_millihz, timing.value))
 const eyeRate = computed(() => {
   const refresh = Number(selectedDevice.value?.refresh_millihz) / 1000
   const repeats = Number(props.config.local_monitor_eye_repeats)
@@ -25,6 +32,9 @@ const setEnabled = (key, event) => {
 const displayLabel = device => `${device.name || 'Physical monitor'} · ${device.width} × ${device.height} · ${(device.refresh_millihz / 1000).toFixed(2)} Hz${device.is_primary ? ' · Primary' : ''}`
 const receiveStatus = body => {
   devices.value = body.devices || []
+  rememberLocalMonitorDevices(devices.value)
+  timingProfiles.value = body.timing_limits || []
+  rememberLocalMonitorTimingLimits(timingProfiles.value)
   ports.value = body.ports || []
 }
 </script>
@@ -39,7 +49,7 @@ const receiveStatus = body => {
     </header>
     <p class="text-body-secondary">Save and restart Sunshine 3D to apply changes. Remote streaming temporarily takes priority over local presentation.</p>
     <p class="text-body-secondary">Your selected monitor keeps its desktop position. Sunshine transfers its windows and cursor automatically for 3D and back for 2D; other monitors stay usable. Use borderless fullscreen for games that need to follow this handoff.</p>
-    <LocalMonitorSession ref="session" :show-when-disabled="true" :can-start="!props.settingsChanged" @status="receiveStatus" />
+    <LocalMonitorSession ref="session" :show-when-disabled="true" :can-start="!props.settingsChanged && validation.length === 0" @status="receiveStatus" />
 
     <label class="monitor-enable" for="local_monitor_enabled">
       <span><strong>{{ $t('config.local_monitor_enabled') }}</strong><small>{{ $t('config.local_monitor_enabled_desc') }}</small></span>
@@ -84,31 +94,33 @@ const receiveStatus = body => {
 
     <details class="monitor-calibration">
       <summary>Shutter-glasses calibration</summary>
-      <p class="form-text">Tune these values for your display and glasses. Timing values are in microseconds. Apply them with Save and restart.</p>
+      <p class="form-text">Tune these values for your display and glasses. Timing values are in microseconds. Leave room for the emitter's IR pulse; delay and duration together must fit the assigned eye interval. Apply them with Save and restart.</p>
       <div class="monitor-fields">
         <div>
           <label for="local_monitor_ir_protocol" class="form-label">{{ $t('config.local_monitor_ir_protocol') }}</label>
           <select id="local_monitor_ir_protocol" v-model.number="props.config.local_monitor_ir_protocol" class="form-select">
+            <option v-if="![2, 4, 5, 6].includes(Number(props.config.local_monitor_ir_protocol))" :value="props.config.local_monitor_ir_protocol" disabled>Unsupported saved protocol ({{ props.config.local_monitor_ir_protocol }})</option>
             <option :value="6">Panasonic custom firmware</option>
             <option :value="5">Panasonic</option>
             <option :value="4">Sony</option>
-            <option :value="3">Sharp</option>
             <option :value="2">NVIDIA 3D Vision</option>
-            <option :value="1">Xpand</option>
-            <option :value="0">Samsung 2007</option>
           </select>
+          <p class="form-text">{{ $t('config.local_monitor_ir_protocol_desc') }}</p>
         </div>
         <div>
           <label for="local_monitor_frame_delay_us" class="form-label">{{ $t('config.local_monitor_frame_delay_us') }}</label>
-          <input id="local_monitor_frame_delay_us" v-model.number="props.config.local_monitor_frame_delay_us" class="form-control" type="number" min="0" max="65000" step="1" />
+          <input id="local_monitor_frame_delay_us" v-model.number="props.config.local_monitor_frame_delay_us" class="form-control" type="number" :min="timing?.min_delay_us ?? 1" :max="timing?.max_delay_us ?? 32767" step="1" />
+          <p class="form-text">{{ $t('config.local_monitor_frame_delay_us_desc') }} <span v-if="timing">Allowed: {{ timing.min_delay_us }}–{{ timing.max_delay_us }} µs.</span></p>
         </div>
         <div>
           <label for="local_monitor_frame_duration_us" class="form-label">{{ $t('config.local_monitor_frame_duration_us') }}</label>
-          <input id="local_monitor_frame_duration_us" v-model.number="props.config.local_monitor_frame_duration_us" class="form-control" type="number" min="1" max="65000" step="1" />
+          <input id="local_monitor_frame_duration_us" v-model.number="props.config.local_monitor_frame_duration_us" class="form-control" type="number" :min="minimumDuration" :max="timing?.max_duration_us ?? 32767" step="1" />
+          <p class="form-text">{{ $t('config.local_monitor_frame_duration_us_desc') }} <span v-if="timing">Allowed: {{ minimumDuration }}–{{ timing.max_duration_us }} µs.</span></p>
         </div>
         <div>
           <label for="local_monitor_signal_spacing_us" class="form-label">{{ $t('config.local_monitor_signal_spacing_us') }}</label>
-          <input id="local_monitor_signal_spacing_us" v-model.number="props.config.local_monitor_signal_spacing_us" class="form-control" type="number" min="0" max="65000" step="1" />
+          <input id="local_monitor_signal_spacing_us" v-model.number="props.config.local_monitor_signal_spacing_us" class="form-control" type="number" :min="timing?.min_signal_spacing_us ?? 1" :max="timing?.max_signal_spacing_us ?? 1023" step="1" />
+          <p class="form-text">{{ $t('config.local_monitor_signal_spacing_us_desc') }} <span v-if="timing">Allowed: {{ timing.min_signal_spacing_us }}–{{ timing.max_signal_spacing_us }} µs.</span></p>
         </div>
       </div>
       <label class="monitor-flip" for="local_monitor_flip_eyes">

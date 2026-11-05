@@ -8,6 +8,7 @@
 #include <charconv>
 #include <chrono>
 #include <mutex>
+#include <thread>
 #include <utility>
 #include <windows.h>
 
@@ -40,20 +41,37 @@ namespace platf::open3d {
              });
     }
 
-    std::vector<int> configured_values(const detail::parameters_t &current, const settings_t &settings) {
+    std::vector<int> quiescent_values(const detail::parameters_t &current) {
       auto values = current.values;
+      values[8] = 0;  // No duplicate-frame diagnostic stream on the frame-signalling transport.
+      values[9] = 0;  // No optical statistics stream.
+      values[14] = 0;  // No autonomous averaging after the last explicit trigger.
+      values[16] = 1;  // Stop optical triggers without changing the previous protocol/timings.
+      return values;
+    }
+
+    std::string command_for_values(const std::vector<int> &values) {
+      auto command = std::string {"0"};
+      for (int value : values) {
+        command += ',';
+        command += std::to_string(value);
+      }
+      return command;
+    }
+
+    std::vector<int> configured_values(const detail::parameters_t &current, const settings_t &settings) {
+      auto values = quiescent_values(current);
       values[0] = settings.protocol;
       values[1] = settings.frame_delay_us;
       values[2] = settings.frame_duration_us;
       values[3] = settings.signal_spacing_us;
-      values[8] = 0;  // No duplicate-frame diagnostic stream on the frame-signalling transport.
-      values[9] = 0;  // No optical statistics stream.
       values[12] = settings.flip_eyes ? 1 : 0;
       // Every eye boundary is explicitly acknowledged by the presenter. Disable autonomous
       // averaging so a stalled/closed presenter cannot leave a free-running shutter sequence.
       values[14] = 0;
-      values[15] = settings.target_frametime_us;
-      values[16] = 1;  // PC serial drive mode.
+      // The firmware's averaging filter is uint16, but averaging is disabled. Keep its value
+      // zero and validate the actual host eye interval independently, including slow repeats.
+      values[15] = 0;
       return values;
     }
   }  // namespace
@@ -74,12 +92,18 @@ namespace platf::open3d {
     }
 
     bool valid_settings(const settings_t &settings) {
-      return normalize_port(settings.port).has_value() &&
-             settings.protocol >= 0 && settings.protocol <= 6 &&
-             settings.frame_delay_us >= 0 && settings.frame_delay_us <= 65535 &&
-             settings.frame_duration_us > 0 && settings.frame_duration_us <= 65535 &&
-             settings.signal_spacing_us >= 0 && settings.signal_spacing_us <= 65535 &&
-             settings.target_frametime_us >= 0 && settings.target_frametime_us <= 65535;
+      const auto timing = timing_limits(settings.protocol, settings.signal_spacing_us);
+      if (!normalize_port(settings.port) || !timing || settings.frame_delay_us < timing->min_delay_us || settings.frame_delay_us > timing->max_delay_us || settings.frame_duration_us < timing->min_duration_us || settings.frame_duration_us > timing->max_duration_us || settings.target_frametime_us < 0) {
+        return false;
+      }
+      const int window_end_us = settings.frame_delay_us + settings.frame_duration_us;
+      // Timer1 cannot represent a full-wrap delay. The presentation policy additionally keeps
+      // this eye's complete finite window inside its selected eye interval, rather than relying
+      // on the firmware's ability to overlap work across opposite-eye boundaries.
+      const int queue_end_us = settings.frame_duration_us + settings.signal_spacing_us + timing->min_period_tail_base_us;
+      return window_end_us <= timing->max_window_us &&
+             (settings.target_frametime_us == 0 ||
+              (window_end_us <= settings.target_frametime_us && queue_end_us <= settings.target_frametime_us));
     }
 
     std::optional<parameters_t> parse_parameters(std::string_view line) {
@@ -119,16 +143,23 @@ namespace platf::open3d {
       return parameters;
     }
 
+    std::optional<std::string> quiesce_command(const parameters_t &current) {
+      if (!supported_parameters(current)) {
+        return std::nullopt;
+      }
+      return command_for_values(quiescent_values(current));
+    }
+
+    bool quiesce_matches(const parameters_t &actual, const parameters_t &previous) {
+      return supported_parameters(actual) && supported_parameters(previous) &&
+             actual.firmware_version == previous.firmware_version && actual.values == quiescent_values(previous);
+    }
+
     std::optional<std::string> configuration_command(const parameters_t &current, const settings_t &settings) {
       if (!supported_parameters(current) || !valid_settings(settings)) {
         return std::nullopt;
       }
-      auto command = std::string {"0"};
-      for (int value : configured_values(current, settings)) {
-        command += ',';
-        command += std::to_string(value);
-      }
-      return command;
+      return command_for_values(configured_values(current, settings));
     }
 
     bool configuration_matches(const parameters_t &actual, const parameters_t &previous, const settings_t &settings) {
@@ -242,6 +273,21 @@ namespace platf::open3d {
       return std::nullopt;
     }
 
+    bool settle() const {
+      // Resetting firmware averaging does not cancel already scheduled OPEN/CLOSE comparators.
+      // Let both wrap horizons plus the bounded IR-send drain margin elapse before a first new
+      // trigger, especially when changing protocol while the previous profile was still active.
+      const auto until = std::chrono::steady_clock::now() + limits::startup_settle;
+      while (!closing.load()) {
+        const auto remaining = until - std::chrono::steady_clock::now();
+        if (remaining <= std::chrono::steady_clock::duration::zero()) {
+          return true;
+        }
+        std::this_thread::sleep_for(std::min(remaining, std::chrono::duration_cast<std::chrono::steady_clock::duration>(5ms)));
+      }
+      return false;
+    }
+
     void close_locked() {
       ready.store(false);
       const auto handle = port.load();
@@ -322,16 +368,31 @@ namespace platf::open3d {
     }
     impl_->signal_io.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     const auto previous = impl_->read_parameters();
-    const auto command = previous ? detail::configuration_command(*previous, settings) : std::nullopt;
+    const auto quiet_command = previous ? detail::quiesce_command(*previous) : std::nullopt;
     std::vector<std::string> response;
-    if (!impl_->signal_io.hEvent || !command || !impl_->transaction(*command, response)) {
+    if (!impl_->signal_io.hEvent || !quiet_command || !impl_->transaction(*quiet_command, response)) {
+      BOOST_LOG(error) << "Open3DOLED emitter could not enter a quiescent PC serial state on " << normalized;
+      impl_->close_locked();
+      return false;
+    }
+    const auto quiet = impl_->read_parameters();
+    if (!quiet || !detail::quiesce_matches(*quiet, *previous) || !impl_->settle()) {
+      impl_->close_locked();
+      return false;
+    }
+    const auto command = detail::configuration_command(*quiet, settings);
+    if (!command || !impl_->transaction(*command, response)) {
       BOOST_LOG(error) << "Open3DOLED emitter did not acknowledge a supported PC serial configuration on " << normalized;
       impl_->close_locked();
       return false;
     }
     const auto actual = impl_->read_parameters();
-    if (!actual || !detail::configuration_matches(*actual, *previous, settings) || impl_->closing.load()) {
+    if (!actual || !detail::configuration_matches(*actual, *quiet, settings) || impl_->closing.load()) {
       BOOST_LOG(error) << "Open3DOLED emitter configuration readback failed on " << normalized;
+      impl_->close_locked();
+      return false;
+    }
+    if (!impl_->settle()) {
       impl_->close_locked();
       return false;
     }

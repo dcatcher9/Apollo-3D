@@ -65,9 +65,22 @@ not prove that a particular panel or timing calibration is correct.
 
 ## Emitter and presentation contract
 
-The native Windows emitter implementation uses a 115200 baud, 8N1 COM connection. It reads the
-firmware settings, applies PC serial drive mode and the selected timings without saving EEPROM,
-then sends left/right sync commands from the presentation path. Serial work is bounded. A failed
+The native Windows emitter implementation uses a 115200 baud, 8N1 COM connection. It first reads
+the firmware settings and stops optical triggering and averaging while preserving the old protocol
+and timings. After verified readback and about 100 ms for outstanding timer work to drain, it applies
+and verifies the selected profile, then waits another drain interval before sending eye commands.
+No settings are saved to EEPROM. Supported protocols have separate open/close commands: NVIDIA 3D
+Vision (`2`), Sony (`4`), Panasonic (`5`), and Panasonic custom firmware (`6`, the default kit).
+Averaging remains disabled, so stopping presentation leaves no autonomous trigger sequence running.
+The authoritative native `timing_limits` helper accounts for each protocol's IR tokens and a 100 µs
+scheduling margin. Delay must provide at least 100 µs of comparator lead (150 µs for NVIDIA); duration
+must accommodate the complete opening token and spacing before the close command. Delay plus duration
+must stay below the 32768 µs Timer1 wrap and fit the selected eye interval. The close-token queue tail
+must also drain within that interval. Timer4's 1023 µs capacity includes both the IR token and spacing,
+so the maximum spacing is 882 µs for NVIDIA, 483 µs for Sony, and 803 µs for Panasonic. These bounds
+are current-eye presentation policy and firmware interoperability limits, not physical panel
+calibration. The host eye interval is independent of the unused firmware averaging filter, so slow
+refresh/repetition combinations do not wrap a 16-bit filter value. Serial work is bounded. A failed
 emitter connection or sync write stops the presentation attempt rather than continuing without
 synchronization.
 
@@ -84,13 +97,46 @@ shared pipeline contracts.
 | `local_monitor_display_id` | empty | Exact physical Windows monitor device path |
 | `local_monitor_mode` | `host` | `host` or `game` |
 | `local_monitor_emitter_port` | empty | Open3DOLED COM port, such as `COM3` |
-| `local_monitor_ir_protocol` | `6` | Glasses protocol, `0` through `6` |
-| `local_monitor_frame_delay_us` | `500` | Delay from sync to shutter window, `0`–`65000` µs |
-| `local_monitor_frame_duration_us` | `2000` | Shutter-open duration, `1`–`65000` µs |
-| `local_monitor_signal_spacing_us` | `30` | IR signal spacing, `0`–`65000` µs |
+| `local_monitor_ir_protocol` | `6` | Finite-window protocol: NVIDIA 3D Vision (`2`), Sony (`4`), Panasonic (`5`), or Panasonic custom firmware (`6`) |
+| `local_monitor_frame_delay_us` | `500` | Delay from sync to shutter window; minimum `150` µs for protocol `2`, `100` µs for `4`/`5`/`6`; maximum `32767` µs |
+| `local_monitor_frame_duration_us` | `2000` | Shutter-open duration; minimum configured spacing plus `300` µs for protocol `2`, `640` µs for `4`, or `320` µs for `5`/`6`; maximum `32767` µs |
+| `local_monitor_signal_spacing_us` | `30` | IR signal spacing; `30`–`882` µs for protocol `2`, `30`–`483` µs for `4`, or `30`–`803` µs for `5`/`6` |
 | `local_monitor_flip_eyes` | `disabled` | Swap left/right shutter assignment |
 | `local_monitor_eye_repeats` | `1` | Consecutive refreshes per eye, `1`–`4` |
 
 Invalid mode, boolean, timing, protocol, or repeat values disable the monitor capability during
 configuration loading. An enabled configuration also requires both a physical monitor selection
 and an emitter port. Configuration loading never starts a 3D session by itself.
+
+Delay plus duration must not exceed `32767` µs and must fit the assigned eye interval: the monitor's
+physical refresh period multiplied by **Refreshes per eye**. Duration plus the protocol's close-pulse
+margin must also fit that interval. These limits leave room for the emitter's IR pulse and scheduling.
+The UI receives the native protocol limits and checks the interval when the selected monitor is
+connected; the emitter driver validates the actual target before starting.
+The `30` µs minimum spacing is a conservative host floor for the firmware's greater-than-`5` µs
+gap-arm lead and observed `17` µs service overhead.
+
+## Live qualification
+
+Native tests exercise the shared converter, immutable stereo packets, delayed presentation
+feedback, firmware command validation, and display transactions with injected Windows I/O. They
+do not establish the physical panel's scanout phase or confirm application interaction after a
+real topology change. Qualify a monitor/emitter profile with the optimized development host:
+
+1. Open a normal browser or video player on the selected monitor before starting Host 3D. Check
+   typing, clicking, seeking, the cursor, and movement between that monitor and an unchanged 2D
+   monitor. No manual move to a virtual screen should be required.
+2. Minimize and restore an application, then launch another application that remembers this
+   monitor. Verify both remain reachable, and that windows deliberately moved to another monitor
+   stay there. Return to 2D and verify the windows, monitor roles, and layout are restored.
+3. Repeat with a configured Game 3D source in borderless fullscreen. Check both stereo content
+   and game input; a converter test alone does not qualify the game's window/display binding.
+4. Use a left/right test pattern with the actual glasses to verify eye assignment, shutter phase,
+   brightness, and crosstalk. Record the Windows refresh, repeat count, glasses protocol, and
+   delay/duration/spacing that worked. Software presentation feedback is not optical measurement.
+5. Verify Return to 2D and the emergency shortcut, then verify USB loss restores the desktop.
+   Check remote-stream priority and local restart separately using the shared display lifecycle.
+
+Follow the machine's local development-launch instructions. Keep the installed and development
+hosts mutually exclusive. A profile remains unqualified until these live observations are made;
+mock API, offscreen GPU, and fake topology results cannot substitute for them.

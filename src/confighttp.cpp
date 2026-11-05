@@ -1302,7 +1302,22 @@ namespace confighttp {
       {"requested", ar_glasses::monitor_requested()}, {"active", ar_glasses::monitor_active()},
       {"error", ar_glasses::monitor_error()},
       {"devices", nlohmann::json::array()}, {"ports", platf::open3d::serial_ports()},
+      {"timing_limits", nlohmann::json::array()},
     };
+    for (const int protocol : platf::open3d::limits::supported_protocols) {
+      const auto limits = platf::open3d::timing_limits(protocol, 30);
+      if (!limits) {
+        continue;
+      }
+      output["timing_limits"].push_back({
+        {"protocol", protocol},
+        {"min_delay_us", limits->min_delay_us}, {"max_delay_us", limits->max_delay_us},
+        {"min_duration_base_us", limits->min_duration_base_us}, {"min_duration_us", limits->min_duration_us},
+        {"max_duration_us", limits->max_duration_us},
+        {"min_signal_spacing_us", limits->min_signal_spacing_us}, {"max_signal_spacing_us", limits->max_signal_spacing_us},
+        {"max_window_us", limits->max_window_us}, {"min_period_tail_base_us", limits->min_period_tail_base_us},
+      });
+    }
     for (const auto &device : ar_glasses::monitor_devices()) {
       output["devices"].push_back({{"id", device.id}, {"name", device.name},
         {"width", device.width}, {"height", device.height},
@@ -1320,8 +1335,13 @@ namespace confighttp {
       body << request->content.rdbuf();
       const auto input = nlohmann::json::parse(body);
       const auto action = input.at("action").get<std::string>();
-      if ((action != "start" && action != "stop") || !ar_glasses::request_monitor_session(action == "start")) {
-        bad_request(response, request, "Configure a connected physical monitor and emitter, save, and restart before starting 3D.");
+      if (action != "start" && action != "stop") {
+        bad_request(response, request, "Choose start or stop for the monitor session.");
+        return;
+      }
+      if (!ar_glasses::request_monitor_session(action == "start")) {
+        const auto error = ar_glasses::monitor_error();
+        bad_request(response, request, error.empty() ? "Configure a connected physical monitor and emitter, save, and restart before starting 3D." : error);
         return;
       }
       send_response(response, nlohmann::json {{"status", true}, {"requested", ar_glasses::monitor_requested()}});

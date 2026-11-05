@@ -27,6 +27,7 @@
 #include "network.h"
 #include "nvhttp.h"
 #include "platform/common.h"
+#include "platform/windows/open3d_emitter.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "utility.h"
@@ -664,12 +665,26 @@ namespace config {
     string_f(vars, "local_monitor_display_id", result.display_id);
     string_f(vars, "local_monitor_mode", result.mode);
     string_f(vars, "local_monitor_emitter_port", result.emitter_port);
-    integer("local_monitor_ir_protocol", result.ir_protocol, 0, 6);
-    integer("local_monitor_frame_delay_us", result.frame_delay_us, 0, 65000);
-    integer("local_monitor_frame_duration_us", result.frame_duration_us, 1, 65000);
-    integer("local_monitor_signal_spacing_us", result.signal_spacing_us, 0, 65000);
+    integer("local_monitor_ir_protocol", result.ir_protocol, 2, 6);
+    integer("local_monitor_frame_delay_us", result.frame_delay_us, platf::open3d::limits::minimum_timing_us, platf::open3d::limits::maximum_timer1_interval_us);
+    integer("local_monitor_frame_duration_us", result.frame_duration_us, platf::open3d::limits::minimum_timing_us, platf::open3d::limits::maximum_timer1_interval_us);
+    integer("local_monitor_signal_spacing_us", result.signal_spacing_us, platf::open3d::limits::minimum_timing_us, platf::open3d::limits::maximum_signal_spacing_us);
     boolean("local_monitor_flip_eyes", result.flip_eyes);
     integer("local_monitor_eye_repeats", result.eye_repeats, 1, 4);
+    const auto timing = platf::open3d::timing_limits(result.ir_protocol, result.signal_spacing_us);
+    if (!timing) {
+      invalid(platf::open3d::limits::finite_close_protocol(result.ir_protocol) ? "local_monitor_signal_spacing_us" : "local_monitor_ir_protocol");
+    } else {
+      if (result.frame_delay_us < timing->min_delay_us || result.frame_delay_us > timing->max_delay_us) {
+        invalid("local_monitor_frame_delay_us");
+      }
+      if (result.frame_duration_us < timing->min_duration_us || result.frame_duration_us > timing->max_duration_us) {
+        invalid("local_monitor_frame_duration_us");
+      }
+      if (result.frame_delay_us + result.frame_duration_us > timing->max_window_us) {
+        invalid("local_monitor_frame_delay_us/local_monitor_frame_duration_us (combined shutter window exceeds emitter timer limit)");
+      }
+    }
     if (result.mode != "host" && result.mode != "game") {
       invalid("local_monitor_mode");
     }

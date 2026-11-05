@@ -9075,10 +9075,24 @@ namespace platf::dxgi {
           }
           shutter_failed.store(true, std::memory_order_release);
         };
+        auto feedback_waiter = platf::create_deadline_waiter();
+        if (!feedback_waiter) {
+          fail("high-resolution presentation feedback waits are unavailable on this system");
+          return;
+        }
         std::stop_source emitter_setup_stop;
-        std::stop_callback cancel_session_setup(stop_token, [&]() { emitter_setup_stop.request_stop(); });
-        std::stop_callback cancel_capture_setup(shutter_stop, [&]() { emitter_setup_stop.request_stop(); });
+        const auto cancel_waits = [&]() {
+          emitter_setup_stop.request_stop();
+          feedback_waiter->notify();
+        };
+        std::stop_callback cancel_session_setup(stop_token, cancel_waits);
+        std::stop_callback cancel_capture_setup(shutter_stop, cancel_waits);
         platf::open3d::emitter_t emitter;
+        const auto emitter_eye_period = platf::open3d::eye_period_us(config.target_refresh_millihz, eye_repeats);
+        if (!emitter_eye_period) {
+          fail("the selected display refresh cannot represent a safe shutter-eye interval");
+          return;
+        }
         platf::open3d::settings_t emitter_settings {
           .port = config.monitor_config.emitter_port,
           .protocol = config.monitor_config.ir_protocol,
@@ -9086,7 +9100,7 @@ namespace platf::dxgi {
           .frame_duration_us = config.monitor_config.frame_duration_us,
           .signal_spacing_us = config.monitor_config.signal_spacing_us,
           .flip_eyes = config.monitor_config.flip_eyes,
-          .target_frametime_us = static_cast<int>(std::llround(1000000000.0 * eye_repeats / config.target_refresh_millihz)),
+          .target_frametime_us = *emitter_eye_period,
         };
         if (!emitter.connect(emitter_settings, emitter_setup_stop.get_token())) {
           if (!stopped()) {
@@ -9095,6 +9109,24 @@ namespace platf::dxgi {
           return;
         }
         detail::shutter_presentation_clock_t eye_clock {static_cast<unsigned>(eye_repeats)};
+        const detail::shutter_feedback_wait_io_t feedback_io {
+          .now = []() { return std::chrono::steady_clock::now(); },
+          .cancelled = stopped,
+          .query = [&]() {
+            DXGI_FRAME_STATISTICS statistics {};
+            const auto queried = swapchain->GetFrameStatistics(&statistics);
+            if (queried == S_OK) {
+              return detail::shutter_feedback_t {detail::shutter_feedback_status_e::available, statistics.PresentCount, statistics.PresentRefreshCount};
+            }
+            return detail::shutter_feedback_t {queried == DXGI_ERROR_FRAME_STATISTICS_DISJOINT ?
+                                                detail::shutter_feedback_status_e::disjoint :
+                                                detail::shutter_feedback_status_e::unsupported};
+          },
+          // Hardware Flip Queue may not publish statistics until DWM is flushed. This is one
+          // synchronous OS call per stale present, with no worker or extra present queue.
+          .flush = []() { return SUCCEEDED(DwmFlush()); },
+          .wait_until = [&](auto deadline) { return feedback_waiter->wait_until(deadline); },
+        };
         ID3D11Texture2D *pair = nullptr;
         bool has_displayed = false;
         while (!stopped()) {
@@ -9135,27 +9167,15 @@ namespace platf::dxgi {
             fail("DXGI could not identify the submitted eye frame");
             break;
           }
-          DXGI_FRAME_STATISTICS statistics {};
-          bool observed = false;
-          const auto deadline = std::chrono::steady_clock::now() + 250ms;
-          while (!stopped() && std::chrono::steady_clock::now() < deadline) {
-            const auto queried = swapchain->GetFrameStatistics(&statistics);
-            if (queried == S_OK && statistics.PresentCount == requested_present) {
-              observed = true;
-              break;
-            }
-            if ((FAILED(queried) && (queried != DXGI_ERROR_FRAME_STATISTICS_DISJOINT || has_displayed)) ||
-                (queried == S_OK && static_cast<std::int32_t>(statistics.PresentCount - requested_present) > 0)) {
-              break;
-            }
-            if (FAILED(target_output->WaitForVBlank())) {
-              break;
-            }
-          }
-          if (stopped()) {
+          const auto confirmation = detail::await_shutter_present(feedback_io, requested_present, !has_displayed);
+          if (confirmation.status == detail::shutter_feedback_wait_status_e::cancelled) {
             break;
           }
-          if (!observed || !eye_clock.observe_displayed(statistics.PresentRefreshCount)) {
+          if (confirmation.status != detail::shutter_feedback_wait_status_e::displayed) {
+            fail("DXGI scanout feedback is unavailable, late, or invalid on this display configuration; returning to 2D");
+            break;
+          }
+          if (!eye_clock.observe_displayed(confirmation.feedback.refresh_count)) {
             fail("DXGI could not prove an uninterrupted eye scanout cadence; restart after checking display timing");
             break;
           }

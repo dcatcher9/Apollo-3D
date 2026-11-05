@@ -59,10 +59,10 @@ namespace config {
       std::string display_id;  ///< Exact physical Windows monitor device path, not a recyclable DISPLAY number.
       std::string mode = "host";  ///< host = Host AI 3D, game = Game 3D stereo source.
       std::string emitter_port;
-      int ir_protocol = 6;
-      int frame_delay_us = 500;
+      int ir_protocol = 6;  ///< Finite PC-serial shutter windows support protocols 2, 4, 5, and 6.
+      int frame_delay_us = 500;  ///< Protocol-specific pulse and timer bounds are validated together.
       int frame_duration_us = 2000;
-      int signal_spacing_us = 30;
+      int signal_spacing_us = 30;  ///< Must leave room for the protocol's longest IR token.
       bool flip_eyes = false;
       int eye_repeats = 1;  ///< Number of physical refreshes assigned to each eye.
     };

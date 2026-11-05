@@ -40,12 +40,12 @@ namespace {
     settings.protocol = 5;
     settings.frame_delay_us = 350;
     settings.frame_duration_us = 1800;
-    settings.signal_spacing_us = 20;
+    settings.signal_spacing_us = 40;
     settings.flip_eyes = true;
     settings.target_frametime_us = 6061;
     const auto command = detail::configuration_command(*previous, settings);
     ASSERT_TRUE(command);
-    EXPECT_EQ(*command, "0,5,350,1800,20,7500,10,128,0,0,0,0,0,1,32,0,6061,1,42,99");
+    EXPECT_EQ(*command, "0,5,350,1800,40,7500,10,128,0,0,0,0,0,1,32,0,0,1,42,99");
     const auto applied = detail::parse_parameters("parameters 20" + command->substr(1));
     ASSERT_TRUE(applied);
     EXPECT_TRUE(detail::configuration_matches(*applied, *previous, settings));
@@ -69,7 +69,7 @@ namespace {
     settings.frame_duration_us = 0;
     EXPECT_FALSE(detail::configuration_command(*previous, settings));
     settings.frame_duration_us = 2000;
-    settings.target_frametime_us = 65536;
+    settings.target_frametime_us = -1;
     EXPECT_FALSE(detail::configuration_command(*previous, settings));
     emitter_t emitter;
     EXPECT_FALSE(emitter.healthy());
@@ -78,6 +78,160 @@ namespace {
     emitter.close();
     emitter.close();
     EXPECT_FALSE(emitter.healthy());
+  }
+
+  TEST(Open3DEmitter, AdmitsOnlyProtocolsWithIndependentlyScheduledFiniteCloseTokens) {
+    settings_t settings;
+    settings.port = "COM4";
+    for (const int protocol : {2, 4, 5, 6}) {
+      settings.protocol = protocol;
+      EXPECT_TRUE(detail::valid_settings(settings)) << protocol;
+    }
+    for (const int protocol : {-1, 0, 1, 3, 7, 8}) {
+      settings.protocol = protocol;
+      EXPECT_FALSE(detail::valid_settings(settings)) << protocol;
+    }
+  }
+
+  TEST(Open3DEmitter, RejectsTimerWrapAndZeroDelayRatherThanSilentlyChangingPulseTiming) {
+    settings_t settings;
+    settings.port = "COM4";
+    settings.frame_delay_us = 32417;
+    settings.frame_duration_us = 350;
+    EXPECT_TRUE(detail::valid_settings(settings));
+    settings.frame_delay_us = 32418;
+    EXPECT_FALSE(detail::valid_settings(settings));  // Complete window would wrap at32768us.
+    settings.frame_delay_us = 40000;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.frame_delay_us = 0;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.frame_delay_us = 1;
+    EXPECT_FALSE(detail::valid_settings(settings));  // Not enough time to arm the comparator.
+    settings.frame_delay_us = 100;
+    settings.frame_duration_us = 32667;
+    EXPECT_TRUE(detail::valid_settings(settings));
+    settings.frame_duration_us = 32668;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.frame_duration_us = 40000;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.frame_duration_us = 0;
+    EXPECT_FALSE(detail::valid_settings(settings));
+  }
+
+  TEST(Open3DEmitter, KeepsFiniteWindowInsideTheSelectedEyeInterval) {
+    settings_t settings;
+    settings.port = "COM4";
+    settings.target_frametime_us = 2500;
+    EXPECT_TRUE(detail::valid_settings(settings));
+    settings.target_frametime_us = 2499;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.target_frametime_us = 0;
+    EXPECT_TRUE(detail::valid_settings(settings));  // Unknown cadence still enforces Timer1 wrap.
+    settings.target_frametime_us = -1;
+    EXPECT_FALSE(detail::valid_settings(settings));
+  }
+
+  TEST(Open3DEmitter, RestrictsSignalSpacingToThePositiveTimer4Range) {
+    settings_t settings;
+    settings.port = "COM4";
+    settings.signal_spacing_us = 1;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.signal_spacing_us = 29;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.signal_spacing_us = 30;
+    EXPECT_TRUE(detail::valid_settings(settings));
+    settings.signal_spacing_us = 803;
+    EXPECT_TRUE(detail::valid_settings(settings));
+    settings.signal_spacing_us = 804;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.signal_spacing_us = 40000;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.signal_spacing_us = 0;
+    EXPECT_FALSE(detail::valid_settings(settings));
+  }
+
+  TEST(Open3DEmitter, DerivesProtocolSpecificLeadDurationAndCompleteTimer4TokenBudgets) {
+    struct profile_t {
+      int protocol;
+      int lead;
+      int minimum_duration;
+      int maximum_spacing;
+      int period_tail;
+    };
+
+    for (const auto &profile : {profile_t {2, 150, 330, 882, 241}, profile_t {4, 100, 670, 483, 560}, profile_t {5, 100, 350, 803, 320}, profile_t {6, 100, 350, 803, 320}}) {
+      const auto timing = timing_limits(profile.protocol, 30);
+      ASSERT_TRUE(timing);
+      EXPECT_EQ(timing->min_delay_us, profile.lead);
+      EXPECT_EQ(timing->min_duration_us, profile.minimum_duration);
+      EXPECT_EQ(timing->min_period_tail_base_us, profile.period_tail);
+      EXPECT_EQ(timing->max_signal_spacing_us, profile.maximum_spacing);
+      settings_t settings;
+      settings.port = "COM4";
+      settings.protocol = profile.protocol;
+      settings.frame_delay_us = profile.lead;
+      settings.frame_duration_us = profile.minimum_duration;
+      EXPECT_TRUE(detail::valid_settings(settings));
+      --settings.frame_delay_us;
+      EXPECT_FALSE(detail::valid_settings(settings));
+      ++settings.frame_delay_us;
+      --settings.frame_duration_us;
+      EXPECT_FALSE(detail::valid_settings(settings));
+      settings.frame_duration_us = 2000;
+      settings.signal_spacing_us = profile.maximum_spacing;
+      EXPECT_TRUE(detail::valid_settings(settings));
+      ++settings.signal_spacing_us;
+      EXPECT_FALSE(detail::valid_settings(settings));
+    }
+  }
+
+  TEST(Open3DEmitter, RejectsIrCloseQueueTailsThatWouldCrossTheNextEyeBoundary) {
+    settings_t settings;
+    settings.port = "COM4";
+    settings.frame_delay_us = 100;
+    settings.target_frametime_us = 2350;
+    EXPECT_TRUE(detail::valid_settings(settings));
+    settings.target_frametime_us = 2349;
+    EXPECT_FALSE(detail::valid_settings(settings));  // Delay+duration fits, but close-token tail does not.
+  }
+
+  TEST(Open3DEmitter, QuiescesOldUnsupportedProfileWithoutChangingItsProtocolOrLiveTimings) {
+    const auto previous = detail::parse_parameters("parameters 22,1,40000,40000,1000,7500,10,128,0,1,1,0,0,1,32,1,8333,0");
+    ASSERT_TRUE(previous);
+    const auto command = detail::quiesce_command(*previous);
+    ASSERT_TRUE(command);
+    EXPECT_EQ(*command, "0,1,40000,40000,1000,7500,10,128,0,0,0,0,0,1,32,0,8333,1");
+    auto quiet = detail::parse_parameters("parameters 22" + command->substr(1));
+    ASSERT_TRUE(quiet);
+    EXPECT_TRUE(detail::quiesce_matches(*quiet, *previous));
+    quiet->values[0] = 6;
+    EXPECT_FALSE(detail::quiesce_matches(*quiet, *previous));
+  }
+
+  TEST(Open3DEmitter, SupportsSlowHostEyeIntervalsWithoutWrappingTheUnusedFirmwareFilter) {
+    const auto previous = detail::parse_parameters(parameters);
+    ASSERT_TRUE(previous);
+    settings_t settings;
+    settings.port = "COM4";
+    settings.target_frametime_us = 66667;
+    EXPECT_TRUE(detail::valid_settings(settings));
+    const auto command = detail::configuration_command(*previous, settings);
+    ASSERT_TRUE(command);
+    const auto actual = detail::parse_parameters("parameters 20" + command->substr(1));
+    ASSERT_TRUE(actual);
+    EXPECT_EQ(actual->values[14], 0);
+    EXPECT_EQ(actual->values[15], 0);
+    EXPECT_TRUE(detail::configuration_matches(*actual, *previous, settings));
+  }
+
+  TEST(Open3DEmitter, ComputesTheSharedEyePeriodWithoutOverflowOrAnArtificialUint16Limit) {
+    EXPECT_EQ(eye_period_us(330000, 2), 6061);
+    EXPECT_EQ(eye_period_us(60000, 4), 66667);
+    EXPECT_FALSE(eye_period_us(0, 1));
+    EXPECT_FALSE(eye_period_us(-60000, 1));
+    EXPECT_FALSE(eye_period_us(60000, 0));
+    EXPECT_FALSE(eye_period_us(60000, 5));
+    EXPECT_FALSE(eye_period_us(1, 4));
   }
 
   TEST(Open3DEmitter, CancellationBeforeConnectNeverOpensTheSelectedPort) {

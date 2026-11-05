@@ -5156,24 +5156,49 @@ namespace ar_glasses {
 
   bool request_monitor_session(bool start) {
     if (start) {
+      if (physical_monitor_requested.load()) {
+        return true;
+      }
+      const auto fail = [](std::string message) {
+        std::lock_guard lock(physical_monitor_error_mutex);
+        physical_monitor_error = std::move(message);
+        return false;
+      };
       const auto &settings = config::video.local_monitor;
       if (!settings.enabled || settings.display_id.empty() || settings.emitter_port.empty()) {
-        return false;
+        return fail("Configure a physical monitor and emitter, save, and restart Sunshine 3D before starting 3D.");
       }
       const auto selected_port = platf::open3d::detail::normalize_port(settings.emitter_port);
       const auto ports = platf::open3d::serial_ports();
       if (!selected_port || std::none_of(ports.begin(), ports.end(), [&](const auto &port) {
             return platf::open3d::detail::normalize_port(port) == selected_port;
           })) {
-        return false;
+        return fail("The selected emitter COM port is not connected. Connect the emitter, then start 3D again.");
       }
       const auto targets = enumerate_targets();
-      if (!targets || std::none_of(targets->begin(), targets->end(), [&](const auto &target) {
-            return platf::to_utf8(target.device_path) == settings.display_id && !target.is_cloned &&
-              classify_monitor_mode(target.rect.right - target.rect.left, target.rect.bottom - target.rect.top,
-                target.refresh_millihz, settings.mode == "game") != presentation_mode_e::unsupported;
-          })) {
-        return false;
+      if (!targets) {
+        return fail("Windows display information is changing. Wait for the desktop to settle, then start 3D again.");
+      }
+      const auto target = std::find_if(targets->begin(), targets->end(), [&](const auto &candidate) {
+        return platf::to_utf8(candidate.device_path) == settings.display_id;
+      });
+      if (target == targets->end() || target->is_cloned ||
+          classify_monitor_mode(target->rect.right - target->rect.left, target->rect.bottom - target->rect.top,
+            target->refresh_millihz, settings.mode == "game") == presentation_mode_e::unsupported) {
+        return fail("The selected monitor must be connected in a supported extended-desktop mode before starting 3D.");
+      }
+      const auto period = platf::open3d::eye_period_us(target->refresh_millihz, settings.eye_repeats);
+      const platf::open3d::settings_t emitter_settings {
+        .port = settings.emitter_port,
+        .protocol = settings.ir_protocol,
+        .frame_delay_us = settings.frame_delay_us,
+        .frame_duration_us = settings.frame_duration_us,
+        .signal_spacing_us = settings.signal_spacing_us,
+        .flip_eyes = settings.flip_eyes,
+        .target_frametime_us = period.value_or(-1),
+      };
+      if (!period || !platf::open3d::detail::valid_settings(emitter_settings)) {
+        return fail("The shutter timing does not fit this monitor's refresh rate. Shorten the timing window or increase refreshes per eye in Monitor settings before starting 3D.");
       }
       physical_monitor_requested.store(true);
       {
