@@ -76,6 +76,12 @@ export const validateLocalMonitorConfig = (config, refreshMillihz = monitorRefre
       if (timing && spacing !== undefined && duration + timing.min_period_tail_base_us + spacing > interval) {
         errors.push(`Shutter duration plus the emitter close-pulse margin (${duration + timing.min_period_tail_base_us + spacing} µs) exceeds the selected monitor's ${interval} µs eye interval. Shorten the shutter duration or increase Refreshes per eye.`)
       }
+      if (timing && spacing !== undefined && combined <= interval && duration + timing.min_period_tail_base_us + spacing <= interval) {
+        const occupied = combined + timing.min_period_tail_base_us + spacing
+        if (occupied >= interval) {
+          errors.push(`Shutter delay, duration and the emitter close-pulse margin (${occupied} µs) leave no time for current-eye presentation feedback in the selected monitor's ${interval} µs eye interval. Shorten the shutter window or increase Refreshes per eye.`)
+        }
+      }
     }
   }
   return errors

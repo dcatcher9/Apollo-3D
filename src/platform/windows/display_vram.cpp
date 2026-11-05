@@ -9102,16 +9102,12 @@ namespace platf::dxgi {
           .flip_eyes = config.monitor_config.flip_eyes,
           .target_frametime_us = *emitter_eye_period,
         };
-        const auto emitter_limits = platf::open3d::timing_limits(emitter_settings.protocol, emitter_settings.signal_spacing_us);
-        const auto host_age_budget_us = emitter_limits ?
-                                          static_cast<std::int64_t>(*emitter_eye_period) - emitter_settings.frame_delay_us -
-                                            emitter_settings.frame_duration_us - emitter_settings.signal_spacing_us -
-                                            emitter_limits->min_period_tail_base_us :
-                                          0;
-        if (host_age_budget_us <= 0) {
+        const auto feedback_budget = platf::open3d::detail::host_feedback_budget_us(emitter_settings);
+        if (!feedback_budget) {
           fail("the shutter profile leaves no time for current-eye presentation feedback");
           return;
         }
+        const auto host_age_budget_us = *feedback_budget;
         if (!emitter.connect(emitter_settings, emitter_setup_stop.get_token())) {
           if (!stopped()) {
             fail("could not configure and verify the selected USB emitter");

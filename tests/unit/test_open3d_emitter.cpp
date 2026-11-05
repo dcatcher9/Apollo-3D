@@ -3,6 +3,7 @@
   #include "src/platform/windows/open3d_emitter.h"
 
   #include <gtest/gtest.h>
+  #include <utility>
 
 namespace {
   using namespace platf::open3d;
@@ -193,6 +194,49 @@ namespace {
     EXPECT_TRUE(detail::valid_settings(settings));
     settings.target_frametime_us = 2349;
     EXPECT_FALSE(detail::valid_settings(settings));  // Delay+duration fits, but close-token tail does not.
+  }
+
+  TEST(Open3DEmitter, MonitorFeedbackBudgetRejectsFirmwareValidProfilesWithNoHostTimeRemaining) {
+    settings_t settings;
+    settings.port = "COM4";
+    settings.target_frametime_us = 8333;
+    settings.frame_duration_us = 7800;
+    ASSERT_TRUE(detail::valid_settings(settings));
+    EXPECT_FALSE(detail::host_feedback_budget_us(settings));
+    settings.frame_duration_us = 7483;
+    ASSERT_TRUE(detail::valid_settings(settings));
+    EXPECT_FALSE(detail::host_feedback_budget_us(settings));  // Exactly zero host-feedback time.
+    settings.frame_duration_us = 7482;
+    EXPECT_EQ(detail::host_feedback_budget_us(settings), 1);
+    settings.frame_duration_us = 2000;
+    EXPECT_EQ(detail::host_feedback_budget_us(settings), 5483);
+  }
+
+  TEST(Open3DEmitter, MonitorFeedbackBudgetUsesEachProtocolCloseMarginAndTheActualEyeInterval) {
+    settings_t settings;
+    settings.port = "COM4";
+    for (const auto [protocol, expected_budget] : std::array {
+           std::pair {2, 5562}, std::pair {4, 5243}, std::pair {5, 5483}, std::pair {6, 5483}}) {
+      SCOPED_TRACE(protocol);
+      settings.protocol = protocol;
+      settings.target_frametime_us = 8333;
+      EXPECT_EQ(detail::host_feedback_budget_us(settings), expected_budget);
+      settings.target_frametime_us = 16667;
+      EXPECT_EQ(detail::host_feedback_budget_us(settings), expected_budget + 8334);
+    }
+  }
+
+  TEST(Open3DEmitter, MonitorFeedbackBudgetRequiresAKnownCadenceAndAValidFirmwareProfile) {
+    settings_t settings;
+    settings.port = "COM4";
+    ASSERT_TRUE(detail::valid_settings(settings));
+    EXPECT_FALSE(detail::host_feedback_budget_us(settings));
+    settings.target_frametime_us = 8333;
+    settings.protocol = 1;
+    EXPECT_FALSE(detail::host_feedback_budget_us(settings));
+    settings.protocol = 6;
+    settings.frame_delay_us = 0;
+    EXPECT_FALSE(detail::host_feedback_budget_us(settings));
   }
 
   TEST(Open3DEmitter, QuiescesOldUnsupportedProfileWithoutChangingItsProtocolOrLiveTimings) {

@@ -122,10 +122,12 @@ configuration loading. An enabled configuration also requires both a physical mo
 and an emitter port. Configuration loading never starts a 3D session by itself.
 
 Delay plus duration must not exceed `32767` µs and must fit the assigned eye interval: the monitor's
-physical refresh period multiplied by **Refreshes per eye**. Duration plus the protocol's close-pulse
-margin must also fit that interval. These limits leave room for the emitter's IR pulse and scheduling.
+physical refresh period multiplied by **Refreshes per eye**. Delay, duration, signal spacing, and the
+protocol's close-pulse margin together must leave positive time for host presentation feedback in
+that interval. These limits leave room for the emitter's IR pulse and scheduling.
 The UI receives the native protocol limits and checks the interval when the selected monitor is
-connected; the emitter driver validates the actual target before starting.
+connected; Start 3D and the presenter share the native feedback-budget check before preparing a
+display session or sending eye commands.
 The `30` µs minimum spacing is a conservative host floor for the firmware's greater-than-`5` µs
 gap-arm lead and observed `17` µs service overhead.
 

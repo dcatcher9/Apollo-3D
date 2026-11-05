@@ -5663,7 +5663,7 @@ namespace ar_glasses {
         .flip_eyes = settings.flip_eyes,
         .target_frametime_us = period.value_or(-1),
       };
-      if (!period || !platf::open3d::detail::valid_settings(emitter_settings)) {
+      if (!period || !platf::open3d::detail::host_feedback_budget_us(emitter_settings)) {
         return fail("The shutter timing does not fit this monitor's refresh rate. Shorten the timing window or increase refreshes per eye in Monitor settings before starting 3D.");
       }
       {

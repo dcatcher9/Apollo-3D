@@ -129,6 +129,9 @@ namespace platf::open3d {
 
     std::optional<std::string> normalize_port(std::string_view port);
     bool valid_settings(const settings_t &settings);
+    // Monitor presentation additionally needs a known eye interval and positive remaining
+    // host-feedback time after delay, duration, spacing and the protocol close margin.
+    std::optional<int> host_feedback_budget_us(const settings_t &settings);
     std::optional<parameters_t> parse_parameters(std::string_view line);
     std::optional<std::string> quiesce_command(const parameters_t &current);
     bool quiesce_matches(const parameters_t &actual, const parameters_t &previous);

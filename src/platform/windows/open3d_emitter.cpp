@@ -7,6 +7,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -104,6 +105,16 @@ namespace platf::open3d {
       return window_end_us <= timing->max_window_us &&
              (settings.target_frametime_us == 0 ||
               (window_end_us <= settings.target_frametime_us && queue_end_us <= settings.target_frametime_us));
+    }
+
+    std::optional<int> host_feedback_budget_us(const settings_t &settings) {
+      if (!valid_settings(settings) || settings.target_frametime_us <= 0) {
+        return std::nullopt;
+      }
+      const auto timing = timing_limits(settings.protocol, settings.signal_spacing_us);
+      const auto budget = static_cast<std::int64_t>(settings.target_frametime_us) - settings.frame_delay_us -
+                          settings.frame_duration_us - settings.signal_spacing_us - timing->min_period_tail_base_us;
+      return budget > 0 ? std::make_optional(static_cast<int>(budget)) : std::nullopt;
     }
 
     std::optional<parameters_t> parse_parameters(std::string_view line) {
