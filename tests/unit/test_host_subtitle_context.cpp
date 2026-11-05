@@ -430,6 +430,79 @@ namespace {
     EXPECT_EQ(evaluate(0u, tracker.key()).browser_key.kind, context::kind_e::disabled);
   }
 
+  TEST_F(BrowserSubtitleContextPolicyTest, ResizeRecoversAfterChangedHelperWithFreshCausalGeometry) {
+    target = {{0, 0, 3840, 2160}, 3840, 2160, 0x200u, true};
+    root.monitor_screen_rect = target.screen_rect;
+    root.client_screen_rect = {1449, 295, 3568, 2032};
+    root.frame_screen_rect = {1439, 265, 3578, 2042};
+    browser.screen_rect = {1626, 704, 3367, 1680};
+    const auto initial_root = root;
+    const auto initial_browser = browser;
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(evaluate().browser_key));
+    ASSERT_TRUE(tracker.eligible());
+    const auto initial_key = tracker.key();
+    const auto pending_generation = tracker.generation();
+    const context::presentation_authority_t packed {root.generation, root.generation, 4u, false};
+
+    begin_modal_move();
+    const auto retained = evaluate(0u, tracker.key());
+    ASSERT_TRUE(retained.retained_for_interactive_move_size);
+    EXPECT_FALSE(tracker.update(retained.browser_key));
+    browser = {.status = dom::status_e::changed, .generation = 10u,
+      .helper_sequence = 8u, .received_at = now - 4ms};
+    const auto changed = evaluate(0u, tracker.key());
+    EXPECT_FALSE(changed.retained_for_interactive_move_size);
+    ASSERT_TRUE(tracker.update(changed.browser_key));
+    EXPECT_FALSE(tracker.eligible());
+    EXPECT_FALSE(tracker.matches(pending_generation));
+
+    // Even a positive helper heartbeat cannot revive a lost context inside the modal loop.
+    browser = initial_browser;
+    browser.generation++;
+    browser.helper_sequence = 9u;
+    browser.screen_rect = {2000, 400, 3760, 1390};
+    browser.received_at = now - 1ms;
+    browser.geometry_valid_since = now - 1ms;
+    EXPECT_EQ(evaluate(0u, tracker.key()).browser_key.kind, context::kind_e::disabled);
+
+    root = initial_root;
+    root.generation++;
+    root.client_screen_rect = {1922, 0, 3838, 2086};
+    root.frame_screen_rect = {1912, -30, 3848, 2096};
+    root.geometry_valid_since = now - 3ms;
+    // Old content predates the new foreground run. A later frame can authenticate the root
+    // while still predating the helper's new geometry run; both cases remain disabled.
+    EXPECT_FALSE(evaluate(6u, tracker.key()).foreground_usable);
+    EXPECT_EQ(evaluate(6u, tracker.key()).browser_key.kind, context::kind_e::disabled);
+    content = now - 2ms;
+    const auto premature = evaluate(6u, tracker.key());
+    EXPECT_TRUE(premature.foreground_usable);
+    EXPECT_FALSE(premature.browser_usable);
+    EXPECT_EQ(premature.browser_key.kind, context::kind_e::disabled);
+
+    content = now;
+    browser.received_at = now - 2501ms;
+    EXPECT_EQ(evaluate(6u, tracker.key()).browser_key.kind, context::kind_e::disabled);
+    browser.received_at = now - 1ms;
+    browser.window++;
+    EXPECT_FALSE(evaluate(6u, tracker.key()).browser_identity_matches);
+    EXPECT_EQ(evaluate(6u, tracker.key()).browser_key.kind, context::kind_e::disabled);
+    browser.window = root.window;
+    const auto recovered = evaluate(6u, tracker.key());
+    EXPECT_TRUE(recovered.foreground_usable);
+    EXPECT_TRUE(recovered.browser_usable);
+    EXPECT_TRUE(recovered.mapping_succeeded);
+    EXPECT_FALSE(recovered.retained_for_interactive_move_size);
+    EXPECT_EQ(recovered.browser_key, initial_key);
+    ASSERT_TRUE(tracker.update(recovered.browser_key));
+    EXPECT_TRUE(tracker.eligible());
+    EXPECT_FALSE(tracker.matches(pending_generation));
+    const context::presentation_authority_t current {root.generation, root.generation, 6u, false};
+    EXPECT_FALSE(packed.permits_packed_repeat(current, true));
+    EXPECT_FALSE(tracker.update(evaluate(6u, tracker.key()).browser_key));
+  }
+
   TEST_F(BrowserSubtitleContextPolicyTest, ModalMoveRejectsStaleReplacedOrUnavailableBrowserAuthority) {
     const auto previous = evaluate().browser_key;
     begin_modal_move();

@@ -5212,6 +5212,41 @@ namespace platf::dxgi {
       std::uint64_t browser_authority_epoch = 0u;
     };
 
+    struct subtitle_admission_diagnostic_key_t {
+      std::uint64_t context_generation = 0u;
+      std::string_view reason;
+      foreground_window::status_e foreground_status {};
+      foreground_window::mapping_status_e foreground_mapping_status {};
+      video_dom::status_e browser_status {};
+      video_dom::mapping_status_e browser_mapping_status {};
+      std::uint64_t foreground_window = 0u;
+      std::uint32_t foreground_process = 0u;
+      std::uint64_t browser_window = 0u;
+      std::uint32_t browser_process = 0u;
+      std::int32_t browser_document = 0;
+      std::int32_t browser_video = 0;
+      bool foreground_root = false;
+      bool foreground_region = false;
+      bool foreground_target_usable = false;
+      bool foreground_usable = false;
+      bool content_timestamp_available = false;
+      bool browser_snapshot = false;
+      bool browser_heartbeat_fresh = false;
+      bool browser_after_move = false;
+      bool browser_authority = false;
+      bool browser_identity_matches = false;
+      bool browser_usable = false;
+      bool mapping_attempted = false;
+      bool mapping_succeeded = false;
+      bool fullscreen_checked = false;
+      bool fullscreen_match = false;
+      bool registered_player_candidate = false;
+      bool registry_ready = false;
+      bool retained_for_interactive_move_size = false;
+
+      bool operator==(const subtitle_admission_diagnostic_key_t &) const = default;
+    };
+
     void observe_live_browser_authority(
       const video_dom::snapshot_ptr &browser
     ) {
@@ -5523,73 +5558,151 @@ namespace platf::dxgi {
                  video_player_registry->contains_process(foreground.process_id)) {
         next = {kind_e::registered_video_player, foreground.window, foreground.process_id};
       }
-      if (subtitle_context.update(next)) {
+      const bool context_changed = subtitle_context.update(next);
+      if (context_changed) {
         // Revoke even full-source completions and already-packed output. The generation survives
         // busy drops, so returning to the same video cannot revive pre-transition protection.
         matched_presentation_cache.reset();
         latest_v2_lineage.reset();
         subtitle_context_reprocess_pending = true;
-        const char *reason = "no-video-authority";
-        if (subtitle_context.kind() == kind_e::browser_video) reason = "browser-video-authorized";
-        else if (subtitle_context.kind() == kind_e::registered_video_player) reason = "registered-player-authorized";
-        else if (!live_window_authority) reason = "foreground-root-unavailable";
-        else if (!foreground_usable) reason = "foreground-unusable-for-content";
-        else if (!admission.foreground_target_usable) reason = "foreground-target-unavailable";
-        else if (!foreground_region_present && !browser_identity_matches) reason = "foreground-region-unavailable";
-        else if (!browser) reason = "browser-snapshot-unavailable";
-        else if (!live_browser_authority) reason = "browser-authority-unavailable";
-        else if (!browser_identity_matches) reason = "browser-identity-mismatch";
-        else if (!browser_usable) reason = "browser-unusable-for-content";
-        else if (!mapping_succeeded) reason = "browser-mapping-failed";
-        else if (!fullscreen_match) reason = "browser-fullscreen-mismatch";
-        else if (browser_video) reason = "browser-key-rejected";
-        const bool heartbeat_age_available = browser &&
-          browser->received_at.time_since_epoch().count() != 0;
-        const double heartbeat_age_ms = heartbeat_age_available ?
-          std::chrono::duration<double, std::milli>(now - browser->received_at).count() : 0.0;
-        const bool geometry_content_delta_available = browser && content_timestamp &&
-          browser->geometry_valid_since.time_since_epoch().count() != 0;
-        const double content_minus_geometry_ms = geometry_content_delta_available ?
-          std::chrono::duration<double, std::milli>(*content_timestamp - browser->geometry_valid_since).count() : 0.0;
-        BOOST_LOG(info) << "Host SBS subtitle context="sv
-                        << kind_name(subtitle_context.kind())
-                        << " generation="sv << subtitle_context.generation() << '.'
-                        << " reason="sv << reason
-                        << " foreground_root="sv << static_cast<bool>(live_window_authority)
-                        << " foreground_region="sv << foreground_region_present
-                        << " foreground_target_usable="sv << admission.foreground_target_usable
-                        << " foreground_mapping_status="sv << foreground_window::mapping_status_name(foreground_mapping.status)
-                        << " foreground_usable="sv << foreground_usable
-                        << " foreground_hwnd=0x"sv << util::hex(foreground.window).to_string_view()
-                        << " foreground_pid="sv << foreground.process_id
-                        << " foreground_generation="sv << foreground.generation
-                        << " content_timestamp_available="sv << content_timestamp.has_value()
-                        << " browser_snapshot="sv << static_cast<bool>(browser)
-                        << " browser_status="sv << (browser ? video_dom::status_name(browser->status) : "none")
-                        << " live_browser_authority="sv << static_cast<bool>(live_browser_authority)
-                        << " browser_epoch="sv << live_browser_authority_epoch
-                        << " browser_identity_checked="sv << (foreground_usable && admission.foreground_target_usable)
-                        << " browser_identity_match="sv << browser_identity_matches
-                        << " browser_usable_checked="sv << (foreground_usable && browser_identity_matches)
-                        << " browser_usable="sv << browser_usable
-                        << " mapping_attempted="sv << mapping_attempted
-                        << " mapping_status="sv << (mapping_attempted ? video_dom::mapping_status_name(mapping_status) : "not-evaluated")
-                        << " fullscreen_checked="sv << fullscreen_check_evaluated
-                        << " fullscreen_match="sv << fullscreen_match
-                        << " browser_sequence="sv << (browser ? browser->helper_sequence : 0u)
-                        << " browser_hwnd=0x"sv << util::hex(browser ? browser->window : 0u).to_string_view()
-                        << " browser_pid="sv << (browser ? browser->process_id : 0u)
-                        << " browser_document="sv << (browser ? browser->document_id : 0)
-                        << " browser_video="sv << (browser ? browser->video_id : 0)
-                        << " browser_rect="sv << (browser ? browser->screen_rect.left : 0) << ':'
-                        << (browser ? browser->screen_rect.top : 0) << '-'
-                        << (browser ? browser->screen_rect.right : 0) << ':'
-                        << (browser ? browser->screen_rect.bottom : 0)
-                        << " heartbeat_age_available="sv << heartbeat_age_available
-                        << " heartbeat_age_ms="sv << heartbeat_age_ms
-                        << " geometry_content_delta_available="sv << geometry_content_delta_available
-                        << " content_minus_geometry_ms="sv << content_minus_geometry_ms;
       }
+      const char *reason = "no-video-authority";
+      if (subtitle_context.kind() == kind_e::browser_video) {
+        reason = "browser-video-authorized";
+      } else if (subtitle_context.kind() == kind_e::registered_video_player) {
+        reason = "registered-player-authorized";
+      } else if (!live_window_authority) {
+        reason = "foreground-root-unavailable";
+      } else if (!foreground_usable) {
+        reason = "foreground-unusable-for-content";
+      } else if (!admission.foreground_target_usable) {
+        reason = "foreground-target-unavailable";
+      } else if (!foreground_region_present && !browser_identity_matches) {
+        reason = "foreground-region-unavailable";
+      } else if (!browser) {
+        reason = "browser-snapshot-unavailable";
+      } else if (!live_browser_authority) {
+        reason = "browser-authority-unavailable";
+      } else if (!browser_identity_matches) {
+        reason = "browser-identity-mismatch";
+      } else if (!browser_usable) {
+        reason = "browser-unusable-for-content";
+      } else if (!mapping_succeeded) {
+        reason = "browser-mapping-failed";
+      } else if (!fullscreen_match) {
+        reason = "browser-fullscreen-mismatch";
+      } else if (browser_video) {
+        reason = "browser-key-rejected";
+      }
+      const bool heartbeat_age_available = browser &&
+                                           browser->received_at.time_since_epoch().count() != 0;
+      const bool browser_heartbeat_fresh = heartbeat_age_available && now >= browser->received_at &&
+                                           now - browser->received_at <= std::chrono::milliseconds {2500};
+      const bool browser_after_move = browser && browser->received_at >= browser_roi_not_before;
+      const subtitle_admission_diagnostic_key_t diagnostic_key {
+        .context_generation = subtitle_context.generation(),
+        .reason = reason,
+        .foreground_status = foreground.status,
+        .foreground_mapping_status = foreground_mapping.status,
+        .browser_status = browser ? browser->status : video_dom::status_e::stopped,
+        .browser_mapping_status = mapping_status,
+        .foreground_window = foreground.window,
+        .foreground_process = foreground.process_id,
+        .browser_window = browser ? browser->window : 0u,
+        .browser_process = browser ? browser->process_id : 0u,
+        .browser_document = browser ? browser->document_id : 0,
+        .browser_video = browser ? browser->video_id : 0,
+        .foreground_root = static_cast<bool>(live_window_authority),
+        .foreground_region = foreground_region_present,
+        .foreground_target_usable = admission.foreground_target_usable,
+        .foreground_usable = foreground_usable,
+        .content_timestamp_available = content_timestamp.has_value(),
+        .browser_snapshot = static_cast<bool>(browser),
+        .browser_heartbeat_fresh = browser_heartbeat_fresh,
+        .browser_after_move = browser_after_move,
+        .browser_authority = static_cast<bool>(live_browser_authority),
+        .browser_identity_matches = browser_identity_matches,
+        .browser_usable = browser_usable,
+        .mapping_attempted = mapping_attempted,
+        .mapping_succeeded = mapping_succeeded,
+        .fullscreen_checked = fullscreen_check_evaluated,
+        .fullscreen_match = fullscreen_match,
+        .registered_player_candidate = admission.registered_player_candidate,
+        .registry_ready = video_player_registry_ready_observed,
+        .retained_for_interactive_move_size = admission.retained_for_interactive_move_size,
+      };
+      // Admission can change between disabled reasons without changing semantic context. Keep
+      // that evidence visible without resetting history or logging every heartbeat/geometry tick.
+      // Rapid nonsemantic fluctuations coalesce to the latest state at most once per second;
+      // actual context transitions retain their immediate log and existing revocation semantics.
+      if (!context_changed && last_subtitle_admission_diagnostic &&
+          (*last_subtitle_admission_diagnostic == diagnostic_key ||
+           now - last_subtitle_admission_diagnostic_at < std::chrono::seconds {1})) {
+        return;
+      }
+      last_subtitle_admission_diagnostic = diagnostic_key;
+      last_subtitle_admission_diagnostic_at = now;
+      const double heartbeat_age_ms = heartbeat_age_available ?
+                                        std::chrono::duration<double, std::milli>(now - browser->received_at).count() :
+                                        0.0;
+      const bool geometry_content_delta_available = browser && content_timestamp &&
+                                                    browser->geometry_valid_since.time_since_epoch().count() != 0;
+      const double content_minus_geometry_ms = geometry_content_delta_available ?
+                                                 std::chrono::duration<double, std::milli>(*content_timestamp - browser->geometry_valid_since).count() :
+                                                 0.0;
+      BOOST_LOG(info) << "Host SBS subtitle context="sv
+                      << kind_name(subtitle_context.kind())
+                      << " generation="sv << subtitle_context.generation() << '.'
+                      << " reason="sv << reason
+                      << " context_changed="sv << context_changed
+                      << " foreground_status="sv << foreground_window::status_name(foreground.status)
+                      << " foreground_root="sv << static_cast<bool>(live_window_authority)
+                      << " foreground_region="sv << foreground_region_present
+                      << " foreground_target_usable="sv << admission.foreground_target_usable
+                      << " foreground_mapping_status="sv << foreground_window::mapping_status_name(foreground_mapping.status)
+                      << " foreground_usable="sv << foreground_usable
+                      << " foreground_hwnd=0x"sv << util::hex(foreground.window).to_string_view()
+                      << " foreground_pid="sv << foreground.process_id
+                      << " foreground_generation="sv << foreground.generation
+                      << " foreground_client="sv << foreground.client_screen_rect.left << ':'
+                      << foreground.client_screen_rect.top << '-'
+                      << foreground.client_screen_rect.right << ':' << foreground.client_screen_rect.bottom
+                      << " capture="sv << output.DesktopCoordinates.left << ':'
+                      << output.DesktopCoordinates.top << '-' << output.DesktopCoordinates.right << ':'
+                      << output.DesktopCoordinates.bottom
+                      << " source="sv << source.Width << 'x' << source.Height
+                      << " content_timestamp_available="sv << content_timestamp.has_value()
+                      << " content_age_ms="sv << (content_timestamp ? std::chrono::duration<double, std::milli>(now - *content_timestamp).count() : 0.0)
+                      << " browser_snapshot="sv << static_cast<bool>(browser)
+                      << " browser_status="sv << (browser ? video_dom::status_name(browser->status) : "none")
+                      << " live_browser_authority="sv << static_cast<bool>(live_browser_authority)
+                      << " browser_heartbeat_fresh="sv << browser_heartbeat_fresh
+                      << " browser_after_move="sv << browser_after_move
+                      << " browser_epoch="sv << live_browser_authority_epoch
+                      << " browser_identity_checked="sv << (foreground_usable && admission.foreground_target_usable)
+                      << " browser_identity_match="sv << browser_identity_matches
+                      << " browser_usable_checked="sv << (foreground_usable && browser_identity_matches)
+                      << " browser_usable="sv << browser_usable
+                      << " mapping_attempted="sv << mapping_attempted
+                      << " mapping_status="sv << (mapping_attempted ? video_dom::mapping_status_name(mapping_status) : "not-evaluated")
+                      << " fullscreen_checked="sv << fullscreen_check_evaluated
+                      << " fullscreen_match="sv << fullscreen_match
+                      << " registered_player_candidate="sv << admission.registered_player_candidate
+                      << " registry_ready="sv << video_player_registry_ready_observed
+                      << " retained_for_interactive_move_size="sv << admission.retained_for_interactive_move_size
+                      << " browser_sequence="sv << (browser ? browser->helper_sequence : 0u)
+                      << " browser_hwnd=0x"sv << util::hex(browser ? browser->window : 0u).to_string_view()
+                      << " browser_pid="sv << (browser ? browser->process_id : 0u)
+                      << " browser_document="sv << (browser ? browser->document_id : 0)
+                      << " browser_video="sv << (browser ? browser->video_id : 0)
+                      << " browser_rect="sv << (browser ? browser->screen_rect.left : 0) << ':'
+                      << (browser ? browser->screen_rect.top : 0) << '-'
+                      << (browser ? browser->screen_rect.right : 0) << ':'
+                      << (browser ? browser->screen_rect.bottom : 0)
+                      << " heartbeat_age_available="sv << heartbeat_age_available
+                      << " heartbeat_age_ms="sv << heartbeat_age_ms
+                      << " geometry_content_delta_available="sv << geometry_content_delta_available
+                      << " content_minus_geometry_ms="sv << content_minus_geometry_ms;
     }
 
     bool window_region_matches_live_authority(
@@ -6738,6 +6851,8 @@ namespace platf::dxgi {
       live_browser_authority_epoch = 0u;
       subtitle_context = {};
       subtitle_context_reprocess_pending = false;
+      last_subtitle_admission_diagnostic.reset();
+      last_subtitle_admission_diagnostic_at = {};
       video_player_registry_ready_observed = false;
       interactive_move_size_observed = false;
       browser_roi_not_before = {};
@@ -7584,6 +7699,8 @@ namespace platf::dxgi {
     std::unique_ptr<video_player::registry_t> video_player_registry;
     bool video_player_registry_ready_observed = false;
     models::host_subtitle_context::tracker_t subtitle_context;
+    std::optional<subtitle_admission_diagnostic_key_t> last_subtitle_admission_diagnostic;
+    std::chrono::steady_clock::time_point last_subtitle_admission_diagnostic_at {};
     const actual_converter_probe_v1::context_t *probe_context = nullptr;
     actual_converter_probe_v1::observer_t probe_observer {};
     // Same-TU research actor only; no UI/config/default activation.

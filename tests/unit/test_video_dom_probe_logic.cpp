@@ -211,6 +211,64 @@ TEST(VideoDomProbeLogic, EstablishedSelectionStaysEstablishedAfterExactRefresh) 
   EXPECT_TRUE(policy.publish_ok);
 }
 
+TEST(VideoDomProbeLogic, ResizeReacquiresAuthorityOnlyAfterNewCensusAndExactRefresh) {
+  constexpr probe::rect_t old_client {1449, 295, 3568, 2032};
+  constexpr probe::rect_t old_video {1626, 704, 3367, 1680};
+  constexpr probe::rect_t new_client {1922, 0, 3838, 2086};
+  constexpr probe::rect_t new_document {1922, 100, 3838, 2086};
+  constexpr probe::rect_t new_video {2000, 400, 3760, 1390};
+  ASSERT_TRUE(probe::windowed_cache_refresh_matches(
+    old_video, old_video, old_client, old_client, old_video
+  ));
+
+  const bool old_cache_matches = probe::windowed_cache_refresh_matches(
+    old_video, old_video, new_client, new_document, new_video
+  );
+  const auto dropped = probe::cached_refresh_policy(
+    probe::cached_selection_phase_e::established, old_cache_matches, {}
+  );
+  EXPECT_FALSE(dropped.retain_selection);
+  EXPECT_FALSE(dropped.publish_ok);
+
+  // The same semantic video can be selected again at its new position, but a complete
+  // census alone must not publish the replacement geometry as established authority.
+  const std::array candidates {candidate(-262467, new_video)};
+  const auto selection = probe::select_authority_candidate(candidates, new_client);
+  ASSERT_TRUE(selection.index);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::single);
+  const auto authority = probe::selection_authority_rect(candidates, selection, new_client);
+  ASSERT_TRUE(authority);
+  EXPECT_EQ(*authority, new_video);
+  const auto census = probe::complete_census_policy(selection, false);
+  ASSERT_TRUE(census.stage_selection);
+  EXPECT_FALSE(census.revoke_cached_selection);
+  EXPECT_EQ(census.phase, probe::cached_selection_phase_e::provisional);
+  EXPECT_FALSE(census.publish_ok);
+
+  // A stale retained object still reporting the pre-resize rectangle cannot promote it.
+  const auto stale = probe::cached_refresh_policy(
+    census.phase,
+    probe::windowed_cache_refresh_matches(new_video, *authority, new_client, new_document, old_video),
+    {}
+  );
+  EXPECT_FALSE(stale.retain_selection);
+  EXPECT_FALSE(stale.publish_ok);
+
+  const auto repeated_census = probe::complete_census_policy(selection, false);
+  ASSERT_TRUE(repeated_census.stage_selection);
+  EXPECT_FALSE(repeated_census.publish_ok);
+  const auto refreshed = probe::cached_refresh_policy(
+    repeated_census.phase,
+    probe::windowed_cache_refresh_matches(new_video, *authority, new_client, new_document, new_video),
+    probe::machine_event_policy({.foreground = 5, .object = 10},
+                                {.foreground = 5, .object = 11})
+  );
+  EXPECT_TRUE(refreshed.retain_selection);
+  EXPECT_EQ(refreshed.next_phase, probe::cached_selection_phase_e::established);
+  EXPECT_TRUE(refreshed.publish_ok);
+  EXPECT_TRUE(refreshed.request_follow_up_audit);
+}
+
 TEST(VideoDomProbeLogic, UncachedIncompleteRetriesFastButAccessibilityBacksOff) {
   EXPECT_EQ(
     probe::uncached_scan_retry_delay(
