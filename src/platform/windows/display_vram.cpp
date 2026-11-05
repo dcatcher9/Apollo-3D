@@ -9302,6 +9302,18 @@ namespace platf::dxgi {
         };
         std::optional<std::chrono::steady_clock::time_point> acquisition_deadline;
         unsigned acquisition_presents = 0;
+        struct acquisition_sample_t {
+          UINT requested = 0;
+          detail::shutter_feedback_wait_status_e status {};
+          detail::shutter_feedback_t feedback {};
+          std::int64_t present_begin = 0, present_end = 0, query = 0, flush_begin = 0, flush_end = 0;
+          unsigned streak = 0;
+        };
+        std::array<acquisition_sample_t, 8> acquisition_history {};
+        std::array<unsigned, 6> acquisition_wait_counts {};
+        unsigned acquisition_maximum_streak = 0;
+        std::uint64_t confirmed_eye_commands = 0, held_eye_images = 0, extra_held_refreshes = 0;
+        std::uint32_t maximum_confirmed_refresh_delta = 0;
         std::optional<detail::shutter_feedback_t> first_feedback;
         bool feedback_disjoint = false;
         HRESULT flush_result = S_FALSE;
@@ -9349,6 +9361,28 @@ namespace platf::dxgi {
         bool has_displayed = false;
         bool recovering_clock = false;
         std::optional<std::uint32_t> previous_displayed_refresh;
+        const auto log_acquisition_history = [&]() {
+          log_local_shutter_window_snapshot(window, read_target_rect(), target_output_desc.Monitor);
+          BOOST_LOG(error) << "Local shutter acquisition outcomes: presents="sv << acquisition_presents
+                           << " maximum_streak="sv << acquisition_maximum_streak
+                           << " displayed="sv << acquisition_wait_counts[0] << " cancelled="sv << acquisition_wait_counts[1]
+                           << " timeout="sv << acquisition_wait_counts[2] << " unsupported="sv << acquisition_wait_counts[3]
+                           << " flush_failed="sv << acquisition_wait_counts[4] << " wait_failed="sv << acquisition_wait_counts[5]
+                           << " qpc_frequency="sv << qpc_frequency.QuadPart << " host_age_budget_us="sv << host_age_budget_us << '.';
+          const auto count = std::min<std::size_t>(acquisition_presents, acquisition_history.size());
+          for (std::size_t i = acquisition_presents - count; i < acquisition_presents; ++i) {
+            const auto &sample = acquisition_history[i % acquisition_history.size()];
+            BOOST_LOG(error) << "Local shutter acquisition sample: requested="sv << sample.requested
+                             << " wait_status="sv << static_cast<unsigned>(sample.status)
+                             << " raw_status="sv << static_cast<unsigned>(sample.feedback.status)
+                             << " raw_hr="sv << util::log_hex(sample.feedback.result_code)
+                             << " present="sv << sample.feedback.present_count << " refresh="sv << sample.feedback.refresh_count
+                             << " sync_refresh="sv << sample.feedback.sync_refresh_count << " sync_qpc="sv << sample.feedback.sync_qpc
+                             << " query_qpc="sv << sample.query << " present_begin_qpc="sv << sample.present_begin
+                             << " present_end_qpc="sv << sample.present_end << " flush_begin_qpc="sv << sample.flush_begin
+                             << " flush_end_qpc="sv << sample.flush_end << " streak="sv << sample.streak << '.';
+          }
+        };
         const auto recovery_context_valid = [&]() {
           if (stopped() || shutter_frames.failed() || !config.shutter_recovery_allowed ||
               !config.shutter_recovery_allowed() || platf::display_change_epoch() != display_epoch_at_open) {
@@ -9400,6 +9434,9 @@ namespace platf::dxgi {
           recovering_clock = true;
           previous_displayed_refresh.reset();
           acquisition_presents = 0;
+          acquisition_history = {};
+          acquisition_wait_counts = {};
+          acquisition_maximum_streak = 0;
           acquisition_deadline = std::chrono::steady_clock::now() + detail::shutter_recovery_budget_t::acquisition_timeout;
           BOOST_LOG(info) << "Local shutter emitter quiet; reacquiring an unsignalled left-eye clock without changing the desktop."sv;
           return true;
@@ -9428,6 +9465,7 @@ namespace platf::dxgi {
               acquisition_deadline = std::chrono::steady_clock::now() + detail::shutter_recovery_budget_t::acquisition_timeout;
             }
             if (std::chrono::steady_clock::now() >= *acquisition_deadline) {
+              log_acquisition_history();
               BOOST_LOG(error) << "Local shutter clock acquisition expired: presents="sv << acquisition_presents
                                << " stable_samples="sv << feedback_tracker.streak() << '.';
               fail("DXGI could not establish a stable monitor clock before starting the glasses; returning to 2D");
@@ -9558,8 +9596,16 @@ namespace platf::dxgi {
               // A timeout's last raw sample is diagnostic data, never display authorization.
               feedback_tracker.observe(requested_present, detail::shutter_feedback_t {}, confirmation_qpc);
             }
-            if (confirmation.status == detail::shutter_feedback_wait_status_e::displayed &&
-                feedback_tracker.observe(requested_present, confirmation.feedback, confirmation_qpc) == detail::shutter_feedback_tracker_status_e::ready) {
+            const auto acquisition_status = confirmation.status == detail::shutter_feedback_wait_status_e::displayed ?
+                                              feedback_tracker.observe(requested_present, confirmation.feedback, confirmation_qpc) :
+                                              detail::shutter_feedback_tracker_status_e::acquiring;
+            ++acquisition_wait_counts[static_cast<std::size_t>(confirmation.status)];
+            acquisition_maximum_streak = std::max(acquisition_maximum_streak, feedback_tracker.streak());
+            acquisition_history[(acquisition_presents - 1) % acquisition_history.size()] = {
+              requested_present, confirmation.status, confirmation.feedback,
+              present_start_qpc, present_end_qpc, confirmation_qpc, flush_start_qpc, flush_end_qpc, feedback_tracker.streak(),
+            };
+            if (acquisition_status == detail::shutter_feedback_tracker_status_e::ready) {
               if (recovering_clock && !recovery_context_valid()) {
                 if (!stopped()) {
                   fail("the display or Windows desktop changed while reacquiring the shutter clock");
@@ -9614,6 +9660,9 @@ namespace platf::dxgi {
             fail("DXGI could not prove an uninterrupted eye scanout cadence; restart after checking display timing");
             break;
           }
+          const auto confirmed_refresh_delta = previous_displayed_refresh ?
+                                                 static_cast<std::uint32_t>(confirmation.feedback.refresh_count - *previous_displayed_refresh) :
+                                                 static_cast<std::uint32_t>(eye_repeats);
           previous_displayed_refresh = confirmation.feedback.refresh_count;
           if (!feedback_tracker.fresh_for_emit(qpc_now())) {
             log_feedback_failure();
@@ -9633,11 +9682,20 @@ namespace platf::dxgi {
             fail("the USB emitter missed an eye boundary");
             break;
           }
+          ++confirmed_eye_commands;
+          maximum_confirmed_refresh_delta = std::max(maximum_confirmed_refresh_delta, confirmed_refresh_delta);
+          if (confirmed_refresh_delta > static_cast<unsigned>(eye_repeats)) {
+            ++held_eye_images;
+            extra_held_refreshes += confirmed_refresh_delta - eye_repeats;
+          }
           has_displayed = true;
           if (config.presented_frames) {
             config.presented_frames->fetch_add(eye_repeats, std::memory_order_relaxed);
           }
         }
+        BOOST_LOG(info) << "Local shutter presentation summary: confirmed_eye_commands="sv << confirmed_eye_commands
+                        << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
+                        << " maximum_refresh_delta="sv << maximum_confirmed_refresh_delta << " repeats="sv << eye_repeats << '.';
         // PC serial mode uses finite pulses with averaging disabled. Closing the transport
         // leaves no autonomous eye-toggle source running after the last pulse expires.
         emitter.close();

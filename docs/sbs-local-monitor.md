@@ -96,9 +96,19 @@ presentation polls exact metadata with cancellable 200 µs waits; it never falls
 blocking call, which can consume more than a shutter interval under load. If a driver requires
 a flush for every feedback update, the live wait times out and follows quiet recovery instead.
 
-Once armed, a missing frame, counter discontinuity, or invalid timestamp immediately stops eye
-commands. For a timing-only interruption, the presenter freezes image submissions and retains its
-stereo pair while the emitter finishes its previous USB write. A read-only settings query on the
+Once armed, each confirmed image may have been held for between the configured eye interval and
+four times that interval. Its raw refresh-counter difference and QPC elapsed time must agree
+within 100 µs, and its exact next present identity and current-frame freshness remain mandatory.
+The emitter has averaging disabled and receives explicit finite left/right commands: no command
+is replayed for held refreshes, and eye phase advances once per confirmed image, independent of
+the number or parity of refreshes. This tolerates an occasional held image without rebuilding
+the desktop; it does not recover a stale frame or authorize a shorter shutter interval. Cold
+acquisition still requires 13 consecutive samples at the exact configured minimum cadence.
+
+A missing/invalid present, counter-domain discontinuity, excessive hold, or invalid timestamp
+immediately stops eye commands. For a timing-only interruption, the presenter freezes image
+submissions and retains its stereo pair while the emitter finishes its previous USB write.
+A read-only settings query on the
 same serial connection acts as a firmware processing barrier; the complete verified profile must
 match before the finite-pulse drain can begin. It then reacquires 13 strict samples with no eye
 commands and resumes a fresh left/right cycle on that pair. This preserves the desktop during a

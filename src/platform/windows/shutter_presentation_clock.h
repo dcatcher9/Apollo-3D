@@ -10,6 +10,13 @@
 #include <optional>
 
 namespace platf::dxgi::detail {
+  // A confirmed image can be held beyond its requested minimum dwell. Finite explicit eye
+  // commands do not toggle during that hold. Bound the gap and retain raw QPC/counter agreement;
+  // this never authorizes a shorter eye interval or infers an eye from refresh parity.
+  constexpr bool held_refresh_delta_valid(unsigned repeats, std::uint32_t delta) noexcept {
+    return repeats >= 1 && repeats <= 4 && delta >= repeats && delta <= 4 * repeats;
+  }
+
   // A transient path change may be reacquired with the emitter quiet. Repeated losses must
   // still return to 2D instead of keeping the desktop indefinitely in a dark recovery loop.
   class shutter_recovery_budget_t {
@@ -102,10 +109,11 @@ namespace platf::dxgi::detail {
       if (!present_qpc || feedback.sync_qpc > query_qpc || !fresh(*present_qpc, query_qpc)) {
         return invalidate();
       }
+      const auto refresh_delta = static_cast<std::uint32_t>(feedback.refresh_count - last_refresh_);
       const bool continuous = last_present_qpc_ &&
                               requested_id == static_cast<std::uint32_t>(last_present_id_ + 1u) &&
-                              static_cast<std::uint32_t>(feedback.refresh_count - last_refresh_) == repeats_ &&
-                              cadence_matches(*present_qpc);
+                              (armed_ ? held_refresh_delta_valid(repeats_, refresh_delta) : refresh_delta == repeats_) &&
+                              cadence_matches(*present_qpc, refresh_delta);
       if (last_present_qpc_ && !continuous) {
         if (armed_) {
           return invalidate();
@@ -177,11 +185,11 @@ namespace platf::dxgi::detail {
              static_cast<long double>(now_qpc - present_qpc) * 1000000.0L / qpc_frequency_ <= host_age_budget_us_;
     }
 
-    bool cadence_matches(std::int64_t present_qpc) const noexcept {
+    bool cadence_matches(std::int64_t present_qpc, std::uint32_t refresh_delta) const noexcept {
       if (present_qpc <= *last_present_qpc_) {
         return false;
       }
-      const auto error_ticks = std::fabs(static_cast<long double>(present_qpc - *last_present_qpc_) - refresh_ticks_ * repeats_);
+      const auto error_ticks = std::fabs(static_cast<long double>(present_qpc - *last_present_qpc_) - refresh_ticks_ * refresh_delta);
       return error_ticks * 1000000.0L / qpc_frequency_ <= cadence_tolerance_us_;
     }
 
@@ -307,8 +315,9 @@ namespace platf::dxgi::detail {
     }
   }
 
-  // Eye phase advances only when DXGI proves the requested present reached scanout. A late or
-  // missing flip invalidates the session instead of guessing an eye from elapsed wall time.
+  // Eye phase advances once for an explicitly confirmed submitted image. A bounded extra hold
+  // does not replay a command or advance phase by refresh parity; the feedback tracker must
+  // independently prove exact identity, raw counter/QPC agreement and current-frame freshness.
   class shutter_presentation_clock_t {
   public:
     explicit shutter_presentation_clock_t(unsigned eye_repeats):
@@ -323,7 +332,8 @@ namespace platf::dxgi::detail {
     }
 
     bool observe_displayed(std::uint32_t refresh_count) noexcept {
-      if (repeats_ < 1 || repeats_ > 4 || (last_refresh_ && static_cast<std::uint32_t>(refresh_count - *last_refresh_) != repeats_)) {
+      if (repeats_ < 1 || repeats_ > 4 ||
+          (last_refresh_ && !held_refresh_delta_valid(repeats_, static_cast<std::uint32_t>(refresh_count - *last_refresh_)))) {
         return false;
       }
       last_refresh_ = refresh_count;

@@ -43,13 +43,32 @@ TEST(ShutterPresentationClock, HoldsOneStereoPairThroughRepeatedEyeScanouts) {
   EXPECT_TRUE(clock.left_eye());
 }
 
-TEST(ShutterPresentationClock, MissingOrRepeatedScanoutDoesNotGuessNextEye) {
+TEST(ShutterPresentationClock, HeldRefreshesAdvanceOneExplicitEyeWithoutUsingRefreshParity) {
   shutter_presentation_clock_t clock(1);
   ASSERT_TRUE(clock.observe_displayed(42));
-  EXPECT_FALSE(clock.observe_displayed(44));
   EXPECT_FALSE(clock.left_eye());
-  EXPECT_FALSE(clock.observe_displayed(42));
+  ASSERT_TRUE(clock.observe_displayed(44));  // Two refreshes still mean one newly displayed eye.
+  EXPECT_TRUE(clock.left_eye());
+  ASSERT_TRUE(clock.observe_displayed(47));
   EXPECT_FALSE(clock.left_eye());
+  ASSERT_TRUE(clock.observe_displayed(51));
+  EXPECT_TRUE(clock.left_eye());
+}
+
+TEST(ShutterPresentationClock, ShortRepeatedBackwardsAndUnboundedHoldsDoNotAdvancePhase) {
+  for (unsigned repeats : {1u, 2u, 3u, 4u}) {
+    for (const auto delta : {0u, repeats - 1u, 4u * repeats + 1u, UINT32_MAX}) {
+      SCOPED_TRACE(repeats);
+      SCOPED_TRACE(delta);
+      shutter_presentation_clock_t clock(repeats);
+      ASSERT_TRUE(clock.observe_displayed(100));
+      EXPECT_FALSE(clock.observe_displayed(100u + delta));
+      EXPECT_FALSE(clock.left_eye());
+      // A rejected boundary did not replace the last accepted refresh or consume an eye.
+      ASSERT_TRUE(clock.observe_displayed(100u + repeats));
+      EXPECT_TRUE(clock.left_eye());
+    }
+  }
 }
 
 TEST(ShutterPresentationClock, RefreshCounterWrapPreservesPhase) {
@@ -191,9 +210,9 @@ TEST(ShutterPresentFeedback, FuturePresentAndUnsupportedFeedbackCannotAuthorizeA
   EXPECT_EQ(probe.flushes, 0u);
 }
 
-TEST(ShutterPresentFeedback, SkippedActualRefreshStillFailsAfterMetadataBecomesAvailable) {
+TEST(ShutterPresentFeedback, UnboundedHeldRefreshStillFailsAfterMetadataBecomesAvailable) {
   feedback_probe_t probe;
-  probe.refresh = 102;
+  probe.refresh = 105;
   shutter_presentation_clock_t eye_clock(1);
   ASSERT_TRUE(eye_clock.observe_displayed(100));
   const auto result = shutter::await_shutter_present(probe.io(), probe.present_id, false);
@@ -447,6 +466,118 @@ TEST(ShutterFeedbackTracker, RepeatedEyesAndBothCounterWrapsPreserveExactContinu
   }
 }
 
+TEST(ShutterFeedbackTracker, ArmedMeasuredHoldsPreserveTheExplicitLeftRightSequence) {
+  for (unsigned repeats : {1u, 2u, 3u, 4u}) {
+    SCOPED_TRACE(repeats);
+    tracker_t tracker(repeats, 120000, tracker_frequency, 2000, 100, 2);
+    acquire_tracker(tracker, repeats);
+    shutter_presentation_clock_t eye_clock(repeats);
+    std::uint32_t present_id = 11;
+    std::uint32_t refresh = 1000 + repeats;
+    auto boundary = tracker_origin + repeats * tracker_refresh_ticks;
+    unsigned accepted_eyes = 0;
+    for (unsigned delta = repeats; delta <= 4u * repeats; ++delta) {
+      SCOPED_TRACE(delta);
+      ++present_id;
+      refresh += delta;
+      boundary += delta * tracker_refresh_ticks;
+      ASSERT_EQ(tracker.observe(present_id, tracker_feedback(present_id, refresh, boundary), boundary + 1200), tracker_status::accepted);
+      ASSERT_TRUE(tracker.fresh_for_emit(boundary + 1200));
+      EXPECT_EQ(tracker.last_present_qpc(), boundary);
+      // Includes odd holds for repeated eyes: refresh parity never chooses the emitted eye.
+      EXPECT_EQ(eye_clock.left_eye(), accepted_eyes % 2u == 0);
+      EXPECT_EQ(eye_clock.starts_pair(), accepted_eyes % 2u == 0);
+      ASSERT_TRUE(eye_clock.observe_displayed(refresh));
+      ++accepted_eyes;
+      EXPECT_EQ(eye_clock.left_eye(), accepted_eyes % 2u == 0);
+    }
+  }
+}
+
+TEST(ShutterFeedbackTracker, BoundedHeldRefreshesAlsoCrossBothCounterWraps) {
+  tracker_t tracker(1, 120000, tracker_frequency, 2000, 100, 2);
+  ASSERT_EQ(tracker.observe(UINT32_MAX - 1u, tracker_feedback(UINT32_MAX - 1u, UINT32_MAX - 2u, tracker_origin), tracker_origin + 1200), tracker_status::acquiring);
+  const auto second = tracker_origin + tracker_refresh_ticks;
+  ASSERT_EQ(tracker.observe(UINT32_MAX, tracker_feedback(UINT32_MAX, UINT32_MAX - 1u, second), second + 1200), tracker_status::ready);
+  ASSERT_TRUE(tracker.arm());
+  const auto held = second + 3 * tracker_refresh_ticks;
+  EXPECT_EQ(tracker.observe(0, tracker_feedback(0, 1, held), held + 1200), tracker_status::accepted);
+  EXPECT_TRUE(tracker.fresh_for_emit(held + 1200));
+}
+
+TEST(ShutterFeedbackTracker, ColdMeasuredHoldsRestartAllThirteenAcquisitionSamples) {
+  for (unsigned repeats : {1u, 2u, 3u, 4u}) {
+    SCOPED_TRACE(repeats);
+    tracker_t tracker(repeats, 120000, tracker_frequency, 2000, 100);
+    std::uint32_t present_id = 100;
+    std::uint32_t refresh = 500;
+    auto boundary = tracker_origin;
+    for (unsigned sample = 0; sample < 12; ++sample) {
+      ASSERT_EQ(tracker.observe(present_id, tracker_feedback(present_id, refresh, boundary), boundary + 1200), tracker_status::acquiring);
+      ++present_id;
+      refresh += repeats;
+      boundary += repeats * tracker_refresh_ticks;
+    }
+    ASSERT_EQ(tracker.streak(), 12u);
+    // One additional held refresh interval is valid feedback, but is not a cold continuous clock.
+    refresh += repeats;
+    boundary += repeats * tracker_refresh_ticks;
+    ASSERT_EQ(tracker.observe(present_id, tracker_feedback(present_id, refresh, boundary), boundary + 1200), tracker_status::acquiring);
+    EXPECT_EQ(tracker.streak(), 1u);
+    EXPECT_FALSE(tracker.arm());
+    for (unsigned interval = 1; interval <= 12; ++interval) {
+      ++present_id;
+      refresh += repeats;
+      boundary += repeats * tracker_refresh_ticks;
+      EXPECT_EQ(tracker.observe(present_id, tracker_feedback(present_id, refresh, boundary), boundary + 1200),
+        interval == 12 ? tracker_status::ready : tracker_status::acquiring);
+    }
+    EXPECT_TRUE(tracker.arm());
+  }
+}
+
+TEST(ShutterFeedbackTracker, ArmedHoldsRejectShortRepeatedBackwardsAndExcessiveRefreshDeltas) {
+  for (unsigned repeats : {1u, 2u, 3u, 4u}) {
+    for (const auto delta : {0u, repeats - 1u, 4u * repeats + 1u, UINT32_MAX}) {
+      SCOPED_TRACE(repeats);
+      SCOPED_TRACE(delta);
+      tracker_t tracker(repeats, 120000, tracker_frequency, 2000, 100, 2);
+      acquire_tracker(tracker, repeats);
+      const auto elapsed = delta == UINT32_MAX ? repeats : delta;
+      const auto boundary = tracker_origin + (repeats + elapsed) * tracker_refresh_ticks;
+      EXPECT_EQ(tracker.observe(12, tracker_feedback(12, 1000u + repeats + delta, boundary), boundary + 1200), tracker_status::rejected);
+      EXPECT_TRUE(tracker.failed());
+      EXPECT_FALSE(tracker.fresh_for_emit(boundary + 1200));
+    }
+  }
+}
+
+TEST(ShutterFeedbackTracker, HeldRefreshesCannotHideSkippedIdsClockDomainChangesOrExpiredFrames) {
+  enum class fault { skipped_id, old_id, wrong_qpc, counter_domain, stale, future };
+  for (auto error : {fault::skipped_id, fault::old_id, fault::wrong_qpc, fault::counter_domain, fault::stale, fault::future}) {
+    SCOPED_TRACE(static_cast<int>(error));
+    tracker_t tracker(1, 120000, tracker_frequency, 2000, 100, 2);
+    acquire_tracker(tracker);
+    const auto boundary = tracker_origin + 3 * tracker_refresh_ticks;
+    std::uint32_t requested = 12;
+    auto feedback = tracker_feedback(requested, 1003, boundary);
+    auto query = boundary + 1200;
+    switch (error) {
+      case fault::skipped_id: requested = feedback.present_count = 13; break;
+      case fault::old_id: requested = feedback.present_count = 10; break;
+      case fault::wrong_qpc: feedback.sync_qpc += 1212; query += 1212; break;  // 101 us beyond measured hold.
+      case fault::counter_domain: feedback.refresh_count += 1000; feedback.sync_refresh_count += 1000; break;
+      case fault::stale: query = boundary + 24001; break;
+      case fault::future: query = boundary - 1; break;
+    }
+    EXPECT_EQ(tracker.observe(requested, feedback, query), tracker_status::rejected);
+    EXPECT_TRUE(tracker.failed());
+    EXPECT_FALSE(tracker.arm());
+    // Even a subsequent valid held boundary cannot revive a failed armed clock.
+    EXPECT_EQ(tracker.observe(12, tracker_feedback(12, 1003, boundary), boundary + 1200), tracker_status::rejected);
+  }
+}
+
 TEST(ShutterFeedbackTracker, SignedSyncOffsetsReconstructTheAcceptedPresentRatherThanTheNewerSyncSample) {
   tracker_t tracker(2, 120000, tracker_frequency, 10000, 100, 2);
   const auto first = tracker_origin;
@@ -477,8 +608,8 @@ TEST(ShutterFeedbackTracker, CallerBudgetAcceptsItsBoundaryAndRejectsDelayBefore
 }
 
 TEST(ShutterFeedbackTracker, EveryArmedFeedbackViolationLatchesInsteadOfReacquiringOrRearming) {
-  enum class fault { missing, disjoint, unsupported, wrong_id, skipped_refresh, wrong_cadence, zero_qpc, future_present, future_sync, stale, oversized_offset, offset_min };
-  for (auto error : {fault::missing, fault::disjoint, fault::unsupported, fault::wrong_id, fault::skipped_refresh, fault::wrong_cadence,
+  enum class fault { missing, disjoint, unsupported, wrong_id, unmeasured_refresh, wrong_cadence, zero_qpc, future_present, future_sync, stale, oversized_offset, offset_min };
+  for (auto error : {fault::missing, fault::disjoint, fault::unsupported, fault::wrong_id, fault::unmeasured_refresh, fault::wrong_cadence,
          fault::zero_qpc, fault::future_present, fault::future_sync, fault::stale, fault::oversized_offset, fault::offset_min}) {
     SCOPED_TRACE(static_cast<int>(error));
     tracker_t tracker(1, 120000, tracker_frequency, 2000, 100, 2);
@@ -491,7 +622,7 @@ TEST(ShutterFeedbackTracker, EveryArmedFeedbackViolationLatchesInsteadOfReacquir
       case fault::disjoint: feedback.status = shutter::shutter_feedback_status_e::disjoint; break;
       case fault::unsupported: feedback.status = shutter::shutter_feedback_status_e::unsupported; break;
       case fault::wrong_id: feedback.present_count = 13; break;
-      case fault::skipped_refresh: ++feedback.refresh_count; ++feedback.sync_refresh_count; break;
+      case fault::unmeasured_refresh: ++feedback.refresh_count; ++feedback.sync_refresh_count; break;
       case fault::wrong_cadence: feedback.sync_qpc += tracker_refresh_ticks; query += tracker_refresh_ticks; break;
       case fault::zero_qpc: feedback.sync_qpc = 0; break;
       case fault::future_present: query = next - 1; break;
