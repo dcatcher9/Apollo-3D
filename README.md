@@ -145,6 +145,8 @@ feature. See [Microphone and DualSense setup](./docs/host-client-features.md).
 The Web UI also shows QR pairing as a secondary option for compatible clients. Moonlight 3D’s
 normal setup flow uses the PIN. For the direct local path, configure
 [Local AR glasses](./docs/sbs-local-ar-glasses.md) instead; Moonlight 3D is not involved.
+For a physical monitor and active shutter glasses, configure
+[Local monitor 3D](./docs/sbs-local-monitor.md), then choose **Start 3D** when needed.
 
 While streaming, the virtual display temporarily becomes the Windows primary display, making it
 the default destination for applications that follow primary-monitor placement. Current Moonlight
@@ -310,6 +312,7 @@ streaming remains available. See [Building](./docs/building.md) for packaging an
 | Virtual display, cursor, and display recovery | [Virtual desktop interaction](./docs/virtual-desktop.md) |
 | Microphone and DualSense setup | [Optional client features](./docs/host-client-features.md) |
 | Local AR glasses | [Local AR glasses](./docs/sbs-local-ar-glasses.md) |
+| Local monitor and shutter glasses | [Local monitor 3D](./docs/sbs-local-monitor.md) |
 | ReShade game stereo | [ReShade SBS setup](./docs/reshade-sbs.md) |
 | Host AI 3D design | [Host SBS pipeline](./docs/host-sbs.md) |
 | Host AI 3D scene cuts | [Host SBS scene cuts](./docs/host-sbs-scene-cuts.md) |

@@ -307,6 +307,7 @@
       </aside>
 
       <section class="settings-panel">
+        <div v-if="configError" class="alert alert-danger" role="alert">{{ configError }}</div>
         <header v-if="currentTab !== 'essential'" class="settings-panel-header">
           <div>
             <h2>{{ currentTabName }}</h2>
@@ -343,6 +344,12 @@
           v-if="currentTab === 'ar-glasses'"
           :config="config">
         </ar-glasses>
+
+        <local-monitor
+          v-if="currentTab === 'local-monitor'"
+          :config="config"
+          :settings-changed="localMonitorSettingsChanged">
+        </local-monitor>
 
         <network
           v-if="currentTab === 'network'"
@@ -405,6 +412,8 @@
   import Advanced from './configs/tabs/Advanced.vue'
   import AudioVideo from './configs/tabs/AudioVideo.vue'
   import ArGlasses from './configs/tabs/ArGlasses.vue'
+  import LocalMonitor from './configs/tabs/LocalMonitor.vue'
+  import {localMonitorFingerprint, validateLocalMonitorConfig} from './configs/localMonitorConfig'
   import ContainerEncoders from './configs/tabs/ContainerEncoders.vue'
 
   const app = createApp({
@@ -419,6 +428,7 @@
       // They will be accessible via audio-video, container-encoders only.
       AudioVideo,
       ArGlasses,
+      LocalMonitor,
       ContainerEncoders,
     },
     data() {
@@ -429,6 +439,8 @@
         dirty: false,
         advancedOpen: false,
         config: null,
+        configError: '',
+        loadedLocalMonitorFingerprint: '',
         currentTab: "essential",
         platform: "",
         vdisplayStatus: "1",
@@ -502,6 +514,22 @@
             },
           },
           {
+            id: "local-monitor",
+            name: "Local monitor",
+            options: {
+              "local_monitor_enabled": "disabled",
+              "local_monitor_display_id": "",
+              "local_monitor_mode": "host",
+              "local_monitor_emitter_port": "",
+              "local_monitor_ir_protocol": 6,
+              "local_monitor_frame_delay_us": 500,
+              "local_monitor_frame_duration_us": 2000,
+              "local_monitor_signal_spacing_us": 30,
+              "local_monitor_flip_eyes": "disabled",
+              "local_monitor_eye_repeats": 1,
+            },
+          },
+          {
             id: "network",
             name: "Network",
             options: {
@@ -553,6 +581,9 @@
       };
     },
     computed: {
+      localMonitorSettingsChanged() {
+        return localMonitorFingerprint(this.config) !== this.loadedLocalMonitorFingerprint
+      },
       advancedTabs() {
         return this.tabs.filter((tab) => tab.id !== 'essential')
       },
@@ -602,6 +633,8 @@
             });
           });
 
+          this.loadedLocalMonitorFingerprint = localMonitorFingerprint(this.config);
+
           this.global_prep_cmd = this.config.global_prep_cmd.map((i) => {
             i.elevated = !!i.elevated
             return i
@@ -611,6 +644,7 @@
     },
     methods: {
       markDirty() {
+        this.configError = ''
         this.dirty = true
         this.saved = false
         this.restarted = false
@@ -630,6 +664,7 @@
           input: 'fas fa-gamepad',
           av: 'fas fa-photo-video',
           'ar-glasses': 'fas fa-glasses',
+          'local-monitor': 'fas fa-display',
           network: 'fas fa-network-wired',
           files: 'fas fa-folder-open',
           advanced: 'fas fa-code',
@@ -657,6 +692,13 @@
         return config;
       },
       save() {
+        const monitorErrors = validateLocalMonitorConfig(this.config);
+        if (monitorErrors.length) {
+          this.configError = monitorErrors.join(' ');
+          this.selectTab('local-monitor');
+          return Promise.resolve(false);
+        }
+        this.configError = '';
         this.saved = false;
         this.restarted = false;
         this.saving = true;

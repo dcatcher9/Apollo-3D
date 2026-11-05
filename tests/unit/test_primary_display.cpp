@@ -3,8 +3,8 @@
  * @brief Primary-display transactions against an in-memory CCD and journal adapter.
  */
 #include "../tests_common.h"
-#include "src/platform/windows/primary_display.h"
 #include "src/platform/windows/exclusive_display_reconcile_retry.h"
+#include "src/platform/windows/primary_display.h"
 
 #include <algorithm>
 #include <array>
@@ -1752,14 +1752,14 @@ TEST(PrimaryDisplayExclusive, KeepsApprovedArOutputActiveAndDisablesOrdinaryMoni
   ASSERT_TRUE(manager.promote(L"virtual", true));
   ASSERT_EQ(fake.current.paths.size(), 2u);
   expect_positions(fake.current, {
-    {L"virtual", 0, 0},
-    {L"physical-left", -1920, 0},
-  });
+                                   {L"virtual", 0, 0},
+                                   {L"physical-left", -1920, 0},
+                                 });
   ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
   expect_positions(*fake.journal->exclusive_topology, {
-    {L"virtual", 0, 0},
-    {L"physical-left", -1920, 0},
-  });
+                                                        {L"virtual", 0, 0},
+                                                        {L"physical-left", -1920, 0},
+                                                      });
 
   const auto virtual_index = named_index(fake.current, L"virtual");
   fake.current.modes[fake.current.paths[virtual_index].sourceInfo.sourceModeInfoIdx].sourceMode.width = 3840;
@@ -1789,9 +1789,9 @@ TEST(PrimaryDisplayExclusive, PacksOnlyAvailablePreservedArOutputsBesideVirtualD
 
   ASSERT_TRUE(manager.promote(L"virtual", true));
   expect_positions(fake.current, {
-    {L"virtual", 0, 0},
-    {L"physical-left", -1920, 0},
-  });
+                                   {L"virtual", 0, 0},
+                                   {L"physical-left", -1920, 0},
+                                 });
 }
 
 TEST(PrimaryDisplayRetainedCursor, CapturesBeforeClipReleaseAndRestoresAfterFinalPromotion) {
@@ -1986,10 +1986,10 @@ TEST(PrimaryDisplayExclusive, RememberedVirtualOnlyTopologyReactivatesApprovedAr
   manager_t restarted(fake.io());
   ASSERT_TRUE(restarted.restore(L"virtual"));
   expect_positions(fake.current, {
-    {L"physical-left", -1920, 120},
-    {L"physical-primary", 0, 0},
-    {L"virtual", 1920, 0},
-  });
+                                   {L"physical-left", -1920, 120},
+                                   {L"physical-primary", 0, 0},
+                                   {L"virtual", 1920, 0},
+                                 });
   EXPECT_FALSE(fake.journal);
 }
 
@@ -2027,11 +2027,11 @@ TEST(PrimaryDisplayExclusive, KeepsApprovedArOutputThatConnectsDuringStreamActiv
 
   ASSERT_TRUE(manager.restore(L"virtual"));
   expect_positions(fake.current, {
-    {L"physical-left", -1920, 120},
-    {L"physical-primary", 0, 0},
-    {L"hotplugged-ar", 1920, 0},
-    {L"virtual", 3840, 0},
-  });
+                                   {L"physical-left", -1920, 120},
+                                   {L"physical-primary", 0, 0},
+                                   {L"hotplugged-ar", 1920, 0},
+                                   {L"virtual", 3840, 0},
+                                 });
   EXPECT_FALSE(fake.journal);
 }
 
@@ -2084,10 +2084,10 @@ TEST(PrimaryDisplayExclusive, KeepsApprovedHotpluggedArWhenVirtualDisappearedBef
 
   ASSERT_TRUE(manager.restore(L"virtual"));
   expect_positions(fake.current, {
-    {L"physical-left", -1920, 120},
-    {L"physical-primary", 0, 0},
-    {L"hotplugged-ar", 1920, 0},
-  });
+                                   {L"physical-left", -1920, 120},
+                                   {L"physical-primary", 0, 0},
+                                   {L"hotplugged-ar", 1920, 0},
+                                 });
   EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"virtual"), 0);
   EXPECT_FALSE(fake.journal);
 }
@@ -3045,15 +3045,25 @@ TEST(PrimaryDisplayCaptureRecovery, ReconcilesBeforeProbeAndStopsOnCancellation)
   bool running = true;
   unsigned attempts = 0, probes = 0, sleeps = 0;
   const auto result = reconcile_before_capture(
-    [&]() { return ++attempts < 3 ? result_e::retry_active : result_e::settled; },
-    [&]() { return running; }, [&]() { return now; }, [&](auto delay) {
+    [&]() {
+      return ++attempts < 3 ? result_e::retry_active : result_e::settled;
+    },
+    [&]() {
+      return running;
+    },
+    [&]() {
+      return now;
+    },
+    [&](auto delay) {
       EXPECT_EQ(probes, 0u);
       EXPECT_EQ(delay, exclusive_reconcile_retry_delay);
       ++sleeps;
       now += delay;
     }
   );
-  if (result == capture_reconcile_result_e::ready) ++probes;
+  if (result == capture_reconcile_result_e::ready) {
+    ++probes;
+  }
   EXPECT_EQ(result, capture_reconcile_result_e::ready);
   EXPECT_EQ(attempts, 3u);
   EXPECT_EQ(sleeps, 2u);
@@ -3061,15 +3071,37 @@ TEST(PrimaryDisplayCaptureRecovery, ReconcilesBeforeProbeAndStopsOnCancellation)
 
   attempts = 0;
   const auto cancelled = reconcile_before_capture(
-    [&]() { ++attempts; running = false; return result_e::retry_active; },
-    [&]() { return running; }, [&]() { return now; }, [&](auto) { ADD_FAILURE(); }
+    [&]() {
+      ++attempts;
+      running = false;
+      return result_e::retry_active;
+    },
+    [&]() {
+      return running;
+    },
+    [&]() {
+      return now;
+    },
+    [&](auto) {
+      ADD_FAILURE();
+    }
   );
   EXPECT_EQ(cancelled, capture_reconcile_result_e::cancelled);
   EXPECT_EQ(attempts, 1u);
-  EXPECT_EQ(reconcile_before_capture(
-    [&]() { ADD_FAILURE(); return result_e::settled; },
-    [&]() { return running; }, [&]() { return now; }, [&](auto) { ADD_FAILURE(); }
-  ), capture_reconcile_result_e::cancelled);
+  EXPECT_EQ(reconcile_before_capture([&]() {
+              ADD_FAILURE();
+              return result_e::settled;
+            },
+                                     [&]() {
+                                       return running;
+                                     },
+                                     [&]() {
+                                       return now;
+                                     },
+                                     [&](auto) {
+                                       ADD_FAILURE();
+                                     }),
+            capture_reconcile_result_e::cancelled);
 }
 
 TEST(PrimaryDisplayCaptureRecovery, RetryBudgetIsBoundedAndDoesNotWaitForInactiveRecovery) {
@@ -3077,10 +3109,23 @@ TEST(PrimaryDisplayCaptureRecovery, RetryBudgetIsBoundedAndDoesNotWaitForInactiv
   for (bool advance_clock : {false, true}) {
     auto now = std::chrono::steady_clock::time_point {};
     unsigned attempts = 0, sleeps = 0;
-    EXPECT_EQ(reconcile_before_capture(
-      [&]() { ++attempts; return result_e::retry_active; }, []() { return true; },
-      [&]() { return now; }, [&](auto delay) { ++sleeps; if (advance_clock) now += delay; }
-    ), capture_reconcile_result_e::exhausted);
+    EXPECT_EQ(reconcile_before_capture([&]() {
+                ++attempts;
+                return result_e::retry_active;
+              },
+                                       []() {
+                                         return true;
+                                       },
+                                       [&]() {
+                                         return now;
+                                       },
+                                       [&](auto delay) {
+                                         ++sleeps;
+                                         if (advance_clock) {
+                                           now += delay;
+                                         }
+                                       }),
+              capture_reconcile_result_e::exhausted);
     EXPECT_EQ(attempts, exclusive_reconcile_max_attempts);
     EXPECT_EQ(sleeps, exclusive_reconcile_max_attempts - 1);
     if (advance_clock) {
@@ -3088,10 +3133,19 @@ TEST(PrimaryDisplayCaptureRecovery, RetryBudgetIsBoundedAndDoesNotWaitForInactiv
     }
   }
   auto now = std::chrono::steady_clock::time_point {};
-  EXPECT_EQ(reconcile_before_capture(
-    []() { return result_e::pending_recovery; }, []() { return true; },
-    [&]() { return now; }, [&](auto) { ADD_FAILURE(); }
-  ), capture_reconcile_result_e::ready);
+  EXPECT_EQ(reconcile_before_capture([]() {
+              return result_e::pending_recovery;
+            },
+                                     []() {
+                                       return true;
+                                     },
+                                     [&]() {
+                                       return now;
+                                     },
+                                     [&](auto) {
+                                       ADD_FAILURE();
+                                     }),
+            capture_reconcile_result_e::ready);
 }
 
 TEST(PrimaryDisplayCaptureRecovery, StaleCaptureGenerationCannotAdoptSuccessor) {
@@ -3100,17 +3154,23 @@ TEST(PrimaryDisplayCaptureRecovery, StaleCaptureGenerationCannotAdoptSuccessor) 
   std::uint64_t generation = 7;
   const auto expected_generation = generation;
   unsigned attempts = 0;
-  EXPECT_EQ(reconcile_before_capture(
-    [&]() {
-      ++attempts;
-      ++generation;
-      // The serialized manager returns settled without mutation for a stale
-      // expected generation. That does not authorize the old capture to reopen.
-      return result_e::settled;
-    },
-    [&]() { return generation == expected_generation; },
-    [&]() { return now; }, [&](auto) { ADD_FAILURE(); }
-  ), capture_reconcile_result_e::cancelled);
+  EXPECT_EQ(reconcile_before_capture([&]() {
+              ++attempts;
+              ++generation;
+              // The serialized manager returns settled without mutation for a stale
+              // expected generation. That does not authorize the old capture to reopen.
+              return result_e::settled;
+            },
+                                     [&]() {
+                                       return generation == expected_generation;
+                                     },
+                                     [&]() {
+                                       return now;
+                                     },
+                                     [&](auto) {
+                                       ADD_FAILURE();
+                                     }),
+            capture_reconcile_result_e::cancelled);
   EXPECT_EQ(attempts, 1u);
 }
 
@@ -3287,11 +3347,11 @@ TEST(PrimaryDisplayExclusive, DisplayChangeDisablesAndLaterRestoresANewOrdinaryO
 
   ASSERT_TRUE(manager.restore(L"virtual"));
   expect_positions(fake.current, {
-    {L"physical-left", -1920, 120},
-    {L"physical-primary", 0, 0},
-    {L"hotplugged-monitor", 1920, 0},
-    {L"virtual", 3840, 0},
-  });
+                                   {L"physical-left", -1920, 120},
+                                   {L"physical-primary", 0, 0},
+                                   {L"hotplugged-monitor", 1920, 0},
+                                   {L"virtual", 3840, 0},
+                                 });
 }
 
 TEST(PrimaryDisplayExclusive, DisplayChangeKeepsANewApprovedArOutputAndExcludesItFromCursorBounds) {
@@ -3382,11 +3442,11 @@ TEST(PrimaryDisplayExclusive, DisplayChangeReclassifiesAFormerlyDisconnectedHotp
   ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
   ASSERT_TRUE(manager.restore(L"virtual"));
   expect_positions(fake.current, {
-    {L"physical-left", -1920, 120},
-    {L"physical-primary", 0, 0},
-    {L"hotplugged-monitor", 1920, 0},
-    {L"virtual", 3840, 0},
-  });
+                                   {L"physical-left", -1920, 120},
+                                   {L"physical-primary", 0, 0},
+                                   {L"hotplugged-monitor", 1920, 0},
+                                   {L"virtual", 3840, 0},
+                                 });
 }
 
 TEST(PrimaryDisplayExclusive, DisconnectMergesANewOutputAfterApprovedArUnplugs) {
@@ -3410,11 +3470,11 @@ TEST(PrimaryDisplayExclusive, DisconnectMergesANewOutputAfterApprovedArUnplugs) 
   fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-monitor", 1920, 0}});
   ASSERT_TRUE(manager.restore(L"virtual"));
   expect_positions(fake.current, {
-    {L"physical-left", -1920, 120},
-    {L"physical-primary", 0, 0},
-    {L"hotplugged-monitor", 1920, 0},
-    {L"virtual", 3840, 0},
-  });
+                                   {L"physical-left", -1920, 120},
+                                   {L"physical-primary", 0, 0},
+                                   {L"hotplugged-monitor", 1920, 0},
+                                   {L"virtual", 3840, 0},
+                                 });
   EXPECT_FALSE(fake.journal);
 }
 
@@ -3502,4 +3562,281 @@ TEST(PrimaryDisplayExclusiveCursor, FailedClipReleasePreventsTopologyRestoreUnti
   EXPECT_TRUE(fake.journal);
   release_ok = true;
   EXPECT_TRUE(manager.restore(L"virtual"));
+}
+
+namespace {
+  void monitor_baseline(fake_io_t &fake, bool primary) {
+    layout_t physical;
+    if (primary) {
+      physical = {{L"monitor", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}};
+    } else {
+      physical = {{L"other", 0, 0}, {L"monitor", 1920, 0}, {L"left", -1920, 0}};
+    }
+    fake.current = make_snapshot(physical);
+    set_display_mode(fake.current, L"monitor", 2560, 1440, 165);
+    auto added = physical;
+    added.push_back({L"virtual", 4480, 0});
+    fake.catalog = make_snapshot(added);
+    set_display_mode(fake.catalog, L"monitor", 2560, 1440, 165);
+    set_display_mode(fake.catalog, L"virtual", 2560, 1440, 165);
+  }
+}  // namespace
+
+TEST(PrimaryDisplayMonitorReplacement, PrimaryMonitorKeepsOtherDesktopOutputsAndNativeRaster) {
+  fake_io_t fake;
+  monitor_baseline(fake, true);
+  std::vector<std::optional<cursor_bounds_t>> clips;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, auto bounds) {
+    clips.push_back(bounds);
+    return true;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+  EXPECT_TRUE(std::ranges::all_of(clips, [](auto bounds) {
+    return !bounds;
+  }));
+  const auto &path = fake.current.paths[named_index(fake.current, L"virtual")];
+  EXPECT_EQ(fake.current.modes[path.sourceInfo.sourceModeInfoIdx].sourceMode.width, 2560u);
+  EXPECT_EQ(fake.current.modes[path.sourceInfo.sourceModeInfoIdx].sourceMode.height, 1440u);
+  EXPECT_EQ(path.targetInfo.refreshRate.Numerator, 165u);
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"monitor", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"virtual", 4480, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, SecondaryMonitorDoesNotStealThePhysicalPrimary) {
+  fake_io_t fake;
+  monitor_baseline(fake, false);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+  const auto encoded = serialize(*fake.journal);
+  ASSERT_FALSE(encoded.empty());
+  auto roundtrip = deserialize(encoded);
+  ASSERT_TRUE(roundtrip);
+  EXPECT_TRUE(roundtrip->monitor_replacement);
+  EXPECT_EQ(nlohmann::json::parse(encoded)["version"], 5);
+  fake.journal = *roundtrip;
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"other", 0, 0}, {L"monitor", 1920, 0}, {L"left", -1920, 0}, {L"virtual", 4480, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, PauseResumeReplacesTheSameSecondaryWithoutRemovingNeighbors) {
+  fake_io_t fake;
+  monitor_baseline(fake, false);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained, L"monitor"));
+  expect_positions(fake.current, {{L"other", 0, 0}, {L"monitor", 1920, 0}, {L"left", -1920, 0}});
+  ASSERT_TRUE(retained);
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(fake.journal && fake.journal->monitor_replacement);
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, ReconcileRetainsOtherMonitorModeColorAndUserPosition) {
+  fake_io_t fake;
+  monitor_baseline(fake, true);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  const auto other = named_index(fake.current, L"other");
+  fake.current.modes[fake.current.paths[other].sourceInfo.sourceModeInfoIdx].sourceMode.position.y = 300;
+  set_display_mode(fake.current, L"other", 1920, 1200, 144);
+  auto &color = *fake.current.colors[other];
+  color.bits_per_color_channel = 10;
+  const auto expected_color = color;
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"monitor", 0, 0}, {L"other", 2560, 300}, {L"left", -1920, 0}, {L"virtual", 4480, 300}});
+  const auto restored = named_index(fake.current, L"other");
+  EXPECT_EQ(fake.current.modes[fake.current.paths[restored].sourceInfo.sourceModeInfoIdx].sourceMode.height, 1200u);
+  EXPECT_EQ(fake.current.colors[restored]->bits_per_color_channel, expected_color.bits_per_color_channel);
+}
+
+TEST(PrimaryDisplayMonitorReplacement, FailedJournalWriteCannotParkAnyOutput) {
+  fake_io_t fake;
+  monitor_baseline(fake, true);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.save_ok = false;
+  fake.events.clear();
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+}
+
+TEST(PrimaryDisplayMonitorReplacement, FailedApplyRestoresOriginalSinkInsteadOfAppendedSource) {
+  fake_io_t fake;
+  monitor_baseline(fake, true);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.ignore_apply = true;
+  fake.apply_ok = false;
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+  fake.ignore_apply = false;
+  fake.apply_ok = true;
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"monitor", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"virtual", 4480, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, StartupAfterSaveBeforeApplyPreservesSecondaryMonitorBaseline) {
+  fake_io_t fake;
+  monitor_baseline(fake, false);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.ignore_apply = true;
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  const auto durable = deserialize(serialize(*fake.journal));
+  ASSERT_TRUE(durable);
+  fake.journal = *durable;
+  fake.ignore_apply = false;
+  manager_t recovered(fake.io());
+  ASSERT_TRUE(recovered.recover_inactive_exclusive());
+  expect_positions(fake.current, {{L"other", 0, 0}, {L"monitor", 1920, 0}, {L"left", -1920, 0}, {L"virtual", 4480, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, RetryAfterUnappliedPromotionDoesNotAdoptTheAddPosition) {
+  fake_io_t fake;
+  monitor_baseline(fake, true);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.ignore_apply = true;
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  fake.ignore_apply = false;
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"monitor", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"virtual", 4480, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, GrowingSinkRestoresWithoutOverlapEvenWithAnUpperBridge) {
+  fake_io_t fake;
+  const layout_t physical {{L"monitor", 0, 0}, {L"other", 2560, 0}, {L"above", 0, -1080}};
+  fake.current = make_snapshot(physical);
+  set_display_mode(fake.current, L"monitor", 2560, 1440, 165);
+  set_display_mode(fake.current, L"above", 4480, 1080, 60);
+  auto added = physical;
+  added.push_back({L"virtual", 4480, 0});
+  fake.catalog = make_snapshot(added);
+  set_display_mode(fake.catalog, L"monitor", 2560, 1440, 165);
+  set_display_mode(fake.catalog, L"above", 4480, 1080, 60);
+  set_display_mode(fake.catalog, L"virtual", 2560, 1440, 165);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  set_display_mode(fake.current, L"monitor", 3840, 1440, 165);
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  for (size_t i = 0; i < fake.current.paths.size(); ++i) {
+    const auto &a = fake.current.modes[fake.current.paths[i].sourceInfo.sourceModeInfoIdx].sourceMode;
+    for (size_t j = 0; j < i; ++j) {
+      const auto &b = fake.current.modes[fake.current.paths[j].sourceInfo.sourceModeInfoIdx].sourceMode;
+      const bool overlap = static_cast<std::int64_t>(a.position.x) < static_cast<std::int64_t>(b.position.x) + b.width &&
+                           static_cast<std::int64_t>(b.position.x) < static_cast<std::int64_t>(a.position.x) + a.width &&
+                           static_cast<std::int64_t>(a.position.y) < static_cast<std::int64_t>(b.position.y) + b.height &&
+                           static_cast<std::int64_t>(b.position.y) < static_cast<std::int64_t>(a.position.y) + a.height;
+      EXPECT_FALSE(overlap);
+    }
+  }
+  const auto index = named_index(fake.current, L"monitor");
+  EXPECT_EQ(fake.current.modes[fake.current.paths[index].sourceInfo.sourceModeInfoIdx].sourceMode.width, 3840u);
+}
+
+TEST(PrimaryDisplayMonitorReplacement, PausedSourceReactivationCanDetachAfterSelectedSinkUnplugs) {
+  fake_io_t fake;
+  monitor_baseline(fake, false);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained, L"monitor"));
+  fake.current = make_snapshot({{L"other", 0, 0}, {L"left", -1920, 0}, {L"virtual", 1920, 0}});
+  set_display_mode(fake.current, L"virtual", 2560, 1440, 165);
+  fake.available_override = fake.current;
+  ASSERT_TRUE(manager.pause(L"virtual", retained, L"monitor"));
+  expect_positions(fake.current, {{L"other", 0, 0}, {L"left", -1920, 0}});
+  EXPECT_FALSE(fake.journal);
+  EXPECT_TRUE(manager.pause(L"virtual", retained, L"monitor"));
+  // Returning the same monitor resumes replacement policy rather than becoming an exclusive
+  // two-output AR session after the unplug rollback.
+  monitor_baseline(fake, false);
+  fake.available_override.reset();
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(fake.journal && fake.journal->monitor_replacement);
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, FailedApplyThenNeighborModeHdrAndHotplugCannotAuthorizeTheAddPosition) {
+  fake_io_t fake;
+  monitor_baseline(fake, true);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.ignore_apply = true;
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  fake.ignore_apply = false;
+  fake.current = make_snapshot({{L"monitor", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"virtual", 4480, 0}, {L"hotplug", 0, -1080}});
+  set_display_mode(fake.current, L"monitor", 2560, 1440, 165);
+  set_display_mode(fake.current, L"virtual", 2560, 1440, 165);
+  set_display_mode(fake.current, L"other", 1920, 1200, 144);
+  auto &color = *fake.current.colors[named_index(fake.current, L"other")];
+  color.advanced_color_enabled = color.hdr_user_enabled = color.advanced_color_active = true;
+  color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"hotplug", 0, -1080}, {L"monitor", 4480, 0}});
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"other")]->hdr_user_enabled);
+  const auto &other = fake.current.paths[named_index(fake.current, L"other")];
+  EXPECT_EQ(other.targetInfo.refreshRate.Numerator, 144u);
+  EXPECT_EQ(fake.current.paths.size(), 5u);
+}
+
+TEST(PrimaryDisplayMonitorReplacement, FailedColorSetupKeepsRecordedHdrIntentForRecovery) {
+  fake_io_t fake;
+  monitor_baseline(fake, true);
+  for (auto *snapshot : {&fake.current, &fake.catalog}) {
+    auto &color = *snapshot->colors[named_index(*snapshot, L"other")];
+    color.advanced_color_enabled = color.hdr_user_enabled = color.advanced_color_active = true;
+    color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  }
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.reset_colors_on_apply = true;
+  fake.color_set_ok = false;
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  EXPECT_FALSE(fake.current.colors[named_index(fake.current, L"other")]->hdr_user_enabled);
+  fake.color_set_ok = true;
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"other")]->hdr_user_enabled);
+  EXPECT_FALSE(fake.journal);
 }

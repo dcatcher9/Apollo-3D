@@ -30,6 +30,7 @@ protected:
       {"Input", "input"},
       {"Audio/Video", "av"},
       {"AR Displays", "ar-glasses"},
+      {"Local monitor", "local-monitor"},
       {"Network", "network"},
       {"Config Files", "files"},
       {"Advanced", "advanced"},
@@ -50,7 +51,9 @@ protected:
       std::regex(R"DELIM((?:double_f|double_between_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM(generic_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM(list_prep_cmd_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
-      std::regex(R"DELIM(map_int_int_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM")
+      std::regex(R"DELIM(map_int_int_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
+      // The monitor surface consumes and validates its activation/timing keys together.
+      std::regex(R"DELIM((?:boolean|integer)\s*\(\s*"(local_monitor_[^"]+)")DELIM")
     };
 
     for (const auto &pattern : patterns) {

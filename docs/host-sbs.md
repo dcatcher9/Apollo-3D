@@ -17,6 +17,11 @@ owns the normal-size virtual display and final presentation or encoding. The ReS
 its own source, resource and color contract; the V2 contracts below continue to govern
 Sunshine-generated geometry.
 
+[Local shutter-monitor presentation](sbs-local-monitor.md) selects Host 3D or Game 3D explicitly.
+Host 3D always uses this AI converter, independently of the local-AR `sbs_reshade` setting; Game 3D
+uses the existing Game 3D stereo-source path. Its final adapter unpacks the resulting matched SBS
+pair into alternating physical-monitor eye images without changing the geometry contract.
+
 ## Pipeline
 
 Live streaming, offline conversion and estimator evaluation use one adaptive geometry and

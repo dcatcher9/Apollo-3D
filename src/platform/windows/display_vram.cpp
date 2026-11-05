@@ -36,6 +36,9 @@
 #include "game3d_setup.h"
 #include "host_sbs_v2_renderer.h"
 #include "misc.h"
+#include "local_monitor_pointer_geometry.h"
+#include "open3d_emitter.h"
+#include "shutter_presentation_clock.h"
 #include "packed_output_fit.h"
 #include "reshade_bridge.h"
 #include "sbs_debug_dump.h"
@@ -7228,7 +7231,13 @@ namespace platf::dxgi {
         {},
         0,
         {},
-        true
+        true,
+        {},
+        {},
+        {},
+        ::video::is_game_mode(sbs_mode_param),
+        width / 2,
+        height
       );
     }
 
@@ -7952,6 +7961,7 @@ namespace platf::dxgi {
       RECT target_fallback_rect {};
       std::shared_ptr<local_presenter_config_t::target_t> live_target;
       std::shared_ptr<local_presenter_cursor_clip_t> cursor_clip;
+      bool park_only = false;
 
       RECT current_source_rect() const {
         if (const auto rect = query_local_presenter_display_rect(source_display_name)) {
@@ -7999,7 +8009,7 @@ namespace platf::dxgi {
       }
 
       void acquire_clip() {
-        if (!cursor_clip || std::chrono::steady_clock::now() < cursor_clip->retry_after) {
+        if (park_only || !cursor_clip || std::chrono::steady_clock::now() < cursor_clip->retry_after) {
           return;
         }
         if (!deferred_cursor_restore_manager().ready_for_new_owner()) {
@@ -8094,7 +8104,7 @@ namespace platf::dxgi {
       }
 
       void refresh_clip() {
-        if (!cursor_clip) {
+        if (park_only || !cursor_clip) {
           return;
         }
         if (!cursor_clip->owns_clip) {
@@ -8167,6 +8177,38 @@ namespace platf::dxgi {
       }
 
       bool clamp_pointer_to_source_edge() const {
+        if (park_only) {
+          // Monitor presentation parks only its physical scanout sink. Every other output remains
+          // interactive; a global rectangular clip would incorrectly exclude those monitors.
+          const auto previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+          auto restore_dpi = util::fail_guard([previous_dpi]() {
+            if (previous_dpi) {
+              SetThreadDpiAwarenessContext(previous_dpi);
+            }
+          });
+          if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+            return false;
+          }
+          const auto sink = current_target_rect();
+          POINT cursor {};
+          if (!valid_local_presenter_rect(sink) || !GetCursorPos(&cursor) || !PtInRect(&sink, cursor)) {
+            return false;
+          }
+          std::vector<RECT> interactive_monitors;
+          const auto enumerated = EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM parameter) -> BOOL {
+            MONITORINFO info {sizeof(MONITORINFO)};
+            if (!GetMonitorInfoW(monitor, &info)) {
+              return FALSE;
+            }
+            reinterpret_cast<std::vector<RECT> *>(parameter)->push_back(info.rcMonitor);
+            return TRUE;
+          }, reinterpret_cast<LPARAM>(&interactive_monitors));
+          if (!enumerated) {
+            return false;
+          }
+          const auto clamped = detail::nearest_interactive_pointer_point(cursor, sink, interactive_monitors);
+          return clamped && SetCursorPos(clamped->x, clamped->y) != FALSE;
+        }
         const auto source_rect = current_source_rect();
         const auto target_rect = current_target_rect();
         if (!valid_local_presenter_rect(source_rect) || !valid_local_presenter_rect(target_rect)) {
@@ -8336,9 +8378,10 @@ namespace platf::dxgi {
   void refresh_local_presenter_pointer_isolation(
     const std::string &source_display_name,
     const std::shared_ptr<local_presenter_config_t::target_t> &live_target,
-    const std::shared_ptr<local_presenter_cursor_clip_t> &cursor_clip
+    const std::shared_ptr<local_presenter_cursor_clip_t> &cursor_clip,
+    bool frame_sequential
   ) {
-    if (source_display_name.empty() || !live_target || !cursor_clip) {
+    if (source_display_name.empty() || !live_target || (!cursor_clip && !frame_sequential)) {
       return;
     }
     RECT target_rect {};
@@ -8353,9 +8396,248 @@ namespace platf::dxgi {
       target_rect,
       live_target,
       cursor_clip,
+      frame_sequential,
     };
     pointer_isolation.refresh_clip();
+    if (frame_sequential) {
+      pointer_isolation.clamp_pointer_to_source_edge();
+    }
   }
+
+  namespace {
+    // Two GPU-owned packets bound publication: capture never overwrites the stereo pair whose
+    // left/right eyes are being scanned out. Each device has its own immediate context; keyed
+    // mutexes carry GPU completion between them without a CPU readback or context-thread race.
+    class local_shutter_frame_ring_t {
+    public:
+      struct slot_t {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> producer_texture;
+        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> producer_target;
+        Microsoft::WRL::ComPtr<IDXGIKeyedMutex> producer_mutex;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> consumer_texture;
+        Microsoft::WRL::ComPtr<IDXGIKeyedMutex> consumer_mutex;
+        enum class state_e { free, producing, pending, current } state = state_e::free;
+        std::uint64_t sequence = 0;
+      };
+
+      bool init(ID3D11Device *producer, ID3D11Device *consumer, UINT width, UINT height, DXGI_FORMAT format) {
+        Microsoft::WRL::ComPtr<ID3D11Device1> consumer1;
+        if (FAILED(consumer->QueryInterface(IID_PPV_ARGS(&consumer1)))) {
+          return false;
+        }
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+        desc.Format = format;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+        for (auto &slot : slots_) {
+          if (FAILED(producer->CreateTexture2D(&desc, nullptr, &slot.producer_texture)) ||
+              FAILED(producer->CreateRenderTargetView(slot.producer_texture.Get(), nullptr, &slot.producer_target)) ||
+              FAILED(slot.producer_texture.As(&slot.producer_mutex))) {
+            return false;
+          }
+          Microsoft::WRL::ComPtr<IDXGIResource1> resource;
+          HANDLE shared_handle = nullptr;
+          if (FAILED(slot.producer_texture.As(&resource)) ||
+              FAILED(resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &shared_handle))) {
+            return false;
+          }
+          const auto opened = consumer1->OpenSharedResource1(shared_handle, IID_PPV_ARGS(&slot.consumer_texture));
+          CloseHandle(shared_handle);
+          if (FAILED(opened) || FAILED(slot.consumer_texture.As(&slot.consumer_mutex))) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      slot_t *acquire_producer() {
+        std::lock_guard lock(mutex_);
+        for (auto &slot : slots_) {
+          if (slot.state != slot_t::state_e::free) {
+            continue;
+          }
+          const auto status = slot.producer_mutex->AcquireSync(0, 0);
+          if (status == WAIT_TIMEOUT) {
+            continue;
+          }
+          if (status != S_OK) {
+            failed_ = true;
+            return nullptr;
+          }
+          slot.state = slot_t::state_e::producing;
+          return &slot;
+        }
+        return nullptr;
+      }
+
+      bool publish(slot_t &slot, bool converted) {
+        std::lock_guard lock(mutex_);
+        if (FAILED(slot.producer_mutex->ReleaseSync(converted ? 1 : 0))) {
+          failed_ = true;
+          return false;
+        }
+        slot.sequence = ++sequence_;
+        slot.state = converted ? slot_t::state_e::pending : slot_t::state_e::free;
+        return true;
+      }
+
+      ID3D11Texture2D *acquire_pair() {
+        std::lock_guard lock(mutex_);
+        slot_t *newest = nullptr;
+        for (auto &slot : slots_) {
+          if (slot.state == slot_t::state_e::pending && (!newest || slot.sequence > newest->sequence)) {
+            newest = &slot;
+          }
+        }
+        if (!newest) {
+          return current_ ? current_->consumer_texture.Get() : nullptr;
+        }
+        const auto acquired = newest->consumer_mutex->AcquireSync(1, 0);
+        if (acquired == WAIT_TIMEOUT) {
+          return current_ ? current_->consumer_texture.Get() : nullptr;
+        }
+        if (acquired != S_OK) {
+          failed_ = true;
+          return nullptr;
+        }
+        if (current_) {
+          if (FAILED(current_->consumer_mutex->ReleaseSync(0))) {
+            failed_ = true;
+          }
+          current_->state = slot_t::state_e::free;
+        }
+        current_ = newest;
+        current_->state = slot_t::state_e::current;
+        // Only startup can have two pending packets. Retire the older one before the producer
+        // runs again; subsequent cycles always have one current and at most one pending packet.
+        for (auto &slot : slots_) {
+          if (slot.state == slot_t::state_e::pending && slot.consumer_mutex->AcquireSync(1, 0) == S_OK) {
+            if (FAILED(slot.consumer_mutex->ReleaseSync(0))) {
+              failed_ = true;
+            }
+            slot.state = slot_t::state_e::free;
+          }
+        }
+        return failed_ ? nullptr : current_->consumer_texture.Get();
+      }
+
+      [[nodiscard]] bool failed() const {
+        return failed_.load(std::memory_order_acquire);
+      }
+
+      ~local_shutter_frame_ring_t() {
+        if (current_) {
+          current_->consumer_mutex->ReleaseSync(0);
+        }
+      }
+
+    private:
+      std::array<slot_t, 2> slots_;
+      std::mutex mutex_;
+      std::uint64_t sequence_ = 0;
+      slot_t *current_ = nullptr;
+      std::atomic<bool> failed_ = false;
+    };
+  }  // namespace
+
+#ifdef SUNSHINE_TESTS
+  local_shutter_frame_probe_t probe_local_shutter_frame_ring() {
+    local_shutter_frame_probe_t result;
+    Microsoft::WRL::ComPtr<ID3D11Device> producer;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> producer_context;
+    Microsoft::WRL::ComPtr<ID3D11Device> consumer;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> consumer_context;
+    const D3D_FEATURE_LEVEL levels[] {D3D_FEATURE_LEVEL_11_0};
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+          levels, std::size(levels), D3D11_SDK_VERSION, &producer, nullptr, &producer_context))) {
+      return result;
+    }
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(producer.As(&dxgi_device)) || FAILED(dxgi_device->GetAdapter(&adapter)) ||
+        FAILED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+          levels, std::size(levels), D3D11_SDK_VERSION, &consumer, nullptr, &consumer_context))) {
+      return result;
+    }
+    local_shutter_frame_ring_t frames;
+    result.available = true;
+    if (!frames.init(producer.Get(), consumer.Get(), 4, 2, DXGI_FORMAT_R8G8B8A8_UNORM)) {
+      return result;
+    }
+    const auto publish = [&](const std::array<std::uint32_t, 8> &pixels) {
+      auto *slot = frames.acquire_producer();
+      if (!slot) {
+        return false;
+      }
+      producer_context->UpdateSubresource(slot->producer_texture.Get(), 0, nullptr, pixels.data(), 4 * sizeof(std::uint32_t), 0);
+      producer_context->Flush();
+      return frames.publish(*slot, true);
+    };
+    const auto wait_pair = [&]() {
+      ID3D11Texture2D *pair = nullptr;
+      for (int attempt = 0; attempt < 1000 && !pair; ++attempt) {
+        pair = frames.acquire_pair();
+        if (!pair) {
+          std::this_thread::sleep_for(1ms);
+        }
+      }
+      return pair;
+    };
+    constexpr std::array<std::uint32_t, 8> first {0xff0000ff, 0xff0000ff, 0xff00ff00, 0xff00ff00,
+                                               0xff0000ff, 0xff0000ff, 0xff00ff00, 0xff00ff00};
+    constexpr std::array<std::uint32_t, 8> second {0xffff0000, 0xffff0000, 0xffffffff, 0xffffffff,
+                                                0xffff0000, 0xffff0000, 0xffffffff, 0xffffffff};
+    if (!publish(first)) {
+      return result;
+    }
+    auto *pair = wait_pair();
+    if (!pair || !publish(second)) {
+      return result;
+    }
+    result.publication_bounded = frames.acquire_producer() == nullptr;
+    const auto read = [&](ID3D11Texture2D *texture, UINT left, UINT width) -> std::vector<std::uint32_t> {
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+      desc.Width = width;
+      desc.MiscFlags = desc.BindFlags = 0;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+      if (FAILED(consumer->CreateTexture2D(&desc, nullptr, &staging))) {
+        return {};
+      }
+      const D3D11_BOX box {left, 0, 0, left + width, 2, 1};
+      consumer_context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture, 0, &box);
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(consumer_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return {};
+      }
+      std::vector<std::uint32_t> pixels(width * 2);
+      for (UINT y = 0; y < 2; ++y) {
+        std::memcpy(pixels.data() + y * width, static_cast<const std::uint8_t *>(mapped.pData) + y * mapped.RowPitch, width * sizeof(std::uint32_t));
+      }
+      consumer_context->Unmap(staging.Get(), 0);
+      return pixels;
+    };
+    result.current_pair_immutable = read(pair, 0, 4) == std::vector<std::uint32_t>(first.begin(), first.end());
+    result.eye_crop_exact = read(pair, 0, 2) == std::vector<std::uint32_t>(4, 0xff0000ff) &&
+                            read(pair, 2, 2) == std::vector<std::uint32_t>(4, 0xff00ff00);
+    ID3D11Texture2D *next = nullptr;
+    for (int attempt = 0; attempt < 1000; ++attempt) {
+      next = frames.acquire_pair();
+      if (next != pair) {
+        break;
+      }
+      std::this_thread::sleep_for(1ms);
+    }
+    result.next_pair_published = next && next != pair && read(next, 0, 4) == std::vector<std::uint32_t>(second.begin(), second.end());
+    return result;
+  }
+#endif
 
   local_presenter_result_e run_local_presenter(const local_presenter_config_t &config, std::stop_token stop_token) {
     auto read_target_rect = [&]() {
@@ -8389,6 +8671,7 @@ namespace platf::dxgi {
       target_rect,
       config.live_target,
       config.cursor_clip,
+      config.frame_sequential,
     };
     // A cursor clip belongs to the complete local session, not one DXGI attempt. Reconcile it
     // before any early return so repeated pre-window reinitializations cannot leave stale bounds.
@@ -8399,13 +8682,25 @@ namespace platf::dxgi {
       BOOST_LOG(error) << "Local AR presenter received invalid source or target geometry."sv;
       return local_presenter_result_e::error;
     }
+    const int eye_repeats = config.frame_sequential ? config.monitor_config.eye_repeats : 1;
+    if (config.frame_sequential &&
+        (eye_repeats < 1 || eye_repeats > 4 || config.target_refresh_millihz <= 0 ||
+         !::video::is_packed_mode(config.sbs_mode) ||
+         output_width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION / 2)) {
+      BOOST_LOG(error) << "Local shutter monitor received an unsupported stereo raster or eye cadence."sv;
+      return local_presenter_result_e::error;
+    }
+    const int packed_width = config.frame_sequential ? output_width * 2 : output_width;
+    const int capture_refresh_millihz = config.frame_sequential ?
+                                          std::max(1, config.target_refresh_millihz / (2 * eye_repeats)) :
+                                          config.target_refresh_millihz;
 
     ::video::config_t capture_config {};
-    capture_config.width = config.sbs_mode == ::video::SBS_AI ? output_width / 2 : output_width;
+    capture_config.width = ::video::is_packed_mode(config.sbs_mode) ? packed_width / 2 : output_width;
     capture_config.height = output_height;
-    capture_config.framerate = std::max(1, (config.target_refresh_millihz + 500) / 1000);
+    capture_config.framerate = std::max(1, (capture_refresh_millihz + 500) / 1000);
     capture_config.dynamicRange = config.hdr ? 1 : 0;
-    capture_config.encodingFramerate = config.target_refresh_millihz;
+    capture_config.encodingFramerate = capture_refresh_millihz;
 
     const auto preferred_capture_backend = config.capture_failover ?
                                              config.capture_failover->preferred_backend() :
@@ -8428,7 +8723,7 @@ namespace platf::dxgi {
     }
     // Follow the sink's exact milliHz capture cadence. Remote capture's whole-rate fallback only
     // adapts downward and would turn, for example, 60.120 Hz into 60 fps.
-    dxgi_display->set_local_frame_rate_millihz(config.target_refresh_millihz);
+    dxgi_display->set_local_frame_rate_millihz(capture_refresh_millihz);
     if (dxgi_display->is_hdr() != config.hdr) {
       BOOST_LOG(info) << "Local AR virtual source has not settled to "sv
                       << (config.hdr ? "HDR"sv : "SDR"sv) << "; reinitializing."sv;
@@ -8450,7 +8745,7 @@ namespace platf::dxgi {
     }
 
     auto depth_pipeline_ready_event = std::make_shared<safe::event_t<bool>>();
-    if (converter.init_rgb_output(output_width, output_height, config.sbs_mode, config.sbs_config, depth_pipeline_ready_event)) {
+    if (converter.init_rgb_output(packed_width, output_height, config.sbs_mode, config.sbs_config, depth_pipeline_ready_event)) {
       BOOST_LOG(error) << "Local AR presenter could not initialize RGB presentation resources."sv;
       return local_presenter_result_e::error;
     }
@@ -8558,6 +8853,8 @@ namespace platf::dxgi {
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     Microsoft::WRL::ComPtr<IDXGIFactory2> factory;
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain;
+    Microsoft::WRL::ComPtr<ID3D11Device> shutter_device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> shutter_context;
     auto status = converter.device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
     if (SUCCEEDED(status)) {
       status = dxgi_device->GetAdapter(&adapter);
@@ -8583,6 +8880,18 @@ namespace platf::dxgi {
                          "requesting a complete presentation-session rebuild."sv;
       return local_presenter_result_e::error;
     }
+    if (config.frame_sequential) {
+      const D3D_FEATURE_LEVEL levels[] {D3D_FEATURE_LEVEL_11_0};
+      status = D3D11CreateDevice(
+        adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        levels, std::size(levels), D3D11_SDK_VERSION, &shutter_device, nullptr, &shutter_context
+      );
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Local shutter monitor could not create its independent presentation device: "sv << util::log_hex(status);
+        return local_presenter_result_e::error;
+      }
+    }
+    ID3D11Device *presentation_device = config.frame_sequential ? shutter_device.Get() : converter.device.get();
 
     Microsoft::WRL::ComPtr<IDXGIOutput> target_output;
     DXGI_OUTPUT_DESC target_output_desc {};
@@ -8671,7 +8980,7 @@ namespace platf::dxgi {
     swapchain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     swapchain_desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     status = factory->CreateSwapChainForHwnd(
-      converter.device.get(),
+      presentation_device,
       window,
       &swapchain_desc,
       nullptr,
@@ -8735,12 +9044,135 @@ namespace platf::dxgi {
     status = swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> backbuffer_rtv;
     if (SUCCEEDED(status)) {
-      status = converter.device->CreateRenderTargetView(backbuffer.Get(), nullptr, &backbuffer_rtv);
+      status = presentation_device->CreateRenderTargetView(backbuffer.Get(), nullptr, &backbuffer_rtv);
     }
     if (FAILED(status)) {
       BOOST_LOG(error) << "Local AR presenter could not create the swapchain render target: "sv
                        << util::log_hex(status);
       return local_presenter_result_e::error;
+    }
+
+    local_shutter_frame_ring_t shutter_frames;
+    std::atomic<bool> shutter_failed = false;
+    if (config.frame_sequential && !shutter_frames.init(
+          converter.device.get(), shutter_device.Get(), packed_width, output_height, swapchain_desc.Format
+        )) {
+      BOOST_LOG(error) << "Local shutter monitor could not create its bounded shared stereo packets."sv;
+      return local_presenter_result_e::error;
+    }
+    std::jthread shutter_thread;
+    if (config.frame_sequential) {
+      shutter_thread = std::jthread([&](std::stop_token shutter_stop) {
+        auto presentation_scheduling = platf::acquire_presentation_scheduling();
+        platf::adjust_thread_priority(platf::thread_priority_e::high);
+        const auto stopped = [&]() {
+          return shutter_stop.stop_requested() || stop_token.stop_requested() || !IsWindow(window);
+        };
+        auto fail = [&](std::string_view reason) {
+          BOOST_LOG(error) << "Local shutter monitor stopped: "sv << reason;
+          if (config.on_failure) {
+            config.on_failure(std::string(reason));
+          }
+          shutter_failed.store(true, std::memory_order_release);
+        };
+        std::stop_source emitter_setup_stop;
+        std::stop_callback cancel_session_setup(stop_token, [&]() { emitter_setup_stop.request_stop(); });
+        std::stop_callback cancel_capture_setup(shutter_stop, [&]() { emitter_setup_stop.request_stop(); });
+        platf::open3d::emitter_t emitter;
+        platf::open3d::settings_t emitter_settings {
+          .port = config.monitor_config.emitter_port,
+          .protocol = config.monitor_config.ir_protocol,
+          .frame_delay_us = config.monitor_config.frame_delay_us,
+          .frame_duration_us = config.monitor_config.frame_duration_us,
+          .signal_spacing_us = config.monitor_config.signal_spacing_us,
+          .flip_eyes = config.monitor_config.flip_eyes,
+          .target_frametime_us = static_cast<int>(std::llround(1000000000.0 * eye_repeats / config.target_refresh_millihz)),
+        };
+        if (!emitter.connect(emitter_settings, emitter_setup_stop.get_token())) {
+          if (!stopped()) {
+            fail("could not configure and verify the selected USB emitter");
+          }
+          return;
+        }
+        detail::shutter_presentation_clock_t eye_clock {static_cast<unsigned>(eye_repeats)};
+        ID3D11Texture2D *pair = nullptr;
+        bool has_displayed = false;
+        while (!stopped()) {
+          if (!emitter.healthy() || shutter_frames.failed()) {
+            fail("USB emitter or shared stereo packet became unavailable");
+            break;
+          }
+          // The current packet stays keyed-locked through both eyes, including all repeated
+          // refreshes. Publishing another capture can never change the second eye of this pair.
+          if (eye_clock.starts_pair()) {
+            pair = shutter_frames.acquire_pair();
+          }
+          if (!pair) {
+            std::this_thread::sleep_for(1ms);
+            continue;
+          }
+          const auto latency = WaitForSingleObject(frame_latency_waitable, 50);
+          if (latency != WAIT_OBJECT_0) {
+            if (!stopped()) {
+              fail("the physical output did not admit a bounded presentation slot");
+            }
+            break;
+          }
+          const bool left_eye = eye_clock.left_eye();
+          const UINT left = left_eye ? 0 : static_cast<UINT>(output_width);
+          const D3D11_BOX eye_box {left, 0, 0, left + static_cast<UINT>(output_width), static_cast<UINT>(output_height), 1};
+          shutter_context->CopySubresourceRegion(backbuffer.Get(), 0, 0, 0, 0, pair, 0, &eye_box);
+          DXGI_PRESENT_PARAMETERS parameters {};
+          const auto presented = swapchain->Present1(eye_repeats, DXGI_PRESENT_RESTRICT_TO_OUTPUT, &parameters);
+          if (presented != S_OK) {
+            // Occlusion is not a successful scanout. Never continue emitting an alternating eye
+            // sequence while Windows is showing some other image on the selected monitor.
+            fail("the restricted swapchain was occluded, stale, or could not present");
+            break;
+          }
+          UINT requested_present = 0;
+          if (FAILED(swapchain->GetLastPresentCount(&requested_present))) {
+            fail("DXGI could not identify the submitted eye frame");
+            break;
+          }
+          DXGI_FRAME_STATISTICS statistics {};
+          bool observed = false;
+          const auto deadline = std::chrono::steady_clock::now() + 250ms;
+          while (!stopped() && std::chrono::steady_clock::now() < deadline) {
+            const auto queried = swapchain->GetFrameStatistics(&statistics);
+            if (queried == S_OK && statistics.PresentCount == requested_present) {
+              observed = true;
+              break;
+            }
+            if ((FAILED(queried) && (queried != DXGI_ERROR_FRAME_STATISTICS_DISJOINT || has_displayed)) ||
+                (queried == S_OK && static_cast<std::int32_t>(statistics.PresentCount - requested_present) > 0)) {
+              break;
+            }
+            if (FAILED(target_output->WaitForVBlank())) {
+              break;
+            }
+          }
+          if (stopped()) {
+            break;
+          }
+          if (!observed || !eye_clock.observe_displayed(statistics.PresentRefreshCount)) {
+            fail("DXGI could not prove an uninterrupted eye scanout cadence; restart after checking display timing");
+            break;
+          }
+          if (!emitter.signal(left_eye)) {
+            fail("the USB emitter missed an eye boundary");
+            break;
+          }
+          has_displayed = true;
+          if (config.presented_frames) {
+            config.presented_frames->fetch_add(eye_repeats, std::memory_order_relaxed);
+          }
+        }
+        // PC serial mode uses finite pulses with averaging disabled. Closing the transport
+        // leaves no autonomous eye-toggle source running after the last pulse expires.
+        emitter.close();
+        shutter_context->Flush();
+      });
     }
 
     BOOST_LOG(info) << "Local AR presentation started: source="sv << config.source_display_name
@@ -8799,7 +9231,7 @@ namespace platf::dxgi {
     std::uint64_t present_call_retries = 0;
     std::shared_ptr<platf::img_t> retained_presenter_source;
     detail::local_presenter_retry_state_t presenter_retry;
-    detail::local_presenter_schedule_t presenter_schedule {config.target_refresh_millihz};
+    detail::local_presenter_schedule_t presenter_schedule {capture_refresh_millihz};
     auto present_stats_started = diagnostics_enabled ? std::chrono::steady_clock::now() :
                                                        std::chrono::steady_clock::time_point {};
     auto log_present_stats = [&]() {
@@ -8828,6 +9260,9 @@ namespace platf::dxgi {
     auto push_image = [&](std::shared_ptr<platf::img_t> &&image, bool frame_captured) {
       poll_presenter_state();
       if (stop_token.stop_requested() || window_closed) {
+        return false;
+      }
+      if (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_frames.failed())) {
         return false;
       }
       if (frame_captured) {
@@ -8878,6 +9313,37 @@ namespace platf::dxgi {
           return false;
         }
         target_rect = latest_target_rect;
+      }
+
+      if (config.frame_sequential) {
+        // Capture/conversion is a producer, never the physical eye clock. If both packets are
+        // owned, retain the newest source and service it later rather than queueing GPU work or
+        // blocking the independent scanout thread.
+        auto *slot = shutter_frames.acquire_producer();
+        if (!slot) {
+          return !shutter_frames.failed();
+        }
+        if (depth_pipeline_ready && depth_pipeline_ready_event) {
+          depth_pipeline_ready_event->pop(0ms);
+        }
+        const auto deadline = config.sbs_mode == ::video::SBS_AI ?
+                                std::optional {presenter_schedule.begin_frame(std::chrono::steady_clock::now())} :
+                                std::nullopt;
+        const bool converted = converter.convert_rgb(
+                                 *retained_presenter_source,
+                                 slot->producer_texture.Get(), slot->producer_target.Get(),
+                                 config.hdr, deadline
+                               ) == 0;
+        converter.device_ctx->Flush();
+        if (!shutter_frames.publish(*slot, converted) || !converted) {
+          BOOST_LOG(error) << "Local shutter monitor failed to publish a complete stereo pair."sv;
+          return false;
+        }
+        presenter_retry.record_slot_acquired();
+        presenter_retry.record_converted();
+        presenter_retry.record_presented();
+        presenter_schedule.record_presented();
+        return true;
       }
 
       // Never let a slower physical output back-pressure capture, asynchronous depth processing,
@@ -8969,7 +9435,8 @@ namespace platf::dxgi {
     const auto capture_backend = display->capture_backend();
     const auto capture_started = std::chrono::steady_clock::now();
     const auto has_pending_work = [&]() {
-      return presenter_retry.should_process(
+      return (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_frames.failed())) ||
+             presenter_retry.should_process(
                static_cast<bool>(retained_presenter_source),
                depth_pipeline_ready_event && depth_pipeline_ready_event->peek(),
                converter.needs_conversion_poll()
@@ -8982,12 +9449,19 @@ namespace platf::dxgi {
       &capture_cursor,
       has_pending_work
     );
+    shutter_thread.request_stop();
+    if (shutter_thread.joinable()) {
+      shutter_thread.join();
+    }
     // A mode-loss reinit can race an off-head request during graphics destruction. Publish the
     // same stopped proof for every completed capture attempt, before those destructors run.
     close_window();
     destroy_window.disable();
     if (config.on_quiesced) {
       config.on_quiesced();
+    }
+    if (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_frames.failed())) {
+      return local_presenter_result_e::error;
     }
     if (config.capture_failover && config.capture_failover->note_capture_result({
                                      capture_backend,

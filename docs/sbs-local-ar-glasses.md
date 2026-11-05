@@ -3,6 +3,10 @@
 Sunshine 3D can automatically own a local presentation session for an AR-glasses monitor connected as a
 Windows display. This is a local D3D11 path: it does not use RTSP, NVENC, Moonlight, or Artemis.
 
+[Local shutter monitors](sbs-local-monitor.md) reuse this display lifecycle and converter with explicit
+session activation, native per-eye source dimensions, and a frame-sequential output adapter. The
+automatic AR recognition, wear detection, and AR resolution rules below remain specific to glasses.
+
 Local RGB presentation and remote NVENC conversion both use `d3d_base_encode_device::convert`
 for depth, frame attribution, reuse, scene state, and warp. Windows scheduling belongs to
 `acquire_presentation_scheduling()`, and initial/live capture cadences use the same publication

@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -74,6 +75,7 @@ namespace config {
     {},  // adapter_name
     {},  // output_name
     default_local_ar_virtual_display_only,  // local_ar_virtual_display_only
+    {},  // local_monitor
 
     0,  // max_bitrate
     0,  // minimum_fps_target (0 = max(requested framerate / 5, 10 FPS); never above the requested framerate)
@@ -620,6 +622,64 @@ namespace config {
     return opts;
   }
 
+  video_t::local_monitor_t parse_local_monitor_config(std::unordered_map<std::string, std::string> &vars) {
+    video_t::local_monitor_t result;
+    bool valid = true;
+    const auto invalid = [&](const std::string &key) {
+      valid = false;
+      BOOST_LOG(warning) << "Local monitor presentation disabled by invalid "sv << key;
+    };
+    const auto boolean = [&](const std::string &key, bool &value) {
+      const auto entry = vars.find(key);
+      if (entry == vars.end()) {
+        return;
+      }
+      const auto &text = entry->second;
+      if (text == "enabled" || text == "on" || text == "true" || text == "1") {
+        value = true;
+      } else if (text == "disabled" || text == "off" || text == "false" || text == "0") {
+        value = false;
+      } else {
+        invalid(key);
+      }
+      vars.erase(entry);
+    };
+    const auto integer = [&](const std::string &key, int &value, int minimum, int maximum) {
+      const auto entry = vars.find(key);
+      if (entry == vars.end()) {
+        return;
+      }
+      const auto &text = entry->second;
+      int parsed = 0;
+      const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+      if (error != std::errc {} || end != text.data() + text.size() || parsed < minimum || parsed > maximum) {
+        invalid(key);
+      } else {
+        value = parsed;
+      }
+      vars.erase(entry);
+    };
+
+    boolean("local_monitor_enabled", result.enabled);
+    string_f(vars, "local_monitor_display_id", result.display_id);
+    string_f(vars, "local_monitor_mode", result.mode);
+    string_f(vars, "local_monitor_emitter_port", result.emitter_port);
+    integer("local_monitor_ir_protocol", result.ir_protocol, 0, 6);
+    integer("local_monitor_frame_delay_us", result.frame_delay_us, 0, 65000);
+    integer("local_monitor_frame_duration_us", result.frame_duration_us, 1, 65000);
+    integer("local_monitor_signal_spacing_us", result.signal_spacing_us, 0, 65000);
+    boolean("local_monitor_flip_eyes", result.flip_eyes);
+    integer("local_monitor_eye_repeats", result.eye_repeats, 1, 4);
+    if (result.mode != "host" && result.mode != "game") {
+      invalid("local_monitor_mode");
+    }
+    if (result.enabled && (result.display_id.empty() || result.emitter_port.empty())) {
+      invalid("local_monitor_display_id/local_monitor_emitter_port");
+    }
+    result.enabled = result.enabled && valid;
+    return result;
+  }
+
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
     // File parsing already removes retired options. Apply the same boundary to command-line
     // overrides so an old launch script is silent and cannot repopulate Web UI state.
@@ -649,6 +709,8 @@ namespace config {
     string_f(vars, "adapter_name", video.adapter_name);
     string_f(vars, "output_name", video.output_name);
     bool_f(vars, "local_ar_virtual_display_only", video.local_ar_virtual_display_only);
+
+    video.local_monitor = parse_local_monitor_config(vars);
 
     int_f(vars, "max_bitrate", video.max_bitrate);
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});

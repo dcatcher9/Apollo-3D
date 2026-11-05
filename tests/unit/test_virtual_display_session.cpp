@@ -137,6 +137,34 @@ namespace {
     }
   };
 
+  TEST(VirtualDisplaySession, MonitorReplacementRetainsItsOwnerPolicyAcrossPauseAndResume) {
+    owner_probe_t fake;
+    auto io = fake.io();
+    unsigned topology_owner_promotions = 0;
+    unsigned topology_owner_resumes = 0;
+    io.promote = [&](std::wstring_view, bool owner) {
+      topology_owner_promotions += owner;
+      return true;
+    };
+    io.reactivate = [&](const auto &, bool owner) {
+      topology_owner_resumes += owner;
+      return true;
+    };
+    session_t session(io);
+    auto spec = fake.spec();
+    spec.exclusive = false;
+    spec.monitor_replacement = true;
+    ASSERT_TRUE(session.acquire(spec));
+    EXPECT_TRUE(fake.prepared_spec.monitor_replacement);
+    EXPECT_FALSE(fake.prepared_spec.exclusive);
+    ASSERT_TRUE(session.promote());
+    EXPECT_EQ(topology_owner_promotions, 1u);
+    ASSERT_TRUE(session.pause());
+    ASSERT_TRUE(session.begin_resume());
+    EXPECT_EQ(topology_owner_resumes, 1u);
+    EXPECT_TRUE(session.spec().monitor_replacement);
+  }
+
   TEST(VirtualDisplaySession, AcquisitionOrdersDurablePreparationBeforeAddAndExactBinding) {
     owner_probe_t fake;
     session_t owner(fake.io());

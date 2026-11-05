@@ -17,6 +17,9 @@ namespace VDISPLAY {
     session_io_t production_io() {
       return {
         .prepare = [](const display_spec_t &spec) {
+          if (spec.monitor_replacement) {
+            return platf::primary_display::prepare_local_monitor(spec.local_sink);
+          }
           return spec.exclusive && !spec.local_sink.empty() ?
                    platf::primary_display::prepare_local_exclusive(spec.local_sink) :
                    platf::primary_display::prepare(spec.exclusive);
@@ -215,7 +218,7 @@ namespace VDISPLAY {
   }
 
   bool session_t::promote() {
-    return owns_display() && !retiring() && !binding_.device_path.empty() && io_.promote && io_.promote(binding_.device_path, spec_.exclusive);
+    return owns_display() && !retiring() && !binding_.device_path.empty() && io_.promote && io_.promote(binding_.device_path, spec_.exclusive || spec_.monitor_replacement);
   }
 
   bool session_t::restore() {
@@ -277,7 +280,7 @@ namespace VDISPLAY {
     }
     // An accepted mutation can still fail verification; the old pause proof is already invalid.
     paused_ = false;
-    return retained_ && io_.reactivate && io_.reactivate(retained_, spec_.exclusive);
+    return retained_ && io_.reactivate && io_.reactivate(retained_, spec_.exclusive || spec_.monitor_replacement);
   }
 
   void session_t::commit_resume() {

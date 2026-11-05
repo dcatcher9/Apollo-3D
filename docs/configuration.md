@@ -977,6 +977,76 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
     </tr>
 </table>
 
+## Local monitor
+
+Use a selected physical monitor with an Open3DOLED USB emitter and active shutter glasses.
+Save settings and restart before starting a session. Enabling this surface does not start it;
+choose **Start 3D** in the web UI or tray. **Return to 2D** restores the ordinary desktop.
+The private virtual source takes the selected monitor's original desktop rectangle and primary
+role, with automatic window and cursor handoff. The physical sink remains active for stereo
+scanout; other monitors stay usable. See
+[Local monitor 3D](sbs-local-monitor.md) for presentation, calibration, shortcuts, and lifecycle.
+
+### local_monitor_enabled
+
+| Default | Description |
+|---|---|
+| `disabled` | Allow explicitly requested local monitor sessions. Values: `enabled`, `disabled`. |
+
+### local_monitor_display_id
+
+| Default | Description |
+|---|---|
+| empty | Exact physical Windows monitor device path chosen in the web UI. |
+
+### local_monitor_mode
+
+| Default | Description |
+|---|---|
+| `host` | `host` selects Host AI 3D; `game` selects the existing Game 3D stereo source. |
+
+### local_monitor_emitter_port
+
+| Default | Description |
+|---|---|
+| empty | Open3DOLED emitter Windows COM port, such as `COM3`. |
+
+### local_monitor_ir_protocol
+
+| Default | Description |
+|---|---|
+| `6` | Glasses IR protocol, `0`–`6`. `6` is Panasonic custom firmware. |
+
+### local_monitor_frame_delay_us
+
+| Default | Description |
+|---|---|
+| `500` | Delay from frame sync to the shutter window, `0`–`65000` microseconds. |
+
+### local_monitor_frame_duration_us
+
+| Default | Description |
+|---|---|
+| `2000` | Shutter-open duration, `1`–`65000` microseconds. |
+
+### local_monitor_signal_spacing_us
+
+| Default | Description |
+|---|---|
+| `30` | IR signal spacing, `0`–`65000` microseconds. |
+
+### local_monitor_flip_eyes
+
+| Default | Description |
+|---|---|
+| `disabled` | Swap left/right shutter assignment. Values: `enabled`, `disabled`. |
+
+### local_monitor_eye_repeats
+
+| Default | Description |
+|---|---|
+| `1` | Consecutive physical refreshes assigned to each eye, `1`–`4`. |
+
 ## Network
 
 ### address_family

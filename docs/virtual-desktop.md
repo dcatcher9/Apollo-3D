@@ -223,13 +223,32 @@ this way. Glasses that remain worn throughout a remote session wait for its grac
 a new wear or connection event occurs. Both paths share the grace deadline rules and Windows display
 pause/reactivation implementation; their network and hardware event adapters remain separate.
 
-Local AR and remote streaming use the same `VDISPLAY::session_t` resource owner in
+Local AR, local shutter monitors, and remote streaming use the same `VDISPLAY::session_t` resource owner in
 `platform/windows/virtual_display_session.h`. It saves the baseline before creation, records the
 driver identity even if Windows delays publication, and owns binding, pause, reactivation, and
 retirement. A failed resume retains its recovery snapshot until mode, HDR, and topology checks all
 succeed. Deferred cleanup receives the same owner by move; it cannot reconstruct a second owner
 from a stale display name or reused GUID. The primary-display manager remains the sole Windows
 topology and recovery-journal owner.
+
+[Local shutter monitors](sbs-local-monitor.md) use a distinct monitor-replacement policy in that
+owner. Its version-5 recovery journal records the complete physical baseline before the virtual
+source is attached. The source takes the selected monitor's original rectangle and primary or
+secondary role; other physical outputs retain their layout, modes, and color. The physical sink
+is parked beside the interactive desktop for scanout. Cursor isolation excludes that sink without
+confining input to the source, so the other monitors remain usable. A saved desired topology is
+never proof that Windows applied it; failed applies and interrupted startup recover from the
+recorded physical baseline rather than adopting the virtual source's temporary Add position.
+
+The local-monitor adapter additionally owns explicit application-window handoff, unlike the
+remote/glasses placement behavior described above. It records the selected monitor's windows,
+including minimized placements, before changing topology, and moves them to the corresponding
+source coordinates. While active it redirects newly opened application windows that target the
+parked sink. Before pause or retirement it snapshots those source/sink-owned windows, restores the
+physical topology, and maps their latest placements back. Failed window restoration remains an
+owned cleanup obligation; source removal and successful pause cannot bypass it. Windows moved by
+the user to another interactive monitor are left there. Foreground and cursor restoration are
+best effort; games bound to an exclusive physical output require separate live verification.
 
 The event adapters keep their admission locks and hardware-specific work: remote app/Explorer
 cleanup and local glasses presentation/row cleanup. The shared owner handles removal retries,

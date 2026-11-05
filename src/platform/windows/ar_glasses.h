@@ -26,6 +26,8 @@ namespace ar_glasses {
     unsupported,
     normal,
     sbs_ai,
+    monitor_host,
+    monitor_game,
   };
 
   enum class device_decision_e {
@@ -41,6 +43,27 @@ namespace ar_glasses {
     bool connected = false;
     bool auto_detected = false;
   };
+
+  struct monitor_info_t {
+    std::string id;  // Exact Windows monitor device-instance path, never a model-wide match.
+    std::string name;
+    int width = 0;
+    int height = 0;
+    int refresh_millihz = 0;
+    bool is_primary = false;
+  };
+
+  constexpr bool is_monitor_mode(presentation_mode_e mode) {
+    return mode == presentation_mode_e::monitor_host || mode == presentation_mode_e::monitor_game;
+  }
+
+  constexpr presentation_mode_e classify_monitor_mode(int width, int height, int refresh_millihz, bool game) {
+    // A packed pair must fit one D3D11 texture. The physical output keeps its native dimensions.
+    if (width < 2 || width > 8192 || height < 2 || height > 16384 || refresh_millihz <= 0) {
+      return presentation_mode_e::unsupported;
+    }
+    return game ? presentation_mode_e::monitor_game : presentation_mode_e::monitor_host;
+  }
 
   constexpr presentation_mode_e classify_mode(int width, int height) {
     if (height != 1080) {
@@ -358,6 +381,14 @@ namespace ar_glasses {
 
   /** Snapshot the persisted monitor decisions and their current connection state. */
   std::vector<device_info_t> devices();
+
+  /** Connected physical outputs, excluding Sunshine's private virtual sources. */
+  std::vector<monitor_info_t> monitor_devices();
+  bool monitor_active();
+  bool monitor_requested();
+  std::string monitor_error();
+  /** Start/stop is separate from saved capability; startup always leaves the desktop in 2D. */
+  bool request_monitor_session(bool start);
 
   /** Approve or reject a discovered monitor model. Pending is not accepted from the UI. */
   bool set_device_decision(std::string_view id, device_decision_e decision);

@@ -46,6 +46,7 @@
 
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
+  #include "platform/windows/open3d_emitter.h"
   #include "platform/windows/game3d_setup.h"
   #include "platform/windows/utils.h"
 #endif
@@ -1292,6 +1293,43 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
+  void getLocalMonitor(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    nlohmann::json output {
+      {"status", true}, {"enabled", config::video.local_monitor.enabled},
+      {"requested", ar_glasses::monitor_requested()}, {"active", ar_glasses::monitor_active()},
+      {"error", ar_glasses::monitor_error()},
+      {"devices", nlohmann::json::array()}, {"ports", platf::open3d::serial_ports()},
+    };
+    for (const auto &device : ar_glasses::monitor_devices()) {
+      output["devices"].push_back({{"id", device.id}, {"name", device.name},
+        {"width", device.width}, {"height", device.height},
+        {"refresh_millihz", device.refresh_millihz}, {"is_primary", device.is_primary}});
+    }
+    send_response(response, output);
+  }
+
+  void setLocalMonitor(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    try {
+      std::stringstream body;
+      body << request->content.rdbuf();
+      const auto input = nlohmann::json::parse(body);
+      const auto action = input.at("action").get<std::string>();
+      if ((action != "start" && action != "stop") || !ar_glasses::request_monitor_session(action == "start")) {
+        bad_request(response, request, "Configure a connected physical monitor and emitter, save, and restart before starting 3D.");
+        return;
+      }
+      send_response(response, nlohmann::json {{"status", true}, {"requested", ar_glasses::monitor_requested()}});
+    } catch (const std::exception &error) {
+      bad_request(response, request, error.what());
+    }
+  }
+
   void setArGlassDevice(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
       return;
@@ -2226,6 +2264,8 @@ namespace confighttp {
     server.resource["^/api/game3d/setup/decision$"]["POST"] = decideGame3dSetup;
     server.resource["^/api/ar-glasses$"]["GET"] = getArGlassDevices;
     server.resource["^/api/ar-glasses$"]["POST"] = setArGlassDevice;
+    server.resource["^/api/local-monitor$"]["GET"] = getLocalMonitor;
+    server.resource["^/api/local-monitor$"]["POST"] = setLocalMonitor;
 #endif
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = restart;

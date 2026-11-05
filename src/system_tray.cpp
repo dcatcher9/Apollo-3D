@@ -46,6 +46,9 @@
   #include "nvhttp.h"
   #include "platform/common.h"
   #include "src/entry_handler.h"
+  #ifdef _WIN32
+    #include "platform/windows/ar_glasses.h"
+  #endif
 
 using namespace std::literals;
 
@@ -92,6 +95,18 @@ namespace system_tray {
     lifetime::exit_sunshine(0, true);
   }
 
+  #ifdef _WIN32
+  void tray_monitor_toggle_cb([[maybe_unused]] struct tray_menu *item) {
+    if (!ar_glasses::request_monitor_session(!ar_glasses::monitor_requested())) {
+      launch_ui("/config#local-monitor");
+    }
+  }
+
+  void tray_monitor_stop_cb([[maybe_unused]] struct tray_menu *item) {
+    ar_glasses::request_monitor_session(false);
+  }
+  #endif
+
   // Tray menu
   static struct tray tray = {
     .icon = TRAY_ICON,
@@ -112,6 +127,10 @@ namespace system_tray {
         //   { .text = nullptr } } },
         // { .text = "-" },
         {.text = TRAY_MSG_NO_APP_RUNNING, .cb = tray_force_stop_cb},
+        #ifdef _WIN32
+        {.text = "Toggle monitor 3D", .cb = tray_monitor_toggle_cb},
+        {.text = "Return monitor to 2D", .cb = tray_monitor_stop_cb},
+        #endif
         {.text = "Restart", .cb = tray_restart_cb},
         {.text = "Quit", .cb = tray_quit_cb},
         {.text = nullptr}

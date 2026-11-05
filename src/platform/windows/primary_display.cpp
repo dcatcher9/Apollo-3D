@@ -109,6 +109,9 @@ namespace platf::primary_display {
     }
 
     bool valid_journal(const detail::journal_t &journal) {
+      if (journal.monitor_replacement && (!journal.exclusive || journal.local_sink.empty())) {
+        return false;
+      }
       if (!valid_layout(journal.original)) {
         return false;
       }
@@ -140,9 +143,9 @@ namespace platf::primary_display {
             duplicate = duplicate || same_device(identity, journal.exclusive_preserved[j]);
           }
           const bool recorded_hotplug = journal.pending_restore &&
-                                         std::ranges::any_of(journal.pending_restore->device_paths, [&](const auto &pending) {
-                                           return same_device(identity, pending);
-                                         });
+                                        std::ranges::any_of(journal.pending_restore->device_paths, [&](const auto &pending) {
+                                          return same_device(identity, pending);
+                                        });
           if (identity.empty() || (!find_position(*saved, identity) && !recorded_hotplug) || duplicate) {
             return false;
           }
@@ -156,18 +159,14 @@ namespace platf::primary_display {
         if (journal.exclusive_started && (!journal.before_exclusive || (!empty_before && !detail::inspect(*journal.before_exclusive)) || journal.prepared)) {
           return false;
         }
-        if ((!journal.exclusive_started && journal.exclusive_topology) ||
-            (journal.exclusive_topology && (!detail::inspect(*journal.exclusive_topology) ||
-                                            journal.exclusive_topology->colors.size() != journal.exclusive_topology->paths.size()))) {
+        if ((!journal.exclusive_started && journal.exclusive_topology) || (journal.exclusive_topology && (!detail::inspect(*journal.exclusive_topology) || journal.exclusive_topology->colors.size() != journal.exclusive_topology->paths.size()))) {
           return false;
         }
         if (journal.exclusive_topology) {
           const auto exclusive_layout = detail::inspect(*journal.exclusive_topology);
           const auto *exclusive_primary = find_position(*exclusive_layout, journal.promoted_primary);
-          if (!exclusive_primary || exclusive_primary->x != 0 || exclusive_primary->y != 0 ||
-              std::ranges::any_of(*exclusive_layout, [&](const auto &entry) {
-                if (same_device(entry.device_path, journal.promoted_primary) ||
-                    std::ranges::any_of(journal.exclusive_preserved, [&](const auto &preserved) {
+          if (!exclusive_primary || (!journal.monitor_replacement && (exclusive_primary->x != 0 || exclusive_primary->y != 0)) || std::ranges::any_of(*exclusive_layout, [&](const auto &entry) {
+                if (same_device(entry.device_path, journal.promoted_primary) || (journal.monitor_replacement && find_position(*saved, entry.device_path)) || std::ranges::any_of(journal.exclusive_preserved, [&](const auto &preserved) {
                       return same_device(entry.device_path, preserved);
                     })) {
                   return false;
@@ -313,6 +312,9 @@ namespace platf::primary_display {
       if (displays.empty()) {
         return false;
       }
+      // Callers may pass the identity of an element in this same vector. Sorting moves its
+      // short-string storage, so retain the value before reordering the display owners.
+      const std::wstring anchor_device(anchor_identity);
       std::ranges::sort(displays, [](const auto &left, const auto &right) {
         if (left.source.position.x != right.source.position.x) {
           return left.source.position.x < right.source.position.x;
@@ -323,7 +325,7 @@ namespace platf::primary_display {
         return CompareStringOrdinal(left.identity.c_str(), -1, right.identity.c_str(), -1, TRUE) == CSTR_LESS_THAN;
       });
       const auto anchor = std::ranges::find_if(displays, [&](const auto &spec) {
-        return same_device(spec.identity, anchor_identity);
+        return same_device(spec.identity, anchor_device);
       });
       if (anchor == displays.end()) {
         return false;
@@ -511,6 +513,106 @@ namespace platf::primary_display {
       return detail::inspect(result) ? std::make_optional(std::move(result)) : reject("reconstructed display modes or layout are invalid");
     }
 
+    bool park_beside_desktop(display_spec_t &parked, const std::vector<display_spec_t> &desktop) {
+      if (desktop.empty()) {
+        return false;
+      }
+      const auto anchor = std::ranges::max_element(desktop, {}, [](const auto &spec) {
+        return static_cast<std::int64_t>(spec.source.position.x) + spec.source.width;
+      });
+      const auto right = static_cast<std::int64_t>(anchor->source.position.x) + anchor->source.width;
+      if (right > std::numeric_limits<LONG>::max() || right + parked.source.width > std::numeric_limits<LONG>::max()) {
+        return false;
+      }
+      parked.source.position = {static_cast<LONG>(right), anchor->source.position.y};
+      return true;
+    }
+
+    bool monitor_pair_placement_matches(const detail::snapshot_t &current, const detail::snapshot_t &reference,
+      std::wstring_view source, std::wstring_view sink) {
+      const auto current_source = find_path(current, source);
+      const auto current_sink = find_path(current, sink);
+      const auto saved_source = find_path(reference, source);
+      const auto saved_sink = find_path(reference, sink);
+      if (!current_source || !current_sink || !saved_source || !saved_sink) return false;
+      const auto a = display_spec(current, *current_source).source.position;
+      const auto b = display_spec(current, *current_sink).source.position;
+      const auto x = display_spec(reference, *saved_source).source.position;
+      const auto y = display_spec(reference, *saved_sink).source.position;
+      return static_cast<std::int64_t>(a.x) - b.x == static_cast<std::int64_t>(x.x) - y.x &&
+             static_cast<std::int64_t>(a.y) - b.y == static_cast<std::int64_t>(x.y) - y.y;
+    }
+
+    bool normalize_monitor_desktop(std::vector<display_spec_t> &wanted, std::wstring_view preferred) {
+      auto primary = std::ranges::find_if(wanted, [](const auto &spec) {
+        return spec.source.position.x == 0 && spec.source.position.y == 0;
+      });
+      if (primary == wanted.end()) {
+        primary = std::ranges::find_if(wanted, [&](const auto &spec) {
+          return same_device(spec.identity, preferred);
+        });
+      }
+      if (primary == wanted.end()) {
+        primary = wanted.begin();
+      }
+      if (primary == wanted.end()) {
+        return false;
+      }
+      const auto origin = primary->source.position;
+      for (auto &spec : wanted) {
+        const auto x = subtract(spec.source.position.x, origin.x);
+        const auto y = subtract(spec.source.position.y, origin.y);
+        if (!x || !y) {
+          return false;
+        }
+        spec.source.position = {*x, *y};
+      }
+      return true;
+    }
+
+    bool monitor_desktop_connected(const std::vector<display_spec_t> &wanted) {
+      if (wanted.empty()) {
+        return false;
+      }
+      for (size_t i = 0; i < wanted.size(); ++i) {
+        const auto &a = wanted[i].source;
+        for (size_t j = 0; j < i; ++j) {
+          const auto &b = wanted[j].source;
+          if (static_cast<std::int64_t>(a.position.x) < static_cast<std::int64_t>(b.position.x) + b.width && static_cast<std::int64_t>(b.position.x) < static_cast<std::int64_t>(a.position.x) + a.width && static_cast<std::int64_t>(a.position.y) < static_cast<std::int64_t>(b.position.y) + b.height && static_cast<std::int64_t>(b.position.y) < static_cast<std::int64_t>(a.position.y) + a.height) {
+            return false;
+          }
+        }
+      }
+      std::vector<bool> reached(wanted.size());
+      reached.front() = true;
+      for (size_t pass = 0; pass < wanted.size(); ++pass) {
+        for (size_t i = 0; i < wanted.size(); ++i) {
+          if (reached[i]) {
+            continue;
+          }
+          const auto &a = wanted[i].source;
+          const auto right_a = static_cast<std::int64_t>(a.position.x) + a.width;
+          const auto bottom_a = static_cast<std::int64_t>(a.position.y) + a.height;
+          for (size_t j = 0; j < wanted.size(); ++j) {
+            if (!reached[j]) {
+              continue;
+            }
+            const auto &b = wanted[j].source;
+            const auto right_b = static_cast<std::int64_t>(b.position.x) + b.width;
+            const auto bottom_b = static_cast<std::int64_t>(b.position.y) + b.height;
+            reached[i] = ((right_a == b.position.x || right_b == a.position.x) && std::max(a.position.y, b.position.y) < std::min(bottom_a, bottom_b)) ||
+                         ((bottom_a == b.position.y || bottom_b == a.position.y) && std::max(a.position.x, b.position.x) < std::min(right_a, right_b));
+            if (reached[i]) {
+              break;
+            }
+          }
+        }
+      }
+      return std::ranges::all_of(reached, [](bool value) {
+        return value;
+      });
+    }
+
     // A verified user arrangement becomes the existing recovery baseline, not another journal
     // mode. Keep the exact pending apply separately so color failures and new hotplugs can retry
     // without rediscovering the superseded launch positions. Missing outputs start fresh later.
@@ -666,8 +768,7 @@ namespace platf::primary_display {
       std::wstring_view virtual_identity,
       bool reconcile_active_source
     ) {
-      if (!journal.exclusive_topology || !journal.original_topology ||
-          !find_path(current, virtual_identity)) {
+      if (!journal.exclusive_topology || !journal.original_topology || !find_path(current, virtual_identity)) {
         return false;
       }
       auto owned = current;
@@ -731,8 +832,7 @@ namespace platf::primary_display {
     }
 
     bool same_colors(const detail::snapshot_t &left, const detail::snapshot_t &right) {
-      if (left.paths.size() != right.paths.size() || left.colors.size() != left.paths.size() ||
-          right.colors.size() != right.paths.size()) {
+      if (left.paths.size() != right.paths.size() || left.colors.size() != left.paths.size() || right.colors.size() != right.paths.size()) {
         return false;
       }
       for (size_t i = 0; i < left.paths.size(); ++i) {
@@ -1108,7 +1208,11 @@ namespace platf::primary_display {
     detail::manager_t manager() {
       return detail::manager_t({query_snapshot, [](detail::snapshot_t snapshot) {
                                   return apply_snapshot(std::move(snapshot), false);
-                                }, load_journal, save_journal, clear_journal, [] {
+                                },
+                                load_journal,
+                                save_journal,
+                                clear_journal,
+                                [] {
                                   return query_snapshot_flags(QDC_ALL_PATHS);
                                 },
                                 apply_color,
@@ -1123,7 +1227,8 @@ namespace platf::primary_display {
                                   POINT cursor {};
                                   // CCD rectangles use physical pixels regardless of thread DPI.
                                   return syncThreadDesktop() && GetPhysicalCursorPos(&cursor) ?
-                                           std::optional {cursor} : std::nullopt;
+                                           std::optional {cursor} :
+                                           std::nullopt;
                                 },
                                 [](POINT cursor) {
                                   return syncThreadDesktop() && SetPhysicalCursorPos(cursor.x, cursor.y);
@@ -1137,6 +1242,7 @@ namespace platf::primary_display {
   struct retained_display_t {
     display_spec_t display;
     std::wstring local_sink;
+    bool monitor_replacement = false;
     std::optional<POINT> cursor_offset;
     std::string_view last_resume_failure {};
     // Keep the last verified remote physical desktop after the durable transaction completes.
@@ -1338,14 +1444,18 @@ namespace platf::primary_display {
         }
         return result;
       };
-      nlohmann::json result {{"version", !journal.local_sink.empty() ? 4 : journal.exclusive ? 3 :
-                                                                                               1},
+      nlohmann::json result {{"version", journal.monitor_replacement ? 5 : !journal.local_sink.empty() ? 4 :
+                                                                         journal.exclusive             ? 3 :
+                                                                                                         1},
                              {"prepared", journal.prepared},
                              {"original_primary", platf::to_utf8(journal.original_primary)},
                              {"promoted_primary", platf::to_utf8(journal.promoted_primary)},
                              {"original", encode(journal.original)},
                              {"promoted", encode(journal.promoted)}};
       if (journal.exclusive) {
+        if (journal.monitor_replacement) {
+          result["monitor_replacement"] = true;
+        }
         result["exclusive"] = true;
         result["exclusive_started"] = journal.exclusive_started;
         result["original_topology"] = encode_snapshot(*journal.original_topology);
@@ -1370,7 +1480,7 @@ namespace platf::primary_display {
       try {
         const auto value = nlohmann::json::parse(contents);
         const int version = value.at("version").get<int>();
-        if (version != 1 && version != 2 && version != 3 && version != 4) {
+        if (version != 1 && version != 2 && version != 3 && version != 4 && version != 5) {
           return std::nullopt;
         }
         auto decode = [](const nlohmann::json &entries) {
@@ -1399,6 +1509,12 @@ namespace platf::primary_display {
         };
         journal_t result {platf::from_utf8(value.at("original_primary").get<std::string>()), platf::from_utf8(value.at("promoted_primary").get<std::string>()), decode(value.at("original")), decode(value.at("promoted")), value.at("prepared").get<bool>()};
         if (version >= 2) {
+          if (version >= 5) {
+            result.monitor_replacement = value.at("monitor_replacement").get<bool>();
+            if (!result.monitor_replacement) {
+              return std::nullopt;
+            }
+          }
           result.exclusive = value.at("exclusive").get<bool>();
           result.exclusive_started = value.at("exclusive_started").get<bool>();
           result.original_topology = decode_snapshot(value.at("original_topology"));
@@ -1436,8 +1552,8 @@ namespace platf::primary_display {
     manager_t::manager_t(io_t io):
         io_(std::move(io)) {}
 
-    bool manager_t::prepare(bool exclusive, std::wstring_view local_sink) {
-      if (!local_sink.empty() && !exclusive) {
+    bool manager_t::prepare(bool exclusive, std::wstring_view local_sink, bool monitor_replacement) {
+      if ((!local_sink.empty() && !exclusive) || (monitor_replacement && (!exclusive || local_sink.empty()))) {
         return false;
       }
       const auto loaded = io_.load();
@@ -1460,6 +1576,7 @@ namespace platf::primary_display {
         return entry.x == 0 && entry.y == 0;
       });
       journal_t journal {primary->device_path, {}, *layout, {}, true};
+      journal.monitor_replacement = monitor_replacement;
       if (exclusive) {
         journal.exclusive = true;
         journal.original_topology = *snapshot;
@@ -1474,6 +1591,9 @@ namespace platf::primary_display {
           });
         }
         journal.local_sink = local_sink;
+        if (monitor_replacement) {
+          journal.exclusive_preserved = {std::wstring(local_sink)};
+        }
       }
       return valid_journal(journal) && io_.save(journal);
     }
@@ -1627,10 +1747,152 @@ namespace platf::primary_display {
       return true;
     }
 
+    bool manager_t::apply_snapshot_verified(const snapshot_t &before, const snapshot_t &desired) {
+      const auto latest = io_.query();
+      if (!latest || !same_topology(*latest, before) || !same_colors(*latest, before)) {
+        return false;
+      }
+      if (!same_topology(before, desired) && !io_.apply(desired)) {
+        return false;
+      }
+      auto observed = io_.query();
+      if (!observed || !same_topology(*observed, desired)) {
+        return false;
+      }
+      for (size_t i = 0; i < desired.paths.size(); ++i) {
+        const auto index = find_path(*observed, desired.device_paths[i]);
+        if (!index || i >= desired.colors.size() || !desired.colors[i] || *index >= observed->colors.size() || !observed->colors[*index]) {
+          return false;
+        }
+        if (!color_matches(*observed->colors[*index], *desired.colors[i]) && (!io_.set_color || !io_.set_color(observed->paths[*index], *desired.colors[i]))) {
+          return false;
+        }
+      }
+      observed = io_.query();
+      return observed && same_topology(*observed, desired) && same_colors(*observed, desired);
+    }
+
+    bool manager_t::promote_monitor(std::wstring_view device_path) {
+      auto loaded = io_.load();
+      if (!loaded.success || !loaded.journal || !valid_journal(*loaded.journal) || !loaded.journal->monitor_replacement) {
+        return false;
+      }
+      if (loaded.journal->prepared) {
+        if (!bind_pending(device_path)) {
+          return false;
+        }
+        loaded = io_.load();
+      }
+      if (!loaded.success || !loaded.journal || !same_device(loaded.journal->promoted_primary, device_path)) {
+        return false;
+      }
+      auto journal = *loaded.journal;
+      const auto current = io_.query();
+      const auto available = io_.query_all ? io_.query_all() : std::nullopt;
+      const auto source_index_now = current ? find_path(*current, device_path) : std::nullopt;
+      const auto sink_index_now = current ? find_path(*current, journal.local_sink) : std::nullopt;
+      const auto sink_saved = find_path(*journal.original_topology, journal.local_sink);
+      if (!current || !inspect(*current) || !available || available->paths.size() != available->device_paths.size() || available->paths.size() > max_available_paths || !source_index_now || !sink_index_now || !sink_saved) {
+        return false;
+      }
+      auto source = display_spec(*current, *source_index_now);
+      auto sink = display_spec(*current, *sink_index_now);
+      if (source.source.width != sink.source.width || source.source.height != sink.source.height) {
+        return false;
+      }
+      // Only the source/sink placement proves that replacement reached Windows. A changed
+      // neighbor mode, HDR toggle or hotplug cannot turn a saved-but-unapplied intent into proof.
+      const bool continuing = journal.exclusive_topology && !journal.pending_restore &&
+                              monitor_pair_placement_matches(*current, *journal.exclusive_topology, device_path, journal.local_sink);
+      if (!continuing) {
+        source.source.position = display_spec(*journal.original_topology, *sink_saved).source.position;
+      }
+
+      std::vector<display_spec_t> wanted {source};
+      if (continuing) {
+        // Unselected physical outputs remain owned by the user. Their latest layout, modes and
+        // colors also become the recovery baseline; the parked sink never supplies that layout.
+        for (size_t i = 0; i < current->paths.size(); ++i) {
+          if (!same_device(current->device_paths[i], device_path) && !same_device(current->device_paths[i], journal.local_sink)) {
+            wanted.push_back(display_spec(*current, i));
+          }
+        }
+      } else {
+        for (size_t i = 0; i < journal.original_topology->paths.size(); ++i) {
+          if (!same_device(journal.original_topology->device_paths[i], device_path) && !same_device(journal.original_topology->device_paths[i], journal.local_sink)) {
+            auto ordinary = display_spec(*journal.original_topology, i);
+            if (journal.exclusive_topology) {
+              const auto live = find_path(*current, ordinary.identity);
+              if (live) {
+                const auto position = ordinary.source.position;
+                ordinary = display_spec(*current, *live);
+                ordinary.source.position = position;
+              }
+            }
+            wanted.push_back(std::move(ordinary));
+          }
+        }
+        // Do not erase a physical hotplug that arrived while AddVirtualDisplay was publishing.
+        for (size_t i = 0; i < current->paths.size(); ++i) {
+          if (!same_device(current->device_paths[i], device_path) && !same_device(current->device_paths[i], journal.local_sink) && !find_path(*journal.original_topology, current->device_paths[i])) {
+            wanted.push_back(display_spec(*current, i));
+          }
+        }
+      }
+      if (!normalize_monitor_desktop(wanted, same_device(journal.original_primary, journal.local_sink) ? device_path : std::wstring_view(journal.original_primary))) {
+        return false;
+      }
+      source = wanted.front();
+      // This logical physical snapshot is the reverse operation, saved before parking the sink.
+      auto logical = wanted;
+      sink.source.position = source.source.position;
+      logical.front() = sink;
+      const auto physical_baseline = build_topology(*available, logical);
+      if (!physical_baseline || !park_beside_desktop(sink, wanted)) {
+        return false;
+      }
+      wanted.push_back(sink);
+      const auto desired = build_topology(*available, wanted);
+      if (!desired) {
+        return false;
+      }
+      journal.original_topology = *physical_baseline;
+      const auto baseline_layout = inspect(*physical_baseline);
+      const auto primary = std::ranges::find_if(*baseline_layout, [](const auto &entry) {
+        return entry.x == 0 && entry.y == 0;
+      });
+      if (primary == baseline_layout->end()) {
+        return false;
+      }
+      journal.original_primary = primary->device_path;
+      journal.original = *baseline_layout;
+      auto parked_source = source;
+      if (!park_beside_desktop(parked_source, logical)) {
+        return false;
+      }
+      journal.original.push_back({std::wstring(device_path), parked_source.source.position.x, parked_source.source.position.y});
+      const auto promoted = translated(journal.original, parked_source.source.position.x, parked_source.source.position.y);
+      if (!promoted) {
+        return false;
+      }
+      journal.promoted = *promoted;
+      journal.exclusive_started = true;
+      journal.before_exclusive = *current;
+      journal.exclusive_topology = *desired;
+      journal.pending_restore.reset();
+      if (!valid_journal(journal) || !io_.save(journal)) {
+        return false;
+      }
+      return apply_snapshot_verified(*current, *desired);
+    }
+
     bool manager_t::promote_exclusive(std::wstring_view device_path, bool reconcile_active_source) {
       auto loaded = io_.load();
       if (!loaded.success || (loaded.journal && (!valid_journal(*loaded.journal) || !loaded.journal->exclusive))) {
         return false;
+      }
+      if (loaded.journal && loaded.journal->monitor_replacement) {
+        return promote_monitor(device_path);
       }
       auto snapshot = io_.query();
       auto layout = snapshot ? inspect(*snapshot) : std::nullopt;
@@ -1661,8 +1923,7 @@ namespace platf::primary_display {
       }
 
       const auto available = io_.query_all ? io_.query_all() : std::nullopt;
-      if (!available || available->paths.size() > max_available_paths ||
-          available->paths.size() != available->device_paths.size()) {
+      if (!available || available->paths.size() > max_available_paths || available->paths.size() != available->device_paths.size()) {
         return false;
       }
       const auto virtual_index = find_path(*snapshot, device_path);
@@ -1735,8 +1996,7 @@ namespace platf::primary_display {
         return false;
       }
       if (journal.exclusive_started && same_topology(*snapshot, *desired) && same_colors(*snapshot, *desired)) {
-        if (!journal.exclusive_topology || !same_topology(*journal.exclusive_topology, *desired) ||
-            !same_colors(*journal.exclusive_topology, *desired)) {
+        if (!journal.exclusive_topology || !same_topology(*journal.exclusive_topology, *desired) || !same_colors(*journal.exclusive_topology, *desired)) {
           journal.exclusive_topology = *desired;
           return valid_journal(journal) && io_.save(journal);
         }
@@ -1772,9 +2032,7 @@ namespace platf::primary_display {
         if ((remembered_exclusive || continuing_exclusive || resuming_restore) && !current_index) {
           continue;
         }
-        if (!current_index || *current_index >= snapshot->colors.size() || !snapshot->colors[*current_index] ||
-            (!remembered_exclusive && !continuing_exclusive && !resuming_restore &&
-             !color_matches(*snapshot->colors[*current_index], *journal.original_topology->colors[i]))) {
+        if (!current_index || *current_index >= snapshot->colors.size() || !snapshot->colors[*current_index] || (!remembered_exclusive && !continuing_exclusive && !resuming_restore && !color_matches(*snapshot->colors[*current_index], *journal.original_topology->colors[i]))) {
           return false;
         }
         current_physical.paths.push_back(snapshot->paths[*current_index]);
@@ -1785,8 +2043,7 @@ namespace platf::primary_display {
       if (saved_physical.paths.empty() && !remembered_exclusive && !continuing_exclusive && !resuming_restore) {
         return io_.clear();
       }
-      if (!remembered_exclusive && !continuing_exclusive && !resuming_restore &&
-          !same_modes(current_physical, saved_physical)) {
+      if (!remembered_exclusive && !continuing_exclusive && !resuming_restore && !same_modes(current_physical, saved_physical)) {
         return false;
       }
       journal.exclusive_started = true;
@@ -1884,15 +2141,15 @@ namespace platf::primary_display {
           const auto &source = retained->display.source;
           const auto x = static_cast<std::int64_t>(cursor_before_pause->x) - source.position.x;
           const auto y = static_cast<std::int64_t>(cursor_before_pause->y) - source.position.y;
-          if (x >= 0 && y >= 0 && x < source.width && y < source.height &&
-              x <= std::numeric_limits<LONG>::max() && y <= std::numeric_limits<LONG>::max()) {
+          if (x >= 0 && y >= 0 && x < source.width && y < source.height && x <= std::numeric_limits<LONG>::max() && y <= std::numeric_limits<LONG>::max()) {
             retained->cursor_offset = POINT {static_cast<LONG>(x), static_cast<LONG>(y)};
           }
         }
         retained->display.source.position = {0, 0};
         retained->local_sink = loaded.journal && !loaded.journal->local_sink.empty() ?
                                  loaded.journal->local_sink :
-                                  std::wstring(local_sink);
+                                 std::wstring(local_sink);
+        retained->monitor_replacement = loaded.journal && loaded.journal->monitor_replacement;
       }
       // Persist the in-memory bookmark before a clip release can move the pointer. All work
       // above is read-only; failed topology validation leaves both topology and clip unchanged.
@@ -1901,11 +2158,22 @@ namespace platf::primary_display {
       }
       if (loaded.journal) {
         if (loaded.journal->exclusive_started) {
-          return restore_exclusive(*loaded.journal, false, retained->local_sink.empty() ? retained : retained_display_ptr {});
+          return restore_exclusive(*loaded.journal, false, (retained->local_sink.empty() || retained->monitor_replacement) ? retained : retained_display_ptr {});
         }
         // A failed reactivation may have saved its physical baseline before binding. Complete
         // that recovery first, then detach any target which Windows already made active.
         return restore(device_path) && pause(device_path, retained, retained->local_sink);
+      }
+      if (retained->monitor_replacement && retained->pause_recovery) {
+        if (!index && !current->paths.empty()) {
+          // The detached desktop is now entirely user-owned. A missing selected sink must not
+          // erase the retained monitor policy or its last owned rollback snapshot.
+          return true;
+        }
+        // Windows can reactivate a retained VD after its successful pause journal was cleared.
+        // Reuse that exact rollback proof even if the selected sink is currently unplugged;
+        // remaining ordinary monitors are still a complete physical destination for detachment.
+        return restore_monitor(*retained->pause_recovery, false, retained);
       }
       if (!index && !current->paths.empty()) {
         // A healthy disconnected desktop is user-owned. Remember its latest arrangement, modes
@@ -1930,8 +2198,7 @@ namespace platf::primary_display {
             return false;
           }
           for (size_t i = 0; i < available->paths.size(); ++i) {
-            if (available->paths[i].targetInfo.targetAvailable &&
-                find_path(*retained->pause_recovery->original_topology, available->device_paths[i])) {
+            if (available->paths[i].targetInfo.targetAvailable && find_path(*retained->pause_recovery->original_topology, available->device_paths[i])) {
               // Reconstruct current routes from the last verified physical modes. The ordinary
               // restore transaction journals and verifies every mutation before detaching the VD.
               return restore_exclusive(*retained->pause_recovery, false, retained);
@@ -1947,7 +2214,7 @@ namespace platf::primary_display {
       // Reconnect rollback can reach us after its activation journal was completed. Save the
       // current physical desktop before removing this still-active target from that desktop.
       const auto connected_sink = find_path(*current, retained->local_sink) ? std::wstring_view(retained->local_sink) : std::wstring_view {};
-      if (!prepare(true, connected_sink) || !bind_pending(device_path)) {
+      if (!prepare(true, connected_sink, retained->monitor_replacement) || !bind_pending(device_path)) {
         return false;
       }
       const auto prepared = io_.load();
@@ -1960,7 +2227,7 @@ namespace platf::primary_display {
       if (!valid_journal(journal) || !io_.save(journal)) {
         return false;
       }
-      return restore_exclusive(std::move(journal), false, retained->local_sink.empty() ? retained : retained_display_ptr {});
+      return restore_exclusive(std::move(journal), false, (retained->local_sink.empty() || retained->monitor_replacement) ? retained : retained_display_ptr {});
     }
 
     void manager_t::restore_retained_cursor(const retained_display_ptr &retained) {
@@ -1984,8 +2251,7 @@ namespace platf::primary_display {
                        std::min<std::int64_t>(retained->cursor_offset->x, static_cast<std::int64_t>(source.width) - 1);
         const auto y = static_cast<std::int64_t>(source.position.y) +
                        std::min<std::int64_t>(retained->cursor_offset->y, static_cast<std::int64_t>(source.height) - 1);
-        if (x < std::numeric_limits<LONG>::min() || x > std::numeric_limits<LONG>::max() ||
-            y < std::numeric_limits<LONG>::min() || y > std::numeric_limits<LONG>::max()) {
+        if (x < std::numeric_limits<LONG>::min() || x > std::numeric_limits<LONG>::max() || y < std::numeric_limits<LONG>::min() || y > std::numeric_limits<LONG>::max()) {
           return;
         }
         (void) io_.set_cursor(POINT {static_cast<LONG>(x), static_cast<LONG>(y)});
@@ -2078,7 +2344,7 @@ namespace platf::primary_display {
           // A local-only PC keeps its sole VD when the glasses are unplugged. Their return
           // needs a fresh local sink journal even though the source never needed activation.
           return !exclusive || retained->local_sink.empty() ||
-                 (prepare(true, retained->local_sink) && bind_pending(identity)) ||
+                 (prepare(true, retained->local_sink, retained->monitor_replacement) && bind_pending(identity)) ||
                  reject("the already-active local source could not prepare and bind its recovery journal");
         }
         const auto &journal = *loaded.journal;
@@ -2145,7 +2411,7 @@ namespace platf::primary_display {
           headless.original_topology = *current;
           loaded.journal = std::move(headless);
         } else {
-          if (!prepare(true, retained->local_sink)) {
+          if (!prepare(true, retained->local_sink, retained->monitor_replacement)) {
             return reject("the physical desktop recovery baseline could not be prepared");
           }
           loaded = io_.load();
@@ -2197,14 +2463,105 @@ namespace platf::primary_display {
       return exclusive || restore(identity) || reject("primary-only resume could not complete its recovery journal");
     }
 
+    bool manager_t::restore_monitor(journal_t journal, bool keep_virtual_active, retained_display_ptr retained) {
+      const auto current = io_.query();
+      const auto available = io_.query_all ? io_.query_all() : std::nullopt;
+      if (!current || (!current->paths.empty() && !inspect(*current)) || !available || available->paths.size() != available->device_paths.size() || available->paths.size() > max_available_paths) {
+        return false;
+      }
+      const auto source_index_now = find_path(*current, journal.promoted_primary);
+      const bool owned = journal.exclusive_topology && owned_subset(*current, *journal.exclusive_topology);
+      bool source_replaced_sink = false;
+      if (source_index_now && journal.exclusive_topology && journal.before_exclusive) {
+        const auto before_source = find_path(*journal.before_exclusive, journal.promoted_primary);
+        const auto actual_position = display_spec(*current, *source_index_now).source.position;
+        const auto before_position = before_source ? display_spec(*journal.before_exclusive, *before_source).source.position : actual_position;
+        // A saved desired topology proves intent, not that Windows applied it. In particular,
+        // an Add-appended source is never authority for the physical sink's restore position.
+        source_replaced_sink = owned || actual_position.x != before_position.x || actual_position.y != before_position.y;
+      }
+      const auto is_available = [&](std::wstring_view identity) {
+        return std::ranges::any_of(available->paths, [&](const auto &path) {
+          const auto i = static_cast<size_t>(&path - available->paths.data());
+          return path.targetInfo.targetAvailable && same_device(available->device_paths[i], identity);
+        });
+      };
+      std::vector<display_spec_t> wanted;
+      for (size_t i = 0; i < journal.original_topology->paths.size(); ++i) {
+        const auto &identity = journal.original_topology->device_paths[i];
+        if (same_device(identity, journal.promoted_primary) || !is_available(identity)) {
+          continue;
+        }
+        auto spec = display_spec(*journal.original_topology, i);
+        const auto baseline_color = spec.color;
+        const auto live = find_path(*current, identity);
+        if (live) {
+          const auto baseline_position = spec.source.position;
+          spec = display_spec(*current, *live);
+          if (owned || same_device(identity, journal.local_sink)) {
+            spec.source.position = baseline_position;
+          }
+          if (owned) spec.color = baseline_color;
+          if (same_device(identity, journal.local_sink) && source_index_now && source_replaced_sink && !journal.pending_restore) {
+            spec.source.position = display_spec(*current, *source_index_now).source.position;
+          }
+        }
+        if (journal.pending_restore) {
+          const auto pending = find_path(*journal.pending_restore, identity);
+          if (pending && *pending < journal.pending_restore->colors.size()) spec.color = journal.pending_restore->colors[*pending];
+        }
+        wanted.push_back(std::move(spec));
+      }
+      for (size_t i = 0; i < current->paths.size(); ++i) {
+        if (!same_device(current->device_paths[i], journal.promoted_primary) && !find_path(*journal.original_topology, current->device_paths[i])) {
+          wanted.push_back(display_spec(*current, i));
+        }
+      }
+      // Never remove the sole surviving interactive source from a headless machine. Keep the
+      // durable transaction until Windows can restore an actual physical desktop.
+      if (wanted.empty() || !normalize_monitor_desktop(wanted, journal.original_primary)) {
+        return false;
+      }
+      if (!monitor_desktop_connected(wanted)) {
+        const auto primary = std::ranges::find_if(wanted, [](const auto &spec) {
+          return spec.source.position.x == 0 && spec.source.position.y == 0;
+        });
+        if (primary == wanted.end() || !pack_horizontally(wanted, primary->identity, 0, 0)) {
+          return false;
+        }
+      }
+      if (keep_virtual_active && source_index_now) {
+        auto source = display_spec(*current, *source_index_now);
+        if (!park_beside_desktop(source, wanted)) {
+          return false;
+        }
+        wanted.push_back(std::move(source));
+      }
+      const auto desired = build_topology(*available, wanted);
+      if (!desired) {
+        return false;
+      }
+      journal.pending_restore = *desired;
+      if (!valid_journal(journal) || !io_.save(journal) || !apply_snapshot_verified(*current, *desired)) {
+        return false;
+      }
+      if (retained) {
+        retained->monitor_replacement = true;
+        retained->pause_recovery = journal;
+      }
+      return io_.clear();
+    }
+
     bool manager_t::restore_exclusive(journal_t journal, bool keep_virtual_active, retained_display_ptr retained) {
+      if (journal.monitor_replacement) {
+        return restore_monitor(std::move(journal), keep_virtual_active, std::move(retained));
+      }
       const auto restore_started = std::chrono::steady_clock::now();
       if (!io_.query_all || !io_.set_color) {
         return false;
       }
       const auto current = io_.query();
-      if (!current || current->colors.size() != current->paths.size() ||
-          (!current->paths.empty() && !inspect(*current))) {
+      if (!current || current->colors.size() != current->paths.size() || (!current->paths.empty() && !inspect(*current))) {
         return false;
       }
       const auto virtual_index = find_path(*current, journal.promoted_primary);
@@ -2219,8 +2576,7 @@ namespace platf::primary_display {
         }
         const auto pending_index = journal.pending_restore ? find_path(*journal.pending_restore, identity) : std::nullopt;
         newly_recorded_output = newly_recorded_output || !pending_index;
-        added_outputs.push_back(pending_index ? display_spec(*journal.pending_restore, *pending_index) :
-                                                display_spec(*current, i));
+        added_outputs.push_back(pending_index ? display_spec(*journal.pending_restore, *pending_index) : display_spec(*current, i));
         if (journal.local_sink.empty() && io_.preserve_exclusive && io_.preserve_exclusive(current->paths[i], identity) && !preserved_exclusive_identity(journal, identity)) {
           journal.exclusive_preserved.push_back(identity);
           preservation_changed = true;
@@ -2277,8 +2633,7 @@ namespace platf::primary_display {
       if (journal.pending_restore) {
         for (size_t i = 0; i < journal.pending_restore->paths.size(); ++i) {
           const auto &identity = journal.pending_restore->device_paths[i];
-          if (same_device(identity, journal.promoted_primary) || find_path(*journal.original_topology, identity) ||
-              !available_identity(identity) || std::ranges::any_of(added_outputs, [&](const auto &entry) {
+          if (same_device(identity, journal.promoted_primary) || find_path(*journal.original_topology, identity) || !available_identity(identity) || std::ranges::any_of(added_outputs, [&](const auto &entry) {
                 return same_device(entry.identity, identity);
               })) {
             continue;
@@ -2429,8 +2784,7 @@ namespace platf::primary_display {
           rightmost = std::max(rightmost, edge);
         }
         for (auto &spec : added_outputs) {
-          if (rightmost > std::numeric_limits<LONG>::max() ||
-              rightmost + spec.source.width > std::numeric_limits<LONG>::max()) {
+          if (rightmost > std::numeric_limits<LONG>::max() || rightmost + spec.source.width > std::numeric_limits<LONG>::max()) {
             return false;
           }
           spec.source.position = {static_cast<LONG>(rightmost), origin.y};
@@ -2850,23 +3204,22 @@ namespace platf::primary_display {
       if (!loaded.success || (loaded.journal && !valid_journal(*loaded.journal))) {
         return false;
       }
+      if (loaded.journal && loaded.journal->monitor_replacement) {
+        return promote_monitor(device_path) && refresh_exclusive_cursor_clip(device_path);
+      }
       if (!loaded.journal) {
         // A session that began truly headless needs no recovery journal. If a display appears
         // later, promotion captures that new baseline before disabling or preserving it.
         return promote_exclusive(device_path) && refresh_exclusive_cursor_clip(device_path);
       }
       auto journal = *loaded.journal;
-      if (!journal.exclusive || !journal.exclusive_started ||
-          !same_device(journal.promoted_primary, device_path) || !journal.exclusive_topology ||
-          !journal.original_topology || !io_.query_all) {
+      if (!journal.exclusive || !journal.exclusive_started || !same_device(journal.promoted_primary, device_path) || !journal.exclusive_topology || !journal.original_topology || !io_.query_all) {
         return false;
       }
       const auto current = io_.query();
       const auto virtual_index = current ? find_path(*current, device_path) : std::nullopt;
       const auto available = io_.query_all();
-      if (!current || !virtual_index || !inspect(*current) || !available ||
-          available->paths.size() > max_available_paths ||
-          available->paths.size() != available->device_paths.size()) {
+      if (!current || !virtual_index || !inspect(*current) || !available || available->paths.size() > max_available_paths || available->paths.size() != available->device_paths.size()) {
         return false;
       }
 
@@ -2892,8 +3245,7 @@ namespace platf::primary_display {
       if (journal.pending_restore) {
         for (size_t i = 0; i < journal.pending_restore->paths.size(); ++i) {
           const auto &identity = journal.pending_restore->device_paths[i];
-          if (!same_device(identity, device_path) && !find_path(*journal.original_topology, identity) &&
-              is_available(identity)) {
+          if (!same_device(identity, device_path) && !find_path(*journal.original_topology, identity) && is_available(identity)) {
             upsert_hotplug(display_spec(*journal.pending_restore, i));
           }
         }
@@ -2953,8 +3305,7 @@ namespace platf::primary_display {
         record.push_back(std::move(virtual_spec));
         std::int64_t x = record.front().source.width;
         for (auto &spec : recorded_hotplugs) {
-          if (x > std::numeric_limits<LONG>::max() ||
-              x + spec.source.width > std::numeric_limits<LONG>::max()) {
+          if (x > std::numeric_limits<LONG>::max() || x + spec.source.width > std::numeric_limits<LONG>::max()) {
             return false;
           }
           spec.source.position = {static_cast<LONG>(x), 0};
@@ -3004,8 +3355,10 @@ namespace platf::primary_display {
       }
       if (loaded.journal) {
         const auto &journal = *loaded.journal;
-        if (!journal.exclusive || !journal.exclusive_started || !same_device(journal.promoted_primary, device_path) ||
-            !journal.exclusive_topology || !same_topology(*snapshot, *journal.exclusive_topology)) {
+        if (journal.monitor_replacement) {
+          return same_device(journal.promoted_primary, device_path) && io_.cursor_clip(device_path, std::nullopt);
+        }
+        if (!journal.exclusive || !journal.exclusive_started || !same_device(journal.promoted_primary, device_path) || !journal.exclusive_topology || !same_topology(*snapshot, *journal.exclusive_topology)) {
           return false;
         }
       } else if (snapshot->paths.size() != 1) {
@@ -3230,6 +3583,23 @@ namespace platf::primary_display {
       return prepared;
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Could not prepare local AR display recovery: " << exception.what();
+      return false;
+    }
+  }
+
+  bool prepare_local_monitor(std::wstring_view sink_device_path) {
+    if (sink_device_path.empty()) {
+      return false;
+    }
+    std::lock_guard lock(transaction_mutex);
+    try {
+      const bool prepared = acquire_ownership() && manager().prepare(true, sink_device_path, true);
+      if (prepared) {
+        exclusive_session_state.prepared();
+      }
+      return prepared;
+    } catch (const std::exception &exception) {
+      BOOST_LOG(error) << "Could not prepare physical-monitor replacement recovery: " << exception.what();
       return false;
     }
   }

@@ -161,6 +161,7 @@
     </section>
 
     <Game3dSetup :setup="game3dSetup" @update="game3dSetup = $event"></Game3dSetup>
+    <LocalMonitorSession></LocalMonitorSession>
 
     <footer class="apollo-overview-footer">
       <span>{{ pairedClients.length }} {{ pairedClients.length === 1 ? 'device' : 'devices' }} paired</span>
@@ -179,9 +180,10 @@
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
   import Game3dSetup from './Game3dSetup.vue'
+  import LocalMonitorSession from './LocalMonitorSession.vue'
 
   const app = createApp({
-    components: { Navbar, Game3dSetup },
+    components: { Navbar, Game3dSetup, LocalMonitorSession },
     data() {
       return {
         config: null,

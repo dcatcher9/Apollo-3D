@@ -23,7 +23,7 @@ intentionally narrow:
 - native NVIDIA NVENC;
 - encrypted Artemis protocol 13;
 - one active remote session per host; and
-- host, client, authored-SBS, and local-AR presentation modes documented in [README.md](README.md).
+- host, client, authored-SBS, local AR, and local shutter-monitor presentation modes documented in [README.md](README.md).
 
 Internal names such as `Apollo`, `sunshine.exe`, `test_sunshine`, the CMake project FQDN, service
 identifiers, and configuration paths remain for upstream and protocol compatibility.

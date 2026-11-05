@@ -8,6 +8,8 @@
 #include "display.h"
 #include "display_config.h"
 #include "misc.h"
+#include "monitor_desktop_handoff.h"
+#include "open3d_emitter.h"
 #include "primary_display.h"
 #include "rayneo_wear_monitor.h"
 #include "src/config.h"
@@ -64,6 +66,11 @@ namespace ar_glasses {
     constexpr auto failed_session_retry = 2s;
     constexpr auto maximum_failed_session_retry = 30s;
     constexpr auto ownership_release_timeout = 10s;
+    std::atomic<bool> physical_monitor_active {false};
+    std::atomic<bool> physical_monitor_requested {false};
+    std::mutex physical_monitor_error_mutex;
+    std::string physical_monitor_error;
+
 
     std::mutex ownership_mutex;
     std::condition_variable ownership_changed;
@@ -345,6 +352,18 @@ namespace ar_glasses {
                hdr.limited_by_policy == other.hdr.limited_by_policy;
       }
     };
+
+    int target_source_width(const target_state_t &target) {
+      return is_monitor_mode(target.mode) ? target.rect.right - target.rect.left : source_width;
+    }
+
+    int target_source_height(const target_state_t &target) {
+      return is_monitor_mode(target.mode) ? target.rect.bottom - target.rect.top : source_height;
+    }
+
+    bool target_exclusive(const target_state_t &target) {
+      return is_monitor_mode(target.mode) || config::video.local_ar_virtual_display_only;
+    }
 
     struct stored_device_t: device_info_t {
       bool notified = false;
@@ -824,6 +843,9 @@ namespace ar_glasses {
       bool exclusive
     ) {
       return same_physical_output(left, right) &&
+             target_source_width(*left) == target_source_width(*right) &&
+             target_source_height(*left) == target_source_height(*right) &&
+             is_monitor_mode(left->mode) == is_monitor_mode(right->mode) &&
              left->mode != presentation_mode_e::unsupported &&
              right->mode != presentation_mode_e::unsupported &&
              (exclusive || !right->is_primary) && !right->is_cloned;
@@ -1238,6 +1260,11 @@ namespace ar_glasses {
         state.rect.bottom = source_mode.position.y + (LONG) source_mode.height;
         state.refresh_millihz = refresh_millihz;
         state.mode = classify_mode(source_mode.width, source_mode.height);
+        if (config::video.local_monitor.enabled && physical_monitor_requested.load() &&
+            platf::to_utf8(state.device_path) == config::video.local_monitor.display_id) {
+          state.mode = classify_monitor_mode(source_mode.width, source_mode.height, refresh_millihz,
+            config::video.local_monitor.mode == "game");
+        }
         targets.emplace_back(std::move(state));
       }
 
@@ -1328,6 +1355,18 @@ namespace ar_glasses {
         return match == targets.end() ? std::nullopt : std::optional<target_state_t>(*match);
       }
 
+      // Explicit monitor selection chooses a surface by its exact instance. An unplug must not
+      // silently transfer the emitter to another monitor or activate a nearby pair of glasses.
+      if (config::video.local_monitor.enabled && physical_monitor_requested.load()) {
+        const auto match = std::find_if(targets.begin(), targets.end(), [](const auto &target) {
+          return platf::to_utf8(target.device_path) == config::video.local_monitor.display_id;
+        });
+        if (match != targets.end() && approved_targets) {
+          approved_targets->push_back(*match);
+        }
+        return match == targets.end() ? std::nullopt : std::optional<target_state_t>(*match);
+      }
+
       std::vector<std::pair<std::string, std::string>> notify_devices;
       std::optional<target_state_t> selected;
       bool changed = false;
@@ -1337,6 +1376,12 @@ namespace ar_glasses {
           device.connected = false;
         }
         for (const auto &target : targets) {
+          // A configured shutter monitor is an explicitly activated surface, even if its model
+          // was approved as glasses in an older configuration. Stop must remain a 2D exit.
+          if (config::video.local_monitor.enabled &&
+              platf::to_utf8(target.device_path) == config::video.local_monitor.display_id) {
+            continue;
+          }
           auto known = std::find_if(known_devices.begin(), known_devices.end(), [&](const auto &device) {
             return device.id == target.device_id;
           });
@@ -1405,8 +1450,24 @@ namespace ar_glasses {
       return selected;
     }
 
+    bool restore_monitor_desktop(
+      const std::shared_ptr<platf::monitor_desktop_handoff_t> &handoff,
+      const std::wstring &device_path,
+      RECT original_rect
+    ) {
+      if (handoff) {
+        const auto target = find_target(device_path);
+        return handoff->restore(target ? target->rect : original_rect);
+      }
+      return true;
+    }
+
     const char *mode_name(presentation_mode_e mode) {
       switch (mode) {
+        case presentation_mode_e::monitor_host:
+          return "monitor Host 3D";
+        case presentation_mode_e::monitor_game:
+          return "monitor Game 3D";
         case presentation_mode_e::normal:
           return "normal";
         case presentation_mode_e::sbs_ai:
@@ -1567,6 +1628,7 @@ namespace ar_glasses {
       std::wstring gdi_name;
       std::wstring device_path;
       int refresh_millihz = 0;
+      RECT rect {};
     };
 
     enum class virtual_display_presence_e {
@@ -1583,7 +1645,9 @@ namespace ar_glasses {
     virtual_display_probe_t probe_virtual_display(
       const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
       std::wstring_view device_path,
-      std::wstring_view gdi_name
+      std::wstring_view gdi_name,
+      int expected_width = source_width,
+      int expected_height = source_height
     ) {
       const auto snapshot = query_complete_topology_snapshot();
       if (!snapshot) {
@@ -1636,8 +1700,8 @@ namespace ar_glasses {
       }
 
       const auto &source = *matches.front();
-      const bool expected_geometry = source.rect.right - source.rect.left == source_width &&
-                                     source.rect.bottom - source.rect.top == source_height;
+      const bool expected_geometry = source.rect.right - source.rect.left == expected_width &&
+                                     source.rect.bottom - source.rect.top == expected_height;
       if (!expected_geometry) {
         // ChangeDisplaySettings can publish an intermediate mode for the retained source. That is
         // present-but-not-ready, never evidence that it is safe to destroy the desktop.
@@ -1654,6 +1718,7 @@ namespace ar_glasses {
             snapshot->paths[source.path_index].targetInfo.refreshRate.Numerator,
             snapshot->paths[source.path_index].targetInfo.refreshRate.Denominator
           ),
+          .rect = source.rect,
         },
       };
     }
@@ -1662,12 +1727,14 @@ namespace ar_glasses {
       const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
       std::wstring_view device_path,
       std::wstring_view gdi_name,
-      bool *topology_query_succeeded = nullptr
+      bool *topology_query_succeeded = nullptr,
+      int expected_width = source_width,
+      int expected_height = source_height
     ) {
       if (topology_query_succeeded) {
         *topology_query_succeeded = false;
       }
-      auto probe = probe_virtual_display(identity, device_path, gdi_name);
+      auto probe = probe_virtual_display(identity, device_path, gdi_name, expected_width, expected_height);
       if (topology_query_succeeded) {
         *topology_query_succeeded = probe.presence != virtual_display_presence_e::indeterminate;
       }
@@ -1675,9 +1742,11 @@ namespace ar_glasses {
     }
 
     std::optional<std::wstring> refresh_virtual_display_name(
-      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity
+      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+      int expected_width = source_width,
+      int expected_height = source_height
     ) {
-      const auto resolved = resolve_virtual_display(identity, {}, {});
+      const auto resolved = resolve_virtual_display(identity, {}, {}, nullptr, expected_width, expected_height);
       return resolved ? std::optional<std::wstring>(resolved->gdi_name) : std::nullopt;
     }
 
@@ -2570,7 +2639,7 @@ namespace ar_glasses {
           return false;
         }
 
-        const auto refreshed = refresh_virtual_display_name(identity);
+        const auto refreshed = refresh_virtual_display_name(identity, target_source_width(*physical_target), target_source_height(*physical_target));
         if (!refreshed) {
           stable_observations = 0;
           std::this_thread::sleep_for(50ms);
@@ -2580,8 +2649,8 @@ namespace ar_glasses {
 
         DEVMODEW mode {};
         const bool geometry_ready = VDISPLAY::getDeviceSettings(display_name.c_str(), mode) &&
-                                    mode.dmPelsWidth == source_width &&
-                                    mode.dmPelsHeight == source_height;
+                                    mode.dmPelsWidth == target_source_width(*physical_target) &&
+                                    mode.dmPelsHeight == target_source_height(*physical_target);
         const auto hdr_state = VDISPLAY::queryDisplayHDRByName(display_name.c_str());
         const bool hdr_matches = hdr_state && *hdr_state == expected_hdr;
         if (geometry_ready && hdr_matches) {
@@ -2666,6 +2735,10 @@ namespace ar_glasses {
           return controller_stop_token.stop_requested() || !session_requested_();
         };
         original_target_rect_ = target.rect;
+        exclusive_ = target_exclusive(target);
+        monitor_surface_ = is_monitor_mode(target.mode);
+        source_width_ = target_source_width(target);
+        source_height_ = target_source_height(target);
         target_device_path_ = target.device_path;
         target_adapter_id_ = target.adapter_id;
         if (proc::vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
@@ -2676,6 +2749,13 @@ namespace ar_glasses {
           return;
         }
         auto active_target = target;
+        if (monitor_surface_) {
+          desktop_handoff_ = std::make_shared<platf::monitor_desktop_handoff_t>();
+          if (!desktop_handoff_->capture(target.rect)) {
+            BOOST_LOG(error) << "Could not capture the selected monitor's interactive desktop before 3D activation."sv;
+            return;
+          }
+        }
 
         if (target.hdr.known) {
           BOOST_LOG(info) << "AR display HDR: supported="sv << target.hdr.supported
@@ -2696,11 +2776,12 @@ namespace ar_glasses {
         VDISPLAY::display_spec_t display_spec {
           .client_uid = virtual_display_uuid,
           .client_name = virtual_display_name,
-          .width = source_width,
-          .height = source_height,
+          .width = static_cast<std::uint32_t>(source_width_),
+          .height = static_cast<std::uint32_t>(source_height_),
           .refresh_millihz = static_cast<std::uint32_t>(active_target.refresh_millihz),
           .render_adapter_luid = active_target.adapter_id,
-          .exclusive = exclusive_,
+          .exclusive = exclusive_ && !monitor_surface_,
+          .monitor_replacement = monitor_surface_,
           .local_sink = target_device_path_,
           .primary_binding = exclusive_,
         };
@@ -2972,8 +3053,12 @@ namespace ar_glasses {
         }
         presentation_target = *final_target;
         BOOST_LOG(info) << "Local AR desktop layout: "sv
-                        << (exclusive_ ? "virtual desktop primary, glasses active, other displays disabled; cursor confined."sv : "extended desktop; physical displays remain active."sv);
+                        << (monitor_surface_ ? "selected monitor replaced by the interactive source; other displays remain active."sv :
+                            exclusive_ ? "virtual desktop primary, glasses active, other displays disabled; cursor confined."sv : "extended desktop; physical displays remain active."sv);
         if (cancelled()) {
+          return;
+        }
+        if (!activate_monitor_desktop()) {
           return;
         }
         start_presenter(presentation_target);
@@ -2991,7 +3076,9 @@ namespace ar_glasses {
       }
 
       bool same_retained_device(const target_state_t &target) const {
-        return target.device_path == target_device_path_ && same_luid(target.adapter_id, target_adapter_id_);
+        return target.device_path == target_device_path_ && same_luid(target.adapter_id, target_adapter_id_) &&
+               is_monitor_mode(target.mode) == monitor_surface_ &&
+               target_source_width(target) == source_width_ && target_source_height(target) == source_height_;
       }
 
       bool suspend_for_resume() {
@@ -3031,10 +3118,15 @@ namespace ar_glasses {
             target_device_path_
           );
         }
+        if (desktop_handoff_) {
+          desktop_handoff_->prepare_restore();
+          release_pointer_isolation();
+          cursor_clip_.reset();
+        }
         if (!virtual_display_.paused()) {
           if (resume_topology_cleanup_) {
             const auto source = virtual_display_binding();
-            const auto probe = source.identity ? probe_virtual_display(*source.identity, source.device_path, source.display_name) : virtual_display_probe_t {};
+            const auto probe = source.identity ? probe_virtual_display(*source.identity, source.device_path, source.display_name, source_width_, source_height_) : virtual_display_probe_t {};
             if (probe.presence == virtual_display_presence_e::indeterminate || (probe.presence == virtual_display_presence_e::present && !resume_topology_cleanup_->prepare_removal())) {
               return false;
             }
@@ -3042,6 +3134,9 @@ namespace ar_glasses {
           if (!virtual_display_.pause(target_device_path_)) {
             return false;
           }
+        }
+        if (!restore_monitor_desktop(desktop_handoff_, target_device_path_, original_target_rect_)) {
+          return false;
         }
         // In extended mode the source occupied the original sink position. Only restore that
         // rectangle after the shared transaction has detached the source and cleared its journal.
@@ -3057,6 +3152,10 @@ namespace ar_glasses {
           return std::nullopt;
         }
         live_gpu_lease_ = std::move(*lease);
+        if (desktop_handoff_ && !desktop_handoff_->capture(target.rect)) {
+          live_gpu_lease_.reset();
+          return std::nullopt;
+        }
         // Reactivation may partially apply before verification fails. Every failure must run
         // pause again; the previous successful detachment no longer certifies the live topology.
         if (!virtual_display_.begin_resume()) {
@@ -3081,8 +3180,32 @@ namespace ar_glasses {
       }
 
       void refresh_pointer_isolation() {
+        if (monitor_surface_ && desktop_handoff_ && live_target_ && running_.load()) {
+          const auto source = refresh_virtual_display_reference();
+          if (source) {
+            RECT sink_rect {};
+            {
+              std::lock_guard lock(live_target_->mutex);
+              sink_rect = live_target_->rect;
+            }
+            if (desktop_handoff_->refresh(sink_rect, source->rect)) {
+              handoff_refresh_unready_started_.reset();
+            } else {
+              const auto now = std::chrono::steady_clock::now();
+              if (!handoff_refresh_unready_started_) {
+                handoff_refresh_unready_started_ = now;
+              } else if (now - *handoff_refresh_unready_started_ >= 2s) {
+                std::lock_guard lock(physical_monitor_error_mutex);
+                physical_monitor_error = "An application could not enter the monitor's 3D desktop. Switch it to a normal or borderless window, then start 3D again.";
+                physical_monitor_requested.store(false);
+              }
+            }
+          }
+        }
         if (exclusive_) {
-          platf::primary_display::refresh_exclusive_cursor_clip();
+          if (!monitor_surface_) {
+            platf::primary_display::refresh_exclusive_cursor_clip();
+          }
           return;
         }
         const auto source_name = virtual_display_binding().display_name;
@@ -3116,7 +3239,8 @@ namespace ar_glasses {
         const auto probe = probe_virtual_display(
           *source.identity,
           source.device_path,
-          source.display_name
+          source.display_name,
+          source_width_, source_height_
         );
         if (probe.presence != virtual_display_presence_e::absent) {
           virtual_display_absence_started_.reset();
@@ -3275,6 +3399,9 @@ namespace ar_glasses {
         if (cancelled()) {
           return std::nullopt;
         }
+        if (!activate_monitor_desktop()) {
+          return std::nullopt;
+        }
         start_presenter(*presentation_target);
         BOOST_LOG(info) << "Local AR presentation switched in place to "sv
                         << mode_name(presentation_target->mode)
@@ -3309,6 +3436,9 @@ namespace ar_glasses {
 
       ~local_session_t() {
         stop_presenter();
+        if (desktop_handoff_) {
+          desktop_handoff_->prepare_restore();
+        }
         // The shared clip deliberately survives presenter-only restarts, but whole-session
         // teardown restores it before Windows removes the source rectangle it was based on.
         release_pointer_isolation();
@@ -3424,6 +3554,10 @@ namespace ar_glasses {
         return presented_frames_ && presented_frames_->load(std::memory_order_relaxed) >= 60;
       }
 
+      bool has_presented() const {
+        return presented_frames_ && presented_frames_->load(std::memory_order_relaxed) > 0;
+      }
+
       std::optional<target_state_t> re_isolate_target(const target_state_t &expected_target) {
         auto source = refresh_virtual_display_reference();
         if (!source) {
@@ -3464,6 +3598,29 @@ namespace ar_glasses {
       friend detail::local_pause_order_result_t detail::local_pause_order_for_test();
 #endif
 
+      bool activate_monitor_desktop() {
+        if (!desktop_handoff_) {
+          return true;
+        }
+        const auto source = refresh_virtual_display_reference();
+        if (!source || source->rect.right - source->rect.left != source_width_ ||
+            source->rect.bottom - source->rect.top != source_height_) {
+          return false;
+        }
+        if (!desktop_handoff_->activate(source->rect)) {
+          BOOST_LOG(error) << "The monitor's application windows could not enter the private 3D desktop; restoring 2D."sv;
+          return false;
+        }
+        const auto sink = find_target(target_device_path_);
+        if (!sink) {
+          return false;
+        }
+        // Record the parked identity before Stop can race the first periodic handoff pass.
+        // New asynchronous arrivals are reconciled by the controller without stalling capture.
+        desktop_handoff_->refresh(sink->rect, source->rect);
+        return true;
+      }
+
       bool configure_source_refresh(int requested_millihz, const std::function<bool()> &cancelled) {
         // A successful mode setter is not proof of the active cadence. Conversely, a rejected
         // setter may have applied its baseline mode. Re-resolve the stable source for every
@@ -3476,8 +3633,8 @@ namespace ar_glasses {
           [&](const resolved_virtual_display_t &source) {
             VDISPLAY::changeDisplaySettings(
               source.gdi_name.c_str(),
-              source_width,
-              source_height,
+              source_width_,
+              source_height_,
               requested_millihz,
               !exclusive_
             );
@@ -3494,7 +3651,7 @@ namespace ar_glasses {
           BOOST_LOG(warning) << "The local AR source mode could not be verified; retaining the desktop for a later topology retry."sv;
           return false;
         }
-        virtual_display_.update_mode(source_width, source_height, static_cast<std::uint32_t>(*verified_millihz));
+        virtual_display_.update_mode(source_width_, source_height_, static_cast<std::uint32_t>(*verified_millihz));
         if (source_refresh_matches(*verified_millihz, requested_millihz)) {
           return true;
         }
@@ -3514,7 +3671,7 @@ namespace ar_glasses {
           return false;
         }
         const auto binding = virtual_display_binding();
-        const auto source = binding.identity ? resolve_virtual_display(*binding.identity, binding.device_path, binding.display_name) : std::nullopt;
+        const auto source = binding.identity ? resolve_virtual_display(*binding.identity, binding.device_path, binding.display_name, nullptr, source_width_, source_height_) : std::nullopt;
         if (!source || source->refresh_millihz <= 0) {
           return false;
         }
@@ -3542,16 +3699,22 @@ namespace ar_glasses {
           return;
         }
         if (!virtual_display_.owns_display()) {
+          if (desktop_handoff_) {
+            desktop_handoff_->prepare_restore();
+          }
           if (!virtual_display_.restore()) {
             BOOST_LOG(warning) << "Local AR startup recovery is pending; retaining the physical desktop journal."sv;
           }
+          restore_monitor_desktop(desktop_handoff_, target_device_path_, original_target_rect_);
           return;
         }
         // Restore ordinary monitors before the source is removed. Both callbacks survive this
         // session object, including an unpublished Add or teardown deferred to a later handoff.
         if (!begin_local_virtual_display_retirement(std::move(virtual_display_), {
-                                                                                   .prepare = [](VDISPLAY::session_t &session) {
-                                                                                     return session.restore();
+                                                                                   .prepare = [handoff = desktop_handoff_, path = target_device_path_, original = original_target_rect_](VDISPLAY::session_t &session) {
+                                                                                     if (handoff) handoff->prepare_restore();
+                                                                                     if (!session.restore()) return false;
+                                                                                     return restore_monitor_desktop(handoff, path, original);
                                                                                    },
                                                                                    .query = query_retiring_local_virtual_display,
                                                                                    .finish = [](VDISPLAY::session_t &session) {
@@ -3569,6 +3732,9 @@ namespace ar_glasses {
           presenter_.join();
         }
         running_.store(false);
+        if (monitor_surface_) {
+          physical_monitor_active.store(false);
+        }
       }
 
       std::optional<resolved_virtual_display_t> refresh_virtual_display_reference() {
@@ -3580,7 +3746,8 @@ namespace ar_glasses {
         const auto resolved = resolve_virtual_display(
           *binding.identity,
           binding.device_path,
-          binding.display_name
+          binding.display_name,
+          nullptr, source_width_, source_height_
         );
         if (!resolved) {
           return std::nullopt;
@@ -3610,6 +3777,7 @@ namespace ar_glasses {
 
       void start_presenter(const target_state_t &presentation_target) {
         stop_presenter();
+        handoff_refresh_unready_started_.reset();
         if (!live_target_) {
           live_target_ = std::make_shared<platf::dxgi::local_presenter_config_t::target_t>();
         }
@@ -3645,11 +3813,25 @@ namespace ar_glasses {
         presenter_config.target_rect = presentation_target.rect;
         presenter_config.target_adapter_id = presentation_target.adapter_id;
         presenter_config.target_refresh_millihz = presentation_target.refresh_millihz;
+        presenter_config.frame_sequential = monitor_surface_;
+        presenter_config.monitor_config = config::video.local_monitor;
+        if (monitor_surface_) {
+          presenter_config.on_failure = [](std::string reason) {
+            std::lock_guard lock(physical_monitor_error_mutex);
+            physical_monitor_error = "Monitor 3D stopped: " + std::move(reason) + ". Check the emitter connection and fixed display refresh rate, then start 3D again.";
+          };
+        }
         presenter_config.hdr = virtual_hdr_active_;
         presenter_config.sbs_mode = presentation_target.mode == presentation_mode_e::sbs_ai ?
                                       ::video::SBS_AI :
                                       ::video::SBS_OFF;
+        if (monitor_surface_) {
+          presenter_config.sbs_mode = presentation_target.mode == presentation_mode_e::monitor_game ? ::video::SBS_GAME_SBS : ::video::SBS_AI;
+        }
         presenter_config.sbs_config = config::video.sbs;
+        if (monitor_surface_) {
+          presenter_config.sbs_config.reshade = false;
+        }
         presenter_config.capture_failover = capture_failover_;
         presenter_config.live_target = live_target_;
         presented_frames_ = std::make_shared<std::atomic<std::uint64_t>>(0);
@@ -3722,6 +3904,20 @@ namespace ar_glasses {
           // user-closed or driver-closed presenter window that otherwise exits cleanly.
           failed_.store(!stop_token.stop_requested());
           running_.store(false);
+          if (monitor_surface_) {
+            physical_monitor_active.store(false);
+            // A lost emitter or unverifiable scanout restores an ordinary desktop instead of
+            // repeatedly running a full-screen output without a valid shutter phase.
+            if (!stop_token.stop_requested()) {
+              {
+                std::lock_guard lock(physical_monitor_error_mutex);
+                if (physical_monitor_error.empty()) {
+                  physical_monitor_error = "Monitor 3D could not establish a stable display session. Check the display and emitter settings, then start 3D again.";
+                }
+              }
+              physical_monitor_requested.store(false);
+            }
+          }
         });
       }
 
@@ -3729,7 +3925,12 @@ namespace ar_glasses {
       // Hold the live reservation across presenter restarts. Reconnect retention releases it.
       gpu_workload::lease_t live_gpu_lease_;
       std::shared_ptr<pre_removal_topology_cleanup_t> resume_topology_cleanup_;
-      const bool exclusive_;
+      bool exclusive_;
+      bool monitor_surface_ = false;
+      std::shared_ptr<platf::monitor_desktop_handoff_t> desktop_handoff_;
+      std::optional<std::chrono::steady_clock::time_point> handoff_refresh_unready_started_;
+      int source_width_ = source_width;
+      int source_height_ = source_height;
       std::function<bool()> session_requested_;
       RECT original_target_rect_ {};
       LUID target_adapter_id_ {};
@@ -3761,9 +3962,64 @@ namespace ar_glasses {
         worker_ = std::jthread([this](std::stop_token stop_token) {
           run(stop_token);
         });
+        if (config::video.local_monitor.enabled) {
+          monitor_hotkeys_ = std::jthread([](std::stop_token stop_token) {
+            if (!platf::syncThreadDesktop()) {
+              BOOST_LOG(warning) << "Could not register monitor shortcuts on the interactive desktop; use the web UI or tray."sv;
+              return;
+            }
+            constexpr int toggle_id = 0x5333;
+            constexpr int stop_id = 0x5330;
+            const UINT modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT;
+            const bool toggle_registered = RegisterHotKey(nullptr, toggle_id, modifiers, '3');
+            const bool stop_registered = RegisterHotKey(nullptr, stop_id, modifiers, '0');
+            auto cleanup = util::fail_guard([&]() {
+              if (toggle_registered) UnregisterHotKey(nullptr, toggle_id);
+              if (stop_registered) UnregisterHotKey(nullptr, stop_id);
+            });
+            if (!toggle_registered || !stop_registered) {
+              BOOST_LOG(warning) << "A local-monitor shortcut is already reserved. Use the web UI or tray to stop 3D."sv;
+            }
+            const auto desktop_name = [](HANDLE desktop) -> std::wstring {
+              wchar_t name[256] {};
+              DWORD size = 0;
+              return desktop && GetUserObjectInformationW(desktop, UOI_NAME, name, sizeof(name), &size) ? std::wstring(name) : std::wstring {};
+            };
+            const auto presentation_desktop = desktop_name(GetThreadDesktop(GetCurrentThreadId()));
+            while (!stop_token.stop_requested()) {
+              if (monitor_requested()) {
+                const auto input_desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+                const auto input_name = desktop_name(input_desktop);
+                if (input_desktop) CloseDesktop(input_desktop);
+                if (input_name.empty() || input_name != presentation_desktop) {
+                  // A private primary source must not hide a sign-in/UAC screen on the secure
+                  // desktop, where the presentation HWND and its hotkeys cannot operate.
+                  {
+                    std::lock_guard lock(physical_monitor_error_mutex);
+                    physical_monitor_error = "Monitor 3D returned to 2D for a Windows sign-in or permission screen. Start 3D again after closing it.";
+                  }
+                  request_monitor_session(false);
+                }
+              }
+              MSG message {};
+              while (PeekMessageW(&message, nullptr, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {
+                if (message.wParam == stop_id) {
+                  request_monitor_session(false);
+                } else if (message.wParam == toggle_id) {
+                  request_monitor_session(!monitor_requested());
+                }
+              }
+              std::this_thread::sleep_for(25ms);
+            }
+          });
+        }
       }
 
       ~controller_t() override {
+        monitor_hotkeys_.request_stop();
+        if (monitor_hotkeys_.joinable()) {
+          monitor_hotkeys_.join();
+        }
         worker_.request_stop();
         if (worker_.joinable()) {
           worker_.join();
@@ -3864,7 +4120,9 @@ namespace ar_glasses {
 
       void monitor_target(const std::optional<target_state_t> &target) {
         const auto device_path = target ? target->device_path : std::wstring {};
-        if (device_path == wear_device_path_) {
+        const bool previous_monitor_surface = monitor_surface_selected_;
+        monitor_surface_selected_ = target && is_monitor_mode(target->mode);
+        if (device_path == wear_device_path_ && previous_monitor_surface == monitor_surface_selected_) {
           return;
         }
         // The physical device owns wear authority. Keep this subscription alive when its virtual
@@ -3874,12 +4132,17 @@ namespace ar_glasses {
         activation_ = {};
         logged_activation_.reset();
         session_request_.reset();
-        if (target) {
+        if (target && !monitor_surface_selected_) {
           wear_monitor_ = rayneo::create_wear_monitor(target->device_id);
         }
       }
 
       bool wear_allows_session() {
+        if (monitor_surface_selected_) {
+          const bool requested = physical_monitor_requested.load();
+          session_request_.observe(requested);
+          return requested;
+        }
         if (wear_device_path_.empty()) {
           return false;
         }
@@ -3935,8 +4198,11 @@ namespace ar_glasses {
       }
 
       bool replacement_requests_session(const target_state_t &target) {
-        if (target.mode == presentation_mode_e::unsupported || target.is_cloned || (!config::video.local_ar_virtual_display_only && target.is_primary)) {
+        if (target.mode == presentation_mode_e::unsupported || target.is_cloned || (!target_exclusive(target) && target.is_primary)) {
           return false;
+        }
+        if (is_monitor_mode(target.mode)) {
+          return physical_monitor_requested.load();
         }
         if (!replacement_target_ || replacement_target_->device_path != target.device_path) {
           replacement_target_ = target;
@@ -4126,6 +4392,11 @@ namespace ar_glasses {
           deferred_for_remote_ = true;
         }
         if (!rejected_for_remote && !construction_stop.stop_requested() && wear_allows_session()) {
+          if (is_monitor_mode(target.mode)) {
+            std::lock_guard lock(physical_monitor_error_mutex);
+            physical_monitor_error = "Could not prepare the monitor's 3D desktop. Check the display and emitter settings, then start 3D again.";
+            physical_monitor_requested.store(false);
+          }
           schedule_failure_retry();
         }
       }
@@ -4148,7 +4419,7 @@ namespace ar_glasses {
                              << " is unsupported; expected 1920x1080 or 3840x1080."sv;
           return;
         }
-        if ((!config::video.local_ar_virtual_display_only && target->is_primary) || target->is_cloned) {
+        if ((!target_exclusive(*target) && target->is_primary) || target->is_cloned) {
           BOOST_LOG(warning) << "AR display cannot start local presentation while it is "sv
                              << (target->is_primary ? "the Windows primary display"sv : "part of a cloned display source"sv)
                              << "; waiting for a unique extended-desktop topology."sv;
@@ -4169,6 +4440,8 @@ namespace ar_glasses {
         while (!stop_token.stop_requested()) {
           suspend_for_remote_if_needed();
           progress_inactive_retirement();
+          physical_monitor_active.store(session_ && applied_ && is_monitor_mode(applied_->mode) &&
+                                        session_->running() && session_->has_presented());
 
           const std::wstring_view preferred_device_path = wear_device_path_;
           bool topology_query_succeeded = false;
@@ -4413,7 +4686,7 @@ namespace ar_glasses {
                 schedule_failure_retry();
               }
             }
-          } else if (pending == applied_ && applied_ && !session_ && now - pending_since >= topology_debounce && applied_->mode != presentation_mode_e::unsupported && (config::video.local_ar_virtual_display_only || !applied_->is_primary) && !applied_->is_cloned && (now >= retry_after_ || session_request_.fresh())) {
+          } else if (pending == applied_ && applied_ && !session_ && now - pending_since >= topology_debounce && applied_->mode != presentation_mode_e::unsupported && (target_exclusive(*applied_) || !applied_->is_primary) && !applied_->is_cloned && (now >= retry_after_ || session_request_.fresh())) {
             start_session(*applied_, stop_token);
           }
 
@@ -4424,6 +4697,7 @@ namespace ar_glasses {
       }
 
       std::optional<target_state_t> applied_;
+      bool monitor_surface_selected_ = false;
       std::unique_ptr<local_session_t> session_;
       session_lifecycle::resume_state_t resume_state_;
       bool suspended_topology_complete_ = false;
@@ -4445,6 +4719,7 @@ namespace ar_glasses {
       detail::local_session_activation_t activation_;
       std::optional<detail::local_session_activation_e> logged_activation_;
       std::jthread worker_;
+      std::jthread monitor_hotkeys_;
     };
   }  // namespace
 
@@ -4849,6 +5124,73 @@ namespace ar_glasses {
   std::vector<device_info_t> devices() {
     std::lock_guard lock(device_mutex);
     return {known_devices.begin(), known_devices.end()};
+  }
+
+  std::vector<monitor_info_t> monitor_devices() {
+    std::vector<monitor_info_t> result;
+    const auto targets = enumerate_targets();
+    if (!targets) {
+      return result;
+    }
+    for (const auto &target : *targets) {
+      result.push_back({platf::to_utf8(target.device_path), target.friendly_name,
+        static_cast<int>(target.rect.right - target.rect.left),
+        static_cast<int>(target.rect.bottom - target.rect.top),
+        target.refresh_millihz, target.is_primary});
+    }
+    return result;
+  }
+
+  bool monitor_active() {
+    return physical_monitor_active.load();
+  }
+
+  bool monitor_requested() {
+    return physical_monitor_requested.load();
+  }
+
+  std::string monitor_error() {
+    std::lock_guard lock(physical_monitor_error_mutex);
+    return physical_monitor_error;
+  }
+
+  bool request_monitor_session(bool start) {
+    if (start) {
+      const auto &settings = config::video.local_monitor;
+      if (!settings.enabled || settings.display_id.empty() || settings.emitter_port.empty()) {
+        return false;
+      }
+      const auto selected_port = platf::open3d::detail::normalize_port(settings.emitter_port);
+      const auto ports = platf::open3d::serial_ports();
+      if (!selected_port || std::none_of(ports.begin(), ports.end(), [&](const auto &port) {
+            return platf::open3d::detail::normalize_port(port) == selected_port;
+          })) {
+        return false;
+      }
+      const auto targets = enumerate_targets();
+      if (!targets || std::none_of(targets->begin(), targets->end(), [&](const auto &target) {
+            return platf::to_utf8(target.device_path) == settings.display_id && !target.is_cloned &&
+              classify_monitor_mode(target.rect.right - target.rect.left, target.rect.bottom - target.rect.top,
+                target.refresh_millihz, settings.mode == "game") != presentation_mode_e::unsupported;
+          })) {
+        return false;
+      }
+      physical_monitor_requested.store(true);
+      {
+        std::lock_guard lock(physical_monitor_error_mutex);
+        physical_monitor_error.clear();
+      }
+    } else {
+      const bool was_requested = physical_monitor_requested.exchange(false);
+      physical_monitor_active.store(false);
+      if (was_requested) {
+        std::lock_guard lock(ownership_mutex);
+        if (local_session_construction_stop) {
+          local_session_construction_stop->request_stop();
+        }
+      }
+    }
+    return true;
   }
 
   bool set_device_decision(std::string_view id, device_decision_e decision) {

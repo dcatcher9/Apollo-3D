@@ -29,6 +29,12 @@ namespace platf::primary_display {
    */
   bool prepare_local_exclusive(std::wstring_view sink_device_path);
 
+  /** Replace one physical desktop rectangle with the private source, retaining all other
+   * displays and the selected monitor's primary/secondary role. The physical sink is parked
+   * outside the interactive desktop for scanout; no global cursor clip is acquired.
+   */
+  bool prepare_local_monitor(std::wstring_view sink_device_path);
+
   /** Serialize local source/sink mode changes with display-notification reconciliation.
    * The callback must not call this namespace. Promotion/verification runs after the callback.
    */
@@ -201,6 +207,7 @@ namespace platf::primary_display {
       std::vector<std::wstring> exclusive_preserved;
       std::optional<snapshot_t> exclusive_topology;
       std::wstring local_sink;
+      bool monitor_replacement = false;
     };
 
     struct load_result_t {
@@ -232,7 +239,7 @@ namespace platf::primary_display {
     class manager_t {
     public:
       explicit manager_t(io_t io);
-      bool prepare(bool exclusive = false, std::wstring_view local_sink = {});
+      bool prepare(bool exclusive = false, std::wstring_view local_sink = {}, bool monitor_replacement = false);
       bool is_local_exclusive(std::wstring_view source_device_path);
       bool bind_pending(std::wstring_view device_path);
       bool promote(std::wstring_view device_path, bool exclusive = false);
@@ -248,6 +255,9 @@ namespace platf::primary_display {
       io_t io_;
       bool apply_verified(const snapshot_t &before, const layout_t &desired);
       bool promote_exclusive(std::wstring_view device_path, bool reconcile_active_source = false);
+      bool promote_monitor(std::wstring_view device_path);
+      bool restore_monitor(journal_t journal, bool keep_virtual_active, retained_display_ptr retained);
+      bool apply_snapshot_verified(const snapshot_t &before, const snapshot_t &desired);
       bool refresh_exclusive_cursor_clip(std::wstring_view device_path);
       bool clip_cursor_to_display(const snapshot_t &snapshot, std::wstring_view device_path);
       bool restore_exclusive(journal_t journal, bool keep_virtual_active = true, retained_display_ptr retained = {});

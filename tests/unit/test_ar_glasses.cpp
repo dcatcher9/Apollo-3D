@@ -15,6 +15,32 @@
 
 using namespace std::chrono_literals;
 
+TEST(LocalMonitor, NativePhysicalModesAreIndependentOfArPacking) {
+  using enum ar_glasses::presentation_mode_e;
+  EXPECT_EQ(ar_glasses::classify_monitor_mode(5120, 2160, 165000, false), monitor_host);
+  EXPECT_EQ(ar_glasses::classify_monitor_mode(2560, 1080, 330000, true), monitor_game);
+  EXPECT_EQ(ar_glasses::classify_mode(5120, 2160), unsupported);
+  EXPECT_EQ(ar_glasses::classify_mode(3840, 1080), sbs_ai);
+  EXPECT_EQ(ar_glasses::classify_monitor_mode(8193, 2160, 165000, false), unsupported);
+  EXPECT_EQ(ar_glasses::classify_monitor_mode(1920, 1080, 0, false), unsupported);
+  EXPECT_EQ(ar_glasses::classify_monitor_mode(0, 1080, 120000, false), unsupported);
+}
+
+TEST(LocalMonitor, NativeResolutionChangeRequiresNewSourceButRefreshCanReconfigure) {
+  ar_glasses::detail::local_session_contract_t before;
+  before.device_path = L"monitor-instance";
+  before.rect = {0, 0, 2560, 1080};
+  before.mode = ar_glasses::presentation_mode_e::monitor_host;
+  auto after = before;
+  after.refresh_millihz = 165000;
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after, true));
+  after.rect = {0, 0, 5120, 2160};
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after, true));
+  after = before;
+  after.mode = ar_glasses::presentation_mode_e::sbs_ai;
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after, true));
+}
+
 namespace {
   std::array<std::uint8_t, 65> rayneo_sensor_report(
     float proximity,

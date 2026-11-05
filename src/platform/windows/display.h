@@ -1223,6 +1223,11 @@ namespace platf::dxgi {
     bool hdr = false;
     int sbs_mode = ::video::SBS_OFF;
     config::video_t::sbs_t sbs_config {};
+    // AR outputs consume the packed raster directly. A physical shutter monitor consumes one
+    // native-size eye per scanout, driven independently from capture/conversion.
+    bool frame_sequential = false;
+    std::function<void(std::string)> on_failure;
+    config::video_t::local_monitor_t monitor_config {};
     std::shared_ptr<::video::capture_backend_failover_t> capture_failover;
 
     struct target_t {
@@ -1254,7 +1259,8 @@ namespace platf::dxgi {
   void refresh_local_presenter_pointer_isolation(
     const std::string &source_display_name,
     const std::shared_ptr<local_presenter_config_t::target_t> &live_target,
-    const std::shared_ptr<local_presenter_cursor_clip_t> &cursor_clip
+    const std::shared_ptr<local_presenter_cursor_clip_t> &cursor_clip,
+    bool frame_sequential = false
   );
 
   /**
@@ -1262,4 +1268,15 @@ namespace platf::dxgi {
    * SBS mode uses the same matched-frame depth and warp implementation as the encoder path.
    */
   local_presenter_result_e run_local_presenter(const local_presenter_config_t &config, std::stop_token stop_token);
+
+#ifdef SUNSHINE_TESTS
+  struct local_shutter_frame_probe_t {
+    bool available = false;
+    bool publication_bounded = false;
+    bool current_pair_immutable = false;
+    bool next_pair_published = false;
+    bool eye_crop_exact = false;
+  };
+  local_shutter_frame_probe_t probe_local_shutter_frame_ring();
+#endif
 }  // namespace platf::dxgi

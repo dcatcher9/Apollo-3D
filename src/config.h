@@ -54,6 +54,21 @@ namespace config {
     // the glasses output required for scanout.
     bool local_ar_virtual_display_only;
 
+    struct local_monitor_t {
+      bool enabled = false;
+      std::string display_id;  ///< Exact physical Windows monitor device path, not a recyclable DISPLAY number.
+      std::string mode = "host";  ///< host = Host AI 3D, game = Game 3D stereo source.
+      std::string emitter_port;
+      int ir_protocol = 6;
+      int frame_delay_us = 500;
+      int frame_duration_us = 2000;
+      int signal_spacing_us = 30;
+      bool flip_eyes = false;
+      int eye_repeats = 1;  ///< Number of physical refreshes assigned to each eye.
+    };
+
+    local_monitor_t local_monitor;
+
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
     double minimum_fps_target;  ///< Lowest framerate used when streaming. Range 0-1000; 0 = max(one fifth of the requested rate, 10 FPS). Never above the requested rate.
 
@@ -67,6 +82,9 @@ namespace config {
 
     sbs_t sbs;
   };
+
+  // Consume this surface's keys together so invalid timing or mode cannot accidentally activate it.
+  video_t::local_monitor_t parse_local_monitor_config(std::unordered_map<std::string, std::string> &vars);
 
   struct audio_t {
     std::string sink;

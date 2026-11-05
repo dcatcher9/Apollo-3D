@@ -18,6 +18,7 @@ namespace VDISPLAY {
     std::optional<LUID> render_adapter_luid;
     std::wstring adapter_name;
     bool exclusive = false;
+    bool monitor_replacement = false;
     std::wstring local_sink;
     // Extended local AR owns its existing row journal and supplies acquire's prepare callback.
     bool primary_binding = true;
