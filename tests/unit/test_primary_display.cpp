@@ -939,6 +939,96 @@ TEST(PrimaryDisplayExclusive, GraceRecheckDetachesReappearedTargetAndKeepsCurren
   EXPECT_EQ(fake.cursor_sets[0].y, 900);
 }
 
+TEST(PrimaryDisplayExclusive, GraceRecheckRecoversInactivePrimaryBesideAReattachedVirtualAndSecondary) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"physical-left", -3840, 0}, {L"virtual", 5120, 0}});
+  set_display_mode(fake.current, L"physical-primary", 5120, 2160, 165);
+  set_display_mode(fake.current, L"physical-left", 3840, 2160, 120);
+  auto &hdr = *fake.current.colors[named_index(fake.current, L"physical-primary")];
+  hdr.hdr_user_enabled = hdr.advanced_color_active = hdr.advanced_color_enabled = true;
+  hdr.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  fake.catalog = fake.current;
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  set_display_mode(fake.current, L"virtual", 3840, 2160, 90);
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  const auto bookmark = retained;
+  ASSERT_EQ(fake.current.device_paths.size(), 2u);
+
+  // The live failure returned to VD+secondary at 60Hz after both physical displays had
+  // already verified restored. The primary is still available, but no longer active.
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"physical-left", 3840, 0}});
+  set_display_mode(fake.current, L"virtual", 3840, 2160, 90);
+  set_display_mode(fake.current, L"physical-left", 3840, 2160, 60);
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"virtual"), 0);
+  ASSERT_EQ(fake.current.device_paths.size(), 2u);
+  const auto primary = named_index(fake.current, L"physical-primary");
+  const auto &mode = fake.current.modes[fake.current.paths[primary].sourceInfo.sourceModeInfoIdx].sourceMode;
+  EXPECT_EQ(mode.width, 5120u);EXPECT_EQ(mode.height, 2160u);
+  EXPECT_EQ(fake.current.paths[primary].targetInfo.refreshRate.Numerator, 165u);
+  EXPECT_TRUE(fake.current.colors[primary]->hdr_user_enabled);
+  EXPECT_EQ(fake.current.colors[primary]->active_mode, DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR);
+  // Recovery preserves the currently usable secondary mode rather than claiming a user edit.
+  EXPECT_EQ(fake.current.paths[named_index(fake.current, L"physical-left")].targetInfo.refreshRate.Numerator, 60u);
+  EXPECT_EQ(retained, bookmark);EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, GracePartialWakeKeepsVerifiedBookmarkUntilMissingPhysicalBecomesAvailable) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  const auto bookmark = retained;
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"physical-left", 1920, 0}});
+  set_display_mode(fake.current, L"physical-left", 2560, 1440, 120);
+  const auto primary = named_index(fake.catalog, L"physical-primary");
+  fake.catalog.paths[primary].targetInfo.targetAvailable = FALSE;
+
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-left", 0, 0}});
+  EXPECT_FALSE(fake.journal);EXPECT_EQ(retained, bookmark);
+  const auto applies = std::ranges::count(fake.events, "apply");
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+  EXPECT_FALSE(fake.journal);EXPECT_EQ(retained, bookmark);
+
+  // The VD remains detached; availability alone must now restore the remembered output.
+  fake.catalog.paths[primary].targetInfo.targetAvailable = TRUE;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"virtual"), 0);
+  ASSERT_EQ(fake.current.device_paths.size(), 2u);
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"physical-primary"), 1);
+  const auto secondary = named_index(fake.current, L"physical-left");
+  const auto &mode = fake.current.modes[fake.current.paths[secondary].sourceInfo.sourceModeInfoIdx].sourceMode;
+  EXPECT_EQ(mode.width, 2560u);EXPECT_EQ(mode.height, 1440u);
+  EXPECT_EQ(fake.current.paths[secondary].targetInfo.refreshRate.Numerator, 120u);
+  EXPECT_FALSE(fake.journal);EXPECT_EQ(retained, bookmark);
+}
+
+TEST(PrimaryDisplayExclusive, GracePhysicalOnlyUserDisableDoesNotBecomeAMonitorWakeRecovery) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  // No VD returned and no all-path loss was observed: the current physical desktop remains
+  // user-owned, even if an available physical output was deliberately disabled.
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  const auto applies = std::ranges::count(fake.events, "apply");
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+  EXPECT_FALSE(fake.journal);
+  // Its accepted baseline is also retained if Windows subsequently reattaches the VD.
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
 TEST(PrimaryDisplayExclusive, GraceRecheckKeepsTheOnlyUsableRetainedDisplay) {
   fake_io_t fake;
   start_exclusive(fake);

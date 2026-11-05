@@ -1142,6 +1142,7 @@ namespace platf::primary_display {
     // Keep the last verified remote physical desktop after the durable transaction completes.
     // A monitor may briefly disappear while waking, leaving Windows on the retained VD again.
     std::optional<detail::journal_t> pause_recovery;
+    bool partial_wake_recovery = false;
   };
 
   namespace detail {
@@ -1907,6 +1908,43 @@ namespace platf::primary_display {
         // that recovery first, then detach any target which Windows already made active.
         return restore(device_path) && pause(device_path, retained, retained->local_sink);
       }
+      if (retained->pause_recovery && retained->pause_recovery->original_topology &&
+          (index || retained->partial_wake_recovery) &&
+          !current->paths.empty() && (!index || current->paths.size() > 1)) {
+        const auto &remembered = *retained->pause_recovery->original_topology;
+        const auto missing_remembered = [&](std::wstring_view identity) {
+          return !same_device(identity, device_path) && !find_path(*current, identity);
+        };
+        if (std::ranges::any_of(remembered.device_paths, missing_remembered)) {
+          const auto available = io_.query_all ? io_.query_all() : std::nullopt;
+          if (!available || available->paths.size() > max_available_paths || available->paths.size() != available->device_paths.size()) {
+            return false;
+          }
+          const bool missing_output_available = std::ranges::any_of(remembered.device_paths, [&](const auto &identity) {
+            if (!missing_remembered(identity)) {
+              return false;
+            }
+            for (size_t i = 0; i < available->paths.size(); ++i) {
+              if (available->paths[i].targetInfo.targetAvailable && same_device(available->device_paths[i], identity)) {
+                return true;
+              }
+            }
+            return false;
+          });
+          retained->partial_wake_recovery = true;
+          if (index || missing_output_available) {
+            // A wake can reattach our VD with only part of the restored physical desktop.
+            // Recover available remembered outputs through the existing transaction instead
+            // of replacing its baseline with that transient subset. Current physical edits
+            // still use restore_exclusive's ordinary user-desktop preservation rules.
+            return restore_exclusive(*retained->pause_recovery, false, retained);
+          }
+          // The VD is already detached and every absent remembered output is unavailable.
+          // Keep the usable physical desktop and its prior recovery bookmark without a CCD
+          // mutation; a later availability observation can recover a waking monitor.
+          return true;
+        }
+      }
       if (!index && !current->paths.empty()) {
         // A healthy disconnected desktop is user-owned. Remember its latest arrangement, modes
         // and color, including deliberate changes made after the first successful restore.
@@ -1920,11 +1958,13 @@ namespace platf::primary_display {
             return false;
           }
           retained->pause_recovery = std::move(recovery);
+          retained->partial_wake_recovery = false;
         }
         return true;
       }
       if (current->paths.empty() || (index && current->paths.size() == 1)) {
         if (retained->pause_recovery) {
+          retained->partial_wake_recovery = true;
           const auto available = io_.query_all ? io_.query_all() : std::nullopt;
           if (!available || available->paths.size() > max_available_paths || available->paths.size() != available->device_paths.size()) {
             return false;
@@ -2382,6 +2422,7 @@ namespace platf::primary_display {
         }
         if (retained) {
           retained->pause_recovery.reset();
+          retained->partial_wake_recovery = false;
         }
         return true;
       }
@@ -2645,14 +2686,19 @@ namespace platf::primary_display {
         BOOST_LOG(warning) << "Available physical displays are active; retaining exclusive-display recovery until their color settings are restored.";
         return false;
       }
+      const bool preserve_verified_pause_recovery = retained && retained->partial_wake_recovery && retained->pause_recovery && missing;
       if (missing || missing_local_sink) {
-        // All available outputs were restored and verified. An unplugged monitor must not
-        // hold future sessions hostage; its return starts from Windows' current layout.
-        BOOST_LOG(info) << "Restored available physical displays; absent monitors will use a fresh topology baseline on reconnect.";
+        // All available outputs were restored and verified; an unplugged monitor must not
+        // hold a durable transaction open. A prior verified pause bookmark still covers a
+        // transient wake failure, while an initially absent output starts fresh on reconnect.
+        BOOST_LOG(info) << (preserve_verified_pause_recovery ?
+                             "Restored available physical displays; retaining the last verified desktop for monitor-wake recovery." :
+                             "Restored available physical displays; absent monitors will use a fresh topology baseline on reconnect.");
       }
-      if (retained) {
-        // Retain only the desktop that actually completed recovery. Missing originals must not
-        // be resurrected later, and user edits accepted above become the next recovery baseline.
+      if (retained && !preserve_verified_pause_recovery) {
+        // The first completed recovery defines the pause baseline, and a later complete
+        // physical desktop adopts accepted user edits. A partial wake must not replace a
+        // previously verified desktop with its temporary subset.
         if (!rebase_recovery(journal, *observed, *observed)) {
           return false;
         }
@@ -2665,8 +2711,9 @@ namespace platf::primary_display {
       if (!io_.clear()) {
         return false;
       }
-      if (retained) {
+      if (retained && !preserve_verified_pause_recovery) {
         retained->pause_recovery = std::move(journal);
+        retained->partial_wake_recovery = false;
       }
       return true;
     }
