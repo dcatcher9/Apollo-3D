@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -14,6 +15,41 @@
 #include <vector>
 
 namespace video_dom_probe {
+  enum class census_checkpoint_e {
+    continue_walk,
+    service,
+    exhausted,
+  };
+
+  // A large tree retains traversal progress while the scan thread services liveness and
+  // independently retained authority. Neither a checkpoint nor elapsed time completes a census.
+  [[nodiscard]] inline constexpr census_checkpoint_e census_checkpoint_policy(
+    std::chrono::steady_clock::duration elapsed,
+    std::chrono::steady_clock::duration since_service,
+    std::size_t visited_nodes,
+    std::size_t maximum_nodes,
+    std::chrono::steady_clock::duration lifetime,
+    std::chrono::steady_clock::duration service_interval
+  ) noexcept {
+    if (elapsed >= lifetime || visited_nodes >= maximum_nodes) {
+      return census_checkpoint_e::exhausted;
+    }
+    return since_service >= service_interval ? census_checkpoint_e::service :
+                                              census_checkpoint_e::continue_walk;
+  }
+
+  // Refresh may enter cross-process COM and deliver a foreground transition. Authenticate
+  // again after it returns, immediately before publishing any tentative heartbeat record.
+  template<typename Refresh, typename Validate, typename Publish>
+  [[nodiscard]] bool service_census_checkpoint(Refresh refresh, Validate validate, Publish publish) {
+    const auto tentative = refresh();
+    if (!validate()) {
+      return false;
+    }
+    publish(tentative);
+    return true;
+  }
+
   struct machine_event_generations_t {
     std::uint64_t foreground {};
     std::uint64_t object {};

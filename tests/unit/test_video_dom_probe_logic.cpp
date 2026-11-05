@@ -211,6 +211,120 @@ TEST(VideoDomProbeLogic, EstablishedSelectionStaysEstablishedAfterExactRefresh) 
   EXPECT_TRUE(policy.publish_ok);
 }
 
+TEST(VideoDomProbeLogic, LongCensusRetainsProgressWhileServicingFreshHeartbeats) {
+  using namespace std::chrono_literals;
+  std::chrono::steady_clock::duration elapsed {};
+  std::chrono::steady_clock::duration last_service {};
+  std::chrono::steady_clock::duration last_heartbeat {};
+  std::size_t checkpoints = 0;
+  // This complete walk takes ten seconds. Restarting at the former two-second budget
+  // would never reach its final candidate; a service checkpoint must preserve its progress.
+  for (std::size_t visited = 0; visited < 5000; ++visited) {
+    elapsed += 2ms;
+    const auto action = probe::census_checkpoint_policy(
+      elapsed, elapsed - last_service, visited, 20000, 15s, 100ms
+    );
+    ASSERT_NE(action, probe::census_checkpoint_e::exhausted);
+    if (action == probe::census_checkpoint_e::service) {
+      ++checkpoints;
+      last_service = elapsed;
+      if (elapsed - last_heartbeat >= 1s) {
+        last_heartbeat = elapsed;
+      }
+    }
+    EXPECT_LT(elapsed - last_heartbeat, 2500ms);
+  }
+  EXPECT_EQ(elapsed, 10s);
+  EXPECT_EQ(checkpoints, 100u);
+  EXPECT_EQ(last_heartbeat, elapsed);
+  // Completion still stages only an unpublished selection. Servicing was not authority.
+  const auto census = probe::complete_census_policy(
+    {.index = 0, .reason = probe::selection_reason_e::single}, false
+  );
+  EXPECT_TRUE(census.stage_selection);
+  EXPECT_FALSE(census.publish_ok);
+  EXPECT_FALSE(probe::cached_refresh_policy(census.phase, false, {}).publish_ok);
+  EXPECT_TRUE(probe::cached_refresh_policy(census.phase, true, {}).publish_ok);
+}
+
+TEST(VideoDomProbeLogic, CensusLifetimeAndNodeLimitsTakePrecedenceOverService) {
+  using namespace std::chrono_literals;
+  EXPECT_EQ(probe::census_checkpoint_policy(99ms, 99ms, 99, 20000, 15s, 100ms),
+    probe::census_checkpoint_e::continue_walk);
+  EXPECT_EQ(probe::census_checkpoint_policy(100ms, 100ms, 100, 20000, 15s, 100ms),
+    probe::census_checkpoint_e::service);
+  EXPECT_EQ(probe::census_checkpoint_policy(14999ms, 99ms, 19999, 20000, 15s, 100ms),
+    probe::census_checkpoint_e::continue_walk);
+  EXPECT_EQ(probe::census_checkpoint_policy(15s, 100ms, 1000, 20000, 15s, 100ms),
+    probe::census_checkpoint_e::exhausted);
+  EXPECT_EQ(probe::census_checkpoint_policy(1s, 100ms, 20000, 20000, 15s, 100ms),
+    probe::census_checkpoint_e::exhausted);
+}
+
+TEST(VideoDomProbeLogic, ForegroundAbaDuringLongCensusCannotRefreshOrPublishAuthority) {
+  using namespace std::chrono_literals;
+  ASSERT_EQ(probe::census_checkpoint_policy(3s, 100ms, 1500, 20000, 15s, 100ms),
+    probe::census_checkpoint_e::service);
+  // The root may have returned to the same HWND/client. The pumped foreground-event
+  // generation still proves the intervening authority loss and vetoes the unfinished walk.
+  const auto events = probe::machine_event_policy(
+    {.foreground = 5, .object = 10}, {.foreground = 7, .object = 12}
+  );
+  EXPECT_TRUE(events.discard_completed_scan);
+  EXPECT_TRUE(events.invalidate_semantic_state);
+  for (const auto phase : {probe::cached_selection_phase_e::provisional,
+                          probe::cached_selection_phase_e::established}) {
+    const auto refreshed = probe::cached_refresh_policy(phase, true, events);
+    EXPECT_FALSE(refreshed.retain_selection);
+    EXPECT_FALSE(refreshed.publish_ok);
+  }
+}
+
+TEST(VideoDomProbeLogic, CensusServiceRevalidatesAfterComRefreshBeforePublishing) {
+  for (const bool foreground_aba : {false, true}) {
+    const probe::machine_event_generations_t before {.foreground = 5, .object = 10};
+    auto after = before;
+    bool foreground_matches = true;
+    bool refreshed = false;
+    bool published = false;
+    const bool serviced = probe::service_census_checkpoint([&]() {
+      // Exact COM refresh succeeds, but a foreground transition or client change occurs
+      // while it is executing. The tentative positive must not become a heartbeat.
+      refreshed = true;
+      if (foreground_aba) after.foreground += 2;
+      else foreground_matches = false;
+      return probe::cached_refresh_policy(probe::cached_selection_phase_e::established, true, {});
+    }, [&]() {
+      EXPECT_TRUE(refreshed);
+      return foreground_matches && !probe::machine_event_policy(before, after).invalidate_semantic_state;
+    }, [&](const auto &) {
+      published = true;
+    });
+    EXPECT_TRUE(refreshed);
+    EXPECT_FALSE(serviced);
+    EXPECT_FALSE(published);
+  }
+}
+
+TEST(VideoDomProbeLogic, CensusServicePublishesOnlyAfterSuccessfulValidation) {
+  bool refreshed = false;
+  bool validated = false;
+  bool published = false;
+  EXPECT_TRUE(probe::service_census_checkpoint([&]() {
+    refreshed = true;
+    return probe::cached_refresh_policy(probe::cached_selection_phase_e::established, true, {});
+  }, [&]() {
+    EXPECT_TRUE(refreshed);
+    validated = true;
+    return true;
+  }, [&](const auto &record) {
+    EXPECT_TRUE(validated);
+    EXPECT_TRUE(record.publish_ok);
+    published = true;
+  }));
+  EXPECT_TRUE(published);
+}
+
 TEST(VideoDomProbeLogic, ResizeReacquiresAuthorityOnlyAfterNewCensusAndExactRefresh) {
   constexpr probe::rect_t old_client {1449, 295, 3568, 2032};
   constexpr probe::rect_t old_video {1626, 704, 3367, 1680};

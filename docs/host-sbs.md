@@ -2718,6 +2718,15 @@ changes are hard vetoes, while unrelated descendant-object churn only requests a
 three-second audit. An uncached incomplete traversal retries within one second; confirmed
 accessibility unavailability retains the 15-second backoff.
 
+A census retains its traversal progress for up to 15 seconds instead of restarting at a two-second
+prefix of a larger accessibility tree. Approximately every 100 ms, the same scan thread services
+foreground events, revalidates the original browser root/process/client, and independently refreshes
+any established selection before sending its normal heartbeat. An uncached walk publishes only
+`warming` until the complete census and next-tick exact refresh succeed. Foreground changes abort
+the census; node, depth, child-count, provider-error and total-lifetime bounds still fail closed.
+Heartbeats have no separate timer thread: a blocked accessibility call still stops them and remains
+subject to the host's existing watchdog.
+
 Both authority sources are currently Desktop-Duplication-only. WGC does not expose an equivalent of
 `LastPresentTime` that separates desktop content from cursor-only compositor frames, so a missing
 content timestamp selects ordinary full-frame V2 instead of claiming a false match.

@@ -38,7 +38,8 @@ namespace {
   constexpr std::size_t maximum_nodes = 20000;
   constexpr std::size_t maximum_depth = 128;
   constexpr LONG maximum_children_per_node = 10000;
-  constexpr auto maximum_scan_work_time = 2s;
+  constexpr auto maximum_scan_work_time = 15s;
+  constexpr auto scan_service_interval = 100ms;
   constexpr auto machine_heartbeat_interval = 1s;
   constexpr auto periodic_full_scan_interval = 15s;
   constexpr auto event_full_scan_min_interval = 3s;
@@ -49,6 +50,8 @@ namespace {
   std::atomic_uint64_t foreground_change_generation {1};
   std::atomic_uint64_t object_change_generation {1};
   std::atomic_uintptr_t monitored_window_value {};
+
+  void pump_messages();
 
   template<typename T>
   class com_ptr_t {
@@ -423,7 +426,8 @@ namespace {
     return true;
   }
 
-  scan_result_t scan_foreground() {
+  template<typename Service>
+  scan_result_t scan_foreground(Service service) {
     const auto started = std::chrono::steady_clock::now();
     scan_result_t result;
 
@@ -460,6 +464,10 @@ namespace {
       return result;
     }
     result.client_rect = *client_rect;
+    // The first census can pump WinEvents before it finishes. Route its descendant events
+    // now, rather than losing them against the previous foreground window or a null HWND.
+    monitored_window_value.store(reinterpret_cast<std::uintptr_t>(foreground), std::memory_order_relaxed);
+    const auto initial_foreground_generation = foreground_change_generation.load(std::memory_order_relaxed);
 
     IAccessible *root_raw = nullptr;
     const HRESULT root_status = AccessibleObjectFromWindow(
@@ -477,7 +485,48 @@ namespace {
     }
 
     bool complete = true;
-    const auto work_deadline = started + maximum_scan_work_time;
+    bool aborted = false;
+    bool foreground_changed = false;
+    auto last_service = started;
+    const auto foreground_current = [&]() {
+      pump_messages();
+      DWORD current_process_id = 0;
+      const HWND current_foreground = GetAncestor(GetForegroundWindow(), GA_ROOT);
+      GetWindowThreadProcessId(current_foreground, &current_process_id);
+      const auto current_client = foreground_client_rect(current_foreground);
+      if (foreground_change_generation.load(std::memory_order_relaxed) != initial_foreground_generation ||
+          current_foreground != foreground || current_process_id != result.process_id ||
+          !current_client || *current_client != result.client_rect || !window_available(foreground)) {
+        foreground_changed = true;
+        aborted = true;
+        return false;
+      }
+      return true;
+    };
+    const auto checkpoint = [&]() {
+      const auto now = std::chrono::steady_clock::now();
+      const auto action = probe::census_checkpoint_policy(
+        now - started, now - last_service, result.visited_nodes, maximum_nodes,
+        maximum_scan_work_time, scan_service_interval
+      );
+      if (!keep_running.load(std::memory_order_relaxed) || action == probe::census_checkpoint_e::exhausted) {
+        complete = false;
+        aborted = true;
+        return false;
+      }
+      if (action != probe::census_checkpoint_e::service) {
+        return true;
+      }
+      // This runs on the scanning thread: a blocked cross-process COM call also blocks
+      // heartbeats, so the host's existing watchdog can still terminate a hung helper.
+      if (!foreground_current() || !service(foreground_current)) {
+        complete = false;
+        aborted = true;
+        return false;
+      }
+      last_service = std::chrono::steady_clock::now();
+      return true;
+    };
     std::deque<queued_node_t> queue;
     queue.push_back({com_ptr_t<IAccessible> {root_raw}, 0, std::nullopt});
     std::unordered_set<std::uintptr_t> visited;
@@ -487,9 +536,8 @@ namespace {
     std::vector<com_ptr_t<IAccessible>> retained_documents;
     retained_documents.reserve(16);
 
-    while (!queue.empty()) {
-      if (result.visited_nodes >= maximum_nodes || std::chrono::steady_clock::now() > work_deadline) {
-        complete = false;
+    while (!queue.empty() && !aborted) {
+      if (!checkpoint()) {
         break;
       }
       auto node = std::move(queue.front());
@@ -663,8 +711,7 @@ namespace {
         continue;
       }
       for (LONG first = 0; first < child_count;) {
-        if (std::chrono::steady_clock::now() > work_deadline) {
-          complete = false;
+        if (!checkpoint()) {
           break;
         }
         std::array<VARIANT, 64> children;
@@ -693,6 +740,9 @@ namespace {
         }
 
         for (LONG index = 0; index < obtained; ++index) {
+          if (!checkpoint()) {
+            break;
+          }
           auto &child = children[static_cast<std::size_t>(index)];
           if (child.vt == VT_DISPATCH && child.pdispVal) {
             if (!queue_dispatch(
@@ -735,6 +785,9 @@ namespace {
         for (auto &child : children) {
           VariantClear(&child);
         }
+        if (aborted) {
+          break;
+        }
         if (obtained == 0) {
           if (first < child_count) {
             complete = false;
@@ -745,6 +798,9 @@ namespace {
       }
     }
 
+    if (std::chrono::steady_clock::now() - started >= maximum_scan_work_time) {
+      complete = false;
+    }
     const HWND foreground_after = GetAncestor(GetForegroundWindow(), GA_ROOT);
     DWORD process_id_after = 0;
     const auto process_name_after = process_name_for_window(
@@ -752,7 +808,7 @@ namespace {
       process_id_after
     );
     const auto client_rect_after = foreground_client_rect(foreground_after);
-    if (foreground_after != foreground || process_id_after != result.process_id || process_name_after != result.process_name || !client_rect_after || *client_rect_after != result.client_rect || !window_available(foreground_after)) {
+    if (foreground_changed || foreground_after != foreground || process_id_after != result.process_id || process_name_after != result.process_name || !client_rect_after || *client_rect_after != result.client_rect || !window_available(foreground_after)) {
       result.status = scan_status_e::foreground_changed;
       result.candidates.clear();
     } else if (!complete) {
@@ -1278,7 +1334,7 @@ namespace {
     auto last_report = std::chrono::steady_clock::time_point {};
     do {
       pump_messages();
-      auto result = scan_foreground();
+      auto result = scan_foreground([](const auto &) { return true; });
       const auto tentative_selection = select_video(result);
       if (result.status == scan_status_e::warming_up && result.extended_properties_ready) {
         const auto current_semantics = semantic_fingerprint(result, tentative_selection);
@@ -1414,13 +1470,29 @@ namespace {
       const auto object_generation_before_scan = object_change_generation.load(
         std::memory_order_relaxed
       );
-      // A bounded tree walk may consume most of the host freshness budget. Publish the latest
-      // independently revalidated cache immediately before entering cross-process COM calls.
+      // A complete tree walk may outlast the heartbeat budget. Checkpoints retain its traversal
+      // progress while independently refreshing only existing authority; partial candidates stay
+      // private until the complete census and the following tick's exact refresh succeed.
       publish(current, true);
-      auto result = scan_foreground();
-      // Route queued descendant-object events from this census before pumping them. On the first
-      // scan (or a new foreground window) the previous monitored HWND is null or stale; pumping
-      // first would permanently discard churn that must request the three-second follow-up audit.
+      auto result = scan_foreground([&](const auto &foreground_current) {
+        return probe::service_census_checkpoint([&]() {
+          if (cached) {
+            const auto refresh_policy = probe::cached_refresh_policy(
+              cached->phase, refresh_cached_selection(*cached), {}
+            );
+            if (!refresh_policy.retain_selection) {
+              cached.reset();
+              return invalid_machine_record("changed");
+            }
+            cached->phase = refresh_policy.next_phase;
+            return refresh_policy.publish_ok ? machine_record_for_cache(*cached) :
+                                               invalid_machine_record("warming");
+          }
+          return invalid_machine_record("warming");
+        }, foreground_current, [&](const auto &record) { publish(record); });
+      });
+      // Successful scans route events before their first checkpoint. Also clear stale routing
+      // when the census returned early for an unsupported foreground window.
       monitored_window_value.store(
         reinterpret_cast<std::uintptr_t>(
           result.status == scan_status_e::unsupported_foreground ? nullptr :
