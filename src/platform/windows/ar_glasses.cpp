@@ -1623,6 +1623,59 @@ namespace ar_glasses {
                std::nullopt;
     }
 
+    template<class Query, class Apply, class Wait, class Now>
+    bool establish_source_mode_with_io(
+      int width,
+      int height,
+      Query query,
+      Apply apply,
+      Wait wait,
+      Now now,
+      const std::function<bool()> &cancelled
+    ) {
+      // Add publishes an exact identity before Windows necessarily applies the requested mode.
+      // A remembered AR 1080p mode must not make a new native-monitor source unresolvable before
+      // its first setter. Query is identity-only here; callers retain strict geometry afterward.
+      // Allow five seconds for publication, applying at most once per repair attempt. Windows
+      // setters are synchronous; their time counts against the deadline but cannot be interrupted.
+      const auto deadline = now() + 5s;
+      for (int attempt = 0; attempt < 5 && !cancelled(); ++attempt) {
+        bool applied = false;
+        for (int poll = 0; poll < 20 && !cancelled() && now() < deadline; ++poll) {
+          const auto source = query();
+          if (cancelled() || now() >= deadline) {
+            return false;
+          }
+          if (source && source->rect.right - source->rect.left == width && source->rect.bottom - source->rect.top == height && source->refresh_millihz > 0) {
+            return !cancelled();
+          }
+          if (source && !applied) {
+            apply(*source);
+            applied = true;
+          }
+          if (cancelled() || now() >= deadline) {
+            return false;
+          }
+          wait(50ms);
+        }
+      }
+      return false;
+    }
+
+    bool owned_bootstrap_source_identity(
+      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+      std::wstring_view device_path,
+      const active_source_t &source
+    ) {
+      // A path learned while binding the Add result is stronger than recyclable numeric IDs.
+      // Never let a reused LUID/target or an Apollo-like friendly name override that path.
+      if (!device_path.empty()) {
+        return source.device_path == device_path;
+      }
+      return same_luid(source.target.adapter_id, identity.AdapterLuid) &&
+             source.target.target_id == identity.TargetId && is_apollo_ar_virtual_name(source.friendly_name);
+    }
+
     struct resolved_virtual_display_t {
       SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT identity {};
       std::wstring gdi_name;
@@ -1647,7 +1700,8 @@ namespace ar_glasses {
       std::wstring_view device_path,
       std::wstring_view gdi_name,
       int expected_width = source_width,
-      int expected_height = source_height
+      int expected_height = source_height,
+      bool require_geometry = true
     ) {
       const auto snapshot = query_complete_topology_snapshot();
       if (!snapshot) {
@@ -1668,11 +1722,12 @@ namespace ar_glasses {
       };
 
       auto matches = select([&](const auto &source) {
-        return same_luid(source.target.adapter_id, identity.AdapterLuid) &&
-               source.target.target_id == identity.TargetId &&
-               is_local_virtual_source(source);
+        return !require_geometry ? owned_bootstrap_source_identity(identity, device_path, source) :
+                                   same_luid(source.target.adapter_id, identity.AdapterLuid) &&
+                                     source.target.target_id == identity.TargetId &&
+                                     is_local_virtual_source(source);
       });
-      if (matches.empty() && !device_path.empty()) {
+      if (require_geometry && matches.empty() && !device_path.empty()) {
         matches = select([&](const auto &source) {
           // This path was learned from the driver-returned identity while Apollo exclusively
           // owned SudoVDA, so it remains valid when Windows renumbers the target during a mode
@@ -1680,7 +1735,7 @@ namespace ar_glasses {
           return source.device_path == device_path;
         });
       }
-      if (matches.empty() && !gdi_name.empty()) {
+      if (require_geometry && matches.empty() && !gdi_name.empty()) {
         matches = select([&](const auto &source) {
           return source.gdi_name == gdi_name && is_local_virtual_source(source);
         });
@@ -1689,11 +1744,11 @@ namespace ar_glasses {
       // A complete active snapshot can temporarily renumber every published identifier. Any
       // Apollo AR source proves the driver-owned desktop is still present, but an ambiguous match
       // is deliberately not selected for capture or topology mutation.
-      if (matches.empty()) {
+      if (require_geometry && matches.empty()) {
         matches = select(is_local_virtual_source);
       }
       if (matches.empty()) {
-        return {virtual_display_presence_e::absent, std::nullopt};
+        return {require_geometry ? virtual_display_presence_e::absent : virtual_display_presence_e::indeterminate, std::nullopt};
       }
       if (matches.size() != 1) {
         return {virtual_display_presence_e::present, std::nullopt};
@@ -1702,7 +1757,7 @@ namespace ar_glasses {
       const auto &source = *matches.front();
       const bool expected_geometry = source.rect.right - source.rect.left == expected_width &&
                                      source.rect.bottom - source.rect.top == expected_height;
-      if (!expected_geometry) {
+      if (require_geometry && !expected_geometry) {
         // ChangeDisplaySettings can publish an intermediate mode for the retained source. That is
         // present-but-not-ready, never evidence that it is safe to destroy the desktop.
         return {virtual_display_presence_e::present, std::nullopt};
@@ -1729,12 +1784,13 @@ namespace ar_glasses {
       std::wstring_view gdi_name,
       bool *topology_query_succeeded = nullptr,
       int expected_width = source_width,
-      int expected_height = source_height
+      int expected_height = source_height,
+      bool require_geometry = true
     ) {
       if (topology_query_succeeded) {
         *topology_query_succeeded = false;
       }
-      auto probe = probe_virtual_display(identity, device_path, gdi_name, expected_width, expected_height);
+      auto probe = probe_virtual_display(identity, device_path, gdi_name, expected_width, expected_height, require_geometry);
       if (topology_query_succeeded) {
         *topology_query_succeeded = probe.presence != virtual_display_presence_e::indeterminate;
       }
@@ -2834,8 +2890,20 @@ namespace ar_glasses {
         }
 
         if (exclusive_) {
-          if (!refresh_virtual_display_reference() || !virtual_display_.bind() || !virtual_display_.promote()) {
-            BOOST_LOG(error) << "Could not establish the local AR virtual desktop as the exclusive primary display."sv;
+          if (monitor_surface_) {
+            // acquire() has already bound the exact Add result to durable recovery. Windows may
+            // publish neither its native raster nor a stable active CCD route immediately; let
+            // the bounded identity-only repair wait before requiring the final geometry.
+            if (!establish_native_source_mode(active_target.refresh_millihz, cancelled)) {
+              BOOST_LOG(error) << "Could not establish the selected monitor's native local source mode before display replacement."sv;
+              return;
+            }
+          } else if (!refresh_virtual_display_reference() || !virtual_display_.bind()) {
+            BOOST_LOG(error) << "Could not resolve and bind the local AR source after virtual-display creation."sv;
+            return;
+          }
+          if (!virtual_display_.promote()) {
+            BOOST_LOG(error) << (monitor_surface_ ? "Could not apply the selected monitor replacement topology while preserving the other displays."sv : "Could not establish the local AR virtual desktop as the exclusive primary display."sv);
             return;
           }
         } else {
@@ -3621,6 +3689,39 @@ namespace ar_glasses {
         return true;
       }
 
+      bool establish_native_source_mode(int requested_millihz, const std::function<bool()> &cancelled) {
+        const bool established = establish_source_mode_with_io(
+          source_width_,
+          source_height_,
+          [&]() {
+            return refresh_virtual_display_reference(false);
+          },
+          [&](const resolved_virtual_display_t &source) {
+            BOOST_LOG(info) << "Local monitor source bootstrap: observed="sv
+                            << (source.rect.right - source.rect.left) << 'x'
+                            << (source.rect.bottom - source.rect.top) << '@'
+                            << (source.refresh_millihz / 1000.0) << " requested="sv
+                            << source_width_ << 'x' << source_height_ << '@'
+                            << (requested_millihz / 1000.0) << " on owned source "sv
+                            << platf::to_utf8(source.device_path) << '.';
+            VDISPLAY::changeDisplaySettings(source.gdi_name.c_str(), source_width_, source_height_, requested_millihz, false);
+          },
+          [](std::chrono::milliseconds delay) {
+            std::this_thread::sleep_for(delay);
+          },
+          []() {
+            return std::chrono::steady_clock::now();
+          },
+          cancelled
+        );
+        // Mode establishment cannot relax capture, HDR or presentation geometry verification.
+        if (!established || cancelled()) {
+          return false;
+        }
+        const auto verified = refresh_virtual_display_reference();
+        return verified.has_value() && !cancelled();
+      }
+
       bool configure_source_refresh(int requested_millihz, const std::function<bool()> &cancelled) {
         // A successful mode setter is not proof of the active cadence. Conversely, a rejected
         // setter may have applied its baseline mode. Re-resolve the stable source for every
@@ -3737,7 +3838,7 @@ namespace ar_glasses {
         }
       }
 
-      std::optional<resolved_virtual_display_t> refresh_virtual_display_reference() {
+      std::optional<resolved_virtual_display_t> refresh_virtual_display_reference(bool require_geometry = true) {
         std::lock_guard lock(virtual_display_mutex_);
         auto binding = virtual_display_.binding();
         if (!binding.identity) {
@@ -3747,7 +3848,10 @@ namespace ar_glasses {
           *binding.identity,
           binding.device_path,
           binding.display_name,
-          nullptr, source_width_, source_height_
+          nullptr,
+          source_width_,
+          source_height_,
+          require_geometry
         );
         if (!resolved) {
           return std::nullopt;
@@ -4752,6 +4856,37 @@ namespace ar_glasses {
     );
   }
 
+  bool detail::establish_local_source_mode_for_test(
+    int width,
+    int height,
+    const std::function<std::optional<local_source_mode_t>()> &query,
+    const std::function<void()> &apply,
+    const std::function<void(std::chrono::milliseconds)> &wait,
+    const std::function<std::chrono::steady_clock::time_point()> &now,
+    const std::function<bool()> &cancelled
+  ) {
+    return establish_source_mode_with_io(
+      width,
+      height,
+      [&]() -> std::optional<resolved_virtual_display_t> {
+        const auto mode = query();
+        if (!mode) {
+          return std::nullopt;
+        }
+        return resolved_virtual_display_t {
+          .refresh_millihz = mode->refresh_millihz,
+          .rect = {0, 0, mode->width, mode->height},
+        };
+      },
+      [&](const resolved_virtual_display_t &) {
+        apply();
+      },
+      wait,
+      now,
+      cancelled
+    );
+  }
+
   bool detail::primary_source_is_authoritative_for_test(
     std::wstring_view primary_gdi_name,
     const std::vector<std::wstring> &active_gdi_names
@@ -4910,6 +5045,22 @@ namespace ar_glasses {
     bool transition_presenter_paused
   ) {
     return can_re_isolate_local_session(make_test_target(before), make_test_target(after), transition_presenter_paused);
+  }
+
+  bool detail::bootstrap_source_identity_matches_for_test(
+    const virtual_display_identity_contract_t &owned,
+    const virtual_display_identity_contract_t &observed
+  ) {
+    active_source_t source;
+    source.target = {observed.adapter_id, observed.target_id};
+    source.device_path = observed.device_path;
+    source.gdi_name = observed.gdi_name;
+    source.friendly_name = observed.friendly_name;
+    return owned_bootstrap_source_identity(
+      {owned.adapter_id, owned.target_id},
+      owned.device_path,
+      source
+    );
   }
 
   bool detail::retirement_identity_matches_for_test(

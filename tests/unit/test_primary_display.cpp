@@ -3580,6 +3580,28 @@ namespace {
     set_display_mode(fake.catalog, L"monitor", 2560, 1440, 165);
     set_display_mode(fake.catalog, L"virtual", 2560, 1440, 165);
   }
+
+  void secondary_tv_baseline(fake_io_t &fake) {
+    const layout_t physical {{L"UltraGear", 0, 0}, {L"TV", -3840, 0}};
+    fake.current = make_snapshot(physical);
+    set_display_mode(fake.current, L"UltraGear", 5120, 2160, 165);
+    set_display_mode(fake.current, L"TV", 3840, 2160, 120);
+    auto &color = *fake.current.colors[named_index(fake.current, L"TV")];
+    color.advanced_color_enabled = color.hdr_user_enabled = color.advanced_color_active = true;
+    color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+    color.bits_per_color_channel = 12;
+    fake.catalog = make_snapshot({{L"UltraGear", 0, 0}, {L"TV", -3840, 0}, {L"virtual", 5120, 0}});
+    set_display_mode(fake.catalog, L"UltraGear", 5120, 2160, 165);
+    set_display_mode(fake.catalog, L"TV", 3840, 2160, 120);
+    set_display_mode(fake.catalog, L"virtual", 3840, 2160, 120);
+    fake.catalog.colors[named_index(fake.catalog, L"TV")] = color;
+  }
+
+  void secondary_tv_inactive_after_add(fake_io_t &fake, bool native_source = true) {
+    fake.current = make_snapshot({{L"UltraGear", 0, 0}, {L"virtual", 5120, 0}});
+    set_display_mode(fake.current, L"UltraGear", 5120, 2160, 165);
+    set_display_mode(fake.current, L"virtual", native_source ? 3840 : 1920, native_source ? 2160 : 1080, native_source ? 120 : 60);
+  }
 }  // namespace
 
 TEST(PrimaryDisplayMonitorReplacement, PrimaryMonitorKeepsOtherDesktopOutputsAndNativeRaster) {
@@ -3626,6 +3648,99 @@ TEST(PrimaryDisplayMonitorReplacement, SecondaryMonitorDoesNotStealThePhysicalPr
   fake.journal = *roundtrip;
   ASSERT_TRUE(manager.restore(L"virtual"));
   expect_positions(fake.current, {{L"other", 0, 0}, {L"monitor", 1920, 0}, {L"left", -1920, 0}, {L"virtual", 4480, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, ConnectedInactiveSecondary4kTvUsesRecordedNativeModeAndKeepsThe5120Primary) {
+  fake_io_t fake;
+  secondary_tv_baseline(fake);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"TV", true));
+  secondary_tv_inactive_after_add(fake);
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", -3840, 0}, {L"UltraGear", 0, 0}, {L"TV", 5120, 0}});
+  const auto tv = named_index(fake.current, L"TV");
+  const auto &tv_path = fake.current.paths[tv];
+  EXPECT_EQ(fake.current.modes[tv_path.sourceInfo.sourceModeInfoIdx].sourceMode.width, 3840u);
+  EXPECT_EQ(fake.current.modes[tv_path.sourceInfo.sourceModeInfoIdx].sourceMode.height, 2160u);
+  EXPECT_EQ(tv_path.targetInfo.refreshRate.Numerator, 120u);
+  ASSERT_TRUE(fake.current.colors[tv]);
+  EXPECT_TRUE(fake.current.colors[tv]->hdr_user_enabled);
+  EXPECT_TRUE(fake.current.colors[tv]->advanced_color_active);
+  EXPECT_EQ(fake.current.colors[tv]->bits_per_color_channel, 12u);
+  const auto &primary = fake.current.paths[named_index(fake.current, L"UltraGear")];
+  EXPECT_EQ(fake.current.modes[primary.sourceInfo.sourceModeInfoIdx].sourceMode.width, 5120u);
+  EXPECT_EQ(primary.targetInfo.refreshRate.Numerator, 165u);
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"TV", -3840, 0}, {L"UltraGear", 0, 0}, {L"virtual", 5120, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, InactiveSecondaryTvWithoutConnectedRouteCannotApplyReplacement) {
+  fake_io_t fake;
+  secondary_tv_baseline(fake);
+  auto io = fake.io();
+  const auto query_all = io.query_all;
+  io.query_all = [query_all]() -> std::optional<snapshot_t> {
+    auto available = query_all();
+    if (available) {
+      for (size_t i = 0; i < available->paths.size(); ++i) {
+        if (available->device_paths[i] == L"TV") {
+          available->paths[i].targetInfo.targetAvailable = FALSE;
+        }
+      }
+    }
+    return available;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true, L"TV", true));
+  secondary_tv_inactive_after_add(fake);
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.events.clear();
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  ASSERT_TRUE(fake.journal && fake.journal->original_topology);
+  EXPECT_EQ(fake.journal->local_sink, L"TV");
+  expect_positions(fake.current, {{L"UltraGear", 0, 0}, {L"virtual", 5120, 0}});
+}
+
+TEST(PrimaryDisplayMonitorReplacement, AmbiguousInactiveTvTargetCannotApplyReplacement) {
+  fake_io_t fake;
+  secondary_tv_baseline(fake);
+  auto io = fake.io();
+  const auto query_all = io.query_all;
+  io.query_all = [query_all]() -> std::optional<snapshot_t> {
+    auto available = query_all();
+    if (available) {
+      const auto index = named_index(*available, L"TV");
+      auto duplicate = available->paths[index];
+      duplicate.targetInfo.id += 42;
+      duplicate.sourceInfo.id += 42;
+      available->paths.push_back(duplicate);
+      available->device_paths.push_back(L"TV");
+      available->colors.push_back(std::nullopt);
+    }
+    return available;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true, L"TV", true));
+  secondary_tv_inactive_after_add(fake);
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.events.clear();
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+}
+
+TEST(PrimaryDisplayMonitorReplacement, InactiveTvRecoveryStillRequiresTheBootstrappedNativeSourceRaster) {
+  fake_io_t fake;
+  secondary_tv_baseline(fake);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"TV", true));
+  secondary_tv_inactive_after_add(fake, false);
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.events.clear();
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  expect_positions(fake.current, {{L"UltraGear", 0, 0}, {L"virtual", 5120, 0}});
 }
 
 TEST(PrimaryDisplayMonitorReplacement, PauseResumeReplacesTheSameSecondaryWithoutRemovingNeighbors) {

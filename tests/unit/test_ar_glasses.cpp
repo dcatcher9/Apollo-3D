@@ -151,7 +151,167 @@ namespace {
       );
     }
   };
+
+  struct source_mode_probe_t {
+    using mode_t = ar_glasses::detail::local_source_mode_t;
+    std::optional<mode_t> measured = mode_t {1920, 1080, 60000};
+    std::optional<mode_t> after_set;
+    unsigned visible_after_waits = 0;
+    unsigned queries = 0;
+    unsigned setters = 0;
+    unsigned waits = 0;
+    std::chrono::milliseconds elapsed {};
+    std::chrono::milliseconds setter_duration {};
+    bool cancelled = false;
+    bool cancel_on_query = false;
+    bool cancel_on_set = false;
+    bool cancel_on_wait = false;
+
+    bool establish() {
+      return ar_glasses::detail::establish_local_source_mode_for_test(
+        3840,
+        2160,
+        [&]() -> std::optional<mode_t> {
+          ++queries;
+          cancelled = cancelled || cancel_on_query;
+          return waits >= visible_after_waits ? measured : std::nullopt;
+        },
+        [&]() {
+          ++setters;
+          elapsed += setter_duration;
+          if (after_set) {
+            measured = after_set;
+          }
+          cancelled = cancelled || cancel_on_set;
+        },
+        [&](std::chrono::milliseconds delay) {
+          ++waits;
+          elapsed += delay;
+          cancelled = cancelled || cancel_on_wait;
+        },
+        [&]() {
+          return std::chrono::steady_clock::time_point {} + elapsed;
+        },
+        [&]() {
+          return cancelled;
+        }
+      );
+    }
+  };
 }  // namespace
+
+TEST(LocalMonitorBootstrap, RepairsRememberedArGeometryBeforeRequiringNativeReadback) {
+  source_mode_probe_t probe;
+  probe.after_set = source_mode_probe_t::mode_t {3840, 2160, 120000};
+  EXPECT_TRUE(probe.establish());
+  EXPECT_EQ(probe.queries, 2u);
+  EXPECT_EQ(probe.setters, 1u);
+  EXPECT_EQ(probe.elapsed, 50ms);
+}
+
+TEST(LocalMonitorBootstrap, WaitsForOwnedIdentityBeforeTheFirstModeSetter) {
+  source_mode_probe_t probe;
+  probe.visible_after_waits = 40;
+  probe.after_set = source_mode_probe_t::mode_t {3840, 2160, 120000};
+  EXPECT_TRUE(probe.establish());
+  EXPECT_EQ(probe.setters, 1u);
+  EXPECT_EQ(probe.elapsed, 2050ms);
+}
+
+TEST(LocalMonitorBootstrap, NativeGeometryDoesNotReplaceTheLaterCadenceRepair) {
+  source_mode_probe_t probe;
+  probe.measured = source_mode_probe_t::mode_t {3840, 2160, 60000};
+  EXPECT_TRUE(probe.establish());
+  EXPECT_EQ(probe.setters, 0u);
+  EXPECT_EQ(probe.waits, 0u);
+}
+
+TEST(LocalMonitorBootstrap, MatchingRefreshCannotCertifyTheWrongRaster) {
+  source_mode_probe_t probe;
+  probe.measured = source_mode_probe_t::mode_t {1920, 1080, 120000};
+  EXPECT_FALSE(probe.establish());
+  EXPECT_EQ(probe.setters, 5u);
+  EXPECT_EQ(probe.elapsed, 5s);
+}
+
+TEST(LocalMonitorBootstrap, MissingIdentityAndUnknownCadenceRemainBoundedAndUnusable) {
+  source_mode_probe_t missing;
+  missing.measured.reset();
+  EXPECT_FALSE(missing.establish());
+  EXPECT_EQ(missing.setters, 0u);
+  EXPECT_EQ(missing.elapsed, 5s);
+
+  source_mode_probe_t unknown_cadence;
+  unknown_cadence.measured = source_mode_probe_t::mode_t {3840, 2160, 0};
+  EXPECT_FALSE(unknown_cadence.establish());
+  EXPECT_EQ(unknown_cadence.setters, 5u);
+  EXPECT_EQ(unknown_cadence.elapsed, 5s);
+}
+
+TEST(LocalMonitorBootstrap, CancellationCannotMutateOrCertifyAfterAnObservation) {
+  source_mode_probe_t before_query;
+  before_query.cancelled = true;
+  EXPECT_FALSE(before_query.establish());
+  EXPECT_EQ(before_query.queries, 0u);
+
+  source_mode_probe_t during_query;
+  during_query.cancel_on_query = true;
+  EXPECT_FALSE(during_query.establish());
+  EXPECT_EQ(during_query.setters, 0u);
+  EXPECT_EQ(during_query.waits, 0u);
+
+  source_mode_probe_t during_set;
+  during_set.cancel_on_set = true;
+  during_set.after_set = source_mode_probe_t::mode_t {3840, 2160, 120000};
+  EXPECT_FALSE(during_set.establish());
+  EXPECT_EQ(during_set.setters, 1u);
+  EXPECT_EQ(during_set.waits, 0u);
+
+  source_mode_probe_t during_wait;
+  during_wait.cancel_on_wait = true;
+  EXPECT_FALSE(during_wait.establish());
+  EXPECT_EQ(during_wait.elapsed, 50ms);
+}
+
+TEST(LocalMonitorBootstrap, SlowModeSettersConsumeThePublicationDeadline) {
+  source_mode_probe_t probe;
+  probe.setter_duration = 5s;
+  probe.after_set = source_mode_probe_t::mode_t {3840, 2160, 120000};
+  EXPECT_FALSE(probe.establish());
+  EXPECT_EQ(probe.setters, 1u);
+  EXPECT_EQ(probe.waits, 0u);
+}
+
+TEST(LocalMonitorBootstrapIdentity, RequiresDriverIdentityBeforeLearningADevicePath) {
+  ar_glasses::detail::virtual_display_identity_contract_t owned;
+  owned.adapter_id = {42, 0};
+  owned.target_id = 7;
+  auto observed = owned;
+  observed.device_path = L"owned-device-path";
+  observed.gdi_name = L"\\\\.\\DISPLAY5";
+  observed.friendly_name = L"Apollo AR Desktop";
+  EXPECT_TRUE(ar_glasses::detail::bootstrap_source_identity_matches_for_test(owned, observed));
+  observed.target_id = 8;
+  EXPECT_FALSE(ar_glasses::detail::bootstrap_source_identity_matches_for_test(owned, observed));
+  observed.target_id = 7;
+  observed.friendly_name = L"Ordinary monitor";
+  EXPECT_FALSE(ar_glasses::detail::bootstrap_source_identity_matches_for_test(owned, observed));
+}
+
+TEST(LocalMonitorBootstrapIdentity, LearnedPathOverridesRecycledNumericIdentityAndFriendlyNames) {
+  ar_glasses::detail::virtual_display_identity_contract_t owned;
+  owned.adapter_id = {42, 0};
+  owned.target_id = 7;
+  owned.device_path = L"owned-device-path";
+  auto observed = owned;
+  observed.friendly_name = L"Apollo AR Desktop";
+  observed.device_path = L"different-device-path";
+  EXPECT_FALSE(ar_glasses::detail::bootstrap_source_identity_matches_for_test(owned, observed));
+  observed = owned;
+  observed.adapter_id = {123, 0};
+  observed.target_id = 99;
+  EXPECT_TRUE(ar_glasses::detail::bootstrap_source_identity_matches_for_test(owned, observed));
+}
 
 TEST(ArGlassesMode, SelectsNormalForNativeTwoDimensionalMode) {
   EXPECT_EQ(

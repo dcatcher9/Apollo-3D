@@ -1773,18 +1773,22 @@ namespace platf::primary_display {
     }
 
     bool manager_t::promote_monitor(std::wstring_view device_path) {
+      const auto reject = [](std::string_view stage) {
+        BOOST_LOG(warning) << "Local monitor replacement failed at " << stage << '.';
+        return false;
+      };
       auto loaded = io_.load();
       if (!loaded.success || !loaded.journal || !valid_journal(*loaded.journal) || !loaded.journal->monitor_replacement) {
-        return false;
+        return reject("recovery journal validation");
       }
       if (loaded.journal->prepared) {
         if (!bind_pending(device_path)) {
-          return false;
+          return reject("exact virtual-source journal binding");
         }
         loaded = io_.load();
       }
       if (!loaded.success || !loaded.journal || !same_device(loaded.journal->promoted_primary, device_path)) {
-        return false;
+        return reject("bound virtual-source identity verification");
       }
       auto journal = *loaded.journal;
       const auto current = io_.query();
@@ -1792,13 +1796,31 @@ namespace platf::primary_display {
       const auto source_index_now = current ? find_path(*current, device_path) : std::nullopt;
       const auto sink_index_now = current ? find_path(*current, journal.local_sink) : std::nullopt;
       const auto sink_saved = find_path(*journal.original_topology, journal.local_sink);
-      if (!current || !inspect(*current) || !available || available->paths.size() != available->device_paths.size() || available->paths.size() > max_available_paths || !source_index_now || !sink_index_now || !sink_saved) {
-        return false;
+      if (!current || !inspect(*current) || !available || available->paths.size() != available->device_paths.size() || available->paths.size() > max_available_paths || !source_index_now || !sink_saved) {
+        return reject("active source/available-route snapshot validation");
+      }
+      bool connected_sink_route = false;
+      for (size_t i = 0; i < available->paths.size(); ++i) {
+        connected_sink_route = connected_sink_route ||
+                               (available->paths[i].targetInfo.targetAvailable && same_device(available->device_paths[i], journal.local_sink));
+      }
+      if (!sink_index_now && !connected_sink_route) {
+        return reject("inactive selected sink has no exact connected target route");
       }
       auto source = display_spec(*current, *source_index_now);
-      auto sink = display_spec(*current, *sink_index_now);
+      // AddVirtualDisplay can temporarily deactivate a connected physical target while restoring
+      // Windows' remembered virtual mode. The pre-Add journal already owns this exact sink and its
+      // native mode/color. QDC_ALL_PATHS must still prove it connected; build_topology below rejects
+      // ambiguous routes and reconstructs its saved mode before any CCD mutation.
+      auto sink = sink_index_now ? display_spec(*current, *sink_index_now) : display_spec(*journal.original_topology, *sink_saved);
+      if (!sink_index_now) {
+        BOOST_LOG(info) << "Local monitor replacement: selected sink is temporarily inactive; reconstructing its recorded native mode from an exact connected target route.";
+      }
       if (source.source.width != sink.source.width || source.source.height != sink.source.height) {
-        return false;
+        BOOST_LOG(warning) << "Local monitor replacement source/sink raster mismatch: source "
+                          << source.source.width << 'x' << source.source.height << ", sink "
+                          << sink.source.width << 'x' << sink.source.height << '.';
+        return reject("native virtual-source raster verification");
       }
       // Only the source/sink placement proves that replacement reached Windows. A changed
       // neighbor mode, HDR toggle or hotplug cannot turn a saved-but-unapplied intent into proof.
@@ -1840,21 +1862,27 @@ namespace platf::primary_display {
         }
       }
       if (!normalize_monitor_desktop(wanted, same_device(journal.original_primary, journal.local_sink) ? device_path : std::wstring_view(journal.original_primary))) {
-        return false;
+        return reject("interactive desktop origin normalization");
       }
       source = wanted.front();
       // This logical physical snapshot is the reverse operation, saved before parking the sink.
       auto logical = wanted;
       sink.source.position = source.source.position;
       logical.front() = sink;
-      const auto physical_baseline = build_topology(*available, logical);
-      if (!physical_baseline || !park_beside_desktop(sink, wanted)) {
-        return false;
+      std::string_view reconstruction_failure;
+      const auto physical_baseline = build_topology(*available, logical, &reconstruction_failure);
+      if (!physical_baseline) {
+        BOOST_LOG(warning) << "Local monitor physical-baseline reconstruction: " << reconstruction_failure << '.';
+        return reject("physical recovery baseline reconstruction");
+      }
+      if (!park_beside_desktop(sink, wanted)) {
+        return reject("physical sink parking");
       }
       wanted.push_back(sink);
-      const auto desired = build_topology(*available, wanted);
+      const auto desired = build_topology(*available, wanted, &reconstruction_failure);
       if (!desired) {
-        return false;
+        BOOST_LOG(warning) << "Local monitor replacement topology reconstruction: " << reconstruction_failure << '.';
+        return reject("replacement topology reconstruction");
       }
       journal.original_topology = *physical_baseline;
       const auto baseline_layout = inspect(*physical_baseline);
@@ -1862,28 +1890,34 @@ namespace platf::primary_display {
         return entry.x == 0 && entry.y == 0;
       });
       if (primary == baseline_layout->end()) {
-        return false;
+        return reject("preserved physical primary verification");
       }
       journal.original_primary = primary->device_path;
       journal.original = *baseline_layout;
       auto parked_source = source;
       if (!park_beside_desktop(parked_source, logical)) {
-        return false;
+        return reject("retirement-source parking");
       }
       journal.original.push_back({std::wstring(device_path), parked_source.source.position.x, parked_source.source.position.y});
       const auto promoted = translated(journal.original, parked_source.source.position.x, parked_source.source.position.y);
       if (!promoted) {
-        return false;
+        return reject("recovery-layout translation");
       }
       journal.promoted = *promoted;
       journal.exclusive_started = true;
       journal.before_exclusive = *current;
       journal.exclusive_topology = *desired;
       journal.pending_restore.reset();
-      if (!valid_journal(journal) || !io_.save(journal)) {
-        return false;
+      if (!valid_journal(journal)) {
+        return reject("replacement recovery journal validation");
       }
-      return apply_snapshot_verified(*current, *desired);
+      if (!io_.save(journal)) {
+        return reject("durable replacement recovery save");
+      }
+      if (!apply_snapshot_verified(*current, *desired)) {
+        return reject("CCD apply/readback/color verification");
+      }
+      return true;
     }
 
     bool manager_t::promote_exclusive(std::wstring_view device_path, bool reconcile_active_source) {

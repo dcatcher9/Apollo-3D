@@ -211,6 +211,22 @@ namespace ar_glasses {
       const std::function<bool()> &cancelled
     );
 
+    struct local_source_mode_t {
+      int width = 0;
+      int height = 0;
+      int refresh_millihz = 0;
+    };
+
+    bool establish_local_source_mode_for_test(
+      int width,
+      int height,
+      const std::function<std::optional<local_source_mode_t>()> &query,
+      const std::function<void()> &apply,
+      const std::function<void(std::chrono::milliseconds)> &wait,
+      const std::function<std::chrono::steady_clock::time_point()> &now,
+      const std::function<bool()> &cancelled
+    );
+
     struct linear_layout_t {
       RECT virtual_rect {};
       RECT physical_rect {};
@@ -325,6 +341,11 @@ namespace ar_glasses {
       std::wstring gdi_name;
       std::wstring friendly_name;
     };
+
+    bool bootstrap_source_identity_matches_for_test(
+      const virtual_display_identity_contract_t &owned,
+      const virtual_display_identity_contract_t &observed
+    );
 
     /** Match a retiring Apollo source without trusting a possibly reused numeric target ID. */
     bool retirement_identity_matches_for_test(
