@@ -58,6 +58,7 @@ EXPECTED_GROUP_NAMES = (
     "parallax_v2_queued_renderer",
     "current_mask_holes",
     "current_stroke_coverage",
+    "current_foreground_edge",
 )
 ANY_INCLUDE = re.compile(rb"^\s*#\s*include\b")
 QUOTED_INCLUDE = re.compile(rb'^\s*#\s*include\s*"([^"]+)"')

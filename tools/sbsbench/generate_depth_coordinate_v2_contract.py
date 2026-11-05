@@ -68,9 +68,9 @@ CURRENT_OUTLINE_RUNTIME_HEADER = ROOT / "src" / "host_sbs_current_outline_runtim
 CURRENT_BACKGROUND_RUNTIME_HEADER = ROOT / "src" / "host_sbs_selected_glyph_push_pull_runtime.h"
 CURRENT_SHARED_UI_WARP_RUNTIME_HEADER = ROOT / "src" / "host_sbs_shared_ui_warp_runtime.h"
 CURRENT_OUTLINE_RUNTIME_ROOTS = {
-    name: ("outline" if name == "stability" else "hole" if name == "coverage" else name)
+    name: ("outline" if name == "stability" else "hole" if name in {"coverage", "foreground_edge"} else name)
     for name in ("source5", "colour", "components", "enclosure", "roi", "outline", "stability",
-                 "inside", "selector", "hole", "coverage")
+                 "inside", "selector", "hole", "coverage", "foreground_edge")
 }
 # Lines of LIMITER_SERIAL_MAX_LINES cells or fewer keep the serial float recurrence. Longer
 # lines are scanned in LIMITER_LINE_CHUNKS Q30 chunks, LIMITER_GROUP_LINES adjacent lines per

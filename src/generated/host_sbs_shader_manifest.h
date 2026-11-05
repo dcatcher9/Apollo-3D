@@ -88,6 +88,7 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_current_stroke_coverage_clear_offers {"current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl", "clear_offers_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_current_stroke_coverage_prepare {"current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl", "prepare_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_current_stroke_coverage_support {"current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl", "support_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_current_foreground_edge {"current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl", "foreground_edge_main", "cs_5_0"};
 
   inline constexpr std::array preprocess_specs {
     host_sbs_near_identical_fused_preprocess,
@@ -127,7 +128,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_gaussian_horizontal_limit,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "10bde01f74c90532a705986fdc175bf95d291889f52e49175bf60578c320e2d3";
+    "0101ba86546749b03a43e40cf62f3e08f38580bc9f6d329b51d805a5e6e8b984";
 
   inline constexpr std::array parallax_v2_coordinate_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
@@ -248,5 +249,11 @@ namespace models::host_sbs_shader_cache {
   };
   inline constexpr std::string_view current_stroke_coverage_source_closure_sha256 =
     "1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063";
+
+  inline constexpr std::array current_foreground_edge_specs {
+    host_sbs_current_foreground_edge,
+  };
+  inline constexpr std::string_view current_foreground_edge_source_closure_sha256 =
+    "36e2de5b0337270fee63b6e2afb2c3c49f144dd150bdf23ba61460019ab34dcd";
 
 }  // namespace models::host_sbs_shader_cache

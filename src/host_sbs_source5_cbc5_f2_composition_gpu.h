@@ -97,6 +97,7 @@ class resources_t {
   std::array<ComPtr<ID3D11ComputeShader>, 3u> stability_shader_lease_;
   std::array<ComPtr<ID3D11ComputeShader>, 9u> hole_shader_lease_;
   std::array<ComPtr<ID3D11ComputeShader>, 3u> coverage_shader_lease_;
+  std::array<ComPtr<ID3D11ComputeShader>, 1u> foreground_edge_shader_lease_;
   UINT width_ = 0u, full_height_ = 0u, crop_top_ = 0u, band_height_ = 0u;
   std::uint64_t sequence_ = 0u, owner_epoch_ = 0u;
   bool ready_ = false, recorded_ = true, all_stages_issued_ = false;
@@ -117,6 +118,7 @@ class resources_t {
     for (UINT i = 0u; i < stability_shader_lease_.size(); ++i) if (p.outline.stability_shaders[i] != stability_shader_lease_[i].Get()) return false;
     for (UINT i = 0u; i < hole_shader_lease_.size(); ++i) if (p.outline.hole_shaders[i] != hole_shader_lease_[i].Get()) return false;
     for (UINT i = 0u; i < coverage_shader_lease_.size(); ++i) if (p.outline.coverage_shaders[i] != coverage_shader_lease_[i].Get()) return false;
+    for (UINT i = 0u; i < foreground_edge_shader_lease_.size(); ++i) if (p.outline.foreground_edge_shaders[i] != foreground_edge_shader_lease_[i].Get()) return false;
     return true;
   }
 
@@ -175,6 +177,7 @@ class resources_t {
                  std::array<ComPtr<ID3D11ComputeShader>, 3u> &stability_shaders,
                  std::array<ComPtr<ID3D11ComputeShader>, 9u> &hole_shaders,
                  std::array<ComPtr<ID3D11ComputeShader>, 3u> &coverage_shaders,
+                 std::array<ComPtr<ID3D11ComputeShader>, 1u> &foreground_edge_shaders,
                  bool &reused_program,
                  std::string &error) const {
     reused_program = false;
@@ -278,6 +281,10 @@ class resources_t {
     for (auto *shader : p.outline.coverage_shaders) coverage_available = coverage_available && same_device(shader);
     if (coverage_available)
       for (UINT i = 0u; i < coverage_shaders.size(); ++i) coverage_shaders[i] = p.outline.coverage_shaders[i];
+    bool foreground_edge_available = true;
+    for (auto *shader : p.outline.foreground_edge_shaders) foreground_edge_available = foreground_edge_available && same_device(shader);
+    if (foreground_edge_available)
+      for (UINT i = 0u; i < foreground_edge_shaders.size(); ++i) foreground_edge_shaders[i] = p.outline.foreground_edge_shaders[i];
     bool stability_available = true;
     for (auto *s : p.outline.stability_shaders)
       stability_available = stability_available && same_device(s);
@@ -384,8 +391,9 @@ public:
     std::array<ComPtr<ID3D11ComputeShader>, 3u> stability_shaders;
     std::array<ComPtr<ID3D11ComputeShader>, 9u> hole_shaders;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> coverage_shaders;
+    std::array<ComPtr<ID3D11ComputeShader>, 1u> foreground_edge_shaders;
     bool reused_program = false;
-    if (!preflight(context, p, r, shaders, stability_shaders, hole_shaders, coverage_shaders, reused_program, error))
+    if (!preflight(context, p, r, shaders, stability_shaders, hole_shaders, coverage_shaders, foreground_edge_shaders, reused_program, error))
       return false;
     if (sequence_ == std::numeric_limits<std::uint64_t>::max()) {
       error = "Composition host sequence exhausted";
@@ -401,6 +409,7 @@ public:
       stability_shader_lease_ = std::move(stability_shaders);
       hole_shader_lease_ = std::move(hole_shaders);
       coverage_shader_lease_ = std::move(coverage_shaders);
+      foreground_edge_shader_lease_ = std::move(foreground_edge_shaders);
       program_validated_ = true;
     }
     const auto source_request = current_.source_request();
@@ -418,6 +427,7 @@ public:
     program.stage_observer = r.stage_observer;
     for (UINT i = 0u; i < program.hole_shaders.size(); ++i) program.hole_shaders[i] = hole_shader_lease_[i].Get();
     for (UINT i = 0u; i < program.coverage_shaders.size(); ++i) program.coverage_shaders[i] = coverage_shader_lease_[i].Get();
+    for (UINT i = 0u; i < program.foreground_edge_shaders.size(); ++i) program.foreground_edge_shaders[i] = foreground_edge_shader_lease_[i].Get();
     for (UINT i = 0u; i < program.stability_shaders.size(); ++i)
       program.stability_shaders[i] = stability_shader_lease_[i].Get();
     program.enclosure.shaders = p.outline.enclosure.shaders;

@@ -11616,6 +11616,7 @@ namespace models {
       v.current_constants=current.actual_contour_constants96;
       v.current_outline_hole_program_ready=pimpl->subtitle_current_outline_programs.hole_ready();
       v.current_outline_coverage_program_ready=pimpl->subtitle_current_outline_programs.coverage_ready();
+      v.current_outline_foreground_edge_program_ready=pimpl->subtitle_current_outline_programs.foreground_edge_ready();
       const auto cbc_diagnostics = pimpl->subtitle_current_outline_composition.parent_diagnostics();
       const auto f2_diagnostics = pimpl->subtitle_current_outline_composition.diagnostics();
       v.current_outline_cbc_recordings=cbc_diagnostics.recordings;

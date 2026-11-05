@@ -37,7 +37,9 @@ static const uint ADAPTIVE_CLOCK = 8u;
 // Survives abstention, unlike the current mask: clock rearm is not a new cue.
 static const uint ADAPTIVE_PRESENTED = V2_SUBTITLE_PLANE_ADAPTIVE_PRESENTED_FLAG;
 static const uint ADAPTIVE_HOST_MAX_SOURCE_WIDTH = 5120u;
-static const uint ADAPTIVE_COUNT_WORDS = 56u;
+// At width5120, fine index205 plus population/invalid/overflow uses209 words.
+// The256-lane group still clears the complete histogram in one pass.
+static const uint ADAPTIVE_COUNT_WORDS = 209u;
 groupshared uint PreviousState[V2_SUBTITLE_PLANE_STATE_WORD_COUNT];
 groupshared uint ConditionStateSnapshot[V2_SUBTITLE_PLANE_STATE_WORD_COUNT];
 groupshared uint AdaptiveReset, AdaptiveDistinct, AdaptiveOcrValid;
@@ -100,6 +102,12 @@ uint AdaptiveMaximumIndex() {
     // .04 source U / (4/source_width) equals source_width/100. Integer ceil keeps the level
     // bound independent of SM5 division rounding; the last candidate returns the cap exactly.
     return (locator_source.x + 99u) / 100u;
+}
+
+uint AdaptiveFineMaximumIndex() {
+    // .04 source U in one-source-pixel steps. The final candidate returns the
+    // cap exactly, including widths whose cap is a fractional source pixel.
+    return (locator_source.x + 24u) / 25u;
 }
 
 uint AdaptiveRead(bool previous, uint word) {
@@ -444,6 +452,11 @@ float AdaptiveCandidate(uint index, float limit) {
     return min((4.0f * (float)index) / (float)locator_source.x, limit);
 }
 
+float AdaptiveFineCandidate(uint index, float limit) {
+    if (index == AdaptiveFineMaximumIndex()) return limit;
+    return min((float)index / (float)locator_source.x, limit);
+}
+
 bool AdaptiveBudgetPass(uint bad, uint covered, uint content) {
     if (covered == 0u) return true;
     // Calibrated field sizes keep these integer products below 2^32. Equality passes.
@@ -515,7 +528,7 @@ void AdaptiveAdvance() {
 
     uint covered = AdaptiveCounts[0u];
     uint content_area = LocatorContentWidth() * (locator_content.w - locator_content.y);
-    uint maximum_index = AdaptiveMaximumIndex();
+    uint maximum_index = AdaptiveFineMaximumIndex();
     uint required = maximum_index;
     bool required_found = false;
     [loop]
@@ -564,9 +577,10 @@ void AdaptiveAdvance() {
     }
 
     // Current clearance is a diagnostic goal, not a presentation lower bound.
-    uint goal = required;
+    // UIP4 keeps its existing4px diagnostic bucket; only the applied goal is fine.
+    uint goal = (required + 3u) / 4u;
     AdaptiveDisarm(flags, tail);
-    precise float current_goal = AdaptiveCandidate(required, limit);
+    precise float current_goal = AdaptiveFineCandidate(required, limit);
     if ((flags & ADAPTIVE_PRESENTED) == 0u) {
         // No frame confirmation or temporal wait on first visible entry/reentry.
         applied = current_goal;
@@ -590,19 +604,19 @@ void AdaptiveAdvance() {
     AdaptivePublish(tail);
 }
 
-uint AdaptiveFirstNonconflictingIndex(float desired, float limit, uint maximum_index) {
+uint AdaptiveFineFirstNonconflictingIndex(float desired, float limit, uint maximum_index) {
     if (desired <= 0.0f) return 0u;
     if (desired > limit) return maximum_index + 1u;
-    uint index = min((uint)ceil(desired * (float)locator_source.x * 0.25f), maximum_index);
+    uint index = min((uint)ceil(desired * (float)locator_source.x), maximum_index);
     // The arithmetic estimate can straddle a level by one FP32 ULP. Compare against the actual
     // shader candidates so histogram bins retain the strict conflict predicate.
-    if (index != 0u && desired <= AdaptiveCandidate(index - 1u, limit)) --index;
-    if (desired > AdaptiveCandidate(index, limit)) ++index;
+    if (index != 0u && desired <= AdaptiveFineCandidate(index - 1u, limit)) --index;
+    if (desired > AdaptiveFineCandidate(index, limit)) ++index;
     return index;
 }
 
 void AdaptiveResolveHistogram() {
-    uint maximum_index = AdaptiveMaximumIndex();
+    uint maximum_index = AdaptiveFineMaximumIndex();
     uint conflicts = AdaptiveCounts[1u] + AdaptiveCounts[3u + maximum_index];
     // Bucket k names the first candidate that can clear a sample; only buckets above a level
     // conflict with it. The extra bucket above the last level is explicitly unclearable.
@@ -620,7 +634,7 @@ void AdaptiveProbe(uint lane) {
     uint invalid = 0u;
     float limit = AdaptiveMaximumPlane();
     float clearance = 2.0f / (float)locator_source.x;
-    uint maximum_index = AdaptiveMaximumIndex();
+    uint maximum_index = AdaptiveFineMaximumIndex();
     uint pending_bucket = 0xffffffffu;
     uint pending_count = 0u;
     uint current_count = AdaptiveCurrentCount;
@@ -661,7 +675,7 @@ void AdaptiveProbe(uint lane) {
             if (!finite) ++invalid;
             if (finite) {
                 precise float desired = base + clearance;
-                uint bucket = AdaptiveFirstNonconflictingIndex(desired, limit, maximum_index);
+                uint bucket = AdaptiveFineFirstNonconflictingIndex(desired, limit, maximum_index);
                 if (bucket != pending_bucket && pending_count != 0u) {
                     InterlockedAdd(AdaptiveCounts[2u + pending_bucket], pending_count);
                     pending_count = 0u;

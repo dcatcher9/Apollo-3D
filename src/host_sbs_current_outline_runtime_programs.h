@@ -111,6 +111,10 @@ inline constexpr std::array<cache::shader_spec, 3u> coverage_specs{{
   cache::shader_spec{"host_sbs_current_stroke_coverage_cs.hlsl","support_main","cs_5_0"},
 }};
 inline constexpr std::string_view coverage_closure="185fbaed311da1c2f55ad6dfa8fbdf922da8a973e32926cf8ab8032819eb8f8d";
+inline constexpr std::array<cache::shader_spec, 1u> foreground_edge_specs{{
+  cache::shader_spec{"host_sbs_current_foreground_edge_cs.hlsl","foreground_edge_main","cs_5_0"},
+}};
+inline constexpr std::string_view foreground_edge_closure="011e521ceca537b166a4a353fa05c08bb061395e9ef8af5253caa96f8bb493c4";
 inline constexpr std::array<cache::shader_spec, 4u> inside_specs{{
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","prepare_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","emit_init_main","cs_5_0"},
@@ -132,9 +136,10 @@ inline constexpr std::size_t required_compute_shader_count=source5_specs.size()+
 inline constexpr std::size_t stability_compute_shader_offset=required_compute_shader_count;
 inline constexpr std::size_t hole_compute_shader_offset=stability_compute_shader_offset+stability_specs.size();
 inline constexpr std::size_t coverage_compute_shader_offset=hole_compute_shader_offset+hole_specs.size();
-inline constexpr std::size_t unique_compute_shader_count=coverage_compute_shader_offset+coverage_specs.size();
+inline constexpr std::size_t foreground_edge_compute_shader_offset=coverage_compute_shader_offset+coverage_specs.size();
+inline constexpr std::size_t unique_compute_shader_count=foreground_edge_compute_shader_offset+foreground_edge_specs.size();
 static_assert(required_compute_shader_count==51u&&hole_compute_shader_offset==54u&&
-              coverage_compute_shader_offset==63u&&unique_compute_shader_count==66u);
+              coverage_compute_shader_offset==63u&&foreground_edge_compute_shader_offset==66u&&unique_compute_shader_count==67u);
 
 namespace detail {
   inline constexpr std::size_t maximum_bytecode_workers = 4u;
@@ -300,6 +305,7 @@ class programs_t {
   std::string stability_error_;
   std::string hole_error_;
   std::string coverage_error_;
+  std::string foreground_edge_error_;
 
 public:
   bool load(ID3D11Device *device, const std::filesystem::path &parent_root, std::string &error) {
@@ -344,6 +350,12 @@ public:
       } catch (const std::exception &e) {
         next.coverage_error_ = e.what();
       }
+      detail::bytecode_group_t foreground_edge;
+      try {
+        foreground_edge = detail::authenticate_group("foreground_edge", parent_root / "hole", foreground_edge_specs, foreground_edge_closure, bytecodes);
+      } catch (const std::exception &e) {
+        next.foreground_edge_error_ = e.what();
+      }
       detail::prepare_bytecodes(bytecodes);
       auto compile = [&]<std::size_t N>(const detail::bytecode_group_t &group, const std::array<cache::shader_spec, N> &) {
         return detail::create_compute_group<N>(device, group, bytecodes, next.shaders_, at);
@@ -375,6 +387,8 @@ public:
         hole_compute_shader_offset, next.composition_.outline.hole_shaders, next.hole_error_);
       detail::create_optional_compute_group(device, coverage, bytecodes, next.shaders_,
         coverage_compute_shader_offset, next.composition_.outline.coverage_shaders, next.coverage_error_);
+      detail::create_optional_compute_group(device, foreground_edge, bytecodes, next.shaders_,
+        foreground_edge_compute_shader_offset, next.composition_.outline.foreground_edge_shaders, next.foreground_edge_error_);
       next.ready_ = true;
       *this = std::move(next);
       return true;
@@ -417,6 +431,12 @@ public:
   [[nodiscard]] const std::string &coverage_error() const noexcept {
     return coverage_error_;
   }
+
+  [[nodiscard]] bool foreground_edge_ready() const noexcept {
+    return std::all_of(composition_.outline.foreground_edge_shaders.begin(), composition_.outline.foreground_edge_shaders.end(), [](auto *s) { return s != nullptr; });
+  }
+
+  [[nodiscard]] const std::string &foreground_edge_error() const noexcept { return foreground_edge_error_; }
 
   [[nodiscard]] composition::program_t composition_program() const {
     return composition_;

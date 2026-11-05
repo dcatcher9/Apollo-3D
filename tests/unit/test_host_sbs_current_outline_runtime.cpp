@@ -244,7 +244,9 @@ namespace {
     EXPECT_EQ(runtime::required_compute_shader_count, 51u);
     EXPECT_EQ(runtime::hole_compute_shader_offset, 54u);
     EXPECT_EQ(runtime::coverage_compute_shader_offset, 63u);
-    EXPECT_EQ(runtime::unique_compute_shader_count, 66u);
+    EXPECT_EQ(runtime::foreground_edge_compute_shader_offset,66u);
+    EXPECT_EQ(runtime::unique_compute_shader_count, 67u);
+    EXPECT_EQ(runtime::foreground_edge_specs.size(),1u);
     const auto root = directory / "optional-compute";
     std::filesystem::create_directory(root);
     {
@@ -258,7 +260,7 @@ namespace {
     ASSERT_TRUE(sources);
     const auto code = cache::get(sources, specs[0u]);
     ASSERT_TRUE(code);
-    std::vector<runtime::detail::bytecode_request_t> requests(15u, {sources, specs[0u], code, {}});
+    std::vector<runtime::detail::bytecode_request_t> requests(16u, {sources, specs[0u], code, {}});
     std::array<ComPtr<ID3D11ComputeShader>, runtime::unique_compute_shader_count> owned;
     const runtime::detail::bytecode_group_t core {"core", 0u, 1u};
     std::size_t at = 0u;
@@ -318,6 +320,29 @@ namespace {
     }
     for (auto *handle : coverage_handles) EXPECT_EQ(handle, nullptr);
     EXPECT_EQ(owned[0u].Get(), core_handle);
+    // FG has its own optional segment. Restoring coverage and then failing FG
+    // must preserve every already-published core/C7/G1/cache handle.
+    requests[13u].code=code;
+    coverage_error.clear(); // A fresh retry must discard the intentionally retained earlier failure.
+    runtime::detail::create_optional_compute_group(device.Get(),coverage,requests,owned,
+      runtime::coverage_compute_shader_offset,coverage_handles,coverage_error);
+    ASSERT_TRUE(coverage_error.empty())<<coverage_error;
+    const auto current_coverage=coverage_handles;
+    const runtime::detail::bytecode_group_t fg{"foreground_edge",15u,1u};
+    std::array<ID3D11ComputeShader*,1u> fg_handles{};std::string fg_error;
+    runtime::detail::create_optional_compute_group(device.Get(),fg,requests,owned,
+      runtime::foreground_edge_compute_shader_offset,fg_handles,fg_error);
+    ASSERT_TRUE(fg_error.empty())<<fg_error;ASSERT_NE(fg_handles[0u],nullptr);
+    EXPECT_EQ(owned[66u].Get(),fg_handles[0u]);
+    requests[15u].code.reset();
+    runtime::detail::create_optional_compute_group(device.Get(),fg,requests,owned,
+      runtime::foreground_edge_compute_shader_offset,fg_handles,fg_error);
+    EXPECT_FALSE(fg_error.empty());EXPECT_EQ(fg_handles[0u],nullptr);EXPECT_FALSE(owned[66u]);
+    EXPECT_EQ(owned[0u].Get(),core_handle);
+    for(std::size_t i=0u;i<3u;++i){EXPECT_EQ(owned[51u+i].Get(),retained_stability[i]);EXPECT_EQ(owned[63u+i].Get(),current_coverage[i]);}
+    for(std::size_t i=0u;i<9u;++i)EXPECT_EQ(owned[54u+i].Get(),retained_hole[i]);
+    runtime::programs_t unavailable;
+    EXPECT_FALSE(unavailable.foreground_edge_ready());
   }
 }  // namespace
 #endif

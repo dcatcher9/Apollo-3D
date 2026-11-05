@@ -168,13 +168,15 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Native foreground-client pictures share Chromium's crop-local subtitle reference.
             126: "9229139554b939eab1f9d33660122770106cdca38af601256d967fa5107dca0c",
             # Authenticated identity-only history publication for force-infer feature owners.
-            127: "b3768340a2953943fce4173ba84d07f6bd6d22e2a4004dcb34b3294238058c8a",
+            # Reviewed producer-body refresh for the integer-pixel clearance search; the
+            # separately asserted public tag, layout and timing semantics remain unchanged.
+            127: "dc007fd6ab26b4a5acd0809d7a2e9e9a65b56b4efd94f287bbb7297a5f7d3e85",
         }
         contract = generator.load_contract()
         self.assertEqual(
             expected_digest_by_schema.get(contract["schema"]),
             generator.contract_digest(contract),
-            "v2 semantics changed without a reviewed schema version",
+            "v2 contract or shader identity changed without a reviewed identity pin",
         )
         self.assertEqual(generator.contract_tag(contract), 0x2B6FE941)
         self.assertEqual(
@@ -183,7 +185,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "10bde01f74c90532a705986fdc175bf95d291889f52e49175bf60578c320e2d3",
+            "0101ba86546749b03a43e40cf62f3e08f38580bc9f6d329b51d805a5e6e8b984",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

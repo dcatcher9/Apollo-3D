@@ -119,9 +119,11 @@ fallbacks. This file-fed full-source check establishes renderer wiring and prove
 not establish live capture eligibility, window-region behavior, visual quality or live timing.
 Ordinary metric PNGs, schemas and scores remain separate.
 
-Qualification schema5 binds the shared renderer without a retired completed-pixel-shader field.
-Schemas1–4 remain retired read-only formats and never qualify the current rendering policy;
-source, coordinate-contract and executable checks still apply.
+Qualification schema6 also binds the foreground-edge compute closure and requires its shader
+availability at the root and every frame. Availability is not evidence of GPU execution. The
+shared renderer has no retired completed-pixel-shader field. Schemas1–5 remain read-only formats
+and never qualify the current rendering policy; source, coordinate-contract and executable
+checks still apply.
 
 Schema2 added a binding for
 `current-outline/selected_matte_<id>.u32`, the exact post-draw selected t3 input in little-endian

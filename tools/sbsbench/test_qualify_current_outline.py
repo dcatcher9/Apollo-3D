@@ -142,6 +142,125 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
         (self.output / qualification.MANIFEST).write_text(json.dumps(document or self.document), encoding="utf-8")
         return qualification.validate_qualification(self.output, self.frames, self.executable, **kwargs)
 
+    def document_for_schema(self, schema):
+        """Authored ABI bytes only; program readiness does not assert GPU execution."""
+        document = copy.deepcopy(self.document)
+        document["schema"] = schema
+        for key in ("completed_source_closure_sha256", "background_source_closure_sha256"):
+            document.pop(key, None)
+        document.update(qualification.expected_closures(schema))
+        if schema >= 3:
+            document.update(composition_source_closures=qualification.expected_composition_closures(schema),
+                            hole_program_ready=True, coverage_program_ready=True)
+        if schema >= 6:
+            document["foreground_edge_program_ready"] = True
+        for frame in document["frames"]:
+            selected = frame["selected_receipt"]
+            width, height, top, band = selected[4:8]
+            if schema >= 2:
+                path = self.output / f"current-outline/selected_matte_{frame['source_file_id']}.u32"
+                path.write_bytes(bytes(width * band * 4))
+                frame["selected_mask"] = {
+                    "file": path.relative_to(self.output).as_posix(), "sha256": qualification._sha(path),
+                    "size": [width, band], "source_rect": [0, top, width, height],
+                    "byte_count": width * band * 4, "format": "r32_uint_little_endian_0_or_1",
+                }
+            if schema >= 3:
+                frame.update(hole_program_ready=True, coverage_program_ready=True)
+                cbc, raw, f2 = ([0] * count for count in (512, 512, 68608))
+                cbc[:4] = [0x31434E45, 5, 1, 0]
+                cbc[4] = cbc[5] = cbc[9] = 1
+                cbc[16:40] = selected[4:28]
+                cbc[40:44] = [0x31434E45, 1, 1, 2]
+                cbc[44:52] = [width, band, 28, 1, width, height, 28, 1]
+                cbc[52:56] = [*selected[60:62], 1, 1 ^ 0x6F435257]
+                cbc[56:60] = [*selected[16:18], *selected[20:22]]
+                cbc[60:64] = [*selected[18:20], 0, 0]
+                cbc[64:72] = [0, 0, width, height, 5, 0, 4, 136]
+                cbc[80] = frame["contour_identity"][3]
+                raw[:4] = [0x31474E52, 1, 1, 0]
+                raw[12:36], raw[36:52] = selected[4:28], cbc[:16]
+                f2[:4] = [0x37424643, 7, 1, 0]
+                f2[8:32], f2[32:48] = selected[4:28], raw[:16]
+                directory = self.output / f"current-outline/producer-stages/frame_{frame['source_file_id']}"
+                directory.mkdir(parents=True, exist_ok=True)
+                buffers = {}
+                for (name, (words, role, dimension, view_format, stride)), data in zip(
+                        qualification.PRODUCER_STAGES.items(), (cbc, raw, f2)):
+                    path = directory / f"{name}.u32"
+                    path.write_bytes(struct.pack(f"<{words}I", *data))
+                    buffers[name] = {
+                        "file": path.relative_to(self.output).as_posix(), "sha256": qualification._sha(path),
+                        "word_count": words, "byte_count": words * 4, "format": "uint32-little-endian",
+                        "role": role, "view_dimension": dimension, "view_format": view_format,
+                        "view_first_element": 0, "view_word_count": words, "resource_byte_count": words * 4,
+                        "structure_stride_bytes": stride,
+                    }
+                frame["producer_stages"] = {
+                    "scope": "diagnostic-only-exact-completed-composition", "pending_queued": False,
+                    "selected_matte_matches_draw": True, "selected_receipt_matches_draw": True,
+                    **{key: frame[key] for key in ("completed_frame_id", "observation_timestamp_us",
+                                                   "analysis_generation", "transaction_token",
+                                                   "source_snapshot_sha256")}, "buffers": buffers,
+                }
+            if schema >= 4:
+                serial = frame.pop("background_serial")
+                frame.pop("background_proof")
+                frame.pop("background_expected")
+                pin_top = max(0, top - 1)
+                frame["shared_warp"] = {
+                    "renderer": "shared-ui-pin-band", "shape": [width, height, pin_top, height - pin_top],
+                    "draw_serial": serial, "selected_receipt_header": 1,
+                    "active_rows": [0] * (height - pin_top),
+                }
+            if schema >= 6:
+                frame["foreground_edge_program_ready"] = True
+        return document
+
+    def test_schema6_requires_current_foreground_edge_source_and_availability(self):
+        document = self.document_for_schema(6)
+        self.assertIn("foreground_edge", document["composition_source_closures"])
+        result = self.validate(document)
+        self.assertEqual(result["renderer_schema"], 6)
+        self.assertTrue(result["renderer_policy_current"])
+        self.assertEqual(result["producer_stage_current_frames"], 2)
+
+    def test_schema6_rejects_missing_false_or_nonboolean_readiness_at_root_and_each_frame(self):
+        document = self.document_for_schema(6)
+        for index in (None, 0, 1):
+            for value in (False, 0, 1, None, "missing"):
+                with self.subTest(frame=index, value=value):
+                    changed = copy.deepcopy(document)
+                    owner = changed if index is None else changed["frames"][index]
+                    if value == "missing":
+                        owner.pop("foreground_edge_program_ready")
+                    else:
+                        owner["foreground_edge_program_ready"] = value
+                    with self.assertRaisesRegex(ValueError, "unknown or missing|foreground-edge"):
+                        self.validate(changed)
+
+    def test_schema6_rejects_missing_changed_or_extra_composition_roles(self):
+        document = self.document_for_schema(6)
+        for change in (lambda roles: roles.pop("foreground_edge"),
+                       lambda roles: roles.update(foreground_edge="0" * 64),
+                       lambda roles: roles.update(unexpected="0" * 64)):
+            changed = copy.deepcopy(document)
+            change(changed["composition_source_closures"])
+            with self.assertRaisesRegex(ValueError, "composition source closures"):
+                self.validate(changed)
+
+    def test_schemas1_through5_remain_read_only_without_foreground_edge_fields(self):
+        for schema in range(1, 6):
+            with self.subTest(schema=schema):
+                document = self.document_for_schema(schema)
+                self.assertNotIn("foreground_edge_program_ready", document)
+                self.assertNotIn("foreground_edge", document.get("composition_source_closures", {}))
+                result = self.validate(document)
+                self.assertFalse(result["renderer_policy_current"])
+                document["foreground_edge_program_ready"] = True
+                with self.assertRaisesRegex(ValueError, "unknown or missing"):
+                    self.validate(document)
+
     def test_current_selected_proof_and_source_sequence_are_qualified(self):
         result = self.validate(timeline=self.timeline)
         self.assertEqual(result["status"], "PASS")

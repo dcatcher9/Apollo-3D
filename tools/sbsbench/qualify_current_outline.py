@@ -143,10 +143,11 @@ def expected_closures(schema=1):
     return result
 
 
-def expected_composition_closures():
+def expected_composition_closures(schema=5):
     source = generator.CURRENT_OUTLINE_RUNTIME_HEADER.read_text(encoding="utf-8")
     result = {}
-    for role in COMPOSITION_ROLES:
+    roles = (*COMPOSITION_ROLES, "foreground_edge") if schema >= 6 else COMPOSITION_ROLES
+    for role in roles:
         match = re.search(rf'inline constexpr std::string_view {role}_closure="([0-9a-f]{{64}})";', source)
         _require(match is not None, f"native composition {role} closure is absent")
         result[role] = match[1]
@@ -249,10 +250,14 @@ def _validate_frame(frame, ordinal, source, clock, output, scale, schema):
         fields.add("producer_stages")
         fields.add("hole_program_ready")
         fields.add("coverage_program_ready")
+    if schema >= 6:
+        fields.add("foreground_edge_program_ready")
     _closed(frame, fields, "qualified frame")
     if schema >= 3:
         _require(frame["hole_program_ready"] is True, "current mask-hole programs were unavailable")
         _require(frame["coverage_program_ready"] is True, "current stroke-coverage programs were unavailable")
+    if schema >= 6:
+        _require(frame["foreground_edge_program_ready"] is True, "current foreground-edge program was unavailable")
     source_id = FRAME_NAME.fullmatch(source.name)[1]
     _require(_uint(frame["observation_ordinal"], "observation ordinal", positive=True) == ordinal and
              _uint(frame["completed_frame_id"], "completed frame", positive=True) == ordinal,
@@ -389,8 +394,10 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
         root_fields.add("composition_source_closures")
         root_fields.add("hole_program_ready")
         root_fields.add("coverage_program_ready")
+    if type(schema) is int and schema >= 6:
+        root_fields.add("foreground_edge_program_ready")
     _closed(document, root_fields, "qualification manifest")
-    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4, 5} and
+    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4, 5, 6} and
              document["status"] == "COMPLETE" and document["role"] == ROLE and
              document["ordinary_metric_artifacts"] == "unchanged-legacy-native-matte-renderer" and
              document["live_capture"] is False and document["source_transfer"] == "encoded-srgb" and
@@ -406,8 +413,10 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
     if document["schema"] >= 3:
         _require(document["hole_program_ready"] is True, "current mask-hole programs were unavailable")
         _require(document["coverage_program_ready"] is True, "current stroke-coverage programs were unavailable")
-        _require(document["composition_source_closures"] == expected_composition_closures(),
+        _require(document["composition_source_closures"] == expected_composition_closures(document["schema"]),
                  "producer stage composition source closures differ")
+    if document["schema"] >= 6:
+        _require(document["foreground_edge_program_ready"] is True, "current foreground-edge program was unavailable")
     calibrations = [item for item in coordinate.MODEL_CALIBRATIONS if item.depth_model == document["model"] and
                     item.depth_model_url == document["model_url"] and item.onnx_sha256 == document["onnx_sha256"] and
                     item.raw_coordinate_scale == document["raw_coordinate_scale"]]
@@ -443,7 +452,7 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
                          if path.is_file()}
         _require(stages == actual_stages, "producer stage artifact coverage differs")
     return {"schema": 1, "status": "PASS", "frame_count": len(outcomes),
-            "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] == 5,
+            "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] == 6,
             "selected_current_frames": sum(item[3] == 3 for item in outcomes),
             "background_valid_frames": sum(item[4] == 1 for item in outcomes) if document["schema"] < 4 else 0,
             "shared_warp_frames": len(outcomes) if document["schema"] >= 4 else 0,

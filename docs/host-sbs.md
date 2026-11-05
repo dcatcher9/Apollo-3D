@@ -71,7 +71,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 127/tag `0x2B6FE941`, canonical SHA-256
-`b3768340a2953943fce4173ba84d07f6bd6d22e2a4004dcb34b3294238058c8a`. It binds the
+`dc007fd6ab26b4a5acd0809d7a2e9e9a65b56b4efd94f287bbb7297a5f7d3e85`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -82,7 +82,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 29 | `10bde01f74c90532a705986fdc175bf95d291889f52e49175bf60578c320e2d3` |
+| `parallax_v2_producer` | 29 | `0101ba86546749b03a43e40cf62f3e08f38580bc9f6d329b51d805a5e6e8b984` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `1ed356a5904c324842a493f14758ed04d8b05bad9e9ca03375ef8a534dee4a9c` |
 | `near_identical_detector` | 4 | `ba5f8ca3ca402a7fff876e974c0775c28e5391ddc5841aa423d3b2d328295831` |
 | `gpu_trace` | 1 | `783a932493b2060c26735dc8bb14fcc785c6c2451b830f7d730e57437383ec08` |
@@ -98,6 +98,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `parallax_v2_queued_renderer` | 1 | `1058907ac7dca7cc73ee5beb20d318e8ab760a36e7b7503bbe2a8d69d7a23d52` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
+| `current_foreground_edge` | 1 | `36e2de5b0337270fee63b6e2afb2c3c49f144dd150bdf23ba61460019ab34dcd` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -200,8 +201,10 @@ The subtitle path transfers Game 3D's UI mask/protection/plane ideas using Host'
 cores and paired coarse covers to bound native current pixel evidence. It does not add a logo detector.
 Exact current OCR authority remains required; no separate cover ownership qualification remains.
 The controller probes immutable post-limit Base over the union of all current covers, deduplicating
-overlaps and including edge covers. Candidates advance in four per-eye analysis-source-pixel
-steps through the full `0.04` representation bound; the final candidate is exactly `0.04`.
+overlaps and including edge covers. The applied goal searches in steps of one per-eye analysis-source
+pixel through the full `0.04` representation bound; the final candidate is exactly `0.04`.
+The serialized diagnostic index retains its four-pixel scale: it is the ceiling of the internal
+one-pixel index divided by four. The existing UIP4 layout and coarse-index validators remain valid.
 A Base sample conflicts above candidate minus two per-eye analysis-source pixels. Entry uses
 more than 20% of covered cells or 2% of content cells. Under
 `current-clearance-goal-first-visible-immediate-symmetric-source-time-exponential-native-slew-empty-reset-v3`,
@@ -219,6 +222,9 @@ explicit exceptions to slew. These response parameters are not an XR comfort qua
 
 The goal is the existing histogram entry-budget candidate, not the maximum Base value over the
 scene or an all-glyph clearance requirement. It permits the same conflict budgets as before.
+The finer internal search changes the authenticated producer implementation digest. The public
+schema/tag and timing policy remain unchanged: no state layout, units, clearance budget or
+clock interpretation changes, and captured state is not retagged.
 An authenticated capped-conflict flag records that even the top candidate cannot satisfy those
 budgets. Presentation can temporarily remain below a rising goal, so its current conflict budget
 can exceed 20%/2% during that transition. The goal, representation cap and subsequent shared limits do not guarantee no crossing,
@@ -1451,6 +1457,33 @@ AA/history donor permission. The existing selector retains original native SDR/H
 Validation scope and unresolved cases belong to the
 [finite coverage record](host-sbs-review-followups.md#p12-generic-original-stroke-coverage);
 this rule alone establishes no general subtitle, live-XR or performance acceptance.
+
+##### Current foreground edge recovery
+
+An independent optional pass runs after Inside and C7/G1. It copies that completed binary mask
+into an immutable native snapshot; the pass reads this snapshot for both query and donor membership
+and writes the existing final mask. New pixels never become donors during the pass.
+
+A missing pixel requires current cover ownership, a current learned outline-colour model and
+qualified foreground families for every covering unit. Colour-model readiness is independent of
+physical-width adoption, Inside membership or BODY membership. Within an owning unit's native ROI,
+an eight-neighbour donor must already have snapshot M1, own LOW support and source RGB8 in exactly
+one qualified foreground family. The query must admit one common foreground fraction across all
+three RGB quantization intervals between that actual donor colour and the learned outline-colour
+interval. Both contributions must satisfy the existing `5/255` visibility test. A matching current
+RGB8 outside all covers on the same row vetoes recovery; unavailable exterior evidence abstains.
+
+The pass ORs only missing pixels, preserves original source RGB and outlines, and updates the
+existing F2 unique-add counters. It changes no Raw/Code1 pixels, width estimate, AA history or
+renderer mapping. Missing programs, allocation failure or invalid current operands preserve the
+previous mask. Root0 has a zero dispatch and grants no new source observation. The snapshot and
+program views remain in the existing recorded-command and source leases.
+
+The finite nine-case check recovered 392 visible inner-edge pixels and 16 visible outer-edge
+pixels without adding zero-alpha background or withdrawing original ink. This is not general
+glyph-alpha recovery: detached unseeded punctuation and broad glow remain limitations. The
+[combined refinement review](host-sbs-review-followups.md#p19-foreground-edges-and-integer-clearance-goals)
+records the mask, stereo and background comparison scope.
 
 ##### Proposed shared-width original-outline detection (unimplemented)
 

@@ -1054,3 +1054,71 @@ results do not measure live startup latency or FPS. Live XR startup evidence rem
 The superseded deferred-loader checkpoint and its thirteen passing mechanism tests remain
 external historical evidence, not validation of this final shared-only cleanup. The
 mask-recovery goal remains open separately.
+
+### P19 foreground edges and integer clearance goals
+
+Two bounded changes address missing text edges and unnecessary background deformation. The
+foreground pass uses an immutable post-Inside/C7/G1 mask, current qualified foreground donors and
+one shared RGB blend interval with the current learned outline colour. It preserves source RGB
+and generates no outlines. The UI-plane controller searches the same cover population and
+clearance budgets on a one-source-pixel grid, while retaining the public four-pixel diagnostic
+index, cap, clock rules and symmetric continuation filter.
+
+The foreground hypothesis was measured on nine previously exposed authored development first
+cues, using actual D3D production-mask readbacks and independent original RGBA alpha. It recovers
+392 visible inner-edge pixels and 16 visible outer-edge pixels; no new zero-alpha background or
+original-ink withdrawal occurs. One of the additional three cases has valid EMPTY OCR and remains
+a full missed-ink case in the score. The six-case fixed-plane stereo replay improves 291
+foreground pixels with none worse; five cases are byte-identical. Background error improves on
+142 pixels and worsens on 48, with at most one RGB8 level of mean-channel error increase. This
+does not solve detached unseeded punctuation, broad glow, or the existing false foreground
+families. Native-scale OCR crops also fail to recover the 74 recorded punctuation misses.
+
+The integer-goal study retains all fourteen authored geometry cases, all source-only budget
+checks and twelve actual GPU route/reference positions. Every foreground-cohort mean error,
+both source/layer references and left/right eyes improve or tie; both local and full-frame
+background means improve or tie. Kai moves from eight to seven pixels: foreground MAE improves
+from 8.252 to 6.791 RGB8 and local background from 1.308 to 1.011. The checker case moves from
+twelve to eleven: foreground improves from 15.630 to 14.432 and local background from 1.469 to
+0.020. The other twelve cases tie these primary means. All fourteen integer candidates pass
+the original 20% cover/2% content conflict budgets and native field invariants.
+
+These are finite mean/percentile improvements, not pointwise or XR-comfort guarantees. Kai has
+927 background pixels with worse error and 4,525 with better error; its worst channel error
+increases from 190 to 202, while p99 decreases from 50 to 38. The checker maximum decreases
+from 209 to 7. Continuous fractional goals and preservation of an unrelated supplied phase were
+rejected after foreground/background regressions. A separate exact vertical-exterior colour
+veto stayed inactive on all six cases and is not integrated.
+
+The external evidence root is `E:\ApolloDev\subtitle-mask-background-20261104`. The nine-case
+alpha receipts are `private-resume-v1/fg-edge-all6-quality-v3.json` and
+`private-resume-v1/fg-family-def-quality-v2.json`; the two fixed-plane RGB receipts are
+`private-resume-v1/fg-fixed-{original,supplemental}-RGB-quality-v1.json`. Integer source-only
+feasibility is `integer-plane-v6/integer-validation-v6.json`; the complete measurement is
+`integer-plane-quality-v6/report.json` (SHA256
+`2ea5465a9728bee0305cc87ff856a2f3397cefa29c10b0bcd7ef8fccee8c44e6`).
+All stages use the same recorded machine evaluation interpreter and package fingerprint. No
+captured state was retagged and no CPU mask candidate or renderer supplied these measurements.
+
+The production port passes all nine saved composition replays against the actual GPU hypothesis
+masks, including the 392-pixel mixed-width recovery. All 55 controller GPU tests pass, including
+four new regressions covering integer goals, coarse-tail compatibility, cap edges, ROI union,
+invalid input, clocks and empty reset. The five optional-program runtime tests and five shared-warp
+ownership tests also pass.
+
+Five foreground-owner GPU regressions pass. Two use explicitly authored current records to isolate
+overlap accounting, immutable donors and disabled/zero-dispatch/stale-context behavior; the other
+three exercise the production composition snapshot, binding restoration and foreign-device
+rejection. The nine saved replays above supply the separate real-producer mask-parity evidence.
+
+The actual main executable passes schema-6 qualification for 54 observations across nine source
+sequences. Applied planes use the finer targets and every final blank publishes canonical zero.
+The Latin control has identical source/timeline bytes; its finer continuation moves below the old
+twelve-pixel target. This proves integration, not isolated stereo quality: the RGB evidence above
+comes from the fourteen native renderer cases. The external actual-main integration audit is
+`actual-main-plane-integration-v1.json` (SHA256
+`1ca386738ad03eae0e168aa4da951b4aec6f0c9aa6140a5de1275ab6fdbfeeab`).
+
+Packaged qualification and the requested combined live build are tracked separately from these
+development measurements. Live headset acceptance remains pending; shader availability by itself
+proves neither execution nor a visible gain.

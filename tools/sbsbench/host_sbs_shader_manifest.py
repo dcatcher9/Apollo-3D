@@ -376,6 +376,11 @@ HOST_SBS_CURRENT_STROKE_COVERAGE_SUPPORT = ShaderSpec(
     source_entrypoint="support_main",
     source_target="cs_5_0",
 )
+HOST_SBS_CURRENT_FOREGROUND_EDGE = ShaderSpec(
+    source_file="current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
+    source_entrypoint="foreground_edge_main",
+    source_target="cs_5_0",
+)
 
 SHADER_SPECS: Dict[str, ShaderSpec] = {
     "buffer_to_tex": BUFFER_TO_TEX,
@@ -448,6 +453,7 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "host_sbs_current_stroke_coverage_clear_offers": HOST_SBS_CURRENT_STROKE_COVERAGE_CLEAR_OFFERS,
     "host_sbs_current_stroke_coverage_prepare": HOST_SBS_CURRENT_STROKE_COVERAGE_PREPARE,
     "host_sbs_current_stroke_coverage_support": HOST_SBS_CURRENT_STROKE_COVERAGE_SUPPORT,
+    "host_sbs_current_foreground_edge": HOST_SBS_CURRENT_FOREGROUND_EDGE,
 }
 
 PREPROCESS_GROUP = ClosureGroup(
@@ -497,7 +503,7 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_GAUSSIAN_VERTICAL_LIMIT,
         HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT,
     ),
-    source_closure_sha256="10bde01f74c90532a705986fdc175bf95d291889f52e49175bf60578c320e2d3",
+    source_closure_sha256="0101ba86546749b03a43e40cf62f3e08f38580bc9f6d329b51d805a5e6e8b984",
 )
 
 PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
@@ -695,6 +701,17 @@ CURRENT_STROKE_COVERAGE_GROUP = ClosureGroup(
     source_closure_sha256="1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063",
 )
 
+CURRENT_FOREGROUND_EDGE_GROUP = ClosureGroup(
+    name="current_foreground_edge",
+    description=(
+        "Optional current-source foreground antialias recovery from an immutable post-completion mask, current qualified foreground seeds and a common foreground/outline RGB interval. Failure preserves the existing mask."
+    ),
+    specs=(
+        HOST_SBS_CURRENT_FOREGROUND_EDGE,
+    ),
+    source_closure_sha256="36e2de5b0337270fee63b6e2afb2c3c49f144dd150bdf23ba61460019ab34dcd",
+)
+
 CLOSURE_GROUPS: Dict[str, ClosureGroup] = {
     "preprocess": PREPROCESS_GROUP,
     "parallax_v2_producer": PARALLAX_V2_PRODUCER_GROUP,
@@ -713,4 +730,5 @@ CLOSURE_GROUPS: Dict[str, ClosureGroup] = {
     "parallax_v2_queued_renderer": PARALLAX_V2_QUEUED_RENDERER_GROUP,
     "current_mask_holes": CURRENT_MASK_HOLES_GROUP,
     "current_stroke_coverage": CURRENT_STROKE_COVERAGE_GROUP,
+    "current_foreground_edge": CURRENT_FOREGROUND_EDGE_GROUP,
 }
