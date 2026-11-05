@@ -181,12 +181,36 @@ TEST(ShutterPresentFeedback, StaleFeedbackFlushesOnceAndStopsAtABoundedDeadline)
   auto io = probe.io();
   probe.displayed_at = probe.now;
   io.query = [&]() {
-    return shutter::shutter_feedback_t {shutter::shutter_feedback_status_e::available, probe.present_id - 1u, 0};
+    ++probe.queries;
+    return shutter::shutter_feedback_t {shutter::shutter_feedback_status_e::available, probe.present_id - 1u, 0, 73, 1234567, 0};
   };
-  EXPECT_EQ(shutter::await_shutter_present(io, probe.present_id, false).status, shutter::shutter_feedback_wait_status_e::timeout);
+  const auto result = shutter::await_shutter_present(io, probe.present_id, false);
+  EXPECT_EQ(result.status, shutter::shutter_feedback_wait_status_e::timeout);
+  EXPECT_EQ(result.feedback.present_count, probe.present_id - 1u);
+  EXPECT_EQ(result.feedback.sync_refresh_count, 73u);
+  EXPECT_EQ(result.feedback.sync_qpc, 1234567);
+  EXPECT_EQ(result.feedback.result_code, 0);
+  EXPECT_EQ(result.queries, probe.queries);
+  EXPECT_EQ(result.flushes, 1u);
+  EXPECT_EQ(result.waits, 1250u);
   EXPECT_EQ(probe.now.time_since_epoch(), 250ms);
   EXPECT_EQ(probe.flushes, 1u);
   EXPECT_EQ(probe.waits.size(), 1250u);
+}
+
+TEST(ShutterPresentFeedback, UnsupportedFeedbackRetainsTheRawFailureWithoutPublishingOrAuthorizing) {
+  feedback_probe_t probe;
+  auto io = probe.io();
+  constexpr auto dxgi_unsupported = static_cast<std::int32_t>(0x887A0004u);
+  io.query = [&]() {
+    return shutter::shutter_feedback_t {shutter::shutter_feedback_status_e::unsupported, 0, 0, 0, 0, dxgi_unsupported};
+  };
+  const auto result = shutter::await_shutter_present(io, probe.present_id, true);
+  EXPECT_EQ(result.status, shutter::shutter_feedback_wait_status_e::unsupported);
+  EXPECT_EQ(result.feedback.result_code, dxgi_unsupported);
+  EXPECT_EQ(result.queries, 1u);
+  EXPECT_EQ(result.flushes, 0u);
+  EXPECT_EQ(result.waits, 0u);
 }
 
 TEST(ShutterPresentFeedback, CancellationInterruptsSubframeWaitAndAvoidsAnyFurtherQuery) {

@@ -50,9 +50,9 @@ priority over local presentation. Use borderless fullscreen for games so their w
 desktop handoff. A game tied to an exclusive physical output may need a switch to borderless or
 windowed mode before entering local 3D.
 
-A Windows sign-in or permission-screen transition stops the monitor session, because the normal
-presenter and its shortcuts cannot operate on the secure desktop. Start 3D again after returning
-to the ordinary desktop.
+Unlock Windows and dismiss its lock or sign-in screen before starting 3D. A lock, sign-in, or
+permission-screen transition stops the monitor session and restores 2D. Start 3D again after
+returning to the ordinary desktop.
 
 **Refreshes per eye** controls how many physical refreshes repeat one eye before switching.
 For example, a 330 Hz monitor with two refreshes per eye switches eyes at 165 Hz and presents

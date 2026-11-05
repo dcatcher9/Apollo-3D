@@ -142,36 +142,6 @@ namespace {
     return static_cast<bool>(result);
   }
 
-  bool is_user_session_locked() {
-	LPWSTR buffer { nullptr };
-	const auto cleanup_guard {
-		util::fail_guard([&buffer]() {
-			if (buffer) {
-				WTSFreeMemory(buffer);
-			}
-		})
-	};
-
-	DWORD buffer_size_in_bytes { 0 };
-	if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTSGetActiveConsoleSessionId(), WTSSessionInfoEx, &buffer, &buffer_size_in_bytes)) {
-		if (buffer_size_in_bytes > 0) {
-			const auto wts_info { reinterpret_cast<const WTSINFOEXW *>(buffer) };
-			if (wts_info && wts_info->Level == 1) {
-				const bool is_locked { wts_info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK };
-				BOOST_LOG(debug) << "is_user_session_locked: " << is_locked;
-				return is_locked;
-			}
-		}
-
-		BOOST_LOG(warning) << "Failed to get session info in is_user_session_locked.";
-	}
-	else {
-		BOOST_LOG(error) << get_error_string(GetLastError()) << " failed while calling WTSQuerySessionInformationW!";
-	}
-
-	return false;
-  }
-
   bool test_no_access_to_ccd_api() {
 	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
 	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
@@ -191,6 +161,33 @@ namespace {
   }
 }  // namespace
 
+std::optional<bool> query_console_session_locked() {
+  LPWSTR buffer = nullptr;
+  const auto cleanup_guard = util::fail_guard([&buffer]() {
+    if (buffer) {
+      WTSFreeMemory(buffer);
+    }
+  });
+  DWORD buffer_size_in_bytes = 0;
+  if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTSGetActiveConsoleSessionId(), WTSSessionInfoEx, &buffer, &buffer_size_in_bytes)) {
+    BOOST_LOG(error) << get_error_string(GetLastError()) << " failed while calling WTSQuerySessionInformationW!";
+    return std::nullopt;
+  }
+  const auto *wts_info = reinterpret_cast<const WTSINFOEXW *>(buffer);
+  if (!wts_info || buffer_size_in_bytes < sizeof(WTSINFOEXW) || wts_info->Level != 1) {
+    BOOST_LOG(warning) << "Failed to get valid console session info in query_console_session_locked.";
+    return std::nullopt;
+  }
+  const auto flags = wts_info->Data.WTSInfoExLevel1.SessionFlags;
+  if (flags != WTS_SESSIONSTATE_LOCK && flags != WTS_SESSIONSTATE_UNLOCK) {
+    BOOST_LOG(warning) << "Unknown console session lock state in query_console_session_locked: " << flags;
+    return std::nullopt;
+  }
+  const bool locked = flags == WTS_SESSIONSTATE_LOCK;
+  BOOST_LOG(debug) << "query_console_session_locked: " << locked;
+  return locked;
+}
+
 bool is_changing_settings_going_to_fail() {
-	return is_user_session_locked() || test_no_access_to_ccd_api();
+	return query_console_session_locked().value_or(false) || test_no_access_to_ccd_api();
 }

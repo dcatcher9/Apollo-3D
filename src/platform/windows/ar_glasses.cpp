@@ -21,10 +21,12 @@
 #include "src/system_tray.h"
 #include "src/utility.h"
 #include "src/uuid.h"
+#include "utils.h"
 #include "virtual_display.h"
 #include "virtual_display_session.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -71,6 +73,92 @@ namespace ar_glasses {
     std::mutex physical_monitor_error_mutex;
     std::string physical_monitor_error;
 
+    std::wstring desktop_object_name(HANDLE desktop) {
+      wchar_t name[256] {};
+      DWORD size = 0;
+      return desktop && GetUserObjectInformationW(desktop, UOI_NAME, name, sizeof(name), &size) ?
+               std::wstring(name) :
+               std::wstring {};
+    }
+
+    bool same_windows_name(std::wstring_view left, std::wstring_view right) {
+      return left.size() == right.size() && std::equal(left.begin(), left.end(), right.begin(), [](wchar_t a, wchar_t b) {
+               return std::towlower(a) == std::towlower(b);
+             });
+    }
+
+    std::wstring window_process_name(HWND window) {
+      DWORD process_id = 0;
+      if (!window || !GetWindowThreadProcessId(window, &process_id)) {
+        return {};
+      }
+      const auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+      if (!process) {
+        return {};
+      }
+      std::array<wchar_t, 1024> path {};
+      DWORD size = static_cast<DWORD>(path.size());
+      const bool queried = QueryFullProcessImageNameW(process, 0, path.data(), &size);
+      CloseHandle(process);
+      if (!queried) {
+        return {};
+      }
+      const std::wstring_view image(path.data(), size);
+      const auto separator = image.find_last_of(L"\\/");
+      return std::wstring(image.substr(separator == std::wstring_view::npos ? 0 : separator + 1));
+    }
+
+    bool lock_screen_overlay_present(std::optional<RECT> selected_monitor) {
+      if (same_windows_name(window_process_name(GetForegroundWindow()), L"LockApp.exe")) {
+        return true;
+      }
+      if (!selected_monitor) {
+        return false;
+      }
+      const POINT center {
+        static_cast<LONG>((static_cast<std::int64_t>(selected_monitor->left) + selected_monitor->right) / 2),
+        static_cast<LONG>((static_cast<std::int64_t>(selected_monitor->top) + selected_monitor->bottom) / 2),
+      };
+      const auto hit = WindowFromPhysicalPoint(center);
+      const auto shell_lock_window = [](HWND window) {
+        wchar_t class_name[256] {};
+        return window && GetClassNameW(window, class_name, static_cast<int>(std::size(class_name))) &&
+               same_windows_name(class_name, L"LockScreenInputOcclusionFrame") &&
+               same_windows_name(window_process_name(window), L"explorer.exe");
+      };
+      return shell_lock_window(hit) || shell_lock_window(GetAncestor(hit, GA_ROOT));
+    }
+
+    std::string_view monitor_desktop_block_reason(
+      std::optional<bool> session_locked,
+      std::wstring_view input_desktop,
+      std::wstring_view presentation_desktop,
+      bool lock_overlay_present
+    ) {
+      if (session_locked && *session_locked) {
+        return "Unlock Windows and return to your desktop before starting Monitor 3D again."sv;
+      }
+      if (lock_overlay_present) {
+        return "Dismiss the Windows lock or sign-in screen, then start Monitor 3D again."sv;
+      }
+      if (!session_locked) {
+        return "Windows session state could not be verified. Return to your unlocked desktop, then start Monitor 3D again."sv;
+      }
+      if (!same_windows_name(input_desktop, L"Default") || !same_windows_name(presentation_desktop, L"Default")) {
+        return "Monitor 3D returned to 2D for a Windows sign-in or permission screen. Start 3D again after closing it."sv;
+      }
+      return {};
+    }
+
+    std::string_view query_monitor_desktop_block_reason(std::wstring_view presentation_desktop, std::optional<RECT> selected_monitor = std::nullopt) {
+      const auto locked = query_console_session_locked();
+      const auto desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+      const auto input_name = desktop_object_name(desktop);
+      if (desktop) {
+        CloseDesktop(desktop);
+      }
+      return monitor_desktop_block_reason(locked, input_name, presentation_desktop, lock_screen_overlay_present(selected_monitor));
+    }
 
     std::mutex ownership_mutex;
     std::condition_variable ownership_changed;
@@ -2877,6 +2965,14 @@ namespace ar_glasses {
         }
         auto active_target = target;
         if (monitor_surface_) {
+          // API callers can live on a service/tray desktop. The input desktop and console
+          // session are authoritative here, immediately before any new display preparation.
+          if (const auto reason = query_monitor_desktop_block_reason(L"Default", target.rect); !reason.empty()) {
+            request_monitor_session(false);
+            std::lock_guard lock(physical_monitor_error_mutex);
+            physical_monitor_error = reason;
+            return;
+          }
           desktop_handoff_ = std::make_shared<platf::monitor_desktop_handoff_t>();
           if (!desktop_handoff_->capture(target.rect)) {
             BOOST_LOG(error) << "Could not capture the selected monitor's interactive desktop before 3D activation."sv;
@@ -4083,7 +4179,9 @@ namespace ar_glasses {
         if (monitor_surface_) {
           presenter_config.on_failure = [](std::string reason) {
             std::lock_guard lock(physical_monitor_error_mutex);
-            physical_monitor_error = "Monitor 3D stopped: " + std::move(reason) + ". Check the emitter connection and fixed display refresh rate, then start 3D again.";
+            if (physical_monitor_requested.load()) {
+              physical_monitor_error = "Monitor 3D stopped: " + std::move(reason) + ". Check the emitter connection and fixed display refresh rate, then start 3D again.";
+            }
           };
         }
         presenter_config.hdr = virtual_hdr_active_;
@@ -4229,41 +4327,36 @@ namespace ar_glasses {
         });
         if (config::video.local_monitor.enabled) {
           monitor_hotkeys_ = std::jthread([](std::stop_token stop_token) {
-            if (!platf::syncThreadDesktop()) {
+            const bool desktop_synced = platf::syncThreadDesktop();
+            if (!desktop_synced) {
               BOOST_LOG(warning) << "Could not register monitor shortcuts on the interactive desktop; use the web UI or tray."sv;
-              return;
             }
             constexpr int toggle_id = 0x5333;
             constexpr int stop_id = 0x5330;
             const UINT modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT;
-            const bool toggle_registered = RegisterHotKey(nullptr, toggle_id, modifiers, '3');
-            const bool stop_registered = RegisterHotKey(nullptr, stop_id, modifiers, '0');
+            const bool toggle_registered = desktop_synced && RegisterHotKey(nullptr, toggle_id, modifiers, '3');
+            const bool stop_registered = desktop_synced && RegisterHotKey(nullptr, stop_id, modifiers, '0');
             auto cleanup = util::fail_guard([&]() {
               if (toggle_registered) UnregisterHotKey(nullptr, toggle_id);
               if (stop_registered) UnregisterHotKey(nullptr, stop_id);
             });
-            if (!toggle_registered || !stop_registered) {
+            if (desktop_synced && (!toggle_registered || !stop_registered)) {
               BOOST_LOG(warning) << "A local-monitor shortcut is already reserved. Use the web UI or tray to stop 3D."sv;
             }
-            const auto desktop_name = [](HANDLE desktop) -> std::wstring {
-              wchar_t name[256] {};
-              DWORD size = 0;
-              return desktop && GetUserObjectInformationW(desktop, UOI_NAME, name, sizeof(name), &size) ? std::wstring(name) : std::wstring {};
-            };
-            const auto presentation_desktop = desktop_name(GetThreadDesktop(GetCurrentThreadId()));
+            const auto presentation_desktop = desktop_object_name(GetThreadDesktop(GetCurrentThreadId()));
+            auto next_desktop_check = std::chrono::steady_clock::now();
             while (!stop_token.stop_requested()) {
-              if (monitor_requested()) {
-                const auto input_desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
-                const auto input_name = desktop_name(input_desktop);
-                if (input_desktop) CloseDesktop(input_desktop);
-                if (input_name.empty() || input_name != presentation_desktop) {
+              if (monitor_requested() && std::chrono::steady_clock::now() >= next_desktop_check) {
+                next_desktop_check = std::chrono::steady_clock::now() + 100ms;
+                const auto selected = find_target(platf::from_utf8(config::video.local_monitor.display_id));
+                if (const auto reason = query_monitor_desktop_block_reason(presentation_desktop, selected ? std::make_optional(selected->rect) : std::nullopt); !reason.empty()) {
                   // A private primary source must not hide a sign-in/UAC screen on the secure
-                  // desktop, where the presentation HWND and its hotkeys cannot operate.
+                  // desktop, or a lock-screen overlay which Windows can place on Default.
+                  request_monitor_session(false);
                   {
                     std::lock_guard lock(physical_monitor_error_mutex);
-                    physical_monitor_error = "Monitor 3D returned to 2D for a Windows sign-in or permission screen. Start 3D again after closing it.";
+                    physical_monitor_error = reason;
                   }
-                  request_monitor_session(false);
                 }
               }
               MSG message {};
@@ -4989,6 +5082,15 @@ namespace ar_glasses {
   }  // namespace
 
 #ifdef SUNSHINE_TESTS
+  std::string detail::monitor_desktop_block_reason_for_test(
+    std::optional<bool> session_locked,
+    std::wstring_view input_desktop,
+    std::wstring_view presentation_desktop,
+    bool lock_overlay_present
+  ) {
+    return std::string(monitor_desktop_block_reason(session_locked, input_desktop, presentation_desktop, lock_overlay_present));
+  }
+
   int detail::local_source_refresh_millihz_for_test(std::uint32_t numerator, std::uint32_t denominator) {
     return source_refresh_millihz(numerator, denominator);
   }
@@ -5512,14 +5614,19 @@ namespace ar_glasses {
 
   bool request_monitor_session(bool start) {
     if (start) {
-      if (physical_monitor_requested.load()) {
-        return true;
-      }
       const auto fail = [](std::string message) {
         std::lock_guard lock(physical_monitor_error_mutex);
         physical_monitor_error = std::move(message);
         return false;
       };
+      constexpr std::wstring_view presentation_desktop = L"Default";
+      if (const auto reason = query_monitor_desktop_block_reason(presentation_desktop); !reason.empty()) {
+        request_monitor_session(false);
+        return fail(std::string(reason));
+      }
+      if (physical_monitor_requested.load()) {
+        return true;
+      }
       const auto &settings = config::video.local_monitor;
       if (!settings.enabled || settings.display_id.empty() || settings.emitter_port.empty()) {
         return fail("Configure a physical monitor and emitter, save, and restart Sunshine 3D before starting 3D.");
@@ -5543,6 +5650,9 @@ namespace ar_glasses {
             target->refresh_millihz, settings.mode == "game") == presentation_mode_e::unsupported) {
         return fail("The selected monitor must be connected in a supported extended-desktop mode before starting 3D.");
       }
+      if (const auto reason = query_monitor_desktop_block_reason(presentation_desktop, target->rect); !reason.empty()) {
+        return fail(std::string(reason));
+      }
       const auto period = platf::open3d::eye_period_us(target->refresh_millihz, settings.eye_repeats);
       const platf::open3d::settings_t emitter_settings {
         .port = settings.emitter_port,
@@ -5556,10 +5666,10 @@ namespace ar_glasses {
       if (!period || !platf::open3d::detail::valid_settings(emitter_settings)) {
         return fail("The shutter timing does not fit this monitor's refresh rate. Shorten the timing window or increase refreshes per eye in Monitor settings before starting 3D.");
       }
-      physical_monitor_requested.store(true);
       {
         std::lock_guard lock(physical_monitor_error_mutex);
         physical_monitor_error.clear();
+        physical_monitor_requested.store(true);
       }
     } else {
       const bool was_requested = physical_monitor_requested.exchange(false);

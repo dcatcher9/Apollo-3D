@@ -191,6 +191,13 @@ namespace ar_glasses {
     }
 
 #ifdef SUNSHINE_TESTS
+    std::string monitor_desktop_block_reason_for_test(
+      std::optional<bool> session_locked,
+      std::wstring_view input_desktop,
+      std::wstring_view presentation_desktop = L"Default",
+      bool lock_overlay_present = false
+    );
+
     /** Primary evidence is authoritative only when it names an active CCD source. */
     bool primary_source_is_authoritative_for_test(
       std::wstring_view primary_gdi_name,

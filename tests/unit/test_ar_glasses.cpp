@@ -15,6 +15,33 @@
 
 using namespace std::chrono_literals;
 
+TEST(LocalMonitorDesktopGuard, LockedSessionOnDefaultDesktopRequiresUnlockingWindows) {
+  const auto reason = ar_glasses::detail::monitor_desktop_block_reason_for_test(true, L"Default");
+  EXPECT_NE(reason.find("Unlock Windows"), std::string::npos);
+}
+
+TEST(LocalMonitorDesktopGuard, UnlockedDefaultDesktopMayStartOrContinuePresentation) {
+  EXPECT_TRUE(ar_glasses::detail::monitor_desktop_block_reason_for_test(false, L"Default").empty());
+  EXPECT_TRUE(ar_glasses::detail::monitor_desktop_block_reason_for_test(false, L"default", L"DEFAULT").empty());
+}
+
+TEST(LocalMonitorDesktopGuard, VisibleLockOverlayBlocksAnApparentlyUnlockedDefaultDesktop) {
+  const auto reason = ar_glasses::detail::monitor_desktop_block_reason_for_test(false, L"Default", L"Default", true);
+  EXPECT_NE(reason.find("Dismiss the Windows lock or sign-in screen"), std::string::npos);
+}
+
+TEST(LocalMonitorDesktopGuard, UnknownSessionStateCannotCertifyAnInteractiveDesktop) {
+  const auto reason = ar_glasses::detail::monitor_desktop_block_reason_for_test(std::nullopt, L"Default");
+  EXPECT_NE(reason.find("could not be verified"), std::string::npos);
+}
+
+TEST(LocalMonitorDesktopGuard, SecureOrUnavailableDesktopsCannotStartOrContinuePresentation) {
+  EXPECT_FALSE(ar_glasses::detail::monitor_desktop_block_reason_for_test(false, L"Winlogon").empty());
+  EXPECT_FALSE(ar_glasses::detail::monitor_desktop_block_reason_for_test(false, L"Default", L"Winlogon").empty());
+  EXPECT_FALSE(ar_glasses::detail::monitor_desktop_block_reason_for_test(false, L"Winlogon", L"Winlogon").empty());
+  EXPECT_FALSE(ar_glasses::detail::monitor_desktop_block_reason_for_test(false, L"").empty());
+}
+
 TEST(LocalMonitor, NativePhysicalModesAreIndependentOfArPacking) {
   using enum ar_glasses::presentation_mode_e;
   EXPECT_EQ(ar_glasses::classify_monitor_mode(5120, 2160, 165000, false), monitor_host);

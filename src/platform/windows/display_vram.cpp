@@ -9109,26 +9109,55 @@ namespace platf::dxgi {
           return;
         }
         detail::shutter_presentation_clock_t eye_clock {static_cast<unsigned>(eye_repeats)};
+        const auto qpc_now = []() {
+          LARGE_INTEGER counter {};
+          QueryPerformanceCounter(&counter);
+          return counter.QuadPart;
+        };
+        LARGE_INTEGER qpc_frequency {};
+        QueryPerformanceFrequency(&qpc_frequency);
+        std::optional<detail::shutter_feedback_t> first_feedback;
+        HRESULT flush_result = S_FALSE;
+        std::int64_t flush_start_qpc = 0;
+        std::int64_t flush_end_qpc = 0;
         const detail::shutter_feedback_wait_io_t feedback_io {
-          .now = []() { return std::chrono::steady_clock::now(); },
+          .now = []() {
+            return std::chrono::steady_clock::now();
+          },
           .cancelled = stopped,
           .query = [&]() {
             DXGI_FRAME_STATISTICS statistics {};
             const auto queried = swapchain->GetFrameStatistics(&statistics);
-            if (queried == S_OK) {
-              return detail::shutter_feedback_t {detail::shutter_feedback_status_e::available, statistics.PresentCount, statistics.PresentRefreshCount};
+            const detail::shutter_feedback_t feedback {
+              queried == S_OK                                 ? detail::shutter_feedback_status_e::available :
+              queried == DXGI_ERROR_FRAME_STATISTICS_DISJOINT ? detail::shutter_feedback_status_e::disjoint :
+                                                                detail::shutter_feedback_status_e::unsupported,
+              statistics.PresentCount,
+              statistics.PresentRefreshCount,
+              statistics.SyncRefreshCount,
+              statistics.SyncQPCTime.QuadPart,
+              static_cast<std::int32_t>(queried),
+            };
+            if (!first_feedback) {
+              first_feedback = feedback;
             }
-            return detail::shutter_feedback_t {queried == DXGI_ERROR_FRAME_STATISTICS_DISJOINT ?
-                                                detail::shutter_feedback_status_e::disjoint :
-                                                detail::shutter_feedback_status_e::unsupported};
+            return feedback;
           },
           // Hardware Flip Queue may not publish statistics until DWM is flushed. This is one
           // synchronous OS call per stale present, with no worker or extra present queue.
-          .flush = []() { return SUCCEEDED(DwmFlush()); },
-          .wait_until = [&](auto deadline) { return feedback_waiter->wait_until(deadline); },
+          .flush = [&]() {
+            flush_start_qpc = qpc_now();
+            flush_result = DwmFlush();
+            flush_end_qpc = qpc_now();
+            return SUCCEEDED(flush_result);
+          },
+          .wait_until = [&](auto deadline) {
+            return feedback_waiter->wait_until(deadline);
+          },
         };
         ID3D11Texture2D *pair = nullptr;
         bool has_displayed = false;
+        std::optional<std::uint32_t> previous_displayed_refresh;
         while (!stopped()) {
           if (!emitter.healthy() || shutter_frames.failed()) {
             fail("USB emitter or shared stereo packet became unavailable");
@@ -9154,8 +9183,15 @@ namespace platf::dxgi {
           const UINT left = left_eye ? 0 : static_cast<UINT>(output_width);
           const D3D11_BOX eye_box {left, 0, 0, left + static_cast<UINT>(output_width), static_cast<UINT>(output_height), 1};
           shutter_context->CopySubresourceRegion(backbuffer.Get(), 0, 0, 0, 0, pair, 0, &eye_box);
+          first_feedback.reset();
+          flush_result = S_FALSE;
+          flush_start_qpc = flush_end_qpc = 0;
+          UINT before_present_count = 0;
+          const auto before_count_result = swapchain->GetLastPresentCount(&before_present_count);
           DXGI_PRESENT_PARAMETERS parameters {};
+          const auto present_start_qpc = qpc_now();
           const auto presented = swapchain->Present1(eye_repeats, DXGI_PRESENT_RESTRICT_TO_OUTPUT, &parameters);
+          const auto present_end_qpc = qpc_now();
           if (presented != S_OK) {
             // Occlusion is not a successful scanout. Never continue emitting an alternating eye
             // sequence while Windows is showing some other image on the selected monitor.
@@ -9163,22 +9199,81 @@ namespace platf::dxgi {
             break;
           }
           UINT requested_present = 0;
-          if (FAILED(swapchain->GetLastPresentCount(&requested_present))) {
+          const auto present_count_result = swapchain->GetLastPresentCount(&requested_present);
+          if (FAILED(present_count_result)) {
+            BOOST_LOG(error) << "Local shutter present identity failure: Present1="sv << util::log_hex(presented)
+                             << " GetLastPresentCount="sv << util::log_hex(present_count_result) << '.';
             fail("DXGI could not identify the submitted eye frame");
             break;
           }
           const auto confirmation = detail::await_shutter_present(feedback_io, requested_present, !has_displayed);
+          const auto confirmation_qpc = qpc_now();
+          const auto log_feedback_failure = [&]() {
+            const auto first = first_feedback.value_or(detail::shutter_feedback_t {});
+            const auto &last = confirmation.feedback;
+            constexpr std::array status_names {"displayed", "cancelled", "timeout", "unsupported", "flush_failed", "wait_failed"};
+            BOOST_LOG(error) << "Local shutter scanout feedback: result="sv
+                             << status_names[static_cast<std::size_t>(confirmation.status)]
+                             << " requested="sv << requested_present << " prior_submitted="sv << before_present_count
+                             << " first_eye="sv << !has_displayed << " left="sv << left_eye << " repeats="sv << eye_repeats
+                             << " Present1="sv << util::log_hex(presented)
+                             << " count_hr="sv << util::log_hex(present_count_result)
+                             << " prior_count_hr="sv << util::log_hex(before_count_result)
+                             << " queries="sv << confirmation.queries << " flushes="sv << confirmation.flushes << " waits="sv << confirmation.waits
+                             << " first_hr="sv << util::log_hex(first.result_code)
+                             << " first_present="sv << first.present_count << " first_refresh="sv << first.refresh_count
+                             << " first_sync_refresh="sv << first.sync_refresh_count << " first_sync_qpc="sv << first.sync_qpc
+                             << " last_hr="sv << util::log_hex(last.result_code)
+                             << " last_present="sv << last.present_count << " last_refresh="sv << last.refresh_count
+                             << " last_sync_refresh="sv << last.sync_refresh_count << " last_sync_qpc="sv << last.sync_qpc
+                             << " previous_displayed_refresh="sv << previous_displayed_refresh.value_or(0)
+                             << " qpc_frequency="sv << qpc_frequency.QuadPart
+                             << " present_start_qpc="sv << present_start_qpc << " present_end_qpc="sv << present_end_qpc
+                             << " confirmation_qpc="sv << confirmation_qpc
+                             << " flush_hr="sv << util::log_hex(flush_result)
+                             << " flush_start_qpc="sv << flush_start_qpc << " flush_end_qpc="sv << flush_end_qpc << '.';
+
+            // Read-only, failure-only probes distinguish composition feedback from a stale or
+            // wrong output. They never authorize an eye or replace the confirmed-present gate.
+            BOOL fullscreen = FALSE;
+            const auto fullscreen_result = swapchain->GetFullscreenState(&fullscreen, nullptr);
+            Microsoft::WRL::ComPtr<IDXGIOutput> containing_output;
+            DXGI_OUTPUT_DESC containing_desc {};
+            auto containing_result = swapchain->GetContainingOutput(&containing_output);
+            if (SUCCEEDED(containing_result)) {
+              containing_result = containing_output->GetDesc(&containing_desc);
+            }
+            Microsoft::WRL::ComPtr<IDXGISwapChainMedia> media;
+            DXGI_FRAME_STATISTICS_MEDIA media_stats {};
+            auto media_result = swapchain.As(&media);
+            if (SUCCEEDED(media_result)) {
+              media_result = media->GetFrameStatisticsMedia(&media_stats);
+            }
+            BOOST_LOG(error) << "Local shutter scanout context: target="sv << target_display_name
+                             << " containing="sv << platf::to_utf8(containing_desc.DeviceName)
+                             << " containing_hr="sv << util::log_hex(containing_result)
+                             << " fullscreen="sv << fullscreen << " fullscreen_hr="sv << util::log_hex(fullscreen_result)
+                             << " format="sv << swapchain_desc.Format << " swap_effect="sv << swapchain_desc.SwapEffect
+                             << " flags="sv << swapchain_desc.Flags << " present_flags="sv << DXGI_PRESENT_RESTRICT_TO_OUTPUT
+                             << " hdr="sv << config.hdr << " media_hr="sv << util::log_hex(media_result)
+                             << " media_present="sv << media_stats.PresentCount << " media_refresh="sv << media_stats.PresentRefreshCount
+                             << " media_sync_refresh="sv << media_stats.SyncRefreshCount << " media_sync_qpc="sv << media_stats.SyncQPCTime.QuadPart
+                             << " composition_mode="sv << media_stats.CompositionMode << '.';
+          };
           if (confirmation.status == detail::shutter_feedback_wait_status_e::cancelled) {
             break;
           }
           if (confirmation.status != detail::shutter_feedback_wait_status_e::displayed) {
+            log_feedback_failure();
             fail("DXGI scanout feedback is unavailable, late, or invalid on this display configuration; returning to 2D");
             break;
           }
           if (!eye_clock.observe_displayed(confirmation.feedback.refresh_count)) {
+            log_feedback_failure();
             fail("DXGI could not prove an uninterrupted eye scanout cadence; restart after checking display timing");
             break;
           }
+          previous_displayed_refresh = confirmation.feedback.refresh_count;
           if (!emitter.signal(left_eye)) {
             fail("the USB emitter missed an eye boundary");
             break;

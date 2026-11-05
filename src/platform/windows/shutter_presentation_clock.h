@@ -17,6 +17,9 @@ namespace platf::dxgi::detail {
     shutter_feedback_status_e status = shutter_feedback_status_e::unsupported;
     std::uint32_t present_count = 0;
     std::uint32_t refresh_count = 0;
+    std::uint32_t sync_refresh_count = 0;
+    std::int64_t sync_qpc = 0;
+    std::int32_t result_code = 0;
   };
 
   enum class shutter_feedback_wait_status_e {
@@ -31,6 +34,9 @@ namespace platf::dxgi::detail {
   struct shutter_feedback_wait_result_t {
     shutter_feedback_wait_status_e status;
     shutter_feedback_t feedback {};
+    std::uint32_t queries = 0;
+    std::uint32_t flushes = 0;
+    std::uint32_t waits = 0;
   };
 
   struct shutter_feedback_wait_io_t {
@@ -56,44 +62,53 @@ namespace platf::dxgi::detail {
     const auto deadline = io.now() + timeout;
     constexpr auto poll_interval = std::chrono::microseconds {200};
     bool flushed = false;
+    shutter_feedback_wait_result_t result {result_e::unsupported};
+    const auto finish = [&](result_e status) {
+      result.status = status;
+      return result;
+    };
     while (true) {
       if (io.cancelled()) {
-        return {result_e::cancelled};
+        return finish(result_e::cancelled);
       }
       if (io.now() >= deadline) {
-        return {result_e::timeout};
+        return finish(result_e::timeout);
       }
       const auto feedback = io.query();
+      result.feedback = feedback;
+      ++result.queries;
       if (io.cancelled()) {
-        return {result_e::cancelled};
+        return finish(result_e::cancelled);
       }
       if (io.now() >= deadline) {
-        return {result_e::timeout};
+        return finish(result_e::timeout);
       }
       if (feedback.status == shutter_feedback_status_e::available) {
         if (feedback.present_count == requested_present) {
-          return {result_e::displayed, feedback};
+          return finish(result_e::displayed);
         }
         if (static_cast<std::int32_t>(feedback.present_count - requested_present) > 0) {
-          return {result_e::unsupported};
+          return finish(result_e::unsupported);
         }
       } else if (feedback.status != shutter_feedback_status_e::disjoint || !first_present) {
-        return {result_e::unsupported};
+        return finish(result_e::unsupported);
       }
       if (!flushed) {
         flushed = true;
+        ++result.flushes;
         const bool published = io.flush();
         if (io.cancelled()) {
-          return {result_e::cancelled};
+          return finish(result_e::cancelled);
         }
         if (!published) {
-          return {result_e::flush_failed};
+          return finish(result_e::flush_failed);
         }
         continue;
       }
       const auto next_poll = std::min(deadline, io.now() + poll_interval);
+      ++result.waits;
       if (!io.wait_until(next_poll)) {
-        return {io.cancelled() ? result_e::cancelled : result_e::wait_failed};
+        return finish(io.cancelled() ? result_e::cancelled : result_e::wait_failed);
       }
     }
   }
