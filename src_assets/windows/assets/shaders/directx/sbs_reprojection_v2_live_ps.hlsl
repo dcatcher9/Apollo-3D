@@ -21,6 +21,9 @@ cbuffer HostSbsV2Geometry : register(b2) {
 };
 
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
+#if defined(HOST_SBS_BASE_ONLY) && defined(HOST_SBS_SHARED_PIN_QUEUED)
+#include "include/host_sbs_queued_render_guard.hlsl"
+#endif
 
 // Renderer-local mirror of the producer's authenticated row-slope contract. Keeping the collar
 // bound here avoids making a renderer-only ROI feature part of the generated producer ABI. The
@@ -37,7 +40,11 @@ bool WarpAuthorized() {
     bool roi_mode_valid = video_roi_active == 0.0f || video_roi_active == 1.0f;
     bool roi_reserved_valid = geometry_reserved == 0.0f;
     return asuint(V2_STATE_RENDERER_AUTHORIZATION_BITS(mapping_state)) == V2_CONTRACT_TAG &&
-        roi_mode_valid && roi_reserved_valid;
+        roi_mode_valid && roi_reserved_valid
+#if defined(HOST_SBS_BASE_ONLY) && defined(HOST_SBS_SHARED_PIN_QUEUED)
+        && QueuedRenderAuthorized()
+#endif
+        ;
 }
 
 bool VideoRoiRectValid() {
@@ -213,6 +220,7 @@ float2 ReprojectIfAuthorized(float2 source_uv, float eye_sign) {
     return sample_uv;
 }
 
+#if !defined(HOST_SBS_BASE_ONLY)
 #include "include/host_sbs_subtitle_render.hlsl"
 
 float4 main_ps(PS_INPUT input) : SV_TARGET {
@@ -228,3 +236,4 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     sample_uv.x = saturate(sample_uv.x);
     return SourceColor.Sample(LinearSampler, sample_uv);
 }
+#endif

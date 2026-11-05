@@ -954,37 +954,13 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             header = Path(temporary) / generator.CURRENT_OUTLINE_RUNTIME_HEADER.name
             header.write_bytes(generator.CURRENT_OUTLINE_RUNTIME_HEADER.read_bytes())
             self.assertTrue(generator._write_current_outline_runtime_pins(True, root, header))
-            for variant in ("colour", "enclosure", "completed", "queued"):
+            for variant in ("colour", "enclosure"):
                 with self.subTest(variant=variant), mock.patch("sys.stderr"):
                     include = root / "current_outline" / variant / "include" / generator.HLSL_TARGET.name
                     include.write_bytes(include.read_bytes() + b"\n// simulated contract drift\n")
                     self.assertFalse(generator._write_current_outline_runtime_pins(True, root, header))
                     self.assertTrue(generator._write_current_outline_runtime_pins(False, root, header))
                     self.assertTrue(generator._write_current_outline_runtime_pins(True, root, header))
-
-    def test_selected_render_helper_has_one_owner_and_checked_exact_mirror(self):
-        owner = generator.SELECTED_RENDER_HELPER_SOURCE
-        mirrors = generator.SELECTED_RENDER_HELPER_MIRRORS
-        private = generator.SHADER_ROOT / "current_outline"
-        self.assertEqual(set(private.rglob(owner.name)), {owner, *mirrors})
-        self.assertTrue(generator._write_selected_render_helper_mirrors(True))
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source, mirror = root / "owner.hlsl", root / "mirror.hlsl"
-            expected = b"// byte-preserved selector\r\nfloat x = 1;\r\n"
-            source.write_bytes(expected)
-            mirror.write_bytes(b"// divergent fallback\n")
-            with mock.patch.object(generator, "SELECTED_RENDER_HELPER_SOURCE", source), \
-                    mock.patch.object(generator, "SELECTED_RENDER_HELPER_MIRRORS", (mirror,)), \
-                    mock.patch("sys.stderr"):
-                self.assertFalse(generator._write_selected_render_helper_mirrors(True))
-                self.assertEqual(source.read_bytes(), expected)
-                self.assertTrue(generator._write_selected_render_helper_mirrors(False))
-                self.assertEqual(mirror.read_bytes(), expected)
-                mirror.unlink()
-                self.assertFalse(generator._write_selected_render_helper_mirrors(True))
-                self.assertTrue(generator._write_selected_render_helper_mirrors(False))
-                self.assertTrue(generator._write_selected_render_helper_mirrors(True))
 
     def test_physical_black_model_has_one_authority_and_checked_group_mirror(self):
         owner = generator.PHYSICAL_BLACK_MODEL_SOURCE
@@ -1429,7 +1405,6 @@ class GeneratedContractWriteTests(unittest.TestCase):
                 "_write_physical_black_model_mirrors": lambda check: True,
                 "_write_cbc_unit_state_mirrors": lambda check: True,
                 "_write_current_stroke_math_mirrors": lambda check: True,
-                "_write_selected_render_helper_mirrors": lambda check: True,
                 "_write_current_outline_runtime_pins": lambda check: True,
                 "_write_current_background_runtime_pin": lambda check: True,
                 "validate_renderer_source_closure_pins": lambda: None,

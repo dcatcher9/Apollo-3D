@@ -1,4 +1,4 @@
-/** Authenticated renderer-role loading, independent of an estimator or queued probe. */
+/** Authenticated bytecode preparation and compute-program ownership. */
 #include <gtest/gtest.h>
 
 #ifdef _WIN32
@@ -8,8 +8,7 @@
   #include <condition_variable>
   #include <filesystem>
   #include <fstream>
-  #include <future>
-  #include <mutex>
+    #include <mutex>
   #include <stdexcept>
   #include <string>
   #include <thread>
@@ -18,14 +17,14 @@ namespace {
   namespace runtime = models::current_outline_runtime;
   namespace cache = models::host_sbs_shader_cache;
   using Microsoft::WRL::ComPtr;
+  constexpr std::array<cache::shader_spec, 1u> fixture_specs {{{"fixture_pixel.hlsl", "main_ps", "ps_5_0"}}};
 
   class HostSbsCurrentOutlineRuntimeTest: public testing::Test {
   protected:
     ComPtr<ID3D11Device> device;
     std::filesystem::path directory;
-    std::filesystem::path completed;
-    std::filesystem::path queued;
-    std::string completed_identity;
+    std::filesystem::path shader_root;
+    std::string shader_identity;
 
     void SetUp() override {
       D3D_FEATURE_LEVEL level {};
@@ -52,11 +51,10 @@ namespace {
         }
       }
       ASSERT_FALSE(directory.empty());
-      completed = directory / "completed";
-      queued = directory / "queued";
-      write_renderer(completed, "0.25");
-      completed_identity = identity(completed);
-      ASSERT_EQ(completed_identity.size(), 64u);
+      shader_root = directory / "fixture-programs";
+      write_fixture_shader(shader_root, "0.25");
+      shader_identity = identity(shader_root);
+      ASSERT_EQ(shader_identity.size(), 64u);
     }
 
     void TearDown() override {
@@ -67,106 +65,22 @@ namespace {
       }
     }
 
-    static void write_renderer(const std::filesystem::path &root, const std::string &value) {
+    static void write_fixture_shader(const std::filesystem::path &root, const std::string &value) {
       std::filesystem::create_directories(root);
-      std::ofstream file(root / "sbs_reprojection_v2_live_ps.hlsl");
+      std::ofstream file(root / "fixture_pixel.hlsl");
       file << "float4 main_ps(float4 position : SV_Position) : SV_Target { return float4("
            << value << ", 0.5, 0.75, 1.0); }\n";
       ASSERT_TRUE(file.good());
     }
 
     static std::string identity(const std::filesystem::path &root) {
-      const auto sources = cache::snapshot_sources(root, runtime::completed_specs);
+      const auto sources = cache::snapshot_sources(root, fixture_specs);
       return cache::source_closure_sha256(sources);
     }
   };
 
-  TEST_F(HostSbsCurrentOutlineRuntimeTest, CompletedRoleDoesNotRequireQueuedFiles) {
-    runtime::pixel_programs_t programs;
-    std::string error;
-    ASSERT_FALSE(std::filesystem::exists(queued));
-    ASSERT_TRUE(programs.load(device.Get(), completed, completed_identity, {}, {}, error)) << error;
-    EXPECT_TRUE(programs.completed_ready());
-    EXPECT_FALSE(programs.queued_ready());
-    EXPECT_FALSE(std::filesystem::exists(queued));
-  }
-
-  TEST_F(HostSbsCurrentOutlineRuntimeTest, ExplicitQueuedRoleRequiresAuthenticatedSource) {
-    write_renderer(queued, "0.75");
-    const auto queued_identity = identity(queued);
-    runtime::pixel_programs_t programs;
-    std::string error;
-    ASSERT_FALSE(programs.load(device.Get(), completed, completed_identity, queued, std::string(64u, '0'), error));
-    EXPECT_FALSE(programs.completed_ready());
-    EXPECT_FALSE(programs.queued_ready());
-    ASSERT_TRUE(programs.load(device.Get(), completed, completed_identity, queued, queued_identity, error)) << error;
-    EXPECT_TRUE(programs.completed_ready());
-    EXPECT_TRUE(programs.queued_ready());
-    write_renderer(queued, "0.125");
-    EXPECT_FALSE(programs.load(device.Get(), completed, completed_identity, queued, queued_identity, error));
-    // A failed replacement does not discard the preceding fully prepared handle tuple.
-    EXPECT_TRUE(programs.completed_ready());
-    EXPECT_TRUE(programs.queued_ready());
-  }
-
-  TEST_F(HostSbsCurrentOutlineRuntimeTest, PartialQueuedConfigurationAndInvalidCompletedStayClosed) {
-    for (const bool provide_path : {false, true}) {
-      runtime::pixel_programs_t programs;
-      std::string error;
-      EXPECT_FALSE(programs.load(device.Get(), completed, completed_identity, provide_path ? queued : std::filesystem::path {}, provide_path ? std::string {} : std::string(64u, '0'), error));
-      EXPECT_FALSE(programs.completed_ready());
-      EXPECT_FALSE(programs.queued_ready());
-    }
-    runtime::pixel_programs_t programs;
-    std::string error;
-    EXPECT_FALSE(programs.load(device.Get(), completed, std::string(64u, '0'), {}, {}, error));
-    EXPECT_FALSE(programs.completed_ready());
-    EXPECT_FALSE(programs.load(device.Get(), directory / "absent", completed_identity, {}, {}, error));
-    EXPECT_FALSE(programs.completed_ready());
-  }
-
-  TEST_F(HostSbsCurrentOutlineRuntimeTest, PreparedHandlesMoveFromWorkerAndRetireWithAbandonedResult) {
-    const auto load = [owned_device = device, completed_path = completed, expected = completed_identity]() {
-      runtime::pixel_programs_t programs;
-      std::string error;
-      if (!programs.load(owned_device.Get(), completed_path, expected, {}, {}, error)) {
-        throw std::runtime_error(error);
-      }
-      return programs;
-    };
-    std::packaged_task<runtime::pixel_programs_t()> task(load);
-    auto result = task.get_future();
-    std::thread worker(std::move(task));
-    worker.join();
-    auto programs = result.get();
-    ASSERT_TRUE(programs.completed_ready());
-    ComPtr<ID3D11PixelShader> adopted;
-    adopted.Attach(programs.take_completed());
-    EXPECT_TRUE(adopted);
-    EXPECT_FALSE(programs.completed_ready());
-    EXPECT_FALSE(programs.queued_ready());
-
-    // This is the unconsumed packaged-task result shape used by live pipeline teardown.
-    std::packaged_task<runtime::pixel_programs_t()> abandoned_task(load);
-    auto abandoned = abandoned_task.get_future();
-    std::thread abandoned_worker(std::move(abandoned_task));
-    abandoned_worker.join();
-    std::exception_ptr retirement_error;
-    std::thread retirement([&retirement_error, owned_result = std::move(abandoned)]() mutable {
-      try {
-        (void) owned_result.get();
-      } catch (...) {
-        retirement_error = std::current_exception();
-      }
-    });
-    retirement.join();
-    EXPECT_FALSE(retirement_error);
-    // Releasing an unrelated future's result did not transfer or revoke the adopted COM handle.
-    EXPECT_TRUE(adopted);
-  }
-
   TEST_F(HostSbsCurrentOutlineRuntimeTest, BytecodeWorkersAreBoundedAndPreserveRequestOrdering) {
-    const auto sources = cache::snapshot_sources(completed, runtime::completed_specs);
+    const auto sources = cache::snapshot_sources(shader_root, fixture_specs);
     ASSERT_TRUE(sources);
     constexpr std::size_t count = 24u;
     std::array<std::string, count> names;
@@ -211,7 +125,7 @@ namespace {
   }
 
   TEST_F(HostSbsCurrentOutlineRuntimeTest, BytecodeFailuresRemainPerRequestAndWorkersJoinBeforeReturning) {
-    const auto sources = cache::snapshot_sources(completed, runtime::completed_specs);
+    const auto sources = cache::snapshot_sources(shader_root, fixture_specs);
     ASSERT_TRUE(sources);
     std::array<std::string, 8u> names;
     std::array<std::atomic_uint, 8u> visits {};
@@ -273,11 +187,11 @@ namespace {
 
   TEST_F(HostSbsCurrentOutlineRuntimeTest, SourceAuthenticationAndMissingSnapshotsRejectBeforeResolution) {
     std::vector<runtime::detail::bytecode_request_t> requests;
-    EXPECT_THROW(runtime::detail::authenticate_group("fixture", completed, runtime::completed_specs, std::string(64u, '0'), requests), std::runtime_error);
+    EXPECT_THROW(runtime::detail::authenticate_group("fixture", shader_root, fixture_specs, std::string(64u, '0'), requests), std::runtime_error);
     EXPECT_TRUE(requests.empty());
-    EXPECT_THROW(runtime::detail::authenticate_group("fixture", directory / "absent", runtime::completed_specs, completed_identity, requests), std::runtime_error);
+    EXPECT_THROW(runtime::detail::authenticate_group("fixture", directory / "absent", fixture_specs, shader_identity, requests), std::runtime_error);
     EXPECT_TRUE(requests.empty());
-    requests.push_back({{}, runtime::completed_specs[0u], {}, {}});
+    requests.push_back({{}, fixture_specs[0u], {}, {}});
     std::atomic_uint calls {0u};
     EXPECT_THROW(runtime::detail::prepare_bytecodes(requests, [&](const auto &, const auto &) -> cache::bytecode_t {
                    calls.fetch_add(1u);

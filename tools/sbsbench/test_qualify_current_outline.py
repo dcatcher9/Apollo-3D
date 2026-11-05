@@ -149,6 +149,33 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
         self.assertEqual(result["background_valid_frames"], 2)
         self.assertFalse(result["ordinary_metrics_qualify_selected_composite"])
 
+    def test_retired_renderer_evidence_is_explicitly_not_current_policy(self):
+        result = self.validate()
+        self.assertEqual(result["renderer_schema"], 1)
+        self.assertFalse(result["renderer_policy_current"])
+        retired = qualification.expected_closures(4)
+        self.assertEqual(retired["completed_source_closure_sha256"],
+                         qualification.RETIRED_COMPLETED_SOURCE_CLOSURE)
+        self.assertEqual(retired["shared_warp_source_closure_sha256"],
+                         qualification.RETIRED_SHARED_SOURCE_CLOSURE)
+
+    def test_shared_only_schema_has_no_retired_pixel_shader_dependency(self):
+        current = qualification.expected_closures(5)
+        self.assertEqual(set(current), {"selector_source_closure_sha256", "shared_warp_source_closure_sha256"})
+        self.assertNotIn("completed_source_closure_sha256", current)
+        self.assertNotEqual(current["shared_warp_source_closure_sha256"],
+                            qualification.RETIRED_SHARED_SOURCE_CLOSURE)
+
+    def test_shared_only_schema_rejects_retired_pixel_shader_metadata(self):
+        document = copy.deepcopy(self.document)
+        document["schema"] = 5
+        document.pop("background_source_closure_sha256")
+        document.update(qualification.expected_closures(5))
+        document.update(composition_source_closures=qualification.expected_composition_closures(),
+                        hole_program_ready=True, coverage_program_ready=True)
+        with self.assertRaisesRegex(ValueError, "unknown or missing"):
+            self.validate(document)
+
     def test_rejects_corrupt_identity_receipts_and_hashes(self):
         changes = {
             "source snapshot": lambda d: d["frames"][0].update(source_snapshot_sha256="0" * 64),

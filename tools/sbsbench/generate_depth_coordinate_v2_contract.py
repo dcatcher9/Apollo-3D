@@ -39,7 +39,7 @@ SHADER_ROOT = HLSL_TARGET.parent.parent
 HLSL_TARGETS = (
     HLSL_TARGET,
     *(SHADER_ROOT / "current_outline" / variant / "include" / HLSL_TARGET.name
-      for variant in ("colour", "completed", "enclosure", "queued")),
+      for variant in ("colour", "enclosure")),
 )
 HLSL_OCR_ASSERT_TARGETS = (
     HLSL_OCR_ASSERT_TARGET,
@@ -64,19 +64,13 @@ CBC_UNIT_STATE_SOURCE = SHADER_ROOT / "current_outline" / "outline" / "cbc_unit_
 CBC_UNIT_STATE_MIRRORS = (
     SHADER_ROOT / "current_outline" / "hole" / CBC_UNIT_STATE_SOURCE.name,
 )
-# Completed rendering owns the common selector/fallback helper. The queued probe compiles it
-# under its own SELECTED_MATTE_QUEUED macro and confined include root, with no editable fork.
-SELECTED_RENDER_HELPER_SOURCE = SHADER_ROOT / "current_outline" / "completed" / "include" / "host_sbs_subtitle_render.hlsl"
-SELECTED_RENDER_HELPER_MIRRORS = (
-    SHADER_ROOT / "current_outline" / "queued" / "include" / SELECTED_RENDER_HELPER_SOURCE.name,
-)
 CURRENT_OUTLINE_RUNTIME_HEADER = ROOT / "src" / "host_sbs_current_outline_runtime_programs.h"
 CURRENT_BACKGROUND_RUNTIME_HEADER = ROOT / "src" / "host_sbs_selected_glyph_push_pull_runtime.h"
 CURRENT_SHARED_UI_WARP_RUNTIME_HEADER = ROOT / "src" / "host_sbs_shared_ui_warp_runtime.h"
 CURRENT_OUTLINE_RUNTIME_ROOTS = {
     name: ("outline" if name == "stability" else "hole" if name == "coverage" else name)
     for name in ("source5", "colour", "components", "enclosure", "roi", "outline", "stability",
-                 "inside", "selector", "completed", "queued", "hole", "coverage")
+                 "inside", "selector", "hole", "coverage")
 }
 # Lines of LIMITER_SERIAL_MAX_LINES cells or fewer keep the serial float recurrence. Longer
 # lines are scanned in LIMITER_LINE_CHUNKS Q30 chunks, LIMITER_GROUP_LINES adjacent lines per
@@ -2247,11 +2241,6 @@ def _write_current_stroke_math_mirrors(check: bool) -> bool:
         CURRENT_STROKE_MATH_SOURCE, CURRENT_STROKE_MATH_TARGETS, check, "current stroke math")
 
 
-def _write_selected_render_helper_mirrors(check: bool) -> bool:
-    return _write_byte_mirrors(
-        SELECTED_RENDER_HELPER_SOURCE, SELECTED_RENDER_HELPER_MIRRORS, check, "selected-render helper")
-
-
 def _write_current_outline_runtime_pins(
         check: bool, shader_root: Path = SHADER_ROOT,
         header: Path = CURRENT_OUTLINE_RUNTIME_HEADER) -> bool:
@@ -2349,7 +2338,6 @@ def main(argv: list[str] | None = None) -> int:
     mirrors_valid = _write_physical_black_model_mirrors(args.check)
     mirrors_valid &= _write_cbc_unit_state_mirrors(args.check)
     mirrors_valid &= _write_current_stroke_math_mirrors(args.check)
-    mirrors_valid &= _write_selected_render_helper_mirrors(args.check)
     if not mirrors_valid:
         return 1
     if args.refresh_shader_identity:

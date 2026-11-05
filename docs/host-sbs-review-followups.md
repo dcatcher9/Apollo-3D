@@ -938,8 +938,8 @@ ROI embedding, applies current-RGB-revoked native mask contributors, pins the ho
 and samples original SDR/HDR colour once through the existing bounded inverse. It prepares no
 subtitle RGB repair background on the successful shared route. Mask detection, original outline
 style, SCP plane policy and retained inference ownership remain unchanged. The queued wrapper
-keeps its independent exact-source guard. Empty/revoked subtitle inputs preserve Base; unavailable
-shared preparation and invalid selected receipts retain the literal legacy fallback.
+keeps its independent exact-source guard. Empty/revoked subtitle inputs preserve Base. The original
+adoption retained a literal legacy fallback; the subsequent shared-only cleanup below removes it.
 
 The actual shared draw is identified in qualification and dump evidence with its draw-owned
 field, weights, rows/header and geometry, separately from the retained legacy analytic diagnostic
@@ -1022,3 +1022,35 @@ Evidence is outside Git under `E:\ApolloDev\shared-warp-cleanup-20261104`. Earli
 attempts remain distinct from the final checks. Existing scene deformation, row transitions,
 inactive-mask preparation and occasional expensive cold fallback-shader compilation remain
 limitations; this cleanup establishes no live FPS or additional physical-headset acceptance.
+
+### P18 shared-only subtitle renderer cleanup
+
+The November 4 live session waited from 14:51:50.844 to 14:54:23.269 for its per-stream pipeline,
+although the depth estimator initialized in 309 ms. Publication was ordered after loading the
+older selected-subtitle pixel shader; its new 441,264-byte cache artifact appeared at 14:54:18.
+The log and cache timing identify that dependency as the observed preparation delay, without a
+per-shader compile-duration measurement. The stream subsequently rendered normally.
+
+The requested cleanup removes that renderer rather than retaining a separate deferred loader.
+Its completed/queued shader copies, generator registrations, configuration fields, runtime pixel
+loader and dedicated old-renderer tests are removed. Shared rendering imports the canonical Base
+geometry and a current-mask authority helper, without an analytic subtitle inverse or RGB repair.
+Invalid GPU selected receipts use ordinary Base. A CPU shared-preparation failure records ordinary
+Base with actual b3 subtitle permission disabled and selected authority cleared, so it cannot
+reactivate the old subtitle map. Qualification schema5 names only the active shared renderer;
+retired evidence remains versioned and does not acquire current rendering authority.
+
+The normal ordinary pixel-shader preprocessed token stream is unchanged and both generators
+check. The full optimized build succeeds; the Python suite runs 962 tests with thirteen optional
+skips. Twenty-seven distinct native tests pass, covering ordinary Base, current source/receipt
+rejections, queued guards and shared rendering. Ten authored valid-output comparisons preserve
+all 140 shared RGB/field/weight/row/header/map/coverage payloads byte-for-byte; their Base outputs
+and unchanged authority operands also match. The production executable also passes schema5
+qualification for all six ordered observations with current depth/OCR publication and producer
+stages: the four caption observations activate the shared warp, and the two blank observations
+retain empty masks. Its first isolated attempt failed a TensorRT DLL lookup; a fresh attempt
+with verified adjacent runtime DLLs passes, and both attempts remain preserved. These functional
+results do not measure live startup latency or FPS. Live XR startup evidence remains pending.
+The superseded deferred-loader checkpoint and its thirteen passing mechanism tests remain
+external historical evidence, not validation of this final shared-only cleanup. The
+mask-recovery goal remains open separately.

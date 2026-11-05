@@ -1,14 +1,9 @@
 // Production Host adapter. The pin band itself is the exact shared Game 3D pass.
 // Original source/Base/SCP/SCT/matte/receipt operands remain unchanged. No RGB fill.
-#define main_ps BaselineCompletedMainPs
-#define background_diagnostic_ps BaselineCompletedDiagnosticPs
-#if defined(HOST_SBS_SHARED_PIN_QUEUED)
-#include "current_outline/queued/sbs_reprojection_v2_live_ps.hlsl"
-#else
-#include "current_outline/completed/sbs_reprojection_v2_live_ps.hlsl"
-#endif
-#undef main_ps
-#undef background_diagnostic_ps
+#define HOST_SBS_BASE_ONLY 1
+#include "sbs_reprojection_v2_live_ps.hlsl"
+#undef HOST_SBS_BASE_ONLY
+#include "include/host_sbs_shared_current_glyph.hlsl"
 
 cbuffer SharedPinGeometry : register(b6) {
     uint4 PinSourceShape; // full width, full height, native band top, native band height
@@ -61,7 +56,7 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
     if (all(lane.xy == 0u)) {
         uint2 source_size; float plane;
         SharedPinGroupSelectedReceipt = SelectedMatteAuthorized() ? 1u : 0u;
-        SharedPinGroupAuthorized = SubtitleRenderAuthorized(source_size, plane, true) &&
+        SharedPinGroupAuthorized = SubtitleRenderAuthorized(source_size, plane) &&
             SharedPinGroupSelectedReceipt != 0u && all(source_size == PinSourceShape.xy) ? 1u : 0u;
     }
     GroupMemoryBarrierWithGroupSync();
@@ -71,7 +66,7 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
     uint2 pixel = uint2(id.x, id.y + PinSourceShape.z);
     float2 uv = (float2(pixel) + 0.5f) / float2(PinSourceShape.xy);
     SunshineHostFinalStore[id.xy] = SharedOriginalParallax(uv);
-    float weight = SharedPinGroupAuthorized != 0u && CurrentGlyphContributor(int2(pixel), true) ? 1.0f : 0.0f;
+    float weight = SharedPinGroupAuthorized != 0u && CurrentGlyphContributor(int2(pixel)) ? 1.0f : 0.0f;
     SharedPinWeightStore[id.xy] = weight;
     if (weight > 0.0f) InterlockedOr(SharedPinRowStore[uint2(0u,id.y)], 1u);
 }
@@ -97,7 +92,7 @@ bool SharedPinRowContributes(float source_v) {
 float2 SharedPinSourceUV(float2 destination_uv, float eye_sign) {
     // The queued transaction/state remains a draw-time gate as well as a preparation gate.
     if (!WarpAuthorized()) return destination_uv;
-    if (SharedPinRows.Load(int3(0,PinSourceShape.w,0)) == 0u) return SelectSourceUV(destination_uv,eye_sign);
+    if (SharedPinRows.Load(int3(0,PinSourceShape.w,0)) == 0u) return ReprojectIfAuthorized(destination_uv,eye_sign);
     // Empty rows and missing/stale/revoked masks retain the exact original Base inverse.
     if (!SharedPinRowContributes(destination_uv.y)) return ReprojectIfAuthorized(destination_uv,eye_sign);
     float x = destination_uv.x;
@@ -114,9 +109,9 @@ float4 shared_pin_main_ps(PS_INPUT input) : SV_TARGET {
     float native_y=uv.y*(float)PinSourceShape.y-0.5f;
     if (native_y <= (float)PinSourceShape.z-1.0f || native_y >= (float)(PinSourceShape.z+PinSourceShape.w))
         return BackgroundOriginalSample(ReprojectIfAuthorized(uv,eye_sign));
-    // Preserve the production literal legacy selector when selected receipt authority fails.
+    // Missing selected authority retains only the canonical ordinary Base inverse.
     if (SharedPinRows.Load(int3(0,PinSourceShape.w,0)) == 0u)
-        return BackgroundOriginalSample(SelectSourceUV(uv,eye_sign));
+        return BackgroundOriginalSample(ReprojectIfAuthorized(uv,eye_sign));
     return BackgroundOriginalSample(SharedPinSourceUV(uv,eye_sign));
 }
 float4 shared_pin_mapping_ps(PS_INPUT input) : SV_TARGET {
@@ -135,7 +130,7 @@ float4 shared_pin_coverage_ps(PS_INPUT input) : SV_TARGET {
     float2 uv; float eye_sign;
     if (!PackedToSource(input.TexCoord,uv,eye_sign)) return 0.0f;
     uint2 source_size; float plane;
-    if (!SubtitleRenderAuthorized(source_size,plane,true) || !SelectedMatteAuthorized()) return 0.0f;
+    if (!SubtitleRenderAuthorized(source_size,plane) || !SelectedMatteAuthorized()) return 0.0f;
     float2 ui_uv=float2(uv.x+eye_sign*plane,uv.y);
     float2 position=saturate(ui_uv)*float2(source_size)-0.5f;
     int2 low=int2(floor(position));float2 fraction=position-float2(low);
@@ -143,7 +138,7 @@ float4 shared_pin_coverage_ps(PS_INPUT input) : SV_TARGET {
     [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x) {
         float weight=(x==0?1.0f-fraction.x:fraction.x)*(y==0?1.0f-fraction.y:fraction.y);
         if(weight<=0.0f)continue;
-        if(CurrentGlyphContributor(clamp(low+int2(x,y),int2(0,0),int2(source_size)-1),true)) {coverage+=weight;any_marked=true;}
+        if(CurrentGlyphContributor(clamp(low+int2(x,y),int2(0,0),int2(source_size)-1))) {coverage+=weight;any_marked=true;}
         else all_marked=false;
     }
     return float4(coverage,any_marked&&all_marked?1.0f:0.0f,0.0f,1.0f);

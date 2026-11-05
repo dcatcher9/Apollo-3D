@@ -26,7 +26,7 @@
   #include <src/depth_coordinate_v2.h>
   #include <src/host_sbs_current_outline_runtime_programs.h>
   #include <src/host_sbs_queued_render_guard.h>
-  #include <src/host_sbs_selected_glyph_push_pull_runtime.h>
+  #include <src/host_sbs_current_outline_selected_matte_gpu.h>
   #include <src/host_sbs_shared_ui_warp_runtime.h>
   #include <src/host_sbs_shader_cache.h>
   #include <src/host_sbs_subtitle_render.h>
@@ -43,12 +43,6 @@
   #include <vector>
   #include <wrl/client.h>
 
-class HostSbsV2LiveWarpGpuTest_QueuedRenderRecorderScopeMatchesLegacyOrIndependentFlat_Test;
-class HostSbsV2LiveWarpGpuTest_ActualV5BackgroundRepairColourReference_Test;
-class HostSbsV2LiveWarpGpuTest_ActualV5PushPullBackgroundColourReference_Test;
-class HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageColourReference_Test;
-class HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageBalancedDrawCost_Test;
-class HostSbsV2LiveWarpGpuTest_ActualCurrentExactGlyphErasureColourReference_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
@@ -94,7 +88,7 @@ namespace {
 
   enum class warp_shader_e {
     live_main,
-    current_outline_completed,
+    selected_outline,
     live_mapping,
     live_mask,
     direct_main,
@@ -132,13 +126,6 @@ namespace {
   struct current_outline_inputs_t {
     std::vector<std::uint32_t> matte;
     std::array<std::uint32_t, 64u> receipt {};
-    bool background_requested = false;
-    bool stale_background_proof = false;
-    // Test-only literal observed draw operands. No authority is inferred from their presence.
-    const saved_background_inputs_t *saved_background = nullptr;
-    // Opt-in causal probe only. Neither field changes ordinary test/render routes.
-    bool experimental_background = false;
-    saved_background_inputs_t *background_diagnostic_output = nullptr;
     bool shared_ui_pin = false;
     bool production_shared_ui_pin = false;
     bool production_shared_ui_pin_queued = false;
@@ -149,12 +136,6 @@ namespace {
   };
 
   class live_v2_warp_fixture_t {
-    friend class ::HostSbsV2LiveWarpGpuTest_QueuedRenderRecorderScopeMatchesLegacyOrIndependentFlat_Test;
-    friend class ::HostSbsV2LiveWarpGpuTest_ActualV5BackgroundRepairColourReference_Test;
-    friend class ::HostSbsV2LiveWarpGpuTest_ActualV5PushPullBackgroundColourReference_Test;
-    friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageColourReference_Test;
-    friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentWeightedUiCoverageBalancedDrawCost_Test;
-    friend class ::HostSbsV2LiveWarpGpuTest_ActualCurrentExactGlyphErasureColourReference_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
@@ -163,9 +144,7 @@ namespace {
       std::string &error,
       const warp_shader_e shader = warp_shader_e::live_main,
       const bool fixed_eleven_reference = false,
-      const bool hardware = false,
-      const std::filesystem::path &completed_reference_root = {},
-      const std::string_view completed_reference_closure = {}
+      const bool hardware = false
     ) {
       if (const auto *cache_root = std::getenv("SUNSHINE_TEST_HOST_SBS_SHADER_CACHE")) {
         models::host_sbs_shader_cache::configure_persistent_cache(cache_root);
@@ -176,7 +155,7 @@ namespace {
       direct_replay =
         shader == warp_shader_e::direct_main ||
         shader == warp_shader_e::direct_mapping;
-      current_outline_completed = shader == warp_shader_e::current_outline_completed;
+      selected_outline = shader == warp_shader_e::selected_outline;
       constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
       D3D_FEATURE_LEVEL actual {};
       auto status = D3D11CreateDevice(
@@ -223,29 +202,7 @@ namespace {
                     "could not create the independent flat-SBS pixel shader";
           return false;
         }
-      } else if (current_outline_completed) {
-        namespace runtime = models::current_outline_runtime;
-        namespace cache = models::host_sbs_shader_cache;
-        // An optional external frozen source group is used only for before/after actual-PS
-        // parity. It must carry its independently recorded pre-change closure identity.
-        const auto completed_root = completed_reference_root.empty() ?
-                                      runtime::completed_root(shader_root / "current_outline") :
-                                      completed_reference_root;
-        const auto expected = completed_reference_root.empty() ? runtime::completed_closure : completed_reference_closure;
-        const auto sources = cache::snapshot_sources(
-          completed_root,
-          runtime::completed_specs
-        );
-        if (!sources || expected.size() != 64u || cache::source_closure_sha256(sources) != expected) {
-          error = "current-outline completed renderer source closure does not match its authenticated pin";
-          return false;
-        }
-        const auto code = cache::get(sources, runtime::completed_specs.front());
-        if (!code || FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &pixel_shader))) {
-          error = "could not create the production current-outline completed pixel shader";
-          return false;
-        }
-      } else if (shader == warp_shader_e::live_main && !fixed_eleven_reference) {
+      } else if ((shader == warp_shader_e::live_main || selected_outline) && !fixed_eleven_reference) {
         const auto live_sources =
           models::host_sbs_shader_cache::snapshot_sources(
             shader_root,
@@ -401,28 +358,10 @@ namespace {
               {"adapter_luid_high", desc.AdapterLuid.HighPart}};
     }
 
-    // Research-only: compile a pinned private shader and own immutable guard operands.
-    bool configure_private_guard(const std::filesystem::path &root, const std::string &closure, const models::research_queued_render_guard_v1::expected_t *expected, const std::vector<std::uint32_t> *transaction, std::string &error, std::string_view source_file = "sbs_reprojection_v2_live_ps.hlsl") {
-      if (!device || !context) {
-        error = "private guard requires initialized fixture";
-        return false;
-      }
-      const std::array specs {models::host_sbs_shader_cache::shader_spec {
-        source_file,
-        "main_ps",
-        "ps_5_0"
-      }};
-      const auto sources = models::host_sbs_shader_cache::snapshot_sources(root, specs);
-      if (!sources || models::host_sbs_shader_cache::source_closure_sha256(sources) != closure) {
-        error = "private queued guard closure mismatch";
-        return false;
-      }
-      const auto code = models::host_sbs_shader_cache::get(sources, specs[0]);
-      ComPtr<ID3D11PixelShader> ps;
-      if (!code || FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &ps))) {
-        error = "private queued guard PS unavailable";
-        return false;
-      }
+    // Immutable current guard operands; the shared renderer owns its pixel program.
+    bool configure_guard_operands(const models::research_queued_render_guard_v1::expected_t *expected,
+                                  const std::vector<std::uint32_t> *transaction, std::string &error) {
+      if (!device || !context) {error = "queued guard requires initialized fixture";return false;}
       ComPtr<ID3D11Buffer> cb, packet;
       ComPtr<ID3D11ShaderResourceView> srv;
       if (expected) {
@@ -453,46 +392,11 @@ namespace {
           return false;
         }
       }
-      pixel_shader = ps;
       private_guard_cb = cb;
       private_guard_packet = packet;
       private_guard_srv = srv;
       private_guard_configured = true;
       return true;
-    }
-
-    // Test-only six-CS program. Production programs_t keeps its compiled closure check.
-    bool configure_experimental_background(const std::filesystem::path &root, const std::string &closure, std::string &error) {
-      namespace cache = models::host_sbs_shader_cache;
-      namespace runtime = models::selected_glyph_push_pull_runtime_v1;
-      if (!device || !context || closure.size() != 64u ||
-          !std::all_of(closure.begin(), closure.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) {
-        error = "experimental background requires initialized fixture and exact lowercase closure";
-        return false;
-      }
-      const auto sources = cache::snapshot_sources(root, runtime::specs);
-      if (!sources || cache::source_closure_sha256(sources) != closure) {
-        error = "experimental background source closure mismatch";
-        return false;
-      }
-      std::array<ComPtr<ID3D11ComputeShader>, 6u> next;
-      for (std::size_t i = 0u; i < next.size(); ++i) {
-        const auto code = cache::get(sources, runtime::specs[i]);
-        if (!code || code->empty() || FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, next[i].GetAddressOf()))) {
-          error = "experimental background shader creation failed";
-          return false;
-        }
-      }
-      experimental_background_shaders = std::move(next);
-      experimental_background_root = root;
-      experimental_background_closure = closure;
-      return true;
-    }
-
-    bool experimental_background_source_unchanged() const {
-      const auto sources = models::host_sbs_shader_cache::snapshot_sources(
-        experimental_background_root, models::selected_glyph_push_pull_runtime_v1::specs);
-      return sources && models::host_sbs_shader_cache::source_closure_sha256(sources) == experimental_background_closure;
     }
 
     static constexpr std::array<models::host_sbs_shader_cache::shader_spec, 5u> shared_ui_pin_specs {{
@@ -564,6 +468,13 @@ namespace {
       const bool readback_output = true,
       const current_outline_inputs_t *outline = nullptr
     ) {
+      // Even an absent selected receipt goes through the current shared program. It
+      // cannot fall back to the ordinary renderer's legacy subtitle selector.
+      current_outline_inputs_t unavailable_outline;
+      if (selected_outline && subtitle && !outline) {
+        unavailable_outline.matte = subtitle->matte;
+        outline = &unavailable_outline;
+      }
       const UINT resolved_depth_width = depth_width == 0u ? source_width : depth_width;
       const UINT resolved_depth_height = depth_height == 0u ? source_height : depth_height;
       if (!source_pixels || source_width == 0u || source_height == 0u ||
@@ -691,7 +602,7 @@ namespace {
           error = "could not create glyph owner/plane/constants operands";
           return false;
         }
-        if (current_outline_completed) {
+        if (selected_outline) {
           const std::array<std::uint32_t, 64u> unavailable_receipt {};
           const auto &selected = outline ? outline->matte : subtitle->matte;
           const auto &receipt = outline ? outline->receipt : unavailable_receipt;
@@ -765,16 +676,17 @@ namespace {
         ID3D11Buffer *direct_constants[] = {direct_constants_buffer.Get()};
         context->PSSetConstantBuffers(4, 1, direct_constants);
       }
-      const bool production_shared_pin = outline && outline->production_shared_ui_pin;
+      const bool production_shared_pin = selected_outline && subtitle &&
+        (!outline || outline->production_shared_ui_pin || !outline->shared_ui_pin);
       const bool shared_pin = outline && (outline->shared_ui_pin || production_shared_pin);
-      if (shared_pin && (!current_outline_completed || !subtitle ||
+      if (shared_pin && (!selected_outline || !subtitle ||
           (!production_shared_pin && (!shared_ui_pin_ps[0] || !shared_ui_pin_ps[1])))) {
-        error = "shared UI pin route needs a configured actual completed tuple";
+        error = "shared UI pin route needs a configured current tuple";
         return false;
       }
       if (production_shared_pin && !production_shared_ui_pin_programs.ready() &&
           !production_shared_ui_pin_programs.load(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
-      const bool production_queued_pin = production_shared_pin && outline->production_shared_ui_pin_queued;
+      const bool production_queued_pin = production_shared_pin && outline && outline->production_shared_ui_pin_queued;
       platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {output_rtv.Get(), nullptr},
         .render_target_count = 1u,
@@ -787,7 +699,7 @@ namespace {
           color_srv.Get(),
           parallax_srv.Get(),
           state_srv.Get(),
-          current_outline_completed ? selected_matte_srv.Get() : matte_srv.Get(),
+          selected_outline ? selected_matte_srv.Get() : matte_srv.Get(),
           snapshot_srv.Get(),
           condition_srv.Get(),
           identity_srv.Get(),
@@ -798,14 +710,6 @@ namespace {
         .queued_guard_constants = use_recorder_guard_scope ? private_guard_cb.Get() : nullptr,
         .queued_guard_transaction = use_recorder_guard_scope ? private_guard_srv.Get() : nullptr,
       };
-      namespace background = models::selected_glyph_push_pull_bg_gpu_v1;
-      namespace background_runtime = models::selected_glyph_push_pull_runtime_v1;
-      models::selected_glyph_receipt_c24_transport_v1::resources_t contour_transport;
-      background::resources_t background_owner;
-      background::views_t background_views;
-      ComPtr<ID3D11Buffer> stale_background_buffer;
-      ComPtr<ID3D11Texture2D> saved_background_texture;
-      ComPtr<ID3D11Buffer> saved_background_proof;
       struct pin_plane_t {
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<ID3D11ShaderResourceView> srv;
@@ -906,109 +810,15 @@ namespace {
         ID3D11ShaderResourceView *pin_srvs[3] {pin_weights.srv.Get(),pin_field.srv.Get(),pin_rows.srv.Get()};
         context->PSSetShaderResources(12u,3u,pin_srvs);context->PSSetConstantBuffers(6u,1u,&b5);
         }
-      } else if (current_outline_completed && subtitle && outline && outline->saved_background) {
-        const auto &saved = *outline->saved_background;
-        if (saved.pixels.size() != subtitle->matte.size() || outline->background_requested ||
-            outline->stale_background_proof ||
-            !create_immutable_texture_srv(DXGI_FORMAT_R32G32B32A32_FLOAT, subtitle->width, subtitle->height,
-              sizeof(rgba32f_t), saved.pixels.data(), saved_background_texture, background_views.background)) {
-          error = "invalid literal saved background replay operands";
-          return false;
-        }
-        D3D11_BUFFER_DESC desc {};
-        desc.ByteWidth = sizeof(saved.proof);desc.Usage = D3D11_USAGE_IMMUTABLE;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        desc.StructureByteStride = sizeof(std::uint32_t);
-        D3D11_SUBRESOURCE_DATA initial {saved.proof.data(), 0u, 0u};
-        if (FAILED(device->CreateBuffer(&desc, &initial, &saved_background_proof)) ||
-            FAILED(device->CreateShaderResourceView(saved_background_proof.Get(), nullptr, &background_views.proof))) {
-          error = "saved background proof allocation failed";
-          return false;
-        }
-        desc.ByteWidth = sizeof(saved.expected);desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        desc.MiscFlags = desc.StructureByteStride = 0u;initial.pSysMem = saved.expected.data();
-        if (FAILED(device->CreateBuffer(&desc, &initial, &background_views.expected_constants))) {
-          error = "saved background expected lease allocation failed";
-          return false;
-        }
-      } else if (current_outline_completed && subtitle && outline && outline->background_requested) {
-        if (outline->experimental_background) {
-          if (!std::all_of(experimental_background_shaders.begin(), experimental_background_shaders.end(), [](const auto &shader) { return bool(shader); })) {
-            error = "experimental background was requested without pinned six-CS program";
-            return false;
-          }
-        } else if (!background_programs.ready() && !background_programs.load(device.Get(), std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline" / "background", error)) {
-          return false;
-        }
-        if (!contour_transport.ensure(device.Get(), error) || !background_owner.ensure(device.Get(), subtitle->width, subtitle->height, error)) {
-          return false;
-        }
-        begin_timing();
-        if (!contour_transport.queue(context.Get(),selected_receipt_srv.Get(),error)) return false;
-        background::request_t request;
-        std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
-        request.draw_srvs[7u] = selected_receipt_srv.Get();
-        request.actual_contour_constants96 = contour_transport.constants();
-        request.actual_subtitle_render_constants32 = subtitle_buffer.Get();
-        std::copy_n(subtitle->identity.begin() + 8u, 4u, request.analysis_shape.begin());
-        const auto program = outline->experimental_background ? background::program_t {
-          experimental_background_shaders[0].Get(), experimental_background_shaders[1].Get(), experimental_background_shaders[2].Get(),
-          experimental_background_shaders[3].Get(), experimental_background_shaders[4].Get(), experimental_background_shaders[5].Get()
-        } : background_programs.program();
-        if (!background_owner.queue(context.Get(), program, request, error)) {
-          return false;
-        }
-        background_views = background_owner.views();
-        if (outline->stale_background_proof) {
-          // Test-only corruption after the actual GPU owner publishes its proof. Its immutable
-          // expected lease remains untouched, so the real PS must reject the mismatched token.
-          ComPtr<ID3D11Resource> resource;
-          ComPtr<ID3D11Buffer> proof, staging;
-          background_views.proof->GetResource(&resource);
-          if (FAILED(resource.As(&proof))) {
-            return false;
-          }
-          D3D11_BUFFER_DESC desc {};
-          proof->GetDesc(&desc);
-          desc.Usage = D3D11_USAGE_STAGING;
-          desc.BindFlags = desc.MiscFlags = desc.StructureByteStride = 0u;
-          desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-          if (FAILED(device->CreateBuffer(&desc, nullptr, &staging))) {
-            return false;
-          }
-          context->CopyResource(staging.Get(), proof.Get());
-          D3D11_MAPPED_SUBRESOURCE mapped {};
-          if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) {
-            return false;
-          }
-          std::array<std::uint32_t, background::proof_words> words {};
-          std::memcpy(words.data(), mapped.pData, sizeof(words));
-          context->Unmap(staging.Get(), 0u);
-          if (words[2u] != 1u || words[3u] != 0u) {
-            error = "actual background producer did not publish a valid proof before fault injection";
-            return false;
-          }
-          words[60u] ^= 1u;
-          desc.Usage = D3D11_USAGE_IMMUTABLE;
-          desc.CPUAccessFlags = 0u;
-          desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-          desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-          desc.StructureByteStride = sizeof(std::uint32_t);
-          const D3D11_SUBRESOURCE_DATA initial {words.data(), 0u, 0u};
-          if (FAILED(device->CreateBuffer(&desc, &initial, &stale_background_buffer)) || FAILED(device->CreateShaderResourceView(stale_background_buffer.Get(), nullptr, background_views.proof.ReleaseAndGetAddressOf()))) {
-            return false;
-          }
-        }
       }
       begin_timing();
       bool submitted = false;
-      recorder_flat_fallback_used = false;
-      ComPtr<ID3D11Buffer> previous_background_constants;
-      std::array<ComPtr<ID3D11ShaderResourceView>, 2u> previous_background_resources;
-      if (current_outline_completed) {
-        context->PSGetConstantBuffers(4u, 1u, previous_background_constants.GetAddressOf());
-        context->PSGetShaderResources(9u, 1u, &previous_background_resources[0u]);
-        context->PSGetShaderResources(11u, 1u, &previous_background_resources[1u]);
+      ComPtr<ID3D11Buffer> previous_auxiliary_constants;
+      std::array<ComPtr<ID3D11ShaderResourceView>, 2u> previous_auxiliary_resources;
+      if (selected_outline) {
+        context->PSGetConstantBuffers(4u, 1u, previous_auxiliary_constants.GetAddressOf());
+        context->PSGetShaderResources(9u, 1u, &previous_auxiliary_resources[0u]);
+        context->PSGetShaderResources(11u, 1u, &previous_auxiliary_resources[1u]);
       }
       {
         models::research_queued_render_guard_v1::scoped_binding_t guard;
@@ -1017,40 +827,19 @@ namespace {
           return false;
         }
         models::research_current_outline_selected_matte_v2::scoped_receipt_t selected_scope;
-        if (current_outline_completed && subtitle && !selected_scope.bind(context.Get(), selected_receipt_srv.Get(), matte_srv.Get())) {
+        if (selected_outline && subtitle && !selected_scope.bind(context.Get(), selected_receipt_srv.Get(), matte_srv.Get())) {
           error = "production selected-matte receipt scope rejected draw operands";
-          return false;
-        }
-        background_runtime::scoped_background_t background_scope;
-        if (current_outline_completed && !background_scope.bind(context.Get(), background_views.background ? &background_views : nullptr)) {
-          error = "production current-background scope rejected draw operands";
           return false;
         }
         models::host_sbs_shared_ui_warp::scoped_binding_t pin_scope;
         if (production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) return false;
         submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
       }
-      if (!submitted && use_recorder_guard_scope && recorder_flat_fallback_ps) {
-        ComPtr<ID3D11Predicate> previous_predicate;
-        BOOL previous_predicate_value = FALSE;
-        context->GetPredication(&previous_predicate, &previous_predicate_value);
-        context->SetPredication(nullptr, FALSE);
-        auto fallback = draw_command;
-        fallback.pixel_shader = recorder_flat_fallback_ps.Get();
-        fallback.shader_resources = {color_srv.Get(), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
-        fallback.subtitle_constants = nullptr;
-        fallback.queued_guard_override = false;
-        fallback.queued_guard_constants = nullptr;
-        fallback.queued_guard_transaction = nullptr;
-        submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), fallback);
-        context->SetPredication(previous_predicate.Get(), previous_predicate_value);
-        recorder_flat_fallback_used = submitted;
-      }
-      if (current_outline_completed) {
-        ComPtr<ID3D11Buffer> restored_background_constants;
-        context->PSGetConstantBuffers(4u, 1u, restored_background_constants.GetAddressOf());
-        if (restored_background_constants.Get() != previous_background_constants.Get()) {
-          error = "completed current-outline draw did not restore background b4 before fixture cleanup";
+      if (selected_outline) {
+        ComPtr<ID3D11Buffer> restored_auxiliary_constants;
+        context->PSGetConstantBuffers(4u, 1u, restored_auxiliary_constants.GetAddressOf());
+        if (restored_auxiliary_constants.Get() != previous_auxiliary_constants.Get()) {
+          error = "shared warp changed unrelated b4 state";
           return false;
         }
       }
@@ -1064,33 +853,41 @@ namespace {
         *outline->render_gpu_ms=double(end-start)*1000.0/double(disjoint.Frequency);
       }
       if (shared_pin && outline->shared_ui_pin_diagnostic_output) {
+        // Production renders do not configure the separate private pin shaders.
+        // Read their diagnostics through the canonical same-device program tuple.
+        if (production_shared_pin &&
+            !production_shared_ui_pin_programs.load_diagnostics(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
         auto &out=*outline->shared_ui_pin_diagnostic_output;out={};out.shape=pin_shape;
         std::vector<std::byte> bytes;
-        if (!read_diagnostic_texture(pin_field.texture.Get(),4u,bytes)) return false;
+        if (!read_diagnostic_texture(pin_field.texture.Get(),4u,bytes)) {error="shared UI pin field diagnostic readback failed";return false;}
         out.field.resize(bytes.size()/4u);std::memcpy(out.field.data(),bytes.data(),bytes.size());
-        if (!read_diagnostic_texture(pin_weights.texture.Get(),4u,bytes)) return false;
+        if (!read_diagnostic_texture(pin_weights.texture.Get(),4u,bytes)) {error="shared UI pin weights diagnostic readback failed";return false;}
         out.authorized_weights.resize(bytes.size()/4u);std::memcpy(out.authorized_weights.data(),bytes.data(),bytes.size());
-        if (!read_diagnostic_texture(pin_rows.texture.Get(),4u,bytes)) return false;
+        if (!read_diagnostic_texture(pin_rows.texture.Get(),4u,bytes)) {error="shared UI pin rows diagnostic readback failed";return false;}
         out.active_rows.resize(bytes.size()/4u);std::memcpy(out.active_rows.data(),bytes.data(),bytes.size());
         out.selected_receipt_header[0u]=out.active_rows.back();out.selected_receipt_authorized=out.active_rows.back()!=0u;out.active_rows.pop_back();
         D3D11_TEXTURE2D_DESC d=output_desc;d.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
         ComPtr<ID3D11Texture2D> map;ComPtr<ID3D11RenderTargetView> map_rtv;
-        if (FAILED(device->CreateTexture2D(&d,nullptr,&map)) || FAILED(device->CreateRenderTargetView(map.Get(),nullptr,&map_rtv))) return false;
-        auto command=draw_command;command.pixel_shader=shared_ui_pin_ps[1u].Get();command.render_targets[0u]=map_rtv.Get();
+        if (FAILED(device->CreateTexture2D(&d,nullptr,&map)) || FAILED(device->CreateRenderTargetView(map.Get(),nullptr,&map_rtv))) {error="shared UI pin diagnostic render target unavailable";return false;}
+        auto command=draw_command;
+        command.pixel_shader=production_shared_pin?production_shared_ui_pin_programs.mapping(production_queued_pin):
+          shared_ui_pin_ps[1u].Get();
+        command.render_targets[0u]=map_rtv.Get();
         models::research_current_outline_selected_matte_v2::scoped_receipt_t coverage_scope;
-        if (!coverage_scope.bind(context.Get(),selected_receipt_srv.Get(),matte_srv.Get())) return false;
+        if (!coverage_scope.bind(context.Get(),selected_receipt_srv.Get(),matte_srv.Get())) {error="shared UI pin diagnostic receipt binding failed";return false;}
         models::host_sbs_shared_ui_warp::scoped_binding_t pin_scope;
-        if (production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) return false;
-        if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.mapping_rgba32f)) return false;
-        command.pixel_shader=shared_ui_pin_ps[2u].Get();
-        if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.ui_coverage_rgba32f)) return false;
+        if (production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) {error="production shared UI pin diagnostic binding failed";return false;}
+        if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.mapping_rgba32f)) {error="shared UI pin mapping diagnostic draw/readback failed";return false;}
+        command.pixel_shader=production_shared_pin?production_shared_ui_pin_programs.coverage(production_queued_pin):
+          shared_ui_pin_ps[2u].Get();
+        if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.ui_coverage_rgba32f)) {error="shared UI pin coverage diagnostic draw/readback failed";return false;}
       }
       if (shared_pin && !production_shared_pin) {
         ID3D11ShaderResourceView *null_srvs[3] {};context->PSSetShaderResources(12u,3u,null_srvs);
         ID3D11Buffer *null_cb=nullptr;context->PSSetConstantBuffers(6u,1u,&null_cb);
       }
       ID3D11Buffer *null_constants = nullptr;
-      context->PSSetConstantBuffers(4u, 1u, &null_constants);
+      if (direct_constants_buffer) context->PSSetConstantBuffers(4u, 1u, &null_constants);
       if (!submitted) {
         error = "shared Host SBS V2 draw recorder rejected complete operands";
         return false;
@@ -1110,7 +907,7 @@ namespace {
         error = "shared renderer left native subtitle resources or b3 bound";
         return false;
       }
-      if (current_outline_completed) {
+      if (selected_outline) {
         std::array<ID3D11ShaderResourceView *, 2u> private_resources {};
         context->PSGetShaderResources(7u, static_cast<UINT>(private_resources.size()), private_resources.data());
         for (auto *resource : private_resources) {
@@ -1120,67 +917,21 @@ namespace {
           }
         }
         if (!unbound) {
-          error = "completed current-outline draw leaked selected receipt/legacy bindings";
+          error = "shared warp leaked selected receipt/legacy bindings";
           return false;
         }
-        constexpr std::array<UINT, 2u> background_slots {9u, 11u};
-        for (std::size_t index = 0u; index < background_slots.size(); ++index) {
+        constexpr std::array<UINT, 2u> auxiliary_slots {9u, 11u};
+        for (std::size_t index = 0u; index < auxiliary_slots.size(); ++index) {
           ComPtr<ID3D11ShaderResourceView> resource;
-          context->PSGetShaderResources(background_slots[index], 1u, &resource);
-          if (resource.Get() != previous_background_resources[index].Get()) {
-            error = "completed current-outline draw did not restore background bindings";
+          context->PSGetShaderResources(auxiliary_slots[index], 1u, &resource);
+          if (resource.Get() != previous_auxiliary_resources[index].Get()) {
+            error = "shared warp changed unrelated auxiliary resources";
             return false;
           }
         }
       }
 
       if (gpu_output) *gpu_output = output_texture;
-      if (outline && outline->background_diagnostic_output) {
-        auto &diagnostic = *outline->background_diagnostic_output;
-        diagnostic = {};
-        if (!background_views.background || !background_views.proof || !background_views.expected_constants || !subtitle) {
-          error = "background diagnostic requested without actual owned output";
-          return false;
-        }
-        ComPtr<ID3D11Resource> resource;
-        ComPtr<ID3D11Texture2D> texture, staging_texture;
-        background_views.background->GetResource(&resource);
-        if (FAILED(resource.As(&texture))) return false;
-        D3D11_TEXTURE2D_DESC desc {};texture->GetDesc(&desc);
-        if (desc.Width != subtitle->width || desc.Height != subtitle->height || desc.Format != DXGI_FORMAT_R32G32B32A32_FLOAT ||
-            desc.MipLevels != 1u || desc.ArraySize != 1u || desc.SampleDesc.Count != 1u) {
-          error = "background diagnostic native texture shape mismatch";
-          return false;
-        }
-        desc.Usage = D3D11_USAGE_STAGING;desc.BindFlags = desc.MiscFlags = 0u;desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging_texture))) return false;
-        context->CopyResource(staging_texture.Get(), texture.Get());
-        D3D11_MAPPED_SUBRESOURCE mapped {};
-        if (FAILED(context->Map(staging_texture.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
-        diagnostic.pixels.resize(std::size_t(desc.Width) * desc.Height);
-        for (UINT y = 0u; y < desc.Height; ++y) std::memcpy(diagnostic.pixels.data() + std::size_t(y) * desc.Width,
-          static_cast<const std::byte *>(mapped.pData) + std::size_t(y) * mapped.RowPitch, std::size_t(desc.Width) * sizeof(rgba32f_t));
-        context->Unmap(staging_texture.Get(), 0u);
-        const auto buffer_readback = [&](ID3D11Buffer *buffer, auto &values) {
-          D3D11_BUFFER_DESC d {};buffer->GetDesc(&d);
-          if (d.ByteWidth != sizeof(values)) return false;
-          d.Usage = D3D11_USAGE_STAGING;d.BindFlags = d.MiscFlags = d.StructureByteStride = 0u;d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-          ComPtr<ID3D11Buffer> staging;
-          if (FAILED(device->CreateBuffer(&d, nullptr, &staging))) return false;
-          context->CopyResource(staging.Get(), buffer);
-          D3D11_MAPPED_SUBRESOURCE m {};
-          if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &m))) return false;
-          std::memcpy(values.data(), m.pData, sizeof(values));context->Unmap(staging.Get(), 0u);return true;
-        };
-        ComPtr<ID3D11Buffer> proof;
-        background_views.proof->GetResource(resource.ReleaseAndGetAddressOf());
-        if (FAILED(resource.As(&proof)) || !buffer_readback(proof.Get(), diagnostic.proof) ||
-            !buffer_readback(background_views.expected_constants.Get(), diagnostic.expected)) return false;
-        if (diagnostic.proof[0u] != 0x31504742u || diagnostic.proof[1u] != 1u || diagnostic.proof[2u] != 1u || diagnostic.proof[3u] != 0u) {
-          error = "causal background diagnostic requires a valid completed GPU proof";
-          return false;
-        }
-      }
       if (!readback_output) { packed_output.clear(); return true; }
 
       auto staging_desc = output_desc;
@@ -1723,7 +1474,7 @@ namespace {
         submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), private_command) && submitted;
       }
       ID3D11Buffer *null_constants = nullptr;
-      context->PSSetConstantBuffers(4u, 1u, &null_constants);
+      if (direct_constants_buffer) context->PSSetConstantBuffers(4u, 1u, &null_constants);
       if (!submitted) {
         error = "shared Host SBS V2 draw recorder rejected complete operands";
         return false;
@@ -1857,11 +1608,7 @@ namespace {
     ComPtr<ID3D11SamplerState> sampler;
     bool mapping_output = false;
     bool direct_replay = false;
-    bool current_outline_completed = false;
-    models::selected_glyph_push_pull_runtime_v1::programs_t background_programs;
-    std::array<ComPtr<ID3D11ComputeShader>, 6u> experimental_background_shaders;
-    std::filesystem::path experimental_background_root;
-    std::string experimental_background_closure;
+    bool selected_outline = false;
     std::array<ComPtr<ID3D11ComputeShader>,2u> shared_ui_pin_cs;
     std::array<ComPtr<ID3D11PixelShader>,3u> shared_ui_pin_ps;
     std::filesystem::path shared_ui_pin_root;
@@ -1870,8 +1617,6 @@ namespace {
     models::host_sbs_shared_ui_warp::resources_t production_shared_ui_pin_owner;
     bool private_guard_configured = false;
     bool use_recorder_guard_scope = false;
-    ComPtr<ID3D11PixelShader> recorder_flat_fallback_ps;
-    bool recorder_flat_fallback_used = false;
     ComPtr<ID3D11Buffer> private_guard_cb, private_guard_packet;
     ComPtr<ID3D11ShaderResourceView> private_guard_srv;
   };
@@ -2053,7 +1798,7 @@ namespace {
   }
 
   current_outline_inputs_t make_current_outline_inputs(const subtitle_inputs_t &subtitle) {
-    // This is the published selector ABI consumed by the production completed PS, not a
+    // This is the published selector ABI consumed by the production shared warp, not a
     // substitute renderer. The compute-selector producer has separate executable coverage.
     current_outline_inputs_t input;
     input.matte = subtitle.matte;
@@ -3848,299 +3593,6 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
   EXPECT_LE(roi_base_samples, 11u);
 }
 
-TEST(HostSbsV2LiveWarpGpuTest, PrivateQueuedRenderGuardMatchesLegacyOrIndependentFlat) {
-  namespace guard = models::research_queued_render_guard_v1;
-  namespace v2 = models::depth_coordinate_v2;
-  const char *root = std::getenv("APOLLO_QUEUED_RENDER_GUARD_SHADER_ROOT");
-  if (!root || !*root) {
-    GTEST_SKIP() << "Opt-in private shader root required";
-  }
-  const char *hw = std::getenv("APOLLO_QUEUED_RENDER_GUARD_HARDWARE");
-  const bool hardware = hw && std::string_view(hw) == "1";
-  constexpr UINT width = 128u, height = 4u, row = 2u, xglyph = 64u;
-  constexpr std::uint64_t token = 0x123456789abcdef0ull, clock = 0x1020304050607080ull;
-  const auto expected = guard::make_expected(token, 1u, clock);
-  auto state = make_live_state(true, true);
-  state[v2::gain_last_observation_low] = static_cast<std::uint32_t>(clock);
-  state[v2::gain_last_observation_high] = static_cast<std::uint32_t>(clock >> 32u);
-  state[v2::gain_seed_first_low] = state[v2::gain_seed_last_low] = static_cast<std::uint32_t>(clock);
-  state[v2::gain_seed_first_high] = state[v2::gain_seed_last_high] = static_cast<std::uint32_t>(clock >> 32u);
-  state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
-  auto subtitle = make_subtitle_inputs(width, height, state, 2.5f / width);
-  subtitle.matte[row * width + xglyph] = 1u;
-  subtitle.snapshot[row * width + xglyph] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
-  std::vector<rgba32f_t> source(width * height);
-  for (UINT y = 0; y < height; ++y) {
-    for (UINT x = 0; x < width; ++x) {
-      source[y * width + x] = {float(x) / width, float(y) / height, 0.2f, 1.0f};
-    }
-  }
-  source[row * width + xglyph] = {1.0f, 1.0f, 1.0f, 1.0f};
-  const std::vector<float> base(width * height, -2.0f / width);
-  std::string error;
-  live_v2_warp_fixture_t legacy, flat, private_ps;
-  ASSERT_TRUE(legacy.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
-  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main, false, hardware)) << error;
-  ASSERT_TRUE(private_ps.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
-  const auto render = [&](live_v2_warp_fixture_t &f, const auto &s, const subtitle_inputs_t *ui) {
-    std::vector<std::byte> out;
-    EXPECT_TRUE(f.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t), width, height, source.data(), base, base, s, {}, out, error, 0u, 0u, {}, ui)) << error;
-    return out;
-  };
-  const auto legacy_pixels = render(legacy, state, &subtitle), flat_pixels = render(flat, state, &subtitle);
-  ASSERT_NE(legacy_pixels, flat_pixels) << "Exercise a real nonidentity Base/UI draw";
-  ASSERT_NE(legacy_pixels, render(legacy, state, nullptr)) << "Fixture must exercise analytic UI too";
-  const auto packet_for = [&](const guard::expected_t &e, std::uint32_t marker) {
-    std::vector<std::uint32_t> p(64u);
-    p[0] = 1u;
-    p[1] = 1u ^ 0xd1ec15a5u ^ marker;
-    p[2] = e.root[0];
-    p[3] = e.root[1];
-    p[4] = e.root[0] ^ 0xa3756c91u;
-    p[5] = e.root[1] ^ 0x5c8a936eu;
-    p[6] = 0x47524243u;
-    p[7] = marker;
-    p[8] = p[2];
-    p[9] = p[3];
-    p[10] = p[4];
-    p[11] = p[5];
-    p[12] = 0x54535152u;
-    p[13] = e.root[2];
-    p[14] = e.root[3];
-    p[20] = p[21] = p[22] = 1u;
-    p[24] = (width + 15u) / 16u;
-    p[25] = (height + 15u) / 16u;
-    p[26] = 1u;
-    return p;
-  };
-  constexpr const char *closure = "dea3e41340dc8e5a219a823a1c438d9cd6812a2c3fc7ed7477c52a40443f0660";
-  auto disabled = expected;
-  disabled.control[0] = 0u;
-  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &disabled, nullptr, error)) << error;
-  EXPECT_EQ(render(private_ps, state, &subtitle), legacy_pixels);
-  EXPECT_TRUE(private_ps.private_guard_slots_clear());
-  for (const auto work : {0u, 1u, 2u}) {
-    for (const auto marker : {0u, 0x52434f4fu}) {
-      if (marker && work != 1u) {
-        continue;
-      }
-      const auto e = guard::make_expected(token, work, clock);
-      const auto p = packet_for(e, marker);
-      ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &e, &p, error)) << error;
-      EXPECT_EQ(render(private_ps, state, &subtitle), legacy_pixels) << "work=" << work << " marker=" << marker;
-      EXPECT_TRUE(private_ps.private_guard_slots_clear());
-    }
-  }
-
-  struct bad_t {
-    std::string name;
-    guard::expected_t e;
-    std::vector<std::uint32_t> p;
-    v2::state_words_t s;
-    bool missing = false;
-  };
-
-  const auto good = packet_for(expected, 0x52434f4fu);
-  std::vector<bad_t> bad;
-  const auto add = [&](const std::string &name) {
-    bad.push_back({name, expected, good, state, false});
-    return &bad.back();
-  };
-  add("missing_raw_packet")->missing = true;
-  add("raw_packet_wrong_size")->p.resize(63u);
-  add("control_bad_enable")->e.control[0] = 2u;
-  add("control_bad_tag")->e.control[1] ^= 1u;
-  add("control_bad_schema")->e.control[2] = 2u;
-  add("control_bad_reserved")->e.control[3] = 1u;
-  add("zero_expected_token")->e.root[0] = 0u;
-  bad.back().e.root[1] = 0u;
-  add("bad_expected_work4")->e.root[2] = 4u;
-  add("bad_expected_cookie")->e.root[3] ^= 1u;
-  add("zero_expected_clock")->e.observation = {0u, 0u, 0u, 0u};
-  add("expected_reserved")->e.observation[2] = 1u;
-  for (const auto index : {8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u}) {
-    add("bad_request_word_" + std::to_string(index))->p[index] ^= 1u;
-  }
-  add("request_mixed_work3")->p[13] = 3u;
-  bad.back().p[14] = 3u ^ 0x6f435257u;
-  add("request_work4")->p[13] = 4u;
-  bad.back().p[14] = 4u ^ 0x6f435257u;
-  add("pre_child_magic0")->p[6] = 0u;
-  add("proposal_magic")->p[6] = 0x504f5250u;
-  add("reuse_not_infer")->p[0] = 0u;
-  bad.back().p[1] = 0xd1ec15a5u;
-  bad.back().p[7] = 0u;
-  for (const auto index : {1u, 2u, 3u, 4u, 5u, 7u}) {
-    add("bad_receipt_word_" + std::to_string(index))->p[index] ^= 1u;
-  }
-  add("OOCR_wrong_work2")->e = guard::make_expected(token, 2u, clock);
-  bad.back().p = packet_for(bad.back().e, 0x52434f4fu);
-  for (const auto index : {20u, 21u, 22u, 23u, 24u, 25u, 26u, 27u}) {
-    add("bad_finalizer_word_" + std::to_string(index))->p[index] ^= 1u;
-  }
-  add("old_state_clock")->s[v2::gain_last_observation_low] ^= 1u;
-  bad.back().s[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(bad.back().s);
-  for (const auto &c : bad) {
-    SCOPED_TRACE(c.name);
-    ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &c.e, c.missing ? nullptr : &c.p, error)) << error;
-    EXPECT_EQ(render(private_ps, c.s, &subtitle), flat_pixels) << "Both Base and UI must be rejected";
-    EXPECT_TRUE(private_ps.private_guard_slots_clear());
-  }
-}
-
-TEST(HostSbsV2LiveWarpGpuTest, QueuedRenderRecorderScopeMatchesLegacyOrIndependentFlat) {
-  namespace guard = models::research_queued_render_guard_v1;
-  namespace v2 = models::depth_coordinate_v2;
-  const char *root = std::getenv("APOLLO_QUEUED_LIVE_SHADER_ROOT");
-  if (!root || !*root) {
-    GTEST_SKIP() << "Opt-in private shader root required";
-  }
-  const char *hw = std::getenv("APOLLO_QUEUED_RENDER_GUARD_HARDWARE");
-  const bool hardware = hw && std::string_view(hw) == "1";
-  constexpr UINT width = 128u, height = 4u, row = 2u, xglyph = 64u;
-  constexpr std::uint64_t token = 0x123456789abcdef0ull, clock = 0x1020304050607080ull;
-  const auto expected = guard::make_expected(token, 1u, clock);
-  auto state = make_live_state(true, true);
-  state[v2::gain_last_observation_low] = static_cast<std::uint32_t>(clock);
-  state[v2::gain_last_observation_high] = static_cast<std::uint32_t>(clock >> 32u);
-  state[v2::gain_seed_first_low] = state[v2::gain_seed_last_low] = static_cast<std::uint32_t>(clock);
-  state[v2::gain_seed_first_high] = state[v2::gain_seed_last_high] = static_cast<std::uint32_t>(clock >> 32u);
-  state[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(state);
-  auto subtitle = make_subtitle_inputs(width, height, state, 2.5f / width);
-  subtitle.matte[row * width + xglyph] = 1u;
-  subtitle.snapshot[row * width + xglyph] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
-  std::vector<rgba32f_t> source(width * height);
-  for (UINT y = 0; y < height; ++y) {
-    for (UINT x = 0; x < width; ++x) {
-      source[y * width + x] = {float(x) / width, float(y) / height, 0.2f, 1.0f};
-    }
-  }
-  source[row * width + xglyph] = {1.0f, 1.0f, 1.0f, 1.0f};
-  const std::vector<float> base(width * height, -2.0f / width);
-  std::string error;
-  live_v2_warp_fixture_t legacy, flat, private_ps;
-  ASSERT_TRUE(legacy.initialize(error, warp_shader_e::live_main, false, hardware)) << error;
-  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main, false, hardware)) << error;
-  ASSERT_TRUE(private_ps.initialize(error, warp_shader_e::flat_main, false, hardware)) << error;
-  private_ps.use_recorder_guard_scope = true;
-  // Every fixture owns a different D3D device; keep the fallback PS on this device.
-  private_ps.recorder_flat_fallback_ps = private_ps.pixel_shader;
-  const auto object_device = [](ID3D11DeviceChild *object) {
-    ComPtr<ID3D11Device> owner;
-    object->GetDevice(&owner);
-    return owner;
-  };
-  ASSERT_EQ(object_device(private_ps.recorder_flat_fallback_ps.Get()).Get(), private_ps.device.Get());
-  const auto render = [&](live_v2_warp_fixture_t &f, const auto &s, const subtitle_inputs_t *ui) {
-    std::vector<std::byte> out;
-    EXPECT_TRUE(f.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t), width, height, source.data(), base, base, s, {}, out, error, 0u, 0u, {}, ui)) << error;
-    return out;
-  };
-  const auto legacy_pixels = render(legacy, state, &subtitle), flat_pixels = render(flat, state, &subtitle);
-  ASSERT_NE(legacy_pixels, flat_pixels) << "Exercise a real nonidentity Base/UI draw";
-  ASSERT_NE(legacy_pixels, render(legacy, state, nullptr)) << "Fixture must exercise analytic UI too";
-  const auto packet_for = [&](const guard::expected_t &e, std::uint32_t marker) {
-    std::vector<std::uint32_t> p(64u);
-    p[0] = 1u;
-    p[1] = 1u ^ 0xd1ec15a5u ^ marker;
-    p[2] = e.root[0];
-    p[3] = e.root[1];
-    p[4] = e.root[0] ^ 0xa3756c91u;
-    p[5] = e.root[1] ^ 0x5c8a936eu;
-    p[6] = 0x47524243u;
-    p[7] = marker;
-    p[8] = p[2];
-    p[9] = p[3];
-    p[10] = p[4];
-    p[11] = p[5];
-    p[12] = 0x54535152u;
-    p[13] = e.root[2];
-    p[14] = e.root[3];
-    p[20] = p[21] = p[22] = 1u;
-    p[24] = (width + 15u) / 16u;
-    p[25] = (height + 15u) / 16u;
-    p[26] = 1u;
-    return p;
-  };
-  constexpr const char *closure = "9c5c978e1c09a573cf5c12f6b248afe37a21d08b102ffe63a8e2423094dd80ee";
-  constexpr const char *filename = "sbs_reprojection_v2_queued_ps.hlsl";
-  const auto good = packet_for(expected, 0x52434f4fu);
-  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
-  const auto sentinel_cb = private_ps.private_guard_cb;
-  const auto sentinel_srv = private_ps.private_guard_srv;
-  auto malformed = good;
-  malformed[6] = 0u;
-  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &malformed, error, filename)) << error;
-  auto *old_cb = sentinel_cb.Get();
-  auto *old_srv = sentinel_srv.Get();
-  private_ps.context->PSSetConstantBuffers(5u, 1u, &old_cb);
-  private_ps.context->PSSetShaderResources(10u, 1u, &old_srv);
-  EXPECT_EQ(render(private_ps, state, &subtitle), flat_pixels);
-  ComPtr<ID3D11Buffer> restored_cb;
-  ComPtr<ID3D11ShaderResourceView> restored_srv;
-  private_ps.context->PSGetConstantBuffers(5u, 1u, &restored_cb);
-  private_ps.context->PSGetShaderResources(10u, 1u, &restored_srv);
-  EXPECT_EQ(restored_cb.Get(), sentinel_cb.Get());
-  EXPECT_EQ(restored_srv.Get(), sentinel_srv.Get());
-  // Create the legacy sentinels on its own device, then restore its ordinary PS.
-  const auto ordinary_ps = legacy.pixel_shader;
-  ASSERT_TRUE(legacy.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
-  const auto legacy_sentinel_cb = legacy.private_guard_cb;
-  const auto legacy_sentinel_srv = legacy.private_guard_srv;
-  legacy.pixel_shader = ordinary_ps;
-  legacy.private_guard_configured = false;
-  ASSERT_EQ(object_device(legacy_sentinel_cb.Get()).Get(), legacy.device.Get());
-  ASSERT_EQ(object_device(legacy_sentinel_srv.Get()).Get(), legacy.device.Get());
-  auto *legacy_old_cb = legacy_sentinel_cb.Get();
-  auto *legacy_old_srv = legacy_sentinel_srv.Get();
-  legacy.context->PSSetConstantBuffers(5u, 1u, &legacy_old_cb);
-  legacy.context->PSSetShaderResources(10u, 1u, &legacy_old_srv);
-  EXPECT_EQ(render(legacy, state, &subtitle), legacy_pixels);
-  ComPtr<ID3D11Buffer> legacy_cb;
-  ComPtr<ID3D11ShaderResourceView> legacy_srv;
-  legacy.context->PSGetConstantBuffers(5u, 1u, &legacy_cb);
-  legacy.context->PSGetShaderResources(10u, 1u, &legacy_srv);
-  EXPECT_EQ(legacy_cb.Get(), legacy_sentinel_cb.Get());
-  EXPECT_EQ(legacy_srv.Get(), legacy_sentinel_srv.Get());
-  ID3D11Buffer *null_cb = nullptr;
-  ID3D11ShaderResourceView *null_srv = nullptr;
-  private_ps.context->PSSetConstantBuffers(5u, 1u, &null_cb);
-  private_ps.context->PSSetShaderResources(10u, 1u, &null_srv);
-  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
-  EXPECT_EQ(render(private_ps, state, &subtitle), legacy_pixels);
-  EXPECT_TRUE(private_ps.private_guard_slots_clear());
-  EXPECT_FALSE(private_ps.recorder_flat_fallback_used);
-  // Both incomplete binding forms execute the caller's independent current-flat GPU path.
-  private_ps.private_guard_cb.Reset();
-  EXPECT_EQ(render(private_ps, state, &subtitle), flat_pixels);
-  EXPECT_TRUE(private_ps.recorder_flat_fallback_used);
-  EXPECT_TRUE(private_ps.private_guard_slots_clear());
-  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
-  private_ps.private_guard_srv.Reset();
-  EXPECT_EQ(render(private_ps, state, &subtitle), flat_pixels);
-  EXPECT_TRUE(private_ps.recorder_flat_fallback_used);
-  EXPECT_TRUE(private_ps.private_guard_slots_clear());
-  auto disabled = expected;
-  disabled.control[0] = 0u;
-  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &disabled, &good, error, filename)) << error;
-  EXPECT_EQ(render(private_ps, state, &subtitle), legacy_pixels);
-  EXPECT_TRUE(private_ps.private_guard_slots_clear());
-  ASSERT_TRUE(private_ps.configure_private_guard(root, closure, &expected, &good, error, filename)) << error;
-  ComPtr<ID3D11Predicate> predicate;
-  D3D11_QUERY_DESC predicate_desc {D3D11_QUERY_OCCLUSION_PREDICATE, 0u};
-  ASSERT_TRUE(SUCCEEDED(private_ps.device->CreatePredicate(&predicate_desc, &predicate)));
-  private_ps.context->SetPredication(predicate.Get(), TRUE);
-  EXPECT_EQ(render(private_ps, state, &subtitle), flat_pixels);
-  EXPECT_TRUE(private_ps.recorder_flat_fallback_used);
-  ComPtr<ID3D11Predicate> restored_predicate;
-  BOOL restored_predicate_value = FALSE;
-  private_ps.context->GetPredication(&restored_predicate, &restored_predicate_value);
-  EXPECT_EQ(restored_predicate.Get(), predicate.Get());
-  EXPECT_EQ(restored_predicate_value, TRUE);
-  private_ps.context->SetPredication(nullptr, FALSE);
-  EXPECT_TRUE(private_ps.private_guard_slots_clear());
-}
-
 TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {
   constexpr UINT width = 8u;
   constexpr UINT height = 1u;
@@ -4361,367 +3813,6 @@ TEST(HostSbsV2LiveWarpGpuTest, NativeGlyphRgbRevocationUsesSdrLinearAndHdrDispla
   }
 }
 
-TEST(HostSbsV2LiveWarpGpuTest, CompletedCurrentOutlineDrawSelectsCurrentMaskAndSignedUiCandidates) {
-  constexpr UINT width = 128u, height = 4u, row = 2u, current_x = 64u, legacy_x = 96u;
-  const auto state = make_live_state(true, true);
-  const std::vector<float> base(width * height, -2.0f / width);
-  std::vector<rgba32f_t> source(width * height, {0.0f, 0.0f, 0.0f, 1.0f});
-  source[row * width + current_x] = source[row * width + legacy_x] = {1.0f, 1.0f, 1.0f, 1.0f};
-  std::string error;
-  live_v2_warp_fixture_t completed, legacy;
-  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
-  ASSERT_TRUE(legacy.initialize(error)) << error;
-  const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *subtitle, const current_outline_inputs_t *outline = nullptr) {
-    std::vector<std::byte> output;
-    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t), width, height, source.data(), base, base, state, {}, output, error, 0u, 0u, {}, subtitle, nullptr, true, outline)) << error;
-    return output;
-  };
-  const auto base_pixels = render(legacy, nullptr);
-  for (const float shift : {2.0f, 2.5f}) {
-    SCOPED_TRACE(shift);
-    auto subtitle = make_subtitle_inputs(width, height, state, shift / width);
-    subtitle.matte[row * width + legacy_x] = 1u;
-    subtitle.snapshot[row * width + current_x] = subtitle.snapshot[row * width + legacy_x] =
-      {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
-    auto outline = make_current_outline_inputs(subtitle);
-    outline.matte.assign(width * height, 0u);
-    outline.matte[row * width + current_x] = 1u;
-    auto current_reference = subtitle;
-    current_reference.matte = outline.matte;
-    const auto expected = render(legacy, &current_reference);
-    const auto original = render(legacy, &subtitle);
-    const auto actual = render(completed, &subtitle, &outline);
-    ASSERT_NE(expected, base_pixels) << "The fixture must exercise an actual UI selection";
-    ASSERT_NE(expected, original) << "The selected and original legacy masks must be distinguishable";
-    EXPECT_EQ(actual, expected) << "The production completed PS must consume current t3, not original t8";
-    ASSERT_EQ(actual.size(), static_cast<std::size_t>(width) * height * 2u * sizeof(rgba32f_t));
-    const auto pixels = unpack_rgba32f(actual);
-    for (UINT eye = 0u; eye < 2u; ++eye) {
-      const auto at = [&](UINT x) {
-        return row * width * 2u + eye * width + x;
-      };
-      const UINT first = eye == 0u ? 66u : (shift == 2.0f ? 62u : 61u);
-      const UINT last = eye == 0u && shift != 2.0f ? 67u : (eye == 0u ? 66u : 62u);
-      for (UINT x = first; x <= last; ++x) {
-        EXPECT_NEAR(pixels[at(x)].r, shift == 2.0f ? 1.0f : 0.5f, 2.0e-6f) << "eye=" << eye;
-      }
-      EXPECT_EQ(pixels[at(eye == 0u ? 62u : 66u)].r, 0.0f) << "Base glyph ghost must select UI too";
-      EXPECT_EQ(pixels[at(eye == 0u ? 94u : 98u)].r, 1.0f) << "Original-only glyph remains ordinary Base";
-    }
-    // An unavailable selected receipt executes the exact original legacy GPU route.
-    EXPECT_EQ(render(completed, &subtitle), original);
-    for (const UINT word : {0u, 1u, 3u, 4u, 16u, 20u, 22u, 23u, 24u, 25u, 26u, 28u, 62u, 63u}) {
-      SCOPED_TRACE(word);
-      auto stale = outline;
-      stale.receipt[word] ^= word == 22u ? 2u : 1u;
-      EXPECT_EQ(render(completed, &subtitle, &stale), original);
-    }
-    auto wrong_kind = outline;
-    wrong_kind.receipt[2u] = 1u;  // Algorithm2 requires current kind3, never a baseline kind.
-    EXPECT_EQ(render(completed, &subtitle, &wrong_kind), original);
-    auto missing_token = outline;
-    missing_token.receipt[60u] = missing_token.receipt[61u] = 0u;
-    EXPECT_EQ(render(completed, &subtitle, &missing_token), original);
-  }
-}
-
-TEST(HostSbsV2LiveWarpGpuTest, CompletedCurrentOutlineDrawRejectsStaleOwnersAndRevokesChangedRgb) {
-  namespace v2 = models::depth_coordinate_v2;
-  constexpr UINT width = 128u, height = 4u, row = 2u, glyph_x = 64u;
-  const auto state = make_live_state(true, true);
-  const std::vector<float> base(width * height, -2.0f / width);
-  std::vector<rgba32f_t> source(width * height, {0.0f, 0.0f, 0.0f, 1.0f});
-  source[row * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
-  auto original = make_subtitle_inputs(width, height, state, 2.0f / width);
-  original.snapshot[row * width + glyph_x] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
-  auto original_outline = make_current_outline_inputs(original);
-  original_outline.matte[row * width + glyph_x] = 1u;
-  std::string error;
-  live_v2_warp_fixture_t completed, legacy, flat;
-  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
-  ASSERT_TRUE(legacy.initialize(error)) << error;
-  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main)) << error;
-  const auto render = [&](live_v2_warp_fixture_t &fixture, const auto &owner, const subtitle_inputs_t *subtitle, const current_outline_inputs_t *outline = nullptr) {
-    std::vector<std::byte> output;
-    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R32G32B32A32_FLOAT, sizeof(rgba32f_t), width, height, source.data(), base, base, owner, {}, output, error, 0u, 0u, {}, subtitle, nullptr, true, outline)) << error;
-    return output;
-  };
-  const auto base_pixels = render(legacy, state, nullptr);
-  const auto selected_pixels = render(completed, state, &original, &original_outline);
-  ASSERT_NE(selected_pixels, base_pixels);
-  for (UINT fault = 0u; fault < 11u; ++fault) {
-    SCOPED_TRACE(fault);
-    auto subtitle = original;
-    auto outline = original_outline;
-    switch (fault) {
-      case 0u:
-        subtitle.constants.enabled = 0u;
-        break;
-      case 1u:
-        subtitle.condition[4u] = 0u;
-        break;
-      case 2u:
-        subtitle.condition[2u] = 0u;
-        break;
-      case 3u:
-        subtitle.identity[3u] ^= 1u;
-        break;
-      case 4u:
-        subtitle.constants.analysis_generation_low ^= 1u;
-        break;
-      case 5u:
-        subtitle.identity[20u] ^= 1u;
-        break;
-      case 6u:
-        subtitle.snapshot[row * width + glyph_x].a = 0u;
-        break;
-      case 7u:
-        subtitle.identity[22u] ^= 1u;
-        break;
-      case 8u:
-        subtitle.identity[24u] = 1u;
-        break;
-      case 9u:
-        subtitle.condition[5u] = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());
-        break;
-      case 10u:
-        outline.matte.assign(width * height, 0u);
-        break;
-    }
-    // Bind a receipt that exactly mirrors the malformed current tuple as well. Receipt equality
-    // must never bypass the independent SCT/SCP/clock checks in the real completed pixel shader.
-    const auto mask = outline.matte;
-    outline = make_current_outline_inputs(subtitle);
-    outline.matte = mask;
-    EXPECT_EQ(render(completed, state, &subtitle, &outline), base_pixels);
-  }
-  source[row * width + glyph_x] = {0.2f, 0.0f, 0.0f, 1.0f};
-  EXPECT_EQ(render(completed, state, &original, &original_outline), render(legacy, state, nullptr))
-    << "A valid retained mask cannot retain a glyph whose current native color disagrees";
-  source[row * width + glyph_x] = {1.0f, 1.0f, 1.0f, 1.0f};
-  EXPECT_EQ(render(completed, state, &original, &original_outline), selected_pixels);
-  auto unauthenticated = state;
-  unauthenticated[v2::renderer_authorization_bits] ^= 1u;
-  EXPECT_EQ(render(completed, unauthenticated, &original, &original_outline), render(flat, unauthenticated, nullptr));
-}
-
-TEST(HostSbsV2LiveWarpGpuTest, CompletedCurrentOutlineDrawUsesRoiScaleAndSdrLinearHdrSnapshots) {
-  constexpr UINT width = 128u, height = 16u, field_width = 16u, field_height = 4u;
-  constexpr UINT glyph_x = 64u, glyph_y = 10u;
-  const auto state = make_live_state(true, true);
-  const std::vector<float> base(field_width * field_height, 0.0f);
-  host_sbs_v2_geometry_t geometry {
-    .video_roi_active = 1.0f,
-    .video_roi_left = 0.25f,
-    .video_roi_top = 0.25f,
-    .video_roi_right = 0.75f,
-    .video_roi_bottom = 0.75f,
-    .tensor_content_right = field_width,
-    .tensor_content_bottom = field_height,
-  };
-  std::string error;
-  live_v2_warp_fixture_t completed, legacy;
-  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
-  ASSERT_TRUE(legacy.initialize(error)) << error;
-  for (UINT mode = 0u; mode < 3u; ++mode) {
-    SCOPED_TRACE(mode);
-    auto subtitle = make_subtitle_inputs(64u, 8u, state, 2.0f / 64u, field_width, field_height);
-    subtitle.constants.color_mode = mode;
-    subtitle.constants.source_left = 32u;
-    subtitle.constants.source_top = 4u;
-    subtitle.height = 4u;
-    subtitle.identity[10u] = 4u;
-    subtitle.identity[11u] = 4u;
-    subtitle.matte.resize(64u * 4u);
-    subtitle.snapshot.resize(64u * 4u);
-    const auto native_index = (glyph_y - 8u) * 64u + (glyph_x - 32u);
-    const std::uint16_t native = mode == 2u ? 0x3c00u : 0x3800u;
-    const std::uint16_t display = mode == 0u ? 0x3800u : 0x39e2u;
-    subtitle.snapshot[native_index] = {display, display, display, 0x3c00u};
-    auto outline = make_current_outline_inputs(subtitle);
-    outline.matte[native_index] = 1u;
-    auto reference = subtitle;
-    reference.matte = outline.matte;
-    std::vector<rgba16_bits_t> source(width * height, {0u, 0u, 0u, 0x3c00u});
-    source[glyph_y * width + glyph_x] = {native, native, native, 0x3c00u};
-    const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *ui, const current_outline_inputs_t *selected = nullptr) {
-      std::vector<std::byte> output;
-      EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base, state, {}, output, error, field_width, field_height, geometry, ui, nullptr, true, selected)) << error;
-      return output;
-    };
-    const auto actual = render(completed, &subtitle, &outline);
-    EXPECT_EQ(actual, render(legacy, &reference));
-    ASSERT_NE(actual, render(legacy, nullptr));
-    ASSERT_EQ(actual.size(), static_cast<std::size_t>(width) * height * 2u * sizeof(rgba16_bits_t));
-    const auto pixels = unpack_rgba16(actual);
-    for (UINT eye = 0u; eye < 2u; ++eye) {
-      const auto moved_x = eye == 0u ? 66u : 62u;
-      EXPECT_EQ(pixels[glyph_y * width * 2u + eye * width + moved_x], source[glyph_y * width + glyph_x]);
-      EXPECT_EQ(pixels[glyph_y * width * 2u + eye * width + glyph_x].r, 0u);
-    }
-    const std::uint16_t changed = mode == 2u ? 0x3800u : 0x3400u;
-    source[glyph_y * width + glyph_x] = {changed, changed, changed, 0x3c00u};
-    EXPECT_EQ(render(completed, &subtitle, &outline), render(legacy, nullptr));
-  }
-}
-
-TEST(HostSbsV2LiveWarpGpuTest, CompletedCurrentOutlineDrawUsesGpuBackgroundAndRejectsStaleProof) {
-  constexpr UINT width = 128u, height = 4u, row = 2u, glyph_x = 64u;
-  const auto state = make_live_state(true, true);
-  const std::vector<float> base(width * height, -2.0f / width);
-  std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});  // .25
-  source[row * width + glyph_x] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};  // marked white
-  source[row * width + glyph_x + 1u] = {0x3a00u, 0x3a00u, 0x3a00u, 0x3c00u};  // unmarked .75
-  auto subtitle = make_subtitle_inputs(width, height, state, 2.5f / width);
-  subtitle.snapshot[row * width + glyph_x] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
-  auto outline = make_current_outline_inputs(subtitle);
-  outline.matte[row * width + glyph_x] = 1u;
-  std::string error;
-  live_v2_warp_fixture_t completed;
-  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
-  const auto render = [&](const current_outline_inputs_t &selected) {
-    std::vector<std::byte> output;
-    EXPECT_TRUE(completed.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base, state, {}, output, error, 0u, 0u, {}, &subtitle, nullptr, true, &selected)) << error;
-    return output;
-  };
-  const auto no_background = render(outline);
-  outline.background_requested = true;
-  const auto actual = render(outline);
-  ASSERT_NE(actual, no_background) << "The fixture must exercise the current background branch";
-  ASSERT_EQ(actual.size(), static_cast<std::size_t>(width) * height * 2u * sizeof(rgba16_bits_t));
-  const auto pixels = unpack_rgba16(actual);
-  for (UINT eye = 0u; eye < 2u; ++eye) {
-    const auto at = [&](UINT x) {
-      return row * width * 2u + eye * width + x;
-    };
-    const UINT first = eye == 0u ? 66u : 61u;
-    // Only marked white contributes to UI; the .75 unmarked UI tap must not enter the blend.
-    // The real push/pull owner reconstructs the uniform .25 background from its clear seeds.
-    EXPECT_EQ(pixels[at(first)].r, 0x3900u);  // .5 * 1 + .5 * .25 = .625
-    EXPECT_EQ(pixels[at(first + 1u)].r, 0x3900u);
-    EXPECT_EQ(pixels[at(eye == 0u ? 63u : 67u)].r, 0x3400u) << "erase1 neighbor uses current repaired Base";
-  }
-  outline.stale_background_proof = true;
-  EXPECT_EQ(render(outline), no_background) << "A stale BG owner must use the exact qualified no-BG GPU route";
-}
-
-TEST(HostSbsV2LiveWarpSourceTest, CurrentOutlineFallbackForwardsTheOriginalBaseInverse) {
-  for (const auto *role : {"completed", "queued"}) {
-    SCOPED_TRACE(role);
-    const auto path = std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline" / role / "include" / "host_sbs_subtitle_render.hlsl";
-    std::ifstream file(path, std::ios::binary);
-    ASSERT_TRUE(file);
-    const std::string source {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-    const auto selector = source.find("float2 SelectSourceUVFromBase(");
-    const auto wrapper = source.find("float2 SelectSourceUV(", selector);
-    const auto fallback = source.find("float4 BackgroundOldSelectedSample(", wrapper);
-    const auto background_gate = source.find("bool CurrentBackgroundAuthorized(", fallback);
-    const auto colour = source.find("float4 SelectPushPullColour(", background_gate);
-    ASSERT_NE(selector, std::string::npos);
-    ASSERT_NE(wrapper, std::string::npos);
-    ASSERT_NE(fallback, std::string::npos);
-    ASSERT_NE(background_gate, std::string::npos);
-    ASSERT_NE(colour, std::string::npos);
-    EXPECT_EQ(source.substr(selector, wrapper - selector).find("ReprojectIfAuthorized("), std::string::npos);
-    EXPECT_NE(source.substr(wrapper, fallback - wrapper).find("ReprojectIfAuthorized(destination_uv,eye_sign)"), std::string::npos);
-    const auto fallback_body = source.substr(fallback, background_gate - fallback);
-    EXPECT_NE(fallback_body.find("SelectSourceUVFromBase(uv,eye_sign,base_uv)"), std::string::npos);
-    EXPECT_EQ(fallback_body.find("ReprojectIfAuthorized("), std::string::npos);
-    EXPECT_EQ(fallback_body.find("SelectSourceUV("), std::string::npos);
-    const auto colour_body = source.substr(colour);
-    const auto inverse = colour_body.find("base_uv=ReprojectIfAuthorized(source_uv,eye_sign)");
-    ASSERT_NE(inverse, std::string::npos);
-    const auto inverse_call = colour_body.find("ReprojectIfAuthorized(", inverse);
-    EXPECT_EQ(colour_body.find("ReprojectIfAuthorized(", inverse_call + 1u), std::string::npos);
-    std::size_t next = 0u;
-    bool found_fallback = false;
-    while ((next = colour_body.find("return BackgroundOldSelectedSample(", next)) != std::string::npos) {
-      found_fallback = true;
-      const auto end = colour_body.find(';', next);
-      ASSERT_NE(end, std::string::npos);
-      EXPECT_EQ(colour_body.substr(next, end - next), "return BackgroundOldSelectedSample(source_uv,eye_sign,base_uv)");
-      next = end + 1u;
-    }
-    EXPECT_TRUE(found_fallback);
-  }
-}
-
-TEST(HostSbsV2LiveWarpGpuTest, CompletedFallbackMatchesPriorShaderAcrossSignedRoiTransfers) {
-  constexpr UINT width = 128u, height = 16u, field_width = 16u, field_height = 4u;
-  constexpr UINT glyph_x = 64u, glyph_y = 10u;
-  const auto state = make_live_state(true, true);
-  std::string error;
-  live_v2_warp_fixture_t completed, legacy, prior;
-  ASSERT_TRUE(completed.initialize(error, warp_shader_e::current_outline_completed)) << error;
-  ASSERT_TRUE(legacy.initialize(error)) << error;
-  const auto *reference_root = std::getenv("SUNSHINE_TEST_HOST_SBS_COMPLETED_REFERENCE_ROOT");
-  const auto *reference_closure = std::getenv("SUNSHINE_TEST_HOST_SBS_COMPLETED_REFERENCE_CLOSURE");
-  const bool compare_prior = reference_root && *reference_root;
-  ASSERT_EQ(compare_prior, reference_closure && *reference_closure);
-  if (compare_prior) {
-    ASSERT_TRUE(prior.initialize(error, warp_shader_e::current_outline_completed, false, false, std::filesystem::path(reference_root), reference_closure)) << error;
-  }
-  for (const bool roi : {false, true}) {
-    SCOPED_TRACE(roi);
-    const UINT analysis_width = roi ? 64u : width;
-    const UINT analysis_height = roi ? 8u : height;
-    host_sbs_v2_geometry_t geometry;
-    if (roi) {
-      geometry.video_roi_active = 1.0f;
-      geometry.video_roi_left = geometry.video_roi_top = 0.25f;
-      geometry.video_roi_right = geometry.video_roi_bottom = 0.75f;
-      geometry.tensor_content_right = field_width;
-      geometry.tensor_content_bottom = field_height;
-    }
-    for (const float sign : {-1.0f, 1.0f}) {
-      SCOPED_TRACE(sign);
-      std::vector<float> base(field_width * field_height);
-      for (UINT y = 0u; y < field_height; ++y) {
-        for (UINT x = 0u; x < field_width; ++x) {
-          base[y * field_width + x] = sign * (1.25f + 0.5f * float(x) / float(field_width - 1u) + 0.125f * float(y)) / float(analysis_width);
-        }
-      }
-      for (const float shift : {2.0f, 2.5f}) {
-        SCOPED_TRACE(shift);
-        for (UINT mode = 0u; mode < 3u; ++mode) {
-          SCOPED_TRACE(mode);
-          auto subtitle = make_subtitle_inputs(analysis_width, analysis_height, state, shift / float(analysis_width), field_width, field_height);
-          subtitle.constants.color_mode = mode;
-          subtitle.constants.source_left = roi ? 32u : 0u;
-          subtitle.constants.source_top = roi ? 4u : 0u;
-          const auto index = (glyph_y - subtitle.constants.source_top) * analysis_width + glyph_x - subtitle.constants.source_left;
-          subtitle.matte[index] = 1u;
-          const std::uint16_t native = mode == 2u ? 0x3c00u : 0x3800u;
-          const std::uint16_t display = mode == 0u ? 0x3800u : 0x39e2u;
-          subtitle.snapshot[index] = {display, display, display, 0x3c00u};
-          auto outline = make_current_outline_inputs(subtitle);
-          std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});
-          source[glyph_y * width + glyph_x] = {native, native, native, 0x3c00u};
-          const auto render = [&](live_v2_warp_fixture_t &fixture, const subtitle_inputs_t *ui, const current_outline_inputs_t *selected) {
-            std::vector<std::byte> output;
-            EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base, state, {}, output, error, field_width, field_height, geometry, ui, nullptr, true, selected)) << error;
-            return output;
-          };
-          const auto ordinary = render(legacy, &subtitle, nullptr);
-          ASSERT_NE(ordinary, render(legacy, nullptr, nullptr)) << "The edge case must select its glyph plane";
-          for (const bool stale_background : {false, true}) {
-            SCOPED_TRACE(stale_background);
-            outline.background_requested = stale_background;
-            outline.stale_background_proof = stale_background;
-            const auto actual = render(completed, &subtitle, &outline);
-            EXPECT_EQ(actual, ordinary) << "Missing/stale BG retains the actual ordinary GPU selector";
-            if (compare_prior) {
-              EXPECT_EQ(actual, render(prior, &subtitle, &outline)) << "Frozen pre-change actual completed PS parity";
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-// Actual completed renderer replay of a bound live HDR tuple. References execute GPU shaders;
-// cropped RGB is evidence, never a CPU inverse, segmentation oracle or release-quality score.
 TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
   const auto *input_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_OUTLINE_CASES");
   if (!input_env || !*input_env) GTEST_SKIP() << "No saved-current HDR specification selected";
@@ -4747,17 +3838,42 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
     return result;
   };
   try {
+    for (const auto *retired : {"SUNSHINE_TEST_SAVED_CURRENT_BG_SHADER_ROOT",
+                               "SUNSHINE_TEST_SAVED_CURRENT_BG_SHADER_PIN",
+                               "SUNSHINE_TEST_SHARED_UI_PIN_PERF_SAMPLES"}) {
+      require(!std::getenv(retired),
+        "Retired literal/repair pixel-shader modes are unavailable; use the shared warp replay");
+    }
     const fs::path input(input_env), output(output_env);
     const auto specification_bytes = read(input);
     const auto spec = json::parse(specification_bytes.begin(), specification_bytes.end());
     require(spec.at("schema") == 1u && (spec.at("driver") == "hardware" || spec.at("driver") == "warp"), "Saved-current draw schema/driver");
     require(!fs::exists(output) || (fs::is_directory(output) && fs::is_empty(output)), "Saved-current draw output must be new or empty");
     const auto &cases = spec.at("cases");require(cases.is_array() && !cases.empty() && cases.size() <= 8u, "Saved-current draw case count");
+    // Contract identity includes the current renderer source inventory. Historical
+    // captured states stay immutable and cannot be retagged to authorize this build.
+    // Reject unsupported captures before creating a device or submitting GPU work.
+    for (const auto &entry : cases) {
+      const auto &binding = entry.at("artifacts").at("state");
+      const auto bytes = read(binding.at("path").get<std::string>());
+      require(bytes.size() == sizeof(v2::state_words_t) && binding.at("byte_count") == bytes.size() &&
+        binding.at("sha256") == sha256(bytes), "Saved-current preflight state binding");
+      v2::state_words_t state {};std::memcpy(state.data(), bytes.data(), bytes.size());
+      const auto &typed = entry.at("provenance").at("typed_state_json");
+      const auto typed_bytes = read(typed.at("path").get<std::string>());
+      require(typed.at("byte_count") == typed_bytes.size() && typed.at("sha256") == sha256(typed_bytes),
+        "Saved-current preflight typed-state binding");
+      const auto document = json::parse(typed_bytes.begin(), typed_bytes.end());
+      const float scale = document.at("constants").at("raw_coordinate_scale").get<float>();
+      require(v2::parallax_state_words_are_authenticated(state, scale, v2::adaptive_policy_id) &&
+        state[v2::renderer_authorization_bits] == v2::contract_tag,
+        "Saved-current captured renderer contract is retired; immutable captures cannot authorize the current shared warp");
+    }
     fs::create_directories(output);
     const bool hardware = spec.at("driver") == "hardware";
     live_v2_warp_fixture_t fixture;
     std::string error;
-    ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed, false, hardware)) << error;
+    ASSERT_TRUE(fixture.initialize(error, warp_shader_e::selected_outline, false, hardware)) << error;
     std::array<wchar_t, 32768u> exe_path {};
     const auto exe_size = GetModuleFileNameW(nullptr, exe_path.data(), DWORD(exe_path.size()));
     require(exe_size > 0u && exe_size < exe_path.size(), "Cannot locate current draw replay executable");
@@ -4769,9 +3885,8 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
       {"input_specification", {{"path", input.string()}, {"sha256", sha256(specification_bytes)}}},
       {"test_executable", {{"path", executable.string()}, {"sha256", sha256(executable_bytes)}}},
       {"fixture_source", {{"path", fixture_path.string()}, {"sha256", sha256(fixture_bytes)}}},
-      {"completed_shader_closure", models::current_outline_runtime::completed_closure},
-      {"background_shader_closure", models::selected_glyph_push_pull_runtime_v1::closure},
-      {"scope", "Literal saved native-HDR production completed pixel shader inputs, shared draw recorder and selected/background scopes"},
+      {"shared_shader_closure", models::host_sbs_shared_ui_warp::closure},
+      {"scope", "Immutable saved native-HDR source/producer inputs rendered by the current shared warp; captured renderer identity remains provenance only"},
       {"pixel_route_map", "not exported; colour crops and whole-output hashes only"},
       {"quality_claim", false}, {"performance_claim", false}, {"cases", json::array()}};
     const auto read_binding = [&](const json &binding) {
@@ -4846,18 +3961,6 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
       report["candidate_input_specification"] = {{"path", candidate_env}, {"sha256", sha256(candidate_specification_bytes)}};
       report["candidate_producer_report"] = candidate_specification.at("producer_report");
     }
-    const auto *experimental_bg_root = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_BG_SHADER_ROOT");
-    const auto *experimental_bg_pin = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_BG_SHADER_PIN");
-    const bool has_experimental_bg = experimental_bg_root && *experimental_bg_root;
-    require(has_experimental_bg == bool(experimental_bg_pin && *experimental_bg_pin), "Experimental BG requires both external root and exact closure pin");
-    if (has_experimental_bg) {
-      require(has_candidate, "Experimental BG requires a bound current producer mask/receipt");
-      ASSERT_TRUE(fixture.configure_experimental_background(experimental_bg_root, experimental_bg_pin, error)) << error;
-      report["experimental_background"] = {{"root", experimental_bg_root}, {"source_closure_sha256", experimental_bg_pin},
-        {"route", "candidate_own_only_background"}, {"not_production_qualified", true},
-        {"intended_causal_change", "Erase only current own M; retain original rawNear BG-seed exclusion"},
-        {"scope", "Pinned external six-CS experiment; completed PS, producer M/receipt and all six ordinary routes remain unchanged"}};
-    }
     const auto *shared_pin_root=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_ROOT");
     const auto *shared_pin_pin=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_SHADER_PIN");
     const bool has_shared_pin=shared_pin_root && *shared_pin_root;
@@ -4922,8 +4025,12 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
       const auto state_document = bound_provenance("typed_state_json");
       const auto actual_draw = bound_provenance("actual_draw_evidence");
       const float raw_scale = state_document.at("constants").at("raw_coordinate_scale").get<float>();
-      require(actual_draw.at("pixel_shader_closure") == models::current_outline_runtime::completed_closure &&
-        actual_draw.at("program") == "current-outline-selected", "Saved-current draw completed program identity");
+      // Historical capture provenance only. This closure is never loaded or used
+      // as the current renderer identity; the report pins the shared warp above.
+      constexpr std::string_view captured_literal_shader_closure =
+        "c8053c9ed5b1f3969e2852f63df3f811671e88f8b1ec8e9dae3b7fc616a3ebe6";
+      require(actual_draw.at("pixel_shader_closure") == captured_literal_shader_closure &&
+        actual_draw.at("program") == "current-outline-selected", "Saved-current captured renderer provenance");
       require(subtitle.constants.color_mode == 2u && subtitle.constants.enabled == 1u &&
         subtitle.constants.source_width == shape[0] && subtitle.constants.source_height == shape[1] &&
         subtitle.identity[10u] == shape[2] && subtitle.identity[11u] == shape[3] &&
@@ -4983,10 +4090,9 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
           candidate_outline.receipt[60u] == outline.receipt[60u] && candidate_outline.receipt[61u] == outline.receipt[61u] &&
           std::equal(contour_constants.begin(), contour_constants.end(), candidate_outline.receipt.begin() + 4u) &&
           std::equal(subtitle.identity.begin(), subtitle.identity.end(), candidate_outline.receipt.begin() + 28u), "Candidate selected current receipt");
-        candidate_outline.background_requested = true;
         candidate_binding = {{"producer_report", candidate_specification.at("producer_report")}, {"producer_case_index", producer_index},
           {"selected_matte", mapping.at("selected_matte")}, {"selected_receipt", mapping.at("selected_receipt")},
-          {"background_policy", "New GPU background owner for actual candidate M; captured old background is never bound"}};
+          {"render_policy", "Current shared warp consumes the actual candidate M and unchanged captured source/receipt"}};
       }
       const auto expected = outline.matte;
       UINT left = width, top = height, right = 0u, bottom = 0u;
@@ -5001,35 +4107,22 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
       json result {{"name", entry.at("name")}, {"crop_ltrb", {left, top, right, bottom}}, {"crop_layout", "eye-major RGBA16F tightly packed"},
         {"input_bindings", bindings}, {"routes", json::object()}};
       if (has_candidate) result["candidate"] = candidate_binding;
-      std::vector<std::byte> captured;
-      std::vector<std::string> routes {"captured", "regenerated_background", "no_background", "base", "ui_reference"};
-      if (has_candidate) routes.emplace_back("candidate_regenerated_background");
-      if (has_experimental_bg) routes.emplace_back("candidate_own_only_background");
-      if (has_shared_pin) {routes.emplace_back("shared_ui_pin");routes.emplace_back("shared_ui_pin_resample_only");}
+      std::vector<std::string> routes {"shared_ui_pin", "base", "ui_reference"};
+      if (has_candidate) routes.emplace_back("candidate_shared_ui_pin");
+      if (has_shared_pin) routes.emplace_back("shared_ui_pin_resample_only");
       for (const auto &route : routes) {
         auto render_subtitle = subtitle;auto render_outline = outline;auto render_geometry = geometry;
         auto render_base = base;
-        if (route == "captured") render_outline.saved_background = &background;
-        if (route == "regenerated_background") render_outline.background_requested = true;
-        if (route == "candidate_regenerated_background") render_outline = candidate_outline;
+        if (route == "candidate_shared_ui_pin") render_outline = candidate_outline;
         shared_ui_pin_diagnostics_t pin_diagnostic;
-        const bool pin_route=route=="shared_ui_pin" || route=="shared_ui_pin_resample_only";
+        const bool pin_route=route=="shared_ui_pin" || route=="candidate_shared_ui_pin" || route=="shared_ui_pin_resample_only";
+        render_outline.production_shared_ui_pin=true;
         if (pin_route) {
-          if (has_candidate) render_outline=candidate_outline;
-          render_outline.background_requested=false;render_outline.shared_ui_pin=true;
+          render_outline.production_shared_ui_pin=!has_shared_pin;render_outline.shared_ui_pin=has_shared_pin;
           render_outline.shared_ui_pin_resample_only=route=="shared_ui_pin_resample_only";
           render_outline.shared_ui_pin_diagnostic_output=&pin_diagnostic;
         }
-        double gpu_ms=-1.0;
-        if (has_shared_pin) render_outline.render_gpu_ms=&gpu_ms;
-        saved_background_inputs_t actual_background;
-        if (route == "candidate_own_only_background") {
-          render_outline = candidate_outline;
-          render_outline.experimental_background = true;
-        }
-        const bool capture_background = has_experimental_bg &&
-          (route == "candidate_regenerated_background" || route == "candidate_own_only_background");
-        if (capture_background) render_outline.background_diagnostic_output = &actual_background;
+        double gpu_ms=-1.0;render_outline.render_gpu_ms=&gpu_ms;
         if (route == "base" || route == "ui_reference") render_subtitle.constants.enabled = 0u;
         if (route == "ui_reference") {
           const float target = std::bit_cast<float>(subtitle.condition[5u]) * (float(shape[0]) / float(width));
@@ -5041,9 +4134,6 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
           source.data(), render_base, render_base, state, {}, pixels, error, field[0], field[1], render_geometry,
           &render_subtitle, nullptr, true, &render_outline)) << route << ": " << error;
         ASSERT_EQ(pixels.size(), std::size_t(width) * height * 2u * sizeof(rgba16_bits_t));
-        if (route == "captured") captured = pixels;
-        if (route == "regenerated_background") result["captured_vs_regenerated_background_bitexact"] = pixels == captured;
-        if (route == "no_background") result["captured_differs_from_no_background"] = pixels != captured;
         const std::size_t row_bytes = std::size_t(right - left) * sizeof(rgba16_bits_t);
         std::vector<std::byte> crop(row_bytes * (bottom - top) * 2u);
         for (UINT eye = 0u; eye < 2u; ++eye) for (UINT y = top; y < bottom; ++y) {
@@ -5083,41 +4173,6 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
             {"coverage_layout","eye-major cropped RGBA32F: actual GPU current selected-M bilinear UI coverage, full-coverage flag,0,1"},
             {"native_plane_bytes",std::uint64_t(pin_diagnostic.field.size())*8u+(std::uint64_t(pin_diagnostic.active_rows.size())+1u)*4u}};
         }
-        if (capture_background) {
-          require(actual_background.pixels.size() == native_pixels, "Actual diagnostic BG dimensions");
-          const auto artifact = [&](const char *suffix, const void *data, std::size_t size) {
-            const auto destination = case_output / (route + suffix);
-            std::vector<char> bytes(size);std::memcpy(bytes.data(), data, size);
-            std::ofstream saved(destination, std::ios::binary);
-            saved.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));saved.close();
-            require(bool(saved), "Cannot write actual GPU BG diagnostic");
-            return json {{"path", destination.string()}, {"byte_count", bytes.size()}, {"sha256", sha256(bytes)}};
-          };
-          result["routes"][route]["actual_background"] = {
-            {"pixels", artifact(".background.rgba32f", actual_background.pixels.data(), actual_background.pixels.size() * sizeof(rgba32f_t))},
-            {"proof", artifact(".background-proof.u32", actual_background.proof.data(), sizeof(actual_background.proof))},
-            {"expected", artifact(".background-expected.u32", actual_background.expected.data(), sizeof(actual_background.expected))},
-            {"native_shape", {shape[0], shape[3]}}, {"selected_matte", candidate_binding.at("selected_matte")},
-            {"selected_receipt", candidate_binding.at("selected_receipt")},
-            {"shader_closure", route == "candidate_own_only_background" ? std::string(experimental_bg_pin) : std::string(models::selected_glyph_push_pull_runtime_v1::closure)},
-            {"not_production_qualified", route == "candidate_own_only_background"}};
-        }
-      }
-      if (has_shared_pin) {
-        const auto *samples_env=std::getenv("SUNSHINE_TEST_SHARED_UI_PIN_PERF_SAMPLES");
-        const UINT samples=samples_env?static_cast<UINT>(std::stoul(samples_env)):0u;
-        require(samples<=64u,"Shared UI pin perf sample cap");
-        json timings={{"current_bg",json::array()},{"shared_ui_pin",json::array()}};
-        for(UINT sample=0u;sample<samples+2u && samples>0u;++sample)for(UINT order=0u;order<2u;++order) {
-          const bool pin=((sample+order)&1u)!=0u;auto selected=has_candidate?candidate_outline:outline;
-          selected.background_requested=!pin;selected.shared_ui_pin=pin;
-          double elapsed=-1.0;selected.render_gpu_ms=&elapsed;std::vector<std::byte> ignored;
-          ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,sizeof(rgba16_bits_t),width,height,source.data(),base,base,state,{},
-            ignored,error,field[0],field[1],geometry,&subtitle,nullptr,false,&selected)) << error;
-          if(sample>=2u)timings[pin?"shared_ui_pin":"current_bg"].push_back(elapsed);
-        }
-        result["balanced_gpu_timing"]={{"samples_per_route",samples},{"warmup_rounds",2u},{"ms",timings},
-          {"scope","Hardware GPU timestamp interval for native preparation plus completed draw; excludes shader compilation/resource creation, diagnostic draws/copies/readbacks; fresh fixture resources per call, not production retained-resource CPU cost"}};
       }
       if (entry.contains("provenance")) result["provenance"] = entry.at("provenance");
       for (const auto &[key, bytes] : imported) require(read(bindings.at(key).at("path").get<std::string>()) == bytes, "Saved-current draw input changed during replay");
@@ -5128,7 +4183,6 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
       require(read(candidate_env) == candidate_specification_bytes &&
         read_binding(candidate_specification.at("producer_report")) == candidate_producer_bytes, "Candidate draw specification/producer report changed");
     }
-    if (has_experimental_bg) require(fixture.experimental_background_source_unchanged(), "Experimental BG source changed during replay");
     if (has_shared_pin) require(fixture.shared_ui_pin_source_unchanged(),"Shared UI pin source changed during replay");
     if (!fixture_f2_binding.is_null()) {
       const auto unchanged = [&](const char *name, const auto &specs) {
@@ -5775,13 +4829,13 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinAuthoredStressComparison) {
     require(spec.at("schema")==1u && spec.at("driver")=="hardware" && spec.at("cases").size()>=1u && spec.at("cases").size()<=16u,"Authored stress schema/driver/case count");
     const fs::path output(output_env);require(!fs::exists(output)||(fs::is_directory(output)&&fs::is_empty(output)),"Authored stress output must be new or empty");fs::create_directories(output);
     live_v2_warp_fixture_t fixture;std::string error;
-    ASSERT_TRUE(fixture.initialize(error,warp_shader_e::current_outline_completed,false,true))<<error;
+    ASSERT_TRUE(fixture.initialize(error,warp_shader_e::selected_outline,false,true))<<error;
     ASSERT_TRUE(fixture.configure_shared_ui_pin(shader_root,shader_pin,error))<<error;
     json report={{"schema",1u},{"driver","hardware"},{"adapter",fixture.adapter_identity()},
       {"input_specification",{{"path",cases_env},{"sha256",sha(specification_bytes)}}},
       {"reference_specification",{{"path",reference_env},{"sha256",sha(reference_bytes)}}},
       {"shared_ui_pin_source_closure_sha256",shader_pin},
-      {"scope","Authored fixed-mask current BG versus shared Game 3D pin, with independent actual-GPU known-layer reference; no OCR or live qualification"},
+      {"scope","Authored fixed-mask shared warp with independent actual-GPU known-layer reference; retired repair route is not executed"},
       {"cases",json::array()}};
     for(std::size_t index=0u;index<spec.at("cases").size();++index) {
       const auto &entry=spec.at("cases").at(index);SCOPED_TRACE(entry.at("name").get<std::string>());
@@ -5842,9 +4896,9 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinAuthoredStressComparison) {
         {"input_bindings",bindings},{"authored_parameters",entry},{"routes",json::object()},
         {"comparison_preparation","Current SCT/SCP/receipt explicitly authored by fixture; all renderer operands common, no current-producer claim"}};
       if(entry.contains("original_input_bindings"))result["original_input_bindings"]=entry.at("original_input_bindings");
-      for(const auto *route:{"current_bg","shared_ui_pin","shared_ui_pin_resample_only","base_composite"}) {
+      for(const auto *route:{"shared_ui_pin","shared_ui_pin_resample_only","base_composite"}) {
         const bool pin=std::string_view(route)=="shared_ui_pin"||std::string_view(route)=="shared_ui_pin_resample_only";
-        auto operands=selected;auto ui=subtitle;operands.background_requested=std::string_view(route)=="current_bg";operands.shared_ui_pin=pin;
+        auto operands=selected;auto ui=subtitle;operands.shared_ui_pin=pin;
         operands.shared_ui_pin_resample_only=std::string_view(route)=="shared_ui_pin_resample_only";
         if(std::string_view(route)=="base_composite")ui.constants.enabled=0u;
         shared_ui_pin_diagnostics_t diagnostic;if(pin)operands.shared_ui_pin_diagnostic_output=&diagnostic;
@@ -5887,9 +4941,8 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinAuthoredStressComparison) {
           std::vector<std::byte> actual,expected;
           ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM,4u,width,height,source.data(),base,base,state,{},actual,error,
             field[0u],field[1u],geometry,&ui,nullptr,true,&operands))<<kind<<": "<<error;
-          // Receipt failure keeps literal legacy selection; other refusals keep Base.
-          operands.shared_ui_pin=false;operands.background_requested=false;
-          if(std::string_view(kind)!="stale_receipt")ui.constants.enabled=0u;
+          // Every rejected shared receipt/source tuple retains ordinary Base.
+          operands.shared_ui_pin=false;ui.constants.enabled=0u;
           ASSERT_TRUE(fixture.render(DXGI_FORMAT_B8G8R8A8_UNORM,4u,width,height,source.data(),base,base,state,{},expected,error,
             field[0u],field[1u],geometry,&ui,nullptr,true,&operands))<<error;
           EXPECT_EQ(actual,expected)<<kind;adversaries.push_back({{"kind",kind},{"actual_sha256",sha(actual)},{"reference_sha256",sha(expected)},{"bitexact",actual==expected}});
@@ -5915,7 +4968,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinPreservesNativeGlyphAndAuthorityAcross
   const std::string pin=external_root&&*external_root?(external_pin?external_pin:""):
     models::host_sbs_shader_cache::source_closure_sha256(source);
   ASSERT_EQ(pin.size(),64u);live_v2_warp_fixture_t fixture;std::string error;
-  ASSERT_TRUE(fixture.initialize(error,warp_shader_e::current_outline_completed,false,true))<<error;
+  ASSERT_TRUE(fixture.initialize(error,warp_shader_e::selected_outline,false,true))<<error;
   ASSERT_TRUE(fixture.configure_shared_ui_pin(root,pin,error))<<error;
   constexpr UINT W=128u,H=32u,FW=24u,FH=10u;const auto state=make_live_state(true,true);
   for(bool roi:{false,true})for(float sign:{-1.0f,1.0f})for(float shift:{2.0f,2.5f})for(UINT mode:{0u,1u,2u})for(float scale_y:{1.0f,0.8125f}) {
@@ -5987,7 +5040,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRetainsAuthorityAndClearsReu
   selected.production_shared_ui_pin = true;
   std::string error;
   live_v2_warp_fixture_t fixture;
-  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::selected_outline)) << error;
   const auto render = [&](const subtitle_inputs_t &subtitle, const current_outline_inputs_t &operands) {
     std::vector<std::byte> output;
     EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
@@ -6012,20 +5065,70 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRetainsAuthorityAndClearsReu
     } else operands.receipt[63u] = 1u;
     const auto actual = render(changed, operands);
     if (std::string_view(fault) == "stale receipt") {
-      operands.production_shared_ui_pin = false;
-      const auto legacy = render(changed, operands);
-      EXPECT_EQ(actual, legacy) << "Receipt rejection must retain the literal original legacy selector";
-      EXPECT_NE(actual, base_output) << "This fault must actually exercise positive original M";
+      EXPECT_EQ(actual, base_output) << "Receipt rejection must retain ordinary Base";
     } else EXPECT_EQ(actual, base_output);
     EXPECT_EQ(render(ui, selected), current) << "A rejected/empty draw must not poison a later current draw";
   }
+  // A receipt that mirrors a malformed tuple cannot grant source/plane authority.
+  // These were previously exercised through the retired literal pixel program.
+  for (UINT fault = 0u; fault < 11u; ++fault) {
+    SCOPED_TRACE("independent tuple authority " + std::to_string(fault));
+    auto changed = ui;
+    switch (fault) {
+      case 0u: changed.constants.enabled = 0u; break;
+      case 1u: changed.condition[4u] = 0u; break;
+      case 2u: changed.condition[2u] = 0u; break;
+      case 3u: changed.identity[3u] ^= 1u; break;
+      case 4u: changed.constants.analysis_generation_low ^= 1u; break;
+      case 5u: changed.identity[20u] ^= 1u; break;
+      case 6u: changed.snapshot[15u * width + 64u].a = 0u; break;
+      case 7u: changed.identity[22u] ^= 1u; break;
+      case 8u: changed.identity[24u] = 1u; break;
+      case 9u: changed.condition[5u] = 0x7fc00000u; break;
+      default: break;
+    }
+    auto operands = make_current_outline_inputs(changed);
+    operands.matte = selected.matte;
+    operands.production_shared_ui_pin = true;
+    if (fault == 10u) std::fill(operands.matte.begin(), operands.matte.end(), 0u);
+    EXPECT_EQ(render(changed, operands), base_output);
+    EXPECT_EQ(render(ui, selected), current);
+  }
+  for (const UINT word : {0u, 1u, 3u, 4u, 16u, 20u, 22u, 23u, 24u, 25u, 26u, 28u, 62u, 63u}) {
+    SCOPED_TRACE("receipt word " + std::to_string(word));
+    auto operands = selected;operands.receipt[word] ^= word == 22u ? 2u : 1u;
+    EXPECT_EQ(render(ui, operands), base_output);
+    EXPECT_EQ(render(ui, selected), current);
+  }
+  for (const bool zero_token : {false, true}) {
+    auto operands = selected;
+    if (zero_token) operands.receipt[60u] = operands.receipt[61u] = 0u;
+    else operands.receipt[2u] = 1u;
+    EXPECT_EQ(render(ui, operands), base_output);
+  }
+  std::vector<std::byte> absent_receipt;
+  ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+    source.data(), base, base, state, {}, absent_receipt, error, field_width, field_height, {}, &ui)) << error;
+  EXPECT_EQ(absent_receipt, base_output) << "An absent receipt cannot select the ordinary renderer's legacy subtitle warp";
+
+  auto unauthorized = state;
+  unauthorized[models::depth_coordinate_v2::renderer_authorization_bits] ^= 1u;
+  live_v2_warp_fixture_t flat;
+  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main)) << error;
+  std::vector<std::byte> rejected, flat_pixels;
+  ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+    source.data(), base, base, unauthorized, {}, rejected, error, field_width, field_height, {}, &ui,
+    nullptr, true, &selected)) << error;
+  ASSERT_TRUE(flat.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+    source.data(), base, base, unauthorized, {}, flat_pixels, error, field_width, field_height)) << error;
+  EXPECT_EQ(rejected, flat_pixels) << "A selected receipt cannot bypass renderer authorization";
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs) {
   namespace shared = models::host_sbs_shared_ui_warp;
   live_v2_warp_fixture_t fixture;
   std::string error;
-  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::selected_outline)) << error;
   ASSERT_TRUE(fixture.production_shared_ui_pin_programs.load(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
   constexpr UINT width = 128u, height = 16u;
   const auto state = make_live_state(true, true);
@@ -6089,7 +5192,9 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejec
   fixture.context->PSGetShaderResources(11u, 1u, &restored_proof);
   EXPECT_EQ(restored_background.Get(), old_background);
   EXPECT_EQ(restored_proof.Get(), old_background);
-  // render() verifies b4 restoration at scope exit before clearing its draw constants.
+  ComPtr<ID3D11Buffer> restored_auxiliary_constants;
+  fixture.context->PSGetConstantBuffers(4u, 1u, &restored_auxiliary_constants);
+  EXPECT_EQ(restored_auxiliary_constants.Get(), old_buffer);
   shared::request_t missing;
   EXPECT_FALSE(fixture.production_shared_ui_pin_owner.queue(fixture.context.Get(),
     fixture.production_shared_ui_pin_programs.program(), missing, error));
@@ -6101,7 +5206,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRejectsInvalidRowExtentAndDi
   namespace shared = models::host_sbs_shared_ui_warp;
   live_v2_warp_fixture_t fixture;
   std::string error;
-  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::selected_outline)) << error;
   shared::resources_t owner;
   EXPECT_FALSE(owner.ensure(fixture.device.Get(), {8u, 16384u, 0u, 16384u}, error));
   EXPECT_EQ(error, "Shared UI warp native source domain unavailable");
@@ -6139,7 +5244,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAt
   const std::vector<float> base(width * height, -1.25f / width);
   std::string error;
   live_v2_warp_fixture_t fixture, flat;
-  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::current_outline_completed)) << error;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::selected_outline)) << error;
   ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main)) << error;
   const auto packet_for = [&](const guard::expected_t &e) {
     std::vector<std::uint32_t> packet(64u);
@@ -6155,11 +5260,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAt
   };
   const auto good = packet_for(expected);
   const auto configure = [&](const guard::expected_t &owner, const std::vector<std::uint32_t> &packet) {
-    // Reuse only the fixture's raw packet/CB materialization. The selected PS is the actual
-    // authenticated shared runtime program, not this ordinary completed helper.
-    return fixture.configure_private_guard(
-      std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline" / "completed",
-      std::string(models::current_outline_runtime::completed_closure), &owner, &packet, error);
+    return fixture.configure_guard_operands(&owner, &packet, error);
   };
   const auto render = [&](live_v2_warp_fixture_t &renderer, const current_outline_inputs_t *operands) {
     std::vector<std::byte> pixels;
@@ -6184,6 +5285,80 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAt
   auto stale_clock = expected;stale_clock.observation[0u] ^= 1u;
   ASSERT_TRUE(configure(stale_clock, good)) << error;
   EXPECT_EQ(render(fixture, &selected), identity);
+  struct malformed_guard_t {
+    std::string name;
+    guard::expected_t owner;
+    std::vector<std::uint32_t> packet;
+  };
+  std::vector<malformed_guard_t> malformed;
+  const auto add = [&](const std::string &name) {
+    malformed.push_back({name, expected, good});return &malformed.back();
+  };
+  add("raw packet wrong size")->packet.resize(63u);
+  add("bad enable")->owner.control[0u] = 2u;
+  add("bad tag")->owner.control[1u] ^= 1u;
+  add("bad schema")->owner.control[2u] = 2u;
+  add("reserved control")->owner.control[3u] = 1u;
+  add("zero token")->owner.root[0u] = 0u;malformed.back().owner.root[1u] = 0u;
+  add("invalid work")->owner.root[2u] = 4u;
+  add("bad work cookie")->owner.root[3u] ^= 1u;
+  add("zero clock")->owner.observation = {0u, 0u, 0u, 0u};
+  add("reserved observation")->owner.observation[2u] = 1u;
+  for (const UINT word : {8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u})
+    add("request word " + std::to_string(word))->packet[word] ^= 1u;
+  add("mixed request work")->packet[13u] = 3u;
+  malformed.back().packet[14u] = 3u ^ 0x6f435257u;
+  add("invalid request work")->packet[13u] = 4u;
+  malformed.back().packet[14u] = 4u ^ 0x6f435257u;
+  add("pre-child marker")->packet[6u] = 0u;
+  add("proposal marker")->packet[6u] = 0x504f5250u;
+  add("reuse is not inference")->packet[0u] = 0u;
+  malformed.back().packet[1u] = 0xd1ec15a5u;malformed.back().packet[7u] = 0u;
+  for (const UINT word : {1u, 2u, 3u, 4u, 5u, 7u})
+    add("receipt word " + std::to_string(word))->packet[word] ^= 1u;
+  add("OCR marker with wrong work")->owner = guard::make_expected(token, 2u, clock);
+  malformed.back().packet = packet_for(malformed.back().owner);
+  for (const UINT word : {20u, 21u, 22u, 23u, 24u, 25u, 26u, 27u})
+    add("finalizer word " + std::to_string(word))->packet[word] ^= 1u;
+  for (const auto &fault : malformed) {
+    SCOPED_TRACE(fault.name);
+    ASSERT_TRUE(configure(fault.owner, fault.packet)) << error;
+    EXPECT_EQ(render(fixture, &selected), identity);
+    EXPECT_TRUE(fixture.private_guard_slots_clear());
+  }
+  // Missing guard resources are rejected before queueing any shared preparation.
+  for (const bool missing_constants : {false, true}) {
+    ASSERT_TRUE(configure(expected, good)) << error;
+    if (missing_constants) fixture.private_guard_cb.Reset();else fixture.private_guard_srv.Reset();
+    std::vector<std::byte> pixels;
+    EXPECT_FALSE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+      source.data(), base, base, state, {}, pixels, error, 0u, 0u, {}, &ui, nullptr, true, &selected));
+    EXPECT_EQ(error, "Shared UI warp program/context/draw operands unavailable");
+    EXPECT_TRUE(fixture.private_guard_slots_clear());
+  }
+  ASSERT_TRUE(configure(expected, good)) << error;
+  auto old_state_clock = state;
+  old_state_clock[v2::gain_last_observation_low] ^= 1u;
+  old_state_clock[v2::camera_center_integrity_bits] = v2::camera_center_integrity_for_state_words(old_state_clock);
+  std::vector<std::byte> old_clock_pixels;
+  ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+    source.data(), base, base, old_state_clock, {}, old_clock_pixels, error, 0u, 0u, {}, &ui,
+    nullptr, true, &selected)) << error;
+  EXPECT_EQ(old_clock_pixels, identity);
+
+  ComPtr<ID3D11Predicate> predicate;
+  D3D11_QUERY_DESC predicate_desc {D3D11_QUERY_OCCLUSION_PREDICATE, 0u};
+  ASSERT_TRUE(SUCCEEDED(fixture.device->CreatePredicate(&predicate_desc, &predicate)));
+  fixture.context->SetPredication(predicate.Get(), TRUE);
+  std::vector<std::byte> predicated_pixels;
+  EXPECT_FALSE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+    source.data(), base, base, state, {}, predicated_pixels, error, 0u, 0u, {}, &ui,
+    nullptr, true, &selected));
+  EXPECT_EQ(error, "Shared UI warp requires an unpredicated draw");
+  ComPtr<ID3D11Predicate> restored_predicate;BOOL restored_predicate_value = FALSE;
+  fixture.context->GetPredication(&restored_predicate, &restored_predicate_value);
+  EXPECT_EQ(restored_predicate.Get(), predicate.Get());EXPECT_EQ(restored_predicate_value, TRUE);
+  fixture.context->SetPredication(nullptr, FALSE);
   ASSERT_TRUE(configure(expected, good)) << error;
   EXPECT_EQ(render(fixture, &selected), completed) << "Rejected guards must not poison a later current queued draw";
   EXPECT_TRUE(fixture.private_guard_slots_clear());

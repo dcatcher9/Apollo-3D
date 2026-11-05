@@ -198,8 +198,6 @@ namespace sbs_bench::current_outline_qualification {
       config.current_outline_shader_root = root.string();
       config.selector_shader_root = runtime::selector_root(root).string();
       config.selector_source_closure_sha256 = runtime::selector_closure;
-      config.completed_shader_root = runtime::completed_root(root).string();
-      config.completed_source_closure_sha256 = runtime::completed_closure;
       return estimator.configure_subtitle_selected_matte_research(config, error);
     }
 

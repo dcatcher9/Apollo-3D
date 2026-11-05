@@ -1386,8 +1386,6 @@ namespace models {
     bool current_outline = false;
     std::string current_outline_shader_root;
     std::string selector_shader_root, selector_source_closure_sha256;
-    std::string completed_shader_root, completed_source_closure_sha256;
-    std::string queued_shader_root, queued_source_closure_sha256;
   };
   // PRIVATE observer aliases only. Exact pending/current model join; not completed authority.
   struct subtitle_selected_matte_diagnostic_views_t {

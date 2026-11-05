@@ -33,6 +33,10 @@ ROLE = "file-fed-actual-completed-current-outline-compositor"
 FRAME_NAME = re.compile(r"frame_(\d+)\.png\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 MAXIMUM_FRAMES = 64
+# Read-only identities for retired qualification schemas. These do not load or
+# register the deleted renderer, and cannot qualify the current shared-only ABI.
+RETIRED_COMPLETED_SOURCE_CLOSURE = "c8053c9ed5b1f3969e2852f63df3f811671e88f8b1ec8e9dae3b7fc616a3ebe6"
+RETIRED_SHARED_SOURCE_CLOSURE = "60febe4bfb1ab4d22142648c9898e3407af0a1f83eedbbcf5593f3ca19a90626"
 COMPOSITION_ROLES = ("source5", "colour", "components", "enclosure", "roi", "outline", "inside", "selector", "stability", "hole", "coverage")
 PRODUCER_STAGES = {
     "cbc_meta": (512, "current_outline_stages[2]:CBCMeta512", "BUFFER", "UNKNOWN", 4),
@@ -115,17 +119,22 @@ def expected_closures(schema=1):
     # The C++ role/spec lists remain the owner. Check their source pins through the normal
     # generator rather than trusting a digest supplied by a qualification document.
     _require(generator._write_current_outline_runtime_pins(True), "current-outline source pins are stale")
-    if schema >= 4:
+    if schema >= 5:
         _require(generator._write_shared_ui_warp_runtime_pin(True), "shared warp source pin is stale")
-    else:
+    elif schema < 4:
         _require(generator._write_current_background_runtime_pin(True), "background source pin is stale")
     source = generator.CURRENT_OUTLINE_RUNTIME_HEADER.read_text(encoding="utf-8")
     result = {}
-    for name in ("completed", "selector"):
+    if schema < 5:
+        result["completed_source_closure_sha256"] = RETIRED_COMPLETED_SOURCE_CLOSURE
+    for name in ("selector",):
         match = re.search(rf'inline constexpr std::string_view {name}_closure="([0-9a-f]{{64}})";', source)
         _require(match is not None, f"native {name} closure is absent")
         result[f"{name}_source_closure_sha256"] = match[1]
-    header = (generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER if schema >= 4
+    if schema == 4:
+        result["shared_warp_source_closure_sha256"] = RETIRED_SHARED_SOURCE_CLOSURE
+        return result
+    header = (generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER if schema >= 5
               else generator.CURRENT_BACKGROUND_RUNTIME_HEADER)
     source = header.read_text(encoding="utf-8")
     match = re.search(r'inline constexpr std::string_view closure\s*=\s*"([0-9a-f]{64})";', source)
@@ -368,17 +377,20 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
     document = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
     root_fields = {"schema", "status", "role", "ordinary_metric_artifacts", "live_capture", "scheduling_authority",
                        "source_transfer", "frame_count", "executable_sha256", "coordinate_contract_schema",
-                       "coordinate_contract_sha256", "producer_source_closure_sha256", "completed_source_closure_sha256",
+                       "coordinate_contract_sha256", "producer_source_closure_sha256",
                        "selector_source_closure_sha256", "observation_timeline",
                        "model", "model_url", "onnx_sha256", "raw_coordinate_scale", "frames"}
-    root_fields.add("shared_warp_source_closure_sha256" if isinstance(document, dict) and
-                    document.get("schema") == 4 else "background_source_closure_sha256")
-    if isinstance(document, dict) and document.get("schema") in {3, 4}:
+    schema = document.get("schema") if isinstance(document, dict) else None
+    if type(schema) is not int or schema < 5:
+        root_fields.add("completed_source_closure_sha256")
+    root_fields.add("shared_warp_source_closure_sha256" if type(schema) is int and
+                    schema >= 4 else "background_source_closure_sha256")
+    if type(schema) is int and schema >= 3:
         root_fields.add("composition_source_closures")
         root_fields.add("hole_program_ready")
         root_fields.add("coverage_program_ready")
     _closed(document, root_fields, "qualification manifest")
-    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4} and
+    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4, 5} and
              document["status"] == "COMPLETE" and document["role"] == ROLE and
              document["ordinary_metric_artifacts"] == "unchanged-legacy-native-matte-renderer" and
              document["live_capture"] is False and document["source_transfer"] == "encoded-srgb" and
@@ -431,6 +443,7 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
                          if path.is_file()}
         _require(stages == actual_stages, "producer stage artifact coverage differs")
     return {"schema": 1, "status": "PASS", "frame_count": len(outcomes),
+            "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] == 5,
             "selected_current_frames": sum(item[3] == 3 for item in outcomes),
             "background_valid_frames": sum(item[4] == 1 for item in outcomes) if document["schema"] < 4 else 0,
             "shared_warp_frames": len(outcomes) if document["schema"] >= 4 else 0,

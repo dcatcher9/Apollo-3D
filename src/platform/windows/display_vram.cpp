@@ -53,7 +53,6 @@
 #include "src/host_sbs_provider.h"
 #include "src/host_sbs_queued_render_guard.h"
 #include "src/host_sbs_pending_current_colour_lane.h"
-#include "src/host_sbs_selected_matte_gpu.h"
 #include "src/host_sbs_current_outline_runtime_programs.h"
 #include "src/host_sbs_shared_ui_warp_runtime.h"
 #include "src/host_sbs_resolution.h"
@@ -429,41 +428,30 @@ namespace platf::dxgi {
   }
 
   struct selected_matte_programs_t {
-    models::current_outline_runtime::pixel_programs_t pixel;
     models::host_sbs_shared_ui_warp::programs_t shared_warp;
     models::subtitle_selected_matte_research_configuration_t configuration;
     std::string error;
-    std::string shared_warp_error;
+    bool configured = false;
     bool ready = false;
   };
 
-  // Configuration creates device objects and loads authenticated CPU bytecode only. It must
-  // never dispatch, bind, or otherwise use the shared immediate context from a build worker.
+  // Device-object preparation only, before the estimator's first input. The
+  // shared warp is the only current-outline selected renderer. Historical
+  // selector receipt ABIs do not authorize this renderer.
   selected_matte_programs_t prepare_selected_matte_programs(
     models::video_depth_estimator &estimator,
     ID3D11Device *device,
     const models::subtitle_selected_matte_research_configuration_t &configuration
   ) {
-    selected_matte_programs_t result;
-    result.configuration = configuration;
-    if (!result.pixel.load(device,
-                           configuration.completed_shader_root,
-                           configuration.completed_source_closure_sha256,
-                           configuration.queued_shader_root,
-                           configuration.queued_source_closure_sha256,
-                           result.error) ||
-        !estimator.configure_subtitle_selected_matte_research(configuration, result.error)) {
+    selected_matte_programs_t result;result.configuration = configuration;
+    if (!configuration.current_outline) {
+      result.error = "Selected rendering requires the current-outline shared warp";
       return result;
     }
-    result.ready = true;
-    if (configuration.current_outline) {
-      // Shared preparation failure preserves the authenticated literal source selector.
-      // Native source availability and ordinary depth never depend on subtitle preparation.
-      (void) result.shared_warp.load(
-        device, std::filesystem::path(configuration.current_outline_shader_root).parent_path(),
-        result.shared_warp_error
-      );
-    }
+    if (!estimator.configure_subtitle_selected_matte_research(configuration, result.error)) return result;
+    result.configured = true;
+    result.ready = result.shared_warp.load(device,
+      std::filesystem::path(configuration.current_outline_shader_root).parent_path(), result.error);
     return result;
   }
 
@@ -2703,22 +2691,22 @@ namespace platf::dxgi {
                                                                                                    nullptr,
             };
 
-            // Bounded opt-in SDR completed/exact-source queued route only. Pending-C, HDR,
-            // linear-source and P010 forms keep their original t3/PS and current-colour policy.
+            // Current-outline selected rendering uses only the authenticated
+            // shared warp. Pending current-colour research is not this route.
             ID3D11ShaderResourceView *selected_receipt=nullptr;
             ID3D11ShaderResourceView *selected_original_legacy=dump_warp_inputs[3];
             bool selected_unpredicated=true;
             if(selected_matte_ready){Microsoft::WRL::ComPtr<ID3D11Predicate> p;BOOL value=FALSE;device_ctx->GetPredication(&p,&value);selected_unpredicated=!p;}
             const bool selected_supported=selected_matte_ready&&
-              (queued_geometry_selected ? selected_matte_queued_ps != nullptr : selected_matte_completed_ps != nullptr)&&
+              selected_shared_warp_programs.ready()&&
               v2_draw_selected&&!pending_current_colour_selected&&
-              (selected_matte_current_outline||(!render_input_is_linear&&!output_is_hdr&&format!=DXGI_FORMAT_P010))&&selected_unpredicated;
+              selected_unpredicated;
             if(selected_supported){
               auto *m=queued_geometry_selected?queued_geometry->research_selected_matte.Get():est.research_selected_matte.Get();
               auto *r=queued_geometry_selected?queued_geometry->research_selected_matte_receipt.Get():est.research_selected_matte_receipt.Get();
               if(m&&r){dump_warp_inputs[3]=m;selected_receipt=r;}
             }
-            const bool selected_draw=selected_receipt!=nullptr;
+            bool selected_draw=selected_receipt!=nullptr;
             // Only an authenticated V2 stream selects the production warp. Awaiting, stale, and
             // terminal failure states use the independent current-frame identity shader, so V2
             // shader authentication/device-creation failures cannot freeze or end the stream.
@@ -2751,6 +2739,8 @@ namespace platf::dxgi {
               );
               device_ctx->UpdateSubresource(queued_render_guard_cbuffer.get(), 0u, nullptr, &guard, 0u, 0u);
             }
+            auto *ordinary_pixel_shader = p010_y_mrt_selected ? sbs_reprojection_v2_p010_y_ps.get() : queued_geometry_selected ? (pending_current_colour_selected ? pending_colour_lane.pixel_shader() : sbs_reprojection_v2_queued_ps.get()) :
+              v2_live_warp_selected ? sbs_reprojection_v2_live_ps.get() : sbs_flat_identity_ps.get();
             host_sbs_v2_draw_command_t draw_command {
               .render_targets = {
                 sbs_intermediate_rtv.get(),
@@ -2758,9 +2748,7 @@ namespace platf::dxgi {
               },
               .render_target_count = p010_y_mrt_selected ? 2u : 1u,
               .vertex_shader = sbs_reprojection_vs.get(),
-              .pixel_shader = selected_draw ? (queued_geometry_selected?selected_matte_queued_ps.get():selected_matte_completed_ps.get()) : p010_y_mrt_selected ? sbs_reprojection_v2_p010_y_ps.get() : queued_geometry_selected ? (pending_current_colour_selected?pending_colour_lane.pixel_shader():sbs_reprojection_v2_queued_ps.get()) :
-                                                                                        v2_live_warp_selected  ? sbs_reprojection_v2_live_ps.get() :
-                                                                                                                 sbs_flat_identity_ps.get(),
+              .pixel_shader = ordinary_pixel_shader,
               .viewport = sbs_viewport,
               .sampler = sampler_linear.get(),
               .shader_resources = dump_warp_inputs,
@@ -2791,7 +2779,7 @@ namespace platf::dxgi {
               request.queued_guard_transaction = draw_command.queued_guard_transaction;
               return request;
             };
-            if (selected_draw && selected_matte_current_outline && subtitle_constants.enabled == 1u && selected_shared_warp_programs.ready()) {
+            if (selected_draw && subtitle_constants.enabled == 1u && selected_shared_warp_programs.ready()) {
               Microsoft::WRL::ComPtr<ID3D11Resource> matte_resource;
               Microsoft::WRL::ComPtr<ID3D11Texture2D> matte_texture;
               dump_warp_inputs[3]->GetResource(&matte_resource);
@@ -2819,17 +2807,31 @@ namespace platf::dxgi {
                 }
               }
             }
+            if (!shared_warp_selected) {
+              // Shared programs being ready does not guarantee THIS frame's
+              // preparation. Keep the original legacy M bound for the ABI,
+              // but disable its old subtitle UI permission: this draw uses
+              // only ordinary authenticated Base geometry and current RGB.
+              // Finalize before receipt scopes, recorder binding and evidence.
+              dump_warp_inputs[3u] = selected_original_legacy;
+              draw_command.shader_resources[3u] = selected_original_legacy;
+              draw_command.pixel_shader = ordinary_pixel_shader;
+              selected_receipt = nullptr;
+              selected_draw = false;
+              subtitle_constants.enabled = 0u;
+              if (!update_sbs_subtitle_constant_buffer(subtitle_constants)) return -1;
+              dump_subtitle_constants = sbs_subtitle_render_cbuffer.get();
+              draw_command.subtitle_constants = dump_subtitle_constants;
+              dump_subtitle_render_enabled = false;
+            }
             bool draw_recorded = false;
             {
               models::research_pending_current_colour_v1::scoped_negative_t negative;
               const bool bound = !pending_current_colour_selected || negative.bind(device_ctx.get(), pending_colour_lane.negative_expected(), pending_colour_lane.negative_receipt(), pending_colour_lane.current_constants().Get(), pending_colour_lane.current_snapshot().receipt.Get());
-              models::research_selected_matte_v1::scoped_receipt_t selected_scope;
               models::research_current_outline_selected_matte_v2::scoped_receipt_t outline_scope;
-              const bool selected_bound = !selected_draw || (selected_matte_current_outline ?
-                                                               outline_scope.bind(device_ctx.get(), selected_receipt, selected_original_legacy) :
-                                                               selected_scope.bind(device_ctx.get(), selected_receipt));
+              const bool selected_bound = !selected_draw || outline_scope.bind(device_ctx.get(), selected_receipt, selected_original_legacy);
               shared_warp::scoped_binding_t shared_scope;
-              const bool shared_bound = !selected_draw || !selected_matte_current_outline ||
+              const bool shared_bound = !selected_draw ||
                                         shared_scope.bind(device_ctx.get(), shared_warp_selected ? &current_shared_warp : nullptr);
               auto observe_dump_bindings = [&](ID3D11DeviceContext *observed_context) noexcept {
                 if (!dump_actual_draw && !(probe_observer.record && shared_warp_selected)) {
@@ -2895,9 +2897,6 @@ namespace platf::dxgi {
                   if (e.shared_pin_selected) {
                     e.program = "shared-ui-pin-v1";
                     e.pixel_shader_closure = shared_warp::closure;
-                  } else if (e.selected_shader) {
-                    e.program = selected_matte_current_outline ? "current-outline-selected" : "research-selected";
-                    e.pixel_shader_closure = queued_geometry_selected ? selected_matte_queued_closure : selected_matte_completed_closure;
                   } else if (actual_shader.Get() == sbs_reprojection_v2_live_ps.get()) {
                     e.program = "ordinary-v2";
                     e.pixel_shader_closure = sbs_reprojection_v2_live_source_closure_sha256;
@@ -3653,6 +3652,7 @@ namespace platf::dxgi {
     void fail_depth_pipeline_flat() {
       host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);
       retire_depth_estimator(std::move(depth_estimator));
+      selected_matte_configured = selected_matte_ready = false;
       for (auto &slot : matched_frame_slots) {
         slot.gpu_undecided_transaction = false;
         slot.pending = false;
@@ -3772,12 +3772,16 @@ namespace platf::dxgi {
             if (depth_estimator) {
               depth_estimator->set_telemetry_performance(sbs_telemetry_performance);
               if (!probe_context) {
-                if (!pipeline.selected_matte.ready) {
+                if (!pipeline.selected_matte.configured) {
                   BOOST_LOG(warning) << "Subtitle outline initialization unavailable: "
                                      << pipeline.selected_matte.error;
                 } else {
                   adopt_selected_matte_programs(std::move(pipeline.selected_matte));
-                  BOOST_LOG(info) << "Current subtitle glyph and black-outline protection active.";
+                  if (selected_matte_ready) {
+                    BOOST_LOG(info) << "Current subtitle glyph and black-outline protection active.";
+                  } else {
+                    BOOST_LOG(warning) << "Subtitle shared renderer unavailable; ordinary authenticated Base rendering remains available.";
+                  }
                 }
               }
               // Isolated source-stage activation only; no new user config/UI. Qualification
@@ -3862,12 +3866,6 @@ namespace platf::dxgi {
           configuration.current_outline_shader_root = root.string();
           configuration.selector_shader_root = outline::selector_root(root).string();
           configuration.selector_source_closure_sha256 = std::string(outline::selector_closure);
-          configuration.completed_shader_root = outline::completed_root(root).string();
-          configuration.completed_source_closure_sha256 = std::string(outline::completed_closure);
-          if constexpr (queued_live_candidate_enabled) {
-            configuration.queued_shader_root = outline::queued_root(root).string();
-            configuration.queued_source_closure_sha256 = std::string(outline::queued_closure);
-          }
           result.selected_matte = prepare_selected_matte_programs(
             *result.estimator, dev.Get(), configuration
           );
@@ -4720,9 +4718,10 @@ namespace platf::dxgi {
     }
 
 
-    // Explicit SDR source-only research activation. Other renderer forms retain literal legacy.
+    // Explicit current-outline shared-renderer activation before the first input.
     bool configure_selected_matte_for_instance(const models::subtitle_selected_matte_research_configuration_t &cfg,std::string &error) {
-      if(!depth_estimator||selected_matte_ready||(!cfg.current_outline&&sbs_frame_sequence!=0u)){error="Selected matte requires prepared device before first input";return false;}
+      if (!cfg.current_outline) {error = "Historical selected-render receipt ABI is unsupported; current-outline shared warp required";return false;}
+      if(!depth_estimator||selected_matte_configured||sbs_frame_sequence!=0u){error="Selected matte requires prepared device before first input";return false;}
       auto programs = prepare_selected_matte_programs(*depth_estimator, device.get(), cfg);
       if (!programs.ready) {error = programs.error;return false;}
       adopt_selected_matte_programs(std::move(programs));
@@ -4731,17 +4730,13 @@ namespace platf::dxgi {
     }
 
     void adopt_selected_matte_programs(selected_matte_programs_t programs) {
-      selected_matte_completed_ps.reset(programs.pixel.take_completed());
-      selected_matte_queued_ps.reset(programs.pixel.take_queued());
       selected_shared_warp_programs = std::move(programs.shared_warp);
       selected_shared_warp_root = std::filesystem::path(programs.configuration.current_outline_shader_root).parent_path();
-      selected_matte_current_outline = programs.configuration.current_outline;
-      selected_matte_completed_closure = std::move(programs.configuration.completed_source_closure_sha256);
-      selected_matte_queued_closure = std::move(programs.configuration.queued_source_closure_sha256);
-      selected_matte_ready = selected_matte_completed_ps != nullptr;
-      if (!programs.shared_warp_error.empty()) {
-        BOOST_LOG(warning) << "Host SBS shared UI warp unavailable; preserving literal subtitle selector: "
-                           << programs.shared_warp_error;
+      selected_matte_configured = programs.configured;
+      selected_matte_ready = selected_matte_configured && selected_shared_warp_programs.ready();
+      if (!programs.error.empty()) {
+        BOOST_LOG(warning) << "Host SBS shared UI warp unavailable; preserving ordinary authenticated Base rendering: "
+                           << programs.error;
       }
     }
 
@@ -7558,9 +7553,7 @@ namespace platf::dxgi {
     static constexpr bool queued_live_candidate_enabled = false;
     bool queued_live_ready = false;
     bool selected_matte_ready = false;
-    bool selected_matte_current_outline = false;
-    ps_t selected_matte_completed_ps,selected_matte_queued_ps;
-    std::string selected_matte_completed_closure,selected_matte_queued_closure;
+    bool selected_matte_configured = false;
     models::host_sbs_shared_ui_warp::programs_t selected_shared_warp_programs;
     models::host_sbs_shared_ui_warp::resources_t selected_shared_warp;
     std::filesystem::path selected_shared_warp_root;

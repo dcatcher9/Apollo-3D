@@ -60,8 +60,9 @@ rebuilds this field from immutable Base and the retained mask after current-colo
 One inverse samples original native colour; no subtitle background RGB is reconstructed. Empty
 rows retain the exact ordinary Base inverse. The pin pass preserves the horizontal slope bound;
 it does not promise a vertical bound at UI-row transitions. Nearby scene geometry can deform and
-horizontal row transitions can remain visible. The older analytic glyph selector remains the
-literal fallback when shared preparation is unavailable or selected-receipt authority fails.
+horizontal row transitions can remain visible. Unavailable shared preparation or invalid selected
+authority preserves ordinary Base rendering without subtitle displacement. The old selected
+analytic renderer and its shader copies have been removed.
 Protected Final remains an independently authenticated diagnostic, not this draw's pin field.
 Reuse retains Base, ParallaxState, native matte, SCT5, SCP4, joined source snapshot, and diagnostics
 as one tuple; the draw-owned pin resources are not a new temporal observation.
@@ -85,10 +86,10 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `parallax_v2_coordinate_diagnostic` | 1 | `1ed356a5904c324842a493f14758ed04d8b05bad9e9ca03375ef8a534dee4a9c` |
 | `near_identical_detector` | 4 | `ba5f8ca3ca402a7fff876e974c0775c28e5391ddc5841aa423d3b2d328295831` |
 | `gpu_trace` | 1 | `783a932493b2060c26735dc8bb14fcc785c6c2451b830f7d730e57437383ec08` |
-| `parallax_v2_live_renderer` | 2 | `ea8198104ace300a4c93a64d2ce257224bba1df3148d533ae2cf7d089e2c2786` |
-| `parallax_v2_p010_y` | 1 | `692eba56b199220b73472c168f2c85e72d700958e1f3ce55c494bc17b4efcd47` |
+| `parallax_v2_live_renderer` | 2 | `fc12a023a3b930001d746622aecf5ceac11604aea033d9da0914ccaa845689b0` |
+| `parallax_v2_p010_y` | 1 | `52c9752f0c9759a41c2e0f767fee1369b1e0c34be2f92f8c40a9c5b3ff6fe89a` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `2b8aae70413b11b70d10429caf925bf8654c40bcd515b7c0e40ce094ba6f624e` |
+| `parallax_v2_live_diagnostic` | 2 | `113dee041c3cbb0cf14b09bb31bfa1843f2eeb6faf280c93af9a33fea6246210` |
 | `subtitle_cohort_prototype_research` | 3 | `13827867460a6e47543a95244536d3b27a5a9c7583eab19c880ad2237c5a3b84` |
 | `subtitle_cohort_research` | 4 | `b01a1b250e23fc43a6cc3126745335577a9d808e6c27abe310d5a3227d42a909` |
 | `subtitle_inner_colour_research` | 5 | `9aa49deee394a05395a7d685a34648c8a41bbd200fd6d3ebe1d9c0fafec27cd5` |
@@ -341,8 +342,8 @@ reacquire the camera.
 Live streaming and conversion use `host_sbs_shared_ui_warp.hlsl` and its queued wrapper. Their seven common
 operands are rendered native color, ordinary Base, ParallaxState, the selected native `R32_UINT`
 matte, joined display-sRGB `RGBA16F` source crop, six-word SCP4, and 32-word SCT5. A 64-word selected
-receipt at t7 authenticates the current-outline mask; t8 retains the original legacy mask for
-literal fallback when that receipt is unavailable or invalid. Separate 32-byte PS b3 binds
+receipt at t7 authenticates the current-outline mask; t8 retains the original legacy binding for
+ABI and diagnostic continuity, without granting a second subtitle map. Separate 32-byte PS b3 binds
 enabled/color mode, exact analysis-domain generation, and the integer analysis-source rectangle
 inside rendered color. Existing 48-byte b2 geometry is unchanged.
 Missing or invalid subtitle inputs preserve authorized Base; invalid Base authorization retains
@@ -615,7 +616,9 @@ exact Base. A malformed source/field policy cannot acquire this identity publica
 Every reuse leaves OCR crop/TensorRT/postprocess/plane/condition work dormant and holds the complete
 depth/cut/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Reprojection builds
 the shared pin field from that retained tuple; exact current native RGB can only revoke matte
-contributors. The literal analytic selector remains its unavailable-preparation fallback. Once
+contributors. Failed shared preparation restores ordinary authenticated Base rendering with b3
+subtitle permission disabled and selected-receipt state cleared. An invalid selected receipt in a
+shared draw also selects the canonical Base inverse. Once
 the joined root has submitted work, any asynchronous CUDA error
 fails the whole estimator closed because a later API call may surface an earlier context-wide launch
 fault. OCR does not run for source frames dropped while the previous observation is busy.
@@ -2229,10 +2232,13 @@ nor a late receipt can establish authority on the new route.
 
 Model preparation, shader compilation, and the live renderer are fail-closed. Shared producer,
 arbitration and legacy-renderer bytecode is prewarmed at process startup. Live current-outline
-compute and completed-renderer device programs prepare on the tracked per-device background build
+compute and shared-warp device programs prepare on the tracked per-device background build
 worker before its future becomes ready; the encode thread only adopts the prepared handles.
-The unused queued renderer is not requested by the ordinary completed live route. Explicit queued
-probes still require its authenticated source, and optional cache/background program-preparation failures cannot
+There is no separate literal selected-matte pixel shader or preparation task. Per-frame shared
+failure disables b3 subtitle permission and clears selected authority before recording an ordinary
+Base draw. The shared shader imports only canonical Base/ROI/packed geometry and current glyph
+authorization; it contains no analytic subtitle inverse or background reconstruction. Explicit queued
+probes still require their authenticated shared source, and optional cache/background program-preparation failures cannot
 disable the completed glyph route or a valid depth producer. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
 schema-50 dump preserves ordinary Base, the protected Final diagnostic, native matte, SCT5,
