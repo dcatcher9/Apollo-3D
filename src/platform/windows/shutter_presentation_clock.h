@@ -242,13 +242,14 @@ namespace platf::dxgi::detail {
   };
 
   // GetFrameStatistics is asynchronous feedback. Waiting another whole vblank whenever it is
-  // stale can itself miss the next eye deadline. Publish outstanding DWM feedback once, then
-  // service metadata at a bounded subframe cadence without issuing or guessing another present.
-  // The production adapter uses DwmFlush and the shared cancellable high-resolution waiter.
+  // stale can itself miss the next eye deadline. DwmFlush can block past the current shutter
+  // window, so permit it only during unsignalled acquisition. Armed frames poll raw metadata
+  // with the shared cancellable high-resolution waiter, without guessing another present or
+  // falling back to a blocking flush. Flush-dependent systems must time out and recover quietly.
   inline shutter_feedback_wait_result_t await_shutter_present(
     const shutter_feedback_wait_io_t &io,
     std::uint32_t requested_present,
-    bool first_present,
+    bool acquiring,
     std::chrono::milliseconds timeout = std::chrono::milliseconds {250}
   ) {
     using result_e = shutter_feedback_wait_status_e;
@@ -283,10 +284,10 @@ namespace platf::dxgi::detail {
         if (static_cast<std::int32_t>(feedback.present_count - requested_present) > 0) {
           return finish(result_e::unsupported);
         }
-      } else if (feedback.status != shutter_feedback_status_e::disjoint || !first_present) {
+      } else if (feedback.status != shutter_feedback_status_e::disjoint || !acquiring) {
         return finish(result_e::unsupported);
       }
-      if (!flushed) {
+      if (acquiring && !flushed) {
         flushed = true;
         ++result.flushes;
         const bool published = io.flush();

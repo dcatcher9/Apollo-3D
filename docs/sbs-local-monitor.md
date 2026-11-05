@@ -91,6 +91,11 @@ Cold timeouts and counter-domain changes restart acquisition within a two-second
 per-present wait scales with the eye interval. Waiting for the first stereo packet has a separate
 five-second limit. No eye commands are sent during this startup phase.
 
+Only unsignalled clock acquisition may use `DwmFlush` to request feedback publication. Armed
+presentation polls exact metadata with cancellable 200 µs waits; it never falls back to this
+blocking call, which can consume more than a shutter interval under load. If a driver requires
+a flush for every feedback update, the live wait times out and follows quiet recovery instead.
+
 Once armed, a missing frame, counter discontinuity, or invalid timestamp immediately stops eye
 commands. For a timing-only interruption, the presenter freezes image submissions and retains its
 stereo pair while the emitter finishes its previous USB write. A read-only settings query on the

@@ -9331,8 +9331,9 @@ namespace platf::dxgi {
             }
             return feedback;
           },
-          // Hardware Flip Queue may not publish statistics until DWM is flushed. This is one
-          // synchronous OS call per stale present, with no worker or extra present queue.
+          // Hardware Flip Queue may require a flush to publish statistics. The wait policy
+          // permits this synchronous call only while acquiring with IR quiet; armed frames
+          // must never spend their current shutter window blocked inside DwmFlush.
           .flush = [&]() {
             flush_start_qpc = qpc_now();
             flush_result = DwmFlush();

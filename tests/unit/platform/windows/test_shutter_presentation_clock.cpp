@@ -127,8 +127,8 @@ TEST(ShutterPresentFeedback, LateMetadataDoesNotSpendAnotherRefreshForSingleOrRe
       EXPECT_EQ(eye_clock.left_eye(), frame % 2 == 0);
       ASSERT_TRUE(eye_clock.observe_displayed(confirmed.feedback.refresh_count));
     }
-    EXPECT_EQ(probe.flushes, 6u);
-    EXPECT_EQ(probe.waits.size(), 6u);
+    EXPECT_EQ(probe.flushes, 1u);  // Only the unsignalled acquisition call may flush.
+    EXPECT_GT(probe.waits.size(), 6u);
     for (auto wait : probe.waits) {
       EXPECT_EQ(wait, 200us);
     }
@@ -151,7 +151,7 @@ TEST(ShutterPresentFeedback, PresentIdWrapTreatsPreviousMaximumAsPending) {
   const auto result = shutter::await_shutter_present(probe.io(), 0, false);
   EXPECT_EQ(result.status, shutter::shutter_feedback_wait_status_e::displayed);
   EXPECT_EQ(result.feedback.present_count, 0u);
-  EXPECT_EQ(probe.flushes, 1u);
+  EXPECT_EQ(probe.flushes, 0u);
 }
 
 TEST(ShutterPresentFeedback, InitialDisjointStartsASequenceButLiveDisjointStopsIt) {
@@ -202,7 +202,7 @@ TEST(ShutterPresentFeedback, SkippedActualRefreshStillFailsAfterMetadataBecomesA
   EXPECT_FALSE(eye_clock.left_eye());
 }
 
-TEST(ShutterPresentFeedback, StaleFeedbackFlushesOnceAndStopsAtABoundedDeadline) {
+TEST(ShutterPresentFeedback, StaleLiveFeedbackPollsWithoutFlushingAndStopsAtABoundedDeadline) {
   feedback_probe_t probe;
   auto io = probe.io();
   probe.displayed_at = probe.now;
@@ -217,10 +217,10 @@ TEST(ShutterPresentFeedback, StaleFeedbackFlushesOnceAndStopsAtABoundedDeadline)
   EXPECT_EQ(result.feedback.sync_qpc, 1234567);
   EXPECT_EQ(result.feedback.result_code, 0);
   EXPECT_EQ(result.queries, probe.queries);
-  EXPECT_EQ(result.flushes, 1u);
+  EXPECT_EQ(result.flushes, 0u);
   EXPECT_EQ(result.waits, 1250u);
   EXPECT_EQ(probe.now.time_since_epoch(), 250ms);
-  EXPECT_EQ(probe.flushes, 1u);
+  EXPECT_EQ(probe.flushes, 0u);
   EXPECT_EQ(probe.waits.size(), 1250u);
 }
 
@@ -267,8 +267,8 @@ TEST(ShutterPresentFeedback, CancellationInterruptsSubframeWaitAndAvoidsAnyFurth
     return true;
   };
   EXPECT_EQ(shutter::await_shutter_present(io, probe.present_id, false).status, shutter::shutter_feedback_wait_status_e::cancelled);
-  EXPECT_EQ(probe.flushes, 1u);
-  EXPECT_EQ(probe.queries, 2u);
+  EXPECT_EQ(probe.flushes, 0u);
+  EXPECT_EQ(probe.queries, 1u);
   const auto queries = probe.queries;
   EXPECT_EQ(shutter::await_shutter_present(io, probe.present_id, false).status, shutter::shutter_feedback_wait_status_e::cancelled);
   EXPECT_EQ(probe.queries, queries);
@@ -280,12 +280,72 @@ TEST(ShutterPresentFeedback, FailedFlushOrTimerDoesNotAuthorizeAnEye) {
   io.flush = []() {
     return false;
   };
-  EXPECT_EQ(shutter::await_shutter_present(io, probe.present_id, false).status, shutter::shutter_feedback_wait_status_e::flush_failed);
+  EXPECT_EQ(shutter::await_shutter_present(io, probe.present_id, true).status, shutter::shutter_feedback_wait_status_e::flush_failed);
   io = probe.io();
   io.wait_until = [](auto) {
     return false;
   };
   EXPECT_EQ(shutter::await_shutter_present(io, probe.present_id, false).status, shutter::shutter_feedback_wait_status_e::wait_failed);
+}
+
+TEST(ShutterPresentFeedback, LiveMetadataNeverEntersAFlushThatWouldSpendTheShutterWindow) {
+  feedback_probe_t probe;
+  auto io = probe.io();
+  io.flush = [&]() {
+    ++probe.flushes;
+    probe.now += 18ms;  // Observed live DwmFlush stall exceeds an entire 120Hz eye interval.
+    return true;
+  };
+  const auto result = shutter::await_shutter_present(io, probe.present_id, false, 10ms);
+  ASSERT_EQ(result.status, shutter::shutter_feedback_wait_status_e::displayed);
+  EXPECT_EQ(result.feedback.present_count, probe.present_id);
+  EXPECT_EQ(probe.flushes, 0u);
+  EXPECT_EQ(result.flushes, 0u);
+  EXPECT_GE(probe.now, probe.feedback_at);
+  EXPECT_LT(probe.now - probe.displayed_at, 1ms);
+}
+
+TEST(ShutterPresentFeedback, FlushDependentPublisherCannotFallBackToALiveBlockingFlush) {
+  for (bool acquiring : {true, false}) {
+    SCOPED_TRACE(acquiring);
+    feedback_probe_t probe;
+    auto io = probe.io();
+    bool published = false;
+    io.query = [&]() {
+      ++probe.queries;
+      return shutter::shutter_feedback_t {shutter::shutter_feedback_status_e::available,
+        published ? probe.present_id : probe.present_id - 1u, probe.refresh};
+    };
+    io.flush = [&]() {
+      ++probe.flushes;
+      published = true;
+      return true;
+    };
+    const auto result = shutter::await_shutter_present(io, probe.present_id, acquiring);
+    EXPECT_EQ(result.status, acquiring ? shutter::shutter_feedback_wait_status_e::displayed :
+                                        shutter::shutter_feedback_wait_status_e::timeout);
+    EXPECT_EQ(probe.flushes, acquiring ? 1u : 0u);
+    EXPECT_EQ(published, acquiring);
+    if (!acquiring) {
+      EXPECT_EQ(probe.now.time_since_epoch(), 250ms);
+      EXPECT_NE(result.feedback.present_count, probe.present_id);
+    }
+  }
+}
+
+TEST(ShutterPresentFeedback, ColdFlushReturningPastDeadlineCannotAuthorizeAnEye) {
+  feedback_probe_t probe;
+  auto io = probe.io();
+  io.flush = [&]() {
+    ++probe.flushes;
+    probe.now += 18ms;
+    return true;
+  };
+  const auto result = shutter::await_shutter_present(io, probe.present_id, true, 10ms);
+  EXPECT_EQ(result.status, shutter::shutter_feedback_wait_status_e::timeout);
+  EXPECT_EQ(probe.flushes, 1u);
+  EXPECT_EQ(probe.queries, 1u);
+  EXPECT_NE(result.feedback.present_count, probe.present_id);
 }
 
 namespace {
