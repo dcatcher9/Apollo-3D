@@ -82,6 +82,29 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             r'\{"target", "([^"]+)"\}', resolver))
         self.assertEqual(native_specs, dump_contract._SUBTITLE_PLANE_SHADER_SPECS)
 
+    def test_live_dump_resolver_step_metadata_matches_canonical_reader(self):
+        source = (REPO / "src/platform/windows/sbs_debug_dump.cpp").read_text()
+        resolver = source.split("nlohmann::json subtitle_plane_resolver_contract_json(", 1)[1]
+        resolver = resolver.split("bool subtitle_target_is_representable(", 1)[0]
+        expected = dump_contract._subtitle_plane_resolver_contract()
+        policies = (
+            ("host_model_policy", expected["adaptive_ui"]["host_model_policy"], (
+                "candidate_step_per_eye_source_pixels", "candidate_step_scope")),
+            ("target_policy", expected["target_policy"], (
+                "candidate_step_per_eye_source_pixels",
+                "coarse_diagnostic_step_per_eye_source_pixels")),
+        )
+        for name, canonical, fields in policies:
+            block = resolver.split('{"' + name + '", {', 1)[1].split("}}", 1)[0]
+            for field in fields:
+                with self.subTest(policy=name, field=field):
+                    literals = re.findall(
+                        r'\{"' + re.escape(field) + r'",\s*("[^"]*"|\d+u)\}', block)
+                    self.assertEqual(len(literals), 1, "native descriptor field missing or repeated")
+                    literal = literals[0]
+                    value = json.loads(literal) if literal.startswith('"') else int(literal[:-1])
+                    self.assertEqual(value, canonical[field])
+
     def test_renderer_closure_constants_match_native_authenticated_pins(self):
         pins = generator.validate_renderer_source_closure_pins()
         self.assertEqual(

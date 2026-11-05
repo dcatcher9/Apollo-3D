@@ -1016,6 +1016,7 @@ namespace platf::primary_display {
 
     std::mutex transaction_mutex;
     detail::ownership_t process_ownership;
+    detail::restore_observation_cache_t restore_observations;
 
     detail::cursor_clip_manager_t &exclusive_cursor_clip() {
       static detail::cursor_clip_manager_t cursor_clip({
@@ -1130,7 +1131,7 @@ namespace platf::primary_display {
                                 },
                                 [](detail::snapshot_t snapshot) {
                                   return apply_snapshot(std::move(snapshot), true);
-                                }});
+                                }}, &restore_observations);
     }
   }  // namespace
 
@@ -1434,8 +1435,60 @@ namespace platf::primary_display {
       }
     }
 
-    manager_t::manager_t(io_t io):
-        io_(std::move(io)) {}
+    bool restore_observation_cache_t::unchanged_failure(
+      const snapshot_t &current,
+      const snapshot_t &desired,
+      const snapshot_t &available
+    ) const {
+      if (!failure_ || !same_topology(current, failure_->observed) ||
+          !same_colors(current, failure_->observed) || !same_topology(desired, failure_->desired) ||
+          !same_colors(desired, failure_->desired) || available.paths.size() != failure_->available.paths.size() ||
+          available.paths.size() != available.device_paths.size() ||
+          failure_->available.paths.size() != failure_->available.device_paths.size()) {
+        return false;
+      }
+      // QDC_ALL_PATHS may reorder alternative routes or update transient IN_USE flags after
+      // our own apply. Compare the target/source route multiset, not mode indexes or status.
+      const auto same_route = [](const snapshot_t &a, size_t ai, const snapshot_t &b, size_t bi) {
+        const auto &ap = a.paths[ai];
+        const auto &bp = b.paths[bi];
+        return same_device(a.device_paths[ai], b.device_paths[bi]) &&
+               same_adapter(ap.sourceInfo.adapterId, bp.sourceInfo.adapterId) && ap.sourceInfo.id == bp.sourceInfo.id &&
+               same_adapter(ap.targetInfo.adapterId, bp.targetInfo.adapterId) && ap.targetInfo.id == bp.targetInfo.id &&
+               ap.targetInfo.targetAvailable == bp.targetInfo.targetAvailable;
+      };
+      std::vector<bool> used(failure_->available.paths.size(), false);
+      for (size_t i = 0; i < available.paths.size(); ++i) {
+        bool matched = false;
+        for (size_t j = 0; j < used.size(); ++j) {
+          if (!used[j] && same_route(available, i, failure_->available, j)) {
+            used[j] = true;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    void restore_observation_cache_t::remember_failure(
+      const snapshot_t &observed,
+      const snapshot_t &desired,
+      const snapshot_t &available
+    ) {
+      failure_ = failure_t {observed, desired, available};
+    }
+
+    void restore_observation_cache_t::clear() {
+      failure_.reset();
+    }
+
+    manager_t::manager_t(io_t io, restore_observation_cache_t *restore_observations):
+        io_(std::move(io)),
+        restore_observations_(restore_observations) {}
 
     bool manager_t::prepare(bool exclusive, std::wstring_view local_sink) {
       if (!local_sink.empty() && !exclusive) {
@@ -2625,22 +2678,38 @@ namespace platf::primary_display {
       if (!latest || !same_topology(*current, *latest)) {
         return false;
       }
+      const bool apply_needed = !same_topology(*current, *desired);
+      if (apply_needed && restore_observations_ && restore_observations_->unchanged_failure(*current, *desired, *available)) {
+        // One failed apply with a verified outcome is enough for this exact observation.
+        // Repeating it cannot supply new evidence and can flash a healthy physical monitor.
+        // Keep the journal and wake bookmark; raw WM_DISPLAYCHANGE alone grants no retry.
+        return false;
+      }
       log_restore_snapshot("before", *current);
       log_restore_snapshot("requested", *desired);
-      const bool apply_needed = !same_topology(*current, *desired);
       const auto apply_started = std::chrono::steady_clock::now();
+      bool applied = true;
       if (apply_needed) {
         const bool force_physical_restore = !keep_virtual_active && retained && retained->local_sink.empty() && io_.apply_physical_restore;
         if (force_physical_restore) {
           BOOST_LOG(info) << "Forcing the restored physical-display modes down to the driver while retaining the virtual-display device.";
         }
-        if (!(force_physical_restore ? io_.apply_physical_restore(*desired) : io_.apply(*desired))) {
-          return false;
-        }
+        applied = force_physical_restore ? io_.apply_physical_restore(*desired) : io_.apply(*desired);
       }
       const auto apply_finished = std::chrono::steady_clock::now();
+      if (!applied && !restore_observations_) {
+        return false;
+      }
       auto observed = io_.query();
-      if (!observed || !same_topology(*observed, *desired)) {
+      if (!applied || !observed || !same_topology(*observed, *desired)) {
+        if (apply_needed && restore_observations_) {
+          const bool observed_valid = observed && observed->colors.size() == observed->paths.size() &&
+                                      (observed->paths.empty() || inspect(*observed));
+          // If the immediate query is unavailable, retain the last valid pre-apply view.
+          // Suppression still requires a fresh next-call query to match that exact view.
+          restore_observations_->remember_failure(observed_valid ? *observed : *current, *desired, *available);
+          BOOST_LOG(warning) << "Display restore did not reach the requested topology; preserving recovery state and deferring identical mode sets until display observations change.";
+        }
         return false;
       }
       bool color_ok = true;
@@ -2714,6 +2783,9 @@ namespace platf::primary_display {
       if (retained && !preserve_verified_pause_recovery) {
         retained->pause_recovery = std::move(journal);
         retained->partial_wake_recovery = false;
+      }
+      if (restore_observations_) {
+        restore_observations_->clear();
       }
       return true;
     }

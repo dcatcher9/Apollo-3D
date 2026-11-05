@@ -209,6 +209,23 @@ namespace video_dom_probe {
     return intersection;
   }
 
+  [[nodiscard]] inline std::optional<rect_t> windowed_video_viewport(
+    const rect_t &client,
+    const rect_t &document,
+    const rect_t &video
+  ) noexcept {
+    if (!rect_valid(client) || !rect_valid(document) || !rect_valid(video)) {
+      return std::nullopt;
+    }
+    const auto in_client = rect_intersection(client, video);
+    return in_client ? rect_intersection(*in_client, document) : std::nullopt;
+  }
+
+  [[nodiscard]] inline bool credible_video_extent(const rect_t &video, const rect_t &client) noexcept {
+    const auto client_area = rect_area(client);
+    return rect_valid(video) && client_area > 0u && rect_area(video) >= client_area / 20u;
+  }
+
   // Chromium occasionally reports a fullscreen IA2 rectangle one physical pixel
   // beyond the Win32 client rectangle. Accept only that bounded rounding error and
   // always return geometry clipped into the trusted outer coordinate space.
@@ -350,10 +367,9 @@ namespace video_dom_probe {
     long unique_id {};
     rect_t element_rect {};
     rect_t visible_rect {};
-    // Windowed ROI authority requires the element and its owning document to be
-    // available and fully contained. Fullscreen authority deliberately has a
-    // separate availability bit: a Chromium document can be clipped while its
-    // available <video> still covers the complete foreground client.
+    // Windowed availability requires current video/document states and a visible
+    // intersection. Containment remains diagnostic only. Fullscreen keeps its
+    // separate availability/coverage policy, independent of document clipping.
     bool available {};
     bool fully_contained {};
     bool credible_size {};
@@ -421,42 +437,29 @@ namespace video_dom_probe {
     };
   }
 
-  [[nodiscard]] inline selection_t select_candidate(std::span<const video_candidate_t> candidates) {
+  [[nodiscard]] inline selection_t select_candidate(
+    std::span<const video_candidate_t> candidates,
+    const rect_t &client_rect
+  ) {
     std::vector<std::size_t> eligible;
     eligible.reserve(candidates.size());
-    bool has_partial_candidate = false;
     for (std::size_t index = 0; index < candidates.size(); ++index) {
       const auto &candidate = candidates[index];
-      if (!candidate.credible_size || !rect_valid(candidate.visible_rect)) {
+      if (!candidate.available || !candidate.credible_size || !rect_valid(candidate.element_rect) || !rect_valid(candidate.visible_rect)) {
         continue;
       }
-      // A credible clipped video can be the real main player even when Chromium also marks it
-      // OFFSCREEN/UNAVAILABLE. It must poison selection before availability filtering; otherwise
-      // a smaller fully visible advert could be promoted merely because the main player is clipped.
-      if (!candidate.fully_contained) {
-        has_partial_candidate = true;
-      } else if (candidate.available) {
-        eligible.push_back(index);
-      }
-    }
-
-    if (has_partial_candidate) {
-      return {.reason = selection_reason_e::ambiguous};
+      eligible.push_back(index);
     }
 
     if (eligible.empty()) {
       return {};
     }
 
-    if (eligible.size() == 1) {
-      return {.index = eligible.front(), .reason = selection_reason_e::single};
-    }
-
     std::size_t largest_index = eligible.front();
-    auto largest_area = rect_area(candidates[largest_index].visible_rect);
+    auto largest_area = rect_area(candidates[largest_index].element_rect);
     bool tied = false;
     for (const auto index : std::span(eligible).subspan(1)) {
-      const auto area = rect_area(candidates[index].visible_rect);
+      const auto area = rect_area(candidates[index].element_rect);
       if (area > largest_area) {
         largest_index = index;
         largest_area = area;
@@ -468,7 +471,13 @@ namespace video_dom_probe {
     if (tied) {
       return {.reason = selection_reason_e::ambiguous};
     }
-    return {.index = largest_index, .reason = selection_reason_e::largest};
+    // Rank the complete semantic element before testing its visible viewport. Cropping the
+    // main video must not promote a smaller advert, even when only a tiny sliver remains.
+    const auto &largest = candidates[largest_index];
+    if (!credible_video_extent(largest.visible_rect, client_rect) || !rect_contains(client_rect, largest.visible_rect) || !rect_contains(largest.element_rect, largest.visible_rect)) {
+      return {};
+    }
+    return {.index = largest_index, .reason = eligible.size() == 1u ? selection_reason_e::single : selection_reason_e::largest};
   }
 
   // A true-fullscreen semantic authority is independent of windowed ROI selection. An available
@@ -505,7 +514,7 @@ namespace video_dom_probe {
         .reason = selection_reason_e::fullscreen,
       };
     }
-    return select_candidate(candidates);
+    return select_candidate(candidates, client_rect);
   }
 
   [[nodiscard]] inline std::optional<rect_t> selection_authority_rect(
@@ -529,7 +538,7 @@ namespace video_dom_probe {
       }
       return client_rect;
     }
-    if (!rect_valid(candidate.visible_rect)) {
+    if (!candidate.available || !credible_video_extent(candidate.visible_rect, client_rect) || !rect_contains(client_rect, candidate.visible_rect) || !rect_contains(candidate.element_rect, candidate.visible_rect)) {
       return std::nullopt;
     }
     return candidate.visible_rect;
@@ -537,33 +546,24 @@ namespace video_dom_probe {
 
   // The retained document/video identities are authenticated by the caller. An unrelated
   // document layout change does not revoke a video whose exact geometry and visible authority
-  // remain unchanged. Still validate containment against the CURRENT document and client.
+  // remain unchanged. Recompute the exact visible intersection of the CURRENT document/client.
   [[nodiscard]] inline bool windowed_cache_refresh_matches(
     const rect_t &cached_element_rect,
     const rect_t &cached_authority_rect,
     const rect_t &current_client_rect,
     const rect_t &current_document_rect,
-    const rect_t &current_video_rect,
-    long coordinate_tolerance = 1
+    const rect_t &current_video_rect
   ) noexcept {
     if (current_video_rect != cached_element_rect) {
       return false;
     }
-    const auto document_in_client = clip_if_within_tolerance(
-      current_client_rect, current_document_rect, coordinate_tolerance
+    const auto visible = windowed_video_viewport(
+      current_client_rect,
+      current_document_rect,
+      current_video_rect
     );
-    const auto video_in_client = clip_if_within_tolerance(
-      current_client_rect, current_video_rect, coordinate_tolerance
-    );
-    const auto video_in_document = clip_if_within_tolerance(
-      current_document_rect, current_video_rect, coordinate_tolerance
-    );
-    if (!document_in_client || !video_in_client || !video_in_document ||
-        rect_area(current_video_rect) < rect_area(current_client_rect) / 20) {
-      return false;
-    }
-    const auto visible = rect_intersection(*video_in_client, *video_in_document);
-    return visible && *visible == cached_authority_rect;
+    return visible && credible_video_extent(*visible, current_client_rect) &&
+           *visible == cached_authority_rect;
   }
 
   // Fullscreen cache refresh deliberately has no document-rectangle input. The authority is the

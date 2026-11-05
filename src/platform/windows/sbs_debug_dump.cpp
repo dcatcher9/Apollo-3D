@@ -237,6 +237,7 @@ namespace platf::sbs_debug {
           {"host_model_policy", {
             {"mode", 3u}, {"maximum_plane_source_u", direct_container_limit},
             {"candidate_step_per_eye_source_pixels", 4u},
+            {"candidate_step_scope", "serialized-coarse-diagnostic-index"},
             {"last_candidate", "exact-representation-cap"},
             {"maximum_candidate_index", "ceil-analysis-source-width-over-100"},
             {"core_range_per_eye_source_pixels", 0u},
@@ -256,7 +257,8 @@ namespace platf::sbs_debug {
           {"units", "one-eye-analysis-source-U"},
           {"selection", "authenticated-current-cover-conflict-histogram"},
           {"forward_policy", subtitle_ui_plane_policy},
-          {"candidate_step_per_eye_source_pixels", 4u},
+          {"candidate_step_per_eye_source_pixels", 1u},
+          {"coarse_diagnostic_step_per_eye_source_pixels", 4u},
           {"clearance_per_eye_source_pixels", 2u},
           {"approach_dwell_us", 0u},
           {"retreat_dwell_us", 0u},

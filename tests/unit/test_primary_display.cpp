@@ -978,7 +978,8 @@ TEST(PrimaryDisplayExclusive, GraceRecheckRecoversInactivePrimaryBesideAReattach
 TEST(PrimaryDisplayExclusive, GracePartialWakeKeepsVerifiedBookmarkUntilMissingPhysicalBecomesAvailable) {
   fake_io_t fake;
   start_exclusive(fake);
-  manager_t manager(fake.io());
+  restore_observation_cache_t observations;
+  manager_t manager(fake.io(), &observations);
   platf::primary_display::retained_display_ptr retained;
   ASSERT_TRUE(manager.pause(L"virtual", retained));
   const auto bookmark = retained;
@@ -1011,7 +1012,8 @@ TEST(PrimaryDisplayExclusive, GracePartialWakeKeepsVerifiedBookmarkUntilMissingP
 TEST(PrimaryDisplayExclusive, GracePhysicalOnlyUserDisableDoesNotBecomeAMonitorWakeRecovery) {
   fake_io_t fake;
   start_exclusive(fake);
-  manager_t manager(fake.io());
+  restore_observation_cache_t observations;
+  manager_t manager(fake.io(), &observations);
   platf::primary_display::retained_display_ptr retained;
   ASSERT_TRUE(manager.pause(L"virtual", retained));
   // No VD returned and no all-path loss was observed: the current physical desktop remains
@@ -1027,6 +1029,110 @@ TEST(PrimaryDisplayExclusive, GracePhysicalOnlyUserDisableDoesNotBecomeAMonitorW
   ASSERT_TRUE(manager.pause(L"virtual", retained));
   expect_positions(fake.current, {{L"physical-primary", 0, 0}});
   EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, UnchangedFailedRestoreDoesNotReapplyAcrossNotificationAndRetirementManagers) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  fake.ignore_apply = true; // Windows accepts the call but never activates the available TV.
+  restore_observation_cache_t observations;
+  auto io = fake.io();
+  const auto apply = io.apply;
+  std::optional<snapshot_t> requested;
+  io.apply = [&](snapshot_t desired) {
+    requested = desired;
+    return apply(std::move(desired));
+  };
+  const auto applies_before = std::ranges::count(fake.events, "apply");
+  EXPECT_FALSE(manager_t(io, &observations).restore(L"virtual"));
+  ASSERT_TRUE(requested);
+  const auto tv = named_index(*requested, L"physical-left");
+  EXPECT_NE(requested->paths[tv].flags & DISPLAYCONFIG_PATH_ACTIVE, 0u);
+  EXPECT_EQ(requested->paths[tv].targetInfo.statusFlags, 0u)
+    << "Target status copied from an inactive available route is not desired activation policy";
+  ASSERT_TRUE(fake.journal);
+  const auto original = serialize(*fake.journal);
+  platf::primary_display::retained_display_ptr retained;
+  for (unsigned notification = 0; notification < 32; ++notification) {
+    // A late self-generated WM can start a new scheduler cycle, and the independent
+    // retirement worker creates another manager. Neither supplies new display evidence.
+    manager_t worker(io, &observations);
+    EXPECT_FALSE(notification % 2u ? worker.pause(L"virtual", retained) : worker.restore(L"virtual"));
+    expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+    ASSERT_TRUE(fake.journal);
+    EXPECT_EQ(serialize(*fake.journal), original);
+  }
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies_before + 1);
+
+  // The requested physical topology can settle after the failed immediate query. Its
+  // successful verification bypasses the no-progress budget and needs no second apply.
+  fake.current = *requested;
+  ASSERT_TRUE(manager_t(io, &observations).restore(L"virtual"));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies_before + 1);
+  EXPECT_FALSE(fake.journal);
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"physical-left", -1920, 120}});
+}
+
+TEST(PrimaryDisplayExclusive, FailedRestoreRearmsWhenAvailableTargetsChange) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  fake.ignore_apply = true;
+  restore_observation_cache_t observations;
+  EXPECT_FALSE(manager_t(fake.io(), &observations).restore(L"virtual"));
+  const auto applies = std::ranges::count(fake.events, "apply");
+  EXPECT_FALSE(manager_t(fake.io(), &observations).restore(L"virtual"));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+
+  // An available route is now a different driver target. This is fresh device evidence,
+  // unlike notification count, route order, mode indexes or IN_USE status flag churn.
+  fake.catalog.paths[named_index(fake.catalog, L"physical-left")].targetInfo.id += 1u;
+  fake.ignore_apply = false;
+  ASSERT_TRUE(manager_t(fake.io(), &observations).restore(L"virtual"));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies + 1);
+  EXPECT_FALSE(fake.journal);
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"physical-left"), 1);
+}
+
+TEST(PrimaryDisplayExclusive, AvailableInactiveTargetOutsideOriginalBaselineStaysDisabled) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  restore_observation_cache_t observations;
+  manager_t manager(fake.io(), &observations);
+  ASSERT_TRUE(manager.prepare(true));
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 1920, 0}});
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"physical-left"), 0);
+}
+
+TEST(PrimaryDisplayRestoreObservation, ComparesMaterialRoutesAndIgnoresOwnApplyMetadataChurn) {
+  const auto current = make_snapshot({{L"physical-primary", 0, 0}});
+  const auto desired = make_snapshot({{L"physical-primary", 0, 0}, {L"physical-left", -1920, 0}});
+  auto available = desired;
+  restore_observation_cache_t observations;
+  observations.remember_failure(current, desired, available);
+  available.paths[1].targetInfo.statusFlags ^= DISPLAYCONFIG_TARGET_IN_USE;
+  available.paths[1].sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+  std::swap(available.paths[0], available.paths[1]);
+  std::swap(available.device_paths[0], available.device_paths[1]);
+  EXPECT_TRUE(observations.unchanged_failure(current, desired, available));
+  available.paths[0].targetInfo.targetAvailable = FALSE;
+  EXPECT_FALSE(observations.unchanged_failure(current, desired, available));
+  available.paths[0].targetInfo.targetAvailable = TRUE;
+  auto changed = current;
+  set_display_mode(changed, L"physical-primary", 2560, 1440, 120);
+  EXPECT_FALSE(observations.unchanged_failure(changed, desired, available));
+  changed = desired;
+  set_display_mode(changed, L"physical-left", 2560, 1440, 120);
+  EXPECT_FALSE(observations.unchanged_failure(current, changed, available));
+  observations.clear();
+  EXPECT_FALSE(observations.unchanged_failure(current, desired, available));
 }
 
 TEST(PrimaryDisplayExclusive, GraceRecheckKeepsTheOnlyUsableRetainedDisplay) {

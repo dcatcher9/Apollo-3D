@@ -4012,6 +4012,14 @@ namespace {
     if (graph_diagnostics) {
       ASSERT_STREQ(graph_env, "1");
     }
+    const auto *inner_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_INNER_SOURCE_DIAGNOSTICS");
+    const bool inner_diagnostics = inner_env && *inner_env;
+    if (inner_diagnostics) {
+      ASSERT_STREQ(inner_env, "1");
+      ASSERT_FALSE(graph_diagnostics);
+      ASSERT_FALSE(foreground_replay);
+      ASSERT_FALSE(sdr);
+    }
     namespace fs = std::filesystem;
     namespace runtime = models::current_outline_runtime;
     namespace composition = models::source5_cbc5_f2_composition_gpu_v1;
@@ -4101,6 +4109,7 @@ namespace {
       {"history", "New owner per case; prior live strong/weak/AA private history is unavailable and is not synthesized"},
       {"parent_descriptor_scope", "Saved full shape/format/ROI/transfer; undumped descriptor flags are not claimed byteexact, and the GPU proof describes the replay allocation"},
       {"single_unit_graph_diagnostics_requested", graph_diagnostics},
+      {"inner_source_diagnostics_requested", inner_diagnostics},
       {"performance_claim", false}, {"cases", json::array()}};
     report["closures"]["hole"] = programs.hole_ready() ? std::string(runtime::hole_closure) : std::string();
     report["closures"]["coverage"] = programs.coverage_ready() ? std::string(runtime::coverage_closure) : std::string();
@@ -4374,6 +4383,8 @@ namespace {
           {"domain_scope", "Only current own CoverBits/unit ROI establishes graph membership; exported whole resources do not authorize unused pixels"},
           {"history_restored", false}, {"rendering_authority", false}};
       }
+      json inner_report = nullptr;
+      #include "current_outline_inner_source_saved.inc"
       const auto case_output = output / ("case_" + std::to_string(index));fs::create_directory(case_output);
       json outputs = json::object();
       for (const auto &[name, bytes] : arrays) outputs[name] = store(case_output / name, bytes);
@@ -4386,6 +4397,7 @@ namespace {
           exact ? "captured-current-mask-exact-with-fresh-history" : "fresh-history-current-producer-only-mask-differs"},
         {"history_restored", false}, {"model_rgb_origin", "exact joined display_snapshot; parent raw texels never sampled"}};
       if (graph_diagnostics) result["single_unit_graph_diagnostics"] = std::move(graph_report);
+      if (inner_diagnostics) result["inner_source_diagnostics"] = std::move(inner_report);
       if(foreground_replay)result["foreground_edge_production_diagnostic"]=std::move(foreground_case);
       if(sdr){result["expected_production_parity"]=production_parity;result["trace_authorized"]=true;result["source5_reference_band_rect"]={0u,shape[2],shape[0],shape[1]};}
       if (entry.contains("provenance")) result["provenance"] = entry.at("provenance");

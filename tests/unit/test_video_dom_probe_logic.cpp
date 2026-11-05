@@ -427,7 +427,7 @@ TEST(VideoDomProbeLogic, SelectsOneAvailableFullyContainedVideo) {
     candidate(1, {200, 100, 1720, 955}),
     candidate(2, {0, 0, 0, 0}, false, false),
   };
-  const auto selection = probe::select_candidate(candidates);
+  const auto selection = probe::select_candidate(candidates, browser);
   ASSERT_TRUE(selection.index);
   EXPECT_EQ(*selection.index, 0U);
   EXPECT_EQ(selection.reason, probe::selection_reason_e::single);
@@ -438,7 +438,7 @@ TEST(VideoDomProbeLogic, SelectsTheUniqueLargestVideo) {
     candidate(10, {200, 100, 1720, 955}),
     candidate(20, {1500, 50, 1850, 250}),
   };
-  const auto selection = probe::select_candidate(candidates);
+  const auto selection = probe::select_candidate(candidates, browser);
   ASSERT_TRUE(selection.index);
   EXPECT_EQ(*selection.index, 0U);
   EXPECT_EQ(selection.reason, probe::selection_reason_e::largest);
@@ -449,7 +449,7 @@ TEST(VideoDomProbeLogic, EqualLargestVideosRemainAmbiguous) {
     candidate(10, {100, 100, 900, 700}),
     candidate(20, {1000, 100, 1800, 700}),
   };
-  const auto selection = probe::select_candidate(candidates);
+  const auto selection = probe::select_candidate(candidates, browser);
   EXPECT_FALSE(selection.index);
   EXPECT_EQ(selection.reason, probe::selection_reason_e::ambiguous);
 }
@@ -458,44 +458,97 @@ TEST(VideoDomProbeLogic, TinyVideoIsListedButNotSelected) {
   auto tiny = candidate(1, {10, 10, 20, 20});
   tiny.credible_size = false;
   const std::array candidates {tiny};
-  const auto selection = probe::select_candidate(candidates);
+  const auto selection = probe::select_candidate(candidates, browser);
   EXPECT_FALSE(selection.index);
   EXPECT_EQ(selection.reason, probe::selection_reason_e::none);
 }
 
-TEST(VideoDomProbeLogic, RejectsOffscreenOrPartiallyClippedAuthority) {
+TEST(VideoDomProbeLogic, RejectsUnavailableOrFullyOccludedWindowedVideo) {
   const std::array candidates {
-    candidate(1, {-100, 100, 1000, 900}, true, false),
+    candidate(1, {0, 0, 0, 0}, true, false),
     candidate(2, {200, 100, 1200, 900}, false, true),
   };
-  const auto selection = probe::select_candidate(candidates);
+  const auto selection = probe::select_candidate(candidates, browser);
   EXPECT_FALSE(selection.index);
-  EXPECT_EQ(selection.reason, probe::selection_reason_e::ambiguous);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::none);
   EXPECT_TRUE(probe::rect_contains(browser, candidates[1].element_rect));
 }
 
 TEST(VideoDomProbeLogic, PartiallyClippedMainVideoCannotPromoteASmallerAd) {
-  auto clipped_main = candidate(1, {-100, 100, 1400, 950}, true, false);
-  clipped_main.visible_rect = {0, 100, 1400, 950};
+  auto clipped_main = candidate(1, {-1300, 100, 200, 950}, true, false);
+  clipped_main.visible_rect = {0, 100, 200, 950};
   const std::array candidates {
     clipped_main,
-    candidate(2, {1500, 100, 1850, 300}),
+    candidate(2, {1000, 200, 1600, 550}),
   };
-  const auto selection = probe::select_candidate(candidates);
-  EXPECT_FALSE(selection.index);
-  EXPECT_EQ(selection.reason, probe::selection_reason_e::ambiguous);
+  const auto selection = probe::select_candidate(candidates, browser);
+  ASSERT_TRUE(selection.index);
+  EXPECT_EQ(*selection.index, 0u);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::largest);
+  EXPECT_LT(probe::rect_area(clipped_main.visible_rect), probe::rect_area(candidates[1].visible_rect));
 }
 
-TEST(VideoDomProbeLogic, UnavailablePartiallyClippedMainStillPoisonsSmallerAd) {
+TEST(VideoDomProbeLogic, UnavailableVideoCannotAuthorizeOrPoisonAvailableVideo) {
   auto clipped_main = candidate(1, {-100, 100, 1400, 950}, false, false);
   clipped_main.visible_rect = {0, 100, 1400, 950};
   const std::array candidates {
     clipped_main,
-    candidate(2, {1500, 100, 1850, 300}),
+    candidate(2, {1400, 100, 1800, 400}),
   };
-  const auto selection = probe::select_candidate(candidates);
-  EXPECT_FALSE(selection.index);
-  EXPECT_EQ(selection.reason, probe::selection_reason_e::ambiguous);
+  const auto selection = probe::select_candidate(candidates, browser);
+  ASSERT_TRUE(selection.index);
+  EXPECT_EQ(*selection.index, 1u);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::single);
+}
+
+TEST(VideoDomProbeLogic, BrowserWidthVideoPublishesItsExactDocumentClippedViewport) {
+  constexpr probe::rect_t client {0, 0, 3840, 2088};
+  constexpr probe::rect_t document {0, 132, 3840, 2088};
+  constexpr probe::rect_t element {277, 85, 2813, 1512};
+  constexpr probe::rect_t expected {277, 132, 2813, 1512};
+  const auto visible = probe::windowed_video_viewport(client, document, element);
+  ASSERT_TRUE(visible);
+  EXPECT_EQ(*visible, expected);
+  auto video = candidate(-764704, element, true, false);
+  video.visible_rect = *visible;
+  const std::array candidates {video};
+  const auto selected = probe::select_authority_candidate(candidates, client);
+  ASSERT_TRUE(selected.index);
+  EXPECT_EQ(selected.reason, probe::selection_reason_e::single);
+  EXPECT_EQ(probe::selection_authority_rect(candidates, selected, client), visible);
+  EXPECT_TRUE(probe::windowed_cache_refresh_matches(element, expected, client, document, element));
+  // The document may overscan the client without changing these exact visible video pixels.
+  EXPECT_TRUE(probe::windowed_cache_refresh_matches(element, expected, client, {-500, 132, 4500, 2200}, element));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(element, expected, client, {0, 133, 3840, 2088}, element));
+}
+
+TEST(VideoDomProbeLogic, EqualFullElementAreasRemainAmbiguousWhenClippingDiffers) {
+  auto first = candidate(1, {-100, 0, 1100, 900}, true, false);
+  first.visible_rect = {0, 0, 1100, 900};
+  auto second = candidate(2, {1000, 0, 2200, 900}, true, false);
+  second.visible_rect = {1000, 0, 1920, 900};
+  const std::array candidates {first, second};
+  const auto selected = probe::select_authority_candidate(candidates, browser);
+  EXPECT_FALSE(selected.index);
+  EXPECT_EQ(selected.reason, probe::selection_reason_e::ambiguous);
+}
+
+TEST(VideoDomProbeLogic, TinyVisibleSliverDoesNotPromoteSmallerAdvert) {
+  auto main = candidate(1, {-1900, 100, 20, 1000}, true, false);
+  main.visible_rect = {0, 100, 20, 1000};
+  const std::array candidates {main, candidate(2, {1000, 100, 1500, 500})};
+  const auto selected = probe::select_authority_candidate(candidates, browser);
+  EXPECT_FALSE(selected.index);
+  EXPECT_EQ(selected.reason, probe::selection_reason_e::none);
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(main.element_rect, main.visible_rect, browser, browser, main.element_rect));
+}
+
+TEST(VideoDomProbeLogic, VisibleViewportMustMeetExistingFivePercentThreshold) {
+  constexpr probe::rect_t client {0, 0, 1000, 1000};
+  EXPECT_TRUE(probe::credible_video_extent({0, 0, 1000, 50}, client));
+  EXPECT_FALSE(probe::credible_video_extent({0, 0, 1000, 49}, client));
+  EXPECT_FALSE(probe::windowed_video_viewport(client, {0, 0, 0, 1000}, client));
+  EXPECT_FALSE(probe::windowed_video_viewport(client, client, {1200, 0, 1500, 1000}));
 }
 
 TEST(VideoDomProbeLogic, DuplicateFullClientVideosAuthorizeFullscreen) {
@@ -637,44 +690,26 @@ TEST(VideoDomProbeLogic, WindowedCacheRefreshKeepsStableVideoThroughDocumentLayo
   EXPECT_TRUE(probe::windowed_cache_refresh_matches(
     video, video, browser, {0, 40, 1920, 1040}, video
   ));
-  EXPECT_TRUE(probe::windowed_cache_refresh_matches(
-    video, video, browser, {20, 0, 1900, 1080}, video
-  ));
+  EXPECT_TRUE(probe::windowed_cache_refresh_matches(video, video, browser, {20, 0, 1900, 1080}, video));
 }
 
-TEST(VideoDomProbeLogic, WindowedCacheRefreshRejectsVideoMotionOrCurrentContainmentLoss) {
+TEST(VideoDomProbeLogic, WindowedCacheRefreshRejectsVideoMotionOrVisibleViewportChanges) {
   constexpr probe::rect_t video {200, 150, 1480, 870};
-  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
-    video, video, browser, browser, {201, 150, 1481, 870}
-  ));
-  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
-    video, video, browser, {0, 151, 1920, 1080}, video
-  ));
-  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
-    video, video, browser, {0, 152, 1920, 1080}, video
-  ));
-  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
-    video, video, browser, {-2, 0, 1920, 1080}, video
-  ));
-  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
-    video, video, browser, {0, 0, 0, 1080}, video
-  ));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(video, video, browser, browser, {201, 150, 1481, 870}));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(video, video, browser, {0, 151, 1920, 1080}, video));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(video, video, browser, {0, 152, 1920, 1080}, video));
+  EXPECT_TRUE(probe::windowed_cache_refresh_matches(video, video, browser, {-2, 0, 1920, 1080}, video));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(video, video, browser, {0, 0, 0, 1080}, video));
   constexpr probe::rect_t tiny {200, 150, 210, 160};
   EXPECT_FALSE(probe::windowed_cache_refresh_matches(tiny, tiny, browser, browser, tiny));
 }
 
-TEST(VideoDomProbeLogic, WindowedCacheRefreshPreservesExistingRoundingAndVisibleRectangleChecks) {
+TEST(VideoDomProbeLogic, WindowedCacheRefreshRequiresExactVisibleIntersection) {
   constexpr probe::rect_t edge_video {-1, 100, 1000, 800};
   constexpr probe::rect_t visible {0, 100, 1000, 800};
-  EXPECT_TRUE(probe::windowed_cache_refresh_matches(
-    edge_video, visible, browser, browser, edge_video
-  ));
-  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
-    edge_video, edge_video, browser, browser, edge_video
-  ));
-  EXPECT_FALSE(probe::windowed_cache_refresh_matches(
-    edge_video, visible, browser, browser, edge_video, 0
-  ));
+  EXPECT_TRUE(probe::windowed_cache_refresh_matches(edge_video, visible, browser, browser, edge_video));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(edge_video, edge_video, browser, browser, edge_video));
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(edge_video, visible, browser, {1, 0, 1920, 1080}, edge_video));
 }
 
 TEST(VideoDomProbeLogic, FullscreenCacheRefreshAllowsDocumentAndOverscanChanges) {

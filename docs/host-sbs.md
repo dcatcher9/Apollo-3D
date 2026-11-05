@@ -2690,18 +2690,24 @@ from the foreground Chrome or Edge root, maps its half-open authority rectangle 
 identity-oriented single-output capture, and tolerates at most one physical pixel of browser
 endpoint rounding before clipping.
 
-Windowed ROI and true fullscreen use deliberately separate selection rules. A windowed ROI still
-requires the unique largest credible IA2-available `<video>` to be fully contained by both its
-owning document and the foreground browser client; equal-largest candidates remain ambiguous. For
-true fullscreen, an available semantic `<video>` need only cover the complete foreground client.
+Windowed ROI and true fullscreen use deliberately separate selection rules. Windowed selection
+ranks credible IA2-available `<video>` elements by their full element area, including clipped
+elements; equal-largest elements remain ambiguous. Its authority is the exact visible intersection
+of that video, its available owning document and the foreground browser client. The winning
+viewport must occupy at least the existing five-percent credible-size threshold of the client;
+a tiny remaining sliver does not promote a smaller advert. Document clipping or overscan alone
+does not reject a meaningful visible viewport. Unavailable or fully occluded videos grant no
+windowed authority. For true fullscreen, an available semantic `<video>` need only cover the
+complete foreground client.
 The element may overscan that client, the available owning document's rectangle may be clipped, and
 multiple full-cover Chromium clones do not make fullscreen ambiguous; the helper retains a stable
 semantic identity and publishes the client rectangle. Only the foreground browser root is scanned,
 so background browser windows and tabs cannot authorize either route. Playback state is not
 required, and a paused retained identity remains eligible.
 
-The machine protocol preserves that provenance: strict windowed selection publishes `ok`, while
-the relaxed full-client selection publishes `ok-fullscreen`. The host never accepts an
+The unchanged eleven-field machine protocol preserves that provenance: verified visible windowed
+selection publishes `ok`, while the relaxed full-client selection publishes `ok-fullscreen`.
+The host never accepts an
 `ok-fullscreen` subrectangle as a windowed ROI; it is eligible only after mapping exactly to the
 capture. A transition between the two positive status classes starts a new live-detector source
 generation even when the semantic IDs and rectangle are otherwise identical.
@@ -2709,8 +2715,11 @@ generation even when the semantic IDs and rectangle are otherwise identical.
 One complete census can only stage a new machine-mode selection as provisional; it remains
 unpublished and Host SBS continues on full-frame V2. On the next 100 ms helper tick, a windowed
 selection's retained document and video objects must independently pass the same identity, state,
-tag, containment, size, and exact-rectangle checks before the helper emits `ok`. A fullscreen
-refresh instead requires the same available retained video identity to keep covering the unchanged
+tag and size checks before the helper emits `ok`. Its client and full video rectangle must remain
+unchanged, and the intersection with the current document must equal the exact cached visible
+viewport. A changed visible region revokes positioned authority even if the video identity is
+unchanged. A fullscreen refresh instead requires the same available retained video identity to
+keep covering the unchanged
 foreground client; document-rectangle clipping and harmless element overscan changes are not
 fullscreen revocations. A failed refresh emits `changed` and requests an immediate new census. A
 complete no-video or windowed ambiguity revokes an existing selection immediately. Foreground

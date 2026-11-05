@@ -187,6 +187,25 @@ namespace platf::primary_display {
       std::vector<std::optional<display_config::advanced_color_state_t>> colors;
     };
 
+    /** Process-local suppression of repeated mode sets which reached the same failed state.
+     * The durable journal owns recovery intent; this cache only defers another identical
+     * mutation until fresh active, available-target or desired observations change.
+     */
+    class restore_observation_cache_t {
+    public:
+      bool unchanged_failure(const snapshot_t &current, const snapshot_t &desired, const snapshot_t &available) const;
+      void remember_failure(const snapshot_t &observed, const snapshot_t &desired, const snapshot_t &available);
+      void clear();
+
+    private:
+      struct failure_t {
+        snapshot_t observed;
+        snapshot_t desired;
+        snapshot_t available;
+      };
+      std::optional<failure_t> failure_;
+    };
+
     struct journal_t {
       std::wstring original_primary;
       std::wstring promoted_primary;
@@ -231,7 +250,7 @@ namespace platf::primary_display {
 
     class manager_t {
     public:
-      explicit manager_t(io_t io);
+      explicit manager_t(io_t io, restore_observation_cache_t *restore_observations = nullptr);
       bool prepare(bool exclusive = false, std::wstring_view local_sink = {});
       bool is_local_exclusive(std::wstring_view source_device_path);
       bool bind_pending(std::wstring_view device_path);
@@ -246,6 +265,9 @@ namespace platf::primary_display {
 
     private:
       io_t io_;
+      // Production managers share one owner under transaction_mutex. Independent transaction
+      // adapters may omit it when testing their individual journal/API failure transitions.
+      restore_observation_cache_t *restore_observations_;
       bool apply_verified(const snapshot_t &before, const layout_t &desired);
       bool promote_exclusive(std::wstring_view device_path, bool reconcile_active_source = false);
       bool refresh_exclusive_cursor_clip(std::wstring_view device_path);

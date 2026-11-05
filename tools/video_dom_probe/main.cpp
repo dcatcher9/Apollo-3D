@@ -398,7 +398,6 @@ namespace {
     LONG unique_id {};
     probe::rect_t rect {};
     bool state_available {};
-    bool available {};
     IAccessible *accessible {};
   };
 
@@ -589,12 +588,6 @@ namespace {
                 .unique_id = unique_id_before,
                 .rect = *document_rect,
                 .state_available = state_available,
-                .available = state_available &&
-                             probe::clip_if_within_tolerance(
-                               result.client_rect,
-                               *document_rect,
-                               coordinate_rounding_tolerance
-                             ).has_value(),
                 .accessible = retained_documents.back().get(),
               };
               ++result.document_nodes;
@@ -630,18 +623,9 @@ namespace {
                     constexpr DWORD unavailable_states =
                       STATE_SYSTEM_UNAVAILABLE | STATE_SYSTEM_INVISIBLE |
                       STATE_SYSTEM_OFFSCREEN;
-                    auto visible_rect = probe::rect_intersection(
-                      *element_rect,
-                      result.client_rect
-                    );
-                    if (visible_rect && current_document) {
-                      visible_rect = probe::rect_intersection(
-                        *visible_rect,
-                        current_document->rect
-                      );
-                    }
-                    const auto client_area = probe::rect_area(result.client_rect);
-                    const auto element_area = probe::rect_area(*element_rect);
+                    const auto visible_rect = current_document ?
+                                                probe::windowed_video_viewport(result.client_rect, current_document->rect, *element_rect) :
+                                                std::nullopt;
                     const bool state_available =
                       (*state & unavailable_states) == 0;
                     observed_candidate_t candidate;
@@ -650,21 +634,23 @@ namespace {
                     candidate.geometry.visible_rect = visible_rect.value_or(probe::rect_t {});
                     candidate.geometry.available =
                       state_available && visible_rect.has_value() &&
-                      current_document && current_document->available;
+                      current_document && current_document->state_available;
                     candidate.geometry.fully_contained =
                       current_document &&
                       probe::clip_if_within_tolerance(
                         result.client_rect,
                         *element_rect,
                         coordinate_rounding_tolerance
-                      ).has_value() &&
+                      )
+                        .has_value() &&
                       probe::clip_if_within_tolerance(
                         current_document->rect,
                         *element_rect,
                         coordinate_rounding_tolerance
-                      ).has_value();
+                      )
+                        .has_value();
                     candidate.geometry.credible_size =
-                      client_area > 0 && element_area >= client_area / 20;
+                      probe::credible_video_extent(*element_rect, result.client_rect);
                     candidate.geometry.fullscreen_available =
                       probe::fullscreen_semantic_available(
                         state_available,
@@ -997,8 +983,7 @@ namespace {
       cached.visible_rect,
       *client_rect,
       document->rect,
-      video->rect,
-      coordinate_rounding_tolerance
+      video->rect
     );
   }
 
