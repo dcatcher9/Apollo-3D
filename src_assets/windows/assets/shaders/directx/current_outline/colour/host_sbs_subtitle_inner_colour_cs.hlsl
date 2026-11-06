@@ -476,15 +476,22 @@ void TrustedPaletteMain(uint lane,uint argBytes) {
             }
             GTrustedCandidate=best;GTrustedVotes=0u;GTrustedBoundary=0u;
             if(best!=512u) {
-                GTrustedRGB=GInkSamples[best]&0x00ffffffu;uint3 prototype=BlackUnpack(GTrustedRGB),shells=0u;
+                GTrustedRGB=GInkSamples[best]&0x00ffffffu;uint3 prototype=BlackUnpack(GTrustedRGB);
+                uint shell0=0u,shell1=0u,shell2=0u;
                 [loop]for(uint j=0u;j<512u;++j)if((GInkSamples[j]&0x80000000u)!=0u&&GInkFrequency[j]>=2u) {
                     uint3 delta=(uint3)abs(int3(BlackUnpack(GInkSamples[j]))-int3(prototype));
                     uint distance=max(delta.r,max(delta.g,delta.b));
-                    if(distance<=64u)shells[distance/32u]|=1u<<(distance&31u);
+                    // FXC requires dynamically indexed local-vector writes to unroll this loop.
+                    if(distance<32u)shell0|=1u<<distance;
+                    else if(distance<64u)shell1|=1u<<(distance&31u);
+                    else if(distance==64u)shell2|=1u;
                     if((GInkSamples[j]&0x00ffffffu)==GTrustedRGB&&GTrustedSeed[j]!=0u)++GTrustedVotes;
                 }
                 GTrustedRadius=65u;
-                [loop]for(uint shell=0u;shell<=64u;++shell)if((shells[shell/32u]&(1u<<(shell&31u)))==0u){GTrustedRadius=shell;break;}
+                [loop]for(uint shell=0u;shell<=64u;++shell) {
+                    uint occupied=shell<32u?shell0:shell<64u?shell1:shell2;
+                    if((occupied&(1u<<(shell&31u)))==0u){GTrustedRadius=shell;break;}
+                }
                 if(any(GTrustedBounds.xy>=GTrustedBounds.zw))GTrustedBoundary=1u;
             }
         }
