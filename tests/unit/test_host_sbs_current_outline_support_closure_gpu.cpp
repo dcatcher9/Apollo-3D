@@ -308,6 +308,14 @@ namespace {
         // Loading makes the optional shader available; old fixtures stay OFF.
         // New owner tests and the explicit Saved FG replay opt in separately.
       }
+      const auto *trusted_root = std::getenv("SUNSHINE_TEST_TRUSTED_INNER_SHADER_ROOT");
+      const auto *trusted_pin = std::getenv("SUNSHINE_TEST_TRUSTED_INNER_SHADER_PIN");
+      if (trusted_root || trusted_pin) {
+        require(trusted_root && trusted_pin);
+        load_shaders(trusted_root, trusted_pin, models::current_outline_runtime::trusted_inner_specs, trusted_inner_shaders_);
+        RecordProperty("trusted_inner_source_closure", trusted_pin);
+        // Availability alone keeps every older native fixture on its exact old route.
+      }
       require(hp && std::string(hp) == compiled_ring_helper_pin);
       RecordProperty("outline_source_closure", ring_closure_);
       RecordProperty("outline_helper_source_pin", compiled_ring_helper_pin);
@@ -1959,6 +1967,7 @@ namespace {
     void saved();
     void saved_current(bool sdr);
     #include "current_outline_foreground_edge_fixture.inc"
+    #include "current_outline_trusted_inner_authored_fixture.inc"
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
     ring::resources_t helper_;
@@ -1988,11 +1997,13 @@ namespace {
     std::array<ComPtr<ID3D11ComputeShader>, models::host_sbs_current_mask_holes_gpu::shader_count> hole_shaders_;
     std::string hole_closure_;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> coverage_shaders_;
+    std::array<ComPtr<ID3D11ComputeShader>, 1u> trusted_inner_shaders_;
     std::string coverage_closure_;
     nlohmann::json adapter_;
   };
 
   #include "current_outline_foreground_edge_tests.inc"
+  #include "current_outline_trusted_inner_authored_tests.inc"
 
   TEST_F(HostSbsCurrentOutlineSupportClosureGpuTest, InsideProgramIsRequiredAndFreshFinalizerPublishesVersionedReady) {
     for (auto *shader : program_.inside_shaders) ASSERT_NE(shader, nullptr);
@@ -4046,6 +4057,11 @@ namespace {
     // Historical native controls stay OFF even when the new production loader
     // makes FG available. The explicit replay below runs a second fresh ON owner.
     effective_composition.outline.foreground_edge_shaders={};
+    if (inner_diagnostics) {
+      ASSERT_TRUE(std::all_of(effective_composition.outline.trusted_inner_publish_shaders.begin(),
+        effective_composition.outline.trusted_inner_publish_shaders.end(), [](auto *shader) { return shader == nullptr; }))
+        << "Strict captured-baseline inner diagnostics require the original route; trusted-inner treatment is incompatible";
+    }
     if(foreground_replay){ASSERT_TRUE(programs.foreground_edge_ready());ASSERT_EQ(foreground_edge_closure_,runtime::foreground_edge_closure);}
     // Saved/native output diagnostics explicitly request the independent offer plane.
     effective_composition.outline.coverage_diagnostics = true;
@@ -4105,6 +4121,9 @@ namespace {
       {"coverage_policy", {{"compiled_source_closure",runtime::coverage_closure},{"production_program_ready",programs.coverage_ready()}}},
       {"foreground_edge_policy", {{"compiled_source_closure",runtime::foreground_edge_closure},{"production_program_ready",programs.foreground_edge_ready()},
         {"requested",foreground_replay},{"baseline_arrays_foreground_edge_OFF",true},{"scope","Explicit ON arrays are prefixed foreground_edge_; baseline current arrays remain OFF"}}},
+      {"trusted_inner_policy", {{"compiled_source_closure",runtime::trusted_inner_closure},{"production_program_ready",programs.trusted_inner_ready()},
+        {"production_route_enabled",effective_composition.outline.trusted_inner_publish_shaders[0u]!=nullptr},
+        {"scope","Current production route; captured expected-M binding and equality remain independently reported"}}},
       {"scope", "Actual production Source5/CBC/Raw/F2 and selected-matte GPU programs; no CPU mask reconstruction"},
       {"history", "New owner per case; prior live strong/weak/AA private history is unavailable and is not synthesized"},
       {"parent_descriptor_scope", "Saved full shape/format/ROI/transfer; undumped descriptor flags are not claimed byteexact, and the GPU proof describes the replay allocation"},

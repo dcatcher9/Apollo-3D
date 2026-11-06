@@ -53,6 +53,7 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
     ID3D11ShaderResourceView *current_sct = nullptr;
     ID3D11ShaderResourceView *current_uip = nullptr;
     producer_t producer;
+    bool trusted_inner = false;
   };
 
   struct mutable_views_t {
@@ -63,6 +64,8 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
     ComPtr<ID3D11Buffer> unit_arguments, root_mirror;
     // Current per-unit family boxes, Texture2D<uint> 17x8; never native graph scratch.
     ComPtr<ID3D11ShaderResourceView> family_models;
+    ComPtr<ID3D11ShaderResourceView> trusted_inner_bits;
+    ComPtr<ID3D11Buffer> trusted_publication_arguments;
   };
 
   struct diagnostics_t {
@@ -202,9 +205,10 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
     [[nodiscard]] baseline::mutable_views_t baseline_views() const {
       return base_.mutable_views();
     }
+    [[nodiscard]] bool trusted_inner_ready() const noexcept { return trusted_ready_; }
 
     [[nodiscard]] mutable_views_t mutable_views() const {
-      return {width_, height_, candidate_body_.srv, candidate_matte_.srv, meta_.srv, all_body_.srv, cover_bits_.srv, selected_bits_.srv, producer_cb_, hook_cb_, native_args_, unit_args_.resource, root_mirror_.resource, family_models_.srv};
+      return {width_, height_, candidate_body_.srv, candidate_matte_.srv, meta_.srv, all_body_.srv, cover_bits_.srv, selected_bits_.srv, producer_cb_, hook_cb_, native_args_, unit_args_.resource, root_mirror_.resource, family_models_.srv, trusted_inner_.srv, trusted_publication_args_.resource};
     }
 
     bool ensure(ID3D11Device *device, UINT width, UINT height, std::string &error) {
@@ -284,6 +288,12 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       // integer/SRGB view to the private Texture2D<float4> register. Null is format fallback,
       // not an encoded-SDR assertion. The shader must reject support before any origin load.
       program_t safe_program = *program;
+      if (safe_program.trusted_inner && !trusted_ready_ && !trusted_allocation_attempted_) {
+        trusted_allocation_attempted_ = true;
+        try { trusted_ready_ = prepare_trusted_inner(); }
+        catch (const std::exception &) { trusted_ready_ = false; }
+      }
+      safe_program.trusted_inner = safe_program.trusted_inner && trusted_ready_;
       if (producer[30] != static_cast<UINT>(D3D11_SRV_DIMENSION_TEXTURE2D) || (producer[6] != static_cast<UINT>(DXGI_FORMAT_R8G8B8A8_UNORM) && producer[6] != static_cast<UINT>(DXGI_FORMAT_B8G8R8A8_UNORM))) {
         safe_program.producer.original_source = nullptr;
       }
@@ -297,7 +307,9 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       }
       std::array<IUnknown *, 96u> objects {};
       UINT count = 0u;
-      if (!signature_objects(objects, count, colour, graph, constants96, rgb, probability, support, ocr, root, *program)) {
+      auto signature_program = *program;
+      signature_program.trusted_inner = safe_program.trusted_inner;
+      if (!signature_objects(objects, count, colour, graph, constants96, rgb, probability, support, ocr, root, signature_program)) {
         return fail(error, "CBC recorded signature exceeds checked capacity96.");
       }
       if (!commands_ || !signature_.matches(objects, count, root_offset)) {
@@ -537,6 +549,52 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       return true;
     }
 
+    // Optional storage is prepared atomically, outside recording. Failure leaves the original
+    // helper and all its allocations usable; no new mask is published from partial storage.
+    bool prepare_trusted_inner() {
+      texture_t inner;
+      buffer_t palette, modes, publication;
+      std::array<ComPtr<ID3D11Buffer>, 64u> requests;
+      const std::vector<UINT> zero(static_cast<std::size_t>(pixels_) + 128u, 0u);
+      D3D11_TEXTURE2D_DESC t{};
+      t.Width = width_;t.Height = height_;t.MipLevels = t.ArraySize = t.SampleDesc.Count = 1u;
+      t.Format = DXGI_FORMAT_R32_UINT;t.Usage = D3D11_USAGE_DEFAULT;
+      t.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      D3D11_SUBRESOURCE_DATA ti{zero.data(), width_ * 4u, 0u};
+      if (FAILED(device_->CreateTexture2D(&t, &ti, &inner.resource)) ||
+          FAILED(device_->CreateShaderResourceView(inner.resource.Get(), nullptr, &inner.srv)) ||
+          FAILED(device_->CreateUnorderedAccessView(inner.resource.Get(), nullptr, &inner.uav))) return false;
+      D3D11_BUFFER_DESC b{};
+      b.ByteWidth = 128u * 4u;b.Usage = D3D11_USAGE_DEFAULT;
+      b.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      b.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;b.StructureByteStride = 4u;
+      D3D11_SUBRESOURCE_DATA init{zero.data(), 0u, 0u};
+      if (FAILED(device_->CreateBuffer(&b, &init, &palette.resource)) ||
+          FAILED(device_->CreateShaderResourceView(palette.resource.Get(), nullptr, &palette.srv)) ||
+          FAILED(device_->CreateUnorderedAccessView(palette.resource.Get(), nullptr, &palette.uav))) return false;
+      const auto raw = [&](UINT bytes, buffer_t &out) {
+        b.ByteWidth = bytes;b.StructureByteStride = 0u;
+        b.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS | D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC u{};
+        u.Format = DXGI_FORMAT_R32_TYPELESS;u.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        u.Buffer.NumElements = bytes / 4u;u.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        return SUCCEEDED(device_->CreateBuffer(&b, &init, &out.resource)) &&
+               SUCCEEDED(device_->CreateUnorderedAccessView(out.resource.Get(), &u, &out.uav));
+      };
+      if (!raw(96u, modes) || !raw(16u, publication)) return false;
+      b.ByteWidth = 16u;b.Usage = D3D11_USAGE_IMMUTABLE;
+      b.BindFlags = D3D11_BIND_CONSTANT_BUFFER;b.MiscFlags = 0u;
+      for (UINT unit = 0u; unit < 8u; ++unit) for (UINT mode = 0u; mode < 8u; ++mode) {
+        const std::array<UINT, 4u> value{unit, mode, 1u, 0u};
+        const D3D11_SUBRESOURCE_DATA data{value.data(), 0u, 0u};
+        if (FAILED(device_->CreateBuffer(&b, &data, &requests[unit * 8u + mode]))) return false;
+      }
+      trusted_inner_ = std::move(inner);trusted_palette_ = std::move(palette);
+      trusted_mode_args_ = std::move(modes);trusted_publication_args_ = std::move(publication);
+      for (UINT i = 0u; i < requests.size(); ++i) mode_constants_[64u + i] = std::move(requests[i]);
+      return true;
+    }
+
     bool signature_objects(std::array<IUnknown *, 96u> &o, UINT &n, const std::array<ID3D11ComputeShader *, 5u> &c, const std::array<ID3D11ComputeShader *, 6u> &g, ID3D11Buffer *cb, ID3D11ShaderResourceView *rgb, ID3D11ShaderResourceView *p, ID3D11ShaderResourceView *s, ID3D11ShaderResourceView *ocr, ID3D11Buffer *root, const program_t &program) const {
       bool valid = true;
       auto add = [&](IUnknown *x) {
@@ -584,6 +642,11 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       add(base_views_.current_mode_args.Get());
       add(base_views_.native_clear_args.Get());
       add(family_models_.resource.Get());add(family_models_.srv.Get());add(family_models_.uav.Get());
+      // A null first identity records the optional route's disabled state in the command key.
+      add(program.trusted_inner ? trusted_inner_.uav.Get() : nullptr);
+      add(trusted_palette_.srv.Get());add(trusted_palette_.uav.Get());
+      add(trusted_mode_args_.resource.Get());add(trusted_mode_args_.uav.Get());
+      add(trusted_publication_args_.resource.Get());add(trusted_publication_args_.uav.Get());
       return valid;
     }
 
@@ -610,6 +673,17 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       c->CSSetShader(colour[4], nullptr, 0u);
       c->DispatchIndirect(base_views_.native_clear_args.Get(), 0u);
       unbind(c);
+      if (program.trusted_inner) {
+        const std::array<UINT, 4u> publication {(width_ + 15u) / 16u, (height_ + 15u) / 16u, 0u, 0u};
+        c->UpdateSubresource(trusted_publication_args_.resource.Get(), 0u, nullptr, publication.data(), 0u, 0u);
+        ID3D11Buffer *trusted_constants[3] {cb, mode_constants_[64u].Get(), nullptr};
+        u.fill(nullptr);u[6u] = trusted_inner_.uav.Get();
+        c->CSSetConstantBuffers(0u, 3u, trusted_constants);
+        c->CSSetUnorderedAccessViews(0u, 8u, u.data(), nullptr);
+        c->CSSetShader(colour[2u], nullptr, 0u);
+        c->DispatchIndirect(base_views_.native_clear_args.Get(), 0u);
+        unbind(c);
+      }
       const std::array<ID3D11ShaderResourceView *, 16u> ei {rgb, ocr, base_views_.validation_receipt.Get(), base_views_.palette.Get(), base_views_.mode_body.Get(), base_views_.cover_clip.Get(), base_views_.parent.Get(), base_views_.root_flags.Get(), all_body_.srv.Get(), cover_bits_.srv.Get(), program.current_sct, program.current_uip, root_mirror_.srv.Get(), program.producer.original_source, base_views_.body.Get(), base_views_.matte.Get()};
       ID3D11Buffer *ec[3] {cb, validation_cb_.Get(), producer_cb_.Get()};
       auto enc = [&](UINT entry, const std::array<ID3D11UnorderedAccessView *, 8u> &out, ID3D11Buffer *args, UINT offset, bool bits_write = false, bool scratch_write = false) {
@@ -693,6 +767,14 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       bindings.emission_outputs = {nullptr, base_uavs_[0].Get(), base_uavs_[1].Get(), base_uavs_[2].Get(), base_uavs_[3].Get(), nullptr, nullptr, nullptr};
       bindings.component_outputs = {base_uavs_[9].Get(), base_uavs_[10].Get(), base_uavs_[4].Get(), base_uavs_[5].Get(), nullptr, nullptr, nullptr, nullptr};
       bindings.accumulation_outputs = {nullptr, nullptr, nullptr, nullptr, nullptr, base_uavs_[6].Get(), base_uavs_[7].Get(), nullptr};
+      if (program.trusted_inner) {
+        bindings.trusted_palette = trusted_palette_.srv.Get();
+        bindings.trusted_palette_output = trusted_palette_.uav.Get();
+        bindings.trusted_mode_arguments = trusted_mode_args_.resource.Get();
+        bindings.trusted_mode_output = trusted_mode_args_.uav.Get();
+        bindings.trusted_inner_output = trusted_inner_.uav.Get();
+        bindings.trusted_publication_output = trusted_publication_args_.uav.Get();
+      }
       const auto collect_unit = [&](UINT unit) {
         ec[1u] = mode_constants_[unit * 8u].Get();
         std::array<ID3D11UnorderedAccessView *, 8u> outputs{};
@@ -769,18 +851,18 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       unbind(c);
     }
 
-    bool ready_ = false, recorded_ = true, last_enabled_ = false;
+    bool ready_ = false, recorded_ = true, last_enabled_ = false, trusted_ready_ = false, trusted_allocation_attempted_ = false;
     UINT width_ = 0u, height_ = 0u, pixels_ = 0u;
     ComPtr<ID3D11Device> device_;
     baseline::resources_t base_;
     baseline::mutable_views_t base_views_;
     std::array<ComPtr<ID3D11UnorderedAccessView>, 12u> base_uavs_;
     ComPtr<ID3D11UnorderedAccessView> mode_args_uav_;
-    texture_t all_body_, cover_bits_, selected_bits_, candidate_body_, candidate_matte_, family_models_;
-    buffer_t meta_, unit_args_, root_mirror_;
+    texture_t all_body_, cover_bits_, selected_bits_, candidate_body_, candidate_matte_, family_models_, trusted_inner_;
+    buffer_t meta_, unit_args_, root_mirror_, trusted_palette_, trusted_mode_args_, trusted_publication_args_;
     ComPtr<ID3D11Buffer> producer_cb_, hook_cb_, graph_cb_, native_args_;
     ComPtr<ID3D11Buffer> validation_cb_;
-    std::array<ComPtr<ID3D11Buffer>, 64u> mode_constants_;
+    std::array<ComPtr<ID3D11Buffer>, 128u> mode_constants_;
     host_sbs_compute_program_lease::group_t<5u> colour_program_lease_;
     host_sbs_compute_program_lease::group_t<6u> graph_program_lease_;
     host_sbs_compute_program_lease::group_t<12u> enclosure_program_lease_;

@@ -17,6 +17,7 @@ namespace models::host_sbs_current_foreground_edge_gpu {
     ID3D11ShaderResourceView *rgb = nullptr, *ocr = nullptr, *selected = nullptr, *cover = nullptr;
     ID3D11ShaderResourceView *cbc = nullptr, *models = nullptr, *sct = nullptr;
     ID3D11ShaderResourceView *inside = nullptr, *body = nullptr, *raw_m = nullptr, *code1 = nullptr;
+    ID3D11ShaderResourceView *trusted_inner = nullptr;
     ID3D11Resource *original_final = nullptr;
     ID3D11UnorderedAccessView *final_m = nullptr, *data = nullptr;
   };
@@ -113,6 +114,30 @@ namespace models::host_sbs_current_foreground_edge_gpu {
       context->CSSetUnorderedAccessViews(0u, UINT(out.size()), out.data(), nullptr);
       context->CSSetShader(programs[0u], nullptr, 0u);
       context->DispatchIndirect(native_arguments, 0u);
+      unbind(context);
+    }
+
+    // Separate optional program and zero-work indirect gate. It does not depend on the
+    // foreground-edge snapshot allocation or enablement and cannot suppress the old pass.
+    static void finish_trusted(ID3D11DeviceContext *context, ID3D11ComputeShader *program,
+                               ID3D11Buffer *constants, ID3D11Buffer *shape,
+                               const inputs_t &views, ID3D11Buffer *publication_arguments) {
+      if (!context || !program || !constants || !shape || !views.trusted_inner ||
+          !views.final_m || !views.data || !publication_arguments) return;
+      unbind(context);
+      const std::array<ID3D11ShaderResourceView *, 16u> in {
+        views.rgb, views.ocr, views.selected, views.cover, views.cbc, nullptr,
+        views.models, views.sct, views.trusted_inner, nullptr, nullptr,
+        nullptr, views.raw_m, views.code1, nullptr, nullptr
+      };
+      std::array<ID3D11UnorderedAccessView *, 8u> out{};
+      out[4u] = views.final_m;out[5u] = views.data;
+      ID3D11Buffer *buffers[2u] {constants, shape};
+      context->CSSetConstantBuffers(0u, 2u, buffers);
+      context->CSSetShaderResources(0u, UINT(in.size()), in.data());
+      context->CSSetUnorderedAccessViews(0u, UINT(out.size()), out.data(), nullptr);
+      context->CSSetShader(program, nullptr, 0u);
+      context->DispatchIndirect(publication_arguments, 0u);
       unbind(context);
     }
 

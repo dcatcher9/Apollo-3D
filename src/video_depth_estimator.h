@@ -1394,6 +1394,7 @@ namespace models {
     bool current_outline_hole_program_ready=false; // Shader availability only, never GPU execution proof.
     bool current_outline_coverage_program_ready=false; // Shader availability only, never GPU execution proof.
     bool current_outline_foreground_edge_program_ready=false; // Shader availability only, never GPU execution proof.
+    bool current_outline_trusted_inner_program_ready=false; // Availability only; zero indirect work is a valid observation.
     std::uint64_t current_outline_cbc_recordings=0u,current_outline_cbc_replays=0u,current_outline_cbc_allocations=0u;
     std::uint64_t current_outline_f2_recordings=0u,current_outline_f2_replays=0u,current_outline_f2_allocations=0u;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_matte,selected_receipt;

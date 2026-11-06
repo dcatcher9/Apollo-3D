@@ -12,7 +12,7 @@ cbuffer InnerColourConstants : register(b0) {
     uint4 contour_observation;
     uint4 contour_options;
 };
-cbuffer InnerColourRequest : register(b1) { uint4 inner_request; }; // slot, mode, 0, 0
+cbuffer InnerColourRequest : register(b1) { uint4 inner_request; }; // slot, mode, route(0 original/1 trusted inner), 0
 Texture2D<float4> CurrentDisplayBand : register(t0);
 StructuredBuffer<float> CurrentProbability : register(t1);
 Texture2D<uint> CurrentSupport : register(t2);
@@ -28,7 +28,8 @@ RWTexture2D<uint> DomainWrite : register(u3);
 RWTexture2D<uint> CoverWrite : register(u4);
 RWTexture2D<uint> AccumulatedBody : register(u5);
 RWTexture2D<uint> AccumulatedFinal : register(u6);
-RWByteAddressBuffer ModeDispatchArgs : register(u7); //96B/8 uint3, unbound before indirect consumers
+// Palette:96B/8 uint3. Trusted accumulation:independent16B final-publication args.
+RWByteAddressBuffer ModeDispatchArgs : register(u7);
 
 static const uint INNER_MAGIC = 0x35434c49u;
 static const uint INNER_SCHEMA = 3u;
@@ -39,6 +40,7 @@ static const uint INNER_INVALID = 0u;
 static const uint INNER_EMPTY = 1u;
 static const uint INNER_READY = 2u;
 static const uint INNER_SLOT_OUTSIDE = 3u;
+static const uint TRUSTED_INNER_MAGIC = 0x31524954u; // TIR1, separate private palette
 
 groupshared uint CurrentCount;
 groupshared int CurrentReferenceCenterTwice;
@@ -61,6 +63,12 @@ groupshared uint GPlaneShape;
 groupshared uint4 GSearch;
 groupshared uint4 GSeedSearch; // Exact old130 evidence window; growth Domain has its own extent.
 groupshared uint3 GRepresentative;
+groupshared uint GInkFrequency[512];
+groupshared uint GTrustedSeed[512];
+groupshared uint GTrustedCandidate,GTrustedRGB,GTrustedRadius,GTrustedVotes,GTrustedBoundary;
+groupshared uint GTrustedExamined,GTrustedRejected;
+groupshared uint4 GTrustedBounds;
+groupshared uint GTrustedAccepted;
 
 bool ContourFinite(float v) { return !isnan(v) && !isinf(v); }
 bool ContourFinite3(float3 v) { return all(!isnan(v)) && all(!isinf(v)); }
@@ -104,7 +112,7 @@ bool TypedCurrentValid(out uint count,out int reference) {
         any(contour_field.xy==0u) || any(contour_field.xy>V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT) ||
         contour_field.z>=contour_field.w || contour_field.w>contour_field.y ||
         any(contour_content.xy>=contour_content.zw) || any(contour_content.zw>contour_field.xy) ||
-        contour_observation.w!=0u || any(contour_options.zw!=0u) || any(inner_request.zw!=0u)) return false;
+        contour_observation.w!=0u || any(contour_options.zw!=0u) || inner_request.z>1u || inner_request.w!=0u) return false;
     if (CurrentOcrRecord[0]!=4u || CurrentOcrRecord[1]!=0x3852434fu || CurrentOcrRecord[2]!=1u ||
         CurrentOcrRecord[3]!=CurrentOcrRecord[4] || CurrentOcrRecord[4]>8u ||
         any(uint4(CurrentOcrRecord[5],CurrentOcrRecord[6],CurrentOcrRecord[7],CurrentOcrRecord[8])!=contour_frame) ||
@@ -342,6 +350,17 @@ bool BlackNeighborWitness(int2 p,float3 own,uint representativePeak) {
         BlackNeighborAt(p+int2(0,radius),own,representativePeak);
 }
 
+bool TrustedInnerSeed(int2 p,float3 color) {
+    if(!SourcePixelInRect(p,CurrentCores[inner_request.x]) || CurrentSupport.Load(int3(p,0))!=1u)return false;
+    float probability;
+    if(!CurrentProbabilityEvidence(p,probability)||probability<=V2_OCR_ACTIVE_PROBABILITY_THRESHOLD)return false;
+    bool2 edges=CurrentSpatialEdges(p,color);
+    uint4 core=CurrentCores[inner_request.x];
+    uint limit=3u*(core.w-core.y)*contour_source.y/(contour_content.w-contour_content.y);
+    return (edges.x&&CurrentShortTangent(p,color,int2(0,1),limit)) ||
+           (edges.y&&CurrentShortTangent(p,color,int2(1,0),limit));
+}
+
 // Private per-call numeric proof. u0/PaletteWrite is stage-local: it binds the
 // dedicated32-word receipt here and the original128-word palette in palette_main.
 // No parent/root flags, SCT word, or production producer contract is reused.
@@ -408,13 +427,106 @@ void validate_main(uint3 group:SV_GroupID,uint3 thread:SV_DispatchThreadID,uint 
 
 uint PublishPaletteHeader() {
     bool valid=GTyped!=0u && GFault==0u;
-    PaletteWrite[0]=INNER_MAGIC;PaletteWrite[1]=INNER_SCHEMA;PaletteWrite[2]=valid?1u:0u;
+    PaletteWrite[0]=inner_request.z==1u?TRUSTED_INNER_MAGIC:INNER_MAGIC;
+    PaletteWrite[1]=inner_request.z==1u?1u:INNER_SCHEMA;PaletteWrite[2]=valid?1u:0u;
     PaletteWrite[3]=inner_request.x;PaletteWrite[7]=valid?CurrentCount:0u;
     PaletteWrite[21]=valid?asuint(CurrentReferenceCenterTwice):0u;
     [unroll] for(uint constantWord=0u;constantWord<24u;++constantWord)PaletteWrite[24u+constantWord]=ReadConstant(constantWord);
     uint status=!valid?INNER_INVALID:CurrentCount==0u?INNER_EMPTY:inner_request.x>=CurrentCount?INNER_SLOT_OUTSIDE:INNER_READY;
     PaletteWrite[22]=status;
+    PaletteWrite[23]=inner_request.z;
     return status;
+}
+
+uint TrustedLex(uint packed) {
+    return ((packed&255u)<<16u)|(packed&0x0000ff00u)|((packed>>16u)&255u);
+}
+uint4 TrustedSearchBounds() {
+    // Exact ceil of the existing half-open pixel-centre inequalities, then native-band clipping.
+    uint cw=contour_content.z-contour_content.x,ch=contour_content.w-contour_content.y;
+    uint2 low=(2u*(GSearch.xy-contour_content.xy)*contour_source.xy+uint2(cw,ch)-1u)/(2u*uint2(cw,ch));
+    uint2 high=(2u*(GSearch.zw-contour_content.xy)*contour_source.xy+uint2(cw,ch)-1u)/(2u*uint2(cw,ch));
+    return uint4(min(low.x,contour_source.x),clamp((int)low.y-(int)contour_source.z,0,(int)contour_source.w),
+                 min(high.x,contour_source.x),clamp((int)high.y-(int)contour_source.z,0,(int)contour_source.w));
+}
+void TrustedPaletteMain(uint lane,uint argBytes) {
+    [unroll]for(uint part=0u;part<2u;++part) {
+        uint i=lane+256u*part,key=GInkSamples[i];GTrustedSeed[i]=0u;
+        if((key&0x80000000u)!=0u&&GInkFrequency[i]>=2u) {
+            int2 p=CurrentPaletteSamplePosition(CurrentCores[inner_request.x],i);float3 color;
+            if(LoadDisplayColor(p,color)&&TrustedInnerSeed(p,color))GTrustedSeed[i]=1u;
+        }
+    }
+    if(lane==0u) {
+        PublishPaletteHeader();GTrustedBounds=TrustedSearchBounds();GTrustedExamined=0u;GTrustedRejected=0u;
+        uint4 core=CurrentCores[inner_request.x],cover=CurrentCovers[inner_request.x];
+        [unroll]for(uint j=0u;j<4u;++j){PaletteWrite[8u+j]=GSearch[j];PaletteWrite[12u+j]=cover[j];PaletteWrite[16u+j]=core[j];}
+        PaletteWrite[20u]=CurrentSlotRibbon(inner_request.x)?1u:0u;
+        PaletteWrite[5u]=GAnchorCount;PaletteWrite[6u]=GAnchorPeak;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // At most256 distinct colours can repeat among512 unique source positions. Rejected
+    // boundary families do not consume the eight accepted-family slots.
+    [loop]for(uint attempt=0u;attempt<256u;++attempt) {
+        if(lane==0u) {
+            uint best=512u;
+            [loop]for(uint i=0u;i<512u;++i)if(GTrustedSeed[i]!=0u) {
+                if(best==512u||GInkFrequency[i]>GInkFrequency[best]||
+                   (GInkFrequency[i]==GInkFrequency[best]&&TrustedLex(GInkSamples[i])<TrustedLex(GInkSamples[best])))best=i;
+            }
+            GTrustedCandidate=best;GTrustedVotes=0u;GTrustedBoundary=0u;
+            if(best!=512u) {
+                GTrustedRGB=GInkSamples[best]&0x00ffffffu;uint3 prototype=BlackUnpack(GTrustedRGB),shells=0u;
+                [loop]for(uint j=0u;j<512u;++j)if((GInkSamples[j]&0x80000000u)!=0u&&GInkFrequency[j]>=2u) {
+                    uint3 delta=(uint3)abs(int3(BlackUnpack(GInkSamples[j]))-int3(prototype));
+                    uint distance=max(delta.r,max(delta.g,delta.b));
+                    if(distance<=64u)shells[distance/32u]|=1u<<(distance&31u);
+                    if((GInkSamples[j]&0x00ffffffu)==GTrustedRGB&&GTrustedSeed[j]!=0u)++GTrustedVotes;
+                }
+                GTrustedRadius=65u;
+                [loop]for(uint shell=0u;shell<=64u;++shell)if((shells[shell/32u]&(1u<<(shell&31u)))==0u){GTrustedRadius=shell;break;}
+                if(any(GTrustedBounds.xy>=GTrustedBounds.zw))GTrustedBoundary=1u;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if(GTrustedCandidate==512u)break;
+        [unroll]for(uint part=0u;part<2u;++part) {
+            uint i=lane+256u*part;
+            if((GInkSamples[i]&0x00ffffffu)==GTrustedRGB)GTrustedSeed[i]=0u;
+        }
+        uint width=GTrustedBounds.z-GTrustedBounds.x,height=GTrustedBounds.w-GTrustedBounds.y;
+        uint perimeter=2u*(width+height);
+        [loop]for(uint edge=lane;edge<perimeter;edge+=256u) {
+            uint2 p;
+            if(edge<width)p=uint2(GTrustedBounds.x+edge,GTrustedBounds.y);
+            else if(edge<2u*width)p=uint2(GTrustedBounds.x+edge-width,GTrustedBounds.w-1u);
+            else if(edge<2u*width+height)p=uint2(GTrustedBounds.x,GTrustedBounds.y+edge-2u*width);
+            else p=uint2(GTrustedBounds.z-1u,GTrustedBounds.y+edge-2u*width-height);
+            float3 color;bool valid=LoadDisplayColor(int2(p),color);
+            uint3 delta=valid?(uint3)abs(int3(BlackRGB8(color))-int3(BlackUnpack(GTrustedRGB))):0u;
+            if(!valid||max(delta.r,max(delta.g,delta.b))<=GTrustedRadius)InterlockedOr(GTrustedBoundary,1u);
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if(lane==0u) {
+            ++GTrustedExamined;
+            if(GTrustedBoundary!=0u)++GTrustedRejected;
+            else {
+                uint start=INNER_MODE_OFFSET+GModeCount*INNER_MODE_WORDS;uint3 modal=BlackUnpack(GTrustedRGB);
+                PaletteWrite[start]=modal.r;PaletteWrite[start+1u]=modal.g;PaletteWrite[start+2u]=modal.b;
+                PaletteWrite[start+3u]=MaxChannel(modal);PaletteWrite[start+4u]=GInkFrequency[GTrustedCandidate];
+                PaletteWrite[start+5u]=GTrustedVotes;PaletteWrite[start+6u]=GTrustedCandidate;
+                PaletteWrite[start+7u]=GTrustedRGB|((128u|GTrustedRadius)<<24u);
+                if(argBytes==96u&&!CurrentSlotRibbonUi(inner_request.x))ModeDispatchArgs.Store3(GModeCount*12u,uint3((contour_source.x+15u)/16u,(contour_source.w+15u)/16u,1u));
+                ++GModeCount;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if(GModeCount==8u)break;
+    }
+    if(lane==0u) {
+        PaletteWrite[4u]=GModeCount;PaletteWrite[48u]=GTrustedExamined;
+        PaletteWrite[49u]=GTrustedRejected;PaletteWrite[50u]=GModeCount;
+    }
 }
 
 [numthreads(256,1,1)]
@@ -433,7 +545,7 @@ void palette_main(uint3 group:SV_GroupID,uint lane:SV_GroupIndex) {
     if(lane<64u){GBinCount[lane]=0u;GBinRepresentative[lane]=0u;GInkMaximumFrequency[lane]=0u;GInkModalLex[lane]=0xffffffffu;}
     GBlackHistogram[lane]=0u;
     if(lane<192u)GInkRepeatedShells[lane]=0u;
-    [unroll]for(uint blackIndex=lane;blackIndex<512u;blackIndex+=256u){GBlackPixel[blackIndex]=0u;GBlackRGB[blackIndex]=0u;GInkSamples[blackIndex]=0u;}
+    [unroll]for(uint blackIndex=lane;blackIndex<512u;blackIndex+=256u){GBlackPixel[blackIndex]=0u;GBlackRGB[blackIndex]=0u;GInkSamples[blackIndex]=0u;GInkFrequency[blackIndex]=0u;}
     if(lane<outputWords && lane<INNER_WORDS)PaletteWrite[lane]=0u;
     if(lane<8u && argBytes==96u)ModeDispatchArgs.Store3(lane*12u,uint3(0u,0u,0u));
     AllMemoryBarrierWithGroupSync();
@@ -479,12 +591,20 @@ void palette_main(uint3 group:SV_GroupID,uint lane:SV_GroupIndex) {
         uint key=GInkSamples[lane+256u*samplePart];
         if((key&0x80000000u)!=0u) {
             uint matches=0u;
-            [loop]for(uint other=0u;other<512u;++other)if(GInkSamples[other]==key)++matches;
+            [loop]for(uint other=0u;other<512u;++other) {
+                uint observed=GInkSamples[other];
+                bool same=inner_request.z==1u?
+                    ((observed&0x80000000u)!=0u&&(observed&0x00ffffffu)==(key&0x00ffffffu)):
+                    observed==key;
+                if(same)++matches;
+            }
             inkCounts[samplePart]=matches;
+            if(inner_request.z==1u)GInkFrequency[lane+256u*samplePart]=matches;
             InterlockedMax(GInkMaximumFrequency[(key>>24u)&63u],matches);
         }
     }
     GroupMemoryBarrierWithGroupSync();
+    if(inner_request.z==1u){TrustedPaletteMain(lane,argBytes);return;}
     // Stable modal choice: maximize frequency, then minimize lexicographic RGB.
     // BlackPack stores Rlow/Bhigh, so swap R/B before the atomic minimum.
     [unroll]for(uint samplePart=0u;samplePart<2u;++samplePart) {
@@ -512,11 +632,11 @@ void palette_main(uint3 group:SV_GroupID,uint lane:SV_GroupIndex) {
     if(lane==0u && outputWords==INNER_WORDS && outputStride==4u) {
         uint status=PublishPaletteHeader();
         if(status==INNER_READY) {
-            LearnBlackModel();
             uint4 core=CurrentCores[inner_request.x],cover=CurrentCovers[inner_request.x];
             [unroll] for(uint rectLane=0u;rectLane<4u;++rectLane){PaletteWrite[8u+rectLane]=GSearch[rectLane];PaletteWrite[12u+rectLane]=cover[rectLane];PaletteWrite[16u+rectLane]=core[rectLane];}
             PaletteWrite[20]=CurrentSlotRibbon(inner_request.x)?1u:0u;
             PaletteWrite[5]=GAnchorCount;PaletteWrite[6]=GAnchorPeak;
+            LearnBlackModel();
             uint visitedLow=0u,visitedHigh=0u;
             [loop] for(uint attemptIndex=0u;attemptIndex<64u;++attemptIndex) {
                 uint best=64u,bestPeak=0u,bestCount=1u;
@@ -566,17 +686,29 @@ void palette_main(uint3 group:SV_GroupID,uint lane:SV_GroupIndex) {
 bool PaletteContextValid() {
     uint words,stride;PaletteRead.GetDimensions(words,stride);
     if(words!=INNER_WORDS || stride!=4u || GTyped==0u || inner_request.x>=CurrentCount)return false;
-    if(PaletteRead[0]!=INNER_MAGIC || PaletteRead[1]!=INNER_SCHEMA || PaletteRead[2]!=1u || PaletteRead[3]!=inner_request.x ||
+    bool trusted=inner_request.z==1u;
+    if(PaletteRead[0]!=(trusted?TRUSTED_INNER_MAGIC:INNER_MAGIC) || PaletteRead[1]!=(trusted?1u:INNER_SCHEMA) || PaletteRead[2]!=1u || PaletteRead[3]!=inner_request.x ||
        PaletteRead[4]>8u || PaletteRead[5]>512u || PaletteRead[6]>65535u || PaletteRead[7]!=CurrentCount ||
-       PaletteRead[20]!=(CurrentSlotRibbon(inner_request.x)?1u:0u) || PaletteRead[21]!=asuint(CurrentReferenceCenterTwice) || PaletteRead[22]!=INNER_READY || PaletteRead[23]!=0u)return false;
+       PaletteRead[20]!=(CurrentSlotRibbon(inner_request.x)?1u:0u) || PaletteRead[21]!=asuint(CurrentReferenceCenterTwice) || PaletteRead[22]!=INNER_READY || PaletteRead[23]!=inner_request.z)return false;
     uint4 core=CurrentCores[inner_request.x],cover=CurrentCovers[inner_request.x],search=CurrentOrdinarySupportSearch(inner_request.x);
     [unroll] for(uint contextLane=0u;contextLane<4u;++contextLane)if(PaletteRead[8u+contextLane]!=search[contextLane] || PaletteRead[12u+contextLane]!=cover[contextLane] || PaletteRead[16u+contextLane]!=core[contextLane])return false;
     [loop] for(uint checkConstant=0u;checkConstant<24u;++checkConstant)if(PaletteRead[24u+checkConstant]!=ReadConstant(checkConstant))return false;
-    if(!LoadBlackModel())return false;
+    if(!trusted&&!LoadBlackModel())return false;
     if(inner_request.y>=PaletteRead[4])return false;
     uint modeStart=INNER_MODE_OFFSET+inner_request.y*INNER_MODE_WORDS;
     GRepresentative=uint3(PaletteRead[modeStart],PaletteRead[modeStart+1u],PaletteRead[modeStart+2u]);
     uint peak=MaxChannel(GRepresentative);
+    if(trusted) {
+        uint packed=PaletteRead[modeStart+7u],control=packed>>24u;
+        if(any(GRepresentative>255u)||PaletteRead[modeStart+3u]!=peak||PaletteRead[modeStart+4u]<2u||PaletteRead[modeStart+4u]>512u||
+           PaletteRead[modeStart+5u]==0u||PaletteRead[modeStart+5u]>PaletteRead[modeStart+4u]||PaletteRead[modeStart+6u]>=512u||
+           (control&128u)==0u||(control&127u)<1u||(control&127u)>65u||
+           any(BlackUnpack(packed)!=GRepresentative))return false;
+        if(PaletteRead[48u]>256u||PaletteRead[49u]>PaletteRead[48u]||PaletteRead[50u]!=PaletteRead[4u]||
+           PaletteRead[48u]-PaletteRead[49u]!=PaletteRead[4u])return false;
+        [unroll]for(uint word=51u;word<64u;++word)if(PaletteRead[word]!=0u)return false;
+        GSearch=search;return true;
+    }
     if(peak==0u || any(GRepresentative>65535u) || PaletteRead[modeStart+3u]!=peak || PaletteRead[modeStart+4u]>=64u || PaletteRead[modeStart+5u]==0u || PaletteRead[modeStart+5u]>512u || PaletteRead[modeStart+6u]>=512u || ((PaletteRead[modeStart+7u]>>24u)&127u)<1u || ((PaletteRead[modeStart+7u]>>24u)&127u)>65u)return false;
     GSearch=search;return true;
 }
@@ -623,6 +755,12 @@ void emit_main(uint3 dispatch:SV_DispatchThreadID,uint3 group:SV_GroupID,uint la
         cover=SourcePixelInRect(p,CurrentCovers[inner_request.x])?1u:0u;
         float3 color;bool valid=LoadDisplayColor(p,color);
         if(inSearch && valid) {
+            if(inner_request.z==1u) {
+                uint radius=(PaletteRead[INNER_MODE_OFFSET+inner_request.y*INNER_MODE_WORDS+7u]>>24u)&127u;
+                uint3 delta=(uint3)abs(int3(BlackRGB8(color))-int3(GRepresentative));
+                eligible=max(delta.r,max(delta.g,delta.b))<=radius?1u:0u;
+                if(eligible!=0u&&TrustedInnerSeed(p,color))seed=3u;
+            } else {
             uint3 q=PaletteQuantize(color),hue=PaletteHue(q),modeHue=PaletteHue(GRepresentative);
             uint hueDistance=MaxChannel((uint3)abs(int3(hue)-int3(modeHue))),peak=MaxChannel(GRepresentative);
             eligible=2u*MaxChannel(q)>=peak && 20u*hueDistance<=3u*4095u?1u:0u;
@@ -639,6 +777,7 @@ void emit_main(uint3 dispatch:SV_DispatchThreadID,uint3 group:SV_GroupID,uint la
                         seed=probability>V2_OCR_ACTIVE_PROBABILITY_THRESHOLD?3u:1u;
                 }
             }
+            }
         }
     }
     EligibleWrite[dispatch.xy]=eligible;SeedsWrite[dispatch.xy]=seed;DomainWrite[dispatch.xy]=domain;CoverWrite[dispatch.xy]=cover;
@@ -646,6 +785,11 @@ void emit_main(uint3 dispatch:SV_DispatchThreadID,uint3 group:SV_GroupID,uint la
 
 [numthreads(16,16,1)]
 void clear_main(uint3 dispatch:SV_DispatchThreadID,uint3 group:SV_GroupID) {
+    if(inner_request.z==1u) {
+        uint w,h;AccumulatedFinal.GetDimensions(w,h);
+        if(all(dispatch.xy<uint2(w,h)))AccumulatedFinal[dispatch.xy]=0u;
+        return;
+    }
     uint2 bodySize,finalSize;AccumulatedBody.GetDimensions(bodySize.x,bodySize.y);AccumulatedFinal.GetDimensions(finalSize.x,finalSize.y);
     bool canonical=all(contour_source.xw>0u)&&all(contour_source.xw<=V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT)&&all(bodySize==contour_source.xw)&&all(finalSize==bodySize);
     if(canonical){if(all(dispatch.xy<bodySize)){AccumulatedBody[dispatch.xy]=0u;AccumulatedFinal[dispatch.xy]=0u;}return;}
@@ -659,10 +803,25 @@ void accumulate_main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex)
         GTyped=TypedCurrentValid(CurrentCount,CurrentReferenceCenterTwice)?1u:0u;LoadCurrentGeometry();GModeReady=PaletteContextValid()?1u:0u;
         uint2 b,f,ab,af;ModeBody.GetDimensions(b.x,b.y);ModeFinal.GetDimensions(f.x,f.y);AccumulatedBody.GetDimensions(ab.x,ab.y);AccumulatedFinal.GetDimensions(af.x,af.y);
         uint parentWords,parentStride;ComponentParent.GetDimensions(parentWords,parentStride);
-        if(any(b!=contour_source.xw)||any(f!=b)||any(ab!=b)||any(af!=b)||parentWords!=contour_source.x*contour_source.w+1u||parentStride!=4u)GModeReady=0u;
+        if(any(b!=contour_source.xw)||any(f!=b)||(inner_request.z==0u&&any(ab!=b))||any(af!=b)||parentWords!=contour_source.x*contour_source.w+1u||parentStride!=4u)GModeReady=0u;
         else if(ComponentParent[0]!=0u)GModeReady=0u;
     }
     GroupMemoryBarrierWithGroupSync();
+    if(inner_request.z==1u) {
+        if(lane==0u)GTrustedAccepted=0u;
+        GroupMemoryBarrierWithGroupSync();
+        uint bytes;ModeDispatchArgs.GetDimensions(bytes);
+        if(GModeReady!=0u&&bytes==16u&&all(dispatch.xy<contour_source.xw)) {
+            uint body=ModeBody.Load(int3(dispatch.xy,0));
+            if(body==1u) {
+                uint ignored;InterlockedOr(AccumulatedFinal[dispatch.xy],1u<<inner_request.x,ignored);
+                InterlockedOr(GTrustedAccepted,1u,ignored);
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if(lane==0u&&GTrustedAccepted!=0u){uint ignored;ModeDispatchArgs.InterlockedOr(8u,1u,ignored);}
+        return;
+    }
     if(GModeReady==0u || any(dispatch.xy>=contour_source.xw))return;
     uint body=ModeBody.Load(int3(dispatch.xy,0)),final=ModeFinal.Load(int3(dispatch.xy,0));
     if(body<=1u && final<=1u) {AccumulatedBody[dispatch.xy]|=body;AccumulatedFinal[dispatch.xy]|=final;}

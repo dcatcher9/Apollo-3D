@@ -120,12 +120,12 @@ fallbacks. This file-fed full-source check establishes renderer wiring and prove
 not establish live capture eligibility, window-region behavior, visual quality or live timing.
 Ordinary metric PNGs, schemas and scores remain separate.
 
-Qualification schema7 records `authenticated-ordinary-base-renderer-v1` for the ordinary metric
+Qualification schema8 records `authenticated-ordinary-base-renderer-v1` for the ordinary metric
 artifacts, which now use only authenticated Base without an analytic subtitle selector. Selected
-shared output remains separate. Schema7 retains all twelve composition closures and requires
-foreground-edge shader availability at the root and every frame. Availability is not evidence of
-GPU execution. The shared renderer has no retired completed-pixel-shader field. Schemas1–6 remain
-read-only formats and never qualify the current rendering policy. Their original ordinary metric
+shared output remains separate. Schema8 retains all thirteen composition closures and requires
+foreground-edge and trusted-inner shader availability at the root and every frame. Availability is
+not evidence of GPU execution. The shared renderer has no retired completed-pixel-shader field. Schemas1–7 remain
+read-only formats and never qualify the current rendering policy. Each original ordinary metric
 label is preserved; source, coordinate-contract and executable checks still apply, so older
 captures require their authenticated frozen contract/source reader. No captured evidence is retagged.
 
@@ -323,7 +323,7 @@ unrecognized historical options fail argument parsing.
 The current dump reader accepts the authenticated OCR8 record, 40-word UIP4 source/controller state and
 complete joined native contour tuple as live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
-The current coordinate contract is schema 128/OCR 38/contour recipe 27. UIP4 remains 40 words and
+The current coordinate contract is schema 129/OCR 38/contour recipe 27. UIP4 remains 40 words and
 OCR8 remains 256 words. The UI plane keeps its immediate current entry floor, uses a 100 ms
 source-time exponential response toward the current release candidate, and clears invisible
 controller history on a genuinely newer valid-empty observation. Duplicate clocks and whole-tuple

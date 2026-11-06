@@ -173,6 +173,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             127: "dc007fd6ab26b4a5acd0809d7a2e9e9a65b56b4efd94f287bbb7297a5f7d3e85",
             # Ordinary rendering now has only authenticated Base; the analytic selector is retired.
             128: "6eb37c930253ff3f5d114cb3ab5e41af392772c212ccf8e4eaa4130bb095022a",
+            # Independent repeated-colour current fill, preserving the original outline path.
+            129: "084289418305d5e20c32abe893fc1a8f92446762f4fac8e91ccd54ec81c12494",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -180,14 +182,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x4D680D18)
+        self.assertEqual(generator.contract_tag(contract), 0x1500CC5E)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "4d680d180a4c9525388b7afa353c440c9cb29cbc54d4cdfac10ff31b8fdf51ec",
+            "1500cc5e30290c9dfa1075459f23a992438ab8096d5809e0e305e890d8226db7",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "5e696c8a07548c511d84784465f48852584a6e30ab1c61e1e6f4da1baa7c6f7d",
+            "f2c835b0e42ed2d9a550c0191b77102a07f2ff96fc9021564df72851a70fb548",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -472,7 +474,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 128u',
+                'contract_schema = 129u',
                 'final_parallax_contract_schema = 4u',
                 'final_parallax_authority = '
                 '"authenticated-subtitle-conditioned-r32f-diagnostic-only"',
@@ -572,7 +574,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 128u',
+                '#define V2_CONTRACT_SCHEMA 129u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS 28u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG 1u',
                 '#define V2_SUBTITLE_CONTOUR_RECIPE 27u',

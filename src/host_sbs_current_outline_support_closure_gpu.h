@@ -46,6 +46,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     holes::programs_t hole_shaders {};
     holes::coverage_programs_t coverage_shaders {};
     foreground_edge::programs_t foreground_edge_shaders {};
+    std::array<ID3D11ComputeShader *, 1u> trusted_inner_publish_shaders {};
     // Early current Inside: prepare, combined init, publish; final OR remains late.
     std::array<ID3D11ComputeShader *, 4u> inside_shaders {};
     // PRIVATE BBSC1 optional all-or-none begin/validate/commit.
@@ -186,6 +187,8 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
 
     [[nodiscard]] ID3D11ShaderResourceView *mask_hole_proof() const noexcept { return holes_.proof(); }
     [[nodiscard]] ID3D11ShaderResourceView *foreground_edge_original_mask() const noexcept { return foreground_edge_enabled_ ? foreground_edge_.original_mask() : nullptr; }
+    [[nodiscard]] ID3D11ShaderResourceView *trusted_inner_mask() const noexcept { return trusted_inner_enabled_ ? enclosure_views_.trusted_inner_bits.Get() : nullptr; }
+    [[nodiscard]] bool trusted_inner_enabled() const noexcept { return trusted_inner_enabled_; }
     [[nodiscard]] ID3D11ShaderResourceView *mask_hole_parents() const noexcept { return holes_.parents(); }
     [[nodiscard]] ID3D11ShaderResourceView *mask_hole_flags() const noexcept { return holes_.flags(); }
     [[nodiscard]] bool mask_holes_enabled() const noexcept { return holes_enabled_; }
@@ -330,6 +333,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       error.clear();
       last_enabled_ = false;
       foreground_edge_enabled_ = false;
+      trusted_inner_enabled_ = false;
       if (!program) {
         invalidate_weak_aa();
         stability_needs_reset_ = true;
@@ -353,6 +357,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         if (coverage_enabled_ && !holes_.ensure_coverage(optional_error, program->coverage_diagnostics)) coverage_enabled_ = false;
       } catch (const std::exception &) { coverage_enabled_ = false; }
       foreground_edge_enabled_ = foreground_edge_program_lease_.acquire(device_.Get(), program->foreground_edge_shaders);
+      trusted_inner_enabled_ = trusted_inner_program_lease_.acquire(device_.Get(), program->trusted_inner_publish_shaders);
       try {
         std::string optional_error;
         if (foreground_edge_enabled_ && !foreground_edge_.ensure(device_.Get(), width_, height_, colour_first_.resource.Get(), colour_first_.uav.Get(), optional_error)) foreground_edge_enabled_ = false;
@@ -377,11 +382,15 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       }
       // CBC19 performs the full CB/root/current/origin descriptor and predication preflight
       // before submitting its original cached helper. It is called exactly once per whole call.
-      if (!enclosure_.dispatch(context, colour, graph, constants96, rgb, probability, support, ocr, root, root_offset, error, &program->enclosure)) {
+      auto enclosure_program = program->enclosure;
+      enclosure_program.trusted_inner = trusted_inner_enabled_;
+      if (!enclosure_.dispatch(context, colour, graph, constants96, rgb, probability, support, ocr, root, root_offset, error, &enclosure_program)) {
         stability_needs_reset_ = true;
         invalidate_weak_aa();
         return false;
       }
+      enclosure_views_ = enclosure_.mutable_views();
+      trusted_inner_enabled_ = trusted_inner_enabled_ && enclosure_.trusted_inner_ready();
       if (program->stage_observer) program->stage_observer->mark(context, current_outline_stage_observer::stage_e::cbc_end);
       if (!recorded_) {
         const saved_cs_t saved {context};
@@ -460,7 +469,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         }
       }
       auto aliases_current = [&](ID3D11Resource *snapshot) {
-        for (auto *view : {rgb, probability, support, ocr, p.enclosure.current_sct, p.enclosure.current_uip, p.enclosure.producer.original_source, enclosure_views_.body.Get(), enclosure_views_.matte.Get(), enclosure_views_.receipt.Get(), enclosure_views_.all_body_bits.Get(), enclosure_views_.cover_bits.Get(), enclosure_views_.selected_bits.Get(), enclosure_views_.family_models.Get(), scratch_.eligible.Get(), scratch_.seeds.Get(), scratch_.domain_tag.Get(), scratch_.cover_clip.Get(), scratch_.parent.Get(), scratch_.root_flags.Get(), scratch_.mode_body.Get(), scratch_.mode_final.Get(), scratch_.body.Get(), scratch_.matte.Get(), scratch_.palette.Get(), scratch_.validation_receipt.Get(), matte_.srv.Get(), inner_.srv.Get(), meta_.srv.Get(), profile_data_.srv.Get(), colour_first_.srv.Get(), root_cache_.srv.Get(), inside_bits_.srv.Get(), inside_args_.srv.Get(), stability_image_.srv.Get(), stability_header_.srv.Get(), stability_aa_history_.srv.Get(), weak_aa_state_.srv.Get(), foreground_edge_.original_mask()}) {
+        for (auto *view : {rgb, probability, support, ocr, p.enclosure.current_sct, p.enclosure.current_uip, p.enclosure.producer.original_source, enclosure_views_.body.Get(), enclosure_views_.matte.Get(), enclosure_views_.receipt.Get(), enclosure_views_.all_body_bits.Get(), enclosure_views_.cover_bits.Get(), enclosure_views_.selected_bits.Get(), enclosure_views_.family_models.Get(), scratch_.eligible.Get(), scratch_.seeds.Get(), scratch_.domain_tag.Get(), scratch_.cover_clip.Get(), scratch_.parent.Get(), scratch_.root_flags.Get(), scratch_.mode_body.Get(), scratch_.mode_final.Get(), scratch_.body.Get(), scratch_.matte.Get(), scratch_.palette.Get(), scratch_.validation_receipt.Get(), matte_.srv.Get(), inner_.srv.Get(), meta_.srv.Get(), profile_data_.srv.Get(), colour_first_.srv.Get(), root_cache_.srv.Get(), inside_bits_.srv.Get(), inside_args_.srv.Get(), stability_image_.srv.Get(), stability_header_.srv.Get(), stability_aa_history_.srv.Get(), weak_aa_state_.srv.Get(), foreground_edge_.original_mask(), enclosure_views_.trusted_inner_bits.Get()}) {
           if (!view) continue;
           ComPtr<ID3D11Resource> resource;view->GetResource(&resource);
           if (resource.Get() == snapshot) return true;
@@ -684,6 +693,9 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       for (auto *shader : p.hole_shaders) add(shader);
       for (auto *shader : p.coverage_shaders) add(shader);
       for (auto *shader : p.foreground_edge_shaders) add(shader);
+      for (auto *shader : p.trusted_inner_publish_shaders) add(shader);
+      add(trusted_inner_enabled_ ? enclosure_views_.trusted_inner_bits.Get() : nullptr);
+      add(enclosure_views_.trusted_publication_arguments.Get());
       add(foreground_edge_enabled_ ? foreground_edge_.original_mask() : nullptr);
       foreground_edge_.signature_objects(add);
       add(holes_enabled_ ? holes_.proof() : nullptr);
@@ -974,6 +986,17 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         in.original_final = colour_first_.resource.Get();in.final_m = colour_first_.uav.Get();in.data = profile_data_.uav.Get();
         foreground_edge_.finish(c, p.foreground_edge_shaders, cb, shape_cb_.Get(), in, native_args_.Get());
       }
+      if (trusted_inner_enabled_) {
+        foreground_edge::inputs_t in;
+        in.rgb = rgb;in.ocr = ocr;in.selected = enclosure_views_.selected_bits.Get();
+        in.cover = enclosure_views_.cover_bits.Get();in.cbc = enclosure_views_.receipt.Get();
+        in.models = enclosure_views_.family_models.Get();in.sct = p.enclosure.current_sct;
+        in.raw_m = matte_.srv.Get();in.code1 = enclosure_views_.matte.Get();
+        in.trusted_inner = enclosure_views_.trusted_inner_bits.Get();
+        in.final_m = colour_first_.uav.Get();in.data = profile_data_.uav.Get();
+        foreground_edge::resources_t::finish_trusted(c, p.trusted_inner_publish_shaders[0u], cb, shape_cb_.Get(), in,
+                                                   enclosure_views_.trusted_publication_arguments.Get());
+      }
       unbind(c);
     }
 
@@ -992,6 +1015,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     holes::resources_t holes_;
     foreground_edge::resources_t foreground_edge_;
     bool foreground_edge_enabled_ = false;
+    bool trusted_inner_enabled_ = false;
     bool holes_enabled_ = false;
     bool coverage_enabled_ = false;
     buffer_t weak_aa_state_;
@@ -1004,6 +1028,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     host_sbs_compute_program_lease::group_t<4u> inside_program_lease_;
     host_sbs_compute_program_lease::group_t<9u> hole_program_lease_;
     host_sbs_compute_program_lease::group_t<1u> foreground_edge_program_lease_;
+    host_sbs_compute_program_lease::group_t<1u> trusted_inner_program_lease_;
     ComPtr<ID3D11DeviceContext> deferred_;
     ComPtr<ID3D11CommandList> commands_;
     signature_t signature_;

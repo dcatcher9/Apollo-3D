@@ -429,6 +429,12 @@
       "source_file": "current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
       "source_entrypoint": "foreground_edge_main",
       "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_current_trusted_inner",
+      "source_file": "current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
+      "source_entrypoint": "trusted_inner_publish_main",
+      "source_target": "cs_5_0"
     }
   ],
   "groups": [
@@ -474,7 +480,7 @@
         "host_sbs_subtitle_gaussian_vertical_limit",
         "host_sbs_subtitle_gaussian_horizontal_limit"
       ],
-      "source_closure_sha256": "5e696c8a07548c511d84784465f48852584a6e30ab1c61e1e6f4da1baa7c6f7d"
+      "source_closure_sha256": "f2c835b0e42ed2d9a550c0191b77102a07f2ff96fc9021564df72851a70fb548"
     },
     {
       "name": "parallax_v2_coordinate_diagnostic",
@@ -482,7 +488,7 @@
       "specs": [
         "depth_coordinate_v2_coordinate_diagnostic"
       ],
-      "source_closure_sha256": "d9093985c554b6bdc061feef167fbe021bc7e7efd2a7e5e465392f841419921e"
+      "source_closure_sha256": "4af4c677307e7ab977a52ecd4b4ca54ab55c62a322eca20890b51a38f7fd6314"
     },
     {
       "name": "near_identical_detector",
@@ -493,7 +499,7 @@
         "host_sbs_near_identical_finalize",
         "host_sbs_near_identical_reuse_depth"
       ],
-      "source_closure_sha256": "62525b3d742f13cf38d32ed0483479102a0d7882143fe744fce791589cf7dbc7"
+      "source_closure_sha256": "6a38ce04b5bb118467bbb3cc93c9b0d54c7982484b1101634f1c34797445a125"
     },
     {
       "name": "gpu_trace",
@@ -501,7 +507,7 @@
       "specs": [
         "host_sbs_gpu_trace"
       ],
-      "source_closure_sha256": "98b4cd91dc15853b1c5426cba1922b287d8ba63b11bdd2648e2568f2dd95491a"
+      "source_closure_sha256": "ac33c68d199105b142d2ebf6a4fc6437e6ebb10b1eeaf449d85bea5dbf561294"
     },
     {
       "name": "parallax_v2_live_renderer",
@@ -510,7 +516,7 @@
         "parallax_v2_live_renderer",
         "sbs_reprojection_vertex"
       ],
-      "source_closure_sha256": "74b7d6d982be2041b48b09890578d1433f749047d2d6d5239a0b3e3029cb1ca9"
+      "source_closure_sha256": "aaeab938258701c2748a71888ad8a23e21a3fdd135a1a1faa022e8e48e7d4bf3"
     },
     {
       "name": "parallax_v2_p010_y",
@@ -518,7 +524,7 @@
       "specs": [
         "parallax_v2_p010_y_renderer"
       ],
-      "source_closure_sha256": "1aaccba3f74a09e059da73252bba143b763f237833267b54e3939d68bc2441a8"
+      "source_closure_sha256": "a047449579693a6cbbee7c56984166bcb3607c91713c53415fc5838ef6808efd"
     },
     {
       "name": "sbs_flat_fallback",
@@ -536,7 +542,7 @@
         "parallax_v2_live_mapping",
         "parallax_v2_live_mask"
       ],
-      "source_closure_sha256": "48bd9cc18ca5a551121c347493681ef647c3c6629decf944d6f5680d7673980d"
+      "source_closure_sha256": "a3ace036cb485ee61de78a57c4baa1c026adc6cd74050f653a89abb58eb73a3c"
     },
     {
       "name": "subtitle_cohort_prototype_research",
@@ -546,7 +552,7 @@
         "host_sbs_subtitle_cohort_members",
         "host_sbs_subtitle_cohort_filter"
       ],
-      "source_closure_sha256": "00de07d754cbb2f771d6cea756b378fcbaae043f3422fdc9877e49eed8775c2c"
+      "source_closure_sha256": "14d727e2633c941f5dda7fb899c53f526334f681ef2ec0a6d4ae31e96bfc3a46"
     },
     {
       "name": "subtitle_cohort_research",
@@ -557,7 +563,7 @@
         "host_sbs_subtitle_cohort_filter",
         "host_sbs_subtitle_cohort_snapshot"
       ],
-      "source_closure_sha256": "87525f08edf471d3ad0ecb555f6370043ebf7af08cf955d1bde47724752554c0"
+      "source_closure_sha256": "20f83e0b0fddc179d7d1769e3cf393aa479ecd92cfba2dd4a00a3e88ed08aa80"
     },
     {
       "name": "subtitle_inner_colour_research",
@@ -569,7 +575,7 @@
         "host_sbs_subtitle_inner_colour_research_accumulate",
         "host_sbs_subtitle_inner_colour_research_validate"
       ],
-      "source_closure_sha256": "1d2ebce7a347866db6c66e02dab96d1df4f53dbf5f7576a73433682b5979587c"
+      "source_closure_sha256": "f741ddfcfb5b489e7a10828d8857c80f7f3969fc9417b9e843fc465e2c0adf80"
     },
     {
       "name": "subtitle_inner_components_research",
@@ -590,7 +596,7 @@
       "specs": [
         "host_sbs_subtitle_matte_guard"
       ],
-      "source_closure_sha256": "d8aec7ce8e6a73dfe44f4254c87c7c98b7501d67d99acf28496e8ea1874b722d"
+      "source_closure_sha256": "8658c5dc385c3f87613bebd91951a5e0460a1dd2818f505dbdf34dff309805a3"
     },
     {
       "name": "parallax_v2_queued_renderer",
@@ -598,7 +604,7 @@
       "specs": [
         "parallax_v2_queued_renderer"
       ],
-      "source_closure_sha256": "83678aa1cef29e33c9aa11e54895ca30e14115393ac2024392316a7353acdc84"
+      "source_closure_sha256": "ae3047c6d0a0eef72cb86d157d8932f3eec583bcc47a40133d477abda68ae840"
     },
     {
       "name": "current_mask_holes",
@@ -632,7 +638,15 @@
       "specs": [
         "host_sbs_current_foreground_edge"
       ],
-      "source_closure_sha256": "36e2de5b0337270fee63b6e2afb2c3c49f144dd150bdf23ba61460019ab34dcd"
+      "source_closure_sha256": "968b3fce0bedb875df9f09540a04256e877ec2ae7cecbdbaf0a1ccd54065b315"
+    },
+    {
+      "name": "current_trusted_inner",
+      "description": "Optional current-source repeated-colour inner-fill recovery, independently accumulated and published after existing outline and foreground-edge completion. Failure preserves the existing mask.",
+      "specs": [
+        "host_sbs_current_trusted_inner"
+      ],
+      "source_closure_sha256": "2a6749300ff4907ae2b9b806854d285c1238b93f32f31e62ba25260c15e4f06e"
     }
   ]
 }

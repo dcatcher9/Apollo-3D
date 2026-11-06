@@ -59,6 +59,7 @@ EXPECTED_GROUP_NAMES = (
     "current_mask_holes",
     "current_stroke_coverage",
     "current_foreground_edge",
+    "current_trusted_inner",
 )
 ANY_INCLUDE = re.compile(rb"^\s*#\s*include\b")
 QUOTED_INCLUDE = re.compile(rb'^\s*#\s*include\s*"([^"]+)"')

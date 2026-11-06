@@ -156,6 +156,8 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
                             hole_program_ready=True, coverage_program_ready=True)
         if schema >= 6:
             document["foreground_edge_program_ready"] = True
+        if schema >= 8:
+            document["trusted_inner_program_ready"] = True
         for frame in document["frames"]:
             selected = frame["selected_receipt"]
             width, height, top, band = selected[4:8]
@@ -217,6 +219,8 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
                 }
             if schema >= 6:
                 frame["foreground_edge_program_ready"] = True
+            if schema >= 8:
+                frame["trusted_inner_program_ready"] = True
         return document
 
     def test_schema6_requires_current_foreground_edge_source_and_availability(self):
@@ -231,17 +235,17 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
         document = self.document_for_schema(7)
         result = self.validate(document)
         self.assertEqual(result["renderer_schema"], 7)
-        self.assertTrue(result["renderer_policy_current"])
+        self.assertFalse(result["renderer_policy_current"])
         self.assertEqual(result["producer_stage_current_frames"], 2)
         self.assertEqual(result["shared_warp_frames"], 2)
         self.assertFalse(result["ordinary_metrics_qualify_selected_composite"])
         self.assertEqual(document["ordinary_metric_artifacts"], "authenticated-ordinary-base-renderer-v1")
 
     def test_ordinary_metric_semantics_cannot_cross_qualification_versions(self):
-        for schema in range(1, 8):
+        for schema in range(1, 9):
             with self.subTest(schema=schema):
                 document = self.document_for_schema(schema)
-                document["ordinary_metric_artifacts"] = ("unchanged-legacy-native-matte-renderer" if schema == 7
+                document["ordinary_metric_artifacts"] = ("unchanged-legacy-native-matte-renderer" if schema >= 7
                                                          else "authenticated-ordinary-base-renderer-v1")
                 with self.assertRaisesRegex(ValueError, "scope/version"):
                     self.validate(document)
@@ -266,6 +270,45 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
             change(changed["composition_source_closures"])
             with self.assertRaisesRegex(ValueError, "composition source closures"):
                 self.validate(changed)
+
+    def test_schema8_qualifies_trusted_inner_availability(self):
+        document = self.document_for_schema(8)
+        result = self.validate(document)
+        self.assertEqual(result["renderer_schema"], 8)
+        self.assertTrue(result["renderer_policy_current"])
+        self.assertEqual(result["producer_stage_current_frames"], 2)
+        self.assertIn("trusted_inner", document["composition_source_closures"])
+        self.assertFalse(result["ordinary_metrics_qualify_selected_composite"])
+
+    def test_schema8_requires_trusted_inner_source_and_boolean_readiness(self):
+        document = self.document_for_schema(8)
+        for index in (None, 0, 1):
+            for value in (False, 0, 1, None, "missing"):
+                with self.subTest(frame=index, value=value):
+                    changed = copy.deepcopy(document)
+                    owner = changed if index is None else changed["frames"][index]
+                    if value == "missing":
+                        owner.pop("trusted_inner_program_ready")
+                    else:
+                        owner["trusted_inner_program_ready"] = value
+                    with self.assertRaisesRegex(ValueError, "unknown or missing|trusted-inner"):
+                        self.validate(changed)
+        for change in (lambda roles: roles.pop("trusted_inner"),
+                       lambda roles: roles.update(trusted_inner="0" * 64)):
+            changed = copy.deepcopy(document)
+            change(changed["composition_source_closures"])
+            with self.assertRaisesRegex(ValueError, "composition source closures"):
+                self.validate(changed)
+
+    def test_historical_schemas_do_not_accept_trusted_inner_availability(self):
+        for schema in range(1, 8):
+            with self.subTest(schema=schema):
+                document = self.document_for_schema(schema)
+                self.assertFalse(self.validate(document)["renderer_policy_current"])
+                self.assertNotIn("trusted_inner", document.get("composition_source_closures", {}))
+                document["trusted_inner_program_ready"] = True
+                with self.assertRaisesRegex(ValueError, "unknown or missing"):
+                    self.validate(document)
 
     def test_schema6_rejects_missing_false_or_nonboolean_readiness_at_root_and_each_frame(self):
         document = self.document_for_schema(6)

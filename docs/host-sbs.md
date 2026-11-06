@@ -70,8 +70,8 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 128/tag `0x4D680D18`, canonical SHA-256
-`6eb37c930253ff3f5d114cb3ab5e41af392772c212ccf8e4eaa4130bb095022a`. It binds the
+schema 129/tag `0x1500CC5E`, canonical SHA-256
+`084289418305d5e20c32abe893fc1a8f92446762f4fac8e91ccd54ec81c12494`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -82,23 +82,24 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 29 | `5e696c8a07548c511d84784465f48852584a6e30ab1c61e1e6f4da1baa7c6f7d` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `d9093985c554b6bdc061feef167fbe021bc7e7efd2a7e5e465392f841419921e` |
-| `near_identical_detector` | 4 | `62525b3d742f13cf38d32ed0483479102a0d7882143fe744fce791589cf7dbc7` |
-| `gpu_trace` | 1 | `98b4cd91dc15853b1c5426cba1922b287d8ba63b11bdd2648e2568f2dd95491a` |
-| `parallax_v2_live_renderer` | 2 | `74b7d6d982be2041b48b09890578d1433f749047d2d6d5239a0b3e3029cb1ca9` |
-| `parallax_v2_p010_y` | 1 | `1aaccba3f74a09e059da73252bba143b763f237833267b54e3939d68bc2441a8` |
+| `parallax_v2_producer` | 29 | `f2c835b0e42ed2d9a550c0191b77102a07f2ff96fc9021564df72851a70fb548` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `4af4c677307e7ab977a52ecd4b4ca54ab55c62a322eca20890b51a38f7fd6314` |
+| `near_identical_detector` | 4 | `6a38ce04b5bb118467bbb3cc93c9b0d54c7982484b1101634f1c34797445a125` |
+| `gpu_trace` | 1 | `ac33c68d199105b142d2ebf6a4fc6437e6ebb10b1eeaf449d85bea5dbf561294` |
+| `parallax_v2_live_renderer` | 2 | `aaeab938258701c2748a71888ad8a23e21a3fdd135a1a1faa022e8e48e7d4bf3` |
+| `parallax_v2_p010_y` | 1 | `a047449579693a6cbbee7c56984166bcb3607c91713c53415fc5838ef6808efd` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `48bd9cc18ca5a551121c347493681ef647c3c6629decf944d6f5680d7673980d` |
-| `subtitle_cohort_prototype_research` | 3 | `00de07d754cbb2f771d6cea756b378fcbaae043f3422fdc9877e49eed8775c2c` |
-| `subtitle_cohort_research` | 4 | `87525f08edf471d3ad0ecb555f6370043ebf7af08cf955d1bde47724752554c0` |
-| `subtitle_inner_colour_research` | 5 | `1d2ebce7a347866db6c66e02dab96d1df4f53dbf5f7576a73433682b5979587c` |
+| `parallax_v2_live_diagnostic` | 2 | `a3ace036cb485ee61de78a57c4baa1c026adc6cd74050f653a89abb58eb73a3c` |
+| `subtitle_cohort_prototype_research` | 3 | `14d727e2633c941f5dda7fb899c53f526334f681ef2ec0a6d4ae31e96bfc3a46` |
+| `subtitle_cohort_research` | 4 | `20f83e0b0fddc179d7d1769e3cf393aa479ecd92cfba2dd4a00a3e88ed08aa80` |
+| `subtitle_inner_colour_research` | 5 | `f741ddfcfb5b489e7a10828d8857c80f7f3969fc9417b9e843fc465e2c0adf80` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
-| `subtitle_matte_guard_research` | 1 | `d8aec7ce8e6a73dfe44f4254c87c7c98b7501d67d99acf28496e8ea1874b722d` |
-| `parallax_v2_queued_renderer` | 1 | `83678aa1cef29e33c9aa11e54895ca30e14115393ac2024392316a7353acdc84` |
+| `subtitle_matte_guard_research` | 1 | `8658c5dc385c3f87613bebd91951a5e0460a1dd2818f505dbdf34dff309805a3` |
+| `parallax_v2_queued_renderer` | 1 | `ae3047c6d0a0eef72cb86d157d8932f3eec583bcc47a40133d477abda68ae840` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
-| `current_foreground_edge` | 1 | `36e2de5b0337270fee63b6e2afb2c3c49f144dd150bdf23ba61460019ab34dcd` |
+| `current_foreground_edge` | 1 | `968b3fce0bedb875df9f09540a04256e877ec2ae7cecbdbaf0a1ccd54065b315` |
+| `current_trusted_inner` | 1 | `2a6749300ff4907ae2b9b806854d285c1238b93f32f31e62ba25260c15e4f06e` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -1460,6 +1461,33 @@ pixels without adding zero-alpha background or withdrawing original ink. This is
 glyph-alpha recovery: detached unseeded punctuation and broad glow remain limitations. The
 [combined refinement review](host-sbs-review-followups.md#p19-foreground-edges-and-integer-clearance-goals)
 records the mask, stereo and background comparison scope.
+
+##### Current repeated-colour inner-fill recovery
+
+An independent optional route recovers current fill that the original brightest-anchor palette or
+black-neighbour seed can omit. It samples the same current core on the unique native positions of
+the 64-by-8 grid. Each actual RGB8 prototype needs at least two unique samples and a current seed.
+Prototypes rank by repeated frequency, then lexicographic RGB and earliest grid position. Its RGB8
+maximum-channel radius is the first distance from zero through 64 without a repeated colour
+sample, or 65 when all those shells are present. Every native pixel on the exact clipped search
+perimeter must have valid current RGB, and none may match the prototype interval. Rejected families
+do not consume the eight accepted mode slots. This palette is separate from the original
+brightest-anchor palette and uses no coarse-bin, brightness or hue pruning. At most 256 repeated
+prototypes can be examined from the 512 unique sample positions.
+
+A trusted-route seed needs its own current core, literal current support one, finite current
+detector probability strictly above `0.2`, and the existing native contrast and three-core-height
+tangent test. It requires no black neighbour. Eligibility uses the learned RGB8 radius within the
+current unit's search, rather than the broad normalized-hue test. The existing four-connected
+component operator admits only seeded components that do not meet the search boundary. Only its
+body is accumulated; the operator's box collar supplies no authority on this route.
+
+The route accumulates independent unit bits and ORs them into the completed mask after Inside,
+C7/G1 and foreground-edge recovery. Only actual new binary pixels increment the existing F2
+unique-add counters. They do not feed original BODY, CBC, Raw, outline-width learning, AA donors
+or history. Missing programs, allocation failure or invalid current operands preserve the previous
+mask. This is a bounded current-colour hypothesis, not a semantic glyph-alpha guarantee. It
+preserves original source RGB and decoration and generates no new outlines.
 
 ##### Proposed shared-width original-outline detection (unimplemented)
 

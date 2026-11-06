@@ -14,6 +14,7 @@ StructuredBuffer<uint> CBCMeta : register(t4);
 // t5 is NULL: F2 is never simultaneously bound as SRV and UAV.
 Texture2D<uint> FamilyModels : register(t6);
 StructuredBuffer<uint> SCT : register(t7);
+Texture2D<uint> TrustedInnerBits : register(t8); // Independent current modal/seeded components, unit bits.
 Texture2D<uint> CurrentInsideBits : register(t9);
 Texture2D<uint> CurrentBody : register(t10);
 Texture2D<uint> CurrentFinalM : register(t11); // immutable post-completion copy
@@ -151,6 +152,49 @@ void FgExteriorRow(uint y,uint3 code,uint active,
     }
 }
 
+void PublishCurrentMaskAddition(uint2 p,uint raw,uint code1) {
+    uint before;InterlockedOr(MaskWrite[p],1u,before);
+    if(before==0u) {
+        uint ignored;
+        if(raw==0u) {
+            Data.InterlockedAdd(7u*4u,1u,ignored);Data.InterlockedAdd(70u*4u,1u,ignored);
+        } else Data.InterlockedAdd(73u*4u,0xffffffffu,ignored);
+        if(code1!=0u)Data.InterlockedAdd(76u*4u,0xffffffffu,ignored);
+    }
+}
+
+bool TrustedCurrentCover(uint2 p,uint unit) {
+    uint first=144u+8u*unit;
+    uint4 r=uint4(CurrentOCR[first],CurrentOCR[first+1u],CurrentOCR[first+2u],CurrentOCR[first+3u]);
+    if(any(r.xy>=r.zw)||any(r.xy<CContent.xy)||any(r.zw>CContent.zw))return false;
+    uint2 scaled=2u*CContent.xy*CSource.xy+
+        (2u*uint2(p.x,p.y+CSource.z)+1u)*(CContent.zw-CContent.xy);
+    return all(scaled>=2u*r.xy*CSource.xy)&&all(scaled<2u*r.zw*CSource.xy);
+}
+
+// Runs after every original completion stage. A trusted inner component neither supplies
+// physical-black adoption nor becomes an outline/AA/history donor for the original pipeline.
+[numthreads(16,16,1)]
+void trusted_inner_publish_main(uint3 d:SV_DispatchThreadID) {
+    if(d.z!=0u||any(d.xy>=Shape.xy))return;
+    uint w,h;TrustedInnerBits.GetDimensions(w,h);if(any(uint2(w,h)!=Shape.xy))return;
+    uint bits=TrustedInnerBits.Load(int3(d.xy,0));if(bits==0u)return;
+    if(!FrameReady()||R(3u)!=0u)return;
+    uint active=(1u<<CurrentOCR[4u])-1u;
+    if((bits&~active)!=0u)return;
+    [loop]for(uint unit=0u;unit<CurrentOCR[4u];++unit)if((bits&(1u<<unit))!=0u) {
+        uint u=UB(unit);
+        if(CBCMeta[u]!=1u||CBCMeta[u+1u]!=1u||!TrustedCurrentCover(d.xy,unit))return;
+    }
+    if(!FgSourceValid(CurrentRGB.Load(int3(d.xy,0))))return;
+    MaskWrite.GetDimensions(w,h);if(any(uint2(w,h)!=Shape.xy))return;
+    RawM.GetDimensions(w,h);if(any(uint2(w,h)!=Shape.xy))return;
+    Code1M.GetDimensions(w,h);if(any(uint2(w,h)!=Shape.xy))return;
+    uint raw=RawM.Load(int3(d.xy,0)),code1=Code1M.Load(int3(d.xy,0));
+    if(raw>1u||code1>1u)return;
+    PublishCurrentMaskAddition(d.xy,raw,code1);
+}
+
 
 [numthreads(16,16,1)]
 void foreground_edge_main(uint3 d:SV_DispatchThreadID) {
@@ -195,12 +239,5 @@ void foreground_edge_main(uint3 d:SV_DispatchThreadID) {
     if(malformed||!available||present)return;
     // Same unique-add accounting as current Inside/C7. Counts are not read by
     // FrameReady or the permission functions. No output M is ever read as a donor.
-    uint before;InterlockedOr(MaskWrite[d.xy],1u,before);
-    if(before==0u) {
-        uint ignored;
-        if(raw==0u) {
-            Data.InterlockedAdd(7u*4u,1u,ignored);Data.InterlockedAdd(70u*4u,1u,ignored);
-        } else Data.InterlockedAdd(73u*4u,0xffffffffu,ignored);
-        if(code1!=0u)Data.InterlockedAdd(76u*4u,0xffffffffu,ignored);
-    }
+    PublishCurrentMaskAddition(d.xy,raw,code1);
 }
