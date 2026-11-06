@@ -29,7 +29,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp_queued.hlsl", "SunshineApplyUICS", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view closure = "c5569833240e15fcd3932e53b3717fa060c01c94e67cbcc6e2b56545aab7da99";
+  inline constexpr std::string_view closure = "21c15ac603ca0a61b415b0a5889a57b1827b818dfafcedbfc5d6305c5989dd01";
   inline constexpr std::array<cache::shader_spec, 6u> diagnostic_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
@@ -38,7 +38,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view diagnostic_closure = "9bfe17b51561329ec76619781eda728fc28f298a0c762de740113002f3723f20";
+  inline constexpr std::string_view diagnostic_closure = "b42715f138eb69ab87a8af5c2314600f1bb274200a0ad31a3cce0a966a5c3916";
 
   struct program_t {
     ID3D11ComputeShader *initialize = nullptr, *pin = nullptr;

@@ -36,7 +36,7 @@ inline constexpr std::array<cache::shader_spec, 5u> colour_specs{{
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","accumulate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","validate_main","cs_5_0"},
 }};
-inline constexpr std::string_view colour_closure="2e913da4644a7e91a4d215e33ca7cf0255a3ccc1b5fae6cc51d28c876acb6592";
+inline constexpr std::string_view colour_closure="04e99a19ea54d1dd5d357760b726818a1665dba9f84d503a2260158376c9a027";
 inline constexpr std::array<cache::shader_spec, 6u> components_specs{{
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","init_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","union_main","cs_5_0"},
@@ -60,7 +60,7 @@ inline constexpr std::array<cache::shader_spec, 12u> enclosure_specs{{
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","select_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","publish_main","cs_5_0"},
 }};
-inline constexpr std::string_view enclosure_closure="f83f937c8b52519a54c5b6dfb7ca8d8da92ed43297e84528653d54928b8cee16";
+inline constexpr std::string_view enclosure_closure="7ccae5c357592a3fcb8714c1c46831832a731f4194aff65e8578e5681d7d2f13";
 // One canonical ROI owner; the historical enclosure-local file remains for its independently
 // pinned enclosure/ring fixtures. Production loads this group once.
 inline constexpr std::array<cache::shader_spec, 3u> roi_specs{{
@@ -114,11 +114,11 @@ inline constexpr std::string_view coverage_closure="185fbaed311da1c2f55ad6dfa8fb
 inline constexpr std::array<cache::shader_spec, 1u> foreground_edge_specs{{
   cache::shader_spec{"host_sbs_current_foreground_edge_cs.hlsl","foreground_edge_main","cs_5_0"},
 }};
-inline constexpr std::string_view foreground_edge_closure="e7b10d5c0b0dc3400da86aae24358933af7f0dc88b51b79a0ac37c3424269cc2";
+inline constexpr std::string_view foreground_edge_closure="70df7262ab4819474c8f436682eed0de1832b85898e88809d9045374e891af16";
 inline constexpr std::array<cache::shader_spec, 1u> trusted_inner_specs{{
   cache::shader_spec{"host_sbs_current_foreground_edge_cs.hlsl","trusted_inner_publish_main","cs_5_0"},
 }};
-inline constexpr std::string_view trusted_inner_closure="7f6ed4a703d276910850b6f958f0f49fcc5d0318621db93fe4b8ba5eafd22062";
+inline constexpr std::string_view trusted_inner_closure="63b229b7a1a99bd18f7c04795c5429349c411bb6bb15a606987c23330e3125d9";
 inline constexpr std::array<cache::shader_spec, 4u> inside_specs{{
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","prepare_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","emit_init_main","cs_5_0"},

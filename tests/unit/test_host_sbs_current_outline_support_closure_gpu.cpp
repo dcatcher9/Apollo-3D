@@ -4031,6 +4031,12 @@ namespace {
       ASSERT_FALSE(foreground_replay);
       ASSERT_FALSE(sdr);
     }
+    const auto *trusted_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_TRUSTED_INNER_DIAGNOSTICS");
+    const bool trusted_diagnostics = trusted_env && *trusted_env;
+    if (trusted_diagnostics) {
+      ASSERT_STREQ(trusted_env, "1");ASSERT_FALSE(sdr);ASSERT_FALSE(graph_diagnostics);
+      ASSERT_FALSE(inner_diagnostics);ASSERT_FALSE(foreground_replay);
+    }
     namespace fs = std::filesystem;
     namespace runtime = models::current_outline_runtime;
     namespace composition = models::source5_cbc5_f2_composition_gpu_v1;
@@ -4062,6 +4068,7 @@ namespace {
         effective_composition.outline.trusted_inner_publish_shaders.end(), [](auto *shader) { return shader == nullptr; }))
         << "Strict captured-baseline inner diagnostics require the original route; trusted-inner treatment is incompatible";
     }
+    if (trusted_diagnostics) ASSERT_TRUE(programs.trusted_inner_ready());
     if(foreground_replay){ASSERT_TRUE(programs.foreground_edge_ready());ASSERT_EQ(foreground_edge_closure_,runtime::foreground_edge_closure);}
     // Saved/native output diagnostics explicitly request the independent offer plane.
     effective_composition.outline.coverage_diagnostics = true;
@@ -4129,6 +4136,7 @@ namespace {
       {"parent_descriptor_scope", "Saved full shape/format/ROI/transfer; undumped descriptor flags are not claimed byteexact, and the GPU proof describes the replay allocation"},
       {"single_unit_graph_diagnostics_requested", graph_diagnostics},
       {"inner_source_diagnostics_requested", inner_diagnostics},
+      {"trusted_inner_diagnostics_requested", trusted_diagnostics},
       {"performance_claim", false}, {"cases", json::array()}};
     report["closures"]["hole"] = programs.hole_ready() ? std::string(runtime::hole_closure) : std::string();
     report["closures"]["coverage"] = programs.coverage_ready() ? std::string(runtime::coverage_closure) : std::string();
@@ -4271,6 +4279,10 @@ namespace {
         {"CBC_M.u32", read(bundle.enclosure.matte.Get())}, {"Raw_M.u32", read(bundle.ring.matte.Get())},
         {"F2_M.u32", read(bundle.outline.matte.Get())}, {"selected_M.u32", read(selected_views.matte.Get())},
         {"selected_receipt.u32", read(selected_views.receipt.Get())}, {"numeric_proof.u32", read(bundle.numeric_proof.Get())}};
+      if (bundle.enclosure.trusted_inner_bits) {
+        arrays.emplace("trusted_inner_bits.u32", read(bundle.enclosure.trusted_inner_bits.Get()));
+        arrays.emplace("trusted_publication_arguments.u32", read(bundle.enclosure.trusted_publication_arguments.Get()));
+      }
       const auto selected_receipt = words(arrays.at("selected_receipt.u32"));
       ASSERT_EQ(selected_receipt.size(), 64u);
       EXPECT_EQ(selected_receipt[0u], selector::tag);EXPECT_EQ(selected_receipt[1u], selector::schema);
@@ -4404,6 +4416,8 @@ namespace {
       }
       json inner_report = nullptr;
       #include "current_outline_inner_source_saved.inc"
+      json trusted_report = nullptr;
+      #include "current_outline_trusted_inner_saved.inc"
       const auto case_output = output / ("case_" + std::to_string(index));fs::create_directory(case_output);
       json outputs = json::object();
       for (const auto &[name, bytes] : arrays) outputs[name] = store(case_output / name, bytes);
@@ -4417,6 +4431,7 @@ namespace {
         {"history_restored", false}, {"model_rgb_origin", "exact joined display_snapshot; parent raw texels never sampled"}};
       if (graph_diagnostics) result["single_unit_graph_diagnostics"] = std::move(graph_report);
       if (inner_diagnostics) result["inner_source_diagnostics"] = std::move(inner_report);
+      if (trusted_diagnostics) result["trusted_inner_diagnostics"] = std::move(trusted_report);
       if(foreground_replay)result["foreground_edge_production_diagnostic"]=std::move(foreground_case);
       if(sdr){result["expected_production_parity"]=production_parity;result["trace_authorized"]=true;result["source5_reference_band_rect"]={0u,shape[2],shape[0],shape[1]};}
       if (entry.contains("provenance")) result["provenance"] = entry.at("provenance");

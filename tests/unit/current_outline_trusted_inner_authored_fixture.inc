@@ -2,7 +2,7 @@
 // participates in authoring, and neither alpha nor glyph membership is a GPU input.
 void expect_authored_trusted_inner(bool coloured, bool gray_wall, bool shadow,
                                   bool black_outline, bool caption, UINT frame, bool current_support = true,
-                                  bool empty_original = false) {
+                                  bool empty_original = false, float current_probability = 1.0f) {
   author(true, frame, 0u, false, true, false, 384u, 64u, 3u);
   const std::size_t count = std::size_t(W_) * H_;
   std::vector<pixel8> scene(count), ink(count, coloured ? pixel8{75u,165u,225u,255u} : pixel8{225u,225u,226u,255u});
@@ -64,7 +64,7 @@ void expect_authored_trusted_inner(bool coloured, bool gray_wall, bool shadow,
   }
   // Fixed broad evidence and broad current boxes, identical for caption/no-caption.
   // A false positive OCR search is intentional in the no-caption controls.
-  std::fill(probability_words_.begin(), probability_words_.end(), 1.0f);
+  std::fill(probability_words_.begin(), probability_words_.end(), current_probability);
   std::fill(support_words_.begin(), support_words_.end(), current_support ? 1u : 0u);
   upload_pixels_from_origin();
   auto old_program = program_;
@@ -120,8 +120,9 @@ void expect_authored_trusted_inner(bool coloured, bool gray_wall, bool shadow,
     }
   }
   const auto label = std::string(coloured ? "colour" : "white") + (empty_original ? "_flat_bright_empty_body" : gray_wall ? "_gray_bridge" : "_skin_counter") +
-    (black_outline ? "_black_outline" : shadow ? "_soft_shadow" : "_no_outline") + (caption ? "_caption" : "_no_caption") + (current_support ? "" : "_no_support");
-  nlohmann::json metrics {{"scene",label},{"independent_alpha",true},{"broad_P",1.0f},{"broad_support",current_support ? 1u : 0u},
+    (black_outline ? "_black_outline" : shadow ? "_soft_shadow" : "_no_outline") + (caption ? "_caption" : "_no_caption") + (current_support ? "" : "_no_support") +
+    (current_probability==1.0f ? std::string() : "_P"+std::to_string(current_probability));
+  nlohmann::json metrics {{"scene",label},{"independent_alpha",true},{"broad_P",current_probability},{"broad_support",current_support ? 1u : 0u},
     {"added",added},{"added_true",added_true},{"added_false",added_false},{"transparent_counter_added",counter_added},
     {"existing_foreground_stage_enabled",bool(foreground_edge_shaders_[0u])},
     {"glyph_opaque_fill_pixels",fills},{"old_glyph_opaque_fill_marked",old_fills},{"new_glyph_opaque_fill_marked",new_fills},
@@ -133,7 +134,7 @@ void expect_authored_trusted_inner(bool coloured, bool gray_wall, bool shadow,
     EXPECT_EQ(words(read(old_owner.baseline_views().body.Get())),std::vector<UINT>(count,0u));
     EXPECT_EQ(old_m,std::vector<UINT>(count,0u));
   }
-  if (caption && current_support) {
+  if (caption && current_probability>0.2f) {
     EXPECT_GE(100u*added_true,99u*added) << metrics.dump();
     for (UINT component = 0u; component < 3u; ++component) {
       ASSERT_GT(fills[component],0u);EXPECT_GE(100u*new_fills[component],95u*fills[component]) << metrics.dump();
@@ -154,9 +155,61 @@ void expect_authored_trusted_inner(bool coloured, bool gray_wall, bool shadow,
     emit("P.f32",probability_words_);emit("S.u32",support_words_);emit("OCR.u32",ocr_words_);emit("C96.u32",cb_words_);
     emit("SCT.u32",sct_words_);emit("UIP.u32",uip_words_);emit("root.u32",root_words_);
     emit("old_M.u32",old_m);emit("new_M.u32",new_m);emit("trusted_inner_bits.u32",trusted);
+    emit("old_CBC.u32",read(old_e.receipt.Get()));emit("new_CBC.u32",read(new_e.receipt.Get()));
+    emit("old_F2.u32",read(old_owner.mutable_views().calibration_data.Get()));
+    emit("new_F2.u32",read(new_owner.mutable_views().calibration_data.Get()));
+    emit("trusted_publication_arguments.u32",read(new_e.trusted_publication_arguments.Get()));
     metrics["artifacts"] = artifacts;metrics["native_band"] = {W_,H_};metrics["full_source"] = {W_,fullH_,top_};
     std::ofstream f(folder/"report.json");f << metrics.dump(2);f.close();require(bool(f));
   }
+}
+
+// Independently authored identical glyphs, translated by an exact native grid
+// period, create equal-frequency colour families. Neither alpha nor palette
+// metadata is fed back to the producer. A current-family tie must abstain.
+void expect_trusted_inner_equal_families() {
+  author(true,0x2944u,0u,false,true,false,384u,64u,3u);
+  rect(0u,0u,W_,H_,{248u,248u,248u,255u});
+  const std::array<pixel8,2u> inks{pixel8{225u,225u,226u,255u},pixel8{75u,165u,225u,255u}};
+  for(UINT component=0u;component<2u;++component) {
+    const UINT x=112u+96u*component;
+    rect(x,24u,x+32u,29u,inks[component]);rect(x,47u,x+32u,52u,inks[component]);
+    rect(x,29u,x+5u,47u,inks[component]);rect(x+27u,29u,x+32u,47u,inks[component]);
+  }
+  std::fill(probability_words_.begin(),probability_words_.end(),1.0f);
+  std::fill(support_words_.begin(),support_words_.end(),1u);
+  upload_pixels_from_origin();
+  // Verify the input's intended tie on the fixed canonical64x8 source grid.
+  // This measures authored RGB only, not a producer colour/component verdict.
+  std::array<UINT,2u> frequencies{};
+  const auto cw=cb_words_[10u]-cb_words_[8u],ch=cb_words_[11u]-cb_words_[9u];
+  for(UINT i=0u;i<512u;++i) {
+    const UINT x=(((ocr_words_[16u]-cb_words_[8u])*128u+(2u*(i%64u)+1u)*(ocr_words_[18u]-ocr_words_[16u]))*W_)/(128u*cw);
+    const UINT y=(((ocr_words_[17u]-cb_words_[9u])*16u+(2u*(i/64u)+1u)*(ocr_words_[19u]-ocr_words_[17u]))*fullH_)/(16u*ch);
+    const auto value=origin_pixels_[y*W_+x];
+    for(UINT component=0u;component<2u;++component)if(value==inks[component])++frequencies[component];
+  }
+  ASSERT_GE(frequencies[0u],2u);ASSERT_EQ(frequencies[0u],frequencies[1u]);
+  auto off=program_;off.trusted_inner_publish_shaders={};
+  off.foreground_edge_shaders[0u]=foreground_edge_shaders_[0u].Get();
+  auto on=off;on.trusted_inner_publish_shaders[0u]=trusted_inner_shaders_[0u].Get();
+  ring::resources_t old_owner,new_owner;
+  ASSERT_TRUE(old_owner.ensure(device_.Get(),W_,H_,error_)) << error_;
+  ASSERT_TRUE(new_owner.ensure(device_.Get(),W_,H_,error_)) << error_;
+  const auto submit=[&](ring::resources_t &owner,const auto &program) {
+    return owner.dispatch(context_.Get(),colour_ptrs(),graph_ptrs(),cb_.resource.Get(),rgb_.srv.Get(),
+      probability_.srv.Get(),support_.srv.Get(),ocr_.srv.Get(),root_.resource.Get(),240u,error_,&program);
+  };
+  ASSERT_TRUE(submit(old_owner,off)) << error_;ASSERT_TRUE(submit(new_owner,on)) << error_;
+  ASSERT_TRUE(new_owner.trusted_inner_enabled());
+  const std::vector<UINT> empty(W_*H_,0u);
+  EXPECT_EQ(words(read(old_owner.mutable_views().matte.Get())),empty);
+  EXPECT_EQ(words(read(new_owner.mutable_views().matte.Get())),empty);
+  EXPECT_EQ(words(read(new_owner.trusted_inner_mask())),empty);
+  EXPECT_EQ(read(old_owner.mutable_views().calibration_data.Get()),read(new_owner.mutable_views().calibration_data.Get()));
+  RecordProperty("trusted_inner_equal_family_scope",nlohmann::json{{"independent_source",true},
+    {"white_grid_frequency",frequencies[0u]},{"blue_grid_frequency",frequencies[1u]},
+    {"broad_P",1u},{"broad_S",1u},{"expected","Unique maximum absent: no TIR or final additions"}}.dump());
 }
 
 // Real producer inputs, one retained owner, and fresh-owner controls. No receipt,

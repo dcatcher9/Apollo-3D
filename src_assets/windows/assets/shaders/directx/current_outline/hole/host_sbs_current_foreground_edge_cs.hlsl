@@ -184,7 +184,7 @@ void trusted_inner_publish_main(uint3 d:SV_DispatchThreadID) {
     if((bits&~active)!=0u)return;
     [loop]for(uint unit=0u;unit<CurrentOCR[4u];++unit)if((bits&(1u<<unit))!=0u) {
         uint u=UB(unit);
-        if(CBCMeta[u]!=1u||CBCMeta[u+1u]!=1u||!TrustedCurrentCover(d.xy,unit))return;
+        if(CBCMeta[u]!=1u||!TrustedCurrentCover(d.xy,unit))return;
     }
     if(!FgSourceValid(CurrentRGB.Load(int3(d.xy,0))))return;
     MaskWrite.GetDimensions(w,h);if(any(uint2(w,h)!=Shape.xy))return;

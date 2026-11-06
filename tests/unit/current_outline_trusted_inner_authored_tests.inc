@@ -23,10 +23,21 @@ TEST_F(HostSbsCurrentOutlineSupportClosureGpuTest, TrustedInnerAuthoredSameScene
   expect_authored_trusted_inner(false,true,true,false,false,0x2931u);
 }
 
-TEST_F(HostSbsCurrentOutlineSupportClosureGpuTest, TrustedInnerAuthoredMissingCurrentSupportCannotAcquireProtection) {
+TEST_F(HostSbsCurrentOutlineSupportClosureGpuTest, TrustedInnerAuthoredOriginalSupportDoesNotGateCurrentFill) {
   if (!trusted_inner_shaders_[0u]) GTEST_SKIP() << "Explicit trusted-inner shader root/pin required";
   expect_authored_trusted_inner(false,false,true,false,true,0x2940u,false);
   expect_authored_trusted_inner(true,true,false,false,true,0x2941u,false);
+}
+
+TEST_F(HostSbsCurrentOutlineSupportClosureGpuTest, TrustedInnerAuthoredMissingCurrentProbabilityCannotAcquireProtection) {
+  if (!trusted_inner_shaders_[0u]) GTEST_SKIP() << "Explicit trusted-inner shader root/pin required";
+  expect_authored_trusted_inner(false,false,true,false,true,0x2942u,true,false,0.0f);
+  expect_authored_trusted_inner(true,true,false,false,true,0x2943u,true,false,0.0f);
+}
+
+TEST_F(HostSbsCurrentOutlineSupportClosureGpuTest, TrustedInnerAuthoredEqualDominantCurrentFamiliesAbstain) {
+  if (!trusted_inner_shaders_[0u]) GTEST_SKIP() << "Explicit trusted-inner shader root/pin required";
+  expect_trusted_inner_equal_families();
 }
 
 TEST_F(HostSbsCurrentOutlineSupportClosureGpuTest, TrustedInnerAuthoredCurrentLifecycleAndOptionalPublisherFallback) {

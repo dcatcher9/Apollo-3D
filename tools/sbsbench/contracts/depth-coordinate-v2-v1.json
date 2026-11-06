@@ -1,5 +1,5 @@
 {
-  "schema": 129,
+  "schema": 130,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -248,7 +248,7 @@
       "history_feature_valid_bit": 2,
       "history_feature_mask_bit": 1,
       "history_rgb_distance": 0.08,
-      "mask_evidence_policy": "original-current-core-palette-black-witness-outline-path-plus-independent-repeated-modal-current-supported-inner-fill-late-union-no-probability-only-bypass-v14",
+      "mask_evidence_policy": "original-current-core-palette-black-witness-outline-path-plus-independent-unique-dominant-repeated-current-fill-late-union-no-probability-only-bypass-v15",
       "history_confirmation_observations": 4,
       "history_feature_count_shift": 2,
       "history_anchor_policy": "same-pixel-qualified-fixed-anchor-first-even-with-current-core-probability-cue-otherwise-unflagged-min-rgb-distance-then-squared-spatial-distance-then-scan-order-v3",
@@ -299,10 +299,10 @@
       "ordinary_search_center_bias_detector_pixels": 8,
       "palette_representative_policy": "max-key-q16-max-channel-shift10-or-1023-minus-grid-index-reload-actual-valid-center-anchor-no-neighbor-endpoint-no-mean-color-v1",
       "palette_merge_policy": "greedy-dimmer-representative-q12-normalized-rgb-nearest-integer-max-channel-distance-three-twentieths-from-retained-brighter-mode-v1",
-      "trusted_inner_palette_policy": "independent-current-core-unique-64x8-grid-exact-rgb8-repeated-prototypes-at-least-two-samples-own-seed-required-frequency-descending-rgb-lexicographic-earliest-grid-ties-first-unrepeated-shell-zero-through64-or65-radius-complete-native-search-perimeter-valid-and-interval-absent-before-eight-accepted-cap-no-coarse-bin-brightness-or-hue-pruning-v1",
-      "trusted_inner_seed_policy": "own-current-core-literal-support-one-and-finite-probability-above-point-two-native-contrast-and-existing-three-core-height-tangent-no-black-neighbor-witness-v1",
+      "trusted_inner_palette_policy": "independent-current-core-unique-64x8-grid-exact-rgb8-repeated-prototypes-at-least-two-samples-current-seed-required-frequency-descending-rgb-lexicographic-first-unrepeated-shell-zero-through64-or65-radius-complete-native-search-perimeter-valid-and-interval-absent-unique-maximum-frequency-after-boundary-veto-ties-abstain-no-coarse-bin-brightness-or-hue-pruning-v2",
+      "trusted_inner_seed_policy": "own-current-core-finite-probability-above-point-two-native-contrast-and-existing-three-core-height-tangent-no-old-palette-support-or-black-neighbor-witness-v2",
       "trusted_inner_component_policy": "same-modal-rgb8-linf-radius-current-own-search-four-connected-seeded-boundary-free-component-body-only-no-box3-collar-v1",
-      "trusted_inner_publication_policy": "independent-unit-bits-late-or-after-inside-coverage-and-foreground-edge-unique-add-f2-counters-no-original-body-cbc-raw-style-history-feedback-optional-failure-preserves-existing-mask-v1",
+      "trusted_inner_publication_policy": "independent-unit-bits-late-or-after-inside-coverage-and-foreground-edge-unique-add-f2-counters-current-own-cover-without-whole-legacy-cover-observation-no-original-body-cbc-raw-style-history-feedback-optional-failure-preserves-existing-mask-v2",
       "ordinary_search_reference_policy": "current-canonical-scl1-clock-frame-generation-source-crop-field-content-bounded-signed-reference-only-zero48-source-center-fallback-invalid-nonzero-fail-closed-never-layout-votes-v1",
       "ordinary_search_inset_preserves_core": true,
       "distance_row_policy": "inclusive-exact-integer-rational-field-node-center-plus-minus-source-height-over-content-height-plus-completion-native-row-membership-v1",
@@ -556,7 +556,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "f2c835b0e42ed2d9a550c0191b77102a07f2ff96fc9021564df72851a70fb548"
+    "source_closure_sha256": "5b1fed0051487dd4aedebb84b2d6558e4cd3a281152ecb40a7205da54aae30c8"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
