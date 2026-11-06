@@ -227,6 +227,8 @@ namespace platf::foreground_window {
   /**
    * Map an available client rectangle only when it is wholly contained by the exact selected
    * output in raw virtual-screen coordinates. Spanning/partial windows are never clipped.
+   * `monitor_mismatch` is returned only after the capture target's handle, extent and identity
+   * orientation validate; it does not invalidate an independently mapped semantic video source.
    */
   [[nodiscard]] mapping_result_t map_to_capture(
     const snapshot_t &snapshot,

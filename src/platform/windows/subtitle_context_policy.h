@@ -71,28 +71,40 @@ namespace platf::subtitle_context_policy {
       return result;
     }
     result.foreground_usable = foreground && foreground_window::usable_for_content(
-      *foreground, content_timestamp, now, std::chrono::milliseconds {250});
-    // Reuse the capture owner's single mapping result. Partial client containment is the only
-    // relaxed prerequisite; orientation, extent, monitor identity and failed GetDesc stay closed.
+                                               *foreground,
+                                               content_timestamp,
+                                               now,
+                                               std::chrono::milliseconds {250}
+                                             );
+    const bool matching_browser = result.foreground_usable && browser && browser_authority_epoch != 0u &&
+                                  browser->window == foreground->window && browser->process_id == foreground->process_id;
+    // The capture owner validates target extent, handle and orientation before returning monitor
+    // mismatch. A spanning browser can belong mostly to another monitor while its independently
+    // mapped semantic video fits this output. Native/generic authority still requires its monitor.
+    // Invalid targets, unsupported orientation and failed GetDesc never reach this exception.
     result.foreground_target_usable =
       foreground_mapping.status == foreground_window::mapping_status_e::ok ||
-      foreground_mapping.status == foreground_window::mapping_status_e::partially_outside_capture;
+      foreground_mapping.status == foreground_window::mapping_status_e::partially_outside_capture ||
+      (matching_browser && foreground_mapping.status == foreground_window::mapping_status_e::monitor_mismatch);
     if (!result.foreground_usable || !result.foreground_target_usable) {
       return result;
     }
 
-    result.browser_identity_matches = browser && browser_authority_epoch != 0u &&
-      browser->window == foreground->window && browser->process_id == foreground->process_id;
+    result.browser_identity_matches = matching_browser;
     // A registered native player retains the whole-client ROI requirement. A browser instead
     // supplies its independently authenticated video rectangle, which may fit a partially visible
     // client. Failed browser evidence must not fall through to native-player classification.
     result.registered_player_candidate = foreground_region_present &&
-      foreground_mapping.status == foreground_window::mapping_status_e::ok && !result.browser_identity_matches;
+                                         foreground_mapping.status == foreground_window::mapping_status_e::ok && !result.browser_identity_matches;
     if (!result.browser_identity_matches) {
       return result;
     }
     result.browser_usable = video_dom::detail::usable_for_content(
-      *browser, content_timestamp, now, std::chrono::milliseconds {2500});
+      *browser,
+      content_timestamp,
+      now,
+      std::chrono::milliseconds {2500}
+    );
     if (!result.browser_usable) {
       return result;
     }

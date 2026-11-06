@@ -969,6 +969,8 @@ namespace platf::foreground_window {
     if (!target.identity_orientation) {
       return {.status = mapping_status_e::unsupported_orientation};
     }
+    // Keep target validation above the monitor check: browser subtitle admission can use this
+    // specific failure to continue with independent semantic-video mapping on a spanning root.
     // HMONITOR values may differ for duplicated outputs. Exact monitor bounds equal to the
     // selected output's raw DesktopCoordinates prove that both handles use the same physical
     // coordinate domain; all partial/spanning checks below still apply unchanged.

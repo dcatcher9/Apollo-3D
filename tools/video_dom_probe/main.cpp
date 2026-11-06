@@ -160,6 +160,7 @@ namespace {
     DWORD process_id {};
     std::wstring process_name;
     probe::rect_t client_rect {};
+    bool client_fills_monitor {};
     std::size_t visited_nodes {};
     std::size_t ia2_nodes {};
     std::size_t document_nodes {};
@@ -288,6 +289,13 @@ namespace {
       sizeof(cloaked)
     );
     return SUCCEEDED(cloak_status) && cloaked == 0;
+  }
+
+  [[nodiscard]] bool client_fills_monitor(HWND window, const probe::rect_t &client) {
+    const auto monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
+    MONITORINFO info {};
+    info.cbSize = sizeof(info);
+    return monitor && GetMonitorInfoW(monitor, &info) && probe::client_fills_monitor(client, {info.rcMonitor.left, info.rcMonitor.top, info.rcMonitor.right, info.rcMonitor.bottom});
   }
 
   template<typename T>
@@ -463,6 +471,7 @@ namespace {
       return result;
     }
     result.client_rect = *client_rect;
+    result.client_fills_monitor = client_fills_monitor(foreground, *client_rect);
     // The first census can pump WinEvents before it finishes. Route its descendant events
     // now, rather than losing them against the previous foreground window or a null HWND.
     monitored_window_value.store(reinterpret_cast<std::uintptr_t>(foreground), std::memory_order_relaxed);
@@ -493,9 +502,7 @@ namespace {
       const HWND current_foreground = GetAncestor(GetForegroundWindow(), GA_ROOT);
       GetWindowThreadProcessId(current_foreground, &current_process_id);
       const auto current_client = foreground_client_rect(current_foreground);
-      if (foreground_change_generation.load(std::memory_order_relaxed) != initial_foreground_generation ||
-          current_foreground != foreground || current_process_id != result.process_id ||
-          !current_client || *current_client != result.client_rect || !window_available(foreground)) {
+      if (foreground_change_generation.load(std::memory_order_relaxed) != initial_foreground_generation || current_foreground != foreground || current_process_id != result.process_id || !current_client || *current_client != result.client_rect || !window_available(foreground) || client_fills_monitor(current_foreground, *current_client) != result.client_fills_monitor) {
         foreground_changed = true;
         aborted = true;
         return false;
@@ -794,7 +801,7 @@ namespace {
       process_id_after
     );
     const auto client_rect_after = foreground_client_rect(foreground_after);
-    if (foreground_changed || foreground_after != foreground || process_id_after != result.process_id || process_name_after != result.process_name || !client_rect_after || *client_rect_after != result.client_rect || !window_available(foreground_after)) {
+    if (foreground_changed || foreground_after != foreground || process_id_after != result.process_id || process_name_after != result.process_name || !client_rect_after || *client_rect_after != result.client_rect || !window_available(foreground_after) || client_fills_monitor(foreground_after, *client_rect_after) != result.client_fills_monitor) {
       result.status = scan_status_e::foreground_changed;
       result.candidates.clear();
     } else if (!complete) {
@@ -825,6 +832,7 @@ namespace {
     probe::rect_t element_rect {};
     probe::rect_t visible_rect {};
     bool fullscreen {};
+    bool client_fills_monitor {};
     std::string semantic_fingerprint;
     com_ptr_t<IAccessible> accessible;
     com_ptr_t<IAccessible> document_accessible;
@@ -931,6 +939,7 @@ namespace {
       .element_rect = candidate.geometry.element_rect,
       .visible_rect = *authority_rect,
       .fullscreen = selection.reason == probe::selection_reason_e::fullscreen,
+      .client_fills_monitor = result.client_fills_monitor,
       .semantic_fingerprint = std::move(semantics),
       .accessible = retain_com(candidate.accessible.get()),
       .document_accessible = retain_com(candidate.document_accessible.get()),
@@ -938,16 +947,27 @@ namespace {
   }
 
   [[nodiscard]] bool refresh_cached_selection(const cached_selection_t &cached) {
-    HWND foreground = GetForegroundWindow();
-    if (!foreground || GetAncestor(foreground, GA_ROOT) != cached.window ||
-        !window_available(cached.window)) {
-      return false;
-    }
-    DWORD process_id = 0;
-    GetWindowThreadProcessId(cached.window, &process_id);
-    const auto client_rect = foreground_client_rect(cached.window);
-    if (process_id != cached.process_id || !client_rect ||
-        *client_rect != cached.client_rect) {
+    const auto foreground_generation = foreground_change_generation.load(std::memory_order_relaxed);
+    const auto foreground_current = [&]() {
+      pump_messages();
+      const auto events = probe::machine_event_policy(
+        {.foreground = foreground_generation},
+        {.foreground = foreground_change_generation.load(std::memory_order_relaxed)}
+      );
+      if (events.invalidate_semantic_state) {
+        return false;
+      }
+      const HWND foreground = GetForegroundWindow();
+      if (!foreground || GetAncestor(foreground, GA_ROOT) != cached.window || !window_available(cached.window)) {
+        return false;
+      }
+      DWORD process_id = 0;
+      GetWindowThreadProcessId(cached.window, &process_id);
+      const auto client = foreground_client_rect(cached.window);
+      return process_id == cached.process_id && client && *client == cached.client_rect &&
+             (!cached.fullscreen || !cached.client_fills_monitor || client_fills_monitor(cached.window, *client));
+    };
+    if (!foreground_current()) {
       return false;
     }
 
@@ -963,7 +983,10 @@ namespace {
       false,
       true
     );
-    if (!document || !video) {
+    // COM calls may span a foreground/client/topology change, including A->B->A with matching
+    // geometry. Pump events and recheck the original foreground epoch plus Win32 authority after
+    // querying the retained semantic objects.
+    if (!document || !video || !foreground_current()) {
       return false;
     }
 
@@ -972,7 +995,7 @@ namespace {
         cached.video_unique_id,
         video->unique_id,
         cached.visible_rect,
-        *client_rect,
+        cached.client_rect,
         video->rect,
         coordinate_rounding_tolerance
       );
@@ -981,7 +1004,7 @@ namespace {
     return probe::windowed_cache_refresh_matches(
       cached.element_rect,
       cached.visible_rect,
-      *client_rect,
+      cached.client_rect,
       document->rect,
       video->rect
     );
@@ -1002,7 +1025,8 @@ namespace {
     return probe::select_authority_candidate(
       geometry,
       result.client_rect,
-      coordinate_rounding_tolerance
+      coordinate_rounding_tolerance,
+      result.client_fills_monitor
     );
   }
 
@@ -1048,6 +1072,7 @@ namespace {
               << " hwnd=0x" << std::hex
               << reinterpret_cast<std::uintptr_t>(result.window) << std::dec
               << " client=" << rect_string(result.client_rect)
+              << " client_fills_monitor=" << result.client_fills_monitor
               << " nodes=" << result.visited_nodes
               << " ia2=" << result.ia2_nodes
               << " documents=" << result.document_nodes

@@ -360,7 +360,11 @@ draw only, are unbound between compute and sampling, and are rebuilt before reus
 wrapper retains the exact-source GPU guard independently of subtitle authorisation.
 `src/host_sbs_shared_ui_warp_runtime.h` owns the ordered completed/queued production and diagnostic
 shader specifications. The depth-contract generator checks both source-closure pins, including
-the common pin owner; this changes no estimator state schema or calibration.
+the common pin owner. All six source specifications must authenticate, but ordinary completed
+programs prepare independently; queued programs prepare only when that route is explicitly
+requested. A queued compile or device-creation failure preserves completed handles and readiness,
+while a missing queued program still disables that route. This changes no estimator state schema
+or calibration.
 
 Field construction uses explicit FP32 interpolation of Base, including the existing continuous
 ROI embedding. Hardware-filtered coarse-to-native construction is not equivalent: quantised
@@ -2733,7 +2737,13 @@ of that video, its available owning document and the foreground browser client. 
 viewport must occupy at least the existing five-percent credible-size threshold of the client;
 a tiny remaining sliver does not promote a smaller advert. Document clipping or overscan alone
 does not reject a meaningful visible viewport. Unavailable or fully occluded videos grant no
-windowed authority. For true fullscreen, an available semantic `<video>` need only cover the
+windowed authority. In an ordinary browser window, a successful unique windowed selection takes
+priority even when its video covers the complete client: that coverage alone does not prove the
+browser fills the captured output. A current client exactly equal to its physical monitor bounds
+instead retains relaxed fullscreen priority, preserving its tolerance of harmless element overscan
+and document clipping. The helper rechecks that Win32 monitor/client fact across the census and
+retained-object refresh. When windowed selection cannot authorize a viewport, relaxed fullscreen
+also remains available as a fallback. For that route, an available semantic `<video>` need only cover the
 complete foreground client.
 The element may overscan that client, the available owning document's rectangle may be clipped, and
 multiple full-cover Chromium clones do not make fullscreen ambiguous; the helper retains a stable
@@ -2743,6 +2753,11 @@ required, and a paused retained identity remains eligible.
 
 The unchanged eleven-field machine protocol preserves that provenance: verified visible windowed
 selection publishes `ok`, while the relaxed full-client selection publishes `ok-fullscreen`.
+An authenticated semantic video may lie wholly inside the captured output while its spanning
+browser belongs mostly to another monitor. The browser route maps that video independently after
+validating the capture extent, handle and identity orientation; the root's nearest-monitor mismatch
+alone does not revoke subtitle permission. Native-player and generic foreground routes retain
+their existing monitor and whole-client containment requirements.
 The host never accepts an
 `ok-fullscreen` subrectangle as a windowed ROI; it is eligible only after mapping exactly to the
 capture. A transition between the two positive status classes starts a new live-detector source

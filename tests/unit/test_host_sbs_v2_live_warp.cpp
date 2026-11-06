@@ -47,6 +47,7 @@
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
+class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedPreparationFailurePreservesCompletedProtection_Test;
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -142,6 +143,7 @@ namespace {
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedPreparationFailurePreservesCompletedProtection_Test;
   public:
     bool initialize(
       std::string &error,
@@ -692,6 +694,8 @@ namespace {
       if (production_shared_pin && !production_shared_ui_pin_programs.ready() &&
           !production_shared_ui_pin_programs.load(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
       const bool production_queued_pin = production_shared_pin && outline && outline->production_shared_ui_pin_queued;
+      if (production_queued_pin && !production_shared_ui_pin_programs.ready(true) &&
+          !production_shared_ui_pin_programs.load_queued(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
       if (production_shared_pin && (mapping_output || shared_boundary_output) &&
           !production_shared_ui_pin_programs.load_diagnostics(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
       platf::dxgi::host_sbs_v2_draw_command_t draw_command {
@@ -5251,6 +5255,77 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRejectsInvalidRowExtentAndDi
   error = "previous diagnostic failure";
   ASSERT_TRUE(programs.load_diagnostics(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
   EXPECT_TRUE(error.empty());
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedPreparationFailurePreservesCompletedProtection) {
+  namespace shared = models::host_sbs_shared_ui_warp;
+  live_v2_warp_fixture_t fixture, ordinary;
+  std::string error;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::selected_outline)) << error;
+  ASSERT_TRUE(ordinary.initialize(error)) << error;
+  auto &programs = fixture.production_shared_ui_pin_programs;
+  ASSERT_TRUE(programs.load(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
+  ASSERT_TRUE(programs.ready(false));
+  EXPECT_FALSE(programs.ready(true));
+  EXPECT_TRUE(programs.route_error(false).empty());
+  const auto completed_program = programs.program(false), missing_queued = programs.program(true);
+  EXPECT_EQ(missing_queued.initialize, nullptr);
+  EXPECT_EQ(missing_queued.pin, nullptr);
+  EXPECT_EQ(missing_queued.pixel, nullptr);
+
+  constexpr UINT width = 128u, height = 16u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(width * height, -1.0f / width);
+  auto ui = make_subtitle_inputs(width, height, state, 2.5f / width);
+  ui.matte[8u * width + 64u] = 1u;
+  ui.snapshot[8u * width + 64u] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});
+  source[8u * width + 64u] = ui.snapshot[8u * width + 64u];
+  auto selected = make_current_outline_inputs(ui);selected.production_shared_ui_pin = true;
+  const auto render = [&](std::vector<std::byte> &pixels) {
+    return fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+      source.data(), base, base, state, {}, pixels, error, 0u, 0u, {}, &ui, nullptr, true, &selected);
+  };
+  std::vector<std::byte> protected_pixels, ordinary_pixels;
+  ASSERT_TRUE(render(protected_pixels)) << error;
+  ASSERT_TRUE(ordinary.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+    source.data(), base, base, state, {}, ordinary_pixels, error)) << error;
+  ASSERT_NE(protected_pixels, ordinary_pixels) << "The completed-only owner must actually protect the glyph";
+  const auto expect_completed_unchanged = [&] {
+    EXPECT_TRUE(programs.ready(false));
+    EXPECT_EQ(programs.program(false).initialize, completed_program.initialize);
+    EXPECT_EQ(programs.program(false).pin, completed_program.pin);
+    EXPECT_EQ(programs.program(false).pixel, completed_program.pixel);
+    EXPECT_TRUE(programs.route_error(false).empty());
+    std::vector<std::byte> after;
+    ASSERT_TRUE(render(after)) << error;
+    EXPECT_EQ(after, protected_pixels);
+  };
+  EXPECT_FALSE(programs.load_queued(nullptr, SUNSHINE_SHADERS_DIR, error));
+  EXPECT_FALSE(programs.route_error(true).empty());
+  EXPECT_FALSE(programs.ready(true));
+  expect_completed_unchanged();
+  ComPtr<ID3D11Device> foreign_device;
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0u, nullptr, 0u,
+    D3D11_SDK_VERSION, foreign_device.GetAddressOf(), nullptr, nullptr)));
+  EXPECT_FALSE(programs.load_queued(foreign_device.Get(), SUNSHINE_SHADERS_DIR, error));
+  EXPECT_FALSE(programs.route_error(true).empty());
+  EXPECT_FALSE(programs.ready(true));
+  expect_completed_unchanged();
+  // A regular source file cannot be an authenticated shader-root directory.
+  const auto unavailable_source = std::filesystem::path(SUNSHINE_SHADERS_DIR) / "host_sbs_shared_ui_warp.hlsl";
+  EXPECT_FALSE(programs.load_queued(fixture.device.Get(), unavailable_source, error));
+  EXPECT_EQ(programs.route_error(true), "Shared UI warp shader source mismatch");
+  expect_completed_unchanged();
+  shared::programs_t unauthenticated;
+  EXPECT_FALSE(unauthenticated.load(fixture.device.Get(), unavailable_source, error));
+  EXPECT_FALSE(unauthenticated.ready(false));
+  EXPECT_FALSE(unauthenticated.ready(true));
+
+  ASSERT_TRUE(programs.load_queued(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
+  EXPECT_TRUE(programs.ready(true));
+  EXPECT_TRUE(programs.route_error(true).empty());
+  expect_completed_unchanged();
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw) {

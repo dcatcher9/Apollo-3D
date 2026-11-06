@@ -1,6 +1,20 @@
 # SBS 3D status and roadmap
 
-Latest subtitle work adopts the [shared Game 3D pin-band warp](host-sbs-review-followups.md#p15-production-shared-ui-warp) for Host rendering. Original RGB moves through one conditioned field instead of subtitle background reconstruction. G1 mask detection is unchanged. This deliberately accepts nearby scene deformation and possible UI-row transitions in exchange for retaining original strokes with incomplete masks; the preceding comparison has no universal quality winner. The validated build uses `E:\ApolloDev\run-dev.cmd`. No live FPS or headset acceptance is claimed.
+Current Host rendering uses the [shared Game 3D pin-band warp](host-sbs-review-followups.md#p15-production-shared-ui-warp).
+Original RGB moves through one conditioned field instead of subtitle background reconstruction.
+The original G1 path is supplemented by [independent current fill recovery](host-sbs.md#current-repeated-colour-inner-fill-recovery).
+Browser admission distinguishes an ordinary full-client video from a full-monitor client and maps
+semantic video independently of a spanning browser's nearest monitor. Completed subtitle rendering
+does not require the optional queued shader route; its source authentication and current draw guards
+remain unchanged. These fixes do not establish complete decoration recovery or semantic rejection
+of every scene object. Asymmetric video clipping still needs separately authenticated full-element
+reference geometry to preserve the original caption-centering prior.
+
+The only manual development launcher is `E:\ApolloDev\run-dev.cmd`; launcher references in the
+historical experiment records below do not select independent current runtimes. Physical monitor
+recovery, live XR acceptance and live FPS remain unqualified by the headless checks. Shared pinning
+still accepts nearby scene deformation and possible UI-row transitions; the preceding renderer
+comparison has no universal quality winner.
 
 The current subtitle policy is Generic Outline G1
 [original stroke coverage](host-sbs.md#original-stroke-coverage). It uses observed reference

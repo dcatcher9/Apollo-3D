@@ -55,6 +55,21 @@ namespace models::host_sbs_shared_ui_warp {
     };
     std::array<route_t, 2u> routes_;
     std::array<ComPtr<ID3D11PixelShader>, 6u> diagnostics_;
+    std::array<std::string, 2u> route_errors_;
+
+    static bool create_route(ID3D11Device *device, const cache::source_snapshot_t &source,
+                             std::size_t route, route_t &output, std::string &error) {
+      for (std::size_t stage = 0u; stage < 3u; ++stage) {
+        const auto code = cache::get(source, specs[route * 3u + stage]);
+        if (!code || code->empty() || (stage < 2u ?
+            FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &output.compute[stage])) :
+            FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &output.pixel)))) {
+          error = route == 0u ? "Completed shared UI warp shader creation failed" : "Queued shared UI warp shader creation failed";
+          return false;
+        }
+      }
+      return true;
+    }
 
   public:
     bool load(ID3D11Device *device, const std::filesystem::path &root, std::string &error) {
@@ -62,25 +77,52 @@ namespace models::host_sbs_shared_ui_warp {
       try {
         const auto source = cache::snapshot_sources(root, specs);
         if (!device || !source || cache::source_closure_sha256(source) != closure) {
-          error = "Shared UI warp shader source mismatch";
+          error = route_errors_[0] = "Shared UI warp shader source mismatch";
           return false;
         }
         programs_t next;
-        for (std::size_t route = 0u; route < 2u; ++route) {
-          for (std::size_t stage = 0u; stage < 3u; ++stage) {
-            const auto code = cache::get(source, specs[route * 3u + stage]);
-            if (!code || code->empty() || (stage < 2u ?
-                FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &next.routes_[route].compute[stage])) :
-                FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &next.routes_[route].pixel)))) {
-              error = "Shared UI warp shader creation failed";
-              return false;
-            }
-          }
+        // Both routes remain source-authenticated above. Only the completed route is
+        // mandatory; unused queued bytecode/device objects cannot disable its mask.
+        if (!create_route(device, source, 0u, next.routes_[0], error)) {
+          route_errors_[0] = error;
+          return false;
         }
         *this = std::move(next);
         return true;
       } catch (const std::exception &exception) {
-        error = exception.what();
+        error = route_errors_[0] = exception.what();
+        return false;
+      }
+    }
+
+    // Explicit optional preparation. Keep the already authenticated completed objects
+    // on any queued source/compilation/device failure, including a wrong-device request.
+    bool load_queued(ID3D11Device *device, const std::filesystem::path &root, std::string &error) {
+      error.clear();
+      try {
+        ComPtr<ID3D11Device> completed_device;
+        if (routes_[0].pixel) routes_[0].pixel->GetDevice(&completed_device);
+        if (!device || !ready(false) || completed_device.Get() != device) {
+          error = route_errors_[1] = "Queued shared UI warp device does not match its completed programs";
+          return false;
+        }
+        const auto source = cache::snapshot_sources(root, specs);
+        if (!source || cache::source_closure_sha256(source) != closure) {
+          error = route_errors_[1] = "Shared UI warp shader source mismatch";
+          return false;
+        }
+        if (!ready(true)) {
+          route_t next;
+          if (!create_route(device, source, 1u, next, error)) {
+            route_errors_[1] = error;
+            return false;
+          }
+          routes_[1] = std::move(next);
+        }
+        route_errors_[1].clear();
+        return true;
+      } catch (const std::exception &exception) {
+        error = route_errors_[1] = exception.what();
         return false;
       }
     }
@@ -118,7 +160,11 @@ namespace models::host_sbs_shared_ui_warp {
       }
     }
 
-    [[nodiscard]] bool ready() const noexcept { return routes_[0].pixel && routes_[1].pixel; }
+    [[nodiscard]] bool ready(bool queued = false) const noexcept {
+      const auto &route = routes_[queued ? 1u : 0u];
+      return route.compute[0] && route.compute[1] && route.pixel;
+    }
+    [[nodiscard]] const std::string &route_error(bool queued = false) const noexcept { return route_errors_[queued ? 1u : 0u]; }
     [[nodiscard]] program_t program(bool queued = false) const noexcept {
       const auto route = queued ? 1u : 0u;
       const auto &shaders = routes_[route];

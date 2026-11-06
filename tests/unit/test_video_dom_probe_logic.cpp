@@ -183,20 +183,22 @@ TEST(VideoDomProbeLogic, ObjectChurnDoesNotBlockProvisionalPromotion) {
   EXPECT_TRUE(policy.request_follow_up_audit);
 }
 
-TEST(VideoDomProbeLogic, ForegroundChangeVetoesProvisionalPromotion) {
-  const auto events = probe::machine_event_policy(
-    {.foreground = 5, .object = 10},
-    {.foreground = 6, .object = 10}
-  );
-  const auto policy = probe::cached_refresh_policy(
-    probe::cached_selection_phase_e::provisional,
-    true,
-    events
-  );
-
-  EXPECT_FALSE(policy.retain_selection);
-  EXPECT_FALSE(policy.publish_ok);
-  EXPECT_TRUE(policy.request_follow_up_audit);
+TEST(VideoDomProbeLogic, ForegroundChangeOrAbaVetoesOtherwiseExactCachedRefresh) {
+  for (const auto phase : {probe::cached_selection_phase_e::provisional, probe::cached_selection_phase_e::established}) {
+    for (const auto after_foreground : {6u, 7u}) {
+      // A->B and A->B->A both revoke authority even when retained objects, root and geometry
+      // match after a successful COM refresh. The latter must not publish on the fast tick.
+      const auto events = probe::machine_event_policy(
+        {.foreground = 5, .object = 10},
+        {.foreground = after_foreground, .object = 10}
+      );
+      const auto policy = probe::cached_refresh_policy(phase, true, events);
+      EXPECT_TRUE(events.invalidate_semantic_state);
+      EXPECT_FALSE(policy.retain_selection);
+      EXPECT_FALSE(policy.publish_ok);
+      EXPECT_TRUE(policy.request_follow_up_audit);
+    }
+  }
 }
 
 TEST(VideoDomProbeLogic, EstablishedSelectionStaysEstablishedAfterExactRefresh) {
@@ -551,20 +553,75 @@ TEST(VideoDomProbeLogic, VisibleViewportMustMeetExistingFivePercentThreshold) {
   EXPECT_FALSE(probe::windowed_video_viewport(client, client, {1200, 0, 1500, 1000}));
 }
 
+TEST(VideoDomProbeLogic, FullMonitorClientHintRequiresExactValidPhysicalBounds) {
+  constexpr probe::rect_t monitor {-1920, 0, 0, 1080};
+  EXPECT_TRUE(probe::client_fills_monitor(monitor, monitor));
+  EXPECT_FALSE(probe::client_fills_monitor({-1920, 0, 0, 1040}, monitor));
+  EXPECT_FALSE(probe::client_fills_monitor({-1919, 0, 0, 1080}, monitor));
+  EXPECT_FALSE(probe::client_fills_monitor({0, 0, 0, 0}, {0, 0, 0, 0}));
+}
+
 TEST(VideoDomProbeLogic, DuplicateFullClientVideosAuthorizeFullscreen) {
   const std::array candidates {
     candidate(20, {0, 0, 1920, 1080}),
     candidate(10, {0, 0, 1920, 1080}),
   };
 
+  for (const bool full_monitor_client : {false, true}) {
+    const auto selection = probe::select_authority_candidate(candidates, browser, 1, full_monitor_client);
+    ASSERT_TRUE(selection.index);
+    EXPECT_EQ(*selection.index, 1U);
+    EXPECT_EQ(selection.reason, probe::selection_reason_e::fullscreen);
+    EXPECT_EQ(
+      probe::selection_authority_rect(candidates, selection, browser),
+      std::optional<probe::rect_t> {browser}
+    );
+  }
+}
+
+TEST(VideoDomProbeLogic, UniqueFullClientVideoKeepsWindowedAuthorityAtAnyScreenPosition) {
+  // Full-client coverage does not prove that the browser itself fills the captured output.
+  for (const auto client : {browser, probe::rect_t {200, 100, 1600, 900}}) {
+    const std::array candidates {candidate(7, client)};
+    const auto selection = probe::select_authority_candidate(candidates, client);
+    ASSERT_TRUE(selection.index);
+    EXPECT_EQ(selection.reason, probe::selection_reason_e::single);
+    const auto authority = probe::selection_authority_rect(candidates, selection, client);
+    ASSERT_TRUE(authority);
+    EXPECT_EQ(*authority, client);
+    EXPECT_TRUE(probe::windowed_cache_refresh_matches(client, *authority, client, client, client));
+    const auto census = probe::complete_census_policy(selection, false);
+    EXPECT_FALSE(census.publish_ok);
+    EXPECT_TRUE(probe::cached_refresh_policy(census.phase, true, {}).publish_ok);
+  }
+}
+
+TEST(VideoDomProbeLogic, FullCoverVideoPrefersItsVerifiedDocumentClippedWindowedViewport) {
+  auto clipped = candidate(7, {-30, -20, 1950, 1100}, true, false);
+  clipped.visible_rect = {100, 80, 1820, 1000};
+  const std::array candidates {clipped};
   const auto selection = probe::select_authority_candidate(candidates, browser);
   ASSERT_TRUE(selection.index);
-  EXPECT_EQ(*selection.index, 1U);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::single);
+  EXPECT_EQ(probe::selection_authority_rect(candidates, selection, browser), std::optional<probe::rect_t> {clipped.visible_rect});
+}
+
+TEST(VideoDomProbeLogic, FullMonitorClientPreservesRelaxedUniqueVideoRefresh) {
+  constexpr probe::rect_t monitor {-1920, 0, 0, 1080};
+  const bool full_monitor_client = probe::client_fills_monitor(monitor, monitor);
+  const std::array candidates {candidate(7, monitor)};
+  const auto selection = probe::select_authority_candidate(candidates, monitor, 1, full_monitor_client);
+  ASSERT_TRUE(selection.index);
   EXPECT_EQ(selection.reason, probe::selection_reason_e::fullscreen);
-  EXPECT_EQ(
-    probe::selection_authority_rect(candidates, selection, browser),
-    std::optional<probe::rect_t> {browser}
-  );
+  const auto authority = probe::selection_authority_rect(candidates, selection, monitor);
+  ASSERT_TRUE(authority);
+  EXPECT_EQ(*authority, monitor);
+  // Harmless element overscan and document clipping would revoke strict windowed refresh,
+  // but they do not revoke the established full-monitor client/video authority.
+  constexpr probe::rect_t new_video {-1950, -20, 30, 1100};
+  constexpr probe::rect_t new_document {-1920, 100, 0, 1000};
+  EXPECT_FALSE(probe::windowed_cache_refresh_matches(monitor, *authority, monitor, new_document, new_video));
+  EXPECT_TRUE(probe::fullscreen_cache_refresh_matches(7, 7, *authority, monitor, new_video));
 }
 
 TEST(VideoDomProbeLogic, FullClientSelectionIsIndependentOfTraversalOrder) {
@@ -599,16 +656,17 @@ TEST(VideoDomProbeLogic, FullClientVideoBeatsUnrelatedPartialCandidate) {
   const auto selection = probe::select_authority_candidate(candidates, browser);
   ASSERT_TRUE(selection.index);
   EXPECT_EQ(*selection.index, 1U);
-  EXPECT_EQ(selection.reason, probe::selection_reason_e::fullscreen);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::largest);
 }
 
-TEST(VideoDomProbeLogic, DocumentClippingDoesNotDisableFullClientVideo) {
-  auto document_clipped = candidate(7, {-30, -20, 1950, 1100}, false, false);
-  document_clipped.visible_rect = {100, 80, 1820, 1000};
+TEST(VideoDomProbeLogic, FullClientFallbackRetainsItsIndependentDocumentClippingPolicy) {
+  auto document_clipped = candidate(7, {-30, -20, 1950, 1100}, true, false);
+  document_clipped.visible_rect = {0, 0, 1920, 20};
   document_clipped.fullscreen_available =
     probe::fullscreen_semantic_available(true, true, true);
   const std::array candidates {document_clipped};
 
+  EXPECT_FALSE(probe::select_candidate(candidates, browser).index);
   const auto selection = probe::select_authority_candidate(candidates, browser);
   ASSERT_TRUE(selection.index);
   EXPECT_EQ(selection.reason, probe::selection_reason_e::fullscreen);

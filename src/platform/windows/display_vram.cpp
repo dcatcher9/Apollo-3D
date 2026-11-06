@@ -2696,7 +2696,7 @@ namespace platf::dxgi {
             bool selected_unpredicated=true;
             if(selected_matte_ready){Microsoft::WRL::ComPtr<ID3D11Predicate> p;BOOL value=FALSE;device_ctx->GetPredication(&p,&value);selected_unpredicated=!p;}
             const bool selected_supported=selected_matte_ready&&
-              selected_shared_warp_programs.ready()&&
+              selected_shared_warp_programs.ready(queued_geometry_selected)&&
               v2_draw_selected&&!pending_current_colour_selected&&
               selected_unpredicated;
             if(selected_supported){
@@ -2776,7 +2776,7 @@ namespace platf::dxgi {
               request.queued_guard_transaction = draw_command.queued_guard_transaction;
               return request;
             };
-            if (selected_draw && subtitle_constants.enabled == 1u && selected_shared_warp_programs.ready()) {
+            if (selected_draw && subtitle_constants.enabled == 1u && selected_shared_warp_programs.ready(queued_geometry_selected)) {
               Microsoft::WRL::ComPtr<ID3D11Resource> matte_resource;
               Microsoft::WRL::ComPtr<ID3D11Texture2D> matte_texture;
               dump_warp_inputs[3]->GetResource(&matte_resource);
@@ -3715,6 +3715,15 @@ namespace platf::dxgi {
     bool initialize_queued_renderer_for_instance(bool enable) {
       if (!enable || !depth_estimator) { return false; }
       if (queued_live_ready) { return true; }
+
+      // Optional queued shaders are prepared only for this explicit route. Their failure
+      // leaves the completed subtitle programs and ordinary depth renderer available.
+      if (selected_matte_ready) {
+        std::string shared_error;
+        if (!selected_shared_warp_programs.load_queued(device.get(), selected_shared_warp_root, shared_error)) {
+          BOOST_LOG(warning) << "Queued subtitle shared renderer unavailable; completed protection remains available: " << shared_error;
+        }
+      }
 
       namespace cache = models::host_sbs_shader_cache;
       const auto queued_sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, cache::parallax_v2_queued_renderer_specs);

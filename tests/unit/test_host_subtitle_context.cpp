@@ -578,6 +578,22 @@ namespace {
     EXPECT_EQ(evaluate().browser_key.kind, context::kind_e::browser_video);
   }
 
+  TEST_F(BrowserSubtitleContextPolicyTest, VerifiedWindowedFullClientVideoCanAuthorizeSubcaptureViewport) {
+    root.client_screen_rect = {200, 100, 1600, 900};
+    root.frame_screen_rect = {190, 70, 1610, 910};
+    browser.screen_rect = {200, 100, 1600, 900};
+    ASSERT_TRUE(foreground::map_to_capture(root, target));
+    const auto windowed = evaluate();
+    EXPECT_TRUE(windowed.mapping_succeeded);
+    EXPECT_TRUE(windowed.fullscreen_match);
+    EXPECT_EQ(windowed.browser_key.kind, context::kind_e::browser_video);
+    // An independently verified viewport remains valid when it also fills the whole output.
+    root.client_screen_rect = target.screen_rect;
+    root.frame_screen_rect = target.screen_rect;
+    browser.screen_rect = {0, 0, 1920, 1080};
+    EXPECT_EQ(evaluate().browser_key.kind, context::kind_e::browser_video);
+  }
+
   TEST_F(BrowserSubtitleContextPolicyTest, NoncausalBrowserRevokesPreviousContextWithoutNativeFallback) {
     root.client_screen_rect.left = 100;
     root.frame_screen_rect.left = 90;
@@ -609,8 +625,7 @@ namespace {
     browser.received_at = now - 426ms;
     browser.geometry_valid_since = now - 223208ms;
     content = now;
-    ASSERT_EQ(foreground::map_to_capture(root, target).status,
-      foreground::mapping_status_e::partially_outside_capture);
+    ASSERT_EQ(foreground::map_to_capture(root, target).status, foreground::mapping_status_e::partially_outside_capture);
     const auto result = evaluate();
     EXPECT_TRUE(result.foreground_target_usable);
     EXPECT_EQ(result.browser_key.kind, context::kind_e::browser_video);
@@ -618,17 +633,50 @@ namespace {
     EXPECT_EQ(result.browser_key.process_id, root.process_id);
   }
 
-  TEST_F(BrowserSubtitleContextPolicyTest, MonitorMismatchStaysDisabledButExactCloneRemainsEligible) {
-    target.monitor = 0x201u;
-    root.monitor_screen_rect = {-1920, 0, 0, 1080};
+  TEST_F(BrowserSubtitleContextPolicyTest, SpanningBrowserCanAuthorizeVideoOnOutputOtherThanItsRootMonitor) {
+    root.monitor = 0x201u;
+    root.monitor_screen_rect = {1920, 0, 3840, 1080};
+    root.client_screen_rect = {100, 50, 4000, 1040};
+    root.frame_screen_rect = {90, 20, 4010, 1050};
     ASSERT_EQ(foreground::map_to_capture(root, target).status, foreground::mapping_status_e::monitor_mismatch);
-    const auto wrong_monitor = evaluate();
-    EXPECT_FALSE(wrong_monitor.foreground_target_usable);
-    EXPECT_FALSE(wrong_monitor.mapping_attempted);
+    const auto spanning = evaluate();
+    EXPECT_TRUE(spanning.foreground_target_usable);
+    EXPECT_TRUE(spanning.browser_identity_matches);
+    EXPECT_TRUE(spanning.browser_usable);
+    EXPECT_TRUE(spanning.mapping_succeeded);
+    EXPECT_EQ(spanning.browser_key.kind, context::kind_e::browser_video);
+    EXPECT_FALSE(spanning.registered_player_candidate);
+    // Generic/native authority still cannot use the other monitor's root.
+    const auto native = policy::evaluate(&root, false, foreground::map_to_capture(root, target), nullptr, 0u, {0, 0, 1920, 1080}, 1920, 1080, content, now);
+    EXPECT_FALSE(native.foreground_target_usable);
+    EXPECT_FALSE(native.registered_player_candidate);
+
+    browser.screen_rect = {2200, 200, 3600, 900};
+    const auto disjoint_video = evaluate();
+    EXPECT_TRUE(disjoint_video.mapping_attempted);
+    EXPECT_EQ(disjoint_video.mapping_status, dom::mapping_status_e::outside_capture);
     expect_disabled();
+    browser.screen_rect = {200, 200, 1600, 900};
+    browser.received_at = now - 2501ms;
+    EXPECT_FALSE(evaluate().browser_usable);
+    expect_disabled();
+    browser.received_at = now - 100ms;
+    browser.geometry_valid_since = *content + 1ms;
+    EXPECT_FALSE(evaluate().browser_usable);
+    expect_disabled();
+    browser.geometry_valid_since = now - 1s;
+    browser.process_id++;
+    EXPECT_FALSE(evaluate().browser_identity_matches);
+    expect_disabled();
+    browser.process_id--;
+    EXPECT_FALSE(evaluate(0u).foreground_target_usable);
+    EXPECT_EQ(evaluate(0u).browser_key.kind, context::kind_e::disabled);
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, DistinctExactCloneMonitorRemainsEligible) {
+    target.monitor = 0x201u;
     root.monitor_screen_rect = target.screen_rect;
-    ASSERT_EQ(foreground::map_to_capture(root, target).status,
-      foreground::mapping_status_e::partially_outside_capture);
+    ASSERT_EQ(foreground::map_to_capture(root, target).status, foreground::mapping_status_e::partially_outside_capture);
     EXPECT_EQ(evaluate().browser_key.kind, context::kind_e::browser_video);
     root.client_screen_rect.left = 100;
     root.frame_screen_rect.left = 90;
@@ -637,13 +685,15 @@ namespace {
   }
 
   TEST_F(BrowserSubtitleContextPolicyTest, UnsupportedOrientationExtentAndFailedTargetStayDisabled) {
+    // Exercise invalid targets even when the root belongs mostly to another output.
+    root.monitor = 0x201u;
+    root.monitor_screen_rect = {1920, 0, 3840, 1920};
     // Covers180 degrees and square90 degrees: matching extents alone never grant orientation.
     for (const auto square : {false, true}) {
       target.identity_orientation = false;
       if (square) {
         target.screen_rect = {0, 0, 1920, 1920};
         target.height = 1920;
-        root.monitor_screen_rect = target.screen_rect;
       }
       ASSERT_EQ(foreground::map_to_capture(root, target).status, foreground::mapping_status_e::unsupported_orientation);
       EXPECT_FALSE(evaluate().foreground_target_usable);
@@ -657,8 +707,7 @@ namespace {
     target.width++;
     // Failed GetDesc must remain invalid even if COM wrote apparently valid output coordinates.
     const foreground::mapping_result_t failed_target {.status = foreground::mapping_status_e::invalid_capture_target};
-    const auto rejected = policy::evaluate(&root, false, failed_target, &browser, 4u,
-      {0, 0, 1920, 1920}, 1920, 1920, content, now);
+    const auto rejected = policy::evaluate(&root, false, failed_target, &browser, 4u, {0, 0, 1920, 1920}, 1920, 1920, content, now);
     EXPECT_FALSE(rejected.foreground_target_usable);
     EXPECT_FALSE(rejected.mapping_attempted);
     EXPECT_EQ(rejected.browser_key.kind, context::kind_e::disabled);

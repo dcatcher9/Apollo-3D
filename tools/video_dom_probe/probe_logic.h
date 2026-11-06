@@ -226,6 +226,10 @@ namespace video_dom_probe {
     return rect_valid(video) && client_area > 0u && rect_area(video) >= client_area / 20u;
   }
 
+  [[nodiscard]] inline bool client_fills_monitor(const rect_t &client, const rect_t &monitor) noexcept {
+    return rect_valid(client) && rect_valid(monitor) && client == monitor;
+  }
+
   // Chromium occasionally reports a fullscreen IA2 rectangle one physical pixel
   // beyond the Win32 client rectangle. Accept only that bounded rounding error and
   // always return geometry clipped into the trusted outer coordinate space.
@@ -480,30 +484,29 @@ namespace video_dom_probe {
     return {.index = largest_index, .reason = eligible.size() == 1u ? selection_reason_e::single : selection_reason_e::largest};
   }
 
-  // A true-fullscreen semantic authority is independent of windowed ROI selection. An available
-  // video may overscan the browser client and may belong to a document whose rectangle is clipped;
-  // neither condition makes the captured client any less fully covered. Equal fullscreen clones
-  // are therefore not ambiguous. Pick a stable IA2 identity so enumeration-order churn does not
-  // change the retained cache object or its semantic fingerprint.
+  // Prefer the independently verified visible viewport for an ordinary browser client. Only a
+  // currently verified full-monitor client preserves relaxed fullscreen priority, so harmless
+  // element overscan/document clipping cannot tighten its established refresh requirements.
+  // The relaxed fallback can still accept full-cover clones or clipped document geometry. Pick
+  // a stable IA2 identity there so traversal-order churn does not change the retained object.
   [[nodiscard]] inline selection_t select_authority_candidate(
     std::span<const video_candidate_t> candidates,
     const rect_t &client_rect,
-    long coordinate_tolerance = 1
+    long coordinate_tolerance = 1,
+    bool verified_full_monitor_client = false
   ) {
+    const auto windowed = select_candidate(candidates, client_rect);
+    if (windowed.index && !verified_full_monitor_client) {
+      return windowed;
+    }
     std::optional<std::size_t> fullscreen_index;
     if (rect_valid(client_rect) && coordinate_tolerance >= 0) {
       for (std::size_t index = 0; index < candidates.size(); ++index) {
         const auto &candidate = candidates[index];
-        if (!candidate.fullscreen_available ||
-            !rect_contains_with_tolerance(
-              candidate.element_rect,
-              client_rect,
-              coordinate_tolerance
-            )) {
+        if (!candidate.fullscreen_available || !rect_contains_with_tolerance(candidate.element_rect, client_rect, coordinate_tolerance)) {
           continue;
         }
-        if (!fullscreen_index ||
-            candidate.unique_id < candidates[*fullscreen_index].unique_id) {
+        if (!fullscreen_index || candidate.unique_id < candidates[*fullscreen_index].unique_id) {
           fullscreen_index = index;
         }
       }
@@ -514,7 +517,7 @@ namespace video_dom_probe {
         .reason = selection_reason_e::fullscreen,
       };
     }
-    return select_candidate(candidates, client_rect);
+    return windowed;
   }
 
   [[nodiscard]] inline std::optional<rect_t> selection_authority_rect(
