@@ -177,6 +177,17 @@ real topology change. Qualify a monitor/emitter profile with the optimized devel
 5. Verify Return to 2D and the emergency shortcut, then verify USB loss restores the desktop.
    Check remote-stream priority and local restart separately using the shared display lifecycle.
 
+For development calibration, launch the optimized monitor host with
+`SUNSHINE_LOCAL_MONITOR_TEST_PATTERN=1`, then use the usual Start/Stop controls. The physical
+output shows a red **L** for the logical left image and a blue **R** for the logical right image,
+with large white labels. Check one lens at a time: the left lens should show L and the right
+lens R. Compare the top, middle and bottom of the panel for the other eye's colour or label.
+The fixture keeps the production capture, stereo-packet ownership, timing checks and USB
+commands active, including unsignalled acquisition and quiet recovery. It identifies eye
+assignment and crosstalk; judge brightness with normal content. The environment flag is sampled
+once per presenter initialization and only affects shutter monitors. Stop the session and
+launch the usual host without the flag to return to normal content.
+
 Follow the machine's local development-launch instructions. Keep the installed and development
 hosts mutually exclusive. A profile remains unqualified until these live observations are made;
 mock API, offscreen GPU, and fake topology results cannot substitute for them.

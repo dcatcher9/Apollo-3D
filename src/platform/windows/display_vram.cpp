@@ -8777,6 +8777,12 @@ namespace platf::dxgi {
 #endif
 
   local_presenter_result_e run_local_presenter(const local_presenter_config_t &config, std::stop_token stop_token) {
+    // Internal optical-calibration aid, sampled once for this presenter initialization.
+    // It replaces only the physical shutter image; packet ownership and all timing gates stay active.
+    std::array<wchar_t, 2> test_pattern_flag {};
+    const bool shutter_test_pattern = config.frame_sequential &&
+                                      GetEnvironmentVariableW(L"SUNSHINE_LOCAL_MONITOR_TEST_PATTERN", test_pattern_flag.data(), static_cast<DWORD>(test_pattern_flag.size())) == 1 &&
+                                      test_pattern_flag[0] == L'1';
     auto read_target_rect = [&]() {
       if (!config.live_target) {
         return config.target_rect;
@@ -9212,6 +9218,54 @@ namespace platf::dxgi {
       return local_presenter_result_e::error;
     }
 
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext1> test_pattern_context;
+
+    struct test_pattern_glyph_t {
+      std::array<D3D11_RECT, 35> rectangles {};
+      UINT count = 0;
+    };
+
+    std::array<test_pattern_glyph_t, 2> test_pattern_glyphs {};
+    if (shutter_test_pattern) {
+      D3D11_FEATURE_DATA_D3D11_OPTIONS options {};
+      status = shutter_device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options));
+      if (SUCCEEDED(status) && options.ClearView) {
+        status = shutter_context.As(&test_pattern_context);
+      }
+      if (FAILED(status) || !options.ClearView || !test_pattern_context) {
+        BOOST_LOG(error) << "Local shutter calibration pattern requires ClearView support: "sv << util::log_hex(status);
+        return local_presenter_result_e::error;
+      }
+      // Five columns by seven rows. Precompute the large centered L/R glyphs once;
+      // each eye needs one background clear and one bounded batch of white rectangles.
+      constexpr std::array<std::array<std::uint8_t, 7>, 2> glyph_rows {{
+        {{0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111}},
+        {{0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001}},
+      }};
+      const LONG cell = std::min(output_width / 9, output_height / 11);
+      if (cell < 1) {
+        BOOST_LOG(error) << "Local shutter calibration pattern received a raster too small for its eye labels."sv;
+        return local_presenter_result_e::error;
+      }
+      const LONG glyph_left = (output_width - 5 * cell) / 2;
+      const LONG glyph_top = (output_height - 7 * cell) / 2;
+      for (std::size_t eye = 0; eye < glyph_rows.size(); ++eye) {
+        auto &glyph = test_pattern_glyphs[eye];
+        for (unsigned row = 0; row < 7; ++row) {
+          for (unsigned column = 0; column < 5; ++column) {
+            if (glyph_rows[eye][row] & (1u << (4u - column))) {
+              const LONG left = glyph_left + static_cast<LONG>(column) * cell;
+              const LONG top = glyph_top + static_cast<LONG>(row) * cell;
+              glyph.rectangles[glyph.count++] = {left, top, left + cell, top + cell};
+            }
+          }
+        }
+      }
+      BOOST_LOG(info) << "Local shutter calibration pattern enabled: left=red L, right=blue R; RGB values are 0/1, "sv
+                         "production packet ownership, clock and USB emitter remain active; emitter_flip_eyes="sv
+                      << config.monitor_config.flip_eyes << '.';
+    }
+
     local_shutter_frame_ring_t shutter_frames;
     std::atomic<bool> shutter_failed = false;
     if (config.frame_sequential && !shutter_frames.init(
@@ -9492,9 +9546,18 @@ namespace platf::dxgi {
             break;
           }
           const bool left_eye = eye_clock.left_eye();
-          const UINT left = left_eye ? 0 : static_cast<UINT>(output_width);
-          const D3D11_BOX eye_box {left, 0, 0, left + static_cast<UINT>(output_width), static_cast<UINT>(output_height), 1};
-          shutter_context->CopySubresourceRegion(backbuffer.Get(), 0, 0, 0, 0, pair, 0, &eye_box);
+          if (shutter_test_pattern) {
+            constexpr FLOAT red[4] {1.0f, 0.0f, 0.0f, 1.0f};
+            constexpr FLOAT blue[4] {0.0f, 0.0f, 1.0f, 1.0f};
+            constexpr FLOAT white[4] {1.0f, 1.0f, 1.0f, 1.0f};
+            const auto &glyph = test_pattern_glyphs[left_eye ? 0 : 1];
+            test_pattern_context->ClearView(backbuffer_rtv.Get(), left_eye ? red : blue, nullptr, 0);
+            test_pattern_context->ClearView(backbuffer_rtv.Get(), white, glyph.rectangles.data(), glyph.count);
+          } else {
+            const UINT left = left_eye ? 0 : static_cast<UINT>(output_width);
+            const D3D11_BOX eye_box {left, 0, 0, left + static_cast<UINT>(output_width), static_cast<UINT>(output_height), 1};
+            shutter_context->CopySubresourceRegion(backbuffer.Get(), 0, 0, 0, 0, pair, 0, &eye_box);
+          }
           first_feedback.reset();
           feedback_disjoint = false;
           flush_result = S_FALSE;
