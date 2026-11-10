@@ -2448,6 +2448,42 @@ namespace {
     }
   }
 
+  TEST(HostSbsOcrGpuTest, AssistedEntryKeepsItsEpisodeForTheFirstTrustedObservation) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> strong(ocr_pixels, 0.0f), glyph(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+    paint_rectangle(strong, 240u, 100u, 720u, 115u);
+    paint_envelope_line(glyph, 390u, 95, 180u, 20, 8, 0);
+    ASSERT_TRUE(learn_three_layout_entries(fixture, strong));
+    const auto trusted = classifier_history(fixture.record());
+    ASSERT_TRUE(observe_classifier(fixture, empty, 6u, 1'500'000u));
+    // The cue enters through the prior alone. It cannot teach, and it must not spend the
+    // independent entry that its own later trusted observation is entitled to.
+    ASSERT_TRUE(observe_classifier(fixture, glyph, 7u, 1'600'000u));
+    ASSERT_EQ(fixture.record()[4u], 1u);
+    const auto assisted = classifier_history(fixture.record());
+    EXPECT_EQ(assisted[3u], trusted[3u]);
+    EXPECT_EQ(assisted[23u], 0u);
+    EXPECT_EQ(assisted[24u], 1u);
+    EXPECT_EQ(assisted[25u], 1'500'000u);
+    EXPECT_EQ(assisted[26u], 0u);
+    for (std::size_t word = 27u; word < trusted.size(); ++word)
+      EXPECT_EQ(assisted[word], trusted[word]);
+    ASSERT_TRUE(observe_classifier(fixture, strong, 8u, 1'700'000u));
+    const auto taught = classifier_history(fixture.record());
+    EXPECT_EQ(taught[3u], trusted[3u] + 1u);
+    EXPECT_EQ(taught[23u], 1u);
+    EXPECT_EQ(taught[24u], 0u);
+    EXPECT_EQ(taught[25u], 0u);
+    // The same cue remains one episode: later static frames add nothing.
+    ASSERT_TRUE(observe_classifier(fixture, strong, 9u, 1'800'000u));
+    const auto held = classifier_history(fixture.record());
+    EXPECT_EQ(held[3u], taught[3u]);
+    for (std::size_t word = 32u; word < taught.size(); ++word)
+      EXPECT_EQ(held[word], taught[word]);
+  }
+
   TEST(HostSbsOcrGpuTest, QualifiedPriorKeepsUnknownNarrowGlyphsSeparateFromOrientationVeto) {
     ocr_warp_fixture_t fixture;
     std::string error;

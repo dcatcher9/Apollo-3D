@@ -130,7 +130,7 @@ inline constexpr std::array<cache::shader_spec, 2u> selector_specs{{
   cache::shader_spec{"host_sbs_selected_matte_cs.hlsl","prepare_main","cs_5_0"},
   cache::shader_spec{"host_sbs_selected_matte_cs.hlsl","select_main","cs_5_0"},
 }};
-inline constexpr std::string_view selector_closure="a79bf728bc9f25c73bd745b4783664047bde3435d5f342d1b6ba21848ec40f63";
+inline constexpr std::string_view selector_closure="3bb92b4c79c5317ff105e05365a673c5be1d4443d641640aa7b1ba8d27253dec";
 inline std::filesystem::path selector_root(const std::filesystem::path&p){return p/"selector";}
 
 // The mandatory roles share one ROI implementation. Each optional role owns a fixed,

@@ -71,7 +71,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 130/tag `0x808647CD`, canonical SHA-256
-`422cc8622990d4b162c1442af76d89dac3e6f74867f98716d4508dd845ca5691`. It binds the
+`0e0a0de27b710cad9eb64e1462b9c136428fd9db1e686def2bea61c265fb55d0`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -82,7 +82,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 29 | `5b1fed0051487dd4aedebb84b2d6558e4cd3a281152ecb40a7205da54aae30c8` |
+| `parallax_v2_producer` | 29 | `6bd69347bc5a3776ac83336a783f62c3987765de713cdc578305a85a9314baeb` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `50c712473211a3b66638fb0bcf89938cb46f2501126bee79cca8e352243ca53a` |
 | `near_identical_detector` | 4 | `9272bf6f9d293e556dbc38a9d48a74d5c70090af390836e150d0d6bd8c46a670` |
 | `gpu_trace` | 1 | `2c442b910b839fe7daf0c073d157c36258cd5b2f264c9d901187d83752f2b7c1` |
@@ -552,7 +552,10 @@ the prior only on their first trusted entry or after an authoritative blank inte
 100 ms of source time. Each learning episode decays bin votes by one, adds four to its trusted
 positions, and saturates at 255. Assistance requires eight votes and a current height between
 one half and twice the trusted height. Static frames and duplicate observations add no votes;
-assisted candidates do not teach. Direct cue replacements without a blank may undercount learning
+assisted candidates do not teach. An eligible entry that publishes no trusted pair, for example a
+cue admitted only through the prior, keeps its pending episode and blank clock; the first trusted
+observation of that same cue then teaches once and closes the episode. An entry that was not
+eligible still closes it. Direct cue replacements without a blank may undercount learning
 conservatively. The 100 ms rule controls learning only and adds no protection delay.
 The episode boundary currently uses an empty complete classified result, rather than a separate
 content-change history for each line. A retained false scene-text pair can therefore prevent
