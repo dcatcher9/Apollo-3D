@@ -1073,7 +1073,8 @@ void FinishClassifierHistory(uint final_total) {
             bool separated_episode = ClassifierHistory[23u] == 0u &&
                 ClassifierHistory[24u] != 0u && LearningGapElapsed(source_clock_us,
                     uint2(ClassifierHistory[25u], ClassifierHistory[26u]));
-            if (TrustedCurrentBins != 0u && (first_episode || separated_episode)) {
+            bool can_teach = first_episode || separated_episode;
+            if (TrustedCurrentBins != 0u && can_teach) {
                 [unroll]
                 for (uint bin = 0u; bin < V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT; ++bin) {
                     uint vote = ClassifierHistory[32u + bin];
@@ -1091,10 +1092,14 @@ void FinishClassifierHistory(uint final_total) {
                 ClassifierHistory[28u] = TrustedCurrentSpan.x;
                 ClassifierHistory[29u] = TrustedCurrentSpan.y;
             }
-            ClassifierHistory[23u] = 1u;
-            ClassifierHistory[24u] = 0u;
-            ClassifierHistory[25u] = 0u;
-            ClassifierHistory[26u] = 0u;
+            // An eligible entry without trusted pairs (prior-assisted or attached text only)
+            // keeps its pending episode, so the cue's first trusted observation still teaches.
+            if (TrustedCurrentBins != 0u || !can_teach) {
+                ClassifierHistory[23u] = 1u;
+                ClassifierHistory[24u] = 0u;
+                ClassifierHistory[25u] = 0u;
+                ClassifierHistory[26u] = 0u;
+            }
         }
     }
     [loop]
