@@ -71,7 +71,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 130/tag `0x808647CD`, canonical SHA-256
-`141e21433c050cfa6a347d191b9c4d8b143b5569b807815d17e6ff7ab04cb299`. It binds the
+`d8dd9abbb11f27fdc22cbfaae3cc6a756421ec1bcf68adaf9be5e238fc6f6de3`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -82,7 +82,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 29 | `aed3fcfa72e402aa66421dce0b3dc6a8f0c6e8999a9a01d2a2e905e09ecd8508` |
+| `parallax_v2_producer` | 29 | `5a89c64ad9489d9208fb86d0b48d1f27187d4c9369c7db97bbc795fa79d9b84d` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `50c712473211a3b66638fb0bcf89938cb46f2501126bee79cca8e352243ca53a` |
 | `near_identical_detector` | 4 | `9272bf6f9d293e556dbc38a9d48a74d5c70090af390836e150d0d6bd8c46a670` |
 | `gpu_trace` | 1 | `2c442b910b839fe7daf0c073d157c36258cd5b2f264c9d901187d83752f2b7c1` |
@@ -563,7 +563,9 @@ horizontal members are published and every other member of the group is dropped.
 or weak blob inside the word gap therefore cannot remove a centered caption, and gains no
 admission itself. A group made only of horizontal members has identical unions, so the
 off-center scene pairs the two-percent rule was tightened against stay rejected.
-This position prior does not establish glyph membership or pixel stability. Full-width ribbons
+This position prior does not establish glyph membership or pixel stability. A published ribbon
+never teaches the prior or the single trusted height, because its core is a whole bottom run
+rather than a caption line. Full-width ribbons
 retain their separate extent policy and are exempt from this ordinary-group span check; their existing
 orientation and centered-line checks still apply. This adds no frame wait or temporal evidence.
 The prior-only span rule remains explicit and unchanged. The separate unknown short-glyph path

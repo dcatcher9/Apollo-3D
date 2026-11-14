@@ -526,7 +526,11 @@ void PublishCandidate(
         OCR8_FINAL_OFFSET, pair_index, expanded_box, score,
         kind_flags, stats.island_count, stats.structural_gap_count);
     uint bin = CandidatePriorBin(stats);
-    RetainedTrusted[pair_index] = independently_strong ?
+    // A ribbon's tight core is its whole broad bottom run, with its own extent policy and no
+    // center-span requirement. Its row and height are not an ordinary caption line, so it is
+    // published but never teaches the position prior or the single trusted height.
+    RetainedTrusted[pair_index] =
+        independently_strong && (kind_flags & V2_OCR_BOX_FLAG_RIBBON) == 0u ?
         uint4(1u << bin, stats.active_pixels, stats.tight_top, stats.tight_bottom) :
         uint4(0u, 0u, 0u, 0u);
 }

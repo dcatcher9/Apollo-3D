@@ -3790,6 +3790,12 @@ namespace {
       static_cast<std::uint32_t>(islands.size())
     );
     EXPECT_EQ(record[v2::subtitle_ocr_final_box_offset + 7u], 4u);
+    // A published ribbon is not an ordinary caption line: it teaches neither the position
+    // prior nor the trusted height.
+    const auto ribbon_history = classifier_history(record);
+    EXPECT_EQ(ribbon_history[3u], 0u);
+    EXPECT_EQ(ribbon_history[27u], 0u);
+    for (std::size_t word = 32u; word < ribbon_history.size(); ++word) EXPECT_EQ(ribbon_history[word], 0u);
 
     // The exact classifier boundary is SAFE_ROW_BOTTOM(155) - tolerance(2). An otherwise
     // identical segmented/wide run ending at detector row 153 is a ribbon; row 152 is ordinary.

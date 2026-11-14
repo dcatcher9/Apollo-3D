@@ -1265,3 +1265,20 @@ qualification are byte-identical to their controls. The authored clips contain n
 line, so they show no regression and no gain. A short scene mark that is centred within two
 percent and one row flat can now be independent evidence; the centring and span rules are the
 remaining guard.
+
+Fix 9, orientation-fit foreign pixels, is confirmed and not changed. The second classification
+runs after ordinary merging, so `ActivePixelsInRow` does count every active pixel in the merged
+bounding rectangle, including pieces too small to queue and pieces whose class kept them out of
+the merge. Those pixels are confined to the union's own rows, and a least-squares fit gives
+central bins little leverage. Several authored attempts to flip a merged line's class with
+foreign pixels stayed within the two-degree bound, so there is no failing case to fix against.
+Restricting the count to members needs per-member rectangles in a single-lane, already
+quadratic path (HSR-15). It stays open as a low-priority accuracy item.
+
+Fix 10, prior learning, is kept: ribbons no longer teach. A ribbon's core is its whole broad
+bottom run, it is exempt from the centre-span rule, and its height is not a caption height, yet
+an independently horizontal ribbon set the position votes and the single trusted height.
+`BottomRibbonTopologyIsPublishedWithPairedCappedCover` now also requires an untouched prior
+after a published ribbon; that assertion fails on the previous shader. The ribbon is still
+published with its paired cover. The OCR suite passes 68 tests, and the four subtitle clips and
+the selected qualification are byte-identical to their controls.
