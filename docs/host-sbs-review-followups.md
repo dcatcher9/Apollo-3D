@@ -1359,5 +1359,5 @@ and a client-requested Dump 3D during subtitled video playback was written compl
 (`dump_20261114_093139_372_18e7f9ad46a62f28_0`, frame 4035, 54 files, no rejection or warning
 in the host log). The OCR record carries the same frame, the conditioned Final field differs
 from Base on 37,471 field samples, and that count equals the non-zero Gaussian weight samples,
-so the diagnostic conditioner ran for the dumped observation under the live policy. Subjective
-headset quality was not assessed here.
+so the diagnostic conditioner ran for the dumped observation under the live policy. The owner
+watched the same session in the headset and reported that subtitles looked fine.
