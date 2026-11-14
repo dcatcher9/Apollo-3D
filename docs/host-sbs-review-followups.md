@@ -1319,7 +1319,33 @@ Items 11 to 14 and 16 are not attempted in this series:
 Closing state of the series: both generators pass `--check`, evaluator discovery passes 979
 tests with 13 skips, and the OCR, selected-matte, current-outline, contour, locator, cohort,
 matte-guard, trajectory, topology and seeded-component GPU suites pass 357 tests with 38
-opt-in skips. The full native suite was not run at the owner's request. Four
-`HostSbsSubtitleInnerColourGpuTest` cases failed in one interrupted run with the private
-shader-root environment set; whether they fail on the unmodified tree was not established.
-No live host or headset run was made.
+opt-in skips.
+
+The full native suite was then run once at the series head with the private shader-root
+environment set: 2,279 tests pass, 145 skip and 118 fail. None of the 118 is caused by this
+series:
+
+- 71 `HostSbsCurrentOutlineSupportClosureGpuTest`, 9 `HostSbsSubtitleInnerColourGpuTest`, 3
+  `HostSbsInnerColourHelperGpuTest` and 7 `HostSbsInnerColourRecordedHelperGpuTest` failures
+  are environment conflicts. These suites share the same root and pin variables but hash
+  different entry-point lists, and the inner-colour suites expect the default shader
+  directory rather than the frozen `current_outline/colour` copy. Each suite passes when run
+  alone with the roots and pins it expects (support closure with the runtime closure pins;
+  the three inner-colour suites with the default roots, 9 and 10 tests).
+- `HostSbsCurrentBlackEnclosureGpuTest` passes 20 tests once its pin is computed over its own
+  fifteen entry points instead of the runtime closure.
+- 11 `HostSbsCurrentBlackRingGpuTest` failures need `host_sbs_current_black_ring_cs.hlsl`, and
+  11 `HostSbsInnerColourGlobalValidationGpuTest` failures need the external `original6750`
+  source root. Neither is in this repository, so these suites cannot run here.
+- Six source-text tests are stale and search for strings that `master` does not contain
+  either: `DirectxShaderSourceTest.SubtitleResolveBindsExactOcrRecordAndConditionParams`,
+  two `OfflineSbsWorker` cases, two `ParallaxV2ContractTest` cases (they still expect contract
+  schema 121 and dump schema 50) and
+  `SbsDebugDumpAsyncTest.Schema49PackagesCompleteContourTupleAndNoScalarPreviews`. They are
+  left for a separate test-maintenance change.
+
+`V2_SUBTITLE_CONTOUR_HISTORY_JITTER_RADIUS_SOURCE_PIXELS` is no longer read by any shader
+after fix 2. It is left in the contract deliberately: removing a contract constant regenerates
+the include copy inside every frozen runtime root and moves all of their closure pins for no
+behavioural gain. No live host or headset run was made; a Dump 3D capture under fix 1's live
+policy is the remaining unverified path.
