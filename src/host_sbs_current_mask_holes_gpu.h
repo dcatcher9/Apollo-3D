@@ -10,6 +10,7 @@
   #include <limits>
   #include <string>
   #include <utility>
+  #include <vector>
 
 namespace models::host_sbs_current_mask_holes_gpu {
   using Microsoft::WRL::ComPtr;
@@ -142,7 +143,12 @@ namespace models::host_sbs_current_mask_holes_gpu {
       texture.Format = DXGI_FORMAT_R32_UINT;
       texture.Usage = D3D11_USAGE_DEFAULT;
       texture.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-      if (FAILED(device->CreateTexture2D(&texture, nullptr, &next.proof_.resource)) ||
+      // Diagnostic views can read these planes before the first authenticated clear, so they
+      // start as literal zero instead of undefined driver memory.
+      const std::vector<UINT> zero(static_cast<std::size_t>(width) * height + 32u, 0u);
+      const D3D11_SUBRESOURCE_DATA zero_texture {zero.data(), width * 4u, 0u};
+      const D3D11_SUBRESOURCE_DATA zero_buffer {zero.data(), 0u, 0u};
+      if (FAILED(device->CreateTexture2D(&texture, &zero_texture, &next.proof_.resource)) ||
           FAILED(device->CreateShaderResourceView(next.proof_.resource.Get(), nullptr, &next.proof_.srv)) ||
           FAILED(device->CreateUnorderedAccessView(next.proof_.resource.Get(), nullptr, &next.proof_.uav))) {
         error = "Could not allocate optional current-mask proof.";
@@ -155,7 +161,7 @@ namespace models::host_sbs_current_mask_holes_gpu {
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
         desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
         desc.StructureByteStride = 4u;
-        return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &target.resource)) &&
+        return SUCCEEDED(device->CreateBuffer(&desc, &zero_buffer, &target.resource)) &&
                SUCCEEDED(device->CreateShaderResourceView(target.resource.Get(), nullptr, &target.srv)) &&
                SUCCEEDED(device->CreateUnorderedAccessView(target.resource.Get(), nullptr, &target.uav));
       };
@@ -173,7 +179,7 @@ namespace models::host_sbs_current_mask_holes_gpu {
       uav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
       uav.Buffer.NumElements = 32u;
       uav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
-      if (FAILED(device->CreateBuffer(&args, nullptr, &next.args_.resource)) ||
+      if (FAILED(device->CreateBuffer(&args, &zero_buffer, &next.args_.resource)) ||
           FAILED(device->CreateUnorderedAccessView(next.args_.resource.Get(), &uav, &next.args_.uav))) {
         error = "Could not allocate optional current-mask indirect arguments.";
         return false;

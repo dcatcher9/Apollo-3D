@@ -288,6 +288,9 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       // integer/SRGB view to the private Texture2D<float4> register. Null is format fallback,
       // not an encoded-SDR assertion. The shader must reject support before any origin load.
       program_t safe_program = *program;
+      // One attempt per allocation: ensure() replaces this owner, and with it this latch, on
+      // every device or native-shape change, so a failed optional allocation is retried exactly
+      // when the storage it competes with is rebuilt and never once per observation.
       if (safe_program.trusted_inner && !trusted_ready_ && !trusted_allocation_attempted_) {
         trusted_allocation_attempted_ = true;
         try { trusted_ready_ = prepare_trusted_inner(); }
