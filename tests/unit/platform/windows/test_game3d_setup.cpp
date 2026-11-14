@@ -91,6 +91,23 @@ namespace {
     EXPECT_FALSE(fs::exists(choices));
   }
 
+  TEST_F(Game3DSetup, ForeignProxyIsNeitherOfferedNorRetriedAfterAnEarlierConfirmation) {
+    game3d::detail::setup_decisions decisions {choices};
+    // Confirmed while the folder was fresh; another injector's proxy arrived afterwards.
+    ASSERT_TRUE(decisions.record(game, game3d::file_identity(game), decision::install));
+    write(game.parent_path() / "dxgi.dll", "an upscaler mod's proxy");
+    const auto before = game_files();
+    for (int launch = 0; launch < 2; ++launch) {
+      const auto outcome = apply(decisions);
+      EXPECT_EQ(outcome.installation.state, state::unavailable);
+      EXPECT_EQ(outcome.state, "");
+      EXPECT_NE(outcome.installation.detail.find("dxgi.dll"), std::string::npos) << outcome.installation.detail;
+    }
+    // No installer ran and nothing was written or replaced.
+    EXPECT_TRUE(progress.empty());
+    EXPECT_EQ(game_files(), before);
+  }
+
   TEST_F(Game3DSetup, DeclinedExecutableIsNeverWrittenEvenWhereReShadeExists) {
     game3d::detail::setup_decisions decisions {choices};
     ASSERT_TRUE(decisions.record(game, game3d::file_identity(game), decision::never));

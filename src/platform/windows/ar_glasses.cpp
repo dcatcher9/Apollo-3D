@@ -2582,7 +2582,7 @@ namespace ar_glasses {
         const bool geometry_ready = VDISPLAY::getDeviceSettings(display_name.c_str(), mode) &&
                                     mode.dmPelsWidth == source_width &&
                                     mode.dmPelsHeight == source_height;
-        const auto hdr_state = VDISPLAY::queryDisplayHDRByName(display_name.c_str());
+        const auto hdr_state = VDISPLAY::queryDisplayHDR(identity.AdapterLuid, identity.TargetId);
         const bool hdr_matches = hdr_state && *hdr_state == expected_hdr;
         if (geometry_ready && hdr_matches) {
           if (++stable_observations >= 3) {
@@ -2616,8 +2616,8 @@ namespace ar_glasses {
         }
         BOOST_LOG(warning) << "Local AR virtual display did not settle before HDR configuration."sv;
       }
-      if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), false)) {
-        const auto current_hdr = VDISPLAY::queryDisplayHDRByName(display_name.c_str());
+      if (!VDISPLAY::setDisplayHDR(identity.AdapterLuid, identity.TargetId, false)) {
+        const auto current_hdr = VDISPLAY::queryDisplayHDR(identity.AdapterLuid, identity.TargetId);
         if (!current_hdr || *current_hdr) {
           BOOST_LOG(error) << "Could not authoritatively reset the local AR virtual display to SDR before HDR setup."sv;
           return false;
@@ -2634,7 +2634,7 @@ namespace ar_glasses {
         return true;
       }
 
-      if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), true)) {
+      if (!VDISPLAY::setDisplayHDR(identity.AdapterLuid, identity.TargetId, true)) {
         BOOST_LOG(warning) << "Windows rejected HDR for the local AR virtual display; using color-managed SDR presentation."sv;
         return true;
       }
@@ -2643,7 +2643,7 @@ namespace ar_glasses {
           return false;
         }
         BOOST_LOG(warning) << "Local AR virtual display did not reach a stable HDR state; using color-managed SDR presentation."sv;
-        if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), false) || !wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
+        if (!VDISPLAY::setDisplayHDR(identity.AdapterLuid, identity.TargetId, false) || !wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
           BOOST_LOG(error) << "Local AR virtual display could not recover to SDR after HDR setup failed."sv;
           return false;
         }
@@ -3189,7 +3189,19 @@ namespace ar_glasses {
           // actually SDR, that mismatch makes the presenter reject every target generation. SDR is
           // the safe common contract and remains color-managed when the sink later proves to be HDR.
           const bool desired_virtual_hdr = target.hdr.known && target.hdr.active;
-          const auto current_virtual_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
+          // Address the owned source by its stable adapter/target identity. A GDI name such as
+          // DISPLAYn can be renumbered or reused by another display during a mode switch.
+          const auto query_source_hdr = [&]() -> std::optional<bool> {
+            const auto binding = virtual_display_binding();
+            return binding.identity ? VDISPLAY::queryDisplayHDR(binding.identity->AdapterLuid, binding.identity->TargetId) :
+                                      VDISPLAY::queryDisplayHDRByName(binding.display_name.c_str());
+          };
+          const auto set_source_hdr = [&](bool enabled) {
+            const auto binding = virtual_display_binding();
+            return binding.identity ? VDISPLAY::setDisplayHDR(binding.identity->AdapterLuid, binding.identity->TargetId, enabled) :
+                                      VDISPLAY::setDisplayHDRByName(binding.display_name.c_str(), enabled);
+          };
+          const auto current_virtual_hdr = query_source_hdr();
           if (!current_virtual_hdr) {
             return false;
           }
@@ -3199,7 +3211,7 @@ namespace ar_glasses {
               if (!refresh_virtual_display_reference()) {
                 continue;
               }
-              const auto observed_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
+              const auto observed_hdr = query_source_hdr();
               if (observed_hdr && *observed_hdr == expected_hdr) {
                 return true;
               }
@@ -3209,9 +3221,7 @@ namespace ar_glasses {
 
           bool configured_virtual_hdr = *current_virtual_hdr;
           if (configured_virtual_hdr != desired_virtual_hdr) {
-            const bool setting_accepted = VDISPLAY::setDisplayHDRByName(
-              virtual_display_binding().display_name.c_str(),
-              desired_virtual_hdr
+            const bool setting_accepted = set_source_hdr(desired_virtual_hdr
             );
             if (setting_accepted && wait_for_source_color(desired_virtual_hdr)) {
               configured_virtual_hdr = desired_virtual_hdr;
@@ -3220,19 +3230,15 @@ namespace ar_glasses {
               // swapchain when Windows/SudoVDA rejects source HDR. Never remove the desktop merely
               // because its virtual output cannot activate Advanced Color in this mode.
               BOOST_LOG(warning) << "Persistent local AR source HDR was unavailable after the mode switch; using color-managed SDR presentation."sv;
-              const auto fallback_state = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
+              const auto fallback_state = query_source_hdr();
               bool fallback_ready = fallback_state && !*fallback_state;
               if (!fallback_ready) {
-                const bool fallback_accepted = VDISPLAY::setDisplayHDRByName(
-                  virtual_display_binding().display_name.c_str(),
-                  false
+                const bool fallback_accepted = set_source_hdr(false
                 );
                 if (fallback_accepted) {
                   fallback_ready = wait_for_source_color(false);
                 } else {
-                  const auto observed_fallback = VDISPLAY::queryDisplayHDRByName(
-                    virtual_display_binding().display_name.c_str()
-                  );
+                  const auto observed_fallback = query_source_hdr();
                   fallback_ready = observed_fallback && !*observed_fallback;
                 }
               }
@@ -3254,7 +3260,7 @@ namespace ar_glasses {
             BOOST_LOG(warning) << "The new AR physical mode could not be safely re-isolated; preserving the virtual desktop for retry."sv;
             return false;
           }
-          const auto final_virtual_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
+          const auto final_virtual_hdr = query_source_hdr();
           if (!final_virtual_hdr || *final_virtual_hdr != virtual_hdr_active_) {
             BOOST_LOG(warning) << "The persistent local AR source color state changed during final isolation; retaining the desktop for a coherent retry."sv;
             return false;

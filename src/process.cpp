@@ -1865,8 +1865,15 @@ namespace proc {
       return _display_mode_change_test_hook(name, width, height, fps_millihz, probe);
     }
   #endif
-    return probe ? VDISPLAY::testDisplaySettings(name, width, height, fps_millihz) :
-                   VDISPLAY::changeDisplaySettings(name, width, height, fps_millihz, false);
+    if (probe) {
+      return VDISPLAY::testDisplaySettings(name, width, height, fps_millihz);
+    }
+    // The mode set queries the active topology and re-applies it. Hold the display transaction
+    // so the display-change worker's reconcile cannot interleave with that pair, as local AR
+    // does through run_local_exclusive_update().
+    return platf::primary_display::run_serialized_mode_change([&]() -> long {
+      return VDISPLAY::changeDisplaySettings(name, width, height, fps_millihz, false);
+    });
   }
 
   bool proc_t::display_settings_unavailable() {

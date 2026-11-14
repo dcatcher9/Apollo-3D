@@ -34,6 +34,13 @@ namespace platf::primary_display {
    */
   bool run_local_exclusive_update(std::wstring_view source_device_path, const std::function<bool()> &update);
 
+  /** Serialize a remote session's mode set with display-notification reconciliation, so the
+   * reconcile worker cannot apply a topology between this change's query and its apply (or the
+   * reverse). Unlike the local update above it neither promotes nor verifies: the caller settles
+   * and rolls back itself. The callback must not call this namespace.
+   */
+  long run_serialized_mode_change(const std::function<long()> &change);
+
   /** Bind a prepared baseline to the exact published AddVirtualDisplay identity.
    * Call before mode changes. Idempotent for an already-bound identity or no pending journal.
    */

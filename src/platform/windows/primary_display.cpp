@@ -3374,6 +3374,11 @@ namespace platf::primary_display {
     }
   }
 
+  long run_serialized_mode_change(const std::function<long()> &change) {
+    std::lock_guard lock(transaction_mutex);
+    return change();
+  }
+
   bool bind_pending(std::wstring_view device_path) {
     std::lock_guard lock(transaction_mutex);
     try {

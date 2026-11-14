@@ -626,6 +626,16 @@ namespace platf::game3d {
           case anti_cheat_e::absent:
             break;
         }
+        // The bundled runtime installer never replaces an existing proxy DLL or ReShade.ini
+        // (Assert-FreshTarget in tools/reshade/install-runtime.ps1; keep the names in step).
+        // Offering a setup that it will refuse would retry and fail on every launch, so say
+        // why here instead: another injector such as an upscaler mod owns the folder.
+        for (const auto *name : {L"ReShade.ini", L"dxgi.dll", L"d3d9.dll", L"d3d10.dll", L"d3d10_1.dll", L"d3d11.dll", L"d3d12.dll", L"opengl32.dll", L"d3d8.dll", L"dinput8.dll", L"version.dll", L"winmm.dll", L"dsound.dll"}) {
+          const auto existing = status.executable.parent_path() / name;
+          if (path_exists(existing)) {
+            return unavailable(std::move(status), "This folder already contains " + utf8(existing.filename()) + ", which is not a ReShade runtime Sunshine 3D recognizes. Existing files are never replaced, so automatic setup is not offered; install ReShade with full add-on support manually for this game.");
+          }
+        }
         status.state = installation_state_e::missing_reshade;
         status.detail = "Install ReShade with full add-on support for this game's executable, then install the Sunshine 3D add-on.";
         return status;

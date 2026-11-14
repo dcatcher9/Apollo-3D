@@ -4903,6 +4903,26 @@ namespace offline_sbs {
                 "offline worker tree identity pin is missing before worker launch" :
                 "offline managed path attestation failed before worker launch: " +
                   identity_error;
+          } else if (
+            std::string codec_probe_error;
+            // Hardware NVENC probing is itself GPU work. It runs only once a user has
+            // started a conversion, under the same exclusive lease as the worker, so host
+            // startup can never race a fast live-stream connection.
+            record->snapshot.operation == operation_e::convert &&
+            config.probe_media_tools &&
+            !probe_ffmpeg_codec_runtime(
+              config,
+              ffmpeg,
+              record->snapshot.codec,
+              codec_probe_error
+            )
+          ) {
+            outcome.error =
+              "the requested 10-bit NVIDIA encoder failed its runtime preflight: " +
+              codec_probe_error;
+          } else if (job_stop.stop_requested()) {
+            // Canceled or shut down during the preflight: do not launch the worker at all.
+            outcome.canceled = true;
           } else
             outcome = runner ?
                         runner(record->worker, job_stop, callback) :
@@ -5724,28 +5744,9 @@ namespace offline_sbs {
           "offline conversion cannot start while a live streaming session is active",
       };
     }
-    if (
-      request.operation == operation_e::convert &&
-      impl_->config.probe_media_tools
-    ) {
-      // Hardware NVENC probing is itself GPU work. Defer it until a user
-      // explicitly starts conversion and hold the same exclusive lease as the
-      // worker, so host startup can never race a fast live-stream connection.
-      std::string codec_probe_error;
-      if (!probe_ffmpeg_codec_runtime(
-            impl_->config,
-            impl_->ffmpeg,
-            effective_codec,
-            codec_probe_error
-          )) {
-        return {
-          .code = error_code_e::unavailable,
-          .error =
-            "the requested 10-bit NVIDIA encoder failed its runtime preflight: " +
-            codec_probe_error,
-        };
-      }
-    }
+    // The hardware NVENC runtime preflight is GPU work that can take several seconds. It runs
+    // on the job's supervisor thread under this lease (see worker_loop), not here: this call
+    // is made on the Web UI's only request thread while holding the lifecycle mutex.
 
     job_snapshot_t snapshot;
     snapshot.state = job_state_e::queued;
