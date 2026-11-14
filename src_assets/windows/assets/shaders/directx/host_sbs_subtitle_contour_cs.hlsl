@@ -43,12 +43,10 @@ static const uint RECIPE_SCHEMA = V2_SUBTITLE_CONTOUR_RECIPE;
 static const uint HISTORY_TAG = V2_SUBTITLE_CONTOUR_HISTORY_TAG;
 static const uint HISTORY_WORDS = V2_SUBTITLE_CONTOUR_HISTORY_WORD_COUNT;
 static const uint MAX_SOURCE_EXTENT = V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT;
-static const int HISTORY_JITTER_RADIUS = V2_SUBTITLE_CONTOUR_HISTORY_JITTER_RADIUS_SOURCE_PIXELS;
 
 groupshared uint CurrentGate;
 groupshared uint CurrentCount;
 groupshared uint CurrentEpoch;
-groupshared uint CurrentResetMask;
 groupshared int CurrentReferenceCenterTwice;
 groupshared uint4 CurrentCovers[V2_SUBTITLE_PLANE_COVER_CAPACITY];
 groupshared uint4 CurrentCores[V2_SUBTITLE_PLANE_COVER_CAPACITY];
@@ -501,8 +499,6 @@ void PrepareCurrentGate(uint group_index) {
         // In particular, a rejected ribbon in epoch zero cannot borrow prior valid RGB.
         CurrentGate = CurrentAuthorityValid(count, epoch) && SnapshotGate != 0u ? 1u : 0u;
         CurrentCount = CurrentGate != 0u ? count : 0u;
-        CurrentResetMask = CurrentGate != 0u ?
-            CurrentPlane[V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD] : 0u;
         CurrentEpoch = SnapshotGate != 0u ?
             asuint(SBS_STATE_HARD_CUT_COUNT(CurrentCutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT])) : 0u;
         [unroll]
@@ -583,18 +579,6 @@ bool SupportSearchSourcePixel(int2 p) {
     }
     return false;
 }
-
-bool ChangedCurrentCorePixel(int2 p) {
-    [unroll]
-    for (uint slot = 0u; slot < V2_SUBTITLE_PLANE_COVER_CAPACITY; ++slot) {
-        // Overlap uses only the union of flagged current raw/cores. An expanded cover or an
-        // unflagged core cannot recursively extend reset scope through another current box.
-        if (slot < CurrentCount && (CurrentResetMask & (1u << slot)) != 0u &&
-            SourcePixelInRect(p, CurrentCores[slot])) return true;
-    }
-    return false;
-}
-
 
 bool CurrentProbabilityEvidence(int2 p, out float probability) {
     probability = 0.0f;
@@ -928,49 +912,18 @@ float4 AdvanceFeature(int2 p, float3 color, bool candidate) {
     }
     count = 1u;
     // Only a genuine newer observation reaches here. A qualifying same-pixel fixed reference
-    // wins even in a flagged current raw/core; duplicate/reuse consumed no confirmation above.
+    // keeps its anchor and streak; duplicate/reuse consumed no confirmation above.
     if (HistoryGate != 0u && PreviousIdentity[2u] == 1u) {
-        bool found = false;
         float4 same = PreviousFeatures.Load(int3(p, 0));
         uint same_count;
-        // Keep a valid fixed reference at this pixel. A closer colour in a newly admitted
-        // neighbour must not replace an already stable reference and restart its streak.
+        // Keep a valid fixed reference at this pixel.
         bool same_counted = DecodeFeature(same, same_count) && same_count != 0u;
         if (same_counted && ColorDistance(color, same.rgb) <= V2_SUBTITLE_CONTOUR_HISTORY_RGB_DISTANCE) {
-            found = true;
             anchor = same.rgb;
             count = min(same_count + 1u, V2_SUBTITLE_CONTOUR_HISTORY_CONFIRMATION_OBSERVATIONS);
         }
-        float best_color = 2.0f;
-        int best_space = 0;
-        // A coordinate previously outside current authority (count0) or invalid must acquire
-        // its own first observation. Nearby mature colors cannot preconfirm newly added covers.
-        // A flagged current raw/core mismatch starts at count1/current RGB without borrowing
-        // a mature neighbour. Otherwise counted coordinates retain bounded jitter correspondence.
-        if (!found && same_counted && !ChangedCurrentCorePixel(p)) {
-          [loop]
-          for (int dy = -HISTORY_JITTER_RADIUS; dy <= HISTORY_JITTER_RADIUS; ++dy) {
-            [loop]
-            for (int dx = -HISTORY_JITTER_RADIUS; dx <= HISTORY_JITTER_RADIUS; ++dx) {
-                int2 q = p + int2(dx, dy);
-                if (!BandPositionValid(q)) continue;
-                float4 prior = PreviousFeatures.Load(int3(q, 0));
-                uint prior_count;
-                if (!DecodeFeature(prior, prior_count) || prior_count == 0u) continue;
-                float distance = ColorDistance(color, prior.rgb);
-                int space = dx * dx + dy * dy;
-                // Select one correspondence, never pool counts or prefer the oldest candidate.
-                if (distance <= V2_SUBTITLE_CONTOUR_HISTORY_RGB_DISTANCE &&
-                    (!found || distance < best_color || (distance == best_color && space < best_space))) {
-                    found = true;
-                    best_color = distance;
-                    best_space = space;
-                    anchor = prior.rgb;
-                    count = min(prior_count + 1u, V2_SUBTITLE_CONTOUR_HISTORY_CONFIRMATION_OBSERVATIONS);
-                }
-            }
-          }
-        }
+        // No neighbour correspondence: a pixel whose own reference no longer matches starts a
+        // new count-one observation with its current colour. Support needs only count != 0.
     }
     uint code = V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_VALID_BIT |
         (count << V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_COUNT_SHIFT) |

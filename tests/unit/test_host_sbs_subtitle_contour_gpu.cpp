@@ -2490,26 +2490,6 @@ namespace {
       << "published source is current RGB while history carries the fixed anchor";
   }
 
-  TEST_F(HostSbsSubtitleContourGpuTest, TwoPixelJitterCarriesOneReferenceAcrossFourGenuineFrames) {
-    const std::array colors {pixel_t {.875f, .625f, .3125f, 1.f}, pixel_t {.84375f, .59375f, .28125f, 1.f}, pixel_t {.90625f, .65625f, .34375f, 1.f}, pixel_t {.8125f, .5625f, .25f, 1.f}};
-    for (std::uint32_t frame = 1u; frame <= 4u; ++frame) {
-      clear_scene(.125f * float(frame - 1u));
-      const auto x = 50u + 2u * (frame - 1u);
-      pixels_[point_index(x)] = colors[frame - 1u];
-      paint_palette_anchor(colors[frame - 1u]);
-      ASSERT_TRUE(observe(frame));
-      expect_count(point_index(x), frame);
-      for (std::size_t lane = 0u; lane < 3u; ++lane) {
-        EXPECT_EQ(result_.features[point_index(x)][lane], colors[0u][lane]);
-      }
-    }
-    EXPECT_EQ(result_.support[point_index(50u)], 0u) << "uniform former glyph background has no current stroke";
-    EXPECT_EQ(result_.support[point_index(56u)], 1u);
-    EXPECT_EQ(result_.features[point_index(50u)], (pixel_t {.375f, .375f, .375f, feature_code(1u)}));
-    // This is an explicit <=2 per-observation correspondence chain, not four observations
-    // of one absolute source coordinate or semantic proof that the tracked color is text.
-  }
-
   TEST_F(HostSbsSubtitleContourGpuTest, MovementBeyondJitterRestartsFourObservationConfirmation) {
     clear_scene(0.f);
     paint_glyph_point(50u);
@@ -2556,19 +2536,6 @@ namespace {
     EXPECT_EQ(result_.support[point_index(60u)], 1u);
     expect_count(point_index(61u), 2u);
     EXPECT_EQ(result_.support[point_index(61u)], 1u);
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, EqualColorAndSpatialTiesUseScanOrderNotGreatestCount) {
-    paint_point(62u, .5f);
-    ASSERT_TRUE(observe(1u));
-    ASSERT_TRUE(observe(2u));
-    paint_point(58u, .5f);  // Four pixels from older anchor, so this is a genuine new streak1.
-    ASSERT_TRUE(observe(3u));
-    expect_count(point_index(58u), 1u);
-    expect_count(point_index(62u), 3u);
-    paint_point(60u, .5f);
-    ASSERT_TRUE(observe(4u));
-    expect_count(point_index(), 2u);  // Equal RGB/dist2 selects left anchor before count3 at right.
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, StableUniformZeroProbabilityBackgroundNeverAcquiresProtection) {
@@ -2814,137 +2781,6 @@ namespace {
     }
   }
 
-  TEST_F(HostSbsSubtitleContourGpuTest, FlaggedRgbMismatchBlocksAvailableMatureNeighborOnlyOnThatGenuineObservation) {
-    for (const bool flagged : {false, true}) {
-      SCOPED_TRACE(flagged);
-      ASSERT_TRUE(resize(160u, 90u));
-      clear_scene(.125f);
-      paint_point(60u, .75f);
-      paint_point(62u, .5f); // A genuinely acquired mature reference at the2px search boundary.
-      paint_point(85u, .9375f); // A stable same-pixel reference inside the same flagged core.
-      ASSERT_TRUE(mature_observations());
-      expect_count(point_index(62u), confirmation_count);
-      auto core = field_cover_;
-      core[0u] = source_x_edge(50u);
-      core[2u] = source_x_edge(90u);
-      paint_point(60u, .5625f); // Own anchor mismatch>.08, neighbor distance .0625<=.08.
-      for (std::uint32_t frame = 5u; frame <= 8u; ++frame) {
-        make_authority(frame, 1000001u + (frame - 1u) * 100000u);
-        current_cores({core});
-        plane_words_[v2::subtitle_plane_history_reset_mask_word] = flagged ? 1u : 0u;
-        ASSERT_TRUE(run());
-        expect_count(point_index(), flagged ? frame - 4u : confirmation_count);
-        EXPECT_EQ(result_.features[point_index()][0u], flagged ? .5625f : .5f);
-        expect_count(point_index(62u), confirmation_count);
-        expect_count(point_index(85u), confirmation_count);
-        EXPECT_EQ(result_.features[point_index(85u)][0u], .9375f);
-        expect_evidence_exact_copy();
-      }
-    }
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, CurrentResetIsLocalToFlaggedCoreInsideOverlappingExpandedCovers) {
-    const pixel_t left_rgb {.125f, .75f, .5f, 1.f}, right_rgb {.3125f, .25f, .9375f, 1.f};
-    auto left = field_cover_, right = field_cover_;
-    left[2u] = source_x_edge(105u);
-    right[0u] = source_x_edge(70u); // Expanded covers overlap well beyond the changed core.
-    auto left_core = left, right_core = right;
-    left_core[0u] = source_x_edge(40u);
-    left_core[2u] = source_x_edge(90u);
-    right_core[0u] = source_x_edge(100u);
-    right_core[2u] = source_x_edge(130u);
-    clear_scene(.5f); // Nearby background references mature alongside each tested coordinate.
-    pixels_[point_index(60u)] = pixels_[point_index(85u)] = pixels_[point_index(95u)] = left_rgb;
-    pixels_[point_index(110u)] = right_rgb;
-    for (std::uint32_t frame = 1u; frame <= 8u; ++frame) {
-      if (frame == 5u) {
-        // All three own anchors mismatch. Matching mature neighbors exist within2px, so the
-        // unflagged shared margin can borrow while the two flagged core coordinates cannot.
-        for (const auto x : {60u, 85u, 95u}) paint_point(x, .5f);
-      }
-      make_authority(frame, 1000001u + (frame - 1u) * 100000u);
-      current_covers(frame == 6u ? std::vector<uint4_t> {right, left} : std::vector<uint4_t> {left, right});
-      current_cores(frame == 6u ? std::vector<uint4_t> {right_core, left_core} : std::vector<uint4_t> {left_core, right_core});
-      if (frame == 5u) plane_words_[v2::subtitle_plane_history_reset_mask_word] = 1u;
-      ASSERT_TRUE(run());
-      const auto left_count = frame <= 4u ? frame : frame - 4u;
-      expect_count(point_index(60u), left_count);
-      expect_count(point_index(85u), left_count);
-      // Shared expanded-cover margins retain ordinary fallback despite an RGB mismatch.
-      expect_count(point_index(95u), std::min(frame, confirmation_count));
-      expect_count(point_index(110u), std::min(frame, confirmation_count));
-      EXPECT_EQ(result_.features[point_index(110u)][0u], right_rgb[0u]);
-      expect_evidence_exact_copy();
-    }
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, FlaggedCurrentCoreUnionResetsSharedPixelsWithoutExtendingExpandedCovers) {
-    for (const auto reset_mask : {1u, 2u, 3u}) {
-      SCOPED_TRACE(reset_mask);
-      ASSERT_TRUE(resize(160u, 90u));
-      clear_scene(.5f);
-      for (const auto x : {60u, 85u, 110u, 130u}) paint_point(x, .9375f);
-      ASSERT_TRUE(mature_observations());
-      auto left = field_cover_, right = field_cover_;
-      left[0u] = source_x_edge(40u);
-      left[2u] = source_x_edge(90u);
-      right[0u] = source_x_edge(70u);
-      right[2u] = source_x_edge(120u);
-      for (std::uint32_t frame = 5u; frame <= 8u; ++frame) {
-        // Own RGB mismatches; unchanged adjacent .5 references can preconfirm an unflagged
-        // coordinate. This makes the raw-core union assertions exercise the fallback veto.
-        if (frame == 5u) for (const auto x : {60u, 85u, 110u, 130u}) paint_point(x, .5f);
-        make_authority(frame, 1000001u + (frame - 1u) * 100000u);
-        current_covers({field_cover_, field_cover_});
-        current_cores(frame == 6u ? std::vector<uint4_t> {right, left} : std::vector<uint4_t> {left, right});
-        if (frame == 5u) plane_words_[v2::subtitle_plane_history_reset_mask_word] = reset_mask;
-        ASSERT_TRUE(run());
-        expect_count(point_index(60u), (reset_mask & 1u) != 0u ? frame - 4u : confirmation_count);
-        expect_count(point_index(85u), frame - 4u); // Inside both raw/cores, so either bit resets.
-        expect_count(point_index(110u), (reset_mask & 2u) != 0u ? frame - 4u : confirmation_count);
-        expect_count(point_index(130u), confirmation_count); // Expanded covers only: fallback allowed.
-        expect_evidence_exact_copy();
-      }
-    }
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, CurrentCoreResetUsesHalfOpenNativeCentersAcrossPaddedAwkwardCrops) {
-    // 161x91 gives the rounded 27-row bottom crop. The first padded content transform has
-    // exact center/edge equalities; the second has fractional centers in both dimensions.
-    const std::array contents {uint4_t {5u, 9u, 649u, 373u}, uint4_t {3u, 7u, 766u, 426u}};
-    const std::array cores {uint4_t {247u, 307u, 407u, 335u}, uint4_t {290u, 350u, 479u, 382u}};
-    for (std::size_t domain = 0u; domain < contents.size(); ++domain) {
-      SCOPED_TRACE(domain);
-      ASSERT_TRUE(resize(161u, 91u));
-      content_ = contents[domain];
-      clear_scene(.5f);
-      const std::array points {std::array {59u, 10u}, std::array {60u, 10u}, std::array {61u, 10u},
-        std::array {99u, 16u}, std::array {100u, 16u}, std::array {61u, 9u}, std::array {99u, 17u}};
-      for (const auto &p : points) pixels_[native_index(p[0u], p[1u])] = {.9375f, .9375f, .9375f, 1.f};
-      ASSERT_TRUE(mature_observations());
-      for (std::uint32_t frame = 5u; frame <= 8u; ++frame) {
-        // Each boundary coordinate mismatches its own anchor but has mature .5 neighbors.
-        // Outside the flagged half-open core the otherwise unchanged fallback must succeed.
-        if (frame == 5u) for (const auto &p : points) pixels_[native_index(p[0u], p[1u])] = {.5f, .5f, .5f, 1.f};
-        make_authority(frame, 1000001u + (frame - 1u) * 100000u);
-        current_cores({cores[domain]});
-        if (frame == 5u) plane_words_[v2::subtitle_plane_history_reset_mask_word] = 1u;
-        ASSERT_TRUE(run());
-        // In domain0, native center(60,10) equals the left/top raw edge and is included.
-        // Centers x100 and y17 equal the right/bottom edges and are excluded. Domain1 moves
-        // the first included x to61 through the fractional transform without rounding authority.
-        expect_count(native_index(59u, 10u), confirmation_count);
-        expect_count(native_index(60u, 10u), domain == 0u ? frame - 4u : confirmation_count);
-        expect_count(native_index(61u, 10u), frame - 4u);
-        expect_count(native_index(99u, 16u), frame - 4u);
-        expect_count(native_index(100u, 16u), confirmation_count);
-        expect_count(native_index(61u, 9u), confirmation_count);
-        expect_count(native_index(99u, 17u), confirmation_count);
-        expect_evidence_exact_copy();
-      }
-    }
-  }
-
   TEST_F(HostSbsSubtitleContourGpuTest, MalformedFlaggedCurrentCoreCannotUseMatureExpandedCoverHistory) {
     for (const auto fault : {0u, 1u, 2u, 3u, 4u, 5u}) {
       SCOPED_TRACE(fault);
@@ -2973,35 +2809,6 @@ namespace {
       ASSERT_TRUE(run());
       expect_cleared_snapshot();
     }
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, ChangedCoreBoundaryRgbRetainsExistingMatureMarginJitterCorrespondence) {
-    clear_scene(.125f);
-    paint_point(60u, .9375f);
-    ASSERT_TRUE(mature_observations());
-    auto core = field_cover_;
-    core[0u] = source_x_edge(60u);
-    core[2u] = source_x_edge(61u);
-    const auto y = body_y() + 5u;
-    const auto content_height = content_[3u] - content_[1u];
-    core[1u] = content_[1u] + std::uint32_t(std::uint64_t(crop_top_ + y) * content_height / source_h_);
-    core[3u] = content_[1u] + std::uint32_t(std::uint64_t(crop_top_ + y + 1u) * content_height / source_h_);
-    paint_point(60u, .75f); // A true same-pixel mismatch from the mature .9375 fixed anchor.
-    make_authority(5u, 1400001u);
-    current_cores({core});
-    plane_words_[v2::subtitle_plane_history_reset_mask_word] = 1u;
-    ASSERT_TRUE(run());
-    expect_count(point_index(60u), 1u);
-    expect_count(point_index(59u), confirmation_count);
-    // This next genuine observation changes RGB beyond the reset pixel's fixed-anchor bound.
-    // The unchanged2px fallback can choose an unreset mature margin anchor. Four observations
-    // after a flagged mismatch are not guaranteed for arbitrary later matched references.
-    paint_point(60u, .125f);
-    make_authority(6u, 1500001u);
-    current_cores({core});
-    ASSERT_TRUE(run());
-    expect_count(point_index(60u), confirmation_count);
-    EXPECT_EQ(result_.features[point_index(60u)][0u], .125f);
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, ResetUsesOnlyCurrentCoreAcrossExpansionShrinkAndReplacement) {
@@ -3533,7 +3340,7 @@ namespace {
       EXPECT_EQ(plane_words_[v2::subtitle_plane_warmup_word], 0u);
       if (frame >= 5u) {
         EXPECT_EQ(remaining, 0u);
-        EXPECT_EQ(plane_words_[v2::subtitle_plane_history_reset_mask_word], frame == 6u ? 1u : 0u);
+        EXPECT_EQ(plane_words_[v2::subtitle_plane_history_reset_mask_word], 0u);
       }
       const std::array distance_words {constants_.source, uint4_t {field_w_, field_h_, 0u, 0u}, content_};
       context_->UpdateSubresource(distance_cb.Get(), 0u, nullptr, distance_words.data(), 0u, 0u);
@@ -3798,7 +3605,8 @@ namespace {
     paint({1002u, top + 2u, 1102u, top + 62u}, {.28125f, .71875f, .53125f, 1.f});
     paint_palette_anchor({.28125f,.71875f,.53125f,1.f});
     ASSERT_TRUE(observe(4u));
-    expect_flat_patch({1002u, top + 2u, 1102u, top + 62u}, 4u, original);
+    // Without neighbour correspondence only pixels that keep their own reference continue the streak.
+    expect_flat_patch({1002u, top + 2u, 1100u, top + 60u}, 4u, original);
     EXPECT_LT(pin_count(result_.support), 6000u) << "a flat interior cannot become a binary glyph seed from P alone";
     EXPECT_EQ(result_.support[native_index(1050u, top + 30u)], 0u);
     EXPECT_EQ(result_.support[native_index(1002u, top + 30u)], 1u);

@@ -71,7 +71,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 130/tag `0x808647CD`, canonical SHA-256
-`d6701e8e9e8fec919ff69cd38732669cccb58c622571880159ec011f10862595`. It binds the
+`9a0c84534baa03eda27930f1ee15636373bea007b764ccaa6aa1e1bcccfaefb2`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -82,7 +82,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 29 | `8cc4223f874b8244ad9610e49751e8201caf0e3566387cec7dbe25b54434c307` |
+| `parallax_v2_producer` | 29 | `ac5de62d32e4c41c17b90978819c348d270fc41cf516b79b1ef2eaf08adaf001` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `50c712473211a3b66638fb0bcf89938cb46f2501126bee79cca8e352243ca53a` |
 | `near_identical_detector` | 4 | `9272bf6f9d293e556dbc38a9d48a74d5c70090af390836e150d0d6bd8c46a670` |
 | `gpu_trace` | 1 | `2c442b910b839fe7daf0c073d157c36258cd5b2f264c9d901187d83752f2b7c1` |
@@ -767,10 +767,9 @@ The state is 40 words with schema `4` and little-endian tag bytes `UIP4` (`0x345
 are schema and tag. Word 2 has only the current-valid flag `1`; word 3 is the current slot
 mask `(1 << final_count) - 1`. Words 4--9 bind frame identity, analysis generation and source
 observation time; words 10--19 bind source/field extents, dynamic ROI and content rectangle.
-Word 20 binds the authenticated durable CutBridge epoch. Word 21 is the eight-bit current-core
-probability-change cue mask and must be a subset of word 3. The legacy `history_reset_mask`
-field names are retained for wire/API compatibility; they no longer imply an unconditional RGB
-count reset. Word 22 is canonical zero; the retired presentation countdown and cue latch grant no
+Word 20 binds the authenticated durable CutBridge epoch. Word 21 is the retired current-core
+probability-change cue mask; it is published as zero and readers still require a subset of
+word 3. The legacy `history_reset_mask` field names are retained for wire/API compatibility. Word 22 is canonical zero; the retired presentation countdown and cue latch grant no
 authority. Word 23 is zero. The
 existing 16-word adaptive controller occupies words 24--39, with its applied UI plane at word 27.
 There are no rectangle blocks or duplicate target in the header. Canonical initialization/reset
@@ -1600,9 +1599,9 @@ addition in that order, followed by the same three operations vertically. Contra
 reassociation are disabled for this dependency chain. The CPU readers perform the same FP32
 steps and compare the resulting anchor probability strictly against FP32 `0.2`; support has no epsilon.
 
-The spatial radius `2` and RGB distance `0.08` are explicit spatial-policy parameters. They happen
-to equal the diagnostic temporal jitter radius and fixed-anchor tolerance; this does not derive
-spatial validity from temporal correspondence. The spatial test assumes an overlay has nearby
+The spatial radius `2` and RGB distance `0.08` are explicit spatial-policy parameters. The RGB
+distance happens to equal the diagnostic fixed-anchor tolerance; this does not derive spatial
+validity from temporal correspondence. The spatial test assumes an overlay has nearby
 contrast and a compatible current text palette within a classified current cover. It is a bounded high-contrast-overlay hypothesis,
 not a calibrated semantic subtitle guarantee. The existing five-center interval extension can cover interiors
 around the supported edge pixels; it does not turn that assumption into text recognition.
@@ -1625,8 +1624,7 @@ The existing fixed-RGB history continues independently as a diagnostic. It count
 completed eligible inference observations, not displayed frames, duplicate deliveries, reused tuples
 or frames dropped while the single inference is busy. These counts and their feature-code low bit
 do not impose a four-observation rendering gate. The positive-count duplicate-admission rule above
-remains; the count-four feature bit does not authorize support. Probability-change cues affect only
-the diagnostic correspondence described below and do not delay or prolong protection.
+remains; the count-four feature bit does not authorize support.
 
 The count starts at one only inside a current authenticated OCR8 cover with valid RGB and
 probability evidence. History compatibility is bound to source/crop/field/content geometry,
@@ -1637,56 +1635,30 @@ pixels need four genuine confirmations to reach diagnostic count four. The adapt
 remains independent, and current pixel support can be present at diagnostic counts one through four.
 
 Compatible genuine observations require both a strictly newer source frame and timestamp. A
-qualified pixel finds one prior counted reference within two native pixels on each axis and RGB
-maximum-channel distance `0.08`. A qualifying fixed reference at the same pixel has priority,
-including inside a current raw/core carrying a probability-change cue. When that reference does
-not qualify, a cued current raw/core blocks neighbor fallback and the pixel restarts at one.
-Otherwise correspondence minimizes RGB distance, then squared spatial distance, then scan order;
-it never prefers or pools larger counts. The reference RGB is carried
-unchanged as the count saturates at four. This prevents gradual pairwise RGB drift from confirming
-a pixel. Missing matches restart at one. Exact duplicates can only retain same-pixel counts and
-never increment or create them; complete reuse holds the whole tuple. Cuts, clock faults and
-domain changes discard history compatibility. No old OCR-cover rectangle supplies new authority.
+qualified pixel continues only its own reference: when the counted reference at the same native
+pixel is within RGB maximum-channel distance `0.08`, its RGB is carried unchanged and the count
+advances, saturating at four. This prevents gradual pairwise RGB drift from confirming a pixel.
+Any other eligible pixel restarts at one with its current RGB as the fixed reference. There is
+no neighbour correspondence. Exact duplicates can only retain same-pixel counts and never
+increment or create them; complete reuse holds the whole tuple. Cuts, clock faults and domain
+changes discard history compatibility. No old OCR-cover rectangle supplies new authority.
 
-On a compatible, strictly newer genuine observation, the resolver compares the current joined OCR
-probability map with the previous completed probability snapshot. It samples both at each native
-source pixel center inside each current half-open raw/core and the exact bottom source crop,
-using the same clamped bilinear map as temporal probability validation. For each current core,
-the resolver first sums each map within that current core: `C = sum(P_current)` and
-`H = sum(P_previous)`. If both are positive, a second reduction computes
-`T = 0.5 * sum(abs(P_current / C - P_previous / H))`. Uniform nonzero confidence scaling
-therefore leaves the distribution unchanged. Both zero masses set no bit; exactly one zero
-mass sets a change bit without division. All four contributors to both samples must be finite
-in `[0,1]`; malformed evidence or nonfinite sums cannot manufacture a witness. Strict
-`T > 1/8` sets that core's current slot cue bit. The ratio remains one fixed experimental
-hypothesis, not a calibrated semantic cue detector. Each current raw/core is independent; no previous rectangle association,
-per-box tracker, historical cover union or additional model is used.
+The former two-pixel jitter search and the per-core spatial probability-change cue are retired.
+Support needs only a positive count, which every genuine eligible observation has, so neither
+could add or withdraw a rendered pixel; they only moved diagnostic counts and anchors. Word 21
+stays in the UIP layout as canonical zero, which satisfies every reader's subset-of-word-3
+check. The contract keeps the jitter radius and cue ratio constants for wire compatibility;
+no shader reads them. The one remaining effect of a count above one is the duplicate rule
+above: a duplicate delivery whose pixels are not bit-identical keeps a pixel only if that pixel
+had already been confirmed at least twice at its own location.
 
-The witness requires authenticated prior SCT5 snapshot and pin authority, active current
-conditioning, current OCR/geometry/cut identity and compatible source/crop/field/ROI/content,
-generation and cut epoch. Duplicate, reused, reset, stale or incompatible observations create
-no new witness. Before the previous completed probability map is overwritten, the existing
-256-lane resolver performs both reductions in the same dispatch and publishes word 21.
-The existing scratch is reused with one shared mass pair; no new persistent GPU buffer or
-readback is needed. The union of cued current raw/cores applies locally at the same native
-source centers even where other covers overlap. Expanded covers continue to authorize pixel
-search and do not enlarge the cue region. A qualifying same-pixel fixed RGB reference retains
-its anchor and advances its count on a genuine observation even when its current raw/core is
-cued. If the same-pixel reference is missing or fails the RGB rule, a cue blocks only the
-two-pixel neighbor search; valid eligible pixels then start at one with current RGB as their
-fixed reference. Outside cued cores, ordinary correspondence remains unchanged.
-
-The cue cannot grant support, change the independent adaptive UI controller, or substitute a
-rectangle for current-evidence-supported pixels. Four genuine RGB confirmations are required
-only for a diagnostic counted reference; they are not required after every probability cue. On a
-later uncued RGB mismatch, the unchanged neighbor fallback can still select a mature diagnostic
-reference elsewhere. No previous-box association is used. Recipe 27 changes current glyph selection while retaining recipe 26's
-five centers, completion radius three, the horizontal slope guard and minimum interval
+No previous-box association is used. Recipe 27 changes current glyph selection while retaining
+recipe 26's five centers, completion radius three, the horizontal slope guard and minimum interval
 extension below. It rejects earlier recipe history despite the unchanged
 32-word SCT5 layout.
 
 RGB stability is not semantic text recognition. Static scenery and similar replacement colors may
-retain diagnostic counts even when a probability cue is present. Those counts have no protection
+retain diagnostic counts. Those counts have no protection
 authority apart from positive-count duplicate admission. Current probabilities or spatial contrast
 can still be false positives or omit glyphs; immediate support
 does not establish complete glyph coverage, same-shape replacement quality, live quality or
