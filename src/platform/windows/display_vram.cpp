@@ -1636,7 +1636,7 @@ namespace platf::dxgi {
               depth_reuse_authorization,
               latest_v2_lineage.slot.frame_id,
               frame_id,
-              latest_v2_lineage.estimate.shadow_final_parallax &&
+              latest_v2_lineage.estimate.shadow_base_final_parallax &&
                 latest_v2_lineage.estimate.shadow_state
             );
           if (depth_estimator && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
@@ -2295,7 +2295,7 @@ namespace platf::dxgi {
               post_completion_reuse_authorization,
               latest_v2_lineage.slot.frame_id,
               frame_id,
-              latest_v2_lineage.estimate.shadow_final_parallax &&
+              latest_v2_lineage.estimate.shadow_base_final_parallax &&
                 latest_v2_lineage.estimate.shadow_state
             );
           if (
@@ -2546,7 +2546,7 @@ namespace platf::dxgi {
               << "Host SBS lost authenticated live-warp authority after parallax-v2 was active"
               << " (result_authenticated=" << (v2_result_authenticated ? "true" : "false")
               << ", live_shader=" << (sbs_reprojection_v2_live_ps ? "present" : "missing")
-              << ", final_field=" << (est.shadow_final_parallax ? "present" : "missing")
+              << ", base_field=" << (est.shadow_base_final_parallax ? "present" : "missing")
               << ", state=" << (est.shadow_state ? "present" : "missing")
               << "); rendering current-frame flat identity. Further warnings are suppressed for "
                  "this stream.";
@@ -3186,6 +3186,7 @@ namespace platf::dxgi {
               matched_render_slot && dump_warp_depth && est.model_input_snapshot &&
               est.raw_model_depth_snapshot && est.raw_model_provenance &&
               est.shadow_final_parallax &&
+              (est.subtitle_conditioning_diagnostics_current || est.subtitle_work_suppressed) &&
               v2_renderer_selected &&
               models::parallax_v2_result_is_authenticated(est);
             ID3D11ShaderResourceView *dump_depth_input_source =
@@ -3861,6 +3862,8 @@ namespace platf::dxgi {
           sbs_cfg,
           active
         );
+        // Live rendering binds Base. Conditioned-field diagnostics run only for Dump 3D.
+        result.estimator->set_subtitle_conditioning_diagnostics_always(false);
         if (prepare_live_outline && result.estimator->is_valid() &&
             !result.estimator->has_terminal_failure()) {
           namespace outline = models::current_outline_runtime;
@@ -4634,7 +4637,7 @@ namespace platf::dxgi {
         const bool current_interactive_move_size
       ) const noexcept {
         return authenticated && estimate.completed_frame_valid &&
-               estimate.completed_frame_id == slot.frame_id && estimate.shadow_final_parallax &&
+               estimate.completed_frame_id == slot.frame_id && estimate.shadow_base_final_parallax &&
                estimate.shadow_state && estimate.input_region.valid() &&
                depth_completion_region_matches_submission(
                  estimate,

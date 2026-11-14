@@ -917,6 +917,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_base_final_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_final_parallax;
+    /// True only when this completion ran the diagnostic conditioner. Otherwise Final holds exact
+    /// Base and the field-pin, distance and Gaussian views are not current evidence.
+    bool subtitle_conditioning_diagnostics_current = false;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 only when subtitle_evidence_is_exact_frame() succeeds.
@@ -1438,6 +1441,13 @@ namespace models {
     ~video_depth_estimator();
     // Called on the owning render thread before the first submission. Null outside diagnostics.
     void set_telemetry_performance(std::shared_ptr<host_sbs_telemetry::collector> performance);
+
+    /** The field pin, native distance, Gaussian proposal and compatibility limiters reach only
+     * Dump 3D and harness artifacts; rendering binds Base. The default (true) runs them on every
+     * subtitle observation. Live streaming passes false so only a dump-forced observation runs
+     * them; every other observation publishes exact Base through the distinct Final texture.
+     */
+    void set_subtitle_conditioning_diagnostics_always(bool always) noexcept;
 
     /** Research harness only, default false; accepted only before the first input.
      * Runs private cohort/filter/M1 diagnostics without replacing production S/M or geometry.

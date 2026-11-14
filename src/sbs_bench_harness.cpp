@@ -3453,6 +3453,9 @@ namespace sbs_bench {
       // Private bounded real-PFM export. Copies existing completed operands; never renders a
       // replacement mask or reconstructs a publication, contour CB, or final dispatch buffer.
       bool pfm_joined_diagnostics = false;
+      // Parity probe: use live streaming's policy, where the conditioned-field diagnostics run
+      // only for Dump 3D. Final then equals Base, so this is not an evaluator configuration.
+      bool subtitle_conditioning_live_policy = false;
       std::string joined_completion_probe; // PRIVATE default-off three-source async experiment
       std::optional<std::vector<detail::subtitle_diagnostic_observation_range>>
         subtitle_plane_diagnostic_ranges;
@@ -3512,6 +3515,8 @@ namespace sbs_bench {
           o.current_outline_qualification = true;
         } else if (a == "--pfm-joined-diagnostics") {
           o.pfm_joined_diagnostics = true;
+        } else if (a == "--subtitle-conditioning-live-policy") {
+          o.subtitle_conditioning_live_policy = true;
         } else if (a == "--joined-completion-probe") {
           if (!o.joined_completion_probe.empty()) { BOOST_LOG(error) << "sbs-bench: private probe plan must appear once"; return false; }
           o.joined_completion_probe = next("--joined-completion-probe");
@@ -4640,6 +4645,9 @@ namespace sbs_bench {
           !estimator->set_subtitle_inner_colour_research_enabled(true)) {
         BOOST_LOG(error) << "sbs-bench: cannot enable private subtitle inner-colour research";
         return 5;
+      }
+      if (o.subtitle_conditioning_live_policy) {
+        estimator->set_subtitle_conditioning_diagnostics_always(false);
       }
       if (o.pfm_joined_diagnostics &&
           !estimator->set_completed_ocr_conditioner_research_enabled(true)) {

@@ -3665,6 +3665,17 @@ namespace models {
     std::uint64_t pending_gpu_transaction_baseline_frame_id = 0u;
     std::uint64_t pending_observation_timestamp_us = 0u;
     bool pending_dump_forced = false;
+    // Field pin, native distance, Gaussian proposal and both compatibility limiters feed only
+    // Dump 3D and harness artifacts; the renderer binds Base. Live streaming runs them only
+    // while completing an observation that a Dump 3D request snapshots (or one a dump forced)
+    // and otherwise publishes exact Base as the Final field.
+    bool subtitle_conditioning_diagnostics_always = true;
+    bool completion_dump_snapshot_requested = false;
+    bool completed_subtitle_conditioning_diagnostics = false;
+    [[nodiscard]] bool subtitle_conditioning_diagnostics_requested() const noexcept {
+      return subtitle_conditioning_diagnostics_always || pending_dump_forced ||
+             completion_dump_snapshot_requested;
+    }
     std::uint64_t force_infer_transaction_sequence = 0u;
     bool gpu_undecided_requires_force_infer_refresh = false;
     bool ocr_signature_refresh_required = false;
@@ -6385,6 +6396,7 @@ namespace models {
       subtitle_gaussian_vertical_conditioned.reset();
       subtitle_gaussian_control.reset();
       completed_contour = {};
+      completed_subtitle_conditioning_diagnostics = false;
       subtitle_selected_matte = {};
       subtitle_current_outline_composition = {};
       subtitle_current_outline_selected = {};
@@ -7088,6 +7100,7 @@ namespace models {
       if (subtitle_conditioned_uav) {
         context->ClearUnorderedAccessViewFloat(subtitle_conditioned_uav.Get(), zero_float);
       }
+      completed_subtitle_conditioning_diagnostics = false;
       // Disabled completions may expose these initialized views only as unused diagnostics.
       // Reentry cannot retain snapshots belonging to a prior source extent or subtitle context.
       completed_contour = {
@@ -7961,12 +7974,15 @@ namespace models {
                                near_identical_gpu_subtitle_condition_grid16_byte_offset);
       context->CSSetUnorderedAccessViews(6u, 1u, &null_uav, nullptr);
 
-      output = subtitle_contour_field_mask.uav.Get();
-      context->CSSetUnorderedAccessViews(1u, 1u, &output, nullptr);
-      context->CSSetShader(subtitle_contour_project_cs.Get(), nullptr, 0u);
-      context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
-                               near_identical_gpu_subtitle_condition_grid16_byte_offset);
-      context->CSSetUnorderedAccessViews(1u, 1u, &null_uav, nullptr);
+      const bool conditioning_diagnostics = subtitle_conditioning_diagnostics_requested();
+      if (conditioning_diagnostics) {
+        output = subtitle_contour_field_mask.uav.Get();
+        context->CSSetUnorderedAccessViews(1u, 1u, &output, nullptr);
+        context->CSSetShader(subtitle_contour_project_cs.Get(), nullptr, 0u);
+        context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
+                                 near_identical_gpu_subtitle_condition_grid16_byte_offset);
+        context->CSSetUnorderedAccessViews(1u, 1u, &null_uav, nullptr);
+      }
 
       // CPU-completed force work has an exact-current observation even when OCR abstains. Its
       // staged features can become history by exchanging owners after every old-feature read.
@@ -8015,6 +8031,10 @@ namespace models {
 
       if (subtitle_selected_matte_enabled) dispatch_subtitle_selected_matte_research(perf_slot);
 
+      // The native distance transform is consumed only by the diagnostic Gaussian proposal.
+      if (!conditioning_diagnostics) {
+        return true;
+      }
       const std::array<std::uint32_t, 12u> distance_constants {
         pending_input_region.width(), pending_input_region.height(),
         pending_input_region.height() - std::min(crop_height, pending_input_region.height()),
@@ -8163,9 +8183,33 @@ namespace models {
       if (!dispatch_subtitle_contours(ocr_record_submitted, input_domain_reset, perf_slot)) {
         return false;
       }
+      const auto retain_completed_contour = [&]() {
+        // Retain completed backing views before estimate() can allocate the next source extent.
+        // Working OCR inputs may change immediately; the joined completed snapshots cannot.
+        completed_contour = {
+          subtitle_contour_support.srv, subtitle_contour_field_mask.srv,
+          subtitle_contour_distance.srv, subtitle_contour_identity.srv,
+          subtitle_contour_previous_features.srv, subtitle_contour_source_snapshot.srv,
+          subtitle_contour_probability_snapshot.srv,
+          subtitle_gaussian_weight.srv, subtitle_gaussian_blend.srv,
+          subtitle_gaussian_vertical_conditioned.srv, subtitle_gaussian_control.srv,
+          subtitle_glyph_matte.srv, subtitle_condition_params_srv
+        };
+        if(subtitle_selected_matte_commands){const auto v=selected_matte_views();completed_contour.research_selected_matte=v.matte;completed_contour.research_selected_matte_receipt=v.receipt;}
+      };
+      if (!subtitle_conditioning_diagnostics_requested()) {
+        // No renderer consumes the conditioned field. Publish exact Base through the distinct
+        // Final texture, as suppressed observations do, and leave the diagnostic tuple unclaimed.
+        ID3D11Buffer *null_constants[3] = {};
+        context->CSSetConstantBuffers(0, 3, null_constants);
+        context->CopyResource(subtitle_conditioned_tex.Get(), depth_coordinate_v2_final_tex.Get());
+        completed_subtitle_conditioning_diagnostics = false;
+        retain_completed_contour();
+        return true;
+      }
       context->CSSetConstantBuffers(0, 3, constant_buffers);
 
-      // Base remains immutable. Every authenticated subtitle observation writes the complete
+      // Base remains immutable. Every diagnostic subtitle observation writes the complete
       // Gaussian proposal, weight and smoothing-control tuple. Reuse holds this tuple with the
       // complete depth, subtitle and final field.
       ID3D11ShaderResourceView *condition_srvs[8] = {
@@ -8230,18 +8274,11 @@ namespace models {
       context->CSSetShaderResources(0u, 4u, null_srvs);
       ID3D11Buffer *null_constants[3] = {};
       context->CSSetConstantBuffers(0, 3, null_constants);
-      // Retain completed backing views before estimate() can allocate the next source extent.
-      // Working OCR inputs may change immediately; the joined completed snapshots cannot.
-      completed_contour = {
-        subtitle_contour_support.srv, subtitle_contour_field_mask.srv,
-        subtitle_contour_distance.srv, subtitle_contour_identity.srv,
-        subtitle_contour_previous_features.srv, subtitle_contour_source_snapshot.srv,
-        subtitle_contour_probability_snapshot.srv,
-        subtitle_gaussian_weight.srv, subtitle_gaussian_blend.srv,
-        subtitle_gaussian_vertical_conditioned.srv, subtitle_gaussian_control.srv,
-        subtitle_glyph_matte.srv, subtitle_condition_params_srv
-      };
-      if(subtitle_selected_matte_commands){const auto v=selected_matte_views();completed_contour.research_selected_matte=v.matte;completed_contour.research_selected_matte_receipt=v.receipt;}
+      // A receipt-gated root may issue zero groups and hold the prior tuple, so it can only
+      // continue an already current diagnostic tuple; a CPU-completed root establishes one.
+      completed_subtitle_conditioning_diagnostics =
+        !receipt_gated_postprocess_pending() || completed_subtitle_conditioning_diagnostics;
+      retain_completed_contour();
       return true;
     }
 
@@ -8586,6 +8623,7 @@ namespace models {
         r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
         r.shadow_base_final_parallax = depth_coordinate_v2_final_srv;
         r.shadow_final_parallax = subtitle_conditioned_srv;
+        r.subtitle_conditioning_diagnostics_current = completed_subtitle_conditioning_diagnostics;
         r.shadow_state = depth_coordinate_v2_state_srv;
         r.shadow_frame_stats = depth_coordinate_v2_frame_stats_srv;
         const auto calibration_shape = calibrated_dav2_shape();
@@ -8757,6 +8795,7 @@ namespace models {
         // Activates receipt-gated indirect work and queued-force mode4 BEFORE any mutation.
         // normalize invalidates old borrowed publication; no completed authority is installed.
         pending_same_source_gpu_postprocess_queued = true;
+        completion_dump_snapshot_requested = false;
         if (!normalize_depth_output(nullptr, pending_same_source_gpu_input_domain_reset)) {
           error = "Same-source GPU continuation submission failed";
           mark_terminal_failure();
@@ -8849,6 +8888,7 @@ namespace models {
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       const bool input_domain_reset = pending_same_source_gpu_postprocess_queued ?
         pending_same_source_gpu_input_domain_reset : prepare_pending_input_domain();
+      completion_dump_snapshot_requested = snapshot_debug_inputs;
       if (!pending_same_source_gpu_postprocess_queued && !normalize_depth_output(
             d3d_timer,
             input_domain_reset
@@ -9510,6 +9550,7 @@ namespace models {
             context->CopyResource(
               subtitle_conditioned_tex.Get(), depth_coordinate_v2_final_tex.Get()
             );
+            completed_subtitle_conditioning_diagnostics = false;
           } else {
             mark_terminal_failure();
             return false;
@@ -10046,6 +10087,7 @@ namespace models {
           depth_optional_work_suppresses_subtitle(pending_optional_work);
         completed_input_domain_reset = pending_same_source_gpu_postprocess_queued ?
           pending_same_source_gpu_input_domain_reset : prepare_pending_input_domain();
+        completion_dump_snapshot_requested = snapshot_raw_model_depth;
         if (!pending_same_source_gpu_postprocess_queued && !normalize_depth_output(
               d3d_timer,
               completed_input_domain_reset
@@ -11223,6 +11265,12 @@ namespace models {
       .source=pimpl->pending_source_observation,.baseline_body=b.body,.baseline_matte=b.matte,.body=t.body,.matte=t.matte,.state=t.state,.receipt=t.receipt,
       .frame256=pimpl->subtitle_temporal_frame_context.output_view(),.current_constants=pimpl->subtitle_contour_cbuffer,
       .transaction=pimpl->near_identical_transaction.buffer,.dispatch_arguments=pimpl->near_identical_transaction.dispatch};
+  }
+
+  void video_depth_estimator::set_subtitle_conditioning_diagnostics_always(const bool always) noexcept {
+    if (pimpl) {
+      pimpl->subtitle_conditioning_diagnostics_always = always;
+    }
   }
 
   bool video_depth_estimator::set_completed_ocr_conditioner_research_enabled(const bool enabled) {

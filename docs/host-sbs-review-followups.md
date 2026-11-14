@@ -1156,3 +1156,44 @@ physical-display fix preserves the last verified recovery target when a retained
 returns beside only part of the physical desktop. Three simulated CCD regressions cover partial
 wake, delayed availability and deliberate user disable. The driver's virtual-display reactivation
 and physical settling still require live validation.
+
+### P21 static-review fix series
+
+This series works through the numbered static-review list on `claude/intelligent-feynman-d45yhh`.
+It runs in a dedicated worktree with a fresh RelWithDebInfo build. Model and TensorRT engine
+assets were copied from the main development build; the exact AGENTS.md interpreter is used for
+every evaluator stage. Earlier dumps are replay inputs only, since the producer closure changed.
+
+The two fixes merged without compilation in PR #1 build and pass on the local RTX 5080:
+`HostSbsOcrGpuTest.AssistedEntryKeepsItsEpisodeForTheFirstTrustedObservation`, all eleven
+`HostSbsSelectedMatteGpuTest` cases and all eight `HostSbsCurrentOutlineSelectedMatteGpuTest`
+cases. The wider OCR, selected-matte and current-outline groups pass 162 tests with the private
+shader roots and closure pins taken from the current tree. The black-ring and black-enclosure
+fixture suites expect frozen historical shader roots, cannot be pointed at the current tree, and
+are not part of this gate.
+
+Fix 1, diagnostic-only conditioning passes, is kept. Live streaming no longer runs the field-pin
+projection, the two native distance passes, the proposal writer, the compatibility vertical copy
+or the subtitle horizontal guard unless the completing observation is snapshotted for Dump 3D.
+Other observations publish exact Base through the distinct Final texture. The four renderer
+presence gates test Base. The harness, conversion worker and native tests keep the always-on
+default, so their artifacts are unchanged. The current policy is described in
+[Host SBS](host-sbs.md#native-subtitle-contours-and-ui-plane).
+
+- A fresh `control` covers all 19 core clips and 480 frames on the unmodified binary. It reports
+  one existing named issue, `subtitle_cjk_highres_transitions.subtitle_glyph_soft_plane_inlier_pct`
+  at 62.678, which every later run reproduces unchanged.
+- `fix1-treatment`, bound with `--report-control`, is `screen_neutral`. All 3,973 SBS, depth,
+  raw, model-input, warp-map, structure, mask, cut-state, contract and receipt files are
+  byte-identical; only timing JSON and the aggregate result file differ.
+- `fix1-livepolicy` repeats the run with `--subtitle-conditioning-live-policy`, which really
+  skips the passes. The same 3,973 files are byte-identical to the control.
+- `TensorRtOcrAvailabilityGpuTest` now also checks that the live policy publishes Final equal to
+  Base, keeps the result authenticated, clears the diagnostics-current flag, and sets it again
+  when the completion is snapshotted for a dump. It passes.
+
+The ordinary evaluator renders Base with the legacy matte compositor, so this is parity of the
+shared depth, Base and matte path rather than of the selected shared-warp draw. The skipped
+passes write only the field mask, distance, Gaussian tuple and Final, none of which that draw
+binds. No shader source changed, so no closure pin or contract identity moved. No timing claim
+is made, and a live Dump 3D capture with the new policy has not been taken.
