@@ -69,6 +69,8 @@ namespace platf::dxgi::detail {
     std::function<clock::time_point()> now;
     std::function<bool()> cancelled;
     std::function<bool(clock::time_point)> wait_until;
+    // A nonblocking processor hint only; the fine tail must not enter an OS sleep/yield.
+    std::function<void()> relax;
   };
 
   // This authorizes no write itself. The caller must preserve the captured logical eye and
@@ -81,7 +83,7 @@ namespace platf::dxgi::detail {
   ) {
     using status_e = shutter_emit_phase_wait_status_e;
     using clock = shutter_emit_phase_wait_io_t::clock;
-    if (!io.now_qpc || !io.now || !io.cancelled || !io.wait_until || qpc_frequency <= 0 ||
+    if (!io.now_qpc || !io.now || !io.cancelled || !io.wait_until || !io.relax || qpc_frequency <= 0 ||
         plan.target_qpc <= 0 || plan.latest_write_qpc < plan.target_qpc) {
       return status_e::invalid;
     }
@@ -102,22 +104,30 @@ namespace platf::dxgi::detail {
     if (qpc == plan.target_qpc) {
       return status_e::ready;
     }
-    const auto duration_for = [qpc_frequency](std::int64_t ticks) -> std::optional<clock::duration> {
-      const auto count = std::ceil(static_cast<long double>(ticks) * clock::period::den /
-                                   (static_cast<long double>(qpc_frequency) * clock::period::num));
-      if (!std::isfinite(count) || count < 1 || count >= static_cast<long double>(clock::duration::max().count())) {
+    const auto duration_for = [qpc_frequency](std::int64_t ticks, bool round_up) -> std::optional<clock::duration> {
+      const auto exact = static_cast<long double>(ticks) * clock::period::den /
+                         (static_cast<long double>(qpc_frequency) * clock::period::num);
+      const auto count = round_up ? std::ceil(exact) : std::floor(exact);
+      if (!std::isfinite(count) || count < 0 || (round_up && count < 1) ||
+          count >= static_cast<long double>(clock::duration::max().count())) {
         return std::nullopt;
       }
       return clock::duration {static_cast<clock::duration::rep>(count)};
     };
-    const auto hard_wait = duration_for(plan.latest_write_qpc - qpc);
+    const auto hard_wait = duration_for(plan.latest_write_qpc - qpc, true);
     if (!hard_wait || now.time_since_epoch().count() > clock::duration::max().count() - hard_wait->count()) {
       return status_e::invalid;
     }
     const auto deadline = now + *hard_wait;
-    // A broken notifier that returns forever without advancing either clock is bounded too.
-    constexpr unsigned maximum_waits = 4096;
-    for (unsigned waits = 0; waits < maximum_waits; ++waits) {
+    // Windows timer wakeups may overshoot sub-millisecond waits. Stop using the OS timer
+    // before the final 750 us and poll the same clocks with a processor hint instead. This
+    // does not widen either deadline. Separate limits bound broken timers and frozen clocks
+    // without exhausting the timer retry count during legitimate fast QPC polling.
+    constexpr auto fine_guard = std::chrono::duration_cast<clock::duration>(std::chrono::microseconds {750});
+    constexpr auto coarse_poll = std::chrono::duration_cast<clock::duration>(std::chrono::microseconds {200});
+    constexpr unsigned maximum_waits = 4096, maximum_spins = 131072;
+    unsigned waits = 0, spins = 0;
+    while (true) {
       if (io.cancelled()) {
         return status_e::cancelled;
       }
@@ -130,18 +140,27 @@ namespace platf::dxgi::detail {
       if (now >= deadline) {
         return status_e::missed;
       }
-      const auto target_wait = duration_for(plan.target_qpc - qpc);
+      const auto target_wait = duration_for(plan.target_qpc - qpc, false);
       if (!target_wait) {
         return status_e::invalid;
       }
-      const auto delay = std::min({*target_wait, deadline - now,
-        std::chrono::duration_cast<clock::duration>(std::chrono::microseconds {200})});
-      const bool waited = io.wait_until(now + delay);
-      if (io.cancelled()) {
-        return status_e::cancelled;
-      }
-      if (!waited) {
-        return status_e::wait_failed;
+      if (*target_wait <= fine_guard) {
+        if (spins++ >= maximum_spins) {
+          return status_e::wait_failed;
+        }
+        io.relax();
+      } else {
+        if (waits++ >= maximum_waits) {
+          return status_e::wait_failed;
+        }
+        const auto delay = std::min({*target_wait - fine_guard, deadline - now, coarse_poll});
+        const bool waited = io.wait_until(now + delay);
+        if (io.cancelled()) {
+          return status_e::cancelled;
+        }
+        if (!waited) {
+          return status_e::wait_failed;
+        }
       }
       const auto next_qpc = io.now_qpc();
       const auto next_now = io.now();
@@ -154,7 +173,6 @@ namespace platf::dxgi::detail {
       qpc = next_qpc;
       now = next_now;
     }
-    return status_e::wait_failed;
   }
 
   // A confirmed image can be held beyond its requested minimum dwell. Finite explicit eye

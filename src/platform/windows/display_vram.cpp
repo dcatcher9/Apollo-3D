@@ -9829,6 +9829,9 @@ namespace platf::dxgi {
             .wait_until = [&](auto deadline) {
               return feedback_waiter->wait_until(deadline);
             },
+            .relax = []() {
+              YieldProcessor();
+            },
           });
         }
         ID3D11Texture2D *pair = nullptr;

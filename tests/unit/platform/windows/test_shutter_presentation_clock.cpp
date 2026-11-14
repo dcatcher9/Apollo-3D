@@ -686,7 +686,7 @@ namespace {
     std::int64_t qpc = 1000000;
     clock::time_point now = clock::time_point {} + 1s;
     bool cancelled = false;
-    unsigned waits = 0, qpc_queries = 0;
+    unsigned waits = 0, relaxes = 0, qpc_queries = 0;
 
     shutter::shutter_emit_phase_wait_io_t io() {
       return {
@@ -698,6 +698,11 @@ namespace {
           qpc += std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
           now = deadline;
           return true;
+        },
+        .relax = [&]() {
+          ++relaxes;
+          ++qpc;
+          now += 1us;
         },
       };
     }
@@ -760,6 +765,106 @@ TEST(ShutterEmitPhase, WaitRechecksEarlyNotificationsAndNeverReturnsBeforeTheTar
   EXPECT_EQ(shutter::await_shutter_emit_phase(io, *plan, 1000000), phase_status::ready);
   EXPECT_EQ(probe.qpc, plan->target_qpc);
   EXPECT_GT(probe.waits, 1u);
+  EXPECT_GT(probe.relaxes, 0u);
+}
+
+TEST(ShutterEmitPhase, CoarseTimerQuantumCannotReplaceTheFineTailWithALateWake) {
+  // Model a 500-us timer quantum that reproduces the late wake with feedback 422 us old. Repeated
+  // 200-us OS waits alone first reach a 2000-us target at age 2422, past its 2250-us limit.
+  constexpr std::int64_t feedback_age = 422;
+  phase_wait_probe_t timer_only;
+  const auto boundary = timer_only.qpc - feedback_age;
+  const auto plan = shutter::plan_shutter_emit_phase(boundary, 1000000, 2000, 3317);
+  ASSERT_TRUE(plan);
+  const auto coarse_io = [](phase_wait_probe_t &probe) {
+    auto io = probe.io();
+    io.wait_until = [&](auto deadline) {
+      ++probe.waits;
+      const auto requested = std::chrono::ceil<std::chrono::microseconds>(deadline - probe.now).count();
+      const auto actual = std::chrono::microseconds {((requested + 499) / 500) * 500};
+      probe.qpc += actual.count();
+      probe.now += actual;
+      return true;
+    };
+    return io;
+  };
+  auto previous_io = coarse_io(timer_only);
+  while (timer_only.qpc < plan->target_qpc) {
+    ASSERT_TRUE(previous_io.wait_until(timer_only.now + 200us));
+  }
+  EXPECT_EQ(timer_only.qpc - boundary, 2422);
+  EXPECT_GT(timer_only.qpc, plan->latest_write_qpc);
+
+  phase_wait_probe_t precise;
+  auto io = coarse_io(precise);
+  const auto quantum_wait = io.wait_until;
+  io.wait_until = [&](auto deadline) {
+    const auto requested = std::chrono::duration_cast<std::chrono::microseconds>(deadline - precise.now).count();
+    const auto remaining = plan->target_qpc - precise.qpc;
+    EXPECT_GT(remaining, 750);
+    EXPECT_LE(requested, 200);
+    EXPECT_LE(requested, remaining - 750);
+    return quantum_wait(deadline);
+  };
+  EXPECT_EQ(shutter::await_shutter_emit_phase(io, *plan, 1000000), phase_status::ready);
+  EXPECT_EQ(precise.qpc, plan->target_qpc);
+  EXPECT_EQ(precise.qpc - boundary, 2000);
+  EXPECT_EQ(precise.waits, 2u);
+  EXPECT_GT(precise.relaxes, 0u);
+  EXPECT_LE(precise.qpc, plan->latest_write_qpc);
+}
+
+TEST(ShutterEmitPhase, FineTailAllowsFastPollingBeyondTheCoarseTimerRetryLimit) {
+  phase_wait_probe_t probe;
+  auto io = probe.io();
+  io.relax = [&]() {
+    ++probe.relaxes;
+    ++probe.qpc;
+    probe.now += 100ns;
+  };
+  const auto plan = shutter::plan_shutter_emit_phase(probe.qpc, 10000000, 500, 3317);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(shutter::await_shutter_emit_phase(io, *plan, 10000000), phase_status::ready);
+  EXPECT_EQ(probe.qpc, plan->target_qpc);
+  EXPECT_EQ(probe.waits, 0u);
+  EXPECT_EQ(probe.relaxes, 5000u);
+}
+
+TEST(ShutterEmitPhase, FineTailCancellationAndClockFaultsNeverAuthorizeAnEye) {
+  for (int fault : {0, 1, 2, 3, 4, 5}) {
+    SCOPED_TRACE(fault);
+    phase_wait_probe_t probe;
+    auto io = probe.io();
+    const auto plan = shutter::plan_shutter_emit_phase(probe.qpc, 1000000, 500, 3317);
+    ASSERT_TRUE(plan);
+    io.relax = [&]() {
+      ++probe.relaxes;
+      if (fault == 0) {
+        probe.cancelled = true;
+      } else if (fault == 1) {
+        --probe.qpc;
+      } else if (fault == 2) {
+        probe.now -= 1us;
+      } else if (fault == 3) {
+        probe.now += 1us;  // Frozen QPC still expires at the steady hard deadline.
+      } else if (fault == 5) {
+        probe.qpc = plan->latest_write_qpc + 1;
+        probe.now += 751us;
+      }
+      // fault 4: both clocks are frozen, so the independent spin count must terminate.
+    };
+    const auto status = shutter::await_shutter_emit_phase(io, *plan, 1000000);
+    const auto expected = fault == 0 ? phase_status::cancelled : fault < 3 ? phase_status::invalid :
+                          fault == 4 ? phase_status::wait_failed : phase_status::missed;
+    EXPECT_EQ(status, expected);
+    EXPECT_EQ(probe.waits, 0u);
+    EXPECT_LE(probe.relaxes, 131072u);
+    unsigned writes = 0;
+    if (status == phase_status::ready) {
+      ++writes;
+    }
+    EXPECT_EQ(writes, 0u);
+  }
 }
 
 TEST(ShutterEmitPhase, LateFeedbackCannotCatchUpEvenInsideTheWakeLatenessAllowance) {
@@ -831,6 +936,9 @@ TEST(ShutterEmitPhase, RegressingClocksAndStalledQpcFailClosed) {
 
 TEST(ShutterEmitPhase, InvalidPlansAndSteadyDeadlineOverflowNeverWait) {
   phase_wait_probe_t probe;
+  auto missing_relax = probe.io();
+  missing_relax.relax = {};
+  EXPECT_EQ(shutter::await_shutter_emit_phase(missing_relax, {1001000, 1001250}, 1000000), phase_status::invalid);
   EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), {}, 1000000), phase_status::invalid);
   EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), {1001000, 1000999}, 1000000), phase_status::invalid);
   EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), {1001000, 1001250}, 0), phase_status::invalid);

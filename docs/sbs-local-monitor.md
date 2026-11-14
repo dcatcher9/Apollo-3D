@@ -225,7 +225,10 @@ emitter configuration. No phase file is read during armed presentation.
 An already-missed target, cancellation, excessive wake lateness, or expiry inside the transport
 checks sends no scheduled command. Timing failures use the existing bounded quiet recovery;
 transport failures retain their existing stop behavior. The final deadline is checked again
-immediately before `WriteFile`. Calibrate one logical slot at a time, then verify both physical
+immediately before `WriteFile`. A positive phase uses timer waits followed by bounded processor
+polling within the last 750 µs of the target; zero phases bypass this additional work. This avoids
+relying solely on repeated short kernel waits, while preserving cancellation and the write cutoff.
+It does not guarantee operating-system dispatch deadlines. Calibrate one logical slot at a time, then verify both physical
 lenses, held-refresh counts and neighboring-slot submission timing. A passing host deadline does
 not establish a clean optical window or unchanged behavior of the other lens.
 
