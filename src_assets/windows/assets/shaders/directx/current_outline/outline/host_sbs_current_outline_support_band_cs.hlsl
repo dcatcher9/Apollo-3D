@@ -87,6 +87,13 @@ bool InputReady() {
     [loop]for(uint i=0u;i<24u;++i)if(CBCMeta[16u+i]!=CBWord(i)||RawMeta[12u+i]!=CBWord(i)||R(8u+i)!=CBWord(i))return false;
     return all(CSource.xw==Shape.xy)&&Shape.z==Shape.x*Shape.y&&Shape.w==0u;
 }
+// The echo and header proof is identical for every lane of a dispatch. The per-pixel entry
+// points evaluate it once in lane zero and share the verdict with their group.
+groupshared uint GroupInputReady;
+void ShareInputReady(uint lane) {
+    if(lane==0u)GroupInputReady=InputReady()?1u:0u;
+    GroupMemoryBarrierWithGroupSync();
+}
 bool ROI(uint2 local,out uint2 p) {
     p=0u;if(Hook.x>=8u||any(Hook.yzw))return false;
     uint ub=128u+32u*Hook.x;uint4 r=uint4(CBCMeta[ub+24u],CBCMeta[ub+25u],CBCMeta[ub+26u],CBCMeta[ub+27u]);
@@ -208,8 +215,9 @@ bool AcceptedProfile(int2 p,int2 dir,uint Rmax,out uint extent) {
     return false;
 }
 [numthreads(16,16,1)]
-void profile_main(uint3 d:SV_DispatchThreadID) {
-    uint2 p;if(d.z!=0u||!InputReady()||!ROI(d.xy,p))return;
+void profile_main(uint3 d:SV_DispatchThreadID,uint lane:SV_GroupIndex) {
+    ShareInputReady(lane);
+    uint2 p;if(d.z!=0u||GroupInputReady==0u||!ROI(d.xy,p))return;
     uint cu=U(Hook.x);if(R(cu+14u)!=1u||!OwnBody(int2(p)))return;
     if(!GraphReady()){W(cu+13u,ST_FAULT);return;}
     uint xmin=R(cu+1u),bandw=R(cu+5u),Rmax=R(cu+6u);
@@ -851,7 +859,8 @@ void private_cache_commit_main(uint3 g:SV_GroupID){
 
 [numthreads(16,16,1)]
 void grow_tile_main(uint3 group:SV_GroupID,uint3 tid:SV_GroupThreadID,uint lane:SV_GroupIndex,uint3 d:SV_DispatchThreadID) {
-    bool input=InputReady()&&Hook.x<8u,known=false,cached=false,localConflict=false;uint t=1u,cacheT=0u;
+    ShareInputReady(lane);
+    bool input=GroupInputReady!=0u&&Hook.x<8u,known=false,cached=false,localConflict=false;uint t=1u,cacheT=0u;
     // Raw's own black4CC does not exist yet at this stage. K4 may not replace
     // that proof with a BAND/N8 envelope or an old width/snapshot offer.
     // Keep every lane in the shared work/barriers: FXC treats resource-backed
@@ -1622,8 +1631,9 @@ void RejectRoot(uint root,uint2 rootPixel) {
     uint ignored;InterlockedOr(PassableCache[rootPixel],BAD_RIM,ignored);
 }
 [numthreads(16,16,1)]
-void aggregate_support_main(uint3 d:SV_DispatchThreadID) {
-    uint2 p;if(d.z!=0u||!InputReady()||!ROI(d.xy,p))return;
+void aggregate_support_main(uint3 d:SV_DispatchThreadID,uint lane:SV_GroupIndex) {
+    ShareInputReady(lane);
+    uint2 p;if(d.z!=0u||GroupInputReady==0u||!ROI(d.xy,p))return;
     uint cu=U(Hook.x),ru=128u+32u*Hook.x;
     // Appending and this observation are serial, before the next unit reuses
     // Parent/RootFlags. Unissued units must never consult an older graph.
@@ -1693,8 +1703,9 @@ void aggregate_support_main(uint3 d:SV_DispatchThreadID) {
     if(bad){RejectRoot(root,rp);Data.InterlockedAdd((cu+29u)*4u,1u,ignored);}
 }
 [numthreads(16,16,1)]
-void publish_closure_main(uint3 d:SV_DispatchThreadID) {
-    uint2 p;if(d.z!=0u||!InputReady()||!ROI(d.xy,p))return;
+void publish_closure_main(uint3 d:SV_DispatchThreadID,uint lane:SV_GroupIndex) {
+    ShareInputReady(lane);
+    uint2 p;if(d.z!=0u||GroupInputReady==0u||!ROI(d.xy,p))return;
     if(OpaqueBlackOnly(Hook.x))return;
     uint cu=U(Hook.x);
     if(!RawComponentWitnessShapeKnown()){Fault(F_SHAPE);return;}
