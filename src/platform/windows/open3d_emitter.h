@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -120,6 +121,20 @@ namespace platf::open3d {
     int target_frametime_us = 0;  // Host eye interval only; the disabled firmware averaging filter receives zero.
   };
 
+  // Optional host-call timing only: neither WriteFile return nor these timestamps prove USB
+  // arrival, firmware processing, IR emission, or a physical shutter transition. A pending write
+  // remains subject to the existing completion check before the next signal.
+  struct signal_timing_t {
+    std::int64_t write_begin_qpc = 0;
+    std::int64_t write_end_qpc = 0;
+    std::int64_t qpc_frequency = 0;
+    bool write_pending = false;
+
+    [[nodiscard]] constexpr bool valid() const noexcept {
+      return qpc_frequency > 0 && write_begin_qpc > 0 && write_end_qpc >= write_begin_qpc;
+    }
+  };
+
   namespace detail {
     struct parameters_t {
       int firmware_version = 0;
@@ -173,7 +188,9 @@ namespace platf::open3d {
 
     bool connect(const settings_t &settings, std::stop_token stop = {});
     bool quiesce(std::stop_token stop = {});
-    bool signal(bool left_eye);
+    // timing is reset on entry and populated only when WriteFile is attempted. Its validity
+    // does not affect the signal result; callers must separately check the successful write.
+    bool signal(bool left_eye, signal_timing_t *timing = nullptr);
     bool healthy() const;
     void close();
 

@@ -188,6 +188,20 @@ assignment and crosstalk; judge brightness with normal content. The environment 
 once per presenter initialization and only affects shutter monitors. Stop the session and
 launch the usual host without the flag to return to normal content.
 
+For per-slot host timing measurements, additionally set
+`SUNSHINE_LOCAL_MONITOR_SLOT_TIMING=1` before launching the host. This diagnostic leaves the
+profile, image order, presentation checks, and emitter commands unchanged. It collects bounded
+in-memory measurements and writes separate logical-left and logical-right summaries only after
+presentation stops. The summaries identify the configured physical shutter channel after eye
+swapping; that channel name does not establish which image the panel actually emitted.
+
+Compare reconstructed display-boundary-to-feedback and boundary-to-USB-`WriteFile` timing,
+submission timing, write-call duration, and the next slot's submission. Inspect recovery segments
+and held-refresh counts alongside the distributions. A host delay in one slot can postpone the
+next slot's submission, so unchanged settings for the other eye do not establish unchanged
+presentation. Host write timestamps measure submission to Windows, not USB arrival, IR decoding,
+the panel's light output, or the glasses' transmission window. Visual calibration remains required.
+
 Follow the machine's local development-launch instructions. Keep the installed and development
 hosts mutually exclusive. A profile remains unqualified until these live observations are made;
 mock API, offscreen GPU, and fake topology results cannot substitute for them.

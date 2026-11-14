@@ -211,6 +211,7 @@ namespace platf::open3d {
     std::array<char, 4> signal_bytes {};
     bool signal_pending = false;
     std::optional<detail::parameters_t> configured_parameters;
+    std::int64_t qpc_frequency = 0;
 
     bool transfer(bool write, void *bytes, DWORD length, DWORD &transferred, std::chrono::steady_clock::time_point deadline) {
       OVERLAPPED io {};
@@ -376,6 +377,7 @@ namespace platf::open3d {
     void close_locked() {
       ready.store(false);
       configured_parameters.reset();
+      qpc_frequency = 0;
       const auto handle = port.load();
       if (handle != INVALID_HANDLE_VALUE) {
         CancelIoEx(handle, nullptr);
@@ -493,6 +495,8 @@ namespace platf::open3d {
       return false;
     }
     impl_->configured_parameters = *actual;
+    LARGE_INTEGER frequency {};
+    impl_->qpc_frequency = QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0 ? frequency.QuadPart : 0;
     impl_->ready.store(true);
     BOOST_LOG(info) << "Open3DOLED emitter ready on " << normalized << ", firmware " << actual->firmware_version << " (volatile PC serial mode).";
     return true;
@@ -521,7 +525,10 @@ namespace platf::open3d {
     return true;
   }
 
-  bool emitter_t::signal(bool left_eye) {
+  bool emitter_t::signal(bool left_eye, signal_timing_t *timing) {
+    if (timing) {
+      *timing = {};
+    }
     std::unique_lock lock(impl_->mutex, std::try_to_lock);
     if (!lock || !impl_->ready.load() || impl_->closing.load()) {
       return false;
@@ -544,12 +551,28 @@ namespace platf::open3d {
     }
     impl_->signal_bytes = {'9', ',', left_eye ? '0' : '1', '\n'};
     ResetEvent(impl_->signal_io.hEvent);
+    LARGE_INTEGER write_begin {}, write_end {};
+    BOOL begin_clock_valid = FALSE;
+    if (timing) {
+      begin_clock_valid = QueryPerformanceCounter(&write_begin);
+    }
     const auto started = WriteFile(handle, impl_->signal_bytes.data(), static_cast<DWORD>(impl_->signal_bytes.size()), &count, &impl_->signal_io);
+    // Preserve WriteFile's result before the optional clock query can change thread last-error.
+    const auto write_error = started ? ERROR_SUCCESS : GetLastError();
+    if (timing) {
+      const auto end_clock_valid = QueryPerformanceCounter(&write_end);
+      *timing = {
+        begin_clock_valid ? write_begin.QuadPart : 0,
+        end_clock_valid ? write_end.QuadPart : 0,
+        impl_->qpc_frequency,
+        !started && write_error == ERROR_IO_PENDING,
+      };
+    }
     if (started) {
       if (count == impl_->signal_bytes.size()) {
         return true;
       }
-    } else if (GetLastError() == ERROR_IO_PENDING) {
+    } else if (write_error == ERROR_IO_PENDING) {
       impl_->signal_pending = true;
       return true;
     }

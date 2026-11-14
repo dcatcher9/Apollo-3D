@@ -338,6 +338,31 @@ namespace {
     emitter.close();
   }
 
+  TEST(Open3DEmitter, RejectedSignalClearsPriorHostWriteTimingWithoutAccessingAPort) {
+    emitter_t emitter;
+    signal_timing_t timing {100, 110, 10000000, true};
+    ASSERT_TRUE(timing.valid());
+    EXPECT_FALSE(emitter.signal(true, &timing));
+    EXPECT_EQ(timing.write_begin_qpc, 0);
+    EXPECT_EQ(timing.write_end_qpc, 0);
+    EXPECT_EQ(timing.qpc_frequency, 0);
+    EXPECT_FALSE(timing.write_pending);
+    EXPECT_FALSE(timing.valid());
+    // The original single-argument caller remains supported and cannot signal while closed.
+    EXPECT_FALSE(emitter.signal(false));
+  }
+
+  TEST(Open3DEmitter, HostWriteTimingRequiresAnOrderedQpcPairAndKnownFrequency) {
+    EXPECT_TRUE((signal_timing_t {100, 100, 10000000, false}).valid());
+    EXPECT_TRUE((signal_timing_t {100, 101, 10000000, true}).valid());
+    EXPECT_FALSE((signal_timing_t {}).valid());
+    EXPECT_FALSE((signal_timing_t {0, 100, 10000000, false}).valid());
+    EXPECT_FALSE((signal_timing_t {-1, 100, 10000000, false}).valid());
+    EXPECT_FALSE((signal_timing_t {100, 99, 10000000, false}).valid());
+    EXPECT_FALSE((signal_timing_t {100, 101, 0, false}).valid());
+    EXPECT_FALSE((signal_timing_t {100, 101, -1, false}).valid());
+  }
+
   TEST(Open3DEmitter, QuiescentBarrierFinishesTheEyeThenVerifiesReadbackBeforeFiniteDrain) {
     quiesce_fixture_t fixture;
     const auto original = fixture.expected;
