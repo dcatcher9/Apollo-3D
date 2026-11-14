@@ -2634,8 +2634,12 @@ def sunshine_running():
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq sunshine.exe", "/NH"],
                              capture_output=True, text=True, timeout=15).stdout
         return "sunshine.exe" in out
-    except Exception:
-        return False
+    except Exception as exc:
+        # Unknown is treated as contended: the perf gate is skipped and a baseline update is
+        # refused, rather than trusting timings that may have shared the GPU with a live host.
+        print(f"run_eval: WARNING cannot tell whether sunshine.exe is running ({exc}); "
+              "assuming GPU contention.")
+        return True
 
 
 def file_sha256(path):
@@ -3026,6 +3030,11 @@ def main():
         fail("--direct-parallax-root is reference-only and requires --comparison-only")
     if direct_parallax_root and not os.path.isdir(direct_parallax_root):
         fail(f"--direct-parallax-root is not a directory: {direct_parallax_root}")
+    # The harness takes the last occurrence of a flag. These inputs are the evaluator's own:
+    # overriding them would score a different source or location than the one hashed here.
+    evaluator_owned = sorted({"--frames", "--out", "--capabilities"} & set(args.extra))
+    if evaluator_owned:
+        fail(f"--extra may not override evaluator-owned harness arguments: {', '.join(evaluator_owned)}")
     if "--cuda-graph" in args.extra:
         fail("--cuda-graph was removed; inference-producing runs always require the joined "
              "DAV2/OCR conditional wrapper")

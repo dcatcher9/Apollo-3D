@@ -1358,25 +1358,37 @@
           if (!body.status) throw new Error(body.error || body.message ||'Sunshine 3D did not return a device list.');
 
           this.platform = body.platform || this.platform;
+          // The pairing poll calls this every two seconds. Keep the entry the user is editing
+          // or saving, so a refresh does not discard an open device editor.
+          const inProgress = new Map(
+            this.clients.filter(client => client.editing || client.saving).map(client => [client.uuid, client])
+          );
           const clients = (body.named_certs || []).map(({
             name,
             uuid,
             perm,
             connected
-          }) => ({
-            name,
-            uuid,
-            perm: Number.parseInt(perm, 10),
-            connected,
-            editing: false,
-            saving: false,
-            saveError: ''
-          }));
+          }) => {
+            const kept = inProgress.get(uuid);
+            if (kept) {
+              kept.connected = connected;
+              return kept;
+            }
+            return {
+              name,
+              uuid,
+              perm: Number.parseInt(perm, 10),
+              connected,
+              editing: false,
+              saving: false,
+              saveError: ''
+            };
+          });
 
           this.clients = clients;
           this.clientsLoaded = true;
           this.clientsError = '';
-          currentEditingClient = null;
+          if (!clients.includes(currentEditingClient)) currentEditingClient = null;
 
           if (detectPairing && this.pairingActive) {
             const initialIds = new Set(this.pairingInitialClientIds);

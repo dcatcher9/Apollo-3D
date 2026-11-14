@@ -3140,7 +3140,7 @@ namespace proc {
     };
   }
 
-  void refresh(const std::string &file_name, bool needs_terminate) {
+  void refresh(const std::string &file_name, bool needs_terminate, bool wait_for_display_driver) {
     std::lock_guard lock(process_state_mutex);
     if (needs_terminate) {
       proc.terminate(false, false);
@@ -3153,15 +3153,20 @@ namespace proc {
       BOOST_LOG(warning) << "Deferring app configuration refresh while virtual-display cleanup remains owned by the process."sv;
       return;
     }
+    // This holds process_state_mutex. Without the wait it is one attempt and no sleep; the
+    // launch path initializes the driver again when a session actually needs it.
+    const size_t attempts = wait_for_display_driver ? 5 : 1;
     size_t fail_count = 0;
-    while (fail_count < 5 && vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
+    while (fail_count < attempts && vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
       initVDisplayDriver();
       if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
         break;
       }
 
       fail_count += 1;
-      std::this_thread::sleep_for(1s);
+      if (fail_count < attempts) {
+        std::this_thread::sleep_for(1s);
+      }
     }
 #endif
 

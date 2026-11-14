@@ -6704,6 +6704,9 @@ namespace platf::sbs_debug {
         BOOST_LOG(warning)
           << "SBS debug dump: production V2 resources do not resolve to exactly one "sv
              "authenticated model/preprocess/shape calibration; dump rejected."sv;
+        // Back off like every sibling rejection: the request latch is restored on return, so
+        // without it this warning and the snapshot arming would repeat on every frame.
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
       if (!parallax_v2_shader_identity_matches_contract(
@@ -6712,6 +6715,7 @@ namespace platf::sbs_debug {
         BOOST_LOG(warning)
           << "SBS debug dump: production V2 resources have missing or mismatched "sv
              "shader-source provenance; dump rejected."sv;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
 

@@ -219,7 +219,7 @@ namespace nvhttp {
   void reload_apps(const std::string &file_name) {
     std::lock_guard launch_lock(launch_request_mutex);
     terminate_active_session_locked();
-    proc::refresh(file_name, false);
+    proc::refresh(file_name, false, false);
   }
 
   void prune_pairing_sessions_locked(std::chrono::steady_clock::time_point now) {

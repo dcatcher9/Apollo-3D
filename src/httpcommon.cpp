@@ -366,7 +366,13 @@ namespace http {
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-    curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    // This runs on the Web UI's only request thread. Bound a server that never connects or
+    // stalls mid-transfer, and treat an HTTP error page as a failure rather than as the file.
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
 #ifdef _WIN32
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
 #endif
@@ -376,6 +382,10 @@ namespace http {
     }
     curl_easy_cleanup(curl);
     fclose(fp);
+    if (result != CURLE_OK) {
+      // Do not leave a truncated or error-page file where a complete download is expected.
+      std::remove(file.c_str());
+    }
     return result == CURLE_OK;
   }
 
