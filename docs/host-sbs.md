@@ -71,7 +71,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 130/tag `0x808647CD`, canonical SHA-256
-`0e0a0de27b710cad9eb64e1462b9c136428fd9db1e686def2bea61c265fb55d0`. It binds the
+`d6701e8e9e8fec919ff69cd38732669cccb58c622571880159ec011f10862595`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -82,7 +82,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 29 | `6bd69347bc5a3776ac83336a783f62c3987765de713cdc578305a85a9314baeb` |
+| `parallax_v2_producer` | 29 | `8cc4223f874b8244ad9610e49751e8201caf0e3566387cec7dbe25b54434c307` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `50c712473211a3b66638fb0bcf89938cb46f2501126bee79cca8e352243ca53a` |
 | `near_identical_detector` | 4 | `9272bf6f9d293e556dbc38a9d48a74d5c70090af390836e150d0d6bd8c46a670` |
 | `gpu_trace` | 1 | `2c442b910b839fe7daf0c073d157c36258cd5b2f264c9d901187d83752f2b7c1` |

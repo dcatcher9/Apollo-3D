@@ -473,6 +473,11 @@ bool PrepareCandidateBoxes(
     return true;
 }
 
+uint CandidatePriorBin(CandidateStats stats) {
+    return min(V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT - 1u,
+        (stats.tight_bottom - 1u) * V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT / OCR_HEIGHT);
+}
+
 void PublishCandidate(
     CandidateStats stats, float score, uint kind_flags, bool independently_strong,
     inout uint raw_total, inout uint final_total) {
@@ -520,15 +525,14 @@ void PublishCandidate(
     StoreBox(
         OCR8_FINAL_OFFSET, pair_index, expanded_box, score,
         kind_flags, stats.island_count, stats.structural_gap_count);
-    uint bin = min(V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT - 1u,
-        (stats.tight_bottom - 1u) * V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT / OCR_HEIGHT);
+    uint bin = CandidatePriorBin(stats);
     RetainedTrusted[pair_index] = independently_strong ?
         uint4(1u << bin, stats.active_pixels, stats.tight_top, stats.tight_bottom) :
         uint4(0u, 0u, 0u, 0u);
 }
 
 bool QueueLineCandidate(
-    CandidateStats stats, float score, uint kind_flags, inout uint candidate_count) {
+    CandidateStats stats, uint kind_flags, inout uint candidate_count) {
     // A band of height h has <=60 column islands and <=floor((h+1)/4) valid local row spans
     // per island (height>=3 and at least one blank row between). For B disjoint global bands,
     // sum(h)+(B-1)<=131, so sum(floor((h+1)/4))<=33. Thus 60*33 bounds the WHOLE observation,
@@ -800,14 +804,7 @@ void AttachContainedPunctuation(uint candidate_begin, uint candidate_end) {
 }
 
 bool SameTextLine(CandidateStats candidate, uint2 anchor, uint4 bounds) {
-    uint intersection_top = max(candidate.tight_top, anchor.x);
-    uint intersection_bottom = min(candidate.tight_bottom, anchor.y);
-    if (intersection_top >= intersection_bottom) return false;
-    uint union_height = max(candidate.tight_bottom, anchor.y) -
-        min(candidate.tight_top, anchor.x);
-    if ((intersection_bottom - intersection_top) *
-        V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_DENOMINATOR <
-        union_height * V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR) return false;
+    if (!SpanHasHalfIoU(candidate.tight_top, candidate.tight_bottom, anchor)) return false;
     // Compare native-source lengths, including rounded or height-clipped OCR crops. A row
     // at the same height in a distant column cannot lend this line a false centered union.
     uint gap_begin = max(candidate.tight_left, bounds.x);
@@ -1015,11 +1012,6 @@ void BeginClassifierHistory() {
     StampClassifierIdentity();
 }
 
-uint CandidatePriorBin(CandidateStats stats) {
-    return min(V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT - 1u,
-        (stats.tight_bottom - 1u) * V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT / OCR_HEIGHT);
-}
-
 bool CandidateHasQualifiedPrior(uint candidate) {
     if ((OcrCandidateScratch[ScratchBase(candidate) + 3u].x &
          CANDIDATE_PRIOR_GEOMETRY_ALLOWED) == 0u || ClassifierClockValid == 0u ||
@@ -1166,6 +1158,7 @@ void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint
             if (!CandidateHasQualifiedPrior(candidate) ||
                 !LineSpansReferenceCenter(OcrCandidateScratch[ScratchBase(group) + 4u])) continue;
         }
+        // Queueing already validated these exact stored statistics; this recomputes the score.
         float score;
         if (!CandidateEvidenceValid(stats, score)) continue;
         PublishCandidate(stats, score, OcrCandidateScratch[base + 3u].y, strong,
@@ -1326,7 +1319,7 @@ void resolve_main(uint3 group_thread_id : SV_GroupThreadID) {
                     broad.structural_gap_count >= V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS;
             }
             if (broad_is_ribbon) {
-                if (!QueueLineCandidate(broad, broad_score, V2_OCR_BOX_FLAG_RIBBON, candidate_count)) {
+                if (!QueueLineCandidate(broad, V2_OCR_BOX_FLAG_RIBBON, candidate_count)) {
                     ClearAndPublishInvalidRecord();
                     return;
                 }
@@ -1388,7 +1381,7 @@ void resolve_main(uint3 group_thread_id : SV_GroupThreadID) {
                         // Queue mutates scratch/count. Keep the evidence gate as control flow;
                         // HLSL may evaluate both sides of a logical && expression.
                         if (CandidateEvidenceValid(piece, piece_score)) {
-                            if (!QueueLineCandidate(piece, piece_score, 0u, candidate_count)) {
+                            if (!QueueLineCandidate(piece, 0u, candidate_count)) {
                                 ClearAndPublishInvalidRecord();
                                 return;
                             }
