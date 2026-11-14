@@ -677,3 +677,194 @@ TEST(ShutterFeedbackTracker, FractionalQpcRefreshShiftRoundsOnceAndKeepsTheMeasu
   EXPECT_EQ(tracker.observe(2, second, tracker_origin + 83334 + 1000), tracker_status::ready);
   EXPECT_EQ(tracker.last_present_qpc(), tracker_origin + 83334);
 }
+
+namespace {
+  using phase_status = shutter::shutter_emit_phase_wait_status_e;
+
+  struct phase_wait_probe_t {
+    using clock = shutter::shutter_emit_phase_wait_io_t::clock;
+    std::int64_t qpc = 1000000;
+    clock::time_point now = clock::time_point {} + 1s;
+    bool cancelled = false;
+    unsigned waits = 0, qpc_queries = 0;
+
+    shutter::shutter_emit_phase_wait_io_t io() {
+      return {
+        .now_qpc = [&]() { ++qpc_queries; return qpc; },
+        .now = [&]() { return now; },
+        .cancelled = [&]() { return cancelled; },
+        .wait_until = [&](auto deadline) {
+          ++waits;
+          qpc += std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
+          now = deadline;
+          return true;
+        },
+      };
+    }
+  };
+}
+
+TEST(ShutterEmitPhase, BudgetIncludesTheWholeLatenessWindowAndZeroStaysDisabled) {
+  const auto edge = shutter::plan_shutter_emit_phase(1000000, 1000000, 1000, 1250);
+  ASSERT_TRUE(edge);
+  EXPECT_EQ(edge->target_qpc, 1001000);
+  EXPECT_EQ(edge->latest_write_qpc, 1001250);
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(1000000, 1000000, 1000, 1249));
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(1000000, 1000000, 0, 1250));
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(1000000, 1000000, -1, 1250));
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(0, 1000000, 1000, 1250));
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(1000000, 0, 1000, 1250));
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(1000000, 1000000, 1000, -1));
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(1000000, 1000000, 1000, 1250, -1));
+  const auto exact = shutter::plan_shutter_emit_phase(1000000, 1000000, 1000, 1000, 0);
+  ASSERT_TRUE(exact);
+  EXPECT_EQ(exact->target_qpc, exact->latest_write_qpc);
+}
+
+TEST(ShutterEmitPhase, FractionalQpcRoundingCannotAdvanceTheTargetOrWidenTheLimit) {
+  const auto plan = shutter::plan_shutter_emit_phase(1000000, 10000001, 1000, 1250);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->target_qpc, 1010001);
+  EXPECT_EQ(plan->latest_write_qpc, 1012500);
+  // No representable tick lies inside this sub-tick requested window.
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(1, 1, 1, 251));
+}
+
+TEST(ShutterEmitPhase, ExtremeInputsCannotOverflowProductsSumsOrTheAcceptedBoundary) {
+  constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(maximum - 1000, 1000000, 1000, 1250));
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(1, maximum, maximum, maximum, 0));
+  EXPECT_FALSE(shutter::plan_shutter_emit_phase(1, 1000000, maximum, maximum));
+  const auto large = shutter::plan_shutter_emit_phase(1, maximum, 999999, 1000000, 1);
+  EXPECT_FALSE(large);  // The exact one-second latest boundary cannot be added to 1.
+  const auto safe = shutter::plan_shutter_emit_phase(1, maximum, 1, 251);
+  ASSERT_TRUE(safe);  // Large factors with a representable result remain valid.
+  EXPECT_GT(safe->latest_write_qpc, safe->target_qpc);
+}
+
+TEST(ShutterEmitPhase, WaitRechecksEarlyNotificationsAndNeverReturnsBeforeTheTarget) {
+  phase_wait_probe_t probe;
+  auto io = probe.io();
+  const auto ordinary_wait = io.wait_until;
+  io.wait_until = [&](auto deadline) {
+    if (probe.waits == 0) {
+      ++probe.waits;
+      probe.qpc += 50;
+      probe.now += 50us;
+      return true;
+    }
+    return ordinary_wait(deadline);
+  };
+  const auto plan = shutter::plan_shutter_emit_phase(probe.qpc, 1000000, 1000, 1250);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(shutter::await_shutter_emit_phase(io, *plan, 1000000), phase_status::ready);
+  EXPECT_EQ(probe.qpc, plan->target_qpc);
+  EXPECT_GT(probe.waits, 1u);
+}
+
+TEST(ShutterEmitPhase, LateFeedbackCannotCatchUpEvenInsideTheWakeLatenessAllowance) {
+  phase_wait_probe_t probe;
+  const shutter::shutter_emit_phase_plan_t plan {probe.qpc - 1, probe.qpc + 249};
+  EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), plan, 1000000), phase_status::missed);
+  EXPECT_EQ(probe.waits, 0u);
+  const shutter::shutter_emit_phase_plan_t at_target {probe.qpc, probe.qpc + 250};
+  EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), at_target, 1000000), phase_status::ready);
+  EXPECT_EQ(probe.waits, 0u);
+}
+
+TEST(ShutterEmitPhase, WakeAtTheFinalWriteLimitIsAllowedButOneTickLaterIsMissed) {
+  for (const std::int64_t overshoot : {0, 1}) {
+    phase_wait_probe_t probe;
+    auto io = probe.io();
+    const auto plan = shutter::plan_shutter_emit_phase(probe.qpc, 1000000, 1000, 1250);
+    ASSERT_TRUE(plan);
+    io.wait_until = [&](auto) {
+      ++probe.waits;
+      probe.qpc = plan->latest_write_qpc + overshoot;
+      probe.now += std::chrono::microseconds {1250 + overshoot};
+      return true;
+    };
+    EXPECT_EQ(shutter::await_shutter_emit_phase(io, *plan, 1000000),
+      overshoot ? phase_status::missed : phase_status::ready);
+    EXPECT_EQ(probe.waits, 1u);
+  }
+}
+
+TEST(ShutterEmitPhase, CancellationAndFailedWaitsCannotAuthorizeAnEye) {
+  phase_wait_probe_t probe;
+  const auto plan = shutter::plan_shutter_emit_phase(probe.qpc, 1000000, 1000, 1250);
+  ASSERT_TRUE(plan);
+  probe.cancelled = true;
+  EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), *plan, 1000000), phase_status::cancelled);
+  EXPECT_EQ(probe.qpc_queries, 0u);
+  probe.cancelled = false;
+  auto io = probe.io();
+  io.wait_until = [&](auto) { probe.cancelled = true; return false; };
+  EXPECT_EQ(shutter::await_shutter_emit_phase(io, *plan, 1000000), phase_status::cancelled);
+  probe.cancelled = false;
+  io.wait_until = [](auto) { return false; };
+  EXPECT_EQ(shutter::await_shutter_emit_phase(io, *plan, 1000000), phase_status::wait_failed);
+}
+
+TEST(ShutterEmitPhase, RegressingClocksAndStalledQpcFailClosed) {
+  for (int fault : {0, 1, 2, 3}) {
+    phase_wait_probe_t probe;
+    auto io = probe.io();
+    const auto plan = shutter::plan_shutter_emit_phase(probe.qpc, 1000000, 1000, 1250);
+    ASSERT_TRUE(plan);
+    io.wait_until = [&](auto deadline) {
+      ++probe.waits;
+      if (fault == 0) {
+        --probe.qpc;
+      } else if (fault == 1) {
+        probe.now -= 1us;
+      } else if (fault == 2) {
+        probe.now = deadline;  // A frozen QPC cannot extend the steady hard deadline.
+      }
+      return true;  // fault 3: a broken notifier advances neither clock.
+    };
+    const auto expected = fault < 2 ? phase_status::invalid : fault == 2 ? phase_status::missed : phase_status::wait_failed;
+    EXPECT_EQ(shutter::await_shutter_emit_phase(io, *plan, 1000000), expected);
+    EXPECT_LE(probe.waits, 4096u);
+  }
+}
+
+TEST(ShutterEmitPhase, InvalidPlansAndSteadyDeadlineOverflowNeverWait) {
+  phase_wait_probe_t probe;
+  EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), {}, 1000000), phase_status::invalid);
+  EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), {1001000, 1000999}, 1000000), phase_status::invalid);
+  EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), {1001000, 1001250}, 0), phase_status::invalid);
+  probe.now = phase_wait_probe_t::clock::time_point::max() - 1us;
+  EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), {1001000, 1001250}, 1000000), phase_status::invalid);
+  probe.now = phase_wait_probe_t::clock::time_point {};
+  probe.qpc = 1;
+  constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+  EXPECT_EQ(shutter::await_shutter_emit_phase(probe.io(), {maximum - 1, maximum}, 1), phase_status::invalid);
+  EXPECT_EQ(probe.waits, 0u);
+}
+
+TEST(ShutterEmitPhase, CapturedLogicalSlotKeepsZeroPhaseImmediateAcrossOddHeldRefreshes) {
+  shutter_presentation_clock_t eye_clock(1);
+  phase_wait_probe_t probe;
+  const std::array<std::int64_t, 2> phases {0, 1000};
+  unsigned immediate = 0, delayed = 0;
+  for (const auto refresh : {40u, 43u, 44u, 48u}) {
+    const bool displayed_left = eye_clock.left_eye();
+    ASSERT_TRUE(eye_clock.observe_displayed(refresh));
+    const auto phase = phases[displayed_left ? 0 : 1];
+    const auto prior_queries = probe.qpc_queries;
+    if (phase == 0) {
+      ++immediate;  // Presenter contract: preserve the original path without consulting IO.
+      EXPECT_EQ(probe.qpc_queries, prior_queries);
+    } else {
+      const auto plan = shutter::plan_shutter_emit_phase(probe.qpc, 1000000, phase, 1250);
+      ASSERT_TRUE(plan);
+      ASSERT_EQ(shutter::await_shutter_emit_phase(probe.io(), *plan, 1000000), phase_status::ready);
+      ++delayed;
+    }
+    EXPECT_NE(displayed_left, eye_clock.left_eye());
+  }
+  EXPECT_EQ(immediate, 2u);
+  EXPECT_EQ(delayed, 2u);
+  EXPECT_TRUE(eye_clock.starts_pair());
+}

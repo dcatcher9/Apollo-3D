@@ -202,6 +202,33 @@ next slot's submission, so unchanged settings for the other eye do not establish
 presentation. Host write timestamps measure submission to Windows, not USB arrival, IR decoding,
 the panel's light output, or the glasses' transmission window. Visual calibration remains required.
 
+Independent host-phase calibration is experimental. The optional environment variables
+`SUNSHINE_LOCAL_MONITOR_L_EMIT_PHASE_US` and `SUNSHINE_LOCAL_MONITOR_R_EMIT_PHASE_US` select a
+logical slot's host command phase after its confirmed display boundary. Both default to zero,
+which preserves immediate emission. A positive phase and its 250 µs write-lateness allowance
+must fit the existing host-feedback budget. These values do not replace the emitter's shared
+delay or duration, and cannot move a command earlier than the received feedback.
+
+For repeated calibration without relaunching the elevated host, set
+`SUNSHINE_LOCAL_MONITOR_PHASE_CONFIG` to a UTF-8 JSON file containing exactly these two integer
+fields:
+
+```json
+{"logical_L_us": 0, "logical_R_us": 0}
+```
+
+The file is limited to 2 KiB and is read once per presenter initialization. Stop 3D and wait for
+the inactive state before editing it; the next Start reads the new values. Nonzero direct phase
+environment variables cannot be combined with a phase file. Invalid files or values fail before
+emitter configuration. No phase file is read during armed presentation.
+
+An already-missed target, cancellation, excessive wake lateness, or expiry inside the transport
+checks sends no scheduled command. Timing failures use the existing bounded quiet recovery;
+transport failures retain their existing stop behavior. The final deadline is checked again
+immediately before `WriteFile`. Calibrate one logical slot at a time, then verify both physical
+lenses, held-refresh counts and neighboring-slot submission timing. A passing host deadline does
+not establish a clean optical window or unchanged behavior of the other lens.
+
 Follow the machine's local development-launch instructions. Keep the installed and development
 hosts mutually exclusive. A profile remains unqualified until these live observations are made;
 mock API, offscreen GPU, and fake topology results cannot substitute for them.

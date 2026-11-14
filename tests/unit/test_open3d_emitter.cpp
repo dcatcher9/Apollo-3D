@@ -342,11 +342,13 @@ namespace {
     emitter_t emitter;
     signal_timing_t timing {100, 110, 10000000, true};
     ASSERT_TRUE(timing.valid());
+    timing.deadline_rejected = true;
     EXPECT_FALSE(emitter.signal(true, &timing));
     EXPECT_EQ(timing.write_begin_qpc, 0);
     EXPECT_EQ(timing.write_end_qpc, 0);
     EXPECT_EQ(timing.qpc_frequency, 0);
     EXPECT_FALSE(timing.write_pending);
+    EXPECT_FALSE(timing.deadline_rejected);
     EXPECT_FALSE(timing.valid());
     // The original single-argument caller remains supported and cannot signal while closed.
     EXPECT_FALSE(emitter.signal(false));
@@ -361,6 +363,46 @@ namespace {
     EXPECT_FALSE((signal_timing_t {100, 99, 10000000, false}).valid());
     EXPECT_FALSE((signal_timing_t {100, 101, 0, false}).valid());
     EXPECT_FALSE((signal_timing_t {100, 101, -1, false}).valid());
+    EXPECT_FALSE((signal_timing_t {100, 101, 10000000, false, true}).valid());
+  }
+
+  TEST(Open3DEmitter, ExpiredOrInvalidSignalDeadlinesNeverInvokeTheTransportWrite) {
+    struct input_t {
+      std::int64_t deadline;
+      std::int64_t now;
+      bool clock_valid;
+    };
+    for (const auto input : std::array {
+           input_t {100, 101, true}, input_t {100, 100, false}, input_t {100, 0, true}, input_t {100, -1, true}, input_t {-1, 1, true}}) {
+      SCOPED_TRACE(input.deadline);
+      SCOPED_TRACE(input.now);
+      unsigned writes = 0;
+      EXPECT_FALSE(detail::invoke_signal_write_with_deadline(input.deadline, input.now, input.clock_valid, [&]() { ++writes; }));
+      EXPECT_EQ(writes, 0u);
+    }
+  }
+
+  TEST(Open3DEmitter, SignalDeadlineIncludesItsBoundaryWithoutTimestampOverflow) {
+    for (const std::int64_t now : {std::int64_t {1}, std::int64_t {99}, std::int64_t {100}}) {
+      unsigned writes = 0;
+      EXPECT_TRUE(detail::invoke_signal_write_with_deadline(100, now, true, [&]() { ++writes; }));
+      EXPECT_EQ(writes, 1u);
+    }
+    unsigned writes = 0;
+    EXPECT_TRUE(detail::invoke_signal_write_with_deadline(
+      std::numeric_limits<std::int64_t>::max(), std::numeric_limits<std::int64_t>::max(), true, [&]() { ++writes; }
+    ));
+    EXPECT_EQ(writes, 1u);
+    EXPECT_FALSE(detail::invoke_signal_write_with_deadline(1, std::numeric_limits<std::int64_t>::max(), true, [&]() { ++writes; }));
+    EXPECT_EQ(writes, 1u);
+  }
+
+  TEST(Open3DEmitter, LegacySignalWriteDoesNotDependOnClockAvailabilityOrValues) {
+    for (const std::int64_t now : {std::int64_t {-1}, std::int64_t {0}, std::numeric_limits<std::int64_t>::max()}) {
+      unsigned writes = 0;
+      EXPECT_TRUE(detail::invoke_signal_write_with_deadline(0, now, false, [&]() { ++writes; }));
+      EXPECT_EQ(writes, 1u);
+    }
   }
 
   TEST(Open3DEmitter, QuiescentBarrierFinishesTheEyeThenVerifiesReadbackBeforeFiniteDrain) {
