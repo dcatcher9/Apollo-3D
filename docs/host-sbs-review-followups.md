@@ -1342,10 +1342,12 @@ series:
   two `OfflineSbsWorker` cases, two `ParallaxV2ContractTest` cases (they still expect contract
   schema 121 and dump schema 50) and
   `SbsDebugDumpAsyncTest.Schema49PackagesCompleteContourTupleAndNoScalarPreviews`. Each
-  failed on a single outdated expectation while the rest of its assertions held, so the
-  expectations were brought to the current source (contract schema 130, OCR contract schema
-  38, dump schema 51, the `perf_slot` contour call, the widened harness snapshot condition and
-  the Base-bound harness field read) instead of deleting the tests. All six pass again.
+  failed on a single outdated expectation (contract schema 121 and OCR contract schema 33,
+  dump schema 50, the contour call without `perf_slot`, the narrower harness snapshot
+  condition and the Final-bound harness field read). The six tests are deleted at the owner's
+  direction; their four suites pass the remaining 88 tests. The deletion removes the other,
+  still-valid source-text assertions those tests carried, including the 287-line production
+  contract constant check.
 
 `V2_SUBTITLE_CONTOUR_HISTORY_JITTER_RADIUS_SOURCE_PIXELS` is no longer read by any shader
 after fix 2. It is left in the contract deliberately: removing a contract constant regenerates

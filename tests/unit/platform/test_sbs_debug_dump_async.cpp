@@ -2276,69 +2276,6 @@ namespace {
     EXPECT_FALSE(dumper.snapshot_requested());
   }
 
-  TEST(SbsDebugDumpAsyncTest, Schema49PackagesCompleteContourTupleAndNoScalarPreviews) {
-    std::ifstream stream(
-      std::filesystem::path(SUNSHINE_SOURCE_DIR) /
-        "src/platform/windows/sbs_debug_dump.cpp",
-      std::ios::binary
-    );
-    ASSERT_TRUE(stream);
-    const std::string source {
-      std::istreambuf_iterator<char> {stream},
-      std::istreambuf_iterator<char> {},
-    };
-    EXPECT_NE(
-      source.find("artifacts[\"shadow_base_final_parallax.f32\"]"),
-      std::string::npos
-    );
-    EXPECT_NE(
-      source.find("artifacts[\"shadow_coordinate.f32\"]"),
-      std::string::npos
-    );
-    EXPECT_NE(
-      source.find("dimensions[\"shadow_coordinate\"]"),
-      std::string::npos
-    );
-    for (const std::string_view retired : {
-           "warp_depth.f32",
-           "shadow_base_final_parallax_shape.json",
-           "shadow_base_final_parallax.png",
-           "shadow_base_final_parallax_heat.png",
-         }) {
-      EXPECT_EQ(source.find(retired), std::string::npos) << retired;
-    }
-    EXPECT_NE(source.find("{\"schema\", 51}"), std::string::npos);
-    EXPECT_NE(source.find("{\"mode\", \"subtitle-contours-v1\"}"), std::string::npos);
-    EXPECT_NE(source.find("nlohmann::json::parse(subtitle_contour_policy_json)"), std::string::npos);
-    for (const std::string_view artifact : {
-           "contour_support.u32", "subtitle_glyph_matte.u32", "subtitle_condition_params.u32", "subtitle_glyph_matte.json", "subtitle_condition_params.json", "render_source.bin", "contour_field_pin.u32", "contour_distance.f32",
-           "contour_identity.u32", "contour_history.rgba32f", "contour_source.rgba16f",
-           "ocr_probability.f32", "gaussian_weight.f32", "gaussian_blend.f32",
-           "gaussian_vertical_conditioned.f32", "gaussian_control.u32",
-         }) {
-      EXPECT_NE(source.find(artifact), std::string::npos) << artifact;
-    }
-    const auto terminal_query = source.find("ctx->End(pending->completion.Get())");
-    ASSERT_NE(terminal_query, std::string::npos);
-    for (const std::string_view resource : {
-           "subtitle_contour_support", "subtitle_glyph_matte", "subtitle_condition_params", "subtitle_contour_field_pin", "subtitle_contour_distance",
-           "subtitle_contour_identity", "subtitle_contour_history", "subtitle_contour_source",
-           "subtitle_ocr_probability", "subtitle_gaussian_weight", "subtitle_gaussian_blend",
-           "subtitle_gaussian_vertical_conditioned", "subtitle_gaussian_control",
-         }) {
-      const auto staging = source.find("device, ctx, completed." + std::string(resource));
-      EXPECT_NE(staging, std::string::npos) << resource;
-      EXPECT_LT(staging, terminal_query) << resource;
-      EXPECT_NE(source.find("job.completed." + std::string(resource) + " = nullptr;"), std::string::npos)
-        << resource;
-    }
-    EXPECT_NE(source.find("{\"matched_observation_timestamp_us\", completed.matched_observation_timestamp_us}"), std::string::npos);
-    EXPECT_NE(
-      source.find("{\"warp_input_artifact\", nullptr}"),
-      std::string::npos
-    );
-  }
-
   TEST(SbsDebugDumpAsyncTest, CollectionChunksAreBoundedAlignedAndComplete) {
     constexpr std::size_t alignment = sizeof(float);
     static_assert(dump_detail::cpu_collection_byte_budget == 64u * 1024u * 1024u);
