@@ -232,6 +232,37 @@ It does not guarantee operating-system dispatch deadlines. Calibrate one logical
 lenses, held-refresh counts and neighboring-slot submission timing. A passing host deadline does
 not establish a clean optical window or unchanged behavior of the other lens.
 
+The internal `SUNSHINE_LOCAL_MONITOR_PHASE_LOOKAHEAD` flag is disabled by default. Set it to
+exactly `1` to test one-image lookahead with a positive logical-slot phase; `0` or an absent flag
+preserves the serial presentation policy. Both zero phases keep immediate emission and the
+ordinary submission path even when the flag is enabled. The flag is read once per presenter
+initialization and malformed values fail before emitter configuration.
+
+For a phased current image, lookahead admits and submits at most one next image before waiting
+for the current command's phase. Admission retries only the zero-time readiness event, for at
+most 500 µs after feedback receipt and only before the phase target minus 250 µs. There is one
+GPU attempt, using the existing positive repeat interval and `DO_NOT_WAIT`. The next iteration
+consumes its saved present identity and timestamps once; it does not reacquire a stereo packet,
+wait for another admission, or render and submit that image again. A queued R retains its L's
+tuple; a queued new L may acquire the next tuple only after the old R's copy was actually
+displayed, and retains that new tuple through R and any cold recovery.
+
+Immediately before the phased command, a non-consuming query must still identify the accepted
+current image and the same reconstructed boundary. Freshness and the actual `WriteFile` deadline
+remain mandatory. A known queued image appearing early, an unavailable admission, a nonaccepted
+busy Present, or a missed phase stops commands and uses bounded quiet recovery. There is no
+serial emission fallback for a failed lookahead attempt. An unexpected submitted/displayed
+identity or ownership mismatch stops after the emitter drain and returns to 2D.
+
+Recovery inhibits the pending ledger before serial work, stops new image submissions, verifies
+the same-handle FIFO barrier and finite-pulse drain, then starts a new metadata epoch and 13
+unsignalled left samples. One already-submitted image can appear during the drain; clearing a
+CPU descriptor cannot cancel it. A readiness signal consumed without an accepted Present stays
+owned through recovery and is used once for the first cold submission. Timing summaries report
+negative write-end-to-next-submission intervals as valid signed overlaps. This experiment can
+remove a host submission dependency; it does not establish unchanged panel phase, USB arrival,
+or a clean optical window for either lens.
+
 Follow the machine's local development-launch instructions. Keep the installed and development
 hosts mutually exclusive. A profile remains unqualified until these live observations are made;
 mock API, offscreen GPU, and fake topology results cannot substitute for them.

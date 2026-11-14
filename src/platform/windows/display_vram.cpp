@@ -8797,6 +8797,8 @@ namespace platf::dxgi {
         phase_cancelled,
         phase_invalid,
         phase_wait_failed,
+        lookahead_unavailable,
+        lookahead_reproof_failed,
         phase_write_deadline_rejected,
         signal_failed,
         signalled,
@@ -8816,6 +8818,8 @@ namespace platf::dxgi {
         "phase_cancelled",
         "phase_invalid",
         "phase_wait_failed",
+        "lookahead_unavailable",
+        "lookahead_reproof_failed",
         "phase_write_deadline_rejected",
         "signal_failed",
         "signalled",
@@ -8855,7 +8859,9 @@ namespace platf::dxgi {
       struct sample_t {
         unsigned logical_slot = 0;
         bool acquiring = false, delta_known = false;
+        bool prefetched = false;
         std::uint64_t segment = 0;
+        std::uint64_t presentation_epoch = 0, tuple_group = 0;
         outcome_e outcome = outcome_e::present_failed;
         UINT requested = 0;
         std::uint32_t refresh_delta = 0;
@@ -8897,6 +8903,7 @@ namespace platf::dxgi {
         std::array<std::uint64_t, 18> refresh_deltas {};
         std::array<sample_t, 32> first_armed_samples {};
         signed_summary_t submission_to_boundary;
+        signed_summary_t write_end_to_next_submit;
         std::uint64_t cold_presents = 0, armed_presents = 0, raw_omitted = 0;
         std::uint64_t invalid_write_metadata = 0, held_images = 0, extra_refreshes = 0;
         std::size_t raw_count = 0;
@@ -8941,7 +8948,13 @@ namespace platf::dxgi {
           auto &prior = slots[sample.previous->logical_slot];
           prior.metrics[boundary_to_next_submit].observe(microseconds(sample.previous->boundary, sample.present_begin));
           if (sample.previous->write_end > 0) {
-            prior.metrics[write_end_to_next_submit].observe(microseconds(sample.previous->write_end, sample.present_begin));
+            const auto overlap = microseconds(sample.previous->write_end, sample.present_begin);
+            prior.write_end_to_next_submit.observe(overlap);
+            // A prefetched next image may be submitted before the current USB write. This is
+            // a valid signed overlap, not invalid clock metadata for the nonnegative histogram.
+            if (overlap >= 0) {
+              prior.metrics[write_end_to_next_submit].observe(overlap);
+            }
           }
         }
         // A rejected tracker has no trusted current reconstructed boundary. Its raw evidence
@@ -9020,10 +9033,15 @@ namespace platf::dxgi {
           BOOST_LOG(info) << "Local shutter slot timing signed: logical="sv << logical << " metric=submission_to_boundary_us count="sv << signed_values.count
                           << " negative="sv << signed_values.negative << " invalid="sv << signed_values.invalid
                           << " min="sv << signed_values.minimum << " mean="sv << signed_values.mean << " max="sv << signed_values.maximum << '.';
+          const auto &overlap = slot.write_end_to_next_submit;
+          BOOST_LOG(info) << "Local shutter slot timing signed: logical="sv << logical << " metric=write_end_to_next_submit_us count="sv << overlap.count
+                          << " negative="sv << overlap.negative << " invalid="sv << overlap.invalid
+                          << " min="sv << overlap.minimum << " mean="sv << overlap.mean << " max="sv << overlap.maximum << '.';
           for (std::size_t i = 0; i < slot.raw_count; ++i) {
             const auto &raw = slot.first_armed_samples[i];
             BOOST_LOG(info) << "Local shutter slot timing raw: logical="sv << logical << " nominal_physical="sv << physical << " index="sv << i
                             << " segment="sv << raw.segment << " outcome="sv << outcome_names[static_cast<std::size_t>(raw.outcome)]
+                            << " prefetched="sv << raw.prefetched << " presentation_epoch="sv << raw.presentation_epoch << " tuple_group="sv << raw.tuple_group
                             << " requested="sv << raw.requested << " observed="sv << raw.feedback.present_count
                             << " feedback_status="sv << static_cast<unsigned>(raw.feedback.status) << " feedback_hr="sv << util::log_hex(raw.feedback.result_code)
                             << " refresh="sv << raw.feedback.refresh_count << " sync_refresh="sv << raw.feedback.sync_refresh_count << " raw_sync_qpc="sv << raw.feedback.sync_qpc
@@ -9048,7 +9066,18 @@ namespace platf::dxgi {
     constexpr std::int64_t emit_phase_allowed_lateness_us = 250;
     std::array<int, 2> emit_phase_us {};
     bool emit_phase_from_file = false;
+    bool shutter_phase_lookahead = false;
     if (config.frame_sequential) {
+      std::array<wchar_t, 2> lookahead_value {};
+      SetLastError(ERROR_SUCCESS);
+      const auto lookahead_length = GetEnvironmentVariableW(L"SUNSHINE_LOCAL_MONITOR_PHASE_LOOKAHEAD", lookahead_value.data(), static_cast<DWORD>(lookahead_value.size()));
+      if (lookahead_length || GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+        if (lookahead_length != 1 || (lookahead_value[0] != L'0' && lookahead_value[0] != L'1')) {
+          BOOST_LOG(error) << "Local shutter phase lookahead requires an exact 0 or 1 environment flag."sv;
+          return local_presenter_result_e::error;
+        }
+        shutter_phase_lookahead = lookahead_value[0] == L'1';
+      }
       constexpr std::array phase_environment_names {
         L"SUNSHINE_LOCAL_MONITOR_L_EMIT_PHASE_US",
         L"SUNSHINE_LOCAL_MONITOR_R_EMIT_PHASE_US",
@@ -9170,6 +9199,8 @@ namespace platf::dxgi {
                       << " logical_L_us="sv << emit_phase_us[0] << " logical_R_us="sv << emit_phase_us[1]
                       << " allowed_lateness_us="sv << emit_phase_allowed_lateness_us << " flip_eyes="sv << config.monitor_config.flip_eyes
                       << "; zero is immediate; positive values are experimental host phases after the confirmed display boundary, not USB or optical timing."sv;
+      BOOST_LOG(info) << "Local shutter phase lookahead: enabled="sv << shutter_phase_lookahead
+                      << "; active only for a positive logical-slot phase; at most one next image may already be queued during quiet recovery."sv;
     }
     // Internal optical-calibration aid, sampled once for this presenter initialization.
     // It replaces only the physical shutter image; packet ownership and all timing gates stay active.
@@ -9680,7 +9711,17 @@ namespace platf::dxgi {
         const auto stopped = [&]() {
           return shutter_stop.stop_requested() || stop_token.stop_requested() || !IsWindow(window);
         };
+        const bool lookahead_active = shutter_phase_lookahead && (emit_phase_us[0] > 0 || emit_phase_us[1] > 0);
+        detail::shutter_pending_present_ledger_t pending_present;
+        detail::shutter_frame_admission_t frame_admission;
+        struct lookahead_counts_t {
+          std::uint64_t attempts = 0, readiness_polls = 0, busy_polls = 0, queued = 0, consumed = 0;
+          std::uint64_t unavailable = 0, present_busy = 0, reproof_rejected = 0, carried_admissions = 0;
+        } lookahead_counts;
         auto fail = [&](std::string_view reason) {
+          if (lookahead_active) {
+            pending_present.invalidate();
+          }
           BOOST_LOG(error) << "Local shutter monitor stopped: "sv << reason;
           if (config.on_failure) {
             config.on_failure(std::string(reason));
@@ -9835,6 +9876,47 @@ namespace platf::dxgi {
           });
         }
         ID3D11Texture2D *pair = nullptr;
+        std::uint64_t held_tuple_group = 0;
+        UINT pending_prior_count = 0;
+        HRESULT pending_prior_count_result = S_FALSE;
+        struct submission_t {
+          detail::shutter_queued_present_t present;
+          UINT prior_count = 0;
+          HRESULT prior_count_result = S_FALSE, result = S_FALSE, count_result = S_FALSE;
+          bool admission_valid = true;
+        };
+        const auto submit_eye = [&](bool left_eye, UINT flags) {
+          submission_t submission;
+          submission.present.epoch = pending_present.epoch();
+          submission.present.tuple_group = held_tuple_group;
+          submission.present.left_eye = left_eye;
+          if (shutter_test_pattern) {
+            constexpr FLOAT red[4] {1.0f, 0.0f, 0.0f, 1.0f};
+            constexpr FLOAT blue[4] {0.0f, 0.0f, 1.0f, 1.0f};
+            constexpr FLOAT white[4] {1.0f, 1.0f, 1.0f, 1.0f};
+            const auto &glyph = test_pattern_glyphs[left_eye ? 0 : 1];
+            test_pattern_context->ClearView(backbuffer_rtv.Get(), left_eye ? red : blue, nullptr, 0);
+            test_pattern_context->ClearView(backbuffer_rtv.Get(), white, glyph.rectangles.data(), glyph.count);
+          } else {
+            const UINT left = left_eye ? 0 : static_cast<UINT>(output_width);
+            const D3D11_BOX eye_box {left, 0, 0, left + static_cast<UINT>(output_width), static_cast<UINT>(output_height), 1};
+            shutter_context->CopySubresourceRegion(backbuffer.Get(), 0, 0, 0, 0, pair, 0, &eye_box);
+          }
+          submission.prior_count_result = swapchain->GetLastPresentCount(&submission.prior_count);
+          DXGI_PRESENT_PARAMETERS parameters {};
+          submission.present.present_begin_qpc = qpc_now();
+          submission.result = swapchain->Present1(eye_repeats, flags, &parameters);
+          submission.present.present_end_qpc = qpc_now();
+          if (submission.result == S_OK) {
+            // A known nonaccepted DO_NOT_WAIT attempt retains its already-owned admission.
+            // Only an accepted Present consumes the permit, including the ordinary cold path.
+            if (lookahead_active) {
+              submission.admission_valid = frame_admission.consume();
+            }
+            submission.count_result = swapchain->GetLastPresentCount(&submission.present.present_id);
+          }
+          return submission;
+        };
         const auto first_pair_deadline = std::chrono::steady_clock::now() + 5s;
         bool has_displayed = false;
         bool recovering_clock = false;
@@ -9884,6 +9966,10 @@ namespace platf::dxgi {
           return !stopped();
         };
         const auto recover_clock = [&](std::string_view reason) {
+          if (lookahead_active) {
+            // Stop admission/metadata consumption before any context checks or serial barrier.
+            pending_present.invalidate();
+          }
           if (!recovery_context_valid()) {
             BOOST_LOG(warning) << "Local shutter clock recovery rejected a changed display, device or desktop context."sv;
             return false;
@@ -9893,12 +9979,20 @@ namespace platf::dxgi {
             return false;
           }
           BOOST_LOG(warning) << "Local shutter clock lost; holding presentation while the emitter drains: "sv << reason;
+          if (lookahead_active && pending_present.pending()) {
+            const auto &queued = *pending_present.pending();
+            BOOST_LOG(warning) << "Local shutter queued eye retained during drain: epoch="sv << queued.epoch
+                               << " tuple_group="sv << queued.tuple_group << " present="sv << queued.present_id << " left="sv << queued.left_eye
+                               << " present_begin_qpc="sv << queued.present_begin_qpc << " present_end_qpc="sv << queued.present_end_qpc
+                               << "; the already-submitted image may appear before quiescence."sv;
+          }
           if (slot_timing) {
             slot_timing->recovering();
           }
           // Present1 may have displayed the new eye even when its metadata was rejected. Freeze
-          // ALL image submissions here, rather than repainting the previous confirmed eye while
-          // an old USB write or finite OPEN/CLOSE timer may still be active.
+          // NEW image submissions here, rather than repainting while an old USB write or finite
+          // OPEN/CLOSE timer may still be active. One already-queued lookahead image may appear
+          // during this drain; cancelling its CPU descriptor cannot cancel that GPU submission.
           if (!emitter.quiesce(emitter_setup_stop.get_token())) {
             BOOST_LOG(warning) << "Local shutter clock recovery could not verify a quiet USB emitter."sv;
             return false;
@@ -9906,6 +10000,15 @@ namespace platf::dxgi {
           if (!recovery_context_valid()) {
             BOOST_LOG(warning) << "Local shutter clock recovery context changed while the emitter drained."sv;
             return false;
+          }
+          if (lookahead_active) {
+            if (pending_present.epoch() == std::numeric_limits<std::uint64_t>::max() || !pending_present.reset_after_quiet(pending_present.epoch() + 1)) {
+              return false;
+            }
+            pending_prior_count = 0;
+            pending_prior_count_result = S_FALSE;
+            // A Wait0 signal consumed without an accepted Present remains owned. Carry that
+            // permit into the first cold submission instead of waiting on the reset event twice.
           }
           // A failed armed tracker is sticky. Only a successful same-handle FIFO barrier and
           // firmware drain authorize a wholly new clock; never repair IDs or infer eye parity.
@@ -9922,15 +10025,65 @@ namespace platf::dxgi {
           BOOST_LOG(info) << "Local shutter emitter quiet; reacquiring an unsignalled left-eye clock without changing the desktop."sv;
           return true;
         };
+        const auto fail_pending_ownership = [&](std::string_view reason, const detail::shutter_queued_present_t &queued, const detail::shutter_queued_present_t *current = nullptr, const detail::shutter_feedback_t *observed = nullptr) {
+          pending_present.invalidate();
+          // An accepted image with inconsistent metadata cannot be repaired by reacquisition.
+          // Stop IR and settle finite pulses before logging that image and returning to 2D.
+          const bool quiet = emitter.quiesce(emitter_setup_stop.get_token());
+          BOOST_LOG(error) << "Local shutter queued ownership failure after drain: quiet_verified="sv << quiet
+                           << " epoch="sv << queued.epoch << " tuple_group="sv << queued.tuple_group
+                           << " present="sv << queued.present_id << " left="sv << queued.left_eye
+                           << " present_begin_qpc="sv << queued.present_begin_qpc << " present_end_qpc="sv << queued.present_end_qpc
+                           << " prior_present="sv << (current ? current->present_id : 0)
+                           << " prior_tuple_group="sv << (current ? current->tuple_group : 0)
+                           << " observed_present="sv << (observed ? observed->present_count : 0)
+                           << " observed_refresh="sv << (observed ? observed->refresh_count : 0)
+                           << " observed_sync_refresh="sv << (observed ? observed->sync_refresh_count : 0)
+                           << " observed_sync_qpc="sv << (observed ? observed->sync_qpc : 0) << '.';
+          fail(reason);
+        };
         while (!stopped()) {
           if (!emitter.healthy() || shutter_frames.failed()) {
             fail("USB emitter or shared stereo packet became unavailable");
             break;
           }
+          const bool acquiring = !feedback_tracker.armed();
+          const bool left_eye = eye_clock.left_eye();
+          bool prefetched = false;
+          submission_t submission;
+          if (lookahead_active) {
+            // Consume metadata before touching the ring. Acquiring another packet here would
+            // split an already-queued L from its matching R when the producer publishes again.
+            const auto pending = pending_present.take(pending_present.epoch(), left_eye, held_tuple_group);
+            if (pending.status == detail::shutter_pending_take_status_e::rejected) {
+              const auto queued = pending_present.pending().value_or(detail::shutter_queued_present_t {});
+              fail_pending_ownership("the queued eye lost its owned stereo packet"sv, queued);
+              break;
+            }
+            if (pending.status == detail::shutter_pending_take_status_e::taken) {
+              if (acquiring || !pair || frame_admission.held()) {
+                fail_pending_ownership("queued-eye resources or admission ownership became inconsistent"sv, *pending.present);
+                break;
+              }
+              prefetched = true;
+              submission.present = *pending.present;
+              submission.prior_count = pending_prior_count;
+              submission.prior_count_result = pending_prior_count_result;
+              submission.result = submission.count_result = S_OK;
+              ++lookahead_counts.consumed;
+            }
+          }
           // The current packet stays keyed-locked through both eyes, including all repeated
           // refreshes. Publishing another capture can never change the second eye of this pair.
-          if (!pair || (has_displayed && eye_clock.starts_pair())) {
+          if (!prefetched && (!pair || (has_displayed && eye_clock.starts_pair()))) {
             pair = shutter_frames.acquire_pair();
+            if (lookahead_active && pair) {
+              if (held_tuple_group == std::numeric_limits<std::uint64_t>::max()) {
+                fail("the stereo-pair ownership generation overflowed");
+                break;
+              }
+              ++held_tuple_group;
+            }
           }
           if (!pair) {
             if (std::chrono::steady_clock::now() >= first_pair_deadline) {
@@ -9940,7 +10093,6 @@ namespace platf::dxgi {
             std::this_thread::sleep_for(1ms);
             continue;
           }
-          const bool acquiring = !feedback_tracker.armed();
           if (acquiring) {
             if (!acquisition_deadline) {
               acquisition_deadline = std::chrono::steady_clock::now() + detail::shutter_recovery_budget_t::acquisition_timeout;
@@ -9953,26 +10105,35 @@ namespace platf::dxgi {
               break;
             }
           }
-          const auto slot_deadline = std::min(
-            std::chrono::steady_clock::now() + std::max(50ms, acquisition_wait),
-            acquiring ? *acquisition_deadline : std::chrono::steady_clock::time_point::max()
-          );
-          DWORD latency = WAIT_TIMEOUT;
-          while (!stopped() && std::chrono::steady_clock::now() < slot_deadline) {
-            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(slot_deadline - std::chrono::steady_clock::now());
-            latency = WaitForSingleObject(frame_latency_waitable,
-              static_cast<DWORD>(std::clamp<std::int64_t>(remaining.count(), 1, 50)));
-            if (latency != WAIT_TIMEOUT) {
+          if (!prefetched) {
+            const bool carried_admission = lookahead_active && frame_admission.held();
+            const auto slot_deadline = std::min(
+              std::chrono::steady_clock::now() + std::max(50ms, acquisition_wait),
+              acquiring ? *acquisition_deadline : std::chrono::steady_clock::time_point::max()
+            );
+            DWORD latency = carried_admission ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
+            while (!carried_admission && !stopped() && std::chrono::steady_clock::now() < slot_deadline) {
+              const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(slot_deadline - std::chrono::steady_clock::now());
+              latency = WaitForSingleObject(frame_latency_waitable, static_cast<DWORD>(std::clamp<std::int64_t>(remaining.count(), 1, 50)));
+              if (latency != WAIT_TIMEOUT) {
+                break;
+              }
+            }
+            if (latency != WAIT_OBJECT_0) {
+              if (!stopped()) {
+                fail("the physical output did not admit a bounded presentation slot");
+              }
               break;
             }
-          }
-          if (latency != WAIT_OBJECT_0) {
-            if (!stopped()) {
-              fail("the physical output did not admit a bounded presentation slot");
+            if (lookahead_active) {
+              if (carried_admission) {
+                ++lookahead_counts.carried_admissions;
+              } else if (!frame_admission.grant()) {
+                fail("the presentation admission was acquired twice");
+                break;
+              }
             }
-            break;
           }
-          const bool left_eye = eye_clock.left_eye();
           const auto logical_slot = left_eye ? 0u : 1u;
           const int slot_emit_phase_us = emit_phase_us[logical_slot];
           std::optional<local_shutter_slot_timing_t::sample_t> timing_sample;
@@ -9982,6 +10143,9 @@ namespace platf::dxgi {
             timing_sample->emit_phase_us = slot_emit_phase_us;
             timing_sample->acquiring = acquiring;
             timing_sample->segment = slot_timing->segment;
+            timing_sample->prefetched = prefetched;
+            timing_sample->presentation_epoch = pending_present.epoch();
+            timing_sample->tuple_group = held_tuple_group;
             timing_sample->previous = slot_timing->previous;
           }
           const auto record_slot_timing = util::fail_guard([&]() {
@@ -9994,28 +10158,21 @@ namespace platf::dxgi {
               timing_sample->outcome = outcome;
             }
           };
-          if (shutter_test_pattern) {
-            constexpr FLOAT red[4] {1.0f, 0.0f, 0.0f, 1.0f};
-            constexpr FLOAT blue[4] {0.0f, 0.0f, 1.0f, 1.0f};
-            constexpr FLOAT white[4] {1.0f, 1.0f, 1.0f, 1.0f};
-            const auto &glyph = test_pattern_glyphs[left_eye ? 0 : 1];
-            test_pattern_context->ClearView(backbuffer_rtv.Get(), left_eye ? red : blue, nullptr, 0);
-            test_pattern_context->ClearView(backbuffer_rtv.Get(), white, glyph.rectangles.data(), glyph.count);
-          } else {
-            const UINT left = left_eye ? 0 : static_cast<UINT>(output_width);
-            const D3D11_BOX eye_box {left, 0, 0, left + static_cast<UINT>(output_width), static_cast<UINT>(output_height), 1};
-            shutter_context->CopySubresourceRegion(backbuffer.Get(), 0, 0, 0, 0, pair, 0, &eye_box);
-          }
           first_feedback.reset();
           feedback_disjoint = false;
           flush_result = S_FALSE;
           flush_start_qpc = flush_end_qpc = 0;
-          UINT before_present_count = 0;
-          const auto before_count_result = swapchain->GetLastPresentCount(&before_present_count);
-          DXGI_PRESENT_PARAMETERS parameters {};
-          const auto present_start_qpc = qpc_now();
-          const auto presented = swapchain->Present1(eye_repeats, DXGI_PRESENT_RESTRICT_TO_OUTPUT, &parameters);
-          const auto present_end_qpc = qpc_now();
+          if (!prefetched) {
+            if (stopped()) {
+              break;
+            }
+            submission = submit_eye(left_eye, DXGI_PRESENT_RESTRICT_TO_OUTPUT);
+          }
+          const auto before_present_count = submission.prior_count;
+          const auto before_count_result = submission.prior_count_result;
+          const auto present_start_qpc = submission.present.present_begin_qpc;
+          const auto present_end_qpc = submission.present.present_end_qpc;
+          const auto presented = submission.result;
           if (slot_timing) {
             timing_sample->present_begin = present_start_qpc;
             timing_sample->present_end = present_end_qpc;
@@ -10026,9 +10183,13 @@ namespace platf::dxgi {
             fail("the restricted swapchain was occluded, stale, or could not present");
             break;
           }
+          if (!submission.admission_valid) {
+            fail("the submitted eye had no owned presentation admission");
+            break;
+          }
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::present_id_failed);
-          UINT requested_present = 0;
-          const auto present_count_result = swapchain->GetLastPresentCount(&requested_present);
+          const auto requested_present = submission.present.present_id;
+          const auto present_count_result = submission.count_result;
           if (slot_timing) {
             timing_sample->requested = requested_present;
           }
@@ -10212,6 +10373,93 @@ namespace platf::dxgi {
             );
             auto wait_status = detail::shutter_emit_phase_wait_status_e::invalid;
             if (plan && phase_wait_io) {
+              if (lookahead_active) {
+                ++lookahead_counts.attempts;
+                const auto admission_window = detail::plan_shutter_lookahead_admission(confirmation_qpc, qpc_frequency.QuadPart, *plan);
+                bool admitted = false;
+                if (admission_window) {
+                  // Only readiness is retried. No copy or GPU submission occurs before one
+                  // owned Wait0 signal and the post-wait cutoff check both succeed.
+                  constexpr unsigned maximum_admission_attempts = 4096;
+                  for (unsigned attempt = 0; attempt < maximum_admission_attempts; ++attempt) {
+                    const auto action = detail::shutter_lookahead_admission_action(*admission_window, qpc_now(), stopped(), false);
+                    if (action != detail::shutter_lookahead_admission_action_e::retry) {
+                      break;
+                    }
+                    ++lookahead_counts.readiness_polls;
+                    const auto readiness = WaitForSingleObject(frame_latency_waitable, 0);
+                    if (readiness == WAIT_TIMEOUT) {
+                      ++lookahead_counts.busy_polls;
+                      YieldProcessor();
+                      continue;
+                    }
+                    if (readiness != WAIT_OBJECT_0 || !frame_admission.grant()) {
+                      fail("the lookahead presentation admission became unavailable");
+                      break;
+                    }
+                    admitted = detail::shutter_lookahead_admission_action(*admission_window, qpc_now(), stopped(), true) ==
+                               detail::shutter_lookahead_admission_action_e::admit;
+                    break;
+                  }
+                }
+                if (shutter_failed.load(std::memory_order_acquire) || stopped()) {
+                  break;
+                }
+                bool queued = false;
+                if (admitted) {
+                  const bool next_left_eye = eye_clock.left_eye();
+                  if (next_left_eye) {
+                    // The current R was actually displayed, so its copy finished reading the
+                    // old keyed tuple. A new L may now acquire the next complete packet.
+                    pair = shutter_frames.acquire_pair();
+                    if (!pair || shutter_frames.failed() || held_tuple_group == std::numeric_limits<std::uint64_t>::max()) {
+                      fail("the next immutable stereo packet could not be retained");
+                      break;
+                    }
+                    ++held_tuple_group;
+                  }
+                  if (stopped()) {
+                    break;
+                  }
+                  // Ring acquisition is nonblocking at the GPU mutex, but CPU contention may
+                  // still spend the phase allowance. Recheck immediately before the GPU copy.
+                  if (detail::shutter_lookahead_admission_action(*admission_window, qpc_now(), stopped(), true) == detail::shutter_lookahead_admission_action_e::admit) {
+                    const auto next = submit_eye(next_left_eye, DXGI_PRESENT_RESTRICT_TO_OUTPUT | DXGI_PRESENT_DO_NOT_WAIT);
+                    if (next.result == S_OK) {
+                      if (!next.admission_valid || FAILED(next.count_result)) {
+                        fail("DXGI could not identify an owned lookahead submission");
+                        break;
+                      }
+                      queued = pending_present.commit(submission.present, next.present);
+                      if (!queued) {
+                        fail_pending_ownership("DXGI returned an unexpected queued-eye identity or owner"sv, next.present, &submission.present);
+                        break;
+                      }
+                      pending_prior_count = next.prior_count;
+                      pending_prior_count_result = next.prior_count_result;
+                      ++lookahead_counts.queued;
+                    } else if (next.result == DXGI_ERROR_WAS_STILL_DRAWING) {
+                      // The copy may have been recorded, but no image was accepted. Retain the
+                      // unused admission through quiet recovery; never retry this GPU attempt.
+                      ++lookahead_counts.present_busy;
+                    } else {
+                      fail("the restricted lookahead swapchain was occluded or could not present");
+                      break;
+                    }
+                  }
+                }
+                if (!queued) {
+                  ++lookahead_counts.unavailable;
+                  set_timing_outcome(local_shutter_slot_timing_t::outcome_e::lookahead_unavailable);
+                  if (recover_clock("the phased eye could not pre-submit its one next image"sv)) {
+                    continue;
+                  }
+                  if (!stopped()) {
+                    fail("the phased eye could not retain one bounded lookahead image");
+                  }
+                  break;
+                }
+              }
               if (timing_sample) {
                 timing_sample->phase_target_qpc = plan->target_qpc;
                 timing_sample->phase_latest_write_qpc = plan->latest_write_qpc;
@@ -10259,6 +10507,36 @@ namespace platf::dxgi {
               }
               fail("the configured logical-slot host phase could not be met; returning to 2D");
               break;
+            }
+            if (lookahead_active) {
+              // Queuing a future image does not prove that the current image is still shown.
+              // Requery without observing/advancing either clock or moving the phase anchor.
+              const auto reproof = feedback_io.query();
+              const auto reproof_qpc = qpc_now();
+              if (!feedback_tracker.confirmed_feedback_matches(requested_present, reproof, reproof_qpc)) {
+                ++lookahead_counts.reproof_rejected;
+                set_timing_outcome(local_shutter_slot_timing_t::outcome_e::lookahead_reproof_failed);
+                const bool known_pending = pending_present.pending() && reproof.present_count == pending_present.pending()->present_id;
+                if (reproof.status == detail::shutter_feedback_status_e::available && reproof.present_count != requested_present && !known_pending) {
+                  const auto queued = pending_present.pending().value_or(detail::shutter_queued_present_t {});
+                  fail_pending_ownership("DXGI reported an unowned displayed eye before its phased command"sv, queued, &submission.present, &reproof);
+                  break;
+                }
+                BOOST_LOG(warning) << "Local shutter lookahead reproof rejected: requested="sv << requested_present
+                                   << " present="sv << reproof.present_count << " refresh="sv << reproof.refresh_count
+                                   << " sync_refresh="sv << reproof.sync_refresh_count << " sync_qpc="sv << reproof.sync_qpc
+                                   << " query_qpc="sv << reproof_qpc << " hr="sv << util::log_hex(reproof.result_code) << '.';
+                if (stopped()) {
+                  break;
+                }
+                if (reproof.status != detail::shutter_feedback_status_e::unsupported && recover_clock("the displayed current eye changed before its phased USB command"sv)) {
+                  continue;
+                }
+                if (!stopped()) {
+                  fail("DXGI could not re-prove the current eye before its phased USB command");
+                }
+                break;
+              }
             }
           }
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::expired_before_emit);
@@ -10328,10 +10606,21 @@ namespace platf::dxgi {
         BOOST_LOG(info) << "Local shutter presentation summary: confirmed_eye_commands="sv << confirmed_eye_commands
                         << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
                         << " maximum_refresh_delta="sv << maximum_confirmed_refresh_delta << " repeats="sv << eye_repeats << '.';
+        if (lookahead_active) {
+          pending_present.invalidate();
+        }
         // PC serial mode uses finite pulses with averaging disabled. Closing the transport
         // leaves no autonomous eye-toggle source running after the last pulse expires.
         emitter.close();
         shutter_context->Flush();
+        if (lookahead_active) {
+          BOOST_LOG(info) << "Local shutter phase lookahead summary: attempts="sv << lookahead_counts.attempts
+                          << " readiness_polls="sv << lookahead_counts.readiness_polls << " busy_polls="sv << lookahead_counts.busy_polls
+                          << " queued="sv << lookahead_counts.queued << " consumed="sv << lookahead_counts.consumed
+                          << " unavailable="sv << lookahead_counts.unavailable << " present_busy="sv << lookahead_counts.present_busy
+                          << " reproof_rejected="sv << lookahead_counts.reproof_rejected << " carried_admissions="sv << lookahead_counts.carried_admissions
+                          << "; one already-queued image may advance during a quiet drain; host timestamps do not prove USB or optical timing."sv;
+        }
         if (phase_calibration_active) {
           for (std::size_t slot = 0; slot < phase_counts.size(); ++slot) {
             const auto &phase = phase_counts[slot];

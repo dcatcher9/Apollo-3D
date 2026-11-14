@@ -976,3 +976,410 @@ TEST(ShutterEmitPhase, CapturedLogicalSlotKeepsZeroPhaseImmediateAcrossOddHeldRe
   EXPECT_EQ(delayed, 2u);
   EXPECT_TRUE(eye_clock.starts_pair());
 }
+
+namespace {
+  using pending_ledger_t = shutter::shutter_pending_present_ledger_t;
+  using queued_present_t = shutter::shutter_queued_present_t;
+  using pending_take_status = shutter::shutter_pending_take_status_e;
+
+  queued_present_t queued_present(std::uint32_t id, bool left, std::uint64_t group,
+    std::int64_t begin = 1000, std::uint64_t epoch = 1) {
+    return {epoch, group, id, left, begin, begin + 10};
+  }
+}  // namespace
+
+TEST(ShutterPendingPresentLedger, TakesExactlyOneImmutableDescriptorWithOriginalSubmissionTimes) {
+  pending_ledger_t ledger;
+  const auto current = queued_present(40, false, 10);
+  auto next = queued_present(41, true, 11, 2000);
+  const auto submitted = next;
+  ASSERT_TRUE(ledger.commit(current, next));
+  next.present_id = 99;
+  next.present_begin_qpc = 9000;  // Caller mutation cannot change the submitted descriptor.
+  ASSERT_TRUE(ledger.pending());
+  EXPECT_EQ(*ledger.pending(), submitted);
+  const auto result = ledger.take(1, true, 11);
+  ASSERT_EQ(result.status, pending_take_status::taken);
+  ASSERT_TRUE(result.present);
+  EXPECT_EQ(*result.present, submitted);
+  EXPECT_FALSE(ledger.pending());
+  const auto again = ledger.take(1, true, 11);
+  EXPECT_EQ(again.status, pending_take_status::none);
+  EXPECT_FALSE(again.present);
+  EXPECT_TRUE(ledger.accepting());
+}
+
+TEST(ShutterPendingPresentLedger, ASecondQueueLatchesFailureWithoutOverwritingAuditMetadata) {
+  pending_ledger_t ledger;
+  const auto current = queued_present(40, false, 10);
+  const auto next = queued_present(41, true, 11, 2000);
+  ASSERT_TRUE(ledger.commit(current, next));
+  EXPECT_FALSE(ledger.commit(next, queued_present(42, false, 11, 3000)));
+  EXPECT_FALSE(ledger.accepting());
+  ASSERT_TRUE(ledger.pending());
+  EXPECT_EQ(*ledger.pending(), next);
+  const auto result = ledger.take(1, true, 11);
+  EXPECT_EQ(result.status, pending_take_status::rejected);
+  EXPECT_FALSE(result.present);
+  EXPECT_EQ(*ledger.pending(), next);
+}
+
+TEST(ShutterPendingPresentLedger, ExactNextPresentIdentityWrapsWithoutSkippingOrReplaying) {
+  pending_ledger_t ledger;
+  const auto current = queued_present(UINT32_MAX, false, 9);
+  const auto left = queued_present(0, true, 10, 2000);
+  ASSERT_TRUE(ledger.commit(current, left));
+  ASSERT_EQ(ledger.take(1, true, 10).status, pending_take_status::taken);
+  const auto right = queued_present(1, false, 10, 3000);
+  ASSERT_TRUE(ledger.commit(left, right));
+  ASSERT_EQ(ledger.take(1, false, 10).status, pending_take_status::taken);
+  for (const auto id : {40u, 42u, UINT32_MAX}) {
+    SCOPED_TRACE(id);
+    pending_ledger_t invalid;
+    EXPECT_FALSE(invalid.commit(queued_present(40, false, 10), queued_present(id, true, 11, 2000)));
+    EXPECT_FALSE(invalid.accepting());
+    EXPECT_EQ(invalid.take(1, true, 11).status, pending_take_status::rejected);
+  }
+}
+
+TEST(ShutterPendingPresentLedger, SlotsAndStereoGroupsMustDescribeTheNextImage) {
+  for (int fault = 0; fault < 4; ++fault) {
+    SCOPED_TRACE(fault);
+    pending_ledger_t ledger;
+    auto current = queued_present(40, false, 10);
+    auto next = queued_present(41, true, 11, 2000);
+    if (fault == 0) next.left_eye = false;
+    if (fault == 1) next.tuple_group = 10;
+    if (fault == 2) next.tuple_group = 12;
+    if (fault == 3) {
+      current.left_eye = true;
+      next.left_eye = false;  // An R image must keep its L image's group, not acquire 11.
+    }
+    EXPECT_FALSE(ledger.commit(current, next));
+    EXPECT_FALSE(ledger.pending());
+    EXPECT_FALSE(ledger.commit(queued_present(40, false, 10), queued_present(41, true, 11, 2000)));
+  }
+}
+
+TEST(ShutterPendingPresentLedger, StereoGroupOverflowCannotWrapIntoAReusableGeneration) {
+  constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+  pending_ledger_t ledger;
+  const auto left = queued_present(40, true, maximum);
+  const auto right = queued_present(41, false, maximum, 2000);
+  ASSERT_TRUE(ledger.commit(left, right));  // Completing the last group does not increment it.
+  ASSERT_EQ(ledger.take(1, false, maximum).status, pending_take_status::taken);
+  EXPECT_FALSE(ledger.commit(right, queued_present(42, true, maximum, 3000)));
+  EXPECT_FALSE(ledger.accepting());
+  pending_ledger_t wrapped;
+  EXPECT_FALSE(wrapped.commit(right, queued_present(42, true, 0, 3000)));
+}
+
+TEST(ShutterPendingPresentLedger, InvalidEpochsAndSubmissionMetadataFailBeforeQueueing) {
+  for (int fault = 0; fault < 9; ++fault) {
+    SCOPED_TRACE(fault);
+    pending_ledger_t ledger;
+    auto current = queued_present(40, false, 10);
+    auto next = queued_present(41, true, 11, 2000);
+    if (fault == 0) current.epoch = 0;
+    if (fault == 1) next.epoch = 2;
+    if (fault == 2) current.tuple_group = 0;
+    if (fault == 3) next.tuple_group = 0;
+    if (fault == 4) current.present_begin_qpc = 0;
+    if (fault == 5) current.present_end_qpc = current.present_begin_qpc - 1;
+    if (fault == 6) next.present_begin_qpc = -1;
+    if (fault == 7) next.present_end_qpc = next.present_begin_qpc - 1;
+    if (fault == 8) next.present_begin_qpc = current.present_end_qpc - 1;
+    EXPECT_FALSE(ledger.commit(current, next));
+    EXPECT_FALSE(ledger.pending());
+    EXPECT_EQ(ledger.take(1, true, 11).status, pending_take_status::rejected);
+  }
+}
+
+TEST(ShutterPendingPresentLedger, WrongEpochSlotOrHeldTupleRejectsRatherThanPretendingNothingIsPending) {
+  for (int fault = 0; fault < 3; ++fault) {
+    SCOPED_TRACE(fault);
+    pending_ledger_t ledger;
+    const auto next = queued_present(41, true, 11, 2000);
+    ASSERT_TRUE(ledger.commit(queued_present(40, false, 10), next));
+    const auto result = ledger.take(fault == 0 ? 2 : 1, fault != 1, fault == 2 ? 12 : 11);
+    EXPECT_EQ(result.status, pending_take_status::rejected);
+    EXPECT_FALSE(result.present);
+    EXPECT_FALSE(ledger.accepting());
+    EXPECT_EQ(*ledger.pending(), next);
+    EXPECT_EQ(ledger.take(1, true, 11).status, pending_take_status::rejected);
+    EXPECT_FALSE(ledger.commit(next, queued_present(42, false, 11, 3000)));
+  }
+}
+
+TEST(ShutterPendingPresentLedger, InvalidationRetainsAuditUntilQuietResetAndNeverReplaysAnOldEpoch) {
+  pending_ledger_t ledger;
+  const auto next = queued_present(41, true, 11, 2000);
+  ASSERT_TRUE(ledger.commit(queued_present(40, false, 10), next));
+  ledger.invalidate();
+  ledger.invalidate();
+  EXPECT_EQ(ledger.epoch(), 1u);
+  EXPECT_EQ(*ledger.pending(), next);
+  EXPECT_EQ(ledger.take(1, true, 11).status, pending_take_status::rejected);
+  EXPECT_FALSE(ledger.reset_after_quiet(0));
+  EXPECT_FALSE(ledger.reset_after_quiet(1));
+  EXPECT_EQ(*ledger.pending(), next);
+  ASSERT_TRUE(ledger.reset_after_quiet(2));
+  EXPECT_TRUE(ledger.accepting());
+  EXPECT_EQ(ledger.epoch(), 2u);
+  EXPECT_FALSE(ledger.pending());
+  EXPECT_EQ(ledger.take(2, true, 11).status, pending_take_status::none);
+  EXPECT_FALSE(ledger.commit(queued_present(40, false, 10), next));  // Old jobs remain invalid.
+  EXPECT_FALSE(ledger.accepting());
+  ASSERT_TRUE(ledger.reset_after_quiet(3));
+  ASSERT_TRUE(ledger.commit(queued_present(80, false, 11, 4000, 3), queued_present(81, true, 12, 5000, 3)));
+  EXPECT_EQ(ledger.take(3, true, 12).status, pending_take_status::taken);
+}
+
+TEST(ShutterPendingPresentLedger, QuietResetRequiresInvalidationAndEpochExhaustionIsTerminal) {
+  pending_ledger_t running;
+  EXPECT_FALSE(running.reset_after_quiet(2));
+  EXPECT_FALSE(running.accepting());
+  EXPECT_EQ(running.epoch(), 1u);
+  constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+  pending_ledger_t exhausted(maximum);
+  const auto next = queued_present(41, true, 11, 2000, maximum);
+  ASSERT_TRUE(exhausted.commit(queued_present(40, false, 10, 1000, maximum), next));
+  exhausted.invalidate();
+  EXPECT_FALSE(exhausted.reset_after_quiet(maximum));
+  EXPECT_FALSE(exhausted.reset_after_quiet(0));
+  EXPECT_FALSE(exhausted.reset_after_quiet(1));
+  EXPECT_EQ(*exhausted.pending(), next);
+  pending_ledger_t zero_epoch(0);
+  EXPECT_FALSE(zero_epoch.accepting());
+  EXPECT_EQ(zero_epoch.take(0, true, 0).status, pending_take_status::rejected);
+}
+
+TEST(ShutterPendingPresentLedger, AccidentalTupleReacquisitionCannotReplaceTheAlreadyCopiedLeft) {
+  pending_ledger_t ledger;
+  const auto next = queued_present(41, true, 11, 2000);
+  ASSERT_TRUE(ledger.commit(queued_present(40, false, 10), next));
+  EXPECT_EQ(ledger.take(1, true, 12).status, pending_take_status::rejected);
+  EXPECT_EQ(*ledger.pending(), next);
+  EXPECT_EQ(ledger.take(1, true, 11).status, pending_take_status::rejected);
+}
+
+TEST(ShutterPendingPresentLedger, QueueAndTakeDoNotAdvanceTheActualFeedbackOrEyeClocks) {
+  tracker_t tracker(2, 120000, tracker_frequency, 2000, 100, 2);
+  acquire_tracker(tracker, 2);
+  shutter_presentation_clock_t eye_clock(2);
+  for (const auto id : {12u, 13u}) {
+    const auto boundary = tracker_origin + (id - 10u) * 2 * tracker_refresh_ticks;
+    ASSERT_EQ(tracker.observe(id, tracker_feedback(id, 1000 + (id - 10u) * 2, boundary), boundary + 1200), tracker_status::accepted);
+    ASSERT_TRUE(eye_clock.observe_displayed(1000 + (id - 10u) * 2));
+  }
+  ASSERT_TRUE(eye_clock.left_eye());
+  const auto accepted_boundary = tracker.last_present_qpc();
+  const auto streak = tracker.streak();
+  pending_ledger_t ledger;
+  const auto next = queued_present(14, true, 2, *accepted_boundary + 1200);
+  ASSERT_TRUE(ledger.commit(queued_present(13, false, 1, *accepted_boundary - 2000), next));
+  EXPECT_EQ(tracker.last_present_qpc(), accepted_boundary);
+  EXPECT_EQ(tracker.streak(), streak);
+  EXPECT_TRUE(tracker.armed());
+  EXPECT_FALSE(tracker.failed());
+  EXPECT_TRUE(eye_clock.left_eye());
+  const auto taken = ledger.take(1, eye_clock.left_eye(), 2);
+  ASSERT_EQ(taken.status, pending_take_status::taken);
+  ASSERT_TRUE(taken.present);
+  EXPECT_EQ(tracker.last_present_qpc(), accepted_boundary);
+  EXPECT_TRUE(eye_clock.left_eye());
+  const auto displayed_boundary = *accepted_boundary + 2 * tracker_refresh_ticks;
+  ASSERT_EQ(tracker.observe(taken.present->present_id, tracker_feedback(14, 1008, displayed_boundary), displayed_boundary + 1200), tracker_status::accepted);
+  ASSERT_TRUE(eye_clock.observe_displayed(1008));
+  EXPECT_FALSE(eye_clock.left_eye());
+  EXPECT_EQ(tracker.last_present_qpc(), displayed_boundary);
+  EXPECT_EQ(ledger.take(1, true, 2).status, pending_take_status::none);
+  EXPECT_FALSE(eye_clock.left_eye());
+  EXPECT_EQ(tracker.last_present_qpc(), displayed_boundary);
+}
+
+TEST(ShutterLookaheadAdmission, ReceiptHorizonAndPhaseGuardBothBoundTheWindow) {
+  const auto phase = shutter::plan_shutter_emit_phase(100000, 10000000, 2000, 3317);
+  ASSERT_TRUE(phase);
+  const auto early = shutter::plan_shutter_lookahead_admission(103000, 10000000, *phase);
+  ASSERT_TRUE(early);
+  EXPECT_EQ(early->receipt_qpc, 103000);
+  EXPECT_EQ(early->cutoff_qpc, 108000);
+  const auto near = shutter::plan_shutter_lookahead_admission(116000, 10000000, *phase);
+  ASSERT_TRUE(near);
+  EXPECT_EQ(near->cutoff_qpc, 117500);
+  const auto late = shutter::plan_shutter_lookahead_admission(118000, 10000000, *phase);
+  ASSERT_TRUE(late);
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action(*late, 118000, false, true),
+    shutter::shutter_lookahead_admission_action_e::expired);
+}
+
+TEST(ShutterLookaheadAdmission, FractionalTicksOnlyShrinkTheBudgetAndArithmeticCannotWrap) {
+  const auto phase = shutter::plan_shutter_emit_phase(100000, 10000001, 2000, 3317);
+  ASSERT_TRUE(phase);
+  const auto early = shutter::plan_shutter_lookahead_admission(103000, 10000001, *phase);
+  const auto near = shutter::plan_shutter_lookahead_admission(116000, 10000001, *phase);
+  ASSERT_TRUE(early);
+  ASSERT_TRUE(near);
+  EXPECT_EQ(early->cutoff_qpc, 108000);  // Receipt + floor(5000.0005) ticks.
+  EXPECT_EQ(near->cutoff_qpc, 117500);   // Ceil(20000.002) - ceil(2500.00025).
+  constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+  const shutter::shutter_emit_phase_plan_t extreme {maximum, maximum};
+  EXPECT_TRUE(shutter::plan_shutter_lookahead_admission(maximum - 5000, 10000000, extreme));
+  EXPECT_FALSE(shutter::plan_shutter_lookahead_admission(maximum - 4999, 10000000, extreme));
+  const auto high_frequency = shutter::plan_shutter_lookahead_admission(1, maximum, extreme);
+  ASSERT_TRUE(high_frequency);
+  EXPECT_EQ(high_frequency->cutoff_qpc, maximum / 2000 + 1);
+}
+
+TEST(ShutterLookaheadAdmission, InvalidOrUnrepresentableWindowsNeverAuthorizeAdmission) {
+  const shutter::shutter_emit_phase_plan_t phase {120000, 122500};
+  EXPECT_FALSE(shutter::plan_shutter_lookahead_admission(0, 10000000, phase));
+  EXPECT_FALSE(shutter::plan_shutter_lookahead_admission(-1, 10000000, phase));
+  EXPECT_FALSE(shutter::plan_shutter_lookahead_admission(103000, 0, phase));
+  EXPECT_FALSE(shutter::plan_shutter_lookahead_admission(103000, -1, phase));
+  EXPECT_FALSE(shutter::plan_shutter_lookahead_admission(103000, 1999, phase));
+  EXPECT_TRUE(shutter::plan_shutter_lookahead_admission(103000, 2000, phase));
+  EXPECT_FALSE(shutter::plan_shutter_lookahead_admission(103000, 10000000, {}));
+  EXPECT_FALSE(shutter::plan_shutter_lookahead_admission(103000, 10000000, {120000, 119999}));
+  EXPECT_FALSE(shutter::plan_shutter_lookahead_admission(1, 10000000, {2500, 2500}));
+}
+
+TEST(ShutterLookaheadAdmission, CancellationReadinessAndCutoffHaveExplicitNoncatchupOutcomes) {
+  using action_e = shutter::shutter_lookahead_admission_action_e;
+  const shutter::shutter_lookahead_admission_window_t window {100, 200};
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action(window, 100, false, false), action_e::retry);
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action(window, 100, false, true), action_e::admit);
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action(window, 199, false, true), action_e::admit);
+  for (const auto now : {200, 201}) {
+    for (const bool ready : {false, true}) {
+      EXPECT_EQ(shutter::shutter_lookahead_admission_action(window, now, false, ready), action_e::expired);
+    }
+  }
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action(window, 100, true, true), action_e::cancelled);
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action(window, 201, true, true), action_e::cancelled);
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action(window, 99, false, true), action_e::invalid);
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action({}, 100, false, true), action_e::invalid);
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action({100, 0}, 100, false, true), action_e::invalid);
+}
+
+TEST(ShutterFrameAdmission, AGrantCannotBeDuplicatedOrConsumedTwice) {
+  shutter::shutter_frame_admission_t admission;
+  EXPECT_FALSE(admission.held());
+  EXPECT_FALSE(admission.consume());
+  ASSERT_TRUE(admission.grant());
+  EXPECT_TRUE(admission.held());
+  EXPECT_FALSE(admission.grant());
+  EXPECT_TRUE(admission.held());
+  EXPECT_TRUE(admission.consume());
+  EXPECT_FALSE(admission.held());
+  EXPECT_FALSE(admission.consume());
+  EXPECT_TRUE(admission.grant());
+  EXPECT_TRUE(admission.consume());
+}
+
+TEST(ShutterFrameAdmission, ExpiredCutoffAndQuietMetadataResetDoNotLoseAGrantedPermit) {
+  shutter::shutter_frame_admission_t admission;
+  pending_ledger_t ledger;
+  ASSERT_TRUE(admission.grant());
+  const shutter::shutter_lookahead_admission_window_t window {100, 200};
+  EXPECT_EQ(shutter::shutter_lookahead_admission_action(window, 200, false, true),
+    shutter::shutter_lookahead_admission_action_e::expired);
+  // The ready Wait was consumed, but no frame was submitted. Recovery must not
+  // clear this independent permit when it abandons old command metadata.
+  ledger.invalidate();
+  EXPECT_TRUE(admission.held());
+  ASSERT_TRUE(ledger.reset_after_quiet(2));
+  EXPECT_EQ(ledger.take(2, true, 0).status, pending_take_status::none);
+  EXPECT_TRUE(admission.held());
+  EXPECT_FALSE(admission.grant());
+  EXPECT_TRUE(admission.consume());
+  EXPECT_FALSE(admission.consume());
+}
+
+TEST(ShutterFeedbackReproof, ConstCheckPreservesTheAcceptedAnchorAndNextObservationIdentity) {
+  tracker_t tracker(2, 120000, tracker_frequency, 2000, 100, 2);
+  acquire_tracker(tracker, 2);
+  const auto boundary = *tracker.last_present_qpc();
+  const auto streak = tracker.streak();
+  const auto raw = tracker_feedback(11, 1002, boundary);
+  const auto &view = tracker;
+  EXPECT_TRUE(view.confirmed_feedback_matches(11, raw, boundary + 1200));
+  EXPECT_TRUE(view.confirmed_feedback_matches(11, raw, boundary + 24000));
+  EXPECT_FALSE(view.confirmed_feedback_matches(11, raw, boundary + 24001));
+  EXPECT_FALSE(view.confirmed_feedback_matches(11, raw, boundary - 1));
+  EXPECT_EQ(tracker.last_present_qpc(), boundary);
+  EXPECT_EQ(tracker.streak(), streak);
+  EXPECT_TRUE(tracker.armed());
+  EXPECT_FALSE(tracker.failed());
+  const auto next = boundary + 2 * tracker_refresh_ticks;
+  EXPECT_EQ(tracker.observe(12, tracker_feedback(12, 1004, next), next + 1200), tracker_status::accepted);
+}
+
+TEST(ShutterFeedbackReproof, WrongImageRefreshEpochOrFutureSyncCannotReanchorTheClock) {
+  tracker_t tracker(2, 120000, tracker_frequency, 2000, 100, 2);
+  acquire_tracker(tracker, 2);
+  const auto boundary = *tracker.last_present_qpc();
+  const auto streak = tracker.streak();
+  for (int fault = 0; fault < 8; ++fault) {
+    SCOPED_TRACE(fault);
+    auto raw = tracker_feedback(11, 1002, boundary);
+    auto requested = 11u;
+    if (fault == 0) requested = 12;
+    if (fault == 1) raw.present_count = 12;
+    if (fault == 2) ++raw.refresh_count;
+    if (fault == 3) raw.status = shutter::shutter_feedback_status_e::disjoint;
+    if (fault == 4) raw.status = shutter::shutter_feedback_status_e::unsupported;
+    if (fault == 5) raw.sync_qpc = 0;
+    if (fault == 6) raw = tracker_feedback(11, 1002, boundary, -1); // Correct boundary, future sync.
+    if (fault == 7) raw = tracker_feedback(11, 1002, boundary, 3);  // Outside the repeat window.
+    EXPECT_FALSE(tracker.confirmed_feedback_matches(requested, raw, boundary + 1200));
+    EXPECT_EQ(tracker.last_present_qpc(), boundary);
+    EXPECT_EQ(tracker.streak(), streak);
+    EXPECT_FALSE(tracker.failed());
+  }
+}
+
+TEST(ShutterFeedbackReproof, OneTickRationalReconstructionToleranceNeverAcceptsAFutureBoundary) {
+  tracker_t tracker(2, 120000, 10000000, 12000, 100, 2);
+  const std::int64_t first = 10000000, boundary = first + 166667;
+  ASSERT_EQ(tracker.observe(30, tracker_feedback(30, 100, first), first + 1000), tracker_status::acquiring);
+  ASSERT_EQ(tracker.observe(31, tracker_feedback(31, 102, boundary), boundary + 1000), tracker_status::ready);
+  ASSERT_TRUE(tracker.arm());
+  for (const int offset : {-1, 1, 2}) {
+    const auto shift = static_cast<std::int64_t>(std::round(offset * 10000000.0L / 120));
+    shutter::shutter_feedback_t raw {
+      shutter::shutter_feedback_status_e::available, 31, 102,
+      static_cast<std::uint32_t>(102 - offset), boundary - shift, 0,
+    };
+    for (const int error : {-2, -1, 0, 1, 2}) {
+      auto shifted = raw;
+      shifted.sync_qpc += error;
+      EXPECT_EQ(tracker.confirmed_feedback_matches(31, shifted, boundary + 100000), std::abs(error) <= 1);
+    }
+  }
+  auto raw = tracker_feedback(31, 102, boundary);
+  --raw.sync_qpc;
+  EXPECT_TRUE(tracker.confirmed_feedback_matches(31, raw, boundary));
+  raw.sync_qpc = boundary + 1;
+  EXPECT_FALSE(tracker.confirmed_feedback_matches(31, raw, boundary));
+  raw = {shutter::shutter_feedback_status_e::available, 31, 102, 101, boundary - 83333 + 1, 0};
+  EXPECT_FALSE(tracker.confirmed_feedback_matches(31, raw, boundary)); // Future reconstructed boundary, past sync.
+  EXPECT_EQ(tracker.last_present_qpc(), boundary);
+  EXPECT_EQ(tracker.streak(), 2u);
+}
+
+TEST(ShutterFeedbackReproof, ColdUnarmedAndFailedTrackersCannotProveAnEye) {
+  tracker_t tracker(2, 120000, tracker_frequency, 2000, 100, 2);
+  const auto boundary = tracker_origin + 2 * tracker_refresh_ticks;
+  const auto raw = tracker_feedback(11, 1002, boundary);
+  EXPECT_FALSE(tracker.confirmed_feedback_matches(11, raw, boundary + 1200));
+  ASSERT_EQ(tracker.observe(10, tracker_feedback(10, 1000, tracker_origin), tracker_origin + 1200), tracker_status::acquiring);
+  ASSERT_EQ(tracker.observe(11, raw, boundary + 1200), tracker_status::ready);
+  EXPECT_FALSE(tracker.confirmed_feedback_matches(11, raw, boundary + 1200));
+  ASSERT_TRUE(tracker.arm());
+  EXPECT_TRUE(tracker.confirmed_feedback_matches(11, raw, boundary + 1200));
+  EXPECT_FALSE(tracker.fresh_for_emit(boundary + 24001));
+  ASSERT_TRUE(tracker.failed());
+  EXPECT_FALSE(tracker.confirmed_feedback_matches(11, raw, boundary + 1200));
+}

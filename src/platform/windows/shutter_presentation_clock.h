@@ -10,6 +10,148 @@
 #include <optional>
 
 namespace platf::dxgi::detail {
+  // Submission metadata only: tuple_group identifies a logical stereo-pair acquisition,
+  // including when the GPU ring reuses the same captured texture. It is not a texture handle.
+  struct shutter_queued_present_t {
+    std::uint64_t epoch = 0;
+    std::uint64_t tuple_group = 0;
+    std::uint32_t present_id = 0;
+    bool left_eye = true;
+    std::int64_t present_begin_qpc = 0;
+    std::int64_t present_end_qpc = 0;
+
+    bool operator==(const shutter_queued_present_t &) const = default;
+  };
+
+  enum class shutter_pending_take_status_e {
+    none,
+    taken,
+    rejected,
+  };
+
+  struct shutter_pending_take_result_t {
+    shutter_pending_take_status_e status = shutter_pending_take_status_e::none;
+    std::optional<shutter_queued_present_t> present;
+  };
+
+  // One owner may retain one already-submitted next image. This ledger never acquires GPU
+  // resources, samples/advances a clock, or authorizes IR. A taken descriptor must still pass
+  // the existing exact-display checks. The caller retains its keyed tuple through both eyes.
+  class shutter_pending_present_ledger_t {
+  public:
+    explicit shutter_pending_present_ledger_t(std::uint64_t epoch = 1) noexcept:
+        epoch_(epoch), accepting_(epoch != 0) {}
+
+    shutter_pending_present_ledger_t(const shutter_pending_present_ledger_t &) = delete;
+    shutter_pending_present_ledger_t &operator=(const shutter_pending_present_ledger_t &) = delete;
+
+    bool commit(const shutter_queued_present_t &current, const shutter_queued_present_t &next) noexcept {
+      if (!accepting_ || pending_ || current.epoch != epoch_ || next.epoch != epoch_ ||
+          !valid(current) || !valid(next) || current.left_eye == next.left_eye ||
+          next.present_id != static_cast<std::uint32_t>(current.present_id + 1u) ||
+          next.present_begin_qpc < current.present_end_qpc) {
+        return reject();
+      }
+      // L/R share a tuple; the following L begins exactly one new acquisition group.
+      if (current.left_eye) {
+        if (next.tuple_group != current.tuple_group) {
+          return reject();
+        }
+      } else if (current.tuple_group == std::numeric_limits<std::uint64_t>::max() ||
+                 next.tuple_group != current.tuple_group + 1u) {
+        return reject();
+      }
+      pending_ = next;
+      return true;
+    }
+
+    shutter_pending_take_result_t take(std::uint64_t expected_epoch, bool expected_left, std::uint64_t held_tuple_group) noexcept {
+      if (!accepting_ || expected_epoch != epoch_) {
+        reject();
+        return {shutter_pending_take_status_e::rejected, std::nullopt};
+      }
+      if (!pending_) {
+        return {shutter_pending_take_status_e::none, std::nullopt};
+      }
+      if (pending_->epoch != expected_epoch || pending_->left_eye != expected_left ||
+          pending_->tuple_group != held_tuple_group) {
+        reject();
+        return {shutter_pending_take_status_e::rejected, std::nullopt};
+      }
+      const auto present = pending_;
+      pending_.reset();
+      return {shutter_pending_take_status_e::taken, present};
+    }
+
+    // Cancelling metadata cannot cancel an already-queued GPU image. Preserve the descriptor
+    // for fault diagnostics while the caller stops submissions and verifies the emitter drain.
+    void invalidate() noexcept {
+      accepting_ = false;
+    }
+
+    // The caller must have completed its FIFO barrier/drain before calling this. This is not
+    // proof of GPU completion and does not release the caller's current/pending resources.
+    bool reset_after_quiet(std::uint64_t new_epoch) noexcept {
+      if (accepting_ || new_epoch == 0 || new_epoch <= epoch_) {
+        return reject();
+      }
+      pending_.reset();
+      epoch_ = new_epoch;
+      accepting_ = true;
+      return true;
+    }
+
+    [[nodiscard]] const std::optional<shutter_queued_present_t> &pending() const noexcept { return pending_; }
+    [[nodiscard]] std::uint64_t epoch() const noexcept { return epoch_; }
+    [[nodiscard]] bool accepting() const noexcept { return accepting_; }
+
+  private:
+    static bool valid(const shutter_queued_present_t &present) noexcept {
+      return present.epoch != 0 && present.tuple_group != 0 && present.present_begin_qpc > 0 &&
+             present.present_end_qpc >= present.present_begin_qpc;
+    }
+
+    bool reject() noexcept {
+      accepting_ = false;
+      return false;
+    }
+
+    std::uint64_t epoch_;
+    bool accepting_;
+    std::optional<shutter_queued_present_t> pending_;
+  };
+
+  // A successful frame-latency Wait grants one admission independently of queued metadata.
+  // Retain it when a cutoff expires before rendering, or when DO_NOT_WAIT confirms no frame
+  // was accepted. Only an S_OK accepted Present may consume it; unknown queue errors are fatal.
+  class shutter_frame_admission_t {
+  public:
+    shutter_frame_admission_t() = default;
+    shutter_frame_admission_t(const shutter_frame_admission_t &) = delete;
+    shutter_frame_admission_t &operator=(const shutter_frame_admission_t &) = delete;
+
+    [[nodiscard]] bool held() const noexcept { return held_; }
+
+    bool grant() noexcept {
+      if (held_) {
+        return false;
+      }
+      held_ = true;
+      return true;
+    }
+
+    bool consume() noexcept {
+      if (!held_) {
+        return false;
+      }
+      held_ = false;
+      return true;
+    }
+
+  private:
+    bool held_ = false;
+  };
+
   struct shutter_emit_phase_plan_t {
     std::int64_t target_qpc = 0;
     std::int64_t latest_write_qpc = 0;
@@ -53,6 +195,60 @@ namespace platf::dxgi::detail {
       return std::nullopt;
     }
     return shutter_emit_phase_plan_t {boundary_qpc + *target, boundary_qpc + *latest};
+  }
+
+  struct shutter_lookahead_admission_window_t {
+    std::int64_t receipt_qpc = 0;
+    std::int64_t cutoff_qpc = 0;
+  };
+
+  inline std::optional<shutter_lookahead_admission_window_t> plan_shutter_lookahead_admission(
+    std::int64_t receipt_qpc,
+    std::int64_t qpc_frequency,
+    const shutter_emit_phase_plan_t &phase
+  ) noexcept {
+    if (receipt_qpc <= 0 || qpc_frequency <= 0 || phase.target_qpc <= 0 ||
+        phase.latest_write_qpc < phase.target_qpc) {
+      return std::nullopt;
+    }
+    // At most 500 us after receipt, and strictly before target minus a 250 us guard.
+    // Floor/ceil only shrink the budget; division avoids overflowing either product.
+    const auto horizon = qpc_frequency / 2000;
+    const auto guard = qpc_frequency / 4000 + (qpc_frequency % 4000 != 0 ? 1 : 0);
+    if (horizon <= 0 || receipt_qpc > std::numeric_limits<std::int64_t>::max() - horizon ||
+        phase.target_qpc <= guard) {
+      return std::nullopt;
+    }
+    return shutter_lookahead_admission_window_t {
+      receipt_qpc, std::min(receipt_qpc + horizon, phase.target_qpc - guard),
+    };
+  }
+
+  enum class shutter_lookahead_admission_action_e {
+    retry,
+    admit,
+    expired,
+    cancelled,
+    invalid,
+  };
+
+  inline shutter_lookahead_admission_action_e shutter_lookahead_admission_action(
+    const shutter_lookahead_admission_window_t &window,
+    std::int64_t now_qpc,
+    bool cancelled,
+    bool ready
+  ) noexcept {
+    using action_e = shutter_lookahead_admission_action_e;
+    if (cancelled) {
+      return action_e::cancelled;
+    }
+    if (window.receipt_qpc <= 0 || window.cutoff_qpc <= 0 || now_qpc < window.receipt_qpc) {
+      return action_e::invalid;
+    }
+    if (now_qpc >= window.cutoff_qpc) {
+      return action_e::expired;
+    }
+    return ready ? action_e::admit : action_e::retry;
   }
 
   enum class shutter_emit_phase_wait_status_e {
@@ -314,6 +510,27 @@ namespace platf::dxgi::detail {
         return false;
       }
       return true;
+    }
+
+    // Reprove the same accepted image without consuming another observation or replacing its
+    // phase anchor. A failed reproof is for the caller's fault path, not a clock repair.
+    [[nodiscard]] bool confirmed_feedback_matches(
+      std::uint32_t requested_id,
+      const shutter_feedback_t &feedback,
+      std::int64_t now_qpc
+    ) const noexcept {
+      if (!armed_ || failed_ || !last_present_qpc_ || requested_id != last_present_id_ ||
+          feedback.refresh_count != last_refresh_ || feedback.sync_qpc > now_qpc ||
+          !fresh(*last_present_qpc_, now_qpc)) {
+        return false;
+      }
+      const auto present_qpc = reconstruct(requested_id, feedback);
+      if (!present_qpc || *present_qpc > now_qpc) {
+        return false;
+      }
+      // Both boundaries are positive, so their signed difference cannot overflow.
+      const auto difference = *present_qpc - *last_present_qpc_;
+      return difference >= -1 && difference <= 1;
     }
 
     [[nodiscard]] unsigned streak() const noexcept { return streak_; }
