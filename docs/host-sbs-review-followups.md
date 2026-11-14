@@ -1300,3 +1300,26 @@ current covers, so a false cover over near foreground can raise the shared plane
 it needs a per-cover goal and a rule for combining them inside the fixed 40-word UIP state,
 which is a controller redesign rather than a bounded fix, and the authored clips have no
 false-cover case to measure it against.
+
+Items 11 to 14 and 16 are not attempted in this series:
+
+- Item 11, whole-frame mask swap. Containing a single unit's fault needs either per-unit proof
+  words through the selected receipt or a retained previous mask with its own authority. Both
+  change what the selector authenticates, and no saved input here reproduces a one-unit fault.
+- Item 12, single empty detection (HSR-05). An exit hold has to be coordinated across cover,
+  plane and mask, and needs appearance and disappearance evidence that the authored clips do
+  not supply. HSR-05's earlier disposition stands.
+- Item 13, vertical row behaviour. A cover-bounded vertical close of row authority needs the
+  clean-background stress cases from the P14 comparison to judge scene deformation; those are
+  external fixtures bound to an older contract and were not rebuilt here.
+- Item 14, revocation flicker. Hysteresis or per-component revocation adds temporal state to a
+  per-draw rule, and there is no captured sequence showing the toggle to measure against.
+- Item 16, completion-stage ablation, depends on item 13.
+
+Closing state of the series: both generators pass `--check`, evaluator discovery passes 979
+tests with 13 skips, and the OCR, selected-matte, current-outline, contour, locator, cohort,
+matte-guard, trajectory, topology and seeded-component GPU suites pass 357 tests with 38
+opt-in skips. The full native suite was not run at the owner's request. Four
+`HostSbsSubtitleInnerColourGpuTest` cases failed in one interrupted run with the private
+shader-root environment set; whether they fail on the unmodified tree was not established.
+No live host or headset run was made.
