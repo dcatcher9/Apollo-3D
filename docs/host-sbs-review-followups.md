@@ -1197,3 +1197,50 @@ shared depth, Base and matte path rather than of the selected shared-warp draw. 
 passes write only the field mask, distance, Gaussian tuple and Final, none of which that draw
 binds. No shader source changed, so no closure pin or contract identity moved. No timing claim
 is made, and a live Dump 3D capture with the new policy has not been taken.
+
+Later fixes in this series use a reduced gate at the owner's request: the subtitle GPU suites,
+the four subtitle clips of the ordinary evaluator compared byte-for-byte with the same
+`control`, and the 24-frame actual selected-compositor qualification on
+`subtitle_cjk_highres_transitions`, compared byte-for-byte with a `q-control` captured from the
+tree before fix 2. No full native suite and no full 19-clip paired report was run for them.
+`q-control` reproduces the recorded mask counts: 153,796 true-positive, 23,625 false-positive
+and zero false-negative pixels.
+
+Fix 2, RGB history and probability-change cue, is kept as a removal. The review's premise holds
+for genuine observations: every eligible one has a positive count, so the two-pixel neighbour
+correspondence and the per-core probability-change reductions could not change support. They
+did change which counts exceed one, and a count above one is what lets a duplicate delivery keep
+a pixel whose RGB is close but not bit-identical. That duplicate rule is unchanged; only pixels
+that had reached a higher count through a neighbour, and then met a non-identical duplicate,
+can differ. Word 21 stays in the layout as zero, and the contract keeps the two retired
+constants. Seven contour tests and seven locator tests that specified the retired behaviour
+are removed and three are updated; the affected suites pass 280 tests. All 24 selected masks,
+48 stereo images and the CBC, Raw and F2 buffers are byte-identical to `q-control`, as are the
+792 artifacts of the four subtitle clips.
+
+Fix 3, dispatch count (HSR-10), is measured and not changed. The chain is recorded once into a
+command list, so issuing it costs about 0.04 ms of CPU per observation. Its GPU floor on the
+eight empty frames is about 1.4 ms for CBC plus 2.4 ms for F2; with captions the medians are
+about 2.6 ms and 3.4 ms. These are functional intervals on a shared GPU, not idle-GPU timing.
+Inactive units and modes already issue zero-group indirect dispatches. D3D11 cannot skip the
+calls themselves without the CPU knowing the unit count, which exists only on the GPU, and a
+compacted argument list would still need the full worst-case loop to keep masks identical.
+Reducing the floor needs either a late CPU hint, which can be one observation stale, or a
+redesign that merges the per-mode graph steps; neither is byte-identical by construction.
+
+Fix 4, shared validation (HSR-11), is kept for the outline band shader only. Its four per-pixel
+entry points now take the echo and header proof from lane zero of their group. Output is
+byte-identical to `q-control` and 85 current-outline GPU tests pass. Stage timing is unchanged
+within run-to-run noise, so this is a redundancy removal without a measured gain. The raw,
+hole, foreground-edge, selector and enclosure shaders are untouched; a cross-stage ready word
+would add a dispatch and storage to each closure and has no measurement to justify it.
+
+Fix 5, minor C++, is kept. Hole proof, parent, flags and argument storage start as zero. The
+trusted-inner latch stays, because `ensure()` replaces the owner and its latch on every device
+or shape change; retrying on every observation would repeat a full-plane allocation.
+
+Fix 6, detector dead code, is kept in part. The unused `score` parameter and two duplicated
+helpers are removed with byte-identical output on the four subtitle clips and 66 passing OCR
+GPU tests. The second reference-centre test is not dead, because ribbons skip the first one.
+Raw slots 8--15 are record layout rather than code and stay. The publish-time evidence check
+cannot fail but supplies the score, so it stays with a comment.
