@@ -1111,7 +1111,7 @@
           });
           const body = await response.json().catch(() => ({}));
           if (!response.ok || !body.status) {
-            throw new Error(body.message || `Pairing request failed (HTTP ${response.status})`);
+            throw new Error(body.error || body.message ||`Pairing request failed (HTTP ${response.status})`);
           }
 
           this.otp = body.otp;
@@ -1174,7 +1174,7 @@
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok || !body.status) {
-          throw new Error(body.message || `HTTP ${response.status}`);
+          throw new Error(body.error || body.message ||`HTTP ${response.status}`);
         }
       },
       async pairWithPin() {
@@ -1242,7 +1242,7 @@
             body: JSON.stringify(this.clientPayload(client))
           });
           const body = await response.json().catch(() => ({}));
-          if (!response.ok || !body.status) throw new Error(body.message || `HTTP ${response.status}`);
+          if (!response.ok || !body.status) throw new Error(body.error || body.message ||`HTTP ${response.status}`);
 
           currentEditingClient = null;
           client.editing = false;
@@ -1343,7 +1343,7 @@
             body: JSON.stringify({uuid: client.uuid})
           });
           const body = await response.json().catch(() => ({}));
-          if (!response.ok || body.status === false) throw new Error(body.message || `HTTP ${response.status}`);
+          if (!response.ok || body.status === false) throw new Error(body.error || body.message ||`HTTP ${response.status}`);
           this.showApplyMessage = true;
           await this.refreshClients();
         } catch (error) {
@@ -1355,7 +1355,7 @@
           const response = await fetch('./api/clients/list', {credentials: 'include'});
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const body = await response.json();
-          if (!body.status) throw new Error(body.message || 'Sunshine 3D did not return a device list.');
+          if (!body.status) throw new Error(body.error || body.message ||'Sunshine 3D did not return a device list.');
 
           this.platform = body.platform || this.platform;
           const clients = (body.named_certs || []).map(({

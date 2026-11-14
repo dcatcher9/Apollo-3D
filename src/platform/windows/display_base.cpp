@@ -949,9 +949,10 @@ namespace platf::dxgi {
     auto adapter_name = from_utf8(config::video.adapter_name);
     auto output_name = from_utf8(display_name);
 
-    adapter_t::pointer adapter_p;
+    // Stop on any failure, not only DXGI_ERROR_NOT_FOUND: another error leaves the pointer unset.
+    adapter_t::pointer adapter_p = nullptr;
     for (int tries = 0; tries < 2; ++tries) {
-      for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
+      for (int x = 0; SUCCEEDED(factory->EnumAdapters1(x, &adapter_p)); ++x) {
         dxgi::adapter_t adapter_tmp {adapter_p};
 
         DXGI_ADAPTER_DESC1 adapter_desc {};
@@ -966,8 +967,8 @@ namespace platf::dxgi {
           continue;
         }
 
-        dxgi::output_t::pointer output_p;
-        for (int y = 0; adapter_tmp->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
+        dxgi::output_t::pointer output_p = nullptr;
+        for (int y = 0; SUCCEEDED(adapter_tmp->EnumOutputs(y, &output_p)); ++y) {
           dxgi::output_t output_tmp {output_p};
 
           DXGI_OUTPUT_DESC desc {};
@@ -1095,7 +1096,7 @@ namespace platf::dxgi {
     {
       const DWORD flags = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
       TOKEN_PRIVILEGES tp;
-      HANDLE token;
+      HANDLE token = nullptr;
       LUID val;
 
       if (OpenProcessToken(GetCurrentProcess(), flags, &token) && !!LookupPrivilegeValue(nullptr, SE_INC_BASE_PRIORITY_NAME, &val)) {
@@ -1108,7 +1109,9 @@ namespace platf::dxgi {
         }
       }
 
-      CloseHandle(token);
+      if (token) {
+        CloseHandle(token);
+      }
 
       HMODULE gdi32 = GetModuleHandleA("GDI32");
       if (gdi32) {

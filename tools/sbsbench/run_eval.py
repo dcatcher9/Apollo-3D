@@ -3834,8 +3834,18 @@ def main():
         print(f"  report: {report_path}")
     if args.update_baselines:
         print(f"  baselines updated in {base_dir} -- commit them with the change that justified it.")
-    sys.exit(1 if regressions or hard_failures or evidence_failures else 0)
+    # 1 is reserved for a named regression. Missing or unauthenticated evidence on its own is
+    # the documented "invalid or incomplete evidence" outcome, not a quality verdict.
+    if regressions or hard_failures:
+        sys.exit(1)
+    sys.exit(2 if evidence_failures else 0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:  # noqa: BLE001 - an unexpected fault is a setup failure, never a verdict
+        import traceback
+        traceback.print_exc()
+        print("run_eval: unexpected error; no verdict was produced", file=sys.stderr)
+        sys.exit(2)

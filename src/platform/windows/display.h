@@ -1139,6 +1139,8 @@ namespace platf::dxgi {
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice uwp_device {nullptr};
     winrt::Windows::Graphics::Capture::GraphicsCaptureItem item {nullptr};
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool frame_pool {nullptr};
+    // Kept so the destructor can revoke the raw-`this` handler before closing the pool.
+    winrt::event_token frame_arrived_token {};
     winrt::Windows::Graphics::Capture::GraphicsCaptureSession capture_session {nullptr};
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame produced_frame {nullptr}, consumed_frame {nullptr};
     // Capture thread only; see keep_frame().

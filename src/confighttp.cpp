@@ -1995,8 +1995,15 @@ namespace confighttp {
       }
 
       offline_sbs::create_request_t create;
-      create.input_path =
-        fs::path(input["input_path"].get<std::string>());
+      {
+        // The request is UTF-8. A narrow std::string would be decoded in the ANSI code page,
+        // so build the path the same way the browse endpoint does.
+        const auto input_path = input["input_path"].get<std::string>();
+        create.input_path = fs::path {std::u8string {
+          reinterpret_cast<const char8_t *>(input_path.data()),
+          reinterpret_cast<const char8_t *>(input_path.data() + input_path.size())
+        }};
+      }
       const auto operation = input.value("operation", std::string {"convert"});
       if (operation == "convert") {
         create.operation = offline_sbs::operation_e::convert;

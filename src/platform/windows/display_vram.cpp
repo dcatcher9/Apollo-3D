@@ -3510,7 +3510,9 @@ namespace platf::dxgi {
       if (stream_gamma_transform && mode == ::video::stream_gamma_mode_e::windows_default && stream_gamma_mode_ == mode) {
         return true;
       }
-      float white_nits = 203.0f;
+      // A transient query failure (for example during a mode change) keeps the level already in
+      // use; falling back to the 203-nit default would be a visible white-level jump.
+      float white_nits = stream_gamma_transform && stream_gamma_white_nits_ > 0.0f ? stream_gamma_white_nits_ : 203.0f;
       if (display) {
         const auto queried = display->get_sdr_white_nits();
         if (queried && std::isfinite(*queried) && *queried > 0.0f) {

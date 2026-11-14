@@ -366,6 +366,10 @@
       </section>
     </div>
 
+    <div v-else-if="configError" class="settings-loading">
+      <div class="alert alert-danger" role="alert">{{ configError }}</div>
+    </div>
+
     <div v-else class="settings-loading">
       <div><span class="spinner-border spinner-border-sm me-2"></span>Loading host settings…</div>
     </div>
@@ -564,33 +568,45 @@
       fetch("./api/config", {
         credentials: 'include'
       })
-        .then((r) => r.json())
         .then((r) => {
-          this.config = r;
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .then((r) => {
+          // Build the settings object completely before publishing it, so a failure below
+          // shows the error instead of a half-populated form.
+          const config = r;
           this.platform = r.platform || "";
 
           // remove values we don't want in the config file
-          delete this.config.platform;
-          delete this.config.status;
-          delete this.config.version;
-          delete this.config.ar_glass_devices;
+          delete config.platform;
+          delete config.status;
+          delete config.version;
+          delete config.ar_glass_devices;
 
-          this.vdisplayStatus = this.config.vdisplayStatus;
-          delete this.config.vdisplayStatus;
+          this.vdisplayStatus = config.vdisplayStatus;
+          delete config.vdisplayStatus;
 
           // TODO: let each tab's Component handle it's own data instead of doing it here
 
           // Parse the special options before population if available
           const specialOptions = ["global_prep_cmd"]
           for (const optionKey of specialOptions) {
-            if (typeof this.config[optionKey] === "string") {
-              this.config[optionKey] = JSON.parse(this.config[optionKey]);
+            if (typeof config[optionKey] === "string") {
+              try {
+                config[optionKey] = JSON.parse(config[optionKey]);
+              } catch (e) {
+                // A hand-edited value that is not valid JSON must not block the whole page.
+                console.error(`Ignoring malformed ${optionKey}`, e);
+                config[optionKey] = null;
+              }
             } else {
-              this.config[optionKey] = null;
+              config[optionKey] = null;
             }
           }
 
-          this.config.global_prep_cmd ??= [];
+          if (!Array.isArray(config.global_prep_cmd)) config.global_prep_cmd = [];
+          this.config = config;
 
           // Populate default values from tabs options
           this.tabs.forEach(tab => {
@@ -607,6 +623,11 @@
             return i
           });
 
+        })
+        .catch((e) => {
+          console.error(e);
+          this.config = null;
+          this.configError = `Could not load host settings: ${e.message || e}. Refresh the page to try again.`;
         });
     },
     methods: {
@@ -694,10 +715,14 @@
             return this.saved
           }
           else {
-            return false
+            return r.json().catch(() => ({})).then((body) => {
+              this.configError = `Settings were not saved: ${body.error || `HTTP ${r.status}`}.`
+              return false
+            })
           }
         }).catch((e) => {
           console.error(e)
+          this.configError = `Settings were not saved: ${e.message || e}.`
           return false
         }).finally(() => {
           this.saving = false

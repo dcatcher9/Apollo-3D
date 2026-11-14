@@ -2238,11 +2238,12 @@ namespace video {
       std::shared_ptr<platf::display_t> display;
       {
         auto lg = capture_thread_ctx.display_wp.lock();
-        if (capture_thread_ctx.display_wp->expired()) {
-          continue;
-        }
-
         display = capture_thread_ctx.display_wp->lock();
+      }
+      if (!display) {
+        // Yield until the capture thread publishes the display instead of spinning a core.
+        std::this_thread::sleep_for(1ms);
+        continue;
       }
 
       // Retune the running capture session every iteration rather than only when the mode

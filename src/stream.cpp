@@ -920,6 +920,9 @@ namespace stream {
       // session lifetime so worker/encode-thread replies cannot disappear between raise() and
       // the control thread's next drain.
       safe::mail_raw_t::queue_t<live_video_mode_ack_t> live_video_mode_ack_queue;
+      // Retained for the same reason: a request committed before the encode loop has subscribed
+      // would otherwise be destroyed with the temporary post and never acknowledged.
+      safe::mail_raw_t::queue_t<video::video_mode_change_t> video_mode_queue;
       safe::mail_raw_t::queue_t<video::stream_gamma_request_t> stream_gamma_queue;
       safe::mail_raw_t::queue_t<video::stream_gamma_ack_t> stream_gamma_ack_queue;
       std::vector<video::stream_gamma_ack_t> deferred_stream_gamma_acks;
@@ -1371,8 +1374,8 @@ namespace stream {
   template<std::size_t max_payload_size>
   static inline std::string_view encode_control(session_t *session, const std::string_view &plaintext, std::array<std::uint8_t, max_payload_size> &tagged_cipher) {
     static_assert(
-      max_payload_size >= sizeof(control_encrypted_t) + sizeof(crypto::cipher::tag_size),
-      "max_payload_size >= sizeof(control_encrypted_t) + sizeof(crypto::cipher::tag_size)"
+      max_payload_size >= sizeof(control_encrypted_t) + crypto::cipher::tag_size,
+      "max_payload_size >= sizeof(control_encrypted_t) + crypto::cipher::tag_size"
     );
 
     auto seq = session->control.seq++;
@@ -2951,6 +2954,8 @@ namespace stream {
     auto timer = platf::create_high_precision_timer();
     if (!timer || !*timer) {
       BOOST_LOG(error) << "Failed to create timer, aborting video broadcast thread";
+      // Match the audio thread: a session without a video sender must end, not linger.
+      shutdown_event->raise(true);
       return;
     }
 
@@ -4639,6 +4644,8 @@ namespace stream {
         mail::live_video_mode_ack,
         LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT
       );
+      session->control.video_mode_queue =
+        mail->queue<video::video_mode_change_t>(mail::video_mode);
       session->control.stream_gamma_queue = mail->queue<video::stream_gamma_request_t>(
         mail::stream_gamma, STREAM_GAMMA_QUEUE_LIMIT
       );

@@ -3339,7 +3339,20 @@ namespace sbs_bench {
       std::uint64_t transient_raster_hard_cap_bytes = 0;
     };
 
+    bool parse_opts_unchecked(int argc, char **argv, opts &o);
+
     bool parse_opts(int argc, char **argv, opts &o) {
+      // std::stoi/stod/stoull throw on a missing or non-numeric value. Report that as an
+      // ordinary argument error instead of terminating the process.
+      try {
+        return parse_opts_unchecked(argc, argv, o);
+      } catch (const std::exception &exception) {
+        BOOST_LOG(error) << "sbs-bench: invalid numeric argument value: " << exception.what();
+        return false;
+      }
+    }
+
+    bool parse_opts_unchecked(int argc, char **argv, opts &o) {
       for (int i = 0; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&](const char *n) -> std::string {

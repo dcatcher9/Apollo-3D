@@ -709,11 +709,15 @@ namespace safe {
 
       auto it = id_to_post.find(id);
       if (it != std::end(id_to_post)) {
-        return lock<event_t<T>>(it->second);
+        // The last owner may have dropped its reference without having run cleanup() yet.
+        // Never hand out null for that expired entry; replace it below instead.
+        if (auto existing = lock<event_t<T>>(it->second)) {
+          return existing;
+        }
       }
 
       auto post = std::make_shared<typename event_t<T>::element_type>(shared_from_this());
-      id_to_post.emplace(std::pair<std::string, std::weak_ptr<void>> {std::string {id}, post});
+      id_to_post.insert_or_assign(std::string {id}, std::weak_ptr<void> {post});
 
       return post;
     }
@@ -724,11 +728,13 @@ namespace safe {
 
       auto it = id_to_post.find(id);
       if (it != std::end(id_to_post)) {
-        return lock<queue_t<T>>(it->second);
+        if (auto existing = lock<queue_t<T>>(it->second)) {
+          return existing;
+        }
       }
 
       auto post = std::make_shared<typename queue_t<T>::element_type>(shared_from_this(), max_elements);
-      id_to_post.emplace(std::pair<std::string, std::weak_ptr<void>> {std::string {id}, post});
+      id_to_post.insert_or_assign(std::string {id}, std::weak_ptr<void> {post});
 
       return post;
     }

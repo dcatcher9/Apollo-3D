@@ -179,7 +179,9 @@ namespace sunshine_game3d::shader_cache {
     }
     inline void write_file(const std::wstring &path, const std::string &key, const blob &value) {
       if (path.empty()) return;
-      const std::wstring temporary = path + L".tmp" + std::to_wstring(GetCurrentThreadId());
+      // Two game processes can compile the same key; thread ids alone are not unique across them.
+      const std::wstring temporary = path + L".tmp" + std::to_wstring(GetCurrentProcessId()) + L"_" +
+        std::to_wstring(GetCurrentThreadId());
       FILE *file = _wfopen(temporary.c_str(), L"wb");
       if (!file) return;
       const std::uint32_t key_length = std::uint32_t(key.size()), size = std::uint32_t(value.size());
