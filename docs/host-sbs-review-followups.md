@@ -1282,3 +1282,21 @@ an independently horizontal ribbon set the position votes and the single trusted
 after a published ribbon; that assertion fails on the previous shader. The ribbon is still
 published with its paired cover. The OCR suite passes 68 tests, and the four subtitle clips and
 the selected qualification are byte-identical to their controls.
+
+Fix 15, plane controller, is evaluated and reverted. The time step is capped at 50 ms, so at a
+100 ms observation cadence the filter and the 30 pixel-per-second slew act at half their
+nominal rate. Raising the cap to 150 ms was tried on the selected qualification replayed at
+`--fps 10/1` (`q10-control` and `q10-fix15`). All 24 selected masks and stage buffers are
+identical and 14 stereo frames change. The applied plane does converge faster, but the
+per-observation goal on this clip moves by about one source pixel in alternating directions,
+and the faster controller follows it: mean plane motion between consecutive captioned
+observations rises from about 0.88 to 1.40 source pixels, with single steps above two pixels
+where the control stays near one. That is more visible caption depth motion for no demonstrated
+benefit, so the 50 ms cap stays; in practice it is part of the smoothing. A cap change should
+follow a steadier goal, not precede it.
+
+The second half of the item is not attempted. One clearance histogram spans the union of
+current covers, so a false cover over near foreground can raise the shared plane. Separating
+it needs a per-cover goal and a rule for combining them inside the fixed 40-word UIP state,
+which is a controller redesign rather than a bounded fix, and the authored clips have no
+false-cover case to measure it against.
