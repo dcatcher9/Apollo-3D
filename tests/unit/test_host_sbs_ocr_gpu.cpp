@@ -2665,6 +2665,26 @@ namespace {
     EXPECT_LT(*std::max_element(history.begin() + 32u, history.end()), 8u);
   }
 
+  TEST(HostSbsOcrGpuTest, UnknownPieceCannotPushACenteredHorizontalLineOffCenter) {
+    // The caption is exactly centered. A same-height unknown blob inside the unchanged
+    // four-height line gap makes the group union about 3.9% off-center, beyond the 2% rule.
+    // The caption's own horizontal union still qualifies; the blob is not published with it.
+    for (const auto with_blob : {false, true}) {
+      SCOPED_TRACE(with_blob);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> cue(ocr_pixels, 0.0f);
+      paint_rectangle(cue, 330u, 90u, 630u, 120u);
+      if (with_blob) paint_rectangle(cue, 700u, 90u, 704u, 120u);
+      ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1'000'000u));
+      ASSERT_EQ(fixture.record()[4u], 1u);
+      EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+        default_ocr_box(330u, 90u, 630u, 120u));
+      EXPECT_EQ(classifier_history(fixture.record())[3u], 1u);
+    }
+  }
+
   TEST(HostSbsOcrGpuTest, ExplicitDomainAndAnalysisGenerationChangesClearTheLayoutPrior) {
     ocr_warp_fixture_t fixture;
     std::string error;

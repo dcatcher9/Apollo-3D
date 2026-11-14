@@ -1122,6 +1122,18 @@ void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint
         OcrCandidateScratch[ScratchBase(candidate) + 3u] = meta;
         uint4 bounds = uint4(stats.tight_left, stats.tight_top, stats.tight_right, stats.tight_bottom);
         uint4 anchor = OcrCandidateScratch[ScratchBase(group) + 5u];
+        bool horizontal_member =
+            OcrCandidateScratch[ScratchBase(candidate) + 5u].z == CLASS_HORIZONTAL;
+        // Word 2's merge anchor is finished; reuse it for the union of the group's
+        // independently horizontal members. An empty union keeps left > right.
+        uint4 horizontal_bounds = group == candidate ?
+            uint4(0xffffffffu, 0xffffffffu, 0u, 0u) :
+            OcrCandidateScratch[ScratchBase(group) + 2u];
+        if (horizontal_member) {
+            horizontal_bounds = uint4(
+                min(horizontal_bounds.xy, bounds.xy), max(horizontal_bounds.zw, bounds.zw));
+        }
+        OcrCandidateScratch[ScratchBase(group) + 2u] = horizontal_bounds;
         if (group == candidate) {
             anchor.xy = uint2(stats.tight_top, stats.tight_bottom);
             anchor.w = anchor.z == CLASS_HORIZONTAL ? 1u : 0u;
@@ -1130,7 +1142,7 @@ void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint
             uint4 previous_bounds = OcrCandidateScratch[ScratchBase(group) + 4u];
             OcrCandidateScratch[ScratchBase(group) + 4u] = uint4(
                 min(previous_bounds.xy, bounds.xy), max(previous_bounds.zw, bounds.zw));
-            if (OcrCandidateScratch[ScratchBase(candidate) + 5u].z == CLASS_HORIZONTAL) {
+            if (horizontal_member) {
                 anchor.w = 1u;
             }
         }
@@ -1141,22 +1153,34 @@ void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint
         if (!CandidateEnabled(candidate) || !CandidateCanJoinClassifiedLine(candidate)) continue;
         uint base = ScratchBase(candidate);
         uint group = OcrCandidateScratch[base + 3u].z;
-        if (!LineIsCentered(OcrCandidateScratch[ScratchBase(group) + 4u])) continue;
+        uint4 line_bounds = OcrCandidateScratch[ScratchBase(group) + 4u];
+        uint classification = OcrCandidateScratch[base + 5u].z;
+        if (!LineIsCentered(line_bounds)) {
+            // A weak or unknown piece within the join gap must not push a real caption off
+            // center. When the whole group fails, its independently horizontal members may
+            // still qualify on their own union, and only those members are published; the
+            // pieces that broke the center test gain nothing. A group of horizontal members
+            // alone has the same two unions, so off-center scene text stays rejected.
+            uint4 horizontal_bounds = OcrCandidateScratch[ScratchBase(group) + 2u];
+            if (classification != CLASS_HORIZONTAL ||
+                horizontal_bounds.x >= horizontal_bounds.z ||
+                !LineIsCentered(horizontal_bounds)) continue;
+            line_bounds = horizontal_bounds;
+        }
         // Ordinary subtitle groups must straddle the actual reference center,
         // including strong/current-line paths. Expanded covers are never evidence.
         // Keep the existing ribbon classification/publication path separate.
         uint kind_flags = OcrCandidateScratch[base + 3u].y;
         if ((kind_flags & V2_OCR_BOX_FLAG_RIBBON) == 0u &&
-            !LineSpansReferenceCenter(OcrCandidateScratch[ScratchBase(group) + 4u])) continue;
+            !LineSpansReferenceCenter(line_bounds)) continue;
         CandidateStats stats = LoadCandidate(candidate);
-        uint classification = OcrCandidateScratch[base + 5u].z;
         bool strong = classification == CLASS_HORIZONTAL;
         bool current_line = classification == CLASS_STACK_ASSISTED ||
             (classification == CLASS_UNKNOWN &&
              OcrCandidateScratch[ScratchBase(group) + 5u].w != 0u);
         if (!strong && !current_line) {
             if (!CandidateHasQualifiedPrior(candidate) ||
-                !LineSpansReferenceCenter(OcrCandidateScratch[ScratchBase(group) + 4u])) continue;
+                !LineSpansReferenceCenter(line_bounds)) continue;
         }
         // Queueing already validated these exact stored statistics; this recomputes the score.
         float score;

@@ -1244,3 +1244,13 @@ helpers are removed with byte-identical output on the four subtitle clips and 66
 GPU tests. The second reference-centre test is not dead, because ribbons skip the first one.
 Raw slots 8--15 are record layout rather than code and stay. The publish-time evidence check
 cannot fail but supplies the score, so it stays with a comment.
+
+Fix 7, centring union, is kept. When the full group union fails the two-percent midpoint rule,
+the union of only its independently horizontal members is tested, and only those members are
+published. `UnknownPieceCannotPushACenteredHorizontalLineOffCenter` fails on the previous
+shader, where the blob removes the caption, and passes now. The existing negatives pass
+unchanged, including `SeparatedStrongFragmentsRequireTheirGroupToBeCentered`. The four subtitle
+clips and the 24-frame selected qualification are byte-identical to their controls, so the
+authored clips show no regression and no gain; the road-marking false positive is unchanged.
+The remaining risk is a scene line whose horizontal part is centred on its own while a weaker
+part is not; that part alone was already admissible before whenever the weaker part was absent.
