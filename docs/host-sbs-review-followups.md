@@ -1352,5 +1352,12 @@ series:
 `V2_SUBTITLE_CONTOUR_HISTORY_JITTER_RADIUS_SOURCE_PIXELS` is no longer read by any shader
 after fix 2. It is left in the contract deliberately: removing a contract constant regenerates
 the include copy inside every frozen runtime root and moves all of their closure pins for no
-behavioural gain. No live host or headset run was made; a Dump 3D capture under fix 1's live
-policy is the remaining unverified path.
+behavioural gain.
+
+Fix 1's live dump path is confirmed on the host. The series build ran as the streaming host
+and a client-requested Dump 3D during subtitled video playback was written complete
+(`dump_20261114_093139_372_18e7f9ad46a62f28_0`, frame 4035, 54 files, no rejection or warning
+in the host log). The OCR record carries the same frame, the conditioned Final field differs
+from Base on 37,471 field samples, and that count equals the non-zero Gaussian weight samples,
+so the diagnostic conditioner ran for the dumped observation under the live policy. Subjective
+headset quality was not assessed here.
