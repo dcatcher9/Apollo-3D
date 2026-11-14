@@ -1341,8 +1341,11 @@ series:
   either: `DirectxShaderSourceTest.SubtitleResolveBindsExactOcrRecordAndConditionParams`,
   two `OfflineSbsWorker` cases, two `ParallaxV2ContractTest` cases (they still expect contract
   schema 121 and dump schema 50) and
-  `SbsDebugDumpAsyncTest.Schema49PackagesCompleteContourTupleAndNoScalarPreviews`. They are
-  left for a separate test-maintenance change.
+  `SbsDebugDumpAsyncTest.Schema49PackagesCompleteContourTupleAndNoScalarPreviews`. Each
+  failed on a single outdated expectation while the rest of its assertions held, so the
+  expectations were brought to the current source (contract schema 130, OCR contract schema
+  38, dump schema 51, the `perf_slot` contour call, the widened harness snapshot condition and
+  the Base-bound harness field read) instead of deleting the tests. All six pass again.
 
 `V2_SUBTITLE_CONTOUR_HISTORY_JITTER_RADIUS_SOURCE_PIXELS` is no longer read by any shader
 after fix 2. It is left in the contract deliberately: removing a contract constant regenerates

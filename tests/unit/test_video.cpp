@@ -1023,8 +1023,8 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 121u);
-  EXPECT_EQ(v2::subtitle_ocr_contract_schema, 33u);
+  EXPECT_EQ(v2::contract_schema, 130u);
+  EXPECT_EQ(v2::subtitle_ocr_contract_schema, 38u);
   EXPECT_EQ(v2::subtitle_ocr_record_schema, 4u);
   EXPECT_EQ(v2::subtitle_ocr_record_word_count, 256u);
   EXPECT_EQ(v2::subtitle_ocr_current_prefix_word_count, 208u);
@@ -4995,7 +4995,7 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesCurrentOc
   EXPECT_LT(resolve, condition);
   EXPECT_EQ(resolver.find("condition_prepare_main"), std::string::npos);
 
-  EXPECT_NE(source.find("{\"schema\", 50}"), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 51}"), std::string::npos);
   for (const auto *current_policy_key : {
          "{\"current_cover_policy\", {",
          "{\"selection\", \"all-valid-current-ocr8-core-cover-pairs\"}",
@@ -9411,7 +9411,7 @@ TEST(DirectxShaderSourceTest, SubtitleResolveBindsExactOcrRecordAndConditionPara
   const auto unbind = dispatch.find("CSSetShaderResources(0, 10, null_srvs)", resolve);
   ASSERT_NE(unbind, std::string::npos);
   const auto contours = dispatch.find(
-    "if (!dispatch_subtitle_contours(ocr_record_submitted, input_domain_reset))"
+    "if (!dispatch_subtitle_contours(ocr_record_submitted, input_domain_reset, perf_slot))"
   );
   ASSERT_NE(contours, std::string::npos);
   // Identity/probability history must stay read-only through resolve, then be unbound

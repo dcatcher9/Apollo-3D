@@ -2307,7 +2307,7 @@ namespace {
          }) {
       EXPECT_EQ(source.find(retired), std::string::npos) << retired;
     }
-    EXPECT_NE(source.find("{\"schema\", 50}"), std::string::npos);
+    EXPECT_NE(source.find("{\"schema\", 51}"), std::string::npos);
     EXPECT_NE(source.find("{\"mode\", \"subtitle-contours-v1\"}"), std::string::npos);
     EXPECT_NE(source.find("nlohmann::json::parse(subtitle_contour_policy_json)"), std::string::npos);
     for (const std::string_view artifact : {

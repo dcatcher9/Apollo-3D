@@ -653,7 +653,7 @@ TEST(OfflineSbsWorker, HeadlessHarnessHasNoForegroundWindowObserver) {
   );
   EXPECT_NE(
     source.find(
-      "const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode;"
+      "const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode ||"
     ),
     std::string::npos
   );
@@ -925,7 +925,7 @@ TEST(OfflineSbsWorker, DeviceConditionalReplayUsesSharedProductionTransactionPol
   EXPECT_NE(source.find("{\"field_width\", est.field_width}"), std::string::npos);
   EXPECT_NE(source.find(".depth_width = est.field_width"), std::string::npos);
   EXPECT_NE(
-    source.find("est.shadow_final_parallax->GetResource"),
+    source.find("est.shadow_base_final_parallax->GetResource"),
     std::string::npos
   );
   EXPECT_NE(
