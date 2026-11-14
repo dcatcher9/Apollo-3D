@@ -176,7 +176,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Independent repeated-colour current fill, preserving the original outline path.
             129: "084289418305d5e20c32abe893fc1a8f92446762f4fac8e91ccd54ec81c12494",
             # Unique repeated fill, independent of old support, with cropped-cover publication.
-            130: "9804fd584c6ea8b303d52cf11b8441a3b72aa69b0ae4d0752cff910da46eb5ba",
+            130: "141e21433c050cfa6a347d191b9c4d8b143b5569b807815d17e6ff7ab04cb299",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -191,7 +191,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "e9310bb0bc0586c0d0e7ae1c51ff65ca07b140ed99f5399760a07f0255fad31e",
+            "aed3fcfa72e402aa66421dce0b3dc6a8f0c6e8999a9a01d2a2e905e09ecd8508",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

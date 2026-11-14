@@ -1254,3 +1254,14 @@ clips and the 24-frame selected qualification are byte-identical to their contro
 authored clips show no regression and no gain; the road-marking false positive is unchanged.
 The remaining risk is a scene line whose horizontal part is centred on its own while a weaker
 part is not; that part alone was already admissible before whenever the weaker part was absent.
+
+Fix 8, short-line slope gate, is kept. A line whose 10th and 90th percentile envelopes each
+move by at most one detector row across its populated bins is independently horizontal. The
+tolerance is tested on the actual envelope range rather than the fitted rise, because a
+least-squares fit of a one-row step reports about 1.33 rows. `ShortLineWithOneRowEnvelopeStepIsHorizontal`
+fails on the previous shader for its one-row case and passes now; its two-row twin stays
+rejected. The 68-test OCR suite passes, and the four subtitle clips and the selected
+qualification are byte-identical to their controls. The authored clips contain no such short
+line, so they show no regression and no gain. A short scene mark that is centred within two
+percent and one row flat can now be independent evidence; the centring and span rules are the
+remaining guard.

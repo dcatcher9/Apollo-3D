@@ -71,7 +71,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 130/tag `0x808647CD`, canonical SHA-256
-`9804fd584c6ea8b303d52cf11b8441a3b72aa69b0ae4d0752cff910da46eb5ba`. It binds the
+`141e21433c050cfa6a347d191b9c4d8b143b5569b807815d17e6ff7ab04cb299`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -82,7 +82,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 29 | `e9310bb0bc0586c0d0e7ae1c51ff65ca07b140ed99f5399760a07f0255fad31e` |
+| `parallax_v2_producer` | 29 | `aed3fcfa72e402aa66421dce0b3dc6a8f0c6e8999a9a01d2a2e905e09ecd8508` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `50c712473211a3b66638fb0bcf89938cb46f2501126bee79cca8e352243ca53a` |
 | `near_identical_detector` | 4 | `9272bf6f9d293e556dbc38a9d48a74d5c70090af390836e150d0d6bd8c46a670` |
 | `gpu_trace` | 1 | `2c442b910b839fe7daf0c073d157c36258cd5b2f264c9d901187d83752f2b7c1` |
@@ -516,8 +516,11 @@ selection; each accepted pair retains its own core and expanded cover.
 The classifier divides a local line into eight horizontal bins and measures the nearest-rank
 10th and 90th active-pixel row quantiles. A least-squares fit in native source units estimates both
 envelope slopes. Six populated bins and both absolute slopes within `tan(2 degrees)` supply
-independent horizontal evidence. Consistent same-sign slopes beyond `tan(10 degrees)` supply
-scene-text rejection. Other shapes are ambiguous or unknown. Every topology kind, including
+independent horizontal evidence. So do six populated bins whose two envelopes each move by at
+most one detector row across all populated bins: envelope rows are whole rows, and on a line
+narrower than roughly 44 detector pixels that single quantization step already exceeds the
+angle bound. A two-row range on such a line is still treated as tilt. Consistent same-sign
+slopes beyond `tan(10 degrees)` supply scene-text rejection. Other shapes are ambiguous or unknown. Every topology kind, including
 ribbons, passes classification. These experimental bounds are geometric hypotheses, not a
 semantic guarantee; square, short, curved, blurred or deliberately angled captions need particular
 recall inspection. Missing geometry is not itself proof of scene text.

@@ -674,6 +674,8 @@ uint ClassifyCurrentGeometry(CandidateStats stats, out float low_slope, out floa
     float sum_high = 0.0f;
     float sum_xlow = 0.0f;
     float sum_xhigh = 0.0f;
+    uint2 low_rows = uint2(0xffffffffu, 0u);
+    uint2 high_rows = uint2(0xffffffffu, 0u);
     [loop]
     for (uint bin = 0u; bin < V2_OCR_CLASSIFIER_X_BINS; ++bin) {
         uint left = stats.tight_left + bin * width / V2_OCR_CLASSIFIER_X_BINS;
@@ -709,6 +711,8 @@ uint ClassifyCurrentGeometry(CandidateStats stats, out float low_slope, out floa
         float high_y = ((float)(high - stats.tight_top) + 0.5f) *
             (float)crop_height_pixels / (float)OCR_HEIGHT;
         ++populated;
+        low_rows = uint2(min(low_rows.x, low), max(low_rows.y, low));
+        high_rows = uint2(min(high_rows.x, high), max(high_rows.y, high));
         sum_x += x;
         sum_xx += x * x;
         sum_low += low_y;
@@ -725,6 +729,11 @@ uint ClassifyCurrentGeometry(CandidateStats stats, out float low_slope, out floa
     if (!FiniteFloat(low_slope) || !FiniteFloat(high_slope)) return CLASS_UNKNOWN;
     if (abs(low_slope) <= V2_OCR_CLASSIFIER_HORIZONTAL_TAN &&
         abs(high_slope) <= V2_OCR_CLASSIFIER_HORIZONTAL_TAN) return CLASS_HORIZONTAL;
+    // Envelope rows are whole detector rows. When each envelope moves by at most one row
+    // across all populated bins, the fit cannot distinguish tilt from row quantization: on a
+    // short line that single step alone exceeds the angle bound. Longer lines with the same
+    // one-row range already satisfy the bound above.
+    if (low_rows.y - low_rows.x <= 1u && high_rows.y - high_rows.x <= 1u) return CLASS_HORIZONTAL;
     if ((low_slope > V2_OCR_CLASSIFIER_SCENE_TAN &&
          high_slope > V2_OCR_CLASSIFIER_SCENE_TAN) ||
         (low_slope < -V2_OCR_CLASSIFIER_SCENE_TAN &&

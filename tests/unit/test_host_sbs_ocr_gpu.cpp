@@ -2685,6 +2685,24 @@ namespace {
     }
   }
 
+  TEST(HostSbsOcrGpuTest, ShortLineWithOneRowEnvelopeStepIsHorizontal) {
+    // A 30-pixel centered line whose right half sits one detector row lower. The one-row step
+    // is pure quantization, yet over this width its fitted slope exceeds the two-degree bound.
+    // A two-row step on the same short line is real tilt and stays outside independent text.
+    for (const auto step : {1u, 2u}) {
+      SCOPED_TRACE(step);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> cue(ocr_pixels, 0.0f);
+      paint_rectangle(cue, 465u, 100u, 480u, 115u);
+      paint_rectangle(cue, 480u, 100u + step, 495u, 115u + step);
+      ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1'000'000u));
+      EXPECT_EQ(fixture.record()[4u], step == 1u ? 1u : 0u);
+      EXPECT_EQ(classifier_history(fixture.record())[3u], step == 1u ? 1u : 0u);
+    }
+  }
+
   TEST(HostSbsOcrGpuTest, ExplicitDomainAndAnalysisGenerationChangesClearTheLayoutPrior) {
     ocr_warp_fixture_t fixture;
     std::string error;
