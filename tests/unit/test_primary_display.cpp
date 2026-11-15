@@ -749,6 +749,19 @@ TEST(PrimaryDisplay, BaselineTopologyGateAcceptsOnlyTheUsersOwnDesktop) {
     EXPECT_TRUE(manager.baseline_topology_active(L"virtual"));
     EXPECT_FALSE(manager.baseline_topology_active(L"unrelated"));
 
+    // Windows applies its own remembered layout for the monitor set and switches a recorded
+    // output off. The original primary is still primary, so this is not a host topology.
+    const auto extended = fake.current;
+    fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 1920, -200}});
+    EXPECT_TRUE(manager.baseline_topology_active(L"virtual"));
+    // An output the record does not know is not the user's recorded desktop.
+    fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 1920, -200}, {L"unknown", 3840, 0}});
+    EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
+    // Nor is a layout where the original primary lost the origin or went dark.
+    fake.current = make_snapshot({{L"physical-left", 0, 0}, {L"virtual", 1920, -200}});
+    EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
+    fake.current = extended;
+
     // Promotion makes the virtual display primary and, when exclusive, disables physical outputs.
     ASSERT_TRUE(manager.promote(L"virtual", exclusive));
     EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));

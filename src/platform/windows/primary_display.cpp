@@ -1690,10 +1690,16 @@ namespace platf::primary_display {
       if (!valid_journal(journal) || journal.prepared || !same_device(journal.promoted_primary, device_path)) {
         return false;
       }
+      // Every topology the host applies either moves the original primary off the origin or
+      // detaches this display, so the original primary at the origin beside this active display
+      // is not a host topology. Windows can still have switched a recorded output off by itself:
+      // it applies its own remembered layout for the monitor set inside Add and after a
+      // reactivation. That layout is the one Windows already holds, so it does not block the
+      // save. An output the record does not know is not the user's recorded desktop.
       const auto *primary = find_position(*current, journal.original_primary);
       return primary && primary->x == 0 && primary->y == 0 &&
-             std::ranges::all_of(journal.original, [&](const auto &entry) {
-               return find_position(*current, entry.device_path) != nullptr;
+             std::ranges::all_of(*current, [&](const auto &entry) {
+               return find_position(journal.original, entry.device_path) != nullptr;
              });
     }
 

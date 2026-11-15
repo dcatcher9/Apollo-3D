@@ -85,8 +85,9 @@ namespace platf::primary_display {
   void restore_retained_cursor(const retained_display_ptr &retained);
 
   /** True while the active desktop is still the user's own topology around this bound display:
-   * every recorded original output is active and the original primary is at the desktop origin.
-   * Without a recovery record no host topology is applied; the display must then not be primary
+   * the original primary is at the desktop origin and every active output is a recorded original
+   * one. A recorded output that Windows switched off by itself does not change that. Without a
+   * recovery record no host topology is applied; the display must then not be primary
    * unless it is the only active output. Unreadable or unexpected state returns false. Read-only.
    */
   bool baseline_topology_active(std::wstring_view device_path);
