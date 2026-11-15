@@ -28,7 +28,7 @@ namespace host_sbs_subtitle_cohort {
     std::array<std::uint32_t, 4u> field;        // W,H,OCR ROI top,bottom
     std::array<std::uint32_t, 4u> content;      // exact half-open field rectangle
     std::array<std::uint32_t, 4u> frame;        // source frame lo/hi,generation lo/hi
-    std::array<std::uint32_t, 4u> observation;  // source us lo/hi,domain reset,reserved zero; cut comes from current UIP
+    std::array<std::uint32_t, 4u> observation;  // source us lo/hi,domain reset,reserved zero
     std::array<std::uint32_t, 4u> control;      // enabled,schema,two reserved zeros
   };
 

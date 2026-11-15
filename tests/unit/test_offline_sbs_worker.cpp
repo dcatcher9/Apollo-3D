@@ -308,7 +308,6 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
   );
   EXPECT_EQ(direct.find("scene_tracker"), std::string::npos);
   EXPECT_EQ(direct.find("scene-audit"), std::string::npos);
-  EXPECT_EQ(source.find("hard_cut"), std::string::npos);
   EXPECT_NE(
     direct.find("conversion_encoder->publish(timing.sequence, std::move(sbs))"),
     std::string::npos

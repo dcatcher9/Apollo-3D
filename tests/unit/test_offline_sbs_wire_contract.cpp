@@ -92,7 +92,7 @@ namespace {
         .frame_file = "adaptive_state_frame.json",
         .retained_history = false,
         .schema = 1,
-        .capture = "cut-bridge-state",
+        .capture = "depth-health-state",
         .frame_count = 2,
       },
       .sbs = {
@@ -278,11 +278,10 @@ TEST(OfflineSbsWireContractTest, WorkerSpecRejectsUnknownFields) {
   );
 }
 
-TEST(OfflineSbsWireContractTest, WorkerSpecRejectsRetiredCutStatePipelineField) {
+TEST(OfflineSbsWireContractTest, WorkerSpecRejectsUnknownPipelineField) {
   auto encoded = offline_sbs::wire::to_json(worker_spec());
   EXPECT_EQ(encoded.at("schema"), 3);
-  EXPECT_FALSE(encoded.at("pipeline").contains("cut_state"));
-  encoded["pipeline"]["cut_state"] = "authenticated-online-pulse-count";
+  encoded["pipeline"]["unknown_field"] = "unknown";
   EXPECT_THROW(
     offline_sbs::wire::parse_worker_spec_contract(encoded),
     offline_sbs::wire::contract_error

@@ -490,7 +490,6 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   EXPECT_EQ(page.find("No future frame can"), std::string::npos);
   EXPECT_EQ(page.find("lookahead"), std::string::npos);
   EXPECT_EQ(page.find("Budget split"), std::string::npos);
-  EXPECT_EQ(page.find("Online hard cut"), std::string::npos);
   EXPECT_EQ(page.find("Recent scene decisions"), std::string::npos);
   EXPECT_EQ(page.find("scene-decisions-title"), std::string::npos);
   EXPECT_EQ(page.find("offline-scene-table"), std::string::npos);

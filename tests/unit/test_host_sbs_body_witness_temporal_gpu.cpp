@@ -792,7 +792,7 @@ namespace {
       program.resources = &backend_;
       program.frame = frame_;
       if (gpu_frame256) {
-        // Shape/caps are the ONLY CPU precondition. No CPU source/cut/model word is uploaded.
+        // Shape/caps are the ONLY CPU precondition. No CPU source/model word is uploaded.
         program.frame = {};
         std::copy_n(frame_.words.begin(), 4u, program.frame.words.begin());
         std::copy_n(frame_.words.begin() + 12u, 4u, program.frame.words.begin() + 12u);

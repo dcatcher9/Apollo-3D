@@ -13,7 +13,7 @@ using frame_t=host_sbs_body_witness_temporal_gpu::frame_constants_t;
 // Exact existing postprocess request classes, sealed by the caller from actual pending state.
 // This is NOT inferred from argument bytes or a CPU completion fabricated by the serializer.
 enum class postprocess_mode_e : std::uint32_t { authorized=1u,cpu_completed_force=2u,queued_force=4u };
-// Literal upload seed, distinct from the GPU output Frame256 ABI. Cut/model context is GPU-owned.
+// Literal upload seed, distinct from the GPU output Frame256 ABI. Model context is GPU-owned.
 inline frame_t seed(const host_sbs_temporal_source_bridge::certificate_t &c,
  UINT width,UINT crop_height,host_sbs_body_witness_temporal_gpu::caps_t caps,
  std::uint64_t model_frame,std::uint64_t model_observation,std::uint64_t transaction_token,postprocess_mode_e mode) {

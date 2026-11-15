@@ -97,7 +97,7 @@
         const auto context_root_pending = archive(context_root.Get());
         ASSERT_TRUE(context_transport.queue(context_.Get(), context_shader.Get(), constants_buffer_.Get(), context_uip.srv.Get(), context_root_srv.Get(), seed, error_)) << error_;
         const auto serialized_pending = archive(context_transport.output().Get());
-        // NO Map, GetData, CPU cut decode or result-dependent dispatch exists between these calls.
+        // NO Map, GetData, CPU decode or result-dependent dispatch exists between these calls.
         ASSERT_TRUE(run_composed(true, context_transport.output().Get())) << error_;
         const auto serialized = read_archive(serialized_pending);
         const auto uploaded_context_cb = read_archive(context_cb_pending);
