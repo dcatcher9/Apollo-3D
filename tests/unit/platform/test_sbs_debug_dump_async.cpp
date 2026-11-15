@@ -44,7 +44,6 @@ namespace {
   using namespace std::chrono_literals;
   namespace dump_detail = platf::sbs_debug::detail;
   namespace v2 = models::depth_coordinate_v2;
-  constexpr std::uint32_t subtitle_scene_epoch = 3u;
   namespace gpu_trace = models::host_sbs_gpu_trace;
 
   template<std::size_t WordCount>
@@ -67,7 +66,7 @@ namespace {
     const platf::sbs_debug::frame &frame
   ) {
     return dump_detail::subtitle_records_match_frame(
-      ocr, locator, frame, subtitle_scene_epoch
+      ocr, locator, frame
     );
   }
 
@@ -157,7 +156,6 @@ namespace {
     words[v2::subtitle_plane_content_offset + 1u] = frame.field_content.top;
     words[v2::subtitle_plane_content_offset + 2u] = frame.field_content.right;
     words[v2::subtitle_plane_content_offset + 3u] = frame.field_content.bottom;
-    words[v2::subtitle_plane_cut_epoch_word] = subtitle_scene_epoch;
     const auto a = v2::subtitle_plane_adaptive_offset;
     words[a] = 1u; words[a + 1u] = 8u;
     words[a + 3u] = std::bit_cast<std::uint32_t>(current_valid && count == 0u ? 0.0f : target);
@@ -421,7 +419,7 @@ namespace {
     identity[0u] = v2::subtitle_contour_schema;
     identity[1u] = v2::subtitle_contour_history_tag;
     identity[2u] = 1u;
-    identity[3u] = subtitle_scene_epoch;
+    identity[3u] = 0u;
     identity[4u] = static_cast<std::uint32_t>(completed.matched_frame_id);
     identity[5u] = static_cast<std::uint32_t>(completed.matched_frame_id >> 32u);
     identity[6u] = static_cast<std::uint32_t>(completed.depth_input_region.analysis_generation);
@@ -449,7 +447,6 @@ namespace {
     fixture.state[v2::frame_valid] = 1.0f;
     fixture.state[v2::renderer_authorization_bits] = std::bit_cast<float>(v2::contract_tag);
     fixture.state[v2::joint_plane_mode_bits] = std::bit_cast<float>(v2::adaptive_policy_id);
-    fixture.state[v2::confirmed_cut_count] = std::bit_cast<float>(subtitle_scene_epoch);
     fixture.state[v2::gain_last_observation_low] = std::bit_cast<float>(identity[20u]);
     fixture.state[v2::gain_last_observation_high] = std::bit_cast<float>(identity[21u]);
     return fixture;
@@ -803,7 +800,7 @@ namespace {
     EXPECT_FALSE(dump_detail::subtitle_capture_resources_are_authenticated(missing_base));
   }
 
-  TEST(SbsDebugDumpContourTest, JoinsCurrentSct5ToCropDomainCutAndSourceClock) {
+  TEST(SbsDebugDumpContourTest, JoinsCurrentSct5ToCropDomainAndSourceClock) {
     const auto too_tall = current_contour_dump_fixture(180u, 200u);
     ASSERT_TRUE(dump_detail::subtitle_ocr_record_is_canonical_for_frame(
       word_bytes(too_tall.ocr), too_tall.completed));
@@ -829,7 +826,7 @@ namespace {
     forged.state[v2::gain_last_observation_low] = std::bit_cast<float>(fixture.identity[20u] + 1u);
     EXPECT_FALSE(contour_identity_matches(forged));
     forged = fixture;
-    forged.state[v2::confirmed_cut_count] = std::bit_cast<float>(subtitle_scene_epoch + 1u);
+    forged.state[v2::control_reserved_0] = std::bit_cast<float>(1u);
     EXPECT_FALSE(contour_identity_matches(forged));
     forged = fixture;
     forged.state[v2::frame_valid] = 0.0f;
@@ -1587,7 +1584,7 @@ namespace {
     );
     EXPECT_FALSE(dump_detail::subtitle_records_match_completion(
       word_bytes(falsely_current_ocr), word_bytes(falsely_current_locator), ring,
-      completed, subtitle_scene_epoch
+      completed
     )) << "an authenticated ordinary reuse may not fresh-stamp its frozen subtitle tuple";
 
     const auto base = gpu_trace::record_base(0u);
@@ -1608,7 +1605,7 @@ namespace {
     set_trace_word(ring, condition_base + 5u, locator[v2::subtitle_plane_adaptive_offset + 3u]);
     ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, completed));
     EXPECT_TRUE(dump_detail::subtitle_records_match_completion(
-      word_bytes(ocr), word_bytes(locator), ring, completed, subtitle_scene_epoch
+      word_bytes(ocr), word_bytes(locator), ring, completed
     ));
 
     set_trace_word(
@@ -1617,7 +1614,7 @@ namespace {
       locator[v2::subtitle_plane_current_slot_mask_word] + 1u
     );
     EXPECT_FALSE(dump_detail::subtitle_records_match_completion(
-      word_bytes(ocr), word_bytes(locator), ring, completed, subtitle_scene_epoch
+      word_bytes(ocr), word_bytes(locator), ring, completed
     ));
   }
 
@@ -1713,7 +1710,7 @@ namespace {
       set_trace_word(ring, plane_base + index, plane[index]);
     ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, completed));
     EXPECT_TRUE(dump_detail::subtitle_records_match_completion(
-      word_bytes(ocr), word_bytes(plane), ring, completed, subtitle_scene_epoch));
+      word_bytes(ocr), word_bytes(plane), ring, completed));
     auto future = ring;
     set_trace_word(future, plane_base + v2::subtitle_plane_observation_timestamp_offset,
                    static_cast<std::uint32_t>(completed.matched_observation_timestamp_us + 1u));
@@ -2360,7 +2357,7 @@ namespace {
     for (const auto index : {v2::subtitle_plane_frame_offset, v2::subtitle_plane_analysis_generation_offset,
         v2::subtitle_plane_observation_timestamp_offset, v2::subtitle_plane_source_extent_offset,
         v2::subtitle_plane_field_extent_offset, v2::subtitle_plane_roi_offset,
-        v2::subtitle_plane_content_offset, v2::subtitle_plane_cut_epoch_word, v2::subtitle_plane_reserved_offset}) {
+        v2::subtitle_plane_content_offset, v2::subtitle_plane_identity_reserved_word, v2::subtitle_plane_reserved_offset}) {
       auto corrupt = plane; corrupt[index] ^= 1u;
       EXPECT_FALSE(subtitle_records_match_frame(word_bytes(ocr), word_bytes(corrupt), frame)) << index;
     }

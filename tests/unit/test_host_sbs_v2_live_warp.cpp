@@ -1794,7 +1794,7 @@ namespace {
     id[0] = v2::subtitle_contour_schema;
     id[1] = v2::subtitle_contour_history_tag;
     id[2] = 1u;
-    id[3] = state[v2::confirmed_cut_count];
+    id[3] = 0u;
     id[4] = 1u;
     id[6] = 7u;
     id[8] = width;
@@ -4361,11 +4361,11 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
               id[10] <= id[9] && id[11] <= id[9] - id[10] &&
               id[12] == field_width && id[13] == field_height &&
               id[16] < id[18] && id[17] < id[19] && id[18] <= field_width && id[19] <= field_height &&
-              id[3] == state[v2::confirmed_cut_count] &&
+              id[3] == 0u &&
               (id[20] != 0u || id[21] != 0u) && id[20] == state[v2::gain_last_observation_low] &&
               id[21] == state[v2::gain_last_observation_high] &&
               std::all_of(id.begin() + v2::subtitle_contour_history_reserved_offset, id.end(), [](auto value) { return value == 0u; }),
-              "Saved SCT owner/observation/cut/generation/shape binding is invalid");
+              "Saved SCT owner/observation/generation/shape binding is invalid");
       subtitle.width = id[8];
       subtitle.height = id[11];
       subtitle.matte = load_vector.template operator()<std::uint32_t>("matte", std::size_t(subtitle.width) * subtitle.height);
@@ -4674,11 +4674,11 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
               id[10] <= id[9] && id[11] <= id[9] - id[10] &&
               id[12] == field_width && id[13] == field_height &&
               id[16] < id[18] && id[17] < id[19] && id[18] <= field_width && id[19] <= field_height &&
-              id[3] == state[v2::confirmed_cut_count] &&
+              id[3] == 0u &&
               (id[20] != 0u || id[21] != 0u) && id[20] == state[v2::gain_last_observation_low] &&
               id[21] == state[v2::gain_last_observation_high] &&
               std::all_of(id.begin() + v2::subtitle_contour_history_reserved_offset, id.end(), [](auto value) { return value == 0u; }),
-              "Saved SCT owner/observation/cut/generation/shape binding is invalid");
+              "Saved SCT owner/observation/generation/shape binding is invalid");
       subtitle.width = id[8];
       subtitle.height = id[11];
       subtitle.matte = load_vector.template operator()<std::uint32_t>("matte", std::size_t(subtitle.width) * subtitle.height);
@@ -5632,11 +5632,11 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteTwoSidedSelectorReplay) {
               id[10] <= id[9] && id[11] <= id[9] - id[10] &&
               id[12] == field_width && id[13] == field_height &&
               id[16] < id[18] && id[17] < id[19] && id[18] <= field_width && id[19] <= field_height &&
-              id[3] == state[v2::confirmed_cut_count] &&
+              id[3] == 0u &&
               (id[20] != 0u || id[21] != 0u) && id[20] == state[v2::gain_last_observation_low] &&
               id[21] == state[v2::gain_last_observation_high] &&
               std::all_of(id.begin() + v2::subtitle_contour_history_reserved_offset, id.end(), [](auto value) { return value == 0u; }),
-              "Saved SCT owner/observation/cut/generation/shape binding is invalid");
+              "Saved SCT owner/observation/generation/shape binding is invalid");
       subtitle.width = id[8];
       subtitle.height = id[11];
       subtitle.matte = load_vector.template operator()<std::uint32_t>("matte", std::size_t(subtitle.width) * subtitle.height);

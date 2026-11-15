@@ -831,7 +831,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
         ), (5, 136, 40, 88, 128, 134, 135, 136))
         self.assertEqual((replay.CONTROL_HARNESS_SCHEMA, replay.CONDITIONAL_HARNESS_SCHEMA), (31, 30))
         self.assertEqual((replay.depth_coordinate_v2_dump_contract.GPU_TRACE_CONTRACT_SCHEMA,
-                          replay.depth_coordinate_v2_dump_contract.GPU_TRACE_DECODED_SCHEMA), (6, 7))
+                          replay.depth_coordinate_v2_dump_contract.GPU_TRACE_DECODED_SCHEMA), (6, 8))
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(Path(directory))
             trace = treatment / replay.TRACE_FILENAME

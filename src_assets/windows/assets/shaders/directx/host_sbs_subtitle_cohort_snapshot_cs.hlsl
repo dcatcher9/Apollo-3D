@@ -64,7 +64,6 @@ bool CurrentSnapshotIdentityValid() {
          snapshot_reserved < V2_SUBTITLE_CONTOUR_HISTORY_WORD_COUNT; ++snapshot_reserved) {
         if (CurrentSCT[snapshot_reserved] != 0u) return false;
     }
-    // Cut word3 is already GPU-owned SCT evidence. There is no CPU cut mirror in b0.
     return true;
 }
 

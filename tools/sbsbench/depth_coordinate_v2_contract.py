@@ -213,7 +213,7 @@ EXPECTED_SUBTITLE_OCR = {'schema': 38,
                     'probability_sampling_arithmetic': 'precise-fp32-divide-center-multiply-subtract-floor-fraction-separated-lerp-delta-multiply-add-no-contraction-no-support-epsilon-v1',
                     'diagnostic_snapshot_policy': 'same-joined-valid-ocr-geometry-source-clock-copy-before-next-admission-clear-invalid-whole-reuse-hold-v1',
                     'native_support': 'r32u-binary-current-classified-centered-bounded-search-valid-current-peak-ink-color-short-stroke-or-local-dark-outline-positive-diagnostic-count-v6',
-                    'authority': 'current-ocr8-uip4-scp4-cut-source-clock-and-current-signed-reference-geometry-no-history-vote-authority-v3',
+                    'authority': 'current-ocr8-uip4-scp4-source-clock-and-current-signed-reference-geometry-no-history-vote-authority-v4',
                     'projection': 'native-visible-support-to-all-bilinear-field-nodes-integer-footprint-v1',
                     'history': 'diagnostic-current-cover-fixed-rgb-anchor-four-genuine-observations-same-pixel-first-cue-blocks-neighbor-fallback-no-four-count-render-gate-v5',
                     'history_schema': 5,
@@ -299,7 +299,7 @@ EXPECTED_SUBTITLE_OCR = {'schema': 38,
                  'field_extent_offset': 12,
                  'roi_offset': 14,
                  'content_offset': 16,
-                 'cut_epoch_word': 20,
+                 'identity_reserved_word': 20,
                  'reserved_offset': 23,
                  'reserved_word_count': 1,
                  'adaptive_offset': 24,
@@ -349,7 +349,7 @@ EXPECTED_SUBTITLE_OCR = {'schema': 38,
                 'max_height_ratio': 2.0,
                 'learning_policy': 'independent-current-horizontal-entry-after-authoritative-blank-not-per-frame-assisted-candidates-never-teach-v1',
                 'release_policy': 'current-classified-covers-only-empty-current-clears-mask-immediately-layout-never-authorizes-pixels-v1',
-                'reset_policy': 'domain-context-source-field-content-reference-or-invalid-clock-clears-prior-layout-survives-scene-cuts-v1',
+                'reset_policy': 'domain-context-source-field-content-reference-or-invalid-clock-clears-prior-layout-v2',
                 'unknown_policy': 'current-compatible-line-or-qualified-position-height-prior-required-no-fixed-frame-wait-v1',
                 'prior_geometry_policy': 'ambiguous-prior-requires-both-envelopes-within-scene-angle-and-either-one-horizontal-or-coherent-same-direction-moderate-slopes-unknown-separate-v1',
                 'prior_only_group_center_policy': 'current-half-open-group-must-contain-signed-reference-center-without-borrowing-prior-location-as-current-line-evidence-v1',
@@ -526,7 +526,7 @@ class SubtitleOcrContract:
     plane_field_extent_offset: int
     plane_roi_offset: int
     plane_content_offset: int
-    plane_cut_epoch_word: int
+    plane_identity_reserved_word: int
     # Legacy reset-mask name: word21 is the current-core probability cue mask.
     plane_history_reset_mask_word: int
     plane_warmup_word: int
@@ -676,7 +676,7 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         plane_field_extent_offset=plane["field_extent_offset"],
         plane_roi_offset=plane["roi_offset"],
         plane_content_offset=plane["content_offset"],
-        plane_cut_epoch_word=plane["cut_epoch_word"],
+        plane_identity_reserved_word=plane["identity_reserved_word"],
         plane_history_reset_mask_word=plane["history_reset_mask_word"],
         plane_warmup_word=plane["warmup_word"],
         plane_warmup_observations=plane["warmup_observations"],

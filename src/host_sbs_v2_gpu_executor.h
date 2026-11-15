@@ -76,7 +76,7 @@ namespace models::host_sbs_v2_gpu {
     base_constants_t constants;
     ID3D11ComputeShader *shader = nullptr;
     ID3D11ShaderResourceView *frame_stats = nullptr;
-    ID3D11ShaderResourceView *cut_bridge_state = nullptr;
+    ID3D11ShaderResourceView *depth_health_state = nullptr;
     ID3D11UnorderedAccessView *state_output = nullptr;
     dispatch_command_t dispatch;
   };
@@ -92,12 +92,10 @@ namespace models::host_sbs_v2_gpu {
     ID3D11ShaderResourceView *minmax_ema = nullptr;
     ID3D11ShaderResourceView *current_model_input = nullptr;
     ID3D11ShaderResourceView *current_appearance_ordinal = nullptr;
-    ID3D11ShaderResourceView *cut_bridge_state = nullptr;
-    ID3D11ShaderResourceView *current_depth = nullptr;
+    ID3D11ShaderResourceView *depth_health_state = nullptr;
     ID3D11UnorderedAccessView *candidate_output = nullptr;
     ID3D11UnorderedAccessView *previous_model_input_output = nullptr;
     ID3D11UnorderedAccessView *previous_appearance_ordinal_output = nullptr;
-    ID3D11UnorderedAccessView *previous_reliable_depth_output = nullptr;
     ID3D11UnorderedAccessView *previous_tensor_exclusion_output = nullptr;
     ID3D11UnorderedAccessView *history_owner_output = nullptr;
     dispatch_command_t dispatch;

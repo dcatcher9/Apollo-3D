@@ -8,7 +8,7 @@
 #include "include/host_sbs_subtitle_history_compatibility.hlsl"
 
 StructuredBuffer<uint4> GeometryState : register(t0);
-StructuredBuffer<float4> CutBridge : register(t1);
+StructuredBuffer<float4> DepthHealth : register(t1);
 Texture2D<float> BaseField : register(t2);
 StructuredBuffer<uint> LocatorStateRead : register(t3);
 StructuredBuffer<uint> ConditionParams : register(t4);
@@ -88,10 +88,9 @@ bool GeometryPublicationReady() {
         V2_STATE_FRAME_VALID(control) == 1.0f &&
         mapping.y == V2_CONTRACT_TAG && mapping.z == V2_ADAPTIVE_POLICY_ID &&
         any(now != 0u) && all(camera.clock.xy == now) &&
-        asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(
-            CutBridge[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS])) == SBS_CUT_CONTRACT_TAG &&
-        asuint(V2_STATE_CONFIRMED_CUT_COUNT(control)) ==
-            asuint(SBS_STATE_HARD_CUT_COUNT(CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]));
+        asuint(SBS_STATE_CONTRACT_TAG_BITS(
+            DepthHealth[SBS_STATE_VECTOR_CONTRACT_TAG_BITS])) == SBS_ADAPTIVE_STATE_CONTRACT_TAG &&
+        asuint(V2_STATE_CONTROL_RESERVED_0(control)) == 0u;
 }
 
 uint AdaptiveMaximumIndex() {
@@ -351,10 +350,8 @@ void ResolveObservation() {
     [loop]
     for (uint word = 0u; word < V2_SUBTITLE_PLANE_STATE_WORD_COUNT; ++word)
         PreviousState[word] = LocatorState[word];
-    bool cut_valid = asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(
-        CutBridge[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS])) == SBS_CUT_CONTRACT_TAG;
-    uint epoch = cut_valid ? asuint(SBS_STATE_HARD_CUT_COUNT(
-        CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT])) : 0u;
+    bool health_valid = asuint(SBS_STATE_CONTRACT_TAG_BITS(
+        DepthHealth[SBS_STATE_VECTOR_CONTRACT_TAG_BITS])) == SBS_ADAPTIVE_STATE_CONTRACT_TAG;
     bool domain_valid = LocatorDomainGeometryValid();
     bool old_valid = domain_valid && StateHeaderValid(true, false);
     AdaptiveReset = !old_valid || locator_source.w != 0u ||
@@ -362,7 +359,7 @@ void ResolveObservation() {
     AdaptiveDistinct = !old_valid ||
         PreviousState[V2_SUBTITLE_PLANE_FRAME_OFFSET] != locator_frame.x ||
         PreviousState[V2_SUBTITLE_PLANE_FRAME_OFFSET + 1u] != locator_frame.y ? 1u : 0u;
-    AdaptiveDomainValid = domain_valid && cut_valid ? 1u : 0u;
+    AdaptiveDomainValid = domain_valid && health_valid ? 1u : 0u;
     AdaptiveGeometryReady = AdaptiveDomainValid != 0u && GeometryPublicationReady() ? 1u : 0u;
     uint count;
     AdaptiveOcrValid = ValidateOcrRecord(count) ? 1u : 0u;
@@ -398,7 +395,6 @@ void ResolveObservation() {
         [unroll]
         for (uint component = 0u; component < 4u; ++component)
             LocatorState[V2_SUBTITLE_PLANE_CONTENT_OFFSET + component] = locator_content[component];
-        LocatorState[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] = epoch;
     }
     [unroll]
     for (uint word = 0u; word < V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT; ++word)
@@ -410,8 +406,7 @@ bool ConditionStateValid(out uint count, out uint kinds, out float target) {
     if (!LocatorGeometryValid() || !GeometryPublicationReady() ||
         !StateHeaderValid(false, true) ||
         ConditionStateSnapshot[V2_SUBTITLE_PLANE_FLAGS_WORD] != V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG ||
-        ConditionStateSnapshot[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] !=
-            asuint(SBS_STATE_HARD_CUT_COUNT(CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]))) return false;
+        ConditionStateSnapshot[V2_SUBTITLE_PLANE_IDENTITY_RESERVED_WORD] != 0u) return false;
     uint current_count;
     if (!ValidateOcrRecord(current_count) ||
         ConditionStateSnapshot[V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD] != SlotMask(current_count)) return false;
@@ -481,7 +476,7 @@ void AdaptiveAdvance() {
     [unroll]
     for (uint word = 0u; word < 16u; ++word) tail[word] = LocatorState[ADAPTIVE + word];
     if (AdaptiveDomainValid == 0u) {
-        // No calibrated source/cut domain exists in which to label a cap or retain timed evidence.
+        // No calibrated source domain exists in which to label a cap or retain timed evidence.
         // Publish a canonical inactive tail; the empty current mask remains exact Base.
         [unroll]
         for (uint word = 0u; word < V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT; ++word) {
@@ -754,7 +749,7 @@ bool ContourIdentityValid(uint current_count, uint current_kinds) {
         ContourIdentity[1u] != V2_SUBTITLE_CONTOUR_HISTORY_TAG || ContourIdentity[2u] != 1u ||
         ContourIdentity[22u] != V2_SUBTITLE_CONTOUR_RECIPE ||
         ContourIdentity[V2_SUBTITLE_CONTOUR_HISTORY_SNAPSHOT_VALID_WORD] != 1u ||
-        ContourIdentity[3u] != ConditionStateSnapshot[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] ||
+        ContourIdentity[3u] != 0u ||
         ContourIdentity[8u] != locator_source.x || ContourIdentity[9u] != locator_source.y ||
         ContourIdentity[20u] != locator_observation.x || ContourIdentity[21u] != locator_observation.y)
         return false;

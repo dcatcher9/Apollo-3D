@@ -730,7 +730,7 @@ namespace {
     id[0] = v2::subtitle_contour_schema;
     id[1] = v2::subtitle_contour_history_tag;
     id[2] = 1u;
-    id[3] = state[v2::confirmed_cut_count];
+    id[3] = 0u;
     id[4] = 1u;
     id[6] = 7u;
     id[8] = width;

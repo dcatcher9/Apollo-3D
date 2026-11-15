@@ -460,7 +460,7 @@
         "host_sbs_subtitle_gaussian_vertical_limit",
         "host_sbs_subtitle_gaussian_horizontal_limit"
       ],
-      "source_closure_sha256": "13d225ac37fd25b1ff942fb9abc2f422ec81e23ce180882afb598f9a3befcf92"
+      "source_closure_sha256": "8f79a8ba600a992b84f591d2e766ad77ef7bd8243f1fb205df909f1481823528"
     },
     {
       "name": "parallax_v2_coordinate_diagnostic",
@@ -468,7 +468,7 @@
       "specs": [
         "depth_coordinate_v2_coordinate_diagnostic"
       ],
-      "source_closure_sha256": "bf89d333b3a857d48f95b3828e5f7567ec94d0723bf05b401393d10583711a69"
+      "source_closure_sha256": "10fc176de3612e30ee5f4602794675e5f8046e698cba7e8a488c37d066901381"
     },
     {
       "name": "near_identical_detector",
@@ -478,7 +478,7 @@
         "host_sbs_near_identical_finalize",
         "host_sbs_near_identical_reuse_depth"
       ],
-      "source_closure_sha256": "d3d7281773f4bff399169d72a0d42188c4b1632a7f95f9e3068ae6e92c76e952"
+      "source_closure_sha256": "57b819cdb54b4862d9114d9c8b9bde5983707169f6c324c3101a51de154ce961"
     },
     {
       "name": "gpu_trace",
@@ -486,7 +486,7 @@
       "specs": [
         "host_sbs_gpu_trace"
       ],
-      "source_closure_sha256": "b7dac2c3bdba3038f6ecccb1af5f87efd7a2f39beefae45fcaef3a9d29509483"
+      "source_closure_sha256": "55a7fe6f92a5be3140fe33f082b32b00c189b33fa580af4ab766d30345b9fd7a"
     },
     {
       "name": "parallax_v2_live_renderer",
@@ -495,7 +495,7 @@
         "parallax_v2_live_renderer",
         "sbs_reprojection_vertex"
       ],
-      "source_closure_sha256": "e28de4fe1281c87bc512c532b3ac55c77b5c4e4a754139236febd3bf59a2786b"
+      "source_closure_sha256": "48d5db82cff195785fda7720fb7fe90696b60dc9d4794df23ac152c1f0c34dab"
     },
     {
       "name": "parallax_v2_p010_y",
@@ -503,7 +503,7 @@
       "specs": [
         "parallax_v2_p010_y_renderer"
       ],
-      "source_closure_sha256": "779e8bdf8fe3c12a33ffd74af07ad131e7a1a75849c1b49eda4326dd8c9eb5a7"
+      "source_closure_sha256": "30c9cb3b33239726ce979da5d5950b64f83c0e0fe34d20d718797f582c91ebfd"
     },
     {
       "name": "sbs_flat_fallback",
@@ -521,7 +521,7 @@
         "parallax_v2_live_mapping",
         "parallax_v2_live_mask"
       ],
-      "source_closure_sha256": "9d919bf2e6510777221a8e4679166d655e8f0ecbe3368b4e6dd8078c25c9440f"
+      "source_closure_sha256": "6c49bc093329409b2cc0cae0a206507bed5c03d8bab2f8e08010f9de7b35b1ab"
     },
     {
       "name": "subtitle_cohort_prototype_research",
@@ -531,7 +531,7 @@
         "host_sbs_subtitle_cohort_members",
         "host_sbs_subtitle_cohort_filter"
       ],
-      "source_closure_sha256": "3ba81be2da8c7a307049d2d238568fbd0543ab8ecc59d8c20b1037f9da3fac3b"
+      "source_closure_sha256": "7a0c3744cbf07ae330fb3ddc74f156b4e4661d3fac4d79f72fe0a2f2b9a2162a"
     },
     {
       "name": "subtitle_cohort_research",
@@ -542,7 +542,7 @@
         "host_sbs_subtitle_cohort_filter",
         "host_sbs_subtitle_cohort_snapshot"
       ],
-      "source_closure_sha256": "12b61eeb22955f5a8fd654f8f5a826338ae8e1f14456f3eba50f0c4cd3effec1"
+      "source_closure_sha256": "b132b1d778a59633b1675c9805208ba7e6a6d0bc03bd788fbb52c3fab680c052"
     },
     {
       "name": "subtitle_inner_colour_research",
@@ -554,7 +554,7 @@
         "host_sbs_subtitle_inner_colour_research_accumulate",
         "host_sbs_subtitle_inner_colour_research_validate"
       ],
-      "source_closure_sha256": "97402661d82cf7807039e01f8cf90755c980a522041d392c70abf24dc547b5e3"
+      "source_closure_sha256": "2a6f2efbb0bb66d3b01f3b4cc003e7729c9284b0a2d03c98a0009c94124be049"
     },
     {
       "name": "subtitle_inner_components_research",
@@ -575,7 +575,7 @@
       "specs": [
         "host_sbs_subtitle_matte_guard"
       ],
-      "source_closure_sha256": "d02680083d15550fd4e349fd480b7cddcfa7f2ba23dda9bf93c9bd7a45eff72a"
+      "source_closure_sha256": "1c9709c6ef565bb451745adfb22722a73d28cf1f5eb512daa907feb613723e46"
     },
     {
       "name": "parallax_v2_queued_renderer",
@@ -583,7 +583,7 @@
       "specs": [
         "parallax_v2_queued_renderer"
       ],
-      "source_closure_sha256": "5b4ff19004b64900f67d15595a6ac5adada4dc6afaa66f5431e7d2b8155a9f8e"
+      "source_closure_sha256": "155f02d04aa844e221ee222a36daef5efc32b875f080fd3a383dac8d31d19bcd"
     },
     {
       "name": "current_mask_holes",

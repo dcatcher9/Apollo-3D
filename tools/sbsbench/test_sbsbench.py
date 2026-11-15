@@ -437,7 +437,7 @@ class EvalContractTests(unittest.TestCase):
                         pixels = np.asarray(image.convert("RGB"))
                     self.assertTrue(np.all(pixels == np.asarray(uniform_rgb, np.uint8)), frame_id)
 
-    def test_committed_synthetic_metadata_matches_generator_without_cut_expectations(self):
+    def test_committed_synthetic_metadata_matches_generator(self):
         for clip in make_synth_clips.GENERATORS:
             with self.subTest(clip=clip):
                 with open(os.path.join(make_synth_clips.CLIPS, clip, "meta.json"),
@@ -1679,10 +1679,10 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             executor = fh.read()
         self.assertIn("bool record_map_history(", executor)
-        self.assertIn("ID3D11ShaderResourceView *inputs[8]", executor)
-        self.assertIn("ID3D11UnorderedAccessView *outputs[6]", executor)
-        self.assertIn("CSSetShaderResources(0u, 8u, inputs)", executor)
-        self.assertIn("CSSetUnorderedAccessViews(0u, 6u, outputs, nullptr)", executor)
+        self.assertIn("ID3D11ShaderResourceView *inputs[7]", executor)
+        self.assertIn("ID3D11UnorderedAccessView *outputs[5]", executor)
+        self.assertIn("CSSetShaderResources(0u, 7u, inputs)", executor)
+        self.assertIn("CSSetUnorderedAccessViews(0u, 5u, outputs, nullptr)", executor)
 
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
                                   "directx")
@@ -1768,8 +1768,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('raw_reproject_source_u_normalized', harness)
         self.assertIn('live_sample_transform', harness)
         self.assertIn('\\"warp_mapping\\"', harness)
-        self.assertNotIn('"cut_state.json"', harness)
-        self.assertNotIn('\\"cut_state\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
                   encoding="utf-8") as fh:
@@ -1793,9 +1791,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('.retained_history = false', harness)
         self.assertIn('offline_sbs::wire::whole_clip_contract_t', harness)
         self.assertIn('offline_sbs::wire::to_json(', harness)
-        whole_contract = harness[harness.index(
-            'offline_sbs::wire::whole_clip_resolved_runtime_t'):]
-        self.assertNotIn('"cut_state"', whole_contract)
+        self.assertIn('offline_sbs::wire::whole_clip_resolved_runtime_t', harness)
 
         with open(os.path.join(repo, "src", "offline_sbs_worker.cpp"),
                   encoding="utf-8") as fh:
@@ -1825,7 +1821,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('depth_step = "current-once"', evaluator)
         self.assertGreaterEqual(
             evaluator.count("whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA"), 2)
-        self.assertNotIn("cut_state", evaluator)
         self.assertIn('"warp_map_*.f32"', evaluator)
         self.assertIn('expected_mapping_bytes = width * height * 4', evaluator)
 

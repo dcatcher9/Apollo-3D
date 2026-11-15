@@ -2652,7 +2652,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     std::vector<std::uint8_t> bytes;
   };
   constexpr std::array<const char *, 26u> names {
-    "depth", "cut", "depth frame state", "raw model depth", "candidate", "vertical majorant",
+    "depth", "depth health", "depth frame state", "raw model depth", "candidate", "vertical majorant",
     "vertical conditioned", "Base", "Final", "camera", "frame statistics", "OCR", "SLR",
     "support", "field pin", "distance", "contour identity", "contour history", "source", "Pmap",
     "Gaussian weight", "Gaussian blend", "Gaussian vertical conditioned", "Gaussian control",
@@ -2709,7 +2709,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   };
   const auto read_tuple = [&](const models::estimate_result &result, tuple_t &out) {
     const std::array<ID3D11ShaderResourceView *, names.size()> views {
-      result.depth.Get(), result.cut_state.Get(), result.depth_frame_state.Get(), result.raw_model_depth.Get(),
+      result.depth.Get(), result.depth_health_state.Get(), result.depth_frame_state.Get(), result.raw_model_depth.Get(),
       result.shadow_candidate_parallax.Get(), result.shadow_vertical_majorant.Get(),
       result.shadow_vertical_conditioned.Get(), result.shadow_base_final_parallax.Get(),
       result.shadow_final_parallax.Get(), result.shadow_state.Get(), result.shadow_frame_stats.Get(),
@@ -3167,7 +3167,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   EXPECT_EQ(word(expected[16u], 9u), 1080u);
   EXPECT_EQ(word(expected[16u], 20u), static_cast<std::uint32_t>(clock_us));
   EXPECT_EQ(word(expected[16u], 21u), static_cast<std::uint32_t>(clock_us >> 32u));
-  EXPECT_EQ(word(expected[12u], v2::subtitle_plane_cut_epoch_word), word(expected[16u], 3u));
+  EXPECT_EQ(word(expected[12u], v2::subtitle_plane_identity_reserved_word), 0u);
+  EXPECT_EQ(word(expected[16u], 3u), 0u);
   bool canonical_empty_distance = true;
   for (std::size_t index = 0u; index < expected[15u].bytes.size() / sizeof(std::uint32_t); ++index) {
     canonical_empty_distance &= word(expected[15u], index) == v2::subtitle_contour_distance_empty_bits;
@@ -7947,7 +7948,7 @@ TEST(DirectxShaderSourceTest, FusedDepthMapperSpecializesSyntheticPadding) {
   EXPECT_NE(mapper.find("MotionMask[DTid.xy] = 0u"), std::string::npos);
 }
 
-TEST(DirectxShaderSourceTest, HostTelemetrySharesPublicationReadbackAndPublishesNoSceneCutFields) {
+TEST(DirectxShaderSourceTest, HostTelemetrySharesPublicationReadbackWithTheDepthHealthState) {
   const std::string shader_dir =
     SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
   const auto minmax = read_source_file(shader_dir + "depth_minmax_ema_cs.hlsl");
@@ -7963,9 +7964,9 @@ TEST(DirectxShaderSourceTest, HostTelemetrySharesPublicationReadbackAndPublishes
   ASSERT_FALSE(receipt_decoder.empty());
   ASSERT_FALSE(display.empty());
 
-  // The transport stays a fixed 32-word tagged state whose only GPU producer is the min/max
+  // The transport is a fixed 8-word tagged state whose only GPU producer is the min/max
   // health pass; renderer geometry is carried by the separate V2 state contract.
-  EXPECT_EQ(sbs_adaptive_state::word_count, 32u);
+  EXPECT_EQ(sbs_adaptive_state::word_count, 8u);
   EXPECT_NE(
     receipt_decoder.find("sbs_adaptive_state::word_count"),
     std::string::npos
@@ -7974,19 +7975,12 @@ TEST(DirectxShaderSourceTest, HostTelemetrySharesPublicationReadbackAndPublishes
     receipt_decoder.find("sbs_adaptive_state::initial_words"),
     std::string::npos
   );
-  EXPECT_NE(
-    receipt_decoder.find("sbs_adaptive_state::retired_zero_words"),
-    std::string::npos
-  );
   for (const auto *health_vector : {
-         "DiagnosticState[SBS_STATE_VECTOR_VALID_DEPTH_FRACTION]",
-         "DiagnosticState[SBS_STATE_VECTOR_HARD_CUT_COUNT]",
-         "DiagnosticState[SBS_STATE_VECTOR_RANGE_COLLAPSED]",
+         "DepthHealthState[SBS_STATE_VECTOR_EMPTY_RAW_COUNT]",
+         "DepthHealthState[SBS_STATE_VECTOR_VALID_DEPTH_FRACTION]",
        }) {
     EXPECT_NE(minmax.find(health_vector), std::string::npos);
   }
-  EXPECT_FALSE(std::filesystem::exists(shader_dir + "depth_scene_cut_evidence_cs.hlsl"));
-  EXPECT_FALSE(std::filesystem::exists(shader_dir + "depth_scene_cut_resolve_cs.hlsl"));
 
   // Health diagnostics use the production publication transport; no second staging/query ring
   // or caller-supplied frame label can race the resources captured by that publication.

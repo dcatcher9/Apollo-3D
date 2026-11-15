@@ -19,7 +19,7 @@ class AdaptiveStateContractTests(unittest.TestCase):
         # count. Intentional layout/key changes must therefore bump the schema and add a new
         # reviewed golden digest instead of silently redefining the current schema.
         expected_digest_by_schema = {
-            7: "a99015fadbd63a0e2964a4292583b9f04465b1120b82b8ac3fe62f9d20facf87",
+            8: "a1f3113ea102d43e968112f930ccf66697b09f9067097256c092f7e8c429f605",
         }
         canonical = json.dumps(
             contract.CONTRACT, sort_keys=True, separators=(",", ":")
@@ -62,11 +62,11 @@ class AdaptiveStateContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_manifest_is_exact(self):
-        self.assertEqual(contract.TRACE_SCHEMA, 7)
-        self.assertEqual(contract.CUT_CONTRACT_TAG, 0xA99015FA)
+        self.assertEqual(contract.TRACE_SCHEMA, 8)
+        self.assertEqual(contract.CONTRACT_TAG, 0xA1F3113E)
         self.assertEqual(
             contract.TRACE_SOURCE,
-            "video_depth_estimator.CutBridgeState",
+            "video_depth_estimator.DepthHealthState",
         )
         self.assertEqual(
             contract.TRACE_CAPTURE,
@@ -76,10 +76,10 @@ class AdaptiveStateContractTests(unittest.TestCase):
             set(contract.CONTRACT),
             {
                 "schema", "source", "capture", "counter_max", "header_keys", "config_keys",
-                "frame_keys", "retired_zero_fields", "fields",
+                "frame_keys", "fields",
             },
         )
-        self.assertEqual(len(contract.FIELD_SPECS), 32)
+        self.assertEqual(len(contract.FIELD_SPECS), 8)
         self.assertEqual(
             contract.HEADER_KEYS,
             frozenset({"record", "schema", "source", "capture", "fields", "config"}),
@@ -95,32 +95,22 @@ class AdaptiveStateContractTests(unittest.TestCase):
                 "collapsed_raw_count", "values",
             }),
         )
-        named = {
-            index: (name, kind, encoding)
-            for index, ((name, kind), encoding) in enumerate(
-                zip(contract.FIELD_SPECS, contract.FIELD_ENCODINGS))
-            if not name.startswith("reserved_cut_bridge_")
-        }
-        self.assertEqual(named, {
-            0: ("cut_contract_tag_bits", "uint32", "uint_bits"),
-            14: ("valid_depth_fraction", "float32", "float"),
-            15: ("effective_raw_range_width", "float32", "float"),
-            16: ("hard_cut_count", "uint32", "uint_bits"),
-            18: ("empty_raw_count", "uint32", "uint_bits"),
-            19: ("collapsed_raw_count", "uint32", "uint_bits"),
-            20: ("range_collapsed", "float32", "float"),
-            21: ("depth_ready", "float32", "float"),
-        })
-        for index, (name, _kind) in enumerate(contract.FIELD_SPECS):
-            if index not in named:
-                self.assertEqual(name, f"reserved_cut_bridge_{index}")
-                self.assertEqual(contract.INITIAL_VALUES[name], 0)
-        # The retired word keeps its slot for layout-stable joins; no producer writes it.
-        self.assertEqual(contract.RETIRED_ZERO_FIELDS, ("hard_cut_count",))
-        self.assertEqual(contract.INITIAL_VALUES["hard_cut_count"], 0)
-        for retired_export in (
-                "CUT_FLAG_BITS", "ANALYSIS_FLAG_BITS", "COMPACT_CUT_TRACE_FIELDS"):
-            self.assertFalse(hasattr(contract, retired_export), retired_export)
+        self.assertEqual(
+            [(name, kind, encoding) for (name, kind), encoding in zip(
+                contract.FIELD_SPECS, contract.FIELD_ENCODINGS)],
+            [
+                ("contract_tag_bits", "uint32", "uint_bits"),
+                ("empty_raw_count", "uint32", "uint_bits"),
+                ("collapsed_raw_count", "uint32", "uint_bits"),
+                ("reserved_3", "uint32", "uint_bits"),
+                ("valid_depth_fraction", "float32", "float"),
+                ("effective_raw_range_width", "float32", "float"),
+                ("range_collapsed", "float32", "float"),
+                ("depth_ready", "float32", "float"),
+            ])
+        self.assertEqual(contract.INITIAL_VALUES["contract_tag_bits"], "contract_tag")
+        for name in contract.FIELD_NAMES[1:]:
+            self.assertEqual(contract.INITIAL_VALUES[name], 0)
 
 
 if __name__ == "__main__":

@@ -45,12 +45,12 @@ namespace sbs_bench {
   namespace shader_cache = models::host_sbs_shader_cache;
 
   namespace {
-    constexpr std::uint32_t manifest_schema = 11u;
+    constexpr std::uint32_t manifest_schema = 12u;
     constexpr std::string_view manifest_mode =
-      "depth-coordinate-v2-production-gpu-sequence-v13";
+      "depth-coordinate-v2-production-gpu-sequence-v14";
     constexpr float direct_container_limit = v2::direct_container_limit;
 
-    const std::array<const char *, 45> trace_field_names {{
+    const std::array<const char *, 42> trace_field_names {{
       "frame_id",
       "observation_timestamp_us",
       "state_words_u32",
@@ -58,9 +58,6 @@ namespace sbs_bench {
       "input_source_frame_id",
       "rendered_source_frame_id",
       "calibration_revision",
-      "confirmed_cut_count",
-      "confirmed_cut",
-      "cut_attribution",
       "input_valid",
       "frame_valid",
       "camera_valid",
@@ -397,8 +394,6 @@ void main(uint3 id : SV_DispatchThreadID) {
       fs::path raw_path;
       std::string raw_sha256;
       std::string source_sha256;
-      std::uint32_t cut_generation = 0u;
-      bool cut_pulse = false;
       std::uint64_t observation_timestamp_us = 0u;
     };
   }  // namespace
@@ -409,7 +404,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     fs::path manifest_path;
     std::string manifest_sha256;
     std::string model_name;
-    std::string cut_source;
     UINT width = 0u;
     UINT height = 0u;
     UINT reduce_groups = 0u;
@@ -451,8 +445,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Buffer> state_buffer;
     ComPtr<ID3D11ShaderResourceView> state_srv;
     ComPtr<ID3D11UnorderedAccessView> state_uav;
-    ComPtr<ID3D11Buffer> cut_state_buffer;
-    ComPtr<ID3D11ShaderResourceView> cut_state_srv;
+    ComPtr<ID3D11Buffer> depth_health_state_buffer;
+    ComPtr<ID3D11ShaderResourceView> depth_health_state_srv;
     ComPtr<ID3D11Buffer> dummy_minmax_buffer;
     ComPtr<ID3D11ShaderResourceView> dummy_minmax_srv;
     ComPtr<ID3D11Buffer> dummy_current_model_input_buffer;
@@ -474,12 +468,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Texture2D> dummy_previous_exclusion_texture;
     ComPtr<ID3D11ShaderResourceView> dummy_previous_exclusion_srv;
     ComPtr<ID3D11UnorderedAccessView> dummy_previous_exclusion_uav;
-    ComPtr<ID3D11Texture2D> dummy_current_depth_texture;
-    ComPtr<ID3D11ShaderResourceView> dummy_current_depth_srv;
-    ComPtr<ID3D11UnorderedAccessView> dummy_current_depth_uav;
-    ComPtr<ID3D11Texture2D> dummy_previous_depth_texture;
-    ComPtr<ID3D11ShaderResourceView> dummy_previous_depth_srv;
-    ComPtr<ID3D11UnorderedAccessView> dummy_previous_depth_uav;
     ComPtr<ID3D11Texture2D> coordinate_texture;
     ComPtr<ID3D11ShaderResourceView> coordinate_srv;
     ComPtr<ID3D11UnorderedAccessView> coordinate_uav;
@@ -513,9 +501,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = std::string("invalid v2 GPU replay manifest JSON: ") + exc.what();
         return false;
       }
-      const std::array<const char *, 9> root_keys {{
+      const std::array<const char *, 8> root_keys {{
         "schema", "mode", "calibration_contract", "model_identity", "raw_shape",
-        "source_shape", "mapping_config", "cut_source", "frames",
+        "source_shape", "mapping_config", "frames",
       }};
       if (!root.is_object() || root.size() != root_keys.size() ||
           std::any_of(root_keys.begin(), root_keys.end(), [&](const char *key) {
@@ -746,23 +734,16 @@ void main(uint3 id : SV_DispatchThreadID) {
         return false;
       }
 
-      if (!root["cut_source"].is_string() || root["cut_source"].get<std::string>().empty()) {
-        error = "v2 GPU replay manifest must identify cut-generation authority";
-        return false;
-      }
-      cut_source = root["cut_source"].get<std::string>();
       const auto &frame_values = root["frames"];
       if (!frame_values.is_array() || frame_values.empty()) {
         error = "v2 GPU replay manifest requires a non-empty ordered frame list";
         return false;
       }
       const fs::path root_directory = manifest_path.parent_path();
-      std::optional<std::uint32_t> previous_generation;
       std::optional<std::uint64_t> previous_frame_number;
       for (const auto &value : frame_values) {
-        const std::array<const char *, 7> frame_keys {{
-          "frame_id", "raw_file", "raw_sha256", "source_sha256", "hard_cut_count",
-          "hard_cut_pulse",
+        const std::array<const char *, 5> frame_keys {{
+          "frame_id", "raw_file", "raw_sha256", "source_sha256",
           "observation_timestamp_us",
         }};
         if (!value.is_object() || value.size() != frame_keys.size() ||
@@ -772,9 +753,7 @@ void main(uint3 id : SV_DispatchThreadID) {
               return !value.contains(key);
             }) ||
             !value["frame_id"].is_string() || !value["raw_file"].is_string() ||
-            !value["raw_sha256"].is_string() || !value["source_sha256"].is_string() ||
-            !value["hard_cut_count"].is_number_unsigned() ||
-            !value["hard_cut_pulse"].is_boolean()) {
+            !value["raw_sha256"].is_string() || !value["source_sha256"].is_string()) {
           error = "v2 GPU replay manifest has an invalid frame record";
           return false;
         }
@@ -789,28 +768,15 @@ void main(uint3 id : SV_DispatchThreadID) {
         const auto raw_file = value["raw_file"].get<std::string>();
         frame.raw_sha256 = value["raw_sha256"].get<std::string>();
         frame.source_sha256 = value["source_sha256"].get<std::string>();
-        if (!uint32_number(value["hard_cut_count"], frame.cut_generation)) {
-          error = "v2 GPU replay hard-cut generation is outside uint32";
-          return false;
-        }
-        frame.cut_pulse = value["hard_cut_pulse"].get<bool>();
         if (frame.frame_id.empty() || frame.frame_id.size() > 10u ||
             parsed.ec != std::errc {} ||
             parsed.ptr != frame.frame_id.data() + frame.frame_id.size() ||
             (previous_frame_number && frame.frame_number <= *previous_frame_number) ||
             !relative_filename(raw_file) || raw_file != "raw_" + frame.frame_id + ".f32" ||
             !sha256_is_lower_hex(frame.raw_sha256) ||
-            !sha256_is_lower_hex(frame.source_sha256) ||
-            frame.cut_generation > sbs_adaptive_state::counter_max) {
-          error = "v2 GPU replay frame identity/hash/generation is invalid";
+            !sha256_is_lower_hex(frame.source_sha256)) {
+          error = "v2 GPU replay frame identity/hash is invalid";
           return false;
-        }
-        if (previous_generation) {
-          const auto delta = frame.cut_generation - *previous_generation;
-          if (frame.cut_generation < *previous_generation || delta > 1u) {
-            error = "v2 GPU replay hard-cut generation is not monotonic";
-            return false;
-          }
         }
         frame.raw_path = root_directory / raw_file;
         std::error_code ec;
@@ -822,7 +788,6 @@ void main(uint3 id : SV_DispatchThreadID) {
           return false;
         }
         frames.push_back(std::move(frame));
-        previous_generation = frames.back().cut_generation;
         previous_frame_number = frames.back().frame_number;
       }
       return true;
@@ -976,12 +941,12 @@ void main(uint3 id : SV_DispatchThreadID) {
           return false;
         }
       }
-      auto cut_state_words = sbs_adaptive_state::initial_words;
+      auto depth_health_state_words = sbs_adaptive_state::initial_words;
       const std::array<float, 4> invalid_minmax {{0.0f, 0.0f, 0.0f, 0.0f}};
       if (!create_structured_buffer(
             device.Get(), sizeof(float) * 4u,
-            static_cast<UINT>(sbs_adaptive_state::vector_count), cut_state_words.data(), false,
-            cut_state_buffer, cut_state_srv, unused_uav
+            static_cast<UINT>(sbs_adaptive_state::vector_count), depth_health_state_words.data(), false,
+            depth_health_state_buffer, depth_health_state_srv, unused_uav
           ) ||
           !create_structured_buffer(
             device.Get(), sizeof(float) * 4u, 1u, invalid_minmax.data(), false,
@@ -1020,14 +985,6 @@ void main(uint3 id : SV_DispatchThreadID) {
           ) ||
           !create_float_texture(
             device.Get(), width, height,
-            dummy_current_depth_texture, dummy_current_depth_srv, dummy_current_depth_uav
-          ) ||
-          !create_float_texture(
-            device.Get(), width, height,
-            dummy_previous_depth_texture, dummy_previous_depth_srv, dummy_previous_depth_uav
-          ) ||
-          !create_float_texture(
-            device.Get(), width, height,
             coordinate_texture, coordinate_srv, coordinate_uav
           ) ||
           !create_float_texture(
@@ -1052,15 +1009,13 @@ void main(uint3 id : SV_DispatchThreadID) {
             device.Get(), width, height,
             encoded_texture, encoded_srv, encoded_uav
           )) {
-        error = "cannot create V2 GPU replay textures or cut-state buffer";
+        error = "cannot create V2 GPU replay textures or depth-health state buffer";
         return false;
       }
       const UINT zero_uint[4] = {};
       const float zero_float[4] = {};
       context->ClearUnorderedAccessViewUint(dummy_exclusion_uav.Get(), zero_uint);
       context->ClearUnorderedAccessViewUint(dummy_previous_exclusion_uav.Get(), zero_uint);
-      context->ClearUnorderedAccessViewFloat(dummy_current_depth_uav.Get(), zero_float);
-      context->ClearUnorderedAccessViewFloat(dummy_previous_depth_uav.Get(), zero_float);
       return true;
     }
 
@@ -1121,12 +1076,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       constants.joint_observation_timestamp_high =
         static_cast<std::uint32_t>(frame.observation_timestamp_us >> 32u);
       context->UpdateSubresource(v2_constants.Get(), 0, nullptr, &constants, 0, 0);
-      const bool confirmed_cut_input = sequence_index > 0u && (
-        frame.cut_pulse ||
-        frame.cut_generation != frames[sequence_index - 1u].cut_generation
-      );
-      // The manifest's cut generation is replay attribution metadata only. The tagged health
-      // state keeps its initial words, including the retired always-zero epoch.
+      // The tagged health state keeps its initial words for the whole sequence.
 
       const v2_gpu::base_constants_t base_constants {
         .depth = common_constants.Get(),
@@ -1162,7 +1112,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         .constants = base_constants,
         .shader = state_shader.Get(),
         .frame_stats = frame_srv.Get(),
-        .cut_bridge_state = cut_state_srv.Get(),
+        .depth_health_state = depth_health_state_srv.Get(),
         .state_output = state_uav.Get(),
         .dispatch = v2_gpu::dispatch_command_t::direct(1u, 1u, 1u),
       };
@@ -1192,12 +1142,10 @@ void main(uint3 id : SV_DispatchThreadID) {
         .minmax_ema = dummy_minmax_srv.Get(),
         .current_model_input = dummy_current_model_input_srv.Get(),
         .current_appearance_ordinal = dummy_current_appearance_srv.Get(),
-        .cut_bridge_state = cut_state_srv.Get(),
-        .current_depth = dummy_current_depth_srv.Get(),
+        .depth_health_state = depth_health_state_srv.Get(),
         .candidate_output = candidate_uav.Get(),
         .previous_model_input_output = dummy_previous_model_input_uav.Get(),
         .previous_appearance_ordinal_output = dummy_previous_appearance_uav.Get(),
-        .previous_reliable_depth_output = dummy_previous_depth_uav.Get(),
         .previous_tensor_exclusion_output = dummy_previous_exclusion_uav.Get(),
         .history_owner_output = dummy_history_owner_uav.Get(),
         .dispatch = v2_gpu::dispatch_command_t::direct(
@@ -1353,7 +1301,6 @@ void main(uint3 id : SV_DispatchThreadID) {
           low <= high && low >= observed_raw_minimum && high <= observed_raw_maximum &&
           std::isfinite(0.5f * (high - low));
       }
-      const bool confirmed_cut = confirmed_cut_input;
       const bool state_values_finite =
         std::isfinite(center) && std::isfinite(inverse_scale) &&
         std::isfinite(latched_scale) && std::isfinite(convergence_curve) &&
@@ -1380,7 +1327,7 @@ void main(uint3 id : SV_DispatchThreadID) {
                    << " camera_integrity=" << camera_integrity_valid
                    << " renderer_authorized=" << renderer_authorization_valid
                    << " mode_reserved_valid=" << mapping_state_reserved_valid
-                   << " confirmed_cut=" << confirmed_cut << " state_words=";
+                   << " state_words=";
         for (const auto word : state_words) diagnostic << word << ',';
         diagnostic << " frame_stats_words=";
         for (const auto word : frame_words) diagnostic << word << ',';
@@ -1540,10 +1487,6 @@ void main(uint3 id : SV_DispatchThreadID) {
         {"input_source_frame_id", frame.frame_id},
         {"rendered_source_frame_id", frame.frame_id},
         {"calibration_revision", state_words[v2::calibration_revision]},
-        {"confirmed_cut_count", state_words[v2::confirmed_cut_count]},
-        {"confirmed_cut", confirmed_cut},
-        {"cut_attribution", sequence_index == 0u ?
-          "initialization" : (confirmed_cut ? cut_source : "none")},
         {"input_valid", input_valid},
         {"frame_valid", frame_valid},
         {"camera_valid", camera_valid},
@@ -1594,7 +1537,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.vertical_majorant = vertical_majorant_srv;
       result.vertical_conditioned = vertical_conditioned_srv;
       result.encoded_final_parallax = encoded_srv;
-      result.cut_state = cut_state_srv;
+      result.depth_health_state = depth_health_state_srv;
       result.raw_values = std::move(raw_values);
       result.canonical_values = canonical;
       result.candidate_parallax_values = candidate;
@@ -1696,13 +1639,12 @@ void main(uint3 id : SV_DispatchThreadID) {
       {"schema", depth_coordinate_v2_state_trace_schema},
       {"policy", std::string(depth_coordinate_v2_state_trace_policy)},
       {"calibration_contract", impl_->calibration_contract},
-      {"cut_source", impl_->cut_source},
       {"diagnostic_role", std::string(depth_coordinate_v2_diagnostic_role)},
       {"diagnostic_method", "gpu-frame-moments-and-rendered-fields-v6"},
       {"mapping_config", impl_->mapping_config},
       {"adaptation_semantics", {
         {"coordinate", "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference"},
-        {"convergence_curve", "continuously-tracked-mean-is-zero-plane-no-cut-latch"},
+        {"convergence_curve", "continuously-tracked-mean-is-zero-plane"},
         {"near_curve", "linear-coordinate-no-depth-curve-before-hard-representation-cap"},
       }},
       {"frame_fields", std::move(fields)},

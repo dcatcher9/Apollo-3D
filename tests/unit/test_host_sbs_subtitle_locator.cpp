@@ -77,7 +77,6 @@ namespace {
   constexpr std::uint32_t ocr_tag = v2::subtitle_ocr_record_tag;
   constexpr std::uint32_t plane_schema = v2::subtitle_plane_state_schema;
   constexpr std::uint32_t plane_tag = v2::subtitle_plane_state_tag;
-  constexpr std::uint32_t cut_tag = sbs_adaptive_state::cut_contract_tag;
   constexpr std::uint32_t final_box_offset = v2::subtitle_ocr_final_box_offset;
 
   static_assert([] {
@@ -517,16 +516,15 @@ namespace {
             nullptr
           )) return false;
 
-      std::array<std::uint32_t, 32u> cut_words {};
-      cut_words[0u] = cut_tag;
+      const auto health_words = sbs_adaptive_state::initial_words;
       if (!create_structured_buffer(
             device_.Get(),
-            cut_words.data(),
-            cut_words.size() * sizeof(std::uint32_t),
+            health_words.data(),
+            health_words.size() * sizeof(std::uint32_t),
             4u * sizeof(std::uint32_t),
             D3D11_BIND_SHADER_RESOURCE,
-            cut_buffer_,
-            &cut_srv_,
+            health_buffer_,
+            &health_srv_,
             nullptr
       )) return false;
 
@@ -628,14 +626,6 @@ namespace {
       if (observation_timestamp_us == std::numeric_limits<std::uint64_t>::max()) {
         observation_timestamp_us = identity;
       }
-      std::array<std::uint32_t, 32u> cut_words {};
-      cut_words[0u] = cut_tag;
-      cut_words[16u] = scene_epoch_;
-      cut_words[22u] = std::bit_cast<std::uint32_t>(cut_pulse_ ? 1.0f : 0.0f);
-      context_->UpdateSubresource(
-        cut_buffer_.Get(), 0u, nullptr, cut_words.data(), 0u, 0u
-      );
-      cut_pulse_ = false;
 
       std::vector<std::uint32_t> record(ocr_words, 0u);
       record[0u] = ocr_schema;
@@ -717,7 +707,7 @@ namespace {
       }
       std::array<ID3D11ShaderResourceView *, 10u> resolve_srvs {
         geometry_available_ ? geometry_state_srv_.Get() : nullptr,
-        cut_srv_.Get(), base_srv_.Get(), nullptr, nullptr, nullptr,
+        health_srv_.Get(), base_srv_.Get(), nullptr, nullptr, nullptr,
         probability_witness_enabled_ ? probability_history_srv_.Get() : nullptr, ocr_srv_.Get(),
         probability_witness_enabled_ && current_probability_available_ ? probability_srv_.Get() : nullptr,
         probability_witness_enabled_ && previous_probability_available_ ? previous_probability_srv_.Get() : nullptr,
@@ -807,11 +797,6 @@ namespace {
       ocr_record_[index] = value;
       context_->UpdateSubresource(ocr_buffer_.Get(), 0u, nullptr, ocr_record_.data(), 0u, 0u);
       return dispatch_conditioner() && read_texture(device_.Get(), context_.Get(), output_texture_.Get(), output_);
-    }
-
-    void set_cut(const std::uint32_t scene_epoch, const bool pulse) {
-      scene_epoch_ = scene_epoch;
-      cut_pulse_ = pulse;
     }
 
     void set_adaptive_policy_words(
@@ -1166,7 +1151,7 @@ namespace {
       contour_identity_[0u] = v2::subtitle_contour_schema;
       contour_identity_[1u] = v2::subtitle_contour_history_tag;
       contour_identity_[2u] = current_valid ? 1u : 0u;
-      contour_identity_[3u] = current_valid ? scene_epoch_ : 0u;
+      contour_identity_[3u] = 0u;
       std::copy(constants.frame.begin(), constants.frame.end(), contour_identity_.begin() + 4u);
       const auto crop_height = ceil_ocr_crop_height(source_width_, source_height_);
       contour_identity_[8u] = source_width_;
@@ -1203,7 +1188,6 @@ namespace {
       words[v2::calibration_revision] = 1u;
       const bool ready = geometry_ready_ && now != 0u;
       put_float(v2::frame_valid, ready ? 1.0f : 0.0f);
-      words[v2::confirmed_cut_count] = scene_epoch_;
       words[v2::contract_tag_bits] = v2::contract_tag;
       words[v2::renderer_authorization_bits] = ready ? v2::contract_tag : 0u;
       words[v2::joint_plane_mode_bits] = v2::adaptive_policy_id;
@@ -1232,7 +1216,7 @@ namespace {
       context_->CSSetShader(condition_validate_test_.Get(), nullptr, 0u);
       std::array<ID3D11ShaderResourceView *, 8u> validator_srvs {
         geometry_available_ ? geometry_state_srv_.Get() : nullptr,
-        cut_srv_.Get(), nullptr, state_srv_.Get(), nullptr, nullptr, nullptr, ocr_srv_.Get()
+        health_srv_.Get(), nullptr, state_srv_.Get(), nullptr, nullptr, nullptr, ocr_srv_.Get()
       };
       context_->CSSetShaderResources(0u, validator_srvs.size(), validator_srvs.data());
       context_->CSSetUnorderedAccessViews(
@@ -1249,7 +1233,7 @@ namespace {
       context_->CSSetConstantBuffers(0u, 3u, constant_buffers);
       std::array<ID3D11ShaderResourceView *, 8u> condition_srvs {
         geometry_available_ ? geometry_state_srv_.Get() : nullptr,
-        cut_srv_.Get(), base_srv_.Get(), state_srv_.Get(), condition_params_srv_.Get(),
+        health_srv_.Get(), base_srv_.Get(), state_srv_.Get(), condition_params_srv_.Get(),
         contour_distance_srv_.Get(), contour_identity_srv_.Get(), ocr_srv_.Get()
       };
       context_->CSSetShaderResources(0u, condition_srvs.size(), condition_srvs.data());
@@ -1308,8 +1292,8 @@ namespace {
     bool geometry_ready_ = true;
     bool geometry_available_ = true;
     std::optional<std::uint64_t> geometry_clock_override_;
-    ComPtr<ID3D11Buffer> cut_buffer_;
-    ComPtr<ID3D11ShaderResourceView> cut_srv_;
+    ComPtr<ID3D11Buffer> health_buffer_;
+    ComPtr<ID3D11ShaderResourceView> health_srv_;
     ComPtr<ID3D11Texture2D> base_texture_;
     ComPtr<ID3D11ShaderResourceView> base_srv_;
     ComPtr<ID3D11Texture2D> contour_distance_texture_;
@@ -1352,8 +1336,6 @@ namespace {
     std::uint32_t roi_top_;
     std::uint32_t roi_bottom_;
     std::uint64_t analysis_generation_ = 1u;
-    std::uint32_t scene_epoch_ = 0u;
-    bool cut_pulse_ = false;
   };
 
   std::vector<std::uint32_t> authored_hollow_and_disjoint_contours() {
@@ -2076,7 +2058,7 @@ namespace {
     }
   }
 
-  TEST(HostSbsSubtitleSlr13GpuTest, CutAndDomainResetBootstrapCurrentClearanceWithoutRejectingCurrentText) {
+  TEST(HostSbsSubtitleSlr13GpuTest, DomainResetBootstrapsCurrentClearanceWithoutRejectingCurrentText) {
     subtitle_plane_fixture_t fixture;
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
@@ -2086,13 +2068,11 @@ namespace {
     for (std::uint64_t frame = 1u; frame <= 5u; ++frame)
       ASSERT_TRUE(fixture.observe_at(frame, {line}, 1u + frame * 200000u));
     ASSERT_GT(std::bit_cast<float>(fixture.state()[a + 3u]), 0.01f);
-    fixture.set_cut(2u, true);
     ASSERT_TRUE(fixture.observe_at(6u, {line}, 1400001u));
-    EXPECT_EQ(fixture.state()[20u], 2u);
+    EXPECT_EQ(fixture.state()[v2::subtitle_plane_identity_reserved_word], 0u);
     EXPECT_EQ(fixture.state()[3u], 1u);
     EXPECT_FLOAT_EQ(std::bit_cast<float>(fixture.state()[a + 3u]), 40.0f / 1920.0f);
     const auto state = fixture.state();
-    fixture.set_cut(2u, true);
     ASSERT_TRUE(fixture.observe_at(6u, {line}, 1400001u));
     EXPECT_EQ(fixture.state(), state);
     fixture.set_analysis_generation(9u);
@@ -2626,7 +2606,6 @@ namespace {
     std::string error;
     ASSERT_TRUE(fixture.initialize(error)) << error;
     fixture.set_base(0.03f);
-    fixture.set_cut(17u, false);
     const line_box_t line {180u, 360u, 590u, 390u};
     ASSERT_TRUE(fixture.set_authored_contour_mask(authored_hollow_and_disjoint_contours()));
     constexpr std::uint64_t frame = 0x100000010ull, source_time = 0x200000064ull;
@@ -2749,7 +2728,6 @@ namespace {
         std::numeric_limits<std::uint32_t>::max(),std::numeric_limits<std::uint32_t>::max(),domain.content);
       std::string error;
       ASSERT_TRUE(fixture.initialize(error,driver)) << error;
-      fixture.set_cut(3u,false);
       const auto top = subtitle_roi_edge(domain.sw,domain.sh,domain.content,v2::subtitle_ocr_safe_row_top);
       const line_box_t text {20u,top,40u,top + 3u};
       constexpr std::uint64_t now = 0x200000001ull;
@@ -2772,11 +2750,11 @@ namespace {
         .left=0u,.top=0u,.right=domain.sw,.bottom=domain.sh,.tensor_content=completed.field_content,
         .analysis_generation=1u,.authority=models::depth_analysis_authority_e::foreground_client};
       EXPECT_TRUE(platf::sbs_debug::detail::subtitle_records_match_frame(
-        bytes(fixture.ocr_record()),bytes(fixture.state()),completed,3u));
+        bytes(fixture.ocr_record()),bytes(fixture.state()),completed));
       auto changed = fixture.state();
       changed[v2::subtitle_plane_observation_timestamp_offset] ^= 1u;
       EXPECT_FALSE(platf::sbs_debug::detail::subtitle_records_match_frame(
-        bytes(fixture.ocr_record()),bytes(changed),completed,3u));
+        bytes(fixture.ocr_record()),bytes(changed),completed));
     }
   }
 

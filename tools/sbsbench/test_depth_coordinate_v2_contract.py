@@ -176,11 +176,13 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Independent repeated-colour current fill, preserving the original outline path.
             129: "084289418305d5e20c32abe893fc1a8f92446762f4fac8e91ccd54ec81c12494",
             # Unique repeated fill, independent of old support, with cropped-cover publication.
-            # The ordered producer sources contain no scene-cut detector shader.
             130: "cf4df4bfd198df89a10619049289dee64399c563d82971b8a0d460ff14586979",
             # OCR resolve word 19 becomes the line-center policy: an owner-enabled foreground
             # application accepts off-center horizontal lines; video keeps both center rules.
             131: "e96fe7e252a2525e055fd8779a19951a655400bf2c8c124764e1abf2edc47f76",
+            # Word 6 of the V2 state and UIP4 word 20 are reserved zero; the depth-health state
+            # is the 8-word schema-8 contract.
+            132: "0d140f857343932b01d3d33f8c66768cc4c807ed377811282c7bf1c7d72c903e",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -188,14 +190,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xDE3CEF0B)
+        self.assertEqual(generator.contract_tag(contract), 0x90278C1A)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "de3cef0bb82711e4fbf1dd8a05c41a2d288ae6aa6d388706809fd0d18b2824cc",
+            "90278c1a6d8a5d0b019ff3eb7c6a5bdb503841a73c82373aa61a2530de4b0f60",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "13d225ac37fd25b1ff942fb9abc2f422ec81e23ce180882afb598f9a3befcf92",
+            "8f79a8ba600a992b84f591d2e766ad77ef7bd8243f1fb205df909f1481823528",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -251,7 +253,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             [field["name"] for field in fields],
             [
                 "center", "inverse_scale", "convergence_curve", "container_scale",
-                "calibration_revision", "frame_valid", "confirmed_cut_count", "contract_tag_bits",
+                "calibration_revision", "frame_valid", "control_reserved_0", "contract_tag_bits",
                 "camera_center_integrity_bits", "renderer_authorization_bits",
                 "joint_plane_mode_bits", "mapping_state_reserved_2",
                 "gain_last_observation_low", "gain_last_observation_high",
@@ -267,7 +269,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             [(field["name"], field["initial"]) for field in uint_fields],
             [
                 ("calibration_revision", 0),
-                ("confirmed_cut_count", 0),
+                ("control_reserved_0", 0),
                 ("contract_tag_bits", generator.CONTRACT_TAG_SENTINEL),
                 ("camera_center_integrity_bits", generator.load_contract()["shadow_state"]["fields"][8]["initial"]),
                 ("renderer_authorization_bits", 0),
@@ -480,7 +482,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 131u',
+                'contract_schema = 132u',
                 'final_parallax_contract_schema = 4u',
                 'final_parallax_authority = '
                 '"authenticated-subtitle-conditioned-r32f-diagnostic-only"',
@@ -580,7 +582,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 131u',
+                '#define V2_CONTRACT_SCHEMA 132u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS 28u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG 1u',
                 '#define V2_SUBTITLE_CONTOUR_RECIPE 27u',
@@ -672,7 +674,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             "current_slot_mask_word": 3, "frame_offset": 4,
             "analysis_generation_offset": 6, "observation_timestamp_offset": 8,
             "source_extent_offset": 10, "field_extent_offset": 12,
-            "roi_offset": 14, "content_offset": 16, "cut_epoch_word": 20,
+            "roi_offset": 14, "content_offset": 16, "identity_reserved_word": 20,
             "history_reset_mask_word": 21, "warmup_word": 22, "warmup_observations": 4,
             "warmup_cue_bit": 8, "reserved_offset": 23, "reserved_word_count": 1,
             "adaptive_offset": 24, "adaptive_word_count": 16,

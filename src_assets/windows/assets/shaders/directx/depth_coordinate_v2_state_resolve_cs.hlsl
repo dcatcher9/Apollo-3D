@@ -2,7 +2,7 @@
 // publication observes the controller; reuse holds the complete tuple.
 
 StructuredBuffer<float4> FrameStats : register(t0);
-StructuredBuffer<float4> CutBridgeState : register(t1);
+StructuredBuffer<float4> DepthHealthState : register(t1);
 // Publish the mixed ABI as integer words. A floating typed UAV store may flush small mode
 // tokens even after integer local computation; numeric camera words use explicit bit casts.
 RWStructuredBuffer<uint4> ShadowState : register(u0);
@@ -172,9 +172,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     camera_state.seed_values = ShadowState[6];
     bool contract_matches = asuint(V2_STATE_CONTRACT_TAG_BITS(control)) == V2_CONTRACT_TAG;
 
-    float4 cut_header = CutBridgeState[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS];
-    bool cut_contract_matches =
-        asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(cut_header)) == SBS_CUT_CONTRACT_TAG;
+    float4 health_header = DepthHealthState[SBS_STATE_VECTOR_CONTRACT_TAG_BITS];
+    bool health_contract_matches =
+        asuint(SBS_STATE_CONTRACT_TAG_BITS(health_header)) == SBS_ADAPTIVE_STATE_CONTRACT_TAG;
     if (!contract_matches) {
         // Never inherit counters or calibration state from an unknown same-sized buffer.
         active = float4(0.0f, 0.0f, v2_convergence_curve_default, 1.0f);
@@ -194,8 +194,8 @@ void main(uint3 id : SV_DispatchThreadID) {
         ClearAdaptiveCameraState(camera_state);
     }
     V2_STATE_CONTRACT_TAG_BITS(control) = asfloat(V2_CONTRACT_TAG);
-    // Retired scene-cut epoch: always zero. Subtitle readers keep it only as an identity join.
-    V2_STATE_CONFIRMED_CUT_COUNT(control) = asfloat(0u);
+    // Reserved control word: canonical zero.
+    V2_STATE_CONTROL_RESERVED_0(control) = asfloat(0u);
 
     // The sole adaptive policy is authenticated, never inferred from arbitrary state bits.
     // Malformed constant padding or a foreign policy cannot authorize a parallax field.
@@ -208,7 +208,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     // The health buffer is an independently authenticated producer. A stale or same-sized foreign
     // buffer makes this frame unavailable, but it must not erase the established adaptive camera.
-    if (!cut_contract_matches) {
+    if (!health_contract_matches) {
         PublishUnavailable(active, control, mapping_state, false);
         DisarmAdaptiveCamera(camera_state);
         StoreCameraState(active, control, mapping_state, camera_state);

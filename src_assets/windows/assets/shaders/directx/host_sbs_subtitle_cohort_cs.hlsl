@@ -47,7 +47,6 @@ groupshared uint GCurrent;
 groupshared uint GCount;
 groupshared uint GPreviousSnapshot;
 groupshared uint GPreviousDuplicate;
-groupshared uint GCutEpoch;
 groupshared uint GOld;
 groupshared uint GDuplicate;
 groupshared int GReference;
@@ -248,8 +247,6 @@ bool CurrentValid() {
         else if (cover.x!=cohort_content.x || cover.z!=cohort_content.z || cover.w!=cohort_content.w || cover.y<rt) return false;
     }
     if (!ClassifierReference()) return false;
-    // Retired scene-cut epoch (always zero): carried only as the SCT/UIP identity join.
-    GCutEpoch=CurrentUIP[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD];
     GCount=count;
     return true;
 }
@@ -358,7 +355,7 @@ int2 Sample(uint4 core,uint sampleIndex) {
 void StoreRect(uint b,uint offset,uint4 r) { [unroll] for (uint cohortLoop13_k=0u;cohortLoop13_k<4u;++cohortLoop13_k) NextState[b+offset+cohortLoop13_k]=r[cohortLoop13_k]; }
 void Header(uint flags) {
     NextState[SBC_H_TAG]=SBC_TAG; NextState[SBC_H_SCHEMA]=SBC_SCHEMA; NextState[SBC_H_VALID]=GCurrent;
-    NextState[SBC_H_CUT]=GCutEpoch;
+    NextState[SBC_H_RESERVED_3]=0u;
     [unroll] for (uint cohortLoop14_k=0u;cohortLoop14_k<2u;++cohortLoop14_k) {
         NextState[SBC_H_FRAME+cohortLoop14_k]=cohort_frame[cohortLoop14_k]; NextState[SBC_H_GENERATION+cohortLoop14_k]=cohort_frame[2u+cohortLoop14_k];
         NextState[SBC_H_CLOCK+cohortLoop14_k]=cohort_observation[cohortLoop14_k]; NextState[SBC_H_SOURCE+cohortLoop14_k]=cohort_source[cohortLoop14_k];
@@ -425,7 +422,7 @@ void prepare_main(uint3 thread:SV_GroupThreadID) {
     [loop] for (uint cohortLoop16_word=lane;cohortLoop16_word<SBC_STATE_WORDS;cohortLoop16_word+=256u) NextState[cohortLoop16_word]=0u;
     AllMemoryBarrierWithGroupSync();
     if (lane==0u) {
-        GCount=0u;GPreviousSnapshot=0u;GPreviousDuplicate=0u;GCutEpoch=0u;GOld=0u;GDuplicate=0u;
+        GCount=0u;GPreviousSnapshot=0u;GPreviousDuplicate=0u;GOld=0u;GDuplicate=0u;
         GReference=(int)cohort_source.x;GReferenceWidth=cohort_source.x;
         GCurrent=CurrentValid()?1u:0u;
         if (GCurrent!=0u) GPreviousSnapshot=PreviousSnapshotValid()?1u:0u;

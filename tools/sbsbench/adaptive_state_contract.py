@@ -15,7 +15,7 @@ from typing import Any
 CONTRACT_PATH = (
     Path(__file__).resolve().parent
     / "contracts"
-    / "sbs-adaptive-state-v7.json"
+    / "sbs-adaptive-state-v8.json"
 )
 
 try:
@@ -42,7 +42,7 @@ def _load_contract() -> dict[str, Any]:
 
 
 CONTRACT = _load_contract()
-CUT_CONTRACT_TAG = contract_tag(CONTRACT)
+CONTRACT_TAG = contract_tag(CONTRACT)
 CONTRACT_CANONICAL_SHA256 = contract_digest(CONTRACT)
 COUNTER_MAX = int(CONTRACT["counter_max"])
 TRACE_SCHEMA = int(CONTRACT["schema"])
@@ -59,7 +59,6 @@ FIELD_DESCRIPTORS = tuple(
 HEADER_KEYS = frozenset(str(key) for key in CONTRACT["header_keys"])
 CONFIG_KEYS = frozenset(str(key) for key in CONTRACT["config_keys"])
 FRAME_KEYS = frozenset(str(key) for key in CONTRACT["frame_keys"])
-RETIRED_ZERO_FIELDS = tuple(str(name) for name in CONTRACT["retired_zero_fields"])
 FIELD_ENCODINGS = tuple(
     str(field["gpu_encoding"]) for field in CONTRACT["fields"]
 )

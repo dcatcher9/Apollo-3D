@@ -289,7 +289,7 @@ namespace {
 
     // Construct only typed current evidence; no shader decision is replicated here.
     void author(std::uint64_t frame, const std::vector<cohort_rect_t> &native_covers,
-                bool reset = false, std::uint64_t generation = 7u, UINT cut = 3u) {
+                bool reset = false, std::uint64_t generation = 7u) {
       const auto time = 1000000u + frame * 33333u;
       constants_ = {{width_, height_, crop_top_, crop_height_},
         {field_width_, field_height_, row_edge(cv2::subtitle_ocr_safe_row_top), row_edge(cv2::subtitle_ocr_safe_row_bottom)}, content_,
@@ -332,9 +332,9 @@ namespace {
         plane_words_[12u + lane] = constants_.field[lane]; plane_words_[14u + lane] = constants_.field[2u + lane];
       }
       std::copy(content_.begin(), content_.end(), plane_words_.begin() + 16u);
-      plane_words_[20u] = cut;
+      plane_words_[cv2::subtitle_plane_identity_reserved_word] = 0u;
       identity_words_[0u] = cv2::subtitle_contour_schema; identity_words_[1u] = cv2::subtitle_contour_history_tag;
-      identity_words_[2u] = count ? 1u : 0u; identity_words_[3u] = cut;
+      identity_words_[2u] = count ? 1u : 0u; identity_words_[3u] = 0u;
       identity_words_[4u] = constants_.frame[0u]; identity_words_[5u] = constants_.frame[1u];
       identity_words_[6u] = constants_.frame[2u]; identity_words_[7u] = constants_.frame[3u];
       std::copy(constants_.source.begin(), constants_.source.end(), identity_words_.begin() + 8u);
@@ -748,52 +748,38 @@ namespace {
     expect_fallback(); expect_binary_subset();
   }
 
-  TEST_F(HostSbsSubtitleCohortGpuTest, NonzeroReservedCutConstantCannotSupplyEpochAuthority) {
-    SCOPED_TRACE("Explicit reserved-constant fault; fresh cut authority belongs to GPU UIP");
+  TEST_F(HostSbsSubtitleCohortGpuTest, NonzeroReservedObservationConstantInvalidatesCurrent) {
+    SCOPED_TRACE("Explicit reserved-constant fault");
     ASSERT_NO_FATAL_FAILURE(acquire());
     author(4u, {{30u, 6u, 130u, 24u}}); glyph();
     ASSERT_EQ(constants_.observation[3u], 0u);
     constants_.observation[3u] = 3u;
     ASSERT_TRUE(run());
-    EXPECT_EQ(result_.state[SBC_H_VALID], 0u); EXPECT_EQ(result_.state[SBC_H_CUT], 0u);
+    EXPECT_EQ(result_.state[SBC_H_VALID], 0u); EXPECT_EQ(result_.state[SBC_H_RESERVED_3], 0u);
     EXPECT_NE(result_.state[SBC_H_FLAGS] & SBC_HEADER_CURRENT_INVALID, 0u);
     EXPECT_TRUE(std::all_of(result_.owner.begin(), result_.owner.end(), [](UINT value) { return value == 0u; }));
     expect_fallback(); expect_binary_subset();
   }
 
-  TEST_F(HostSbsSubtitleCohortGpuTest, RetiredUipEpochChangeKeepsOldCueWithReservedConstantZero) {
-    ASSERT_NO_FATAL_FAILURE(acquire());
-    ASSERT_EQ(result_.state[SBC_H_CUT], 3u);
-    author(4u, {{30u, 6u, 130u, 24u}}, false, 7u, 4u); glyph();
-    ASSERT_EQ(constants_.observation[3u], 0u);
-    ASSERT_EQ(plane_words_[cv2::subtitle_plane_cut_epoch_word], 4u);
-    ASSERT_TRUE(run());
-    // The scene-cut epoch is a retired identity word: changing it neither resets nor rejects
-    // the owner state acquired under the previous value.
-    EXPECT_EQ(result_.state[SBC_H_VALID], 1u); EXPECT_EQ(result_.state[SBC_H_CUT], 4u);
-    EXPECT_NE(id(), 0u); EXPECT_NE(phase(), SBC_PHASE_UNKNOWN);
-    expect_binary_subset();
-  }
-
-  TEST_F(HostSbsSubtitleCohortGpuTest, StaleGpuUipCannotLendItsCutEpochToCurrentFrame) {
+  TEST_F(HostSbsSubtitleCohortGpuTest, StaleGpuUipCannotAuthorizeCurrentFrame) {
     SCOPED_TRACE("Explicit stale-UIP frame fault; OCR and source retain the actual current frame");
     ASSERT_NO_FATAL_FAILURE(acquire());
-    author(4u, {{30u, 6u, 130u, 24u}}, false, 7u, 4u); glyph();
+    author(4u, {{30u, 6u, 130u, 24u}}); glyph();
     plane_words_[cv2::subtitle_plane_frame_offset] = 3u;
     ASSERT_EQ(constants_.observation[3u], 0u);
     ASSERT_TRUE(run());
-    EXPECT_EQ(result_.state[SBC_H_VALID], 0u); EXPECT_EQ(result_.state[SBC_H_CUT], 0u);
+    EXPECT_EQ(result_.state[SBC_H_VALID], 0u); EXPECT_EQ(result_.state[SBC_H_RESERVED_3], 0u);
     EXPECT_NE(result_.state[SBC_H_FLAGS] & SBC_HEADER_CURRENT_INVALID, 0u);
     EXPECT_TRUE(std::all_of(result_.owner.begin(), result_.owner.end(), [](UINT value) { return value == 0u; }));
     expect_fallback(); expect_binary_subset();
   }
 
-  TEST_F(HostSbsSubtitleCohortGpuTest, FreshEmptyImmediatelyReleasesAndCutCannotBorrowOldOwner) {
+  TEST_F(HostSbsSubtitleCohortGpuTest, FreshEmptyImmediatelyReleasesAndResetCannotBorrowOldOwner) {
     ASSERT_NO_FATAL_FAILURE(acquire());
     author(4u, {}); ASSERT_TRUE(run()); EXPECT_EQ(result_.state[SBC_H_COUNT], 0u);
     EXPECT_TRUE(std::all_of(result_.owner.begin(), result_.owner.end(), [](UINT x) { return x == 0u; }));
     expect_fallback();
-    author(5u, {{30u, 6u, 130u, 24u}}, true, 7u, 4u); glyph(); ASSERT_TRUE(run());
+    author(5u, {{30u, 6u, 130u, 24u}}, true); glyph(); ASSERT_TRUE(run());
     EXPECT_NE(phase(), SBC_PHASE_ACTIVE); expect_fallback();
   }
 
@@ -889,7 +875,7 @@ namespace {
       if (boundary == 0u) {
         author(5u, {});
       } else {
-        author(5u, {{30u, 6u, 130u, 24u}}, false, 8u, 3u);
+        author(5u, {{30u, 6u, 130u, 24u}}, false, 8u);
         glyph();
       }
       ASSERT_TRUE(run());
@@ -1287,10 +1273,10 @@ namespace {
     EXPECT_EQ(result_.previous_identity[cv2::subtitle_contour_history_snapshot_valid_word], 1u);
     EXPECT_EQ(result_.previous_p.back(), std::bit_cast<UINT>(.9f));
     EXPECT_EQ(result_.previous_source, source_values_);
-    author(2u, {}, true, 8u, 17u);
+    author(2u, {}, true, 8u);
     ASSERT_TRUE(snapshot_current_tuple());
     EXPECT_EQ(result_.previous_identity, identity_words_);
-    EXPECT_EQ(result_.previous_identity[3u], 17u);
+    EXPECT_EQ(result_.previous_identity[3u], 0u);
   }
 
   TEST_F(HostSbsSubtitleCohortGpuTest, ResearchSnapshotRejectsStaleMalformedAndReservedIdentityAsAWholeTuple) {
@@ -1429,7 +1415,7 @@ namespace {
       const auto time = entry.at("observation_timestamp_us").get<std::uint64_t>();
       const auto generation = entry.at("generation").get<std::uint64_t>();
       ASSERT_GT(frame, 0u); ASSERT_GT(time, 0u);
-      author(frame, {}, entry.value("reset_before", false), generation, entry.at("cut_epoch").get<UINT>());
+      author(frame, {}, entry.value("reset_before", false), generation);
       constants_.observation[0u] = UINT(time); constants_.observation[1u] = UINT(time >> 32u);
       const auto load = [&](const char *key) {
         const auto &binding = entry.at("artifacts").at(key);

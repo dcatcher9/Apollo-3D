@@ -15,7 +15,6 @@ try:
     from . import whole_clip_raw_contract
     from .depth_coordinate_v2_contract import CALIBRATED_DEFAULTS, MODEL_CALIBRATIONS
     from .depth_mapping_v2_temporal import (
-        V2_STATE_TRACE_CUT_SOURCE,
         _clip_sequence_input_contract,
         _load_run_model_contract,
         _load_shape,
@@ -43,7 +42,6 @@ except ImportError:  # Direct execution from tools/sbsbench.
     from depth_coordinate_v2_contract import (  # type: ignore
         CALIBRATED_DEFAULTS, MODEL_CALIBRATIONS)
     from depth_mapping_v2_temporal import (  # type: ignore
-        V2_STATE_TRACE_CUT_SOURCE,
         _clip_sequence_input_contract,
         _load_run_model_contract,
         _load_shape,
@@ -84,7 +82,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             "final_horizontal_slope_max": 0.2,
             "final_vertical_shear_max": 0.3,
             "collapsed": False,
-            "confirmed_cut": False,
             "calibration_revision": 1,
         }
         active = dict(common, frame_valid=True, camera_valid=True)
@@ -105,7 +102,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
         self.assertEqual(summary["retained_camera_unusable_frames"], 1)
         self.assertEqual(summary["camera_clear_unusable_frames"], 1)
         self.assertEqual(summary["collapsed_frames"], 1)
-        self.assertNotIn("confirmed_cuts", summary)
         self.assertNotIn("maximum_abs_candidate_log_scale_drift", summary)
         self.assertNotIn("maximum_abs_candidate_scale_ratio_deviation", summary)
 
@@ -123,7 +119,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             "tools/sbsbench/run_eval.py",
             "tools/sbsbench/whole_clip_raw_contract.py",
         }.issubset(IMPLEMENTATION_SOURCE_FILES))
-        self.assertNotIn("tools/sbsbench/cut_state_contract.py", IMPLEMENTATION_SOURCE_FILES)
 
     def _write_run(self, root: Path) -> tuple[Path, dict]:
         calibration = MODEL_CALIBRATIONS[0]
@@ -222,8 +217,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(
                 evidence["preprocess_source_closure_sha256"],
                 MODEL_CALIBRATIONS[0].preprocess.source_closure_sha256)
-            self.assertNotIn("cut_control_evidence", evidence)
-            self.assertNotIn("cut_expectation_evidence", evidence)
             width, height = MODEL_CALIBRATIONS[0].calibrated_input_shapes[0]
             self.assertEqual(evidence["raw_shape"], {"height": height, "width": width})
             self.assertRegex(evidence["sequence_input_sha256"], r"^[0-9a-f]{64}$")
@@ -644,7 +637,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lossless frame_<id>\\.png"):
                 _source_frames(root)
 
-    def test_gpu_manifest_materializes_current_color_and_authors_no_cut(self):
+    def test_gpu_manifest_materializes_current_color_with_exact_frame_keys(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "output"
@@ -714,11 +707,10 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(
                 manifest["model_identity"]["preprocess_source_closure_sha256"],
                 calibration.preprocess.source_closure_sha256)
-            self.assertEqual(manifest["cut_source"], V2_STATE_TRACE_CUT_SOURCE)
             self.assertEqual(
-                [(frame["hard_cut_count"], frame["hard_cut_pulse"])
-                 for frame in manifest["frames"]],
-                [(0, False), (0, False)],
+                [sorted(frame) for frame in manifest["frames"]],
+                [["frame_id", "observation_timestamp_us", "raw_file", "raw_sha256",
+                  "source_sha256"]] * 2,
             )
             input_contract = {
                 "calibration_id": calibration.calibration_id,
@@ -746,8 +738,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(validated["schema"], GPU_INPUT_MANIFEST_SCHEMA)
             for name in (
                     "model", "shape", "frame_hash", "source_hash",
-                    "retired_color_field", "cut_source", "cut_count", "cut_pulse",
-                    "boolean_cut_count",
+                    "retired_color_field", "unknown_root_key", "unknown_frame_key",
                     "source_shape", "boolean_source_shape", "zero_source_shape",
                     "oversized_source_shape"):
                 with self.subTest(corruption=name):
@@ -762,14 +753,10 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                         corrupt["frames"][0]["source_sha256"] = "0" * 64
                     elif name == "retired_color_field":
                         corrupt["source_color_mode"] = 0
-                    elif name == "cut_source":
-                        corrupt["cut_source"] = "cut-state-hard-cut-generation"
-                    elif name == "cut_count":
-                        corrupt["frames"][1]["hard_cut_count"] = 1
-                    elif name == "cut_pulse":
-                        corrupt["frames"][1]["hard_cut_pulse"] = True
-                    elif name == "boolean_cut_count":
-                        corrupt["frames"][1]["hard_cut_count"] = False
+                    elif name == "unknown_root_key":
+                        corrupt["unknown_key"] = "unknown"
+                    elif name == "unknown_frame_key":
+                        corrupt["frames"][1]["unknown_key"] = 0
                     elif name == "source_shape":
                         corrupt["source_shape"]["width"] += 1
                     elif name == "boolean_source_shape":
@@ -920,17 +907,15 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 output, producer_reference, input_contract, gpu_manifest)
             self.assertEqual(validated["calibration_status"], "calibrated")
             self.assertEqual(producer_reference["schema"], PRODUCER_EVIDENCE_SCHEMA)
-            self.assertNotIn("cut_state", producer_reference)
-            self.assertFalse((output / "gpu_input/provenance/cut_state.json").exists())
 
             shutil.rmtree(eval_root)
             _validate_producer_evidence_bundle(
                 output, producer_reference, input_contract, gpu_manifest)
-            with_retired_trace = dict(
-                producer_reference, cut_state=dict(producer_reference["raw_shape"]))
+            with_unknown_key = dict(
+                producer_reference, unknown_key=dict(producer_reference["raw_shape"]))
             with self.assertRaisesRegex(ValueError, "missing or unknown semantics"):
                 _validate_producer_evidence_bundle(
-                    output, with_retired_trace, input_contract, gpu_manifest)
+                    output, with_unknown_key, input_contract, gpu_manifest)
             shape_path = output / producer_reference["raw_shape"]["file"]
             shape_path.write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "raw_shape hash mismatch"):

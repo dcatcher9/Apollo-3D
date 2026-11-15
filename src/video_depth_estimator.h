@@ -884,7 +884,7 @@ namespace models {
 
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Tagged depth-health state shared with telemetry and coordinate production.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_health_state;  ///< Tagged depth-health state shared with telemetry and coordinate production.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Public model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
@@ -1081,7 +1081,7 @@ namespace models {
       const host_sbs_gpu_completion_receipt::snapshot_words_t &snapshot,
       const host_sbs_gpu_completion_receipt::expected_t &expected,
       std::uint64_t poll_estimator_generation = 0u,
-      bool cut_present = true,
+      bool depth_health_present = true,
       bool outcomes_present = true
     );
   }  // namespace detail

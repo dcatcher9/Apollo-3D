@@ -42,7 +42,6 @@ try:
         DIRECT_PARALLAX_SOURCE_U_LIMIT, MappingV2Config,
         decode_direct_parallax, encode_direct_parallax)
     from .depth_mapping_v2_temporal import (
-        V2_STATE_TRACE_CUT_SOURCE,
         V2_STATE_TRACE_SCHEMA,
         _clip_sequence_input_contract,
         _load_run_model_contract,
@@ -62,7 +61,6 @@ except ImportError:  # Direct execution from tools/sbsbench.
         DIRECT_PARALLAX_SOURCE_U_LIMIT, MappingV2Config,
         decode_direct_parallax, encode_direct_parallax)
     from depth_mapping_v2_temporal import (  # type: ignore
-        V2_STATE_TRACE_CUT_SOURCE,
         V2_STATE_TRACE_SCHEMA,
         _clip_sequence_input_contract,
         _load_run_model_contract,
@@ -77,9 +75,9 @@ REPO = SCRIPT_DIR.parent.parent
 # Exact replay compares a Pillow-decoded NumPy oracle with a WIC-decoded native replay. Keep this
 # lossless-only so both sides attest the same decoded source pixels.
 FRAME_PATTERN = re.compile(r"frame_(\d+)\.png$", re.IGNORECASE)
-SEQUENCE_CONTRACT_SCHEMA = 23
-GPU_INPUT_MANIFEST_SCHEMA = 11
-GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-production-gpu-sequence-v13"
+SEQUENCE_CONTRACT_SCHEMA = 24
+GPU_INPUT_MANIFEST_SCHEMA = 12
+GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-production-gpu-sequence-v14"
 SEQUENCE_MAPPING_CONFIG_KEYS = frozenset(asdict(MappingV2Config()).keys())
 NUMPY_COMPARISON_SCHEMA = 5
 PRODUCER_EVIDENCE_SCHEMA = 2
@@ -321,7 +319,7 @@ def _load_raw_fields(raw_sequence: Path) -> tuple[list[int], list[np.ndarray], t
             raise ValueError(
                 f"{path}: expected {expected_values} float32 values, got {values.size}")
         # Preserve invalid model output exactly. The experimental frame-resolve shader owns the
-        # finite-input decision and publishes flat while retaining a no-cut scene camera.
+        # finite-input decision and publishes flat while retaining the scene camera.
         fields.append(values.reshape(shape))
     return frame_ids, fields, shape
 
@@ -414,9 +412,6 @@ def _materialize_gpu_replay_inputs(
             "raw_file": raw_name,
             "raw_sha256": raw_sha,
             "source_sha256": source_sha,
-            # The native manifest still carries these retired keys; no cut is ever authored.
-            "hard_cut_count": 0,
-            "hard_cut_pulse": False,
         })
         manifest_frames[-1]["observation_timestamp_us"] = observation_timestamps_us[index]
         rows.append({
@@ -454,7 +449,6 @@ def _materialize_gpu_replay_inputs(
         "source_shape": source_shape,
         "mapping_config": {**asdict(config), **(
             {"joint_plane_mode": 3})},
-        "cut_source": V2_STATE_TRACE_CUT_SOURCE,
         "frames": manifest_frames,
     }
     manifest_path = gpu_input / "manifest.json"
@@ -658,13 +652,12 @@ def _validate_gpu_input_manifest_evidence(
     manifest = _read_json(reference_path)
     expected_root = {
         "schema", "mode", "calibration_contract", "model_identity", "raw_shape",
-        "source_shape", "mapping_config", "cut_source", "frames",
+        "source_shape", "mapping_config", "frames",
     }
     if (set(manifest) != expected_root or
             manifest.get("schema") != GPU_INPUT_MANIFEST_SCHEMA or
             manifest.get("mode") != GPU_INPUT_MANIFEST_MODE or
-            manifest.get("mapping_config") != mapping or
-            manifest.get("cut_source") != V2_STATE_TRACE_CUT_SOURCE):
+            manifest.get("mapping_config") != mapping):
         raise ValueError("GPU input manifest does not bind the selected mapping")
     expected_identity = {
         "calibration_id": input_contract.get("calibration_id"),
@@ -723,8 +716,7 @@ def _validate_gpu_input_manifest_evidence(
     selected = input_contract.get("selected_frame_ids")
     raw_records = input_contract.get("ordered_raw_fields")
     expected_frame_keys = {
-        "frame_id", "raw_file", "raw_sha256", "source_sha256", "hard_cut_count",
-        "hard_cut_pulse",
+        "frame_id", "raw_file", "raw_sha256", "source_sha256",
     }
     mode = mapping.get("joint_plane_mode")
     if type(mode) is not int or mode != 3:
@@ -743,10 +735,7 @@ def _validate_gpu_input_manifest_evidence(
                 row.get("raw_sha256") != raw_record.get("sha256") or
                 not isinstance(row.get("source_sha256"), str) or
                 re.fullmatch(r"[0-9a-f]{64}", row["source_sha256"]) is None or
-                raw_record.get("frame_id") != frame_id or
-                type(row.get("hard_cut_count")) is not int or
-                row["hard_cut_count"] != 0 or
-                row.get("hard_cut_pulse") is not False):
+                raw_record.get("frame_id") != frame_id):
             raise ValueError(f"GPU input manifest frame {index} has invalid evidence")
         if (
                 type(row["observation_timestamp_us"]) is not int or
@@ -968,9 +957,8 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
             document.get("experiment") != "depth-coordinate-v2-whole-clip-exact-replay" or
             document.get("mapping_implementation") !=
             "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-gpu-state-v11" or
-            document.get("unusable_depth_semantics") not in {
-                "current-color-flat-retain-camera-unless-cut-v2",
-                "current-color-flat-retain-host-camera-on-unusable-and-cut-v4"}):
+            document.get("unusable_depth_semantics") !=
+            "current-color-flat-retain-host-camera-on-unusable-v5"):
         raise ValueError("sequence contract has missing or unknown semantics")
     if document.get("implementation_sources") != _implementation_sources():
         raise ValueError("sequence implementation source hashes are stale or incomplete")
@@ -1079,7 +1067,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     numpy_comparison = _read_json(output / NUMPY_COMPARISON_FILE)
     mode = mapping.get("joint_plane_mode")
     expected_unusable_semantics = (
-        "current-color-flat-retain-host-camera-on-unusable-and-cut-v4")
+        "current-color-flat-retain-host-camera-on-unusable-v5")
     if document["unusable_depth_semantics"] != expected_unusable_semantics:
         raise ValueError("sequence unavailable-camera policy disagrees with native mode")
     timeline_reference = document.get("observation_timeline")
@@ -1460,7 +1448,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             },
             "frames": output_rows,
             "unusable_depth_semantics": (
-                "current-color-flat-retain-host-camera-on-unusable-and-cut-v4"),
+                "current-color-flat-retain-host-camera-on-unusable-v5"),
             "diagnostic_summary": _diagnostic_summary(trace_rows),
             "implementation_sources": _implementation_sources(),
             "score_evidence": score_evidence,

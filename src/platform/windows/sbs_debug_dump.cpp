@@ -606,8 +606,7 @@ namespace platf::sbs_debug {
     bool subtitle_records_match_frame(
       const std::vector<std::uint8_t> &ocr,
       const std::vector<std::uint8_t> &plane,
-      const frame &completed,
-      const std::uint32_t confirmed_cut_count
+      const frame &completed
     ) {
       namespace ui = models::host_sbs_subtitle_plane;
       if (!joint_plane_mode_word_is_valid(completed.parallax_v2_joint_plane_mode) ||
@@ -622,7 +621,6 @@ namespace platf::sbs_debug {
           ui::join(words.data() + subtitle_plane_frame_offset) != completed.matched_frame_id ||
           ui::join(words.data() + subtitle_plane_analysis_generation_offset) != completed.depth_input_region.analysis_generation ||
           ui::join(words.data() + subtitle_plane_observation_timestamp_offset) != completed.matched_observation_timestamp_us ||
-          words[subtitle_plane_cut_epoch_word] != confirmed_cut_count ||
           words[subtitle_plane_source_extent_offset] != completed.depth_input_region.width() ||
           words[subtitle_plane_source_extent_offset + 1u] != completed.depth_input_region.height() ||
           words[subtitle_plane_field_extent_offset] != static_cast<std::uint32_t>(completed.field_width) ||
@@ -838,8 +836,7 @@ namespace platf::sbs_debug {
           // redispatch with held hidden state. Only a proven new current observation (or an
           // explicit domain reset) must have cleared that invisible plane immediately.
           const bool explicit_reset = (flags & input_domain_reset) != 0u ||
-            (previous_ui_plane && (previous_ui_domain_tag != domain_tag ||
-              (*previous_ui_plane)[subtitle_plane_cut_epoch_word] != plane[subtitle_plane_cut_epoch_word]));
+            (previous_ui_plane && previous_ui_domain_tag != domain_tag);
           const bool genuinely_newer = previous_ui_plane &&
             previous_ui_domain_tag == domain_tag &&
             published_frame != ui::join(previous_ui_plane->data() + subtitle_plane_frame_offset) &&
@@ -888,13 +885,10 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &ocr,
       const std::vector<std::uint8_t> &locator,
       const std::vector<std::uint8_t> &ring,
-      const frame &completed,
-      const std::uint32_t confirmed_cut_count
+      const frame &completed
     ) {
       using namespace models::host_sbs_gpu_trace;
-      if (subtitle_records_match_frame(
-            ocr, locator, completed, confirmed_cut_count
-          )) {
+      if (subtitle_records_match_frame(ocr, locator, completed)) {
         if (!completed.gpu_undecided_completion ||
             !gpu_trace_ring_is_canonical(ring, completed)) {
           return true;
@@ -938,9 +932,7 @@ namespace platf::sbs_debug {
           held.matched_observation_timestamp_us > completed.matched_observation_timestamp_us) return false;
       held.input_domain_reset = false;
       held.gpu_undecided_completion = false;
-      if (!subtitle_records_match_frame(
-            ocr, locator, held, confirmed_cut_count
-          )) {
+      if (!subtitle_records_match_frame(ocr, locator, held)) {
         return false;
       }
 
@@ -1128,7 +1120,7 @@ namespace platf::sbs_debug {
       const models::depth_coordinate_v2::model_preprocess_contract_t *preprocess = nullptr;
 
       normalization_state normalization {};
-      bool scene_cut_bridge_state_available = false;
+      bool depth_health_state_available = false;
       std::vector<std::uint8_t> adaptive_state;
 
       texture_snapshot source;
@@ -1301,7 +1293,7 @@ namespace platf::sbs_debug {
       bool subtitle_plane_active = false;
       bool gpu_trace_requested = false;
       bool depth_input_source_available = false;
-      bool scene_cut_bridge_requested = false;
+      bool depth_health_state_requested = false;
       bool gpu_ready = false;
       std::uint64_t retry_token = 0;
       std::chrono::steady_clock::time_point submitted_at {};
@@ -2264,12 +2256,10 @@ namespace platf::sbs_debug {
         completed.parallax_v2_requested_gain : 0.0f;
       const float latched_scale_value = camera_initialized ?
         1.0f / state[inverse_scale] : 0.0f;
-      const auto confirmed_cut_count_value = state_words[confirmed_cut_count];
       const nlohmann::json decoded {
         {"frame_valid", state_frame_valid},
         {"camera_valid", camera_initialized},
         {"calibration_revision", calibration_revision_value},
-        {"confirmed_cut_count", confirmed_cut_count_value},
         {"contract_tag", contract_tag},
         {"requested_gain", completed.parallax_v2_requested_gain},
         {"requested_pop_strength", completed.parallax_v2_requested_pop_strength},
@@ -2320,7 +2310,7 @@ namespace platf::sbs_debug {
         {"decoded", decoded},
         {"adaptation_semantics", {
                                     {"coordinate", "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference"},
-                                    {"convergence_curve", "continuously-tracked-mean-is-zero-plane-no-cut-latch"},
+                                    {"convergence_curve", "continuously-tracked-mean-is-zero-plane"},
                                     {"requested_gain", "immutable-cfg-pop-strength-independent-of-display-limit"},
                                     {"container_scale", "abi-retained-identity-mode3-hard-representation-cap"},
                                     {"near_curve", "linear-coordinate-no-depth-curve-before-hard-representation-cap"},
@@ -2456,11 +2446,6 @@ namespace platf::sbs_debug {
       }
 
       using sbs_adaptive_state::word_e;
-      for (const auto word : sbs_adaptive_state::retired_zero_words) {
-        if (words[sbs_adaptive_state::index(word)] != 0u) {
-          return false;
-        }
-      }
       adaptive_summary = {
         {"schema", sbs_adaptive_state::schema_version},
         {"source", std::string(sbs_adaptive_state::source)},
@@ -3085,7 +3070,6 @@ namespace platf::sbs_debug {
             {"flags", {{"value", plane_flags}, {"current_valid", (plane_flags & subtitle_plane_current_valid_flag) != 0u}}},
             {"current_slot_mask", slot_mask}, {"current_count", std::popcount(slot_mask)},
             {"target", target}, {"target_bits", target_bits},
-            {"cut_epoch", locator_word(subtitle_plane_cut_epoch_word)},
             {"analysis_generation", join_u64(locator_word(subtitle_plane_analysis_generation_offset), locator_word(subtitle_plane_analysis_generation_offset + 1u))},
             {"frame_id", join_u64(locator_word(subtitle_plane_frame_offset), locator_word(subtitle_plane_frame_offset + 1u))},
             {"observation_timestamp_us", join_u64(locator_word(subtitle_plane_observation_timestamp_offset), locator_word(subtitle_plane_observation_timestamp_offset + 1u))},
@@ -3772,25 +3756,23 @@ namespace platf::sbs_debug {
       frame published = completed;
       published.matched_frame_id = owner_frame;
       published.matched_observation_timestamp_us = clock;
-      if (!subtitle_records_match_frame(ocr, locator, published, subtitle_word(locator, subtitle_plane_cut_epoch_word))) return false;
+      if (!subtitle_records_match_frame(ocr, locator, published)) return false;
       const bool snapshot_valid = source_width <= subtitle_contour_source_max_extent &&
                                   source_height <= subtitle_contour_source_max_extent &&
                                   state[frame_valid] == 1.0f && clock == owner_clock &&
                                   subtitle_word(ocr, 2u) == 1u;
       if (word(subtitle_contour_history_snapshot_valid_word) != static_cast<std::uint32_t>(snapshot_valid) ||
-          word(3u) != (snapshot_valid ? geometry[confirmed_cut_count] : 0u)) return false;
+          word(3u) != 0u || geometry[control_reserved_0] != 0u) return false;
       const auto plane = subtitle_plane_words(locator);
       // The caller authenticates the complete sealed camera state before this artifact join.
       // Its ready publication and actual current OCR verdict must grant every current slot,
       // including valid empty. An invalid Base probe only suppresses conditioning below.
       const bool geometry_ready = state[frame_valid] == 1.0f &&
         geometry[renderer_authorization_bits] == contract_tag &&
-        geometry[joint_plane_mode_bits] == adaptive_policy_id && clock == owner_clock &&
-        geometry[confirmed_cut_count] == plane[subtitle_plane_cut_epoch_word];
+        geometry[joint_plane_mode_bits] == adaptive_policy_id && clock == owner_clock;
       const bool expected_current_valid = geometry_ready && subtitle_word(ocr, 2u) == 1u;
       if ((plane[subtitle_plane_flags_word] == subtitle_plane_current_valid_flag) != expected_current_valid) return false;
-      const bool pin_authority = snapshot_valid &&
-        word(3u) == plane[subtitle_plane_cut_epoch_word] && subtitle_word(ocr, 4u) != 0u &&
+      const bool pin_authority = snapshot_valid && subtitle_word(ocr, 4u) != 0u &&
         plane[subtitle_plane_flags_word] == subtitle_plane_current_valid_flag &&
         models::host_sbs_subtitle_plane::current_count(plane) == subtitle_word(ocr, 4u) &&
         plane[subtitle_plane_adaptive_offset] == 1u && plane[subtitle_plane_adaptive_offset + 15u] == 0u;
@@ -4618,8 +4600,8 @@ namespace platf::sbs_debug {
     bool success = false;
     try {
       const auto &normalization = job.normalization;
-      const bool scene_cut_bridge_state_available =
-        job.scene_cut_bridge_state_available;
+      const bool depth_health_state_available =
+        job.depth_health_state_available;
 
       if (
         !std::filesystem::create_directories(job.root, error) && error
@@ -4887,7 +4869,7 @@ namespace platf::sbs_debug {
 
         nlohmann::json adaptive = nullptr;
         bool adaptive_available = false;
-        if (scene_cut_bridge_state_available) {
+        if (depth_health_state_available) {
           try {
             adaptive_available = dump_adaptive_state(
               job.adaptive_state,
@@ -5579,7 +5561,7 @@ namespace platf::sbs_debug {
         auto selected_map = nlohmann::json::parse(models::depth_coordinate_v2::selected_map_contract_json);
         selected_map["render_enabled"] = completed.subtitle_render_enabled;
         nlohmann::json manifest {
-          {"schema", 51},
+          {"schema", 52},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -5777,7 +5759,7 @@ namespace platf::sbs_debug {
              << '\n'
              << "raw_depth_min=" << raw_stats.minimum << '\n'
              << "raw_depth_max=" << raw_stats.maximum << '\n'
-             << "cut_bridge_diagnostics_available="
+             << "depth_health_diagnostics_available="
              << (adaptive_available ? "true" : "false") << '\n'
              << "normalization_effective_lower=" << normalization.lower << '\n'
              << "normalization_effective_upper=" << normalization.upper << '\n'
@@ -6231,14 +6213,7 @@ namespace platf::sbs_debug {
                   job.subtitle_ocr_record,
                   job.subtitle_locator_state,
                   job.gpu_trace_ring,
-                  job.completed,
-                  [&job]() {
-                    models::depth_coordinate_v2::state_words_t state_words {};
-                    std::memcpy(
-                      state_words.data(), job.shadow_state.data(), sizeof(state_words)
-                    );
-                    return state_words[models::depth_coordinate_v2::confirmed_cut_count];
-                  }()
+                  job.completed
                 )) {
               finish_poll();
               fail_capture("OCR8/UIP4 record identity or layout is invalid", false);
@@ -6255,7 +6230,7 @@ namespace platf::sbs_debug {
             break;
 
           case stage_e::scene_normalization:
-            if (!pending.scene_cut_bridge_requested) {
+            if (!pending.depth_health_state_requested) {
               pending.collection_stage = stage_e::model_input;
               break;
             }
@@ -6269,7 +6244,7 @@ namespace platf::sbs_debug {
               if (status == collect_status_e::ready) {
                 pending.collection_stage = stage_e::scene_adaptive;
               } else if (status == collect_status_e::failed) {
-                pending.scene_cut_bridge_requested = false;
+                pending.depth_health_state_requested = false;
                 pending.depth_frame_state.resource.Reset();
                 pending.adaptive_state.resource.Reset();
                 pending.normalization_state_bytes.clear();
@@ -6293,7 +6268,7 @@ namespace platf::sbs_debug {
               if (status == collect_status_e::ready) {
                 pending.collection_stage = stage_e::scene_decode;
               } else if (status == collect_status_e::failed) {
-                pending.scene_cut_bridge_requested = false;
+                pending.depth_health_state_requested = false;
                 pending.adaptive_state.resource.Reset();
                 pending.normalization_state_bytes.clear();
                 job.adaptive_state.clear();
@@ -6308,12 +6283,12 @@ namespace platf::sbs_debug {
           case stage_e::scene_decode:
             // The retained depth-health state is optional comparison evidence. Malformed bytes do
             // not reject the exact-frame core package.
-            job.scene_cut_bridge_state_available =
+            job.depth_health_state_available =
               decode_normalization_state(
                 pending.normalization_state_bytes, job.normalization
               ) == depth_dumpability::valid;
             pending.normalization_state_bytes.clear();
-            if (!job.scene_cut_bridge_state_available) {
+            if (!job.depth_health_state_available) {
               job.adaptive_state.clear();
             }
             pending.collection_stage = stage_e::model_input;
@@ -6924,7 +6899,7 @@ namespace platf::sbs_debug {
       }
 
       if (completed.adaptive_state && completed.depth_frame_state) {
-        pending->scene_cut_bridge_requested =
+        pending->depth_health_state_requested =
           stage_buffer(
             device,
             ctx,
@@ -6939,7 +6914,7 @@ namespace platf::sbs_debug {
             sbs_adaptive_state::word_count * sizeof(std::uint32_t),
             pending->adaptive_state
           );
-        if (!pending->scene_cut_bridge_requested) {
+        if (!pending->depth_health_state_requested) {
           pending->depth_frame_state = {};
           pending->adaptive_state = {};
         }

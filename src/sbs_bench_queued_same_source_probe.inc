@@ -9,7 +9,7 @@
       const auto root=fs::path(o.out)/"queued-same-source-probe-v1";bool created=false;
       constexpr std::size_t slots=21,phases=5;
       const std::array<const char *,phases> phase_names{{"matched_A","queued_B_before_ACK","matched_B_after_ACK","matched_B_after_no_pending_finish","matched_empty_C"}};
-      const std::array<const char *,slots> names{{"packed.bgra8","source.bgra8","Base.f32","state.u32","M.u32","display-source.rgba16f","SCP.u32","SCT.u32","transaction.u32","arguments.u32","contour-CB.u32","b2.u32","b3.u32","guard-CB.u32","depth-CB.u32","source-region-CB.u32","OCR.u32","UIP.u32","cut-state.u32","depth-frame-state.u32","ema-motion-mask.u32"}};
+      const std::array<const char *,slots> names{{"packed.bgra8","source.bgra8","Base.f32","state.u32","M.u32","display-source.rgba16f","SCP.u32","SCT.u32","transaction.u32","arguments.u32","contour-CB.u32","b2.u32","b3.u32","guard-CB.u32","depth-CB.u32","source-region-CB.u32","OCR.u32","UIP.u32","depth-health.u32","depth-frame-state.u32","ema-motion-mask.u32"}};
       struct capture_t {std::array<std::vector<char>,slots> bytes;std::array<bool,slots> copied{};nlohmann::json metadata;};
       std::array<jp_stage_t,slots> stages;std::array<capture_t,phases> captures;bool flushed=false;
       nlohmann::json diagnostic=nlohmann::json::object();
@@ -99,7 +99,7 @@
         util::require(submit(2,1,1).inference_enqueued,"Warmup failed");auto warm=finish(1,1);const auto warm_receipt=util::receipt(est,warm);
         util::require(submit(0,2,33334).inference_enqueued,"A failed");auto A=finish(2,33334);const auto A_receipt=util::receipt(est,A);
         auto A_views=est.completed_ocr_conditioner_working_views_for_evaluation(A.publication);util::require(A_views.has_value(),"Genuine A diagnostic resources unavailable");
-        const std::array<ID3D11ShaderResourceView *,slots> A_srv{{packed.srv.Get(),input[0],A.shadow_base_final_parallax.Get(),A.shadow_state.Get(),A.subtitle_glyph_matte.Get(),A.subtitle_contour_source.Get(),A.subtitle_condition_params.Get(),A.subtitle_contour_identity.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,A.ocr_box_record.Get(),A.subtitle_locator_state.Get(),A.cut_state.Get(),A.depth_frame_state.Get(),A.ema_motion_mask.Get()}};
+        const std::array<ID3D11ShaderResourceView *,slots> A_srv{{packed.srv.Get(),input[0],A.shadow_base_final_parallax.Get(),A.shadow_state.Get(),A.subtitle_glyph_matte.Get(),A.subtitle_contour_source.Get(),A.subtitle_condition_params.Get(),A.subtitle_contour_identity.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,A.ocr_box_record.Get(),A.subtitle_locator_state.Get(),A.depth_health_state.Get(),A.depth_frame_state.Get(),A.ema_motion_mask.Get()}};
         // Storage-only handles: never reuse A's semantic clock/publication as B authority.
         // They may be sampled after release only if later actual ACK proves identical allocation.
         std::array<ComPtr<ID3D11Resource>,5> unpublished_storage;
@@ -112,7 +112,7 @@
         util::require(captures[0].bytes[0]==captures[3].bytes[0],"Disabled QRG warm-A differs from literal ordinary renderer");captures[3].copied[0]=false;
         const auto capture_normal=[&](std::size_t p,ID3D11ShaderResourceView *color,const models::estimate_result &r){
           auto views=est.completed_ocr_conditioner_working_views_for_evaluation(r.publication);util::require(views.has_value(),"Own completed diagnostic getter failed");
-          const std::array<ID3D11ShaderResourceView *,slots> reads{{packed.srv.Get(),color,r.shadow_base_final_parallax.Get(),r.shadow_state.Get(),r.subtitle_glyph_matte.Get(),r.subtitle_contour_source.Get(),r.subtitle_condition_params.Get(),r.subtitle_contour_identity.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,r.ocr_box_record.Get(),r.subtitle_locator_state.Get(),r.cut_state.Get(),r.depth_frame_state.Get(),r.ema_motion_mask.Get()}};
+          const std::array<ID3D11ShaderResourceView *,slots> reads{{packed.srv.Get(),color,r.shadow_base_final_parallax.Get(),r.shadow_state.Get(),r.subtitle_glyph_matte.Get(),r.subtitle_contour_source.Get(),r.subtitle_condition_params.Get(),r.subtitle_contour_identity.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,r.ocr_box_record.Get(),r.subtitle_locator_state.Get(),r.depth_health_state.Get(),r.depth_frame_state.Get(),r.ema_motion_mask.Get()}};
           for(std::size_t k=0;k<slots;++k)if(reads[k]&&!captures[p].copied[k])srv_copy(p,k,reads[k]);
           copy(p,8,views->transaction.Get());copy(p,9,views->dispatch_arguments.Get());copy(p,10,views->constants.Get());copy(p,11,b2.Get());copy(p,12,b3.Get());
           const auto receipt=util::receipt(est,r);captures[p].metadata={{"own_publication",jp_publication(r.publication)},{"own_receipt_expected",jp_publication(receipt.expected)},{"depth_owner_frame",receipt.depth_owner_frame_id},{"depth_owner_observation_us",receipt.depth_owner_timestamp_us},{"completed_authority",true}};
@@ -173,7 +173,7 @@
           }
           auto B=finish(3,66667);util::require(est.publication_is_current(B.publication),"Actual B ACK did not publish its own current key");normal_draw(input[1],B,ordinary_ps,rtv.Get());capture_normal(2,input[1],B);
           if(ticket){copy(2,14,queued_depth_storage.Get());copy(2,15,queued_source_storage.Get());}
-          if(ticket){const std::array<ID3D11ShaderResourceView *,5> actual{{B.ocr_box_record.Get(),B.subtitle_locator_state.Get(),B.cut_state.Get(),B.depth_frame_state.Get(),B.ema_motion_mask.Get()}};
+          if(ticket){const std::array<ID3D11ShaderResourceView *,5> actual{{B.ocr_box_record.Get(),B.subtitle_locator_state.Get(),B.depth_health_state.Get(),B.depth_frame_state.Get(),B.ema_motion_mask.Get()}};
             for(std::size_t k=0;k<actual.size();++k){auto current=resource(actual[k]);util::require(current.Get()==unpublished_storage[k].Get(),"Unpublished diagnostic storage rotated before actual B ACK");}
             captures[1].metadata["same_allocation_as_actual_ACK_verified"]=true;}
           // Actual ACK consumed the pending unit. No-pending finish must return no NEW completion.
@@ -186,7 +186,7 @@
           for(std::size_t k=0;k<slots;++k)if(captures[2].copied[k])util::require(captures[3].copied[k]&&captures[2].bytes[k]==captures[3].bytes[k],"Second ACK mutated completed B data/render");
           if(ticket){for(std::size_t k=0;k<=12;++k)util::require(captures[1].bytes[k]==captures[2].bytes[k],"Queued B changed on ACK or differs from completed normal renderer");
             util::require(captures[1].bytes[14]==captures[2].bytes[14]&&captures[1].bytes[15]==captures[2].bytes[15],"ACK changed queued actual CBs");
-            for(std::size_t k=16;k<slots;++k)util::require(captures[1].bytes[k]==captures[2].bytes[k],"ACK changed unpublished OCR/UIP/cut/minmaxEMA/motion storage");
+            for(std::size_t k=16;k<slots;++k)util::require(captures[1].bytes[k]==captures[2].bytes[k],"ACK changed unpublished OCR/UIP/depth-health/minmaxEMA/motion storage");
             util::require(ticket->planned_publication==B.publication,"Planned queued identity differs from own genuine ACK");}
           util::require(submit(2,4,100000).inference_enqueued,"C failed");auto C=finish(4,100000);normal_draw(input[2],C,ordinary_ps,rtv.Get());capture_normal(4,input[2],C);
           const auto &m=captures[4].bytes[4];util::require(std::all_of(m.begin(),m.end(),[](char x){return x==0;}),"Genuine current empty C did not clear M");

@@ -14,7 +14,7 @@
 namespace models::host_sbs_gpu_trace {
   inline constexpr std::uint32_t ring_schema = 5u;
   inline constexpr std::uint32_t dump_contract_schema = 6u;
-  inline constexpr std::uint32_t decoded_trace_schema = 7u;
+  inline constexpr std::uint32_t decoded_trace_schema = 8u;
   inline constexpr std::uint32_t ring_tag = 0x48525447u;  // GTRH in little-endian memory.
   inline constexpr std::uint32_t record_tag = 0x31525447u;  // GTR1.
   inline constexpr std::uint32_t capacity = 300u;

@@ -68,8 +68,8 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 131/tag `0xDE3CEF0B`, canonical SHA-256
-`e96fe7e252a2525e055fd8779a19951a655400bf2c8c124764e1abf2edc47f76`. It binds the
+schema 132/tag `0x90278C1A`, canonical SHA-256
+`0d140f857343932b01d3d33f8c66768cc4c807ed377811282c7bf1c7d72c903e`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -80,20 +80,20 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd` |
-| `parallax_v2_producer` | 27 | `13d225ac37fd25b1ff942fb9abc2f422ec81e23ce180882afb598f9a3befcf92` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `bf89d333b3a857d48f95b3828e5f7567ec94d0723bf05b401393d10583711a69` |
-| `near_identical_detector` | 3 | `d3d7281773f4bff399169d72a0d42188c4b1632a7f95f9e3068ae6e92c76e952` |
-| `gpu_trace` | 1 | `b7dac2c3bdba3038f6ecccb1af5f87efd7a2f39beefae45fcaef3a9d29509483` |
-| `parallax_v2_live_renderer` | 2 | `e28de4fe1281c87bc512c532b3ac55c77b5c4e4a754139236febd3bf59a2786b` |
-| `parallax_v2_p010_y` | 1 | `779e8bdf8fe3c12a33ffd74af07ad131e7a1a75849c1b49eda4326dd8c9eb5a7` |
+| `parallax_v2_producer` | 27 | `8f79a8ba600a992b84f591d2e766ad77ef7bd8243f1fb205df909f1481823528` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `10fc176de3612e30ee5f4602794675e5f8046e698cba7e8a488c37d066901381` |
+| `near_identical_detector` | 3 | `57b819cdb54b4862d9114d9c8b9bde5983707169f6c324c3101a51de154ce961` |
+| `gpu_trace` | 1 | `55a7fe6f92a5be3140fe33f082b32b00c189b33fa580af4ab766d30345b9fd7a` |
+| `parallax_v2_live_renderer` | 2 | `48d5db82cff195785fda7720fb7fe90696b60dc9d4794df23ac152c1f0c34dab` |
+| `parallax_v2_p010_y` | 1 | `30c9cb3b33239726ce979da5d5950b64f83c0e0fe34d20d718797f582c91ebfd` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `9d919bf2e6510777221a8e4679166d655e8f0ecbe3368b4e6dd8078c25c9440f` |
-| `subtitle_cohort_prototype_research` | 3 | `3ba81be2da8c7a307049d2d238568fbd0543ab8ecc59d8c20b1037f9da3fac3b` |
-| `subtitle_cohort_research` | 4 | `12b61eeb22955f5a8fd654f8f5a826338ae8e1f14456f3eba50f0c4cd3effec1` |
-| `subtitle_inner_colour_research` | 5 | `97402661d82cf7807039e01f8cf90755c980a522041d392c70abf24dc547b5e3` |
+| `parallax_v2_live_diagnostic` | 2 | `6c49bc093329409b2cc0cae0a206507bed5c03d8bab2f8e08010f9de7b35b1ab` |
+| `subtitle_cohort_prototype_research` | 3 | `7a0c3744cbf07ae330fb3ddc74f156b4e4661d3fac4d79f72fe0a2f2b9a2162a` |
+| `subtitle_cohort_research` | 4 | `b132b1d778a59633b1675c9805208ba7e6a6d0bc03bd788fbb52c3fab680c052` |
+| `subtitle_inner_colour_research` | 5 | `2a6f2efbb0bb66d3b01f3b4cc003e7729c9284b0a2d03c98a0009c94124be049` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
-| `subtitle_matte_guard_research` | 1 | `d02680083d15550fd4e349fd480b7cddcfa7f2ba23dda9bf93c9bd7a45eff72a` |
-| `parallax_v2_queued_renderer` | 1 | `5b4ff19004b64900f67d15595a6ac5adada4dc6afaa66f5431e7d2b8155a9f8e` |
+| `subtitle_matte_guard_research` | 1 | `1c9709c6ef565bb451745adfb22722a73d28cf1f5eb512daa907feb613723e46` |
+| `parallax_v2_queued_renderer` | 1 | `155f02d04aa844e221ee222a36daef5efc32b875f080fd3a383dac8d31d19bcd` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
 | `current_foreground_edge` | 1 | `4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c` |
@@ -794,7 +794,7 @@ The state is 40 words with schema `4` and little-endian tag bytes `UIP4` (`0x345
 are schema and tag. Word 2 has only the current-valid flag `1`; word 3 is the current slot
 mask `(1 << final_count) - 1`. Words 4--9 bind frame identity, analysis generation and source
 observation time; words 10--19 bind source/field extents, dynamic ROI and content rectangle.
-Word 20 (`V2_SUBTITLE_PLANE_CUT_EPOCH_WORD`) is a retired identity-join word that is always zero. Word 21 is the retired current-core
+Word 20 (`V2_SUBTITLE_PLANE_IDENTITY_RESERVED_WORD`) is reserved zero and every reader requires zero. Word 21 is the retired current-core
 probability-change cue mask; it is published as zero and readers still require a subset of
 word 3. The legacy `history_reset_mask` field names are retained for wire/API compatibility. Word 22 is canonical zero; the retired presentation countdown and cue latch grant no
 authority. Word 23 is zero. The
@@ -1842,7 +1842,7 @@ never wins. The result is bit-identical to the serial Q30 recurrence; the schema
 byte-identical depth and field artifacts on all 19 core clips. With no full-line arrays in group
 memory, occupancy is not limited by group memory: the two limiter passes went from 0.125-0.136 ms
 to 0.076-0.080 ms (p50, five clips, idle RTX 5080). Lines of 32 cells or fewer retain the serial
-float recurrence. Schema 51 permits the
+float recurrence. Schema 52 permits the
 limiter field to differ by up to `2e-7` from the former bitwise serial recurrence while the
 container, majorant/minorant ordering, and spatial bounds remain fail-closed requirements.
 
@@ -2158,8 +2158,8 @@ The GPU selects the depth branch without a CPU decision fence. Once CUDA has com
 root and unmaps, D3D submits the complete normalization, history, Base, subtitle and final-field
 publication. Only after that unit does the host enqueue a compact completion snapshot. The existing
 CBRG/RQST transaction, history-owner record, full UIP4 state, condition6, V2 state and depth-frame
-state occupy one 192-word/768-byte staging record, followed by one D3D event. UIP4 starts at
-word 74, condition6 at word 114, and the ParallaxState at word 120. A 32-word tagged depth-health section (`CutBridgeState`) is copied on every publication; an eight-word cumulative-outcome
+state occupy one 168-word/672-byte staging record, followed by one D3D event. UIP4 starts at
+word 74, condition6 at word 114, and the ParallaxState at word 120. An 8-word tagged depth-health section (`DepthHealthState`) is copied on every publication; an eight-word cumulative-outcome
 section is copied when the diagnostics-enabled outcome buffer exists. There is no additional shader,
 CUDA node, model call or change to the
 inference/reuse decision.
@@ -2217,16 +2217,17 @@ Dump, reprocess, interactive move/size, route or transfer changes, missing ident
 failure reject this redelivery shortcut. A new captured source follows ordinary unchanged-input or
 changed-source admission.
 
-The tagged 32-word depth-health state (`CutBridgeState`, contract
-`tools/sbsbench/contracts/sbs-adaptive-state-v7.json`) is CPU-initialized to its tag and zeros at
-creation and on input-domain reset. `depth_minmax_ema_cs` is its only GPU producer and writes the
-valid-depth fraction, effective raw range width, empty and collapsed raw counts, `range_collapsed`
-and `depth_ready`. Word 16 (`hard_cut_count`) is a retired word that is always zero and every other
-word is reserved zero; receipt, harness and Dump 3D readers reject a non-zero retired word. State
-resolve, the V2 map, the subtitle locator and the contour pass fail closed without the tag. State
-resolve writes the V2 state word `confirmed_cut_count` as zero; it, UIP4 word 20, SCT5 word 3, the
-cohort header word `SBC_H_CUT` and CBC meta word 80 remain in their layouts as retired identity-join
-words that are always zero.
+The tagged 8-word depth-health state (`DepthHealthState`, schema 8, contract
+`tools/sbsbench/contracts/sbs-adaptive-state-v8.json`) is CPU-initialized to its tag and zeros at
+creation and on input-domain reset. Word 0 is the contract tag, words 1 and 2 are the empty and
+collapsed raw counts, word 3 is reserved zero, and words 4--7 are the valid-depth fraction,
+effective raw range width, `range_collapsed` and `depth_ready`. `depth_minmax_ema_cs` is its only
+GPU producer; receipt, harness and Dump 3D readers reject a non-zero reserved word. State resolve,
+the V2 map, the subtitle locator and the contour pass fail closed without the tag. State resolve
+writes the V2 state word `control_reserved_0` as zero. That word, UIP4 word 20, SCT5 word 3 and
+the cohort header word `SBC_H_RESERVED_3` are reserved zero: the locator, contour, matte guard,
+shared current-glyph, receipt and Dump 3D readers require zero. CBC meta word 80 is a copy of
+SCT5 word 3.
 
 Routine depth-health state is collected with each completion receipt. An external Stats subscription
 throttles publication of new samples at the requested interval. Repeated output with the same
@@ -2312,7 +2313,7 @@ authorization; it contains no analytic subtitle inverse or background reconstruc
 probes still require their authenticated shared source, and optional cache/background program-preparation failures cannot
 disable the completed glyph route or a valid depth producer. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-51 dump preserves ordinary Base, the protected Final diagnostic, native matte, SCT5,
+schema-52 dump preserves ordinary Base, the protected Final diagnostic, native matte, SCT5,
 SCP4, joined source snapshot and exact rendered native source bytes with ordered D3D11 copies
 and one terminal event. Submission performs no GPU-to-CPU wait or synchronous Map. Later callbacks
 poll with `DONOTFLUSH`, collect with `DO_NOT_WAIT`, and publish only a complete immutable tuple.
@@ -2327,7 +2328,7 @@ authority. Live and whole-clip rendering share
 the shared subtitle policy. Offline scene-cache schema 5 commits Base/state/matte/SCT/SCP/source as one
 hashed six-payload tuple through a per-frame atomic `.tuple.json` record; partial tuples fail closed.
 
-The schema-51 root `matched_observation_timestamp_us` records the completed source transaction's
+The schema-52 root `matched_observation_timestamp_us` records the completed source transaction's
 clock. A fresh publication must bind that clock to the full sealed geometry state before UI
 conditioning can be verified. Conditional reuse retains an older geometry/UI owner; the authenticated
 GPU trace must identify that owner's original observation, whose clock remains in the retained
@@ -2576,9 +2577,9 @@ body: version u8, flags u8, request ID u16, requested interval ms u16, reserved-
 subscription versions receive the current format with unsupported-version status. The unreleased
 version-1 format is not supported. Hosts without the capability do not receive this subscription.
 
-Offsets 44..47 and 64..75 are retired and always zero. Validity bits 3 (`change`), 8 (`scene`) and
-9 (`cuts`) and runtime bits 4 (`geometry_armed`), 5 (`appearance_armed`) and 8 (`hard_cut_pulse`)
-are never set. Runtime bit 0 (`profile_initialized`) is set once depth is ready.
+Offsets 44..47 and 64..75 are reserved and always zero. Validity bits 3, 8 and 9 and runtime
+bits 4, 5 and 8 are reserved and never set; protocol 13 clients still parse those offsets and
+bits. Runtime bit 0 (`profile_initialized`) is set once depth is ready.
 
 Bytes 0â€“87 retain the health/configuration fields serialized by `stream.cpp`. The performance
 fields are:

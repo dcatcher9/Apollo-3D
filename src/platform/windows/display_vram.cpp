@@ -3256,7 +3256,7 @@ namespace platf::dxgi {
                 dump_frame.model_input = est.model_input_snapshot.Get();
                 dump_frame.raw_depth = est.raw_model_depth_snapshot.Get();
                 dump_frame.warp_depth = dump_warp_depth;
-                dump_frame.adaptive_state = est.cut_state.Get();
+                dump_frame.adaptive_state = est.depth_health_state.Get();
                 dump_frame.depth_frame_state = est.depth_frame_state.Get();
                 dump_frame.warp_map =
                   geometry_available ? sbs_debug_mapping_srv.Get() : nullptr;
@@ -3835,7 +3835,7 @@ namespace platf::dxgi {
       // resource creation the constructor does (it makes no immediate-context calls). Capture
       // owning ComPtrs so a presentation-session teardown never has to wait for construction.
       auto sbs_cfg = sbs_config;
-      // Every estimator consumer uses the authenticated Host SBS tensor shapes and private cut
+      // Every estimator consumer uses the authenticated Host SBS tensor shapes and private
       // analysis contract.
       BOOST_LOG(info) << "Host SBS enabled; initializing the per-stream GPU pipeline for resident model \""sv
                       << active.name
@@ -4525,7 +4525,7 @@ namespace platf::dxgi {
         event.views[3]=result->subtitle_glyph_matte; event.views[4]=result->subtitle_contour_source;
         event.views[5]=result->subtitle_condition_params; event.views[6]=result->subtitle_contour_identity;
         event.views[7]=result->ocr_box_record; event.views[8]=result->subtitle_locator_state;
-        event.views[9]=result->cut_state; event.views[10]=result->depth_frame_state; event.views[11]=result->ema_motion_mask;
+        event.views[9]=result->depth_health_state; event.views[10]=result->depth_frame_state; event.views[11]=result->ema_motion_mask;
         if (const auto w=depth_estimator->ocr_working_views_for_evaluation(result->completed_frame_id)) {
           event.buffers[3]=w->transaction; event.buffers[4]=w->dispatch_arguments;
         }
@@ -4997,7 +4997,7 @@ namespace platf::dxgi {
       }
       latest_v2_lineage.estimate = estimate;
       // A reused presentation is not a new inference/completion transition. Preserve the completed
-      // geometry identity while preventing reset/cut side effects from replaying on every cursor
+      // geometry identity while preventing reset side effects from replaying on every cursor
       // delivery that shares the same DDup desktop-content clock.
       latest_v2_lineage.estimate.inference_enqueued = false;
       latest_v2_lineage.estimate.gpu_undecided_transaction_enqueued = false;
@@ -6438,7 +6438,7 @@ namespace platf::dxgi {
       ) {
         // Stop an old-domain staging readback from publishing while the renderer is deliberately
         // flat and waiting for this newly observed ROI/full/transfer domain. The first completion
-        // in the new domain establishes the new cut-counter baseline.
+        // in the new domain establishes the new health-counter baseline.
         sbs_telemetry_input_region = slot.depth_input_region;
         sbs_telemetry_input_color_space = slot.color_space;
         sbs_telemetry_input_domain_valid = true;

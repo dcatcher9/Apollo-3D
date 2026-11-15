@@ -25,7 +25,7 @@ StructuredBuffer<uint> CurrentConditionParams : register(t3);
 Texture2D<uint> CurrentSupportRead : register(t5);
 Texture2D<float4> PreviousFeatures : register(t6); // fixed RGB anchor and exact valid/count/mask code
 StructuredBuffer<uint> PreviousIdentity : register(t7);
-StructuredBuffer<float4> CurrentCutBridge : register(t8);
+StructuredBuffer<float4> CurrentDepthHealth : register(t8);
 StructuredBuffer<uint> CurrentOcrRecord : register(t9);
 StructuredBuffer<uint4> CurrentGeometryState : register(t10);
 Texture2D<float4> NextFeaturesRead : register(t11); // immutable staged result before old history overwrite
@@ -46,7 +46,6 @@ static const uint MAX_SOURCE_EXTENT = V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT;
 
 groupshared uint CurrentGate;
 groupshared uint CurrentCount;
-groupshared uint CurrentEpoch;
 groupshared int CurrentReferenceCenterTwice;
 groupshared uint4 CurrentCovers[V2_SUBTITLE_PLANE_COVER_CAPACITY];
 groupshared uint4 CurrentCores[V2_SUBTITLE_PLANE_COVER_CAPACITY];
@@ -145,15 +144,15 @@ bool CurrentGeometryReady() {
     camera.seed_values = CurrentGeometryState[6u];
     uint2 now = uint2(v2_joint_observation_timestamp_low, v2_joint_observation_timestamp_high);
     // A compact UI-plane timestamp is not an integrity seal for the current raw/Base publication.
-    // Use the same canonical state/clock/cut admission as the UI resolver and conditioner.
+    // Use the same canonical state/clock admission as the UI resolver and conditioner.
     return V2CameraStateWithAdaptiveStateValid(active, control, mapping, camera) &&
         V2_STATE_FRAME_VALID(control) == 1.0f &&
         mapping.y == V2_CONTRACT_TAG && mapping.z == V2_ADAPTIVE_POLICY_ID &&
         any(now != 0u) && all(camera.clock.xy == now) &&
-        asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(
-            CurrentCutBridge[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS])) == SBS_CUT_CONTRACT_TAG &&
-        asuint(V2_STATE_CONFIRMED_CUT_COUNT(control)) ==
-            asuint(SBS_STATE_HARD_CUT_COUNT(CurrentCutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]));
+        asuint(SBS_STATE_CONTRACT_TAG_BITS(
+            CurrentDepthHealth[SBS_STATE_VECTOR_CONTRACT_TAG_BITS])) ==
+            SBS_ADAPTIVE_STATE_CONTRACT_TAG &&
+        asuint(V2_STATE_CONTROL_RESERVED_0(control)) == 0u;
 }
 
 bool CurrentClassifierReferenceValid(out int reference_center) {
@@ -215,11 +214,11 @@ bool CurrentSnapshotEvidenceValid(out int reference_center) {
     // Current detector evidence includes a legal empty record. Plane/condition state is not
     // read here: this independent source/probability snapshot cannot authorize pins.
     uint band_w, band_h, probability_count, probability_stride;
-    uint ocr_words, ocr_stride, cut_vectors, cut_stride;
+    uint ocr_words, ocr_stride, health_vectors, health_stride;
     CurrentDisplayBand.GetDimensions(band_w, band_h);
     ProbabilityMap.GetDimensions(probability_count, probability_stride);
     CurrentOcrRecord.GetDimensions(ocr_words, ocr_stride);
-    CurrentCutBridge.GetDimensions(cut_vectors, cut_stride);
+    CurrentDepthHealth.GetDimensions(health_vectors, health_stride);
     if (contour_options.x != 1u || contour_options.y != RECIPE_SCHEMA ||
         any(contour_options.zw != 0u) || contour_observation.z > 1u ||
         contour_observation.w != 0u || !any(contour_frame.xy != 0u) ||
@@ -235,7 +234,7 @@ bool CurrentSnapshotEvidenceValid(out int reference_center) {
         contour_field.w > contour_content.w ||
         probability_count != V2_OCR_OUTPUT_WIDTH * V2_OCR_OUTPUT_HEIGHT || probability_stride != 4u ||
         ocr_words != V2_OCR_RECORD_WORD_COUNT || ocr_stride != 4u ||
-        cut_vectors != SBS_ADAPTIVE_STATE_VECTOR_COUNT || cut_stride != 16u) return false;
+        health_vectors != SBS_ADAPTIVE_STATE_VECTOR_COUNT || health_stride != 16u) return false;
     uint crop_top, crop_height, roi_top, roi_bottom;
     if (!V2SubtitleOcrComputeCrop(contour_source.x, contour_source.y, crop_top, crop_height) ||
         crop_top != contour_source.z || crop_height != contour_source.w ||
@@ -357,9 +356,8 @@ bool CurrentAdaptiveTailValid() {
         (((flags & 4u) != 0u) == (conflicts * 5u > covered || conflicts * 50u > area));
 }
 
-bool CurrentAuthorityValid(out uint current_count, out uint epoch) {
+bool CurrentAuthorityValid(out uint current_count) {
     current_count = 0u;
-    epoch = 0u;
     uint plane_words, plane_stride, param_words, param_stride;
     CurrentPlane.GetDimensions(plane_words, plane_stride);
     CurrentConditionParams.GetDimensions(param_words, param_stride);
@@ -367,10 +365,9 @@ bool CurrentAuthorityValid(out uint current_count, out uint epoch) {
         plane_words != V2_SUBTITLE_PLANE_STATE_WORD_COUNT || plane_stride != 4u ||
         param_words != V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT || param_stride != 4u) return false;
     // SnapshotGate already authenticates every current OCR8 pair, source/crop/ROI, and the
-    // sealed current geometry/cut publication. No historical rectangle grants authority.
+    // sealed current geometry publication. No historical rectangle grants authority.
     uint ocr_count = CurrentOcrRecord[4u];
     if (ocr_count == 0u || ocr_count > V2_SUBTITLE_PLANE_COVER_CAPACITY) return false;
-    epoch = asuint(SBS_STATE_HARD_CUT_COUNT(CurrentCutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]));
     uint kinds = 0u;
     [loop]
     for (uint slot = 0u; slot < ocr_count; ++slot) {
@@ -385,7 +382,7 @@ bool CurrentAuthorityValid(out uint current_count, out uint epoch) {
         CurrentPlane[V2_SUBTITLE_PLANE_FLAGS_WORD] != V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG ||
         CurrentPlane[V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD] != (1u << ocr_count) - 1u ||
         (CurrentPlane[V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD] & ~((1u << ocr_count) - 1u)) != 0u ||
-        CurrentPlane[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] != epoch ||
+        CurrentPlane[V2_SUBTITLE_PLANE_IDENTITY_RESERVED_WORD] != 0u ||
         !CurrentAdaptiveTailValid() ||
         CurrentPlane[adaptive + 15u] != 0u ||
         CurrentPlane[adaptive + 3u] != target_bits ||
@@ -491,16 +488,14 @@ uint4 CurrentOrdinarySupportSearch(uint slot) {
 
 void PrepareCurrentGate(uint group_index) {
     if (group_index == 0u) {
-        uint count, epoch;
+        uint count;
         int reference_center;
         SnapshotGate = CurrentSnapshotEvidenceValid(reference_center) ? 1u : 0u;
         CurrentReferenceCenterTwice = reference_center;
         // Pins and their published snapshot must share the same global source/OCR verdict.
-        // In particular, a rejected ribbon in epoch zero cannot borrow prior valid RGB.
-        CurrentGate = CurrentAuthorityValid(count, epoch) && SnapshotGate != 0u ? 1u : 0u;
+        // In particular, a rejected ribbon cannot borrow prior valid RGB.
+        CurrentGate = CurrentAuthorityValid(count) && SnapshotGate != 0u ? 1u : 0u;
         CurrentCount = CurrentGate != 0u ? count : 0u;
-        CurrentEpoch = SnapshotGate != 0u ?
-            asuint(SBS_STATE_HARD_CUT_COUNT(CurrentCutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT])) : 0u;
         [unroll]
         for (uint slot = 0u; slot < V2_SUBTITLE_PLANE_COVER_CAPACITY; ++slot) {
             CurrentCovers[slot] = CurrentGate != 0u && slot < count ?
@@ -1125,7 +1120,6 @@ uint HistoryWord(uint word, bool valid) {
     if (word == 0u) return CONTOUR_SCHEMA;
     if (word == 1u) return HISTORY_TAG;
     if (word == 2u) return valid && CurrentGate != 0u ? 1u : 0u;
-    if (word == 3u) return valid ? CurrentEpoch : 0u;
     if (word >= 4u && word < 8u) return contour_frame[word - 4u];
     if (word >= 8u && word < 12u) return contour_source[word - 8u];
     if (word >= 12u && word < 16u) return contour_field[word - 12u];
@@ -1134,7 +1128,7 @@ uint HistoryWord(uint word, bool valid) {
     if (word == 21u) return contour_observation.y;
     if (word == 22u) return RECIPE_SCHEMA;
     if (word == V2_SUBTITLE_CONTOUR_HISTORY_SNAPSHOT_VALID_WORD) return valid ? 1u : 0u;
-    // SCT5 carries source/clock/cut identity only. Reserved24..31 are canonical zero;
+    // SCT5 carries source/clock identity only. Word 3 and reserved24..31 are canonical zero;
     // changing current OCR count, order, kinds or cover segmentation is not a history reset.
     return 0u;
 }

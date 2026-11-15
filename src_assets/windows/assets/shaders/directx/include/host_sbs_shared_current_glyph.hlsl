@@ -63,9 +63,8 @@ bool SubtitleRenderAuthorized(out uint2 source_size, out float full_source_plane
     }
     uint2 owner_clock = uint2(ContourIdentity[20u], ContourIdentity[21u]);
     float4 clock_state = ParallaxState[V2_STATE_VECTOR_GAIN_LAST_OBSERVATION_LOW];
-    float4 control_state = ParallaxState[V2_STATE_VECTOR_CONFIRMED_CUT_COUNT];
     if (all(owner_clock == 0u) || any(owner_clock != asuint(clock_state.xy)) ||
-        ContourIdentity[3u] != asuint(V2_STATE_CONFIRMED_CUT_COUNT(control_state)))
+        ContourIdentity[3u] != 0u)
         return false;
     if (video_roi_active == 1.0f) {
         if (!VideoRoiRectValid() || !VideoRoiContentValid(field_size) ||

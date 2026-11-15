@@ -30,13 +30,10 @@ except ImportError:
     import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics
 
 RAW_PATTERN = re.compile(r"raw_(\d+)\.f32$")
-V2_STATE_TRACE_SCHEMA = 22
+V2_STATE_TRACE_SCHEMA = 23
 V2_STATE_TRACE_POLICY = (
-    "authenticated-adaptive-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v22"
+    "authenticated-adaptive-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v23"
 )
-# The native trace keeps its cut columns for layout stability. No producer advances the cut
-# generation, so every replay names this one source and every row after the first is uncut.
-V2_STATE_TRACE_CUT_SOURCE = "first-frame-only"
 V2_GPU_SHADER_SEQUENCE = (
     "depth_coordinate_v2_moments_cs.hlsl",
     "depth_coordinate_v2_frame_resolve_cs.hlsl",
@@ -55,9 +52,6 @@ V2_STATE_TRACE_FIELDS = (
     "input_source_frame_id",
     "rendered_source_frame_id",
     "calibration_revision",
-    "confirmed_cut_count",
-    "confirmed_cut",
-    "cut_attribution",
     "input_valid",
     "frame_valid",
     "camera_valid",
@@ -116,7 +110,7 @@ def _trace_adaptation_semantics(mode: int) -> Dict[str, str]:
         raise ValueError("v2 trace requires adaptive policy identity 3")
     return {
         "coordinate": "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference",
-        "convergence_curve": "continuously-tracked-mean-is-zero-plane-no-cut-latch",
+        "convergence_curve": "continuously-tracked-mean-is-zero-plane",
         "near_curve": "linear-coordinate-no-depth-curve-before-hard-representation-cap",
     }
 
@@ -127,7 +121,7 @@ def validate_v2_state_trace(
     """Fail closed unless every row proves the simplified persistent-camera contract."""
 
     root_keys = {
-        "schema", "policy", "calibration_contract", "cut_source", "diagnostic_role",
+        "schema", "policy", "calibration_contract", "diagnostic_role",
         "diagnostic_method", "mapping_config", "adaptation_semantics",
         "frame_fields", "frames", "producer",
     }
@@ -139,8 +133,7 @@ def validate_v2_state_trace(
             trace.get("diagnostic_method") not in {
                 "frame-moment-proxies-not-matched-pixel-affine-v2",
                 "gpu-frame-moments-and-rendered-fields-v6"} or
-            trace.get("frame_fields") != list(V2_STATE_TRACE_FIELDS) or
-            trace.get("cut_source") != V2_STATE_TRACE_CUT_SOURCE):
+            trace.get("frame_fields") != list(V2_STATE_TRACE_FIELDS)):
         raise ValueError("v2 state trace has missing or unknown semantics")
     contract = trace.get("calibration_contract")
     expected_contract = {
@@ -258,21 +251,17 @@ def validate_v2_state_trace(
         for key in ("center", "inverse_scale", "convergence_curve", "container_scale"):
             if np.float32(row[key]) != np.float32(native_state[key]):
                 raise ValueError(f"v2 state trace {frame_id} {key} disagrees with authenticated state")
-        for key in ("calibration_revision", "confirmed_cut_count"):
-            if row[key] != native_state[key]:
-                raise ValueError(f"v2 state trace {frame_id} {key} disagrees with authenticated state")
+        if row["calibration_revision"] != native_state["calibration_revision"]:
+            raise ValueError(
+                f"v2 state trace {frame_id} calibration_revision disagrees with authenticated state")
         if row["frame_valid"] != (native_state["frame_valid"] == 1.0):
             raise ValueError(f"v2 state trace {frame_id} validity disagrees with authenticated state")
-        for key in ("calibration_revision", "confirmed_cut_count"):
-            if type(row[key]) is not int or row[key] < 0 or row[key] > 0xFFFFFFFE:
-                raise ValueError(f"v2 state trace {frame_id} has an invalid {key}")
-        for key in ("confirmed_cut", "input_valid", "frame_valid", "camera_valid",
-                    "collapsed"):
+        if (type(row["calibration_revision"]) is not int or
+                not 0 <= row["calibration_revision"] <= 0xFFFFFFFE):
+            raise ValueError(f"v2 state trace {frame_id} has an invalid calibration_revision")
+        for key in ("input_valid", "frame_valid", "camera_valid", "collapsed"):
             if type(row[key]) is not bool:
                 raise ValueError(f"v2 state trace {frame_id} has an invalid {key}")
-        if (row["confirmed_cut_count"] != 0 or row["confirmed_cut"] or
-                row["cut_attribution"] != ("initialization" if index == 0 else "none")):
-            raise ValueError(f"v2 state trace {frame_id} has a retired cut signal")
         for key in (
                 "center", "inverse_scale", "latched_scale", "convergence_curve",
                 "requested_gain", "container_scale", "effective_gain",

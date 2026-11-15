@@ -89,8 +89,7 @@ namespace platf::sbs_debug {
     bool subtitle_records_match_frame(
       const std::vector<std::uint8_t> &ocr,
       const std::vector<std::uint8_t> &locator,
-      const frame &completed,
-      std::uint32_t confirmed_cut_count
+      const frame &completed
     );
 
     /** Accept exact-current evidence (including cadence-due reuse), or an authenticated held tuple. */
@@ -98,8 +97,7 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &ocr,
       const std::vector<std::uint8_t> &locator,
       const std::vector<std::uint8_t> &ring,
-      const frame &completed,
-      std::uint32_t confirmed_cut_count
+      const frame &completed
     );
 
     bool subtitle_ocr_record_is_canonical_for_frame(

@@ -3,7 +3,7 @@
  * @brief Harness-only whole-sequence execution of the production depth-coordinate-v2 shaders.
  *
  * This is deliberately not a second mapping implementation. The helper loads authenticated raw
- * DAV2 fields and hard-cut generations, keeps one GPU state buffer alive for the sequence, and
+ * DAV2 fields, keeps one GPU state buffer alive for the sequence, and
  * records the same six base V2 coordinate entrypoints through the non-owning GPU executor used
  * by video_depth_estimator. Its
  * replay contract supplies canonical full-content analysis geometry and omits the live-only
@@ -32,9 +32,9 @@
 
 namespace sbs_bench {
 
-  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 22;
+  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 23;
   inline constexpr std::string_view depth_coordinate_v2_state_trace_policy =
-    "authenticated-adaptive-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v22";
+    "authenticated-adaptive-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v23";
   inline constexpr std::string_view depth_coordinate_v2_diagnostic_role =
     "non-controlling-mode-selected-camera-audit-v6";
   inline constexpr std::string_view depth_coordinate_v2_gpu_authority =
@@ -50,7 +50,7 @@ namespace sbs_bench {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertical_majorant;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> encoded_final_parallax;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_health_state;
     std::vector<float> raw_values;
     std::vector<float> canonical_values;
     std::vector<float> candidate_parallax_values;

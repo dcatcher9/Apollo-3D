@@ -143,8 +143,8 @@ namespace {
       ++observation_index;
     }
     return {
-      {"schema", 11u},
-      {"mode", "depth-coordinate-v2-production-gpu-sequence-v13"},
+      {"schema", 12u},
+      {"mode", "depth-coordinate-v2-production-gpu-sequence-v14"},
       {"calibration_contract", {
         {"file", "contracts/depth-coordinate-v2-v1.json"},
         {"schema", v2::contract_schema},
@@ -180,7 +180,6 @@ namespace {
         {"vertical_majorant_share", v2::vertical_majorant_share},
         {"direct_container_limit", v2::direct_container_limit},
       }},
-      {"cut_source", "unit-authenticated-hard-cut-generation"},
       {"frames", authenticated_frames},
     };
   }
@@ -790,11 +789,11 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
             std::string::npos);
   EXPECT_NE(map.find("bind_stage_constants(context,command.constants"),
             std::string::npos);
-  EXPECT_NE(map.find("CSSetShaderResources(0u,8u,"), std::string::npos);
-  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,6u,"),
+  EXPECT_NE(map.find("CSSetShaderResources(0u,7u,"), std::string::npos);
+  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,5u,"),
             std::string::npos);
-  EXPECT_EQ(count_occurrences(map, "CSSetShaderResources(0u,8u,"), 2u);
-  EXPECT_EQ(count_occurrences(map, "CSSetUnorderedAccessViews(0u,6u,"), 2u);
+  EXPECT_EQ(count_occurrences(map, "CSSetShaderResources(0u,7u,"), 2u);
+  EXPECT_EQ(count_occurrences(map, "CSSetUnorderedAccessViews(0u,5u,"), 2u);
   EXPECT_NE(vertical.find("CSSetShaderResources(0u,1u"), std::string::npos);
   EXPECT_NE(vertical.find("CSSetUnorderedAccessViews(0u,2u"), std::string::npos);
   EXPECT_NE(horizontal.find("CSSetShaderResources(0u,1u"), std::string::npos);
@@ -1594,8 +1593,6 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
       {"frame_id", "0001"},
       {"raw_file", "raw_0001.f32"},
       {"raw_sha256", sha256_hex(raw_bytes)},
-      {"hard_cut_count", 0u},
-      {"hard_cut_pulse", false},
     }});
     const auto manifest = make_replay_manifest(
       calibration,
@@ -1653,7 +1650,7 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
   }
 }
 
-TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterAdaptsAcrossCutsAndHoldsUnusableInputOnGpu) {
+TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterAdaptsAcrossContentChangesAndHoldsUnusableInputOnGpu) {
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
 
@@ -1704,16 +1701,14 @@ TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterAdaptsAcrossCutsAndHoldsUnusa
 
   std::vector<std::vector<float>> fields(12u, acquired);
   for (float &value : fields[1]) {
-    value += 0.25f;  // no cut: continuous source-time adaptation must move the camera
+    value += 0.25f;  // continuous source-time adaptation must move the camera
   }
   for (std::size_t index = 2u; index < fields.size(); ++index) {
     for (float &value : fields[index]) {
       value += index == 11u ? 1.25f : 1.0f;
     }
   }
-  // A later unusable update and changed evidence after it must not replace the camera acquired
-  // on the confirmed cut. Twelve updates deliberately extend beyond the former age-eight
-  // replacement horizon.
+  // A later unusable update and changed evidence after it must not replace the tracked camera.
   std::fill(fields[10].begin(), fields[10].end(), 2.0f);
 
   nlohmann::ordered_json frames = nlohmann::ordered_json::array();
@@ -1726,8 +1721,6 @@ TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterAdaptsAcrossCutsAndHoldsUnusa
       {"frame_id", frame_id},
       {"raw_file", raw_file},
       {"raw_sha256", sha256_hex(bytes)},
-      {"hard_cut_count", index >= 2u ? 1u : 0u},
-      {"hard_cut_pulse", index == 2u},
     });
   }
 
@@ -1770,7 +1763,6 @@ TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterAdaptsAcrossCutsAndHoldsUnusa
   EXPECT_GT(rows[1]["center"].get<float>(), first_center);
   EXPECT_LT(rows[1]["center"].get<float>(), first_center + 0.25f);
   EXPECT_EQ(rows[1]["calibration_revision"], 2u);
-  EXPECT_EQ(rows[2]["confirmed_cut"], true);
   EXPECT_GT(rows[2]["center"].get<float>(), rows[1]["center"].get<float>());
   EXPECT_LT(rows[2]["center"].get<float>(), first_center + 1.0f);
   EXPECT_EQ(rows[2]["calibration_revision"], 3u);
@@ -1783,7 +1775,6 @@ TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterAdaptsAcrossCutsAndHoldsUnusa
   EXPECT_FLOAT_EQ(rows[10]["center"].get<float>(), rows[9]["center"].get<float>());
   EXPECT_EQ(rows[11]["frame_valid"], true);
   EXPECT_FLOAT_EQ(rows[11]["center"].get<float>(), rows[9]["center"].get<float>());
-  EXPECT_EQ(rows[11]["cut_attribution"], "none");
 }
 
 TEST(DepthCoordinateV2GpuTest, CoordinatePassReplayAuthenticatesAdaptiveStateAndRecoversExactly) {
@@ -1832,7 +1823,7 @@ TEST(DepthCoordinateV2GpuTest, CoordinatePassReplayAuthenticatesAdaptiveStateAnd
   raw_fields.back().back() = 1000.0f;
   raw_fields.push_back(base);  // same shot, an outlier must not rescale this field
   const std::size_t foreground_count = element_count / 4u;
-  raw_fields.emplace_back(element_count, 0.0f);  // confirmed cut, broad foreground
+  raw_fields.emplace_back(element_count, 0.0f);  // abrupt content change, broad foreground
   std::fill_n(raw_fields.back().begin(), foreground_count, 20.0f);
   raw_fields.push_back(base);  // one non-finite texel invalidates the authenticated field
   raw_fields.back()[element_count / 2u] = std::numeric_limits<float>::quiet_NaN();
@@ -1841,10 +1832,10 @@ TEST(DepthCoordinateV2GpuTest, CoordinatePassReplayAuthenticatesAdaptiveStateAnd
   for (float &value : raw_fields.back()) {
     value += 0.5f;
   }
-  raw_fields.push_back(base);  // the same one-NaN field on a cut cannot seed the new camera
+  raw_fields.push_back(base);  // the same one-NaN field cannot move the camera
   raw_fields.back()[element_count / 3u] = std::numeric_limits<float>::quiet_NaN();
   const std::size_t ramp_foreground_count = element_count * 18u / 100u;
-  raw_fields.emplace_back(element_count, 0.0f);  // invalid+cut retained; next valid re-arms
+  raw_fields.emplace_back(element_count, 0.0f);  // invalid retained; next valid re-arms
   std::fill_n(raw_fields.back().begin(), ramp_foreground_count, 20.0f);
 
   nlohmann::ordered_json frames = nlohmann::ordered_json::array();
@@ -1857,8 +1848,6 @@ TEST(DepthCoordinateV2GpuTest, CoordinatePassReplayAuthenticatesAdaptiveStateAnd
       {"frame_id", frame_id},
       {"raw_file", raw_file},
       {"raw_sha256", sha256_hex(bytes)},
-      {"hard_cut_count", index >= 7u ? 2u : (index >= 3u ? 1u : 0u)},
-      {"hard_cut_pulse", false},
     });
   }
 
@@ -1946,7 +1935,7 @@ TEST(DepthCoordinateV2GpuTest, CoordinatePassReplayAuthenticatesAdaptiveStateAnd
   const auto trace = nlohmann::ordered_json::parse(read_bytes(trace_path));
   ASSERT_EQ(trace.at("schema"), sbs_bench::depth_coordinate_v2_state_trace_schema);
   ASSERT_EQ(trace.at("frames").size(), raw_fields.size());
-  ASSERT_EQ(trace.at("frame_fields").size(), 45u);
+  ASSERT_EQ(trace.at("frame_fields").size(), 42u);
   EXPECT_EQ(trace["producer"]["authority"],
             "authenticated-raw-depth-plus-eight-v2-compute-shaders-persistent-gpu-state-v11");
   EXPECT_EQ(trace["producer"]["tensor_shape"]["width"], replay->width());
@@ -1970,9 +1959,6 @@ TEST(DepthCoordinateV2GpuTest, CoordinatePassReplayAuthenticatesAdaptiveStateAnd
       EXPECT_GE(rows[index]["latched_scale"].get<float>(), calibration.raw_coordinate_scale - 2.0e-6f);
     }
   }
-  // The manifest cut generation is attribution metadata only; the GPU epoch word is retired.
-  EXPECT_EQ(rows[3]["confirmed_cut"], true);
-  EXPECT_EQ(rows[3]["confirmed_cut_count"], 0u);
   const float first_center = rows[0]["center"].get<float>();
   EXPECT_GT(rows[1]["center"].get<float>(), first_center);
   EXPECT_LT(rows[3]["center"].get<float>(), rows[3]["observed_mean"].get<float>());
@@ -2046,12 +2032,6 @@ TEST(DepthCoordinateV2GpuTest, CoordinatePassReplayAuthenticatesAdaptiveStateAnd
     mismatched_preprocess;
   expect_rejected(invalid, "mismatched-preprocess-source-closure");
   invalid = manifest;
-  invalid["frames"][0]["hard_cut_count"] = 0xfffffffeu;
-  expect_rejected(invalid, "reserved-hard-cut-generation");
-  invalid = manifest;
-  invalid["frames"][0]["hard_cut_count"] = 0x100000000ull;
-  expect_rejected(invalid, "overflow-hard-cut-generation");
-  invalid = manifest;
   invalid["mapping_config"]["joint_plane_mode"] = 0u;
   expect_rejected(invalid, "retired-policy-zero");
   invalid = manifest;
@@ -2092,7 +2072,7 @@ TEST(DepthCoordinateV2GpuTest, SharedRawScanPreservesIndependentHistogramAuthori
   const std::string reference_histogram = R"HIST_REF(
 // Mode-3 robust raw-depth histogram. Every reduction group overwrites its 256 bins;
 // no clear, global atomic accumulator, CPU readback or reuse dispatch is required.
-// Unlike the private cut-normalization histogram, all finite signed eligible values count.
+// Unlike the private normalization histogram, all finite signed eligible values count.
 StructuredBuffer<float> InputBuffer : register(t0);
 Texture2D<uint> TensorExclusion : register(t1);
 StructuredBuffer<float4> FrameStats : register(t2);
@@ -2232,7 +2212,7 @@ void main(uint3 tid : SV_GroupThreadID) {
   // Frozen pre-fusion normalization arithmetic remains an independent test-only oracle.
   const auto normalization_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl",
     read_bytes(fs::path(SUNSHINE_SOURCE_DIR) /
-      "tests/fixtures/host_sbs_cut_normalization_histogram_reference_cs.hlsl"));
+      "tests/fixtures/host_sbs_normalization_histogram_reference_cs.hlsl"));
   ASSERT_TRUE(moments && frame_resolve && histogram && quantiles && old_histogram &&
     old_quantiles && normalization_histogram);
 
@@ -2490,7 +2470,7 @@ void main(uint3 tid : SV_GroupThreadID) {
   }
 }
 
-TEST(DepthCoordinateV2GpuTest, ContinuousHostPlaneTracksAcrossCutsAndHoldsUnusableInput) {
+TEST(DepthCoordinateV2GpuTest, ContinuousHostPlaneTracksAcrossContentChangesAndHoldsUnusableInput) {
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
   warp_device_t warp;
@@ -2531,8 +2511,8 @@ TEST(DepthCoordinateV2GpuTest, ContinuousHostPlaneTracksAcrossCutsAndHoldsUnusab
     const std::string bytes = float_bytes(fields[index]);
     ASSERT_TRUE(write_bytes(tree.path / name, bytes));
     frames.push_back({{"frame_id", id}, {"raw_file", name},
-      {"raw_sha256", sha256_hex(bytes)}, {"hard_cut_count", index >= 7u ? 1u : 0u},
-      {"hard_cut_pulse", false}, {"observation_timestamp_us", std::uint64_t(100000u + index * 100000u)}});
+      {"raw_sha256", sha256_hex(bytes)},
+      {"observation_timestamp_us", std::uint64_t(100000u + index * 100000u)}});
   }
   constexpr float pop = 1.75f;
   auto manifest = make_replay_manifest(calibration, sha256_hex(contract),
@@ -2567,7 +2547,6 @@ TEST(DepthCoordinateV2GpuTest, ContinuousHostPlaneTracksAcrossCutsAndHoldsUnusab
   EXPECT_GT(rows[1]["center"].get<float>(), rows[0]["center"].get<float>());
   EXPECT_LE(rows[1]["center"].get<float>() - rows[0]["center"].get<float>(),
     0.1f / rows[1]["inverse_scale"].get<float>() + 2.0e-5f);
-  EXPECT_FALSE(rows[1]["confirmed_cut"].get<bool>());
   ASSERT_EQ(outputs[0].candidate_parallax_values.size(), count);
   const auto gain = v2::requested_gain_for_config(pop);
   // Observe actual native candidates across far/near raw samples; no CPU warp replica.
@@ -2583,7 +2562,6 @@ TEST(DepthCoordinateV2GpuTest, ContinuousHostPlaneTracksAcrossCutsAndHoldsUnusab
     EXPECT_FLOAT_EQ(outputs[index].encoded_minimum, 0.5f);
     EXPECT_FLOAT_EQ(outputs[index].encoded_maximum, 0.5f);
   }
-  EXPECT_TRUE(rows[7]["confirmed_cut"].get<bool>());
   EXPECT_TRUE(rows[8]["frame_valid"].get<bool>());
   // First observation after unusable evidence rearms the clock without spending skipped time.
   EXPECT_FLOAT_EQ(rows[8]["center"].get<float>(), rows[7]["center"].get<float>());
@@ -2615,7 +2593,7 @@ TEST(DepthCoordinateV2GpuTest, JointPlaneModeTamperingRecoversAndUnknownModesAre
     const std::string raw_file = "raw_" + std::string(id) + ".f32";
     ASSERT_TRUE(write_bytes(tree.path / raw_file, bytes));
     frames.push_back({{"frame_id", id}, {"raw_file", raw_file},
-      {"raw_sha256", sha256_hex(bytes)}, {"hard_cut_count", 0u}, {"hard_cut_pulse", false}});
+      {"raw_sha256", sha256_hex(bytes)}});
   }
   auto manifest = make_replay_manifest(calibration, sha256_hex(contract),
     shape->width, shape->height, frames);

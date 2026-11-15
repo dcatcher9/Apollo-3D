@@ -27,10 +27,10 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import shared_ui_pin_dump  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 51
+DUMP_MANIFEST_SCHEMA = 52
 GPU_TRACE_RING_SCHEMA = 5
 GPU_TRACE_CONTRACT_SCHEMA = 6
-GPU_TRACE_DECODED_SCHEMA = 7
+GPU_TRACE_DECODED_SCHEMA = 8
 GPU_TRACE_RING_TAG = 0x48525447
 GPU_TRACE_RECORD_TAG = 0x31525447
 GPU_TRACE_CAPACITY = 300
@@ -109,7 +109,7 @@ SUBTITLE_PLANE_ADAPTIVE_OFFSET = coordinate_contract.SUBTITLE_OCR.plane_adaptive
 DEPTH_INPUT_REGION_SCHEMA = 4
 WINDOW_REGION_SCHEMA = 1
 WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"})
-SHADOW_STATE_DUMP_SCHEMA = 18
+SHADOW_STATE_DUMP_SCHEMA = 19
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 3
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
     shader_manifest.PARALLAX_V2_LIVE_RENDERER_GROUP.source_closure_sha256)
@@ -301,7 +301,7 @@ _STATE_CONSTANT_KEYS = {
     "vertical_majorant_share",
 }
 _DECODED_KEYS = {
-    "frame_valid", "camera_valid", "calibration_revision", "confirmed_cut_count", "contract_tag",
+    "frame_valid", "camera_valid", "calibration_revision", "contract_tag",
     "requested_gain", "requested_pop_strength", "latched_scale",
     "convergence_curve", "container_scale", "effective_gain",
     "camera_center_integrity_bits", "renderer_authorization_bits",
@@ -346,7 +346,7 @@ def adaptation_semantics_for_mode(mode: int) -> Dict[str, str]:
         raise ValueError("invalid adaptive policy identity; expected 3")
     return {
         "coordinate": "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference",
-        "convergence_curve": "continuously-tracked-mean-is-zero-plane-no-cut-latch",
+        "convergence_curve": "continuously-tracked-mean-is-zero-plane",
         "requested_gain": "immutable-cfg-pop-strength-independent-of-display-limit",
         "container_scale": "abi-retained-identity-mode3-hard-representation-cap",
         "near_curve": "linear-coordinate-no-depth-curve-before-hard-representation-cap",
@@ -819,7 +819,6 @@ def validate_subtitle_plane_snapshot(
         payload: Any, *, matched_frame_id: int, analysis_generation: int,
         source_width: int, source_height: int, field_width: int, field_height: int,
         tensor_content: tuple[int, int, int, int] | None = None,
-        expected_scene_epoch: int | None = None,
         expected_observation_timestamp_us: int | None = None,
         joint_plane_mode: int = 3, requested_gain: float | None = None) -> Dict[str, Any]:
     """Authenticate UIP4 layout/domain/controller only; it contains no cover geometry.
@@ -860,9 +859,8 @@ def validate_subtitle_plane_snapshot(
             tuple(words[policy.plane_field_extent_offset:policy.plane_field_extent_offset + 2]) != expected_extents[2:] or
             roi is None or tuple(words[policy.plane_roi_offset:policy.plane_roi_offset + 2]) != roi):
         raise ValueError("UIP4 frame/time/source/field/ROI identity differs from current publication")
-    epoch = words[policy.plane_cut_epoch_word]
-    if expected_scene_epoch is not None and epoch != _uint32(expected_scene_epoch, "UIP4 cut epoch"):
-        raise ValueError("UIP4 cut epoch differs from authenticated geometry")
+    if words[policy.plane_identity_reserved_word] != 0:
+        raise ValueError("UIP4 identity-reserved word must be canonical zero")
     if (expected_observation_timestamp_us is not None and
             timestamp != _uint64(expected_observation_timestamp_us, "UIP4 expected observation time")):
         raise ValueError("UIP4 observation timestamp differs from completed source")
@@ -879,7 +877,7 @@ def validate_subtitle_plane_snapshot(
         "warmup_packed": warmup, "warmup_remaining": warmup & policy.plane_warmup_remaining_mask,
         "warmup_previous_cue": bool(warmup & policy.plane_warmup_cue_bit),
         "matched_frame_id": frame, "analysis_generation": generation,
-        "observation_timestamp_us": timestamp, "scene_epoch": epoch,
+        "observation_timestamp_us": timestamp,
         "source_width": source_width, "source_height": source_height,
         "field_width": field_width, "field_height": field_height,
         "roi_top": roi[0], "roi_bottom": roi[1], "tensor_content_rect": content,
@@ -1617,7 +1615,8 @@ def validate_parallax_state_words(
     mode = values["joint_plane_mode_bits"]
     if (mode != 3 or
             (expected_joint_plane_mode is not None and mode != expected_joint_plane_mode) or
-            values["mapping_state_reserved_2"] != 0):
+            values["mapping_state_reserved_2"] != 0 or
+            values["control_reserved_0"] != 0):
         raise ValueError("ParallaxState has invalid mode or reserved mapping state")
     if values["contract_tag_bits"] != _CONTRACT_TAG:
         raise ValueError("ParallaxState has the wrong contract tag")
@@ -1858,7 +1857,7 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         decoded.get("calibration_revision"),
         "shadow_state.json decoded.calibration_revision",
     )
-    for key in ("confirmed_cut_count", "contract_tag", "camera_center_integrity_bits",
+    for key in ("contract_tag", "camera_center_integrity_bits",
                 "renderer_authorization_bits"):
         _uint32(decoded.get(key), f"shadow_state.json decoded.{key}")
     native_decoded = {
@@ -1874,7 +1873,6 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         if camera_valid else 0.0)
     expected_decoded = {
         "calibration_revision": typed["calibration_revision"],
-        "confirmed_cut_count": typed["confirmed_cut_count"],
         "contract_tag": coordinate_tag,
         "requested_gain": constants["requested_gain"],
         "requested_pop_strength": constants["requested_pop_strength"],
@@ -1979,7 +1977,7 @@ def _validate_shadow_manifest_summary(value: Any) -> Dict[str, Any]:
     _calibration_revision(
         value.get("calibration_revision"),
         "dump_manifest.json V2 state calibration_revision")
-    for key in ("confirmed_cut_count", "contract_tag", "camera_center_integrity_bits",
+    for key in ("contract_tag", "camera_center_integrity_bits",
                 "renderer_authorization_bits", "joint_plane_mode"):
         _uint32(value.get(key), f"dump_manifest.json V2 state {key}")
     native_value = {
@@ -3452,7 +3450,7 @@ def validate_gpu_trace_ring(
                 "frame_id": _uint64_words(plane[4], plane[5]),
                 "analysis_generation": _uint64_words(plane[6], plane[7]),
                 "observation_timestamp_us": _uint64_words(plane[8], plane[9]),
-                "cut_epoch": plane[20], "target": _gpu_trace_json_float(plane[27]),
+                "target": _gpu_trace_json_float(plane[27]),
                 "target_bits": plane[27],
                 "adaptive": {
                     "initialized": plane[24] == 1, "flags": plane[25], "current_level": plane[26],
@@ -3989,7 +3987,7 @@ def validate_subtitle_contour_tuple(
         payloads: Any, *, evidence_frame_id: int, analysis_generation: int,
         source_width: int, source_height: int, field_width: int, field_height: int,
         tensor_content: tuple[int, int, int, int], roi_top: int, roi_bottom: int,
-        scene_epoch: int, observation_timestamp_us: int, geometry_ready: bool,
+        observation_timestamp_us: int, geometry_ready: bool,
         ocr_authoritative: bool, current_rectangles: Any,
         plane_state: Any, current_cores: Any = None,
         current_reference_center_twice_source: int | None = None) -> Dict[str, Any]:
@@ -4014,7 +4012,6 @@ def validate_subtitle_contour_tuple(
     _uint64(evidence_frame_id, "contour inference-owner frame")
     _uint64(analysis_generation, "contour analysis generation")
     _uint64(observation_timestamp_us, "contour inference-owner timestamp")
-    _uint32(scene_epoch, "contour scene epoch")
     if (evidence_frame_id == 0 or observation_timestamp_us == 0 or
             type(geometry_ready) is not bool or type(ocr_authoritative) is not bool or
             not isinstance(current_rectangles, list)):
@@ -4045,7 +4042,6 @@ def validate_subtitle_contour_tuple(
             plane_state.get("matched_frame_id") != evidence_frame_id or
             plane_state.get("analysis_generation") != analysis_generation or
             plane_state.get("observation_timestamp_us") != observation_timestamp_us or
-            plane_state.get("scene_epoch") != scene_epoch or
             plane_state.get("source_width") != source_width or plane_state.get("source_height") != source_height or
             plane_state.get("field_width") != field_width or plane_state.get("field_height") != field_height or
             not isinstance(plane_content, (tuple, list)) or tuple(plane_content) != content):
@@ -4067,7 +4063,7 @@ def validate_subtitle_contour_tuple(
     authority = bool(eligible and geometry_ready and ocr_authoritative and current_authority)
     snapshot_gate = bool(eligible and geometry_ready and ocr_authoritative)
     expected_identity = [
-        policy["history_schema"], policy["history_tag"], int(authority), scene_epoch if snapshot_gate else 0,
+        policy["history_schema"], policy["history_tag"], int(authority), 0,
         evidence_frame_id & 0xFFFFFFFF, evidence_frame_id >> 32,
         analysis_generation & 0xFFFFFFFF, analysis_generation >> 32,
         source_width, source_height, crop_top, crop_height,
@@ -4077,7 +4073,7 @@ def validate_subtitle_contour_tuple(
     ]
     expected_identity[policy["history_snapshot_valid_word"]] = int(snapshot_gate)
     if identity != tuple(expected_identity):
-        raise ValueError("SCT5 temporal-mask identity disagrees with exact owner/clock/generation/cut/source/ROI/content/recipe/snapshot/current authority")
+        raise ValueError("SCT5 temporal-mask identity disagrees with exact owner/clock/generation/source/ROI/content/recipe/snapshot/current authority")
     admitted = support != 0
     if np.any(support > 1) or np.any(pin > 1):
         raise ValueError("subtitle temporal support/pin has nonbinary support or unknown enum values")
@@ -4255,7 +4251,7 @@ def _verify_subtitle_conditioning_artifacts(
         analysis_generation: int, source_width: int, source_height: int,
         field_width: int, field_height: int,
         tensor_content: tuple[int, int, int, int],
-        confirmed_cut_count: int, gpu_trace: Dict[str, Any], shadow_state: Dict[str, Any],
+        gpu_trace: Dict[str, Any], shadow_state: Dict[str, Any],
         joint_plane_mode: int = 3, requested_gain: float | None = None,
         input_region: Dict[str, Any] | None = None) -> Dict[str, Any]:
     import json
@@ -4311,7 +4307,6 @@ def _verify_subtitle_conditioning_artifacts(
         plane_payload, ocr_record=ocr, matched_frame_id=evidence_frame_id,
         analysis_generation=analysis_generation, source_width=source_width, source_height=source_height,
         field_width=field_width, field_height=field_height, tensor_content=content,
-        expected_scene_epoch=confirmed_cut_count,
         expected_observation_timestamp_us=publication_timestamp,
         joint_plane_mode=joint_plane_mode, requested_gain=requested_gain)
     state_timestamp = _uint64_words(shadow_state["gain_last_observation_low"],
@@ -4321,7 +4316,7 @@ def _verify_subtitle_conditioning_artifacts(
         shadow_state["renderer_authorization_bits"] == _CONTRACT_TAG and
         shadow_state["joint_plane_mode_bits"] == 3 and
         state_timestamp == publication_timestamp and publication_timestamp != 0 and
-        shadow_state["confirmed_cut_count"] == plane["scene_epoch"])
+        shadow_state["control_reserved_0"] == 0)
     if plane["current_valid"] != bool(geometry_ready and ocr["authoritative"]):
         raise ValueError("UIP4 current-valid verdict differs from current OCR8/geometry authority")
     tail = plane_words[SUBTITLE_PLANE_ADAPTIVE_OFFSET:]
@@ -4347,7 +4342,7 @@ def _verify_subtitle_conditioning_artifacts(
         evidence_frame_id=evidence_frame_id, analysis_generation=analysis_generation,
         source_width=source_width, source_height=source_height,
         field_width=field_width, field_height=field_height, tensor_content=content,
-        roi_top=roi_top, roi_bottom=roi_bottom, scene_epoch=plane["scene_epoch"],
+        roi_top=roi_top, roi_bottom=roi_bottom,
         observation_timestamp_us=publication_timestamp, geometry_ready=geometry_ready,
         ocr_authoritative=ocr["authoritative"], current_rectangles=plane["current_rectangles"],
         current_cores=ocr["raw_boxes"][:plane["current_count"]],
@@ -5101,7 +5096,6 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         field_width=width,
         field_height=height,
         tensor_content=input_region["tensor_content_rect"],
-        confirmed_cut_count=shadow_state["confirmed_cut_count"],
         gpu_trace=gpu_trace,
         joint_plane_mode=shadow_state["joint_plane_mode_bits"],
         requested_gain=shadow_state_constant_float32(shadow_state_document, "requested_gain"),

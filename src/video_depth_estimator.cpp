@@ -1976,7 +1976,7 @@ namespace models {
       {publication_receipt::subtitle_condition_begin, publication_receipt::subtitle_condition_word_count},
       {publication_receipt::parallax_state_begin, publication_receipt::parallax_state_word_count},
       {publication_receipt::depth_frame_state_begin, publication_receipt::depth_frame_state_word_count},
-      {publication_receipt::cut_state_begin, publication_receipt::cut_state_word_count},
+      {publication_receipt::depth_health_state_begin, publication_receipt::depth_health_state_word_count},
       {publication_receipt::outcome_counts_begin, publication_receipt::outcome_counts_word_count},
     }};
 
@@ -2003,7 +2003,7 @@ namespace models {
             continue;
           }
           slot.sampled_at = std::chrono::steady_clock::now();
-          slot.cut_present = sources[6u] != nullptr;
+          slot.depth_health_present = sources[6u] != nullptr;
           slot.outcomes_present = sources[7u] != nullptr;
           for (std::size_t index = 0u; index < sources.size(); ++index) {
             if (!sources[index]) {
@@ -2069,7 +2069,7 @@ namespace models {
           const auto expected = *slot.state.expected();
           if (expected.estimator_generation == estimator_generation) {
             result.diagnostics[result.diagnostic_count++] = publication_receipt::decode_diagnostics(
-              words, expected, slot.cut_present, slot.outcomes_present, slot.sampled_at
+              words, expected, slot.depth_health_present, slot.outcomes_present, slot.sampled_at
             );
           }
           if (auto receipt = slot.state.retire(words, estimator_generation)) {
@@ -2149,7 +2149,7 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11Query> completion;
         publication_receipt::slot_state_t state;
         std::chrono::steady_clock::time_point sampled_at {};
-        bool cut_present = false;
+        bool depth_health_present = false;
         bool outcomes_present = false;
       };
       ID3D11Device *device_;
@@ -2172,7 +2172,7 @@ namespace models {
     const host_sbs_gpu_completion_receipt::snapshot_words_t &snapshot,
     const host_sbs_gpu_completion_receipt::expected_t &expected,
     const std::uint64_t poll_estimator_generation,
-    const bool cut_present,
+    const bool depth_health_present,
     const bool outcomes_present
   ) {
     publication_receipt_readback_test_result result;
@@ -2196,7 +2196,7 @@ namespace models {
       sources[index] = buffers[index].Get();
     }
     result.resources_created = true;
-    if (!cut_present) {
+    if (!depth_health_present) {
       sources[6u] = nullptr;
     }
     if (!outcomes_present) {
@@ -2798,13 +2798,13 @@ namespace models {
       const auto scalar = [&](const word_e word) {
         return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
       };
-      if (!publication_receipt::valid_cut_state_words(words)) {
+      if (!publication_receipt::valid_depth_health_words(words)) {
         return false;
       }
       sample.depth_width = depth_width;
       sample.depth_height = depth_height;
       // Protocol-13 telemetry retains these pre-V2 columns for client wire compatibility. The
-      // V2 state has no adaptive-pop, subject, zero-anchor or scene-cut authority, so publish
+      // V2 state has no adaptive-pop, subject or zero-anchor authority, so publish
       // explicit unavailable/default values instead of decoding reserved GPU words.
       sample.adaptive_pop_ratio = 1.0f;
       sample.edge_fraction = -1.0f;
@@ -3508,9 +3508,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
     // Established 32-word tagged state ABI. V2 writes only its depth-health fields; every
     // retired word keeps its zero initial value.
-    Microsoft::WRL::ComPtr<ID3D11Buffer> cut_state_buf;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> cut_state_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_health_state_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_health_state_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_health_state_srv;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
@@ -3520,9 +3520,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_previous_srv;
     // Normalized depth of the last valid infer observation, restored by near-identical reuse.
     // The ordinary previous texture must still advance every frame for temporal EMA.
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_cut_history_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_cut_history_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_cut_history_srv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> ema_motion_mask_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
@@ -4436,8 +4433,8 @@ namespace models {
         }
         latest_diagnostic_sequence = diagnostic.expected.publication_sequence;
         depth_telemetry_sample sample;
-        if (diagnostic.cut_state && decode_telemetry_words(
-              *diagnostic.cut_state,
+        if (diagnostic.depth_health_state && decode_telemetry_words(
+              *diagnostic.depth_health_state,
               diagnostic.expected.width, diagnostic.expected.height,
               diagnostic.expected.frame_id, diagnostic.sampled_at, sample
             )) {
@@ -5927,8 +5924,8 @@ namespace models {
         }
       }
 
-      // The tagged depth-health state keeps the established 32-word ABI for offline traces,
-      // Dump 3D, and live telemetry. Its CPU-initialized tag is never rewritten on the GPU.
+      // The tagged depth-health state serves offline traces, Dump 3D, and live telemetry. Its
+      // CPU-initialized tag is never rewritten on the GPU.
       {
         D3D11_BUFFER_DESC bd = {};
         bd.Usage = D3D11_USAGE_DEFAULT;
@@ -5938,10 +5935,10 @@ namespace models {
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
         bd.StructureByteStride = sizeof(float) * 4;
         D3D11_SUBRESOURCE_DATA sd2 = {init_state.data(), 0, 0};
-        device->CreateBuffer(&bd, &sd2, &cut_state_buf);
-        if (cut_state_buf) {
-          device->CreateUnorderedAccessView(cut_state_buf.Get(), nullptr, &cut_state_uav);
-          device->CreateShaderResourceView(cut_state_buf.Get(), nullptr, &cut_state_srv);
+        device->CreateBuffer(&bd, &sd2, &depth_health_state_buf);
+        if (depth_health_state_buf) {
+          device->CreateUnorderedAccessView(depth_health_state_buf.Get(), nullptr, &depth_health_state_uav);
+          device->CreateShaderResourceView(depth_health_state_buf.Get(), nullptr, &depth_health_state_srv);
         }
       }
 
@@ -5952,7 +5949,7 @@ namespace models {
         buffer_to_tex_cs && buffer_to_tex_pad_cs &&
         depth_minmax_ema_cs &&
         minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
-        cut_state_uav && cut_state_srv;
+        depth_health_state_uav && depth_health_state_srv;
       if (!mandatory_resources_ready) {
         BOOST_LOG(error) << "Depth estimator failed: required engine or Host SBS GPU resource initialization failed.";
         return;
@@ -6866,7 +6863,7 @@ namespace models {
         ID3D11ShaderResourceView *dense_inputs[13] {
           subtitle_contour_source_snapshot.srv.Get(), subtitle_contour_probability_snapshot.srv.Get(),
           subtitle_locator_state_srv.Get(), subtitle_condition_params_srv.Get(), nullptr, r.filtered_support.srv.Get(),
-          nullptr, nullptr, cut_state_srv.Get(), ocr_box_record_srv.Get(), depth_coordinate_v2_state_srv.Get(), nullptr, nullptr
+          nullptr, nullptr, depth_health_state_srv.Get(), ocr_box_record_srv.Get(), depth_coordinate_v2_state_srv.Get(), nullptr, nullptr
         };
         context->CSSetShaderResources(0u, 13u, dense_inputs);
         context->CSSetUnorderedAccessViews(6u, 1u, r.glyph_matte.uav.GetAddressOf(), nullptr);
@@ -6994,7 +6991,7 @@ namespace models {
       }
       subtitle_selected_matte_commands = false;
       // The preceding joined root and its consumers must be retired first. These are the same
-      // zero-initialized subtitle resources used at startup; depth, cut and camera stay intact.
+      // zero-initialized subtitle resources used at startup; depth and camera stay intact.
       const UINT zero[4] = {};
       for (auto *uav : {
              ocr_box_record_uav.Get(), subtitle_locator_state_uav.Get(),
@@ -7554,10 +7551,9 @@ namespace models {
           !near_identical_cbuffer || !near_identical_history_owner.uav ||
           !tensor_out_srv || !depth_coordinate_v2_state_srv ||
           !tensor_exclusion_srv || !minmax_ema_srv || !tensor_in_srv ||
-          !appearance_ordinal_srv || !cut_state_srv || !depth_srv ||
+          !appearance_ordinal_srv || !depth_health_state_srv ||
           !depth_coordinate_v2_candidate_uav || !tensor_previous_input_uav ||
-          !previous_appearance_ordinal_uav || !depth_cut_history_uav ||
-          !tensor_previous_exclusion_uav) {
+          !previous_appearance_ordinal_uav || !tensor_previous_exclusion_uav) {
         return false;
       }
 
@@ -7572,7 +7568,7 @@ namespace models {
         .constants = base_constants,
         .shader = depth_coordinate_v2_state_resolve_cs.Get(),
         .frame_stats = depth_coordinate_v2_frame_stats_srv.Get(),
-        .cut_bridge_state = cut_state_srv.Get(),
+        .depth_health_state = depth_health_state_srv.Get(),
         .state_output = depth_coordinate_v2_state_uav.Get(),
         .dispatch = parallax_v2_dispatch_command(
           1u,
@@ -7588,7 +7584,7 @@ namespace models {
       mark_d3d_parallax_map_start(perf_slot);
 
       // Raw depth -> immutable pre-limiter candidate, while the same infer-grid dispatch advances
-      // the complete raw padded appearance/depth history and publishes its narrower authenticated
+      // the complete raw padded appearance history and publishes its narrower authenticated
       // owner. normalize_depth_output uploaded the exact b2 words consumed here; no host update
       // occurs between that upload and this dispatch. The full-size canonical-coordinate
       // field is deliberately absent from production; an explicit Dump 3D dispatches it separately.
@@ -7602,12 +7598,10 @@ namespace models {
         .minmax_ema = minmax_ema_srv.Get(),
         .current_model_input = tensor_in_srv.Get(),
         .current_appearance_ordinal = appearance_ordinal_srv.Get(),
-        .cut_bridge_state = cut_state_srv.Get(),
-        .current_depth = depth_srv.Get(),
+        .depth_health_state = depth_health_state_srv.Get(),
         .candidate_output = depth_coordinate_v2_candidate_uav.Get(),
         .previous_model_input_output = tensor_previous_input_uav.Get(),
         .previous_appearance_ordinal_output = previous_appearance_ordinal_uav.Get(),
-        .previous_reliable_depth_output = depth_cut_history_uav.Get(),
         .previous_tensor_exclusion_output = tensor_previous_exclusion_uav.Get(),
         .history_owner_output = near_identical_history_owner.uav.Get(),
         .dispatch = parallax_v2_dispatch_command(
@@ -7860,7 +7854,7 @@ namespace models {
         subtitle_contour_source.srv.Get(), ocr_output_srv.Get(),
         subtitle_locator_state_srv.Get(), subtitle_condition_params_srv.Get(),
         nullptr, nullptr, subtitle_contour_previous_features.srv.Get(),
-        subtitle_contour_identity.srv.Get(), cut_state_srv.Get(), ocr_box_record_srv.Get(),
+        subtitle_contour_identity.srv.Get(), depth_health_state_srv.Get(), ocr_box_record_srv.Get(),
         depth_coordinate_v2_state_srv.Get(), nullptr, nullptr
       };
       context->CSSetShaderResources(0u, 13u, srvs);
@@ -8005,7 +7999,7 @@ namespace models {
           (pending_subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr &&
            !ocr_output_srv) || !subtitle_contour_identity.ready() ||
           !subtitle_contour_probability_snapshot.ready() ||
-          !cut_state_srv || !near_identical_transaction.dispatch) {
+          !depth_health_state_srv || !near_identical_transaction.dispatch) {
         return false;
       }
 
@@ -8068,7 +8062,7 @@ namespace models {
       context->CSSetShader(subtitle_locator_resolve_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *resolve_srvs[10] = {
         depth_coordinate_v2_state_srv.Get(),
-        cut_state_srv.Get(),
+        depth_health_state_srv.Get(),
         depth_coordinate_v2_final_srv.Get(),
         nullptr,
         nullptr,
@@ -8129,7 +8123,7 @@ namespace models {
       // complete depth, subtitle and final field.
       ID3D11ShaderResourceView *condition_srvs[8] = {
         depth_coordinate_v2_state_srv.Get(),
-        cut_state_srv.Get(),
+        depth_health_state_srv.Get(),
         depth_coordinate_v2_final_srv.Get(),
         subtitle_locator_state_srv.Get(),
         subtitle_condition_params_srv.Get(),
@@ -8265,7 +8259,7 @@ namespace models {
           subtitle_condition_params_buf.Get(),
           depth_coordinate_v2_state_buf.Get(),
           minmax_ema_buf.Get(),
-          cut_state_buf.Get(),
+          depth_health_state_buf.Get(),
           gpu_outcome_buffer.Get(),
         }},
         current_publication
@@ -8507,7 +8501,7 @@ namespace models {
     ) {
       estimate_result r;
       r.depth = output_srv();
-      r.cut_state = cut_state_srv;
+      r.depth_health_state = depth_health_state_srv;
       r.depth_frame_state = minmax_ema_srv;
       r.ema_motion_mask = ema_motion_mask_srv;
       r.raw_model_depth = tensor_out_srv;
@@ -9131,9 +9125,9 @@ namespace models {
       if (hist_buf) {
         context->UpdateSubresource(hist_buf.Get(), 0, nullptr, zero_hist.data(), 0, 0);
       }
-      if (cut_state_buf) {
+      if (depth_health_state_buf) {
         context->UpdateSubresource(
-          cut_state_buf.Get(),
+          depth_health_state_buf.Get(),
           0,
           nullptr,
           sbs_adaptive_state::initial_words.data(),
@@ -9159,9 +9153,6 @@ namespace models {
       }
       if (depth_previous_uav) {
         context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), zero4);
-      }
-      if (depth_cut_history_uav) {
-        context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), zero4);
       }
       if (ema_motion_mask_uav) {
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), zero_uint4);
@@ -9287,7 +9278,7 @@ namespace models {
           minmax_ema_uav.Get(),
           minmax_raw_uav.Get(),
           hist_uav.Get(),
-          cut_state_uav.Get(),
+          depth_health_state_uav.Get(),
         };
         context->CSSetUnorderedAccessViews(0, 4, ema_uavs, nullptr);
         dispatch_infer_postprocess(
@@ -9821,24 +9812,6 @@ namespace models {
                        )) &&
                        SUCCEEDED(device->CreateShaderResourceView(depth_previous_tex.Get(), nullptr, &depth_previous_srv));
 
-        auto cut_history_desc = tex_desc;
-        resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateTexture2D(
-                         &cut_history_desc,
-                         nullptr,
-                         &depth_cut_history_tex
-                       )) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(
-                         depth_cut_history_tex.Get(),
-                         nullptr,
-                         &depth_cut_history_uav
-                       )) &&
-                       SUCCEEDED(device->CreateShaderResourceView(
-                         depth_cut_history_tex.Get(),
-                         nullptr,
-                         &depth_cut_history_srv
-                       ));
-
         auto mask_desc = tex_desc;
         mask_desc.Format = DXGI_FORMAT_R32_UINT;
         mask_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
@@ -9878,7 +9851,6 @@ namespace models {
         );
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
         context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), clear_color);
-        context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), clear_color);
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
         context->ClearUnorderedAccessViewUint(tensor_exclusion_uav.Get(), clear_uint);
         context->ClearUnorderedAccessViewUint(tensor_previous_exclusion_uav.Get(), clear_uint);

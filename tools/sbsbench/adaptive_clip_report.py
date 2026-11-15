@@ -28,7 +28,7 @@ if __package__:
     from .adaptive_state_contract import (
         CONFIG_KEYS,
         COUNTER_MAX,
-        CUT_CONTRACT_TAG,
+        CONTRACT_TAG,
         FIELD_DESCRIPTORS,
         FIELD_ENCODINGS,
         FIELD_NAMES,
@@ -36,7 +36,6 @@ if __package__:
         FRAME_KEYS,
         HEADER_KEYS,
         INITIAL_VALUES,
-        RETIRED_ZERO_FIELDS,
         TRACE_CAPTURE,
         TRACE_SCHEMA,
         TRACE_SOURCE,
@@ -45,7 +44,7 @@ else:
     from adaptive_state_contract import (
         CONFIG_KEYS,
         COUNTER_MAX,
-        CUT_CONTRACT_TAG,
+        CONTRACT_TAG,
         FIELD_DESCRIPTORS,
         FIELD_ENCODINGS,
         FIELD_NAMES,
@@ -53,7 +52,6 @@ else:
         FRAME_KEYS,
         HEADER_KEYS,
         INITIAL_VALUES,
-        RETIRED_ZERO_FIELDS,
         TRACE_CAPTURE,
         TRACE_SCHEMA,
         TRACE_SOURCE,
@@ -192,9 +190,9 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
             if encoding in {"uint_bits", "uint_valued_float"} else
             _finite_number(value, description)
         )
-    if decoded["cut_contract_tag_bits"] != CUT_CONTRACT_TAG:
+    if decoded["contract_tag_bits"] != CONTRACT_TAG:
         raise TraceContractError(
-            f"trace cut contract tag at line {line_number} is not schema-{TRACE_SCHEMA}"
+            f"trace contract tag at line {line_number} is not schema-{TRACE_SCHEMA}"
         )
 
     depth_updated = _boolean(
@@ -206,10 +204,6 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
         if name.startswith("reserved_") and decoded[name] != initial:
             raise TraceContractError(
                 f"trace reserved field {name} at line {line_number} is non-default")
-    for name in RETIRED_ZERO_FIELDS:
-        if decoded[name] != 0:
-            raise TraceContractError(
-                f"trace retired field {name} at line {line_number} must be zero")
     for name in (
         "empty_raw_count",
         "collapsed_raw_count",

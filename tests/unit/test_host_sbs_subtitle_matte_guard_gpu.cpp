@@ -199,17 +199,17 @@ namespace {
       ocr_words_[9u] = width_; ocr_words_[10u] = height_; ocr_words_[11u] = field_width_; ocr_words_[12u] = field_height_;
       ocr_words_[13u] = constants_.field[2u]; ocr_words_[14u] = constants_.field[3u];
       uip_words_[0u] = cv2::subtitle_plane_state_schema; uip_words_[1u] = cv2::subtitle_plane_state_tag;
-      uip_words_[2u] = cv2::subtitle_plane_current_valid_flag; uip_words_[3u] = (1u << count) - 1u; uip_words_[20u] = 3u;
+      uip_words_[2u] = cv2::subtitle_plane_current_valid_flag; uip_words_[3u] = (1u << count) - 1u; uip_words_[cv2::subtitle_plane_identity_reserved_word] = 0u;
       for (UINT k = 0u; k < 2u; ++k) {
         uip_words_[4u + k] = constants_.frame[k]; uip_words_[6u + k] = constants_.frame[2u + k]; uip_words_[8u + k] = constants_.observation[k];
         uip_words_[10u + k] = constants_.source[k]; uip_words_[12u + k] = constants_.field[k]; uip_words_[14u + k] = constants_.field[2u + k];
       }
       std::copy(content_.begin(), content_.end(), uip_words_.begin() + 16u);
-      sct_words_[0u] = cv2::subtitle_contour_schema; sct_words_[1u] = cv2::subtitle_contour_history_tag; sct_words_[2u] = count ? 1u : 0u; sct_words_[3u] = 3u;
+      sct_words_[0u] = cv2::subtitle_contour_schema; sct_words_[1u] = cv2::subtitle_contour_history_tag; sct_words_[2u] = count ? 1u : 0u; sct_words_[3u] = 0u;
       std::copy(constants_.frame.begin(), constants_.frame.end(), sct_words_.begin() + 4u); std::copy(constants_.source.begin(), constants_.source.end(), sct_words_.begin() + 8u);
       std::copy(constants_.field.begin(), constants_.field.end(), sct_words_.begin() + 12u); std::copy(content_.begin(), content_.end(), sct_words_.begin() + 16u);
       sct_words_[20u] = constants_.observation[0u]; sct_words_[21u] = constants_.observation[1u]; sct_words_[22u] = cv2::subtitle_contour_recipe; sct_words_[23u] = 1u;
-      state_words_[SBC_H_TAG] = SBC_TAG; state_words_[SBC_H_SCHEMA] = SBC_SCHEMA; state_words_[SBC_H_VALID] = 1u; state_words_[SBC_H_CUT] = 3u;
+      state_words_[SBC_H_TAG] = SBC_TAG; state_words_[SBC_H_SCHEMA] = SBC_SCHEMA; state_words_[SBC_H_VALID] = 1u; state_words_[SBC_H_RESERVED_3] = 0u;
       for (UINT k = 0u; k < 2u; ++k) {
         state_words_[SBC_H_FRAME + k] = constants_.frame[k]; state_words_[SBC_H_GENERATION + k] = constants_.frame[2u + k];
         state_words_[SBC_H_CLOCK + k] = constants_.observation[k]; state_words_[SBC_H_SOURCE + k] = constants_.source[k]; state_words_[SBC_H_CROP + k] = constants_.source[2u + k];
@@ -373,7 +373,7 @@ namespace {
   }
 
   TEST_F(HostSbsSubtitleMatteGuardGpuTest, StaleOrMalformedTypedPacketsFailOpenToExactRawM1) {
-    const std::array<UINT, 11u> state_faults {SBC_H_TAG, SBC_H_SCHEMA, SBC_H_FRAME, SBC_H_GENERATION, SBC_H_CLOCK, SBC_H_CUT,
+    const std::array<UINT, 11u> state_faults {SBC_H_TAG, SBC_H_SCHEMA, SBC_H_FRAME, SBC_H_GENERATION, SBC_H_CLOCK, SBC_H_RESERVED_3,
       SBC_H_SOURCE, SBC_H_FIELD, SBC_H_CONTENT, SBC_H_COUNT, SBC_H_RESERVED};
     for (UINT word : state_faults) {
       SCOPED_TRACE("Private state fault " + std::to_string(word)); author(); ++state_words_[word];

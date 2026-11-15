@@ -44,7 +44,7 @@ def frame_record(
     valid_fraction=1.0,
 ):
     values_by_name = {
-        name: report.CUT_CONTRACT_TAG if initial == "contract_tag" else initial
+        name: report.CONTRACT_TAG if initial == "contract_tag" else initial
         for name, initial in report.INITIAL_VALUES.items()
     }
     values_by_name.update({
@@ -142,31 +142,22 @@ class AdaptiveTraceContractTests(unittest.TestCase):
                             f"{counter} duplicate disagrees"):
                         report.load_trace(path)
 
-    def test_rejects_nonzero_retired_and_reserved_words(self):
-        self.assertEqual(report.RETIRED_ZERO_FIELDS, ("hard_cut_count",))
+    def test_rejects_nonzero_reserved_word(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "adaptive_state.jsonl"
-            retired = frame_record(0)
-            retired["values"][report.FIELD_NAMES.index("hard_cut_count")] = 1
-            write_trace(path, [retired])
-            with self.assertRaisesRegex(
-                    report.TraceContractError,
-                    "retired field hard_cut_count.*must be zero"):
-                report.load_trace(path)
-
             reserved = frame_record(0)
-            reserved["values"][report.FIELD_NAMES.index("reserved_cut_bridge_31")] = 1.0
+            reserved["values"][report.FIELD_NAMES.index("reserved_3")] = 1
             write_trace(path, [reserved])
             with self.assertRaisesRegex(
                     report.TraceContractError,
-                    "reserved field reserved_cut_bridge_31.*non-default"):
+                    "reserved field reserved_3.*non-default"):
                 report.load_trace(path)
 
     def test_rejects_frame_and_header_keys_outside_the_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "adaptive_state.jsonl"
             frame = frame_record(0)
-            frame["hard_cut_pulse"] = False
+            frame["unknown_key"] = False
             write_trace(path, [frame])
             with self.assertRaisesRegex(report.TraceContractError, "exact keys"):
                 report.load_trace(path)
@@ -181,7 +172,7 @@ class AdaptiveTraceContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "adaptive_state.jsonl"
             frame = frame_record(0)
-            frame["values"][1] = math.inf
+            frame["values"][report.FIELD_NAMES.index("valid_depth_fraction")] = math.inf
             write_trace(path, [frame])
             with self.assertRaisesRegex(report.TraceContractError, "must be finite"):
                 report.load_trace(path)
@@ -220,14 +211,14 @@ class AdaptiveTraceContractTests(unittest.TestCase):
             with self.assertRaisesRegex(report.TraceContractError, "duplicate trace frame_id"):
                 report.load_trace(path)
 
-    def test_rejects_same_sized_foreign_cut_contract(self):
+    def test_rejects_same_sized_foreign_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "adaptive_state.jsonl"
             frame = frame_record(0)
             frame["values"][0] ^= 1
             write_trace(path, [frame])
             with self.assertRaisesRegex(
-                    report.TraceContractError, "cut contract tag"):
+                    report.TraceContractError, "contract tag"):
                 report.load_trace(path)
 
     def test_trace_frame_id_rejects_non_ascii_decimal_and_uint64_overflow(self):
@@ -303,8 +294,6 @@ class AdaptiveReportTests(unittest.TestCase):
             self.assertEqual(summary["depth_update_count"], 120)
             self.assertEqual(summary["min_valid_depth_fraction"], 0.5)
             self.assertEqual(summary["anomaly_count"], 0)
-            for retired in ("shot_count", "shots", "hard_cut_pulse_count"):
-                self.assertNotIn(retired, summary)
             self.assertEqual(
                 sorted(path.name for path in output.iterdir()),
                 ["frames.csv", "report.html", "summary.json"])

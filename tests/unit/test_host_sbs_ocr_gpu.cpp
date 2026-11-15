@@ -168,7 +168,6 @@ namespace {
     source_width, source_height, field_height, v2::subtitle_ocr_safe_row_top);
   constexpr std::uint32_t roi_bottom = subtitle_roi_edge(
     source_width, source_height, field_height, v2::subtitle_ocr_safe_row_bottom);
-  constexpr std::uint32_t cut_tag = sbs_adaptive_state::cut_contract_tag;
 
   constexpr std::array<std::uint32_t, 4u> default_ocr_box(
     const std::uint32_t left,
@@ -732,7 +731,7 @@ namespace {
       context_->CSSetShader(locator_resolve_.Get(), nullptr, 0u);
       std::array<ID3D11ShaderResourceView *, 8u> resolve_srvs {
         geometry_state_srv_.Get(),
-        cut_srv_.Get(),
+        health_srv_.Get(),
         base_srv_.Get(),
         nullptr,
         nullptr,
@@ -766,7 +765,7 @@ namespace {
       );
       std::array<ID3D11ShaderResourceView *, 8u> condition_srvs {
         geometry_state_srv_.Get(),
-        cut_srv_.Get(),
+        health_srv_.Get(),
         base_srv_.Get(),
         state_srv_.Get(),
         condition_params_srv_.Get(),
@@ -883,7 +882,7 @@ namespace {
       identity[0u] = v2::subtitle_contour_schema;
       identity[1u] = v2::subtitle_contour_history_tag;
       identity[2u] = current_valid ? 1u : 0u;
-      identity[3u] = current_valid ? state_[v2::subtitle_plane_cut_epoch_word] : 0u;
+      identity[3u] = 0u;
       std::copy(constants.frame.begin(), constants.frame.end(), identity.begin() + 4u);
       identity[8u] = source_width;
       identity[9u] = source_height;
@@ -988,16 +987,15 @@ namespace {
         return false;
       }
 
-      std::array<std::uint32_t, 32u> cut_words {};
-      cut_words[0u] = cut_tag;
+      const auto health_words = sbs_adaptive_state::initial_words;
       if (!create_structured_buffer(
             device_.Get(),
-            cut_words.data(),
-            sizeof(cut_words),
+            health_words.data(),
+            sizeof(health_words),
             4u * sizeof(std::uint32_t),
             D3D11_BIND_SHADER_RESOURCE,
-            cut_buffer_,
-            &cut_srv_,
+            health_buffer_,
+            &health_srv_,
             nullptr
           )) {
         return false;
@@ -1182,8 +1180,8 @@ namespace {
     ComPtr<ID3D11UnorderedAccessView> gaussian_control_uav_;
     ComPtr<ID3D11Texture2D> gaussian_weight_texture_;
     ComPtr<ID3D11UnorderedAccessView> gaussian_weight_uav_;
-    ComPtr<ID3D11Buffer> cut_buffer_;
-    ComPtr<ID3D11ShaderResourceView> cut_srv_;
+    ComPtr<ID3D11Buffer> health_buffer_;
+    ComPtr<ID3D11ShaderResourceView> health_srv_;
     ComPtr<ID3D11Buffer> geometry_state_buffer_;
     ComPtr<ID3D11ShaderResourceView> geometry_state_srv_;
     ComPtr<ID3D11Texture2D> base_texture_;

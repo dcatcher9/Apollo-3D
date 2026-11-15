@@ -121,7 +121,7 @@ bool CurrentPacketsValid(uint width,uint height) {
         CurrentSCT[0u]!=V2_SUBTITLE_CONTOUR_SCHEMA || CurrentSCT[1u]!=V2_SUBTITLE_CONTOUR_HISTORY_TAG ||
         CurrentSCT[2u]>1u || CurrentSCT[22u]!=V2_SUBTITLE_CONTOUR_RECIPE ||
         CurrentSCT[V2_SUBTITLE_CONTOUR_HISTORY_SNAPSHOT_VALID_WORD]!=1u ||
-        CurrentUIP[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD]!=CurrentSCT[3u]) return false;
+        CurrentUIP[V2_SUBTITLE_PLANE_IDENTITY_RESERVED_WORD]!=0u || CurrentSCT[3u]!=0u) return false;
     [unroll] for (uint packetComponent=0u;packetComponent<2u;++packetComponent) {
         if (CurrentOCR[5u+packetComponent]!=guard_frame[packetComponent] ||
             CurrentOCR[7u+packetComponent]!=guard_frame[2u+packetComponent] ||
@@ -176,7 +176,7 @@ bool PrivateContextValid() {
     uint words,stride;CurrentState.GetDimensions(words,stride);
     if (words!=SBC_STATE_WORDS || stride!=4u || CurrentState[SBC_H_TAG]!=SBC_TAG ||
         CurrentState[SBC_H_SCHEMA]!=SBC_SCHEMA || CurrentState[SBC_H_VALID]!=1u ||
-        CurrentState[SBC_H_CUT]!=CurrentSCT[3u] || CurrentState[SBC_H_COUNT]!=GuardCount ||
+        CurrentState[SBC_H_RESERVED_3]!=0u || CurrentState[SBC_H_COUNT]!=GuardCount ||
         CurrentState[SBC_H_NEXT_ID]==0u || CurrentState[SBC_H_NEXT_ID]>SBC_OWNER_ID_LIMIT ||
         CurrentState[SBC_H_EPOCH]==0u || (CurrentState[SBC_H_FLAGS]&~SBC_HEADER_KNOWN_FLAGS)!=0u ||
         CurrentState[SBC_H_REFERENCE]!=asuint(ReferenceCenter) || CurrentState[SBC_H_REFERENCE+1u]!=ReferenceWidth) return false;

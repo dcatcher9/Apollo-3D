@@ -203,7 +203,7 @@ def validate_producer_stages(frame, output):
     _require(cbc[16:40] == raw[12:36] == f2[8:32] == c24 and
              raw[36:52] == cbc[:16] and f2[32:48] == raw[:16], "producer stage current C24/header join differs")
     _require(cbc[4] == cbc[5] == cbc[9] == 1 and cbc[80] == frame["contour_identity"][3],
-             "producer stage current source/cut header differs")
+             "producer stage current source header differs")
     selected = frame["selected_receipt"]
     width, height, _, band = selected[4:8]
     _require(cbc[40:43] == (0x31434E45, 1, 1) and cbc[43] in {1, 2, 4} and
@@ -324,7 +324,7 @@ def _validate_frame(frame, ordinal, source, clock, output, scale, schema):
              selected[24:28] == [1, policy["recipe"], 0, 0], "selected receipt options are invalid")
     if selected[3] == 0:
         _require(selected[28:60] == contour and contour[:2] == [policy["history_schema"], policy["history_tag"]] and
-                 contour[2] in {0, 1} and contour[3] == values["confirmed_cut_count"] and
+                 contour[2] in {0, 1} and contour[3] == 0 and
                  contour[4:8] == selected[16:20] and contour[8:20] == selected[4:16] and
                  contour[20:22] == selected[20:22] and contour[22:24] == [policy["recipe"], 1] and
                  contour[24:] == [0] * 8, "selected receipt/SCT owner join is invalid")

@@ -304,7 +304,7 @@ namespace {
         };
         std::array<std::uint32_t, 32u> identity {};
         identity[0] = v2::subtitle_contour_schema; identity[1] = v2::subtitle_contour_history_tag;
-        identity[2] = 1u; identity[3] = state[v2::confirmed_cut_count];
+        identity[2] = 1u; identity[3] = 0u;
         identity[4] = 1u; identity[6] = 7u;
         identity[8] = source_width; identity[9] = source_height; identity[11] = source_height;
         identity[12] = depth_width; identity[13] = depth_height; identity[15] = depth_height;

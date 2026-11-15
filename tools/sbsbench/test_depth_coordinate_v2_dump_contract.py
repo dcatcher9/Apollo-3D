@@ -240,7 +240,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "container_scale": 1.0,
             "calibration_revision": 4,
             "frame_valid": 1.0,
-            "confirmed_cut_count": 3,
+            "control_reserved_0": 0,
             "contract_tag_bits": tag,
             "camera_center_integrity_bits": 0,
             "renderer_authorization_bits": tag,
@@ -320,7 +320,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "frame_valid": True,
                 "camera_valid": True,
                 "calibration_revision": values["calibration_revision"],
-                "confirmed_cut_count": values["confirmed_cut_count"],
                 "contract_tag": tag,
                 "requested_gain": constants["requested_gain"],
                 "requested_pop_strength": constants["requested_pop_strength"],
@@ -1293,7 +1292,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         words = [dump_contract.SUBTITLE_PLANE_STATE_SCHEMA, dump_contract.SUBTITLE_PLANE_STATE_TAG,
                  int(current_valid), mask, frame & 0xffffffff, frame >> 32,
                  generation & 0xffffffff, generation >> 32, timestamp & 0xffffffff, timestamp >> 32,
-                 *source, *field, *roi, *content, 3, 0, 0, 0,
+                 *source, *field, *roi, *content, 0, 0, 0, 0,
                  1, 8, 0, target, timestamp & 0xffffffff, timestamp >> 32, 0, 0, 0, 0,
                  0, 0, limit, max(count, invalid_probe), 0, invalid_probe]
         assert len(words) == 40
@@ -1305,7 +1304,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "source_width": source[0], "source_height": source[1],
                 "field_width": field[0], "field_height": field[1],
                 "tensor_content": (0, 0, *field) if content is None else content,
-                "expected_scene_epoch": 3,
                 "expected_observation_timestamp_us": 1000001}
 
     def _parse_uip1_ocr_pairs(self, pairs=(), *, authoritative=True,
@@ -2158,7 +2156,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         distance = dump_contract._subtitle_contour_slope_budget(
             support != 0, source_width, source_height, crop_top, field_width, field_height, content).astype("<f4")
         timestamp = manifest["matched_observation_timestamp_us"]
-        identity = [policy["history_schema"], policy["history_tag"], int(valid), locator[20] if snapshot_gate else 0,
+        identity = [policy["history_schema"], policy["history_tag"], int(valid), 0,
                     ocr[5], ocr[6], ocr[7], ocr[8], source_width, source_height, crop_top, crop_height,
                     field_width, field_height, ocr[13], ocr[14], *content,
                     timestamp & 0xffffffff, timestamp >> 32, policy["recipe"], int(snapshot_gate), *([0] * 8)]
@@ -2760,7 +2758,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest, _ = self._write_synthetic_geometry_dump(root)
-            manifest["parallax_v2_shadow"]["state"]["confirmed_cut_count"] += 1
+            manifest["parallax_v2_shadow"]["state"]["calibration_revision"] += 1
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "summary disagrees"):
@@ -3472,7 +3470,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(summary["capacity"], 300)
         self.assertEqual(dump_contract.GPU_TRACE_RING_SCHEMA, 5)
         self.assertEqual(dump_contract.GPU_TRACE_CONTRACT_SCHEMA, 6)
-        self.assertEqual(dump_contract.GPU_TRACE_DECODED_SCHEMA, 7)
+        self.assertEqual(dump_contract.GPU_TRACE_DECODED_SCHEMA, 8)
         self.assertEqual(summary["record_words"], 136)
         self.assertEqual(dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_locator_begin"], 88)
         self.assertEqual(dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_condition_begin"], 128)
@@ -4146,7 +4144,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 writer_state = copy.deepcopy(self.state)
                 writer_state["units"] = units
                 decoded = dump_contract.validate_shadow_state_document(writer_state)
-                self.assertEqual(decoded["confirmed_cut_count"], 3)
+                self.assertEqual(decoded["calibration_revision"], 4)
 
     def test_host_linear_state_requires_coordinate_units_and_hard_cap_semantics(self):
         state = self._host_adapter_state()
@@ -4887,7 +4885,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         common = {"evidence_frame_id": 17, "analysis_generation": (1 << 32) + 2,
                   "source_width": source_width, "source_height": source_height,
                   "field_width": field_width, "field_height": field_height, "tensor_content": content,
-                  "roi_top": 2, "roi_bottom": 5, "scene_epoch": 7,
+                  "roi_top": 2, "roi_bottom": 5,
                   "observation_timestamp_us": (1 << 32) + 1234,
                   "geometry_ready": geometry_ready, "ocr_authoritative": ocr_authoritative,
                   "current_rectangles": ([{"left": 2, "top": 3, "right": 5, "bottom": 5}]
@@ -4900,7 +4898,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
             "current_rectangles": copy.deepcopy(common["current_rectangles"]),
             "matched_frame_id": common["evidence_frame_id"],
             "observation_timestamp_us": common["observation_timestamp_us"],
-            "analysis_generation": common["analysis_generation"], "scene_epoch": common["scene_epoch"],
+            "analysis_generation": common["analysis_generation"],
             "source_width": source_width, "source_height": source_height,
             "field_width": field_width, "field_height": field_height, "tensor_content_rect": content,
             "adaptive": {"invalid_count": int(invalid_probe)},
@@ -4908,7 +4906,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         # This authored contour fixture uses equal raw cores/covers. Integration fixtures pass
         # the independently decoded OCR raw cores, including their narrower vertical search.
         common["current_cores"] = copy.deepcopy(common["current_rectangles"])
-        identity = [policy["history_schema"], policy["history_tag"], int(valid), 7 if snapshot else 0,
+        identity = [policy["history_schema"], policy["history_tag"], int(valid), 0,
                     17, 0, 2, 1, source_width, source_height, crop_top, crop_height, 7, 6, 2, 5,
                     *content, 1234, 1, policy["recipe"], int(snapshot), *([0] * 8)]
         payloads = {"contour_support": support.tobytes(), "contour_field_pin": pin.tobytes(),
@@ -4959,7 +4957,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "eleven"):
             dump_contract.validate_subtitle_contour_tuple(changed, **common)
 
-    def test_every_sct5_identity_word_binds_source_clock_shape_cut_roi_recipe_snapshot_and_reserved_zero(self):
+    def test_every_sct5_identity_word_binds_source_clock_shape_roi_recipe_snapshot_and_reserved_zero(self):
         payloads, common = self._tuple()
         words = list(struct.unpack("<32I", payloads["contour_identity"]))
         for index in range(32):
@@ -4998,7 +4996,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         mutations = {"no-ocr-geometry": ("cover_geometry_verified", False),
                      "frame": ("matched_frame_id", 18),
                      "clock": ("observation_timestamp_us", (1 << 32) + 1235),
-                     "generation": ("analysis_generation", 3), "cut": ("scene_epoch", 8),
+                     "generation": ("analysis_generation", 3),
                      "source": ("source_width", 25), "field": ("field_height", 7),
                      "content": ("tensor_content_rect", (0, 1, 6, 5)),
                      "count": ("current_count", 0), "mask": ("current_slot_mask", 2),
@@ -5080,7 +5078,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         self.assertTrue(result["snapshot_gate_valid"])
         self.assertEqual(result["history_rgb_valid_pixels"], 96)
         identity = struct.unpack("<32I", payloads["contour_identity"])
-        self.assertEqual((identity[2], identity[3], identity[23]), (0, 7, 1))
+        self.assertEqual((identity[2], identity[3], identity[23]), (0, 0, 1))
         self.assertEqual(result["probability_nonfinite_words"], 3)
         self.assertEqual(result["probability_out_of_range_finite_words"], 2)
         self.assertTrue(np.array_equal(np.frombuffer(payloads["ocr_probability"], dtype="<u4")[:5], fault_words))

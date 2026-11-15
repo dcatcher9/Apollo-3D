@@ -37,12 +37,12 @@ namespace {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11ComputeShader> state_shader, map_shader, horizontal_shader;
     ComPtr<ID3D11Buffer> constants, depth_constants, owner_constants;
-    gain_buffer_t state, stats, cut, raw, minmax, owner;
+    gain_buffer_t state, stats, health, raw, minmax, owner;
     ComPtr<ID3D11Texture2D> candidate, final, exclusion;
     ComPtr<ID3D11UnorderedAccessView> candidate_uav, final_uav;
     ComPtr<ID3D11ShaderResourceView> candidate_srv, exclusion_srv;
     v2::constants_t config {};
-    sbs_adaptive_state::words_t cut_words = sbs_adaptive_state::initial_words;
+    sbs_adaptive_state::words_t health_words = sbs_adaptive_state::initial_words;
     v2::state_words_t words = v2::state_initial_words;
 
     bool buffer(const void *data, UINT bytes, UINT stride, UINT flags, gain_buffer_t &out) {
@@ -85,10 +85,10 @@ namespace {
     }
 
     void unbind() {
-      ID3D11ShaderResourceView *srvs[8] {};
-      ID3D11UnorderedAccessView *uavs[6] {};
-      context->CSSetShaderResources(0u, 8u, srvs);
-      context->CSSetUnorderedAccessViews(0u, 6u, uavs, nullptr);
+      ID3D11ShaderResourceView *srvs[7] {};
+      ID3D11UnorderedAccessView *uavs[5] {};
+      context->CSSetShaderResources(0u, 7u, srvs);
+      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
     }
 
     void SetUp() override {
@@ -122,7 +122,7 @@ namespace {
         D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, state));
       ASSERT_TRUE(buffer(zero_stats.data(), sizeof(zero_stats), 16u,
         D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, stats));
-      ASSERT_TRUE(buffer(cut_words.data(), sizeof(cut_words), 16u, D3D11_BIND_SHADER_RESOURCE, cut));
+      ASSERT_TRUE(buffer(health_words.data(), sizeof(health_words), 16u, D3D11_BIND_SHADER_RESOURCE, health));
       ASSERT_TRUE(buffer(zero_minmax.data(), sizeof(zero_minmax), 16u, D3D11_BIND_SHADER_RESOURCE, minmax));
       ASSERT_TRUE(buffer(zero_raw.data(), sizeof(zero_raw), 4u, D3D11_BIND_SHADER_RESOURCE, raw));
       ASSERT_TRUE(buffer(zero_owner.data(), sizeof(zero_owner), 4u, D3D11_BIND_UNORDERED_ACCESS, owner));
@@ -269,10 +269,10 @@ namespace {
         frame[v2::frame_stat_percentile_bin_width] = (high - low) / 256.0f;
       }
       context->UpdateSubresource(stats.buffer.Get(), 0u, nullptr, frame.data(), 0u, 0u);
-      context->UpdateSubresource(cut.buffer.Get(), 0u, nullptr, cut_words.data(), 0u, 0u);
+      context->UpdateSubresource(health.buffer.Get(), 0u, nullptr, health_words.data(), 0u, 0u);
       ID3D11Buffer *cb = constants.Get();
       context->CSSetConstantBuffers(1u, 1u, &cb);
-      ID3D11ShaderResourceView *srvs[] {stats.srv.Get(), cut.srv.Get()};
+      ID3D11ShaderResourceView *srvs[] {stats.srv.Get(), health.srv.Get()};
       context->CSSetShaderResources(0u, 2u, srvs);
       ID3D11UnorderedAccessView *uav = state.uav.Get();
       context->CSSetUnorderedAccessViews(0u, 1u, &uav, nullptr);
@@ -295,10 +295,10 @@ namespace {
       ID3D11Buffer *cbs[] {depth_constants.Get(), constants.Get(), owner_constants.Get()};
       context->CSSetConstantBuffers(0u, 3u, cbs);
       ID3D11ShaderResourceView *srvs[] {raw.srv.Get(), state.srv.Get(), exclusion_srv.Get(),
-        minmax.srv.Get(), nullptr, nullptr, cut.srv.Get(), nullptr};
-      context->CSSetShaderResources(0u, 8u, srvs);
-      ID3D11UnorderedAccessView *uavs[] {candidate_uav.Get(), nullptr, nullptr, nullptr, nullptr, owner.uav.Get()};
-      context->CSSetUnorderedAccessViews(0u, 6u, uavs, nullptr);
+        minmax.srv.Get(), nullptr, nullptr, health.srv.Get()};
+      context->CSSetShaderResources(0u, 7u, srvs);
+      ID3D11UnorderedAccessView *uavs[] {candidate_uav.Get(), nullptr, nullptr, nullptr, owner.uav.Get()};
+      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
       context->CSSetShader(map_shader.Get(), nullptr, 0u);
       context->Dispatch((width + 15u) / 16u, 1u, 1u);
       unbind();

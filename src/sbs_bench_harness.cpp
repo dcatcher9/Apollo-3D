@@ -1749,8 +1749,8 @@ namespace sbs_bench {
 
     bool valid_adaptive_state_words(const adaptive_state_words_t &words) {
       using sbs_adaptive_state::word_e;
-      if (words[sbs_adaptive_state::index(word_e::cut_contract_tag_bits)] !=
-          sbs_adaptive_state::cut_contract_tag) {
+      if (words[sbs_adaptive_state::index(word_e::contract_tag_bits)] !=
+          sbs_adaptive_state::contract_tag) {
         return false;
       }
       for (const auto &field : sbs_adaptive_state::fields) {
@@ -1765,11 +1765,6 @@ namespace sbs_bench {
         if (!std::isfinite(std::bit_cast<float>(
               words[sbs_adaptive_state::index(field.word)]
             ))) {
-          return false;
-        }
-      }
-      for (const auto word : sbs_adaptive_state::retired_zero_words) {
-        if (words[sbs_adaptive_state::index(word)] != 0u) {
           return false;
         }
       }
@@ -2539,7 +2534,7 @@ namespace sbs_bench {
               identity[12] != metadata.depth_width || identity[13] != metadata.depth_height ||
               identity[16] >= identity[18] || identity[17] >= identity[19] ||
               identity[18] > identity[12] || identity[19] > identity[13] ||
-              identity[3] != state[v2::confirmed_cut_count] ||
+              identity[3] != 0u || state[v2::control_reserved_0] != 0u ||
               identity[20] != state[v2::gain_last_observation_low] ||
               identity[21] != state[v2::gain_last_observation_high] ||
               (identity[20] == 0u && identity[21] == 0u) ||
@@ -3748,7 +3743,7 @@ namespace sbs_bench {
           {"observation_timeline_schema", models::host_sbs_observation_timeline::schema},
           {"observation_timeline_unit", "monotonic-source-us-plus-one"},
           {"adaptive_state_schema", sbs_adaptive_state::schema_version},
-          {"adaptive_state_contract_tag", sbs_adaptive_state::cut_contract_tag},
+          {"adaptive_state_contract_tag", sbs_adaptive_state::contract_tag},
           {"adaptive_state_contract_canonical_sha256",
            sbs_adaptive_state::contract_canonical_sha256},
           {"scene_cache_contract_schema", offline_sbs::scene_cache_contract_schema},
@@ -4498,7 +4493,7 @@ namespace sbs_bench {
     // Cache and raw-v2 replay are deliberately pure D3D render passes: do not construct the
     // TensorRT estimator. The GPU replay path uploads authenticated model output directly into
     // the production V2 compute shaders. External final-parallax replay still runs the fixed
-    // production estimator so its cut-state and resolved-shape evidence remain representative.
+    // production estimator so its depth-health and resolved-shape evidence remain representative.
     std::unique_ptr<models::video_depth_estimator> estimator;
     if (!replay_mode && !depth_coordinate_v2_gpu_mode) {
       estimator = std::make_unique<models::video_depth_estimator>(
@@ -4529,7 +4524,7 @@ namespace sbs_bench {
       if (estimator->has_terminal_failure()) {
         BOOST_LOG(error)
           << "sbs-bench: the production V2 estimator failed to initialize; refusing to "
-             "emit output without authenticated cut-state and resolved-shape evidence";
+             "emit output without authenticated depth-health and resolved-shape evidence";
         return 5;
       }
     }
@@ -4999,7 +4994,7 @@ namespace sbs_bench {
           !write_field(result.shadow_base_final_parallax.Get(), "base.f32") ||
           !write_field(result.shadow_final_parallax.Get(), "final.f32") ||
           !write_words(result.shadow_state.Get(), models::depth_coordinate_v2::state_float_count, "state.f32") ||
-          !write_words(result.cut_state.Get(), 32u, "cut_state.f32") ||
+          !write_words(result.depth_health_state.Get(), sbs_adaptive_state::word_count, "depth_health_state.f32") ||
           (exact_subtitle &&
            (!write_words(result.ocr_box_record.Get(), models::depth_coordinate_v2::subtitle_ocr_record_word_count, "ocr_record.u32") ||
             !write_words(result.subtitle_locator_state.Get(), models::depth_coordinate_v2::subtitle_plane_state_word_count, "locator_state.u32") ||
@@ -5071,7 +5066,7 @@ namespace sbs_bench {
       return true;
     };
 
-    ComPtr<ID3D11Buffer> cut_state_stage;
+    ComPtr<ID3D11Buffer> depth_health_state_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
     ComPtr<ID3D11Buffer> scene_cache_state_stage;
     // Evaluation authenticates the tagged depth-health state of every source observation.
@@ -6035,7 +6030,7 @@ namespace sbs_bench {
           return 7;
         }
         est.depth = v2_gpu_frame.encoded_final_parallax;
-        est.cut_state = v2_gpu_frame.cut_state;
+        est.depth_health_state = v2_gpu_frame.depth_health_state;
         est.raw_model_depth = v2_gpu_frame.raw_depth;
         est.raw_width = static_cast<int>(depth_coordinate_v2_gpu->width());
         est.raw_height = static_cast<int>(depth_coordinate_v2_gpu->height());
@@ -6404,16 +6399,15 @@ namespace sbs_bench {
       }
 
       // Export one state sample for every source frame, even when --output-every skips composite
-      // artifacts. This makes accepted shot pulses directly testable without adding any
-      // synchronization or readback to production.
+      // artifacts, without adding any synchronization or readback to production.
       if (whole_clip_mode) {
         const bool adaptive_state_readback_ready = replay_mode ||
           (defer_adaptive_state_readback ?
              queue_adaptive_state_readback(
-               dev.Get(), ctx.Get(), est.cut_state.Get(), cut_state_stage
+               dev.Get(), ctx.Get(), est.depth_health_state.Get(), depth_health_state_stage
              ) :
              read_adaptive_state(
-               dev.Get(), ctx.Get(), est.cut_state.Get(), cut_state_stage, words
+               dev.Get(), ctx.Get(), est.depth_health_state.Get(), depth_health_state_stage, words
              ));
         if (!adaptive_state_readback_ready) {
           BOOST_LOG(error) << "sbs-bench: cannot read adaptive state for frame " << output_id;
@@ -6543,8 +6537,8 @@ namespace sbs_bench {
         }
       } else {
         adaptive_state_words_t health_words {};
-        if (!read_adaptive_state(dev.Get(), ctx.Get(), est.cut_state.Get(),
-                                 cut_state_stage, health_words)) {
+        if (!read_adaptive_state(dev.Get(), ctx.Get(), est.depth_health_state.Get(),
+                                 depth_health_state_stage, health_words)) {
           BOOST_LOG(error) << "sbs-bench: cannot read depth-health state for frame " << output_id;
           return 6;
         }
@@ -6663,7 +6657,7 @@ namespace sbs_bench {
         direct_parallax_mode ? direct_parallax_srv.Get() :
                                est.shadow_base_final_parallax.Get();
       ID3D11ShaderResourceView *warp_state =
-        direct_parallax_mode ? est.cut_state.Get() : est.shadow_state.Get();
+        direct_parallax_mode ? est.depth_health_state.Get() : est.shadow_state.Get();
       ID3D11Buffer *cb = repro_cb.Get();
       if (direct_parallax_cb) {
         ctx->PSSetConstantBuffers(4, 1, direct_parallax_cb.GetAddressOf());
@@ -7224,7 +7218,7 @@ namespace sbs_bench {
             << output_id;
           return 6;
         }
-        if (!map_adaptive_state_readback(ctx.Get(), cut_state_stage.Get(), words)) {
+        if (!map_adaptive_state_readback(ctx.Get(), depth_health_state_stage.Get(), words)) {
           BOOST_LOG(error)
             << "sbs-bench: cannot map deferred adaptive state for frame "
             << output_id;
@@ -8281,7 +8275,7 @@ namespace sbs_bench {
               "scene-cache-contract-schema-" +
                 std::to_string(offline_sbs::scene_cache_contract_schema) +
                 ":parallax-state-12-words" :
-              std::string {"video_depth_estimator:cut-and-health-state-32-words"},
+              std::string {"video_depth_estimator:depth-health-state"},
             .model = model.name,
             .source_frame_count = completed_frame_count,
             .source_width = source_width,
