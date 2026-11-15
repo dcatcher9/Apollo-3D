@@ -1316,6 +1316,40 @@ namespace models {
       return false;
     }
 
+    // Resolve the cache entry before creating a builder. Its name is derived from the ONNX
+    // digest and the device, so a hit needs no parse of the model; every estimator
+    // construction reaches this under g_tensorrt_compile_mutex.
+    if (model.name != models::prod_zipdepth_convex2x::logical_model ||
+        artifact.source_sha256 != models::prod_zipdepth_convex2x::fused_onnx_sha256) {
+      BOOST_LOG(error)
+        << "Fused DAV2 + ZipDepth ONNX identity does not match the frozen production "
+           "contract; refusing to build it.";
+      return false;
+    }
+
+    const auto compatibility_tag = engine_compatibility_tag(cuda, cuda_device);
+    if (compatibility_tag.empty()) {
+      return false;
+    }
+    artifact.name = engine_filename(model, compatibility_tag + "-onnx" + artifact.source_sha256);
+    if (artifact.name.empty()) {
+      BOOST_LOG(error) << "No TensorRT cache recipe exists for the classified depth ONNX.";
+      return false;
+    }
+    artifact.engine_path = assets_dir / artifact.name;
+
+    if (!engine_cache_path_fits_native_limit(artifact.engine_path)) {
+      BOOST_LOG(error) << "TensorRT cache path including .part exceeds the native file limit: "
+                       << artifact.engine_path << ". Choose a shorter model assets directory.";
+      return false;
+    }
+
+    std::error_code existing_ec;
+    if (std::filesystem::is_regular_file(artifact.engine_path, existing_ec)) {
+      BOOST_LOG(info) << "TensorRT engine cache hit: " << artifact.engine_path.filename();
+      return true;
+    }
+
     initLibNvInferPlugins(&gLogger, "");
     auto builder = TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(gLogger));
     if (!builder) {
@@ -1371,36 +1405,6 @@ namespace models {
       BOOST_LOG(error)
         << "Depth ONNX must expose exactly one FP32 output 'refined_depth'.";
       return false;
-    }
-    if (model.name != models::prod_zipdepth_convex2x::logical_model ||
-        artifact.source_sha256 != models::prod_zipdepth_convex2x::fused_onnx_sha256) {
-      BOOST_LOG(error)
-        << "Fused DAV2 + ZipDepth ONNX identity does not match the frozen production "
-           "contract; refusing to build it.";
-      return false;
-    }
-
-    const auto compatibility_tag = engine_compatibility_tag(cuda, cuda_device);
-    if (compatibility_tag.empty()) {
-      return false;
-    }
-    artifact.name = engine_filename(model, compatibility_tag + "-onnx" + artifact.source_sha256);
-    if (artifact.name.empty()) {
-      BOOST_LOG(error) << "No TensorRT cache recipe exists for the classified depth ONNX.";
-      return false;
-    }
-    artifact.engine_path = assets_dir / artifact.name;
-
-    if (!engine_cache_path_fits_native_limit(artifact.engine_path)) {
-      BOOST_LOG(error) << "TensorRT cache path including .part exceeds the native file limit: "
-                       << artifact.engine_path << ". Choose a shorter model assets directory.";
-      return false;
-    }
-
-    std::error_code existing_ec;
-    if (std::filesystem::is_regular_file(artifact.engine_path, existing_ec)) {
-      BOOST_LOG(info) << "TensorRT engine cache hit: " << artifact.engine_path.filename();
-      return true;
     }
 
     BOOST_LOG(info)

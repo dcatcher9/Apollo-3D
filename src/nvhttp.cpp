@@ -8,6 +8,7 @@
 // standard includes
 #include <array>
 #include <atomic>
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -354,9 +355,16 @@ namespace nvhttp {
         nlohmann::json named_cert_node = nlohmann::json::object();
         std::string base_name = named_cert_p->name;
         // Remove any pending id suffix (e.g., " (2)") if present.
-        const size_t pos = base_name.find(" (");
-        if (pos != std::string::npos) {
-          base_name = base_name.substr(0, pos);
+        // Only the generated form is a suffix: digits in parentheses at the very end. A name the
+        // user chose, such as "Quest (bedroom)", must survive a restart unchanged.
+        const size_t pos = base_name.rfind(" (");
+        if (pos != std::string::npos && base_name.size() > pos + 3 && base_name.back() == ')') {
+          const std::string_view digits {base_name.data() + pos + 2, base_name.size() - pos - 3};
+          if (std::all_of(digits.begin(), digits.end(), [](unsigned char ch) {
+                return std::isdigit(ch) != 0;
+              })) {
+            base_name = base_name.substr(0, pos);
+          }
         }
         const int count = name_counts[base_name]++;
         std::string final_name = base_name;
