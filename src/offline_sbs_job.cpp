@@ -2805,7 +2805,8 @@ namespace offline_sbs {
       }
       auto environment = boost::this_process::environment();
       boost::filesystem::path working_directory {
-        config.sunshine_executable.parent_path().string()
+        // Native wide path, so an installation folder outside the ANSI code page still works.
+        config.sunshine_executable.parent_path().wstring()
       };
       bp::group group;
       std::string group_error;
@@ -4546,7 +4547,8 @@ namespace offline_sbs {
       }
       auto environment = boost::this_process::environment();
       boost::filesystem::path working_directory {
-        config.sunshine_executable.parent_path().string()
+        // Native wide path, so an installation folder outside the ANSI code page still works.
+        config.sunshine_executable.parent_path().wstring()
       };
       bp::group group;
       std::string group_error;

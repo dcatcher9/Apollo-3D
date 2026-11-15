@@ -3712,8 +3712,13 @@ namespace ar_glasses {
             if (presented_after - presented_before >= 60) {
               // Reset only after the attempt demonstrably presented a stable run of frames. Slow
               // initialization failures no longer evade the retry breaker merely by taking time.
-              reinit_window_started = now;
               consecutive_reinits = 0;
+            }
+            if (consecutive_reinits == 0) {
+              // The window measures the current run of failed attempts, from its first failure.
+              // Measured from thread start, one benign reinit (a stale output, a size change)
+              // after ten quiet seconds would already count as "did not recover".
+              reinit_window_started = now;
             }
             ++consecutive_reinits;
             if (consecutive_reinits >= 12 || now - reinit_window_started >= 10s) {

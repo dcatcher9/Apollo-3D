@@ -10087,6 +10087,20 @@ namespace platf::dxgi {
     img->dummy = dummy;
     img->format = (capture_format == DXGI_FORMAT_UNKNOWN) ? DXGI_FORMAT_B8G8R8A8_UNORM : capture_format;
 
+    // The early-out above treats a set capture_texture as a complete image. A failure part-way
+    // must therefore leave none of it behind, or a reused pooled image would be accepted with a
+    // null render target, keyed mutex or shared handle.
+    auto incomplete = util::fail_guard([img]() {
+      img->capture_texture.reset();
+      img->capture_rt.reset();
+      img->capture_mutex.reset();
+      img->data = nullptr;
+      if (img->encoder_texture_handle) {
+        CloseHandle(img->encoder_texture_handle);
+        img->encoder_texture_handle = nullptr;
+      }
+    });
+
     D3D11_TEXTURE2D_DESC t {};
     t.Width = img->width;
     t.Height = img->height;
@@ -10133,6 +10147,7 @@ namespace platf::dxgi {
 
     img->data = (std::uint8_t *) img->capture_texture.get();
 
+    incomplete.disable();
     return 0;
   }
 

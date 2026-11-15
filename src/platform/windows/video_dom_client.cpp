@@ -522,8 +522,10 @@ namespace platf::video_dom {
           try {
             bp::group group;
             auto environment = boost::this_process::environment();
+            // Native wide path: a narrow string would be converted through the ANSI code page
+            // and mangle (or fail on) an installation folder with other characters.
             boost::filesystem::path working_directory {
-              helper->parent_path().string()
+              helper->parent_path().wstring()
             };
             std::error_code launch_error;
             auto child = platf::run_command_unelevated(
