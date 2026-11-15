@@ -983,7 +983,20 @@ namespace video {
             }
 #endif
             display_epoch_at_open = platf::display_change_epoch();
-            while (capture_ctx_queue->running()) {
+            // Reopen the display this session was already capturing before looking for another
+            // one, as the first open of the session does. Enumerating the outputs probes every
+            // adapter and output while the viewer waits, and is only needed when that display is
+            // gone or cannot be opened.
+            {
+              const auto session_display_name = proc::proc.get_display_name();
+              if (!session_display_name.empty() && session_display_name == active_display_name) {
+                disp = platf::display(active_display_name, capture_ctx->config, capture_failover.preferred_backend());
+                if (disp) {
+                  capture_failover.note_backend_opened(disp->capture_backend());
+                }
+              }
+            }
+            while (!disp && capture_ctx_queue->running()) {
               // Release the display before reenumerating displays, since some capture backends
               // only support a single display session per device/application.
               disp.reset();
