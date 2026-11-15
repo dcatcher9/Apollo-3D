@@ -185,17 +185,17 @@ namespace microphone {
       return {};
     }
     auto packet = state.packets.find(state.next_sequence);
+    if (packet == state.packets.end() && ++state.missing_slots > 2) {
+      // After a longer gap, advance only toward a received future packet.
+      // When capture pauses its sequence does not advance with our clock.
+      if (!state.packets.empty()) {
+        ++state.next_sequence;
+      }
+      return {};
+    }
     std::vector<std::int16_t> pcm(frame_samples);
     int result;
     if (packet == state.packets.end()) {
-      if (++state.missing_slots > 2) {
-        // After a longer gap, advance only toward a received future packet.
-        // When capture pauses its sequence does not advance with our clock.
-        if (!state.packets.empty()) {
-          ++state.next_sequence;
-        }
-        return {};
-      }
       if (!state.packets.empty()) {
         ++state.next_sequence;
       }

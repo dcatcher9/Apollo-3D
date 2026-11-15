@@ -203,8 +203,10 @@ namespace {
     resumed.playout();
     resumed.playout();
     ASSERT_EQ(resumed.playout().size(), microphone::frame_samples);
-    for (unsigned index = 0; index < 100; ++index) {
-      resumed.playout();
+    EXPECT_EQ(resumed.playout().size(), microphone::frame_samples);
+    EXPECT_EQ(resumed.playout().size(), microphone::frame_samples);
+    for (unsigned index = 0; index < 98; ++index) {
+      EXPECT_TRUE(resumed.playout().empty());
     }
     EXPECT_TRUE(resumed.receive(packet(value, 1, encoded), value.remote_address, 1234));
     EXPECT_EQ(resumed.playout().size(), microphone::frame_samples);
