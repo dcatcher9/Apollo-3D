@@ -68,7 +68,7 @@ namespace models::host_sbs_v2_gpu {
     ID3D11ShaderResourceView *frame_stats = nullptr;
     ID3D11UnorderedAccessView *histogram_output = nullptr;
     ID3D11ShaderResourceView *histogram = nullptr;
-    /** The shared scan also overwrites the independent cut-only P02/P98 population. */
+    /** The shared scan also overwrites the independent normalization P02/P98 population. */
     ID3D11UnorderedAccessView *normalization_histogram_output = nullptr;
   };
 

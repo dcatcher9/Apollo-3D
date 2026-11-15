@@ -213,7 +213,7 @@ namespace platf::sbs_debug {
    * depth_input_region scale/outside-collar embedding for ROI-local source-U. The separately
    * protected Final field never supplies ordinary render authority. The
    * adaptive_state/depth_frame_state pair is optional comparison-only evidence from the retained
-   * scene-cut bridge; it never authorizes a dump or controls live geometry. The immutable V2
+   * depth-health state; it never authorizes a dump or controls live geometry. The immutable V2
    * candidate feeds shadow_vertical_majorant (the exact upper-envelope diagnostic) and
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
    * shadow_base_final_parallax. When OCR8 and UIP4 are active, the compact publication record,

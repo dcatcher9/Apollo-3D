@@ -752,9 +752,9 @@ namespace {
     const auto expected = fixture::expected();
     const auto good = fixture::snapshot(expected);
     using sbs_adaptive_state::word_e;
-    for (const auto field : {word_e::reserved_cut_bridge_2, word_e::hard_cut_pulse,
-                            word_e::model_input_history_state, word_e::analysis_flags,
-                            word_e::cut_flags, word_e::scene_age}) {
+    for (const auto field : {word_e::reserved_cut_bridge_2, word_e::reserved_cut_bridge_22,
+                            word_e::reserved_cut_bridge_11, word_e::reserved_cut_bridge_31,
+                            word_e::reserved_cut_bridge_10, word_e::reserved_cut_bridge_1}) {
       auto words = good;
       words[receipt::cut_state_begin + sbs_adaptive_state::index(field)] = std::bit_cast<std::uint32_t>(-1.0f);
       const auto diagnostic = receipt::decode_diagnostics(words, expected, true, true, {});
@@ -764,7 +764,7 @@ namespace {
       EXPECT_TRUE(receipt::decode(words, expected));
     }
     auto words = good;
-    words[receipt::cut_state_begin + sbs_adaptive_state::index(word_e::current_depth_change_fraction)] =
+    words[receipt::cut_state_begin + sbs_adaptive_state::index(word_e::valid_depth_fraction)] =
       std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());
     EXPECT_FALSE(receipt::decode_diagnostics(words, expected, true, false, {}).cut_state);
     words = good;

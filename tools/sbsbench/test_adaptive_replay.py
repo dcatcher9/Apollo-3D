@@ -277,7 +277,6 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             "parallax_v2_live": {"producer": "b" * 64},
             "parallax_v2_shadow": False,
             "parallax_v2_render": True,
-            "cut_state": {"schema": 5},
             "warp_mapping": {"schema": 1},
             "observation_timeline": timeline_descriptor,
             "adaptive_conditional": {
@@ -342,7 +341,6 @@ class AdaptiveReplayContractTests(unittest.TestCase):
         plane[policy.plane_roi_offset:policy.plane_roi_offset + 2] = list(
             replay.depth_coordinate_v2_contract.subtitle_ocr_dynamic_roi(1920, 1080, 770, 434))
         plane[policy.plane_content_offset:policy.plane_content_offset + 4] = [0, 0, 770, 434]
-        plane[replay.TRACE_PLANE_CUT_EPOCH_WORD] = 7
         condition = [0] * replay.TRACE_CONDITION_WORDS
         subtitle_counts = {
             "suppressed": 0, "optional_ocr": 0,
@@ -372,7 +370,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 is_force = mode in ("force", "force_no_ocr")
                 is_reuse = mode.startswith("reuse")
                 if mode not in (
-                        "force", "force_no_ocr", "opaque", "cut", "reset",
+                        "force", "force_no_ocr", "opaque", "reset",
                         "reuse", "opaque_no_ocr", "reuse_no_ocr"):
                     raise AssertionError(mode)
                 submission = (replay.TRACE_SUBMISSION_FORCE if is_force else
@@ -416,8 +414,6 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                     row_condition = [policy.condition_param_schema, policy.condition_param_tag,
                         1, 0, 2, applied] if optional_executed else [
                         policy.condition_param_schema, policy.condition_param_tag, 0, 0, 0, 0]
-                if mode == "cut":
-                    row_plane[replay.TRACE_PLANE_CUT_EPOCH_WORD] += 1
 
             authentic_subtitle = subtitle
             if invalid_hold_disposition and subtitle == replay.TRACE_SUBTITLE_HELD_WITH_DEPTH:
@@ -587,7 +583,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             self.assertEqual(comparison["summary"]["residual_mae"]["max"], 0.0)
 
     def test_authenticates_each_infer_branch_as_direct_atomic_publication(self):
-        for mode in ("opaque", "cut", "reset"):
+        for mode in ("opaque", "reset"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 control, treatment = self.make_pair(
                     Path(directory), modes=("force", mode))

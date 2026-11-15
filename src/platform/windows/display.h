@@ -100,16 +100,6 @@ namespace platf::dxgi {
       std::optional<std::pair<std::uint64_t, std::chrono::steady_clock::time_point>> last_sample;
     };
 
-    /** A held CutBridge pulse is one event; later health copies need a changed durable count. */
-    [[nodiscard]] constexpr bool host_sbs_telemetry_cut_pulse(
-      const bool has_prior_sample,
-      const std::uint32_t prior_cut_count,
-      const std::uint32_t current_cut_count,
-      const bool current_raw_pulse
-    ) noexcept {
-      return has_prior_sample ? current_cut_count != prior_cut_count : current_raw_pulse;
-    }
-
     /** Select the optional HDR Host-SBS warp+luma MRT without weakening the legacy fallback.
      *
      * The optimization is deliberately narrower than renderer authorization: only an already

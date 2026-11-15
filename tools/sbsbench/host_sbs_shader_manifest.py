@@ -41,16 +41,6 @@ DEPTH_MINMAX_EMA = ShaderSpec(
     source_entrypoint="main",
     source_target="cs_5_0",
 )
-DEPTH_SCENE_CUT_EVIDENCE = ShaderSpec(
-    source_file="depth_scene_cut_evidence_cs.hlsl",
-    source_entrypoint="main",
-    source_target="cs_5_0",
-)
-DEPTH_SCENE_CUT_RESOLVE = ShaderSpec(
-    source_file="depth_scene_cut_resolve_cs.hlsl",
-    source_entrypoint="main",
-    source_target="cs_5_0",
-)
 DEPTH_COORDINATE_V2_MOMENTS = ShaderSpec(
     source_file="depth_coordinate_v2_moments_cs.hlsl",
     source_entrypoint="main",
@@ -179,11 +169,6 @@ HOST_SBS_NEAR_IDENTICAL_FUSED_PREPROCESS = ShaderSpec(
 HOST_SBS_NEAR_IDENTICAL_RESOLVE = ShaderSpec(
     source_file="host_sbs_near_identical_detector_cs.hlsl",
     source_entrypoint="resolve_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_NEAR_IDENTICAL_SCENE_SEED = ShaderSpec(
-    source_file="host_sbs_near_identical_detector_cs.hlsl",
-    source_entrypoint="scene_seed_main",
     source_target="cs_5_0",
 )
 HOST_SBS_NEAR_IDENTICAL_FINALIZE = ShaderSpec(
@@ -391,8 +376,6 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "buffer_to_tex": BUFFER_TO_TEX,
     "buffer_to_tex_pad": BUFFER_TO_TEX_PAD,
     "depth_minmax_ema": DEPTH_MINMAX_EMA,
-    "depth_scene_cut_evidence": DEPTH_SCENE_CUT_EVIDENCE,
-    "depth_scene_cut_resolve": DEPTH_SCENE_CUT_RESOLVE,
     "depth_coordinate_v2_moments": DEPTH_COORDINATE_V2_MOMENTS,
     "depth_coordinate_v2_frame_resolve": DEPTH_COORDINATE_V2_FRAME_RESOLVE,
     "depth_coordinate_v2_histogram": DEPTH_COORDINATE_V2_HISTOGRAM,
@@ -419,7 +402,6 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "host_sbs_subtitle_gaussian_horizontal_limit": HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT,
     "host_sbs_near_identical_fused_preprocess": HOST_SBS_NEAR_IDENTICAL_FUSED_PREPROCESS,
     "host_sbs_near_identical_resolve": HOST_SBS_NEAR_IDENTICAL_RESOLVE,
-    "host_sbs_near_identical_scene_seed": HOST_SBS_NEAR_IDENTICAL_SCENE_SEED,
     "host_sbs_near_identical_finalize": HOST_SBS_NEAR_IDENTICAL_FINALIZE,
     "host_sbs_near_identical_reuse_depth": HOST_SBS_NEAR_IDENTICAL_REUSE_DEPTH,
     "host_sbs_gpu_trace": HOST_SBS_GPU_TRACE,
@@ -470,7 +452,7 @@ PREPROCESS_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_NEAR_IDENTICAL_FUSED_PREPROCESS,
     ),
-    source_closure_sha256="943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744",
+    source_closure_sha256="23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd",
 )
 
 PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
@@ -483,8 +465,6 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         BUFFER_TO_TEX,
         BUFFER_TO_TEX_PAD,
         DEPTH_MINMAX_EMA,
-        DEPTH_SCENE_CUT_EVIDENCE,
-        DEPTH_SCENE_CUT_RESOLVE,
         DEPTH_COORDINATE_V2_MOMENTS,
         DEPTH_COORDINATE_V2_FRAME_RESOLVE,
         DEPTH_COORDINATE_V2_HISTOGRAM,
@@ -509,7 +489,7 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_GAUSSIAN_VERTICAL_LIMIT,
         HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT,
     ),
-    source_closure_sha256="5a89c64ad9489d9208fb86d0b48d1f27187d4c9369c7db97bbc795fa79d9b84d",
+    source_closure_sha256="98beb79249486fd3151ffdda741bf68d146ed0cd2ee77894280050b21b8619c7",
 )
 
 PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
@@ -520,21 +500,20 @@ PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
     specs=(
         DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC,
     ),
-    source_closure_sha256="50c712473211a3b66638fb0bcf89938cb46f2501126bee79cca8e352243ca53a",
+    source_closure_sha256="debe8c4e2259abdd0ffe911e0ae43f7032cc3f8ec14e9d7cb5b618b68f03d51c",
 )
 
 NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
     name="near_identical_detector",
     description=(
-        "Mandatory GPU reuse arbitration, scene seeding, finalization, and reuse-depth closure."
+        "Mandatory GPU reuse arbitration, finalization, and reuse-depth closure."
     ),
     specs=(
         HOST_SBS_NEAR_IDENTICAL_RESOLVE,
-        HOST_SBS_NEAR_IDENTICAL_SCENE_SEED,
         HOST_SBS_NEAR_IDENTICAL_FINALIZE,
         HOST_SBS_NEAR_IDENTICAL_REUSE_DEPTH,
     ),
-    source_closure_sha256="9272bf6f9d293e556dbc38a9d48a74d5c70090af390836e150d0d6bd8c46a670",
+    source_closure_sha256="bd1b095be53a2dd50d468a1a1b623ec25b2f448e8d631d06ca3b8ebe16bcf5d8",
 )
 
 GPU_TRACE_GROUP = ClosureGroup(
@@ -545,7 +524,7 @@ GPU_TRACE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_GPU_TRACE,
     ),
-    source_closure_sha256="2c442b910b839fe7daf0c073d157c36258cd5b2f264c9d901187d83752f2b7c1",
+    source_closure_sha256="22af20b46df3028aa511192c43880060d6b75ec3a183ac096f13d703fa056fda",
 )
 
 PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
@@ -557,7 +536,7 @@ PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_RENDERER,
         SBS_REPROJECTION_VERTEX,
     ),
-    source_closure_sha256="789f70fdf7cf10bf2d2ae804660501ac7cc192ad77b3433ea7d8ea3ebcae16ab",
+    source_closure_sha256="f0535ff09bcd7b519ecca02f9c32c3b9e3089f36b6efdd84002742b54968bbee",
 )
 
 PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
@@ -568,7 +547,7 @@ PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
     specs=(
         PARALLAX_V2_P010_Y_RENDERER,
     ),
-    source_closure_sha256="eddb386114337759c39e16719d830865e836a36a9e2e6a37d0536e03f199c5a2",
+    source_closure_sha256="696be6627aecf8d4e790074036ff85ee68c3b81460aa7e8304b90ccda5b73e5a",
 )
 
 SBS_FLAT_FALLBACK_GROUP = ClosureGroup(
@@ -592,7 +571,7 @@ PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_MAPPING,
         PARALLAX_V2_LIVE_MASK,
     ),
-    source_closure_sha256="a8f85ccd4b688fc8f2a2e543ec925dedadd137fd1f598664c79304623bad0ca0",
+    source_closure_sha256="7b1d25de8159afca42c3f747e57081003adaae6007468fdf7176ca2d4f801a5f",
 )
 
 SUBTITLE_COHORT_PROTOTYPE_RESEARCH_GROUP = ClosureGroup(
@@ -605,7 +584,7 @@ SUBTITLE_COHORT_PROTOTYPE_RESEARCH_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_COHORT_MEMBERS,
         HOST_SBS_SUBTITLE_COHORT_FILTER,
     ),
-    source_closure_sha256="44351fca99d62906c3f62de401c09738d2eb68334b8b59bacd321bce8ab803a5",
+    source_closure_sha256="4457f68849aa877ba437ef0b56c00ddd7498dfbb2141059cef636a94f74fcc93",
 )
 
 SUBTITLE_COHORT_RESEARCH_GROUP = ClosureGroup(
@@ -619,7 +598,7 @@ SUBTITLE_COHORT_RESEARCH_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_COHORT_FILTER,
         HOST_SBS_SUBTITLE_COHORT_SNAPSHOT,
     ),
-    source_closure_sha256="7e6519ea8c3c61050dbfcfbe23d7e550719f1ec1087ce55db6c12d826c6a3143",
+    source_closure_sha256="aec5d3defd8d987f6426779e3566e7e6775876c3ee793aae74a47fa46797ecda",
 )
 
 SUBTITLE_INNER_COLOUR_RESEARCH_GROUP = ClosureGroup(
@@ -634,7 +613,7 @@ SUBTITLE_INNER_COLOUR_RESEARCH_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_ACCUMULATE,
         HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_VALIDATE,
     ),
-    source_closure_sha256="cc67e16109eef4fcc424d59ba9e2083b72aa00f7495fbdc31069697fb1b6525f",
+    source_closure_sha256="ce353c5abdf61c69829b91a6a015637efe9b1cf890617f255d241037f62ab9ec",
 )
 
 SUBTITLE_INNER_COMPONENTS_RESEARCH_GROUP = ClosureGroup(
@@ -661,7 +640,7 @@ SUBTITLE_MATTE_GUARD_RESEARCH_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_SUBTITLE_MATTE_GUARD,
     ),
-    source_closure_sha256="1608a1bb4b02713322f465985d2eb157c5d95998374fe616354a0ef457ca1cda",
+    source_closure_sha256="41ff0a4909dd1a223408fd5a5b30cb612ad48d0ca7cd71ff3781deb5733789df",
 )
 
 PARALLAX_V2_QUEUED_RENDERER_GROUP = ClosureGroup(
@@ -672,7 +651,7 @@ PARALLAX_V2_QUEUED_RENDERER_GROUP = ClosureGroup(
     specs=(
         PARALLAX_V2_QUEUED_RENDERER,
     ),
-    source_closure_sha256="bcf11893dddc8558067a2a0fbc2e8d0e1c608c52cba2bb9d1f00c5a2bda11713",
+    source_closure_sha256="1411458ab1995d5c593a1dab833334b85c470fb5a6514e166a6dd209d7e4a7e1",
 )
 
 CURRENT_MASK_HOLES_GROUP = ClosureGroup(

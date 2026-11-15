@@ -254,7 +254,7 @@ namespace {
       return out.str();
     }
 
-    void observe(std::uint64_t timestamp_us, float low, float high, bool pulse = false,
+    void observe(std::uint64_t timestamp_us, float low, float high,
                  bool collapsed = false, bool quantile_valid = true) {
       config.joint_observation_timestamp_low = static_cast<std::uint32_t>(timestamp_us);
       config.joint_observation_timestamp_high = static_cast<std::uint32_t>(timestamp_us >> 32u);
@@ -269,9 +269,6 @@ namespace {
         frame[v2::frame_stat_percentile_bin_width] = (high - low) / 256.0f;
       }
       context->UpdateSubresource(stats.buffer.Get(), 0u, nullptr, frame.data(), 0u, 0u);
-      cut_words[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_pulse)] =
-        std::bit_cast<std::uint32_t>(pulse ? 1.0f : 0.0f);
-      if (pulse) ++cut_words[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_count)];
       context->UpdateSubresource(cut.buffer.Get(), 0u, nullptr, cut_words.data(), 0u, 0u);
       ID3D11Buffer *cb = constants.Get();
       context->CSSetConstantBuffers(1u, 1u, &cb);
@@ -353,7 +350,7 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, CapsCurrentNearPixelsWhileLogGainAndZeroAda
   }
 }
 
-TEST_F(HostSbsAdaptiveCameraGpuTest, GapCutAndBadClocksEarnNoCatchupAcrossLowWordRollover) {
+TEST_F(HostSbsAdaptiveCameraGpuTest, GapAndBadClocksEarnNoCatchupAcrossLowWordRollover) {
   const std::uint64_t first = 0xffffffffull - 350000ull;
   seed(0.0f, 4.0f, first);
   const auto last = first;
@@ -362,7 +359,7 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, GapCutAndBadClocksEarnNoCatchupAcrossLowWor
   observe(last + 300000u, 0.0f, 40.0f);
   EXPECT_FLOAT_EQ(scalar(v2::center), held_zero);
   EXPECT_FLOAT_EQ(scalar(v2::inverse_scale), held_gain);
-  observe(last + 400000u, 0.0f, 40.0f, true);
+  observe(last + 400000u, 0.0f, 40.0f);
   EXPECT_GT(scalar(v2::center), held_zero);
   EXPECT_LT(scalar(v2::inverse_scale), held_gain);
   held_zero = scalar(v2::center);
@@ -385,7 +382,7 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, CollapseFailsFlatAndSignedDepthRetainsCamer
   seed(-2.0f, 4.0f); // Finite negative values remain part of the mean zero.
   EXPECT_FLOAT_EQ(scalar(v2::center), 1.0f);
   const float held = scalar(v2::inverse_scale);
-  observe(950000u, 0.0f, 4.0f, false, true);
+  observe(950000u, 0.0f, 4.0f, true);
   EXPECT_FLOAT_EQ(scalar(v2::frame_valid), 0.0f);
   EXPECT_FLOAT_EQ(scalar(v2::inverse_scale), held);
   const auto field = map_and_limit(2.0f);
@@ -419,7 +416,7 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, TailTamperingCannotAuthorizeOrPreservePseud
 TEST_F(HostSbsAdaptiveCameraGpuTest, MissingQuantileAuthorityCannotFallBackToExtrema) {
   seed();
   const float held_zero = scalar(v2::center), held_inverse = scalar(v2::inverse_scale);
-  observe(200000u, -100.0f, 100.0f, false, false, false);
+  observe(200000u, -100.0f, 100.0f, false, false);
   EXPECT_FLOAT_EQ(scalar(v2::frame_valid), 0.0f);
   EXPECT_FLOAT_EQ(scalar(v2::center), held_zero);
   EXPECT_FLOAT_EQ(scalar(v2::inverse_scale), held_inverse);
@@ -462,11 +459,11 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, HostMeanAdapterStartsImmediatelyWithModelAm
   EXPECT_NEAR(foreground.front(), config.requested_gain / config.raw_coordinate_scale, 1.0e-7f);
 }
 
-TEST_F(HostSbsAdaptiveCameraGpuTest, HostMeanAdapterTracksAcrossCutsWithoutSpendingGapTime) {
+TEST_F(HostSbsAdaptiveCameraGpuTest, HostMeanAdapterTracksContentChangesWithoutSpendingGapTime) {
   config.joint_plane_mode = 3u;
   observe(100000u, 0.0f, 4.0f);
   const float original = scalar(v2::center);
-  observe(200000u, 10.0f, 14.0f, true);
+  observe(200000u, 10.0f, 14.0f);
   EXPECT_GT(scalar(v2::center), original);
   EXPECT_LE(scalar(v2::center) - original, .1f / scalar(v2::inverse_scale) + 1.0e-6f);
   const float held = scalar(v2::center);

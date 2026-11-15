@@ -27,4 +27,4 @@ jobs:
           python3 tools/sbsbench/generate_depth_coordinate_v2_contract.py --check
           python3 tools/sbsbench/generate_host_sbs_shader_manifest.py --check
           python3 -m unittest discover -s tools/sbsbench -p test_host_sbs_shader_manifest.py
-          python3 -m unittest tools.sbsbench.test_adaptive_state_contract.AdaptiveStateContractTests.test_schema_version_pins_the_complete_contract tools.sbsbench.test_adaptive_state_contract.AdaptiveStateContractTests.test_generated_native_and_shader_contracts_are_current tools.sbsbench.test_adaptive_state_contract.AdaptiveStateContractTests.test_manifest_is_exact_and_carries_confirmation_state
+          python3 -m unittest tools.sbsbench.test_adaptive_state_contract.AdaptiveStateContractTests.test_schema_version_pins_the_complete_contract tools.sbsbench.test_adaptive_state_contract.AdaptiveStateContractTests.test_generated_native_and_shader_contracts_are_current tools.sbsbench.test_adaptive_state_contract.AdaptiveStateContractTests.test_manifest_is_exact

@@ -10,7 +10,7 @@ bool V2SubtitleHistoryClockLess(uint2 a, uint2 b) {
 bool V2SubtitleHistoryCompatible(
     StructuredBuffer<uint> identity,
     uint4 source, uint4 field, uint4 content, uint4 frame, uint2 observation,
-    uint domain_reset, uint epoch, out bool duplicate) {
+    uint domain_reset, out bool duplicate) {
     duplicate = false;
     uint words, stride;
     identity.GetDimensions(words, stride);
@@ -19,7 +19,7 @@ bool V2SubtitleHistoryCompatible(
         identity[0u] != V2_SUBTITLE_CONTOUR_SCHEMA ||
         identity[1u] != V2_SUBTITLE_CONTOUR_HISTORY_TAG || identity[2u] > 1u ||
         identity[V2_SUBTITLE_CONTOUR_HISTORY_SNAPSHOT_VALID_WORD] != 1u ||
-        identity[3u] != epoch || identity[6u] != frame.z || identity[7u] != frame.w ||
+        identity[6u] != frame.z || identity[7u] != frame.w ||
         identity[22u] != V2_SUBTITLE_CONTOUR_RECIPE) return false;
     [unroll]
     for (uint component = 0u; component < 4u; ++component) {

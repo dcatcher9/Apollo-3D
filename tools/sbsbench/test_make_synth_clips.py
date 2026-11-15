@@ -116,11 +116,7 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
         self.assertEqual(
             contract["scene_state_by_frame"],
             list(make_synth_clips.SUBTITLE_HIGHRES_SCENE_BY_FRAME))
-        self.assertEqual(metadata["shot_state_contract"], {
-            "kind": "hard-cut",
-            "monitor_from_frame": 2,
-            "expected_pulse_frames": [21],
-        })
+        self.assertNotIn("shot_state_contract", metadata)
 
         for frame_id, state in enumerate(
                 make_synth_clips.SUBTITLE_HIGHRES_STATE_BY_FRAME, 1):
@@ -174,8 +170,8 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
         after_replace = make_synth_clips._highres_subtitle_layers(9)
         self.assertFalse(np.array_equal(before_replace[1], after_replace[1]))
 
-        # Frame 21 replaces almost the entire scene outside both loose overlay rectangles, so a
-        # future subtitle exclusion cannot turn the genuine cut into an apparent false positive.
+        # Frame 21 replaces almost the entire scene outside both loose overlay rectangles, so
+        # the broad replacement is authored independently of the simultaneous subtitle change.
         before_cut = make_synth_clips._highres_subtitle_layers(20)
         after_cut = make_synth_clips._highres_subtitle_layers(21)
         self.assertFalse(np.array_equal(before_cut[1], after_cut[1]))

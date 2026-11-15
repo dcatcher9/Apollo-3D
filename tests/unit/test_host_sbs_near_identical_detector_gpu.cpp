@@ -423,10 +423,6 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
     std::pair {std::string_view {"buffer_to_tex"}, std::string_view {"buffer_to_tex_cs"}},
     std::pair {std::string_view {"buffer_to_tex_pad"}, std::string_view {"buffer_to_tex_pad_cs"}},
     std::pair {std::string_view {"depth_minmax_ema"}, std::string_view {"depth_minmax_ema_cs"}},
-    std::pair {std::string_view {"depth_scene_cut_evidence"},
-               std::string_view {"depth_scene_cut_evidence_cs"}},
-    std::pair {std::string_view {"depth_scene_cut_resolve"},
-               std::string_view {"depth_scene_cut_resolve_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_moments"},
                std::string_view {"depth_coordinate_v2_moments_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_frame_resolve"},
@@ -1043,14 +1039,9 @@ namespace {
     return records;
   }
 
-  std::array<float, sbs_adaptive_state::word_count> history_state(
-    const std::uint32_t model_input_history_state
-  ) {
-    auto state = sbs_adaptive_state::initial_values;
-    state[sbs_adaptive_state::index(
-      sbs_adaptive_state::word_e::model_input_history_state
-    )] = static_cast<float>(model_input_history_state);
-    return state;
+  // The tagged depth-health state at its CPU-initialized values.
+  std::array<float, sbs_adaptive_state::word_count> health_state() {
+    return sbs_adaptive_state::initial_values;
   }
 
   models::depth_coordinate_v2::state_words_t authenticated_mapping_state() {
@@ -1099,7 +1090,6 @@ namespace {
           !compile(fused_map_path, "main", fused_map_shader_, error) ||
           !compile(fused_map_path, "coordinate_main", coordinate_shader_, error) ||
           !compile(shader_path, "resolve_main", resolve_shader_, error) ||
-          !compile(shader_path, "scene_seed_main", scene_seed_shader_, error) ||
           !compile(shader_path, "finalize_main", finalize_shader_, error)) {
         return initialize_result_e::failed;
       }
@@ -1164,13 +1154,6 @@ namespace {
             history_owner_uav_
           ) ||
           !create_structured_output(
-            10u,
-            sizeof(std::uint32_t),
-            scene_evidence_buffer_,
-            scene_evidence_srv_,
-            scene_evidence_uav_
-          ) ||
-          !create_structured_output(
             models::depth_coordinate_v2::subtitle_ocr_record_word_count,
             sizeof(std::uint32_t),
             ocr_record_buffer_,
@@ -1195,16 +1178,6 @@ namespace {
       staging_desc.MiscFlags = 0u;
       if (FAILED(device_->CreateBuffer(&staging_desc, nullptr, &decision_staging_))) {
         error = "could not create decision staging buffer";
-        return initialize_result_e::failed;
-      }
-      scene_evidence_buffer_->GetDesc(&staging_desc);
-      staging_desc.Usage = D3D11_USAGE_STAGING;
-      staging_desc.BindFlags = 0u;
-      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      staging_desc.MiscFlags = 0u;
-      staging_desc.StructureByteStride = 0u;
-      if (FAILED(device_->CreateBuffer(&staging_desc, nullptr, &scene_evidence_staging_))) {
-        error = "could not create scene-evidence staging buffer";
         return initialize_result_e::failed;
       }
       return initialize_result_e::ready;
@@ -1690,20 +1663,13 @@ namespace {
       return read_decision(decision, error);
     }
 
-    void seed_scene_evidence(const std::array<std::uint32_t, 10> &words) {
-      context_->UpdateSubresource(
-        scene_evidence_buffer_.Get(), 0u, nullptr, words.data(), 0u, 0u
-      );
-    }
-
     bool publish_history_owner(
       const std::uint64_t frame_id,
-      const std::uint32_t model_input_history_state,
       std::string &error,
       const std::uint64_t observation_timestamp_us = owner_observation_timestamp_us,
       const std::array<float, 4> &minmax_ema = valid_minmax_ema
     ) {
-      const auto state = history_state(model_input_history_state);
+      const auto state = health_state();
       const std::vector<float> raw(field_texels, 0.5f);
       const std::vector<float> model_input(3u * field_texels, 0.25f);
       const std::vector<float> appearance(field_texels, 0.75f);
@@ -1731,48 +1697,6 @@ namespace {
       std::string &error
     ) {
       return read_buffer(history_owner_buffer_.Get(), owner, error);
-    }
-
-    bool seed_scene_from_history_owner(
-      const std::uint64_t frame_id,
-      std::array<std::uint32_t, 10> &words,
-      std::string &error
-    ) {
-      update_depth_constants();
-      update_detector_constants(
-        0u, 0u, 0u, frame_id, 0u, 0u, current_observation_timestamp_us
-      );
-      ID3D11Buffer *constants[2] = {depth_constants_.Get(), detector_constants_.Get()};
-      ID3D11ShaderResourceView *inputs[4] = {
-        nullptr, nullptr, nullptr, history_owner_srv_.Get(),
-      };
-      ID3D11UnorderedAccessView *outputs[6] = {
-        nullptr, nullptr, nullptr, nullptr, nullptr, scene_evidence_uav_.Get(),
-      };
-      context_->CSSetShader(scene_seed_shader_.Get(), nullptr, 0u);
-      context_->CSSetConstantBuffers(0u, 2u, constants);
-      context_->CSSetShaderResources(0u, 4u, inputs);
-      context_->CSSetUnorderedAccessViews(0u, 6u, outputs, nullptr);
-      context_->Dispatch(1u, 1u, 1u);
-      unbind(4u, 6u, 2u);
-      return read_scene_evidence(words, error);
-    }
-
-    bool read_scene_evidence(
-      std::array<std::uint32_t, 10> &words,
-      std::string &error
-    ) {
-      context_->CopyResource(scene_evidence_staging_.Get(), scene_evidence_buffer_.Get());
-      D3D11_MAPPED_SUBRESOURCE mapped {};
-      if (FAILED(context_->Map(
-            scene_evidence_staging_.Get(), 0u, D3D11_MAP_READ, 0u, &mapped
-          )) || !mapped.pData) {
-        error = "could not read scene-evidence buffer";
-        return false;
-      }
-      std::memcpy(words.data(), mapped.pData, sizeof(words));
-      context_->Unmap(scene_evidence_staging_.Get(), 0u);
-      return true;
     }
 
     bool finalize_depth_receipt(
@@ -1824,7 +1748,7 @@ namespace {
       };
       ID3D11UnorderedAccessView *outputs[6] = {
         nullptr, ocr_record_uav_.Get(), nullptr, decision_uav_.Get(), nullptr,
-        scene_evidence_uav_.Get(),
+        nullptr,
       };
       context_->CSSetShader(finalize_shader_.Get(), nullptr, 0u);
       context_->CSSetConstantBuffers(0u, 4u, constants);
@@ -2516,7 +2440,6 @@ namespace {
     ComPtr<ID3D11ComputeShader> fused_map_shader_;
     ComPtr<ID3D11ComputeShader> coordinate_shader_;
     ComPtr<ID3D11ComputeShader> resolve_shader_;
-    ComPtr<ID3D11ComputeShader> scene_seed_shader_;
     ComPtr<ID3D11ComputeShader> finalize_shader_;
     ComPtr<ID3D11Buffer> depth_constants_;
     ComPtr<ID3D11Buffer> detector_constants_;
@@ -2531,10 +2454,6 @@ namespace {
     ComPtr<ID3D11Buffer> history_owner_buffer_;
     ComPtr<ID3D11ShaderResourceView> history_owner_srv_;
     ComPtr<ID3D11UnorderedAccessView> history_owner_uav_;
-    ComPtr<ID3D11Buffer> scene_evidence_buffer_;
-    ComPtr<ID3D11ShaderResourceView> scene_evidence_srv_;
-    ComPtr<ID3D11UnorderedAccessView> scene_evidence_uav_;
-    ComPtr<ID3D11Buffer> scene_evidence_staging_;
     ComPtr<ID3D11Buffer> ocr_record_buffer_;
     ComPtr<ID3D11ShaderResourceView> ocr_record_srv_;
     ComPtr<ID3D11UnorderedAccessView> ocr_record_uav_;
@@ -2683,7 +2602,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, PublishesAuthenticatedQuietProposalOnl
   ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
   const auto input = uniform_model_input();
   decision_words_t decision {};
-  ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
+  ASSERT_TRUE(fixture.run_detector(input, input, health_state(), decision, error)) << error;
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
     static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse)
@@ -2716,7 +2635,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, NonfiniteInputInfers) {
   auto nonfinite = previous;
   nonfinite[field_width + 1u] = std::numeric_limits<float>::quiet_NaN();
   ASSERT_TRUE(fixture.run_detector(
-    nonfinite, previous, history_state(1u), decision, error
+    nonfinite, previous, health_state(), decision, error
   )) << error;
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
@@ -2737,7 +2656,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReductionGroupCountMustMatchTensorShap
   ASSERT_TRUE(fixture.run_detector(
     input,
     input,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count + 1u
@@ -2747,7 +2666,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReductionGroupCountMustMatchTensorShap
     static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
   );
 
-  ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
+  ASSERT_TRUE(fixture.run_detector(input, input, health_state(), decision, error)) << error;
   ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::infer,
     true,
@@ -2789,7 +2708,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, OptionalPreprocessRequiresAuthenticate
   ASSERT_TRUE(fixture.run_detector(
     previous,
     previous,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count,
@@ -2814,7 +2733,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, OptionalPreprocessRequiresAuthenticate
 
   for (const auto retired_work : {8u, 16u}) {
     ASSERT_TRUE(fixture.run_detector(
-      previous, previous, history_state(1u), decision, error,
+      previous, previous, health_state(), decision, error,
       reduction_group_count, retired_work
     )) << error;
     EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision_magic)], 0u);
@@ -2824,7 +2743,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, OptionalPreprocessRequiresAuthenticate
   ASSERT_TRUE(fixture.run_detector(
     previous,
     previous,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count,
@@ -2844,7 +2763,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, OptionalPreprocessRequiresAuthenticate
   ASSERT_TRUE(fixture.run_detector(
     changed,
     previous,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count,
@@ -2870,7 +2789,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, OptionalPreprocessRequiresAuthenticate
   ASSERT_TRUE(fixture.run_detector(
     changed,
     previous,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count + 1u,
@@ -2934,7 +2853,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerHasNoAgeOrCountExpiryButReje
   ASSERT_TRUE(fixture.run_detector(
     input,
     input,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count,
@@ -2960,7 +2879,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerHasNoAgeOrCountExpiryButReje
   ASSERT_TRUE(fixture.run_detector(
     input,
     input,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count,
@@ -2978,7 +2897,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerHasNoAgeOrCountExpiryButReje
   ASSERT_TRUE(fixture.run_detector(
     input,
     input,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count,
@@ -2994,7 +2913,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerHasNoAgeOrCountExpiryButReje
 
   // Exercise high-word frame and timestamp distances; no narrowing delta may expire the owner.
   ASSERT_TRUE(fixture.run_detector(
-    input, input, history_state(1u), decision, error, reduction_group_count, 0u,
+    input, input, health_state(), decision, error, reduction_group_count, 0u,
     1u, owner_observation_timestamp_us,
     owner_observation_timestamp_us + (std::uint64_t {1} << 32u) + 17u
   )) << error;
@@ -3004,7 +2923,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerHasNoAgeOrCountExpiryButReje
   // An owner at/after the current frame is never a valid comparison baseline.
   for (const auto invalid_owner : {std::uint64_t {0u}, current_frame_id, current_frame_id + 1u}) {
     ASSERT_TRUE(fixture.run_detector(
-      input, input, history_state(1u), decision, error, reduction_group_count, 0u,
+      input, input, health_state(), decision, error, reduction_group_count, 0u,
       invalid_owner, owner_observation_timestamp_us, current_observation_timestamp_us
     )) << error;
     EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision)],
@@ -3015,7 +2934,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerHasNoAgeOrCountExpiryButReje
   ASSERT_TRUE(fixture.run_detector(
     input,
     input,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count,
@@ -3031,7 +2950,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerHasNoAgeOrCountExpiryButReje
   ASSERT_TRUE(fixture.run_detector(
     input,
     input,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count,
@@ -3067,7 +2986,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, LongReuseChainComparesAgainstUnchanged
   fused_map_result_t owner;
   ASSERT_TRUE(fixture.run_fused_map(
     raw, owner_input.tensor, owner_input.appearance, raw, owner_input.exclusion,
-    history_state(1u), valid_minmax_ema, authenticated_mapping_state(),
+    health_state(), valid_minmax_ema, authenticated_mapping_state(),
     baseline_frame_id, owner_observation_timestamp_us, owner, error
   )) << error;
   decision_words_t decision {};
@@ -3124,7 +3043,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, LongReuseChainComparesAgainstUnchanged
   EXPECT_EQ(held_owner, owner.owner) << "A proposal cannot advance analysis history";
 }
 
-TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerForStatesOneAndThree) {
+TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerForValidDepth) {
   near_identical_gpu_fixture_t fixture;
   std::string error;
   const auto initialized = initialize_fixture(fixture, error);
@@ -3134,8 +3053,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerF
   ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
 
   const auto inputs = patterned_fused_map_inputs();
-  for (const std::uint32_t history_state_value : {1u, 3u}) {
-    SCOPED_TRACE(::testing::Message() << "history state " << history_state_value);
+  {
     fused_map_result_t result;
     ASSERT_TRUE(fixture.run_fused_map(
       inputs.raw,
@@ -3143,7 +3061,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerF
       inputs.appearance,
       inputs.depth,
       inputs.exclusion,
-      history_state(history_state_value),
+      health_state(),
       valid_minmax_ema,
       authenticated_mapping_state(),
       baseline_frame_id,
@@ -3181,7 +3099,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerF
   }
 }
 
-TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHoldsTupleAndClearsOwnerForHeldOrInvalidHistory) {
+TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHoldsTupleAndClearsOwnerForInvalidDepth) {
   near_identical_gpu_fixture_t fixture;
   std::string error;
   const auto initialized = initialize_fixture(fixture, error);
@@ -3193,14 +3111,12 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHoldsTupleAndClearsOwnerForHel
   constexpr float held_float = -73.25f;
   constexpr std::uint32_t held_uint = 0xa5a5c3c3u;
 
-  const auto expect_held = [&](const std::uint32_t state_value,
-                               const std::array<float, 4> &minmax) {
-    SCOPED_TRACE(::testing::Message() << "history state " << state_value
-                                     << ", validity " << minmax[3]);
+  const auto expect_held = [&](const std::array<float, 4> &minmax) {
+    SCOPED_TRACE(::testing::Message() << "validity " << minmax[3]);
     fused_map_result_t result;
     ASSERT_TRUE(fixture.run_fused_map(
       inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
-      history_state(state_value), minmax, authenticated_mapping_state(), baseline_frame_id,
+      health_state(), minmax, authenticated_mapping_state(), baseline_frame_id,
       owner_observation_timestamp_us, result, error
     )) << error;
     EXPECT_TRUE(std::all_of(
@@ -3223,9 +3139,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHoldsTupleAndClearsOwnerForHel
     EXPECT_EQ(result.owner[1], models::near_identical_history_owner_contract_schema);
     EXPECT_EQ(result.owner[2], static_cast<std::uint32_t>(baseline_frame_id));
   };
-  expect_held(2u, valid_minmax_ema);
-  expect_held(4u, valid_minmax_ema);
-  expect_held(1u, invalid_minmax_ema);
+  expect_held(invalid_minmax_ema);
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHistoryPrecedesCandidateValidationAndPaddingClamp) {
@@ -3240,7 +3154,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHistoryPrecedesCandidateValida
   inputs.raw[0] = std::numeric_limits<float>::quiet_NaN();
   auto invalid_mapping = authenticated_mapping_state();
   invalid_mapping[models::depth_coordinate_v2::renderer_authorization_bits] = 0u;
-  auto invalid_tag_state = history_state(1u);
+  auto invalid_tag_state = health_state();
   invalid_tag_state[sbs_adaptive_state::index(
     sbs_adaptive_state::word_e::cut_contract_tag_bits
   )] = std::bit_cast<float>(sbs_adaptive_state::cut_contract_tag ^ 1u);
@@ -3259,24 +3173,6 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHistoryPrecedesCandidateValida
     [](const float value) { return value == 0.0f; }
   ));
 
-  // The tuple predicate deliberately preserves its historical NaN asymmetry, while the stricter
-  // owner authentication rejects a non-finite state. This must copy the tuple but leave tag zero.
-  auto nan_history_state = history_state(1u);
-  nan_history_state[sbs_adaptive_state::index(
-    sbs_adaptive_state::word_e::model_input_history_state
-  )] = std::numeric_limits<float>::quiet_NaN();
-  fused_map_result_t nan_state_result;
-  ASSERT_TRUE(fixture.run_fused_map(
-    inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
-    nan_history_state, valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
-    owner_observation_timestamp_us, nan_state_result, error
-  )) << error;
-  EXPECT_EQ(nan_state_result.previous_model_input, inputs.model_input);
-  EXPECT_EQ(nan_state_result.previous_appearance, inputs.appearance);
-  EXPECT_EQ(nan_state_result.previous_depth, inputs.depth);
-  EXPECT_EQ(nan_state_result.previous_exclusion, inputs.exclusion);
-  EXPECT_EQ(nan_state_result.owner[0], 0u);
-
   constexpr models::depth_tensor_content_rect_t padded_content {8u, 4u, 97u, 81u};
   for (UINT y = 0u; y < field_height; ++y) {
     for (UINT x = 0u; x < field_width; ++x) {
@@ -3292,7 +3188,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHistoryPrecedesCandidateValida
   fused_map_result_t padded_result;
   ASSERT_TRUE(fixture.run_fused_map(
     inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
-    history_state(1u), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
+    health_state(), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
     owner_observation_timestamp_us, padded_result, error, padded_content
   )) << error;
   EXPECT_FLOAT_EQ(padded_result.output[0], padded_result.output[clamped_index]);
@@ -3340,7 +3236,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, CoordinateAndZeroGroupDispatchDoNotMut
   fused_map_result_t coordinate;
   ASSERT_TRUE(fixture.run_fused_map(
     inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
-    history_state(1u), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
+    health_state(), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
     owner_observation_timestamp_us, coordinate, error, content, tile_group_width,
     tile_group_height, true
   )) << error;
@@ -3349,7 +3245,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, CoordinateAndZeroGroupDispatchDoNotMut
   fused_map_result_t zero_group;
   ASSERT_TRUE(fixture.run_fused_map(
     inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
-    history_state(1u), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
+    health_state(), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
     owner_observation_timestamp_us, zero_group, error, content, 0u, 0u, false
   )) << error;
   expect_untouched(zero_group);
@@ -3371,16 +3267,13 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, HistoryOwnerUsesExactValidHistoryPredi
   const auto quiet = quiet_tile_records();
   decision_words_t decision {};
   const auto expect_owner = [&fixture, &quiet, &decision, &error](
-    const std::uint32_t history_state_value,
     const std::array<float, 4> &minmax_ema,
     const models::near_identical_gpu_branch_e expected_branch
   ) {
     SCOPED_TRACE(::testing::Message()
-                 << "history_state=" << history_state_value
-                 << " minmax_validity=" << minmax_ema[3]);
+                 << "minmax_validity=" << minmax_ema[3]);
     ASSERT_TRUE(fixture.publish_history_owner(
       baseline_frame_id,
-      history_state_value,
       error,
       owner_observation_timestamp_us,
       minmax_ema
@@ -3392,11 +3285,8 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, HistoryOwnerUsesExactValidHistoryPredi
     );
   };
 
-  expect_owner(1u, valid_minmax_ema, models::near_identical_gpu_branch_e::reuse);
-  expect_owner(3u, valid_minmax_ema, models::near_identical_gpu_branch_e::reuse);
-  expect_owner(2u, valid_minmax_ema, models::near_identical_gpu_branch_e::infer);
-  expect_owner(4u, valid_minmax_ema, models::near_identical_gpu_branch_e::infer);
-  expect_owner(1u, invalid_minmax_ema, models::near_identical_gpu_branch_e::infer);
+  expect_owner(valid_minmax_ema, models::near_identical_gpu_branch_e::reuse);
+  expect_owner(invalid_minmax_ema, models::near_identical_gpu_branch_e::infer);
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, InvalidSuccessorClearsPreviouslyValidOwner) {
@@ -3408,21 +3298,19 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InvalidSuccessorClearsPreviouslyValidO
   }
   ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
 
-  // A is a valid copied owner. B enters the held geometry-confirmation state and must invalidate
-  // that owner instead of leaving A authenticated under B's newer tuple metadata.
+  // A is a valid copied owner. B has invalid depth, holds the tuple and must invalidate that
+  // owner instead of leaving A authenticated under the newer tuple metadata.
   ASSERT_TRUE(fixture.publish_history_owner(
     baseline_frame_id - 1u,
-    1u,
     error,
     owner_observation_timestamp_us,
     valid_minmax_ema
   )) << error;
   ASSERT_TRUE(fixture.publish_history_owner(
     baseline_frame_id,
-    4u,
     error,
     owner_observation_timestamp_us + 1u,
-    valid_minmax_ema
+    invalid_minmax_ema
   )) << error;
 
   // C has pixels identical to A, but B invalidated the owner proof. Skip C owner publication to
@@ -3432,7 +3320,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InvalidSuccessorClearsPreviouslyValidO
   ASSERT_TRUE(fixture.run_detector(
     input_a,
     input_a,
-    history_state(1u),
+    health_state(),
     decision,
     error,
     reduction_group_count,
@@ -3913,7 +3801,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, MalformedUnsupportedTileInfers) {
   ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
   const auto input = uniform_model_input();
   decision_words_t decision {};
-  ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
+  ASSERT_TRUE(fixture.run_detector(input, input, health_state(), decision, error)) << error;
 
   auto tiles = quiet_tile_records();
   const UINT unsupported_edge_tile = tile_group_width - 1u;
@@ -3937,7 +3825,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SupportedTileThresholdIsInclusive) {
 
   const auto input = uniform_model_input();
   decision_words_t decision {};
-  ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
+  ASSERT_TRUE(fixture.run_detector(input, input, health_state(), decision, error)) << error;
 
   auto tiles = quiet_tile_records();
   constexpr UINT supported_tile = 0u;
@@ -3970,7 +3858,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, GlobalThresholdsAreInclusiveAndVetoAbo
   auto current = previous;
   add_first_content_pixel_deltas(current, 785u, 0.02f);
   ASSERT_TRUE(fixture.run_detector(
-    current, previous, history_state(1u), decision, error
+    current, previous, health_state(), decision, error
   )) << error;
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
@@ -3980,7 +3868,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, GlobalThresholdsAreInclusiveAndVetoAbo
   current = previous;
   add_first_content_pixel_deltas(current, 786u, 0.02f);
   ASSERT_TRUE(fixture.run_detector(
-    current, previous, history_state(1u), decision, error
+    current, previous, health_state(), decision, error
   )) << error;
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
@@ -3990,7 +3878,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, GlobalThresholdsAreInclusiveAndVetoAbo
   current = previous;
   add_first_content_pixel_deltas(current, 196u, 0.21f);
   ASSERT_TRUE(fixture.run_detector(
-    current, previous, history_state(1u), decision, error
+    current, previous, health_state(), decision, error
   )) << error;
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
@@ -4000,7 +3888,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, GlobalThresholdsAreInclusiveAndVetoAbo
   current = previous;
   add_first_content_pixel_deltas(current, 197u, 0.21f);
   ASSERT_TRUE(fixture.run_detector(
-    current, previous, history_state(1u), decision, error
+    current, previous, health_state(), decision, error
   )) << error;
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
@@ -4019,7 +3907,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, MalformedTileShapeFailsClosed) {
   const auto input = uniform_model_input();
   decision_words_t decision {};
   ASSERT_TRUE(fixture.run_detector(
-    input, input, history_state(1u), decision, error
+    input, input, health_state(), decision, error
   )) << error;
   const auto quiet = quiet_tile_records();
   const auto expect_infer = [&](const UINT groups_x, const UINT groups_y,
@@ -4061,7 +3949,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, TileSrvCapacityAndStrideFailClosed) {
   const auto input = uniform_model_input();
   decision_words_t decision {};
   ASSERT_TRUE(fixture.run_detector(
-    input, input, history_state(1u), decision, error
+    input, input, health_state(), decision, error
   )) << error;
 
   const auto expect_infer = [&](const UINT elements, const UINT stride) {
@@ -4103,60 +3991,12 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, UnsupportedEdgeTileCannotMaskSupported
   add_red_pixel_delta(current, 96u, 80u, 0.21f);
   decision_words_t decision {};
   ASSERT_TRUE(fixture.run_detector(
-    current, previous, history_state(1u), decision, error
+    current, previous, health_state(), decision, error
   )) << error;
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
     static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
   );
-}
-
-TEST(HostSbsNearIdenticalDetectorGpuTest, SceneSeedUsesLastAcceptedInferOwner) {
-  near_identical_gpu_fixture_t fixture;
-  std::string error;
-  const auto initialized = initialize_fixture(fixture, error);
-  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
-    GTEST_SKIP() << error;
-  }
-  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
-
-  constexpr std::uint64_t frame_a = 100u;
-  constexpr std::uint64_t frame_b = 107u;
-  constexpr std::uint64_t frame_c = 112u;
-  std::array<std::uint32_t, 10> evidence {};
-
-  // A noncanonical CutBridge history state clears owner word 0, but a receipt-authorized infer
-  // postprocess still publishes words 1..7. Scene age consumes those words independently.
-  ASSERT_TRUE(fixture.publish_history_owner(frame_a, 3u, error)) << error;
-  ASSERT_TRUE(fixture.seed_scene_from_history_owner(frame_b, evidence, error)) << error;
-  for (std::size_t index = 0u; index < 9u; ++index) {
-    EXPECT_EQ(evidence[index], 0u) << "scene-evidence word " << index;
-  }
-  EXPECT_EQ(evidence[9], frame_b - frame_a);
-
-  // If B actually inferred, its owner publication makes C's exact age C-B.
-  ASSERT_TRUE(fixture.publish_history_owner(frame_b, 3u, error)) << error;
-  ASSERT_TRUE(fixture.seed_scene_from_history_owner(frame_c, evidence, error)) << error;
-  EXPECT_EQ(evidence[9], frame_c - frame_b);
-
-  // If B reused, the owner stays A and C's exact age remains C-A.
-  ASSERT_TRUE(fixture.publish_history_owner(frame_a, 3u, error)) << error;
-  ASSERT_TRUE(fixture.seed_scene_from_history_owner(frame_c, evidence, error)) << error;
-  EXPECT_EQ(evidence[9], frame_c - frame_a);
-
-  // The uint64 owner subtraction handles a low-word rollover and saturates long gaps without
-  // wrapping scene age back to a small value.
-  constexpr std::uint64_t rollover_owner = 0x00000000fffffff0ull;
-  constexpr std::uint64_t rollover_current = 0x0000000100000010ull;
-  ASSERT_TRUE(fixture.publish_history_owner(rollover_owner, 3u, error)) << error;
-  ASSERT_TRUE(fixture.seed_scene_from_history_owner(
-    rollover_current, evidence, error
-  )) << error;
-  EXPECT_EQ(evidence[9], 32u);
-
-  ASSERT_TRUE(fixture.publish_history_owner(1u, 3u, error)) << error;
-  ASSERT_TRUE(fixture.seed_scene_from_history_owner(70000u, evidence, error)) << error;
-  EXPECT_EQ(evidence[9], 65535u);
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
@@ -4169,10 +4009,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
   const auto input = uniform_model_input();
   decision_words_t decision {};
-  ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
-  std::array<std::uint32_t, 10> scene_evidence {};
-  scene_evidence.fill(0xA5A5A5A5u);
-  fixture.seed_scene_evidence(scene_evidence);
+  ASSERT_TRUE(fixture.run_detector(input, input, health_state(), decision, error)) << error;
   ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::infer, true, decision, error
   )) << error;
@@ -4184,9 +4021,6 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_columns_x)], 14u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_rows_x)], 12u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 0u);
-  std::array<std::uint32_t, 10> preserved_scene_evidence {};
-  ASSERT_TRUE(fixture.read_scene_evidence(preserved_scene_evidence, error)) << error;
-  EXPECT_EQ(preserved_scene_evidence, scene_evidence);
 
   ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::reuse, true, decision, error
@@ -4194,10 +4028,8 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 7u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_y)], 6u);
-  ASSERT_TRUE(fixture.read_scene_evidence(preserved_scene_evidence, error)) << error;
-  EXPECT_EQ(preserved_scene_evidence, scene_evidence);
 
-  ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
+  ASSERT_TRUE(fixture.run_detector(input, input, health_state(), decision, error)) << error;
   ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::infer, false, decision, error
   )) << error;
@@ -4205,7 +4037,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 7u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_y)], 6u);
 
-  ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
+  ASSERT_TRUE(fixture.run_detector(input, input, health_state(), decision, error)) << error;
   ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::infer,
     true,
@@ -4216,8 +4048,6 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 7u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_y)], 6u);
-  ASSERT_TRUE(fixture.read_scene_evidence(preserved_scene_evidence, error)) << error;
-  EXPECT_EQ(preserved_scene_evidence, scene_evidence);
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, FusedModeSwitchesCompareForceCompareWithoutStaleEvidence) {
@@ -4375,7 +4205,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
   };
 
   ASSERT_TRUE(fixture.publish_history_owner(
-    baseline_frame_id, 1u, error, owner_observation_timestamp_us
+    baseline_frame_id, error, owner_observation_timestamp_us
   )) << error;
   for (const auto &test_case : cases) {
     SCOPED_TRACE(test_case.label);

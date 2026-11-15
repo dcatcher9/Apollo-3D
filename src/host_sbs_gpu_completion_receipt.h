@@ -124,19 +124,12 @@ namespace models::host_sbs_gpu_completion_receipt {
         return false;
       }
     }
-    const float cut_flags = scalar(word_e::cut_flags);
-    const float analysis_flags = scalar(word_e::analysis_flags);
-    const float history_state = scalar(word_e::model_input_history_state);
-    const float cut_pulse = scalar(word_e::hard_cut_pulse);
-    return scalar(word_e::scene_age) >= 0.0f &&
-           cut_flags >= 0.0f && cut_flags <= static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) &&
-           std::trunc(cut_flags) == cut_flags &&
-           analysis_flags >= 0.0f && analysis_flags <= static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) &&
-           std::trunc(analysis_flags) == analysis_flags &&
-           history_state >= 0.0f && history_state <= 4.0f && std::trunc(history_state) == history_state &&
-           (cut_pulse == 0.0f || cut_pulse == 1.0f) &&
-           words[sbs_adaptive_state::index(word_e::hard_cut_count)] <= sbs_adaptive_state::counter_max &&
-           words[sbs_adaptive_state::index(word_e::empty_raw_count)] <= sbs_adaptive_state::counter_max &&
+    for (const auto word : sbs_adaptive_state::retired_zero_words) {
+      if (words[sbs_adaptive_state::index(word)] != 0u) {
+        return false;
+      }
+    }
+    return words[sbs_adaptive_state::index(word_e::empty_raw_count)] <= sbs_adaptive_state::counter_max &&
            words[sbs_adaptive_state::index(word_e::collapsed_raw_count)] <= sbs_adaptive_state::counter_max;
   }
 

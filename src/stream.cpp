@@ -584,12 +584,11 @@ namespace stream {
 
     const auto &snapshot = state.snapshot;
     const auto performance = snapshot.performance ? snapshot.performance->snapshot() : host_sbs_telemetry::sample {};
-    const std::array<float, 9> float_fields {
+    const std::array<float, 8> float_fields {
       snapshot.pop_floor,
       snapshot.pop_ceiling,
       snapshot.effective_pop,
       snapshot.edge_fraction,
-      snapshot.change_fraction,
       snapshot.zero_anchor_shift_px,
       snapshot.subject_depth,
       snapshot.valid_depth_fraction,
@@ -635,14 +634,13 @@ namespace stream {
     write_f32(32, snapshot.pop_ceiling);
     write_f32(36, snapshot.effective_pop);
     write_f32(40, snapshot.edge_fraction);
-    write_f32(44, snapshot.change_fraction);
+    // encoded[44..47] is the retired depth-change fraction: zero, with its valid bit clear.
     write_f32(48, snapshot.zero_anchor_shift_px);
     write_f32(52, snapshot.subject_depth);
     write_f32(56, snapshot.valid_depth_fraction);
     write_f32(60, snapshot.effective_range_width);
-    write_u32(64, snapshot.scene_age);
-    write_u32(68, snapshot.hard_cut_count);
-    write_u32(72, snapshot.external_cut_count);
+    // encoded[64..75] are the retired scene age, hard-cut count and external-cut count: zero,
+    // with the scene and cuts valid bits clear. The offsets stay reserved for protocol 13 clients.
     write_u32(76, snapshot.empty_raw_count);
     write_u32(80, snapshot.collapsed_raw_count);
     write_u32(84, snapshot.sampled_frame_id);

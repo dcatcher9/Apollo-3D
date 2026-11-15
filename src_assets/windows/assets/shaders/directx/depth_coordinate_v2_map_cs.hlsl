@@ -28,13 +28,11 @@ RWStructuredBuffer<uint> NearIdenticalHistoryOwnerOutput : register(u5);
 #include "include/host_sbs_near_identical_constants.hlsl"
 #include "include/host_sbs_near_identical_history_owner.hlsl"
 
-bool DepthHistoryAdvances(out float history_state) {
-    history_state = SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-        CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]);
-    return DepthValidHistoryAdvances(MinMaxEma[0].w, history_state);
+bool DepthHistoryAdvances() {
+    return DepthValidHistoryAdvances(MinMaxEma[0].w);
 }
 
-void PublishNearIdenticalHistoryOwner(bool history_advances, float history_state) {
+void PublishNearIdenticalHistoryOwner(bool history_advances) {
     NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_TAG] = 0u;
     NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_SCHEMA] =
         NEAR_IDENTICAL_HISTORY_OWNER_SCHEMA;
@@ -59,7 +57,6 @@ void PublishNearIdenticalHistoryOwner(bool history_advances, float history_state
         history_advances &&
         asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(CutBridgeState[0])) ==
             SBS_CUT_CONTRACT_TAG &&
-        V2Finite(history_state) &&
         (near_identical_current_frame_low != 0u ||
          near_identical_current_frame_high != 0u) &&
         (near_identical_domain_tag_low != 0u ||
@@ -105,8 +102,7 @@ bool CanonicalCoordinate(uint index, out float coordinate) {
 
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
-    float history_state;
-    bool history_advances = DepthHistoryAdvances(history_state);
+    bool history_advances = DepthHistoryAdvances();
 
     // Preserve the raw padded inference domain before any coordinate-map clamp or early exit.
     // Padded NCHW/depth cells are edge-replicated by their producers and exclusion remains 1.
@@ -123,7 +119,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     if (all(id == uint3(0u, 0u, 0u))) {
-        PublishNearIdenticalHistoryOwner(history_advances, history_state);
+        PublishNearIdenticalHistoryOwner(history_advances);
     }
 
     if (id.x >= target_w || id.y >= target_h) {

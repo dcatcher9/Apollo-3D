@@ -586,7 +586,7 @@ namespace models {
   engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model);
 
   /**
-   * @brief Result of one estimate call: private cut-analysis depth, cut state, and the
+   * @brief Result of one estimate call: private normalized depth, tagged depth-health state, and the
    *        authenticated Host SBS parallax field/state.
    */
   [[nodiscard]] constexpr bool ocr_signature_refresh_satisfied(
@@ -884,7 +884,7 @@ namespace models {
 
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Cut-analysis state shared with telemetry and coordinate production.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Tagged depth-health state shared with telemetry and coordinate production.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Public model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
@@ -1190,44 +1190,33 @@ namespace models {
   }
 
   /**
-   * One opportunistic, nonblocking readback of the append-only diagnostic portion of
-   * cut-analysis state. Live samples may be skipped or coalesced while the GPU is busy; absence
-   * of a sample is not evidence that the detector did not update.
+   * One opportunistic, nonblocking readback of the tagged depth-health state. Live samples may
+   * be skipped or coalesced while the GPU is busy; absence of a sample is not evidence that the
+   * estimator did not update.
    */
   struct depth_telemetry_sample {
     int depth_width = 0;
     int depth_height = 0;
     float adaptive_pop_ratio = 1.0f;  ///< Retained wire field; V2 always publishes 1.
     float edge_fraction = -1.0f;  ///< Retained wire field; unavailable in V2.
-    float change_fraction = 0.0f;
     float zero_anchor_shift_px = 0.0f;  ///< Retained wire field; unavailable in V2.
     float subject_depth = 0.0f;  ///< Retained wire field; unavailable in V2.
     float valid_depth_fraction = 0.0f;
     float effective_range_width = 0.0f;
-    // Current-frame cut evidence used to distinguish detector state from incoming observations.
     float current_edge_fraction = -1.0f;
     float current_zero_anchor_candidate_shift_px = -1.0f;
-    float structural_change_fraction = -1.0f;
-    float raw_rgb_change_fraction = -1.0f;
-    std::uint32_t analysis_flags = 0;
-    std::uint32_t model_input_history_state = 0;
-    std::uint32_t scene_age = 0;
-    std::uint32_t cut_flags = 0;
-    std::uint32_t hard_cut_count = 0;
-    std::uint32_t external_cut_count = 0;
     std::uint32_t empty_raw_count = 0;
     std::uint32_t collapsed_raw_count = 0;
     // Latest authenticated completed transaction at copy submission. An opaque transaction may
     // retain the earlier real depth owner; this diagnostic ID never identifies that owner.
     std::uint64_t sampled_frame_id = 0;
-    // Wall-clock time of the shared snapshot submission that captured this CutBridge state. Readback may
-    // complete much later and must never make old motion evidence look fresh.
+    // Wall-clock time of the shared snapshot submission that captured this state. Readback may
+    // complete much later and must never make an old sample look fresh.
     std::chrono::steady_clock::time_point sampled_at {};
     bool profile_initialized = false;
     bool anchor_valid = false;
     bool range_collapsed = false;
     bool depth_ready = false;
-    bool hard_cut_pulse = false;
   };
 
   struct depth_telemetry_poll_result {
@@ -1569,7 +1558,7 @@ namespace models {
     /**
      * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
      *
-     * It synchronizes the estimator stream and applies normalization, EMA, cut analysis, and
+     * It synchronizes the estimator stream and applies normalization, EMA, and
      * coordinate production exactly once without enqueueing another inference. This is an
      * offline-evaluation quality path; live capture uses only bounded/nonblocking completion polls.
      */

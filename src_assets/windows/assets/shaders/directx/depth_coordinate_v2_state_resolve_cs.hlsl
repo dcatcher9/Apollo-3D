@@ -1,5 +1,5 @@
 // Continuous Host mean zero and robust depth amplitude. Only authenticated infer
-// publication observes the controller; cuts retain geometry and reuse holds the complete tuple.
+// publication observes the controller; reuse holds the complete tuple.
 
 StructuredBuffer<float4> FrameStats : register(t0);
 StructuredBuffer<float4> CutBridgeState : register(t1);
@@ -61,7 +61,6 @@ void ObserveAdaptiveCamera(inout float4 active, inout float4 control, inout uint
                      inout V2AdaptiveCameraState camera_state, float4 frame0, float4 frame1,
                      bool initialized) {
     V2_STATE_FRAME_VALID(control) = 0.0f;
-    // A cut remains authenticated frame metadata; it does not latch or disarm adaptation.
 
     uint2 now = uint2(v2_joint_observation_timestamp_low, v2_joint_observation_timestamp_high);
     uint2 previous = camera_state.clock.xy;
@@ -176,19 +175,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     float4 cut_header = CutBridgeState[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS];
     bool cut_contract_matches =
         asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(cut_header)) == SBS_CUT_CONTRACT_TAG;
-    float4 cut_health = 0.0f;
-    uint current_cut_count = 0u;
-    if (cut_contract_matches) {
-        cut_health = CutBridgeState[SBS_STATE_VECTOR_HARD_CUT_COUNT];
-        current_cut_count = asuint(SBS_STATE_HARD_CUT_COUNT(cut_health));
-    }
-    uint previous_cut_count = contract_matches ?
-        asuint(V2_STATE_CONFIRMED_CUT_COUNT(control)) : current_cut_count;
     if (!contract_matches) {
-        // Never inherit counters or calibration state from an unknown same-sized buffer. The
-        // current authenticated cut generation becomes the new baseline when it is available.
+        // Never inherit counters or calibration state from an unknown same-sized buffer.
         active = float4(0.0f, 0.0f, v2_convergence_curve_default, 1.0f);
-        control = float4(asfloat(0u), 0.0f, asfloat(previous_cut_count),
+        control = float4(asfloat(0u), 0.0f, asfloat(0u),
                          asfloat(V2_CONTRACT_TAG));
         ResetMappingState(mapping_state);
         ClearAdaptiveCameraState(camera_state);
@@ -198,12 +188,14 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (contract_matches && !camera_initialized && !empty_camera) {
         // Same-tag corruption must not become a permanent pseudo-camera.
         active = float4(0.0f, 0.0f, v2_convergence_curve_default, 1.0f);
-        control = float4(asfloat(0u), 0.0f, asfloat(previous_cut_count),
+        control = float4(asfloat(0u), 0.0f, asfloat(0u),
                          asfloat(V2_CONTRACT_TAG));
         ResetMappingState(mapping_state);
         ClearAdaptiveCameraState(camera_state);
     }
     V2_STATE_CONTRACT_TAG_BITS(control) = asfloat(V2_CONTRACT_TAG);
+    // Retired scene-cut epoch: always zero. Subtitle readers keep it only as an identity join.
+    V2_STATE_CONFIRMED_CUT_COUNT(control) = asfloat(0u);
 
     // The sole adaptive policy is authenticated, never inferred from arbitrary state bits.
     // Malformed constant padding or a foreign policy cannot authorize a parallax field.
@@ -214,18 +206,14 @@ void main(uint3 id : SV_DispatchThreadID) {
         return;
     }
 
-    // The cut buffer is an independently authenticated producer. A stale or same-sized foreign
+    // The health buffer is an independently authenticated producer. A stale or same-sized foreign
     // buffer makes this frame unavailable, but it must not erase the established adaptive camera.
     if (!cut_contract_matches) {
-        V2_STATE_CONFIRMED_CUT_COUNT(control) = asfloat(previous_cut_count);
         PublishUnavailable(active, control, mapping_state, false);
         DisarmAdaptiveCamera(camera_state);
         StoreCameraState(active, control, mapping_state, camera_state);
         return;
     }
-
-    // Keep the authenticated cut epoch for shared frame/subtitle ownership.
-    V2_STATE_CONFIRMED_CUT_COUNT(control) = asfloat(current_cut_count);
 
     float4 frame0 = FrameStats[V2_FRAME_STATS_VECTOR_MEAN];
     float4 frame1 = FrameStats[V2_FRAME_STATS_VECTOR_VALID_COUNT];

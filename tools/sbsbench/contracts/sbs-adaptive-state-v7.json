@@ -1,0 +1,65 @@
+{
+  "schema": 7,
+  "source": "video_depth_estimator.CutBridgeState",
+  "capture": "every-source-frame-after-complete-estimator-update",
+  "counter_max": 4294967294,
+  "header_keys": [
+    "record",
+    "schema",
+    "source",
+    "capture",
+    "fields",
+    "config"
+  ],
+  "config_keys": [
+    "model",
+    "pop_strength",
+    "depth_reuse_interval"
+  ],
+  "frame_keys": [
+    "record",
+    "frame_id",
+    "source_index",
+    "depth_updated",
+    "empty_raw_count",
+    "collapsed_raw_count",
+    "values"
+  ],
+  "retired_zero_fields": [
+    "hard_cut_count"
+  ],
+  "fields": [
+    {"index": 0, "name": "cut_contract_tag_bits", "type": "uint32", "gpu_encoding": "uint_bits", "initial": "contract_tag"},
+    {"index": 1, "name": "reserved_cut_bridge_1", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 2, "name": "reserved_cut_bridge_2", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 3, "name": "reserved_cut_bridge_3", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 4, "name": "reserved_cut_bridge_4", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 5, "name": "reserved_cut_bridge_5", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 6, "name": "reserved_cut_bridge_6", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 7, "name": "reserved_cut_bridge_7", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 8, "name": "reserved_cut_bridge_8", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 9, "name": "reserved_cut_bridge_9", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 10, "name": "reserved_cut_bridge_10", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 11, "name": "reserved_cut_bridge_11", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 12, "name": "reserved_cut_bridge_12", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 13, "name": "reserved_cut_bridge_13", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 14, "name": "valid_depth_fraction", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 15, "name": "effective_raw_range_width", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 16, "name": "hard_cut_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 17, "name": "reserved_cut_bridge_17", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 18, "name": "empty_raw_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 19, "name": "collapsed_raw_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 20, "name": "range_collapsed", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 21, "name": "depth_ready", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 22, "name": "reserved_cut_bridge_22", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 23, "name": "reserved_cut_bridge_23", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 24, "name": "reserved_cut_bridge_24", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 25, "name": "reserved_cut_bridge_25", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 26, "name": "reserved_cut_bridge_26", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 27, "name": "reserved_cut_bridge_27", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 28, "name": "reserved_cut_bridge_28", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 29, "name": "reserved_cut_bridge_29", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 30, "name": "reserved_cut_bridge_30", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 31, "name": "reserved_cut_bridge_31", "type": "float32", "gpu_encoding": "float", "initial": 0.0}
+  ]
+}

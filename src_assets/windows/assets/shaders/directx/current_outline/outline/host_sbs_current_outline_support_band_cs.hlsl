@@ -346,8 +346,8 @@ static const uint STABILITY_TAG=0x31435342u,STABILITY_SCHEMA=5u,STABILITY_WORDS=
 // 36..43committedT;44..67lastSeenCB24(every valid fresh call, not only commit)
 // 68..99committedROI;100acceptedOfferPixels101newOfferPixels102commitPlan
 // 103revocationReasons104epoch105privateOfferBit106privatePackedMask107lastSeenValid
-// 108..123committedStaticProducer16;124committedHardCutEpoch;125..126reserved
-// 127lastSeenHardCutEpoch;128..143lastSeenStaticProducer16
+// 108..123committedStaticProducer16;124retired(zero);125..126reserved
+// 127retired(zero);128..143lastSeenStaticProducer16
 // 144completedFramePlan145completedReuseGate146completedCommit147snapshotWriteCount
 // 148freshAdvancePlan149exactDuplicatePlan150completedFresh151completedDuplicate;152legacyGlobalValid;153oldStrongAAPlan; others reserved.
 uint SW(uint i){return StabilityHeaderWrite[uint2(i,0u)];}
@@ -407,14 +407,11 @@ uint StabilityStaticProducerWord(uint i){
 }
 bool StabilityStaticRW(uint first){
     [unroll]for(uint i=0u;i<16u;++i)if(SW(first+i)!=CBCMeta[StabilityStaticProducerWord(i)])return false;
-    // CBC80 is the authenticated SCT/UIP durable hard-cut epoch, independent of C24 input reset.
-    if(first==108u)return SW(124u)==CBCMeta[80u];
-    return first==128u&&SW(127u)==CBCMeta[80u];
+    return first==108u||first==128u;
 }
 bool StabilityStaticRO(uint first){
     [unroll]for(uint i=0u;i<16u;++i)if(SR(first+i)!=CBCMeta[StabilityStaticProducerWord(i)])return false;
-    if(first==108u)return SR(124u)==CBCMeta[80u];
-    return first==128u&&SR(127u)==CBCMeta[80u];
+    return first==108u||first==128u;
 }
 bool StabilityLastTupleRW(){
     [unroll]for(uint i=0u;i<24u;++i)if(SW(44u+i)!=CBWord(i))return false;
@@ -626,7 +623,7 @@ bool WeakAAAnchorScope(){
     if(WeakAAState[54u]!=CFrame.z||WeakAAState[55u]!=CFrame.w)return false;
     [unroll]for(uint i=21u;i<24u;++i)if(WeakAAState[40u+i]!=CBWord(i))return false;
     [unroll]for(uint i=0u;i<16u;++i)if(WeakAAState[64u+i]!=CBCMeta[StabilityStaticProducerWord(i)])return false;
-    return WeakAAState[80u]==CBCMeta[80u];
+    return true;
 }
 bool WeakAAEpisode(uint mask){
     if(WeakAAState[81u]!=mask)return false;
@@ -651,7 +648,7 @@ void WeakAABegin(){
     bool seen=header&&WeakAAState[11u]==1u,duplicate=proof&&seen;
     [unroll]for(uint i=0u;i<24u;++i)if(seen&&WeakAAState[16u+i]!=CBWord(i))duplicate=false;
     bool sameScope=header&&WeakAAAnchorScope();
-    duplicate=duplicate&&sameScope; // Same24CB alone cannot authenticate changed producer/cut/scope.
+    duplicate=duplicate&&sameScope; // Same24CB alone cannot authenticate changed producer/scope.
     bool newer=!seen||(StabilityLater64(CObservation.xy,uint2(WeakAAState[32u],WeakAAState[33u]))&&
         (StabilityLater64(CFrame.xy,uint2(WeakAAState[28u],WeakAAState[29u]))||!sameScope||CObservation.z!=0u));
     bool fresh=proof&&newer;
@@ -742,7 +739,7 @@ void WeakAACommit(){
         WeakAAState[232u]=qualified;WeakAAState[235u]=qualified&~WeakAAState[233u];
         [unroll]for(uint i=0u;i<24u;++i)WeakAAState[40u+i]=CBWord(i);
         [unroll]for(uint i=0u;i<16u;++i)WeakAAState[64u+i]=CBCMeta[StabilityStaticProducerWord(i)];
-        WeakAAState[80u]=CBCMeta[80u];WeakAAState[81u]=WeakAAState[7u];
+        WeakAAState[80u]=0u;WeakAAState[81u]=WeakAAState[7u];
         [unroll]for(uint u=0u;u<8u;++u)[unroll]for(uint k=0u;k<8u;++k){
             WeakAAState[88u+16u*u+k]=CurrentOCR[16u+8u*u+k];
             WeakAAState[96u+16u*u+k]=CurrentOCR[144u+8u*u+k];
@@ -793,7 +790,7 @@ void private_cache_begin_main(uint3 g:SV_GroupID){
     if(freshAdvance){
         [unroll]for(uint j=0u;j<24u;++j)SS(44u+j,CBWord(j));
         [unroll]for(uint k=0u;k<16u;++k)SS(128u+k,CBCMeta[StabilityStaticProducerWord(k)]);
-        SS(127u,CBCMeta[80u]);SS(107u,1u);
+        SS(127u,0u);SS(107u,1u);
     }
 }
 [numthreads(16,16,1)]
@@ -838,7 +835,7 @@ void private_cache_commit_main(uint3 g:SV_GroupID){
         [unroll]for(uint j=0u;j<24u;++j)SS(8u+j,CBWord(j));
         SS(32u,Shape.x);SS(33u,Shape.y);SS(34u,Shape.z);SS(35u,CBCMeta[46u]);
         [unroll]for(uint k=0u;k<16u;++k)SS(108u+k,CBCMeta[StabilityStaticProducerWord(k)]);
-        SS(124u,CBCMeta[80u]);
+        SS(124u,0u);
         [unroll]for(uint u=0u;u<8u;++u){
             SS(36u+u,(mask&(1u<<u))!=0u?R(U(u)+11u):0u);
             [unroll]for(uint z=0u;z<4u;++z)SS(68u+4u*u+z,(mask&(1u<<u))!=0u?CBCMeta[128u+32u*u+24u+z]:0u);

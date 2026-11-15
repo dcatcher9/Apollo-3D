@@ -188,7 +188,7 @@ JSON schema7. The 40 UIP4 words contain current source/domain identity and the i
 16-word adaptive controller; they contain no historical OCR rectangles. Historical trace rows
 authenticate controller structure and condition parameters, not missing OCR geometry or camera
 validity. The matched package separately joins the actual OCR8 paired covers, geometry, contour
-snapshots, original source clock and cut epoch.
+snapshots, original source clock and the retired cut-epoch word, which no producer advances.
 
 Dispatched SCP4 always has its schema/tag. Its payload is either the exact current count/kind
 mask, full-strength value2 and bit-identical applied UI plane, or positive-zero words2..5 when
@@ -282,7 +282,8 @@ collapsed or stale geometry preserves the controller plane/goal but clears grant
 slots, timing authority and conditioning. A valid OCR8 record may still contain covers;
 those are not usable protection authority without the current geometry join.
 
-The reader validates exact source/frame/generation/time/cut/ROI/content identity, current slot
+The reader validates exact source/frame/generation/time/ROI/content identity, equality of the
+retired cut-epoch word with the state's retired `confirmed_cut_count`, current slot
 mask, reserved words, complete controller and SCP4 parameters. Current covers come from the
 actual captured OCR8 record. Historical trace rows have no OCR8 payload and therefore cannot
 prove exact historical cover geometry. See the
@@ -301,7 +302,7 @@ analysis generation, the exact uncropped source rectangle, tensor extent, center
 contain-fit `tensor_content_rect_px`, edge-replicated excluded padding fraction, unit conversion,
 and outside-only video-inverse collar in `depth_input_region.json` schema `4`. The source rectangle is never
 stretched or trimmed: a wider region pads above/below and a taller region pads left/right. Padding
-does not participate in model statistics, scene-cut evidence, OCR, or subtitle state;
+does not participate in model statistics, OCR, or subtitle state;
 ordinary published fields extend the nearest content boundary through it. The renderer clamps
 sampling to centers of the real-content rectangle, so synthetic padding cannot change edge-video
 geometry. Crop-local depth must never be interpreted as a full-source field. Ordinary required

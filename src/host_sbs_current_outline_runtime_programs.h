@@ -36,7 +36,7 @@ inline constexpr std::array<cache::shader_spec, 5u> colour_specs{{
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","accumulate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","validate_main","cs_5_0"},
 }};
-inline constexpr std::string_view colour_closure="04e99a19ea54d1dd5d357760b726818a1665dba9f84d503a2260158376c9a027";
+inline constexpr std::string_view colour_closure="4b1ac77dac5ef888ba43c908a0d729011e234cf3d45cb29cd709f8b016594fab";
 inline constexpr std::array<cache::shader_spec, 6u> components_specs{{
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","init_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","union_main","cs_5_0"},
@@ -60,7 +60,7 @@ inline constexpr std::array<cache::shader_spec, 12u> enclosure_specs{{
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","select_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","publish_main","cs_5_0"},
 }};
-inline constexpr std::string_view enclosure_closure="7ccae5c357592a3fcb8714c1c46831832a731f4194aff65e8578e5681d7d2f13";
+inline constexpr std::string_view enclosure_closure="9bf5d31c0436a742baabc61f8b02987cb848ac6f766292a1793a63304fbc1dce";
 // One canonical ROI owner; the historical enclosure-local file remains for its independently
 // pinned enclosure/ring fixtures. Production loads this group once.
 inline constexpr std::array<cache::shader_spec, 3u> roi_specs{{
@@ -86,13 +86,13 @@ inline constexpr std::array<cache::shader_spec, 15u> outline_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","aggregate_support_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","publish_closure_main","cs_5_0"},
 }};
-inline constexpr std::string_view outline_closure="5abaa9f236d15f959659004944faea439edc76086e2523bee268e10fdaa1bee9";
+inline constexpr std::string_view outline_closure="77ef293359988b8b6b762b1ff286e299746f244cd237d56874b172eaf563c9a5";
 inline constexpr std::array<cache::shader_spec, 3u> stability_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_begin_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_validate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_commit_main","cs_5_0"},
 }};
-inline constexpr std::string_view stability_closure="ffb3c2864d539ad69687cb157431b79acc7fc21c4a27ad9652c1dcd7aa7ff3f6";
+inline constexpr std::string_view stability_closure="e79498f8dadd4ea1c652471241417bc82002d0725246e3de75ee09f045cd5a49";
 inline constexpr std::array<cache::shader_spec, 9u> hole_specs{{
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","clear_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","capture_unit_main","cs_5_0"},

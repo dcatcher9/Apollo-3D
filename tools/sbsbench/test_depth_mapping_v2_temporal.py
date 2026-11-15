@@ -31,8 +31,8 @@ def authored_trace():
         row.update(frame_id=f"{index + 1:05d}", observation_timestamp_us=1 + index * 33333,
                    joint_plane_mode=3, input_source_frame_id=f"{index + 1:05d}",
                    rendered_source_frame_id=f"{index + 1:05d}", calibration_revision=index + 1,
-                   confirmed_cut_count=index, confirmed_cut=bool(index),
-                   cut_attribution="authored-cut" if index else "initialization",
+                   confirmed_cut_count=0, confirmed_cut=False,
+                   cut_attribution="none" if index else "initialization",
                    input_valid=True, frame_valid=True, camera_valid=True, collapsed=False,
                    center=3.5, inverse_scale=f32(0.4), latched_scale=f32(2.5),
                    convergence_curve=0.0, requested_gain=f32(config.parallax_gain),
@@ -44,7 +44,7 @@ def authored_trace():
         values = {field["name"]: 0 for field in descriptors}
         values.update(center=3.5, inverse_scale=f32(.4), convergence_curve=0.0,
                       container_scale=1.0, calibration_revision=index + 1,
-                      frame_valid=1.0, confirmed_cut_count=index, contract_tag_bits=tag,
+                      frame_valid=1.0, confirmed_cut_count=0, contract_tag_bits=tag,
                       renderer_authorization_bits=tag, joint_plane_mode_bits=3,
                       gain_last_observation_low=row["observation_timestamp_us"],
                       gain_clock_armed=1, gain_seed_count=1, gain_target_zero=3.5,
@@ -68,7 +68,8 @@ def authored_trace():
             "schema": coordinate.CONTRACT_SCHEMA,
             "sha256": hashlib.sha256(coordinate.CONTRACT_PATH.read_bytes()).hexdigest(),
         },
-        "cut_source": "authored-cut", "diagnostic_role": "non-controlling-mode-selected-camera-audit-v6",
+        "cut_source": temporal.V2_STATE_TRACE_CUT_SOURCE,
+        "diagnostic_role": "non-controlling-mode-selected-camera-audit-v6",
         "diagnostic_method": "gpu-frame-moments-and-rendered-fields-v6",
         "mapping_config": {**asdict(config), "joint_plane_mode": 3},
         "adaptation_semantics": temporal._trace_adaptation_semantics(3),
@@ -88,9 +89,33 @@ class NativeAdaptiveTraceTests(unittest.TestCase):
     def setUp(self):
         self.trace = authored_trace()
 
-    def test_native_admission_keeps_camera_across_a_confirmed_cut(self):
+    def test_native_admission_accepts_the_uncut_trace(self):
         temporal.validate_v2_state_trace(self.trace, [1, 2])
         self.assertEqual(self.trace["frames"][0]["center"], self.trace["frames"][1]["center"])
+
+    def test_retired_cut_signals_are_rejected(self):
+        bad = copy.deepcopy(self.trace)
+        bad["cut_source"] = "cut-state-hard-cut-generation"
+        with self.assertRaisesRegex(ValueError, "unknown semantics"):
+            temporal.validate_v2_state_trace(bad, [1, 2])
+        for key, value in (
+                ("confirmed_cut", True),
+                ("cut_attribution", temporal.V2_STATE_TRACE_CUT_SOURCE),
+                ("cut_attribution", "initialization")):
+            bad = copy.deepcopy(self.trace)
+            bad["frames"][1][key] = value
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(
+                    ValueError, "retired cut signal"):
+                temporal.validate_v2_state_trace(bad, [1, 2])
+        # A generation sealed into the GPU words is as retired as one in the JSON view.
+        bad = copy.deepcopy(self.trace)
+        index = [
+            field["name"] for field in coordinate.load_contract()["shadow_state"]["fields"]
+        ].index("confirmed_cut_count")
+        bad["frames"][1]["state_words_u32"][index] = 1
+        bad["frames"][1]["confirmed_cut_count"] = 1
+        with self.assertRaises(ValueError):
+            temporal.validate_v2_state_trace(bad, [1, 2])
 
     def test_removed_pipeline_cannot_be_admitted_as_another_mode(self):
         for mode in (0, 1, 2, 4, True):

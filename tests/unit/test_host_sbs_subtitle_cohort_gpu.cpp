@@ -761,17 +761,18 @@ namespace {
     expect_fallback(); expect_binary_subset();
   }
 
-  TEST_F(HostSbsSubtitleCohortGpuTest, FreshGpuUipEpochChangeInvalidatesOldCueWithReservedConstantZero) {
+  TEST_F(HostSbsSubtitleCohortGpuTest, RetiredUipEpochChangeKeepsOldCueWithReservedConstantZero) {
     ASSERT_NO_FATAL_FAILURE(acquire());
     ASSERT_EQ(result_.state[SBC_H_CUT], 3u);
     author(4u, {{30u, 6u, 130u, 24u}}, false, 7u, 4u); glyph();
     ASSERT_EQ(constants_.observation[3u], 0u);
     ASSERT_EQ(plane_words_[cv2::subtitle_plane_cut_epoch_word], 4u);
     ASSERT_TRUE(run());
+    // The scene-cut epoch is a retired identity word: changing it neither resets nor rejects
+    // the owner state acquired under the previous value.
     EXPECT_EQ(result_.state[SBC_H_VALID], 1u); EXPECT_EQ(result_.state[SBC_H_CUT], 4u);
-    EXPECT_EQ(id(), 0u); EXPECT_EQ(phase(), SBC_PHASE_UNKNOWN);
-    EXPECT_TRUE(std::all_of(result_.owner.begin(), result_.owner.end(), [](UINT value) { return value == 0u; }));
-    expect_fallback(); expect_binary_subset();
+    EXPECT_NE(id(), 0u); EXPECT_NE(phase(), SBC_PHASE_UNKNOWN);
+    expect_binary_subset();
   }
 
   TEST_F(HostSbsSubtitleCohortGpuTest, StaleGpuUipCannotLendItsCutEpochToCurrentFrame) {
@@ -878,8 +879,8 @@ namespace {
     }
   }
 
-  TEST_F(HostSbsSubtitleCohortGpuTest, KnownAndUnknownOwnersClearOnEmptyCutOrDomainChange) {
-    for (UINT boundary = 0u; boundary < 3u; ++boundary) {
+  TEST_F(HostSbsSubtitleCohortGpuTest, KnownAndUnknownOwnersClearOnEmptyOrDomainChange) {
+    for (const UINT boundary : {0u, 2u}) {
       SCOPED_TRACE(boundary);
       reset_state(); ASSERT_NO_FATAL_FAILURE(acquire());
       author(4u, {{30u, 6u, 130u, 24u}}); glyph(); paint({100u, 10u, 105u, 18u});
@@ -888,7 +889,7 @@ namespace {
       if (boundary == 0u) {
         author(5u, {});
       } else {
-        author(5u, {{30u, 6u, 130u, 24u}}, false, boundary == 2u ? 8u : 7u, boundary == 1u ? 4u : 3u);
+        author(5u, {{30u, 6u, 130u, 24u}}, false, 8u, 3u);
         glyph();
       }
       ASSERT_TRUE(run());

@@ -6,7 +6,8 @@
 RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialized,frame_state}
 RWByteAddressBuffer        MinMaxRaw : register(u1);  // min/max bits, valid + eligible counts
 RWStructuredBuffer<uint>   Histogram : register(u2);  // permanent P2/P98 histogram from the shared quantile resolve
-// Cut/health bridge. Geometry does not consume this state directly:
+// Tagged depth-health state. Geometry does not consume this state directly, and this pass is
+// its only producer: every other word keeps its CPU-initialized value.
 //   [3].zw = valid-depth fraction, effective EMA range width
 //   [4].zw = empty-raw count, collapsed-raw count (stored as uint bits)
 //   [5].xy = current range-collapsed flag, depth-ready flag
@@ -27,7 +28,7 @@ void main() {
                         !isnan(new_min) && !isinf(new_min) &&
                         !isnan(new_max) && !isinf(new_max) && new_max >= new_min;
     float4 telemetry =
-        DiagnosticState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION];
+        DiagnosticState[SBS_STATE_VECTOR_VALID_DEPTH_FRACTION];
     uint4 health_counters =
         asuint(DiagnosticState[SBS_STATE_VECTOR_HARD_CUT_COUNT]);
     float4 telemetry_flags =
@@ -118,7 +119,7 @@ void main() {
     SBS_STATE_RANGE_COLLAPSED(telemetry_flags) =
         range_collapsed ? 1.0f : 0.0f;
     SBS_STATE_DEPTH_READY(telemetry_flags) = s.z > 0.5f ? 1.0f : 0.0f;
-    DiagnosticState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION] = telemetry;
+    DiagnosticState[SBS_STATE_VECTOR_VALID_DEPTH_FRACTION] = telemetry;
     DiagnosticState[SBS_STATE_VECTOR_HARD_CUT_COUNT] =
         asfloat(health_counters);
     DiagnosticState[SBS_STATE_VECTOR_RANGE_COLLAPSED] = telemetry_flags;

@@ -10,7 +10,6 @@ Texture2D<float> NearIdenticalPreviousDepth : register(t5);
 RWStructuredBuffer<uint> NearIdenticalOcrRecord : register(u1);
 RWByteAddressBuffer NearIdenticalDecision : register(u3);
 RWTexture2D<float> NearIdenticalReuseDepthOutput : register(u4);
-RWStructuredBuffer<uint> NearIdenticalSceneCutEvidence : register(u5);
 
 #include "include/depth_constants.hlsl"
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
@@ -323,57 +322,6 @@ void NearIdenticalWriteOcrAbstention() {
     NearIdenticalOcrRecord[12u] = near_identical_ocr_field_height;
     NearIdenticalOcrRecord[13u] = near_identical_ocr_roi_top;
     NearIdenticalOcrRecord[14u] = near_identical_ocr_roi_bottom;
-}
-
-// Seed CutBridge's frame age from the last receipt-authorized infer postprocess, not from the last
-// branch the CPU can name. The completed fused map dispatch writes words 1..9 for an infer
-// observation and uses word 0 only to authenticate the narrower model-history baseline. Ignoring
-// word 0 here
-// therefore yields B-A for opaque infer B, while opaque reuse leaves A in place and yields C-A.
-[numthreads(1, 1, 1)]
-void scene_seed_main(uint3 dispatch_thread : SV_DispatchThreadID) {
-    uint owner_frame_low =
-        NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_FRAME_LOW];
-    uint owner_frame_high =
-        NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_FRAME_HIGH];
-    bool owner_older =
-        near_identical_current_frame_high > owner_frame_high ||
-        (near_identical_current_frame_high == owner_frame_high &&
-         near_identical_current_frame_low > owner_frame_low);
-    bool owner_valid =
-        NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_SCHEMA] ==
-            NEAR_IDENTICAL_HISTORY_OWNER_SCHEMA &&
-        (owner_frame_low != 0u || owner_frame_high != 0u) &&
-        owner_older &&
-        NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_DOMAIN_TAG_LOW] ==
-            near_identical_domain_tag_low &&
-        NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_DOMAIN_TAG_HIGH] ==
-            near_identical_domain_tag_high &&
-        NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_TARGET_WIDTH] == target_w &&
-        NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_TARGET_HEIGHT] == target_h &&
-        (near_identical_current_frame_low != 0u ||
-         near_identical_current_frame_high != 0u) &&
-        (near_identical_domain_tag_low != 0u || near_identical_domain_tag_high != 0u) &&
-        DepthAnalysisContentValid() &&
-        near_identical_stream_frame_delta == 0u &&
-        NearIdenticalWorkValid(near_identical_expected_work) &&
-        near_identical_expected_work_cookie ==
-            (near_identical_expected_work == 0u ? 0u :
-             near_identical_expected_work ^ NEAR_IDENTICAL_WORK_FLAGS_COOKIE);
-
-    uint frame_delta = 1u;
-    if (owner_valid) {
-        uint borrow = near_identical_current_frame_low < owner_frame_low ? 1u : 0u;
-        uint delta_low = near_identical_current_frame_low - owner_frame_low;
-        uint delta_high = near_identical_current_frame_high - owner_frame_high - borrow;
-        frame_delta = delta_high != 0u ? 65535u : min(delta_low, 65535u);
-    }
-    [unroll]
-    for (uint word = 0u; word < 9u; ++word) {
-        NearIdenticalSceneCutEvidence[word] = 0u;
-    }
-    NearIdenticalSceneCutEvidence[9u] = frame_delta;
-    DeviceMemoryBarrier();
 }
 
 // The CPU has already published the complete current RQST and cleared this proposal/args record

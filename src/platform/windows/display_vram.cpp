@@ -1323,11 +1323,6 @@ namespace platf::dxgi {
               return false;
             }
             if (est.input_domain_reset) {
-              // Cut counters and scene-camera history are domain-scoped. The first ROI/full/
-              // transfer completion starts a fresh telemetry sample without pretending the rearm
-              // was an editorial cut.
-              sbs_telemetry_has_sample = false;
-              sbs_telemetry_last_hard_cut_count = 0;
               sbs_telemetry_min_frame_id = std::max(
                 sbs_telemetry_min_frame_id,
                 est.completed_frame_id
@@ -4023,9 +4018,7 @@ namespace platf::dxgi {
       snapshot.valid_fields =
         ::video::sbs_telemetry_valid_field::config |
         ::video::sbs_telemetry_valid_field::effective_pop |
-        ::video::sbs_telemetry_valid_field::change |
         ::video::sbs_telemetry_valid_field::valid_fraction |
-        ::video::sbs_telemetry_valid_field::cuts |
         ::video::sbs_telemetry_valid_field::faults;
       snapshot.depth_width = static_cast<std::uint16_t>(std::clamp(
         sample.depth_width,
@@ -4039,37 +4032,17 @@ namespace platf::dxgi {
       ));
       snapshot.effective_pop = snapshot.pop_floor;
       snapshot.edge_fraction = sample.edge_fraction;
-      snapshot.change_fraction = sample.change_fraction;
       snapshot.zero_anchor_shift_px = sample.zero_anchor_shift_px;
       snapshot.subject_depth = sample.subject_depth;
       snapshot.valid_depth_fraction = sample.valid_depth_fraction;
       snapshot.effective_range_width = sample.effective_range_width;
-      snapshot.scene_age = sample.scene_age;
-      snapshot.hard_cut_count = sample.hard_cut_count;
-      snapshot.external_cut_count = sample.external_cut_count;
       snapshot.empty_raw_count = sample.empty_raw_count;
       snapshot.collapsed_raw_count = sample.collapsed_raw_count;
       snapshot.sampled_frame_id = static_cast<std::uint32_t>(sample.sampled_frame_id);
 
       if (sample.profile_initialized) {
         snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::profile_initialized;
-        snapshot.valid_fields |= ::video::sbs_telemetry_valid_field::scene;
       }
-      if (
-        (sample.cut_flags & sbs_adaptive_state::cut_flag_geometry_armed) != 0
-      ) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::geometry_armed;
-      }
-      if (
-        (sample.cut_flags & sbs_adaptive_state::cut_flag_appearance_armed) != 0
-      ) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::appearance_armed;
-      }
-      if (detail::host_sbs_telemetry_cut_pulse(sbs_telemetry_has_sample, sbs_telemetry_last_hard_cut_count, sample.hard_cut_count, sample.hard_cut_pulse)) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::hard_cut_pulse;
-      }
-      sbs_telemetry_last_hard_cut_count = sample.hard_cut_count;
-      sbs_telemetry_has_sample = true;
       sbs_telemetry_event->raise(std::move(snapshot));
     }
 
@@ -6138,7 +6111,7 @@ namespace platf::dxgi {
               << " tensor="sv << plan.tensor_shape.width << 'x'
               << plan.tensor_shape.height << " letterbox_padding_pct="sv
               << plan.padded_area_fraction * 100.0f
-              << "; scene cuts and scene center are region-local."sv;
+              << "; the scene center is region-local."sv;
           } else if (
             region.left == 0 && region.top == 0 &&
             region.right == region.source_width &&
@@ -6459,8 +6432,6 @@ namespace platf::dxgi {
         sbs_telemetry_input_color_space = slot.color_space;
         sbs_telemetry_input_domain_valid = true;
         sbs_telemetry_min_frame_id = frame_id;
-        sbs_telemetry_has_sample = false;
-        sbs_telemetry_last_hard_cut_count = 0;
       }
       slot.gpu_undecided_transaction = false;
       slot.pending = false;
@@ -6847,8 +6818,6 @@ namespace platf::dxgi {
       sbs_telemetry_sequence = 0;
       sbs_telemetry_sample_gate.reset();
       sbs_telemetry_min_frame_id = 0;
-      sbs_telemetry_last_hard_cut_count = 0;
-      sbs_telemetry_has_sample = false;
       sbs_telemetry_input_region = {};
       sbs_telemetry_input_color_space = models::input_color_space::srgb;
       sbs_telemetry_input_domain_valid = false;
@@ -7648,8 +7617,6 @@ namespace platf::dxgi {
     std::uint32_t sbs_telemetry_sequence = 0;
     detail::host_sbs_telemetry_sample_gate_t sbs_telemetry_sample_gate;
     std::uint64_t sbs_telemetry_min_frame_id = 0;
-    std::uint32_t sbs_telemetry_last_hard_cut_count = 0;
-    bool sbs_telemetry_has_sample = false;
     models::depth_input_region_t sbs_telemetry_input_region {};
     models::input_color_space sbs_telemetry_input_color_space =
       models::input_color_space::srgb;

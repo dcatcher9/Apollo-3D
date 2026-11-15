@@ -836,7 +836,7 @@ namespace platf::sbs_debug {
               !ui::condition_words_match_plane(condition, plane, true)) return false;
           // A standalone snapshot cannot distinguish a genuine empty from a clock-fault
           // redispatch with held hidden state. Only a proven new current observation (or an
-          // explicit domain/cut reset) must have cleared that invisible plane immediately.
+          // explicit domain reset) must have cleared that invisible plane immediately.
           const bool explicit_reset = (flags & input_domain_reset) != 0u ||
             (previous_ui_plane && (previous_ui_domain_tag != domain_tag ||
               (*previous_ui_plane)[subtitle_plane_cut_epoch_word] != plane[subtitle_plane_cut_epoch_word]));
@@ -2456,65 +2456,28 @@ namespace platf::sbs_debug {
       }
 
       using sbs_adaptive_state::word_e;
-      const auto scalar = [&](const word_e word) {
-        return scalars[sbs_adaptive_state::index(word)];
-      };
-      const float cut_flags_value = scalar(word_e::cut_flags);
-      const float analysis_flags_value = scalar(word_e::analysis_flags);
-      if (
-        cut_flags_value < 0.0f ||
-        cut_flags_value >
-          static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) ||
-        std::trunc(cut_flags_value) != cut_flags_value ||
-        analysis_flags_value < 0.0f ||
-        analysis_flags_value >
-          static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) ||
-        std::trunc(analysis_flags_value) != analysis_flags_value
-      ) {
-        return false;
-      }
-      const auto cut_flags = static_cast<std::uint32_t>(cut_flags_value);
-      const auto analysis_flags =
-        static_cast<std::uint32_t>(analysis_flags_value);
-      nlohmann::json decoded_cut_flags = nlohmann::json::object();
-      for (const auto &bit : sbs_adaptive_state::cut_flag_bits) {
-        decoded_cut_flags[std::string(bit.name)] = (cut_flags & bit.mask) != 0u;
-      }
-      nlohmann::json decoded_analysis_flags = nlohmann::json::object();
-      for (const auto &bit : sbs_adaptive_state::analysis_flag_bits) {
-        decoded_analysis_flags[std::string(bit.name)] =
-          (analysis_flags & bit.mask) != 0u;
+      for (const auto word : sbs_adaptive_state::retired_zero_words) {
+        if (words[sbs_adaptive_state::index(word)] != 0u) {
+          return false;
+        }
       }
       adaptive_summary = {
         {"schema", sbs_adaptive_state::schema_version},
         {"source", std::string(sbs_adaptive_state::source)},
         {"capture", std::string(sbs_adaptive_state::capture)},
-        {"role", "comparison-only scene-cut bridge evidence; no live V2 geometry authority"},
+        {"role", "comparison-only depth-health state; no live V2 geometry authority"},
         {"matched_frame_id", completed.matched_frame_id},
         {"depth_model", completed.depth_model},
         {"fields", std::move(fields)},
         {"values", std::move(values)},
         {"named_values", std::move(named_values)},
         {"decoded", {
-                      {"cut_flags", {
-                                      {"value", cut_flags},
-                                      {"known_mask", sbs_adaptive_state::known_cut_flag_mask},
-                                      {"bits", std::move(decoded_cut_flags)},
-                                    }},
-                      {"analysis_flags", {
-                                           {"value", analysis_flags},
-                                           {"known_mask", sbs_adaptive_state::known_analysis_flag_mask},
-                                           {"bits", std::move(decoded_analysis_flags)},
-                                         }},
-                      {"hard_cut_pulse", scalar(word_e::hard_cut_pulse) > 0.5f},
-                      {"hard_cut_count", words[sbs_adaptive_state::index(word_e::hard_cut_count)]},
-                      {"reserved_cut_bridge_17", words[sbs_adaptive_state::index(word_e::reserved_cut_bridge_17)]},
                       {"empty_raw_count", words[sbs_adaptive_state::index(word_e::empty_raw_count)]},
                       {"collapsed_raw_count", words[sbs_adaptive_state::index(word_e::collapsed_raw_count)]},
                       {"geometry_authority", false},
                     }},
         {"normalization", {
-                            {"role", "comparison-only scene-cut bridge evidence"},
+                            {"role", "comparison-only depth normalization state"},
                             {"effective_lower", normalization.lower},
                             {"effective_upper", normalization.upper},
                             {"initialized", normalization.initialized > 0.5f},
@@ -2587,8 +2550,7 @@ namespace platf::sbs_debug {
           {"model_input_width", completed.model_width},
           {"model_input_height", completed.model_height},
           {"cuda_graph_active", completed.cuda_graph_active},
-          {"cut_analysis", {
-            {"mode", "cut-only"},
+          {"normalization_analysis", {
             {"depth_ema", config::host_sbs_v2_live_calibration::depth_ema},
             {"ema_edge_change", config::host_sbs_v2_live_calibration::edge_change},
             {"ema_edge_gradient", config::host_sbs_v2_live_calibration::edge_gradient},
@@ -4935,7 +4897,7 @@ namespace platf::sbs_debug {
               adaptive
             );
           } catch (...) {
-            // Scene-cut bridge evidence is optional and has no live V2 geometry authority.
+            // Depth-health state evidence is optional and has no live V2 geometry authority.
           }
         }
         // The completion ring is optional diagnostic evidence. Missing resources, a torn ring,
@@ -5359,10 +5321,10 @@ namespace platf::sbs_debug {
         artifacts["adaptive_state.json"] = artifact_description(
           adaptive_available,
           false,
-          "scene-cut bridge comparison state",
+          "depth-health comparison state",
           adaptive_available ?
-            "Comparison-only cut flags, counters, and normalization state; no live V2 geometry authority." :
-            "Unavailable; scene-cut bridge evidence never gates an authenticated live V2 dump."
+            "Comparison-only depth-health counters and normalization state; no live V2 geometry authority." :
+            "Unavailable; depth-health evidence never gates an authenticated live V2 dump."
         );
         artifacts["window_region.json"] = video_region ?
           hashed_artifact_description(
@@ -5704,7 +5666,7 @@ namespace platf::sbs_debug {
           }},
           {"normalization", adaptive_available ?
              nlohmann::json {
-               {"role", "comparison-only scene-cut bridge evidence; no live V2 geometry authority"},
+               {"role", "comparison-only depth-health state; no live V2 geometry authority"},
                {"effective_lower", normalization.lower},
                {"effective_upper", normalization.upper},
                {"initialized", normalization.initialized > 0.5f},
@@ -6344,7 +6306,7 @@ namespace platf::sbs_debug {
             break;
 
           case stage_e::scene_decode:
-            // The retained scene-cut bridge is optional comparison evidence. Malformed bytes do
+            // The retained depth-health state is optional comparison evidence. Malformed bytes do
             // not reject the exact-frame core package.
             job.scene_cut_bridge_state_available =
               decode_normalization_state(

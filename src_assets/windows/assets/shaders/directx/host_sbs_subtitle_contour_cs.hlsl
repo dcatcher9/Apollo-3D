@@ -522,7 +522,7 @@ bool PreviousAuthorityValid(out bool duplicate) {
     PreviousFeatures.GetDimensions(feature_w, feature_h);
     return CurrentGate != 0u && feature_w == contour_source.x && feature_h == contour_source.w &&
         V2SubtitleHistoryCompatible(PreviousIdentity, contour_source, contour_field, contour_content,
-            contour_frame, contour_observation.xy, contour_observation.z, CurrentEpoch, duplicate);
+            contour_frame, contour_observation.xy, contour_observation.z, duplicate);
 }
 
 void PrepareHistoryGate(uint group_index) {

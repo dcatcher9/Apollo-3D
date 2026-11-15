@@ -29,7 +29,6 @@ def trace_header(**config_overrides):
             {"name": name, "type": kind}
             for name, kind in report.FIELD_SPECS
         ],
-        "analysis_flag_bits": report.ANALYSIS_FLAG_BITS,
         "config": config,
     }
 
@@ -37,14 +36,8 @@ def trace_header(**config_overrides):
 def frame_record(
     source_index,
     *,
-    age=0,
-    flags=3,
-    pulse=False,
-    hard_cuts=0,
     empty_raw=0,
     collapsed_raw=0,
-    change=0.02,
-    initialized=True,
     range_collapsed=False,
     depth_ready=True,
     depth_updated=True,
@@ -55,25 +48,12 @@ def frame_record(
         for name, initial in report.INITIAL_VALUES.items()
     }
     values_by_name.update({
-        "scene_age": float(age),
-        "initialized": 1.0 if initialized else 0.0,
-        "depth_change_baseline_ema": 0.08,
-        "cut_flags": int(flags),
-        "model_input_history_state": 1.0,
-        "current_depth_change_fraction": float(change),
         "valid_depth_fraction": float(valid_fraction),
         "effective_raw_range_width": 0.4,
-        "hard_cut_count": int(hard_cuts),
         "empty_raw_count": int(empty_raw),
         "collapsed_raw_count": int(collapsed_raw),
         "range_collapsed": 1.0 if range_collapsed else 0.0,
         "depth_ready": 1.0 if depth_ready else 0.0,
-        "hard_cut_pulse": 1.0 if pulse else 0.0,
-        "structural_change_fraction": 0.03,
-        "raw_rgb_change_fraction": 0.70,
-        "current_structural_support_fraction": 0.65,
-        "previous_structural_support_fraction": 0.62,
-        "common_structural_support_fraction": 0.58,
     })
     values = [
         int(values_by_name[name])
@@ -86,15 +66,6 @@ def frame_record(
         "frame_id": f"{source_index + 1:010d}",
         "source_index": source_index,
         "depth_updated": depth_updated,
-        "geometry_armed": bool(flags & 1),
-        "appearance_armed": bool(flags & 2),
-        "geometry_low_once": bool(flags & 4),
-        "appearance_quiet_once": bool(flags & 8),
-        "cut_latched": bool(flags & 16),
-        "appearance_recovery": bool(flags & 32),
-        "geometry_confirmation_pending": bool(flags & 64),
-        "hard_cut_pulse": pulse,
-        "hard_cut_count": hard_cuts,
         "empty_raw_count": empty_raw,
         "collapsed_raw_count": collapsed_raw,
         "values": values,
@@ -137,8 +108,8 @@ class AdaptiveTraceContractTests(unittest.TestCase):
     def test_incremental_decoder_matches_full_trace_validation(self):
         header_value = trace_header()
         frames = [
-            frame_record(0, age=1),
-            frame_record(1, age=2),
+            frame_record(0),
+            frame_record(1),
         ]
         decoder = report.IncrementalTraceDecoder()
         self.assertIsNone(decoder.feed_line(json.dumps(header_value) + "\n"))
@@ -152,85 +123,58 @@ class AdaptiveTraceContractTests(unittest.TestCase):
             [frame["frame_id"] for frame in decoded],
             ["0000000001", "0000000002"],
         )
-        self.assertIs(decoded[0]["hard_cut_pulse"], False)
+        self.assertEqual(set(decoded[0]), {
+            "frame_id", "source_index", "depth_updated", *report.FIELD_NAMES})
         with self.assertRaisesRegex(
                 report.TraceContractError, "after finalization"):
             decoder.feed_line(json.dumps(frame_record(2)) + "\n")
 
-    def test_decoded_hard_cut_pulse_remains_boolean_after_positional_expansion(self):
-        decoder = report.IncrementalTraceDecoder()
-        decoder.feed_line(json.dumps(trace_header()) + "\n")
-        quiet = decoder.feed_line(json.dumps(frame_record(0, pulse=False)) + "\n")
-        pulse = decoder.feed_line(json.dumps(frame_record(1, pulse=True)) + "\n")
-        self.assertIs(quiet["hard_cut_pulse"], False)
-        self.assertIs(pulse["hard_cut_pulse"], True)
-
     def test_rejects_duplicate_counter_disagreement(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "adaptive_state.jsonl"
+            for counter in ("empty_raw_count", "collapsed_raw_count"):
+                with self.subTest(counter=counter):
+                    frame = frame_record(0)
+                    frame[counter] = 1
+                    write_trace(path, [frame])
+                    with self.assertRaisesRegex(
+                            report.TraceContractError,
+                            f"{counter} duplicate disagrees"):
+                        report.load_trace(path)
+
+    def test_rejects_nonzero_retired_and_reserved_words(self):
+        self.assertEqual(report.RETIRED_ZERO_FIELDS, ("hard_cut_count",))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "adaptive_state.jsonl"
+            retired = frame_record(0)
+            retired["values"][report.FIELD_NAMES.index("hard_cut_count")] = 1
+            write_trace(path, [retired])
+            with self.assertRaisesRegex(
+                    report.TraceContractError,
+                    "retired field hard_cut_count.*must be zero"):
+                report.load_trace(path)
+
+            reserved = frame_record(0)
+            reserved["values"][report.FIELD_NAMES.index("reserved_cut_bridge_31")] = 1.0
+            write_trace(path, [reserved])
+            with self.assertRaisesRegex(
+                    report.TraceContractError,
+                    "reserved field reserved_cut_bridge_31.*non-default"):
+                report.load_trace(path)
+
+    def test_rejects_frame_and_header_keys_outside_the_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "adaptive_state.jsonl"
             frame = frame_record(0)
-            frame["hard_cut_count"] = 1
+            frame["hard_cut_pulse"] = False
             write_trace(path, [frame])
-            with self.assertRaisesRegex(
-                    report.TraceContractError, "hard_cut_count duplicate disagrees"):
+            with self.assertRaisesRegex(report.TraceContractError, "exact keys"):
                 report.load_trace(path)
 
-    def test_accepts_native_appearance_recovery_and_rejects_a_wrong_duplicate(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "adaptive_state.jsonl"
-            recovery = frame_record(0, flags=32)
-            write_trace(path, [recovery])
-            _header, frames = report.load_trace(path)
-            self.assertTrue(frames[0]["appearance_recovery"])
-            output = Path(directory) / "report"
-            report.generate_outputs(
-                path,
-                output,
-                wrapper_timeline([recovery]),
-                "appearance-recovery",
-            )
-            with (output / "frames.csv").open(
-                    newline="", encoding="utf-8") as stream:
-                rows = list(csv.DictReader(stream))
-            self.assertEqual(rows[0]["appearance_recovery"], "1")
-
-            recovery["appearance_recovery"] = False
-            write_trace(path, [recovery])
-            with self.assertRaisesRegex(
-                    report.TraceContractError,
-                    "appearance_recovery duplicate disagrees"):
-                report.load_trace(path)
-
-    def test_accepts_geometry_confirmation_pending_and_rejects_a_wrong_duplicate(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "adaptive_state.jsonl"
-            pending = frame_record(0, flags=64)
-            write_trace(path, [pending])
-            _header, frames = report.load_trace(path)
-            self.assertTrue(frames[0]["geometry_confirmation_pending"])
-
-            pending["geometry_confirmation_pending"] = False
-            write_trace(path, [pending])
-            with self.assertRaisesRegex(
-                    report.TraceContractError,
-                    "geometry_confirmation_pending duplicate disagrees"):
-                report.load_trace(path)
-
-    def test_rejects_unknown_cut_and_analysis_flag_bits(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "adaptive_state.jsonl"
-            unknown_cut = frame_record(0, flags=128)
-            write_trace(path, [unknown_cut])
-            with self.assertRaisesRegex(
-                    report.TraceContractError, "cut_flags.*unknown schema bits"):
-                report.load_trace(path)
-
-            unknown_analysis = frame_record(0)
-            unknown_analysis["values"][31] = 256
-            write_trace(path, [unknown_analysis])
-            with self.assertRaisesRegex(
-                    report.TraceContractError,
-                    "analysis_flags.*unknown schema bits"):
+            header = trace_header()
+            header["analysis_flag_bits"] = {}
+            write_trace(path, [frame_record(0)], header)
+            with self.assertRaisesRegex(report.TraceContractError, "exact keys"):
                 report.load_trace(path)
 
     def test_rejects_nonfinite_float_and_wrong_header_layout(self):
@@ -310,8 +254,7 @@ class AdaptiveTraceContractTests(unittest.TestCase):
             (
                 "empty",
                 frame_record(
-                    0, initialized=False, depth_ready=False, empty_raw=1,
-                    valid_fraction=0.0),
+                    0, depth_ready=False, empty_raw=1, valid_fraction=0.0),
                 "empty_raw_depth",
             ),
             (
@@ -328,7 +271,6 @@ class AdaptiveTraceContractTests(unittest.TestCase):
                 write_trace(trace, [frame])
                 summary = report.generate_outputs(trace, root / "out")
                 self.assertIn(expected_kind, summary["anomaly_counts"])
-                self.assertNotIn("nonzero_initial_counter", summary["anomaly_counts"])
                 event = next(
                     item for item in summary["anomalies"]
                     if item["kind"] == expected_kind
@@ -338,26 +280,11 @@ class AdaptiveTraceContractTests(unittest.TestCase):
 
 
 class AdaptiveReportTests(unittest.TestCase):
-    def test_segments_explicit_pulses_and_emits_cut_state_report(self):
-        frames = []
-        hard_cuts = 0
-        source_index = 0
-        for shot in range(12):
-            for position in range(10):
-                pulse = shot > 0 and position == 0
-                if pulse:
-                    hard_cuts += 1
-                # Keep the first accepted cut's recovery fully disarmed through the next
-                # accepted cut. The next pulse is therefore the important 16 -> 16 case.
-                flags = 16 if shot in (1, 2) else (16 if pulse else 19)
-                frames.append(frame_record(
-                    source_index,
-                    age=position,
-                    flags=flags,
-                    pulse=pulse,
-                    hard_cuts=hard_cuts,
-                ))
-                source_index += 1
+    def test_emits_depth_health_report(self):
+        frames = [
+            frame_record(index, valid_fraction=0.5 if index == 7 else 1.0)
+            for index in range(120)
+        ]
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -368,43 +295,38 @@ class AdaptiveReportTests(unittest.TestCase):
                 trace,
                 output,
                 timeline=wrapper_timeline(frames),
-                source_name="twelve-shot.mp4",
+                source_name="healthy.mp4",
             )
 
-            self.assertEqual(summary["shot_count"], 12)
-            self.assertEqual(summary["hard_cut_pulse_count"], 11)
-            self.assertNotIn("pop_risk_endpoint_advisory", summary)
-            self.assertNotIn("parameter_policy", summary)
-            for filename in ("frames.csv", "shots.csv", "summary.json", "report.html"):
-                self.assertTrue((output / filename).is_file(), filename)
+            self.assertEqual(summary["schema"], 2)
+            self.assertEqual(summary["frame_count"], 120)
+            self.assertEqual(summary["depth_update_count"], 120)
+            self.assertEqual(summary["min_valid_depth_fraction"], 0.5)
+            self.assertEqual(summary["anomaly_count"], 0)
+            for retired in ("shot_count", "shots", "hard_cut_pulse_count"):
+                self.assertNotIn(retired, summary)
+            self.assertEqual(
+                sorted(path.name for path in output.iterdir()),
+                ["frames.csv", "report.html", "summary.json"])
             with (output / "frames.csv").open(encoding="utf-8", newline="") as stream:
-                self.assertEqual(len(list(csv.DictReader(stream))), len(frames))
-            with (output / "shots.csv").open(encoding="utf-8", newline="") as stream:
-                self.assertEqual(len(list(csv.DictReader(stream))), 12)
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(len(rows), len(frames))
+            self.assertEqual(tuple(rows[0]), report.FRAME_CSV_FIELDS)
             html_text = (output / "report.html").read_text(encoding="utf-8")
-            self.assertIn("Host SBS whole-clip cut-state report", html_text)
-            self.assertIn("Red dashed lines are accepted hard-cut pulses", html_text)
+            self.assertIn("Host SBS whole-clip depth-health report", html_text)
+            self.assertIn("Valid depth fraction", html_text)
 
-    def test_flags_health_drift_burst_and_disarmed_intervals(self):
-        frames = []
-        hard_cuts = 0
-        for index in range(70):
-            pulse = index in (10, 14)
-            if pulse:
-                hard_cuts += 1
-            shot_age = index if index < 10 else (
-                index - 10 if index < 14 else index - 14)
-            frames.append(frame_record(
+    def test_flags_health_counters_collapse_and_lost_readiness(self):
+        frames = [
+            frame_record(
                 index,
-                age=shot_age,
-                flags=16,
-                pulse=pulse,
-                hard_cuts=hard_cuts,
                 empty_raw=1 if index >= 25 else 0,
                 collapsed_raw=1 if index >= 30 else 0,
                 range_collapsed=index == 30,
                 depth_ready=index != 40,
-            ))
+            )
+            for index in range(70)
+        ]
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -415,15 +337,30 @@ class AdaptiveReportTests(unittest.TestCase):
                 root / "out",
                 wrapper_timeline(frames, seconds_per_frame=0.05),
             )
-            kinds = {item["kind"] for item in summary["anomalies"]}
-            self.assertTrue({
-                "cut_burst",
-                "both_cut_arms_disarmed_long",
-                "empty_raw_depth",
-                "collapsed_raw_depth",
-                "range_collapsed",
-                "depth_not_ready_after_initialization",
-            }.issubset(kinds))
+            self.assertEqual(summary["anomaly_counts"], {
+                "collapsed_raw_depth": 1,
+                "depth_not_ready_after_ready": 1,
+                "empty_raw_depth": 1,
+                "range_collapsed": 1,
+            })
+            lost = next(
+                item for item in summary["anomalies"]
+                if item["kind"] == "depth_not_ready_after_ready")
+            self.assertEqual(lost["frame_id"], "0000000041")
+
+    def test_flags_delayed_and_absent_depth_readiness(self):
+        delayed = [frame_record(index, depth_ready=index >= 3) for index in range(6)]
+        never = [frame_record(index, depth_ready=False) for index in range(6)]
+        for label, frames, expected in (
+            ("delayed", delayed, {"depth_ready_delay": 1}),
+            ("never", never, {"depth_never_ready": 1}),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                trace = root / "adaptive_state.jsonl"
+                write_trace(trace, frames)
+                summary = report.generate_outputs(trace, root / "out")
+                self.assertEqual(summary["anomaly_counts"], expected)
 
     def test_wrapper_pts_are_normalized_but_absolute_pts_is_preserved(self):
         frames = [frame_record(index) for index in range(3)]

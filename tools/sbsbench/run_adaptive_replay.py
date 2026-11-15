@@ -96,7 +96,6 @@ TRACE_FLAG_SUBTITLE_SUPPRESSED = 1 << 3
 TRACE_FLAG_CONDITION_EXECUTED = 1 << 4
 TRACE_FLAG_SUBTITLE_BRANCH_GATED = 1 << 5
 TRACE_KNOWN_FLAGS = ((1 << 6) - 1)
-TRACE_PLANE_CUT_EPOCH_WORD = depth_coordinate_v2_contract.SUBTITLE_OCR.plane_cut_epoch_word
 TRACE_PLANE_FRAME_WORD = depth_coordinate_v2_contract.SUBTITLE_OCR.plane_frame_offset
 TRACE_PLANE_TIMESTAMP_WORD = depth_coordinate_v2_contract.SUBTITLE_OCR.plane_observation_timestamp_offset
 WORK_NONE = 0
@@ -467,7 +466,7 @@ def common_contract_identity(contract: dict) -> dict:
         for key in (
             "model", "pop_strength", "cuda_graph", "cuda_graph_captured",
             "raw_model_provenance", "parallax_v2_live", "parallax_v2_shadow",
-            "parallax_v2_render", "cut_state", "warp_mapping",
+            "parallax_v2_render", "warp_mapping",
             "adaptive_conditional", "final_parallax_field",
         )
     }

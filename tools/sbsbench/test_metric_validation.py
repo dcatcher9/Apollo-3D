@@ -31,15 +31,6 @@ CHANNELS = [
 ]
 
 
-def cut_state_values(*, initialized=True, flags=3, history=1.0):
-    values = [0] * len(sbsbench.CUT_STATE_FIELDS)
-    values[0] = sbsbench.cut_state_contract.CUT_CONTRACT_TAG
-    values[sbsbench.CUT_STATE_FIELDS.index("initialized")] = 1.0 if initialized else 0.0
-    values[sbsbench.CUT_STATE_FIELDS.index("cut_flags")] = int(flags)
-    values[sbsbench.CUT_STATE_FIELDS.index("model_input_history_state")] = float(history)
-    return values
-
-
 def mapping_shape(eye_width=64, height=32):
     """Return a complete unit-content warp-map shape contract."""
     return {
@@ -1099,7 +1090,6 @@ class LabelProvenanceTests(unittest.TestCase):
                 "sbs_subtitle_metrics.py": "subtitle-v1\n",
                 "sbs_warp_shear_metrics.py": "shear-v1\n",
                 "direct_geometry_contract.py": "direct-geometry-v1\n",
-                "cut_state_contract.py": "cut-state-v1\n",
                 "thresholds.json": "{}\n",
                 "run_eval.py": "runner-v1\n",
                 "rescore_run.py": "rescorer-v1\n",
@@ -1380,20 +1370,6 @@ class ReportEvidenceContractTests(unittest.TestCase):
                             "raw_width": eye_width,
                             "raw_height": height,
                         },
-                        "cut_state": {
-                            "file": "cut_state.json",
-                            "schema": sbsbench.CUT_STATE_SCHEMA,
-                            "capture": sbsbench.cut_state_contract.CAPTURE,
-                        },
-                    }, stream)
-                with open(os.path.join(artifact_dir, "cut_state.json"), "w",
-                          encoding="utf-8") as stream:
-                    json.dump({
-                        "schema": sbsbench.CUT_STATE_SCHEMA,
-                        "source": sbsbench.cut_state_contract.SOURCE,
-                        "capture": sbsbench.cut_state_contract.CAPTURE,
-                        "fields": list(sbsbench.CUT_STATE_FIELDS),
-                        "frames": [{"frame_id": "00000", "values": cut_state_values()}],
                     }, stream)
                 with open(os.path.join(artifact_dir, "sbs_perf.json"), "w",
                           encoding="utf-8") as stream:

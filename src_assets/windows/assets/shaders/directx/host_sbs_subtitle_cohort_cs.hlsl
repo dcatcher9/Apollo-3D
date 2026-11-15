@@ -248,8 +248,7 @@ bool CurrentValid() {
         else if (cover.x!=cohort_content.x || cover.z!=cohort_content.z || cover.w!=cohort_content.w || cover.y<rt) return false;
     }
     if (!ClassifierReference()) return false;
-    // Read the GPU-owned cut only after this UIP's complete current observation
-    // and geometry joins succeed. No CPU cut mirror participates in authority.
+    // Retired scene-cut epoch (always zero): carried only as the SCT/UIP identity join.
     GCutEpoch=CurrentUIP[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD];
     GCount=count;
     return true;
@@ -264,7 +263,7 @@ bool PreviousSnapshotValid() {
     if (w!=cohort_source.x || h!=cohort_source.w) return false;
     bool duplicate;
     bool result=V2SubtitleHistoryCompatible(PreviousSCT,cohort_source,cohort_field,cohort_content,
-        cohort_frame,cohort_observation.xy,cohort_observation.z,GCutEpoch,duplicate);
+        cohort_frame,cohort_observation.xy,cohort_observation.z,duplicate);
     GPreviousDuplicate=result && duplicate ? 1u:0u;
     return result;
 }
@@ -276,7 +275,7 @@ bool PreviousStateValid() {
     if (n!=SBC_STATE_WORDS || s!=4u || w!=cohort_source.x || h!=cohort_source.w || cohort_observation.z!=0u) return false;
     PreviousBirthRGB.GetDimensions(w,h);
     if (w!=cohort_source.x || h!=cohort_source.w || PreviousState[SBC_H_TAG]!=SBC_TAG || PreviousState[SBC_H_SCHEMA]!=SBC_SCHEMA ||
-        PreviousState[SBC_H_VALID]!=1u || PreviousState[SBC_H_CUT]!=GCutEpoch ||
+        PreviousState[SBC_H_VALID]!=1u ||
         PreviousState[SBC_H_COUNT]>SBC_CAPACITY || PreviousState[SBC_H_NEXT_ID]==0u ||
         PreviousState[SBC_H_NEXT_ID]>SBC_OWNER_ID_LIMIT || PreviousState[SBC_H_EPOCH]==0u ||
         (PreviousState[SBC_H_FLAGS]&~SBC_HEADER_KNOWN_FLAGS)!=0u ||

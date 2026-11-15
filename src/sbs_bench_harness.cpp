@@ -1567,7 +1567,7 @@ namespace sbs_bench {
     }
 
     // V2 evaluation depth artifact. Under host_sbs_v2 the estimator's normalized depth SRV is a
-    // private cut field with no geometry authority, so the scored depth_<frame>.png is produced
+    // private normalized field with no geometry authority, so the scored depth_<frame>.png is produced
     // from the authenticated raw model output instead. The container matches the historical
     // depth dump (16-bit grayscale PNG, values clamped to [0,1] scaled to 0-65535); the [0,1] normalization
     // est.depth received upstream is replicated here as an explicit per-frame finite min/max
@@ -1768,53 +1768,23 @@ namespace sbs_bench {
           return false;
         }
       }
-      const auto scalar = [&](const word_e word) {
-        return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
-      };
-      const float hard_cut_pulse = scalar(word_e::hard_cut_pulse);
-      const float cut_flags = scalar(word_e::cut_flags);
-      const float analysis_flags = scalar(word_e::analysis_flags);
+      for (const auto word : sbs_adaptive_state::retired_zero_words) {
+        if (words[sbs_adaptive_state::index(word)] != 0u) {
+          return false;
+        }
+      }
       return
-        (hard_cut_pulse == 0.0f || hard_cut_pulse == 1.0f) &&
-        cut_flags >= 0.0f &&
-        cut_flags <= static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) &&
-        std::trunc(cut_flags) == cut_flags &&
-        analysis_flags >= 0.0f &&
-        analysis_flags <=
-          static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) &&
-        std::trunc(analysis_flags) == analysis_flags &&
-        words[sbs_adaptive_state::index(word_e::hard_cut_count)] <=
-          sbs_adaptive_state::counter_max &&
         words[sbs_adaptive_state::index(word_e::empty_raw_count)] <=
           sbs_adaptive_state::counter_max &&
         words[sbs_adaptive_state::index(word_e::collapsed_raw_count)] <=
           sbs_adaptive_state::counter_max;
     }
 
-    struct cut_state_record {
-      std::string frame_id;
-      adaptive_state_words_t words {};
-    };
-
     bool read_adaptive_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
                              ID3D11ShaderResourceView *srv,
                              ComPtr<ID3D11Buffer> &stage_cache,
                              adaptive_state_words_t &words);
 
-    // Benchmark-only state trace. This readback is deliberately confined to the synchronous
-    // offline harness; the live capture loop must remain free of staging copies and Map calls.
-    bool read_cut_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
-                        ID3D11ShaderResourceView *srv,
-                        ComPtr<ID3D11Buffer> &stage_cache,
-                        adaptive_state_words_t &state_words) {
-      return read_adaptive_state(
-        dev,
-        ctx,
-        srv,
-        stage_cache,
-        state_words
-      );
-    }
 
     std::string scene_cache_frame_stem(std::size_t sequence) {
       return "frame_" + follow_frame_id(sequence);
@@ -3133,17 +3103,12 @@ namespace sbs_bench {
           {"type", field.json_type},
         });
       }
-      nlohmann::json analysis_flag_bits = nlohmann::json::object();
-      for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
-        analysis_flag_bits[std::string {flag.name}] = flag.bit;
-      }
       const nlohmann::json header {
         {"record", "header"},
         {"schema", sbs_adaptive_state::schema_version},
         {"source", sbs_adaptive_state::source},
         {"capture", sbs_adaptive_state::capture},
         {"fields", std::move(fields)},
-        {"analysis_flag_bits", std::move(analysis_flag_bits)},
         {"config", {
           {"model", model_name},
           {"pop_strength", pop_strength},
@@ -3166,56 +3131,9 @@ namespace sbs_bench {
       const auto scalar = [&](const word_e word) {
         return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
       };
-      const float flags_value = scalar(word_e::cut_flags);
-      if (flags_value < 0.0f ||
-          flags_value >
-            static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) ||
-          std::trunc(flags_value) != flags_value) {
-        return false;
-      }
-      const auto cut_flags = static_cast<std::uint32_t>(flags_value);
-      const float analysis_flags_value = scalar(word_e::analysis_flags);
-      if (
-        analysis_flags_value < 0.0f ||
-        analysis_flags_value >
-          static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) ||
-        std::trunc(analysis_flags_value) != analysis_flags_value
-      ) {
-        return false;
-      }
-      const float hard_cut_pulse = scalar(word_e::hard_cut_pulse);
-      if (hard_cut_pulse != 0.0f && hard_cut_pulse != 1.0f) {
-        return false;
-      }
       out << "{\"record\":\"frame\",\"frame_id\":" << json_string(frame_id)
           << ",\"source_index\":" << source_index
           << ",\"depth_updated\":" << (depth_updated ? "true" : "false")
-          << ",\"geometry_armed\":"
-          << ((cut_flags & sbs_adaptive_state::cut_flag_geometry_armed) != 0u ?
-                "true" : "false")
-          << ",\"appearance_armed\":"
-          << ((cut_flags & sbs_adaptive_state::cut_flag_appearance_armed) != 0u ?
-                "true" : "false")
-          << ",\"geometry_low_once\":"
-          << ((cut_flags & sbs_adaptive_state::cut_flag_geometry_low_once) != 0u ?
-                "true" : "false")
-          << ",\"appearance_quiet_once\":"
-          << ((cut_flags & sbs_adaptive_state::cut_flag_appearance_quiet_once) != 0u ?
-                "true" : "false")
-          << ",\"cut_latched\":"
-          << ((cut_flags & sbs_adaptive_state::cut_flag_latched) != 0u ?
-                "true" : "false")
-          << ",\"appearance_recovery\":"
-          << ((cut_flags & sbs_adaptive_state::cut_flag_appearance_recovery) != 0u ?
-                "true" : "false")
-          << ",\"geometry_confirmation_pending\":"
-          << ((cut_flags &
-               sbs_adaptive_state::cut_flag_geometry_confirmation_pending) != 0u ?
-                "true" : "false")
-          << ",\"hard_cut_pulse\":"
-          << (hard_cut_pulse > 0.5f ? "true" : "false")
-          << ",\"hard_cut_count\":"
-          << words[sbs_adaptive_state::index(word_e::hard_cut_count)]
           << ",\"empty_raw_count\":"
           << words[sbs_adaptive_state::index(word_e::empty_raw_count)]
           << ",\"collapsed_raw_count\":"
@@ -3266,59 +3184,6 @@ namespace sbs_bench {
         },
         atomic_write_mode_e::transient
       );
-    }
-
-    bool write_cut_state_trace(
-      const fs::path &path,
-      const std::vector<cut_state_record> &records,
-      const sbs_adaptive_state::compact_cut_trace_contract_t &trace_contract
-    ) {
-      std::ofstream out(path);
-      if (!out) {
-        return false;
-      }
-      out.imbue(std::locale::classic());
-      out << std::setprecision(std::numeric_limits<float>::max_digits10);
-      out << "{\n"
-          << "  \"schema\": " << trace_contract.schema << ",\n"
-          << "  \"source\": " << json_string(trace_contract.source) << ",\n"
-          << "  \"capture\": " << json_string(trace_contract.capture) << ",\n"
-          << "  \"fields\": [";
-      for (std::size_t index = 0;
-           index < sbs_adaptive_state::compact_cut_trace_fields.size();
-           ++index) {
-        if (index != 0u) {
-          out << ", ";
-        }
-        out << json_string(sbs_adaptive_state::compact_cut_trace_fields[index]);
-      }
-      out << "],\n"
-          << "  \"frames\": [\n";
-      for (size_t index = 0; index < records.size(); ++index) {
-        const auto &record = records[index];
-        out << "    {\"frame_id\": " << json_string(record.frame_id) << ", \"values\": [";
-        for (std::size_t value_index = 0;
-             value_index < sbs_adaptive_state::compact_cut_trace_words.size();
-             ++value_index) {
-          if (value_index != 0) {
-            out << ", ";
-          }
-          const auto word = sbs_adaptive_state::compact_cut_trace_words[value_index];
-          const auto word_index = sbs_adaptive_state::index(word);
-          const auto &descriptor = sbs_adaptive_state::fields[word_index];
-          if (descriptor.gpu_encoding ==
-              sbs_adaptive_state::gpu_encoding_e::uint_bits) {
-            out << record.words[word_index];
-          } else {
-            out << std::bit_cast<float>(record.words[word_index]);
-          }
-        }
-        out << "]}"
-            << (index + 1 == records.size() ? "\n" : ",\n");
-      }
-      out << "  ]\n}\n";
-      out.flush();
-      return out.good();
     }
 
     // Keep output identities tied to source identities. Positional renumbering made a dropped
@@ -3849,11 +3714,6 @@ namespace sbs_bench {
       if (!path.parent_path().empty()) {
         fs::create_directories(path.parent_path(), ec);
       }
-      nlohmann::ordered_json adaptive_analysis_flag_bits =
-        nlohmann::ordered_json::object();
-      for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
-        adaptive_analysis_flag_bits[std::string {flag.name}] = flag.bit;
-      }
       nlohmann::ordered_json capabilities = {
         {"schema", 1},
         {"native_whole_clip", {
@@ -3875,7 +3735,6 @@ namespace sbs_bench {
           {"adaptive_state_contract_tag", sbs_adaptive_state::cut_contract_tag},
           {"adaptive_state_contract_canonical_sha256",
            sbs_adaptive_state::contract_canonical_sha256},
-          {"adaptive_analysis_flag_bits", std::move(adaptive_analysis_flag_bits)},
           {"scene_cache_contract_schema", offline_sbs::scene_cache_contract_schema},
           {"scene_cache_packed_sbs_contract", true},
           {"renderer", "depth-coordinate-v2-live-signed-parallax"},
@@ -4300,9 +4159,6 @@ namespace sbs_bench {
     // This is provenance, not a mode switch. Every inference-producing run requires the joined
     // conditional wrapper. Reference/cache replays perform no TensorRT inference at all.
     const bool inference_wrapper_required = !replay_mode && !direct_parallax_mode;
-    const auto &cut_state_trace_contract = depth_coordinate_v2_gpu_mode ?
-      sbs_adaptive_state::gpu_replay_cut_trace_contract :
-      sbs_adaptive_state::production_cut_trace_contract;
     const bool whole_clip_mode = o.artifacts != artifact_mode_e::evaluation;
     const bool device_conditional_replay_evidence =
       o.device_conditional_replay || o.device_conditional_replay_control;
@@ -4323,7 +4179,7 @@ namespace sbs_bench {
     std::vector<scene_plan_entry> scene_plan;
     std::size_t replay_first_sequence = 1u;
     std::size_t replay_frame_count = 0u;
-    // The V2 camera and cut history are stateful per frame, so depth cadence is always one
+    // The V2 camera and depth history are stateful per frame, so depth cadence is always one
     // inference per source frame; the replay cache contract validates the same interval.
     int effective_depth_every = 1;
     if (replay_mode) {
@@ -5202,15 +5058,9 @@ namespace sbs_bench {
     ComPtr<ID3D11Buffer> cut_state_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
     ComPtr<ID3D11Buffer> scene_cache_state_stage;
-    // Evaluation keeps the compact cut-state trace used by the bounded clip scorer.
-    // Whole-clip follow/conversion already emits the superset adaptive-state
-    // transport (JSONL for standalone tooling, atomic latest-record snapshots for the native
-    // worker), so retaining a second per-frame vector there would make memory scale with clip
-    // duration for no additional evidence.
-    std::vector<cut_state_record> cut_state_records;
-    if (!whole_clip_mode) {
-      cut_state_records.reserve(frames.size());
-    }
+    // Evaluation authenticates the tagged depth-health state of every source observation.
+    // Whole-clip follow/conversion already emits the adaptive-state transport instead.
+    std::size_t health_state_observations = 0u;
     bool raw_shape_written = false;
     std::shared_ptr<const models::composite_depth_runtime_provenance_t>
       convex2x_runtime_provenance;
@@ -6672,14 +6522,13 @@ namespace sbs_bench {
           return 6;
         }
       } else {
-        cut_state_record state_record;
-        state_record.frame_id = output_id;
-        if (!read_cut_state(dev.Get(), ctx.Get(), est.cut_state.Get(),
-                            cut_state_stage, state_record.words)) {
-          BOOST_LOG(error) << "sbs-bench: cannot read cut state for frame " << output_id;
+        adaptive_state_words_t health_words {};
+        if (!read_adaptive_state(dev.Get(), ctx.Get(), est.cut_state.Get(),
+                                 cut_state_stage, health_words)) {
+          BOOST_LOG(error) << "sbs-bench: cannot read depth-health state for frame " << output_id;
           return 6;
         }
-        cut_state_records.push_back(std::move(state_record));
+        ++health_state_observations;
       }
 
       if (o.pfm_joined_diagnostics &&
@@ -6769,7 +6618,7 @@ namespace sbs_bench {
         subtitle_plane_frames.back()["source_file_id"] = output_id;
       }
 
-      // Sampling output must never sample the depth/EMA/cut pipeline itself. Every source
+      // Sampling output must never sample the depth/EMA pipeline itself. Every source
       // frame above was inferred and consumed; only expensive composite/readback is skipped.
       if (!detail::subtitle_diagnostic_should_render(
             static_cast<std::uint64_t>(fi) + 1u,
@@ -6789,7 +6638,7 @@ namespace sbs_bench {
       }
       // Ordinary evaluation and cache replay use Base; the retained glyph tuple is diagnostic.
       // Direct replay binds its uploaded encoded field with the
-      // estimator's cut-compat state.
+      // estimator's tagged depth-health state.
       ID3D11ShaderResourceView *warp_depth =
         direct_parallax_mode ? direct_parallax_srv.Get() :
                                est.shadow_base_final_parallax.Get();
@@ -7234,7 +7083,7 @@ namespace sbs_bench {
               return 7;
             }
           } else {
-            // The estimator's normalized depth is a private cut field with no geometry
+            // The estimator's normalized depth is a private normalized field with no geometry
             // authority; scoring it against GT depth would be meaningless. The scored depth
             // artifact is the authenticated raw model output, normalized per frame into the
             // same 16-bit grayscale container dump_depth historically wrote.
@@ -7754,16 +7603,9 @@ namespace sbs_bench {
       BOOST_LOG(error) << "sbs-bench: no warp mapping shape contract was written";
       return 8;
     }
-    if (!whole_clip_mode) {
-      if (cut_state_records.size() != completed_frame_count ||
-          !write_cut_state_trace(
-            fs::path(o.out) / "cut_state.json",
-            cut_state_records,
-            cut_state_trace_contract
-          )) {
-        BOOST_LOG(error) << "sbs-bench: failed writing complete cut_state.json";
-        return 8;
-      }
+    if (!whole_clip_mode && health_state_observations != completed_frame_count) {
+      BOOST_LOG(error) << "sbs-bench: depth-health state did not cover every source observation";
+      return 8;
     }
 
     // Existing evaluation readbacks have completed the last rendered frame. Make one final
@@ -7822,16 +7664,16 @@ namespace sbs_bench {
             (o.subtitle_plane_diagnostic_render_selected &&
              !std::includes(rendered_subtitle_observations.begin(), rendered_subtitle_observations.end(),
                             requested_observations.begin(), requested_observations.end())) ||
-            cut_state_records.size() != completed_frame_count) {
+            health_state_observations != completed_frame_count) {
           BOOST_LOG(error) << "sbs-bench: selected subtitle diagnostics did not cover "
                            << "the exact requested observations and rendered outputs";
           return 6;
         }
         // The render-side processed counter may stop at the last output sample. The already
-        // authenticated complete cut trace records every source observation before output skip.
+        // authenticated depth-health readback counts every source observation before output skip.
         diagnostic_manifest["schema"] = 2u;
         diagnostic_manifest["selection_basis"] = "one-based-observation-ordinal";
-        diagnostic_manifest["processed_frame_count"] = cut_state_records.size();
+        diagnostic_manifest["processed_frame_count"] = health_state_observations;
         diagnostic_manifest["requested_observation_ids"] = requested_observations;
         diagnostic_manifest["captured_observation_ids"] = captured_subtitle_observations;
         diagnostic_manifest["output_every"] = o.output_every;
@@ -7859,7 +7701,7 @@ namespace sbs_bench {
           ocr_working_frames.size() != requested_observations.size() ||
           (o.subtitle_plane_diagnostic_ranges &&
            captured_ocr_working_observations != captured_subtitle_observations) ||
-          cut_state_records.size() != completed_frame_count) {
+          health_state_observations != completed_frame_count) {
         BOOST_LOG(error) << "sbs-bench: working OCR diagnostics did not cover the exact "
                          << "requested observations";
         return 6;
@@ -8161,11 +8003,6 @@ namespace sbs_bench {
                  << ",\n"
                  << "  \"cuda_graph\": " << (inference_wrapper_required ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
-                 << "  \"cut_state\": {\"file\": \"cut_state.json\", "
-                    "\"schema\": " << cut_state_trace_contract.schema
-                 << ", \"capture\": "
-                 << json_string(cut_state_trace_contract.capture)
-                 << "},\n"
                  << "  \"warp_mask\": {\"red\": \"finite_boundary_extrapolation\"},\n"
                  << "  \"warp_mapping\": {\n"
                  << "    \"file_pattern\": \"warp_map_<frame-id>.f32\",\n"

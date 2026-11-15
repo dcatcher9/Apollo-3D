@@ -1970,8 +1970,9 @@ TEST(DepthCoordinateV2GpuTest, CoordinatePassReplayAuthenticatesAdaptiveStateAnd
       EXPECT_GE(rows[index]["latched_scale"].get<float>(), calibration.raw_coordinate_scale - 2.0e-6f);
     }
   }
+  // The manifest cut generation is attribution metadata only; the GPU epoch word is retired.
   EXPECT_EQ(rows[3]["confirmed_cut"], true);
-  EXPECT_EQ(rows[3]["confirmed_cut_count"], 1u);
+  EXPECT_EQ(rows[3]["confirmed_cut_count"], 0u);
   const float first_center = rows[0]["center"].get<float>();
   EXPECT_GT(rows[1]["center"].get<float>(), first_center);
   EXPECT_LT(rows[3]["center"].get<float>(), rows[3]["observed_mean"].get<float>());

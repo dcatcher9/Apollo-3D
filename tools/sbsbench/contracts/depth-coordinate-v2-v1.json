@@ -431,16 +431,6 @@
         "source_target": "cs_5_0"
       },
       {
-        "source_file": "depth_scene_cut_evidence_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
-        "source_file": "depth_scene_cut_resolve_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
         "source_file": "depth_coordinate_v2_moments_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -556,7 +546,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "5a89c64ad9489d9208fb86d0b48d1f27187d4c9369c7db97bbc795fa79d9b84d"
+    "source_closure_sha256": "98beb79249486fd3151ffdda741bf68d146ed0cd2ee77894280050b21b8619c7"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -689,7 +679,7 @@
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744",
+        "source_closure_sha256": "23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",

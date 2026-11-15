@@ -19,15 +19,6 @@ import run_eval  # noqa: E402
 import sbsbench  # noqa: E402
 
 
-def cut_state_values(*, initialized=True, flags=3, history=1.0):
-    values = [0] * len(sbsbench.CUT_STATE_FIELDS)
-    values[0] = sbsbench.cut_state_contract.CUT_CONTRACT_TAG
-    values[sbsbench.CUT_STATE_FIELDS.index("initialized")] = 1.0 if initialized else 0.0
-    values[sbsbench.CUT_STATE_FIELDS.index("cut_flags")] = int(flags)
-    values[sbsbench.CUT_STATE_FIELDS.index("model_input_history_state")] = float(history)
-    return values
-
-
 class RescoreMetadataTests(unittest.TestCase):
     def _fixture(self, root):
         clips_root = os.path.join(root, "clips")
@@ -79,23 +70,10 @@ class RescoreMetadataTests(unittest.TestCase):
                 "legacy_levers_applied": False,
             },
             "raw_model_provenance": {"raw_width": 12, "raw_height": 8},
-            "cut_state": {
-                "file": "cut_state.json", "schema": sbsbench.CUT_STATE_SCHEMA,
-                "capture": sbsbench.cut_state_contract.CAPTURE,
-            },
         }
         with open(os.path.join(artifact_dir, "contract.json"), "w",
                   encoding="utf-8") as stream:
             json.dump(contract, stream)
-        with open(os.path.join(artifact_dir, "cut_state.json"), "w",
-                  encoding="utf-8") as stream:
-            json.dump({
-                "schema": sbsbench.CUT_STATE_SCHEMA,
-                "source": sbsbench.cut_state_contract.SOURCE,
-                "capture": sbsbench.cut_state_contract.CAPTURE,
-                "fields": list(sbsbench.CUT_STATE_FIELDS),
-                "frames": [{"frame_id": "00000", "values": cut_state_values()}],
-            }, stream)
         artifact_hash = run_eval.scored_artifact_sha256(artifact_dir)
         data = {
             "meta": {

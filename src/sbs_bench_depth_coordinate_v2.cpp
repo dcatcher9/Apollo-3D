@@ -1125,14 +1125,8 @@ void main(uint3 id : SV_DispatchThreadID) {
         frame.cut_pulse ||
         frame.cut_generation != frames[sequence_index - 1u].cut_generation
       );
-      auto cut_state_words = sbs_adaptive_state::initial_words;
-      cut_state_words[sbs_adaptive_state::index(
-        sbs_adaptive_state::word_e::hard_cut_count)] = frame.cut_generation;
-      cut_state_words[sbs_adaptive_state::index(
-        sbs_adaptive_state::word_e::hard_cut_pulse)] =
-          std::bit_cast<std::uint32_t>(frame.cut_pulse ? 1.0f : 0.0f);
-      context->UpdateSubresource(
-        cut_state_buffer.Get(), 0, nullptr, cut_state_words.data(), 0, 0);
+      // The manifest's cut generation is replay attribution metadata only. The tagged health
+      // state keeps its initial words, including the retired always-zero epoch.
 
       const v2_gpu::base_constants_t base_constants {
         .depth = common_constants.Get(),

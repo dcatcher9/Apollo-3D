@@ -13,9 +13,9 @@
 
 namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t contract_schema = 130u;
-  inline constexpr std::uint32_t contract_tag = 0x808647CDu;
-  inline constexpr std::string_view contract_canonical_sha256 = "d8dd9abbb11f27fdc22cbfaae3cc6a756421ec1bcf68adaf9be5e238fc6f6de3";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "808647cde9015bb5f23e9674024f536537e5e9f1018582320279f0f61e2ef2e9";
+  inline constexpr std::uint32_t contract_tag = 0x1A593EDDu;
+  inline constexpr std::string_view contract_canonical_sha256 = "cf4df4bfd198df89a10619049289dee64399c563d82971b8a0d460ff14586979";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "1a593eddd7d7e637219600213c254c254e53ccdd7b57e174fcc51265cf8251cb";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -368,7 +368,7 @@ namespace models::depth_coordinate_v2 {
         "cs_5_0",
         34816u,
         0u,
-        "943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744",
+        "23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd",
         1u,
         "float32-le",
         "NCHW",

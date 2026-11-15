@@ -11,20 +11,18 @@ changing a clip's design, and regenerate baselines in the same commit.
   fast_motion  a textured block crossing a textured background at a KNOWN 30 px/frame --
                the async-depth ghost scenario (and the anchor for a future ghost metric).
   scene_cut    a hard cut spliced from two committed clips (c841 bright/calm -> c647 dark/crowd)
-               -- depth-normalization swim across cuts (A1 snap validation); expect the swim /
-               flicker worst frame AT the cut.
+               -- depth-normalization swim across an abrupt scene replacement.
   exposure_flash_strobe
                one static synthetic scene under exact full-frame RGB gain changes. Lossless PNG
-               keeps this a provable exposure-only stimulus for the production shot-state trace.
+               keeps this an exact exposure-only stimulus.
   sustained_motion_scene_cut
-               an initial cut latches shot state, broad persistent motion keeps both detector
-               arms closed, then a second real cut must use the relative-geometry escape.
+               scene A is replaced by scene B, B alternates a broad horizontal roll on every
+               frame, then scene A returns and holds.
   structureless_history_bridge
                a lossless structured A -> black -> A flash followed by structured A -> black
-               slate -> different structured B. The flash is ignored; persistent black and B cut.
+               slate -> different structured B.
   structureless_white_history_bridge
-               the same authenticated history bridge using saturated white, whose lower raw-RGB
-               replacement fraction exercises the support-loss-specific appearance gate.
+               the same sequence using saturated white and a bright structured scene A.
   subtitle_cjk_dense
                movie-like moving imagery with dense, white, dark-outlined CJK subtitles.
   subtitle_bilingual_tall_stack
@@ -50,20 +48,12 @@ EXPOSURE_GAINS_PERCENT = (
     100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
     45, 165, 60, 150, 75, 135, 50, 160, 65, 145, 55, 155, 70,
 )
-SHOT_STATE_MONITOR_FROM_FRAME = 2
-EXPOSURE_STABLE_FROM_FRAME = 10
-SHOT_CUT_FRAME = N // 2 + 1
-# This fixture uses geometry confirmation; the appearance-backed scene_cut is immediate.
-FLAT_TRANSITION_PULSE_FRAME = SHOT_CUT_FRAME + 1
 SUSTAINED_SETUP_CUT_FRAME = 11
 SUSTAINED_TRUE_CUT_FRAME = 27
-SUSTAINED_ESCAPE_PULSE_FRAME = SUSTAINED_TRUE_CUT_FRAME + 1
 SUSTAINED_FRAME_COUNT = 36
 SUSTAINED_ROLL_PX = 96
 BRIDGE_FLASH_FRAME = 11
-BRIDGE_FLASH_RETURN_FRAME = 12
 BRIDGE_SLATE_FRAME = 17
-BRIDGE_PERSISTENT_FRAME = BRIDGE_SLATE_FRAME + 1
 BRIDGE_NEW_SCENE_FRAME = 21
 BRIDGE_FRAME_COUNT = 30
 BRIDGE_UNIFORM_RGB_BY_CLIP = {
@@ -72,11 +62,16 @@ BRIDGE_UNIFORM_RGB_BY_CLIP = {
 }
 BRIDGE_SCENE_A_BY_CLIP = {
     "structureless_history_bridge": ("c841", 1),
-    # The bright page replaces only 28.6% of host model texels when changed to uniform white.
-    # This prevents the conformance clip from accidentally depending on the ordinary 70% raw gate.
+    # A bright page keeps most pixels close to the uniform white flash and slate.
     "structureless_white_history_bridge": ("flat_page", 1),
 }
 BRIDGE_SCENE_B = ("c647", 13)
+# Stimuli that author no ground-truth sidecar or scoring metadata beyond their description.
+UNANNOTATED_CLIPS = (
+    "scene_cut",
+    "exposure_flash_strobe",
+    "sustained_motion_scene_cut",
+) + tuple(BRIDGE_UNIFORM_RGB_BY_CLIP)
 SUBTITLE_CUE_START_FRAMES = (1, 7, 13, 19)
 SUBTITLE_STANDARD_CLIPS = (
     "subtitle_cjk_dense",
@@ -184,42 +179,28 @@ DESC = {
     "flat_page": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
     "fast_motion": "Synthetic textured block crossing a textured background at 30 px/frame: async-depth ghost.",
     "scene_cut": (
-        "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across "
-        "cuts (A1). Shot-state expectations re-verified against the V2 cut-only analysis trace "
-        "on 2026-08-04 (pulse schedule unchanged)."
+        "Hard cut spliced kitchen-vlog -> washerwoman-pond at frame 13: depth-normalization "
+        "swim across an abrupt scene replacement (A1)."
     ),
     "flat_transition": (
-        "Textured depth scene cutting to a static flat page: normalization recovery and "
-        "false-stereo decay. The source changes at frame 13; ordinary geometry confirmation "
-        "emits the single cut pulse at frame 14."
+        "Textured depth scene cutting to a static flat page at frame 13: normalization recovery "
+        "and false-stereo decay."
     ),
     "exposure_flash_strobe": (
-        "Static synthetic depth scene under exact global RGB gain flashes/strobe: exposure must "
-        "not reset the cut detector or valid depth history. Cut-state expectations were "
-        "re-verified against the V2 cut-only analysis trace on 2026-08-04 (no pulses, "
-        "unchanged)."
+        "Static synthetic depth scene under exact global RGB gain flashes/strobe from frame 12: "
+        "only exposure changes between frames."
     ),
     "sustained_motion_scene_cut": (
-        "A setup cut latches shot state; broad persistent horizontal motion prevents either "
-        "proposal arm from rearming, then a real scene cut must survive one held-endpoint update "
-        "before the relative-depth escape pulses. Shot-state expectations re-verified against "
-        "the V2 cut-only analysis trace on 2026-08-04 (pulse schedule unchanged)."
+        "Scene A is replaced at frame 11 by scene B, which alternates a broad 96-pixel "
+        "horizontal roll on every frame; scene A returns at frame 27 and holds."
     ),
     "structureless_history_bridge": (
-        "A one-frame black flash returns to structured scene A without a cut; a later black "
-        "slate must cut when low structure persists, then different structured scene B must cut "
-        "on its visible return."
-        " Pulse expectations re-derived 2026-08-04 for the V2 cut-only analysis: "
-        "the structured return at frame 21 is accepted through the resolver's "
-        "two-update geometry confirmation, pulsing at frame 22."
+        "Structured scene A with a one-frame black flash at frame 11, a black slate over "
+        "frames 17-20, then different structured scene B from frame 21."
     ),
     "structureless_white_history_bridge": (
-        "A one-frame white flash returns to structured scene A without a cut; a later white "
-        "slate must cut when low structure persists, then different structured scene B must cut "
-        "on its visible return."
-        " Pulse expectations re-derived 2026-08-04 for the V2 cut-only analysis: "
-        "the structured return at frame 21 is accepted through the resolver's "
-        "two-update geometry confirmation, pulsing at frame 22."
+        "Structured scene A with a one-frame white flash at frame 11, a white slate over "
+        "frames 17-20, then different structured scene B from frame 21."
     ),
     "subtitle_cjk_dense": (
         "Lossless synthetic movie imagery with dense white, dark-outlined CJK burned-in "
@@ -765,15 +746,15 @@ def exposure_flash_strobe():
     out = os.path.join(CLIPS, "exposure_flash_strobe")
     os.makedirs(out, exist_ok=True)
     for i, gain_percent in enumerate(EXPOSURE_GAINS_PERCENT):
-        # Integer half-up quantization is recorded verbatim in metadata and is reproducible across
-        # NumPy/Pillow versions. uint32 prevents overflow before the final uint8 clamp.
+        # Integer half-up quantization is reproducible across NumPy/Pillow versions. uint32
+        # prevents overflow before the final uint8 clamp.
         scaled = np.minimum(
             (base.astype(np.uint32) * gain_percent + 50) // 100, 255).astype(np.uint8)
         Image.fromarray(scaled).save(os.path.join(out, f"frame_{i + 1:05d}.png"))
 
 
 def sustained_motion_scene_cut():
-    """Latch on one scene replacement, sustain broad motion, then replace the scene again."""
+    """Replace the scene, sustain broad motion, then replace the scene again."""
     with Image.open(os.path.join(CLIPS, "c841", "frame_00001.jpg")) as image:
         prelude = np.asarray(image.convert("RGB"), dtype=np.uint8)
     with Image.open(os.path.join(CLIPS, "c647", "frame_00013.jpg")) as image:
@@ -795,7 +776,7 @@ def sustained_motion_scene_cut():
 
 
 def _structureless_history_bridge(clip, uniform_rgb):
-    """Bridge structureless intervals without confusing a clipped flash with a new scene."""
+    """Author scene A, a one-frame uniform flash, A again, a uniform slate, then scene B."""
     scene_a_clip, scene_a_frame = BRIDGE_SCENE_A_BY_CLIP[clip]
     scene_b_clip, scene_b_frame = BRIDGE_SCENE_B
     with Image.open(os.path.join(
@@ -842,89 +823,9 @@ def clip_metadata(clip):
     if clip == "fast_motion":
         return {"gt_depth_kind": "disparity"}
     if clip == "flat_transition":
-        return {
-            "gt_depth_kind": "disparity",
-            "shot_state_contract": {
-                "kind": "hard-cut",
-                "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
-                "expected_pulse_frames": [FLAT_TRANSITION_PULSE_FRAME],
-            },
-        }
-    if clip == "scene_cut":
-        return {
-            "shot_state_contract": {
-                "kind": "hard-cut",
-                "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
-                "expected_pulse_frames": [SHOT_CUT_FRAME],
-            },
-        }
-    if clip == "exposure_flash_strobe":
-        return {
-            "evaluation_role": "conformance-only",
-            "shot_state_contract": {
-                "kind": "exposure-only",
-                "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
-                "expected_pulse_frames": [],
-                "stable_from_frame": EXPOSURE_STABLE_FROM_FRAME,
-                "base_frame": 1,
-                "gain_percent_by_frame": list(EXPOSURE_GAINS_PERCENT),
-                "rgb_transform": "min(255, (base_rgb * gain_percent + 50) // 100)",
-            },
-        }
-    if clip == "sustained_motion_scene_cut":
-        return {
-            "evaluation_role": "conformance-only",
-            "shot_state_contract": {
-                "kind": "latched-motion-hard-cut",
-                "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
-                "expected_pulse_frames": [
-                    SUSTAINED_SETUP_CUT_FRAME, SUSTAINED_ESCAPE_PULSE_FRAME],
-                "setup_pulse_frame": SUSTAINED_SETUP_CUT_FRAME,
-                "persistent_motion_frames": [
-                    SUSTAINED_SETUP_CUT_FRAME, SUSTAINED_TRUE_CUT_FRAME],
-                "escape_candidate_frame": SUSTAINED_TRUE_CUT_FRAME,
-                "escape_pulse_frame": SUSTAINED_ESCAPE_PULSE_FRAME,
-                "source_base_frame_by_frame": (
-                    [1] * (SUSTAINED_SETUP_CUT_FRAME - 1) +
-                    [SUSTAINED_SETUP_CUT_FRAME] * (
-                        SUSTAINED_TRUE_CUT_FRAME - SUSTAINED_SETUP_CUT_FRAME) +
-                    [1] * (SUSTAINED_FRAME_COUNT - SUSTAINED_TRUE_CUT_FRAME + 1)
-                ),
-                "horizontal_roll_px_by_frame": (
-                    [0] * (SUSTAINED_SETUP_CUT_FRAME - 1) +
-                    [
-                        SUSTAINED_ROLL_PX if index % 2 else 0
-                        for index in range(
-                            SUSTAINED_TRUE_CUT_FRAME - SUSTAINED_SETUP_CUT_FRAME)
-                    ] +
-                    [0] * (SUSTAINED_FRAME_COUNT - SUSTAINED_TRUE_CUT_FRAME + 1)
-                ),
-                "rgb_transform": "np.roll(base_rgb, horizontal_shift_px, axis=1)",
-            },
-        }
-    if clip in BRIDGE_UNIFORM_RGB_BY_CLIP:
-        return {
-            "evaluation_role": "conformance-only",
-            "shot_state_contract": {
-                "kind": "structureless-history-bridge",
-                "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
-                # The V2 cut resolver accepts a post-bridge structured return through its
-                # two-update geometry confirmation (anti-transient by design), so the
-                # new-scene pulse lands one frame after the content cut.
-                "expected_pulse_frames": [
-                    BRIDGE_PERSISTENT_FRAME,
-                    BRIDGE_NEW_SCENE_FRAME + 1,
-                ],
-                "flash_frame": BRIDGE_FLASH_FRAME,
-                "flash_return_frame": BRIDGE_FLASH_RETURN_FRAME,
-                "slate_frame": BRIDGE_SLATE_FRAME,
-                "persistent_frame": BRIDGE_PERSISTENT_FRAME,
-                "new_scene_frame": BRIDGE_NEW_SCENE_FRAME,
-                "uniform_rgb": list(BRIDGE_UNIFORM_RGB_BY_CLIP[clip]),
-                "rgb_transform": (
-                    "scene_a; one uniform flash; scene_a; uniform slate; scene_b"),
-            },
-        }
+        return {"gt_depth_kind": "disparity"}
+    if clip in UNANNOTATED_CLIPS:
+        return {}
     if clip in SUBTITLE_STANDARD_CLIPS:
         return {
             "required_gt_subtitle_region": True,
@@ -960,11 +861,6 @@ def clip_metadata(clip):
                 "overlay_replacement_at_scene_cut_frames": [21],
                 "subtitle_state_by_frame": list(SUBTITLE_HIGHRES_STATE_BY_FRAME),
                 "scene_state_by_frame": list(SUBTITLE_HIGHRES_SCENE_BY_FRAME),
-            },
-            "shot_state_contract": {
-                "kind": "hard-cut",
-                "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
-                "expected_pulse_frames": [21],
             },
             "source_artifacts": [
                 "Authored three-pixel CJK strokes with a two-pixel dark outline; empty frames "

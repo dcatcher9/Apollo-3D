@@ -488,7 +488,6 @@ namespace {
       }
       cut_words_.assign(sbs_adaptive_state::word_count, 0u);
       cut_words_[sbs_adaptive_state::index(sbs_adaptive_state::word_e::cut_contract_tag_bits)] = sbs_adaptive_state::cut_contract_tag;
-      cut_words_[sbs_adaptive_state::index(sbs_adaptive_state::word_e::initialized)] = f(1.0f);
       cut_words_[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_count)] = epoch;
       probability_values_.assign(v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height, 0.0f);
       for (std::uint32_t y = 0u; y < v2::subtitle_ocr_output_height; ++y) {
@@ -2953,7 +2952,7 @@ namespace {
     }
   }
 
-  TEST_F(HostSbsSubtitleContourGpuTest, BothSourceFrameAndClockMustAdvanceBeforeCountFourAcrossCutsAndDomains) {
+  TEST_F(HostSbsSubtitleContourGpuTest, BothSourceFrameAndClockMustAdvanceBeforeCountFourAcrossDomains) {
     for (std::uint32_t fault = 0u; fault < 10u; ++fault) {
       SCOPED_TRACE(fault);
       ASSERT_TRUE(resize(160u, 90u));
@@ -2999,7 +2998,8 @@ namespace {
           }
       }
       ASSERT_TRUE(run());
-      expect_count(point_index(), fault == 0u ? 3u : 1u);
+      // Fault 4 only changes the retired scene-cut epoch, which no longer resets pixel history.
+      expect_count(point_index(), fault == 0u ? 3u : fault == 4u ? 4u : 1u);
       EXPECT_EQ(result_.support[point_index()], 1u) << "current evidence is independent of diagnostic clock resets";
     }
   }
@@ -3296,7 +3296,8 @@ namespace {
     const auto distant_node = std::size_t(point_y) * field_w_ + 100u;
     for (std::uint32_t frame = 1u; frame <= 10u; ++frame) {
       SCOPED_TRACE(frame);
-      // Epoch2 old text is mature before a valid epoch3 cut. No input-domain reset is used.
+      // The retired scene-cut epoch changes at frame 5 without resetting mature pixel history;
+      // only the changed ink at frame 6 restarts confirmation. No input-domain reset is used.
       const auto epoch = frame < 5u ? 2u : 3u;
       if (frame == 6u) pixels_[ink_index] = {.5f,.5f,.5f,1.f};
       make_authority(frame, 1000001u + (frame - 1u) * 100000u, false, 7u, epoch);
@@ -3333,8 +3334,8 @@ namespace {
       ASSERT_EQ(params_words_[4u], v2::subtitle_condition_param_fully_active_value);
       ASSERT_EQ(plane_words_[v2::subtitle_plane_current_slot_mask_word], 1u);
       ASSERT_TRUE(run()); // The actual temporal/history/snapshot entries consume the resolved plane.
-      const auto expected_count = frame < 5u ? std::min(frame, confirmation_count) :
-        frame == 5u ? 1u : std::min(frame - 5u, confirmation_count);
+      const auto expected_count = frame <= 5u ? std::min(frame, confirmation_count) :
+        std::min(frame - 5u, confirmation_count);
       expect_count(ink_index, expected_count);
       const auto remaining = plane_words_[v2::subtitle_plane_warmup_word] & v2::subtitle_plane_warmup_remaining_mask;
       EXPECT_EQ(plane_words_[v2::subtitle_plane_warmup_word], 0u);
@@ -3697,7 +3698,8 @@ namespace {
       replace_prior_identity(prior);
       make_authority(4u, 1300001u);
       ASSERT_TRUE(run());
-      expect_count(point_index(), 1u);
+      // Identity word 3 (fault 3) is the retired scene-cut epoch and is not a compatibility key.
+      expect_count(point_index(), fault == 3u ? 4u : 1u);
       EXPECT_EQ(result_.support[point_index()], 1u) << "malformed diagnostic history cannot delay valid current text evidence";
     }
   }

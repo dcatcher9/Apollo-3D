@@ -211,14 +211,6 @@ namespace models::depth_coordinate_v2 {
 
 
 
-  constexpr bool cut_generation_changed(
-    const std::uint32_t previous_count,
-    const std::uint32_t current_count,
-    const bool pulse
-  ) {
-    return pulse || current_count != previous_count;
-  }
-
   template<class CalibrationRange>
   constexpr const model_calibration_t *find_model_calibration_in(
     const CalibrationRange &calibrations,

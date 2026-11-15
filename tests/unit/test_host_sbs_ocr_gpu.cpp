@@ -8,6 +8,7 @@
 
   #include "src/crypto.h"
   #include "src/depth_coordinate_v2.h"
+  #include "src/generated/sbs_adaptive_state_contract.h"
   #include "src/host_sbs_resolution.h"
   #include "src/host_sbs_shader_cache.h"
   #include "src/platform/windows/sbs_debug_dump.h"
@@ -167,7 +168,7 @@ namespace {
     source_width, source_height, field_height, v2::subtitle_ocr_safe_row_top);
   constexpr std::uint32_t roi_bottom = subtitle_roi_edge(
     source_width, source_height, field_height, v2::subtitle_ocr_safe_row_bottom);
-  constexpr std::uint32_t cut_tag = 0x28632D48u;
+  constexpr std::uint32_t cut_tag = sbs_adaptive_state::cut_contract_tag;
 
   constexpr std::array<std::uint32_t, 4u> default_ocr_box(
     const std::uint32_t left,

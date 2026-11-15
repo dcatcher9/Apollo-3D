@@ -13,7 +13,6 @@ owns evaluation commands and evidence formats, organized as follows:
 | [Datasets](DATASETS.md) | Core fixtures, public extended suite, metadata, and reference sidecars |
 | [Metrics and gates](METRICS.md) | Metric meanings, baseline policy, validators, and evidence floors |
 | [Optional oracles](ORACLES.md) | FLIP, RAFT-Stereo, SEA-RAFT, and iSQoE diagnostics |
-| [Host SBS scene cuts](../../docs/host-sbs-scene-cuts.md) | Normative cut evidence and state machine |
 
 The native harness and offline manager/worker share typed diagnostic and whole-clip wire codecs.
 Compatibility names such as `scene-cache` and `scene-plan` remain evaluator/harness contracts.
@@ -23,7 +22,7 @@ JSON is published atomically, duplicate keys and unknown fields fail closed on r
 dimensions are checked before byte-count arithmetic or GPU allocation. The Python evaluators
 consume those current documents without a second native-contract compatibility translator.
 Evaluator file-follow and raster artifacts remain available for reproducible scoring. Production
-conversion's raw frame transport and paged audits are owned by the linked conversion document.
+conversion's raw frame transport is owned by the linked conversion document.
 
 ## Required evaluation loop
 
@@ -243,7 +242,7 @@ before the after-query; file output and hashing use those immutable CPU bytes af
 Inspect the invocation, completion, phase and raw artifact bindings together. Missing completion,
 an expired presentation owner, or a ready event before a required busy boundary is a failed or
 unavailable experiment. Preserved partial files do not establish a complete trajectory.
-This is bounded approximate presentation with an unknown current cut verdict. It creates no
+This is bounded approximate presentation. It creates no
 depth-reuse authorization or new OCR observation. Old-mask withdrawal cannot detect new glyphs,
 and unchanged background in an imprecise old mask can retain protection after text disappears.
 The live converter has not adopted this route; these captures do not qualify production latency.

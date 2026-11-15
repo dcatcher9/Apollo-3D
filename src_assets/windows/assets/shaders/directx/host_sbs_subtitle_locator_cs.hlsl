@@ -357,9 +357,7 @@ void ResolveObservation() {
         CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT])) : 0u;
     bool domain_valid = LocatorDomainGeometryValid();
     bool old_valid = domain_valid && StateHeaderValid(true, false);
-    bool hard_cut = old_valid && cut_valid &&
-        PreviousState[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] != epoch;
-    AdaptiveReset = !old_valid || locator_source.w != 0u || hard_cut ||
+    AdaptiveReset = !old_valid || locator_source.w != 0u ||
         PreviousState[ADAPTIVE] != 1u ? 1u : 0u;
     AdaptiveDistinct = !old_valid ||
         PreviousState[V2_SUBTITLE_PLANE_FRAME_OFFSET] != locator_frame.x ||
