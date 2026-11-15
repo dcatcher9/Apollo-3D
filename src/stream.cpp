@@ -663,12 +663,6 @@ namespace stream {
     return true;
   }
 
-  constexpr std::size_t MAX_AUDIO_PACKET_SIZE = 1400;
-
-  using audio_aes_t = std::array<
-    char,
-    crypto::cipher::round_to_pkcs7_padded(MAX_AUDIO_PACKET_SIZE)>;
-
   using message_queue_t = std::shared_ptr<safe::queue_t<std::pair<udp::endpoint, std::string>>>;
 
   struct av_ping_route_t {

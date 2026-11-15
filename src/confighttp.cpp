@@ -124,12 +124,6 @@ namespace confighttp {
     return WEB_UI_REQUEST_STREAM_MAX_BYTES;
   }
 
-  // Keep the base enum for client operations.
-  enum class op_e {
-    ADD,  ///< Add client
-    REMOVE  ///< Remove client
-  };
-
   // SESSION COOKIE
   static std::string sessionCookie;
   static std::chrono::time_point<std::chrono::steady_clock> cookie_creation_time;

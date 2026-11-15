@@ -423,10 +423,6 @@ namespace platf::dxgi {
     return compile_shader(file, "main_vs", "vs_5_0");
   }
 
-  blob_t compile_compute_shader(LPCSTR file) {
-    return compile_shader(file, "main", "cs_5_0");
-  }
-
   struct selected_matte_programs_t {
     models::host_sbs_shared_ui_warp::programs_t shared_warp;
     models::subtitle_selected_matte_research_configuration_t configuration;
@@ -7510,8 +7506,6 @@ namespace platf::dxgi {
       return 0;
     }
 
-    ::video::color_t *color_p;
-
     buf_t subsample_offset;
     buf_t color_matrix;
     buf_t sdr_color_transform;
@@ -10223,9 +10217,6 @@ namespace platf::dxgi {
 #define compile_pixel_shader_helper(x) \
   if (!(x##_hlsl = compile_pixel_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
     return -1;
-#define compile_compute_shader_helper(x) \
-  if (!(x##_hlsl = compile_compute_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
-    return -1;
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps);
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear);
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer);
@@ -10370,7 +10361,6 @@ namespace platf::dxgi {
 
 #undef compile_vertex_shader_helper
 #undef compile_pixel_shader_helper
-#undef compile_compute_shader_helper
 
     return 0;
   }
