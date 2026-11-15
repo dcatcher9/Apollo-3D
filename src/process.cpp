@@ -1791,7 +1791,30 @@ namespace proc {
     // Promote only a successful reconnect, before capture starts using the new topology.
     // Windows can briefly publish incomplete CCD readback after restore; the durable display
     // journal makes this bounded promotion replay safe.
-    if (_virtual_display && !promote_virtual_display(launch_session->enable_hdr, 1500ms)) {
+    const auto promote_at_requested_mode = [&]() {
+      if (!promote_virtual_display(launch_session->enable_hdr, 1500ms)) {
+        return false;
+      }
+      // Promotion keeps the mode it finds. Windows can replace the reactivated layout with its
+      // own remembered one after the mode check above, which also retimes the virtual display;
+      // promotion accepts that layout, so the requested mode has to be applied once more.
+      const auto promoted = query_virtual_display_mode();
+      if (!promoted || live_display_mode_matches(*promoted, render_size->width, render_size->height, launch_session->fps)) {
+        return true;
+      }
+      BOOST_LOG(info) << "Restoring the requested virtual-display mode after promotion: Windows changed it to "sv
+                      << promoted->dmPelsWidth << 'x' << promoted->dmPelsHeight << " @ "sv
+                      << promoted->dmDisplayFrequency << " Hz while the display was being reactivated."sv;
+      return configure_display_mode(
+               _display_session.binding().display_name.c_str(),
+               render_size->width,
+               render_size->height,
+               launch_session->fps,
+               false
+             ) == DISP_CHANGE_SUCCESSFUL &&
+             promote_virtual_display(launch_session->enable_hdr, 1500ms);
+    };
+    if (_virtual_display && !promote_at_requested_mode()) {
       // An unchanged source can be paused and retried even if Windows has not published its
       // promoted GDI binding yet. Changed modes must first restore the retained contract.
       bool rollback_succeeded = true;

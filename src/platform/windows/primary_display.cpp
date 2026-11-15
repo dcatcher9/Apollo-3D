@@ -280,6 +280,49 @@ namespace platf::primary_display {
       return same_modes(physical_only(current), physical_only(reference));
     }
 
+    // Windows does not keep the reactivated layout when it re-evaluates the monitors after the
+    // restored desktop wakes: it applies its own remembered layout for this monitor set, which
+    // can switch a recorded physical output off and move and retime the virtual display into the
+    // freed space. That layout is still this session's own. Every active output is a recorded
+    // one, at least one recorded output was dropped, and the physical outputs that remain keep
+    // their modes and their arrangement, so promoting loses no user arrangement and the recovery
+    // record still restores every recorded output. With every recorded output still active, a
+    // moved or edited output is a user edit and stays with the stricter rule above.
+    bool resume_layout_replaced_by_windows(const detail::snapshot_t &current, const detail::snapshot_t &reference, std::wstring_view virtual_identity) {
+      const auto live_layout = detail::inspect(current);
+      const auto pending_layout = detail::inspect(reference);
+      if (!live_layout || !pending_layout || !find_path(current, virtual_identity) || !find_path(reference, virtual_identity) ||
+          current.paths.size() >= reference.paths.size()) {
+        return false;
+      }
+      detail::snapshot_t live_physical, saved_physical;
+      live_physical.modes = current.modes;
+      saved_physical.modes = reference.modes;
+      std::optional<std::pair<int64_t, int64_t>> translation;
+      for (size_t i = 0; i < current.paths.size(); ++i) {
+        const auto &identity = current.device_paths[i];
+        if (same_device(identity, virtual_identity)) {
+          continue;
+        }
+        const auto saved = find_path(reference, identity);
+        const auto *live_position = find_position(*live_layout, identity);
+        const auto *saved_position = find_position(*pending_layout, identity);
+        if (!saved || !live_position || !saved_position) {
+          return false;
+        }
+        const auto delta = std::pair {static_cast<int64_t>(live_position->x) - saved_position->x, static_cast<int64_t>(live_position->y) - saved_position->y};
+        if (translation && *translation != delta) {
+          return false;
+        }
+        translation = delta;
+        live_physical.paths.push_back(current.paths[i]);
+        live_physical.device_paths.push_back(identity);
+        saved_physical.paths.push_back(reference.paths[*saved]);
+        saved_physical.device_paths.push_back(reference.device_paths[*saved]);
+      }
+      return same_modes(live_physical, saved_physical);
+    }
+
     struct display_spec_t {
       std::wstring identity;
       DISPLAYCONFIG_PATH_INFO path {};
@@ -1808,7 +1851,8 @@ namespace platf::primary_display {
                                          ));
       const bool resuming_restore = journal.exclusive_started && journal.pending_restore &&
                                     (owned_subset(*snapshot, *journal.pending_restore) ||
-                                     same_layout_and_physical_modes(*snapshot, *journal.pending_restore, device_path));
+                                     same_layout_and_physical_modes(*snapshot, *journal.pending_restore, device_path) ||
+                                     resume_layout_replaced_by_windows(*snapshot, *journal.pending_restore, device_path));
       if (journal.exclusive_started && !remembered_exclusive && !continuing_exclusive && !resuming_restore) {
         return false;
       }

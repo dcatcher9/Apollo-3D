@@ -602,6 +602,7 @@ TEST_F(RetainedDisplayPauseTest, RestoresAndDetachesEveryVirtualPolicyBeforeReac
                              operation_e::request_hdr,
                              operation_e::promote,
                              operation_e::refresh_binding,
+                             operation_e::refresh_binding,
                            }));
     EXPECT_FALSE(proc::process_test_access::display_pause_pending(process_));
     EXPECT_FALSE(proc::process_test_access::has_retained_display(process_));
@@ -680,8 +681,36 @@ TEST_F(RetainedDisplayPauseTest, UnchangedResumeChecksActualModeWithoutResetting
   auto resumed = make_launch(22);
   resumed->fps = original_->fps;
   ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
-  EXPECT_EQ(queries, 1);
+  // Once after reactivation and once after promotion.
+  EXPECT_EQ(queries, 2);
   EXPECT_EQ(mode_requests, 0);
+  EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
+}
+
+TEST_F(RetainedDisplayPauseTest, ResumeReappliesTheRequestedModeWindowsReplacedDuringPromotion) {
+  // Windows can swap in its own remembered layout after the first mode check: the display is
+  // then promoted at Windows' mode, and the requested mode has to be applied once more.
+  int queries = 0;
+  bool reapplied = false;
+  proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view) {
+    DEVMODEW current {};
+    const bool replaced = ++queries > 1 && !reapplied;
+    current.dmPelsWidth = replaced ? 3840 : 1920;
+    current.dmPelsHeight = replaced ? 2160 : 1080;
+    current.dmDisplayFrequency = replaced ? 90 : 60;
+    return std::optional {current};
+  });
+  std::vector<std::tuple<int, int, int, bool>> mode_requests;
+  proc::process_test_access::configure_display_mode(process_, [&](auto, int width, int height, int fps, bool probe) {
+    mode_requests.emplace_back(width, height, fps, probe);
+    reapplied = reapplied || !probe;
+    return DISP_CHANGE_SUCCESSFUL;
+  });
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  operations_.clear();
+  ASSERT_EQ(process_.reconfigure_retained_session(make_launch(22)), 0);
+  EXPECT_EQ(mode_requests, (std::vector<std::tuple<int, int, int, bool>> {{1920, 1080, 60000, false}}));
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::promote), 2);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
 }
 
@@ -1897,12 +1926,14 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeCommitsPolicyAfterPromotionAndRebi
     resumed->virtual_display_only = !previous_policy;
     ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
 
-    ASSERT_EQ(operations.size(), 5U);
+    ASSERT_EQ(operations.size(), 6U);
     EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, !previous_policy}));
     EXPECT_EQ(operations[1], (std::pair {operation_e::refresh_binding, !previous_policy}));
     EXPECT_EQ(operations[2], (std::pair {operation_e::request_hdr, false}));
     EXPECT_EQ(operations[3], (std::pair {operation_e::promote, !previous_policy}));
     EXPECT_EQ(operations[4], (std::pair {operation_e::refresh_binding, !previous_policy}));
+    // The promoted display's mode is read back once more.
+    EXPECT_EQ(operations[5], (std::pair {operation_e::refresh_binding, !previous_policy}));
     EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !previous_policy);
     EXPECT_EQ(original->virtual_display_only, !previous_policy);
     EXPECT_TRUE(resumed->virtual_display);
@@ -1954,12 +1985,14 @@ TEST(ProcessTest, RestorePrimaryDisplayPreservesRetainedVirtualDisplayForResume)
   resumed->virtual_display_only = true;
   ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
 
-  ASSERT_EQ(operations.size(), 5U);
+  ASSERT_EQ(operations.size(), 6U);
   EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, true}));
   EXPECT_EQ(operations[1], (std::pair {operation_e::refresh_binding, true}));
   EXPECT_EQ(operations[2], (std::pair {operation_e::request_hdr, false}));
   EXPECT_EQ(operations[3], (std::pair {operation_e::promote, true}));
   EXPECT_EQ(operations[4], (std::pair {operation_e::refresh_binding, true}));
+  // The promoted display's mode is read back once more.
+  EXPECT_EQ(operations[5], (std::pair {operation_e::refresh_binding, true}));
   EXPECT_EQ(process.get_host_session_id(), 1234U);
   EXPECT_TRUE(process.get_status().virtual_display);
 }
@@ -2011,6 +2044,7 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeRetriesPromotionWhileWindowsTopolo
                           {operation_e::request_hdr, false},
                           {operation_e::promote, true},
                           {operation_e::promote, true},
+                          {operation_e::refresh_binding, true},
                           {operation_e::refresh_binding, true},
                         }));
   EXPECT_EQ(process.get_host_session_id(), 1234U);

@@ -1510,6 +1510,69 @@ TEST(PrimaryDisplayExclusive, ReactivatedVirtualModeChangeCannotClaimPhysicalEdi
   }
 }
 
+namespace {
+  // What Windows does shortly after a reactivation when it applies its own remembered layout:
+  // one recorded physical output goes dark and the virtual display is moved and retimed.
+  void replace_reactivated_layout(snapshot_t &snapshot, std::wstring_view dropped) {
+    const auto index = static_cast<std::ptrdiff_t>(named_index(snapshot, dropped));
+    snapshot.paths.erase(snapshot.paths.begin() + index);
+    snapshot.device_paths.erase(snapshot.device_paths.begin() + index);
+    snapshot.colors.erase(snapshot.colors.begin() + index);
+    set_display_mode(snapshot, L"virtual", 3840, 2160, 90);
+    const auto &path = snapshot.paths[named_index(snapshot, L"virtual")];
+    snapshot.modes[path.sourceInfo.sourceModeInfoIdx].sourceMode.position = {-3840, 0};
+  }
+}  // namespace
+
+TEST(PrimaryDisplayExclusive, ReactivatedLayoutReplacedByWindowsCanStillPromoteAndRestoreEveryOutput) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  set_display_mode(fake.current, L"virtual", 1920, 1080, 30);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  const auto physical_baseline = fake.current;
+  ASSERT_EQ(physical_baseline.paths.size(), 2u);
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_EQ(fake.current.paths.size(), 3u);
+
+  replace_reactivated_layout(fake.current, L"physical-left");
+  ASSERT_TRUE(inspect(fake.current));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+
+  // The dropped output is still part of the recovery record.
+  retained.reset();
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, *inspect(physical_baseline));
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, ReplacedReactivatedLayoutCannotClaimPhysicalEditsOrUnknownIdentity) {
+  for (const auto mutation : {0, 1}) {
+    SCOPED_TRACE(mutation);
+    fake_io_t fake;
+    start_exclusive(fake);
+    set_display_mode(fake.current, L"virtual", 1920, 1080, 30);
+    manager_t manager(fake.io());
+    platf::primary_display::retained_display_ptr retained;
+    ASSERT_TRUE(manager.pause(L"virtual", retained));
+    ASSERT_TRUE(manager.reactivate(retained, true));
+    replace_reactivated_layout(fake.current, L"physical-left");
+    if (mutation == 0) {
+      set_display_mode(fake.current, L"physical-primary", 1280, 720, 60);
+    } else {
+      fake.current.device_paths[named_index(fake.current, L"physical-primary")] = L"unknown-physical";
+    }
+    const auto before = fake.current;
+    fake.events.clear();
+    EXPECT_FALSE(manager.promote(L"virtual", true));
+    EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+    expect_positions(fake.current, *inspect(before));
+    EXPECT_TRUE(fake.journal);
+  }
+}
+
 TEST(PrimaryDisplayExclusive, PausedReconnectCanSwitchToPrimaryOnlyAndRollback) {
   fake_io_t fake;
   start_exclusive(fake);
