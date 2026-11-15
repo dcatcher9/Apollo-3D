@@ -1,14 +1,14 @@
 # Offline Host 3D conversion
 
-This document owns production offline frame transport, job lifecycle, resource bounds, diagnostics,
-encoding, and publication. [Host SBS](host-sbs.md) owns model, geometry, and color policy;
-[Host SBS scene cuts](host-sbs-scene-cuts.md) owns causal cut decisions. The
+This document owns production offline frame transport, job lifecycle, resource bounds, encoding,
+and publication. [Host SBS](host-sbs.md) owns model, geometry, and color policy. The
 [evaluator guide](../tools/sbsbench/README.md) owns experiments and their evidence requirements.
 [AGENTS.md](../AGENTS.md) owns machine-specific execution instructions.
 
 Offline conversion runs the production Host SBS V2 pipeline in source order. Pop strength,
-camera, OCR, conditioning, and warp rules have the same meaning as live conversion. Diagnostic
-scenes cannot revise a rendered frame or choose new geometry parameters.
+camera, OCR, conditioning, and warp rules have the same meaning as live conversion. Each frame is
+rendered once, causally; nothing later in the file can revise it or choose new geometry
+parameters.
 
 ## Pipeline and ownership
 
@@ -51,7 +51,9 @@ evaluator keeps its established file-based harness inputs and outputs.
 
 The source channel has capacity two and the packed-output channel has capacity one. A separate
 source acknowledgement proves the worker consumed that frame's exact adaptive-state snapshot.
-Receiving pixels alone cannot release that acknowledgement. The next snapshot/progress record
+The worker authenticates the snapshot's identity and layout and then discards it; no conversion
+decision or retained document is derived from its values. Receiving pixels alone cannot release
+that acknowledgement. The next snapshot/progress record
 waits for the previous acknowledgement. Analyze Only uses the same evidence barrier. Small state
 and progress files retain atomic snapshots and directory-change notifications; raw pixel transfer
 uses condition-variable backpressure.
@@ -91,29 +93,21 @@ solely to donate per-frame mastering-display and content-light metadata. Every e
 comes from the packed raw stream. Replacing this donor requires equivalent HEVC/AV1 evidence at
 every random-access keyframe; a looped single donor frame does not establish that equivalence.
 
-## Causal diagnostic pages
+## Retained job documents
 
-The first epoch begins at sequence 1. An authenticated hard-cut pulse with its matching count
-transition at sequence S closes [start, S) and opens the next epoch at S. EOF closes the final
-epoch. Pulse/count disagreement fails closed. Reports identify this as `causal-production-exact`,
-with `lookahead: false`.
+A job retains its worker specification (schema 3), its worker result (schema 4, at most 16 MiB),
+and the contracts in its result directory: source, native capabilities, and, for a conversion,
+output, timeline, and publication. The specification and result are exact-key documents
+exchanged only between the manager and the worker of the same build; the manager reads a worker
+result once, when that worker exits. No scene list or scene-audit file is produced.
 
-Conversion duration is independent of the old 1,920-scene inline-document limit. The worker keeps
-at most 32 recent scenes and one pending page. Immutable pages contain at most 128 scenes and
-2 MiB, with matching boundary records. Finalized pages are never rewritten. The version 4
-`scene-audit.json` manifest records page SHA-256 digests, exact byte counts, contiguous scene/frame
-coverage, and totals. Worker-result schema 3 authenticates that manifest and carries the recent
-tail. Previous inline schemas remain readable for retained jobs.
-
-Storage still has explicit limits: 1 GiB of audit pages, 16,384 page descriptors, a 32 MiB manifest,
-and a 16 MiB worker result. Exhaustion produces a storage error. These limits do not control cuts,
-camera resets, or scene splitting. Checkpoints flush a small page and publish the compact
-manifest; completion publishes the final manifest after output verification.
-
-The manager validates pages one at a time, including hashes, byte bounds, sequence coverage, and
-the result's final scene tail. Downloads revalidate the selected page. The UI explicitly offers
-the manifest and numbered page downloads, with pagination of the page list. A manifest download
-does not claim to include all scene records.
+The durable job record `job.json` is schema 1. A retained record may still carry the retired
+`scene_decisions`, `progress.scene_count`, and `progress.current_scene` fields and scene-audit
+references in its compact worker result. They are accepted and discarded when the record is
+read and are never written, so such a job stays listed, readable, and clearable. Its
+`scene-audit.json` and `scene-audit-page-*.json` files are not read or served; they stay in the
+job's result directory, counted against the retained-artifact quota, until the job is cleared
+or pruned.
 
 ## Media and publication
 
@@ -128,7 +122,7 @@ does not claim to include all scene records.
   under the stream-inventory contract. Subtitle dispositions are cleared where required.
 - HEVC and AV1 use NVENC. Output is `.mkv` or `.mp4`; existing destinations are never overwritten.
 
-Analyze Only emits source, scene, progress, and terminal attestations without encoding. Convert
+Analyze Only emits source, progress, and terminal attestations without encoding. Convert
 Video additionally verifies compressed video, muxed streams, timing, HDR/color, staging identity,
 and complete output before publication. Success requires exactly one scheduled/enqueued TensorRT
 update per source frame, selected-input/full-frame scope, the live V2 renderer, complete immutable
@@ -148,23 +142,23 @@ Admission refuses work while streaming or local AR presentation owns it.
 The exact SHA-256 authenticates the worker specification. Job-root and staging-file identity pins
 constrain writes and cleanup. Cancellation terminates the entire worker process tree, including
 an unresponsive GPU owner and media children. Memory handoffs also wake on cancellation. Restart
-marks interrupted jobs; raw frames and transient snapshots are never resumed. Durable job state,
-audit evidence, and output publication retain their existing guarantees.
+marks interrupted jobs; raw frames and transient snapshots are never resumed. Durable job state
+and output publication retain their existing guarantees.
 
-The Web UI selects a file, operation, output name, and codec; monitors frame progress; downloads
-diagnostic pages; and clears retained job artifacts. Clear preserves published video. Interrupted
+The Web UI selects a file, operation, output name, and codec; monitors frame progress; and clears
+retained job artifacts. Clear preserves published video. Interrupted
 staging cleanup removes only the identity-attested staging link after confirming the published
 file. Replaced paths and a possible last intact copy are preserved.
 
 ## Verification
 
 The joint local gate covers raw handoff ordering/cancellation/bounds, negotiated FEC sizing,
-retained transport generations, permission release, capture clock units/retry scheduling,
-authenticated pages, and client HTTP/presentation transactions.
+retained transport generations, permission release, capture clock units/retry scheduling, and
+client HTTP/presentation transactions.
 
 The opt-in `tests/integration/Invoke-OfflineSbsWorkerSmoke.ps1` runs the actual worker on a small
-deterministic fixture. It checks raw transport, causal state, page digests, frame order,
-timestamps, auxiliary streams, attachment bytes, output identity, and failed-job publication.
+deterministic fixture. It checks raw transport, causal state, frame order, timestamps, auxiliary
+streams, attachment bytes, output identity, and failed-job publication.
 Run SDR, PQ, and HLG with HEVC/AV1 as appropriate after the installed host releases its ports/GPU.
 GPU smoke, throughput comparisons, and physical XR presentation are separate evidence; portable
 CI does not claim to validate the headset compositor or display hardware.

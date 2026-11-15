@@ -3,7 +3,7 @@
  * @brief Bounded host-side lifecycle for native offline SBS evaluation/conversion jobs.
  *
  * This service deliberately owns only job admission, durable state, and child-process
- * lifetime. The conversion policy and scene planner live in the native offline worker.
+ * lifetime. The conversion policy lives in the native offline worker.
  * Keeping that boundary explicit prevents the Web UI thread, the live-stream task pool,
  * and the offline GPU workload from sharing a scheduler.
  */
@@ -128,9 +128,6 @@ namespace offline_sbs {
     std::optional<std::uint64_t> total_frames;
     std::optional<double> source_time_seconds;
     std::optional<double> source_duration_seconds;
-    std::optional<std::uint64_t> scene_count;
-    nlohmann::json current_scene;
-    nlohmann::json scene_decisions = nlohmann::json::array();
   };
 
   struct job_snapshot_t {
@@ -158,18 +155,6 @@ namespace offline_sbs {
     error_code_e code = error_code_e::none;
     std::string error;
     std::optional<job_snapshot_t> job;
-
-    [[nodiscard]] nlohmann::json json() const;
-  };
-
-  struct scene_audit_reply_t {
-    bool ok = false;
-    error_code_e code = error_code_e::none;
-    std::string error;
-    nlohmann::json audit;
-    // Paged downloads preserve the authenticated file bytes, including whitespace,
-    // so external digest checks match the manifest and worker attestations.
-    std::optional<std::string> serialized_artifact;
 
     [[nodiscard]] nlohmann::json json() const;
   };
@@ -252,7 +237,6 @@ namespace offline_sbs {
     [[nodiscard]] service_reply_t cancel(std::string_view id);
     [[nodiscard]] service_reply_t clear(std::string_view id);
     [[nodiscard]] service_reply_t get(std::string_view id) const;
-    [[nodiscard]] scene_audit_reply_t scene_audit(std::string_view id, std::optional<std::uint32_t> page = std::nullopt) const;
     [[nodiscard]] browse_reply_t browse(const browse_request_t &request) const;
     [[nodiscard]] std::vector<job_snapshot_t> list() const;
     [[nodiscard]] bool has_active_job() const;
@@ -281,7 +265,6 @@ namespace offline_sbs {
   service_reply_t cancel(std::string_view id);
   service_reply_t clear(std::string_view id);
   service_reply_t get(std::string_view id);
-  scene_audit_reply_t scene_audit(std::string_view id, std::optional<std::uint32_t> page = std::nullopt);
   browse_reply_t browse(const browse_request_t &request);
   std::vector<job_snapshot_t> list();
   bool has_active_job();

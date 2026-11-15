@@ -4,8 +4,7 @@
  */
 #pragma once
 
-#include "offline_scene_planner.h"
-
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -215,7 +214,7 @@ namespace offline_sbs::wire {
 
   /**
    * Terminal worker result. Timeline and staging identity remain JSON because they are separately
-   * owned contracts; shared scene and whole-clip evidence uses typed codecs here.
+   * owned contracts; shared whole-clip evidence uses typed codecs here.
    */
   struct worker_result_contract_t {
     std::string job_id;
@@ -223,17 +222,12 @@ namespace offline_sbs::wire {
     std::string codec;
     std::string worker_spec_sha256;
     worker_result_source_t source;
-    std::vector<scene_plan_t> scenes;
-    std::string scene_audit_path;
     whole_clip_contract_t analysis_contract;
     std::vector<replay_result_contract_t> replay_contracts;
     worker_result_cache_t cache;
     nlohmann::json timeline_contract;
     std::optional<nlohmann::json> staging_identity;
     std::optional<std::string> output_path;
-    // Present for schema 3: scenes contains only the final bounded tail.
-    std::optional<std::uint64_t> total_scene_count;
-    std::optional<std::string> scene_audit_manifest_sha256;
   };
 
   nlohmann::json to_json(const worker_result_contract_t &value);
@@ -301,66 +295,12 @@ namespace offline_sbs::wire {
   nlohmann::json to_json(const scene_cache_contract_t &value);
   scene_cache_contract_t parse_scene_cache_contract(const nlohmann::json &value);
 
-  nlohmann::json boundary_audit_json(const boundary_audit_t &value);
-  boundary_audit_t parse_boundary_audit(const nlohmann::json &value);
-  nlohmann::json scene_evidence_json(const scene_evidence_t &value);
-  scene_evidence_t parse_scene_evidence(const nlohmann::json &value);
-  nlohmann::json scene_record_json(const scene_plan_t &value);
-  scene_plan_t parse_scene_record(const nlohmann::json &value);
-
-  struct scene_audit_page_descriptor_t {
-    std::uint32_t index = 0;
-    std::uint64_t first_scene_id = 0;
-    std::uint64_t scene_count = 0;
-    std::uint64_t boundary_count = 0;
-    std::uint64_t start_sequence = 0;
-    std::uint64_t end_sequence_exclusive = 0;
-    std::uint64_t bytes = 0;
-    std::string sha256;
-  };
-
-  struct scene_audit_page_t {
-    std::uint32_t index = 0;
-    std::vector<scene_plan_t> scenes;
-    std::vector<boundary_audit_t> boundary_revisions;
-  };
-  std::string scene_audit_page_filename(std::uint32_t index);
-  nlohmann::json to_json(const scene_audit_page_t &value);
-  scene_audit_page_t parse_scene_audit_page(const nlohmann::json &value);
-  void validate_scene_audit_page(const scene_audit_page_t &page,
-                                const scene_audit_page_descriptor_t &descriptor,
-                                bool complete_final_page);
-
-  struct scene_audit_contract_t {
-    std::string status;
-    std::uint64_t peak_cache_bytes = 0;
-    std::uint64_t analysis_source_raster_bytes = 0;
-    std::uint64_t peak_live_raster_bytes = 0;
-    std::uint64_t peak_cache_plus_raster_bytes = 0;
-    std::uint64_t hard_cap_bytes = 0;
-    nlohmann::json timeline_contract;
-    std::vector<scene_plan_t> scenes;
-    std::vector<boundary_audit_t> boundary_revisions;
-    bool paged = false;
-    std::uint64_t scene_count = 0;
-    std::uint64_t boundary_count = 0;
-    std::uint64_t covered_end_sequence = 1;
-    std::uint64_t total_page_bytes = 0;
-    std::vector<scene_audit_page_descriptor_t> pages;
-  };
-
-  nlohmann::json to_json(const scene_audit_contract_t &value);
-  scene_audit_contract_t parse_scene_audit_contract(const nlohmann::json &value);
-
   struct job_progress_contract_t {
     std::string phase;
     std::uint64_t processed_frames = 0;
     std::optional<std::uint64_t> total_frames;
     std::optional<double> source_time_seconds;
     std::optional<double> source_duration_seconds;
-    std::optional<std::uint64_t> scene_count;
-    std::optional<nlohmann::json> current_scene;
-    std::vector<nlohmann::json> scene_decisions;
   };
 
   struct job_snapshot_contract_t {

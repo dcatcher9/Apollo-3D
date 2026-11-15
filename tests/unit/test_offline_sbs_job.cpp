@@ -11,7 +11,6 @@
 #include "src/offline_sbs_contract.h"
 #include "src/offline_sbs_job.h"
 #include "src/offline_sbs_wire_contract.h"
-#include "src/offline_sbs_paged_audit.h"
 #include "src/platform/common.h"
 
 #ifdef _WIN32
@@ -46,38 +45,6 @@ namespace {
     fs::create_directories(path.parent_path());
     std::ofstream output(path, std::ios::binary);
     output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
-  }
-
-  nlohmann::json valid_scene_audit(const std::string_view status) {
-    offline_sbs::scene_plan_t scene;
-    scene.scene_id = 1;
-    scene.semantic_scene_id = 1;
-    scene.start_sequence = 1;
-    scene.end_sequence_exclusive = 11;
-    scene.frame_count = 10;
-    scene.cache_bytes = 0;
-    scene.evidence.source_frame_count = 10;
-    scene.evidence.depth_update_count = 10;
-    scene.boundary.final_sequence = 11;
-    scene.boundary.decision = offline_sbs::boundary_decision_e::end_of_stream;
-    scene.boundary.reason = "end of stream";
-    scene.boundary.accepted = true;
-    scene.cut_state_semantics = "causal-production-exact";
-    scene.known_limit =
-      "diagnostic scene epochs only; rendering is committed causally per source frame";
-    return offline_sbs::wire::to_json(
-      offline_sbs::wire::scene_audit_contract_t {
-        .status = std::string {status},
-        .peak_cache_bytes = 0,
-        .analysis_source_raster_bytes = 256,
-        .peak_live_raster_bytes = 128,
-        .peak_cache_plus_raster_bytes = 256,
-        .hard_cap_bytes = 2048,
-        .timeline_contract = {{"mode", "evaluation-only"}},
-        .scenes = {scene},
-        .boundary_revisions = {scene.boundary},
-      }
-    );
   }
 
   std::string sha256_hex(const std::string_view bytes) {
@@ -194,23 +161,6 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
         .phase = "render",
          .processed_frames = 12,
          .total_frames = 12,
-         .scene_count = 2,
-         .current_scene = {
-           {"index", 1},
-           {"phase", "render"},
-         },
-         .scene_decisions = {
-           {
-             {"index", 0},
-             {"start_sequence", 1},
-             {"end_sequence_exclusive", 7},
-           },
-           {
-             {"index", 1},
-             {"start_sequence", 7},
-             {"end_sequence_exclusive", 13},
-           },
-         },
        });
       write_nonempty(*context.staging_output, "encoded-video");
       return offline_sbs::worker_outcome_t {
@@ -219,7 +169,6 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 2},
         },
       };
     }
@@ -244,20 +193,18 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   EXPECT_TRUE(fs::is_regular_file(*terminal.output_path));
   EXPECT_EQ(fs::file_size(*terminal.output_path), 13u);
   EXPECT_EQ(terminal.progress.processed_frames, 12u);
-  EXPECT_EQ(terminal.progress.current_scene["index"], 1);
-  ASSERT_EQ(terminal.progress.scene_decisions.size(), 2u);
-  EXPECT_EQ(terminal.progress.scene_decisions[1]["start_sequence"], 7);
-  EXPECT_EQ(terminal.worker_result["scene_count"], 2);
+  EXPECT_EQ(terminal.worker_result["status"], "complete");
+  EXPECT_FALSE(terminal.worker_result.contains("scene_count"));
+  EXPECT_FALSE(terminal.worker_result.contains("scene_decisions_contract"));
+  EXPECT_FALSE(terminal.worker_result.contains("scene_audit_sha256"));
 
   const auto summaries = service.list();
   ASSERT_EQ(summaries.size(), 1u);
-  EXPECT_TRUE(summaries.front().progress.scene_decisions.empty());
   EXPECT_TRUE(summaries.front().worker_result.is_null());
   const auto detail = service.get(terminal.id);
   ASSERT_TRUE(detail.ok);
   ASSERT_TRUE(detail.job);
-  EXPECT_EQ(detail.job->progress.scene_decisions.size(), 2u);
-  EXPECT_EQ(detail.job->worker_result["scene_count"], 2);
+  EXPECT_EQ(detail.job->worker_result["status"], "complete");
 
   const auto state_path =
     tree.path / "state" / "jobs" / terminal.id / "job.json";
@@ -267,9 +214,9 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   EXPECT_EQ(persisted["state"], "complete");
   EXPECT_EQ(persisted["output_location"], "input-directory");
   EXPECT_EQ(persisted["progress"]["processed_frames"], 12);
-  EXPECT_EQ(persisted["progress"]["current_scene"]["index"], 1);
-  ASSERT_EQ(persisted["scene_decisions"].size(), 2u);
-  EXPECT_EQ(persisted["scene_decisions"][0]["end_sequence_exclusive"], 7);
+  EXPECT_FALSE(persisted["progress"].contains("scene_count"));
+  EXPECT_FALSE(persisted["progress"].contains("current_scene"));
+  EXPECT_FALSE(persisted.contains("scene_decisions"));
   const auto capabilities = service.capabilities();
   EXPECT_EQ(capabilities["schema"], 2);
   EXPECT_TRUE(capabilities["pipeline"]["causal_online_logic"].get<bool>());
@@ -329,7 +276,6 @@ TEST(OfflineSbsJob, MissingFormerInputDirectoryDoesNotBlockQuotaAccounting) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -365,11 +311,11 @@ TEST(OfflineSbsJob, MissingFormerInputDirectoryDoesNotBlockQuotaAccounting) {
   service.shutdown();
 }
 
-TEST(OfflineSbsJob, PublishesCausalSceneDuringDirectConversion) {
+TEST(OfflineSbsJob, PublishesProgressDuringDirectConversion) {
   temporary_tree_t tree;
   const auto input = tree.path / "media" / "source.mkv";
   write_nonempty(input, "source");
-  std::atomic_bool causal_scene_published {false};
+  std::atomic_bool progress_published {false};
   std::atomic_bool release_worker {false};
 
   offline_sbs::job_service_t service {
@@ -381,28 +327,13 @@ TEST(OfflineSbsJob, PublishesCausalSceneDuringDirectConversion) {
         .phase = "convert",
         .processed_frames = 183,
         .total_frames = 185,
-        .scene_count = 0,
       });
       progress({
         .phase = "convert",
         .processed_frames = 185,
         .total_frames = 185,
-        .scene_count = 1,
-        .current_scene = {
-          {"scene_id", 1},
-          {"start_sequence", 1},
-          {"end_sequence_exclusive", 186},
-        },
-        .scene_decisions = {
-          {
-            {"scene_id", 1},
-            {"start_sequence", 1},
-            {"end_sequence_exclusive", 186},
-            {"boundary", {{"decision", "end_of_stream"}}},
-          },
-        },
       });
-      causal_scene_published = true;
+      progress_published = true;
       while (!release_worker && !stop.stop_requested()) {
         std::this_thread::sleep_for(1ms);
       }
@@ -416,7 +347,6 @@ TEST(OfflineSbsJob, PublishesCausalSceneDuringDirectConversion) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -431,30 +361,24 @@ TEST(OfflineSbsJob, PublishesCausalSceneDuringDirectConversion) {
   ASSERT_TRUE(created.ok) << created.error;
 
   const auto deadline = std::chrono::steady_clock::now() + 3s;
-  while (!causal_scene_published &&
+  while (!progress_published &&
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(1ms);
   }
-  ASSERT_TRUE(causal_scene_published);
+  ASSERT_TRUE(progress_published);
   const auto active = service.get(created.job->id);
   ASSERT_TRUE(active.ok);
   ASSERT_TRUE(active.job);
   EXPECT_EQ(active.job->state, offline_sbs::job_state_e::running);
   EXPECT_EQ(active.job->progress.phase, "convert");
   EXPECT_EQ(active.job->progress.processed_frames, 185u);
-  ASSERT_TRUE(active.job->progress.scene_count);
-  EXPECT_EQ(*active.job->progress.scene_count, 1u);
-  ASSERT_EQ(active.job->progress.scene_decisions.size(), 1u);
-  EXPECT_EQ(
-    active.job->progress.scene_decisions[0]["boundary"]["decision"],
-    "end_of_stream"
-  );
+  ASSERT_TRUE(active.job->progress.total_frames);
+  EXPECT_EQ(*active.job->progress.total_frames, 185u);
 
   release_worker = true;
   const auto terminal = wait_for_terminal(service, created.job->id);
   EXPECT_EQ(terminal.state, offline_sbs::job_state_e::complete);
   EXPECT_EQ(terminal.progress.processed_frames, 185u);
-  ASSERT_EQ(terminal.progress.scene_decisions.size(), 1u);
   service.shutdown();
 }
 
@@ -542,7 +466,6 @@ TEST(OfflineSbsJob, EvaluationDoesNotRequireOrTrustAnEncoderSelection) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -580,7 +503,6 @@ TEST(OfflineSbsJob, StartsForEvaluationWhenNoNvencCodecIsAvailable) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -774,7 +696,6 @@ TEST(OfflineSbsJob, ManagerRemovesTransientWorkAfterSuccessAndFailure) {
             {"schema", 1},
             {"job_id", context.job_id},
             {"status", "complete"},
-            {"scene_count", 1},
           },
         };
       }
@@ -876,7 +797,6 @@ TEST(OfflineSbsJob, ExactHandlePublicationNeverOverwritesALateDestination) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -923,7 +843,6 @@ TEST(OfflineSbsJob, RejectsAStagingLeafSwappedAfterWorkerAttestation) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
           {"staging_identity", identity},
         },
       };
@@ -967,7 +886,6 @@ TEST(OfflineSbsJob, RestartRetiresStagingAfterCrashFollowingFinalHardLink) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1054,7 +972,6 @@ TEST(OfflineSbsJob, RecoversLegacyUnmarkedPublicationInManagedExports) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1141,7 +1058,6 @@ TEST(OfflineSbsJob, RestartRetriesForcedStagingDispositionFailure) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1186,7 +1102,6 @@ TEST(OfflineSbsJob, RestartRetriesForcedStagingDispositionFailure) {
         .result = {
           {"schema", 1},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1235,7 +1150,6 @@ TEST(OfflineSbsJob, ClearRetiresAttestedPendingStagingAndKeepsFinalOutput) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1299,7 +1213,6 @@ TEST(OfflineSbsJob, ClearAcceptsStalePendingMarkerWhenBothOutputsAreGone) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1360,7 +1273,6 @@ TEST(OfflineSbsJob, ClearPreservesPendingStagingWhenFinalOutputIsGone) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1413,7 +1325,6 @@ TEST(OfflineSbsJob, RecoveryNeverRetiresAReplacementStagingIdentity) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1493,7 +1404,6 @@ TEST(OfflineSbsJob, RestartRejectsFinalSymlinkToAttestedStagingIdentity) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1636,7 +1546,6 @@ TEST(OfflineSbsJob, RejectsPersistedInputDirectoryOutputThatWasRedirected) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -1683,145 +1592,6 @@ TEST(OfflineSbsJob, RejectsPersistedInputDirectoryOutputThatWasRedirected) {
   recovered.shutdown();
 }
 #endif
-
-TEST(OfflineSbsJob, ServesOnlyTheBoundedManagerOwnedSceneAudit) {
-  temporary_tree_t tree;
-  const auto input = tree.path / "source.mkv";
-  const auto decoy = tree.path / "outside-scene-audit.json";
-  write_nonempty(input, "source");
-  write_nonempty(
-    decoy,
-    R"({"schema":3,"version":"whole-clip-scene-audit-v3","scenes":[{"scene_id":"decoy"}],"boundary_revisions":[]})"
-  );
-
-  offline_sbs::job_service_t service {
-    service_config(tree.path),
-    [decoy](const offline_sbs::worker_context_t &context,
-            std::stop_token,
-            const offline_sbs::progress_callback_t &progress) {
-      progress({
-        .phase = "analysis",
-        .processed_frames = 10,
-        .total_frames = 10,
-        .scene_count = 1,
-        .scene_decisions = {{{"scene_id", "managed"}}},
-      });
-      write_nonempty(
-        context.result_directory / "scene-audit.json",
-        valid_scene_audit("complete").dump()
-      );
-      return offline_sbs::worker_outcome_t {
-        .completed = true,
-        .result = {
-          {"schema", 1},
-          {"job_id", context.job_id},
-          {"status", "complete"},
-          {"scene_count", 1},
-          // A child-reported path is never used by the audit API.
-          {"scene_audit", decoy.generic_string()},
-        },
-      };
-    }
-  };
-  std::string error;
-  ASSERT_TRUE(service.start(error)) << error;
-  const auto created = service.create({
-    .input_path = input,
-    .operation = offline_sbs::operation_e::evaluate,
-  });
-  ASSERT_TRUE(created.ok) << created.error;
-  ASSERT_EQ(
-    wait_for_terminal(service, created.job->id).state,
-    offline_sbs::job_state_e::complete
-  );
-
-  const auto audit = service.scene_audit(created.job->id);
-  ASSERT_TRUE(audit.ok) << audit.error;
-  ASSERT_EQ(audit.audit["scenes"].size(), 1u);
-  EXPECT_EQ(audit.audit["scenes"][0]["scene_id"], 1);
-  EXPECT_EQ(
-    service.scene_audit("00000000-0000-0000-0000-000000000000").code,
-    offline_sbs::error_code_e::not_found
-  );
-
-  const auto managed_audit =
-    tree.path / "worker" / "jobs" / created.job->id / "result" /
-    "scene-audit.json";
-  nlohmann::json excessive_boundaries = nlohmann::json::array();
-  for (
-    std::size_t index = 0;
-    index <= offline_sbs::max_serialized_scene_count;
-    ++index
-  ) {
-    excessive_boundaries.push_back({{"index", index}});
-  }
-  write_nonempty(
-    managed_audit,
-    nlohmann::json {
-      {"schema", 3},
-      {"version", "whole-clip-scene-audit-v3"},
-      {"status", "complete"},
-      {"scenes", nlohmann::json::array({{{"scene_id", "managed"}}})},
-      {"boundary_revisions", std::move(excessive_boundaries)},
-    }.dump()
-  );
-  const auto excessive = service.scene_audit(created.job->id);
-  EXPECT_FALSE(excessive.ok);
-  EXPECT_EQ(excessive.code, offline_sbs::error_code_e::io_error);
-  EXPECT_NE(excessive.error.find("identity changed"), std::string::npos);
-
-  fs::remove(managed_audit);
-  const auto missing = service.scene_audit(created.job->id);
-  EXPECT_FALSE(missing.ok);
-  EXPECT_EQ(missing.code, offline_sbs::error_code_e::io_error);
-  EXPECT_NE(missing.error.find("unavailable"), std::string::npos);
-  service.shutdown();
-}
-
-TEST(OfflineSbsJob, RetainsAnAttestedPartialAuditAfterWorkerFailure) {
-  temporary_tree_t tree;
-  const auto input = tree.path / "source.mkv";
-  write_nonempty(input, "source");
-
-  offline_sbs::job_service_t service {
-    service_config(tree.path),
-    [](const offline_sbs::worker_context_t &context,
-       std::stop_token,
-       const offline_sbs::progress_callback_t &progress) {
-      progress({
-        .phase = "analysis",
-        .processed_frames = 4,
-        .total_frames = 20,
-        .scene_count = 1,
-      });
-      write_nonempty(
-        context.result_directory / "scene-audit.json",
-        valid_scene_audit("running").dump()
-      );
-      return offline_sbs::worker_outcome_t {
-        .error = "injected failure after one finalized scene",
-      };
-    }
-  };
-  std::string error;
-  ASSERT_TRUE(service.start(error)) << error;
-  const auto created = service.create({
-    .input_path = input,
-    .operation = offline_sbs::operation_e::evaluate,
-  });
-  ASSERT_TRUE(created.ok) << created.error;
-  ASSERT_EQ(
-    wait_for_terminal(service, created.job->id).state,
-    offline_sbs::job_state_e::failed
-  );
-  const auto audit = service.scene_audit(created.job->id);
-  ASSERT_TRUE(audit.ok) << audit.error;
-  EXPECT_EQ(audit.audit["availability"], "partial");
-  EXPECT_EQ(audit.audit["job_terminal_state"], "failed");
-  ASSERT_EQ(audit.audit["scenes"].size(), 1u);
-  EXPECT_EQ(audit.audit["scenes"][0]["scene_id"], 1);
-  service.shutdown();
-}
 
 TEST(OfflineSbsJob, EnforcesOneActiveJobAndCancelsTheWholeWorkerContract) {
   temporary_tree_t tree;
@@ -1931,6 +1701,110 @@ TEST(OfflineSbsJob, RestartRecoveryNeverResumesAnUnfinishedGpuJob) {
   EXPECT_FALSE(runner_called);
   EXPECT_FALSE(service.has_active_job());
   service.shutdown();
+}
+
+TEST(OfflineSbsJob, RestartKeepsACompletedJobThatStillNamesItsSceneAudit) {
+  temporary_tree_t tree;
+  const auto config = service_config(tree.path);
+  const auto input = tree.path / "media" / "source.mkv";
+  write_nonempty(input, "source");
+  const auto runner = [](const offline_sbs::worker_context_t &context,
+                         std::stop_token,
+                         const offline_sbs::progress_callback_t &) {
+    write_nonempty(*context.staging_output, "encoded-video");
+    return offline_sbs::worker_outcome_t {
+      .completed = true,
+      .result = {
+        {"schema", 1},
+        {"job_id", context.job_id},
+        {"status", "complete"},
+      },
+    };
+  };
+  std::string error;
+  std::string id;
+  {
+    offline_sbs::job_service_t service {config, runner};
+    ASSERT_TRUE(service.start(error)) << error;
+    const auto created = service.create({
+      .input_path = input,
+      .operation = offline_sbs::operation_e::convert,
+      .output_name = "converted.mkv",
+    });
+    ASSERT_TRUE(created.ok) << created.error;
+    id = created.job->id;
+    ASSERT_EQ(
+      wait_for_terminal(service, id).state,
+      offline_sbs::job_state_e::complete
+    );
+    service.shutdown();
+  }
+
+  // Rewrite the durable record and result directory into the shape a release with the
+  // diagnostic scene audit left behind for a completed conversion.
+  const auto result_directory = config.worker_root / "jobs" / id / "result";
+  const auto audit_manifest = result_directory / "scene-audit.json";
+  const auto audit_page = result_directory / "scene-audit-page-0.json";
+  write_nonempty(audit_manifest, R"({"schema":4,"version":"whole-clip-scene-audit-v4"})");
+  write_nonempty(audit_page, R"({"schema":1,"version":"whole-clip-scene-audit-page-v1"})");
+  const auto state_path = config.state_root / "jobs" / id / "job.json";
+  auto persisted = nlohmann::json::parse(std::ifstream(state_path));
+  ASSERT_TRUE(persisted.at("worker_result").is_object());
+  persisted["scene_decisions"] = nlohmann::json::array({
+    {
+      {"scene_id", 2},
+      {"start_sequence", 7},
+      {"end_sequence_exclusive", 13},
+      {"boundary", {{"decision", "end_of_stream"}}},
+    },
+  });
+  persisted["progress"]["scene_count"] = 2;
+  persisted["progress"]["current_scene"] = nullptr;
+  persisted["worker_result"]["schema"] = 3;
+  persisted["worker_result"]["scene_count"] = 2;
+  persisted["worker_result"]["scene_audit"] = audit_manifest.generic_string();
+  persisted["worker_result"]["scene_audit_manifest_sha256"] = std::string(64, 'a');
+  persisted["worker_result"]["scene_audit_sha256"] = std::string(64, 'a');
+  persisted["worker_result"]["scene_decisions_contract"] =
+    audit_manifest.generic_string();
+  write_nonempty(state_path, persisted.dump(2));
+
+  offline_sbs::job_service_t recovered {config, runner};
+  ASSERT_TRUE(recovered.start(error)) << error;
+  const auto snapshot = recovered.get(id);
+  ASSERT_TRUE(snapshot.ok) << snapshot.error;
+  ASSERT_TRUE(snapshot.job);
+  EXPECT_EQ(snapshot.job->state, offline_sbs::job_state_e::complete);
+  EXPECT_EQ(snapshot.job->progress.phase, "complete");
+  ASSERT_TRUE(snapshot.job->output_path);
+  EXPECT_TRUE(fs::is_regular_file(*snapshot.job->output_path));
+  EXPECT_EQ(snapshot.job->worker_result["status"], "complete");
+  EXPECT_TRUE(snapshot.job->worker_result.value("published", false));
+  for (const auto retired : {
+         "scene_count",
+         "scene_audit",
+         "scene_audit_manifest_sha256",
+         "scene_audit_sha256",
+         "scene_decisions_contract",
+       }) {
+    EXPECT_FALSE(snapshot.job->worker_result.contains(retired)) << retired;
+  }
+  const auto served = snapshot.job->json();
+  EXPECT_FALSE(served.contains("scene_decisions"));
+  EXPECT_FALSE(served.at("progress").contains("scene_count"));
+  EXPECT_FALSE(served.at("progress").contains("current_scene"));
+  ASSERT_EQ(recovered.list().size(), 1u);
+  // The retained audit files are user data owned by the job: untouched until it is cleared.
+  EXPECT_TRUE(fs::is_regular_file(audit_manifest));
+  EXPECT_TRUE(fs::is_regular_file(audit_page));
+  EXPECT_TRUE(fs::is_directory(config.state_root / "jobs" / id));
+
+  const auto cleared = recovered.clear(id);
+  EXPECT_TRUE(cleared.ok) << cleared.error;
+  EXPECT_FALSE(recovered.get(id).ok);
+  EXPECT_FALSE(fs::exists(audit_manifest));
+  EXPECT_TRUE(fs::is_regular_file(input.parent_path() / "converted.mkv"));
+  recovered.shutdown();
 }
 
 TEST(OfflineSbsJob, RestartNeverDeletesAWorkerTreeWithoutValidProtectedState) {
@@ -2388,7 +2262,6 @@ TEST(OfflineSbsJob, PinsManagedRootsAndRetainedJobDirectoriesByIdentity) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -2455,7 +2328,6 @@ TEST(OfflineSbsJob, PrunesProtectedStateAndUserArtifactsAfterEveryTerminalJob) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -2515,7 +2387,6 @@ TEST(OfflineSbsJob, PrunesOldestTerminalArtifactsToMeetAggregateByteQuota) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -2708,7 +2579,6 @@ TEST(OfflineSbsJob, PublishedFilenameThatOnlyResemblesStagingDoesNotUseQuota) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -2792,7 +2662,6 @@ TEST(OfflineSbsJob, RefusesAdmissionWhileLiveStreamingOwnsTheGpu) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
-          {"scene_count", 1},
         },
       };
     }
@@ -2821,96 +2690,5 @@ TEST(OfflineSbsJob, RefusesAdmissionWhileLiveStreamingOwnsTheGpu) {
     wait_for_terminal(service, admitted.job->id).state,
     offline_sbs::job_state_e::complete
   );
-  service.shutdown();
-}
-
-TEST(OfflineSbsJob, ExportsManifestAndVerifiedPagesAndRejectsChangedOrMissingPage) {
-  temporary_tree_t tree;
-  const auto input = tree.path / "source.mkv";
-  write_nonempty(input, "source");
-  offline_sbs::job_service_t service {
-    service_config(tree.path),
-    [](const offline_sbs::worker_context_t &context, std::stop_token,
-       const offline_sbs::progress_callback_t &progress) {
-      auto summary = offline_sbs::wire::parse_scene_audit_contract(valid_scene_audit("complete"));
-      auto first = summary.scenes.front();
-      first.boundary.decision = offline_sbs::boundary_decision_e::confirmed;
-      first.boundary.semantic_cut = true;
-      auto second = summary.scenes.front();
-      second.scene_id = second.semantic_scene_id = 2;
-      second.start_sequence = 11;
-      second.end_sequence_exclusive = 21;
-      second.boundary.final_sequence = 21;
-      offline_sbs::paged_scene_audit_writer_t writer([&](std::string_view name, std::string_view bytes) {
-        write_nonempty(context.result_directory / std::string(name), bytes);
-        return sha256_hex(bytes);
-      });
-      writer.append(first);
-      writer.flush();
-      writer.append(second);
-      const auto manifest = writer.manifest(summary);
-      write_nonempty(context.result_directory / "scene-audit.json", manifest.dump(2) + "\n");
-      progress({.phase = "analysis", .processed_frames = 20, .total_frames = 20, .scene_count = 2});
-      return offline_sbs::worker_outcome_t {.completed = true};
-    }
-  };
-  std::string error;
-  ASSERT_TRUE(service.start(error)) << error;
-  const auto created = service.create({.input_path = input, .operation = offline_sbs::operation_e::evaluate});
-  ASSERT_TRUE(created.ok) << created.error;
-  ASSERT_EQ(wait_for_terminal(service, created.job->id).state, offline_sbs::job_state_e::complete);
-  const auto manifest = service.scene_audit(created.job->id);
-  ASSERT_TRUE(manifest.ok) << manifest.error;
-  EXPECT_EQ(manifest.audit["document_kind"], "manifest");
-  EXPECT_EQ(manifest.audit["storage"]["scene_count"], 2);
-  EXPECT_EQ(manifest.audit["pages"].size(), 2u);
-  EXPECT_FALSE(manifest.audit.contains("scenes"));
-  ASSERT_TRUE(manifest.serialized_artifact);
-  EXPECT_FALSE(nlohmann::json::parse(*manifest.serialized_artifact).contains("document_kind"));
-  const auto page = service.scene_audit(created.job->id, 1);
-  ASSERT_TRUE(page.ok) << page.error;
-  EXPECT_EQ(page.audit["document_kind"], "page");
-  EXPECT_EQ(page.audit["scenes"][0]["scene_id"], 2);
-  ASSERT_TRUE(page.serialized_artifact);
-  EXPECT_EQ(sha256_hex(*page.serialized_artifact), manifest.audit["pages"][1]["sha256"].get<std::string>());
-  EXPECT_EQ(page.serialized_artifact->size(), manifest.audit["pages"][1]["bytes"].get<std::uint64_t>());
-  EXPECT_EQ(service.scene_audit(created.job->id, 2).code, offline_sbs::error_code_e::not_found);
-  const auto path = tree.path / "worker" / "jobs" / created.job->id / "result" / "scene-audit-page-1.json";
-  auto changed = page.audit;
-  changed["scenes"][0]["known_limit"] = "changed after attestation";
-  write_nonempty(path, changed.dump());
-  const auto tampered = service.scene_audit(created.job->id, 1);
-  EXPECT_FALSE(tampered.ok);
-  EXPECT_NE(tampered.error.find("identity"), std::string::npos);
-  write_nonempty(path, std::string(offline_sbs::scene_audit_page_max_bytes + 1, ' '));
-  EXPECT_FALSE(service.scene_audit(created.job->id, 1).ok);
-  fs::remove(path);
-  EXPECT_FALSE(service.scene_audit(created.job->id, 1).ok);
-  service.shutdown();
-}
-
-TEST(OfflineSbsJob, DoesNotAttestManifestWithMissingPage) {
-  temporary_tree_t tree;
-  const auto input = tree.path / "source.mkv";
-  write_nonempty(input, "source");
-  offline_sbs::job_service_t service {
-    service_config(tree.path),
-    [](const offline_sbs::worker_context_t &context, std::stop_token,
-       const offline_sbs::progress_callback_t &) {
-      auto summary = offline_sbs::wire::parse_scene_audit_contract(valid_scene_audit("complete"));
-      offline_sbs::paged_scene_audit_writer_t writer([](auto, auto) { return std::string(64, 'a'); });
-      writer.append(summary.scenes.front());
-      write_nonempty(context.result_directory / "scene-audit.json", writer.manifest(summary).dump());
-      return offline_sbs::worker_outcome_t {.error = "injected incomplete publication"};
-    }
-  };
-  std::string error;
-  ASSERT_TRUE(service.start(error)) << error;
-  const auto created = service.create({.input_path = input, .operation = offline_sbs::operation_e::evaluate});
-  ASSERT_TRUE(created.ok) << created.error;
-  ASSERT_EQ(wait_for_terminal(service, created.job->id).state, offline_sbs::job_state_e::failed);
-  const auto audit = service.scene_audit(created.job->id);
-  EXPECT_FALSE(audit.ok);
-  EXPECT_NE(audit.error.find("not attested"), std::string::npos);
   service.shutdown();
 }

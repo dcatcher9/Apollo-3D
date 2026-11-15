@@ -405,7 +405,7 @@ TEST(WebUiDesign, LocalArExclusiveDesktopUiMatchesItsDefaultOnNativePolicy) {
   EXPECT_LT(default_enabled, default_end);
 }
 
-TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
+TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   const auto page = read_source(web_root / "offline-conversion.html");
   const auto api = read_source(web_root / "offline-sbs-api.js");
   const auto navbar = read_source(web_root / "Navbar.vue");
@@ -495,9 +495,10 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   EXPECT_EQ(page.find("scene-decisions-title"), std::string::npos);
   EXPECT_EQ(page.find("offline-scene-table"), std::string::npos);
   EXPECT_EQ(page.find("offline-scene-empty"), std::string::npos);
-  EXPECT_NE(page.find("Download manifest"), std::string::npos);
-  EXPECT_NE(page.find("downloadSceneAudit(page.index)"), std::string::npos);
-  EXPECT_NE(page.find("visibleAuditPages"), std::string::npos);
+  EXPECT_EQ(page.find("Scene diagnostics"), std::string::npos);
+  EXPECT_EQ(page.find("Current scene"), std::string::npos);
+  EXPECT_EQ(page.find("SceneAudit"), std::string::npos);
+  EXPECT_EQ(page.find("current_scene"), std::string::npos);
   EXPECT_EQ(page.find("offline-job-selector"), std::string::npos);
   EXPECT_EQ(page.find("offlineSelectedJob"), std::string::npos);
   EXPECT_EQ(page.find("v-for=\"job in jobs\""), std::string::npos);
@@ -545,8 +546,7 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   EXPECT_NE(api.find("cancelOfflineSbsJob"), std::string::npos);
   EXPECT_NE(api.find("clearOfflineSbsJob"), std::string::npos);
   EXPECT_NE(api.find("method: 'DELETE'"), std::string::npos);
-  EXPECT_NE(api.find("downloadOfflineSbsSceneAudit"), std::string::npos);
-  EXPECT_NE(api.find("/scene-audit"), std::string::npos);
+  EXPECT_EQ(api.find("scene-audit"), std::string::npos);
   EXPECT_NE(api.find("getOfflineSbsOverview"), std::string::npos);
   EXPECT_NE(api.find("getOfflineSbsJob"), std::string::npos);
   EXPECT_NE(
@@ -617,11 +617,7 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
     jobs.find("run_bound_user_filesystem_action("),
     std::string::npos
   );
-  EXPECT_NE(
-    http.find("/scene-audit$"),
-    std::string::npos
-  );
-  EXPECT_NE(http.find("getOfflineSbsSceneAudit"), std::string::npos);
+  EXPECT_EQ(http.find("scene-audit"), std::string::npos);
   EXPECT_NE(http.find("void clearOfflineSbsJob"), std::string::npos);
   EXPECT_NE(
     http.find(
@@ -631,30 +627,7 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   );
   EXPECT_NE(jobs.find("job_service_t::clear"), std::string::npos);
   EXPECT_NE(jobs.find("clear_terminal_record_locked"), std::string::npos);
-  const auto audit_handler = http.find("void getOfflineSbsSceneAudit");
-  const auto cancel_handler = http.find("void cancelOfflineSbsJob", audit_handler);
-  ASSERT_NE(audit_handler, std::string::npos);
-  ASSERT_NE(cancel_handler, std::string::npos);
-  const auto audit_handler_source =
-    http.substr(audit_handler, cancel_handler - audit_handler);
-  EXPECT_NE(
-    audit_handler_source.find("if (!authenticate(response, request))"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    jobs.find("max_scene_audit_bytes = 32ull * 1024ull * 1024ull"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    jobs.find("record->worker.result_directory / \"scene-audit.json\""),
-    std::string::npos
-  );
-  EXPECT_NE(
-    jobs.find(
-      "summary.progress.scene_decisions = nlohmann::json::array()"
-    ),
-    std::string::npos
-  );
+  EXPECT_EQ(jobs.find("scene-audit.json"), std::string::npos);
   EXPECT_NE(
     jobs.find("contract size changed while it was being read"),
     std::string::npos

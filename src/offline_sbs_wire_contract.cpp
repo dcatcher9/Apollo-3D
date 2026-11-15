@@ -314,7 +314,7 @@ namespace offline_sbs::wire {
 
   nlohmann::json to_json(const worker_spec_contract_t &value) {
     json result {
-      {"schema", 2},
+      {"schema", 3},
       {"job_id", value.job_id},
       {"operation", value.operation},
       {"input_path", value.input_path},
@@ -341,7 +341,6 @@ namespace offline_sbs::wire {
       {"codec", value.codec},
       {"pipeline", {
         {"implementation", "native-causal-single-pass"},
-        {"cut_state", "authenticated-online-pulse-count"},
         {"lookahead", false},
         {"scene_cache", false},
         {"replay", false},
@@ -360,8 +359,8 @@ namespace offline_sbs::wire {
       "python_dependency"sv,
     };
     require_exact_keys(value, keys, "worker specification");
-    if (value.at("schema") != 2 || value.at("python_dependency") != false) {
-      throw contract_error("worker specification is not native schema 2");
+    if (value.at("schema") != 3 || value.at("python_dependency") != false) {
+      throw contract_error("worker specification is not native schema 3");
     }
     require_exact_keys(
       value.at("sunshine"),
@@ -385,8 +384,8 @@ namespace offline_sbs::wire {
     );
     require_exact_keys(
       value.at("pipeline"),
-      std::array {"implementation"sv, "cut_state"sv, "lookahead"sv,
-                  "scene_cache"sv, "replay"sv},
+      std::array {"implementation"sv, "lookahead"sv, "scene_cache"sv,
+                  "replay"sv},
       "worker specification causal pipeline"
     );
 
@@ -439,7 +438,6 @@ namespace offline_sbs::wire {
     }
     if (value.at("pipeline") != json {
           {"implementation", "native-causal-single-pass"},
-          {"cut_state", "authenticated-online-pulse-count"},
           {"lookahead", false},
           {"scene_cache", false},
           {"replay", false}}) {
@@ -601,40 +599,6 @@ namespace offline_sbs::wire {
       if (source.frame_count == std::numeric_limits<std::uint64_t>::max()) {
         throw contract_error("worker source frame range overflows");
       }
-      const auto total_scenes = result.total_scene_count.value_or(result.scenes.size());
-      const auto first_scene_id = total_scenes - result.scenes.size() + 1;
-      std::uint64_t expected_start = first_scene_id == 1 ? 1 : result.scenes.front().start_sequence;
-      for (std::size_t index = 0; index < result.scenes.size(); ++index) {
-        const auto &scene = result.scenes[index];
-        if (
-          scene.scene_id != first_scene_id + index ||
-          scene.semantic_scene_id != first_scene_id + index ||
-          scene.start_sequence != expected_start ||
-          scene.evidence.source_frame_count != scene.frame_count ||
-          scene.cache_bytes != 0 ||
-          scene.cut_state_semantics != "causal-production-exact" ||
-          scene.boundary.decision !=
-            (index + 1u == result.scenes.size() ?
-               boundary_decision_e::end_of_stream :
-               boundary_decision_e::confirmed) ||
-          scene.boundary.semantic_cut !=
-            (index + 1u != result.scenes.size())
-        ) {
-          throw contract_error(
-            "worker scenes are not exact causal production epochs"
-          );
-        }
-        if (index + 1u != result.scenes.size() &&
-            scene.boundary.final_sequence != scene.end_sequence_exclusive) {
-          throw contract_error(
-            "worker causal scene boundary does not start the next epoch"
-          );
-        }
-        expected_start = scene.end_sequence_exclusive;
-      }
-      if (expected_start != source.frame_count + 1u) {
-        throw contract_error("worker scenes do not cover every source frame exactly once");
-      }
 
       const auto timeline_mode = required_string(
         result.timeline_contract, "mode", "worker result timeline contract"
@@ -673,16 +637,12 @@ namespace offline_sbs::wire {
   }  // namespace
 
   nlohmann::json to_json(const worker_result_contract_t &value) {
-    json scenes = json::array();
-    for (const auto &scene : value.scenes) {
-      scenes.push_back(scene_record_json(scene));
-    }
     json replays = json::array();
     for (const auto &replay : value.replay_contracts) {
       replays.push_back(to_json(replay));
     }
     json result {
-      {"schema", value.total_scene_count ? 3 : 2},
+      {"schema", 4},
       {"job_id", value.job_id},
       {"status", "complete"},
       {"operation", value.operation},
@@ -698,9 +658,6 @@ namespace offline_sbs::wire {
         {"color_mode", value.source.color_mode},
         {"contract", value.source.contract_path},
       }},
-      {"scene_count", value.total_scene_count.value_or(value.scenes.size())},
-      {"scenes", std::move(scenes)},
-      {"scene_audit", value.scene_audit_path},
       {"analysis_contract", to_json(value.analysis_contract)},
       {"replay_contracts", std::move(replays)},
       {"cache", {
@@ -715,9 +672,6 @@ namespace offline_sbs::wire {
       {"staging_identity", value.staging_identity ? *value.staging_identity : json(nullptr)},
       {"output", value.output_path ? json(*value.output_path) : json(nullptr)},
     };
-    if (value.total_scene_count) {
-      result["scene_audit_manifest_sha256"] = optional_json(value.scene_audit_manifest_sha256);
-    }
     (void) parse_worker_result_contract(result);
     return result;
   }
@@ -726,17 +680,11 @@ namespace offline_sbs::wire {
     static constexpr std::array keys {
       "schema"sv, "job_id"sv, "status"sv, "operation"sv, "codec"sv,
       "worker_spec_sha256"sv, "python_dependency"sv, "source"sv,
-      "scene_count"sv, "scenes"sv, "scene_audit"sv, "analysis_contract"sv,
-      "replay_contracts"sv, "cache"sv, "timeline_contract"sv,
-      "staging_identity"sv, "output"sv,
+      "analysis_contract"sv, "replay_contracts"sv, "cache"sv,
+      "timeline_contract"sv, "staging_identity"sv, "output"sv,
     };
-    const bool paged = value.value("schema", 0) == 3;
-    if (paged) {
-      require_keys_with_optional(value, keys, "scene_audit_manifest_sha256", "worker result");
-    } else {
-      require_exact_keys(value, keys, "worker result");
-    }
-    if ((!paged && value.at("schema") != 2) || value.at("status") != "complete" ||
+    require_exact_keys(value, keys, "worker result");
+    if (value.at("schema") != 4 || value.at("status") != "complete" ||
         value.at("python_dependency") != false) {
       throw contract_error("worker result is not a complete native result");
     }
@@ -799,25 +747,6 @@ namespace offline_sbs::wire {
       throw contract_error("worker result source summary is invalid");
     }
 
-    const auto scene_count = unsigned_integer<std::uint64_t>(
-      value, "scene_count", "worker result"
-    );
-    if (!value.at("scenes").is_array() || scene_count == 0 ||
-        value.at("scenes").size() != (paged ? std::min<std::uint64_t>(scene_count, scene_audit_recent_scenes) : scene_count) ||
-        scene_count > (paged ? max_paged_scene_count : max_serialized_scene_count)) {
-      throw contract_error("worker result scene count is invalid");
-    }
-    if (paged) {
-      result.total_scene_count = scene_count;
-      result.scene_audit_manifest_sha256 = required_string(value, "scene_audit_manifest_sha256", "worker result");
-      if (!valid_sha256_hex(*result.scene_audit_manifest_sha256)) {
-        throw contract_error("worker audit manifest digest is not lowercase SHA-256");
-      }
-    }
-    for (const auto &scene : value.at("scenes")) {
-      result.scenes.push_back(parse_scene_record(scene));
-    }
-    result.scene_audit_path = required_string(value, "scene_audit", "worker result");
     if (!value.at("analysis_contract").is_object() ||
         !value.at("replay_contracts").is_array() ||
         !value.at("timeline_contract").is_object()) {
@@ -1205,475 +1134,6 @@ namespace offline_sbs::wire {
           {"enforced_by", "wrapper"}, {"native_limit_bytes", nullptr},
           {"on_write_failure", "fail-closed"}, {"native_eviction", false}}) {
       throw contract_error("scene cache contract has invalid sequence, geometry, or semantics");
-    }
-    return result;
-  }
-
-  nlohmann::json boundary_audit_json(const boundary_audit_t &value) {
-    return {
-      {"proposal_sequences", value.proposal_sequences},
-      {"proposal_frame_ids", value.proposal_frame_ids},
-      {"final_sequence", value.final_sequence},
-      {"decision", boundary_decision_name(value.decision)},
-      {"reason", value.reason},
-      {"accepted", value.accepted},
-      {"semantic_cut", value.semantic_cut},
-      {"truncated", value.truncated},
-      {"budget_forced", value.budget_forced},
-      {"revision_depth_updates", value.revision_depth_updates},
-      {"revision_source_frames", value.revision_source_frames},
-      {"candidate_count", value.candidate_count},
-      {"selected_evidence_score", value.selected_evidence_score},
-      {"evidence_window_first_sequence", value.evidence_window_first_sequence},
-      {"evidence_window_last_sequence", value.evidence_window_last_sequence},
-      {"selected_sequence", value.selected_sequence},
-      {"selected_frame_id", value.selected_frame_id},
-      {"selected_depth_change_fraction", value.selected_depth_change_fraction},
-      {"selected_raw_rgb_change_fraction", value.selected_raw_rgb_change_fraction},
-      {"selected_structural_change_fraction", value.selected_structural_change_fraction},
-      {"selected_appearance_qualified", value.selected_appearance_qualified},
-      {"selected_geometry_qualified", value.selected_geometry_qualified},
-      {"selected_relative_geometry_spike", value.selected_relative_geometry_spike},
-    };
-  }
-
-  boundary_audit_t parse_boundary_audit(const nlohmann::json &value) {
-    require_exact_keys(
-      value,
-      std::array {
-        "proposal_sequences"sv, "proposal_frame_ids"sv, "final_sequence"sv,
-        "decision"sv, "reason"sv, "accepted"sv, "semantic_cut"sv,
-        "truncated"sv, "budget_forced"sv, "revision_depth_updates"sv,
-        "revision_source_frames"sv, "candidate_count"sv,
-        "selected_evidence_score"sv, "evidence_window_first_sequence"sv,
-        "evidence_window_last_sequence"sv, "selected_sequence"sv,
-        "selected_frame_id"sv, "selected_depth_change_fraction"sv,
-        "selected_raw_rgb_change_fraction"sv,
-        "selected_structural_change_fraction"sv,
-        "selected_appearance_qualified"sv, "selected_geometry_qualified"sv,
-        "selected_relative_geometry_spike"sv,
-      },
-      "scene boundary audit"
-    );
-    boundary_audit_t result;
-    if (!value.at("proposal_sequences").is_array() ||
-        !value.at("proposal_frame_ids").is_array()) {
-      throw contract_error("scene boundary proposals must be arrays");
-    }
-    for (const auto &sequence : value.at("proposal_sequences")) {
-      json sequence_object {{"sequence", sequence}};
-      const auto parsed = unsigned_integer<std::uint64_t>(
-        sequence_object, "sequence", "scene boundary proposal"
-      );
-      if (parsed == 0) {
-        throw contract_error("scene boundary proposal sequence is invalid");
-      }
-      result.proposal_sequences.push_back(parsed);
-    }
-    for (const auto &frame_id : value.at("proposal_frame_ids")) {
-      if (!frame_id.is_string() || frame_id.get_ref<const std::string &>().empty() ||
-          frame_id.get_ref<const std::string &>().size() > max_scene_frame_id_bytes) {
-        throw contract_error("scene boundary proposal frame identity is invalid");
-      }
-      result.proposal_frame_ids.push_back(frame_id.get<std::string>());
-    }
-    if (result.proposal_sequences.size() != result.proposal_frame_ids.size()) {
-      throw contract_error("scene boundary proposal identities disagree");
-    }
-    const auto optional_u64 = [&](const std::string_view key) {
-      return optional_value<std::uint64_t>(value, key, [&]() {
-        const auto parsed = unsigned_integer<std::uint64_t>(value, key, "scene boundary audit");
-        if (parsed == 0) {
-          throw contract_error("scene boundary optional sequence must be positive");
-        }
-        return parsed;
-      });
-    };
-    const auto optional_fraction = [&](const std::string_view key) {
-      return optional_value<float>(value, key, [&]() {
-        const auto parsed = finite_number(value, key, "scene boundary audit");
-        if (parsed < 0.0 || parsed > 1.0) {
-          throw contract_error("scene boundary fraction must be in [0, 1]");
-        }
-        return static_cast<float>(parsed);
-      });
-    };
-    result.final_sequence = optional_u64("final_sequence");
-    const auto decision = required_string(value, "decision", "scene boundary audit");
-    static constexpr std::array decisions {
-      std::pair {"confirmed"sv, boundary_decision_e::confirmed},
-      std::pair {"moved_to_correlated_evidence"sv,
-                 boundary_decision_e::moved_to_correlated_evidence},
-      std::pair {"merged_duplicate_proposals"sv,
-                 boundary_decision_e::merged_duplicate_proposals},
-      std::pair {"confirmed_causal_fallback"sv,
-                 boundary_decision_e::confirmed_causal_fallback},
-      std::pair {"rejected_supported_flash_return"sv,
-                 boundary_decision_e::rejected_supported_flash_return},
-      std::pair {"rejected_unsupported_proposal"sv,
-                 boundary_decision_e::rejected_unsupported_proposal},
-      std::pair {"rejected_minimum_scene_length"sv,
-                 boundary_decision_e::rejected_minimum_scene_length},
-      std::pair {"administrative_cache_split"sv,
-                 boundary_decision_e::administrative_cache_split},
-      std::pair {"end_of_stream"sv, boundary_decision_e::end_of_stream},
-    };
-    const auto found = std::ranges::find_if(decisions, [&](const auto &candidate) {
-      return candidate.first == decision;
-    });
-    if (found == decisions.end()) {
-      throw contract_error("scene boundary decision is unknown");
-    }
-    result.decision = found->second;
-    if (!value.at("reason").is_string()) {
-      throw contract_error("scene boundary reason must be a string");
-    }
-    result.reason = value.at("reason").get<std::string>();
-    result.accepted = required_boolean(value, "accepted", "scene boundary audit");
-    result.semantic_cut = required_boolean(value, "semantic_cut", "scene boundary audit");
-    result.truncated = required_boolean(value, "truncated", "scene boundary audit");
-    result.budget_forced = required_boolean(value, "budget_forced", "scene boundary audit");
-    result.revision_depth_updates = signed_integer(value, "revision_depth_updates", "scene boundary audit");
-    result.revision_source_frames = signed_integer(value, "revision_source_frames", "scene boundary audit");
-    result.candidate_count = unsigned_integer<std::size_t>(value, "candidate_count", "scene boundary audit");
-    result.selected_evidence_score = optional_value<float>(value, "selected_evidence_score", [&]() {
-      return static_cast<float>(finite_number(value, "selected_evidence_score", "scene boundary audit"));
-    });
-    result.evidence_window_first_sequence = optional_u64("evidence_window_first_sequence");
-    result.evidence_window_last_sequence = optional_u64("evidence_window_last_sequence");
-    result.selected_sequence = optional_u64("selected_sequence");
-    result.selected_frame_id = optional_value<std::string>(value, "selected_frame_id", [&]() {
-      const auto parsed = required_string(value, "selected_frame_id", "scene boundary audit");
-      if (parsed.size() > max_scene_frame_id_bytes) {
-        throw contract_error("scene boundary selected frame identity is too long");
-      }
-      return parsed;
-    });
-    result.selected_depth_change_fraction = optional_fraction("selected_depth_change_fraction");
-    result.selected_raw_rgb_change_fraction = optional_fraction("selected_raw_rgb_change_fraction");
-    result.selected_structural_change_fraction = optional_fraction("selected_structural_change_fraction");
-    result.selected_appearance_qualified = required_boolean(value, "selected_appearance_qualified", "scene boundary audit");
-    result.selected_geometry_qualified = required_boolean(value, "selected_geometry_qualified", "scene boundary audit");
-    result.selected_relative_geometry_spike = required_boolean(value, "selected_relative_geometry_spike", "scene boundary audit");
-    return result;
-  }
-
-  nlohmann::json scene_evidence_json(const scene_evidence_t &value) {
-    return {
-      {"source_frame_count", value.source_frame_count},
-      {"depth_update_count", value.depth_update_count},
-      {"appearance_veto_count", value.appearance_veto_count},
-      {"depth_change_max", value.depth_change_max},
-    };
-  }
-
-  scene_evidence_t parse_scene_evidence(const nlohmann::json &value) {
-    require_exact_keys(
-      value,
-      std::array {"source_frame_count"sv, "depth_update_count"sv,
-                  "appearance_veto_count"sv, "depth_change_max"sv},
-      "scene evidence"
-    );
-    scene_evidence_t result;
-    result.source_frame_count = unsigned_integer<std::size_t>(value, "source_frame_count", "scene evidence");
-    result.depth_update_count = unsigned_integer<std::size_t>(value, "depth_update_count", "scene evidence");
-    result.appearance_veto_count = unsigned_integer<std::size_t>(value, "appearance_veto_count", "scene evidence");
-    result.depth_change_max = optional_value<float>(value, "depth_change_max", [&]() {
-      const auto parsed = finite_number(value, "depth_change_max", "scene evidence");
-      if (parsed < 0.0 || parsed > 1.0) {
-        throw contract_error("scene maximum depth change must be in [0, 1]");
-      }
-      return static_cast<float>(parsed);
-    });
-    return result;
-  }
-
-  nlohmann::json scene_record_json(const scene_plan_t &value) {
-    return {
-      {"scene_id", value.scene_id},
-      {"semantic_scene_id", value.semantic_scene_id},
-      {"start_sequence", value.start_sequence},
-      {"end_sequence_exclusive", value.end_sequence_exclusive},
-      {"frame_count", value.frame_count},
-      {"cache_bytes", value.cache_bytes},
-      {"start_pts_seconds", value.start_pts_seconds},
-      {"end_pts_seconds_exclusive", value.end_pts_seconds_exclusive},
-      {"evidence", scene_evidence_json(value.evidence)},
-      {"boundary", boundary_audit_json(value.boundary)},
-      {"ground_truth", value.ground_truth},
-      {"cut_state_semantics", value.cut_state_semantics},
-      {"known_limit", value.known_limit},
-    };
-  }
-
-  scene_plan_t parse_scene_record(const nlohmann::json &value) {
-    require_exact_keys(
-      value,
-      std::array {
-        "scene_id"sv, "semantic_scene_id"sv, "start_sequence"sv,
-        "end_sequence_exclusive"sv, "frame_count"sv, "cache_bytes"sv,
-        "start_pts_seconds"sv, "end_pts_seconds_exclusive"sv, "evidence"sv,
-        "boundary"sv, "ground_truth"sv, "cut_state_semantics"sv,
-        "known_limit"sv,
-      },
-      "scene record"
-    );
-    scene_plan_t result;
-    result.scene_id = unsigned_integer<std::uint64_t>(value, "scene_id", "scene record");
-    result.semantic_scene_id = unsigned_integer<std::uint64_t>(value, "semantic_scene_id", "scene record");
-    result.start_sequence = unsigned_integer<std::uint64_t>(value, "start_sequence", "scene record");
-    result.end_sequence_exclusive = unsigned_integer<std::uint64_t>(value, "end_sequence_exclusive", "scene record");
-    result.frame_count = unsigned_integer<std::uint64_t>(value, "frame_count", "scene record");
-    result.cache_bytes = unsigned_integer<std::uint64_t>(value, "cache_bytes", "scene record");
-    result.start_pts_seconds = optional_value<double>(value, "start_pts_seconds", [&]() {
-      return finite_number(value, "start_pts_seconds", "scene record");
-    });
-    result.end_pts_seconds_exclusive = optional_value<double>(value, "end_pts_seconds_exclusive", [&]() {
-      return finite_number(value, "end_pts_seconds_exclusive", "scene record");
-    });
-    result.evidence = parse_scene_evidence(value.at("evidence"));
-    result.boundary = parse_boundary_audit(value.at("boundary"));
-    result.ground_truth = required_boolean(value, "ground_truth", "scene record");
-    result.cut_state_semantics = required_string(value, "cut_state_semantics", "scene record");
-    result.known_limit = required_string(value, "known_limit", "scene record");
-    if (result.scene_id == 0 || result.semantic_scene_id == 0 || result.start_sequence == 0 ||
-        result.end_sequence_exclusive <= result.start_sequence ||
-        result.frame_count != result.end_sequence_exclusive - result.start_sequence ||
-        result.ground_truth ||
-        (result.start_pts_seconds && result.end_pts_seconds_exclusive &&
-         *result.end_pts_seconds_exclusive <= *result.start_pts_seconds)) {
-      throw contract_error("scene record identity, range, or claims are invalid");
-    }
-    return result;
-  }
-
-  std::string scene_audit_page_filename(const std::uint32_t index) {
-    return "scene-audit-page-" + std::to_string(index) + ".json";
-  }
-
-  nlohmann::json to_json(const scene_audit_page_t &value) {
-    json scenes = json::array();
-    json boundaries = json::array();
-    for (const auto &scene : value.scenes) scenes.push_back(scene_record_json(scene));
-    for (const auto &boundary : value.boundary_revisions) boundaries.push_back(boundary_audit_json(boundary));
-    return {{"schema", 1}, {"version", "whole-clip-scene-audit-page-v1"},
-            {"index", value.index}, {"scenes", std::move(scenes)},
-            {"boundary_revisions", std::move(boundaries)}};
-  }
-
-  scene_audit_page_t parse_scene_audit_page(const nlohmann::json &value) {
-    require_exact_keys(value, std::array {"schema"sv, "version"sv, "index"sv,
-      "scenes"sv, "boundary_revisions"sv}, "scene audit page");
-    if (value.at("schema") != 1 || value.at("version") != "whole-clip-scene-audit-page-v1" ||
-        !value.at("scenes").is_array() || value.at("scenes").empty() ||
-        value.at("scenes").size() > scene_audit_page_max_scenes ||
-        !value.at("boundary_revisions").is_array() ||
-        value.at("boundary_revisions").size() > value.at("scenes").size()) {
-      throw contract_error("scene audit page semantics or bounds are invalid");
-    }
-    scene_audit_page_t result;
-    result.index = unsigned_integer<std::uint32_t>(value, "index", "scene audit page");
-    if (result.index >= scene_audit_max_pages) throw contract_error("scene audit page index exceeds its bound");
-    for (const auto &scene : value.at("scenes")) result.scenes.push_back(parse_scene_record(scene));
-    for (const auto &boundary : value.at("boundary_revisions")) result.boundary_revisions.push_back(parse_boundary_audit(boundary));
-    return result;
-  }
-
-  void validate_scene_audit_page(const scene_audit_page_t &page,
-                                const scene_audit_page_descriptor_t &descriptor,
-                                const bool complete_final_page) {
-    if (page.index != descriptor.index || page.scenes.size() != descriptor.scene_count ||
-        page.boundary_revisions.size() != descriptor.boundary_count || page.scenes.empty()) {
-      throw contract_error("scene audit page disagrees with its descriptor");
-    }
-    std::uint64_t sequence = descriptor.start_sequence;
-    std::size_t boundary_index = 0;
-    for (std::size_t i = 0; i < page.scenes.size(); ++i) {
-      const auto &scene = page.scenes[i];
-      const bool final = complete_final_page && i + 1 == page.scenes.size();
-      if (scene.scene_id != descriptor.first_scene_id + i ||
-          scene.semantic_scene_id != scene.scene_id || scene.start_sequence != sequence ||
-          scene.cache_bytes != 0 || scene.evidence.source_frame_count != scene.frame_count ||
-          scene.cut_state_semantics != "causal-production-exact" ||
-          scene.boundary.semantic_cut == final ||
-          scene.boundary.decision != (final ? boundary_decision_e::end_of_stream : boundary_decision_e::confirmed)) {
-        throw contract_error("scene audit page is not contiguous causal production evidence");
-      }
-      if (!final && (scene.boundary.final_sequence != scene.end_sequence_exclusive ||
-          boundary_index >= page.boundary_revisions.size() ||
-          boundary_audit_json(scene.boundary) != boundary_audit_json(page.boundary_revisions[boundary_index++]))) {
-        throw contract_error("scene audit page boundary evidence disagrees with its scenes");
-      }
-      sequence = scene.end_sequence_exclusive;
-    }
-    if (sequence != descriptor.end_sequence_exclusive || boundary_index != page.boundary_revisions.size()) {
-      throw contract_error("scene audit page coverage disagrees with its descriptor");
-    }
-  }
-
-  nlohmann::json to_json(const scene_audit_contract_t &value) {
-    json scenes = json::array();
-    for (const auto &scene : value.scenes) {
-      scenes.push_back(scene_record_json(scene));
-    }
-    json boundaries = json::array();
-    for (const auto &boundary : value.boundary_revisions) {
-      boundaries.push_back(boundary_audit_json(boundary));
-    }
-    json result {
-      {"schema", 3},
-      {"version", "whole-clip-scene-audit-v3"},
-      {"status", value.status},
-      {"claims", {{"ground_truth", false}, {"best_parameters", false}}},
-      {"policy", {
-        {"implementation", "native-causal-scene-tracker"},
-        {"version", "causal-scene-epochs-v1"},
-        {"lookahead", false},
-        {"boundary_only", true},
-        {"python_dependency", false},
-      }},
-      {"cache", {
-        {"peak_bytes", value.peak_cache_bytes},
-        {"analysis_source_raster_bytes", value.analysis_source_raster_bytes},
-        {"peak_live_raster_bytes", value.peak_live_raster_bytes},
-        {"peak_cache_plus_raster_bytes", value.peak_cache_plus_raster_bytes},
-        {"hard_cap_bytes", value.hard_cap_bytes},
-      }},
-      {"timeline_contract", value.timeline_contract},
-      {"scenes", std::move(scenes)},
-      {"boundary_revisions", std::move(boundaries)},
-    };
-    if (value.paged) {
-      result["schema"] = 4;
-      result["version"] = "whole-clip-scene-audit-v4";
-      result.erase("scenes");
-      result.erase("boundary_revisions");
-      result["storage"] = {{"format", "immutable-pages-v1"},
-        {"scene_count", value.scene_count}, {"boundary_count", value.boundary_count},
-        {"covered_end_sequence", value.covered_end_sequence}, {"total_page_bytes", value.total_page_bytes},
-        {"page_max_scenes", scene_audit_page_max_scenes}, {"page_max_bytes", scene_audit_page_max_bytes},
-        {"total_max_bytes", scene_audit_storage_max_bytes}, {"max_pages", scene_audit_max_pages}};
-      result["pages"] = json::array();
-      for (const auto &page : value.pages) {
-        result["pages"].push_back({{"index", page.index}, {"first_scene_id", page.first_scene_id},
-          {"scene_count", page.scene_count}, {"boundary_count", page.boundary_count},
-          {"start_sequence", page.start_sequence}, {"end_sequence_exclusive", page.end_sequence_exclusive},
-          {"bytes", page.bytes}, {"sha256", page.sha256}});
-      }
-    }
-    return result;
-  }
-
-  scene_audit_contract_t parse_scene_audit_contract(const nlohmann::json &value) {
-    if (value.value("schema", 0) == 4) {
-      require_exact_keys(value, std::array {"schema"sv, "version"sv, "status"sv, "claims"sv,
-        "policy"sv, "cache"sv, "timeline_contract"sv, "storage"sv, "pages"sv}, "scene audit manifest");
-      if (value.at("version") != "whole-clip-scene-audit-v4" || !value.at("pages").is_array() ||
-          value.at("pages").size() > scene_audit_max_pages) throw contract_error("scene audit manifest version or index bound is invalid");
-      auto base = value;
-      base["schema"] = 3;
-      base["version"] = "whole-clip-scene-audit-v3";
-      base.erase("storage"); base.erase("pages");
-      base["scenes"] = json::array(); base["boundary_revisions"] = json::array();
-      auto result = parse_scene_audit_contract(base);
-      result.paged = true;
-      const auto &storage = value.at("storage");
-      require_exact_keys(storage, std::array {"format"sv, "scene_count"sv, "boundary_count"sv,
-        "covered_end_sequence"sv, "total_page_bytes"sv, "page_max_scenes"sv, "page_max_bytes"sv,
-        "total_max_bytes"sv, "max_pages"sv}, "scene audit storage");
-      if (storage.at("format") != "immutable-pages-v1" || storage.at("page_max_scenes") != scene_audit_page_max_scenes ||
-          storage.at("page_max_bytes") != scene_audit_page_max_bytes || storage.at("total_max_bytes") != scene_audit_storage_max_bytes ||
-          storage.at("max_pages") != scene_audit_max_pages) throw contract_error("scene audit storage limits are invalid");
-      result.scene_count = unsigned_integer<std::uint64_t>(storage, "scene_count", "scene audit storage");
-      result.boundary_count = unsigned_integer<std::uint64_t>(storage, "boundary_count", "scene audit storage");
-      result.covered_end_sequence = unsigned_integer<std::uint64_t>(storage, "covered_end_sequence", "scene audit storage");
-      result.total_page_bytes = unsigned_integer<std::uint64_t>(storage, "total_page_bytes", "scene audit storage");
-      std::uint64_t scenes = 0, boundaries = 0, bytes = 0, end = 1;
-      for (const auto &entry : value.at("pages")) {
-        require_exact_keys(entry, std::array {"index"sv, "first_scene_id"sv, "scene_count"sv, "boundary_count"sv,
-          "start_sequence"sv, "end_sequence_exclusive"sv, "bytes"sv, "sha256"sv}, "scene audit page descriptor");
-        scene_audit_page_descriptor_t page;
-        page.index = unsigned_integer<std::uint32_t>(entry, "index", "page descriptor");
-        page.first_scene_id = unsigned_integer<std::uint64_t>(entry, "first_scene_id", "page descriptor");
-        page.scene_count = unsigned_integer<std::uint64_t>(entry, "scene_count", "page descriptor");
-        page.boundary_count = unsigned_integer<std::uint64_t>(entry, "boundary_count", "page descriptor");
-        page.start_sequence = unsigned_integer<std::uint64_t>(entry, "start_sequence", "page descriptor");
-        page.end_sequence_exclusive = unsigned_integer<std::uint64_t>(entry, "end_sequence_exclusive", "page descriptor");
-        page.bytes = unsigned_integer<std::uint64_t>(entry, "bytes", "page descriptor");
-        page.sha256 = required_string(entry, "sha256", "page descriptor");
-        const bool final = result.status == "complete" && page.index + 1 == value.at("pages").size();
-        if (page.index != result.pages.size() || page.first_scene_id != scenes + 1 ||
-            page.scene_count == 0 || page.scene_count > scene_audit_page_max_scenes ||
-            page.boundary_count != page.scene_count - (final ? 1 : 0) ||
-            page.start_sequence != end || page.end_sequence_exclusive <= end ||
-            page.bytes == 0 || page.bytes > scene_audit_page_max_bytes || !valid_sha256_hex(page.sha256) ||
-            page.bytes > scene_audit_storage_max_bytes - bytes) throw contract_error("scene audit page index, coverage, or storage bound is invalid");
-        scenes += page.scene_count; boundaries += page.boundary_count; bytes += page.bytes;
-        end = page.end_sequence_exclusive;
-        result.pages.push_back(std::move(page));
-      }
-      if (scenes != result.scene_count || boundaries != result.boundary_count || bytes != result.total_page_bytes ||
-          end != result.covered_end_sequence || (result.status == "complete" && scenes == 0)) {
-        throw contract_error("scene audit manifest totals disagree with its pages");
-      }
-      return result;
-    }
-    require_exact_keys(
-      value,
-      std::array {"schema"sv, "version"sv, "status"sv, "claims"sv, "policy"sv,
-                  "cache"sv, "timeline_contract"sv, "scenes"sv,
-                  "boundary_revisions"sv},
-      "scene audit"
-    );
-    require_exact_keys(value.at("claims"), std::array {"ground_truth"sv, "best_parameters"sv}, "scene audit claims");
-    require_exact_keys(
-      value.at("policy"),
-      std::array {"implementation"sv, "version"sv, "lookahead"sv,
-                  "boundary_only"sv, "python_dependency"sv},
-      "scene audit policy"
-    );
-    require_exact_keys(
-      value.at("cache"),
-      std::array {"peak_bytes"sv, "analysis_source_raster_bytes"sv,
-                  "peak_live_raster_bytes"sv, "peak_cache_plus_raster_bytes"sv,
-                  "hard_cap_bytes"sv},
-      "scene audit cache"
-    );
-    if (value.at("schema") != 3 || value.at("version") != "whole-clip-scene-audit-v3" ||
-        value.at("claims") != json {{"ground_truth", false}, {"best_parameters", false}} ||
-        value.at("policy") != json {
-          {"implementation", "native-causal-scene-tracker"},
-          {"version", "causal-scene-epochs-v1"}, {"lookahead", false},
-          {"boundary_only", true}, {"python_dependency", false}} ||
-        !value.at("timeline_contract").is_object() || !value.at("scenes").is_array() ||
-        !value.at("boundary_revisions").is_array()) {
-      throw contract_error("scene audit has unknown policy or document semantics");
-    }
-    scene_audit_contract_t result;
-    result.status = required_string(value, "status", "scene audit");
-    if (result.status != "running" && result.status != "complete") {
-      throw contract_error("scene audit status is invalid");
-    }
-    const auto &cache = value.at("cache");
-    result.peak_cache_bytes = unsigned_integer<std::uint64_t>(cache, "peak_bytes", "scene audit cache");
-    result.analysis_source_raster_bytes = unsigned_integer<std::uint64_t>(cache, "analysis_source_raster_bytes", "scene audit cache");
-    result.peak_live_raster_bytes = unsigned_integer<std::uint64_t>(cache, "peak_live_raster_bytes", "scene audit cache");
-    result.peak_cache_plus_raster_bytes = unsigned_integer<std::uint64_t>(cache, "peak_cache_plus_raster_bytes", "scene audit cache");
-    result.hard_cap_bytes = unsigned_integer<std::uint64_t>(cache, "hard_cap_bytes", "scene audit cache");
-    if (result.hard_cap_bytes == 0 || result.peak_cache_bytes > result.hard_cap_bytes ||
-        result.peak_cache_plus_raster_bytes > result.hard_cap_bytes) {
-      throw contract_error("scene audit cache attestation exceeds its hard cap");
-    }
-    result.timeline_contract = value.at("timeline_contract");
-    if (value.at("scenes").size() > max_serialized_scene_count ||
-        value.at("boundary_revisions").size() > max_serialized_scene_count) {
-      throw contract_error("scene audit exceeds its serialized scene bound");
-    }
-    for (const auto &scene : value.at("scenes")) {
-      result.scenes.push_back(parse_scene_record(scene));
-    }
-    for (const auto &boundary : value.at("boundary_revisions")) {
-      result.boundary_revisions.push_back(parse_boundary_audit(boundary));
     }
     return result;
   }
@@ -2149,10 +1609,6 @@ namespace offline_sbs::wire {
   }
 
   nlohmann::json to_json(const job_snapshot_contract_t &value) {
-    json decisions = json::array();
-    for (const auto &decision : value.progress.scene_decisions) {
-      decisions.push_back(decision);
-    }
     return {
       {"schema", 1},
       {"id", value.id},
@@ -2173,12 +1629,7 @@ namespace offline_sbs::wire {
                                   json(*value.progress.source_time_seconds) : json(nullptr)},
         {"source_duration_seconds", value.progress.source_duration_seconds ?
                                       json(*value.progress.source_duration_seconds) : json(nullptr)},
-        {"scene_count", value.progress.scene_count ?
-                          json(*value.progress.scene_count) : json(nullptr)},
-        {"current_scene", value.progress.current_scene ?
-                            *value.progress.current_scene : json(nullptr)},
       }},
-      {"scene_decisions", std::move(decisions)},
       {"created_at_unix_ms", value.created_at_unix_ms},
       {"started_at_unix_ms", value.started_at_unix_ms ?
                                json(*value.started_at_unix_ms) : json(nullptr)},
@@ -2197,8 +1648,8 @@ namespace offline_sbs::wire {
       "schema"sv, "id"sv, "state"sv, "operation"sv, "input_path"sv,
       "output_path"sv, "output_location"sv, "codec"sv,
       "scene_cache_max_bytes"sv, "cache_budget_policy"sv, "progress"sv,
-      "scene_decisions"sv, "created_at_unix_ms"sv, "started_at_unix_ms"sv,
-      "ended_at_unix_ms"sv, "error"sv, "worker_result"sv,
+      "created_at_unix_ms"sv, "started_at_unix_ms"sv, "ended_at_unix_ms"sv,
+      "error"sv, "worker_result"sv,
     };
     json normalized = value;
     if (persisted_document) {
@@ -2221,25 +1672,24 @@ namespace offline_sbs::wire {
       }
       normalized.erase("retention_sequence");
       normalized.erase("worker");
-      // These are the only explicitly supported schema-1 durable variants. They predate the
-      // current beside-input publication and bounded in-progress scene summary fields.
+      // These are the only explicitly supported schema-1 durable variants. One predates
+      // beside-input publication. The others carry the retired diagnostic scene summary
+      // (scene_decisions, progress.scene_count, progress.current_scene), which is accepted
+      // and discarded so a retained job stays readable; it is never written.
       if (!normalized.contains("output_location")) {
         normalized["output_location"] = nullptr;
       }
-      if (!normalized.contains("scene_decisions")) {
-        normalized["scene_decisions"] = json::array();
-      }
-      if (normalized.contains("progress") && normalized.at("progress").is_object() &&
-          !normalized.at("progress").contains("current_scene")) {
-        normalized["progress"]["current_scene"] = nullptr;
+      normalized.erase("scene_decisions");
+      if (normalized.contains("progress") && normalized.at("progress").is_object()) {
+        normalized["progress"].erase("scene_count");
+        normalized["progress"].erase("current_scene");
       }
     }
     require_exact_keys(normalized, base_keys, "job snapshot");
     require_exact_keys(
       normalized.at("progress"),
       std::array {"phase"sv, "processed_frames"sv, "total_frames"sv,
-                  "source_time_seconds"sv, "source_duration_seconds"sv,
-                  "scene_count"sv, "current_scene"sv},
+                  "source_time_seconds"sv, "source_duration_seconds"sv},
       "job progress"
     );
     if (normalized.at("schema") != 1) {
@@ -2271,25 +1721,6 @@ namespace offline_sbs::wire {
     result.progress.source_duration_seconds = optional_value<double>(progress, "source_duration_seconds", [&]() {
       return finite_number(progress, "source_duration_seconds", "job progress");
     });
-    result.progress.scene_count = optional_value<std::uint64_t>(progress, "scene_count", [&]() {
-      return unsigned_integer<std::uint64_t>(progress, "scene_count", "job progress");
-    });
-    if (!progress.at("current_scene").is_null()) {
-      if (!progress.at("current_scene").is_object()) {
-        throw contract_error("job current scene must be an object or null");
-      }
-      result.progress.current_scene = progress.at("current_scene");
-    }
-    if (!normalized.at("scene_decisions").is_array() ||
-        normalized.at("scene_decisions").size() > 64) {
-      throw contract_error("job scene decisions must be a bounded array");
-    }
-    for (const auto &decision : normalized.at("scene_decisions")) {
-      if (!decision.is_object()) {
-        throw contract_error("job scene decision must be an object");
-      }
-      result.progress.scene_decisions.push_back(decision);
-    }
     result.created_at_unix_ms = signed_integer(normalized, "created_at_unix_ms", "job snapshot");
     result.started_at_unix_ms = optional_value<std::int64_t>(normalized, "started_at_unix_ms", [&]() {
       return signed_integer(normalized, "started_at_unix_ms", "job snapshot");
@@ -2315,9 +1746,7 @@ namespace offline_sbs::wire {
           *result.progress.total_frames == 0)) ||
         (result.progress.source_time_seconds && *result.progress.source_time_seconds < 0.0) ||
         (result.progress.source_duration_seconds &&
-         *result.progress.source_duration_seconds <= 0.0) ||
-        (result.progress.scene_count &&
-         *result.progress.scene_count > max_paged_scene_count)) {
+         *result.progress.source_duration_seconds <= 0.0)) {
       throw contract_error("job progress has invalid bounded counters or time values");
     }
     return result;

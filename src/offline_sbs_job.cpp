@@ -77,11 +77,7 @@ namespace offline_sbs {
     constexpr std::uint64_t retained_staging_minimum_charge_bytes =
       1ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_contract_bytes = 16ull * 1024ull * 1024ull;
-    constexpr std::uintmax_t max_scene_audit_bytes = 32ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_progress_contract_bytes = 256ull * 1024ull;
-    constexpr std::size_t max_current_scene_bytes = 16ull * 1024ull;
-    constexpr std::size_t max_scene_count = max_paged_scene_count;
-    constexpr std::size_t max_progress_scene_decisions = 64;
     constexpr std::size_t max_browse_entries = 4096;
     constexpr std::size_t max_browse_path_components = 256;
     constexpr std::size_t max_browse_response_bytes = 512ull * 1024ull;
@@ -99,7 +95,6 @@ namespace offline_sbs {
       max_native_worker_log_bytes - native_worker_log_limit_marker.size();
 
     static_assert(max_contract_bytes == worker_result_max_bytes);
-    static_assert(max_scene_audit_bytes == scene_audit_max_bytes);
     static_assert(
       native_worker_log_limit_marker.size() < max_native_worker_log_bytes
     );
@@ -1998,10 +1993,7 @@ namespace offline_sbs {
       const fs::path &path,
       std::string &error,
       const std::uintmax_t max_bytes = max_contract_bytes,
-      std::string *content_sha256 = nullptr,
-      bool *acquisition_failed = nullptr,
-      std::uintmax_t *content_bytes = nullptr,
-      std::string *content_serialized = nullptr
+      bool *acquisition_failed = nullptr
     ) {
       if (acquisition_failed) {
         *acquisition_failed = false;
@@ -2183,61 +2175,11 @@ namespace offline_sbs {
           error = "contract root is not an object";
           return std::nullopt;
         }
-        if (content_sha256) {
-          *content_sha256 = sha256_hex(serialized);
-        }
-        if (content_bytes) *content_bytes = serialized.size();
-        if (content_serialized) *content_serialized = std::move(serialized);
         return value;
       } catch (const std::exception &exception) {
         error = std::string {"cannot parse contract: "} + exception.what();
         return std::nullopt;
       }
-    }
-
-    std::optional<nlohmann::json> read_audit_page_checked(
-      const fs::path &directory, const wire::scene_audit_contract_t &manifest,
-      const std::uint32_t index, std::string &error,
-      std::string *serialized = nullptr
-    ) {
-      if (!manifest.paged || index >= manifest.pages.size()) {
-        error = "scene audit page was not found";
-        return std::nullopt;
-      }
-      const auto &descriptor = manifest.pages[index];
-      std::string digest;
-      std::uintmax_t bytes = 0;
-      auto page = read_json_contract(directory / wire::scene_audit_page_filename(index),
-        error, scene_audit_page_max_bytes, &digest, nullptr, &bytes, serialized);
-      if (!page) return std::nullopt;
-      try {
-        if (digest != descriptor.sha256 || bytes != descriptor.bytes) {
-          throw std::runtime_error("scene audit page identity differs from its manifest");
-        }
-        wire::validate_scene_audit_page(wire::parse_scene_audit_page(*page), descriptor,
-          manifest.status == "complete" && index + 1 == manifest.pages.size());
-        return page;
-      } catch (const std::exception &exception) {
-        error = exception.what();
-        return std::nullopt;
-      }
-    }
-
-    bool validate_audit_pages(const fs::path &directory,
-                              const wire::scene_audit_contract_t &manifest,
-                              std::string &error,
-                              std::vector<scene_plan_t> *recent = nullptr) {
-      for (const auto &descriptor : manifest.pages) {
-        const auto page = read_audit_page_checked(directory, manifest, descriptor.index, error);
-        if (!page) return false;
-        if (recent) {
-          for (const auto &scene : page->at("scenes")) {
-            recent->push_back(wire::parse_scene_record(scene));
-            if (recent->size() > scene_audit_recent_scenes) recent->erase(recent->begin());
-          }
-        }
-      }
-      return true;
     }
 
     std::string quote_windows_process_argument(const std::string_view argument) {
@@ -3130,35 +3072,6 @@ namespace offline_sbs {
         }
         progress.source_duration_seconds = number;
       }
-      if (value.contains("scene_count") && !value["scene_count"].is_null()) {
-        progress.scene_count = value["scene_count"].get<std::uint64_t>();
-        if (*progress.scene_count > max_scene_count) {
-          throw std::runtime_error("worker progress scene count exceeds the serialized contract");
-        }
-      }
-      if (value.contains("current_scene") && !value["current_scene"].is_null()) {
-        if (
-          !value["current_scene"].is_object() ||
-          value["current_scene"].dump().size() > max_current_scene_bytes
-        ) {
-          throw std::runtime_error("worker current scene is invalid");
-        }
-        progress.current_scene = value["current_scene"];
-      }
-      if (value.contains("scene_decisions")) {
-        const auto &decisions = value["scene_decisions"];
-        if (
-          !decisions.is_array() ||
-          decisions.size() > max_progress_scene_decisions ||
-          decisions.dump().size() > max_progress_contract_bytes ||
-          !std::ranges::all_of(decisions, [](const auto &decision) {
-            return decision.is_object();
-          })
-        ) {
-          throw std::runtime_error("worker scene decisions are invalid");
-        }
-        progress.scene_decisions = decisions;
-      }
       return progress;
     }
 
@@ -3204,14 +3117,6 @@ namespace offline_sbs {
           error = "worker result identity/configuration attestation mismatch";
           return false;
         }
-        const auto scene_count = typed_result.total_scene_count.value_or(typed_result.scenes.size());
-        if (
-          scene_count == 0 ||
-          scene_count > max_scene_count
-        ) {
-          error = "worker result scene count is invalid";
-          return false;
-        }
         const auto &source = typed_result.source;
         if (
           source.width == 0 || source.height == 0 || source.frame_count == 0 ||
@@ -3223,46 +3128,15 @@ namespace offline_sbs {
         }
         const auto expected_source_contract =
           (context.result_directory / "source-contract.json").lexically_normal();
-        const auto expected_scene_audit =
-          (context.result_directory / "scene-audit.json").lexically_normal();
         if (
           path_from_utf8(source.contract_path)
               .lexically_normal() != expected_source_contract ||
-          path_from_utf8(typed_result.scene_audit_path)
-              .lexically_normal() != expected_scene_audit ||
-          !regular_nonempty_file(expected_source_contract) ||
-          !regular_nonempty_file(expected_scene_audit)
+          !regular_nonempty_file(expected_source_contract)
         ) {
           error = "worker result artifact paths are invalid";
           return false;
         }
         const auto &cache = typed_result.cache;
-        if (typed_result.total_scene_count) {
-          std::string digest;
-          const auto document = read_json_contract(expected_scene_audit, error, max_scene_audit_bytes, &digest);
-          if (!document || digest != typed_result.scene_audit_manifest_sha256) {
-            error = "worker scene audit manifest identity is invalid: " + error;
-            return false;
-          }
-          const auto manifest = wire::parse_scene_audit_contract(*document);
-          std::vector<scene_plan_t> recent;
-          if (!manifest.paged || manifest.status != "complete" || manifest.scene_count != scene_count ||
-              manifest.covered_end_sequence != source.frame_count + 1 ||
-              !validate_audit_pages(context.result_directory, manifest, error, &recent)) {
-            error = "worker paged audit coverage is invalid: " + error;
-            return false;
-          }
-          if (recent.size() != typed_result.scenes.size()) {
-            error = "worker recent scene tail disagrees with its audit";
-            return false;
-          }
-          for (std::size_t i = 0; i < recent.size(); ++i) {
-            if (wire::scene_record_json(recent[i]) != wire::scene_record_json(typed_result.scenes[i])) {
-              error = "worker recent scene evidence disagrees with its audit";
-              return false;
-            }
-          }
-        }
         if (
           cache.hard_cap_bytes != context.scene_cache_max_bytes ||
           cache.remaining_bytes != 0 ||
@@ -3308,10 +3182,9 @@ namespace offline_sbs {
       const nlohmann::json &result,
       const worker_context_t &context
     ) {
-      // The child-owned worker result and scene-audit manifest/pages retain the complete
-      // per-scene causal evidence. Durable service state stays deliberately small so
-      // listing jobs cannot deep-copy a multi-hour clip's full report under the service
-      // mutex and job.json remains bounded and restart-safe.
+      // The child-owned worker result retains the complete attestation. Durable service
+      // state stays deliberately small so listing jobs cannot deep-copy a full report
+      // under the service mutex and job.json remains bounded and restart-safe.
       nlohmann::json compact = nlohmann::json::object();
       constexpr std::array scalar_fields {
         "schema"sv,
@@ -3321,9 +3194,6 @@ namespace offline_sbs {
         "codec"sv,
         "worker_spec_sha256"sv,
         "python_dependency"sv,
-        "scene_count"sv,
-        "scene_audit"sv,
-        "scene_audit_manifest_sha256"sv,
         "output"sv,
       };
       for (const auto field : scalar_fields) {
@@ -3384,8 +3254,6 @@ namespace offline_sbs {
         }
       );
       compact["full_result_contract"] = path_to_utf8(context.worker_result);
-      compact["scene_decisions_contract"] =
-        path_to_utf8(context.result_directory / "scene-audit.json");
       compact["details_storage"] = "worker-artifacts";
       return compact;
     }
@@ -3395,13 +3263,6 @@ namespace offline_sbs {
     wire::job_snapshot_contract_t job_snapshot_wire_contract(
       const job_snapshot_t &snapshot
     ) {
-      std::vector<nlohmann::json> decisions;
-      if (snapshot.progress.scene_decisions.is_array()) {
-        decisions.assign(
-          snapshot.progress.scene_decisions.begin(),
-          snapshot.progress.scene_decisions.end()
-        );
-      }
       return {
       .id = snapshot.id,
       .state = to_string(snapshot.state),
@@ -3426,13 +3287,6 @@ namespace offline_sbs {
         .total_frames = snapshot.progress.total_frames,
         .source_time_seconds = snapshot.progress.source_time_seconds,
         .source_duration_seconds = snapshot.progress.source_duration_seconds,
-        .scene_count = snapshot.progress.scene_count,
-        .current_scene = snapshot.progress.current_scene.is_object() ?
-                           std::optional<nlohmann::json> {
-                             snapshot.progress.current_scene
-                           } :
-                           std::nullopt,
-        .scene_decisions = std::move(decisions),
       },
       .created_at_unix_ms = snapshot.created_at_unix_ms,
       .started_at_unix_ms = snapshot.started_at_unix_ms,
@@ -3456,15 +3310,6 @@ namespace offline_sbs {
       {"error_code", to_string(code)},
       {"error", error.empty() ? nlohmann::json(nullptr) : nlohmann::json(error)},
       {"job", job ? job->json() : nlohmann::json(nullptr)},
-    };
-  }
-
-  nlohmann::json scene_audit_reply_t::json() const {
-    return {
-      {"status", ok},
-      {"error_code", to_string(code)},
-      {"error", error.empty() ? nlohmann::json(nullptr) : nlohmann::json(error)},
-      {"audit", ok ? audit : nlohmann::json(nullptr)},
     };
   }
 
@@ -3502,7 +3347,7 @@ namespace offline_sbs {
 #ifdef _WIN32
       std::vector<pinned_handle_t> input_pins;
       // The job root is owned by worker_tree. Retain an additional result-directory
-      // identity pin until pruning/shutdown so audit reads cannot be redirected.
+      // identity pin until pruning/shutdown so the retained artifacts cannot be redirected.
       std::vector<pinned_handle_t> worker_path_pins;
 #endif
     };
@@ -3653,24 +3498,25 @@ namespace offline_sbs {
         snapshot.error = contract.error.value_or("");
         if (contract.worker_result) {
           snapshot.worker_result = *contract.worker_result;
+          // A job retained by a release that published the diagnostic scene audit still
+          // names it here. Those references are dropped on read and never written back;
+          // the audit files themselves stay in the job's result directory until the job
+          // is cleared or pruned.
+          for (const auto retired : {
+                 "scene_count",
+                 "scene_audit",
+                 "scene_audit_manifest_sha256",
+                 "scene_audit_sha256",
+                 "scene_decisions_contract",
+               }) {
+            snapshot.worker_result.erase(retired);
+          }
         }
         snapshot.progress.phase = contract.progress.phase;
         snapshot.progress.processed_frames = contract.progress.processed_frames;
         snapshot.progress.total_frames = contract.progress.total_frames;
         snapshot.progress.source_time_seconds = contract.progress.source_time_seconds;
         snapshot.progress.source_duration_seconds = contract.progress.source_duration_seconds;
-        snapshot.progress.scene_count = contract.progress.scene_count;
-        if (contract.progress.current_scene) {
-          if (contract.progress.current_scene->dump().size() > max_current_scene_bytes) {
-            throw std::runtime_error("persisted current scene is too large");
-          }
-          snapshot.progress.current_scene = *contract.progress.current_scene;
-        }
-        snapshot.progress.scene_decisions = contract.progress.scene_decisions;
-        if (snapshot.progress.scene_decisions.dump().size() >
-            max_progress_contract_bytes) {
-          throw std::runtime_error("persisted scene decisions are too large");
-        }
         return snapshot;
       } catch (const std::exception &exception) {
         error = std::string {"invalid persisted job: "} + exception.what();
@@ -4272,8 +4118,6 @@ namespace offline_sbs {
         }
         auto record = std::make_shared<record_t>();
         record->snapshot = std::move(*snapshot);
-        const bool persisted_terminal_state =
-          is_terminal(record->snapshot.state);
         record->retention_sequence = retention_sequence;
         record->worker = worker_context_for(
           record->snapshot,
@@ -4624,43 +4468,6 @@ namespace offline_sbs {
           }
         }
         if (
-          !persisted_terminal_state &&
-          is_terminal(record->snapshot.state) &&
-          worker_paths_trusted &&
-          !record->worker_artifacts_pruned
-        ) {
-          std::string audit_hash;
-          std::string audit_error;
-          bool audit_attested = false;
-          run_user_filesystem_action([&]() {
-            auto audit = read_json_contract(
-              record->worker.result_directory / "scene-audit.json",
-              audit_error,
-              max_scene_audit_bytes,
-              &audit_hash
-            );
-            if (audit) {
-              try {
-                const auto manifest = wire::parse_scene_audit_contract(*audit);
-                audit_attested = validate_audit_pages(record->worker.result_directory, manifest, audit_error);
-              } catch (const std::exception &) { audit_attested = false; }
-            }
-          }, audit_error);
-          if (audit_attested) {
-            if (!record->snapshot.worker_result.is_object()) {
-              record->snapshot.worker_result = nlohmann::json::object();
-            }
-            record->snapshot.worker_result["scene_audit_sha256"] =
-              std::move(audit_hash);
-            if (!persist_locked(*record, read_error)) {
-              error =
-                "cannot persist recovered scene-audit identity: " +
-                read_error;
-              return false;
-            }
-          }
-        }
-        if (
           migrate_retention_sequence &&
           !persist_locked(*record, read_error)
         ) {
@@ -4819,7 +4626,6 @@ namespace offline_sbs {
                 context.worker_progress,
                 contract_error,
                 max_progress_contract_bytes,
-                nullptr,
                 &acquisition_failure
               );
               if (value || !acquisition_failure) {
@@ -4893,7 +4699,7 @@ namespace offline_sbs {
 
       // The child can atomically publish its final progress and exit between two
       // polling ticks. Drain that last contract before terminalizing the job so
-      // finalized scene decisions are not lost on fast success or failure exits.
+      // its final progress is not lost on fast success or failure exits.
       if (const auto progress_error = consume_progress_update(true)) {
         std::string cleanup_error;
         terminate_worker(cleanup_error);
@@ -4967,28 +4773,6 @@ namespace offline_sbs {
       progress_t progress
     ) {
       std::lock_guard lock {mutex};
-      if (
-        (
-          progress.scene_count &&
-          *progress.scene_count > max_scene_count
-        ) ||
-        !progress.scene_decisions.is_array() ||
-        progress.scene_decisions.size() > max_progress_scene_decisions ||
-        progress.scene_decisions.dump().size() >
-          max_progress_contract_bytes ||
-        (
-          !progress.current_scene.is_null() &&
-          (
-            !progress.current_scene.is_object() ||
-            progress.current_scene.dump().size() > max_current_scene_bytes
-          )
-        )
-      ) {
-        BOOST_LOG(error)
-          << "Discarding invalid offline SBS progress decision window ["sv
-          << id << ']';
-        return;
-      }
       const auto iterator = jobs.find(id);
       if (
         iterator == jobs.end() ||
@@ -5309,43 +5093,6 @@ namespace offline_sbs {
               std::move(outcome.result),
               record->worker
             );
-          }
-          // Bind any retained audit to the exact bounded bytes observed after
-          // the worker process has exited. Later HTTP reads use a no-follow
-          // handle and must reproduce this digest, so a same-user leaf swap or
-          // in-place rewrite cannot masquerade as the worker's audit.
-          std::string audit_hash;
-          std::string audit_attestation_error;
-          bool audit_attested = false;
-          run_user_filesystem_action([&]() {
-            auto audit = read_json_contract(
-              record->worker.result_directory / "scene-audit.json",
-              audit_attestation_error,
-              max_scene_audit_bytes,
-              &audit_hash
-            );
-            if (audit) {
-              try {
-                const auto manifest = wire::parse_scene_audit_contract(*audit);
-                const auto expected = record->snapshot.worker_result.is_object() ?
-                  record->snapshot.worker_result.value("scene_audit_manifest_sha256", std::string {}) : std::string {};
-                if (!expected.empty()) {
-                  // Native acceptance already checked every page before publication.
-                  // Recheck its compact manifest identity without re-reading up to
-                  // 1 GiB under the service lock, or rebinding a changed manifest.
-                  audit_attested = manifest.paged && audit_hash == expected;
-                } else {
-                  audit_attested = validate_audit_pages(record->worker.result_directory, manifest, audit_attestation_error);
-                }
-              } catch (const std::exception &) { audit_attested = false; }
-            }
-          }, audit_attestation_error);
-          if (audit_attested) {
-            if (!record->snapshot.worker_result.is_object()) {
-              record->snapshot.worker_result = nlohmann::json::object();
-            }
-            record->snapshot.worker_result["scene_audit_sha256"] =
-              std::move(audit_hash);
           }
           // Never remove a failed/canceled staging pathname from the manager. The
           // native worker reserves its file identity and performs handle-based cleanup;
@@ -6457,184 +6204,6 @@ namespace offline_sbs {
     };
   }
 
-  scene_audit_reply_t job_service_t::scene_audit(
-    const std::string_view id,
-    const std::optional<std::uint32_t> page
-  ) const {
-    std::shared_ptr<impl_t::record_t> record;
-    job_state_e state_at_lookup = job_state_e::queued;
-    std::optional<std::uint64_t> expected_scene_count;
-    std::optional<std::string> expected_audit_sha256;
-    {
-      std::lock_guard lock {impl_->mutex};
-      if (!impl_->started) {
-        return {
-          .code = error_code_e::not_initialized,
-          .error = "offline SBS job manager is not running",
-        };
-      }
-      const auto iterator = impl_->jobs.find(std::string {id});
-      if (iterator == impl_->jobs.end()) {
-        return {
-          .code = error_code_e::not_found,
-          .error = "offline SBS job was not found",
-        };
-      }
-      record = iterator->second;
-      state_at_lookup = record->snapshot.state;
-      expected_scene_count = record->snapshot.progress.scene_count;
-      if (
-        record->snapshot.worker_result.is_object() &&
-        record->snapshot.worker_result.contains("scene_audit_sha256") &&
-        record->snapshot.worker_result["scene_audit_sha256"].is_string()
-      ) {
-        expected_audit_sha256 =
-          record->snapshot.worker_result["scene_audit_sha256"]
-            .get<std::string>();
-      }
-    }
-    if (!is_terminal(state_at_lookup)) {
-      return {
-        .code = error_code_e::conflict,
-        .error = "scene audit is available only after the job becomes terminal",
-      };
-    }
-    const bool completed_job = state_at_lookup == job_state_e::complete;
-    if (
-      !expected_audit_sha256 ||
-      expected_audit_sha256->size() != 64
-    ) {
-      return {
-        .code = error_code_e::io_error,
-        .error =
-          "scene audit is unavailable because its terminal identity was not "
-          "attested",
-      };
-    }
-
-    // Never accept an artifact path from HTTP or from the child result document.
-    // The only readable path is the manager-owned path fixed when this job was admitted.
-    std::lock_guard artifact_lock {record->artifact_mutex};
-    if (!record->worker_tree) {
-      return {
-        .code = error_code_e::io_error,
-        .error = "scene audit worker tree is not identity-pinned",
-      };
-    }
-#ifdef _WIN32
-    std::string identity_error;
-    if (
-      !revalidate_pins(
-        impl_->managed_root_pins,
-        "offline managed roots",
-        identity_error
-      ) ||
-      record->worker_path_pins.empty() ||
-      !revalidate_pins(
-        record->worker_path_pins,
-        "offline worker job paths",
-        identity_error
-      )
-    ) {
-      return {
-        .code = error_code_e::io_error,
-        .error =
-          identity_error.empty() ?
-            "scene audit path is not identity-pinned" :
-            identity_error,
-      };
-    }
-#endif
-    const auto audit_path =
-      record->worker.result_directory / "scene-audit.json";
-    std::optional<nlohmann::json> audit;
-    std::string read_error;
-    std::string observed_audit_sha256;
-    std::string serialized_artifact;
-    bool exact_artifact = false;
-    if (!run_bound_user_filesystem_action(
-          impl_->config.expected_user_id,
-          [&]() {
-          audit = read_json_contract(
-            audit_path,
-            read_error,
-            max_scene_audit_bytes,
-            &observed_audit_sha256,
-            nullptr, nullptr, &serialized_artifact
-          );
-        }, read_error)) {
-      return {
-        .code = error_code_e::io_error,
-        .error = read_error,
-      };
-    }
-    if (!audit) {
-      return {
-        .code = error_code_e::io_error,
-        .error = "scene audit is unavailable: " + read_error,
-      };
-    }
-    if (observed_audit_sha256 != *expected_audit_sha256) {
-      return {
-        .code = error_code_e::io_error,
-        .error =
-          "scene audit identity changed after the worker became terminal",
-      };
-    }
-    try {
-      const auto typed_audit = wire::parse_scene_audit_contract(*audit);
-      exact_artifact = typed_audit.paged;
-      const bool complete_audit = typed_audit.status == "complete";
-      const bool partial_audit = typed_audit.status == "running";
-      if (
-        (
-          completed_job ?
-            !complete_audit :
-            !(complete_audit || partial_audit)
-        ) ||
-        (
-          complete_audit &&
-          expected_scene_count &&
-          (typed_audit.paged ? typed_audit.scene_count : typed_audit.scenes.size()) != *expected_scene_count
-        )
-      ) {
-        return {
-          .code = error_code_e::io_error,
-          .error = "scene audit contract is invalid",
-        };
-      }
-      if (page) {
-        if (!typed_audit.paged || *page >= typed_audit.pages.size()) {
-          return {.code = error_code_e::not_found, .error = "scene audit page was not found"};
-        }
-        std::optional<nlohmann::json> page_document;
-        if (!run_bound_user_filesystem_action(impl_->config.expected_user_id, [&]() {
-              page_document = read_audit_page_checked(record->worker.result_directory, typed_audit, *page, read_error, &serialized_artifact);
-            }, read_error) || !page_document) {
-          return {.code = error_code_e::io_error, .error = "scene audit page is unavailable: " + read_error};
-        }
-        audit = std::move(page_document);
-        (*audit)["document_kind"] = "page";
-      } else {
-        (*audit)["document_kind"] = typed_audit.paged ? "manifest" : "inline-audit";
-      }
-      (*audit)["availability"] = complete_audit ? "complete" : "partial";
-      (*audit)["job_terminal_state"] = to_string(state_at_lookup);
-    } catch (const std::exception &exception) {
-      return {
-        .code = error_code_e::io_error,
-        .error =
-          std::string {"scene audit contract is invalid: "} +
-          exception.what(),
-      };
-    }
-    return {
-      .ok = true,
-      .audit = std::move(*audit),
-      .serialized_artifact = exact_artifact ? std::optional {std::move(serialized_artifact)} : std::nullopt,
-    };
-  }
-
   browse_reply_t job_service_t::browse(
     const browse_request_t &request
   ) const {
@@ -6917,9 +6486,8 @@ namespace offline_sbs {
     values.reserve(impl_->jobs.size());
     for (const auto &[id, record] : impl_->jobs) {
       // The Web UI polls this collection. Keep it bounded per retained job; the
-      // selected-job endpoint supplies its recent decisions and worker result.
+      // selected-job endpoint supplies its worker result.
       auto summary = record->snapshot;
-      summary.progress.scene_decisions = nlohmann::json::array();
       summary.worker_result = nullptr;
       values.push_back(std::move(summary));
     }
@@ -7193,21 +6761,6 @@ namespace offline_sbs {
       };
     }
     return service->get(id);
-  }
-
-  scene_audit_reply_t scene_audit(const std::string_view id, const std::optional<std::uint32_t> page) {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-    }
-    if (!service) {
-      return {
-        .code = error_code_e::not_initialized,
-        .error = "offline SBS job manager is not initialized",
-      };
-    }
-    return service->scene_audit(id, page);
   }
 
   browse_reply_t browse(const browse_request_t &request) {

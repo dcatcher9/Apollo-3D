@@ -189,10 +189,6 @@ namespace offline_sbs {
   bool native_stdout_pipe_error_is_eof_for_test(
     std::uint32_t error
   ) noexcept;
-  bool adaptive_trace_flags_valid_for_test(
-    float cut_flags,
-    std::uint32_t analysis_flags
-  );
   std::uint64_t retained_timing_frame_limit_for_test();
   bool can_retain_timing_frame_for_test(std::uint64_t retained_frames);
   std::uintmax_t stream_inventory_probe_byte_limit_for_test();

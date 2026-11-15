@@ -111,8 +111,6 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/sbs_bench_harness.h"
         "${CMAKE_SOURCE_DIR}/src/sbs_bench_depth_coordinate_v2.cpp"
         "${CMAKE_SOURCE_DIR}/src/sbs_bench_depth_coordinate_v2.h"
-        "${CMAKE_SOURCE_DIR}/src/offline_scene_planner.cpp"
-        "${CMAKE_SOURCE_DIR}/src/offline_scene_planner.h"
         "${CMAKE_SOURCE_DIR}/src/offline_sbs_contract.h"
         "${CMAKE_SOURCE_DIR}/src/offline_sbs_wire_contract.cpp"
         "${CMAKE_SOURCE_DIR}/src/offline_sbs_wire_contract.h"

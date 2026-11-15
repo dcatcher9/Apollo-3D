@@ -87,7 +87,7 @@ namespace {
 
   nlohmann::json worker_spec_json() {
     return {
-      {"schema", 2},
+      {"schema", 3},
       {"job_id", "11111111-2222-3333-4444-555555555555"},
       {"operation", "convert"},
       {"input_path", "C:/media/source.mkv"},
@@ -114,7 +114,6 @@ namespace {
       {"codec", "hevc_nvenc"},
       {"pipeline", {
                       {"implementation", "native-causal-single-pass"},
-                      {"cut_state", "authenticated-online-pulse-count"},
                       {"lookahead", false},
                       {"scene_cache", false},
                       {"replay", false},
@@ -205,44 +204,8 @@ namespace {
   }
 }  // namespace
 
-TEST(OfflineSbsWorker, SharesBoundedLinearSceneAuditContract) {
+TEST(OfflineSbsWorker, SharesBoundedWorkerResultContract) {
   EXPECT_EQ(offline_sbs::worker_result_max_bytes, 16ull * 1024ull * 1024ull);
-  EXPECT_EQ(offline_sbs::scene_audit_max_bytes, 32ull * 1024ull * 1024ull);
-  EXPECT_EQ(offline_sbs::max_serialized_scene_count, 1920u);
-
-  std::size_t checkpoint_count = 0;
-  std::size_t checkpoint_prefix_sum = 0;
-  for (
-    std::size_t scenes = 1;
-    scenes <= offline_sbs::max_serialized_scene_count;
-    ++scenes
-  ) {
-    if (offline_sbs::is_scene_audit_checkpoint(scenes)) {
-      ++checkpoint_count;
-      checkpoint_prefix_sum += scenes;
-    }
-  }
-  EXPECT_EQ(checkpoint_count, 11u);
-  EXPECT_LT(
-    checkpoint_prefix_sum,
-    offline_sbs::max_serialized_scene_count * 2
-  );
-  EXPECT_TRUE(offline_sbs::is_scene_audit_checkpoint(1));
-  EXPECT_TRUE(offline_sbs::is_scene_audit_checkpoint(1024));
-  EXPECT_FALSE(offline_sbs::is_scene_audit_checkpoint(0));
-  EXPECT_FALSE(offline_sbs::is_scene_audit_checkpoint(1025));
-}
-
-TEST(OfflineSbsWorker, RejectsUnknownAdaptiveTraceFlagMeanings) {
-  EXPECT_TRUE(offline_sbs::adaptive_trace_flags_valid_for_test(0.0f, 0u));
-  EXPECT_TRUE(offline_sbs::adaptive_trace_flags_valid_for_test(127.0f, 255u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(128.0f, 0u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(0.0f, 256u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(1.5f, 0u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(
-    std::numeric_limits<float>::quiet_NaN(),
-    0u
-  ));
 }
 
 TEST(OfflineSbsWorker, ObservationTimelineRoundTripsAndRejectsRegression) {
@@ -339,7 +302,13 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
     direct.find("spec.operation == \"convert\" ? \"conversion\" : \"adaptive\""),
     std::string::npos
   );
-  EXPECT_NE(direct.find("causal_scene_tracker_t"), std::string::npos);
+  EXPECT_NE(
+    direct.find("validate_trace_frame(trace.read_frame(analysis, timing.sequence), timing)"),
+    std::string::npos
+  );
+  EXPECT_EQ(direct.find("scene_tracker"), std::string::npos);
+  EXPECT_EQ(direct.find("scene-audit"), std::string::npos);
+  EXPECT_EQ(source.find("hard_cut"), std::string::npos);
   EXPECT_NE(
     direct.find("conversion_encoder->publish(timing.sequence, std::move(sbs))"),
     std::string::npos
@@ -354,14 +323,6 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
   EXPECT_EQ(direct.find("render_decoder"), std::string::npos);
   EXPECT_EQ(direct.find("render_scenes"), std::string::npos);
   EXPECT_EQ(direct.find("\"replay\""), std::string::npos);
-  EXPECT_NE(
-    direct.find("commit_scenes(finalized, timing.sequence)"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    direct.find("commit_scenes(finalized, media.frames.size())"),
-    std::string::npos
-  );
 }
 
 TEST(OfflineSbsWorker, OfflineOverlapHasFixedSmallCapacitiesAndByteBound) {

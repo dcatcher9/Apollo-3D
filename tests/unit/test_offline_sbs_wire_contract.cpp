@@ -1,41 +1,13 @@
 #include "src/offline_sbs_wire_contract.h"
-#include "src/offline_sbs_paged_audit.h"
 
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
-#include <map>
 
 #include <gtest/gtest.h>
 
 namespace {
-  offline_sbs::scene_plan_t scene_record() {
-    offline_sbs::scene_plan_t scene;
-    scene.scene_id = 1;
-    scene.semantic_scene_id = 1;
-    scene.start_sequence = 1;
-    scene.end_sequence_exclusive = 3;
-    scene.frame_count = 2;
-    scene.cache_bytes = 0;
-    scene.start_pts_seconds = 0.0;
-    scene.end_pts_seconds_exclusive = 2.0 / 30.0;
-    scene.evidence.source_frame_count = 2;
-    scene.evidence.depth_update_count = 2;
-    scene.evidence.appearance_veto_count = 0;
-    scene.evidence.depth_change_max = 0.25f;
-    scene.boundary.decision = offline_sbs::boundary_decision_e::end_of_stream;
-    scene.boundary.reason = "end of stream";
-    scene.boundary.accepted = true;
-    scene.boundary.semantic_cut = false;
-    scene.boundary.revision_depth_updates = 0;
-    scene.boundary.revision_source_frames = 0;
-    scene.cut_state_semantics = "causal-production-exact";
-    scene.known_limit =
-      "diagnostic scene epochs only; rendering is committed causally per source frame";
-    return scene;
-  }
-
   offline_sbs::wire::whole_clip_contract_t whole_clip(
     const bool conversion
   ) {
@@ -214,8 +186,6 @@ namespace {
         .color_mode = "sdr",
         .contract_path = "C:/state/jobs/one/result/source-contract.json",
       },
-      .scenes = {scene_record()},
-      .scene_audit_path = "C:/state/jobs/one/result/scene-audit.json",
       .analysis_contract = whole_clip(true),
       .replay_contracts = {},
       .cache = {
@@ -257,11 +227,6 @@ namespace {
         .total_frames = 2,
         .source_time_seconds = 1.0 / 30.0,
         .source_duration_seconds = 2.0 / 30.0,
-        .scene_count = 1,
-        .current_scene = std::optional<nlohmann::json> {
-          nlohmann::json {{"scene_id", 1}}
-        },
-        .scene_decisions = {nlohmann::json {{"scene_id", 1}}},
       },
       .created_at_unix_ms = 1,
       .started_at_unix_ms = 2,
@@ -307,6 +272,23 @@ TEST(OfflineSbsWireContractTest, WorkerSpecRoundTripsThroughOneExactCodec) {
 TEST(OfflineSbsWireContractTest, WorkerSpecRejectsUnknownFields) {
   auto encoded = offline_sbs::wire::to_json(worker_spec());
   encoded["legacy_python_worker"] = false;
+  EXPECT_THROW(
+    offline_sbs::wire::parse_worker_spec_contract(encoded),
+    offline_sbs::wire::contract_error
+  );
+}
+
+TEST(OfflineSbsWireContractTest, WorkerSpecRejectsRetiredCutStatePipelineField) {
+  auto encoded = offline_sbs::wire::to_json(worker_spec());
+  EXPECT_EQ(encoded.at("schema"), 3);
+  EXPECT_FALSE(encoded.at("pipeline").contains("cut_state"));
+  encoded["pipeline"]["cut_state"] = "authenticated-online-pulse-count";
+  EXPECT_THROW(
+    offline_sbs::wire::parse_worker_spec_contract(encoded),
+    offline_sbs::wire::contract_error
+  );
+  encoded = offline_sbs::wire::to_json(worker_spec());
+  encoded["schema"] = 2;
   EXPECT_THROW(
     offline_sbs::wire::parse_worker_spec_contract(encoded),
     offline_sbs::wire::contract_error
@@ -427,6 +409,33 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsNarrowIntegerOverflow) {
   );
 }
 
+TEST(OfflineSbsWireContractTest, WorkerResultCarriesNoSceneListAndRejectsRetiredShapes) {
+  const auto encoded = offline_sbs::wire::to_json(worker_result());
+  EXPECT_EQ(encoded.at("schema"), 4);
+  for (const auto retired : {
+         "scene_count",
+         "scenes",
+         "scene_audit",
+         "scene_audit_manifest_sha256",
+       }) {
+    EXPECT_FALSE(encoded.contains(retired)) << retired;
+    auto with_retired = encoded;
+    with_retired[retired] = nullptr;
+    EXPECT_THROW(
+      offline_sbs::wire::parse_worker_result_contract(with_retired),
+      offline_sbs::wire::contract_error
+    ) << retired;
+  }
+  for (const int retired_schema : {2, 3}) {
+    auto with_schema = encoded;
+    with_schema["schema"] = retired_schema;
+    EXPECT_THROW(
+      offline_sbs::wire::parse_worker_result_contract(with_schema),
+      offline_sbs::wire::contract_error
+    ) << retired_schema;
+  }
+}
+
 TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
   const auto expect_rejected = [](const auto &mutate) {
     auto encoded = offline_sbs::wire::to_json(worker_result());
@@ -439,9 +448,6 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
 
   expect_rejected([](auto &encoded) {
     encoded["analysis_contract"]["source_width"] = 1919;
-  });
-  expect_rejected([](auto &encoded) {
-    encoded["scenes"][0]["evidence"]["source_frame_count"] = 1;
   });
   expect_rejected([](auto &encoded) {
     encoded["analysis_contract"]["artifact_mode"] = "adaptive";
@@ -566,25 +572,6 @@ TEST(OfflineSbsWireContractTest, SceneCacheRequiresCompleteRetainedGlyphTuple) {
   }
 }
 
-TEST(OfflineSbsWireContractTest, SceneAuditRoundTripsTypedSceneAndBoundary) {
-  const offline_sbs::wire::scene_audit_contract_t original {
-    .status = "complete",
-    .peak_cache_bytes = 4096,
-    .analysis_source_raster_bytes = 1024,
-    .peak_live_raster_bytes = 512,
-    .peak_cache_plus_raster_bytes = 4608,
-    .hard_cap_bytes = 8192,
-    .timeline_contract = {{"mode", "exact-rational"}},
-    .scenes = {scene_record()},
-    .boundary_revisions = {scene_record().boundary},
-  };
-  const auto encoded = offline_sbs::wire::to_json(original);
-  const auto parsed = offline_sbs::wire::parse_scene_audit_contract(encoded);
-  ASSERT_EQ(parsed.scenes.size(), 1u);
-  EXPECT_EQ(parsed.scenes.front().frame_count, 2u);
-  EXPECT_EQ(offline_sbs::wire::to_json(parsed), encoded);
-}
-
 TEST(OfflineSbsWireContractTest, WholeClipRoundTripsAndRejectsNestedUnknownField) {
   const auto encoded = offline_sbs::wire::to_json(whole_clip(false));
   const auto parsed = offline_sbs::wire::parse_whole_clip_contract(encoded);
@@ -631,13 +618,10 @@ TEST(OfflineSbsWireContractTest, PersistedJobRoundTripsCurrentWireShape) {
 TEST(OfflineSbsWireContractTest, PersistedJobSupportsOnlyExplicitLegacyOmissions) {
   auto legacy = offline_sbs::wire::to_json(persisted_job());
   legacy.erase("output_location");
-  legacy.erase("scene_decisions");
   legacy.erase("retention_sequence");
   legacy.erase("worker");
-  legacy["progress"].erase("current_scene");
   const auto parsed = offline_sbs::wire::parse_persisted_job_contract(legacy);
   EXPECT_FALSE(parsed.snapshot.output_location);
-  EXPECT_TRUE(parsed.snapshot.progress.scene_decisions.empty());
   EXPECT_FALSE(parsed.retention_sequence);
   EXPECT_FALSE(parsed.worker);
 
@@ -665,21 +649,46 @@ TEST(OfflineSbsWireContractTest, JobSnapshotRejectsNumericOverflow) {
   );
 }
 
-TEST(OfflineSbsWireContractTest, JobSnapshotPreservesAuthoritativeDecisionBound) {
-  auto snapshot = job_snapshot();
-  snapshot.progress.scene_decisions.assign(
-    64,
-    nlohmann::json {{"scene_id", 1}}
-  );
-  auto encoded = offline_sbs::wire::to_json(snapshot);
-  EXPECT_EQ(
-    offline_sbs::wire::parse_job_snapshot_contract(encoded, false)
-      .progress.scene_decisions.size(),
-    64u
-  );
-  encoded["progress"]["scene_decisions"].push_back({{"scene_id", 65}});
+TEST(OfflineSbsWireContractTest, PersistedJobAcceptsAndDiscardsRetiredSceneSummary) {
+  // The shape job.json had while the diagnostic scene list existed.
+  const auto current = offline_sbs::wire::to_json(persisted_job());
+  auto retained = current;
+  retained["scene_decisions"] = nlohmann::json::array({
+    {{"scene_id", 1}, {"boundary", {{"decision", "confirmed"}}}},
+  });
+  retained["progress"]["scene_count"] = 1;
+  retained["progress"]["current_scene"] = {{"scene_id", 2}};
+  retained["worker_result"] = {
+    {"schema", 3},
+    {"scene_count", 2},
+    {"scene_audit", "C:/state/jobs/one/result/scene-audit.json"},
+    {"scene_audit_manifest_sha256", std::string(64, 'b')},
+    {"scene_audit_sha256", std::string(64, 'b')},
+    {"scene_decisions_contract", "C:/state/jobs/one/result/scene-audit.json"},
+  };
+
+  const auto parsed = offline_sbs::wire::parse_persisted_job_contract(retained);
+  EXPECT_EQ(parsed.snapshot.progress.processed_frames, 1u);
+  ASSERT_TRUE(parsed.snapshot.worker_result);
+  const auto rewritten = offline_sbs::wire::to_json(parsed);
+  EXPECT_FALSE(rewritten.contains("scene_decisions"));
+  EXPECT_FALSE(rewritten.at("progress").contains("scene_count"));
+  EXPECT_FALSE(rewritten.at("progress").contains("current_scene"));
+
+  // The older variants with a null or absent summary stay readable too.
+  retained["progress"]["scene_count"] = nullptr;
+  retained["progress"]["current_scene"] = nullptr;
+  retained.erase("scene_decisions");
+  EXPECT_NO_THROW(offline_sbs::wire::parse_persisted_job_contract(retained));
+
+  // The API snapshot is not a durable document and has no retired variant.
+  auto snapshot = offline_sbs::wire::to_json(job_snapshot());
+  EXPECT_FALSE(snapshot.contains("scene_decisions"));
+  EXPECT_FALSE(snapshot.at("progress").contains("scene_count"));
+  EXPECT_FALSE(snapshot.at("progress").contains("current_scene"));
+  snapshot["progress"]["current_scene"] = nullptr;
   EXPECT_THROW(
-    offline_sbs::wire::parse_job_snapshot_contract(encoded, false),
+    offline_sbs::wire::parse_job_snapshot_contract(snapshot, false),
     offline_sbs::wire::contract_error
   );
 }
@@ -703,101 +712,4 @@ TEST(OfflineSbsWireContractTest, RawTransportRoundTripsWithoutRasterFilenames) {
   EXPECT_THROW(offline_sbs::wire::parse_worker_result_contract(encoded), offline_sbs::wire::contract_error);
   value.analysis_contract.sbs.file_pattern = "frame_%010d.png";
   EXPECT_THROW(offline_sbs::wire::to_json(value), offline_sbs::wire::contract_error);
-}
-
-namespace {
-  offline_sbs::scene_plan_t paged_scene(const std::uint64_t id, const bool final = false) {
-    auto scene = scene_record();
-    scene.scene_id = scene.semantic_scene_id = id;
-    scene.start_sequence = id * 2 - 1;
-    scene.end_sequence_exclusive = id * 2 + 1;
-    scene.start_pts_seconds.reset();
-    scene.end_pts_seconds_exclusive.reset();
-    scene.boundary.decision = final ? offline_sbs::boundary_decision_e::end_of_stream : offline_sbs::boundary_decision_e::confirmed;
-    scene.boundary.semantic_cut = !final;
-    scene.boundary.final_sequence = scene.end_sequence_exclusive;
-    return scene;
-  }
-  offline_sbs::wire::scene_audit_contract_t paged_summary(const std::string &status = "complete") {
-    offline_sbs::wire::scene_audit_contract_t result;
-    result.status = status;
-    result.hard_cap_bytes = 1000;
-    result.timeline_contract = nlohmann::json::object();
-    return result;
-  }
-}
-
-TEST(OfflineSbsPagedAudit, LongClipKeepsEverySceneWithBoundedPagesAndRecentTail) {
-  std::map<std::string, std::string> files;
-  offline_sbs::paged_scene_audit_writer_t writer([&](std::string_view name, std::string_view bytes) {
-    EXPECT_TRUE(files.emplace(name, bytes).second);
-    EXPECT_LE(bytes.size(), offline_sbs::scene_audit_page_max_bytes);
-    return std::string(64, 'a');
-  });
-  constexpr std::uint64_t count = 2001;
-  for (std::uint64_t id = 1; id <= count; ++id) {
-    writer.append(paged_scene(id, id == count));
-    EXPECT_LE(writer.pending_scene_count(), offline_sbs::scene_audit_page_max_scenes);
-    EXPECT_LE(writer.recent_scenes().size(), offline_sbs::scene_audit_recent_scenes);
-  }
-  const auto manifest = offline_sbs::wire::parse_scene_audit_contract(writer.manifest(paged_summary()));
-  EXPECT_GT(count, offline_sbs::max_serialized_scene_count);
-  EXPECT_EQ(manifest.scene_count, count);
-  EXPECT_EQ(manifest.boundary_count, count - 1);
-  EXPECT_EQ(manifest.covered_end_sequence, count * 2 + 1);
-  EXPECT_EQ(manifest.pages.size(), 16u);
-  EXPECT_TRUE(manifest.scenes.empty());
-  EXPECT_EQ(writer.recent_scenes().front().scene_id, count - 31);
-  std::uint64_t total = 0;
-  for (const auto &descriptor : manifest.pages) {
-    const auto &bytes = files.at(offline_sbs::wire::scene_audit_page_filename(descriptor.index));
-    const auto page = offline_sbs::wire::parse_scene_audit_page(nlohmann::json::parse(bytes));
-    EXPECT_EQ(bytes.size(), descriptor.bytes);
-    EXPECT_NO_THROW(offline_sbs::wire::validate_scene_audit_page(page, descriptor, descriptor.index + 1 == manifest.pages.size()));
-    total += page.scenes.size();
-  }
-  EXPECT_EQ(total, count);
-  EXPECT_THROW(writer.append(paged_scene(count + 1)), std::runtime_error);
-}
-
-TEST(OfflineSbsPagedAudit, ManifestRejectsMissingReorderedOrOverBudgetPages) {
-  offline_sbs::paged_scene_audit_writer_t writer([](auto, auto) { return std::string(64, 'a'); });
-  for (std::uint64_t id = 1; id <= 129; ++id) writer.append(paged_scene(id, id == 129));
-  const auto manifest = writer.manifest(paged_summary());
-  auto changed = manifest;
-  changed["pages"].erase(0);
-  EXPECT_THROW(offline_sbs::wire::parse_scene_audit_contract(changed), offline_sbs::wire::contract_error);
-  changed = manifest;
-  std::swap(changed["pages"][0], changed["pages"][1]);
-  EXPECT_THROW(offline_sbs::wire::parse_scene_audit_contract(changed), offline_sbs::wire::contract_error);
-  changed = manifest;
-  changed["pages"][0]["bytes"] = offline_sbs::scene_audit_page_max_bytes + 1;
-  EXPECT_THROW(offline_sbs::wire::parse_scene_audit_contract(changed), offline_sbs::wire::contract_error);
-  changed = manifest;
-  changed["storage"]["scene_count"] = 130;
-  EXPECT_THROW(offline_sbs::wire::parse_scene_audit_contract(changed), offline_sbs::wire::contract_error);
-}
-
-TEST(OfflineSbsPagedAudit, RejectsOversizeSingleSceneBeforePublication) {
-  int publishes = 0;
-  offline_sbs::paged_scene_audit_writer_t writer([&](auto, auto) { ++publishes; return std::string(64, 'a'); });
-  auto scene = paged_scene(1);
-  scene.known_limit.assign(offline_sbs::scene_audit_page_max_bytes, 'x');
-  EXPECT_THROW(writer.append(scene), std::runtime_error);
-  EXPECT_EQ(publishes, 0);
-  EXPECT_EQ(writer.scene_count(), 0u);
-}
-
-TEST(OfflineSbsPagedAudit, WorkerResultCarriesOnlyAttestedRecentTail) {
-  auto value = worker_result();
-  value.total_scene_count = 1;
-  value.scene_audit_manifest_sha256 = std::string(64, 'a');
-  auto encoded = offline_sbs::wire::to_json(value);
-  EXPECT_EQ(encoded.at("schema"), 3);
-  EXPECT_EQ(offline_sbs::wire::parse_worker_result_contract(encoded).total_scene_count, 1u);
-  encoded["scene_audit_manifest_sha256"] = "bad";
-  EXPECT_THROW(offline_sbs::wire::parse_worker_result_contract(encoded), offline_sbs::wire::contract_error);
-  encoded = offline_sbs::wire::to_json(value);
-  encoded["scene_count"] = 33;
-  EXPECT_THROW(offline_sbs::wire::parse_worker_result_contract(encoded), offline_sbs::wire::contract_error);
 }

@@ -2086,62 +2086,6 @@ namespace confighttp {
     );
   }
 
-  void getOfflineSbsSceneAudit(
-    resp_https_t response,
-    req_https_t request
-  ) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-    const auto job_id = request->path_match[1].str();
-    std::optional<std::uint32_t> page;
-    for (const auto &[name, value] : request->parse_query_string()) {
-      if (name != "page" || page || value.empty() || value.size() > 5 ||
-          value.find_first_not_of("0123456789") != std::string::npos) {
-        bad_request(response, request, "scene audit accepts one nonnegative page index");
-        return;
-      }
-      page = static_cast<std::uint32_t>(std::stoul(value));
-    }
-    const auto reply = offline_sbs::scene_audit(job_id, page);
-    if (!reply.ok) {
-      const offline_sbs::service_reply_t status_reply {
-        .ok = false,
-        .code = reply.code,
-        .error = reply.error,
-      };
-      send_json_response(
-        response,
-        offline_reply_status(
-          status_reply,
-          SimpleWeb::StatusCode::success_ok
-        ),
-        reply.json()
-      );
-      return;
-    }
-
-    // The route restricts job_id to hexadecimal UUID characters, so it is safe in
-    // this quoted attachment filename. Page indices resolve only through the
-    // authenticated manifest, never through a client-supplied filesystem path.
-    const SimpleWeb::CaseInsensitiveMultimap headers {
-      {"Content-Type", "application/json"},
-      {"Content-Disposition",
-       "attachment; filename=\"scene-audit-" + job_id +
-       (page ? "-page-" + std::to_string(*page) :
-         (reply.audit.value("document_kind", "") == "manifest" ? "-manifest" : "")) + ".json\""},
-      {"Cache-Control", "no-store"},
-      {"X-Content-Type-Options", "nosniff"},
-      {"X-Frame-Options", "DENY"},
-      {"Content-Security-Policy", "frame-ancestors 'none';"}
-    };
-    response->write(
-      SimpleWeb::StatusCode::success_ok,
-      reply.serialized_artifact ? *reply.serialized_artifact : reply.audit.dump(2),
-      headers
-    );
-  }
-
   void cancelOfflineSbsJob(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -2213,8 +2157,6 @@ namespace confighttp {
     server.resource["^/api/offline-sbs/jobs$"]["POST"] = createOfflineSbsJob;
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)/cancel$"]["POST"] =
       cancelOfflineSbsJob;
-    server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)/scene-audit$"]["GET"] =
-      getOfflineSbsSceneAudit;
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$"]["DELETE"] =
       clearOfflineSbsJob;
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$"]["GET"] =

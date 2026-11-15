@@ -189,7 +189,7 @@ own the model, geometry, and failure behavior.
 1. End the remote stream or local AR presentation so the conversion job can use the GPU.
 2. Open **Convert** in the host Web UI on the PC and select a local video.
 3. Choose **Convert video**, an unused output name, and H.265 or AV1. Use **Analyze only**
-   when you want scene diagnostics without creating a video.
+   when you want to check that a file can be converted without creating a video.
 4. Start the job and follow its progress. The completed SBS video is saved beside the input as
    `.mkv` or `.mp4`.
 

@@ -5,7 +5,6 @@
 
 #include "offline_sbs_worker.h"
 #include "offline_frame_transport.h"
-#include "offline_sbs_paged_audit.h"
 #include "sbs_bench_harness.h"
 #include "sbs_perf.h"
 
@@ -14,7 +13,6 @@
 #include "host_sbs_observation_timeline.h"
 #include "host_sbs_shader_cache.h"
 #include "offline_sbs_contract.h"
-#include "offline_scene_planner.h"
 #include "offline_sbs_wire_contract.h"
 
 #include <algorithm>
@@ -2666,19 +2664,8 @@ namespace offline_sbs {
       const worker_spec_t &spec,
       const std::string_view phase,
       const std::uint64_t processed_frames,
-      const media_contract_t *media,
-      const std::uint64_t scene_count,
-      nlohmann::json current_scene = nullptr,
-      nlohmann::json scene_decisions = nlohmann::json::array()
+      const media_contract_t *media
     ) {
-      if (scene_count > max_paged_scene_count) {
-        throw worker_error(
-          "worker progress scene count exceeds the serialized contract"
-        );
-      }
-      if (!scene_decisions.is_array() || scene_decisions.size() > 32) {
-        throw worker_error("worker progress scene decisions exceed their bound");
-      }
       nlohmann::json value {
         {"schema", 1},
         {"job_id", spec.job_id},
@@ -2687,9 +2674,6 @@ namespace offline_sbs {
         {"total_frames", media ? nlohmann::json(media->frames.size()) : nlohmann::json(nullptr)},
         {"source_time_seconds", media && processed_frames > 0 ? nlohmann::json(media->time_base.seconds(nonnegative_tick_difference(media->frames.at(std::min<std::size_t>(static_cast<std::size_t>(processed_frames), media->frames.size()) - 1).pts, media->first_pts(), "worker progress presentation offset"))) : nlohmann::json(nullptr)},
         {"source_duration_seconds", media ? nlohmann::json(media->duration_seconds()) : nlohmann::json(nullptr)},
-        {"scene_count", scene_count},
-        {"current_scene", std::move(current_scene)},
-        {"scene_decisions", std::move(scene_decisions)},
       };
       // This file is a live UI handoff, not restart state. The manager atomically reads it,
       // coalesces durable job.json updates, and never resumes an interrupted worker from it.
@@ -2983,21 +2967,6 @@ namespace offline_sbs {
       std::uint64_t next_sequence_ = 1;
     };
 
-    bool adaptive_trace_flags_valid(
-      const float cut_flags,
-      const std::uint32_t analysis_flags
-    ) {
-      return
-        std::isfinite(cut_flags) &&
-        cut_flags >= 0.0f &&
-        cut_flags <=
-          static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) &&
-        std::trunc(cut_flags) == cut_flags &&
-        (
-          analysis_flags & ~sbs_adaptive_state::known_analysis_flag_mask
-        ) == 0u;
-    }
-
     template<std::size_t Size>
     bool json_object_has_exact_keys(
       const nlohmann::json &value,
@@ -3011,10 +2980,12 @@ namespace offline_sbs {
       });
     }
 
-    scene_frame_t parse_trace_frame(
+    // The bounded adaptive-state snapshot is the harness's per-frame publication handshake.
+    // The worker authenticates its identity and layout against the generated contract and
+    // consumes it; no conversion decision is derived from its values.
+    void validate_trace_frame(
       const nlohmann::json &value,
-      const frame_timing_t &timing,
-      const rational_t time_base
+      const frame_timing_t &timing
     ) {
       using sbs_adaptive_state::word_e;
       if (!json_object_has_exact_keys(value, sbs_adaptive_state::frame_keys) ||
@@ -3062,96 +3033,11 @@ namespace offline_sbs {
           throw worker_error("adaptive trace reserved field is non-default");
         }
       }
-      const auto &cut_contract_tag = words[sbs_adaptive_state::index(
-        word_e::cut_contract_tag_bits
-      )];
-      if (!is_uint32(cut_contract_tag) ||
-          cut_contract_tag.get<std::uint32_t>() !=
-            sbs_adaptive_state::cut_contract_tag) {
-        throw worker_error("adaptive trace cut contract tag mismatch");
-      }
-      const auto scalar = [&](const word_e word) -> std::optional<float> {
-        const auto index = sbs_adaptive_state::index(word);
-        if (words[index].is_null()) {
-          return std::nullopt;
-        }
-        const auto result = words[index].get<float>();
-        if (!std::isfinite(result) || result < 0.0f) {
-          return std::nullopt;
-        }
-        return result;
-      };
-      scene_frame_t frame;
-      frame.sequence = timing.sequence;
-      frame.frame_id = frame_id(timing.sequence);
-      frame.depth_updated = value.at("depth_updated").get<bool>();
-      if (!frame.depth_updated) {
+      if (!value.at("depth_updated").is_boolean() ||
+          !value.at("depth_updated").get<bool>()) {
         throw worker_error("adaptive trace uses the retired depth-reuse cadence");
       }
-      frame.depth_change_fraction = scalar(word_e::current_depth_change_fraction);
-      frame.raw_rgb_change_fraction = scalar(word_e::raw_rgb_change_fraction);
-      frame.structural_change_fraction = scalar(word_e::structural_change_fraction);
-      frame.current_structural_support_fraction =
-        scalar(word_e::current_structural_support_fraction);
-      frame.previous_structural_support_fraction =
-        scalar(word_e::previous_structural_support_fraction);
-      frame.common_structural_support_fraction =
-        scalar(word_e::common_structural_support_fraction);
-      const auto cut_flags_value =
-        words[sbs_adaptive_state::index(word_e::cut_flags)].get<float>();
-      const auto analysis_flags =
-        words[sbs_adaptive_state::index(word_e::analysis_flags)]
-          .get<std::uint32_t>();
-      if (!adaptive_trace_flags_valid(cut_flags_value, analysis_flags)) {
-        throw worker_error("adaptive trace contains invalid or unknown flags");
-      }
-      const auto cut_flags = static_cast<std::uint32_t>(cut_flags_value);
-      const auto require_boolean_duplicate = [&](const char *name, const bool expected) {
-        if (!value.at(name).is_boolean() || value.at(name).get<bool>() != expected) {
-          throw worker_error(
-            std::string {"adaptive trace duplicate disagrees for "} + name
-          );
-        }
-      };
-      require_boolean_duplicate(
-        "geometry_armed",
-        (cut_flags & sbs_adaptive_state::cut_flag_geometry_armed) != 0u
-      );
-      require_boolean_duplicate(
-        "appearance_armed",
-        (cut_flags & sbs_adaptive_state::cut_flag_appearance_armed) != 0u
-      );
-      require_boolean_duplicate(
-        "geometry_low_once",
-        (cut_flags & sbs_adaptive_state::cut_flag_geometry_low_once) != 0u
-      );
-      require_boolean_duplicate(
-        "appearance_quiet_once",
-        (cut_flags & sbs_adaptive_state::cut_flag_appearance_quiet_once) != 0u
-      );
-      require_boolean_duplicate(
-        "cut_latched",
-        (cut_flags & sbs_adaptive_state::cut_flag_latched) != 0u
-      );
-      require_boolean_duplicate(
-        "appearance_recovery",
-        (cut_flags & sbs_adaptive_state::cut_flag_appearance_recovery) != 0u
-      );
-      require_boolean_duplicate(
-        "geometry_confirmation_pending",
-        (cut_flags &
-         sbs_adaptive_state::cut_flag_geometry_confirmation_pending) != 0u
-      );
-      const auto pulse_value = words[sbs_adaptive_state::index(
-        word_e::hard_cut_pulse
-      )].get<float>();
-      if (pulse_value != 0.0f && pulse_value != 1.0f) {
-        throw worker_error("adaptive trace hard-cut pulse is not exactly 0 or 1");
-      }
-      frame.hard_cut_pulse = pulse_value > 0.5f;
-      require_boolean_duplicate("hard_cut_pulse", frame.hard_cut_pulse);
       for (const auto &[name, word] : std::array {
-             std::pair {"hard_cut_count", word_e::hard_cut_count},
              std::pair {"empty_raw_count", word_e::empty_raw_count},
              std::pair {"collapsed_raw_count", word_e::collapsed_raw_count},
            }) {
@@ -3164,13 +3050,6 @@ namespace offline_sbs {
           );
         }
       }
-      frame.hard_cut_count = words[sbs_adaptive_state::index(
-        word_e::hard_cut_count
-      )].get<std::uint32_t>();
-      frame.analysis_flags = analysis_flags;
-      frame.pts_seconds = time_base.seconds(timing.pts);
-      frame.duration_seconds = time_base.seconds(timing.duration);
-      return frame;
     }
 
     class trace_tail_t {
@@ -3212,14 +3091,8 @@ namespace offline_sbs {
             );
           }
         }
-        nlohmann::json expected_flags = nlohmann::json::object();
-        for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
-          expected_flags[std::string {flag.name}] = flag.bit;
-        }
         if (header.value("source", "") != sbs_adaptive_state::source ||
-            header.value("capture", "") != sbs_adaptive_state::capture ||
-            !header.contains("analysis_flag_bits") ||
-            header["analysis_flag_bits"] != expected_flags) {
+            header.value("capture", "") != sbs_adaptive_state::capture) {
           throw worker_error("adaptive trace attribution differs");
         }
         if (!header.contains("config") || !header["config"].is_object() ||
@@ -3392,25 +3265,6 @@ namespace offline_sbs {
       std::ifstream stream_;
       std::uint64_t frame_count_ = 0;
     };
-
-    nlohmann::json scene_progress_json(const scene_plan_t &scene) {
-      return {
-        {"scene_id", scene.scene_id},
-        {"semantic_scene_id", scene.semantic_scene_id},
-        {"start_sequence", scene.start_sequence},
-        {"end_sequence_exclusive", scene.end_sequence_exclusive},
-        {"frame_count", scene.frame_count},
-        {"boundary", {
-                       {"decision", boundary_decision_name(scene.boundary.decision)},
-                       {"final_sequence", scene.boundary.final_sequence},
-                       {"accepted", scene.boundary.accepted},
-                       {"semantic_cut", scene.boundary.semantic_cut},
-                       {"budget_forced", scene.boundary.budget_forced},
-                       {"revision_depth_updates", scene.boundary.revision_depth_updates},
-                       {"revision_source_frames", scene.boundary.revision_source_frames},
-                     }},
-      };
-    }
 
     std::string codec_name_for_request(const std::string &codec) {
       if (codec == "hevc_nvenc") {
@@ -5006,27 +4860,6 @@ namespace offline_sbs {
       }
     }
 
-    wire::scene_audit_contract_t scene_audit_document(
-      const std::string_view status,
-      const std::uint64_t peak_cache_bytes,
-      const std::uint64_t analysis_source_raster_bytes,
-      const std::uint64_t peak_live_raster_bytes,
-      const std::uint64_t peak_cache_plus_raster_bytes,
-      const std::uint64_t hard_cap,
-      const nlohmann::json &timeline_contract
-    ) {
-      return wire::scene_audit_contract_t {
-        .status = std::string {status},
-        .peak_cache_bytes = peak_cache_bytes,
-        .analysis_source_raster_bytes = analysis_source_raster_bytes,
-        .peak_live_raster_bytes = peak_live_raster_bytes,
-        .peak_cache_plus_raster_bytes = peak_cache_plus_raster_bytes,
-        .hard_cap_bytes = hard_cap,
-        .timeline_contract = timeline_contract,
-      };
-    }
-
-
   }  // namespace
 
   std::vector<std::string> build_codec_arguments(
@@ -5069,13 +4902,6 @@ namespace offline_sbs {
     (void) error;
     return false;
 #endif
-  }
-
-  bool adaptive_trace_flags_valid_for_test(
-    const float cut_flags,
-    const std::uint32_t analysis_flags
-  ) {
-    return adaptive_trace_flags_valid(cut_flags, analysis_flags);
   }
 
   std::uint64_t retained_timing_frame_limit_for_test() {
@@ -6700,7 +6526,7 @@ namespace offline_sbs {
         throw worker_error("cannot create native worker directory");
       }
 
-      publish_progress(spec, "probe", 0, nullptr, 0);
+      publish_progress(spec, "probe", 0, nullptr);
       const auto probe_json = work / "source-probe.json";
       const auto media = probe_media(
         spec,
@@ -6740,7 +6566,7 @@ namespace offline_sbs {
 
       // Refuse to start TensorRT unless the harness can publish each production SBS frame
       // directly from the same causal estimator/renderer pass. Offline conversion deliberately
-      // removes wall-clock pacing; it does not replace the online camera, cut, OCR, conditioning,
+      // removes wall-clock pacing; it does not replace the online camera, OCR, conditioning,
       // or renderer state machines with an offline replay implementation.
       const auto capabilities_path = spec.result_directory / "native-capabilities.json";
       run_logged(
@@ -6756,7 +6582,7 @@ namespace offline_sbs {
       );
       const auto capabilities = read_json(capabilities_path);
       const auto &native = capabilities.at("native_whole_clip");
-      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 2 || native.value("follow_wakeup", "") != "windows-directory-change-notification" || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("adaptive_state_contract_tag", 0u) != sbs_adaptive_state::cut_contract_tag || native.value("adaptive_state_contract_canonical_sha256", "") != sbs_adaptive_state::contract_canonical_sha256 || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("direct_conversion_follow", false) || !native.value("direct_conversion_single_pass", false) || !native.value("atomic_sbs_publication", false) || !native.value("transient_raster_cap_preflight", false)) {
+      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 2 || native.value("follow_wakeup", "") != "windows-directory-change-notification" || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("adaptive_state_contract_canonical_sha256", "") != sbs_adaptive_state::contract_canonical_sha256 || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("direct_conversion_follow", false) || !native.value("direct_conversion_single_pass", false) || !native.value("atomic_sbs_publication", false) || !native.value("transient_raster_cap_preflight", false)) {
         throw worker_error("native SBS harness lacks the required direct conversion contract");
       }
       if (
@@ -6767,23 +6593,13 @@ namespace offline_sbs {
           "native SBS harness is not isolated to selected-input full-frame processing"
         );
       }
-      nlohmann::json expected_analysis_flag_bits = nlohmann::json::object();
-      for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
-        expected_analysis_flag_bits[std::string {flag.name}] = flag.bit;
-      }
-      if (
-        !native.contains("adaptive_analysis_flag_bits") ||
-        native["adaptive_analysis_flag_bits"] != expected_analysis_flag_bits
-      ) {
-        throw worker_error("native SBS harness adaptive flag meanings differ");
-      }
 
       const auto analysis_input = work / "analysis-input";
       // The per-frame adaptive trace, harness progress, and (for conversion) atomic SBS raster
       // are transient products of one causal production pass. Keep them below native-work so
       // the manager's identity-pinned cleanup removes them after success, failure, or
-      // cancellation. Durable bounded evidence is emitted separately as scene-audit.json and
-      // the worker result contract.
+      // cancellation. Durable bounded evidence is emitted separately as the worker result
+      // contract.
       const auto analysis_output = work / "analysis-output";
       fs::create_directories(analysis_input, ec);
       fs::create_directories(analysis_output, ec);
@@ -6837,18 +6653,8 @@ namespace offline_sbs {
       std::optional<std::uint64_t> conversion_single_slot_raster_bound;
       std::optional<std::uint64_t> conversion_overlap_raster_bound;
       std::optional<std::uint64_t> conversion_sbs_artifact_bound;
-      paged_scene_audit_writer_t audit_writer([&](std::string_view filename, std::string_view bytes) {
-        const auto path = spec.result_directory / std::string(filename);
-        std::error_code page_error;
-        if (fs::exists(path, page_error) || page_error)
-          throw worker_error("refusing to replace a published scene audit page");
-        write_bytes_atomic(path, std::vector<std::uint8_t>(bytes.begin(), bytes.end()));
-        return sha256_hex(bytes);
-      });
       std::unique_ptr<whole_clip_encoder_t> conversion_encoder;
-      std::unique_ptr<causal_scene_tracker_t> scene_tracker;
       nlohmann::json trace_header;
-      std::uint64_t covered_until = 1;
       nlohmann::json timeline_contract =
         spec.operation != "convert" ?
           nlohmann::json {
@@ -6869,67 +6675,12 @@ namespace offline_sbs {
                {"cumulative_drift_allowed", false},
              });
 
-      const auto initialize_scene_tracker = [&] {
-        if (scene_tracker || !trace_header.is_object()) {
-          throw worker_error("causal scene tracker initialization is invalid");
-        }
-        scene_tracker = std::make_unique<causal_scene_tracker_t>();
-      };
-
-      const auto recent_scene_decisions = [&] {
-        nlohmann::json decisions = nlohmann::json::array();
-        for (const auto &scene : audit_writer.recent_scenes()) {
-          decisions.push_back(scene_progress_json(scene));
-        }
-        return decisions;
-      };
-
-      const auto commit_scenes = [&](
-        const std::vector<scene_plan_t> &finalized,
-        const std::uint64_t analyzed_through_sequence
-      ) {
-        for (const auto &scene : finalized) {
-          if (scene.start_sequence != covered_until || scene.end_sequence_exclusive <= scene.start_sequence || scene.frame_count != scene.end_sequence_exclusive - scene.start_sequence) {
-            throw worker_error("causal scene tracker produced a gap/overlap");
-          }
-          audit_writer.append(scene);
-          covered_until = scene.end_sequence_exclusive;
-          publish_progress(
-            spec,
-            spec.operation == "convert" ? "convert" : "evaluate",
-            analyzed_through_sequence,
-            &media,
-            audit_writer.scene_count(),
-            nullptr,
-            recent_scene_decisions()
-          );
-          if (scene.boundary.decision != boundary_decision_e::end_of_stream &&
-              is_scene_audit_checkpoint(audit_writer.scene_count())) {
-            write_json_atomic_bounded(
-              spec.result_directory / "scene-audit.json",
-              audit_writer.manifest(scene_audit_document(
-                "running",
-                0,
-                analysis_source_raster_bytes.value_or(0),
-                peak_live_raster_bytes,
-                peak_live_raster_bytes,
-                spec.transient_raster_hard_cap_bytes,
-                timeline_contract
-              )),
-              scene_audit_max_bytes,
-              "scene audit"
-            );
-          }
-        }
-      };
-
       try {
         publish_progress(
           spec,
           spec.operation == "convert" ? "convert" : "evaluate",
           0,
-          &media,
-          0
+          &media
         );
         struct queued_source_t {
           const frame_timing_t *timing = nullptr;
@@ -7012,9 +6763,8 @@ namespace offline_sbs {
           }
           if (timing.sequence == 1) {
             trace_header = trace.read_header(analysis);
-            initialize_scene_tracker();
           }
-          const auto trace_value = trace.read_frame(analysis, timing.sequence);
+          validate_trace_frame(trace.read_frame(analysis, timing.sequence), timing);
 
           std::uint64_t current_live_raster_bytes = source_raster_bound;
           if (converting) {
@@ -7116,24 +6866,11 @@ namespace offline_sbs {
           live_source_raster_bytes -= current_source_raster_bytes;
           source_queue.pop_front();
           fill_source_window();
-          if (!scene_tracker) {
-            throw worker_error("causal scene tracker was not initialized");
-          }
-          auto finalized = scene_tracker->feed(parse_trace_frame(
-            trace_value,
-            timing,
-            media.time_base
-          ));
-          (void) scene_tracker->take_boundary_audit();
-          commit_scenes(finalized, timing.sequence);
           publish_progress(
             spec,
             converting ? "convert" : "evaluate",
             timing.sequence,
-            &media,
-            audit_writer.scene_count(),
-            nullptr,
-            recent_scene_decisions()
+            &media
           );
         }
         transport.source.finish();
@@ -7149,12 +6886,6 @@ namespace offline_sbs {
         analysis.terminate();
         analysis_decoder.finish();
         trace.finish(media.frames.size());
-        if (!scene_tracker) {
-          throw worker_error("causal scene tracker received no frames");
-        }
-        auto finalized = scene_tracker->finish();
-        (void) scene_tracker->take_boundary_audit();
-        commit_scenes(finalized, media.frames.size());
       } catch (const std::exception &exception) {
         if (!analysis_done) {
           publish_producer_failed(analysis_input, exception.what());
@@ -7167,9 +6898,6 @@ namespace offline_sbs {
         throw;
       }
 
-      if (covered_until != media.frames.size() + 1) {
-        throw worker_error("final scene plan does not cover every source frame");
-      }
       const auto analysis_contract =
         read_json(analysis_output / "whole_clip_contract.json");
       wire::whole_clip_contract_t typed_analysis_contract;
@@ -7262,8 +6990,7 @@ namespace offline_sbs {
         analysis_state.retained_history ||
         analysis_state.schema.value_or(0) != sbs_adaptive_state::schema_version ||
         analysis_state.capture.value_or("") != sbs_adaptive_state::capture ||
-        analysis_state.frame_count != media.frames.size() ||
-        analysis_contract.contains("cut_state")
+        analysis_state.frame_count != media.frames.size()
       ) {
         throw worker_error(
           "analysis did not attest its bounded adaptive-state transport"
@@ -7278,10 +7005,7 @@ namespace offline_sbs {
           spec,
           "mux",
           media.frames.size(),
-          &media,
-          audit_writer.scene_count(),
-          nullptr,
-          recent_scene_decisions()
+          &media
         );
         {
           // Release the pre-mux timing vector before probing the final container. The source
@@ -7370,29 +7094,11 @@ namespace offline_sbs {
       // The harness snapshot precedes the asynchronous encoder's last write. Snapshot again
       // after the encoder drains so the transport profile covers every source and output frame.
       sbs_perf::dump_json(path_utf8(analysis_output / "sbs_perf.json"));
-      const auto audit = audit_writer.manifest(scene_audit_document(
-        "complete",
-        0,
-        analysis_source_raster_bytes.value_or(0),
-        peak_live_raster_bytes,
-        peak_live_raster_bytes,
-        spec.transient_raster_hard_cap_bytes,
-        timeline_contract
-      ));
-      write_json_atomic_bounded(
-        spec.result_directory / "scene-audit.json",
-        audit,
-        scene_audit_max_bytes,
-        "scene audit"
-      );
       publish_progress(
         spec,
         "complete",
         media.frames.size(),
-        &media,
-        audit_writer.scene_count(),
-        nullptr,
-        recent_scene_decisions()
+        &media
       );
       const auto staging_identity = staging_claim ?
                                       staging_claim->identity_json() :
@@ -7413,7 +7119,6 @@ namespace offline_sbs {
                           (media.color == media_color_e::hdr_pq ? "hdr-pq" : "hdr-hlg"),
           .contract_path = path_utf8(spec.result_directory / "source-contract.json"),
         },
-        .scene_audit_path = path_utf8(spec.result_directory / "scene-audit.json"),
         .analysis_contract = typed_analysis_contract,
         .replay_contracts = {},
         .cache = {
@@ -7432,9 +7137,6 @@ namespace offline_sbs {
                          std::optional<std::string> {path_utf8(*spec.staging_output)} :
                          std::nullopt,
       };
-      result_contract.scenes = audit_writer.recent_scenes();
-      result_contract.total_scene_count = audit_writer.scene_count();
-      result_contract.scene_audit_manifest_sha256 = sha256_hex(audit.dump(2) + "\n");
       const auto result = wire::to_json(result_contract);
       write_json_atomic_bounded(
         spec.result_path,
