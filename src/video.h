@@ -209,14 +209,13 @@ namespace video {
     constexpr std::uint32_t config = 1u << 0;
     constexpr std::uint32_t effective_pop = 1u << 1;
     constexpr std::uint32_t edge = 1u << 2;
-    constexpr std::uint32_t change = 1u << 3;  // Retired wire bit: never set.
     constexpr std::uint32_t anchor = 1u << 4;
     constexpr std::uint32_t subject = 1u << 5;
     constexpr std::uint32_t valid_fraction = 1u << 6;
     constexpr std::uint32_t range = 1u << 7;
-    constexpr std::uint32_t scene = 1u << 8;  // Retired wire bit: never set.
-    constexpr std::uint32_t cuts = 1u << 9;  // Retired wire bit: never set.
     constexpr std::uint32_t faults = 1u << 10;
+    /** Wire bits 3, 8 and 9 that protocol 13 clients parse and the host never sets. */
+    constexpr std::uint32_t reserved = (1u << 3) | (1u << 8) | (1u << 9);
   }  // namespace sbs_telemetry_valid_field
 
   namespace sbs_telemetry_runtime_flag {
@@ -224,11 +223,10 @@ namespace video {
     constexpr std::uint32_t adaptive_enabled = 1u << 1;
     constexpr std::uint32_t pop_classified = 1u << 2;
     constexpr std::uint32_t anchor_valid = 1u << 3;
-    constexpr std::uint32_t geometry_armed = 1u << 4;  // Retired wire bit: never set.
-    constexpr std::uint32_t appearance_armed = 1u << 5;  // Retired wire bit: never set.
     constexpr std::uint32_t range_collapsed = 1u << 6;
     constexpr std::uint32_t depth_ready = 1u << 7;
-    constexpr std::uint32_t hard_cut_pulse = 1u << 8;  // Retired wire bit: never set.
+    /** Wire bits 4, 5 and 8 that protocol 13 clients parse and the host never sets. */
+    constexpr std::uint32_t reserved = (1u << 4) | (1u << 5) | (1u << 8);
   }  // namespace sbs_telemetry_runtime_flag
 
   /**

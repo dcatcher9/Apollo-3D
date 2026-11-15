@@ -8055,16 +8055,12 @@ TEST(DirectxShaderSourceTest, HostTelemetrySharesPublicationReadbackAndPublishes
     display.find("sbs_telemetry_valid_field::range"),
     std::string::npos
   );
-  // Scene-cut detection is retired: its valid and runtime wire bits are never set.
-  for (const auto *retired_bit : {
-         "sbs_telemetry_valid_field::change",
-         "sbs_telemetry_valid_field::scene",
-         "sbs_telemetry_valid_field::cuts",
-         "sbs_telemetry_runtime_flag::geometry_armed",
-         "sbs_telemetry_runtime_flag::appearance_armed",
-         "sbs_telemetry_runtime_flag::hard_cut_pulse",
+  // The renderer never sets a reserved valid or runtime wire bit.
+  for (const auto *reserved_bits : {
+         "sbs_telemetry_valid_field::reserved",
+         "sbs_telemetry_runtime_flag::reserved",
        }) {
-    EXPECT_EQ(display.find(retired_bit), std::string::npos) << retired_bit;
+    EXPECT_EQ(display.find(reserved_bits), std::string::npos) << reserved_bits;
   }
 }
 
@@ -8799,24 +8795,20 @@ TEST(HostSbsTelemetryTest, WireVisibleBitAssignmentsAreFrozen) {
   EXPECT_EQ(video::sbs_telemetry_valid_field::config, 1u << 0);
   EXPECT_EQ(video::sbs_telemetry_valid_field::effective_pop, 1u << 1);
   EXPECT_EQ(video::sbs_telemetry_valid_field::edge, 1u << 2);
-  EXPECT_EQ(video::sbs_telemetry_valid_field::change, 1u << 3);
   EXPECT_EQ(video::sbs_telemetry_valid_field::anchor, 1u << 4);
   EXPECT_EQ(video::sbs_telemetry_valid_field::subject, 1u << 5);
   EXPECT_EQ(video::sbs_telemetry_valid_field::valid_fraction, 1u << 6);
   EXPECT_EQ(video::sbs_telemetry_valid_field::range, 1u << 7);
-  EXPECT_EQ(video::sbs_telemetry_valid_field::scene, 1u << 8);
-  EXPECT_EQ(video::sbs_telemetry_valid_field::cuts, 1u << 9);
   EXPECT_EQ(video::sbs_telemetry_valid_field::faults, 1u << 10);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::reserved, (1u << 3) | (1u << 8) | (1u << 9));
 
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::profile_initialized, 1u << 0);
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::adaptive_enabled, 1u << 1);
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::pop_classified, 1u << 2);
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::anchor_valid, 1u << 3);
-  EXPECT_EQ(video::sbs_telemetry_runtime_flag::geometry_armed, 1u << 4);
-  EXPECT_EQ(video::sbs_telemetry_runtime_flag::appearance_armed, 1u << 5);
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::range_collapsed, 1u << 6);
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::depth_ready, 1u << 7);
-  EXPECT_EQ(video::sbs_telemetry_runtime_flag::hard_cut_pulse, 1u << 8);
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::reserved, (1u << 4) | (1u << 5) | (1u << 8));
 }
 
 TEST(HostSbsTelemetryTest, RendererConfigUsesNeutralWirePlaneForV2) {

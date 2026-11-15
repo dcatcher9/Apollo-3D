@@ -634,13 +634,13 @@ namespace stream {
     write_f32(32, snapshot.pop_ceiling);
     write_f32(36, snapshot.effective_pop);
     write_f32(40, snapshot.edge_fraction);
-    // encoded[44..47] is the retired depth-change fraction: zero, with its valid bit clear.
+    // encoded[44..47] stays zero with valid bit 3 clear; protocol 13 clients parse a float there.
     write_f32(48, snapshot.zero_anchor_shift_px);
     write_f32(52, snapshot.subject_depth);
     write_f32(56, snapshot.valid_depth_fraction);
     write_f32(60, snapshot.effective_range_width);
-    // encoded[64..75] are the retired scene age, hard-cut count and external-cut count: zero,
-    // with the scene and cuts valid bits clear. The offsets stay reserved for protocol 13 clients.
+    // encoded[64..75] stay zero with valid bits 8 and 9 clear; protocol 13 clients parse three
+    // uint32 words there.
     write_u32(76, snapshot.empty_raw_count);
     write_u32(80, snapshot.collapsed_raw_count);
     write_u32(84, snapshot.sampled_frame_id);

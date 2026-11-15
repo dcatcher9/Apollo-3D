@@ -1445,7 +1445,7 @@ TEST(SbsTelemetryWireTests, EncodesEveryStateFieldAtItsFrozenLittleEndianOffset)
   state.snapshot.collapsed_raw_count = 0x41424344;
   state.snapshot.sampled_frame_id = 0xDEADBEEF;
 
-  // Offsets 44..47 and 64..75 are the retired scene-cut fields and stay zero on the wire.
+  // Offsets 44..47 and 64..75 are reserved wire fields and stay zero.
   const std::array<std::uint8_t, stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE> expected {
     0x02,
     0x02,
