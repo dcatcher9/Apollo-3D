@@ -91,6 +91,15 @@ namespace platf::primary_display {
    */
   bool baseline_topology_active(std::wstring_view device_path);
 
+  /** Run the session's own change to its virtual display's color state (HDR on or off) as one
+   * display transaction and record the state it produced as the exclusive session's state.
+   * Promotion and display-change reconciliation restore the recorded state after a topology
+   * change, so a change that is not recorded is undone by the next of them, and the session
+   * and the reconciliation then keep toggling the display between the two states. The callback
+   * applies and verifies the change and must not call this namespace. Returns its result.
+   */
+  bool change_virtual_display_color(std::wstring_view device_path, const std::function<bool()> &change);
+
   /** Recover an interrupted transaction on startup, before creating another virtual display. */
   bool recover();
 
@@ -267,6 +276,7 @@ namespace platf::primary_display {
       bool reactivate(const retained_display_ptr &retained, bool exclusive);
       void restore_retained_cursor(const retained_display_ptr &retained);
       bool baseline_topology_active(std::wstring_view device_path);
+      bool adopt_virtual_color(std::wstring_view device_path);
       bool reconcile_active_exclusive(std::wstring_view device_path);
       bool recover_inactive_exclusive();
 

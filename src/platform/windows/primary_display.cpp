@@ -1697,6 +1697,33 @@ namespace platf::primary_display {
              });
     }
 
+    bool manager_t::adopt_virtual_color(std::wstring_view device_path) {
+      auto loaded = io_.load();
+      if (!loaded.success) {
+        return false;
+      }
+      // Only a remote exclusive session records a color state for its virtual display. A local
+      // presentation follows its physical sink, and anything else restores no recorded color.
+      if (!loaded.journal || !valid_journal(*loaded.journal) || !loaded.journal->exclusive || !loaded.journal->exclusive_topology ||
+          !loaded.journal->local_sink.empty() || !same_device(loaded.journal->promoted_primary, device_path)) {
+        return true;
+      }
+      auto journal = *loaded.journal;
+      const auto snapshot = io_.query();
+      const auto current = snapshot ? find_path(*snapshot, device_path) : std::nullopt;
+      const auto recorded = find_path(*journal.exclusive_topology, device_path);
+      if (!current || !recorded || *current >= snapshot->colors.size() || !snapshot->colors[*current] ||
+          *recorded >= journal.exclusive_topology->colors.size()) {
+        return false;
+      }
+      auto &recorded_color = journal.exclusive_topology->colors[*recorded];
+      if (recorded_color && color_matches(*snapshot->colors[*current], *recorded_color)) {
+        return true;
+      }
+      recorded_color = snapshot->colors[*current];
+      return valid_journal(journal) && io_.save(journal);
+    }
+
     bool manager_t::apply_verified(const snapshot_t &before, const layout_t &desired) {
       const auto baseline = inspect(before);
       auto latest = io_.query();
@@ -3416,6 +3443,24 @@ namespace platf::primary_display {
       BOOST_LOG(error) << "Local AR display update failed: " << exception.what();
       return false;
     }
+  }
+
+  bool change_virtual_display_color(std::wstring_view device_path, const std::function<bool()> &change) {
+    // The callback can outlive the caller's view of a renumbered display.
+    const std::wstring identity(device_path);
+    std::lock_guard lock(transaction_mutex);
+    if (!change || !change()) {
+      return false;
+    }
+    try {
+      // Without a recorded exclusive state there is nothing to keep in step.
+      if (!identity.empty() && acquire_ownership() && !manager().adopt_virtual_color(identity)) {
+        BOOST_LOG(warning) << "The virtual display's new color state could not be recorded for its exclusive session; the next display change may restore the previous state."sv;
+      }
+    } catch (const std::exception &exception) {
+      BOOST_LOG(warning) << "Could not record the virtual display's color state: " << exception.what();
+    }
+    return true;
   }
 
   long run_serialized_mode_change(const std::function<long()> &change) {

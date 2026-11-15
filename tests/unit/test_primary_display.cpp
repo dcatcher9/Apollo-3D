@@ -2607,6 +2607,86 @@ TEST(PrimaryDisplayExclusive, TopologyTransitionsPreserveCurrentVirtualHdrState)
   EXPECT_FALSE(fake.journal);
 }
 
+namespace {
+  platf::display_config::advanced_color_state_t hdr_state(bool enabled) {
+    return {
+      platf::display_config::advanced_color_api_e::modern,
+      false,
+      true,
+      enabled,
+      false,
+      enabled,
+      false,
+      static_cast<UINT32>(enabled ? 10 : 8),
+      enabled ? DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR : DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
+    };
+  }
+}  // namespace
+
+TEST(PrimaryDisplayExclusive, SessionHdrChangeIsRecordedAndSurvivesPromotionAndReconciliation) {
+  for (const bool windows_replaces_layout : {false, true}) {
+    SCOPED_TRACE(windows_replaces_layout);
+    fake_io_t fake;
+    fake.current.colors[2] = hdr_state(true);
+    start_exclusive(fake);
+    ASSERT_TRUE(fake.current.colors[0]->hdr_user_enabled);
+
+    // The session switches its virtual display to SDR and records the result.
+    fake.current.colors[0] = hdr_state(false);
+    manager_t manager(fake.io());
+    ASSERT_TRUE(manager.adopt_virtual_color(L"virtual"));
+    ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+    EXPECT_FALSE(fake.journal->exclusive_topology->colors[named_index(*fake.journal->exclusive_topology, L"virtual")]->hdr_user_enabled);
+
+    if (windows_replaces_layout) {
+      // The toggle makes Windows re-apply its remembered layout: the physical outputs return.
+      fake.current = make_snapshot(baseline);
+      fake.current.colors[2] = hdr_state(false);
+    }
+    fake.events.clear();
+    ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+    ASSERT_TRUE(manager.promote(L"virtual", true));
+    expect_positions(fake.current, {{L"virtual", 0, 0}});
+    EXPECT_FALSE(fake.current.colors.front()->hdr_user_enabled);
+    EXPECT_EQ(std::ranges::count(fake.events, "set_color"), 0);
+  }
+}
+
+TEST(PrimaryDisplayExclusive, UnrecordedHdrChangeIsStillRestoredToTheRecordedState) {
+  // Windows resets color state on some topology changes, so an unexplained difference is
+  // restored. Only the session's own recorded change above replaces the recorded state.
+  fake_io_t fake;
+  fake.current.colors[2] = hdr_state(true);
+  start_exclusive(fake);
+  fake.current.colors[0] = hdr_state(false);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_TRUE(fake.current.colors.front()->hdr_user_enabled);
+}
+
+TEST(PrimaryDisplayExclusive, RecordingVirtualColorNeedsARecordedRemoteExclusiveSession) {
+  // No recovery record: nothing to keep in step, and nothing is written.
+  fake_io_t idle;
+  manager_t idle_manager(idle.io());
+  EXPECT_TRUE(idle_manager.adopt_virtual_color(L"virtual"));
+  EXPECT_FALSE(idle.journal);
+
+  // Another display's session is not touched.
+  fake_io_t fake;
+  fake.current.colors[2] = hdr_state(true);
+  start_exclusive(fake);
+  fake.current.colors[0] = hdr_state(false);
+  manager_t manager(fake.io());
+  fake.events.clear();
+  EXPECT_TRUE(manager.adopt_virtual_color(L"physical-left"));
+  EXPECT_EQ(std::ranges::count(fake.events, "save"), 0);
+
+  // A failed save is reported and leaves the recorded state unchanged.
+  fake.save_ok = false;
+  EXPECT_FALSE(manager.adopt_virtual_color(L"virtual"));
+  EXPECT_TRUE(fake.journal->exclusive_topology->colors[named_index(*fake.journal->exclusive_topology, L"virtual")]->hdr_user_enabled);
+}
+
 TEST(PrimaryDisplayExclusive, ExactAddBindingRecoversWindowsRememberedVirtualOnlyTopology) {
   fake_io_t fake;
   fake.current = make_snapshot({{L"physical-primary", 0, 0}});
