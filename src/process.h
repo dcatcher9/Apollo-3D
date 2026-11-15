@@ -371,6 +371,7 @@ namespace proc {
      */
     bool save_virtual_display_session_mode(int width, int height, int fps_millihz);
     bool prepare_retained_display_for_resume();
+    bool prepare_retained_display_after_settle();
     bool promote_virtual_display(
       bool enable_hdr,
       std::chrono::milliseconds topology_retry_window = std::chrono::milliseconds::zero()

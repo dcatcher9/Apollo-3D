@@ -996,6 +996,54 @@ namespace proc {
     return true;
   }
 
+  bool proc_t::prepare_retained_display_after_settle() {
+    // Restoring the physical desktop makes Windows re-detect its monitors, and for a few seconds
+    // it can keep changing the active outputs by itself: a display query fails, or the detached
+    // virtual display is active again in a different mode. A resume that arrives in that window
+    // fails although nothing is wrong with the retained session. Return to the paused desktop,
+    // let the topology settle, and try again before reporting the failure to the client.
+    constexpr auto settle_window = 6s;
+    constexpr auto settle_delay = 500ms;
+    // Only a resume that started from a verified paused desktop retries. A pause that is itself
+    // still unverified keeps its single attempt and its existing maintenance retry.
+    const bool started_paused = _display_session.pause_requested() && _display_session.paused();
+    if (prepare_retained_display_for_resume()) {
+      return true;
+    }
+    if (!started_paused) {
+      return false;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + settle_window;
+    for (int retry_count = 1;; ++retry_count) {
+      if (!_display_session.owns_display() || _display_session.retiring() || !_display_session.has_retained()) {
+        return false;
+      }
+      // The next attempt repeats this pause when it could not be verified yet.
+      pause_display_for_resume();
+  #ifdef SUNSHINE_TESTS
+      const bool wait_for_settle = !_display_topology_test_hook;
+  #else
+      const bool wait_for_settle = true;
+  #endif
+      if (wait_for_settle) {
+        std::this_thread::sleep_for(settle_delay);
+      }
+      if (prepare_retained_display_for_resume()) {
+        BOOST_LOG(info) << "Retained virtual display reactivated after "sv
+                        << retry_count << " topology-settle retry attempt(s)."sv;
+        return true;
+      }
+  #ifdef SUNSHINE_TESTS
+      if (_display_topology_test_hook && retry_count >= 3) {
+        return false;  // Tests do not wait, so they bound the retries by count.
+      }
+  #endif
+      if (std::chrono::steady_clock::now() + settle_delay >= deadline) {
+        return false;
+      }
+    }
+  }
+
   bool proc_t::promote_virtual_display(
     bool enable_hdr,
     std::chrono::milliseconds topology_retry_window
@@ -1500,7 +1548,7 @@ namespace proc {
     };
     bool hdr_configured_by_recreation = false;
     if (_virtual_display) {
-      if (!prepare_retained_display_for_resume()) {
+      if (!prepare_retained_display_after_settle()) {
         BOOST_LOG(error) << "Could not restore, reactivate, and bind the retained virtual display for resume."sv;
         return 503;
       }

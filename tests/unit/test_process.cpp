@@ -1216,11 +1216,13 @@ TEST_F(RetainedDisplayPauseTest, FailedReactivationLeavesExactSessionRetryable) 
   operations_.clear();
   auto resumed = make_launch(22);
   EXPECT_EQ(process_.reconfigure_retained_session(resumed), 503);
-  EXPECT_EQ(operations_, (std::vector<operation_e> {
-                           operation_e::reactivate,
-                           operation_e::pause,
-                           operation_e::wake,
-                         }));
+  // The resume returns to the paused desktop and retries while the topology may still be
+  // settling. Its final rollback pauses once more, and each completed pause wakes the display.
+  std::vector<operation_e> expected;
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    expected.insert(expected.end(), {operation_e::reactivate, operation_e::pause, operation_e::wake});
+  }
+  EXPECT_EQ(operations_, expected);
   EXPECT_EQ(process_.get_host_session_id(), 1234U);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 11U);
   EXPECT_EQ(original_->sbs_mode, 1);
@@ -1232,6 +1234,37 @@ TEST_F(RetainedDisplayPauseTest, FailedReactivationLeavesExactSessionRetryable) 
   ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
   EXPECT_EQ(operations_.front(), operation_e::reactivate);
   EXPECT_EQ(operations_[1], operation_e::refresh_binding);
+  EXPECT_EQ(process_.get_host_session_id(), 1234U);
+  EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
+  EXPECT_EQ(original_->sbs_mode, 0);
+}
+
+TEST_F(RetainedDisplayPauseTest, TransientReactivationFailureIsRetriedWithinTheSameResume) {
+  ASSERT_TRUE(process_.pause_display_for_resume());
+  int failures_left = 2;
+  operations_.clear();
+  proc::process_test_access::set_display_topology_hook(process_, [&](operation_e operation, bool) {
+    operations_.push_back(operation);
+    if (operation == operation_e::reactivate && failures_left > 0) {
+      --failures_left;
+      return false;
+    }
+    return true;
+  });
+  auto resumed = make_launch(22);
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  ASSERT_GE(operations_.size(), 8U);
+  EXPECT_EQ(std::vector<operation_e>(operations_.begin(), operations_.begin() + 8), (std::vector<operation_e> {
+                                                                                      operation_e::reactivate,
+                                                                                      operation_e::pause,
+                                                                                      operation_e::wake,
+                                                                                      operation_e::reactivate,
+                                                                                      operation_e::pause,
+                                                                                      operation_e::wake,
+                                                                                      operation_e::reactivate,
+                                                                                      operation_e::refresh_binding,
+                                                                                    }));
+  EXPECT_EQ(std::ranges::count(operations_, operation_e::reactivate), 3);
   EXPECT_EQ(process_.get_host_session_id(), 1234U);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
   EXPECT_EQ(original_->sbs_mode, 0);
