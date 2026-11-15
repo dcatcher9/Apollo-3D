@@ -440,10 +440,6 @@ namespace platf {
   struct input_raw_t {
     std::unique_ptr<vigem_t> vigem;
     std::array<ds5::controller_slot_t, MAX_GAMEPADS> ds5_sidecars;
-
-    decltype(CreateSyntheticPointerDevice) *fnCreateSyntheticPointerDevice;
-    decltype(InjectSyntheticPointerInput) *fnInjectSyntheticPointerInput;
-    decltype(DestroySyntheticPointerDevice) *fnDestroySyntheticPointerDevice;
   };
 
   input_t input() {
@@ -454,11 +450,6 @@ namespace platf {
     if (raw.vigem->init()) {
       raw.vigem.reset();
     }
-
-    // Get pointers to virtual touch/pen input functions (Win10 1809+)
-    raw.fnCreateSyntheticPointerDevice = (decltype(CreateSyntheticPointerDevice) *) GetProcAddress(GetModuleHandleA("user32.dll"), "CreateSyntheticPointerDevice");
-    raw.fnInjectSyntheticPointerInput = (decltype(InjectSyntheticPointerInput) *) GetProcAddress(GetModuleHandleA("user32.dll"), "InjectSyntheticPointerInput");
-    raw.fnDestroySyntheticPointerDevice = (decltype(DestroySyntheticPointerDevice) *) GetProcAddress(GetModuleHandleA("user32.dll"), "DestroySyntheticPointerDevice");
 
     return result;
   }
@@ -483,17 +474,15 @@ namespace platf {
 
   /**
    * @brief Calls InjectSyntheticPointerInput() and switches input desktops if required.
-   * @details Must only be called if InjectSyntheticPointerInput() is available.
-   * @param input The global input context.
    * @param device The synthetic pointer device handle.
    * @param pointerInfo An array of `POINTER_TYPE_INFO` structs.
    * @param count The number of elements in `pointerInfo`.
    * @return true if input was successfully injected.
    */
-  bool inject_synthetic_pointer_input(input_raw_t *input, HSYNTHETICPOINTERDEVICE device, const POINTER_TYPE_INFO *pointerInfo, UINT32 count) {
+  bool inject_synthetic_pointer_input(HSYNTHETICPOINTERDEVICE device, const POINTER_TYPE_INFO *pointerInfo, UINT32 count) {
     return detail::run_with_desktop_retry(
       [&]() {
-        return input->fnInjectSyntheticPointerInput(device, pointerInfo, count) != FALSE;
+        return InjectSyntheticPointerInput(device, pointerInfo, count) != FALSE;
       },
       []() {
         return syncThreadDesktop();
@@ -651,10 +640,6 @@ namespace platf {
   }
 
   struct client_input_raw_t: public client_input_t {
-    client_input_raw_t(input_t &input) {
-      global = (input_raw_t *) input.get();
-    }
-
     ~client_input_raw_t() override {
       if (penRepeatTask) {
         task_pool.cancel(penRepeatTask);
@@ -664,14 +649,12 @@ namespace platf {
       }
 
       if (pen) {
-        global->fnDestroySyntheticPointerDevice(pen);
+        DestroySyntheticPointerDevice(pen);
       }
       if (touch) {
-        global->fnDestroySyntheticPointerDevice(touch);
+        DestroySyntheticPointerDevice(touch);
       }
     }
-
-    input_raw_t *global;
 
     // Device state and handles for pen and touch input must be stored in the per-client
     // input context, because each connected client may be sending their own independent
@@ -690,11 +673,10 @@ namespace platf {
 
   /**
    * @brief Allocates a context to store per-client input data.
-   * @param input The global input context.
    * @return A unique pointer to a per-client input data context.
    */
-  std::unique_ptr<client_input_t> allocate_client_input_context(input_t &input) {
-    return std::make_unique<client_input_raw_t>(input);
+  std::unique_ptr<client_input_t> allocate_client_input_context(input_t &) {
+    return std::make_unique<client_input_raw_t>();
   }
 
   /**
@@ -833,7 +815,7 @@ namespace platf {
    * @param raw The raw client-specific input context.
    */
   void repeat_touch(client_input_raw_t *raw) {
-    if (!inject_synthetic_pointer_input(raw->global, raw->touch, raw->touchInfo, raw->activeTouchSlots)) {
+    if (!inject_synthetic_pointer_input(raw->touch, raw->touchInfo, raw->activeTouchSlots)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to refresh virtual touch input: "sv << err;
     }
@@ -846,7 +828,7 @@ namespace platf {
    * @param raw The raw client-specific input context.
    */
   void repeat_pen(client_input_raw_t *raw) {
-    if (!inject_synthetic_pointer_input(raw->global, raw->pen, &raw->penInfo, 1)) {
+    if (!inject_synthetic_pointer_input(raw->pen, &raw->penInfo, 1)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to refresh virtual pen input: "sv << err;
     }
@@ -874,7 +856,7 @@ namespace platf {
         populate_common_pointer_info(raw->touchInfo[i].touchInfo.pointerInfo, {}, LI_TOUCH_EVENT_CANCEL_ALL, 0.0f, 0.0f);
         raw->touchInfo[i].touchInfo.touchMask = TOUCH_MASK_NONE;
       }
-      if (!inject_synthetic_pointer_input(raw->global, raw->touch, raw->touchInfo, raw->activeTouchSlots)) {
+      if (!inject_synthetic_pointer_input(raw->touch, raw->touchInfo, raw->activeTouchSlots)) {
         auto err = GetLastError();
         BOOST_LOG(warning) << "Failed to cancel all virtual touch input: "sv << err;
       }
@@ -897,17 +879,11 @@ namespace platf {
   void touch_update(client_input_t *input, const touch_port_t &touch_port, const touch_input_t &touch) {
     auto raw = (client_input_raw_t *) input;
 
-    // Bail if we're not running on an OS that supports virtual touch input
-    if (!raw->global->fnCreateSyntheticPointerDevice || !raw->global->fnInjectSyntheticPointerInput || !raw->global->fnDestroySyntheticPointerDevice) {
-      BOOST_LOG(warning) << "Touch input requires Windows 10 1809 or later"sv;
-      return;
-    }
-
     // If there's not already a virtual touch device, create one now
     if (!raw->touch) {
       if (touch.eventType != LI_TOUCH_EVENT_CANCEL_ALL) {
         BOOST_LOG(info) << "Creating virtual touch input device"sv;
-        raw->touch = raw->global->fnCreateSyntheticPointerDevice(PT_TOUCH, ARRAYSIZE(raw->touchInfo), POINTER_FEEDBACK_DEFAULT);
+        raw->touch = CreateSyntheticPointerDevice(PT_TOUCH, ARRAYSIZE(raw->touchInfo), POINTER_FEEDBACK_DEFAULT);
         if (!raw->touch) {
           auto err = GetLastError();
           BOOST_LOG(warning) << "Failed to create virtual touch device: "sv << err;
@@ -997,7 +973,7 @@ namespace platf {
       touchInfo.orientation = 0;
     }
 
-    if (!inject_synthetic_pointer_input(raw->global, raw->touch, raw->touchInfo, raw->activeTouchSlots)) {
+    if (!inject_synthetic_pointer_input(raw->touch, raw->touchInfo, raw->activeTouchSlots)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to inject virtual touch input: "sv << err;
       return;
@@ -1021,17 +997,11 @@ namespace platf {
   void pen_update(client_input_t *input, const touch_port_t &touch_port, const pen_input_t &pen) {
     auto raw = (client_input_raw_t *) input;
 
-    // Bail if we're not running on an OS that supports virtual pen input
-    if (!raw->global->fnCreateSyntheticPointerDevice || !raw->global->fnInjectSyntheticPointerInput || !raw->global->fnDestroySyntheticPointerDevice) {
-      BOOST_LOG(warning) << "Pen input requires Windows 10 1809 or later"sv;
-      return;
-    }
-
     // If there's not already a virtual pen device, create one now
     if (!raw->pen) {
       if (pen.eventType != LI_TOUCH_EVENT_CANCEL_ALL) {
         BOOST_LOG(info) << "Creating virtual pen input device"sv;
-        raw->pen = raw->global->fnCreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT);
+        raw->pen = CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT);
         if (!raw->pen) {
           auto err = GetLastError();
           BOOST_LOG(warning) << "Failed to create virtual pen device: "sv << err;
@@ -1114,7 +1084,7 @@ namespace platf {
       penInfo.tiltY = 0;
     }
 
-    if (!inject_synthetic_pointer_input(raw->global, raw->pen, &raw->penInfo, 1)) {
+    if (!inject_synthetic_pointer_input(raw->pen, &raw->penInfo, 1)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to inject virtual pen input: "sv << err;
       return;
@@ -1843,13 +1813,8 @@ namespace platf {
       caps |= platform_caps::controller_touch;
     }
 
-    // We support pen and touch input on Win10 1809+
-    if (GetProcAddress(GetModuleHandleA("user32.dll"), "CreateSyntheticPointerDevice") != nullptr) {
-      if (config::input.native_pen_touch) {
-        caps |= platform_caps::pen_touch;
-      }
-    } else {
-      BOOST_LOG(warning) << "Touch input requires Windows 10 1809 or later"sv;
+    if (config::input.native_pen_touch) {
+      caps |= platform_caps::pen_touch;
     }
 
     return caps;

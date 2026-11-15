@@ -912,19 +912,7 @@ namespace platf::dxgi {
     static std::once_flag windows_cpp_once_flag;
 
     std::call_once(windows_cpp_once_flag, []() {
-      DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
-
-      typedef BOOL (*User32_SetProcessDpiAwarenessContext)(DPI_AWARENESS_CONTEXT value);
-
-      {
-        auto user32 = LoadLibraryA("user32.dll");
-        auto f = (User32_SetProcessDpiAwarenessContext) GetProcAddress(user32, "SetProcessDpiAwarenessContext");
-        if (f) {
-          f(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        }
-
-        FreeLibrary(user32);
-      }
+      SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
       {
         // We aren't calling MH_Uninitialize(), but that's okay because this hook lasts for the life of the process
