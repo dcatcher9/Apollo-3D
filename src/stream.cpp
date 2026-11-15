@@ -1859,22 +1859,6 @@ namespace stream {
     return result_size;
   }
 
-  std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
-    std::vector<std::uint8_t> result;
-    const auto result_size = concat_and_insert_into(
-      result,
-      insert_size,
-      slice_size,
-      data1,
-      data2
-    );
-    if (!result_size) {
-      return {};
-    }
-    result.resize(*result_size);
-    return result;
-  }
-
   /**
    * @brief Pass gamepad feedback data back to the client.
    * @param session The session object.
