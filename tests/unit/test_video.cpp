@@ -7850,7 +7850,7 @@ TEST(DirectxShaderSourceTest, OcrResolveConstantsAppendReferenceAndSourceObserva
          "std::bit_cast<std::uint32_t>(line_reference->center_twice_source)",
          "line_reference->width",
          "std::bit_cast<std::uint32_t>(line_reference->search_top_source)",
-         "static_cast<std::uint32_t>(pending_subtitle_line_position)",
+         "static_cast<std::uint32_t>(pending_subtitle_line_policy)",
          "static_cast<std::uint32_t>(pending_observation_timestamp_us)",
          "static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u)",
          "input_domain_reset ? 1u : 0u",

@@ -3621,7 +3621,7 @@ namespace models {
       depth_optional_work_mode_e::ordinary;
     std::uint64_t accepted_subtitle_context_generation = 0u;
     bool accepted_subtitle_context_disabled = false;
-    subtitle_line_position_e pending_subtitle_line_position = subtitle_line_position_e::centered;
+    subtitle_line_policy_e pending_subtitle_line_policy = subtitle_line_policy_e::video_caption;
     enum class pending_submission_class_e : std::uint8_t {
       force_infer,
       gpu_undecided,
@@ -7738,7 +7738,7 @@ namespace models {
         std::bit_cast<std::uint32_t>(line_reference->center_twice_source),
         line_reference->width,
         std::bit_cast<std::uint32_t>(line_reference->search_top_source),
-        static_cast<std::uint32_t>(pending_subtitle_line_position),
+        static_cast<std::uint32_t>(pending_subtitle_line_policy),
         static_cast<std::uint32_t>(pending_observation_timestamp_us),
         static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
         input_domain_reset ? 1u : 0u,
@@ -9514,7 +9514,7 @@ namespace models {
       const gpu_adaptive_reuse_request &adaptive_reuse_request,
       const std::uint64_t subtitle_context_generation,
       const host_sbs_temporal_source_bridge::certificate_t &source_observation,
-      const subtitle_line_position_e subtitle_line_position
+      const subtitle_line_policy_e subtitle_line_policy
     ) {
       if (!is_operational() || !input_srv) {
         return {};
@@ -10900,7 +10900,7 @@ namespace models {
         pending_color_space = color_space;
         pending_frame_id = frame_id;
         pending_input_region = input_region;
-        pending_subtitle_line_position = subtitle_line_position;
+        pending_subtitle_line_policy = subtitle_line_policy;
         pending_source_observation={};
         if(subtitle_temporal_source_enabled&&source_observation.valid()){
           const auto &d=source_observation.domain;
@@ -11160,7 +11160,7 @@ namespace models {
     gpu_adaptive_reuse_request adaptive_reuse,
     std::uint64_t subtitle_context_generation,
     host_sbs_temporal_source_bridge::certificate_t source_observation,
-    subtitle_line_position_e subtitle_line_position
+    subtitle_line_policy_e subtitle_line_policy
   ) {
     pimpl->subtitle_cohort_research_configuration_locked = true;
     return pimpl->estimate(
@@ -11173,7 +11173,7 @@ namespace models {
       adaptive_reuse,
       subtitle_context_generation,
       source_observation,
-      subtitle_line_position
+      subtitle_line_policy
     );
   }
 

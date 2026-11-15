@@ -3316,7 +3316,7 @@ namespace sbs_bench {
       // Parity probe: use live streaming's policy, where the conditioned-field diagnostics run
       // only for Dump 3D. Final then equals Base, so this is not an evaluator configuration.
       bool subtitle_conditioning_live_policy = false;
-      bool subtitle_any_horizontal_lines = false;  // replay the owner-enabled foreground-app line rule
+      bool subtitle_application_text = false;  // replay the owner-enabled foreground-app line rule
       std::string joined_completion_probe; // PRIVATE default-off three-source async experiment
       std::optional<std::vector<detail::subtitle_diagnostic_observation_range>>
         subtitle_plane_diagnostic_ranges;
@@ -3391,8 +3391,8 @@ namespace sbs_bench {
           o.pfm_joined_diagnostics = true;
         } else if (a == "--subtitle-conditioning-live-policy") {
           o.subtitle_conditioning_live_policy = true;
-        } else if (a == "--subtitle-any-horizontal-lines") {
-          o.subtitle_any_horizontal_lines = true;
+        } else if (a == "--subtitle-application-text") {
+          o.subtitle_application_text = true;
         } else if (a == "--joined-completion-probe") {
           if (!o.joined_completion_probe.empty()) { BOOST_LOG(error) << "sbs-bench: private probe plan must appear once"; return false; }
           o.joined_completion_probe = next("--joined-completion-probe");
@@ -6074,8 +6074,8 @@ namespace sbs_bench {
           replay_request,
           0u,
           {},
-          o.subtitle_any_horizontal_lines ? models::subtitle_line_position_e::any_horizontal :
-                                            models::subtitle_line_position_e::centered
+          o.subtitle_application_text ? models::subtitle_line_policy_e::application_text :
+                                            models::subtitle_line_policy_e::video_caption
         );
         const bool submitted_force = submitted.inference_enqueued;
         const bool submitted_gpu_undecided =

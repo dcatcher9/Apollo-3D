@@ -238,7 +238,7 @@ namespace {
     std::int32_t line_center_twice_source;
     std::uint32_t line_reference_width;
     std::int32_t line_search_top_source;
-    std::uint32_t line_center_policy = 0u;
+    std::uint32_t line_policy = 0u;
     std::array<std::uint32_t, 4u> observation {};
   };
 
@@ -587,7 +587,7 @@ namespace {
       const std::optional<std::int32_t> line_search_top_source = std::nullopt,
       const std::optional<std::uint64_t> observation_timestamp_us = std::nullopt,
       const bool input_domain_reset = false,
-      const std::uint32_t line_center_policy = 0u
+      const std::uint32_t line_policy = 0u
     ) {
       if (!cells_ || !boxes_ || probability.size() != ocr_pixels) {
         return false;
@@ -621,7 +621,7 @@ namespace {
         line_center_twice_source.value_or(static_cast<std::int32_t>(source_w)),
         line_reference_width.value_or(source_w),
         line_search_top_source.value_or(static_cast<std::int32_t>(subtitle_search_top(source_h))),
-        line_center_policy,
+        line_policy,
         {static_cast<std::uint32_t>(source_clock), static_cast<std::uint32_t>(source_clock >> 32u),
           input_domain_reset ? 1u : 0u, 0u},
       };
@@ -3100,7 +3100,7 @@ namespace {
     }
   }
 
-  TEST(HostSbsOcrGpuTest, AnyHorizontalPolicyAdmitsTheSameOffCenterLineVideoRejects) {
+  TEST(HostSbsOcrGpuTest, ApplicationTextPolicyAdmitsTheSameOffCenterLineVideoRejects) {
     // One short horizontal line anchored left of the reference center, as a 2D game draws its
     // dialogue: it neither spans the center nor has a centered midpoint.
     const std::vector<ocr_candidate_patch_t> left_anchored {
@@ -3131,6 +3131,50 @@ namespace {
       ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
       ASSERT_TRUE(run(fixture, 1u));
       expect_retained_native_pairs(fixture.record(), expected_pairs);
+    }
+    {
+      // A line that types out starts as one glyph. The detector rounds a blob's ends, so its
+      // envelopes diverge and it has no orientation of its own. After one trusted line at the
+      // same baseline the application rule admits it; video still wants several cues.
+      const auto paint_line = [](std::vector<float> &map) {
+        paint_rectangle(map, 300u, 60u, 660u, 75u);
+      };
+      const auto paint_first_glyph = [](std::vector<float> &map) {
+        paint_rectangle(map, 474u, 60u, 488u, 75u);
+        paint_rectangle(map, 470u, 65u, 474u, 70u);
+      };
+      // A droplet-sized blob at another height and baseline is not dialogue.
+      const auto paint_speck = [](std::vector<float> &map) {
+        paint_rectangle(map, 478u, 120u, 483u, 126u);
+      };
+      const auto run_policy = [&](ocr_warp_fixture_t &fixture, const std::vector<float> &map,
+                                  const std::uint64_t frame, const std::uint32_t policy) {
+        return fixture.run_boxes(
+          map, frame, 77u, source_width, source_height, field_width, field_height,
+          source_crop_top, source_crop_height, roi_top, roi_bottom, {}, std::nullopt,
+          std::nullopt, std::nullopt, std::nullopt, false, policy);
+      };
+      for (const auto policy : {0u, 1u}) {
+        SCOPED_TRACE(policy);
+        std::vector<float> line(ocr_pixels, 0.0f), glyph(ocr_pixels, 0.0f), speck(ocr_pixels, 0.0f);
+        paint_line(line);
+        paint_first_glyph(glyph);
+        paint_speck(speck);
+        ocr_warp_fixture_t unlearned;
+        ASSERT_TRUE(unlearned.initialize(error, false, true, false)) << error;
+        ASSERT_TRUE(run_policy(unlearned, glyph, 40u, policy));
+        EXPECT_EQ(unlearned.record()[2u], 1u);
+        EXPECT_EQ(unlearned.record()[3u], 0u);  // No line has been seen in this context yet.
+        ocr_warp_fixture_t fixture;
+        ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+        ASSERT_TRUE(run_policy(fixture, line, 40u, policy));
+        ASSERT_EQ(fixture.record()[3u], 1u);
+        ASSERT_EQ(classifier_history(fixture.record())[3u], 1u);
+        ASSERT_TRUE(run_policy(fixture, glyph, 41u, policy));
+        EXPECT_EQ(fixture.record()[3u], policy == 0u ? 0u : 1u);
+        ASSERT_TRUE(run_policy(fixture, speck, 42u, policy));
+        EXPECT_EQ(fixture.record()[3u], 0u);
+      }
     }
     {
       // An unknown policy value is an invalid request, never a third rule.

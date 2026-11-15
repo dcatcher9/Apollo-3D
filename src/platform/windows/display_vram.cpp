@@ -1850,7 +1850,7 @@ namespace platf::dxgi {
                   adaptive_request,
                   matched_candidate_slot->subtitle_context_generation,
                   matched_candidate_slot->temporal_source,
-                  matched_candidate_slot->subtitle_line_position
+                  matched_candidate_slot->subtitle_line_policy
                 );
                 const bool submitted_refined_geometry = submitted.refined_live_geometry_active;
                 if (completion_finalized_before_admission &&
@@ -4472,7 +4472,7 @@ namespace platf::dxgi {
       // authority. Keep it separate from the normal per-frame eligibility used by rendering.
       bool subtitle_context_suppression_eligible = false;
       // Submitted with the same context generation, so it cannot change within one context.
-      models::subtitle_line_position_e subtitle_line_position = models::subtitle_line_position_e::centered;
+      models::subtitle_line_policy_e subtitle_line_policy = models::subtitle_line_policy_e::video_caption;
       std::uint64_t probe_instance = 0u;
       // CPU-owned submission class authenticates matched completion metadata. The exact final
       // publication receipt independently reports the actual infer/reuse branch and depth owner.
@@ -4693,7 +4693,7 @@ namespace platf::dxgi {
       destination.subtitle_context_generation = source.subtitle_context_generation;
       destination.subtitle_context_eligible = source.subtitle_context_eligible;
       destination.subtitle_context_suppression_eligible = source.subtitle_context_suppression_eligible;
-      destination.subtitle_line_position = source.subtitle_line_position;
+      destination.subtitle_line_policy = source.subtitle_line_policy;
       destination.probe_instance = source.probe_instance;
       destination.gpu_undecided_transaction = source.gpu_undecided_transaction;
       destination.pending = false;
@@ -6413,10 +6413,10 @@ namespace platf::dxgi {
       slot.subtitle_context_suppression_eligible =
         slot.observed_interactive_move_size && subtitle_context.eligible();
       slot.probe_instance = probe_context ? probe_context->instance : 0u;
-      slot.subtitle_line_position =
+      slot.subtitle_line_policy =
         models::host_subtitle_context::requires_centered_lines(subtitle_context.kind()) ?
-          models::subtitle_line_position_e::centered :
-          models::subtitle_line_position_e::any_horizontal;
+          models::subtitle_line_policy_e::video_caption :
+          models::subtitle_line_policy_e::application_text;
       slot.subtitle_context_eligible = probe_context ?
         subtitle_context.eligible() && source_desc.Width == probe_context->width && source_desc.Height == probe_context->height :
         subtitle_context.eligible() && slot.window_region &&

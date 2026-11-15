@@ -68,8 +68,8 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 132/tag `0x90278C1A`, canonical SHA-256
-`0d140f857343932b01d3d33f8c66768cc4c807ed377811282c7bf1c7d72c903e`. It binds the
+schema 133/tag `0x1708182E`, canonical SHA-256
+`e631beffe7a464126eb883e9a7f169a70227a30b2688990827834f9ced96e052`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -80,20 +80,20 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd` |
-| `parallax_v2_producer` | 27 | `8f79a8ba600a992b84f591d2e766ad77ef7bd8243f1fb205df909f1481823528` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `10fc176de3612e30ee5f4602794675e5f8046e698cba7e8a488c37d066901381` |
-| `near_identical_detector` | 3 | `57b819cdb54b4862d9114d9c8b9bde5983707169f6c324c3101a51de154ce961` |
-| `gpu_trace` | 1 | `55a7fe6f92a5be3140fe33f082b32b00c189b33fa580af4ab766d30345b9fd7a` |
-| `parallax_v2_live_renderer` | 2 | `48d5db82cff195785fda7720fb7fe90696b60dc9d4794df23ac152c1f0c34dab` |
-| `parallax_v2_p010_y` | 1 | `30c9cb3b33239726ce979da5d5950b64f83c0e0fe34d20d718797f582c91ebfd` |
+| `parallax_v2_producer` | 27 | `071aba3df38db014fb6c339d73a96e3ceaced7373548cfa0b667ffdeb198b9c2` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `c7379c239de2709ea474096403dda48d4b2060f74ffa2ba164cc8dbb0178ad78` |
+| `near_identical_detector` | 3 | `7c229c343901169ff763cd4790a1fe7db8084e222bc6d98169241989d782cca8` |
+| `gpu_trace` | 1 | `49f8fa0cfd1b2273dc142e35ca7008618d62516f1d4028afab1c9eb3f1d1b258` |
+| `parallax_v2_live_renderer` | 2 | `49daaa9016eb6a124ea43bff0a9b1835c08b19d9f862c8c33ea05c7e0c31c893` |
+| `parallax_v2_p010_y` | 1 | `7a96fbda4c8b487522a58b91ee781f5188a0ea263390cee322fd25d82a940561` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `6c49bc093329409b2cc0cae0a206507bed5c03d8bab2f8e08010f9de7b35b1ab` |
-| `subtitle_cohort_prototype_research` | 3 | `7a0c3744cbf07ae330fb3ddc74f156b4e4661d3fac4d79f72fe0a2f2b9a2162a` |
-| `subtitle_cohort_research` | 4 | `b132b1d778a59633b1675c9805208ba7e6a6d0bc03bd788fbb52c3fab680c052` |
-| `subtitle_inner_colour_research` | 5 | `2a6f2efbb0bb66d3b01f3b4cc003e7729c9284b0a2d03c98a0009c94124be049` |
+| `parallax_v2_live_diagnostic` | 2 | `ca675851c503d77afe18ce1ec2f9c35258f80d9b437976b966d7904713aeb3cb` |
+| `subtitle_cohort_prototype_research` | 3 | `fc99c441f90e3eb9ae52994ae394b739ae0100b75e07f61cb0c29f60aa4fdd2a` |
+| `subtitle_cohort_research` | 4 | `2c335e48c193d77dda666777dd2aa2b97cdf3595b028880a31a858b55c4b8582` |
+| `subtitle_inner_colour_research` | 5 | `e7dd5aedd69a52bf9949878cb6ff5c0980885bd83e1676f41824b80a589a9c29` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
-| `subtitle_matte_guard_research` | 1 | `1c9709c6ef565bb451745adfb22722a73d28cf1f5eb512daa907feb613723e46` |
-| `parallax_v2_queued_renderer` | 1 | `155f02d04aa844e221ee222a36daef5efc32b875f080fd3a383dac8d31d19bcd` |
+| `subtitle_matte_guard_research` | 1 | `7b1d7a7771e1ee1794f247b3c0c9d8a05ab67a90d7568545424367c166ee94c2` |
+| `parallax_v2_queued_renderer` | 1 | `f0182ba0ee81102dc51999d0fe9b51924c28b629f93d33f11a93768715c38055` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
 | `current_foreground_edge` | 1 | `4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c` |
@@ -446,11 +446,18 @@ foreground application, such as a 2D game, as a `foreground-app` context keyed b
 process. It carries no video evidence: the owner's switch is its only authority, and it changes
 admission and one classifier rule. Video captions are centered, so the classifier rejects
 off-center text as scene text; an application such as a 2D game anchors its dialogue elsewhere.
-A `foreground-app` submission therefore sets OCR resolve word 19 (`line_center_policy`) to `1`,
-which makes both the two-percent midpoint check and the reference-center span check pass, for
-ordinary groups, stack assistance and prior-only admission alike. The bottom search region,
-orientation classes, height and grouping rules, covers and protection are unchanged. Browser video,
-registered players and offline consumers submit `0` and keep every centering rule; any other value
+A `foreground-app` submission therefore sets OCR resolve word 19 (`line_policy`) to `1`, the
+application-text rule. It makes both the two-percent midpoint check and the reference-center span
+check pass, for ordinary groups, stack assistance and prior-only admission alike. A line that types out begins as one or two glyphs,
+whose detector blob has rounded ends and no measurable orientation. Under this rule a learned
+position therefore qualifies after its first trusted line instead of eight votes, since
+application dialogue repeats at one baseline and height, and the envelope-shape veto on
+prior-assisted pieces is waived. The current-height bound against the trusted height and the
+neighbouring-bin position bound still apply, so a small detector blob elsewhere in the picture
+is not admitted. The first line of a context still proves itself horizontal on its own, and text
+classified as scene text is still rejected. The bottom search region,
+height and grouping rules, covers and protection are unchanged. Browser video, registered players
+and offline consumers submit `0` and keep every centering and prior rule; any other value
 is an invalid request that publishes nothing. The policy is submitted with the context generation
 and cannot change within one context. Registration is evaluated first, so a
 registered player keeps its kind. A browser window whose helper identity matches still requires

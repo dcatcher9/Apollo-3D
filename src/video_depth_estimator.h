@@ -1541,7 +1541,7 @@ namespace models {
      *        clears only subtitle history and forces inference; zero preserves offline behavior.
      *        If this call completes a prior frame, it returns that publication without enqueueing;
      *        submit the changed context again after consuming the returned frame.
-     * @param subtitle_line_position Horizontal position rule for this submission's OCR line
+     * @param subtitle_line_policy Horizontal position rule for this submission's OCR line
      *        classifier. It may change only together with the subtitle context generation.
      * @return estimate_result; all views are owned by the estimator and overwritten by later calls.
      */
@@ -1555,7 +1555,7 @@ namespace models {
       gpu_adaptive_reuse_request adaptive_reuse = {},
       std::uint64_t subtitle_context_generation = 0u,
       host_sbs_temporal_source_bridge::certificate_t source_observation = {},
-      subtitle_line_position_e subtitle_line_position = subtitle_line_position_e::centered
+      subtitle_line_policy_e subtitle_line_policy = subtitle_line_policy_e::video_caption
     );
 
     /**

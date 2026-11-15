@@ -207,7 +207,7 @@ CPU map, readback, query, or synchronization and has no rendering authority.
 
 ## OCR8 and UIP4 records
 
-Coordinate schema 132/OCR 38/contour recipe 27 publishes only classified current subtitle pairs.
+Coordinate schema 133/OCR 38/contour recipe 27 publishes only classified current subtitle pairs.
 Its schema-4 OCR8 buffer is 256 words:
 the original 208-word header/core/cover prefix plus a 48-word classifier history tail. Both producer
 and resolver descriptors bind the complete generated classifier policy. The tail's SCL1 identity

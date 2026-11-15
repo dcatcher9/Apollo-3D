@@ -64,7 +64,7 @@ owns the policy. The former experiment selector has been retired.
 ### sbs_3d_foreground_subtitles
 
 <table>
-    <tr><td>Description</td><td>Also run live Host 3D subtitle detection and protection for the foreground application when it is neither a browser video nor a registered video player, for example a 2D game. For such an application the caption centering rule is dropped, because game dialogue is rarely centered; the text must still be in the bottom subtitle region. Browser videos and registered video players are always eligible and do not need this switch. Applies to new live Host 3D streams. Game 3D is unaffected.</td></tr>
+    <tr><td>Description</td><td>Also run live Host 3D subtitle detection and protection for the foreground application when it is neither a browser video nor a registered video player, for example a 2D game. For such an application the caption centering rule is dropped and the first few characters of a line are accepted once one full line has been seen, because game dialogue is rarely centered and types out a few characters at a time; the text must still be in the bottom subtitle region. Browser videos and registered video players are always eligible and do not need this switch. Applies to new live Host 3D streams. Game 3D is unaffected.</td></tr>
     <tr><td>Default</td><td><code>disabled</code></td></tr>
 </table>
 

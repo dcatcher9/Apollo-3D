@@ -183,6 +183,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Word 6 of the V2 state and UIP4 word 20 are reserved zero; the depth-health state
             # is the 8-word schema-8 contract.
             132: "0d140f857343932b01d3d33f8c66768cc4c807ed377811282c7bf1c7d72c903e",
+            # Under the owner-enabled application-text policy one learned line admits short
+            # pieces, so later dialogue lines are admitted from their first typed glyph.
+            133: "e631beffe7a464126eb883e9a7f169a70227a30b2688990827834f9ced96e052",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -190,14 +193,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x90278C1A)
+        self.assertEqual(generator.contract_tag(contract), 0x1708182E)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "90278c1a6d8a5d0b019ff3eb7c6a5bdb503841a73c82373aa61a2530de4b0f60",
+            "1708182eec0ef2cd807740fbfe5a5820fcf51363466e53e54c8cada992492b9d",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "8f79a8ba600a992b84f591d2e766ad77ef7bd8243f1fb205df909f1481823528",
+            "071aba3df38db014fb6c339d73a96e3ceaced7373548cfa0b667ffdeb198b9c2",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -448,7 +451,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("before-classified-capacity", ocr.line_group_policy)
         self.assertIn("full-screen", ocr.line_center_reference)
         self.assertIn("chromium-video-or-foreground-client-roi", ocr.line_center_reference)
-        self.assertIn("prefix19-then-line-center-policy", ocr.line_center_reference_params)
+        self.assertIn("prefix19-then-line-policy", ocr.line_center_reference_params)
         self.assertIn("source-clock-low-high-domain-reset", ocr.line_center_reference_params)
         self.assertIn("96bytes", ocr.line_center_reference_params)
         self.assertGreater(ocr.text_join_gap_cells, 0)
@@ -482,7 +485,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 132u',
+                'contract_schema = 133u',
                 'final_parallax_contract_schema = 4u',
                 'final_parallax_authority = '
                 '"authenticated-subtitle-conditioned-r32f-diagnostic-only"',
@@ -582,7 +585,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 132u',
+                '#define V2_CONTRACT_SCHEMA 133u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS 28u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG 1u',
                 '#define V2_SUBTITLE_CONTOUR_RECIPE 27u',

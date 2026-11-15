@@ -105,10 +105,13 @@ cbuffer OcrResolveConstants : register(b0) {
     int line_center_twice_source;
     uint line_reference_width;
     int line_search_top_source;
-    // 0: ordinary video captions must be centered on the reference. 1: the owner-enabled
-    // foreground-app context accepts a horizontal line at any horizontal position; the bottom
-    // search region, orientation and every other rule are unchanged.
-    uint line_center_policy;
+    // 0: video captions must be centered on the reference.
+    // 1: the owner has declared this application's bottom text to be dialogue. It may sit at
+    // any horizontal position. A line that types out starts as one or two glyphs whose blob
+    // has no measurable orientation, so one learned line is enough position memory here and a
+    // short piece's envelope shape cannot veto it. The bottom search region, the first line's
+    // own proof of horizontality, scene-text rejection and every other rule are unchanged.
+    uint line_policy;
     uint2 source_clock_us;
     uint input_domain_reset;
     uint classifier_reserved;
@@ -220,7 +223,7 @@ bool ResolveGeometryValid() {
         line_center_twice_source > (int)line_reference_width ||
         line_search_top_source < -(int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         line_search_top_source > (int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
-        line_center_policy > 1u || classifier_reserved != 0u || input_domain_reset > 1u ||
+        line_policy > 1u || classifier_reserved != 0u || input_domain_reset > 1u ||
         source_width > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         source_height > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         source_width == 0u || source_height == 0u || field_width == 0u || field_height == 0u ||
@@ -835,7 +838,7 @@ bool SameTextLine(CandidateStats candidate, uint2 anchor, uint4 bounds) {
 }
 
 bool LineIsCentered(uint4 bounds) {
-    if (line_center_policy != 0u) return true;
+    if (line_policy != 0u) return true;
     // Native extents/reference are bounded to 5120. Even the largest signed difference times
     // the tolerance denominator is <=737,280,000: exact int32 comparison keeps both edges equal.
     int delta = (int)(bounds.x + bounds.z) * (int)source_width -
@@ -846,7 +849,7 @@ bool LineIsCentered(uint4 bounds) {
 }
 
 bool LineSpansReferenceCenter(uint4 bounds) {
-    if (line_center_policy != 0u) return true;
+    if (line_policy != 0u) return true;
     // Position/height memory cannot independently authorize a small fragment merely because
     // its midpoint lies in the broad center tolerance. Require the current bounded line group
     // to contain the signed reference center in its half-open horizontal span. All products
@@ -1031,9 +1034,16 @@ void BeginClassifierHistory() {
 }
 
 bool CandidateHasQualifiedPrior(uint candidate) {
-    if ((OcrCandidateScratch[ScratchBase(candidate) + 3u].x &
-         CANDIDATE_PRIOR_GEOMETRY_ALLOWED) == 0u || ClassifierClockValid == 0u ||
+    // Application text repeats at one baseline and height, so the first trusted line already
+    // identifies it; video keeps the several-cue vote. The detector rounds both ends of a
+    // blob, which makes a single glyph's envelopes diverge without being an object edge, so
+    // the envelope veto applies to video only. Scene text never reaches this function.
+    bool application_text = line_policy != 0u;
+    if ((!application_text && (OcrCandidateScratch[ScratchBase(candidate) + 3u].x &
+         CANDIDATE_PRIOR_GEOMETRY_ALLOWED) == 0u) || ClassifierClockValid == 0u ||
         ClassifierHistory[2u] != V2_OCR_CLASSIFIER_HISTORY_KNOWN_FLAGS) return false;
+    uint required_votes = application_text ?
+        V2_OCR_CLASSIFIER_PRIOR_INCREMENT : V2_OCR_CLASSIFIER_PRIOR_ASSIST;
     CandidateStats stats = LoadCandidate(candidate);
     float trusted_height = asfloat(ClassifierHistory[27u]);
     float height = (float)(stats.tight_bottom - stats.tight_top);
@@ -1045,7 +1055,7 @@ bool CandidateHasQualifiedPrior(uint candidate) {
     uint end = min(bin + 1u, V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT - 1u);
     [loop]
     for (uint current = begin; current <= end; ++current) {
-        if (ClassifierHistory[32u + current] >= V2_OCR_CLASSIFIER_PRIOR_ASSIST) return true;
+        if (ClassifierHistory[32u + current] >= required_votes) return true;
     }
     return false;
 }
