@@ -115,11 +115,13 @@ errors. V2 fails flat when current geometry is invalid; it does not silently fal
 deleted V1 renderer or CPU depth. Rebuild the TensorRT engine after changing the model, TensorRT
 version, GPU, or authenticated shape contract.
 
-### Depth or pop changes after a cut
+### Depth or pop changes between shots
 
-V2 holds one scene camera and literal configured pop until an accepted scene cut. Capture the cut
-state and exact frame identity rather than tuning unrelated geometry constants. The evidence and
-rearm rules are owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
+V2 follows the mean zero plane and robust depth amplitude continuously at bounded rates and applies
+the literal configured pop. It has no scene-cut detection, so the plane moves smoothly after an
+editorial cut. Capture a Dump 3D frame and exact frame identity rather than tuning unrelated
+geometry constants. The controller is owned by
+[Host SBS pipeline](host-sbs.md#adaptive-geometry-and-subtitle-plane).
 
 ### Transparent crowns, duplicated edges, or stretched object rims
 

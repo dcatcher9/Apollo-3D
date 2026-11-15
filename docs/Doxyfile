@@ -44,7 +44,6 @@ INPUT = ../README.md \
         configuration.md \
         app_examples.md \
         host-sbs.md \
-        host-sbs-scene-cuts.md \
         sbs-3d-roadmap.md \
         sbs-local-ar-glasses.md \
         whole-clip-sbs-pipeline.md \

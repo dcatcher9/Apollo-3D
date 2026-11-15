@@ -132,7 +132,7 @@ The public fused output grid is also the only analysis, history, and live geomet
 grid. The following all consume the same high field:
 
 - raw moments, percentile range, normalization, and edge-aware temporal EMA;
-- normalized-depth history, scene-cut evidence, camera acquisition, and near-identical history ownership;
+- normalized-depth history, camera state, and near-identical history ownership;
 - pointwise depth-to-parallax mapping and soft container;
 - vertical and horizontal slope conditioning;
 - subtitle projection/conditioning; and
@@ -149,7 +149,7 @@ the composite result at `2H x 2W`.
 
 Near-identical reuse compares the current high-grid RGB tensor with the last authenticated infer
 input. An authorized reuse skips the complete fused inference and holds the previous complete
-high-grid depth/cut/camera/history tuple. Reuse has no age or frame-count expiry and never promotes
+high-grid depth/camera/history tuple. Reuse has no age or frame-count expiry and never promotes
 the candidate to the comparison owner. Higher spatial sensitivity may reduce reuse frequency; it
 must never authorize a depth result from an incompatible grid or domain.
 
@@ -243,5 +243,5 @@ Rejected experiments remain excluded from the deterministic exporter:
 - a CUDA Tile TensorRT plugin is a runtime/kernel extension and therefore outside this session's
   serialized-model-only boundary.
 
-The optimization remains subordinate to paired dump, edge, temporal, subtitle, scene-cut, and
+The optimization remains subordinate to paired dump, edge, temporal, subtitle, and
 live-XR gates. CUDA 13.3 does not automatically accelerate the ONNX plan.

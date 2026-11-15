@@ -5,7 +5,7 @@ This tracks the static review supplied in `CODEX_HANDOFF.md` on
 The original confidence labels are retained: V = independently verified in that review,
 R = reviewer-confirmed, U = unverified, X = rejected. They are not claims of a local GPU
 reproduction. This is a work tracker, not an alternative algorithm contract; policy remains in
-[Host SBS](host-sbs.md) and [scene cuts](host-sbs-scene-cuts.md).
+[Host SBS](host-sbs.md).
 
 ## Priority repairs
 

@@ -536,7 +536,7 @@ qualify a better width or final mask.
 
 Build 137 adds a calibration prior for the reproduced KNOWN-to-zero-profile-NOINFO black-rim
 switch. The [native contour policy](host-sbs.md#native-subtitle-contours-and-ui-plane) owns its
-current-evidence, geometry, clock and hard-cut constraints. A real-model three-PNG run through the
+current-evidence, geometry and clock constraints. A real-model three-PNG run through the
 actual Source5/current-kind3 draw path commits width six, reuses it on NOINFO, and clears on the
 first genuine EMPTY observation. It recovers 6,417 pixels, including all 3,744 previously omitted
 opaque black pixels in this example. Its NOINFO mask has no authored BODY or opaque omissions and
@@ -546,7 +546,7 @@ All 43 normal masks and numerical outputs remain byte-identical to the preceding
 controls. Thirty authored-GT cases and 33 identical-GT pairs have no new losses or switches;
 their inherited omissions remain. Duplicate, stale, EMPTY, cut-key and Root0 mechanics pass, and
 the maintained suite reports 72 passes and one inherited skip. The cut-key manipulation is a
-receipt-mechanics test, separate from genuine cut-detector qualification. The actual renderer
+receipt-mechanics test. The actual renderer
 uses native clocks and matching source/resource identities; its Base and state differ between
 inputs, so complete eye-image changes cannot all be assigned to the mask.
 
@@ -774,13 +774,12 @@ change was outside that crop. This optimization changes neither ROI selection no
 semantics: uncertainty returns to normal inference, while continuously proven unchanged input
 does not require periodic refresh. WGC has no damage-reuse authority.
 
-The complete implementation contract is in [Host SBS pipeline](host-sbs.md). Scene-cut behavior is
-owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
+The complete implementation contract is in [Host SBS pipeline](host-sbs.md).
 
 ## What is intentionally absent
 
 - No geometry endpoint normalization into `[0,1]`, subject stretch/recenter, adaptive pop gain, or
-  configurable zero-plane translation. Private normalized depth/range EMA remains cut/history
+  configurable zero-plane translation. Private normalized depth/range EMA remains history
   evidence, separate from the adaptive geometry zero/scale controller.
 - No damage-driven ROI selection, image-tracked ROI, background-window/tab ROI, or second-inference
   ROI. The foreground window-region route replaces that frame's full analysis with at most one
@@ -809,7 +808,7 @@ differently surrounded versions of the same image can produce materially differe
 tensor pixels on the main subject do not guarantee a better boundary. Synthetic context must not
 influence monocular analysis. The
 window-region route therefore uses only the exact client/video pixels: its edge-replicated tensor
-padding is excluded from depth statistics, scene cuts, history comparison/authority, and
+padding is excluded from depth statistics, history comparison/authority, and
 OCR authority, although the fused map copies the complete raw padded tuple with exclusion `1`.
 
 ### Foreground window-region ROI boundary
@@ -1182,7 +1181,7 @@ Damage reuse is deliberately DDup-only and fail-open. Dirty and move metadata is
 proof that the exact current ROI pixels did not change: damage outside the crop may save inference,
 whereas an intersecting move source or destination, a sequence gap, metadata failure, protected
 content, route movement, authority change, or WGC forces the wrapper's inference path. Reuse freezes the
-depth/cut/camera/OCR/UIP4 observation state and always warps the current capture color rather than
+depth/camera/OCR/UIP4 observation state and always warps the current capture color rather than
 repeating a packed SBS frame. This exact-current DDup proof is distinct from the presentation-only
 fallback below, which is eligible only when no matched completion reaches the render deadline.
 
@@ -1204,7 +1203,7 @@ DAV2 infer/reuse branch without a CPU decision poll or wait. Only after final D3
 nonblocking receipt report the completed outcome to the CPU. Depth and subtitle use one joint
 observation policy. Current-ready OCR (`1`) or current
 ineligible abstention (`2`) publishes only on valid infer; native USER32 suppression (`0`) advances
-neither OCR nor plane state. Every reuse preserves depth/cut/camera/V2 Base and the complete
+neither OCR nor plane state. Every reuse preserves depth/camera/V2 Base and the complete
 OCR8/UIP4/conditioned-final tuple. No mode relabels
 retained boxes as a new OCR observation, and there is no adaptive OCR-band, localized subtitle or
 SLR-state veto.
@@ -1292,7 +1291,7 @@ an end-to-end latency saving.
 
 The policy no longer forces an inference after four deliveries or `100 ms`. Qualify prolonged
 comparison against the fixed real-inference owner with shared-replay, exact-trace, cumulative-drift,
-scene-cut, subtitle-transition, weak-GPU-tail, and live-XR evidence.
+subtitle-transition, weak-GPU-tail, and live-XR evidence.
 The acceptance metric is final SBS readiness and presentation continuity, not the raw CUDA-root
 event time or a promised reuse percentage.
 
@@ -1369,12 +1368,6 @@ V2 preserves foreground continuity while limiting the slope required by its inve
 large raw cliff this converts one discontinuity into a wider safe ramp. Hair crowns, transparent
 glass rims, and small near-object tops can therefore bend or stretch differently in the two eyes.
 
-### Scene-cut uncertainty
-
-Scene cuts are inferred from depth, raw appearance, ordinal structure, and history. Exposure and
-persistent-motion guards reduce false relatches but cannot create ground truth for an ambiguous
-sequence. Rapid consecutive cuts and structureless transitions remain important headset tests.
-
 ### Unsupported identities fail flat
 
 Live Host SBS, production conversion, and the maintained evaluator accept only the authenticated
@@ -1384,7 +1377,7 @@ and renderer closure. There is no Host SBS model selector or unauthenticated fal
 
 ### Live telemetry is sampled
 
-Routine CutBridge and cumulative outcome samples share the completion receipt's nonblocking
+Routine depth-health and cumulative outcome samples share the completion receipt's nonblocking
 copy/event/map transport. Their validity remains separate from rendering proof and from each other;
 capture-time age and publication ordering prevent delayed samples from appearing fresh. Samples may
 be missing under GPU load, while offline traces are complete. A live/offline discrepancy must first
@@ -1412,10 +1405,41 @@ Before changing V2 geometry:
 5. Confirm the result in Galaxy XR at the intended pop strength before changing the production
    contract or baselines.
 
+Galaxy XR window-region and subtitle scenarios, each exercised for at least 20 seconds and finished
+with five seconds of a static image; the [pipeline contract](host-sbs.md) owns the rules they test:
+
+- Enter and leave both window-region ROI authorities, including Chromium priority, and acquire and
+  release a structural content child.
+- Move a same-sized foreground window without changing its content, then resize it across an
+  analysis-domain boundary and switch between Chromium-video and foreground-client authority.
+  Pure translation must not reacquire the camera; an analysis-domain change must reset state
+  instead of comparing incompatible history.
+- Enter both the semantic Chromium fullscreen and the generic exact-full-capture foreground-client
+  routes; each must keep ordinary full-frame continuity instead of creating an ROI transition.
+- Land an input-domain reset on visible static subtitles. Valid current pixel evidence must give
+  immediate support without a four-count wait or pre-reset support reuse.
+- Keep a subtitle on screen across an editorial cut. Its UI-plane filter memory, pixel confirmation
+  history, cohort owner and outline stability history must persist.
+- Let a caption disappear. A genuine newer valid-empty observation must clear hidden controller
+  state; repeated clocks and reuse must hold rather than spend time or manufacture a reset.
+- Introduce moving scene text inside admitted OCR covers, and static non-subtitle text. Moving RGB
+  must not inherit mature diagnostic counts; false current probabilities and textured scenery
+  inside false current covers remain declared false-positive boundaries.
+- Append and remove a second line, reorder or split OCR boxes, and repeat an observation.
+  Still-covered qualifying same-pixel fixed RGB references keep their history, newly admitted
+  diagnostic pixels start at one, empty or invalid current authority returns exact Base, and
+  duplicate identities add no diagnostic confirmations.
+- Replace one real subtitle cue with another, including similarly colored glyphs and a genuine
+  disappearance. Pixels must lose support when current evidence fails, and a false cover alone
+  must not retain protection after disappearance.
+
+Repeat representative cases in SDR and HDR and across authenticated landscape, ultrawide, and
+portrait tensor shapes.
+
 The immediate priority is to qualify the single-high fused adaptive pipeline
-across paired dumps and Galaxy XR, including high-grid temporal/cut/reuse behavior and the
+across paired dumps and Galaxy XR, including high-grid temporal/reuse behavior and the
 small-source bilinear-upscale exception. The producer shares its raw histogram traversal with private
-cut normalization while preserving both populations and quantile policies; current-cover UI probes
+normalization while preserving both populations and quantile policies; current-cover UI probes
 also retain their exact visits through cached group scratch and add/carry coordinates. These are
 work reductions requiring paired output and timing evidence, not a new distortion or gain policy.
 
@@ -1432,7 +1456,6 @@ witnesses without reintroducing the hair/shoulder discontinuity or hand-boundary
 ## References
 
 - [Host SBS pipeline](host-sbs.md)
-- [Host SBS scene cuts](host-sbs-scene-cuts.md)
 - [Offline Host 3D conversion](whole-clip-sbs-pipeline.md)
 - [Local AR glasses](sbs-local-ar-glasses.md)
 - [sbsbench evaluator](../tools/sbsbench/README.md)

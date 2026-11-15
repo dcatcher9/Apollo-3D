@@ -162,8 +162,9 @@ and recovery after a host crash.
 ## Stable depth from scene to scene
 
 Host AI 3D and Client AI 3D use Depth Coordinate V2 with calibration for their respective models.
-On the first usable depth field of a shot, each places the screen plane at the average raw depth
-and holds it there while objects move. An accepted scene cut lets the next shot choose a new plane.
+The first usable depth field sets the screen plane at the average raw depth and the depth amplitude
+from the field's robust range. Afterwards both follow each new depth result at bounded rates, so
+the plane moves smoothly when the content changes. Neither mode detects scene cuts.
 
 Host AI 3D uses the **Host 3D strength** setting in the host Web UI; Client AI 3D uses its fixed
 calibrated strength. Neither automatically increases or reduces strength for each scene. The
@@ -171,14 +172,14 @@ models and GPU renderers differ, so their output is not expected to be identical
 
 ```mermaid
 flowchart TD
-    START["First usable depth in a new shot"]
-    START --> PLANE["Set the screen plane<br/>from the shot's average depth"]
-    PLANE --> HOLD["Keep that plane steady<br/>as objects move"]
-    HOLD -->|"Scene cut accepted"| START
+    START["First usable depth"]
+    START --> PLANE["Set the screen plane and amplitude<br/>from the depth field"]
+    PLANE --> FOLLOW["Follow the average depth and range<br/>at bounded rates"]
+    FOLLOW -->|"Each new depth result"| FOLLOW
 ```
 
-These shot-stable decisions reduce convergence breathing and pumping. They do not guarantee perfect
-depth, artifact-free reprojection, or flawless cut detection.
+These bounded-rate decisions reduce convergence breathing and pumping. They do not guarantee perfect
+depth or artifact-free reprojection.
 
 The [Host SBS pipeline](./docs/host-sbs.md) and
 [Client SBS architecture](https://github.com/dcatcher9/moonlight-android/blob/moonlight-noir/docs/android-xr-sbs.md)
@@ -231,7 +232,7 @@ views are available.
 | **Game 3D** | Discovers a compatible game export while streaming mono, then presents exact full SBS through a guarded transition; source loss retains packed duplicate-eye fallback |
 | **Movie 3D** | Interprets existing 2D, Half SBS or Full SBS pictures through an explicit format choice without changing transport geometry |
 | **Offline Host 3D conversion** | Converts video to compressed H.265 or AV1 SBS with the same causal V2 estimator/renderer as live Host AI 3D, running as fast as decoder/GPU/encoder backpressure permits |
-| **Stable 3D screen plane** | Both AI modes hold a raw-depth scene center for the shot, with configured Host 3D strength or fixed Client AI 3D strength |
+| **Stable 3D screen plane** | Both AI modes follow the raw-depth average at bounded rates, with configured Host 3D strength or fixed Client AI 3D strength |
 | **Responsive quality controls** | Live resolution, frame-rate, and bitrate updates without rebuilding the application, capture, or virtual-display session when the selected mode supports it |
 | **Headset Host Stats** | Host depth health and, with host diagnostics enabled, inference/reuse counts, output activity, and stage timings in Moonlight 3D |
 | **Modern video path** | Native H.264 NVENC as the baseline; HEVC, AV1, and 10-bit HDR are enabled only when their capabilities are available |
@@ -312,7 +313,6 @@ streaming remains available. See [Building](./docs/building.md) for packaging an
 | Local AR glasses | [Local AR glasses](./docs/sbs-local-ar-glasses.md) |
 | ReShade game stereo | [ReShade SBS setup](./docs/reshade-sbs.md) |
 | Host AI 3D design | [Host SBS pipeline](./docs/host-sbs.md) |
-| Host AI 3D scene cuts | [Host SBS scene cuts](./docs/host-sbs-scene-cuts.md) |
 | Host AI 3D status and limitations | [SBS 3D roadmap](./docs/sbs-3d-roadmap.md) |
 | Offline Host 3D video conversion | [Offline conversion pipeline](./docs/whole-clip-sbs-pipeline.md) |
 | Reproducible quality evaluation | [SBS benchmark tools](./tools/sbsbench/README.md) |

@@ -9,7 +9,6 @@ appropriate to its risk.
 1. Read [CLAUDE.md](../CLAUDE.md) for the repository workflow and build commands.
 2. Read the one document that owns the contract being changed. In particular:
    - [Host SBS pipeline](host-sbs.md) owns live/offline V2 geometry and HDR;
-   - [Host SBS scene cuts](host-sbs-scene-cuts.md) owns cut evidence and state;
    - [Offline Host 3D conversion](whole-clip-sbs-pipeline.md) owns the native job workflow; and
    - [sbsbench](../tools/sbsbench/README.md) owns evaluation artifacts and gates.
 3. Preserve unrelated working-tree changes. Do not reset or reformat files outside the change.
