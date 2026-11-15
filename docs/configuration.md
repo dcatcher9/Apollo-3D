@@ -61,6 +61,16 @@ Host AI 3D always uses continuous adaptive zero/amplitude, linear depth displace
 adaptive subtitle UI plane. Their [pipeline contract](host-sbs.md#adaptive-geometry-and-subtitle-plane)
 owns the policy. The former experiment selector has been retired.
 
+### sbs_3d_foreground_subtitles
+
+<table>
+    <tr><td>Description</td><td>Also run live Host 3D subtitle detection and protection for the foreground application when it is neither a browser video nor a registered video player, for example a 2D game. For such an application the caption centering rule is dropped, because game dialogue is rarely centered; the text must still be in the bottom subtitle region. Browser videos and registered video players are always eligible and do not need this switch. Applies to new live Host 3D streams. Game 3D is unaffected.</td></tr>
+    <tr><td>Default</td><td><code>disabled</code></td></tr>
+</table>
+
+The [subtitle admission contract](host-sbs.md#native-subtitle-contours-and-ui-plane) owns the
+eligibility rules.
+
 ## General
 
 ### locale

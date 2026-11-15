@@ -13,6 +13,7 @@ namespace models::host_subtitle_context {
     disabled,
     browser_video,
     registered_video_player,
+    foreground_app,
   };
 
   [[nodiscard]] constexpr std::string_view kind_name(const kind_e kind) noexcept {
@@ -21,12 +22,41 @@ namespace models::host_subtitle_context {
         return "browser-video";
       case kind_e::registered_video_player:
         return "registered-video-player";
+      case kind_e::foreground_app:
+        return "foreground-app";
       default:
         return "disabled";
     }
   }
 
-  /** Semantic video authority. Fullscreen and windowed video use the same identity rules. */
+  /**
+   * Native (non-browser) admission for a causal whole-client foreground candidate. A registered
+   * video player needs no opt-in. Any other application, such as a 2D game, is admitted only by
+   * the owner's Host 3D foreground-subtitle switch; it carries no video evidence of its own.
+   */
+  [[nodiscard]] constexpr kind_e native_kind(
+    const bool registered_video_player,
+    const bool foreground_app_enabled
+  ) noexcept {
+    return registered_video_player ? kind_e::registered_video_player :
+           foreground_app_enabled ? kind_e::foreground_app :
+                                    kind_e::disabled;
+  }
+
+  /**
+   * Video captions are centered, so off-center text is rejected as scene text. An owner-enabled
+   * foreground app, such as a 2D game, anchors its text elsewhere; only the bottom position holds.
+   */
+  [[nodiscard]] constexpr bool requires_centered_lines(const kind_e kind) noexcept {
+    return kind != kind_e::foreground_app;
+  }
+
+  /** Native kinds identify a root window and process only; they share retention rules. */
+  [[nodiscard]] constexpr bool is_native_kind(const kind_e kind) noexcept {
+    return kind == kind_e::registered_video_player || kind == kind_e::foreground_app;
+  }
+
+  /** Semantic subtitle authority. Fullscreen and windowed content use the same identity rules. */
   struct key_t {
     kind_e kind = kind_e::disabled;
     std::uint64_t window = 0u;
@@ -101,6 +131,7 @@ namespace models::host_subtitle_context {
         case kind_e::browser_video:
           return candidate.document_id != 0 && candidate.video_id != 0 ? candidate : key_t {};
         case kind_e::registered_video_player:
+        case kind_e::foreground_app:
           candidate.document_id = 0;
           candidate.video_id = 0;
           return candidate;

@@ -105,7 +105,10 @@ cbuffer OcrResolveConstants : register(b0) {
     int line_center_twice_source;
     uint line_reference_width;
     int line_search_top_source;
-    uint line_reserved;
+    // 0: ordinary video captions must be centered on the reference. 1: the owner-enabled
+    // foreground-app context accepts a horizontal line at any horizontal position; the bottom
+    // search region, orientation and every other rule are unchanged.
+    uint line_center_policy;
     uint2 source_clock_us;
     uint input_domain_reset;
     uint classifier_reserved;
@@ -217,7 +220,7 @@ bool ResolveGeometryValid() {
         line_center_twice_source > (int)line_reference_width ||
         line_search_top_source < -(int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         line_search_top_source > (int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
-        line_reserved != 0u || classifier_reserved != 0u || input_domain_reset > 1u ||
+        line_center_policy > 1u || classifier_reserved != 0u || input_domain_reset > 1u ||
         source_width > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         source_height > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         source_width == 0u || source_height == 0u || field_width == 0u || field_height == 0u ||
@@ -832,6 +835,7 @@ bool SameTextLine(CandidateStats candidate, uint2 anchor, uint4 bounds) {
 }
 
 bool LineIsCentered(uint4 bounds) {
+    if (line_center_policy != 0u) return true;
     // Native extents/reference are bounded to 5120. Even the largest signed difference times
     // the tolerance denominator is <=737,280,000: exact int32 comparison keeps both edges equal.
     int delta = (int)(bounds.x + bounds.z) * (int)source_width -
@@ -842,6 +846,7 @@ bool LineIsCentered(uint4 bounds) {
 }
 
 bool LineSpansReferenceCenter(uint4 bounds) {
+    if (line_center_policy != 0u) return true;
     // Position/height memory cannot independently authorize a small fragment merely because
     // its midpoint lies in the broad center tolerance. Require the current bounded line group
     // to contain the signed reference center in its half-open horizontal span. All products

@@ -239,7 +239,7 @@ namespace {
     std::int32_t line_center_twice_source;
     std::uint32_t line_reference_width;
     std::int32_t line_search_top_source;
-    std::uint32_t reserved = 0u;
+    std::uint32_t line_center_policy = 0u;
     std::array<std::uint32_t, 4u> observation {};
   };
 
@@ -587,7 +587,8 @@ namespace {
       const std::optional<std::uint32_t> line_reference_width = std::nullopt,
       const std::optional<std::int32_t> line_search_top_source = std::nullopt,
       const std::optional<std::uint64_t> observation_timestamp_us = std::nullopt,
-      const bool input_domain_reset = false
+      const bool input_domain_reset = false,
+      const std::uint32_t line_center_policy = 0u
     ) {
       if (!cells_ || !boxes_ || probability.size() != ocr_pixels) {
         return false;
@@ -621,7 +622,7 @@ namespace {
         line_center_twice_source.value_or(static_cast<std::int32_t>(source_w)),
         line_reference_width.value_or(source_w),
         line_search_top_source.value_or(static_cast<std::int32_t>(subtitle_search_top(source_h))),
-        0u,
+        line_center_policy,
         {static_cast<std::uint32_t>(source_clock), static_cast<std::uint32_t>(source_clock >> 32u),
           input_domain_reset ? 1u : 0u, 0u},
       };
@@ -3098,6 +3099,47 @@ namespace {
       expect_retained_native_pairs(fixture.record(), exact_center ? expected_pairs :
         std::vector<ocr_native_pair_t> {});
       EXPECT_EQ(classifier_history(fixture.record())[3u], exact_center ? 1u : 0u);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, AnyHorizontalPolicyAdmitsTheSameOffCenterLineVideoRejects) {
+    // One short horizontal line anchored left of the reference center, as a 2D game draws its
+    // dialogue: it neither spans the center nor has a centered midpoint.
+    const std::vector<ocr_candidate_patch_t> left_anchored {
+      {{120u, 60u, 400u, 90u}},
+    };
+    ocr_warp_fixture_t expected_fixture;
+    std::string error;
+    ASSERT_TRUE(expected_fixture.initialize(error, false, true, false)) << error;
+    std::vector<ocr_native_pair_t> expected_pairs;
+    ASSERT_TRUE(capture_native_pairs(expected_fixture, left_anchored, expected_pairs));
+    ASSERT_EQ(expected_pairs.size(), 1u);
+    std::vector<float> probability(ocr_pixels, 0.0f);
+    paint_candidate_patches(probability, left_anchored);
+    const auto run = [&](ocr_warp_fixture_t &fixture, const std::uint32_t policy) {
+      return fixture.run_boxes(
+        probability, 40u, 77u, source_width, source_height, field_width, field_height,
+        source_crop_top, source_crop_height, roi_top, roi_bottom, {}, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, false, policy);
+    };
+    {
+      ocr_warp_fixture_t fixture;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      ASSERT_TRUE(run(fixture, 0u));
+      expect_retained_native_pairs(fixture.record(), {});
+    }
+    {
+      ocr_warp_fixture_t fixture;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      ASSERT_TRUE(run(fixture, 1u));
+      expect_retained_native_pairs(fixture.record(), expected_pairs);
+    }
+    {
+      // An unknown policy value is an invalid request, never a third rule.
+      ocr_warp_fixture_t fixture;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      ASSERT_TRUE(run(fixture, 2u));
+      EXPECT_EQ(fixture.record()[2u], 0u);
     }
   }
 

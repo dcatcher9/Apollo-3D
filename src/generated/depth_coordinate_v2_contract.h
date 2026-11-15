@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 130u;
-  inline constexpr std::uint32_t contract_tag = 0x1A593EDDu;
-  inline constexpr std::string_view contract_canonical_sha256 = "cf4df4bfd198df89a10619049289dee64399c563d82971b8a0d460ff14586979";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "1a593eddd7d7e637219600213c254c254e53ccdd7b57e174fcc51265cf8251cb";
+  inline constexpr std::uint32_t contract_schema = 131u;
+  inline constexpr std::uint32_t contract_tag = 0xDE3CEF0Bu;
+  inline constexpr std::string_view contract_canonical_sha256 = "e96fe7e252a2525e055fd8779a19951a655400bf2c8c124764e1abf2edc47f76";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "de3cef0bb82711e4fbf1dd8a05c41a2d288ae6aa6d388706809fd0d18b2824cc";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -193,7 +193,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::string_view subtitle_ocr_line_search_region = "lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1";
   inline constexpr std::string_view subtitle_ocr_line_group_policy = "local-column-island-row-components-true-piece-bounds-fixed-span-ordinary-aggregation-then-centered-native-line-union-before-classified-capacity-v3";
   inline constexpr std::string_view subtitle_ocr_line_center_reference = "chromium-video-or-foreground-client-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v2";
-  inline constexpr std::string_view subtitle_ocr_line_center_reference_params = "ocr-resolve-prefix20-then-source-clock-low-high-domain-reset-reserved-96bytes-v2";
+  inline constexpr std::string_view subtitle_ocr_line_center_reference_params = "ocr-resolve-prefix19-then-line-center-policy-source-clock-low-high-domain-reset-reserved-96bytes-v3";
   inline constexpr std::uint32_t subtitle_ocr_ribbon_join_gap_cells = 12u;
   inline constexpr std::uint32_t subtitle_ocr_ribbon_structural_gap_min_cells = 3u;
   inline constexpr std::uint32_t subtitle_ocr_ribbon_min_structural_gaps = 3u;

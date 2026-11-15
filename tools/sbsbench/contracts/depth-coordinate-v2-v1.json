@@ -1,5 +1,5 @@
 {
-  "schema": 130,
+  "schema": 131,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -177,7 +177,7 @@
       "line_search_region": "lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1",
       "line_group_policy": "local-column-island-row-components-true-piece-bounds-fixed-span-ordinary-aggregation-then-centered-native-line-union-before-classified-capacity-v3",
       "line_center_reference": "chromium-video-or-foreground-client-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v2",
-      "line_center_reference_params": "ocr-resolve-prefix20-then-source-clock-low-high-domain-reset-reserved-96bytes-v2",
+      "line_center_reference_params": "ocr-resolve-prefix19-then-line-center-policy-source-clock-low-high-domain-reset-reserved-96bytes-v3",
       "ribbon_join_gap_cells": 12,
       "ribbon_structural_gap_min_cells": 3,
       "ribbon_min_structural_gaps": 3,
@@ -546,7 +546,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "98beb79249486fd3151ffdda741bf68d146ed0cd2ee77894280050b21b8619c7"
+    "source_closure_sha256": "13d225ac37fd25b1ff942fb9abc2f422ec81e23ce180882afb598f9a3befcf92"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

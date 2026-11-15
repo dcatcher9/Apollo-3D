@@ -322,7 +322,7 @@ unrecognized historical options fail argument parsing.
 The current dump reader accepts the authenticated OCR8 record, 40-word UIP4 source/controller state and
 complete joined native contour tuple as live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
-The current coordinate contract is schema 130/OCR 38/contour recipe 27. UIP4 remains 40 words and
+The current coordinate contract is schema 131/OCR 38/contour recipe 27. UIP4 remains 40 words and
 OCR8 remains 256 words. The UI plane keeps its immediate current entry floor, uses a 100 ms
 source-time exponential response toward the current release candidate, and clears invisible
 controller history on a genuinely newer valid-empty observation. Duplicate clocks and whole-tuple

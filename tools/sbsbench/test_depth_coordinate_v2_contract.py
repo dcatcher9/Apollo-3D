@@ -178,6 +178,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Unique repeated fill, independent of old support, with cropped-cover publication.
             # The ordered producer sources contain no scene-cut detector shader.
             130: "cf4df4bfd198df89a10619049289dee64399c563d82971b8a0d460ff14586979",
+            # OCR resolve word 19 becomes the line-center policy: an owner-enabled foreground
+            # application accepts off-center horizontal lines; video keeps both center rules.
+            131: "e96fe7e252a2525e055fd8779a19951a655400bf2c8c124764e1abf2edc47f76",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -185,14 +188,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x1A593EDD)
+        self.assertEqual(generator.contract_tag(contract), 0xDE3CEF0B)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "1a593eddd7d7e637219600213c254c254e53ccdd7b57e174fcc51265cf8251cb",
+            "de3cef0bb82711e4fbf1dd8a05c41a2d288ae6aa6d388706809fd0d18b2824cc",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "98beb79249486fd3151ffdda741bf68d146ed0cd2ee77894280050b21b8619c7",
+            "13d225ac37fd25b1ff942fb9abc2f422ec81e23ce180882afb598f9a3befcf92",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -443,7 +446,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("before-classified-capacity", ocr.line_group_policy)
         self.assertIn("full-screen", ocr.line_center_reference)
         self.assertIn("chromium-video-or-foreground-client-roi", ocr.line_center_reference)
-        self.assertIn("prefix20", ocr.line_center_reference_params)
+        self.assertIn("prefix19-then-line-center-policy", ocr.line_center_reference_params)
         self.assertIn("source-clock-low-high-domain-reset", ocr.line_center_reference_params)
         self.assertIn("96bytes", ocr.line_center_reference_params)
         self.assertGreater(ocr.text_join_gap_cells, 0)
@@ -477,7 +480,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 130u',
+                'contract_schema = 131u',
                 'final_parallax_contract_schema = 4u',
                 'final_parallax_authority = '
                 '"authenticated-subtitle-conditioned-r32f-diagnostic-only"',
@@ -577,7 +580,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 130u',
+                '#define V2_CONTRACT_SCHEMA 131u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS 28u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG 1u',
                 '#define V2_SUBTITLE_CONTOUR_RECIPE 27u',

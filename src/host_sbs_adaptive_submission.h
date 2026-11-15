@@ -89,6 +89,12 @@ namespace models {
     disable_subtitle,  ///< Publish Base without subtitle work outside an eligible video context.
   };
 
+  /** Horizontal position rule the OCR line classifier applies; the wire value is the enumerator. */
+  enum class subtitle_line_position_e : std::uint32_t {
+    centered = 0u,  ///< Video captions: centered on, and spanning, the reference center.
+    any_horizontal = 1u,  ///< Owner-enabled foreground app: bottom region only, any horizontal position.
+  };
+
   [[nodiscard]] constexpr bool depth_optional_work_suppresses_subtitle(
     const depth_optional_work_mode_e work
   ) noexcept {

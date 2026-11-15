@@ -1849,7 +1849,8 @@ namespace platf::dxgi {
                   optional_work,
                   adaptive_request,
                   matched_candidate_slot->subtitle_context_generation,
-                  matched_candidate_slot->temporal_source
+                  matched_candidate_slot->temporal_source,
+                  matched_candidate_slot->subtitle_line_position
                 );
                 const bool submitted_refined_geometry = submitted.refined_live_geometry_active;
                 if (completion_finalized_before_admission &&
@@ -4470,6 +4471,8 @@ namespace platf::dxgi {
       // Semantic retention during a freshly verified modal loop permits no positioned glyph
       // authority. Keep it separate from the normal per-frame eligibility used by rendering.
       bool subtitle_context_suppression_eligible = false;
+      // Submitted with the same context generation, so it cannot change within one context.
+      models::subtitle_line_position_e subtitle_line_position = models::subtitle_line_position_e::centered;
       std::uint64_t probe_instance = 0u;
       // CPU-owned submission class authenticates matched completion metadata. The exact final
       // publication receipt independently reports the actual infer/reuse branch and depth owner.
@@ -4690,6 +4693,7 @@ namespace platf::dxgi {
       destination.subtitle_context_generation = source.subtitle_context_generation;
       destination.subtitle_context_eligible = source.subtitle_context_eligible;
       destination.subtitle_context_suppression_eligible = source.subtitle_context_suppression_eligible;
+      destination.subtitle_line_position = source.subtitle_line_position;
       destination.probe_instance = source.probe_instance;
       destination.gpu_undecided_transaction = source.gpu_undecided_transaction;
       destination.pending = false;
@@ -5537,9 +5541,12 @@ namespace platf::dxgi {
       const bool browser_video = admission.browser_key.kind == kind_e::browser_video;
       if (browser_video) {
         next = admission.browser_key;
-      } else if (admission.registered_player_candidate && video_player_registry &&
-                 video_player_registry->contains_process(foreground.process_id)) {
-        next = {kind_e::registered_video_player, foreground.window, foreground.process_id};
+      } else if (admission.registered_player_candidate) {
+        // Registration is checked first so a player keeps its identity when the owner's
+        // foreground-app switch is also on. The switch alone admits any other application.
+        next = {native_kind(video_player_registry && video_player_registry->contains_process(foreground.process_id),
+                  sbs_config.foreground_subtitles),
+          foreground.window, foreground.process_id};
       }
       const bool context_changed = subtitle_context.update(next);
       if (context_changed) {
@@ -5554,6 +5561,8 @@ namespace platf::dxgi {
         reason = "browser-video-authorized";
       } else if (subtitle_context.kind() == kind_e::registered_video_player) {
         reason = "registered-player-authorized";
+      } else if (subtitle_context.kind() == kind_e::foreground_app) {
+        reason = "foreground-app-authorized";
       } else if (!live_window_authority) {
         reason = "foreground-root-unavailable";
       } else if (!foreground_usable) {
@@ -6404,6 +6413,10 @@ namespace platf::dxgi {
       slot.subtitle_context_suppression_eligible =
         slot.observed_interactive_move_size && subtitle_context.eligible();
       slot.probe_instance = probe_context ? probe_context->instance : 0u;
+      slot.subtitle_line_position =
+        models::host_subtitle_context::requires_centered_lines(subtitle_context.kind()) ?
+          models::subtitle_line_position_e::centered :
+          models::subtitle_line_position_e::any_horizontal;
       slot.subtitle_context_eligible = probe_context ?
         subtitle_context.eligible() && source_desc.Width == probe_context->width && source_desc.Height == probe_context->height :
         subtitle_context.eligible() && slot.window_region &&

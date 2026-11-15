@@ -50,8 +50,9 @@ namespace platf::subtitle_context_policy {
         return result;
       }
       using models::host_subtitle_context::kind_e;
-      if (previous_context.kind == kind_e::registered_video_player) {
-        // The caller still rechecks current registration before retaining this candidate.
+      if (models::host_subtitle_context::is_native_kind(previous_context.kind)) {
+        // The caller still rechecks current registration or the owner's foreground-app switch
+        // before retaining this candidate.
         result.registered_player_candidate = true;
         result.retained_for_interactive_move_size = true;
       } else if (previous_context.kind == kind_e::browser_video) {
@@ -91,7 +92,8 @@ namespace platf::subtitle_context_policy {
     }
 
     result.browser_identity_matches = matching_browser;
-    // A registered native player retains the whole-client ROI requirement. A browser instead
+    // A native candidate (registered player or owner-enabled foreground app) retains the
+    // whole-client ROI requirement. A browser instead
     // supplies its independently authenticated video rectangle, which may fit a partially visible
     // client. Failed browser evidence must not fall through to native-player classification.
     result.registered_player_candidate = foreground_region_present &&

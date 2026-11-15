@@ -78,8 +78,8 @@ bottom-band OCR8 detection and compact SLR13 final-field conditioning → an 11-
 inverse warp → SBS packing → NVENC. The retired generic overlay sanitizer/exclusion graph is not in
 this path.
 
-Only two configuration keys survive on this surface: `sbs_3d_pop_strength` and
-`sbs_3d_max_encode_width`. Do not reintroduce removed keys; the deletion was
+Only three configuration keys survive on this surface: `sbs_3d_pop_strength`,
+`sbs_3d_foreground_subtitles` and `sbs_3d_max_encode_width`. Do not reintroduce removed keys; the deletion was
 deliberate.
 
 ### A resolution constraint that will bite ROI work

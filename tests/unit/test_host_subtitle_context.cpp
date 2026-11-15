@@ -159,6 +159,49 @@ namespace {
     EXPECT_TRUE(tracker.eligible());
   }
 
+  TEST(HostSubtitleContextTest, ForegroundAppNeedsTheOwnerSwitchAndRegistrationKeepsItsKind) {
+    using context::kind_e;
+    EXPECT_EQ(context::native_kind(false, false), kind_e::disabled);
+    EXPECT_EQ(context::native_kind(false, true), kind_e::foreground_app);
+    EXPECT_EQ(context::native_kind(true, false), kind_e::registered_video_player);
+    EXPECT_EQ(context::native_kind(true, true), kind_e::registered_video_player);
+    EXPECT_TRUE(context::is_native_kind(kind_e::foreground_app));
+    EXPECT_TRUE(context::is_native_kind(kind_e::registered_video_player));
+    EXPECT_FALSE(context::is_native_kind(kind_e::browser_video));
+    EXPECT_FALSE(context::is_native_kind(kind_e::disabled));
+    EXPECT_EQ(context::kind_name(kind_e::foreground_app), "foreground-app");
+    // Only the owner-enabled application drops the video centering rule.
+    EXPECT_FALSE(context::requires_centered_lines(kind_e::foreground_app));
+    EXPECT_TRUE(context::requires_centered_lines(kind_e::browser_video));
+    EXPECT_TRUE(context::requires_centered_lines(kind_e::registered_video_player));
+    EXPECT_TRUE(context::requires_centered_lines(kind_e::disabled));
+  }
+
+  TEST(HostSubtitleContextTest, ForegroundAppIsARootAndProcessIdentity) {
+    auto app = video_player();
+    app.kind = context::kind_e::foreground_app;
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(app));
+    EXPECT_TRUE(tracker.eligible());
+    EXPECT_EQ(tracker.kind(), context::kind_e::foreground_app);
+    const auto generation = tracker.generation();
+    auto browser_noise = app;
+    browser_noise.document_id = 7;
+    browser_noise.video_id = 8;
+    EXPECT_FALSE(tracker.update(browser_noise));
+    // The same window changing between player and plain application is a new context.
+    EXPECT_TRUE(tracker.update(video_player()));
+    EXPECT_FALSE(tracker.matches(generation));
+    ASSERT_TRUE(tracker.update(app));
+    auto other_process = app;
+    ++other_process.process_id;
+    EXPECT_TRUE(tracker.update(other_process));
+    // Turning the switch off for the same window is a hard disable.
+    other_process.kind = context::native_kind(false, false);
+    EXPECT_TRUE(tracker.update(other_process));
+    EXPECT_FALSE(tracker.eligible());
+  }
+
   TEST(HostSubtitleContextTest, SignedBrowserIdentityIsPreserved) {
     auto video = browser_video();
     video.document_id = -35710;
@@ -567,6 +610,23 @@ namespace {
     EXPECT_TRUE(tracker.update({}));
     EXPECT_FALSE(evaluate(0u, tracker.key()).registered_player_candidate);
     EXPECT_FALSE(tracker.matches(accepted_generation));
+  }
+
+  TEST_F(BrowserSubtitleContextPolicyTest, ModalForegroundAppRetainsOnlyItsOwnExistingContext) {
+    root.client_screen_rect.left = 100;
+    root.frame_screen_rect.left = 90;
+    context::tracker_t tracker;
+    const context::key_t app {context::kind_e::foreground_app, root.window, root.process_id};
+    ASSERT_TRUE(tracker.update(app));
+    begin_modal_move();
+    const auto retained = evaluate(0u, tracker.key());
+    EXPECT_TRUE(retained.registered_player_candidate);
+    EXPECT_TRUE(retained.retained_for_interactive_move_size);
+    EXPECT_FALSE(retained.mapping_attempted);
+    // The modal loop cannot admit a foreground app that was not already admitted.
+    EXPECT_FALSE(evaluate(0u).registered_player_candidate);
+    root.window++;
+    EXPECT_FALSE(evaluate(0u, tracker.key()).registered_player_candidate);
   }
 
   TEST_F(BrowserSubtitleContextPolicyTest, FullscreenClaimStillRequiresWholeCapture) {

@@ -68,8 +68,8 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 130/tag `0x1A593EDD`, canonical SHA-256
-`cf4df4bfd198df89a10619049289dee64399c563d82971b8a0d460ff14586979`. It binds the
+schema 131/tag `0xDE3CEF0B`, canonical SHA-256
+`e96fe7e252a2525e055fd8779a19951a655400bf2c8c124764e1abf2edc47f76`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -80,20 +80,20 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd` |
-| `parallax_v2_producer` | 27 | `98beb79249486fd3151ffdda741bf68d146ed0cd2ee77894280050b21b8619c7` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `debe8c4e2259abdd0ffe911e0ae43f7032cc3f8ec14e9d7cb5b618b68f03d51c` |
-| `near_identical_detector` | 3 | `bd1b095be53a2dd50d468a1a1b623ec25b2f448e8d631d06ca3b8ebe16bcf5d8` |
-| `gpu_trace` | 1 | `22af20b46df3028aa511192c43880060d6b75ec3a183ac096f13d703fa056fda` |
-| `parallax_v2_live_renderer` | 2 | `f0535ff09bcd7b519ecca02f9c32c3b9e3089f36b6efdd84002742b54968bbee` |
-| `parallax_v2_p010_y` | 1 | `696be6627aecf8d4e790074036ff85ee68c3b81460aa7e8304b90ccda5b73e5a` |
+| `parallax_v2_producer` | 27 | `13d225ac37fd25b1ff942fb9abc2f422ec81e23ce180882afb598f9a3befcf92` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `bf89d333b3a857d48f95b3828e5f7567ec94d0723bf05b401393d10583711a69` |
+| `near_identical_detector` | 3 | `d3d7281773f4bff399169d72a0d42188c4b1632a7f95f9e3068ae6e92c76e952` |
+| `gpu_trace` | 1 | `b7dac2c3bdba3038f6ecccb1af5f87efd7a2f39beefae45fcaef3a9d29509483` |
+| `parallax_v2_live_renderer` | 2 | `e28de4fe1281c87bc512c532b3ac55c77b5c4e4a754139236febd3bf59a2786b` |
+| `parallax_v2_p010_y` | 1 | `779e8bdf8fe3c12a33ffd74af07ad131e7a1a75849c1b49eda4326dd8c9eb5a7` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `7b1d25de8159afca42c3f747e57081003adaae6007468fdf7176ca2d4f801a5f` |
-| `subtitle_cohort_prototype_research` | 3 | `4457f68849aa877ba437ef0b56c00ddd7498dfbb2141059cef636a94f74fcc93` |
-| `subtitle_cohort_research` | 4 | `aec5d3defd8d987f6426779e3566e7e6775876c3ee793aae74a47fa46797ecda` |
-| `subtitle_inner_colour_research` | 5 | `ce353c5abdf61c69829b91a6a015637efe9b1cf890617f255d241037f62ab9ec` |
+| `parallax_v2_live_diagnostic` | 2 | `9d919bf2e6510777221a8e4679166d655e8f0ecbe3368b4e6dd8078c25c9440f` |
+| `subtitle_cohort_prototype_research` | 3 | `3ba81be2da8c7a307049d2d238568fbd0543ab8ecc59d8c20b1037f9da3fac3b` |
+| `subtitle_cohort_research` | 4 | `12b61eeb22955f5a8fd654f8f5a826338ae8e1f14456f3eba50f0c4cd3effec1` |
+| `subtitle_inner_colour_research` | 5 | `97402661d82cf7807039e01f8cf90755c980a522041d392c70abf24dc547b5e3` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
-| `subtitle_matte_guard_research` | 1 | `41ff0a4909dd1a223408fd5a5b30cb612ad48d0ca7cd71ff3781deb5733789df` |
-| `parallax_v2_queued_renderer` | 1 | `1411458ab1995d5c593a1dab833334b85c470fb5a6514e166a6dd209d7e4a7e1` |
+| `subtitle_matte_guard_research` | 1 | `d02680083d15550fd4e349fd480b7cddcfa7f2ba23dda9bf93c9bd7a45eff72a` |
+| `parallax_v2_queued_renderer` | 1 | `5b4ff19004b64900f67d15595a6ac5adada4dc6afaa66f5431e7d2b8155a9f8e` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
 | `current_foreground_edge` | 1 | `4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c` |
@@ -439,8 +439,23 @@ a Windows `Software\Clients\Media` registration with a video file-association ca
 background registry census supplies this application classification without a player-name list.
 It proves a registered video-player application, not that media is loaded or playing; an empty or
 audio-only window in that application remains eligible. Players without qualifying registration,
-including unregistered portable installations, and unavailable evidence fail closed. Game 3D does
-not use this detector or protection path.
+including unregistered portable installations, and unavailable evidence fail closed unless the
+owner enables [`sbs_3d_foreground_subtitles`](configuration.md#sbs_3d_foreground_subtitles). That
+switch, disabled by default and read when the stream starts, admits any other causal whole-client
+foreground application, such as a 2D game, as a `foreground-app` context keyed by root HWND and
+process. It carries no video evidence: the owner's switch is its only authority, and it changes
+admission and one classifier rule. Video captions are centered, so the classifier rejects
+off-center text as scene text; an application such as a 2D game anchors its dialogue elsewhere.
+A `foreground-app` submission therefore sets OCR resolve word 19 (`line_center_policy`) to `1`,
+which makes both the two-percent midpoint check and the reference-center span check pass, for
+ordinary groups, stack assistance and prior-only admission alike. The bottom search region,
+orientation classes, height and grouping rules, covers and protection are unchanged. Browser video,
+registered players and offline consumers submit `0` and keep every centering rule; any other value
+is an invalid request that publishes nothing. The policy is submitted with the context generation
+and cannot change within one context. Registration is evaluated first, so a
+registered player keeps its kind. A browser window whose helper identity matches still requires
+its own video evidence and never falls through to this route. Game 3D does not use this detector
+or protection path.
 
 The live subtitle-context generation is independent of the depth analysis domain. Context loss or
 identity change revokes pending completions, retained analysis lineage and packed output, including
@@ -452,7 +467,8 @@ causally admitted geometry update alone does not change semantic subtitle identi
 noncausal authority still revokes eligibility outside the native modal suppression route.
 During native interactive move/size, a newly revalidated root HWND/process can retain an already
 admitted semantic context for suppression without carrying a monitor, rectangle or geometry
-generation. Native-player retention still requires current registry membership. Chromium retention
+generation. Native-player retention still requires current registry membership, and foreground-app
+retention the session's enabled switch. Chromium retention
 requires a fresh positive helper heartbeat for the same root/process/document/video; its rectangle
 and geometry-authority epoch are not used as current geometry or as substitutes for heartbeat
 freshness. Missing, stale or replaced evidence selects hard disable, and a
