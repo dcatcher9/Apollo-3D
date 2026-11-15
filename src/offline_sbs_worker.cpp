@@ -47,17 +47,11 @@
 #include <thread>
 #include <utility>
 
-#ifdef _WIN32
 // clang-format off
   #include <winsock2.h>
   #include <ws2tcpip.h>
   #include <windows.h>
 // clang-format on
-#else
-  #include <fcntl.h>
-  #include <sys/stat.h>
-  #include <unistd.h>
-#endif
 
 namespace offline_sbs {
   namespace fs = std::filesystem;
@@ -220,7 +214,6 @@ namespace offline_sbs {
     }
 
     std::string path_utf8(const fs::path &path) {
-#ifdef _WIN32
       const auto wide = path.wstring();
       if (wide.empty()) {
         return {};
@@ -243,13 +236,9 @@ namespace offline_sbs {
         throw worker_error("cannot encode a filesystem path as UTF-8");
       }
       return result;
-#else
-      return path.string();
-#endif
     }
 
     fs::path path_from_utf8(const std::string &value) {
-#ifdef _WIN32
       if (value.empty()) {
         return {};
       }
@@ -269,9 +258,6 @@ namespace offline_sbs {
         throw worker_error("worker contract contains invalid UTF-8");
       }
       return fs::path(wide);
-#else
-      return fs::path(value);
-#endif
     }
 
     std::string lower(std::string value) {
@@ -427,7 +413,6 @@ namespace offline_sbs {
       }
     }
 
-#ifdef _WIN32
     bool write_all(HANDLE handle, const void *data, std::size_t size) {
       const auto *bytes = static_cast<const std::uint8_t *>(data);
       std::size_t offset = 0;
@@ -446,7 +431,6 @@ namespace offline_sbs {
       }
       return true;
     }
-#endif
 
     enum class atomic_write_mode_e {
       durable,
@@ -465,7 +449,6 @@ namespace offline_sbs {
       }
       auto temporary = path;
       temporary += L".tmp";
-#ifdef _WIN32
       const bool durable = mode == atomic_write_mode_e::durable;
       const HANDLE handle = CreateFileW(
         temporary.c_str(),
@@ -518,23 +501,6 @@ namespace offline_sbs {
         fs::remove(temporary, ec);
         throw worker_error("cannot atomically publish: " + path_utf8(path));
       }
-#else
-      (void) mode;
-      std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-      output.write(
-        reinterpret_cast<const char *>(bytes.data()),
-        static_cast<std::streamsize>(bytes.size())
-      );
-      output.close();
-      if (!output) {
-        fs::remove(temporary, ec);
-        throw worker_error("cannot write: " + path.string());
-      }
-      fs::rename(temporary, path, ec);
-      if (ec) {
-        throw worker_error("cannot publish: " + ec.message());
-      }
-#endif
     }
 
     void write_json_atomic(
@@ -583,14 +549,10 @@ namespace offline_sbs {
         if (fs::remove(path, last_error) && !last_error) {
           return;
         }
-#ifdef _WIN32
         const bool retryable =
           last_error.value() == ERROR_SHARING_VIOLATION ||
           last_error.value() == ERROR_LOCK_VIOLATION ||
           last_error.value() == ERROR_ACCESS_DENIED;
-#else
-        const bool retryable = false;
-#endif
         if (!retryable) {
           break;
         }
@@ -614,7 +576,6 @@ namespace offline_sbs {
     public:
       explicit staging_output_claim_t(fs::path path):
           path_(std::move(path)) {
-#ifdef _WIN32
         handle_ = CreateFileW(
           path_.c_str(),
           FILE_READ_ATTRIBUTES,
@@ -641,29 +602,6 @@ namespace offline_sbs {
         volume_serial_ = information.dwVolumeSerialNumber;
         file_index_high_ = information.nFileIndexHigh;
         file_index_low_ = information.nFileIndexLow;
-#else
-        descriptor_ = ::open(
-          path_.c_str(),
-          O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC,
-          0600
-        );
-        struct stat information {};
-        if (
-          descriptor_ < 0 ||
-          ::fstat(descriptor_, &information) != 0 ||
-          !S_ISREG(information.st_mode)
-        ) {
-          if (descriptor_ >= 0) {
-            ::close(descriptor_);
-            descriptor_ = -1;
-          }
-          throw worker_error(
-            "cannot exclusively reserve conversion staging output"
-          );
-        }
-        device_ = information.st_dev;
-        inode_ = information.st_ino;
-#endif
       }
 
       ~staging_output_claim_t() {
@@ -675,18 +613,11 @@ namespace offline_sbs {
 
       staging_output_claim_t(staging_output_claim_t &&other) noexcept:
           path_(std::move(other.path_))
-#ifdef _WIN32
           ,
           handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE)),
           volume_serial_(other.volume_serial_),
           file_index_high_(other.file_index_high_),
           file_index_low_(other.file_index_low_)
-#else
-          ,
-          descriptor_(std::exchange(other.descriptor_, -1)),
-          device_(other.device_),
-          inode_(other.inode_)
-#endif
       {
       }
 
@@ -698,21 +629,14 @@ namespace offline_sbs {
         }
         cleanup_owned();
         path_ = std::move(other.path_);
-#ifdef _WIN32
         handle_ = std::exchange(other.handle_, INVALID_HANDLE_VALUE);
         volume_serial_ = other.volume_serial_;
         file_index_high_ = other.file_index_high_;
         file_index_low_ = other.file_index_low_;
-#else
-        descriptor_ = std::exchange(other.descriptor_, -1);
-        device_ = other.device_;
-        inode_ = other.inode_;
-#endif
         return *this;
       }
 
       [[nodiscard]] nlohmann::json identity_json() const {
-#ifdef _WIN32
         const auto information = verified_path_information();
         const auto size =
           (static_cast<std::uint64_t>(information.nFileSizeHigh) << 32u) |
@@ -726,37 +650,14 @@ namespace offline_sbs {
           {"file_index_low", information.nFileIndexLow},
           {"size_bytes", size},
         };
-#else
-        struct stat information {};
-        if (
-          descriptor_ < 0 ||
-          ::fstat(descriptor_, &information) != 0 ||
-          information.st_size <= 0 ||
-          !path_matches_claim()
-        ) {
-          throw worker_error(
-            "conversion staging output identity changed or is empty"
-          );
-        }
-        return {
-          {"device", static_cast<std::uint64_t>(information.st_dev)},
-          {"inode", static_cast<std::uint64_t>(information.st_ino)},
-          {"size_bytes", static_cast<std::uint64_t>(information.st_size)},
-        };
-#endif
       }
 
       void release_for_publish() {
         (void) identity_json();
-#ifdef _WIN32
         CloseHandle(std::exchange(handle_, INVALID_HANDLE_VALUE));
-#else
-        ::close(std::exchange(descriptor_, -1));
-#endif
       }
 
     private:
-#ifdef _WIN32
       [[nodiscard]] BY_HANDLE_FILE_INFORMATION
       verified_path_information() const {
         if (handle_ == INVALID_HANDLE_VALUE) {
@@ -803,37 +704,12 @@ namespace offline_sbs {
         // and preserve the exact claimed file; never fall back to a racy path deletion.
         CloseHandle(std::exchange(handle_, INVALID_HANDLE_VALUE));
       }
-#else
-      [[nodiscard]] bool path_matches_claim() const noexcept {
-        struct stat information {};
-        return
-          ::lstat(path_.c_str(), &information) == 0 &&
-          S_ISREG(information.st_mode) &&
-          information.st_dev == device_ &&
-          information.st_ino == inode_;
-      }
-
-      void cleanup_owned() noexcept {
-        if (descriptor_ < 0) {
-          return;
-        }
-        // A portable lstat()+unlink() sequence has a pathname race. Preserve the file
-        // rather than ever deleting an identity that was not created by this run.
-        ::close(std::exchange(descriptor_, -1));
-      }
-#endif
 
       fs::path path_;
-#ifdef _WIN32
       HANDLE handle_ = INVALID_HANDLE_VALUE;
       DWORD volume_serial_ = 0;
       DWORD file_index_high_ = 0;
       DWORD file_index_low_ = 0;
-#else
-      int descriptor_ = -1;
-      dev_t device_ {};
-      ino_t inode_ {};
-#endif
     };
 
     bool path_is_within(
@@ -849,11 +725,7 @@ namespace offline_sbs {
         if (candidate_part == normalized_candidate.end()) {
           return false;
         }
-#ifdef _WIN32
         if (lower(path_utf8(*candidate_part)) != lower(path_utf8(*parent_part))) {
-#else
-        if (*candidate_part != *parent_part) {
-#endif
           return false;
         }
       }
@@ -1746,7 +1618,6 @@ namespace offline_sbs {
       std::uint64_t total_bytes_ = 0;
     };
 
-#ifdef _WIN32
     [[nodiscard]] bool native_stdout_pipe_error_is_eof(
       const DWORD error
     ) noexcept {
@@ -2362,56 +2233,6 @@ namespace offline_sbs {
       std::atomic_bool writes_cancelled_ {false};
       HANDLE job_ = nullptr;
     };
-#else
-    class child_process_t: public process_status_t {
-    public:
-      static child_process_t launch(
-        const std::vector<std::string> &,
-        const fs::path &,
-        const fs::path &,
-        const std::optional<fs::path> & = std::nullopt,
-        bool = false,
-        bool = false
-      ) {
-        throw worker_error("offline SBS conversion is Windows-only");
-      }
-
-      bool running() const {
-        return false;
-      }
-
-      int exit_code() const {
-        return -1;
-      }
-
-      void read_exact(void *, std::size_t) {}
-      void write_exact(const void *, std::size_t, std::chrono::steady_clock::time_point) {}
-      void close_stdin() noexcept {}
-      void cancel_writes() noexcept {}
-
-      std::string read_line(std::size_t) {
-        return {};
-      }
-
-      std::size_t read_some(
-        void *,
-        std::size_t,
-        std::chrono::steady_clock::time_point
-      ) {
-        return 0;
-      }
-
-      bool read_one_if_available() {
-        return false;
-      }
-
-      int wait(std::chrono::milliseconds) {
-        return -1;
-      }
-
-      void terminate() {}
-    };
-#endif
 
     class child_stdout_streambuf_t: public std::streambuf {
     public:
@@ -2707,7 +2528,6 @@ namespace offline_sbs {
     class directory_change_watcher_t {
     public:
       explicit directory_change_watcher_t(const fs::path &directory) {
-#ifdef _WIN32
         handle_ = FindFirstChangeNotificationW(
           directory.c_str(),
           FALSE,
@@ -2717,9 +2537,6 @@ namespace offline_sbs {
         if (handle_ == INVALID_HANDLE_VALUE) {
           throw worker_error("cannot watch native harness output directory");
         }
-#else
-        (void) directory;
-#endif
       }
 
       directory_change_watcher_t(const directory_change_watcher_t &) = delete;
@@ -2728,15 +2545,12 @@ namespace offline_sbs {
       ) = delete;
 
       ~directory_change_watcher_t() {
-#ifdef _WIN32
         if (handle_ != INVALID_HANDLE_VALUE) {
           FindCloseChangeNotification(handle_);
         }
-#endif
       }
 
       void wait() {
-#ifdef _WIN32
         const auto status = WaitForSingleObject(handle_, 1000);
         if (status == WAIT_TIMEOUT) {
           return;
@@ -2745,15 +2559,10 @@ namespace offline_sbs {
             !FindNextChangeNotification(handle_)) {
           throw worker_error("native harness output notification failed");
         }
-#else
-        std::this_thread::sleep_for(child_poll);
-#endif
       }
 
     private:
-#ifdef _WIN32
       HANDLE handle_ = INVALID_HANDLE_VALUE;
-#endif
     };
 
     bool follow_progress_has_exact_schema(const nlohmann::json &value) {
@@ -4896,12 +4705,7 @@ namespace offline_sbs {
   bool native_stdout_pipe_error_is_eof_for_test(
     const std::uint32_t error
   ) noexcept {
-#ifdef _WIN32
     return native_stdout_pipe_error_is_eof(static_cast<DWORD>(error));
-#else
-    (void) error;
-    return false;
-#endif
   }
 
   std::uint64_t retained_timing_frame_limit_for_test() {
@@ -5067,11 +4871,7 @@ namespace offline_sbs {
   void validate_windows_command_line_capacity_for_test(
     const std::vector<std::string> &arguments
   ) {
-#ifdef _WIN32
     validate_windows_command_line_capacity(arguments, "test command");
-#else
-    (void) arguments;
-#endif
   }
 
 #endif
@@ -6547,7 +6347,6 @@ namespace offline_sbs {
           work / "logs" / "source-stream-inventory.log"
         );
         validate_stream_preflight(spec, *source_inventory);
-#ifdef _WIN32
         validate_windows_command_line_capacity(
           build_mux_command(
             spec,
@@ -6557,7 +6356,6 @@ namespace offline_sbs {
           ),
           "final mux command; reduce source metadata"
         );
-#endif
       }
       write_json_atomic(
         spec.result_directory / "source-contract.json",
