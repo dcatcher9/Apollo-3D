@@ -263,6 +263,16 @@ negative write-end-to-next-submission intervals as valid signed overlaps. This e
 remove a host submission dependency; it does not establish unchanged panel phase, USB arrival,
 or a clean optical window for either lens.
 
+To separate glasses behaviour from host timing, the internal
+`SUNSHINE_LOCAL_MONITOR_MUTE_SLOT` flag accepts exactly `L` or `R` and is absent by default. The
+named logical slot keeps its image, presentation checks and timing gates but sends no USB eye
+command; the other slot is unchanged. The log names the physical lens that receives no command
+after eye swapping and reports skipped and sent command counts when presentation stops. A lens
+that still shutters while its slot is muted is reacting to something other than its own command.
+The flag is read once per presenter initialization, malformed values fail before emitter
+configuration, and write-timing metadata for the muted slot is empty. It is a diagnostic only and
+never a usable viewing mode.
+
 Follow the machine's local development-launch instructions. Keep the installed and development
 hosts mutually exclusive. A profile remains unqualified until these live observations are made;
 mock API, offscreen GPU, and fake topology results cannot substitute for them.

@@ -9212,6 +9212,26 @@ namespace platf::dxgi {
     const bool shutter_slot_timing = config.frame_sequential &&
                                      GetEnvironmentVariableW(L"SUNSHINE_LOCAL_MONITOR_SLOT_TIMING", slot_timing_flag.data(), static_cast<DWORD>(slot_timing_flag.size())) == 1 &&
                                      slot_timing_flag[0] == L'1';
+    // Internal glasses diagnostic, sampled once for this presenter initialization. One logical
+    // slot keeps every presentation and timing gate but sends no USB eye command, so the lens it
+    // would have driven shows only what the glasses do without their own signal.
+    std::optional<unsigned> shutter_muted_slot;
+    if (config.frame_sequential) {
+      std::array<wchar_t, 3> mute_value {};
+      SetLastError(ERROR_SUCCESS);
+      const auto mute_length = GetEnvironmentVariableW(L"SUNSHINE_LOCAL_MONITOR_MUTE_SLOT", mute_value.data(), static_cast<DWORD>(mute_value.size()));
+      if (mute_length || GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+        if (mute_length != 1 || (mute_value[0] != L'L' && mute_value[0] != L'R')) {
+          BOOST_LOG(error) << "Local shutter single-slot diagnostic requires SUNSHINE_LOCAL_MONITOR_MUTE_SLOT to be exactly L or R."sv;
+          return local_presenter_result_e::error;
+        }
+        shutter_muted_slot = mute_value[0] == L'L' ? 0u : 1u;
+        const bool muted_physical_left = (*shutter_muted_slot == 0u) != config.monitor_config.flip_eyes;
+        BOOST_LOG(info) << "Local shutter single-slot diagnostic: logical "sv << (*shutter_muted_slot == 0u ? 'L' : 'R')
+                        << " sends no USB eye command (nominal physical "sv << (muted_physical_left ? 'L' : 'R')
+                        << " lens); presentation, timing gates and the other slot are unchanged."sv;
+      }
+    }
     auto read_target_rect = [&]() {
       if (!config.live_target) {
         return config.target_rect;
@@ -9816,6 +9836,7 @@ namespace platf::dxgi {
         std::array<unsigned, 6> acquisition_wait_counts {};
         unsigned acquisition_maximum_streak = 0;
         std::uint64_t confirmed_eye_commands = 0, held_eye_images = 0, extra_held_refreshes = 0;
+        std::uint64_t muted_eye_commands = 0;
         std::uint32_t maximum_confirmed_refresh_delta = 0;
         std::optional<detail::shutter_feedback_t> first_feedback;
         bool feedback_disjoint = false;
@@ -10565,7 +10586,11 @@ namespace platf::dxgi {
           platf::open3d::signal_timing_t phase_write_timing;
           auto *write_timing = timing_sample ? &timing_sample->write : slot_emit_phase_us > 0 ? &phase_write_timing :
                                                                                                 nullptr;
-          const bool signalled = emitter.signal(left_eye, write_timing, latest_write_qpc);
+          const bool slot_muted = shutter_muted_slot && *shutter_muted_slot == logical_slot;
+          if (slot_muted) {
+            ++muted_eye_commands;
+          }
+          const bool signalled = slot_muted || emitter.signal(left_eye, write_timing, latest_write_qpc);
           if (slot_timing) {
             timing_sample->signal_end = qpc_now();
           }
@@ -10606,6 +10631,11 @@ namespace platf::dxgi {
         BOOST_LOG(info) << "Local shutter presentation summary: confirmed_eye_commands="sv << confirmed_eye_commands
                         << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
                         << " maximum_refresh_delta="sv << maximum_confirmed_refresh_delta << " repeats="sv << eye_repeats << '.';
+        if (shutter_muted_slot) {
+          BOOST_LOG(info) << "Local shutter single-slot diagnostic summary: muted_logical_slot="sv << (*shutter_muted_slot == 0u ? 'L' : 'R')
+                          << " skipped_usb_commands="sv << muted_eye_commands
+                          << " sent_usb_commands="sv << confirmed_eye_commands - muted_eye_commands << '.';
+        }
         if (lookahead_active) {
           pending_present.invalidate();
         }
