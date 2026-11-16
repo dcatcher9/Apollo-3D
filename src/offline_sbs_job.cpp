@@ -26,6 +26,7 @@
 #include <ranges>
 #include <regex>
 #include <stdexcept>
+#include <string>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -1442,6 +1443,7 @@ namespace offline_sbs {
       std::string name;
       fs::path path;
       bool directory = false;
+      std::wstring folded_filename {};
     };
 
     nlohmann::json browse_entry_json(
@@ -1487,26 +1489,25 @@ namespace offline_sbs {
     }
 
     void sort_browse_entries(std::vector<browse_entry_record_t> &entries) {
+      if (entries.size() < 2) {
+        return;
+      }
+      for (auto &entry : entries) {
+        entry.folded_filename = entry.path.filename().native();
+        std::ranges::transform(
+          entry.folded_filename,
+          entry.folded_filename.begin(),
+          [](const wchar_t character) {
+            return static_cast<wchar_t>(std::towlower(character));
+          }
+        );
+      }
       std::ranges::sort(entries, [](const auto &left, const auto &right) {
         if (left.directory != right.directory) {
           return left.directory;
         }
-        auto left_folded = left.path.filename().native();
-        auto right_folded = right.path.filename().native();
-        std::ranges::transform(
-          left_folded,
-          left_folded.begin(),
-          [](const wchar_t character) {
-          return static_cast<wchar_t>(std::towlower(character));
-        });
-        std::ranges::transform(
-          right_folded,
-          right_folded.begin(),
-          [](const wchar_t character) {
-          return static_cast<wchar_t>(std::towlower(character));
-        });
-        if (left_folded != right_folded) {
-          return left_folded < right_folded;
+        if (left.folded_filename != right.folded_filename) {
+          return left.folded_filename < right.folded_filename;
         }
         if (left.name != right.name) {
           return left.name < right.name;
@@ -1553,7 +1554,6 @@ namespace offline_sbs {
           .directory = true,
         });
       }
-      sort_browse_entries(roots);
       return roots;
     }
 

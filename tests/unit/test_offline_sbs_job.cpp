@@ -1,7 +1,9 @@
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <thread>
 
 #include <gtest/gtest.h>
@@ -1990,16 +1992,57 @@ TEST(OfflineSbsJob, RejectsOutputTraversalAndBuildsOnlyNativeWorkerCommand) {
 TEST(OfflineSbsJob, BrowsesBoundUserFilesWithFilteringAndStableOrdering) {
   temporary_tree_t tree;
   const auto media = tree.path / "browse-media";
-  fs::create_directories(media / "alpha-dir");
-  fs::create_directories(media / "Bravo-dir");
-  write_nonempty(media / "alpha-video.mkv", "alpha");
-  write_nonempty(media / "Bravo-video.mkv", "bravo");
+  const auto long_directory = "zULU-" + std::string(64, 'D') + "-dir";
+  const auto long_alpha = "common-" + std::string(64, 'q') + "-alpha.mkv";
+  const auto long_bravo = "CoMmOn-" + std::string(64, 'Q') + "-Bravo.mkv";
+
+  struct expected_entry_t {
+    fs::path leaf;
+    std::string name;
+    bool directory;
+  };
+
+  const std::array expected_order {
+    expected_entry_t {"alpha-dir", "alpha-dir", true},
+    expected_entry_t {"Bravo-dir", "Bravo-dir", true},
+    expected_entry_t {long_directory, long_directory, true},
+    expected_entry_t {"alpha-video.mkv", "alpha-video.mkv", false},
+    expected_entry_t {"Bravo-video.mkv", "Bravo-video.mkv", false},
+    expected_entry_t {long_alpha, long_alpha, false},
+    expected_entry_t {long_bravo, long_bravo, false},
+    // Native UTF-16 puts the surrogate pair for U+10000 before U+E000. UTF-8 and
+    // Unicode scalar ordering put this pair in the opposite order.
+    expected_entry_t {fs::path {u8"\U00010000-video.mkv"}, "\xf0\x90\x80\x80-video.mkv", false},
+    expected_entry_t {fs::path {u8"\ue000-video.mkv"}, "\xee\x80\x80-video.mkv", false},
+  };
+  for (auto entry = expected_order.rbegin(); entry != expected_order.rend(); ++entry) {
+    if (entry->directory) {
+      fs::create_directories(media / entry->leaf);
+    } else {
+      write_nonempty(media / entry->leaf, "video");
+    }
+  }
+  auto expected_files = nlohmann::json::array();
+  auto expected_directories = nlohmann::json::array();
+  const auto canonical_media = fs::canonical(media);
+  for (const auto &entry : expected_order) {
+    const auto path = (canonical_media / entry.leaf).generic_u8string();
+    nlohmann::json value {
+      {"name", entry.name},
+      {"path", std::string {path.begin(), path.end()}},
+      {"type", entry.directory ? "directory" : "file"},
+      {"selectable", !entry.directory},
+    };
+    expected_files.push_back(value);
+    if (entry.directory) {
+      value["selectable"] = true;
+      expected_directories.push_back(value);
+    }
+  }
 
   offline_sbs::job_service_t service {
     service_config(tree.path),
-    [](const offline_sbs::worker_context_t &,
-       std::stop_token,
-       const offline_sbs::progress_callback_t &) {
+    [](const offline_sbs::worker_context_t &, std::stop_token, const offline_sbs::progress_callback_t &) {
       return offline_sbs::worker_outcome_t {.completed = true};
     }
   };
@@ -2012,27 +2055,21 @@ TEST(OfflineSbsJob, BrowsesBoundUserFilesWithFilteringAndStableOrdering) {
   });
   ASSERT_TRUE(files.ok) << files.error;
   ASSERT_TRUE(files.path);
-  EXPECT_EQ(*files.path, fs::canonical(media));
+  EXPECT_EQ(*files.path, canonical_media);
   EXPECT_FALSE(files.truncated);
   ASSERT_TRUE(files.entries.is_array());
-  ASSERT_EQ(files.entries.size(), 4u);
-  EXPECT_EQ(files.entries[0].at("name"), "alpha-dir");
-  EXPECT_EQ(files.entries[1].at("name"), "Bravo-dir");
-  EXPECT_EQ(files.entries[2].at("name"), "alpha-video.mkv");
-  EXPECT_EQ(files.entries[3].at("name"), "Bravo-video.mkv");
-  EXPECT_EQ(files.entries[0].at("type"), "directory");
-  EXPECT_FALSE(files.entries[0].at("selectable").get<bool>());
-  EXPECT_EQ(files.entries[2].at("type"), "file");
-  EXPECT_TRUE(files.entries[2].at("selectable").get<bool>());
+  EXPECT_EQ(files.entries, expected_files);
+  const auto wire = nlohmann::json::parse(files.json().dump());
+  EXPECT_TRUE(wire.at("status").get<bool>());
+  EXPECT_FALSE(wire.at("truncated").get<bool>());
+  EXPECT_EQ(wire.at("entries"), expected_files);
 
   const auto directories = service.browse({
     .path = media,
     .type = offline_sbs::browse_type_e::directory,
   });
   ASSERT_TRUE(directories.ok) << directories.error;
-  ASSERT_EQ(directories.entries.size(), 2u);
-  EXPECT_TRUE(directories.entries[0].at("selectable").get<bool>());
-  EXPECT_TRUE(directories.entries[1].at("selectable").get<bool>());
+  EXPECT_EQ(directories.entries, expected_directories);
 
   // A manually entered existing file opens its containing directory instead
   // of producing a dead-end "not a directory" response.
@@ -2042,8 +2079,8 @@ TEST(OfflineSbsJob, BrowsesBoundUserFilesWithFilteringAndStableOrdering) {
   });
   ASSERT_TRUE(from_file.ok) << from_file.error;
   ASSERT_TRUE(from_file.path);
-  EXPECT_EQ(*from_file.path, fs::canonical(media));
-  ASSERT_EQ(from_file.entries.size(), 4u);
+  EXPECT_EQ(*from_file.path, canonical_media);
+  EXPECT_EQ(from_file.entries, expected_files);
 
 #ifdef _WIN32
   const auto relative = service.browse({
@@ -2059,9 +2096,15 @@ TEST(OfflineSbsJob, BrowsesBoundUserFilesWithFilteringAndStableOrdering) {
   ASSERT_TRUE(drives.ok) << drives.error;
   EXPECT_FALSE(drives.path);
   ASSERT_FALSE(drives.entries.empty());
+  std::string previous_drive;
   for (const auto &drive : drives.entries) {
     EXPECT_EQ(drive.at("type"), "directory");
     EXPECT_FALSE(drive.at("selectable").get<bool>());
+    const auto name = drive.at("name").get<std::string>();
+    if (!previous_drive.empty()) {
+      EXPECT_LT(previous_drive, name);
+    }
+    previous_drive = name;
   }
 #endif
   service.shutdown();
@@ -2079,9 +2122,7 @@ TEST(OfflineSbsJob, TruncatesBrowseResponsesToTheSerializedByteBudget) {
 
   offline_sbs::job_service_t service {
     service_config(tree.path),
-    [](const offline_sbs::worker_context_t &,
-       std::stop_token,
-       const offline_sbs::progress_callback_t &) {
+    [](const offline_sbs::worker_context_t &, std::stop_token, const offline_sbs::progress_callback_t &) {
       return offline_sbs::worker_outcome_t {.completed = true};
     }
   };
@@ -2094,8 +2135,26 @@ TEST(OfflineSbsJob, TruncatesBrowseResponsesToTheSerializedByteBudget) {
   });
   ASSERT_TRUE(reply.ok) << reply.error;
   EXPECT_TRUE(reply.truncated);
+  ASSERT_FALSE(reply.entries.empty());
   EXPECT_LT(reply.entries.size(), 1800u);
-  EXPECT_LE(reply.json().dump().size(), 512ull * 1024ull);
+  const auto wire = reply.json().dump();
+  EXPECT_LE(wire.size(), 512ull * 1024ull);
+  EXPECT_EQ(nlohmann::json::parse(wire).at("entries"), reply.entries);
+  std::string previous_name;
+  for (const auto &entry : reply.entries) {
+    const auto name = entry.at("name").get<std::string>();
+    SCOPED_TRACE(name);
+    const auto index = std::stoi(name);
+    EXPECT_GE(index, 0);
+    EXPECT_LT(index, 1800);
+    EXPECT_EQ(name, std::to_string(index) + "-" + std::string(120, 'x') + ".mkv");
+    EXPECT_EQ(entry.at("type"), "file");
+    EXPECT_TRUE(entry.at("selectable").get<bool>());
+    if (!previous_name.empty()) {
+      EXPECT_LT(previous_name, name);
+    }
+    previous_name = name;
+  }
   service.shutdown();
 }
 
