@@ -320,17 +320,21 @@ namespace platf {
              (IsHungAppWindow(window.hwnd) ? " not-responding" : "");
     }
 
-    bool await_moves(const std::vector<window_t> &windows, RECT destination) {
+    bool window_arrived(const window_t &window, RECT destination) {
+      if (!same_identity(window)) {
+        return true;
+      }
+      const auto current = observe_window(window.hwnd, false);
+      return current && monitor_desktop_detail::contains_center(destination, current->desktop_rect) &&
+             (!window.visible ? !current->visible : window.minimized ? current->minimized : window.placement.showCmd != SW_SHOWMAXIMIZED || IsZoomed(window.hwnd));
+    }
+
+    bool await_moves(const std::vector<window_t> &windows, RECT destination, std::chrono::milliseconds wait = std::chrono::milliseconds {2000}, bool report = true) {
       // A large desktop with many maximized or busy applications needs more than a few hundred
       // milliseconds to acknowledge a move. The wait ends as soon as every window has arrived.
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {2000};
+      const auto deadline = std::chrono::steady_clock::now() + wait;
       const auto arrived = [&](const auto &window) {
-        if (!same_identity(window)) {
-          return true;
-        }
-        const auto current = observe_window(window.hwnd, false);
-        return current && monitor_desktop_detail::contains_center(destination, current->desktop_rect) &&
-               (!window.visible ? !current->visible : window.minimized ? current->minimized : window.placement.showCmd != SW_SHOWMAXIMIZED || IsZoomed(window.hwnd));
+        return window_arrived(window, destination);
       };
       while (true) {
         const bool complete = std::all_of(windows.begin(), windows.end(), arrived);
@@ -339,6 +343,9 @@ namespace platf {
         }
         if (std::chrono::steady_clock::now() >= deadline) {
           for (const auto &window : windows) {
+            if (!report) {
+              break;
+            }
             if (!arrived(window)) {
               const auto text = [](RECT rect) {
                 return std::to_string(rect.left) + "," + std::to_string(rect.top) + "," + std::to_string(rect.right) + "," + std::to_string(rect.bottom);
@@ -588,6 +595,7 @@ namespace platf {
     const HWND foreground = GetForegroundWindow();
     bool success = true;
     std::vector<window_t> moving;
+    std::vector<RECT> moving_normal;
     for (auto &window : impl_->windows) {
       if (!impl_->owned(window)) {
         continue;
@@ -611,6 +619,7 @@ namespace platf {
       if (mapped && move_window(first_activation ? window : *current, *mapped, virtual_source_rect, impl_->property, impl_->token())) {
         window.moved = true;
         moving.push_back(first_activation ? window : *current);
+        moving_normal.push_back(*mapped);
       } else {
         BOOST_LOG(warning) << "Monitor desktop handoff: window refused its move: " << describe_window(window);
         success = false;
@@ -625,7 +634,21 @@ namespace platf {
         }
       }
     }
-    const bool completed = await_moves(moving, virtual_source_rect);
+    // Windows relocates some windows together with the physical output while the topology
+    // settles, which undoes a move that was already applied. Send the same placement again to
+    // any window that drifted, and report only the windows that never stay.
+    constexpr int move_rounds = 6;
+    bool completed = false;
+    for (int round = 0; round < move_rounds && !completed; ++round) {
+      if (round) {
+        for (std::size_t index = 0; index < moving.size(); ++index) {
+          if (!window_arrived(moving[index], virtual_source_rect)) {
+            (void) move_window(moving[index], moving_normal[index], virtual_source_rect, impl_->property, impl_->token());
+          }
+        }
+      }
+      completed = await_moves(moving, virtual_source_rect, std::chrono::milliseconds {500}, round + 1 == move_rounds);
+    }
     retain_foreground(foreground ? foreground : impl_->original_foreground);
     return success && completed;
   }
