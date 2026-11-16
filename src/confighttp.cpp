@@ -875,15 +875,12 @@ namespace confighttp {
 
     print_req(request);
 
-    std::stringstream ss;
-    ss << request->content.rdbuf();
-
     BOOST_LOG(info) << config::stream.file_apps;
     try {
       // TODO: Input Validation
 
       // Read the input JSON from the request body.
-      nlohmann::json inputTree = nlohmann::json::parse(ss.str());
+      nlohmann::json inputTree = nlohmann::json::parse(request->content);
 
       // Read the existing apps file.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
@@ -984,10 +981,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
 
       // Read the existing apps file.
@@ -1051,9 +1045,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
 
       // Check for required uuid field in body
       if (!input_tree.contains("uuid") || !input_tree["uuid"].is_string()) {
@@ -1138,10 +1130,8 @@ namespace confighttp {
 
     print_req(request);
 
-    std::stringstream ss;
-    ss << request->content.rdbuf();
     try {
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string uuid = input_tree.value("uuid", "");
       std::string name = input_tree.value("name", "");
@@ -1179,10 +1169,8 @@ namespace confighttp {
 
     print_req(request);
 
-    std::stringstream ss;
-    ss << request->content.rdbuf();
     try {
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string uuid = input_tree.value("uuid", "");
       output_tree["status"] = nvhttp::unpair_client(uuid);
@@ -1235,9 +1223,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream body;
-      body << request->content.rdbuf();
-      const auto input = nlohmann::json::parse(body);
+      const auto input = nlohmann::json::parse(request->content);
       const auto failure = platf::game3d::decide_setup(input.at("executable").get<std::string>(), input.at("identity").get<std::string>(), input.at("decision").get<std::string>());
       if (failure) {
         bad_request(response, request, *failure);
@@ -1283,9 +1269,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream body;
-      body << request->content.rdbuf();
-      const auto input = nlohmann::json::parse(body);
+      const auto input = nlohmann::json::parse(request->content);
       const auto id = input.value("id", "");
       const auto decision_name = input.value("decision", "");
       const auto decision = decision_name == "approved" ?
@@ -1368,13 +1352,11 @@ namespace confighttp {
 
     print_req(request);
 
-    std::stringstream ss;
-    ss << request->content.rdbuf();
     try {
       // TODO: Input Validation
       std::stringstream config_stream;
       nlohmann::json output_tree;
-      nlohmann::json input_tree = nlohmann::json::parse(ss);
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       erase_retired_config_options(input_tree);
       // This option is live-managed by the AR display decision API rather than the general form.
       input_tree.erase("ar_glass_devices");
@@ -1414,11 +1396,8 @@ namespace confighttp {
       return;
     }
 
-    std::stringstream ss;
-
-    ss << request->content.rdbuf();
     try {
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string key = input_tree.value("key", "");
       if (key.empty()) {
@@ -1509,10 +1488,8 @@ namespace confighttp {
     }
     print_req(request);
     std::vector<std::string> errors;
-    std::stringstream ss;
-    ss << request->content.rdbuf();
     try {
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string username = input_tree.value("currentUsername", "");
       std::string newUsername = input_tree.value("newUsername", "");
@@ -1570,9 +1547,7 @@ namespace confighttp {
 
     nlohmann::json output_tree;
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
 
       std::string passphrase = input_tree.value("passphrase", "");
       if (passphrase.empty()) {
@@ -1618,9 +1593,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string pin = input_tree.value("pin", "");
       std::string name = input_tree.value("name", "");
@@ -1693,10 +1666,8 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
       nlohmann::json output_tree;
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       std::string uuid = input_tree.value("uuid", "");
       output_tree["status"] = nvhttp::find_and_stop_session(uuid, true);
       send_response(response, output_tree);
@@ -1729,9 +1700,7 @@ namespace confighttp {
     });
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       std::string username = input_tree.value("username", "");
       std::string password = input_tree.value("password", "");
       std::string sessionCookieRaw = crypto::rand_alphabet(64);
@@ -1850,9 +1819,7 @@ namespace confighttp {
       );
     };
     try {
-      std::stringstream content;
-      content << request->content.rdbuf();
-      const auto input = nlohmann::json::parse(content.str());
+      const auto input = nlohmann::json::parse(request->content);
       if (!input.is_object()) {
         reject_request("Offline browse request must be an object");
         return;
@@ -1947,10 +1914,7 @@ namespace confighttp {
       return;
     }
     try {
-      std::stringstream content;
-      content << request->content.rdbuf();
-      const auto serialized = content.str();
-      const auto input = nlohmann::json::parse(serialized);
+      const auto input = nlohmann::json::parse(request->content);
       if (!input.is_object()) {
         bad_request(response, request, "Offline conversion request must be an object");
         return;
