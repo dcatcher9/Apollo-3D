@@ -87,7 +87,7 @@ synchronization.
 Before sending the first eye command, the presenter holds one left-eye image while acquiring the
 selected output's clock. It requires 13 consecutive exact present identities, 12 uninterrupted
 refresh intervals, and QPC intervals within 100 µs of the selected fixed refresh and repeat count.
-Cold timeouts and counter-domain changes restart acquisition within a two-second budget; the
+Cold timeouts and counter-domain changes restart acquisition within a six-second budget; the
 per-present wait scales with the eye interval. Waiting for the first stereo packet has a separate
 five-second limit. No eye commands are sent during this startup phase.
 
@@ -116,7 +116,7 @@ same serial connection acts as a firmware processing barrier; the complete verif
 match before the finite-pulse drain can begin. It then reacquires 13 strict samples with no eye
 commands and resumes a fresh left/right cycle on that pair. This preserves the desktop during a
 short interruption. Recovery allows at most six attempts in ten seconds, with a shared 1.5-second
-USB barrier deadline, a finite-pulse drain, and a two-second clock-acquisition budget per attempt.
+USB barrier deadline, a finite-pulse drain, and a six-second clock-acquisition budget per attempt.
 A failed barrier, persistent timing fault, display/device change, or Windows security transition
 returns to 2D. Recovery never infers eye parity or adjusts raw present IDs or refresh counters.
 

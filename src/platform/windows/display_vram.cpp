@@ -10150,6 +10150,14 @@ namespace platf::dxgi {
             }
             if (latency != WAIT_OBJECT_0) {
               if (!stopped()) {
+                if (acquiring) {
+                  // The acquisition deadline also bounds this wait, so an expired acquisition
+                  // can end here. Record what the output reported before giving up.
+                  log_acquisition_history();
+                  BOOST_LOG(error) << "Local shutter clock acquisition ended waiting for a presentation slot: presents="sv
+                                   << acquisition_presents << " stable_samples="sv << feedback_tracker.streak()
+                                   << " wait_result="sv << latency << '.';
+                }
                 fail("the physical output did not admit a bounded presentation slot");
               }
               break;

@@ -383,7 +383,10 @@ namespace platf::dxgi::detail {
   class shutter_recovery_budget_t {
   public:
     using clock = std::chrono::steady_clock;
-    static constexpr auto acquisition_timeout = std::chrono::seconds {2};
+    // Windows can withhold or blank presentation statistics for a few seconds while it
+    // rearranges composition. No eye command is sent during acquisition, so waiting longer
+    // only extends a pause that would otherwise end the session.
+    static constexpr auto acquisition_timeout = std::chrono::seconds {6};
     static constexpr auto retry_window = std::chrono::seconds {10};
 
     bool begin(clock::time_point now) noexcept {
