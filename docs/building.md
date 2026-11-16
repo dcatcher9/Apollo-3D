@@ -9,6 +9,10 @@ targets. Historical platform source remains only for upstream comparison.
 - The NVIDIA TensorRT C++ Windows ZIP, extracted locally
 - MSYS2 UCRT64 with GCC, CMake, Ninja, cppwinrt, curl-winssl, MinHook, OpenSSL, Opus,
   nlohmann-json, NSIS, and the UCRT64 toolchain
+- Optionally the MSYS2 32-bit toolchain (`pacman -S mingw-w64-i686-gcc`) for the Game 3D text
+  helper, which is loaded into 32-bit games. CMake looks for it in `C:/msys64/mingw32/bin`
+  (`SUNSHINE_TEXT_HOOK_MINGW32_DIR`); without it the host builds with a warning and reports that
+  it has no text helper
 - Official Windows Node.js LTS for the Vue/Vite Web UI
 - A recursive checkout, including `third-party` submodules
 

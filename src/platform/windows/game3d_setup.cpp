@@ -246,6 +246,48 @@ namespace platf::game3d {
       status = update_existing_addon(status.executable, bundle_directory);
       return outcome;
     }
+
+    setup_outcome apply_text_hook_setup(
+      const std::filesystem::path &executable,
+      setup_decisions &decisions,
+      const std::function<bool(const std::filesystem::path &executable)> &anti_cheat_present,
+      const std::function<text_hook::load_result()> &load
+    ) {
+      setup_outcome outcome;
+      auto &status = outcome.installation;
+      status.executable = executable;
+      if (anti_cheat_present(executable)) {
+        status.state = installation_state_e::anti_cheat;
+        status.detail = "Anti-cheat software was found with this game, so Sunshine 3D does not load anything into it.";
+        return outcome;
+      }
+      outcome.identity = file_identity(executable);
+      if (outcome.identity.empty()) {
+        status.state = installation_state_e::unavailable;
+        status.detail = "The game executable could not be identified, so Sunshine 3D does not load anything into it.";
+        return outcome;
+      }
+      const auto decision = decisions.lookup(executable, outcome.identity);
+      if (decision == setup_decision_e::never) {
+        status.state = installation_state_e::missing_addon;
+        outcome.state = "declined";
+        status.detail = "You chose not to set up this game, so Sunshine 3D does not load anything into it. Choose Set up this game to change that.";
+        return outcome;
+      }
+      if (decision != setup_decision_e::install) {
+        status.state = installation_state_e::missing_addon;
+        outcome.state = "ready_to_install";
+        status.detail = "This is a 2D text game. Sunshine 3D can load a small text helper into it while it runs, so the game's own text stays readable in 3D. Nothing is written to the game's folder, and nothing is loaded until you confirm this game.";
+        return outcome;
+      }
+      const auto loaded = load();
+      status.detail = loaded.detail;
+      status.addon_present = loaded.state == text_hook::load_state_e::loaded;
+      status.state = loaded.state == text_hook::load_state_e::loaded      ? installation_state_e::current :
+                     loaded.state == text_hook::load_state_e::not_running ? installation_state_e::installed :
+                                                                            installation_state_e::unavailable;
+      return outcome;
+    }
   }  // namespace detail
 
   namespace {
@@ -395,13 +437,17 @@ namespace platf::game3d {
       void publish(const detected_game &game, const detail::setup_outcome &outcome, const std::string &state) {
         const auto &installation = outcome.installation;
         const auto executable = utf8(game.executable);
-        const bool offer = state == "ready_to_install" || state == "declined";
+        // An add-on installation consumes its confirmation. A text game's confirmation stands
+        // for every later start, so its active state stays an offer the user can withdraw.
+        const bool offer = state == "ready_to_install" || state == "declined" ||
+                           (game.kind == game_kind_e::text_hook && (state == "current" || state == "installed"));
         {
           std::lock_guard lock(mutex_);
           status_ = {
             {"detected", true},
             {"game_name", game.name},
             {"executable", executable},
+            {"kind", game.kind == game_kind_e::text_hook ? "text_hook" : "addon"},
             {"state", state},
             {"detail", installation.detail},
             {"reshade_present", installation.reshade_present},
@@ -416,8 +462,11 @@ namespace platf::game3d {
             offered_.reset();
           }
         }
-        // Focus changes and encoder rebuilds must not repeat the same suggestion.
-        const auto notification_key = executable + "\n" + state;
+        // Focus changes and encoder rebuilds must not repeat the same suggestion. An offer that
+        // is still unanswered is made again when the game is started again: that is a new
+        // occasion to decide, and "never" ends it.
+        const auto notification_key = executable + "\n" + state +
+                                      (state == "ready_to_install" ? "\n" + std::to_string(game.creation_time) : std::string {});
         if (announced_.contains(notification_key)) {
           return;
         }
@@ -435,6 +484,24 @@ namespace platf::game3d {
       }
 
       detail::setup_outcome apply(const detected_game &game, bool publish_progress) {
+        if (game.kind == game_kind_e::text_hook) {
+          auto outcome = detail::apply_text_hook_setup(
+            game.executable, decisions_,
+            [](const std::filesystem::path &executable) {
+              return inspect_installation(executable).state == installation_state_e::anti_cheat;
+            },
+            [&] {
+              return text_hook::load(game.process_id);
+            }
+          );
+          if (outcome.state.empty()) {
+            outcome.state = state_name(outcome.installation.state);
+          }
+          // The capture path converts this process only while the owner's approval stands and
+          // the helper is running in it; "never" withdraws it at once, for the running game too.
+          text_hook::set_consent(game.process_id, game.creation_time, outcome.installation.state == installation_state_e::current);
+          return outcome;
+        }
         auto outcome = detail::apply_setup(game.executable, decisions_, [&](const std::string &detail) {
           if (publish_progress) {
             publish(game, progress_outcome(detail), "installing");

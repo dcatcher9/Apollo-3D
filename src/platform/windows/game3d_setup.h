@@ -2,6 +2,7 @@
 #pragma once
 
 #include "game3d_installation.h"
+#include "game3d_text_hook.h"
 
 #include <filesystem>
 #include <functional>
@@ -90,6 +91,18 @@ namespace platf::game3d {
       setup_decisions &decisions,
       const std::function<void(const std::string &detail)> &progress,
       const std::filesystem::path &bundle_directory = bundled_addon_directory()
+    );
+
+    // One confirmed detection of a text game. Nothing is ever written to its folder: the text
+    // helper is loaded into the running process and ends with it. It is loaded only after the
+    // user confirmed this executable, and never where anti-cheat software was found. Unlike an
+    // add-on installation the confirmation is kept, because the helper must be loaded again at
+    // every start of the game; "never" withdraws it.
+    [[nodiscard]] setup_outcome apply_text_hook_setup(
+      const std::filesystem::path &executable,
+      setup_decisions &decisions,
+      const std::function<bool(const std::filesystem::path &executable)> &anti_cheat_present,
+      const std::function<text_hook::load_result()> &load
     );
   }  // namespace detail
 }  // namespace platf::game3d

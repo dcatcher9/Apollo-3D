@@ -2293,7 +2293,8 @@ def shared_ui_warp_runtime_closures(
     """Calculate the two confined Host adapters from their one runtime specification owner."""
     source = header.read_text(encoding="utf-8")
     result = {}
-    for name, array_name in (("closure", "specs"), ("diagnostic_closure", "diagnostic_specs")):
+    for name, array_name in (("closure", "specs"), ("diagnostic_closure", "diagnostic_specs"),
+                             ("text_game_closure", "text_game_specs")):
         array = re.search(
             rf"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+{array_name}\s*\{{\{{(.*?)\}}\}};",
             source, re.DOTALL)

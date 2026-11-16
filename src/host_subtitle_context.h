@@ -101,6 +101,16 @@ namespace models::host_subtitle_context {
       return true;
     }
 
+    /**
+     * Revoke every earlier submission without a context transition: the consumer stopped
+     * drawing them for a while, so none may be shown when it resumes.
+     */
+    constexpr void revoke() noexcept {
+      if (++generation_ == 0u) {
+        ++generation_;
+      }
+    }
+
     [[nodiscard]] constexpr bool eligible() const noexcept {
       return key_.kind != kind_e::disabled;
     }

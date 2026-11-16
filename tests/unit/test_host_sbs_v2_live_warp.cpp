@@ -127,7 +127,20 @@ namespace {
     std::vector<std::byte> ui_coverage_rgba32f;
   };
 
+  // The Game 3D text-game route: the helper's coverage picture and constants in, and the planes
+  // its preparation leaves for the draw out.
+  struct text_game_pin_inputs_t {
+    UINT surface_width = 0u, surface_height = 0u;
+    std::vector<std::uint32_t> coverage_bgra;  // premultiplied, 0xAARRGGBB
+    models::host_sbs_shared_ui_warp::text_game_constants_t constants;
+    std::array<UINT, 4u> shape {};
+    std::vector<float> field, weights;
+    std::vector<std::uint32_t> rows;  // one flag a band row, then the authorization header
+    std::vector<std::uint32_t> verdict;
+  };
+
   struct current_outline_inputs_t {
+    text_game_pin_inputs_t *text_game = nullptr;
     std::vector<std::uint32_t> matte;
     std::array<std::uint32_t, 64u> receipt {};
     bool shared_ui_pin = false;
@@ -747,6 +760,84 @@ namespace {
           context->Begin(timing_disjoint.Get());context->End(timing_start.Get());timing_started=true;
         }
       };
+      models::host_sbs_shared_ui_warp::views_t text_game_views;
+      ComPtr<ID3D11Texture2D> text_game_coverage;
+      ComPtr<ID3D11ShaderResourceView> text_game_coverage_srv;
+      ComPtr<ID3D11Buffer> text_game_constants, text_game_subtitle;
+      const bool text_game_pin = outline && outline->text_game;
+      if (text_game_pin) {
+        namespace shared = models::host_sbs_shared_ui_warp;
+        auto &text = *outline->text_game;
+        if (!production_shared_ui_pin_programs.ready() &&
+            !production_shared_ui_pin_programs.load(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
+        if (!production_shared_ui_pin_programs.text_game_ready() &&
+            !production_shared_ui_pin_programs.load_text_game(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
+        D3D11_BUFFER_DESC constants_desc {};
+        constants_desc.ByteWidth = sizeof(text.constants);
+        constants_desc.Usage = D3D11_USAGE_DEFAULT;
+        constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        const D3D11_SUBRESOURCE_DATA constants_initial {&text.constants, 0u, 0u};
+        // Without subtitle operands the route still binds the subtitle constants; all zero
+        // selects display code values for the picture.
+        const std::array<std::uint32_t, 8u> no_subtitle {};
+        auto subtitle_desc = constants_desc;
+        subtitle_desc.ByteWidth = sizeof(no_subtitle);
+        const D3D11_SUBRESOURCE_DATA subtitle_initial {no_subtitle.data(), 0u, 0u};
+        if (!create_immutable_texture_srv(DXGI_FORMAT_B8G8R8A8_UNORM, text.surface_width, text.surface_height, 4u,
+              text.coverage_bgra.data(), text_game_coverage, text_game_coverage_srv) ||
+            FAILED(device->CreateBuffer(&constants_desc, &constants_initial, &text_game_constants)) ||
+            FAILED(device->CreateBuffer(&subtitle_desc, &subtitle_initial, &text_game_subtitle))) {
+          error = "could not create the text-game pin operands";
+          return false;
+        }
+        shared::request_t request;
+        request.draw_srvs[0u] = color_srv.Get();
+        request.draw_srvs[1u] = parallax_srv.Get();
+        request.draw_srvs[2u] = state_srv.Get();
+        request.geometry_constants = geometry_buffer.Get();
+        request.subtitle_constants = subtitle_buffer ? subtitle_buffer.Get() : text_game_subtitle.Get();
+        request.sampler = sampler.Get();
+        request.text_game = true;
+        request.text_game_coverage = text_game_coverage_srv.Get();
+        request.text_game_constants = text_game_constants.Get();
+        const auto program = production_shared_ui_pin_programs.text_game_program();
+        if (!text_game_pin_owner.ensure(device.Get(), text.shape, error) ||
+            !text_game_pin_owner.queue(context.Get(), program, request, error) ||
+            !text_game_pin_owner.matches(context.Get(), request)) return false;
+        text_game_views = text_game_pin_owner.views();
+        draw_command.pixel_shader = program.pixel;
+        const auto read_plane = [&](ID3D11ShaderResourceView *view, auto &values) {
+          ComPtr<ID3D11Resource> resource;
+          ComPtr<ID3D11Texture2D> texture;
+          view->GetResource(&resource);
+          std::vector<std::byte> bytes;
+          if (FAILED(resource.As(&texture)) || !read_diagnostic_texture(texture.Get(), 4u, bytes)) return false;
+          values.resize(bytes.size() / 4u);
+          std::memcpy(values.data(), bytes.data(), bytes.size());
+          return true;
+        };
+        D3D11_BUFFER_DESC verdict_desc {};
+        text_game_pin_owner.text_game_verdict()->GetDesc(&verdict_desc);
+        verdict_desc.Usage = D3D11_USAGE_STAGING;
+        verdict_desc.BindFlags = verdict_desc.MiscFlags = 0u;
+        verdict_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Buffer> verdict_staging;
+        D3D11_MAPPED_SUBRESOURCE verdict_map {};
+        if (!read_plane(text_game_views.field.Get(), text.field) || !read_plane(text_game_views.weights.Get(), text.weights) ||
+            !read_plane(text_game_views.rows.Get(), text.rows) ||
+            FAILED(device->CreateBuffer(&verdict_desc, nullptr, &verdict_staging))) {
+          error = "text-game pin readback failed";
+          return false;
+        }
+        context->CopyResource(verdict_staging.Get(), text_game_pin_owner.text_game_verdict());
+        if (FAILED(context->Map(verdict_staging.Get(), 0u, D3D11_MAP_READ, 0u, &verdict_map))) {
+          error = "text-game verdict readback failed";
+          return false;
+        }
+        text.verdict.resize(verdict_desc.ByteWidth / 4u);
+        std::memcpy(text.verdict.data(), verdict_map.pData, verdict_desc.ByteWidth);
+        context->Unmap(verdict_staging.Get(), 0u);
+      }
       if (shared_pin) {
         const UINT crop_top=subtitle->constants.source_top+subtitle->identity[10u];
         const UINT crop_end=std::min(source_height,crop_top+subtitle->height);
@@ -847,6 +938,7 @@ namespace {
         }
         models::host_sbs_shared_ui_warp::scoped_binding_t pin_scope;
         if (production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) return false;
+        if (text_game_pin && !pin_scope.bind(context.Get(), &text_game_views)) return false;
         submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
       }
       if (selected_outline) {
@@ -1630,6 +1722,7 @@ namespace {
     std::string shared_ui_pin_closure;
     models::host_sbs_shared_ui_warp::programs_t production_shared_ui_pin_programs;
     models::host_sbs_shared_ui_warp::resources_t production_shared_ui_pin_owner;
+    models::host_sbs_shared_ui_warp::resources_t text_game_pin_owner;
     bool private_guard_configured = false;
     bool use_recorder_guard_scope = false;
     ComPtr<ID3D11Buffer> private_guard_cb, private_guard_packet;
@@ -5052,6 +5145,114 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinPreservesNativeGlyphAndAuthorityAcross
     EXPECT_EQ(production,base_output)<<"Production owner must recheck current glyph RGB";
   }
   EXPECT_TRUE(fixture.shared_ui_pin_source_unchanged());
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, TextGamePinFollowsTheGlyphsOnlyWhileThePictureShowsThem) {
+  constexpr UINT width = 128u, height = 64u, field_width = 24u, field_height = 10u;
+  constexpr rgba16_bits_t grey {0x3400u, 0x3400u, 0x3400u, 0x3c00u}, white {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u}, black {0u, 0u, 0u, 0x3c00u};
+  constexpr std::uint32_t fill = 0xffffffffu, outline = 0xff000000u;
+  const auto state = make_live_state(true, true);
+  const float scene = -1.25f / width, plane = 2.0f / width, step = 0.5f / width;
+  const std::vector<float> base(field_width * field_height, scene);
+  // One piece of text on rows 24..27: a light fill on columns 44..51 inside a dark outline on
+  // columns 40..43 and 52..55. Rows 44..47 still hold an earlier line the helper has replaced.
+  text_game_pin_inputs_t text;
+  text.surface_width = width;
+  text.surface_height = height;
+  text.coverage_bgra.assign(width * height, 0u);
+  for (UINT y = 24u; y < 28u; ++y) {
+    for (UINT x = 40u; x < 56u; ++x) {
+      text.coverage_bgra[y * width + x] = x >= 44u && x < 52u ? fill : outline;
+      text.coverage_bgra[(y + 20u) * width + x] = fill;
+    }
+  }
+  text.constants.inverse_width = 1.0f / width;
+  text.constants.inverse_height = 1.0f / height;
+  text.constants.enabled = 1u;
+  text.constants.plane = plane;
+  text.constants.text_top = 22u;
+  text.constants.text_bottom = 30u;
+  text.constants.front_cap = 0.04f;
+  text.shape = {width, height, 0u, height};
+  current_outline_inputs_t operands;
+  operands.text_game = &text;
+  std::string error;
+  live_v2_warp_fixture_t fixture;
+  ASSERT_TRUE(fixture.initialize(error)) << error;
+  // `light` and `dark` are how many of the fill's and the outline's columns the picture shows.
+  const auto render = [&](const UINT light, const UINT dark, const rgba16_bits_t background) {
+    std::vector<rgba16_bits_t> source(width * height, background);
+    for (UINT y = 24u; y < 28u; ++y) {
+      for (UINT x = 0u; x < light; ++x) source[y * width + 44u + x] = white;
+      for (UINT x = 0u; x < dark; ++x) source[y * width + (x < 4u ? 40u + x : 48u + x)] = black;
+    }
+    std::vector<std::byte> output;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base,
+      state, {}, output, error, field_width, field_height, {}, nullptr, nullptr, true, &operands)) << error;
+    return output;
+  };
+  const auto at = [&](const std::vector<float> &plane_values, const UINT x, const UINT y) {
+    return plane_values[y * width + x];
+  };
+
+  const auto shown = render(8u, 8u, grey);
+  ASSERT_EQ(text.field.size(), width * height);
+  ASSERT_EQ(text.rows.size(), height + 1u);
+  EXPECT_EQ(text.rows.back(), 1u) << "text the picture shows is pinned";
+  EXPECT_EQ((std::array {text.verdict[0], text.verdict[1], text.verdict[2], text.verdict[3]}), (std::array {32u, 32u, 32u, 32u}));
+  for (UINT y = 24u; y < 28u; ++y) {
+    for (UINT x = 40u; x < 56u; ++x) {
+      EXPECT_EQ(at(text.field, x, y), plane) << x << ',' << y;
+      EXPECT_EQ(at(text.weights, x, y), 1.0f) << x << ',' << y;
+    }
+  }
+  // Below the glyphs the scene leaves the plane by the distance rule, row by row, until it is free.
+  for (UINT rows = 1u; rows <= 12u; ++rows) {
+    const float bound = step * static_cast<float>(rows > 1u ? rows - 1u : 0u);
+    // A texel the column rule moved carries a weight of 1/1024 into the row pass, which holds
+    // it that fraction of its bound nearer the plane.
+    const float tolerance = bound / 1024.0f + 1e-7f;
+    EXPECT_NEAR(at(text.field, 46u, 27u + rows), std::max(scene, plane - bound), tolerance) << rows;
+    EXPECT_NEAR(at(text.field, 46u, 24u - rows), std::max(scene, plane - bound), tolerance) << rows;
+  }
+  // No tear in either direction anywhere in the band, and the far scene is untouched.
+  for (UINT y = 0u; y < height; ++y) {
+    for (UINT x = 0u; x < width; ++x) {
+      if (x + 1u < width) EXPECT_LE(std::abs(at(text.field, x + 1u, y) - at(text.field, x, y)), step + 1e-7f) << x << ',' << y;
+      if (y + 1u < height) EXPECT_LE(std::abs(at(text.field, x, y + 1u) - at(text.field, x, y)), step + 1e-7f) << x << ',' << y;
+    }
+  }
+  EXPECT_EQ(at(text.field, 2u, 2u), scene);
+  // The earlier line outside the current text rows is neither pinned nor counted.
+  EXPECT_EQ(at(text.field, 46u, 45u), scene);
+  EXPECT_EQ(at(text.weights, 46u, 45u), 0.0f);
+  EXPECT_EQ(text.rows[45u], 0u);
+
+  const auto assert_unpinned = [&](const char *why) {
+    EXPECT_EQ(text.rows.back(), 0u) << why;
+    for (std::size_t texel = 0u; texel < text.field.size(); ++texel) {
+      ASSERT_EQ(text.field[texel], scene) << why << ' ' << texel;
+      ASSERT_EQ(text.weights[texel], 0.0f) << why << ' ' << texel;
+    }
+  };
+  const auto hidden = render(0u, 0u, grey);
+  assert_unpinned("text the game has hidden");
+  EXPECT_EQ((std::array {text.verdict[0], text.verdict[1], text.verdict[2], text.verdict[3]}), (std::array {32u, 0u, 32u, 0u}));
+  EXPECT_NE(shown, hidden);
+  (void) render(0u, 0u, white);
+  assert_unpinned("a bright scene is not the text's fill");
+  EXPECT_EQ(text.verdict[1], 32u);
+  EXPECT_EQ(text.verdict[3], 0u);
+  (void) render(0u, 0u, black);
+  assert_unpinned("a dark scene is not the text's outline");
+  // A line being revealed: two fill columns and the left outline are on screen, and it is pinned whole.
+  (void) render(2u, 4u, grey);
+  EXPECT_EQ(text.rows.back(), 1u);
+  EXPECT_EQ(at(text.field, 54u, 26u), plane);
+  // A plane outside the display bound is refused.
+  text.constants.plane = 0.05f;
+  (void) render(8u, 8u, grey);
+  assert_unpinned("an invalid plane");
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRetainsAuthorityAndClearsReusedRows) {

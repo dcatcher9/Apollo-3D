@@ -63,6 +63,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_installation.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_detection.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_detection.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_text_hook.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_text_hook.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_setup.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_setup.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_cursor.h"

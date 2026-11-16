@@ -102,6 +102,9 @@ add-on support, and `SunshineSBS.addon64`. No external FX shader or Depth3D chec
 While Game 3D is active, the host's **Game 3D setup** card offers to install both for the detected
 fullscreen game. Nothing is written into a game folder until you confirm that game there, and Sunshine
 never installs ReShade itself for a game with kernel anti-cheat; see [setup](./docs/reshade-sbs.md#setup).
+A 2D text game (a visual novel) needs no add-on: after you confirm it on the same card, the host
+converts its picture and keeps the game's own text readable; see
+[text games](./docs/reshade-sbs.md#text-games).
 Adjust strength in **ReShade → Add-ons → Sunshine 3D**; native controls save automatically.
 Select Game 3D in Moonlight 3D without changing a host provider toggle or
 restarting Sunshine. SDR and native HDR DirectX 11/12 input are supported; an HDR10 game reaches a

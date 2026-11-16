@@ -37,6 +37,23 @@ namespace {
     EXPECT_EQ(tracker.generation(), 1u);
   }
 
+  TEST(HostSubtitleContextTest, RevokeRetiresEarlierSubmissionsWithoutATransition) {
+    context::tracker_t tracker;
+    ASSERT_TRUE(tracker.update(video_player()));
+    const auto submitted = tracker.generation();
+    tracker.revoke();
+    // The context itself is unchanged; only what was submitted before is no longer current.
+    EXPECT_EQ(tracker.kind(), context::kind_e::registered_video_player);
+    EXPECT_FALSE(tracker.matches(submitted));
+    EXPECT_TRUE(tracker.matches(tracker.generation()));
+    EXPECT_FALSE(tracker.update(video_player()));
+    // A disabled context has submissions too.
+    context::tracker_t disabled;
+    disabled.revoke();
+    EXPECT_FALSE(disabled.matches(1u));
+    EXPECT_FALSE(disabled.eligible());
+  }
+
   TEST(HostSubtitleContextTest, BrowserAndNativeVideoUseSemanticAuthorityIncludingFullscreen) {
     context::tracker_t tracker;
     // Fullscreen can canonicalize depth geometry to the whole source. This policy still uses

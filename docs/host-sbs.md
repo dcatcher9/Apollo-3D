@@ -366,6 +366,38 @@ requested. A queued compile or device-creation failure preserves completed handl
 while a missing queued program still disables that route. This changes no estimator state schema
 or calibration.
 
+#### Text-game pin
+
+`host_sbs_text_game_ui_warp.hlsl` is the same adapter compiled with `HOST_SBS_TEXT_GAME_PIN` for a
+[Game 3D text game](reshade-sbs.md#text-games). It reads rendered native color, ordinary Base and
+ParallaxState only; t3..t7 must be absent. Its pin weight is the coverage picture a game's text
+helper publishes (t11, premultiplied BGRA in the game's own colours, mapped onto the game's client
+rectangle by the 48-byte b7 constants), and only in the source rows the host read for the current
+text. `text_game_specs` and `text_game_closure` in the runtime header are its separately pinned
+programs; a failure to prepare them leaves the subtitle routes unchanged.
+
+Three compute passes precede the shared pin pass on each draw:
+
+- `text_game_verify_main` counts the glyph-core texels (coverage 0.95 or more), light and dark
+  ones apart, and how many of each the picture shows within 0.2 of the drawn colour as display
+  code values. The initializer pins only when a sixteenth of each kind that has at least 16
+  texels is shown, so text the game has drawn but not yet revealed, or has hidden, is not pinned,
+  and neither a bright nor a dark scene alone passes for text. The same pass counts, per tile of a
+  16-by-16 grid of the game's picture, the glyph texels and those with scene in front of each
+  plane level; the host reads these words back without waiting and feeds the plane policy.
+- `text_game_columns_main` leaves, for every texel of the band, the number of rows to the nearest
+  glyph texel (coverage 0.5 or more) of its column.
+- `initialize_main` clamps the scene field to within `0.5 * max(rows - 1, 0) / W` of the plane,
+  the pin band's own distance rule taken down the columns. A glyph texel carries its coverage as
+  weight; a texel that clamp moved carries 1/1024, so the shared pass takes its bound as slack and
+  continues the rule along the row. The field therefore changes by at most half a pixel per pixel
+  in both directions, where a pin of the glyph rows alone tears at depth edges above and below
+  the text.
+
+The band is the text rows and, above and below, twice the sum of the display bound and the
+plane ceiling in pixels, which is as far as the rule can still bound the scene. It only grows
+while the game's picture stays in place, so lines of different height share one set of planes.
+
 Field construction uses explicit FP32 interpolation of Base, including the existing continuous
 ROI embedding. Hardware-filtered coarse-to-native construction is not equivalent: quantised
 filter fractions can exceed the horizontal slope bound. The common owner

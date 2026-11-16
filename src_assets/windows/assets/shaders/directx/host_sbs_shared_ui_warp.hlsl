@@ -15,6 +15,114 @@ RWTexture2D<float> SunshineHostFinalStore : register(u0);
 RWTexture2D<float> SharedPinWeightStore : register(u1);
 RWTexture2D<uint> SharedPinRowStore : register(u2);
 
+#if defined(HOST_SBS_TEXT_GAME_PIN)
+// A Game 3D text game supplies its own text: the helper loaded into it publishes the coverage of
+// every piece of text the game draws. That picture is the pin weight, so no part of the Host
+// subtitle detection, its matte or its receipts takes part in this variant.
+// The glyphs themselves are pinned, as a video subtitle's matte and a game's UI alpha are. Beside
+// a pinned texel the pin pass lets the scene field leave the plane by its distance rule,
+// 0.5 * max(d - 1, 0) / W at d pixels, along the row. This variant applies the same rule down
+// each column first, so a depth edge also leaves the text gradually above and below it instead
+// of tearing between a row with a glyph and the next row without one.
+cbuffer TextGamePin : register(b7) {
+    float4 TextGameRect;   // the game's picture in source pixels: left, top, 1/width, 1/height
+    uint4 TextGameControl; // enabled, UI plane (float bits, full-source U), first and end source row of the current text
+    float4 TextGameScene;  // the scene's positive display bound (full-source U), reserved
+};
+Texture2D<float4> TextGameCoverage : register(t11);
+float3 DepthColorToSrgb(float3 c, uint color_mode);
+// The helper knows when a game draws text, not when the game shows it: an engine draws a whole
+// line at once and reveals it glyph by glyph, and hides its dialogue without drawing anything. So
+// the text is trusted only while the picture shows it. The coverage picture holds the text in its
+// own colours; the verdict counts the texels at the core of the glyphs, light ones (the fill) and
+// dark ones (an outline) apart, and how many of each the picture shows in that colour. Both kinds
+// must be there: a bright scene alone looks like the fill, a dark one like the outline.
+StructuredBuffer<uint> TextGameVerdict : register(t10);
+RWStructuredBuffer<uint> TextGameVerdictStore : register(u3);
+// The observation also feeds the Game 3D UI plane policy (tools/reshade/game3d_ui_adaptive.h,
+// docs/reshade-sbs.md). After the four verdict words come six words for each tile of a 16-by-16
+// grid over the game's picture: the glyph texels pinned exactly (coverage of 1/8 or more), and
+// for each of the policy's five plane levels how many of those have scene in front of it. The
+// scene is the field before any pinning, so the plane never measures its own correction.
+static const uint TextGameVerdictWords = 4u + 256u * 6u;
+static const float TextGamePlaneLevels[5] = {0.0f, 0.001f, 0.002f, 0.003f, 0.0035f};
+float SharedOriginalParallax(float2 uv);
+[numthreads(16,16,1)]
+void text_game_verify_main(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= PinSourceShape.x || id.y >= PinSourceShape.w) return;
+    uint2 pixel = uint2(id.x, id.y + PinSourceShape.z);
+    // Only the current text counts: glyphs of earlier lines left in other rows of the coverage
+    // picture match a reference without text and would vouch for text that is not there.
+    if (pixel.y < TextGameControl.z || pixel.y >= TextGameControl.w) return;
+    float2 uv = (float2(pixel) + 0.5f - TextGameRect.xy) * TextGameRect.zw;
+    if (any(uv < 0.0f) || any(uv >= 1.0f)) return;
+    float4 text = TextGameCoverage.SampleLevel(LinearSampler, uv, 0);
+    float coverage = text.a;
+    float cap = TextGameScene.x;
+    if (coverage >= 0.125f && isfinite(cap) && cap >= 0.0f) {
+        uint2 tile = min(uint2(uv * 16.0f), uint2(15u, 15u));
+        uint base = 4u + (tile.y * 16u + tile.x) * 6u;
+        float scene = SharedOriginalParallax((float2(pixel) + 0.5f) / float2(PinSourceShape.xy));
+        InterlockedAdd(TextGameVerdictStore[base], 1u);
+        [unroll] for (uint level = 0u; level < 5u; ++level)
+            if (scene + 0.05f * cap > min(TextGamePlaneLevels[level], 0.5f * cap))
+                InterlockedAdd(TextGameVerdictStore[base + 1u + level], 1u);
+    }
+    if (coverage < 0.95f) return;
+    // Both sides as display code values, whatever the capture's transfer.
+    float3 drawn = saturate(text.rgb / coverage);
+    float3 shown = DepthColorToSrgb(SourceColor.Load(int3(pixel, 0)).rgb, subtitle_render_control.y);
+    uint kind = dot(drawn, float3(0.2126f, 0.7152f, 0.0722f)) >= 0.5f ? 0u : 2u;
+    InterlockedAdd(TextGameVerdictStore[kind], 1u);
+    if (all(isfinite(shown)) && all(abs(shown - drawn) <= 0.2f)) InterlockedAdd(TextGameVerdictStore[kind + 1u], 1u);
+}
+// A kind too rare to judge does not count against the text. Otherwise a sixteenth of it must be
+// on screen: a line being revealed starts with its first glyphs, and all of it is pinned then.
+bool TextGameKindShown(uint cores, uint shown) {
+    return cores < 16u || shown * 16u >= cores;
+}
+bool TextGameTextVisible() {
+    uint count, stride; TextGameVerdict.GetDimensions(count, stride);
+    if (count != TextGameVerdictWords || stride != 4u) return false;
+    return TextGameKindShown(TextGameVerdict[0u], TextGameVerdict[1u]) && TextGameKindShown(TextGameVerdict[2u], TextGameVerdict[3u]);
+}
+bool TextGamePinAuthorized() {
+    float plane = asfloat(TextGameControl.y);
+    return TextGameControl.x == 1u && TextGameControl.z < TextGameControl.w && WarpAuthorized() &&
+        isfinite(plane) && plane >= 0.0f && plane <= V2_DIRECT_CONTAINER_LIMIT &&
+        all(isfinite(TextGameRect)) && all(TextGameRect.zw > 0.0f);
+}
+// Text coverage at a source pixel. The coverage picture is current only in the rows of the current
+// text; its other rows still hold earlier lines and are never read.
+float TextGameCoverageAt(uint2 pixel) {
+    if (pixel.y < TextGameControl.z || pixel.y >= TextGameControl.w) return 0.0f;
+    float2 uv = (float2(pixel) + 0.5f - TextGameRect.xy) * TextGameRect.zw;
+    if (any(uv < 0.0f) || any(uv > 1.0f)) return 0.0f;
+    return saturate(TextGameCoverage.SampleLevel(LinearSampler, uv, 0).a);
+}
+static const float TextGameNoGlyph = 1.0e6f;
+// One thread walks one column of the pinned rows down and back up, and leaves in the field plane
+// the number of rows from each texel to the nearest glyph texel of its column. The initializer
+// reads that distance and replaces it with the field.
+[numthreads(64,1,1)]
+void text_game_columns_main(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= PinSourceShape.x) return;
+    float distance = TextGameNoGlyph;
+    [loop] for (uint row = 0u; row < PinSourceShape.w; ++row) {
+        bool glyph = TextGameCoverageAt(uint2(id.x, row + PinSourceShape.z)) >= 0.5f;
+        distance = glyph ? 0.0f : min(distance + 1.0f, TextGameNoGlyph);
+        SunshineHostFinalStore[uint2(id.x, row)] = distance;
+    }
+    distance = TextGameNoGlyph;
+    [loop] for (uint back = PinSourceShape.w; back > 0u; --back) {
+        uint2 at = uint2(id.x, back - 1u);
+        float down = SunshineHostFinalStore[at];
+        distance = down == 0.0f ? 0.0f : min(distance + 1.0f, TextGameNoGlyph);
+        if (distance < down) SunshineHostFinalStore[at] = distance;
+    }
+}
+#endif
+
 float SharedNativeBaseSample(float2 uv) {
     // Building a second sampled field needs FP32 coefficients: hardware bilinear's
     // quantized fractions can make a source 0.5-pixel slope become >0.5 on this grid.
@@ -54,10 +162,16 @@ groupshared uint SharedPinGroupSelectedReceipt;
 [numthreads(16,16,1)]
 void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThreadID) {
     if (all(lane.xy == 0u)) {
+#if defined(HOST_SBS_TEXT_GAME_PIN)
+        uint2 source_size; SourceColor.GetDimensions(source_size.x, source_size.y);
+        SharedPinGroupSelectedReceipt = TextGamePinAuthorized() && TextGameTextVisible() && all(source_size == PinSourceShape.xy) ? 1u : 0u;
+        SharedPinGroupAuthorized = SharedPinGroupSelectedReceipt;
+#else
         uint2 source_size; float plane;
         SharedPinGroupSelectedReceipt = SelectedMatteAuthorized() ? 1u : 0u;
         SharedPinGroupAuthorized = SubtitleRenderAuthorized(source_size, plane) &&
             SharedPinGroupSelectedReceipt != 0u && all(source_size == PinSourceShape.xy) ? 1u : 0u;
+#endif
     }
     GroupMemoryBarrierWithGroupSync();
     if (id.x >= PinSourceShape.x || id.y >= PinSourceShape.w) return;
@@ -65,8 +179,25 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
     if (all(id.xy == 0u)) SharedPinRowStore[uint2(0u,PinSourceShape.w)] = SharedPinGroupSelectedReceipt;
     uint2 pixel = uint2(id.x, id.y + PinSourceShape.z);
     float2 uv = (float2(pixel) + 0.5f) / float2(PinSourceShape.xy);
+#if defined(HOST_SBS_TEXT_GAME_PIN)
+    float rows_to_glyph = SunshineHostFinalStore[id.xy];
+    float original = SharedOriginalParallax(uv);
+    float bounded = original, weight = 0.0f;
+    if (SharedPinGroupAuthorized != 0u) {
+        float text_plane = asfloat(TextGameControl.y);
+        float bound = 0.5f * max(rows_to_glyph - 1.0f, 0.0f) / (float)PinSourceShape.x;
+        bounded = clamp(original, text_plane - bound, text_plane + bound);
+        // A glyph texel carries its coverage, as a UI texel carries its alpha. A texel the column
+        // rule moved lies exactly on its bound; the faintest weight makes that bound its slack, so
+        // the pin pass carries it along the row and no texel beside it can jump past it.
+        weight = TextGameCoverageAt(pixel);
+        if (weight <= 0.0f && asuint(bounded) != asuint(original)) weight = 1.0f / 1024.0f;
+    }
+    SunshineHostFinalStore[id.xy] = bounded;
+#else
     SunshineHostFinalStore[id.xy] = SharedOriginalParallax(uv);
     float weight = SharedPinGroupAuthorized != 0u && CurrentGlyphContributor(int2(pixel)) ? 1.0f : 0.0f;
+#endif
     SharedPinWeightStore[id.xy] = weight;
     if (weight > 0.0f) InterlockedOr(SharedPinRowStore[uint2(0u,id.y)], 1u);
 }
@@ -76,7 +207,11 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
 static const uint Sunshine_SourceAlphaUI = 1u;
 float SunshineUIPinWeight(uint x, uint y) { return SharedPinWeights.Load(int3(x,y,0)); }
 float SunshineUIPlaneParallax() {
+#if defined(HOST_SBS_TEXT_GAME_PIN)
+    return asfloat(TextGameControl.y);
+#else
     return asfloat(SubtitleCondition[5u]) * ((float)subtitle_render_source.z / (float)PinSourceShape.x);
+#endif
 }
 #include "include/ui_pin_band_shared.hlsl"
 

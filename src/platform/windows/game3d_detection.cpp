@@ -191,7 +191,8 @@ namespace platf::game3d {
       // The module list may change during game startup. ERROR_BAD_LENGTH explicitly permits a
       // retry; bound it so a busy loader cannot monopolize the setup worker.
       for (int attempt = 0; attempt < 3; ++attempt) {
-        snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, process_id);
+        // SNAPMODULE32 also lists the 32-bit modules of a 32-bit process.
+        snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process_id);
         if (snapshot != INVALID_HANDLE_VALUE || GetLastError() != ERROR_BAD_LENGTH) {
           break;
         }
@@ -231,6 +232,43 @@ namespace platf::game3d {
       return result;
     }
   }  // namespace
+
+  namespace {
+    // A verified executable whose whole client area is on the captured output. A text game is
+    // converted by the host from the captured picture, which works for a window as well as for
+    // fullscreen, so it need not cover the output the way an add-on game's own export must.
+    [[nodiscard]] bool client_on_capture_output(
+      const std::filesystem::path &executable,
+      const foreground_window::observation_t &foreground,
+      const RECT capture_rect
+    ) {
+      if (!foreground_window::carries_geometry(foreground.status) || !foreground.window || !foreground.process_id || !executable.is_absolute() || !equal_name(executable.extension().wstring(), L".exe") || excluded_executable(executable)) {
+        return false;
+      }
+      const auto client = foreground.client_screen_rect;
+      if (!client.valid() || capture_rect.right <= capture_rect.left || capture_rect.bottom <= capture_rect.top) {
+        return false;
+      }
+      return client.left >= capture_rect.left && client.top >= capture_rect.top && client.right <= capture_rect.right && client.bottom <= capture_rect.bottom;
+    }
+
+    [[nodiscard]] bool module_loaded(const std::span<const std::filesystem::path> loaded_modules, const std::wstring_view name) {
+      return std::any_of(loaded_modules.begin(), loaded_modules.end(), [&](const auto &module) {
+        return equal_name(module.filename().wstring(), name);
+      });
+    }
+  }  // namespace
+
+  bool detail::is_text_game_candidate(
+    const std::filesystem::path &executable,
+    const std::span<const std::filesystem::path> loaded_modules,
+    const foreground_window::observation_t &foreground,
+    const RECT capture_rect
+  ) {
+    // The text hook observes Direct2D text drawing, which always goes through DirectWrite.
+    return client_on_capture_output(executable, foreground, capture_rect) &&
+           module_loaded(loaded_modules, L"dwrite.dll") && module_loaded(loaded_modules, L"d2d1.dll");
+  }
 
   bool detail::is_game_candidate(
     const std::filesystem::path &executable,
@@ -275,7 +313,7 @@ namespace platf::game3d {
       return std::nullopt;
     }
     const bool same_capture = capture_rect.left == capture_rect_.left && capture_rect.top == capture_rect_.top && capture_rect.right == capture_rect_.right && capture_rect.bottom == capture_rect_.bottom;
-    const bool same_process = provisional_ && provisional_->process_id == candidate->process_id && provisional_->creation_time == candidate->creation_time && provisional_->window == candidate->window && equal_name(provisional_->executable.wstring(), candidate->executable.wstring());
+    const bool same_process = provisional_ && provisional_->process_id == candidate->process_id && provisional_->creation_time == candidate->creation_time && provisional_->window == candidate->window && provisional_->kind == candidate->kind && equal_name(provisional_->executable.wstring(), candidate->executable.wstring());
     if (!same_capture || !same_process || now < last_seen_ || now - last_seen_ > 5s) {
       provisional_ = candidate;
       capture_rect_ = capture_rect;
@@ -305,9 +343,15 @@ namespace platf::game3d {
         return std::nullopt;
       }
       USHORT process_machine {}, native_machine {};
-      if (!IsWow64Process2(process.get(), &process_machine, &native_machine) || process_machine != IMAGE_FILE_MACHINE_UNKNOWN || native_machine != IMAGE_FILE_MACHINE_AMD64) {
+      if (!IsWow64Process2(process.get(), &process_machine, &native_machine) || native_machine != IMAGE_FILE_MACHINE_AMD64) {
         return std::nullopt;
       }
+      // Native x64 can load the add-on. A 32-bit process never can; it may be a text game.
+      const bool native = process_machine == IMAGE_FILE_MACHINE_UNKNOWN;
+      if (!native && process_machine != IMAGE_FILE_MACHINE_I386) {
+        return std::nullopt;
+      }
+      const auto kind = native ? game_kind_e::addon : game_kind_e::text_hook;
       const auto creation_time = process_creation_time(process.get());
       const auto executable = process_executable(process.get());
       if (!creation_time || !executable || in_windows_directory(*executable) || excluded_executable(*executable)) {
@@ -317,7 +361,8 @@ namespace platf::game3d {
       if (!modules) {
         return std::nullopt;
       }
-      if (!detail::is_game_candidate(*executable, *modules, foreground, capture_rect)) {
+      if (!(native ? detail::is_game_candidate(*executable, *modules, foreground, capture_rect) :
+                     detail::is_text_game_candidate(*executable, *modules, foreground, capture_rect))) {
         return std::nullopt;
       }
       const auto after = foreground_window::sample();
@@ -325,7 +370,7 @@ namespace platf::game3d {
       if (!foreground_window::carries_geometry(after.status) || after.window != foreground.window || after.process_id != foreground.process_id || after.client_screen_rect != foreground.client_screen_rect || !executable_after || !equal_name(executable->wstring(), executable_after->wstring()) || process_creation_time(process.get()) != creation_time || WaitForSingleObject(process.get(), 0) != WAIT_TIMEOUT) {
         return std::nullopt;
       }
-      return detected_game {*executable, foreground.process_id, creation_time, display_name(*executable), foreground.window};
+      return detected_game {*executable, foreground.process_id, creation_time, display_name(*executable), foreground.window, kind};
     } catch (...) {
       // This advisory must not break an active stream on a path conversion/allocation failure.
       return std::nullopt;
