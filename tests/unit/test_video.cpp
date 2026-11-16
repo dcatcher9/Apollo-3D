@@ -7675,13 +7675,7 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   ASSERT_NE(reinit_sleep, std::string::npos);
   EXPECT_LT(cancellation, reinit_sleep);
 
-  const auto capture_guard = video_source.find("auto capture_guard = util::fail_guard(");
-  const auto stop_images = video_source.find("images->stop();", capture_guard);
-  const auto join_capture = video_source.find("end_capture_async(capture_thread_ctx);", stop_images);
-  ASSERT_NE(capture_guard, std::string::npos);
-  ASSERT_NE(stop_images, std::string::npos);
-  ASSERT_NE(join_capture, std::string::npos);
-  EXPECT_LT(stop_images, join_capture);
+  // VideoCaptureLifecycleTest exercises the concrete capture owner's stop-before-join order.
 
   const auto encode_run = video_source.find("void encode_run(");
   const auto capture_async = video_source.find("void capture_async(", encode_run);
@@ -8691,7 +8685,7 @@ TEST(CaptureBackendFailoverTest, CaptureLoopsBracketEachAttemptWithDisplayChange
   // Both capture owners sample before opening the display and after capture returns; host mode
   // changes and Windows notifications advance the same process-wide epoch.
   const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
-  const auto capture_thread = video_source.find("void captureThread(");
+  const auto capture_thread = video_source.find("void capture_session_t::run()");
   ASSERT_NE(capture_thread, std::string::npos);
   const auto initial_epoch = video_source.find("display_epoch_at_open = platf::display_change_epoch();", capture_thread);
   const auto initial_open = video_source.find("disp = platf::display(", capture_thread);

@@ -2120,7 +2120,7 @@ namespace proc {
       return false;
     };
 
-    // Republish the (possibly renumbered) display name so captureThread targets the display that
+    // Republish the (possibly renumbered) display name so the capture worker targets the display that
     // actually carries the mode, then bring the HDR worker back up on that name.
     auto republish_display = [&]() {
       set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));

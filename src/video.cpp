@@ -25,8 +25,13 @@
 #include "sync.h"
 #include "tracked_async_worker.h"
 #include "video.h"
+#include "video_capture_test.h"
 #include "video_encode_pipeline.h"
 #include "video_session_recovery.h"
+
+#ifdef SUNSHINE_TESTS
+  #include <stdexcept>
+#endif
 
 #ifdef _WIN32
   #include "platform/windows/exclusive_display_reconcile_retry.h"
@@ -552,27 +557,147 @@ namespace video {
       std::make_shared<encoded_frame_buffer_pool_t>();
   };
 
-  struct capture_ctx_t {
-    img_event_t images;
-    config_t config;
-  };
+  class capture_session_t {
+  public:
+    capture_session_t(
+      img_event_t images,
+      const config_t &config
+#ifdef SUNSHINE_TESTS
+      ,
+      detail::capture_worker_test_callback_t test_callback = nullptr,
+      void *test_state = nullptr,
+      detail::capture_worker_test_callback_t test_before_admission = nullptr
+#endif
+    ):
+        images_(std::move(images)),
+        config_(config)
+#ifdef SUNSHINE_TESTS
+        ,
+        test_callback_(test_callback),
+        test_state_(test_state),
+        test_before_admission_(test_before_admission)
+#endif
+        ,
+        thread_(&capture_session_t::run, this) {
+    }
 
-  struct capture_thread_async_ctx_t {
-    std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue;
-    std::thread capture_thread;
+    ~capture_session_t() {
+      stop();
+    }
 
-    safe::signal_t reinit_event;
-    sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp;
+    capture_session_t(const capture_session_t &) = delete;
+    capture_session_t &operator=(const capture_session_t &) = delete;
+    capture_session_t(capture_session_t &&) = delete;
+    capture_session_t &operator=(capture_session_t &&) = delete;
 
-    // Latest live video mode (0x3007) applied by the encode thread. captureThread folds it into
+    void stop() {
+      // A tracked native teardown may still retain the old display. End the image wait before
+      // cancellation and join so the capture worker can leave its display-reference drain.
+      images_->stop();
+      run_control_.stop();
+      if (thread_.joinable()) {
+        thread_.join();
+      }
+    }
+
+    bool running() const {
+      return run_control_.running();
+    }
+
+    std::shared_ptr<platf::display_t> current_display() {
+      auto lock = display_wp_.lock();
+      return display_wp_->lock();
+    }
+
+    safe::signal_t &reinit_event() {
+      return reinit_event_;
+    }
+
+    void set_live_video_mode(std::optional<video_mode_change_t> mode) {
+      live_video_mode_ = std::move(mode);
+    }
+
+#ifdef SUNSHINE_TESTS
+    std::optional<video_mode_change_t> live_video_mode() {
+      auto lock = live_video_mode_.lock();
+      return *live_video_mode_;
+    }
+#endif
+
+  private:
+    void run();
+
+    img_event_t images_;
+    config_t config_;
+    safe::signal_t run_control_;
+    safe::signal_t reinit_event_;
+    sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp_;
+
+    // Latest live video mode (0x3007) applied by the encode thread. run() folds it into
     // its own capture config so a *later* display reinitialization rebuilds at the current mode
     // instead of reverting to the mode negotiated at launch. The in-flight capture session is
     // retuned through display_t::set_client_frame_rate() rather than through this copy.
-    sync_util::sync_t<std::optional<video_mode_change_t>> live_video_mode;
+    sync_util::sync_t<std::optional<video_mode_change_t>> live_video_mode_;
+
+#ifdef SUNSHINE_TESTS
+    detail::capture_worker_test_callback_t test_callback_;
+    void *test_state_;
+    detail::capture_worker_test_callback_t test_before_admission_;
+#endif
+
+    std::thread thread_;  ///< Last: run() starts only after all referenced state exists.
   };
 
-  int start_capture_async(capture_thread_async_ctx_t &ctx);
-  void end_capture_async(capture_thread_async_ctx_t &ctx);
+#ifdef SUNSHINE_TESTS
+  namespace detail {
+    capture_worker_test_context_t::capture_worker_test_context_t(
+      const config_t &config,
+      const img_event_t &images,
+      void *cancel_state,
+      bool (*running)(const void *) noexcept,
+      bool (*wait_for_cancel)(void *, std::chrono::milliseconds) noexcept
+    ):
+        config(config),
+        images(images),
+        cancel_state_(cancel_state),
+        running_(running),
+        wait_for_cancel_(wait_for_cancel) {
+    }
+
+    bool capture_worker_test_context_t::running() const noexcept {
+      return running_(cancel_state_);
+    }
+
+    bool capture_worker_test_context_t::wait_for_cancel(std::chrono::milliseconds timeout) const noexcept {
+      return wait_for_cancel_(cancel_state_, timeout);
+    }
+
+    struct capture_worker_test_access {
+      static void invoke(
+        const config_t &config,
+        const img_event_t &images,
+        safe::signal_t &run_control,
+        capture_worker_test_callback_t callback,
+        void *state
+      ) noexcept {
+        const capture_worker_test_context_t borrowed {
+          config,
+          images,
+          &run_control,
+          [](const void *cancel_state) noexcept {
+            return static_cast<const safe::signal_t *>(cancel_state)->running();
+          },
+          [](void *cancel_state, std::chrono::milliseconds timeout) noexcept {
+            auto &run_control = *static_cast<safe::signal_t *>(cancel_state);
+            (void) run_control.pop(timeout);
+            return !run_control.running();
+          },
+        };
+        callback(state, borrowed);
+      }
+    };
+  }  // namespace detail
+#endif
 
 #ifndef _WIN32
   #error Apollo requires Windows with native NVIDIA NVENC support
@@ -698,31 +823,36 @@ namespace video {
     refresh_displays(display_names, current_display_index, empty_str);
   }
 
-  void captureThread(
-    std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
-    sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
-    safe::signal_t &reinit_event,
-    sync_util::sync_t<std::optional<video_mode_change_t>> &live_video_mode
-  ) {
-    std::optional<capture_ctx_t> capture_ctx;
+  void capture_session_t::run() {
+    auto &images = images_;
+    auto &config = config_;
+    auto &run_control = run_control_;
+    auto &display_wp = display_wp_;
+    auto &reinit_event = reinit_event_;
+    auto &live_video_mode = live_video_mode_;
 
     auto fg = util::fail_guard([&]() {
-      capture_ctx_queue->stop();
-
-      if (capture_ctx) {
-        capture_ctx->images->stop();
-      }
-      for (auto &queued_ctx : capture_ctx_queue->unsafe()) {
-        queued_ctx.images->stop();
-      }
+      run_control.stop();
+      images->stop();
     });
 
-    // Wait for the initial capture context or a request to stop the queue
-    auto initial_capture_ctx = capture_ctx_queue->pop();
-    if (!initial_capture_ctx) {
+#ifdef SUNSHINE_TESTS
+    if (test_before_admission_) {
+      detail::capture_worker_test_access::invoke(config, images, run_control, test_before_admission_, test_state_);
+    }
+#endif
+
+    // The old initial-context pop rejected a stop that won before worker admission.
+    if (!run_control.running()) {
       return;
     }
-    capture_ctx.emplace(std::move(*initial_capture_ctx));
+
+#ifdef SUNSHINE_TESTS
+    if (test_callback_) {
+      detail::capture_worker_test_access::invoke(config, images, run_control, test_callback_, test_state_);
+      return;
+    }
+#endif
 
     std::vector<std::string> display_names;
     int display_p = -1;
@@ -736,7 +866,7 @@ namespace video {
       active_display_name = initial_display_name;
       disp = platf::display(
         initial_display_name,
-        capture_ctx->config,
+        config,
         capture_failover.preferred_backend()
       );
       if (disp) {
@@ -753,7 +883,7 @@ namespace video {
       }
       disp = platf::display(
         active_display_name,
-        capture_ctx->config,
+        config,
         capture_failover.preferred_backend()
       );
       if (disp) {
@@ -821,7 +951,7 @@ namespace video {
 
     auto pull_free_image_callback = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
       img_out.reset();
-      while (capture_ctx_queue->running()) {
+      while (run_control.running()) {
         // pick first allocated but unused
         for (auto it = imgs.begin(); it != imgs.end(); it++) {
           if (*it && it->use_count() == 1) {
@@ -870,10 +1000,10 @@ namespace video {
     auto capture_diagnostics = detail::make_diagnostic_state<capture_stage_diagnostics_t>(
       config::sunshine.diagnostics_enabled
     );
-    while (capture_ctx_queue->running()) {
+    while (run_control.running()) {
       std::uint64_t captured_frames = 0;
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
-        if (!capture_ctx_queue->running() || !capture_ctx->images->running()) {
+        if (!run_control.running() || !images->running()) {
           return false;
         }
 
@@ -882,7 +1012,7 @@ namespace video {
             capture_diagnostics->record(*img);
           }
           ++captured_frames;
-          capture_ctx->images->raise(std::move(img));
+          images->raise(std::move(img));
         }
 
         return true;
@@ -912,8 +1042,8 @@ namespace video {
             reinit_event.raise(true);
             // The encode loop releases the display only once it sees the reinit. An independent
             // provider's image wait can last until its keepalive, so end it now.
-            if (capture_ctx->config.encode_wake) {
-              capture_ctx->config.encode_wake->wake();
+            if (config.encode_wake) {
+              config.encode_wake->wake();
             }
 
             // Some classes of images contain references to the display --> display won't delete unless img is deleted
@@ -929,10 +1059,10 @@ namespace video {
               // the ref count from reaching 1. We do this here rather than on the encoder thread to avoid race
               // conditions where the encoding loop might free a good frame after reinitializing if we capture
               // a new frame here before the encoder has finished reinitializing.
-              while (capture_ctx->images->try_pop()) {
+              while (images->try_pop()) {
               }
 
-              if (detail::capture_display_release_wait_cancelled(capture_ctx_queue->running(), capture_ctx->images->running())) {
+              if (detail::capture_display_release_wait_cancelled(run_control.running(), images->running())) {
                 return;
               }
 
@@ -946,12 +1076,12 @@ namespace video {
               auto lg = live_video_mode.lock();
               if (*live_video_mode) {
                 const auto &mode = **live_video_mode;
-                capture_ctx->config.width = mode.width;
-                capture_ctx->config.height = mode.height;
-                capture_ctx->config.framerate = mode.framerate;
-                capture_ctx->config.framerateX100 = mode.framerateX100;
-                capture_ctx->config.encodingFramerate = mode.encodingFramerate;
-                capture_ctx->config.bitrate = mode.bitrate;
+                config.width = mode.width;
+                config.height = mode.height;
+                config.framerate = mode.framerate;
+                config.framerateX100 = mode.framerateX100;
+                config.encodingFramerate = mode.encodingFramerate;
+                config.bitrate = mode.bitrate;
               }
             }
 
@@ -966,11 +1096,15 @@ namespace video {
                 return platf::primary_display::reconcile_exclusive_display_topology(topology_generation).result;
               },
               [&]() {
-                return capture_ctx_queue->running() && capture_ctx->images->running() &&
+                return run_control.running() && images->running() &&
                        platf::primary_display::exclusive_session_generation() == topology_generation;
               },
-              []() { return std::chrono::steady_clock::now(); },
-              [](auto delay) { std::this_thread::sleep_for(delay); }
+              []() {
+                return std::chrono::steady_clock::now();
+              },
+              [](auto delay) {
+                std::this_thread::sleep_for(delay);
+              }
             );
             if (topology == platf::primary_display::detail::capture_reconcile_result_e::cancelled) {
               return;
@@ -980,7 +1114,7 @@ namespace video {
             }
 #endif
             display_epoch_at_open = platf::display_change_epoch();
-            while (capture_ctx_queue->running()) {
+            while (run_control.running()) {
               // Release the display before reenumerating displays, since some capture backends
               // only support a single display session per device/application.
               disp.reset();
@@ -998,7 +1132,7 @@ namespace video {
               reset_display(
                 disp,
                 active_display_name,
-                capture_ctx->config,
+                config,
                 capture_failover.preferred_backend()
               );
               if (disp) {
@@ -2103,21 +2237,8 @@ namespace video {
       shutdown_event->raise(true);
     });
 
-    capture_thread_async_ctx_t capture_thread_ctx;
-    if (start_capture_async(capture_thread_ctx)) {
-      return;
-    }
-    auto capture_guard = util::fail_guard([&]() {
-      // The capture thread can be inside its display-reference reinit wait. Stop the image owner
-      // before joining so that wait has an explicit cancellation edge even if a tracked driver
-      // teardown worker still retains the old display.
-      images->stop();
-      end_capture_async(capture_thread_ctx);
-    });
-
-    capture_thread_ctx.capture_ctx_queue->raise(capture_ctx_t {images, config});
-
-    if (!capture_thread_ctx.capture_ctx_queue->running()) {
+    capture_session_t capture_session {images, config};
+    if (!capture_session.running()) {
       return;
     }
 
@@ -2179,7 +2300,7 @@ namespace video {
             }
             sbs_depth_status_event->raise(0);
           }
-          capture_thread_ctx.live_video_mode = std::optional<video_mode_change_t> {*mode};
+          capture_session.set_live_video_mode(std::optional<video_mode_change_t> {*mode});
           config_from_live_video_mode = true;
           if (active_ack_request) {
             superseded_ack_requests.push_back(*active_ack_request);
@@ -2216,16 +2337,12 @@ namespace video {
       }
 
       // Wait for the main capture event when the display is being reinitialized
-      if (capture_thread_ctx.reinit_event.peek()) {
+      if (capture_session.reinit_event().peek()) {
         std::this_thread::sleep_for(20ms);
         continue;
       }
       // Wait for the display to be ready
-      std::shared_ptr<platf::display_t> display;
-      {
-        auto lg = capture_thread_ctx.display_wp.lock();
-        display = capture_thread_ctx.display_wp->lock();
-      }
+      auto display = capture_session.current_display();
       if (!display) {
         // Yield until the capture thread publishes the display instead of spinning a core.
         std::this_thread::sleep_for(1ms);
@@ -2234,7 +2351,7 @@ namespace video {
 
       // Retune the running capture session every iteration rather than only when the mode
       // changes. The call is a no-op when the cadence already matches, and republishing it
-      // unconditionally means a display rebuilt by captureThread is corrected here even if it
+      // unconditionally means a display rebuilt by the capture worker is corrected here even if it
       // raced the mode change and was created with the previous rate.
       display->set_client_frame_rate(config.framerate, config.framerateX100);
 
@@ -2400,7 +2517,7 @@ namespace video {
         if (current_sbs_mode != SBS_AI) {
           sbs_depth_status_event->raise(0);
         }
-        capture_thread_ctx.live_video_mode = proven_video_mode;
+        capture_session.set_live_video_mode(proven_video_mode);
         config_from_live_video_mode = false;
         // The request never made it into an encode session, so it must not be reported as applied.
         // It is answered once the fallback session comes up and its real mode is known.
@@ -2521,7 +2638,7 @@ namespace video {
         session_config,
         display,
         std::move(encode_session),
-        capture_thread_ctx.reinit_event,
+        capture_session.reinit_event(),
         recovery,
         channel_data,
         [&](const video_mode_change_t &mode) {
@@ -2529,8 +2646,7 @@ namespace video {
           // this callback, a later SBS toggle or display reinitialization would reconstruct the
           // session from the pre-reconfigure bitrate even though the client was told otherwise.
           config.bitrate = mode.bitrate;
-          capture_thread_ctx.live_video_mode =
-            std::optional<video_mode_change_t> {mode};
+          capture_session.set_live_video_mode(std::optional<video_mode_change_t> {mode});
           proven_video_mode = mode;
           config_from_live_video_mode = false;
         }
@@ -2732,26 +2848,53 @@ namespace video {
     return 0;
   }
 
-  int start_capture_async(capture_thread_async_ctx_t &capture_thread_ctx) {
-    capture_thread_ctx.reinit_event.reset();
+#ifdef SUNSHINE_TESTS
+  namespace detail {
+    struct capture_worker_test_t::impl_t {
+      capture_session_t capture;
 
-    capture_thread_ctx.capture_ctx_queue = std::make_shared<safe::queue_t<capture_ctx_t>>(1);
-
-    capture_thread_ctx.capture_thread = std::thread {
-      captureThread,
-      capture_thread_ctx.capture_ctx_queue,
-      std::ref(capture_thread_ctx.display_wp),
-      std::ref(capture_thread_ctx.reinit_event),
-      std::ref(capture_thread_ctx.live_video_mode)
+      impl_t(
+        config_t config,
+        img_event_t images,
+        capture_worker_test_callback_t callback,
+        void *state,
+        capture_worker_test_callback_t before_admission
+      ):
+          capture(std::move(images), config, callback, state, before_admission) {
+      }
     };
 
-    return 0;
-  }
+    capture_worker_test_t::capture_worker_test_t(
+      config_t config,
+      img_event_t images,
+      capture_worker_test_callback_t callback,
+      void *state,
+      capture_worker_test_callback_t before_admission
+    ) {
+      if (!images || !callback) {
+        throw std::invalid_argument("The inert capture worker requires images and a callback");
+      }
+      impl_ = std::make_unique<impl_t>(std::move(config), std::move(images), callback, state, before_admission);
+    }
 
-  void end_capture_async(capture_thread_async_ctx_t &capture_thread_ctx) {
-    capture_thread_ctx.capture_ctx_queue->stop();
+    capture_worker_test_t::~capture_worker_test_t() = default;
 
-    capture_thread_ctx.capture_thread.join();
-  }
+    void capture_worker_test_t::stop() {
+      impl_->capture.stop();
+    }
+
+    bool capture_worker_test_t::running() const {
+      return impl_->capture.running();
+    }
+
+    void capture_worker_test_t::set_live_video_mode(std::optional<video_mode_change_t> mode) {
+      impl_->capture.set_live_video_mode(std::move(mode));
+    }
+
+    std::optional<video_mode_change_t> capture_worker_test_t::live_video_mode() const {
+      return impl_->capture.live_video_mode();
+    }
+  }  // namespace detail
+#endif
 
 }  // namespace video
