@@ -1535,7 +1535,7 @@ namespace nvhttp {
       return;
     }
 
-    const auto selected_app = proc::proc.resolve_app(requested_appid, appuuid_str);
+    auto selected_app = proc::proc.resolve_app(requested_appid, appuuid_str);
     if (selected_app.status == proc::app_lookup_status_e::not_found) {
       tree.put("root.<xmlattr>.status_code", 404);
       tree.put("root.<xmlattr>.status_message", "Cannot find requested application");
@@ -1599,7 +1599,7 @@ namespace nvhttp {
       return;
     }
 
-    auto err = proc::proc.execute(*selected_app.app, launch_session, true);
+    auto err = proc::proc.execute(std::move(*selected_app.app), launch_session, true);
     if (err) {
       tree.put("root.<xmlattr>.status_code", err);
       tree.put(

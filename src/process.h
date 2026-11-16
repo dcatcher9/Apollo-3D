@@ -222,8 +222,9 @@ namespace proc {
         _apps(std::move(apps)) {
     }
 
+    /** Take ownership of the selected snapshot after cleanup and request validation pass. */
     int execute(
-      const ctx_t &app,
+      ctx_t &&app,
       std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
       bool probe_encoder
     );
@@ -320,7 +321,6 @@ namespace proc {
     void set_display_name_locked(std::string name);
 
     int _app_id = 0;
-    std::string _app_name;
     bool _virtual_display = false;
     std::uint64_t _host_session_id = 0;
     // The process token/GUID survive resume; the authorized live-control transport does not.
@@ -419,7 +419,7 @@ namespace proc {
     std::string display_name;
 
     std::vector<ctx_t> _apps;
-    ctx_t _app;
+    ctx_t _app {};
     std::chrono::steady_clock::time_point _app_launch_time;
 
     // If no command associated with _app_id, yet it's still running

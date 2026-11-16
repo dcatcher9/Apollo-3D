@@ -266,6 +266,53 @@ namespace proc {
   };
 }  // namespace proc
 
+namespace {
+  proc::ctx_t rejected_launch_app() {
+    proc::ctx_t app {};
+    app.idx = std::string(256, 'i');
+    app.id = "1";
+    app.uuid = "rejected-" + std::string(256, 'u');
+    app.name = "Rejected launch " + std::string(512, 'n');
+    app.cmd = std::string(1024, 'c');
+    app.working_dir = std::string(256, 'w');
+    app.output = std::string(256, 'o');
+    app.image_path = std::string(256, 'p') + ".png";
+    app.prep_cmds.emplace_back(std::string(512, 'd'), std::string(512, 'r'), true);
+    app.prep_cmds.emplace_back(std::string(512, 'e'), std::string(512, 's'), false);
+    app.detached = {std::string(512, 'a'), std::string(512, 'b')};
+    app.elevated = true;
+    app.auto_detach = true;
+    app.wait_all = true;
+    app.synthetic_virtual_display = true;
+    app.exit_timeout = std::chrono::seconds {17};
+    return app;
+  }
+
+  void expect_app_unchanged(const proc::ctx_t &actual, const proc::ctx_t &expected) {
+    EXPECT_EQ(actual.idx, expected.idx);
+    EXPECT_EQ(actual.id, expected.id);
+    EXPECT_EQ(actual.uuid, expected.uuid);
+    EXPECT_EQ(actual.name, expected.name);
+    EXPECT_EQ(actual.cmd, expected.cmd);
+    EXPECT_EQ(actual.working_dir, expected.working_dir);
+    EXPECT_EQ(actual.output, expected.output);
+    EXPECT_EQ(actual.image_path, expected.image_path);
+    EXPECT_EQ(actual.detached, expected.detached);
+    ASSERT_EQ(actual.prep_cmds.size(), expected.prep_cmds.size());
+    for (std::size_t index = 0; index < expected.prep_cmds.size(); ++index) {
+      SCOPED_TRACE(index);
+      EXPECT_EQ(actual.prep_cmds[index].do_cmd, expected.prep_cmds[index].do_cmd);
+      EXPECT_EQ(actual.prep_cmds[index].undo_cmd, expected.prep_cmds[index].undo_cmd);
+      EXPECT_EQ(actual.prep_cmds[index].elevated, expected.prep_cmds[index].elevated);
+    }
+    EXPECT_EQ(actual.elevated, expected.elevated);
+    EXPECT_EQ(actual.auto_detach, expected.auto_detach);
+    EXPECT_EQ(actual.wait_all, expected.wait_all);
+    EXPECT_EQ(actual.synthetic_virtual_display, expected.synthetic_virtual_display);
+    EXPECT_EQ(actual.exit_timeout, expected.exit_timeout);
+  }
+}  // namespace
+
 TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto original = std::make_shared<rtsp_stream::launch_session_t>();
@@ -1426,13 +1473,17 @@ TEST_F(IdleProcessLifecycleTest, FailedRetirementPreservesOwnerAcrossRefreshAndN
   EXPECT_TRUE(proc::process_test_access::has_virtual_identity(proc::proc));
   EXPECT_EQ(proc::process_test_access::virtual_device_path(proc::proc), device_path);
 
-  proc::ctx_t next_app;
+  auto next_app = rejected_launch_app();
+  const auto expected_app = next_app;
   auto next_launch = std::make_shared<rtsp_stream::launch_session_t>();
   // Cleanup admission precedes even input validation. Invalid geometry also keeps this negative
   // test away from platform acquisition if the guard regresses.
   next_launch->width = next_launch->height = 1;
   next_launch->scale_factor = 20;
-  EXPECT_EQ(proc::proc.execute(next_app, next_launch, false), 503);
+  EXPECT_EQ(proc::proc.execute(std::move(next_app), next_launch, false), 503);
+  expect_app_unchanged(next_app, expected_app);
+  EXPECT_TRUE(proc::proc.get_status().app_name.empty());
+  EXPECT_TRUE(proc::proc.get_last_run_app_name().empty());
   EXPECT_TRUE(proc::process_test_access::has_virtual_identity(proc::proc));
   EXPECT_EQ(proc::process_test_access::virtual_device_path(proc::proc), device_path);
 
@@ -2153,15 +2204,17 @@ TEST(ProcessTest, RejectedNewLaunchClearsPreviousClientDisplayPolicy) {
     proc::process_test_access::clear(process);
   });
 
-  proc::ctx_t app {};
-  app.id = "1";
-  app.name = "Invalid exclusive mode test";
+  auto app = rejected_launch_app();
+  const auto expected_app = app;
   auto invalid = std::make_shared<rtsp_stream::launch_session_t>();
   invalid->width = 1;
   invalid->height = 1;
   invalid->scale_factor = 20;
   invalid->virtual_display_only = true;
-  EXPECT_EQ(process.execute(app, invalid, false), 400);
+  EXPECT_EQ(process.execute(std::move(app), invalid, false), 400);
+  expect_app_unchanged(app, expected_app);
+  EXPECT_TRUE(process.get_status().app_name.empty());
+  EXPECT_TRUE(process.get_last_run_app_name().empty());
   EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
   EXPECT_EQ(process.get_host_session_id(), 0U);
 }
@@ -2187,9 +2240,8 @@ TEST(ProcessTest, CalculatesEvenScaledRenderDimensions) {
 
 TEST(ProcessTest, InvalidRenderSizeLeavesProcessIdle) {
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
-  proc::ctx_t app {};
-  app.id = "1";
-  app.name = "Invalid mode test";
+  auto app = rejected_launch_app();
+  const auto expected_app = app;
 
   auto launch = std::make_shared<rtsp_stream::launch_session_t>();
   launch->width = 1;
@@ -2197,9 +2249,12 @@ TEST(ProcessTest, InvalidRenderSizeLeavesProcessIdle) {
   launch->fps = 60000;
   launch->scale_factor = 20;
 
-  EXPECT_EQ(process.execute(app, launch, false), 400);
+  EXPECT_EQ(process.execute(std::move(app), launch, false), 400);
+  expect_app_unchanged(app, expected_app);
   const auto status = process.get_status();
   EXPECT_EQ(status.app_id, 0);
+  EXPECT_TRUE(status.app_name.empty());
+  EXPECT_TRUE(process.get_last_run_app_name().empty());
   EXPECT_EQ(status.host_session_id, 0U);
 }
 

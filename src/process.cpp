@@ -425,7 +425,7 @@ namespace proc {
     // command exit, stops and joins the media workers, and only then calls running()/terminate().
     return {
       _app_id,
-      _app_name,
+      _app.name,
       _app.uuid,
       _virtual_display,
       _host_session_id,
@@ -1122,7 +1122,7 @@ namespace proc {
 #endif
 
   int proc_t::execute(
-    const ctx_t &app,
+    ctx_t &&app,
     std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
     bool probe_encoder
   ) {
@@ -1150,9 +1150,8 @@ namespace proc {
     // Do not publish process ownership until every side-effect-free request validation has passed.
     // In particular, a tiny scaled mode can floor to zero after enforcing even dimensions; that
     // must leave the host idle rather than advertising an app that was never launched.
-    _app = app;
-    _app_id = util::from_view(app.id);
-    _app_name = app.name;
+    _app = std::move(app);
+    _app_id = util::from_view(_app.id);
     _launch_session = launch_session;
     _active_launch_session_id = launch_session->id;
 #ifdef _WIN32
@@ -2503,7 +2502,6 @@ namespace proc {
     }
 
     _app_id = 0;
-    _app_name.clear();
     _app = {};
     _completed_prep_commands = 0;
     _host_session_id = 0;
@@ -2685,9 +2683,8 @@ namespace proc {
       return local_ar_handoff_e::ready;
     }
 
-    const auto app_name = _app_name;
     BOOST_LOG(info) << "Local AR is taking ownership from inactive remote virtual-display session ["sv
-                    << app_name << "]."sv;
+                    << _app.name << "]."sv;
     terminate(false, false);
 
     // SudoVDA acknowledges removal before Windows necessarily publishes the new topology. Wait
@@ -2779,7 +2776,7 @@ namespace proc {
 
   std::string proc_t::get_last_run_app_name() {
     std::lock_guard lock(process_state_mutex);
-    return _app_name;
+    return _app.name;
   }
 
   std::string proc_t::get_running_app_uuid() {
