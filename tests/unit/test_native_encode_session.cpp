@@ -4,6 +4,7 @@
 #include "src/process.h"
 #include "src/tracked_async_worker.h"
 #include "src/video.h"
+#include "src/video_encode_session.h"
 
 #include <atomic>
 #include <chrono>
@@ -302,7 +303,7 @@ TEST(NativeEncodeSessionTest, FactoryReturnsTheActualForwardingWrapperAndDestruc
 TEST(NativeEncodeSessionTest, FailedReadyBackendOfferRetiresCandidateWithoutReturningAWrapper) {
   fixture_t fixture(true);
   fixture.display.reject_offer = true;
-  std::unique_ptr<video::encode_session_t> session;
+  std::unique_ptr<video::nvenc_encode_session_t> session;
   std::thread::id factory_thread;
   scoped_operation_t creation(fixture.state, [&]() {
     factory_thread = std::this_thread::get_id();

@@ -665,34 +665,6 @@ namespace video {
   config::depth_model_info host_sbs_v2_depth_model();
   using img_event_t = std::shared_ptr<safe::event_t<std::shared_ptr<platf::img_t>>>;
 
-  struct encode_session_t {
-    virtual ~encode_session_t() = default;
-
-    virtual int convert(platf::img_t &img) = 0;
-
-    virtual int convert_with_encode_target(
-      platf::img_t &img,
-      std::chrono::steady_clock::time_point next_encode_target
-    ) {
-      (void) next_encode_target;
-      return convert(img);
-    }
-
-    virtual std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const {
-      return std::nullopt;
-    }
-
-    virtual bool needs_conversion_poll() const {
-      return false;
-    }
-
-    virtual void request_idr_frame() = 0;
-
-    virtual void request_normal_frame() = 0;
-
-    virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
-  };
-
   class encoded_frame_buffer_pool_t {
   public:
     std::vector<std::uint8_t> acquire() {
@@ -800,18 +772,6 @@ namespace video {
   };
 
   using hdr_info_t = std::unique_ptr<hdr_info_raw_t>;
-
-#ifdef SUNSHINE_TESTS
-  namespace detail {
-    std::unique_ptr<encode_session_t> make_native_encode_session_for_test(
-      platf::display_t &display,
-      const config_t &config,
-      bool enforce_launch_hdr_contract = false
-    );
-    hdr_info_t native_encode_session_hdr_info_for_test(const encode_session_t &session);
-    std::future<void> retire_native_encode_session_for_test(std::unique_ptr<encode_session_t> session);
-  }  // namespace detail
-#endif
 
   struct nvenc_capabilities_t {
     bool hevc;

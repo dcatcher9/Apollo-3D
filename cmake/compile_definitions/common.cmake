@@ -86,6 +86,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/stream.h"
         "${CMAKE_SOURCE_DIR}/src/video.cpp"
         "${CMAKE_SOURCE_DIR}/src/video.h"
+        "${CMAKE_SOURCE_DIR}/src/video_encode_session.h"
         "${CMAKE_SOURCE_DIR}/src/native_encode_owner.cpp"
         "${CMAKE_SOURCE_DIR}/src/native_encode_owner.h"
         "${CMAKE_SOURCE_DIR}/src/video_colorspace.cpp"
