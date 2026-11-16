@@ -112,6 +112,8 @@ list(PREPEND PLATFORM_LIBRARIES
         ${CURL_STATIC_LIBRARIES}
         avrt
         cfgmgr32
+        # Resolve D3DKMT through its documented GDI32 provider before D3D11 re-exports.
+        gdi32
         d3d11
         D3DCompiler
         dnsapi
