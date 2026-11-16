@@ -8,6 +8,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <Simple-Web-Server/server_http.hpp>
+#include <src/confighttp.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -58,6 +59,18 @@ namespace {
             );
           }
         };
+      server.resource["^/bad-request$"]["POST"] = [](const auto &response, const auto &request) {
+        try {
+          const auto document = json::parse(request->content);
+          response->write(json {{"document", document}}.dump());
+        } catch (const json::parse_error &error) {
+          response->write(
+            SimpleWeb::StatusCode::client_error_bad_request,
+            confighttp::make_bad_request_body(error.what()),
+            {{"Content-Type", "application/json"}}
+          );
+        }
+      };
       server.resource["^/ping$"]["GET"] = [](const auto &response, const auto &) {
         response->write(json {{"pong", true}}.dump());
       };
@@ -282,5 +295,58 @@ TEST(HttpJsonBody, EarlyParseFailureLeavesFollowingPipelinedRequestIntact) {
                            "\r\nGET /not-a-request HTTP/1.1\r\nHost: localhost\r\n\r\n";
   for (const bool chunked : {false, true}) {
     expect_parser_parity(server, body, false, chunked);
+  }
+}
+
+TEST(HttpJsonBody, InvalidUtf8BadRequestUsesProductionSerializerAndKeepsPipeline) {
+  json_body_server_t server;
+  const std::string body = "{\"value\":\"\xc3(\"}";
+  for (const bool chunked : {false, true}) {
+    SCOPED_TRACE(chunked ? "chunked" : "Content-Length");
+    const auto responses = exchange_json_requests(server.port, pipelined_request("/bad-request", body, chunked));
+    ASSERT_EQ(responses.size(), 2u);
+    EXPECT_EQ(responses[0].status, "400 Bad Request");
+    const auto &failure = responses[0].body;
+    ASSERT_TRUE(failure.is_object());
+    EXPECT_EQ(failure.size(), 3u);
+    EXPECT_EQ(failure.at("status_code"), 400);
+    EXPECT_EQ(failure.at("status"), false);
+    ASSERT_TRUE(failure.at("error").is_string());
+    const auto message = failure.at("error").get<std::string>();
+    EXPECT_NE(message.find("parse_error.101"), std::string::npos);
+    EXPECT_NE(message.find("syntax error"), std::string::npos);
+    EXPECT_NE(message.find("\xef\xbf\xbd"), std::string::npos);
+    EXPECT_EQ(responses[1].status, "200 OK");
+    EXPECT_EQ(responses[1].body, (json {{"pong", true}}));
+  }
+}
+
+TEST(HttpJsonBody, BadRequestPreservesNormalParseMessageAndAcceptsValidJson) {
+  json_body_server_t server;
+  const std::string malformed = R"({"items":[1,]})";
+  std::string expected_message;
+  try {
+    const auto unexpected = json::parse(malformed);
+    FAIL() << "Malformed JSON unexpectedly parsed: " << unexpected;
+  } catch (const json::parse_error &error) {
+    expected_message = error.what();
+  }
+  ASSERT_FALSE(expected_message.empty());
+  const json document {{"value", "accepted"}};
+  for (const bool chunked : {false, true}) {
+    SCOPED_TRACE(chunked ? "chunked" : "Content-Length");
+    const auto rejected = exchange_json_requests(server.port, pipelined_request("/bad-request", malformed, chunked));
+    ASSERT_EQ(rejected.size(), 2u);
+    EXPECT_EQ(rejected[0].status, "400 Bad Request");
+    EXPECT_EQ(rejected[0].body, (json {{"status_code", 400}, {"status", false}, {"error", expected_message}}));
+    EXPECT_EQ(rejected[1].status, "200 OK");
+    EXPECT_EQ(rejected[1].body, (json {{"pong", true}}));
+
+    const auto accepted = exchange_json_requests(server.port, pipelined_request("/bad-request", document.dump(), chunked));
+    ASSERT_EQ(accepted.size(), 2u);
+    EXPECT_EQ(accepted[0].status, "200 OK");
+    EXPECT_EQ(accepted[0].body, (json {{"document", document}}));
+    EXPECT_EQ(accepted[1].status, "200 OK");
+    EXPECT_EQ(accepted[1].body, (json {{"pong", true}}));
   }
 }

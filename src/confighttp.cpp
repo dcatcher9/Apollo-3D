@@ -393,24 +393,28 @@ namespace confighttp {
     response->write(code, tree.dump(), headers);
   }
 
+  std::string make_bad_request_body(std::string_view error_message) {
+    nlohmann::json tree;
+    tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_bad_request);
+    tree["status"] = false;
+    tree["error"] = error_message;
+    return tree.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+  }
+
   /**
    * @brief Send a 400 Bad Request response.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
    * @param error_message The error message.
    */
-  void bad_request(resp_https_t response, [[maybe_unused]] req_https_t request, const std::string &error_message = "Bad Request") {
+  void bad_request(resp_https_t response, [[maybe_unused]] req_https_t request, std::string_view error_message = "Bad Request") {
     constexpr SimpleWeb::StatusCode code = SimpleWeb::StatusCode::client_error_bad_request;
-    nlohmann::json tree;
-    tree["status_code"] = static_cast<int>(code);
-    tree["status"] = false;
-    tree["error"] = error_message;
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json");
     headers.emplace("X-Frame-Options", "DENY");
     headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
 
-    response->write(code, tree.dump(), headers);
+    response->write(code, make_bad_request_body(error_message), headers);
   }
 
   /**

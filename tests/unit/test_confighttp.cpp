@@ -3,6 +3,7 @@
  * @brief Test pure Web UI authorization and request-boundary helpers.
  */
 
+#include <array>
 #include <limits>
 #include <optional>
 #include <string>
@@ -14,6 +15,72 @@
 #include "../tests_common.h"
 
 using confighttp::bounded_content_length_e;
+
+TEST(ConfigHttpErrorResponse, PreservesValidMessagesAndWireFields) {
+  const std::array<std::string, 4> messages {
+    "Bad Request",
+    "quotes: \"value\" and \\ and control\r\n\t",
+    "UTF-8: caf\xc3\xa9 \xe2\x98\x83",
+    std::string {"embedded\0nul", 12},
+  };
+  for (const auto &message : messages) {
+    SCOPED_TRACE(message);
+    const nlohmann::json original {
+      {"status_code", 400},
+      {"status", false},
+      {"error", message}
+    };
+    EXPECT_EQ(confighttp::make_bad_request_body(message), original.dump());
+  }
+}
+
+TEST(ConfigHttpErrorResponse, ReplacesInvalidUtf8WithoutLosingReadableText) {
+  struct case_t {
+    const char *name;
+    std::string message;
+    std::string expected;
+  };
+
+  const std::array cases {
+    case_t {"invalid lead", std::string {"before"} + static_cast<char>(0xff) + "after",
+            "before"
+            "\xef\xbf\xbd"
+            "after"},
+    case_t {"invalid continuation", "before\xc3(after",
+            "before"
+            "\xef\xbf\xbd"
+            "(after"},
+    case_t {"truncated sequence", "before\xe2\x98",
+            "before"
+            "\xef\xbf\xbd"},
+  };
+  for (const auto &test : cases) {
+    SCOPED_TRACE(test.name);
+    const auto body = nlohmann::json::parse(confighttp::make_bad_request_body(test.message));
+    EXPECT_EQ(body, (nlohmann::json {{"status_code", 400}, {"status", false}, {"error", test.expected}}));
+  }
+}
+
+TEST(ConfigHttpErrorResponse, SerializesTheRealMalformedInputDiagnostic) {
+  try {
+    const auto unexpected = nlohmann::json::parse("{\"value\":\"\xc3(\"}");
+    FAIL() << "Malformed UTF-8 unexpectedly parsed: " << unexpected;
+  } catch (const nlohmann::json::parse_error &error) {
+    const nlohmann::json original {
+      {"status_code", 400},
+      {"status", false},
+      {"error", error.what()}
+    };
+    // The former serializer throws while already handling a request parse failure.
+    EXPECT_THROW(original.dump(), nlohmann::json::type_error);
+    const auto body = nlohmann::json::parse(confighttp::make_bad_request_body(error.what()));
+    EXPECT_EQ(body.at("status_code"), 400);
+    EXPECT_EQ(body.at("status"), false);
+    const auto &message = body.at("error").get_ref<const std::string &>();
+    EXPECT_TRUE(message.starts_with("[json.exception.parse_error.101]"));
+    EXPECT_NE(message.find("\xef\xbf\xbd"), std::string::npos);
+  }
+}
 
 TEST(ConfigHttpMigration, RetiredVirtualDisplayOnlyCannotBeSaved) {
   nlohmann::json payload {

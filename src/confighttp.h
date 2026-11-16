@@ -54,6 +54,9 @@ namespace confighttp {
   // Consume the current app array, retaining unknown entries and first-match UUID ordering.
   nlohmann::json reorder_app_list(nlohmann::json apps, const nlohmann::json &order_uuids);
 
+  // Parser diagnostics can retain malformed input bytes; always serialize them as valid JSON.
+  std::string make_bad_request_body(std::string_view error_message);
+
   std::string make_auth_cookie(std::string_view token);
   void start();
 }  // namespace confighttp
