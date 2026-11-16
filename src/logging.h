@@ -117,12 +117,6 @@ namespace logging {
       }
     }
 
-    void collect_and_log(std::function<T()> func) {
-      if (enabled) {
-        collect_and_log(func());
-      }
-    }
-
     void reset() {
       if (enabled) {
         tracker.reset();
@@ -191,10 +185,6 @@ namespace logging {
       if (logger.is_enabled()) {
         logger.reset();
       }
-    }
-
-    bool is_enabled() const {
-      return logger.is_enabled();
     }
 
   private:

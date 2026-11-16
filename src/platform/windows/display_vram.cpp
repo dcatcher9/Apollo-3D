@@ -4722,9 +4722,6 @@ namespace platf::dxgi {
       }
     }
 
-    models::host_sbs_temporal_source_bridge::counters_t temporal_source_bridge_counters_for_evaluation() const noexcept {
-      return temporal_source_ledger.counters();
-    }
     // Explicit same-TU instance setup, before first input. No public encoder or UI setting.
     bool configure_temporal_source_bridge_for_instance(
       const models::subtitle_temporal_source_research_configuration_t &cfg,std::string &error) {

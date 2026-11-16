@@ -62,12 +62,6 @@ namespace platf {
     void *userdata
   );
 
-  struct gp_touch_context_t {
-    uint8_t pointerIndex;
-    uint16_t x;
-    uint16_t y;
-  };
-
   struct gamepad_context_t {
     target_t gp;
     feedback_queue_t feedback_queue;

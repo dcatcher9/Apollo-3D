@@ -91,7 +91,6 @@ namespace models::host_sbs_temporal_source_bridge {
         c.material_serial!=material_.material_serial||c.capture_clock_us!=material_.capture_clock_us)return false;
       ++counters_.admitted;return true;
     }
-    const certificate_t &current_material() const noexcept {return material_;}
     const counters_t &counters() const noexcept {return counters_;}
   };
 } // namespace models::host_sbs_temporal_source_bridge
