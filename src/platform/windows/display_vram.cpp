@@ -9849,6 +9849,41 @@ namespace platf::dxgi {
         std::uint64_t confirmed_eye_commands = 0, held_eye_images = 0, extra_held_refreshes = 0;
         std::uint64_t short_eye_images = 0, clock_recoveries = 0;
         auto next_progress_log = std::chrono::steady_clock::now() + 60s;
+        // Schedule probe, active only with the slot-timing diagnostic. It separates the possible
+        // reasons an eye image reaches the screen on a different refresh than requested: the GPU
+        // finishing the eye copy late, Windows flipping a finished image late, or the output
+        // leaving the direct overlay path. It never authorizes or rejects an eye.
+        struct schedule_probe_t {
+          Microsoft::WRL::ComPtr<ID3D11Query> gpu_event;
+          Microsoft::WRL::ComPtr<IDXGISwapChainMedia> media;
+          bool gpu_pending = false, new_pair = false;
+          std::int64_t gpu_done_qpc = 0, previous_boundary_qpc = 0;
+          std::uint64_t last_tuple_group = std::numeric_limits<std::uint64_t>::max();
+          struct bucket_t {
+            std::uint64_t count = 0, unfinished = 0;
+            long double sum_us = 0, max_us = 0;
+          };
+          std::array<bucket_t, 2> gpu {};  // 0: repeated pair, 1: first eye of a new pair
+          std::uint64_t composed_images = 0, off_schedule_logged = 0;
+        } schedule_probe;
+        if (shutter_slot_timing) {
+          const D3D11_QUERY_DESC event_desc {D3D11_QUERY_EVENT, 0};
+          if (FAILED(shutter_device->CreateQuery(&event_desc, &schedule_probe.gpu_event))) {
+            schedule_probe.gpu_event.Reset();
+          }
+          if (FAILED(swapchain.As(&schedule_probe.media))) {
+            schedule_probe.media.Reset();
+          }
+        }
+        const auto poll_schedule_probe = [&]() {
+          if (schedule_probe.gpu_pending && schedule_probe.gpu_event) {
+            BOOL done = FALSE;
+            if (shutter_context->GetData(schedule_probe.gpu_event.Get(), &done, sizeof(done), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && done) {
+              schedule_probe.gpu_done_qpc = qpc_now();
+              schedule_probe.gpu_pending = false;
+            }
+          }
+        };
         std::uint64_t muted_eye_commands = 0;
         std::uint32_t maximum_confirmed_refresh_delta = 0;
         std::optional<detail::shutter_feedback_t> first_feedback;
@@ -9862,6 +9897,7 @@ namespace platf::dxgi {
           },
           .cancelled = stopped,
           .query = [&]() {
+            poll_schedule_probe();
             DXGI_FRAME_STATISTICS statistics {};
             const auto queried = swapchain->GetFrameStatistics(&statistics);
             const detail::shutter_feedback_t feedback {
@@ -9935,6 +9971,13 @@ namespace platf::dxgi {
             const UINT left = left_eye ? 0 : static_cast<UINT>(output_width);
             const D3D11_BOX eye_box {left, 0, 0, left + static_cast<UINT>(output_width), static_cast<UINT>(output_height), 1};
             shutter_context->CopySubresourceRegion(backbuffer.Get(), 0, 0, 0, 0, pair, 0, &eye_box);
+          }
+          if (schedule_probe.gpu_event) {
+            shutter_context->End(schedule_probe.gpu_event.Get());
+            schedule_probe.gpu_pending = true;
+            schedule_probe.gpu_done_qpc = 0;
+            schedule_probe.new_pair = held_tuple_group != schedule_probe.last_tuple_group;
+            schedule_probe.last_tuple_group = held_tuple_group;
           }
           submission.prior_count_result = swapchain->GetLastPresentCount(&submission.prior_count);
           DXGI_PRESENT_PARAMETERS parameters {};
@@ -10280,7 +10323,9 @@ namespace platf::dxgi {
                              << " acquiring="sv << acquiring << " stable_samples="sv << feedback_tracker.streak()
                              << " host_age_budget_us="sv << host_age_budget_us
                              << " flush_hr="sv << util::log_hex(flush_result)
-                             << " flush_start_qpc="sv << flush_start_qpc << " flush_end_qpc="sv << flush_end_qpc << '.';
+                             << " flush_start_qpc="sv << flush_start_qpc << " flush_end_qpc="sv << flush_end_qpc
+                             << " probe_new_pair="sv << schedule_probe.new_pair << " probe_gpu_done_qpc="sv << schedule_probe.gpu_done_qpc
+                             << " probe_previous_boundary_qpc="sv << schedule_probe.previous_boundary_qpc << '.';
 
             // Read-only, failure-only probes distinguish composition feedback from a stale or
             // wrong output. They never authorize an eye or replace the confirmed-present gate.
@@ -10403,6 +10448,47 @@ namespace platf::dxgi {
           if (slot_timing) {
             timing_sample->delta_known = previous_displayed_refresh.has_value();
             timing_sample->refresh_delta = confirmed_refresh_delta;
+          }
+          if (shutter_slot_timing) {
+            poll_schedule_probe();
+            const auto to_us = [&](std::int64_t ticks) {
+              return static_cast<long double>(ticks) * 1000000.0L / qpc_frequency.QuadPart;
+            };
+            const auto boundary_qpc = feedback_tracker.last_present_qpc().value_or(0);
+            auto &bucket = schedule_probe.gpu[schedule_probe.new_pair ? 1 : 0];
+            ++bucket.count;
+            if (schedule_probe.gpu_done_qpc) {
+              const auto gpu_us = to_us(schedule_probe.gpu_done_qpc - present_end_qpc);
+              bucket.sum_us += gpu_us;
+              bucket.max_us = std::max(bucket.max_us, gpu_us);
+            } else {
+              ++bucket.unfinished;
+            }
+            UINT composition_mode = 255;
+            if (schedule_probe.media) {
+              DXGI_FRAME_STATISTICS_MEDIA media_stats {};
+              if (SUCCEEDED(schedule_probe.media->GetFrameStatisticsMedia(&media_stats))) {
+                composition_mode = static_cast<UINT>(media_stats.CompositionMode);
+              }
+            }
+            const bool composed = composition_mode != static_cast<UINT>(DXGI_FRAME_PRESENTATION_MODE_OVERLAY) && composition_mode != 255;
+            schedule_probe.composed_images += composed;
+            const bool off_schedule = previous_displayed_refresh && confirmed_refresh_delta != static_cast<unsigned>(eye_repeats);
+            if ((off_schedule || composed) && schedule_probe.off_schedule_logged < 2000 && schedule_probe.previous_boundary_qpc) {
+              ++schedule_probe.off_schedule_logged;
+              // The requested refresh is the previous boundary plus one eye interval.
+              const auto target_qpc = schedule_probe.previous_boundary_qpc +
+                                      static_cast<std::int64_t>(static_cast<long double>(qpc_frequency.QuadPart) * 1000.0L * eye_repeats / config.target_refresh_millihz);
+              BOOST_LOG(info) << "Local shutter schedule probe: refresh_delta="sv << confirmed_refresh_delta << " repeats="sv << eye_repeats
+                              << " left="sv << left_eye << " new_pair="sv << schedule_probe.new_pair
+                              << " composition_mode="sv << composition_mode
+                              << " submit_after_previous_boundary_us="sv << to_us(present_end_qpc - schedule_probe.previous_boundary_qpc)
+                              << " gpu_done_after_submit_us="sv << (schedule_probe.gpu_done_qpc ? to_us(schedule_probe.gpu_done_qpc - present_end_qpc) : -1.0L)
+                              << " gpu_done_before_target_us="sv << (schedule_probe.gpu_done_qpc ? to_us(target_qpc - schedule_probe.gpu_done_qpc) : -1.0L)
+                              << " displayed_after_target_us="sv << to_us(boundary_qpc - target_qpc)
+                              << " present_call_us="sv << to_us(present_end_qpc - present_start_qpc) << '.';
+            }
+            schedule_probe.previous_boundary_qpc = boundary_qpc;
           }
           previous_displayed_refresh = confirmation.feedback.refresh_count;
           std::int64_t latest_write_qpc = 0;
@@ -10654,6 +10740,20 @@ namespace platf::dxgi {
             BOOST_LOG(info) << "Local shutter progress: confirmed_eye_commands="sv << confirmed_eye_commands
                             << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
                             << " short_eye_images="sv << short_eye_images << " clock_recoveries="sv << clock_recoveries << '.';
+            if (shutter_slot_timing) {
+              const auto &repeated = schedule_probe.gpu[0];
+              const auto &fresh = schedule_probe.gpu[1];
+              const auto mean = [](const auto &bucket) {
+                return bucket.count > bucket.unfinished ? bucket.sum_us / (bucket.count - bucket.unfinished) : 0.0L;
+              };
+              BOOST_LOG(info) << "Local shutter schedule probe minute: eye copy GPU completion after submit, new_pair count="sv << fresh.count
+                              << " mean_us="sv << mean(fresh) << " max_us="sv << fresh.max_us << " unfinished_at_display="sv << fresh.unfinished
+                              << "; repeated_pair count="sv << repeated.count << " mean_us="sv << mean(repeated) << " max_us="sv << repeated.max_us
+                              << " unfinished_at_display="sv << repeated.unfinished
+                              << "; composed_images="sv << schedule_probe.composed_images << '.';
+              schedule_probe.gpu = {};
+              schedule_probe.composed_images = 0;
+            }
           }
           has_displayed = true;
           if (config.presented_frames) {
