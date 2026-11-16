@@ -17,6 +17,8 @@
 #include <set>
 #include <sstream>
 #include <thread>
+#include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/algorithm/string.hpp>
@@ -924,6 +926,49 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
+  nlohmann::json reorder_app_list(nlohmann::json original_apps_list, const nlohmann::json &order_uuids) {
+    nlohmann::json reordered_apps_list = nlohmann::json::array();
+    std::vector<bool> item_moved(original_apps_list.size(), false);
+
+    // Place the first remaining app for each requested UUID, including duplicate UUIDs.
+    for (const auto &uuid_json_value : order_uuids) {
+      if (!uuid_json_value.is_string()) {
+        BOOST_LOG(warning) << "ReorderApps: Encountered a non-string UUID in the 'order' array. Skipping this entry.";
+        continue;
+      }
+      const auto &target_uuid = uuid_json_value.get_ref<const nlohmann::json::string_t &>();
+      bool found_match_for_ordered_uuid = false;
+
+      for (size_t i = 0; i < original_apps_list.size(); ++i) {
+        if (item_moved[i]) {
+          continue;
+        }
+
+        auto &app_item = original_apps_list[i];
+        if (app_item.is_object() && app_item.contains("uuid") && app_item["uuid"].is_string()) {
+          if (app_item["uuid"].get_ref<const nlohmann::json::string_t &>() == target_uuid) {
+            reordered_apps_list.push_back(std::move(app_item));
+            item_moved[i] = true;
+            found_match_for_ordered_uuid = true;
+            break;
+          }
+        }
+      }
+
+      if (!found_match_for_ordered_uuid) {
+        BOOST_LOG(debug) << "ReorderApps: UUID '" << target_uuid << "' from 'order' array not found in available apps list or its matching app was already processed. Omitting.";
+      }
+    }
+
+    // Preserve the original order and data of every unspecified or malformed entry.
+    for (size_t i = 0; i < original_apps_list.size(); ++i) {
+      if (!item_moved[i]) {
+        reordered_apps_list.push_back(std::move(original_apps_list[i]));
+      }
+    }
+    return reordered_apps_list;
+  }
+
   /**
    * @brief Reorder applications.
    * @param response The HTTP response object.
@@ -960,7 +1005,7 @@ namespace confighttp {
       nlohmann::json original_apps_list = nlohmann::json::array();
       if (fileTree.contains("apps")) {
         if (fileTree["apps"].is_array()) {
-          original_apps_list = fileTree["apps"];
+          original_apps_list = std::move(fileTree["apps"]);
         } else {
           // "apps" key exists but is not an array. This is a malformed state.
           BOOST_LOG(error) << "ReorderApps: 'apps' key in apps configuration file ('" << config::stream.file_apps
@@ -974,55 +1019,8 @@ namespace confighttp {
         // original_apps_list is already an empty array, so no specific action needed here.
       }
 
-      nlohmann::json reordered_apps_list = nlohmann::json::array();
-      std::vector<bool> item_moved(original_apps_list.size(), false);
-
-      // Phase 1: Place apps according to the 'order' array from the request.
-      // Iterate through the desired order of UUIDs.
-      for (const auto &uuid_json_value : order_uuids_json) {
-        if (!uuid_json_value.is_string()) {
-          BOOST_LOG(warning) << "ReorderApps: Encountered a non-string UUID in the 'order' array. Skipping this entry.";
-          continue;
-        }
-        std::string target_uuid = uuid_json_value.get<std::string>();
-        bool found_match_for_ordered_uuid = false;
-
-        // Find the first unmoved app in the original list that matches the current target_uuid.
-        for (size_t i = 0; i < original_apps_list.size(); ++i) {
-          if (item_moved[i]) {
-            continue;  // This specific app object has already been placed.
-          }
-
-          const auto &app_item = original_apps_list[i];
-          // Ensure the app item is an object and has a UUID to match against.
-          if (app_item.is_object() && app_item.contains("uuid") && app_item["uuid"].is_string()) {
-            if (app_item["uuid"].get<std::string>() == target_uuid) {
-              reordered_apps_list.push_back(app_item);  // Add the found app object to the new list.
-              item_moved[i] = true;  // Mark this specific object as moved.
-              found_match_for_ordered_uuid = true;
-              break;  // Found an app for this UUID, move to the next UUID in the 'order' array.
-            }
-          }
-        }
-
-        if (!found_match_for_ordered_uuid) {
-          // This means a UUID specified in the 'order' array was not found in the original_apps_list
-          // among the currently available (unmoved) app objects.
-          // Per instruction "If the uuid is missing from the original json file, omit it."
-          BOOST_LOG(debug) << "ReorderApps: UUID '" << target_uuid << "' from 'order' array not found in available apps list or its matching app was already processed. Omitting.";
-        }
-      }
-
-      // Phase 2: Append any remaining apps from the original list that were not explicitly ordered.
-      // These are app objects that were not marked 'item_moved' in Phase 1.
-      for (size_t i = 0; i < original_apps_list.size(); ++i) {
-        if (!item_moved[i]) {
-          reordered_apps_list.push_back(original_apps_list[i]);
-        }
-      }
-
       // Update the fileTree with the new, reordered list of apps.
-      fileTree["apps"] = reordered_apps_list;
+      fileTree["apps"] = reorder_app_list(std::move(original_apps_list), order_uuids_json);
 
       // Write the modified fileTree back to the apps configuration file.
       file_handler::write_file(config::stream.file_apps.c_str(), fileTree.dump(4));

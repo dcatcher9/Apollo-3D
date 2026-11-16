@@ -51,6 +51,9 @@ namespace confighttp {
 
   void erase_retired_config_options(nlohmann::json &config);
 
+  // Consume the current app array, retaining unknown entries and first-match UUID ordering.
+  nlohmann::json reorder_app_list(nlohmann::json apps, const nlohmann::json &order_uuids);
+
   std::string make_auth_cookie(std::string_view token);
   void start();
 }  // namespace confighttp

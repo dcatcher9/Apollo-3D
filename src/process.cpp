@@ -2995,7 +2995,7 @@ namespace proc {
     if (!new_app_uuid.empty() && inputTree_p) {
       newApps.push_back(*inputTree_p);
     }
-    (*fileTree_p)["apps"] = newApps;
+    (*fileTree_p)["apps"] = std::move(newApps);
   }
 
   std::optional<proc::proc_t> parse(const std::string &file_name) {
