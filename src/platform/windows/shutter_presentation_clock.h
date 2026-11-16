@@ -702,6 +702,23 @@ namespace platf::dxgi::detail {
              result.feedback.status == shutter_feedback_status_e::disjoint);
   }
 
+  // An eye is several presents of the same image and is identified by the first. If the
+  // statistics already report a later present of that same eye, the eye did reach the screen
+  // but its boundary sample was not read in time. That is a missed measurement, which quiet
+  // reacquisition can repair; a present beyond the eye is an unknown image and is not.
+  inline bool shutter_feedback_superseded_within_eye(
+    const shutter_feedback_wait_result_t &result,
+    std::uint32_t requested_present,
+    unsigned present_stride
+  ) noexcept {
+    if (result.status != shutter_feedback_wait_status_e::unsupported ||
+        result.feedback.status != shutter_feedback_status_e::available || present_stride < 2 || present_stride > 4) {
+      return false;
+    }
+    const auto ahead = static_cast<std::uint32_t>(result.feedback.present_count - requested_present);
+    return ahead >= 1 && ahead < present_stride;
+  }
+
   struct shutter_feedback_wait_io_t {
     using clock = std::chrono::steady_clock;
     std::function<clock::time_point()> now;

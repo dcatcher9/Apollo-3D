@@ -10407,7 +10407,8 @@ namespace platf::dxgi {
             set_timing_outcome(local_shutter_slot_timing_t::outcome_e::cold_unsignalled);
             ++acquisition_presents;
             if (recovering_clock && confirmation.status != detail::shutter_feedback_wait_status_e::displayed &&
-                !detail::shutter_feedback_is_timing_interruption(confirmation)) {
+                !detail::shutter_feedback_is_timing_interruption(confirmation) &&
+                !detail::shutter_feedback_superseded_within_eye(confirmation, requested_present, static_cast<unsigned>(eye_repeats))) {
               log_feedback_failure();
               fail("presentation feedback failed while reacquiring the shutter clock");
               break;
@@ -10452,6 +10453,10 @@ namespace platf::dxgi {
             log_feedback_failure();
             if (detail::shutter_feedback_is_timing_interruption(confirmation) &&
                 recover_clock("presentation feedback interrupted"sv)) {
+              continue;
+            }
+            if (detail::shutter_feedback_superseded_within_eye(confirmation, requested_present, static_cast<unsigned>(eye_repeats)) &&
+                recover_clock("the eye's first present was superseded before its feedback was read"sv)) {
               continue;
             }
             if (stopped()) {

@@ -1641,3 +1641,28 @@ TEST(ShutterFeedbackTracker, ColdAcquisitionWithAPresentStrideRejectsTheOldSingl
   EXPECT_EQ(tracker.observe(11, tracker_feedback(11, 1003, next), next + 1200), tracker_status::acquiring);
   EXPECT_FALSE(tracker.arm());
 }
+
+TEST(ShutterPresentFeedback, ALaterPresentOfTheSameEyeIsAMissedMeasurementButABeyondEyePresentIsNot) {
+  using status_e = shutter::shutter_feedback_wait_status_e;
+  shutter::shutter_feedback_wait_result_t result {status_e::unsupported};
+  result.feedback.status = shutter::shutter_feedback_status_e::available;
+  for (std::uint32_t ahead : {1u, 2u}) {
+    result.feedback.present_count = 100u + ahead;
+    EXPECT_TRUE(shutter::shutter_feedback_superseded_within_eye(result, 100, 3));
+  }
+  for (std::uint32_t count : {100u, 103u, 104u, 99u}) {
+    result.feedback.present_count = count;
+    EXPECT_FALSE(shutter::shutter_feedback_superseded_within_eye(result, 100, 3));
+  }
+  result.feedback.present_count = 101;
+  EXPECT_FALSE(shutter::shutter_feedback_superseded_within_eye(result, 100, 1));  // One present per eye has no later one.
+  result.feedback.status = shutter::shutter_feedback_status_e::disjoint;
+  EXPECT_FALSE(shutter::shutter_feedback_superseded_within_eye(result, 100, 3));
+  result.feedback.status = shutter::shutter_feedback_status_e::available;
+  result.status = status_e::displayed;
+  EXPECT_FALSE(shutter::shutter_feedback_superseded_within_eye(result, 100, 3));
+  // Present IDs wrap.
+  result.status = status_e::unsupported;
+  result.feedback.present_count = 0;
+  EXPECT_TRUE(shutter::shutter_feedback_superseded_within_eye(result, UINT32_MAX, 3));
+}
