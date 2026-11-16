@@ -2765,13 +2765,16 @@ namespace proc {
   // Returns http content-type header compatible image type.
   std::string proc_t::get_app_image(int app_id) {
     const auto id = std::to_string(app_id);
-    std::lock_guard lock(process_state_mutex);
-    auto iter = std::find_if(_apps.begin(), _apps.end(), [&id](const auto &app) {
-      return app.id == id;
-    });
-    auto app_image_path = iter == _apps.end() ? std::string() : iter->image_path;
+    std::string app_image_path;
+    {
+      std::lock_guard lock(process_state_mutex);
+      auto iter = std::find_if(_apps.begin(), _apps.end(), [&id](const auto &app) {
+        return app.id == id;
+      });
+      app_image_path = iter == _apps.end() ? std::string() : iter->image_path;
+    }
 
-    return validate_app_image_path(app_image_path);
+    return validate_app_image_path(std::move(app_image_path));
   }
 
   std::string proc_t::get_last_run_app_name() {

@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -29,6 +30,7 @@
 #include "src/config.h"
 #include "src/process.h"
 #include "src/stream.h"
+#include "src/uuid.h"
 
 namespace proc {
   // A retained desktop fixture with no real process, display, or HDR worker. The successful
@@ -2549,4 +2551,120 @@ TEST(ProcessAppListTest, ListingsAndSelectedLaunchOwnTheirDataAcrossProcessRepla
   EXPECT_EQ(retained_launch->auto_detach, original.auto_detach);
   EXPECT_EQ(retained_launch->wait_all, original.wait_all);
   EXPECT_EQ(retained_launch->exit_timeout, original.exit_timeout);
+}
+
+namespace {
+  class ProcessAppImageTest: public testing::Test {
+  protected:
+    void SetUp() override {
+      ASSERT_TRUE(std::filesystem::is_regular_file(desktop_image));
+    }
+
+    void TearDown() override {
+      for (auto path = created_files.rbegin(); path != created_files.rend(); ++path) {
+        std::error_code error;
+        std::filesystem::remove(*path, error);
+        EXPECT_FALSE(error) << path->string() << ": " << error.message();
+      }
+    }
+
+    static std::string unique_leaf(std::string_view extension) {
+      return "apollo_app_image_" + uuid_util::uuid_t::generate().string() + std::string {extension};
+    }
+
+    bool copy_png(const std::filesystem::path &destination) {
+      std::error_code error;
+      const bool copied = std::filesystem::copy_file(desktop_image, destination, std::filesystem::copy_options::none, error);
+      if (copied) {
+        created_files.push_back(destination);
+      }
+      EXPECT_FALSE(error) << destination.string() << ": " << error.message();
+      return copied;
+    }
+
+    const std::filesystem::path assets {SUNSHINE_ASSETS_DIR};
+    const std::filesystem::path desktop_image = assets / "desktop.png";
+    const std::string fallback = SUNSHINE_ASSETS_DIR "/box.png";
+    std::vector<std::filesystem::path> created_files;
+  };
+}  // namespace
+
+TEST_F(ProcessAppImageTest, UsesExactNumericStringAndFirstDuplicateId) {
+  auto leading_zero = lookup_app(7, "leading-zero", "leading zero ID");
+  leading_zero.id = "0007";
+  leading_zero.image_path = "steam.png";
+  auto first = lookup_app(7, "first", "first exact ID");
+  first.image_path = "desktop.png";
+  auto duplicate = lookup_app(7, "duplicate", "later exact ID");
+  duplicate.image_path = "steam.png";
+  auto only_leading_zero = lookup_app(8, "only-leading-zero", "no exact numeric ID");
+  only_leading_zero.id = "0008";
+  only_leading_zero.image_path = "desktop.png";
+  auto process = lookup_process({leading_zero, first, duplicate, only_leading_zero});
+
+  EXPECT_EQ(process.get_app_image(7), desktop_image.string());
+  EXPECT_EQ(process.get_app_image(8), fallback);
+  EXPECT_EQ(process.get_app_image(999), fallback);
+}
+
+TEST_F(ProcessAppImageTest, EmptyMissingAndExistingNonPngPathsUseTheDefaultImage) {
+  const auto non_png = std::filesystem::temp_directory_path() / unique_leaf(".jpg");
+  ASSERT_TRUE(copy_png(non_png));
+  const auto missing = std::filesystem::temp_directory_path() / unique_leaf(".png");
+  ASSERT_FALSE(std::filesystem::exists(missing));
+  auto empty = lookup_app(1, "empty", "empty image");
+  auto non_png_app = lookup_app(2, "not-png", "existing non-PNG extension");
+  non_png_app.image_path = non_png.string();
+  auto missing_app = lookup_app(3, "missing", "missing PNG");
+  missing_app.image_path = missing.string();
+  auto process = lookup_process({empty, non_png_app, missing_app});
+
+  EXPECT_EQ(process.get_app_image(1), fallback);
+  EXPECT_EQ(process.get_app_image(2), fallback);
+  EXPECT_EQ(process.get_app_image(3), fallback);
+}
+
+TEST_F(ProcessAppImageTest, PrefersAssetRelativePngAndPreservesTheLegacySteamRule) {
+  const auto leaf = unique_leaf(".PNG");
+  const auto asset_image = assets / leaf;
+  const auto working_image = std::filesystem::current_path() / leaf;
+  ASSERT_NE(std::filesystem::absolute(asset_image), working_image);
+  ASSERT_TRUE(copy_png(asset_image));
+  ASSERT_TRUE(copy_png(working_image));
+  auto relative = lookup_app(1, "relative", "asset-relative image");
+  relative.image_path = leaf;
+  auto desktop = lookup_app(2, "desktop", "desktop image");
+  desktop.image_path = "desktop.png";
+  auto steam = lookup_app(3, "steam", "legacy Steam image");
+  steam.image_path = "./assets/steam.png";
+  auto process = lookup_process({relative, desktop, steam});
+
+  EXPECT_EQ(process.get_app_image(1), asset_image.string());
+  EXPECT_EQ(process.get_app_image(2), desktop_image.string());
+  // An explicit assets-relative file still wins before the historical Steam spelling rewrite.
+  const auto steam_override = assets / "./assets/steam.png";
+  const bool has_steam_override = std::filesystem::exists(steam_override);
+  RecordProperty("legacy_steam_assets_override", has_steam_override ? 1 : 0);
+  EXPECT_EQ(process.get_app_image(3), has_steam_override ? steam_override.string() : std::string {SUNSHINE_ASSETS_DIR "/steam.png"});
+}
+
+TEST_F(ProcessAppImageTest, AbsoluteUppercasePngResultOwnsItsPathAfterProcessReplacementAndDestruction) {
+  const auto absolute_image = std::filesystem::temp_directory_path() / unique_leaf(".PNG");
+  ASSERT_TRUE(absolute_image.is_absolute());
+  ASSERT_TRUE(copy_png(absolute_image));
+  const auto expected = absolute_image.string();
+  std::string retained;
+  {
+    auto original = lookup_app(7, "original", "temporary image");
+    original.image_path = expected;
+    auto process = lookup_process({original});
+    retained = process.get_app_image(7);
+    EXPECT_EQ(retained, expected);
+
+    auto replacement = lookup_app(7, "replacement", "new image");
+    replacement.image_path = "desktop.png";
+    process = lookup_process({replacement});
+    EXPECT_EQ(process.get_app_image(7), desktop_image.string());
+  }
+  EXPECT_EQ(retained, expected);
 }
