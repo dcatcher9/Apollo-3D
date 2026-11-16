@@ -26,7 +26,10 @@ namespace platf {
       };
       const auto separator = process_image.find_last_of(L"\\/");
       const auto process_name = process_image.substr(separator == std::wstring_view::npos ? 0 : separator + 1);
-      return same_name(window_class, L"LockScreenInputOcclusionFrame") || same_name(process_name, L"LockApp.exe");
+      // Elevation and credential prompts normally live on the secure desktop, but appear on the
+      // application desktop when the secure desktop is switched off by policy.
+      return same_name(window_class, L"LockScreenInputOcclusionFrame") || same_name(process_name, L"LockApp.exe") ||
+             same_name(process_name, L"consent.exe") || same_name(process_name, L"CredentialUIBroker.exe");
     }
 
     bool valid_rect(RECT rect) {
@@ -148,6 +151,10 @@ namespace platf {
       bool visible = true;
       std::optional<RECT> pending_source_normal;
       bool move_posted = false;
+      // A window that stays on the parked output is re-sent once and then left there, so a hung
+      // or unmovable application cannot end the session. Restoration still returns it.
+      std::chrono::steady_clock::time_point pending_since {};
+      bool resent = false, abandoned = false;
     };
 
     bool security_surface_window(HWND hwnd, std::wstring_view known_class = {}) {
@@ -267,6 +274,20 @@ namespace platf {
       }
       result.desktop_rect = *desktop_rect;
       return result;
+    }
+
+    // Application windows live on the interactive "Default" desktop. The input desktop is a
+    // different one while a lock screen or elevation prompt is shown, and window handles from
+    // the application desktop are not valid from a thread attached there: the handoff would
+    // then own nothing, move nothing and still report success. Always work on the desktop the
+    // windows belong to. The handle stays open for the thread's lifetime, as SetThreadDesktop
+    // requires of a desktop in use.
+    bool attach_application_desktop() {
+      static thread_local HDESK desktop = nullptr;
+      if (!desktop) {
+        desktop = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL);
+      }
+      return desktop && SetThreadDesktop(desktop);
     }
 
     bool same_identity(const window_t &window) {
@@ -560,7 +581,7 @@ namespace platf {
   }
 
   bool monitor_desktop_handoff_t::capture(RECT original_monitor_rect) {
-    if (impl_->active || !monitor_desktop_detail::valid_rect(original_monitor_rect) || !syncThreadDesktop()) {
+    if (impl_->active || !monitor_desktop_detail::valid_rect(original_monitor_rect) || !attach_application_desktop()) {
       return false;
     }
     dpi_scope_t dpi;
@@ -606,7 +627,7 @@ namespace platf {
     if (impl_->active && same_rect(impl_->source, virtual_source_rect)) {
       return true;
     }
-    if (!impl_->captured || !monitor_desktop_detail::valid_rect(virtual_source_rect) || !syncThreadDesktop()) {
+    if (!impl_->captured || !monitor_desktop_detail::valid_rect(virtual_source_rect) || !attach_application_desktop()) {
       return false;
     }
     dpi_scope_t dpi;
@@ -677,13 +698,19 @@ namespace platf {
       completed = await_moves(moving, virtual_source_rect, std::chrono::milliseconds {500}, round + 1 == move_rounds);
     }
     retain_foreground(foreground ? foreground : impl_->original_foreground);
-    return success && completed;
+    if (!success || !completed) {
+      // The windows named above stay where they are. They remain tagged, so restoration returns
+      // them with the rest; refusing the whole session for one hung or protected application
+      // would deny 3D for every other window.
+      BOOST_LOG(warning) << "Monitor desktop handoff continues without the windows named above.";
+    }
+    return true;
   }
 
   bool monitor_desktop_handoff_t::refresh(RECT physical_sink_rect, RECT virtual_source_rect) {
     if (!impl_->active || impl_->restore_prepared || !monitor_desktop_detail::valid_rect(physical_sink_rect) ||
         !monitor_desktop_detail::valid_rect(virtual_source_rect) || same_rect(physical_sink_rect, virtual_source_rect) ||
-        !same_rect(virtual_source_rect, impl_->source) || !syncThreadDesktop()) {
+        !same_rect(virtual_source_rect, impl_->source) || !attach_application_desktop()) {
       return false;
     }
     dpi_scope_t dpi;
@@ -727,9 +754,25 @@ namespace platf {
         completed = false;
         continue;
       }
+      if (window->abandoned) {
+        continue;
+      }
       if (window->pending_source_normal && window->move_posted) {
-        // One posted placement per window. A hung UI thread must not accumulate another request
-        // on every controller tick; acknowledgment is checked below without a blocking wait.
+        // A hung UI thread must not accumulate another request on every controller tick;
+        // acknowledgment is checked below without a blocking wait. Windows can undo one move
+        // while the topology settles and keeps a maximized window on its monitor, so send one
+        // more placement with the restore step, then leave the window where it is.
+        const auto pending = std::chrono::steady_clock::now() - window->pending_since;
+        if (!window->resent && pending >= std::chrono::milliseconds {500}) {
+          window->resent = true;
+          (void) move_window(*current, *window->pending_source_normal, virtual_source_rect, impl_->property, impl_->token(), true);
+          attempted_move = true;
+        } else if (pending >= std::chrono::milliseconds {1500}) {
+          BOOST_LOG(warning) << "Monitor desktop handoff: leaving a window on the parked output: " << describe_window(*current);
+          window->abandoned = true;
+          window->pending_source_normal.reset();
+          window->move_posted = false;
+        }
         continue;
       }
       const auto mapped = monitor_desktop_detail::map_rect(current->normal_rect, physical_sink_rect, virtual_source_rect);
@@ -739,9 +782,15 @@ namespace platf {
       }
       *window = *current;
       window->pending_source_normal = *mapped;
+      window->pending_since = std::chrono::steady_clock::now();
       attempted_move = true;
       window->move_posted = move_window(*current, *mapped, virtual_source_rect, impl_->property, impl_->token());
-      completed = window->move_posted && completed;
+      if (!window->move_posted) {
+        // The application refused the placement outright; asking again every tick cannot help.
+        BOOST_LOG(warning) << "Monitor desktop handoff: leaving a window that refused its move on the parked output: " << describe_window(*current);
+        window->abandoned = true;
+        window->pending_source_normal.reset();
+      }
     }
     for (auto &window : impl_->windows) {
       if (!window.pending_source_normal || !impl_->owned(window)) {
@@ -771,7 +820,7 @@ namespace platf {
   }
 
   void monitor_desktop_handoff_t::prepare_restore() {
-    if (!impl_->active || impl_->restore_prepared || !syncThreadDesktop()) {
+    if (!impl_->active || impl_->restore_prepared || !attach_application_desktop()) {
       return;
     }
     dpi_scope_t dpi;
@@ -821,9 +870,20 @@ namespace platf {
 
   bool monitor_desktop_handoff_t::restore(RECT restored_physical_rect) {
     if (!impl_->active) {
-      return true;
+      if (!impl_->captured || impl_->windows.empty()) {
+        return true;
+      }
+      // The start ended before activation, but changing the topology may already have carried
+      // captured windows along with an output. Return them from the capture snapshot, which is
+      // expressed in the original monitor's coordinates.
+      impl_->source = impl_->original;
+      impl_->restoring = impl_->windows;
+      impl_->restore_cursor = impl_->original_cursor;
+      impl_->restore_cursor_captured = impl_->cursor_captured;
+      impl_->restore_prepared = true;
+      impl_->active = true;
     }
-    if (!monitor_desktop_detail::valid_rect(restored_physical_rect) || !syncThreadDesktop()) {
+    if (!monitor_desktop_detail::valid_rect(restored_physical_rect) || !attach_application_desktop()) {
       return false;
     }
     dpi_scope_t dpi;

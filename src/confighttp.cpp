@@ -1304,6 +1304,26 @@ namespace confighttp {
       {"devices", nlohmann::json::array()}, {"ports", platf::open3d::serial_ports()},
       {"timing_limits", nlohmann::json::array()},
     };
+    {
+      // The settings this process is actually running with, in configuration-file form. Saving
+      // without restarting changes the file but not these, and Start uses these.
+      const auto &running = config::video.local_monitor;
+      const auto flag = [](bool value) {
+        return value ? "enabled" : "disabled";
+      };
+      output["running"] = {
+        {"local_monitor_enabled", flag(running.enabled)},
+        {"local_monitor_display_id", running.display_id},
+        {"local_monitor_mode", running.mode},
+        {"local_monitor_emitter_port", running.emitter_port},
+        {"local_monitor_ir_protocol", running.ir_protocol},
+        {"local_monitor_frame_delay_us", running.frame_delay_us},
+        {"local_monitor_frame_duration_us", running.frame_duration_us},
+        {"local_monitor_signal_spacing_us", running.signal_spacing_us},
+        {"local_monitor_flip_eyes", flag(running.flip_eyes)},
+        {"local_monitor_eye_repeats", running.eye_repeats},
+      };
+    }
     for (const int protocol : platf::open3d::limits::supported_protocols) {
       const auto limits = platf::open3d::timing_limits(protocol, 30);
       if (!limits) {

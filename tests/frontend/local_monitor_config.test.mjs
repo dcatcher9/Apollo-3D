@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  localMonitorFingerprint,
   rememberLocalMonitorDevices,
   rememberLocalMonitorTimingLimits,
   validateLocalMonitorConfig,
@@ -79,3 +80,21 @@ test('the global Save metadata cache applies the same check without mounting the
   assert(feedbackError(validateLocalMonitorConfig({...config, local_monitor_frame_duration_us: 7800})))
   assert.deepEqual(validateLocalMonitorConfig({...config, local_monitor_frame_duration_us: 7482}), [])
 })
+
+test('accepts only COM ports, by the same rule as the native driver', () => {
+  const portError = errors => errors.some(error => error.includes('must be a COM port'))
+  for (const port of ['COM1', 'com4', 'COM65535', String.raw`\\.\COM12`]) {
+    assert.equal(portError(validate({local_monitor_emitter_port: port})), false, port)
+  }
+  for (const port of ['LPT1', 'ttyUSB0', 'COM0', 'COM65536', 'COM', 'COM4 ', 'COM4x', 'XCOM4']) {
+    assert.equal(portError(validate({local_monitor_emitter_port: port})), true, port)
+  }
+})
+
+test('the running-settings fingerprint ignores value types and unrelated keys', () => {
+  const form = {...config, local_monitor_flip_eyes: 'disabled', unrelated: 1}
+  const running = {...config, local_monitor_flip_eyes: 'disabled', local_monitor_ir_protocol: '6'}
+  assert.equal(localMonitorFingerprint(form), localMonitorFingerprint(running))
+  assert.notEqual(localMonitorFingerprint(form), localMonitorFingerprint({...running, local_monitor_frame_delay_us: 501}))
+})
+

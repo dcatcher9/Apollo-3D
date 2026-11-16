@@ -1047,9 +1047,10 @@ scanout; other monitors stay usable. See
 |---|---|
 | `1` | Consecutive physical refreshes assigned to each eye, `1`–`4`. |
 
-The combined delay and duration must not exceed `32767` µs. At the actual monitor refresh, both
-that combined shutter window and the duration plus close-pulse margin must fit the eye interval
-(physical refresh period multiplied by `local_monitor_eye_repeats`). The UI receives protocol
+The combined delay and duration must not exceed `32767` µs. At the actual monitor refresh, delay
+plus duration plus signal spacing plus the protocol's close-pulse margin must be strictly less than
+the eye interval (physical refresh period multiplied by `local_monitor_eye_repeats`), so that time
+remains for the host to confirm the displayed image. The UI receives protocol
 limits from the native emitter implementation; the driver validates the actual target again.
 The conservative `30` µs spacing floor leaves room for the firmware's greater-than-`5` µs gap-arm
 lead and measured `17` µs service overhead.

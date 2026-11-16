@@ -1,6 +1,6 @@
 <script setup>
 import {computed, inject, ref} from 'vue'
-import {rememberLocalMonitorDevices, rememberLocalMonitorTimingLimits, settingEnabled, validLocalMonitorTimingLimits, validateLocalMonitorConfig} from '../localMonitorConfig'
+import {localMonitorFingerprint, rememberLocalMonitorDevices, rememberLocalMonitorTimingLimits, settingEnabled, validLocalMonitorTimingLimits, validateLocalMonitorConfig} from '../localMonitorConfig'
 import LocalMonitorSession from '../../LocalMonitorSession.vue'
 
 const props = defineProps({config: {type: Object, required: true}, settingsChanged: {type: Boolean, default: false}})
@@ -9,6 +9,10 @@ const devices = ref([])
 const ports = ref([])
 const timingProfiles = ref([])
 const session = ref(null)
+// What the host process is running with. Saving without restarting changes the file this form
+// was loaded from, but Start uses the running settings.
+const running = ref(null)
+const runningDiffers = computed(() => Boolean(running.value) && localMonitorFingerprint(props.config) !== localMonitorFingerprint(running.value))
 
 const enabled = computed(() => settingEnabled(props.config.local_monitor_enabled))
 const flipEyes = computed(() => settingEnabled(props.config.local_monitor_flip_eyes))
@@ -36,6 +40,7 @@ const receiveStatus = body => {
   timingProfiles.value = body.timing_limits || []
   rememberLocalMonitorTimingLimits(timingProfiles.value)
   ports.value = body.ports || []
+  running.value = body.running || null
 }
 </script>
 
@@ -49,7 +54,7 @@ const receiveStatus = body => {
     </header>
     <p class="text-body-secondary">Save and restart Sunshine 3D to apply changes. Remote streaming temporarily takes priority over local presentation.</p>
     <p class="text-body-secondary">Your selected monitor keeps its desktop position. Sunshine transfers its windows and cursor automatically for 3D and back for 2D; other monitors stay usable. Use borderless fullscreen for games that need to follow this handoff.</p>
-    <LocalMonitorSession ref="session" :show-when-disabled="true" :can-start="!props.settingsChanged && validation.length === 0" @status="receiveStatus" />
+    <LocalMonitorSession ref="session" :show-when-disabled="true" :can-start="!props.settingsChanged && !runningDiffers && validation.length === 0" @status="receiveStatus" />
 
     <label class="monitor-enable" for="local_monitor_enabled">
       <span><strong>{{ $t('config.local_monitor_enabled') }}</strong><small>{{ $t('config.local_monitor_enabled_desc') }}</small></span>

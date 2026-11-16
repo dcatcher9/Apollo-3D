@@ -9,10 +9,16 @@ const actionError = ref('')
 const busy = ref('')
 let refreshTimer = null
 let reading = false
+let readAgain = false
+let unmounted = false
 const visible = computed(() => props.showWhenDisabled || status.value?.enabled || status.value?.requested || status.value?.active || status.value?.error)
 const label = computed(() => error.value ? 'Status unavailable' : status.value?.error ? '3D stopped' : status.value?.active ? 'Presenting' : status.value?.requested ? 'Starting or waiting' : '2D desktop')
-const refresh = async () => {
-  if (reading) return
+const refresh = async (force = false) => {
+  if (reading) {
+    // A read already in flight may predate an action; make sure one more follows it.
+    readAgain = readAgain || force
+    return
+  }
   reading = true
   try {
     const response = await fetch('./api/local-monitor', {credentials: 'include'})
@@ -24,7 +30,22 @@ const refresh = async () => {
     error.value = `Could not read monitor status: ${reason}`
   } finally {
     reading = false
+    if (readAgain) {
+      readAgain = false
+      await refresh()
+    }
   }
+}
+// The status read enumerates displays and serial ports on the host. Read briskly only while a
+// session is starting or running or the settings page is showing the panel; otherwise slowly,
+// and not at all while the page is hidden.
+const schedule = () => {
+  if (unmounted) return
+  const brisk = props.showWhenDisabled || status.value?.requested || status.value?.active
+  refreshTimer = window.setTimeout(async () => {
+    if (!document.hidden) await refresh()
+    schedule()
+  }, brisk ? 2000 : 15000)
 }
 const control = async action => {
   busy.value = action
@@ -38,18 +59,21 @@ const control = async action => {
       const body = await response.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${response.status}`)
     }
-    await refresh()
+    await refresh(true)
   } catch (reason) {
     actionError.value = `Could not ${action === 'start' ? 'start 3D' : 'return to 2D'}: ${reason}`
   } finally {
     busy.value = ''
   }
 }
-onMounted(() => {
-  refresh()
-  refreshTimer = window.setInterval(refresh, 2000)
+onMounted(async () => {
+  await refresh()
+  schedule()
 })
-onUnmounted(() => window.clearInterval(refreshTimer))
+onUnmounted(() => {
+  unmounted = true
+  window.clearTimeout(refreshTimer)
+})
 defineExpose({refresh})
 </script>
 
@@ -64,8 +88,8 @@ defineExpose({refresh})
     </div>
     <p v-if="error" class="text-danger" role="alert">{{ error }}</p>
     <p v-if="actionError" class="text-danger" role="alert">{{ actionError }}</p>
-    <p v-if="status?.error" class="text-danger" role="alert">3D stopped: {{ status.error }}</p>
-    <p v-if="!error && !status?.error && status?.requested && !status?.active" class="text-body-secondary">{{ status.detail || 'Waiting for the selected monitor, emitter, or local presentation ownership.' }}</p>
+    <p v-if="status?.error && !actionError" class="text-danger" role="alert">3D stopped: {{ status.error }}</p>
+    <p v-if="!error && !status?.error && status?.requested && !status?.active" class="text-body-secondary">{{ 'Waiting for the selected monitor, emitter, or local presentation ownership.' }}</p>
     <p v-if="!props.canStart" class="text-body-secondary">Save and restart Sunshine 3D to apply your monitor setting changes before starting 3D.</p>
     <div class="monitor-session-actions">
       <button type="button" class="btn btn-apollo-primary" :disabled="Boolean(busy) || !status?.enabled || status?.requested || !props.canStart || Boolean(error)" @click="control('start')">

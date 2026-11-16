@@ -707,6 +707,8 @@ namespace config {
     }
     if (result.enabled && (result.display_id.empty() || result.emitter_port.empty())) {
       invalid("local_monitor_display_id/local_monitor_emitter_port");
+    } else if (result.enabled && !platf::open3d::detail::normalize_port(result.emitter_port)) {
+      invalid("local_monitor_emitter_port (expected a COM port such as COM4)");
     }
     result.enabled = result.enabled && valid;
     return result;

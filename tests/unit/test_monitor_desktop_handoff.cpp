@@ -17,6 +17,8 @@ namespace {
   TEST(MonitorDesktopHandoff, LockAppOwnerIsExcludedForAnyWindowClass) {
     EXPECT_TRUE(is_security_surface(L"Windows.UI.Core.CoreWindow", L"LockApp.exe"));
     EXPECT_TRUE(is_security_surface(L"ApplicationFrameWindow", L"LOCKAPP.EXE"));
+    EXPECT_TRUE(is_security_surface(L"Credential Dialog Xaml Host", LR"(C:\Windows\System32\consent.exe)"));
+    EXPECT_TRUE(is_security_surface(L"Windows.UI.Core.CoreWindow", L"CREDENTIALUIBROKER.EXE"));
     EXPECT_TRUE(is_security_surface(L"", L"C:\\Windows\\SystemApps\\LockApp_cw5n1h2txyewy\\LockApp.exe"));
   }
 

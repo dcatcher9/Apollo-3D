@@ -5638,7 +5638,10 @@ namespace ar_glasses {
         return true;
       }
       const auto &settings = config::video.local_monitor;
-      if (!settings.enabled || settings.display_id.empty() || settings.emitter_port.empty()) {
+      if (!settings.enabled) {
+        return fail("Local monitor 3D is turned off, or its saved settings are invalid. Check Monitor settings, save, and restart Sunshine 3D before starting 3D.");
+      }
+      if (settings.display_id.empty() || settings.emitter_port.empty()) {
         return fail("Configure a physical monitor and emitter, save, and restart Sunshine 3D before starting 3D.");
       }
       const auto selected_port = platf::open3d::detail::normalize_port(settings.emitter_port);
@@ -5658,7 +5661,7 @@ namespace ar_glasses {
       if (target == targets->end() || target->is_cloned ||
           classify_monitor_mode(target->rect.right - target->rect.left, target->rect.bottom - target->rect.top,
             target->refresh_millihz, settings.mode == "game") == presentation_mode_e::unsupported) {
-        return fail("The selected monitor must be connected in a supported extended-desktop mode before starting 3D.");
+        return fail("The selected monitor is not connected as an extended desktop in a supported mode. A monitor with a separate high-refresh mode is a different display to Windows in each mode; switch it to the mode it was selected in, then start 3D again.");
       }
       if (const auto reason = query_monitor_desktop_block_reason(presentation_desktop, target->rect); !reason.empty()) {
         return fail(std::string(reason));
@@ -5684,6 +5687,12 @@ namespace ar_glasses {
     } else {
       const bool was_requested = physical_monitor_requested.exchange(false);
       physical_monitor_active.store(false);
+      {
+        // Returning to 2D acknowledges whatever stopped or refused the previous session. A
+        // refused start that calls this first sets its own reason afterwards.
+        std::lock_guard lock(physical_monitor_error_mutex);
+        physical_monitor_error.clear();
+      }
       if (was_requested) {
         std::lock_guard lock(ownership_mutex);
         if (local_session_construction_stop) {

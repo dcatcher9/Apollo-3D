@@ -8,6 +8,11 @@ export const localMonitorFingerprint = config => JSON.stringify(Object.keys(conf
 const monitorRefreshRates = new Map()
 const monitorTimingLimits = new Map()
 const timingFields = ['min_delay_us', 'max_delay_us', 'min_duration_base_us', 'max_duration_us', 'min_signal_spacing_us', 'max_signal_spacing_us', 'max_window_us', 'min_period_tail_base_us']
+// Same rule as the native driver: COM followed by 1-65535, optionally with the \\.\ prefix.
+export const validLocalMonitorPort = port => {
+  const match = /^(?:\\\\\.\\)?COM(\d{1,5})$/i.exec(String(port ?? ''))
+  return Boolean(match) && Number(match[1]) >= 1 && Number(match[1]) <= 65535
+}
 export const validLocalMonitorTimingLimits = profile => profile && [2, 4, 5, 6].includes(Number(profile.protocol)) &&
   timingFields.every(key => Number.isInteger(profile[key]) && profile[key] >= 0)
 export const rememberLocalMonitorDevices = devices => {
@@ -30,6 +35,7 @@ export const validateLocalMonitorConfig = (config, refreshMillihz = monitorRefre
   const errors = []
   if (!config.local_monitor_display_id) errors.push('Select a physical monitor.')
   if (!config.local_monitor_emitter_port?.trim()) errors.push('Select the emitter COM port.')
+  else if (!validLocalMonitorPort(config.local_monitor_emitter_port)) errors.push('The emitter port must be a COM port such as COM4.')
   if (!['host', 'game'].includes(config.local_monitor_mode)) errors.push('Select Host 3D or Game 3D.')
   const protocolText = String(config.local_monitor_ir_protocol ?? '')
   if (!/^\d+$/.test(protocolText) || ![2, 4, 5, 6].includes(Number(protocolText))) {
