@@ -263,28 +263,17 @@ namespace confighttp {
    * @brief Check if the IP origin is allowed.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
-   * @return True if allowed, false otherwise.
+   * @return The admitted peer class, or no value after sending the denial response.
    */
-  bool checkIPOrigin(resp_https_t response, req_https_t request) {
+  std::optional<net::net_e> checkIPOrigin(resp_https_t response, req_https_t request) {
     const auto address = request->remote_endpoint().address();
     auto ip_type = net::from_address(address);
     if (ip_type > http::origin_web_ui_allowed) {
       BOOST_LOG(info) << "Web UI: ["sv << net::addr_to_normalized_string(address) << "] -- denied"sv;
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
-      return false;
+      return std::nullopt;
     }
-    return true;
-  }
-
-  /**
-   * @brief Treat the PC and its local network as the trusted Web UI boundary.
-   *
-   * Apollo's host controls are designed for direct use on a private LAN. Requests from a
-   * public address still use the credential flow when WAN access has been explicitly enabled.
-   */
-  bool is_trusted_local_request(const req_https_t &request) {
-    const auto address = request->remote_endpoint().address();
-    return net::from_address(address) <= net::LAN;
+    return ip_type;
   }
 
   namespace {
@@ -347,13 +336,14 @@ namespace confighttp {
    * This function uses session cookies (if set) and ensures they have not expired.
    */
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
-    if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request)) {
+    const auto peer_class = checkIPOrigin(response, request);
+    if (!peer_class || !checkBrowserOrigin(response, request)) {
       return false;
     }
 
     // Local control should feel appliance-like: the network boundary is the trust prompt.
     // Unsafe browser requests still pass the strict same-origin validation above.
-    if (is_trusted_local_request(request)) {
+    if (*peer_class <= net::LAN) {
       return true;
     }
 
@@ -643,11 +633,12 @@ namespace confighttp {
    * @todo Combine this function with getWelcomePage if appropriate.
    */
   void getLoginPage(resp_https_t response, req_https_t request) {
-    if (!checkIPOrigin(response, request)) {
+    const auto peer_class = checkIPOrigin(response, request);
+    if (!peer_class) {
       return;
     }
 
-    if (is_trusted_local_request(request)) {
+    if (*peer_class <= net::LAN) {
       send_redirect(response, request, "/");
       return;
     }
