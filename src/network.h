@@ -49,7 +49,8 @@ namespace net {
 
   net_e from_enum_string(const std::string_view &view);
 
-  net_e from_address(const std::string_view &view);
+  /** Classify a numeric endpoint address, normalizing mapped IPv4. */
+  net_e from_address(boost::asio::ip::address addr);
 
   host_t host_create(af_e af, ENetAddress &addr, std::uint16_t port);
 

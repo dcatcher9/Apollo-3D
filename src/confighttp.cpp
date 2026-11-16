@@ -266,10 +266,10 @@ namespace confighttp {
    * @return True if allowed, false otherwise.
    */
   bool checkIPOrigin(resp_https_t response, req_https_t request) {
-    auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+    const auto address = request->remote_endpoint().address();
     auto ip_type = net::from_address(address);
     if (ip_type > http::origin_web_ui_allowed) {
-      BOOST_LOG(info) << "Web UI: ["sv << address << "] -- denied"sv;
+      BOOST_LOG(info) << "Web UI: ["sv << net::addr_to_normalized_string(address) << "] -- denied"sv;
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
       return false;
     }
@@ -283,7 +283,7 @@ namespace confighttp {
    * public address still use the credential flow when WAN access has been explicitly enabled.
    */
   bool is_trusted_local_request(const req_https_t &request) {
-    const auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+    const auto address = request->remote_endpoint().address();
     return net::from_address(address) <= net::LAN;
   }
 
@@ -1816,11 +1816,10 @@ namespace confighttp {
         !validateOfflineSbsRequestSize(response, request)) {
       return;
     }
-    const auto address =
-      net::addr_to_normalized_string(request->remote_endpoint().address());
+    const auto address = request->remote_endpoint().address();
     if (net::from_address(address) != net::PC) {
       BOOST_LOG(warning)
-        << "Web UI: ["sv << address
+        << "Web UI: ["sv << net::addr_to_normalized_string(address)
         << "] -- rejected non-loopback offline filesystem browse"sv;
       send_json_response(
         response,
