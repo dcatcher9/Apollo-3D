@@ -179,6 +179,7 @@
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
   import Game3dSetup from './Game3dSetup.vue'
+  import { startVisibilityPolling } from './visibility-polling'
 
   const app = createApp({
     components: { Navbar, Game3dSetup },
@@ -195,18 +196,18 @@
         apiError: '',
         actionError: '',
         actionBusy: '',
-        refreshTimer: null,
-        diagnosticsTimer: null,
+        stopOverviewPolling: null,
+        stopDiagnosticsPolling: null,
       }
     },
-    async created() {
-      await this.loadOverview(true)
-      this.refreshTimer = window.setInterval(() => this.loadOverview(false), 5000)
-      this.diagnosticsTimer = window.setInterval(() => this.loadDiagnostics(), 30000)
+    created() {
+      const initialRequest = this.loadOverview(true)
+      this.stopOverviewPolling = startVisibilityPolling(() => this.loadOverview(false), 5000, { initialRequest })
+      this.stopDiagnosticsPolling = startVisibilityPolling(() => this.loadDiagnostics(), 30000, { initialRequest })
     },
     beforeUnmount() {
-      if (this.refreshTimer) window.clearInterval(this.refreshTimer)
-      if (this.diagnosticsTimer) window.clearInterval(this.diagnosticsTimer)
+      this.stopOverviewPolling?.()
+      this.stopDiagnosticsPolling?.()
     },
     computed: {
       hostName() {

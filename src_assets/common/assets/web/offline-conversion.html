@@ -674,6 +674,7 @@
     getOfflineSbsJob,
     getOfflineSbsOverview,
   } from './offline-sbs-api'
+  import { startVisibilityPolling } from './visibility-polling'
 
   const ACTIVE_STATUSES = new Set([
     'queued',
@@ -733,7 +734,7 @@
         startBusy: false,
         cancelBusy: false,
         clearBusy: false,
-        refreshTimer: null,
+        stopPolling: null,
         overviewRequestSerial: 0,
         detailRequestSerial: 0,
         pickerMode: 'input',
@@ -835,12 +836,12 @@
         return !this.startDisabledReason
       },
     },
-    async mounted() {
-      await this.loadJobs(false)
-      this.refreshTimer = window.setInterval(() => this.loadJobs(true), 2000)
+    mounted() {
+      const initialRequest = this.loadJobs(false)
+      this.stopPolling = startVisibilityPolling(() => this.loadJobs(true), 2000, { initialRequest })
     },
     beforeUnmount() {
-      if (this.refreshTimer) window.clearInterval(this.refreshTimer)
+      this.stopPolling?.()
       overviewAbortController?.abort()
       detailAbortController?.abort()
       pickerAbortController?.abort()

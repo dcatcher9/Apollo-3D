@@ -426,6 +426,7 @@
     import { createApp } from 'vue'
     import { initApp } from './init'
     import Navbar from './Navbar.vue'
+    import { startVisibilityPolling } from './visibility-polling'
 
     const app = createApp({
       components: {
@@ -439,7 +440,7 @@
           closeAppStatus: null,
           logs: 'Loading...',
           logFilter: null,
-          logInterval: null,
+          stopPolling: null,
           serverRestarting: false,
           serverQuitting: false,
           serverQuit: false,
@@ -474,19 +475,17 @@
         }
       },
       created() {
-        this.logInterval = setInterval(() => {
-          this.refreshLogs();
-          this.refreshHostState();
-        }, 5000);
-        this.refreshLogs();
-        this.refreshHostState();
+        this.stopPolling = startVisibilityPolling(
+          () => Promise.all([this.refreshLogs(), this.refreshHostState()]),
+          5000,
+        );
       },
       beforeUnmount() {
-        clearInterval(this.logInterval);
+        this.stopPolling?.();
       },
       methods: {
         refreshHostState() {
-          Promise.all([
+          return Promise.all([
             fetch('/api/config', { credentials: 'include' }).then((r) => r.json()),
             fetch('./api/apps', { credentials: 'include' }).then((r) => r.json()),
           ])
@@ -498,7 +497,7 @@
             .catch((error) => console.error('Error fetching host state:', error));
         },
         refreshLogs() {
-          fetch("./api/logs", {
+          return fetch("./api/logs", {
             credentials: 'include'
           })
             .then(response => {

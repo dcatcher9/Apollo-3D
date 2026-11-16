@@ -1,5 +1,6 @@
 <script setup>
 import {computed, inject, onMounted, onUnmounted, ref} from 'vue'
+import { startVisibilityPolling } from '../../visibility-polling'
 
 const $t = inject('i18n').t
 
@@ -17,7 +18,7 @@ const props = defineProps({
 const devices = ref([])
 const error = ref('')
 const savingId = ref('')
-let refreshTimer = null
+let stopPolling = null
 
 const virtualDisplayOnlyEnabled = computed(() => {
   const value = props.config?.local_ar_virtual_display_only
@@ -67,12 +68,11 @@ const decide = async (device, decision) => {
 }
 
 onMounted(() => {
-  refresh()
-  refreshTimer = setInterval(refresh, 3000)
+  stopPolling = startVisibilityPolling(refresh, 3000)
 })
 
 onUnmounted(() => {
-  if (refreshTimer !== null) clearInterval(refreshTimer)
+  stopPolling?.()
 })
 </script>
 
