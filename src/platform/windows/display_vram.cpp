@@ -69,6 +69,7 @@
 #include "src/video.h"
 #include "src/video_depth_estimator.h"
 #include "video_dom_client.h"
+#include "host3d_subtitle_apps.h"
 #include "video_player_context.h"
 
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
@@ -5542,10 +5543,11 @@ namespace platf::dxgi {
       if (browser_video) {
         next = admission.browser_key;
       } else if (admission.registered_player_candidate) {
-        // Registration is checked first so a player keeps its identity when the owner's
-        // foreground-app switch is also on. The switch alone admits any other application.
-        next = {native_kind(video_player_registry && video_player_registry->contains_process(foreground.process_id),
-                  sbs_config.foreground_subtitles),
+        // Registration is checked first so a player keeps its identity. Any other application
+        // is admitted only when its owner enabled that executable; the check runs on every
+        // observation, so the Web UI changes a running stream at once.
+        const bool registered = video_player_registry && video_player_registry->contains_process(foreground.process_id);
+        next = {native_kind(registered, !registered && host3d_subtitle_apps::observe_process(foreground.process_id)),
           foreground.window, foreground.process_id};
       }
       const bool context_changed = subtitle_context.update(next);

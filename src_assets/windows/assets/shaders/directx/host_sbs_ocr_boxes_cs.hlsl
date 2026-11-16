@@ -434,8 +434,11 @@ bool CandidateEvidenceValid(CandidateStats stats, out float score) {
     return FiniteFloat(score) && score >= V2_OCR_MIN_MEAN_SCORE;
 }
 
+// line_span is the horizontal extent, in detector pixels, the ordinary cover must reach. For
+// video it is the candidate's own tight extent, which leaves the cover exactly as before.
 bool PrepareCandidateBoxes(
-    CandidateStats stats, uint kind_flags, out uint4 tight_box, out uint4 expanded_box) {
+    CandidateStats stats, uint kind_flags, uint2 line_span,
+    out uint4 tight_box, out uint4 expanded_box) {
     uint tight_width = stats.tight_right - stats.tight_left;
     uint tight_height = stats.tight_bottom - stats.tight_top;
     tight_box = MapBox(
@@ -461,10 +464,11 @@ bool PrepareCandidateBoxes(
         V2_OCR_ORDINARY_COVER_VERTICAL_GUARD_HEIGHT_DENOMINATOR - 1u) /
         V2_OCR_ORDINARY_COVER_VERTICAL_GUARD_HEIGHT_DENOMINATOR;
     uint vertical_pad = pad + (kind_flags == V2_OCR_BOX_FLAG_RIBBON ? 0u : vertical_guard);
-    uint expanded_left = stats.tight_left > horizontal_pad ?
-        stats.tight_left - horizontal_pad : 0u;
+    uint span_left = kind_flags == V2_OCR_BOX_FLAG_RIBBON ? stats.tight_left : line_span.x;
+    uint span_right = kind_flags == V2_OCR_BOX_FLAG_RIBBON ? stats.tight_right : line_span.y;
+    uint expanded_left = span_left > horizontal_pad ? span_left - horizontal_pad : 0u;
     uint expanded_top = stats.tight_top > vertical_pad ? stats.tight_top - vertical_pad : 0u;
-    uint expanded_right = min(stats.tight_right + horizontal_pad, OCR_WIDTH);
+    uint expanded_right = min(span_right + horizontal_pad, OCR_WIDTH);
     uint expanded_bottom = min(stats.tight_bottom + vertical_pad, OCR_HEIGHT);
     if (min(expanded_right - expanded_left, expanded_bottom - expanded_top) < 5u) return false;
 
@@ -486,9 +490,9 @@ uint CandidatePriorBin(CandidateStats stats) {
 
 void PublishCandidate(
     CandidateStats stats, float score, uint kind_flags, bool independently_strong,
-    inout uint raw_total, inout uint final_total) {
+    uint2 line_span, inout uint raw_total, inout uint final_total) {
     uint4 tight_box, expanded_box;
-    if (!PrepareCandidateBoxes(stats, kind_flags, tight_box, expanded_box)) return;
+    if (!PrepareCandidateBoxes(stats, kind_flags, line_span, tight_box, expanded_box)) return;
     uint pair_capacity = min(OCR8_RAW_CAPACITY, OCR8_FINAL_CAPACITY);
     uint pair_index = final_total;
     if (final_total < pair_capacity) {
@@ -1128,6 +1132,32 @@ void FinishClassifierHistory(uint final_total) {
     }
 }
 
+// The text detector fires on runs of ordinary characters and skips the symbols between them,
+// so one dialogue line of an application arrives as separate pieces with unsearched gaps. For
+// application text the native glyph search of a published piece therefore spans every piece on
+// its own row, bridging those gaps, and starts at the left margin of the whole text block; it
+// still reaches no further past the outermost pieces than the ordinary cover pad. Scene text is not part of a line. Video keeps each piece's own extent.
+uint2 CandidateLineSpan(uint candidate, uint candidate_count, CandidateStats stats) {
+    uint2 span = uint2(stats.tight_left, stats.tight_right);
+    if (line_policy == 0u) return span;
+    uint2 rows = uint2(stats.tight_top, stats.tight_bottom);
+    [loop]
+    for (uint other = 0u; other < candidate_count; ++other) {
+        if (other == candidate || !CandidateEnabled(other) ||
+            OcrCandidateScratch[ScratchBase(other) + 5u].z == CLASS_SCENE) continue;
+        CandidateStats member = LoadCandidate(other);
+        float member_score;
+        if (!CandidateEvidenceValid(member, member_score)) continue;
+        // Dialogue lines share one left margin, so a line whose opening symbols went
+        // undetected still starts where the other lines of the block start.
+        span.x = min(span.x, member.tight_left);
+        if (SpanHasHalfIoU(member.tight_top, member.tight_bottom, rows)) {
+            span.y = max(span.y, member.tight_right);
+        }
+    }
+    return span;
+}
+
 void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint final_total) {
     [loop]
     for (uint candidate = 0u; candidate < candidate_count; ++candidate) {
@@ -1214,6 +1244,7 @@ void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint
         float score;
         if (!CandidateEvidenceValid(stats, score)) continue;
         PublishCandidate(stats, score, OcrCandidateScratch[base + 3u].y, strong,
+                         CandidateLineSpan(candidate, candidate_count, stats),
                          raw_total, final_total);
     }
 }

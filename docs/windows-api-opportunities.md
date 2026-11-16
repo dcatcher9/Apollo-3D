@@ -79,7 +79,7 @@ inverse warp → SBS packing → NVENC. The retired generic overlay sanitizer/ex
 this path.
 
 Only three configuration keys survive on this surface: `sbs_3d_pop_strength`,
-`sbs_3d_foreground_subtitles` and `sbs_3d_max_encode_width`. Do not reintroduce removed keys; the deletion was
+`sbs_3d_subtitle_apps` and `sbs_3d_max_encode_width`. Do not reintroduce removed keys; the deletion was
 deliberate.
 
 ### A resolution constraint that will bite ROI work

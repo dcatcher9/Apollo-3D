@@ -78,6 +78,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/host_sbs_v2_renderer.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/video_dom_client.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/video_dom_client.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/host3d_subtitle_apps.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/host3d_subtitle_apps.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/video_player_context.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/video_player_context.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_debug_dump.h"

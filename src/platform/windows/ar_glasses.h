@@ -368,6 +368,9 @@ namespace ar_glasses {
   /** Load persisted preservation decisions without starting the controller or writing config. */
   void load_preservation_policy();
 
+  /** Atomically replace or append one `key = value` line, keeping every other line as it is. */
+  bool persist_config_value(std::string_view key, std::string_view value);
+
   /** Atomically write a general configuration snapshot while injecting the latest device list. */
   bool write_config_with_devices(std::string_view contents);
 

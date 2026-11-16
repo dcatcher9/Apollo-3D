@@ -62,7 +62,6 @@ namespace config {
     struct sbs_t {
       bool reshade = false;  ///< Receive live final SBS from the ReShade add-on; offline conversion remains V2.
       double pop_strength = 1.75;  ///< Literal live V2 stereo strength (0.25-2) and offline conversion base strength.
-      bool foreground_subtitles = false;  ///< Owner switch: live Host 3D also protects subtitles in a foreground app that is neither a browser video nor a registered video player.
       int max_encode_width = 8192;  ///< Configured packed Host SBS width cap. Output also respects both runtime NVENC axes (RTX 5080: H.264 4096x4096, HEVC/AV1 8192x8192) with aspect-preserving scaling.
     };
 

@@ -793,9 +793,9 @@ void PrepareCurrentPalettes(uint group_index, uint2 dispatch_position) {
     }
 }
 
-bool CurrentPaletteMatches(uint slot, uint3 color) {
+bool CurrentPaletteMatches(uint slot, uint3 color, uint mode_count) {
     [loop]
-    for (uint mode = 0u; mode < PaletteCount[slot]; ++mode) {
+    for (uint mode = 0u; mode < mode_count; ++mode) {
         uint4 value = PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + mode];
         int3 delta = int3(color * value.w) - int3(value.xyz);
         uint distance = MaxChannel((uint3)abs(delta));
@@ -825,14 +825,31 @@ bool CurrentShortTangent(int2 p, float3 color, int2 direction, uint maximum) {
     return true;
 }
 
-bool CurrentOutlineNeighborMatches(int2 p, float3 color, uint slot) {
+// A cover normally reaches only a bounded pad past its detector piece. An application-text
+// cover also bridges the gaps to the other pieces of its line, where the detector saw no text.
+// The palette is learned from a piece's contrasting anchors, so it also holds background shades
+// that touch the glyph outlines; near the piece that is harmless, but across a bridged gap those
+// shades would turn every scene edge of the same colour into text. This reports the columns the
+// detector's own piece explains: its core widened by more than the largest ordinary cover pad.
+// A video cover never leaves this range, so the stricter bridged rule cannot change video.
+bool WithinOrdinaryReach(int2 p, uint slot) {
+    if (CurrentSlotRibbon(slot)) return true;
+    uint4 core = CurrentCores[slot], search = CurrentSupportSearch[slot];
+    uint content_width = contour_content.z - contour_content.x;
+    uint reach = (V2_OCR_ORDINARY_COVER_HORIZONTAL_GUARD_CELLS * 8u * content_width +
+        V2_OCR_OUTPUT_WIDTH - 1u) / V2_OCR_OUTPUT_WIDTH + (core.w - core.y);
+    uint left = core.x > contour_content.x + reach ? core.x - reach : contour_content.x;
+    return SourcePixelInRect(p, uint4(left, search.y, min(core.z + reach, contour_content.z), search.w));
+}
+
+bool CurrentOutlineNeighborMatches(int2 p, float3 color, uint slot, uint mode_count) {
     float3 neighbor;
     bool neighbor_valid = LoadDisplayColor(p, neighbor);
     if (!neighbor_valid) return false;
     float contrast = ColorDistance(color, neighbor);
     if (contrast <= V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RGB_DISTANCE) return false;
     uint3 neighbor_quantized = PaletteQuantize(neighbor);
-    return CurrentPaletteMatches(slot, neighbor_quantized);
+    return CurrentPaletteMatches(slot, neighbor_quantized, mode_count);
 }
 
 bool CurrentGlyphEvidence(int2 p, float3 color) {
@@ -843,7 +860,9 @@ bool CurrentGlyphEvidence(int2 p, float3 color) {
     [loop]
     for (uint slot = 0u; slot < CurrentCount; ++slot) {
         if (!SourcePixelInRect(p, CurrentSupportSearch[slot]) || PaletteCount[slot] == 0u) continue;
-        if (CurrentPaletteMatches(slot, q)) {
+        // Across a bridged gap only the brightest retained mode, the text fill, is evidence.
+        uint mode_count = WithinOrdinaryReach(p, slot) ? PaletteCount[slot] : 1u;
+        if (CurrentPaletteMatches(slot, q, mode_count)) {
             uint limit = (V2_SUBTITLE_CONTOUR_LONG_LINE_CORE_HEIGHT_NUMERATOR *
                 (CurrentCores[slot].w - CurrentCores[slot].y) * contour_source.y) /
                 (V2_SUBTITLE_CONTOUR_LONG_LINE_CORE_HEIGHT_DENOMINATOR * (contour_content.w - contour_content.y));
@@ -861,14 +880,14 @@ bool CurrentGlyphEvidence(int2 p, float3 color) {
         const int radius = (int)V2_SUBTITLE_CONTOUR_OUTLINE_PROBE_RADIUS_SOURCE_PIXELS;
         // Explicit calls preserve the exact eight-point set without nested unrolled
         // continue/early-return lowering in FXC.
-        if (CurrentOutlineNeighborMatches(p + int2(-radius, -radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(0, -radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(radius, -radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(-radius, 0), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(radius, 0), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(-radius, radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(0, radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(radius, radius), color, slot)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(-radius, -radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(0, -radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(radius, -radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(-radius, 0), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(radius, 0), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(-radius, radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(0, radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(radius, radius), color, slot, mode_count)) return true;
     }
     return false;
 }

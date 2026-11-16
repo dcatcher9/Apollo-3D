@@ -3185,6 +3185,49 @@ namespace {
     }
   }
 
+  TEST(HostSbsOcrGpuTest, ApplicationTextCoverSpansItsDialogueLineFromTheBlockMargin) {
+    // Row A holds two pieces separated by far more than the four-height word gap, as when the
+    // detector skips a run of symbols. Row B starts further left and ends earlier.
+    std::vector<float> probability(ocr_pixels, 0.0f);
+    paint_rectangle(probability, 200u, 60u, 320u, 75u);
+    paint_rectangle(probability, 600u, 60u, 760u, 75u);
+    paint_rectangle(probability, 150u, 100u, 400u, 115u);
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    ASSERT_TRUE(fixture.run_boxes(
+      probability, 40u, 77u, source_width, source_height, field_width, field_height,
+      source_crop_top, source_crop_height, roi_top, roi_bottom, {}, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, false, 1u));
+    const auto record = fixture.record();
+    ASSERT_EQ(record[2u], 1u);
+    ASSERT_EQ(record[3u], 3u);
+    const auto box = [&](const std::uint32_t offset, const std::uint32_t slot) {
+      const auto base = offset + slot * v2::subtitle_ocr_box_word_count;
+      return std::array<std::uint32_t, 4u> {record[base], record[base + 1u], record[base + 2u], record[base + 3u]};
+    };
+    const auto core_a1 = box(v2::subtitle_ocr_raw_box_offset, 0u);
+    const auto core_a2 = box(v2::subtitle_ocr_raw_box_offset, 1u);
+    const auto core_b = box(v2::subtitle_ocr_raw_box_offset, 2u);
+    const auto cover_a1 = box(v2::subtitle_ocr_final_box_offset, 0u);
+    const auto cover_a2 = box(v2::subtitle_ocr_final_box_offset, 1u);
+    const auto cover_b = box(v2::subtitle_ocr_final_box_offset, 2u);
+    // The tight cores stay the detector's own pieces.
+    EXPECT_LT(core_a1[2u], core_a2[0u]);
+    EXPECT_LT(core_b[0u], core_a1[0u]);
+    // Both pieces of row A search the same span: bridged to each other, and started at the
+    // block's left margin, which row B supplies.
+    EXPECT_EQ(cover_a1[0u], cover_a2[0u]);
+    EXPECT_EQ(cover_a1[2u], cover_a2[2u]);
+    EXPECT_LE(cover_a1[0u], core_b[0u]);
+    EXPECT_GE(cover_a1[2u], core_a2[2u]);
+    // Row B is not extended to the right by another row's longer line.
+    EXPECT_LE(cover_b[0u], core_b[0u]);
+    EXPECT_LT(cover_b[2u], core_a2[0u]);
+    // The vertical extent of a cover is still its own row.
+    EXPECT_LT(cover_a1[3u], core_b[3u]);
+  }
+
   TEST(HostSbsOcrGpuTest, DistantSameHeightColumnsCannotBorrowEachOthersCenter) {
     ocr_warp_fixture_t fixture;
     std::string error;

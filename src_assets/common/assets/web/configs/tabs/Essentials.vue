@@ -1,5 +1,6 @@
 <script setup>
 import { computed, inject } from 'vue'
+import Host3dSubtitleApps from './Host3dSubtitleApps.vue'
 
 const $t = inject('i18n').t
 
@@ -161,21 +162,7 @@ function setOnOff(key, event) {
         <small>Controls Sunshine-generated 3D separation and the base strength for new offline conversions. Game 3D strength is set in ReShade's Sunshine 3D add-on panel.</small>
       </label>
 
-      <div v-if="platform === 'windows'" class="simple-toggle-row">
-        <div>
-          <strong>{{ $t('config.sbs_3d_foreground_subtitles') }}</strong>
-          <span>{{ $t('config.sbs_3d_foreground_subtitles_desc') }}</span>
-        </div>
-        <label class="form-switch" :aria-label="$t('config.sbs_3d_foreground_subtitles')">
-          <input
-            id="sbs_3d_foreground_subtitles"
-            class="form-check-input"
-            type="checkbox"
-            :checked="isEnabled('sbs_3d_foreground_subtitles')"
-            @change="setEnabled('sbs_3d_foreground_subtitles', $event)"
-          />
-        </label>
-      </div>
+      <Host3dSubtitleApps v-if="platform === 'windows'" />
     </section>
 
     <section class="settings-card">

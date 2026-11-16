@@ -46,6 +46,10 @@ using namespace std::literals;
 
 #define APPS_JSON_PATH platf::appdata().string() + "/apps.json"
 
+#ifdef _WIN32
+  #include "platform/windows/host3d_subtitle_apps.h"
+#endif
+
 namespace config {
 
   namespace nv {
@@ -167,7 +171,8 @@ namespace config {
   }
 
   bool is_retired_config_option(const std::string_view name) {
-    return name == "virtual_display_only"sv;
+    // sbs_3d_foreground_subtitles was a host-wide switch; sbs_3d_subtitle_apps replaces it.
+    return name == "virtual_display_only"sv || name == "sbs_3d_foreground_subtitles"sv;
   }
 
   std::string to_string(const char *begin, const char *end) {
@@ -666,7 +671,14 @@ namespace config {
     video.sbs = {};
     bool_f(vars, "sbs_reshade", video.sbs.reshade);
     double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
-    bool_f(vars, "sbs_3d_foreground_subtitles", video.sbs.foreground_subtitles);
+#ifdef _WIN32
+    {
+      // Per-application Host 3D subtitle protection. Off for every application by default.
+      std::string subtitle_apps;
+      string_f(vars, std::string {platf::host3d_subtitle_apps::config_key}, subtitle_apps);
+      platf::host3d_subtitle_apps::load(subtitle_apps);
+    }
+#endif
     int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, {256, 16384});
     video.sbs.max_encode_width &= ~3;
 

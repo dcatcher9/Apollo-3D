@@ -47,6 +47,7 @@
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
   #include "platform/windows/game3d_setup.h"
+  #include "platform/windows/host3d_subtitle_apps.h"
   #include "platform/windows/utils.h"
 #endif
 
@@ -1371,6 +1372,75 @@ namespace confighttp {
    *
    * @api_examples{/api/config| POST| {"key":"value"}}
    */
+#ifdef _WIN32
+  /**
+   * @brief List the applications Host 3D may protect subtitles in.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * Enabled applications, then applications recently seen in front of a Host 3D stream.
+   *
+   * @api_examples{/api/host3d/subtitle-apps| GET| null}
+   */
+  void getHost3dSubtitleApps(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["apps"] = nlohmann::json::array();
+    for (const auto &app : platf::host3d_subtitle_apps::list()) {
+      output_tree["apps"].push_back({
+        {"executable", app.executable},
+        {"name", app.name},
+        {"enabled", app.enabled},
+        {"recent", app.recent},
+      });
+    }
+    send_response(response, output_tree);
+  }
+
+  /**
+   * @brief Turn Host 3D subtitle protection on or off for one application.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * The running host changes at once and the selection is saved to the configuration file.
+   *
+   * @api_examples{/api/host3d/subtitle-apps| POST| {"executable":"C:/Games/Example/game.exe","enabled":true}}
+   */
+  void setHost3dSubtitleApp(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      std::stringstream body;
+      body << request->content.rdbuf();
+      const auto input = nlohmann::json::parse(body);
+      const auto executable = input.find("executable");
+      const auto enabled = input.find("enabled");
+      if (executable == input.end() || !executable->is_string() || enabled == input.end() || !enabled->is_boolean() ||
+          !platf::host3d_subtitle_apps::set_enabled(executable->get<std::string>(), enabled->get<bool>())) {
+        bad_request(response, request, "An absolute .exe path and a boolean 'enabled' are required");
+        return;
+      }
+      BOOST_LOG(info) << "Host 3D subtitle protection "sv << (enabled->get<bool>() ? "enabled"sv : "disabled"sv)
+                      << " for ["sv << executable->get<std::string>() << "] from the Web UI."sv;
+      // The live selection already changed. A failed save only loses it at the next start.
+      const bool saved = ar_glasses::persist_config_value(
+        platf::host3d_subtitle_apps::config_key, platf::host3d_subtitle_apps::serialize()
+      );
+      send_response(response, nlohmann::json {{"status", true}, {"saved", saved}});
+    } catch (const std::exception &error) {
+      bad_request(response, request, error.what());
+    }
+  }
+#endif
+
   void saveConfig(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
       return;
@@ -1388,6 +1458,15 @@ namespace confighttp {
       erase_retired_config_options(input_tree);
       // This option is live-managed by the AR display decision API rather than the general form.
       input_tree.erase("ar_glass_devices");
+#ifdef _WIN32
+      // The per-application subtitle selection is live-managed by its own API as well. Write the
+      // current selection so a general save cannot drop or revive an entry.
+      input_tree.erase(std::string {platf::host3d_subtitle_apps::config_key});
+      if (const auto subtitle_apps = nlohmann::json::parse(platf::host3d_subtitle_apps::serialize());
+          !subtitle_apps.empty()) {
+        input_tree[std::string {platf::host3d_subtitle_apps::config_key}] = subtitle_apps;
+      }
+#endif
       for (const auto &[k, v] : input_tree.items()) {
         if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
           continue;
@@ -2169,6 +2248,8 @@ namespace confighttp {
     server.resource["^/api/game3d/setup/decision$"]["POST"] = decideGame3dSetup;
     server.resource["^/api/ar-glasses$"]["GET"] = getArGlassDevices;
     server.resource["^/api/ar-glasses$"]["POST"] = setArGlassDevice;
+    server.resource["^/api/host3d/subtitle-apps$"]["GET"] = getHost3dSubtitleApps;
+    server.resource["^/api/host3d/subtitle-apps$"]["POST"] = setHost3dSubtitleApp;
 #endif
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = restart;

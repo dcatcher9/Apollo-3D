@@ -951,8 +951,8 @@ namespace ar_glasses {
       return contents;
     }
 
-    std::string replace_managed_config_value(std::string contents, std::string_view value) {
-      const std::string replacement = std::string(managed_config_key) + " = " + std::string(value);
+    std::string replace_config_value(std::string contents, std::string_view key, std::string_view value) {
+      const std::string replacement = std::string(key) + " = " + std::string(value);
       size_t cursor = 0;
       while (cursor < contents.size()) {
         const auto newline = contents.find('\n', cursor);
@@ -967,7 +967,7 @@ namespace ar_glasses {
         const auto key_end = equals == std::string_view::npos ? equals : line.find_last_not_of(" \t", equals - 1);
         const bool managed_line = first != std::string_view::npos && equals != std::string_view::npos &&
                                   key_end != std::string_view::npos &&
-                                  line.substr(first, key_end - first + 1) == managed_config_key;
+                                  line.substr(first, key_end - first + 1) == key;
         if (managed_line) {
           contents.replace(cursor, line_end - cursor, replacement + (had_carriage_return ? "\r" : ""));
           return contents;
@@ -984,6 +984,10 @@ namespace ar_glasses {
       }
       contents.append(replacement).append(newline);
       return contents;
+    }
+
+    std::string replace_managed_config_value(std::string contents, std::string_view value) {
+      return replace_config_value(std::move(contents), managed_config_key, value);
     }
 
     bool write_config_atomically(std::string_view contents) {
@@ -4907,6 +4911,22 @@ namespace ar_glasses {
     const auto friendly_name = platf::to_utf8(target_name.monitorFriendlyDeviceName);
     std::lock_guard lock(device_mutex);
     return preserve_during_remote_virtual_display_policy(model_id, friendly_name, known_devices);
+  }
+
+  bool persist_config_value(std::string_view key, std::string_view value) {
+    // device_mutex is the single writer lock for the configuration file.
+    std::lock_guard lock(device_mutex);
+    auto contents = read_config_file_strict();
+    if (!contents) {
+      BOOST_LOG(error) << "Could not read the complete configuration file; refusing to replace it while saving ["sv
+                       << key << "]."sv;
+      return false;
+    }
+    if (!write_config_atomically(replace_config_value(std::move(*contents), key, value))) {
+      BOOST_LOG(error) << "Could not save ["sv << key << "] to "sv << config::sunshine.config_file << '.';
+      return false;
+    }
+    return true;
   }
 
   bool write_config_with_devices(std::string_view contents) {
