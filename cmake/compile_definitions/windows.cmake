@@ -114,6 +114,7 @@ list(PREPEND PLATFORM_LIBRARIES
         cfgmgr32
         d3d11
         D3DCompiler
+        dnsapi
         dwmapi
         dxgi
         hid
@@ -126,12 +127,14 @@ list(PREPEND PLATFORM_LIBRARIES
         ntdll
         ole32
         powrprof
+        qwave
         setupapi
         shlwapi
         synchronization.lib
         userenv
         version
         windowscodecs
+        wlanapi
         ws2_32
         wsock32
         z
