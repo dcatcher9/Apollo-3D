@@ -8793,11 +8793,6 @@ namespace platf::dxgi {
         eye_clock_rejected,
         expired_before_emit,
         cancelled_before_emit,
-        phase_missed,
-        phase_cancelled,
-        phase_invalid,
-        phase_wait_failed,
-        phase_write_deadline_rejected,
         signal_failed,
         signalled,
         count,
@@ -8812,11 +8807,6 @@ namespace platf::dxgi {
         "eye_clock_rejected",
         "expired_before_emit",
         "cancelled_before_emit",
-        "phase_missed",
-        "phase_cancelled",
-        "phase_invalid",
-        "phase_wait_failed",
-        "phase_write_deadline_rejected",
         "signal_failed",
         "signalled",
       };
@@ -8862,9 +8852,6 @@ namespace platf::dxgi {
         detail::shutter_feedback_t feedback {};
         std::int64_t present_begin = 0, present_end = 0, receipt = 0, boundary = 0;
         std::int64_t signal_begin = 0, signal_end = 0;
-        int emit_phase_us = 0, phase_wait_status = -1;
-        std::int64_t phase_target_qpc = 0, phase_latest_write_qpc = 0;
-        std::int64_t phase_wait_begin_qpc = 0, phase_wait_end_qpc = 0;
         platf::open3d::signal_timing_t write {};
         std::optional<previous_t> previous;
       };
@@ -8970,7 +8957,7 @@ namespace platf::dxgi {
             if (sample.boundary > 0) {
               slot.metrics[host_write_begin_age].observe(microseconds(sample.boundary, sample.write.write_begin_qpc));
             }
-          } else if (!sample.write.deadline_rejected) {
+          } else {
             ++slot.invalid_write_metadata;
           }
         }
@@ -9040,12 +9027,8 @@ namespace platf::dxgi {
                             << " delta_known="sv << raw.delta_known << " refresh_delta="sv << raw.refresh_delta
                             << " present_begin_qpc="sv << raw.present_begin << " present_end_qpc="sv << raw.present_end << " receipt_qpc="sv << raw.receipt
                             << " boundary_qpc="sv << raw.boundary << " signal_begin_qpc="sv << raw.signal_begin << " signal_end_qpc="sv << raw.signal_end
-                            << " emit_phase_us="sv << raw.emit_phase_us << " phase_wait_status="sv << raw.phase_wait_status
-                            << " phase_target_qpc="sv << raw.phase_target_qpc << " phase_latest_write_qpc="sv << raw.phase_latest_write_qpc
-                            << " phase_wait_begin_qpc="sv << raw.phase_wait_begin_qpc << " phase_wait_end_qpc="sv << raw.phase_wait_end_qpc
                             << " write_begin_qpc="sv << raw.write.write_begin_qpc << " write_end_qpc="sv << raw.write.write_end_qpc
-                            << " write_qpc_frequency="sv << raw.write.qpc_frequency << " write_pending="sv << raw.write.write_pending
-                            << " write_deadline_rejected="sv << raw.write.deadline_rejected << '.';
+                            << " write_qpc_frequency="sv << raw.write.qpc_frequency << " write_pending="sv << raw.write.write_pending << '.';
           }
         }
       }
@@ -9053,134 +9036,6 @@ namespace platf::dxgi {
   }  // namespace
 
   local_presenter_result_e run_local_presenter(const local_presenter_config_t &config, std::stop_token stop_token) {
-    // Internal calibration only: sample once, use independent logical-slot host phases, and
-    // reject invalid settings before presenter resources or the serial transport are created.
-    constexpr std::int64_t emit_phase_allowed_lateness_us = 250;
-    std::array<int, 2> emit_phase_us {};
-    bool emit_phase_from_file = false;
-    if (config.frame_sequential) {
-      constexpr std::array phase_environment_names {
-        L"SUNSHINE_LOCAL_MONITOR_L_EMIT_PHASE_US",
-        L"SUNSHINE_LOCAL_MONITOR_R_EMIT_PHASE_US",
-      };
-      for (std::size_t slot = 0; slot < emit_phase_us.size(); ++slot) {
-        std::array<wchar_t, 32> value {};
-        SetLastError(ERROR_SUCCESS);
-        const auto length = GetEnvironmentVariableW(phase_environment_names[slot], value.data(), static_cast<DWORD>(value.size()));
-        if (!length && GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
-          continue;
-        }
-        bool valid = length > 0 && length < value.size();
-        int parsed = 0;
-        for (DWORD digit = 0; valid && digit < length; ++digit) {
-          valid = value[digit] >= L'0' && value[digit] <= L'9';
-          if (!valid) {
-            break;
-          }
-          const int number = value[digit] - L'0';
-          valid = parsed <= (std::numeric_limits<int>::max() - number) / 10;
-          if (valid) {
-            parsed = parsed * 10 + number;
-          }
-        }
-        if (!valid) {
-          BOOST_LOG(error) << "Local shutter phase calibration requires an exact nonnegative decimal integer for logical slot "sv << (slot ? 'R' : 'L') << '.';
-          return local_presenter_result_e::error;
-        }
-        emit_phase_us[slot] = parsed;
-      }
-      SetLastError(ERROR_SUCCESS);
-      const auto file_path_size = GetEnvironmentVariableW(L"SUNSHINE_LOCAL_MONITOR_PHASE_CONFIG", nullptr, 0);
-      if (file_path_size || GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
-        if (!file_path_size || file_path_size > 32768 || emit_phase_us[0] || emit_phase_us[1]) {
-          BOOST_LOG(error) << "Local shutter phase configuration requires a valid file path and no nonzero direct phase environment values."sv;
-          return local_presenter_result_e::error;
-        }
-        std::wstring file_path(file_path_size, L'\0');
-        const auto path_length = GetEnvironmentVariableW(L"SUNSHINE_LOCAL_MONITOR_PHASE_CONFIG", file_path.data(), file_path_size);
-        if (!path_length || path_length >= file_path_size) {
-          BOOST_LOG(error) << "Local shutter phase configuration file path was empty or changed during initialization."sv;
-          return local_presenter_result_e::error;
-        }
-        file_path.resize(path_length);
-        std::ifstream input(std::filesystem::path(file_path), std::ios::binary);
-        std::array<char, 2049> contents {};
-        if (!input) {
-          BOOST_LOG(error) << "Local shutter phase configuration file is missing or unreadable."sv;
-          return local_presenter_result_e::error;
-        }
-        input.read(contents.data(), static_cast<std::streamsize>(contents.size()));
-        const auto bytes = input.gcount();
-        if (bytes <= 0 || bytes > 2048 || input.bad() || (input.fail() && !input.eof())) {
-          BOOST_LOG(error) << "Local shutter phase configuration file must contain at most 2048 readable bytes."sv;
-          return local_presenter_result_e::error;
-        }
-        std::array<bool, 2> seen {};
-        bool invalid_key = false;
-        const auto check_keys = [&](int, nlohmann::json::parse_event_t event, nlohmann::json &value) {
-          if (event == nlohmann::json::parse_event_t::key) {
-            const auto &key = value.get_ref<const std::string &>();
-            const int slot = key == "logical_L_us" ? 0 : key == "logical_R_us" ? 1 :
-                                                                                 -1;
-            if (slot < 0 || seen[static_cast<std::size_t>(slot)]) {
-              invalid_key = true;
-            } else {
-              seen[static_cast<std::size_t>(slot)] = true;
-            }
-          }
-          return true;
-        };
-        const auto values = nlohmann::json::parse(contents.data(), contents.data() + bytes, check_keys, false);
-        bool valid_file = !values.is_discarded() && values.is_object() && !invalid_key && seen[0] && seen[1] && values.size() == 2;
-        constexpr std::array file_keys {"logical_L_us", "logical_R_us"};
-        for (std::size_t slot = 0; valid_file && slot < file_keys.size(); ++slot) {
-          const auto &value = values.at(file_keys[slot]);
-          if (value.is_number_unsigned()) {
-            const auto number = value.get<std::uint64_t>();
-            valid_file = number <= static_cast<std::uint64_t>(std::numeric_limits<int>::max());
-            if (valid_file) {
-              emit_phase_us[slot] = static_cast<int>(number);
-            }
-          } else if (value.is_number_integer()) {
-            const auto number = value.get<std::int64_t>();
-            valid_file = number >= 0 && number <= std::numeric_limits<int>::max();
-            if (valid_file) {
-              emit_phase_us[slot] = static_cast<int>(number);
-            }
-          } else {
-            valid_file = false;
-          }
-        }
-        if (!valid_file) {
-          BOOST_LOG(error) << "Local shutter phase configuration must be a JSON object containing exactly logical_L_us and logical_R_us as nonnegative integer values, without duplicate or unknown keys."sv;
-          return local_presenter_result_e::error;
-        }
-        emit_phase_from_file = true;
-      }
-      if (emit_phase_us[0] > 0 || emit_phase_us[1] > 0) {
-        const auto period = platf::open3d::eye_period_us(config.target_refresh_millihz, config.monitor_config.eye_repeats);
-        const platf::open3d::settings_t settings {
-          .port = config.monitor_config.emitter_port,
-          .protocol = config.monitor_config.ir_protocol,
-          .frame_delay_us = config.monitor_config.frame_delay_us,
-          .frame_duration_us = config.monitor_config.frame_duration_us,
-          .signal_spacing_us = config.monitor_config.signal_spacing_us,
-          .flip_eyes = config.monitor_config.flip_eyes,
-          .target_frametime_us = period.value_or(0),
-        };
-        const auto budget = platf::open3d::detail::host_feedback_budget_us(settings);
-        if (!budget || std::ranges::any_of(emit_phase_us, [&](int phase) {
-              return phase > 0 && static_cast<std::int64_t>(phase) + emit_phase_allowed_lateness_us > *budget;
-            })) {
-          BOOST_LOG(error) << "Local shutter phase calibration must leave its 250-us lateness window inside the verified host-feedback budget."sv;
-          return local_presenter_result_e::error;
-        }
-      }
-      BOOST_LOG(info) << "Local shutter phase calibration: source="sv << (emit_phase_from_file ? "file"sv : "env"sv)
-                      << " logical_L_us="sv << emit_phase_us[0] << " logical_R_us="sv << emit_phase_us[1]
-                      << " allowed_lateness_us="sv << emit_phase_allowed_lateness_us << " flip_eyes="sv << config.monitor_config.flip_eyes
-                      << "; zero is immediate; positive values are experimental host phases after the confirmed display boundary, not USB or optical timing."sv;
-    }
     // Internal optical-calibration aid, sampled once for this presenter initialization.
     // It replaces only the physical shutter image; packet ownership and all timing gates stay active.
     std::array<wchar_t, 2> test_pattern_flag {};
@@ -9756,12 +9611,6 @@ namespace platf::dxgi {
           return;
         }
         const auto host_age_budget_us = *feedback_budget;
-        const bool phase_calibration_active = emit_phase_us[0] > 0 || emit_phase_us[1] > 0;
-        struct phase_counts_t {
-          std::uint64_t waits = 0, ready = 0, missed = 0, cancelled = 0, invalid = 0, wait_failed = 0;
-          std::uint64_t freshness_rejected = 0, write_deadline_rejected = 0, signalled = 0;
-        };
-        std::array<phase_counts_t, 2> phase_counts {};
         if (!emitter.connect(emitter_settings, emitter_setup_stop.get_token())) {
           if (!stopped()) {
             fail("could not configure and verify the selected USB emitter");
@@ -9823,7 +9672,6 @@ namespace platf::dxgi {
         unsigned acquisition_maximum_streak = 0;
         std::uint64_t confirmed_eye_commands = 0, held_eye_images = 0, extra_held_refreshes = 0;
         std::uint64_t clock_recoveries = 0;
-        auto next_progress_log = std::chrono::steady_clock::now() + 60s;
         std::uint64_t muted_eye_commands = 0;
         std::uint32_t maximum_confirmed_refresh_delta = 0;
         std::optional<detail::shutter_feedback_t> first_feedback;
@@ -9868,22 +9716,6 @@ namespace platf::dxgi {
             return feedback_waiter->wait_until(deadline);
           },
         };
-        std::optional<detail::shutter_emit_phase_wait_io_t> phase_wait_io;
-        if (phase_calibration_active) {
-          phase_wait_io.emplace(detail::shutter_emit_phase_wait_io_t {
-            .now_qpc = qpc_now,
-            .now = []() {
-              return std::chrono::steady_clock::now();
-            },
-            .cancelled = stopped,
-            .wait_until = [&](auto deadline) {
-              return feedback_waiter->wait_until(deadline);
-            },
-            .relax = []() {
-              YieldProcessor();
-            },
-          });
-        }
         ID3D11Texture2D *pair = nullptr;
         struct submission_t {
           // The eye's first present: its identity and when it was handed to DXGI.
@@ -10047,6 +9879,10 @@ namespace platf::dxgi {
             pair = shutter_frames.acquire_pair();
           }
           if (!pair) {
+            if (has_displayed) {
+              fail("the shared stereo frame became unavailable during presentation");
+              break;
+            }
             if (std::chrono::steady_clock::now() >= first_pair_deadline) {
               fail("no stereo frame became available for monitor startup");
               break;
@@ -10093,12 +9929,10 @@ namespace platf::dxgi {
             break;
           }
           const auto logical_slot = left_eye ? 0u : 1u;
-          const int slot_emit_phase_us = emit_phase_us[logical_slot];
           std::optional<local_shutter_slot_timing_t::sample_t> timing_sample;
           if (slot_timing) {
             timing_sample.emplace();
             timing_sample->logical_slot = logical_slot;
-            timing_sample->emit_phase_us = slot_emit_phase_us;
             timing_sample->acquiring = acquiring;
             timing_sample->segment = slot_timing->segment;
             timing_sample->previous = slot_timing->previous;
@@ -10316,73 +10150,8 @@ namespace platf::dxgi {
             timing_sample->refresh_delta = confirmed_refresh_delta;
           }
           previous_displayed_refresh = confirmation.feedback.refresh_count;
-          std::int64_t latest_write_qpc = 0;
-          if (slot_emit_phase_us > 0) {
-            auto &phase = phase_counts[logical_slot];
-            ++phase.waits;
-            const auto plan = detail::plan_shutter_emit_phase(
-              feedback_tracker.last_present_qpc().value_or(0),
-              qpc_frequency.QuadPart,
-              slot_emit_phase_us,
-              host_age_budget_us,
-              emit_phase_allowed_lateness_us
-            );
-            auto wait_status = detail::shutter_emit_phase_wait_status_e::invalid;
-            if (plan && phase_wait_io) {
-              if (timing_sample) {
-                timing_sample->phase_target_qpc = plan->target_qpc;
-                timing_sample->phase_latest_write_qpc = plan->latest_write_qpc;
-                timing_sample->phase_wait_begin_qpc = qpc_now();
-              }
-              wait_status = detail::await_shutter_emit_phase(*phase_wait_io, *plan, qpc_frequency.QuadPart);
-              if (timing_sample) {
-                timing_sample->phase_wait_end_qpc = qpc_now();
-              }
-            }
-            if (timing_sample) {
-              timing_sample->phase_wait_status = static_cast<int>(wait_status);
-            }
-            switch (wait_status) {
-              case detail::shutter_emit_phase_wait_status_e::ready:
-                ++phase.ready;
-                latest_write_qpc = plan->latest_write_qpc;
-                break;
-              case detail::shutter_emit_phase_wait_status_e::missed:
-                ++phase.missed;
-                set_timing_outcome(local_shutter_slot_timing_t::outcome_e::phase_missed);
-                break;
-              case detail::shutter_emit_phase_wait_status_e::cancelled:
-                ++phase.cancelled;
-                set_timing_outcome(local_shutter_slot_timing_t::outcome_e::phase_cancelled);
-                break;
-              case detail::shutter_emit_phase_wait_status_e::wait_failed:
-                ++phase.wait_failed;
-                set_timing_outcome(local_shutter_slot_timing_t::outcome_e::phase_wait_failed);
-                break;
-              case detail::shutter_emit_phase_wait_status_e::invalid:
-                ++phase.invalid;
-                set_timing_outcome(local_shutter_slot_timing_t::outcome_e::phase_invalid);
-                break;
-            }
-            if (wait_status != detail::shutter_emit_phase_wait_status_e::ready) {
-              if (stopped()) {
-                break;
-              }
-              if (recover_clock("the configured logical-slot host phase or wait could not be met"sv)) {
-                continue;
-              }
-              if (stopped()) {
-                break;
-              }
-              fail("the configured logical-slot host phase could not be met; returning to 2D");
-              break;
-            }
-          }
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::expired_before_emit);
           if (!feedback_tracker.fresh_for_emit(qpc_now())) {
-            if (phase_calibration_active) {
-              ++phase_counts[logical_slot].freshness_rejected;
-            }
             log_feedback_failure();
             if (recover_clock("displayed eye expired before the USB command"sv)) {
               continue;
@@ -10401,51 +10170,29 @@ namespace platf::dxgi {
           if (slot_timing) {
             timing_sample->signal_begin = qpc_now();
           }
-          platf::open3d::signal_timing_t phase_write_timing;
-          auto *write_timing = timing_sample ? &timing_sample->write : slot_emit_phase_us > 0 ? &phase_write_timing :
-                                                                                                nullptr;
+          auto *write_timing = timing_sample ? &timing_sample->write : nullptr;
           const bool slot_muted = shutter_muted_slot && *shutter_muted_slot == logical_slot;
           if (slot_muted) {
             ++muted_eye_commands;
+            if (timing_sample) {
+              // Nothing is written for a muted slot, so there is no write to time.
+              timing_sample->signal_begin = 0;
+            }
           }
-          const bool signalled = slot_muted || emitter.signal(left_eye, write_timing, latest_write_qpc);
+          const bool signalled = slot_muted || emitter.signal(left_eye, write_timing);
           if (slot_timing) {
             timing_sample->signal_end = qpc_now();
           }
           if (!signalled) {
-            if (write_timing && write_timing->deadline_rejected) {
-              ++phase_counts[logical_slot].write_deadline_rejected;
-              set_timing_outcome(local_shutter_slot_timing_t::outcome_e::phase_write_deadline_rejected);
-              if (stopped()) {
-                break;
-              }
-              if (recover_clock("the logical-slot host WriteFile deadline was missed"sv)) {
-                continue;
-              }
-              if (stopped()) {
-                break;
-              }
-              fail("the logical-slot host WriteFile deadline could not be met; returning to 2D");
-              break;
-            }
             fail("the USB emitter missed an eye boundary");
             break;
           }
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::signalled);
-          if (phase_calibration_active) {
-            ++phase_counts[logical_slot].signalled;
-          }
           ++confirmed_eye_commands;
           maximum_confirmed_refresh_delta = std::max(maximum_confirmed_refresh_delta, confirmed_refresh_delta);
           if (confirmed_refresh_delta > static_cast<unsigned>(eye_repeats)) {
             ++held_eye_images;
             extra_held_refreshes += confirmed_refresh_delta - eye_repeats;
-          }
-          if (const auto now = std::chrono::steady_clock::now(); shutter_slot_timing && now >= next_progress_log) {
-            next_progress_log = now + 60s;
-            BOOST_LOG(info) << "Local shutter progress: confirmed_eye_commands="sv << confirmed_eye_commands
-                            << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
-                            << " clock_recoveries="sv << clock_recoveries << '.';
           }
           has_displayed = true;
           if (config.presented_frames) {
@@ -10465,18 +10212,6 @@ namespace platf::dxgi {
         // leaves no autonomous eye-toggle source running after the last pulse expires.
         emitter.close();
         shutter_context->Flush();
-        if (phase_calibration_active) {
-          for (std::size_t slot = 0; slot < phase_counts.size(); ++slot) {
-            const auto &phase = phase_counts[slot];
-            BOOST_LOG(info) << "Local shutter phase calibration summary: logical="sv << (slot ? 'R' : 'L')
-                            << " nominal_physical="sv << (((slot == 0) != config.monitor_config.flip_eyes) ? 'L' : 'R')
-                            << " configured_phase_us="sv << emit_phase_us[slot] << " allowed_lateness_us="sv << emit_phase_allowed_lateness_us
-                            << " waits="sv << phase.waits << " ready="sv << phase.ready << " missed="sv << phase.missed
-                            << " cancelled="sv << phase.cancelled << " invalid="sv << phase.invalid << " wait_failed="sv << phase.wait_failed
-                            << " freshness_rejected="sv << phase.freshness_rejected << " write_deadline_rejected="sv << phase.write_deadline_rejected
-                            << " signalled="sv << phase.signalled << '.';
-          }
-        }
         if (slot_timing) {
           slot_timing->log_summary(config.monitor_config.flip_eyes, host_age_budget_us);
         }

@@ -525,7 +525,7 @@ namespace platf::open3d {
     return true;
   }
 
-  bool emitter_t::signal(bool left_eye, signal_timing_t *timing, std::int64_t latest_write_qpc) {
+  bool emitter_t::signal(bool left_eye, signal_timing_t *timing) {
     if (timing) {
       *timing = {};
     }
@@ -553,21 +553,12 @@ namespace platf::open3d {
     ResetEvent(impl_->signal_io.hEvent);
     LARGE_INTEGER write_begin {}, write_end {};
     BOOL begin_clock_valid = FALSE;
-    BOOL started = FALSE;
-    DWORD write_error = ERROR_SUCCESS;
-    if (timing || latest_write_qpc > 0) {
+    if (timing) {
       begin_clock_valid = QueryPerformanceCounter(&write_begin);
     }
-    if (!detail::invoke_signal_write_with_deadline(latest_write_qpc, write_begin.QuadPart, begin_clock_valid != FALSE, [&]() {
-          started = WriteFile(handle, impl_->signal_bytes.data(), static_cast<DWORD>(impl_->signal_bytes.size()), &count, &impl_->signal_io);
-          // Preserve WriteFile's result before the optional clock query can change last-error.
-          write_error = started ? ERROR_SUCCESS : GetLastError();
-        })) {
-      if (timing) {
-        timing->deadline_rejected = true;
-      }
-      return false;
-    }
+    const BOOL started = WriteFile(handle, impl_->signal_bytes.data(), static_cast<DWORD>(impl_->signal_bytes.size()), &count, &impl_->signal_io);
+    // Preserve WriteFile's result before the optional clock query can change last-error.
+    const DWORD write_error = started ? ERROR_SUCCESS : GetLastError();
     if (timing) {
       const auto end_clock_valid = QueryPerformanceCounter(&write_end);
       *timing = {

@@ -130,29 +130,13 @@ namespace platf::open3d {
     std::int64_t write_end_qpc = 0;
     std::int64_t qpc_frequency = 0;
     bool write_pending = false;
-    bool deadline_rejected = false;
 
     [[nodiscard]] constexpr bool valid() const noexcept {
-      return !deadline_rejected && qpc_frequency > 0 && write_begin_qpc > 0 && write_end_qpc >= write_begin_qpc;
+      return qpc_frequency > 0 && write_begin_qpc > 0 && write_end_qpc >= write_begin_qpc;
     }
   };
 
   namespace detail {
-    // Returns whether the write callback ran, not its transport result. A zero deadline keeps
-    // the legacy path independent of clock availability; bounded calls require a valid sample
-    // no later than the caller's deadline. No arithmetic on timestamps may wrap these checks.
-    template<class Write>
-    constexpr bool invoke_signal_write_with_deadline(
-      std::int64_t latest_write_qpc, std::int64_t now_qpc, bool clock_valid, Write &&write
-    ) {
-      if (latest_write_qpc < 0 ||
-          (latest_write_qpc > 0 && (!clock_valid || now_qpc <= 0 || now_qpc > latest_write_qpc))) {
-        return false;
-      }
-      std::forward<Write>(write)();
-      return true;
-    }
-
     struct parameters_t {
       int firmware_version = 0;
       // Positional firmware fields following the version. Retain additional fields from newer
@@ -207,10 +191,7 @@ namespace platf::open3d {
     bool quiesce(std::stop_token stop = {});
     // timing is reset on entry and populated only when WriteFile is attempted. Its validity
     // does not affect the signal result; callers must separately check the successful write.
-    // A positive deadline checks QPC immediately before the write; zero preserves the legacy
-    // unbounded path. A rejected/invalid deadline sends nothing and leaves the connection ready
-    // for quiet recovery, with only timing->deadline_rejected set. It is not a USB-arrival bound.
-    bool signal(bool left_eye, signal_timing_t *timing = nullptr, std::int64_t latest_write_qpc = 0);
+    bool signal(bool left_eye, signal_timing_t *timing = nullptr);
     bool healthy() const;
     void close();
 

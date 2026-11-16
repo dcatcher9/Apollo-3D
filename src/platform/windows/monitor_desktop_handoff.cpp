@@ -146,7 +146,6 @@ namespace platf {
       WINDOWPLACEMENT placement {sizeof(WINDOWPLACEMENT)};
       bool minimized = false;
       bool visible = true;
-      bool moved = false;
       std::optional<RECT> pending_source_normal;
       bool move_posted = false;
     };
@@ -285,6 +284,17 @@ namespace platf {
       const auto destination_workspace = workspace_offset(window.hwnd, destination);
       if (!destination_workspace) {
         return false;
+      }
+      // Windows maximizes a window on the monitor that holds its restore rectangle. One that is
+      // maximized here but would restore onto another monitor can therefore only follow the
+      // handoff if that rectangle comes along; keep its size and bring it inside the destination.
+      const bool maximizes = window.placement.showCmd == SW_SHOWMAXIMIZED || (window.placement.flags & WPF_RESTORETOMAXIMIZED);
+      if (maximizes && !monitor_desktop_detail::contains_center(destination, normal_rect)) {
+        const LONG width = std::min<LONG>(normal_rect.right - normal_rect.left, destination.right - destination.left);
+        const LONG height = std::min<LONG>(normal_rect.bottom - normal_rect.top, destination.bottom - destination.top);
+        const LONG left = std::clamp<LONG>(normal_rect.left, destination.left, destination.right - width);
+        const LONG top = std::clamp<LONG>(normal_rect.top, destination.top, destination.bottom - height);
+        normal_rect = {left, top, left + width, top + height};
       }
       const auto placement = monitor_desktop_detail::placement_for_move(window.placement, translated(normal_rect, *destination_workspace, true), window.minimized, window.visible);
       if (!placement || security_surface_window(window.hwnd)) {
@@ -467,6 +477,11 @@ namespace platf {
     bool captured = false;
     bool active = false;
     bool restore_prepared = false;
+    // Restoration is retried by the session until it succeeds. The cursor is placed once, and a
+    // window that still has not gone back after several attempts is given up so one stuck
+    // application cannot keep the private display alive or keep disturbing the desktop.
+    bool restore_cursor_placed = false;
+    unsigned restore_attempts = 0;
     POINT restore_cursor {};
     bool restore_cursor_captured = false;
 
@@ -555,6 +570,8 @@ namespace platf {
     impl_->release_properties();
     impl_->captured = false;
     impl_->restore_prepared = false;
+    impl_->restore_cursor_placed = false;
+    impl_->restore_attempts = 0;
     impl_->restoring.clear();
     impl_->physical_sink.reset();
     impl_->original = original_monitor_rect;
@@ -628,7 +645,6 @@ namespace platf {
       }
       const auto mapped = monitor_desktop_detail::map_rect(first_activation ? window.normal_rect : current->normal_rect, previous_source, virtual_source_rect);
       if (mapped && move_window(first_activation ? window : *current, *mapped, virtual_source_rect, impl_->property, impl_->token())) {
-        window.moved = true;
         moving.push_back(first_activation ? window : *current);
         moving_normal.push_back(*mapped);
       } else {
@@ -725,7 +741,6 @@ namespace platf {
       window->pending_source_normal = *mapped;
       attempted_move = true;
       window->move_posted = move_window(*current, *mapped, virtual_source_rect, impl_->property, impl_->token());
-      window->moved = window->move_posted;
       completed = window->move_posted && completed;
     }
     for (auto &window : impl_->windows) {
@@ -740,7 +755,6 @@ namespace platf {
       if (monitor_desktop_detail::contains_center(virtual_source_rect, current->desktop_rect)) {
         window.pending_source_normal.reset();
         window.move_posted = false;
-        window.moved = true;
       } else if (monitor_desktop_detail::contains_center(physical_sink_rect, current->desktop_rect)) {
         completed = false;
       } else {
@@ -829,8 +843,10 @@ namespace platf {
     }
     const HWND foreground = GetForegroundWindow();
     impl_->discard_security_windows();
+    ++impl_->restore_attempts;
     bool success = true;
     std::vector<window_t> moving;
+    std::vector<RECT> moving_normal;
     for (const auto &window : impl_->restoring) {
       if (!impl_->owned(window)) {
         continue;
@@ -838,29 +854,57 @@ namespace platf {
       // The pre-topology snapshot identifies source windows even if Windows has already moved
       // them elsewhere after detaching the source. Preserve their latest source-relative layout.
       const auto mapped = monitor_desktop_detail::map_rect(window.normal_rect, impl_->source, *destination);
-      if (mapped && move_window(window, *mapped, *destination, impl_->property, impl_->token())) {
-        moving.push_back(window);
-      } else {
+      if (!mapped) {
         success = false;
+        continue;
       }
+      moving.push_back(window);
+      moving_normal.push_back(*mapped);
     }
-    success = await_moves(moving, *destination) && success;
-    POINT cursor {};
-    if (impl_->restore_cursor_captured || (GetCursorPos(&cursor) && monitor_desktop_detail::contains(impl_->source, cursor))) {
-      if (const auto mapped = monitor_desktop_detail::map_point(impl_->restore_cursor_captured ? impl_->restore_cursor : cursor, impl_->source, *destination)) {
-        SetCursorPos(mapped->x, mapped->y);
+    // Send each placement only to windows that are not already back, so a retry never undoes
+    // what the user has done since with windows that did return. As in activation, Windows can
+    // undo a move while the topology settles and an already maximized window keeps its monitor
+    // unless it is restored first, so later rounds re-send with that step.
+    constexpr int move_rounds = 4;
+    bool completed = false;
+    for (int round = 0; round < move_rounds && !completed; ++round) {
+      for (std::size_t index = 0; index < moving.size(); ++index) {
+        if (!window_arrived(moving[index], *destination) &&
+            !move_window(moving[index], moving_normal[index], *destination, impl_->property, impl_->token(), round > 0 || impl_->restore_attempts > 1) &&
+            round == 0) {
+          success = false;
+        }
       }
+      completed = await_moves(moving, *destination, std::chrono::milliseconds {500}, round + 1 == move_rounds);
+    }
+    success = completed && success;
+    if (!impl_->restore_cursor_placed) {
+      POINT cursor {};
+      if (impl_->restore_cursor_captured || (GetCursorPos(&cursor) && monitor_desktop_detail::contains(impl_->source, cursor))) {
+        if (const auto mapped = monitor_desktop_detail::map_point(impl_->restore_cursor_captured ? impl_->restore_cursor : cursor, impl_->source, *destination)) {
+          SetCursorPos(mapped->x, mapped->y);
+        }
+      }
+      impl_->restore_cursor_placed = true;
     }
     retain_foreground(foreground);
-    if (!success) {
+    constexpr unsigned maximum_restore_attempts = 4;
+    if (!success && impl_->restore_attempts < maximum_restore_attempts) {
       BOOST_LOG(warning) << "Some monitor desktop windows did not acknowledge restoration; retaining their handoff snapshot for cleanup retry.";
       return false;
+    }
+    if (!success) {
+      // Windows relocates whatever remains when the private display is removed.
+      BOOST_LOG(warning) << "Monitor desktop handoff gave up restoring the windows named above after "
+                         << impl_->restore_attempts << " attempts; leaving them to Windows.";
     }
     impl_->active = false;
     impl_->captured = false;
     impl_->release_properties();
     impl_->restoring.clear();
     impl_->restore_prepared = false;
+    impl_->restore_cursor_placed = false;
+    impl_->restore_attempts = 0;
     return true;
   }
 }  // namespace platf

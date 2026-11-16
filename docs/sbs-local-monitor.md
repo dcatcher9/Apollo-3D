@@ -127,8 +127,9 @@ when the presenter reads them. The eye did reach the screen, but its boundary wa
 That is treated like a timing-only interruption below; a present beyond the eye is an unknown
 image and returns to 2D.
 
-A missing/invalid present, counter-domain discontinuity, excessive hold, or invalid timestamp
-immediately stops eye commands. For a timing-only interruption, the presenter freezes image
+A missing/invalid present, counter-domain discontinuity, excessive hold, early boundary, stale
+image or invalid timestamp immediately stops eye commands. Every such rejection of an armed image,
+and a timing-only interruption of the feedback itself, is recoverable: the presenter freezes image
 submissions and retains its stereo pair while the emitter finishes its previous USB write.
 A read-only settings query on the
 same serial connection acts as a firmware processing barrier; the complete verified profile must
@@ -223,36 +224,6 @@ and held-refresh counts alongside the distributions. A host delay in one slot ca
 next slot's submission, so unchanged settings for the other eye do not establish unchanged
 presentation. Host write timestamps measure submission to Windows, not USB arrival, IR decoding,
 the panel's light output, or the glasses' transmission window. Visual calibration remains required.
-
-Independent host-phase calibration is experimental. The optional environment variables
-`SUNSHINE_LOCAL_MONITOR_L_EMIT_PHASE_US` and `SUNSHINE_LOCAL_MONITOR_R_EMIT_PHASE_US` select a
-logical slot's host command phase after its confirmed display boundary. Both default to zero,
-which preserves immediate emission. A positive phase and its 250 µs write-lateness allowance
-must fit the existing host-feedback budget. These values do not replace the emitter's shared
-delay or duration, and cannot move a command earlier than the received feedback.
-
-For repeated calibration without relaunching the elevated host, set
-`SUNSHINE_LOCAL_MONITOR_PHASE_CONFIG` to a UTF-8 JSON file containing exactly these two integer
-fields:
-
-```json
-{"logical_L_us": 0, "logical_R_us": 0}
-```
-
-The file is limited to 2 KiB and is read once per presenter initialization. Stop 3D and wait for
-the inactive state before editing it; the next Start reads the new values. Nonzero direct phase
-environment variables cannot be combined with a phase file. Invalid files or values fail before
-emitter configuration. No phase file is read during armed presentation.
-
-An already-missed target, cancellation, excessive wake lateness, or expiry inside the transport
-checks sends no scheduled command. Timing failures use the existing bounded quiet recovery;
-transport failures retain their existing stop behavior. The final deadline is checked again
-immediately before `WriteFile`. A positive phase uses timer waits followed by bounded processor
-polling within the last 750 µs of the target; zero phases bypass this additional work. This avoids
-relying solely on repeated short kernel waits, while preserving cancellation and the write cutoff.
-It does not guarantee operating-system dispatch deadlines. Calibrate one logical slot at a time, then verify both physical
-lenses, held-refresh counts and neighboring-slot submission timing. A passing host deadline does
-not establish a clean optical window or unchanged behavior of the other lens.
 
 To separate glasses behaviour from host timing, the internal
 `SUNSHINE_LOCAL_MONITOR_MUTE_SLOT` flag accepts exactly `L` or `R` and is absent by default. The
