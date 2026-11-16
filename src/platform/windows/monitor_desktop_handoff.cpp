@@ -340,9 +340,9 @@ namespace platf {
              (!window.visible ? !current->visible : window.minimized ? current->minimized : window.placement.showCmd != SW_SHOWMAXIMIZED || IsZoomed(window.hwnd));
     }
 
-    bool await_moves(const std::vector<window_t> &windows, RECT destination, std::chrono::milliseconds wait = std::chrono::milliseconds {2000}, bool report = true) {
-      // A large desktop with many maximized or busy applications needs more than a few hundred
-      // milliseconds to acknowledge a move. The wait ends as soon as every window has arrived.
+    bool await_moves(const std::vector<window_t> &windows, RECT destination, std::chrono::milliseconds wait = std::chrono::milliseconds {500}, bool report = true) {
+      // The wait ends as soon as every window has arrived. Activation calls this in several
+      // rounds and re-sends moves between them; restoration keeps its single bounded wait.
       const auto deadline = std::chrono::steady_clock::now() + wait;
       const auto arrived = [&](const auto &window) {
         return window_arrived(window, destination);

@@ -9853,91 +9853,8 @@ namespace platf::dxgi {
         std::array<unsigned, 6> acquisition_wait_counts {};
         unsigned acquisition_maximum_streak = 0;
         std::uint64_t confirmed_eye_commands = 0, held_eye_images = 0, extra_held_refreshes = 0;
-        std::uint64_t short_eye_images = 0, clock_recoveries = 0;
+        std::uint64_t clock_recoveries = 0;
         auto next_progress_log = std::chrono::steady_clock::now() + 60s;
-        // Schedule probe, active only with the slot-timing diagnostic. It separates the possible
-        // reasons an eye image reaches the screen on a different refresh than requested: the GPU
-        // finishing the eye copy late, Windows flipping a finished image late, or the output
-        // leaving the direct overlay path. It never authorizes or rejects an eye.
-        struct schedule_probe_t {
-          Microsoft::WRL::ComPtr<ID3D11Query> gpu_event;
-          Microsoft::WRL::ComPtr<IDXGISwapChainMedia> media;
-          bool gpu_pending = false, new_pair = false;
-          std::int64_t gpu_done_qpc = 0, previous_boundary_qpc = 0;
-          // Stereo pairs are counted where they are acquired; the tuple group only advances
-          // with phase lookahead.
-          std::uint64_t pair_serial = 0, last_pair_serial = std::numeric_limits<std::uint64_t>::max();
-          std::int64_t pair_acquired_qpc = 0;
-          // Two independent clock measurements per minute: the selected output from its own
-          // confirmed refresh counter, and the desktop compositor from its timing report.
-          std::uint32_t minute_first_refresh = 0, minute_last_refresh = 0;
-          std::int64_t minute_first_qpc = 0, minute_last_qpc = 0;
-          std::uint64_t dwm_first_refresh = 0, dwm_first_frame = 0;
-          std::int64_t dwm_first_qpc = 0;
-          struct bucket_t {
-            std::uint64_t count = 0, unfinished = 0;
-            long double sum_us = 0, max_us = 0;
-          };
-          std::array<bucket_t, 2> gpu {};  // 0: repeated pair, 1: first eye of a new pair
-          std::uint64_t composed_images = 0, off_schedule_logged = 0;
-        } schedule_probe;
-        if (shutter_slot_timing) {
-          const D3D11_QUERY_DESC event_desc {D3D11_QUERY_EVENT, 0};
-          if (FAILED(shutter_device->CreateQuery(&event_desc, &schedule_probe.gpu_event))) {
-            schedule_probe.gpu_event.Reset();
-          }
-          if (FAILED(swapchain.As(&schedule_probe.media))) {
-            schedule_probe.media.Reset();
-          }
-        }
-        // Independent view of the selected output's vertical blanks: a time-critical thread
-        // wakes on every blank and records when. A blank whose wake-up is late shows that the
-        // system delivered that interrupt late, which is one way a queued image misses its
-        // refresh; blanks that arrive on time around a missed refresh clear that path.
-        struct vblank_watch_t {
-          std::mutex mutex;
-          std::array<std::int64_t, 8192> wake_qpc {};
-          std::size_t next = 0, count = 0;
-          std::uint64_t intervals = 0, late_intervals = 0;
-          long double max_error_us = 0;
-        };
-        const auto vblank_watch = std::make_shared<vblank_watch_t>();
-        std::jthread vblank_thread;
-        if (shutter_slot_timing) {
-          const long double period_us = 1000000000.0L / config.target_refresh_millihz;
-          vblank_thread = std::jthread([output = target_output, watch = vblank_watch, qpc_now, period_us, frequency = qpc_frequency.QuadPart](std::stop_token stop) {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-            std::int64_t previous = 0;
-            while (!stop.stop_requested()) {
-              if (FAILED(output->WaitForVBlank())) {
-                std::this_thread::sleep_for(1ms);
-                previous = 0;
-                continue;
-              }
-              const auto now = qpc_now();
-              std::lock_guard lock(watch->mutex);
-              watch->wake_qpc[watch->next] = now;
-              watch->next = (watch->next + 1) % watch->wake_qpc.size();
-              watch->count = std::min(watch->count + 1, watch->wake_qpc.size());
-              if (previous) {
-                const auto error_us = std::fabs(static_cast<long double>(now - previous) * 1000000.0L / frequency - period_us);
-                ++watch->intervals;
-                watch->late_intervals += error_us > 500.0L;
-                watch->max_error_us = std::max(watch->max_error_us, error_us);
-              }
-              previous = now;
-            }
-          });
-        }
-        const auto poll_schedule_probe = [&]() {
-          if (schedule_probe.gpu_pending && schedule_probe.gpu_event) {
-            BOOL done = FALSE;
-            if (shutter_context->GetData(schedule_probe.gpu_event.Get(), &done, sizeof(done), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && done) {
-              schedule_probe.gpu_done_qpc = qpc_now();
-              schedule_probe.gpu_pending = false;
-            }
-          }
-        };
         std::uint64_t muted_eye_commands = 0;
         std::uint32_t maximum_confirmed_refresh_delta = 0;
         std::optional<detail::shutter_feedback_t> first_feedback;
@@ -9951,7 +9868,6 @@ namespace platf::dxgi {
           },
           .cancelled = stopped,
           .query = [&]() {
-            poll_schedule_probe();
             DXGI_FRAME_STATISTICS statistics {};
             const auto queried = swapchain->GetFrameStatistics(&statistics);
             const detail::shutter_feedback_t feedback {
@@ -10032,13 +9948,6 @@ namespace platf::dxgi {
           submission.present.tuple_group = held_tuple_group;
           submission.present.left_eye = left_eye;
           draw_eye(left_eye);
-          if (schedule_probe.gpu_event) {
-            shutter_context->End(schedule_probe.gpu_event.Get());
-            schedule_probe.gpu_pending = true;
-            schedule_probe.gpu_done_qpc = 0;
-            schedule_probe.new_pair = schedule_probe.pair_serial != schedule_probe.last_pair_serial;
-            schedule_probe.last_pair_serial = schedule_probe.pair_serial;
-          }
           submission.prior_count_result = swapchain->GetLastPresentCount(&submission.prior_count);
           DXGI_PRESENT_PARAMETERS parameters {};
           submission.present.present_begin_qpc = qpc_now();
@@ -10237,8 +10146,6 @@ namespace platf::dxgi {
           // refreshes. Publishing another capture can never change the second eye of this pair.
           if (!prefetched && (!pair || (has_displayed && eye_clock.starts_pair()))) {
             pair = shutter_frames.acquire_pair();
-            ++schedule_probe.pair_serial;
-            schedule_probe.pair_acquired_qpc = qpc_now();
             if (lookahead_active && pair) {
               if (held_tuple_group == std::numeric_limits<std::uint64_t>::max()) {
                 fail("the stereo-pair ownership generation overflowed");
@@ -10407,9 +10314,7 @@ namespace platf::dxgi {
                              << " acquiring="sv << acquiring << " stable_samples="sv << feedback_tracker.streak()
                              << " host_age_budget_us="sv << host_age_budget_us
                              << " flush_hr="sv << util::log_hex(flush_result)
-                             << " flush_start_qpc="sv << flush_start_qpc << " flush_end_qpc="sv << flush_end_qpc
-                             << " probe_new_pair="sv << schedule_probe.new_pair << " probe_gpu_done_qpc="sv << schedule_probe.gpu_done_qpc
-                             << " probe_previous_boundary_qpc="sv << schedule_probe.previous_boundary_qpc << '.';
+                             << " flush_start_qpc="sv << flush_start_qpc << " flush_end_qpc="sv << flush_end_qpc << '.';
 
             // Read-only, failure-only probes distinguish composition feedback from a stale or
             // wrong output. They never authorize an eye or replace the confirmed-present gate.
@@ -10537,79 +10442,6 @@ namespace platf::dxgi {
           if (slot_timing) {
             timing_sample->delta_known = previous_displayed_refresh.has_value();
             timing_sample->refresh_delta = confirmed_refresh_delta;
-          }
-          if (shutter_slot_timing) {
-            poll_schedule_probe();
-            const auto to_us = [&](std::int64_t ticks) {
-              return static_cast<long double>(ticks) * 1000000.0L / qpc_frequency.QuadPart;
-            };
-            const auto boundary_qpc = feedback_tracker.last_present_qpc().value_or(0);
-            auto &bucket = schedule_probe.gpu[schedule_probe.new_pair ? 1 : 0];
-            ++bucket.count;
-            if (schedule_probe.gpu_done_qpc) {
-              const auto gpu_us = to_us(schedule_probe.gpu_done_qpc - present_end_qpc);
-              bucket.sum_us += gpu_us;
-              bucket.max_us = std::max(bucket.max_us, gpu_us);
-            } else {
-              ++bucket.unfinished;
-            }
-            UINT composition_mode = 255;
-            if (schedule_probe.media) {
-              DXGI_FRAME_STATISTICS_MEDIA media_stats {};
-              if (SUCCEEDED(schedule_probe.media->GetFrameStatisticsMedia(&media_stats))) {
-                composition_mode = static_cast<UINT>(media_stats.CompositionMode);
-              }
-            }
-            const bool composed = composition_mode != static_cast<UINT>(DXGI_FRAME_PRESENTATION_MODE_OVERLAY) && composition_mode != 255;
-            schedule_probe.composed_images += composed;
-            if (!schedule_probe.minute_first_qpc) {
-              schedule_probe.minute_first_refresh = confirmation.feedback.refresh_count;
-              schedule_probe.minute_first_qpc = boundary_qpc;
-            }
-            schedule_probe.minute_last_refresh = confirmation.feedback.refresh_count;
-            schedule_probe.minute_last_qpc = boundary_qpc;
-            const bool off_schedule = previous_displayed_refresh && confirmed_refresh_delta != static_cast<unsigned>(eye_repeats);
-            if ((off_schedule || composed) && schedule_probe.off_schedule_logged < 2000 && schedule_probe.previous_boundary_qpc) {
-              ++schedule_probe.off_schedule_logged;
-              // The requested refresh is the previous boundary plus one eye interval.
-              const auto target_qpc = schedule_probe.previous_boundary_qpc +
-                                      static_cast<std::int64_t>(static_cast<long double>(qpc_frequency.QuadPart) * 1000.0L * eye_repeats / config.target_refresh_millihz);
-              BOOST_LOG(info) << "Local shutter schedule probe: refresh_delta="sv << confirmed_refresh_delta << " repeats="sv << eye_repeats
-                              << " left="sv << left_eye << " new_pair="sv << schedule_probe.new_pair
-                              << " composition_mode="sv << composition_mode
-                              << " submit_after_previous_boundary_us="sv << to_us(present_end_qpc - schedule_probe.previous_boundary_qpc)
-                              << " gpu_done_after_submit_us="sv << (schedule_probe.gpu_done_qpc ? to_us(schedule_probe.gpu_done_qpc - present_end_qpc) : -1.0L)
-                              << " gpu_done_before_target_us="sv << (schedule_probe.gpu_done_qpc ? to_us(target_qpc - schedule_probe.gpu_done_qpc) : -1.0L)
-                              << " displayed_after_target_us="sv << to_us(boundary_qpc - target_qpc)
-                              << " present_call_us="sv << to_us(present_end_qpc - present_start_qpc)
-                              << " pair_age_at_submit_us="sv << to_us(present_end_qpc - schedule_probe.pair_acquired_qpc);
-              {
-                // Every blank the watcher woke on from just before the previous boundary to just
-                // after this one, as microseconds after the previous boundary.
-                std::ostringstream wakes;
-                std::lock_guard lock(vblank_watch->mutex);
-                const auto size = vblank_watch->wake_qpc.size();
-                const auto margin = target_qpc - schedule_probe.previous_boundary_qpc;
-                for (std::size_t back = vblank_watch->count; back > 0; --back) {
-                  const auto wake = vblank_watch->wake_qpc[(vblank_watch->next + size - back) % size];
-                  if (wake >= schedule_probe.previous_boundary_qpc - margin / 2 && wake <= boundary_qpc + margin / 2) {
-                    wakes << ' ' << static_cast<std::int64_t>(to_us(wake - schedule_probe.previous_boundary_qpc));
-                  }
-                }
-                BOOST_LOG(info) << "Local shutter schedule probe blanks: wake_after_previous_boundary_us="sv << wakes.str() << '.';
-              }
-              DWM_TIMING_INFO dwm {};
-              dwm.cbSize = sizeof(dwm);
-              if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &dwm))) {
-                // Where the compositor's own refresh clock stands relative to this output's boundary.
-                BOOST_LOG(info) << "Local shutter schedule probe compositor: vblank_minus_boundary_us="sv
-                                << to_us(static_cast<std::int64_t>(dwm.qpcVBlank) - boundary_qpc)
-                                << " compose_minus_vblank_us="sv << to_us(static_cast<std::int64_t>(dwm.qpcCompose) - static_cast<std::int64_t>(dwm.qpcVBlank))
-                                << " refresh_period_us="sv << to_us(static_cast<std::int64_t>(dwm.qpcRefreshPeriod))
-                                << " refresh="sv << dwm.cRefresh << " frame="sv << dwm.cFrame << '.';
-              }
-            }
-            schedule_probe.previous_boundary_qpc = boundary_qpc;
           }
           previous_displayed_refresh = confirmation.feedback.refresh_count;
           std::int64_t latest_write_qpc = 0;
@@ -10768,8 +10600,13 @@ namespace platf::dxgi {
               if (!feedback_tracker.confirmed_feedback_matches(requested_present, reproof, reproof_qpc)) {
                 ++lookahead_counts.reproof_rejected;
                 set_timing_outcome(local_shutter_slot_timing_t::outcome_e::lookahead_reproof_failed);
-                const bool known_pending = pending_present.pending() && reproof.present_count == pending_present.pending()->present_id;
-                if (reproof.status == detail::shutter_feedback_status_e::available && reproof.present_count != requested_present && !known_pending) {
+                // The queued next eye is also several presents; any of them is that owned eye.
+                const bool known_pending = pending_present.pending() &&
+                                           static_cast<std::uint32_t>(reproof.present_count - pending_present.pending()->present_id) < static_cast<std::uint32_t>(eye_repeats);
+                // A later present of the current eye is still that eye; a failed reproof of it is
+                // staleness, which quiet recovery handles, not an unowned image.
+                const bool current_eye = static_cast<std::uint32_t>(reproof.present_count - requested_present) < static_cast<std::uint32_t>(eye_repeats);
+                if (reproof.status == detail::shutter_feedback_status_e::available && !current_eye && !known_pending) {
                   const auto queued = pending_present.pending().value_or(detail::shutter_queued_present_t {});
                   fail_pending_ownership("DXGI reported an unowned displayed eye before its phased command"sv, queued, &submission.present, &reproof);
                   break;
@@ -10853,59 +10690,12 @@ namespace platf::dxgi {
           if (confirmed_refresh_delta > static_cast<unsigned>(eye_repeats)) {
             ++held_eye_images;
             extra_held_refreshes += confirmed_refresh_delta - eye_repeats;
-          } else if (confirmed_refresh_delta < static_cast<unsigned>(eye_repeats)) {
-            ++short_eye_images;
           }
-          if (const auto now = std::chrono::steady_clock::now(); now >= next_progress_log) {
+          if (const auto now = std::chrono::steady_clock::now(); shutter_slot_timing && now >= next_progress_log) {
             next_progress_log = now + 60s;
             BOOST_LOG(info) << "Local shutter progress: confirmed_eye_commands="sv << confirmed_eye_commands
                             << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
-                            << " short_eye_images="sv << short_eye_images << " clock_recoveries="sv << clock_recoveries << '.';
-            if (shutter_slot_timing) {
-              const auto &repeated = schedule_probe.gpu[0];
-              const auto &fresh = schedule_probe.gpu[1];
-              const auto mean = [](const auto &bucket) {
-                return bucket.count > bucket.unfinished ? bucket.sum_us / (bucket.count - bucket.unfinished) : 0.0L;
-              };
-              BOOST_LOG(info) << "Local shutter schedule probe minute: eye copy GPU completion after submit, new_pair count="sv << fresh.count
-                              << " mean_us="sv << mean(fresh) << " max_us="sv << fresh.max_us << " unfinished_at_display="sv << fresh.unfinished
-                              << "; repeated_pair count="sv << repeated.count << " mean_us="sv << mean(repeated) << " max_us="sv << repeated.max_us
-                              << " unfinished_at_display="sv << repeated.unfinished
-                              << "; composed_images="sv << schedule_probe.composed_images << '.';
-              schedule_probe.gpu = {};
-              schedule_probe.composed_images = 0;
-              {
-                std::lock_guard lock(vblank_watch->mutex);
-                BOOST_LOG(info) << "Local shutter schedule probe blanks minute: intervals="sv << vblank_watch->intervals
-                                << " off_by_more_than_500us="sv << vblank_watch->late_intervals
-                                << " max_error_us="sv << vblank_watch->max_error_us << '.';
-                vblank_watch->intervals = vblank_watch->late_intervals = 0;
-                vblank_watch->max_error_us = 0;
-              }
-              const auto output_refreshes = static_cast<std::uint32_t>(schedule_probe.minute_last_refresh - schedule_probe.minute_first_refresh);
-              const auto output_ticks = schedule_probe.minute_last_qpc - schedule_probe.minute_first_qpc;
-              const long double output_hz = output_ticks > 0 ? static_cast<long double>(output_refreshes) * qpc_frequency.QuadPart / output_ticks : 0.0L;
-              DWM_TIMING_INFO dwm {};
-              dwm.cbSize = sizeof(dwm);
-              if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &dwm))) {
-                const auto dwm_qpc = static_cast<std::int64_t>(dwm.qpcVBlank);
-                long double dwm_hz = 0, dwm_frames_per_second = 0;
-                if (schedule_probe.dwm_first_qpc && dwm_qpc > schedule_probe.dwm_first_qpc) {
-                  const auto seconds = static_cast<long double>(dwm_qpc - schedule_probe.dwm_first_qpc) / qpc_frequency.QuadPart;
-                  dwm_hz = static_cast<long double>(dwm.cRefresh - schedule_probe.dwm_first_refresh) / seconds;
-                  dwm_frames_per_second = static_cast<long double>(dwm.cFrame - schedule_probe.dwm_first_frame) / seconds;
-                }
-                BOOST_LOG(info) << "Local shutter schedule probe clocks: output_measured_hz="sv << std::fixed << std::setprecision(4) << output_hz
-                                << " compositor_measured_hz="sv << dwm_hz << " compositor_frames_per_second="sv << dwm_frames_per_second
-                                << " compositor_reported_refresh="sv << dwm.rateRefresh.uiNumerator << '/' << dwm.rateRefresh.uiDenominator
-                                << " compositor_reported_compose="sv << dwm.rateCompose.uiNumerator << '/' << dwm.rateCompose.uiDenominator
-                                << std::defaultfloat << std::setprecision(6) << '.';
-                schedule_probe.dwm_first_qpc = dwm_qpc;
-                schedule_probe.dwm_first_refresh = dwm.cRefresh;
-                schedule_probe.dwm_first_frame = dwm.cFrame;
-              }
-              schedule_probe.minute_first_qpc = 0;
-            }
+                            << " clock_recoveries="sv << clock_recoveries << '.';
           }
           has_displayed = true;
           if (config.presented_frames) {
@@ -10914,7 +10704,7 @@ namespace platf::dxgi {
         }
         BOOST_LOG(info) << "Local shutter presentation summary: confirmed_eye_commands="sv << confirmed_eye_commands
                         << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
-                        << " short_eye_images="sv << short_eye_images << " clock_recoveries="sv << clock_recoveries
+                        << " clock_recoveries="sv << clock_recoveries
                         << " maximum_refresh_delta="sv << maximum_confirmed_refresh_delta << " repeats="sv << eye_repeats << '.';
         if (shutter_muted_slot) {
           BOOST_LOG(info) << "Local shutter single-slot diagnostic summary: muted_logical_slot="sv << (*shutter_muted_slot == 0u ? 'L' : 'R')

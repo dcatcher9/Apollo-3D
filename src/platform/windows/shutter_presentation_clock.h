@@ -381,44 +381,6 @@ namespace platf::dxgi::detail {
     return repeats >= 1 && repeats <= 4 && delta >= repeats && delta <= 4 * repeats;
   }
 
-  // An image that reaches the screen late does not move the schedule of the images after it:
-  // DXGI keeps their original refreshes. The sequence can stay behind for several images and is
-  // then made up by one image that is on screen for fewer refreshes, so its successor's boundary
-  // arrives early by exactly the refreshes still owed. That boundary is an exactly identified
-  // image on the unchanged schedule, not a lost eye.
-  //
-  // The lag is the number of refreshes an armed sequence is behind. It grows with every late
-  // image, is spent by an early boundary, and expires after a few on-time images so an old
-  // delay can never excuse an unrelated short interval. A short interval that exceeds the
-  // outstanding lag, or arrives with none, remains a fault.
-  struct shutter_refresh_lag_t {
-    std::uint32_t refreshes = 0;
-    std::uint32_t images_left = 0;
-  };
-
-  inline constexpr std::uint32_t shutter_refresh_lag_window = 8;
-
-  constexpr std::optional<shutter_refresh_lag_t> advance_refresh_lag(unsigned repeats, std::uint32_t delta, shutter_refresh_lag_t lag) noexcept {
-    if (repeats < 1 || repeats > 4) {
-      return std::nullopt;
-    }
-    if (delta >= repeats && delta <= 4 * repeats) {
-      if (delta > repeats) {
-        const auto owed = lag.refreshes + (delta - repeats);
-        return shutter_refresh_lag_t {owed < 3 * repeats ? owed : 3 * repeats, shutter_refresh_lag_window};
-      }
-      if (lag.refreshes && lag.images_left > 1) {
-        return shutter_refresh_lag_t {lag.refreshes, lag.images_left - 1};
-      }
-      return shutter_refresh_lag_t {};
-    }
-    if (repeats >= 2 && delta >= 1 && delta < repeats && lag.refreshes >= repeats - delta) {
-      const auto remaining = lag.refreshes - (repeats - delta);
-      return shutter_refresh_lag_t {remaining, remaining ? lag.images_left : 0};
-    }
-    return std::nullopt;
-  }
-
   // A transient path change may be reacquired with the emitter quiet. Repeated losses must
   // still return to 2D instead of keeping the desktop indefinitely in a dark recovery loop.
   class shutter_recovery_budget_t {
@@ -537,10 +499,9 @@ namespace platf::dxgi::detail {
         return invalidate();
       }
       const auto refresh_delta = static_cast<std::uint32_t>(feedback.refresh_count - last_refresh_);
-      const auto next_lag = armed_ ? advance_refresh_lag(repeats_, refresh_delta, lag_) : std::nullopt;
       const bool continuous = last_present_qpc_ &&
                               requested_id == static_cast<std::uint32_t>(last_present_id_ + present_stride_) &&
-                              (armed_ ? next_lag.has_value() : refresh_delta == repeats_) &&
+                              (armed_ ? held_refresh_delta_valid(repeats_, refresh_delta) : refresh_delta == repeats_) &&
                               cadence_matches(*present_qpc, refresh_delta);
       if (last_present_qpc_ && !continuous) {
         if (armed_) {
@@ -549,7 +510,6 @@ namespace platf::dxgi::detail {
         // This is a valid boundary in a new sequence, not evidence that the old eye continued.
         streak_ = 0;
       }
-      lag_ = armed_ && continuous ? *next_lag : shutter_refresh_lag_t {};
       last_present_id_ = requested_id;
       last_refresh_ = feedback.refresh_count;
       last_present_qpc_ = *present_qpc;
@@ -587,18 +547,27 @@ namespace platf::dxgi::detail {
       const shutter_feedback_t &feedback,
       std::int64_t now_qpc
     ) const noexcept {
-      if (!armed_ || failed_ || !last_present_qpc_ || requested_id != last_present_id_ ||
-          feedback.refresh_count != last_refresh_ || feedback.sync_qpc - future_ticks() > now_qpc ||
-          !fresh(*last_present_qpc_, now_qpc)) {
+      // The eye is present_stride_ presents of one image. A later present of the same eye,
+      // exactly that many refreshes after the accepted boundary, still shows the accepted eye.
+      const auto ahead = static_cast<std::uint32_t>(feedback.present_count - last_present_id_);
+      if (!armed_ || failed_ || !last_present_qpc_ || requested_id != last_present_id_ || ahead >= present_stride_ ||
+          feedback.refresh_count != static_cast<std::uint32_t>(last_refresh_ + ahead) ||
+          feedback.sync_qpc - future_ticks() > now_qpc || !fresh(*last_present_qpc_, now_qpc)) {
         return false;
       }
-      const auto present_qpc = reconstruct(requested_id, feedback);
+      const auto present_qpc = reconstruct(feedback.present_count, feedback);
       if (!present_qpc || *present_qpc - future_ticks() > now_qpc) {
         return false;
       }
       // Both boundaries are positive, so their signed difference cannot overflow.
       const auto difference = *present_qpc - *last_present_qpc_;
-      return difference >= -1 && difference <= 1;
+      if (!ahead) {
+        return difference >= -1 && difference <= 1;
+      }
+      // A different refresh carries its own timestamp; it must agree with the accepted boundary
+      // within the armed cadence tolerance.
+      const auto error_ticks = std::fabs(static_cast<long double>(difference) - refresh_ticks_ * ahead);
+      return error_ticks * 1000000.0L / qpc_frequency_ <= armed_cadence_tolerance_us_;
     }
 
     [[nodiscard]] unsigned streak() const noexcept { return streak_; }
@@ -673,7 +642,6 @@ namespace platf::dxgi::detail {
     unsigned streak_ = 0;
     std::uint32_t last_present_id_ = 0;
     std::uint32_t last_refresh_ = 0;
-    shutter_refresh_lag_t lag_ {};
     std::optional<std::int64_t> last_present_qpc_;
     bool armed_ = false;
     bool failed_ = false;
@@ -821,12 +789,8 @@ namespace platf::dxgi::detail {
       if (repeats_ < 1 || repeats_ > 4) {
         return false;
       }
-      if (last_refresh_) {
-        const auto next_lag = advance_refresh_lag(repeats_, static_cast<std::uint32_t>(refresh_count - *last_refresh_), lag_);
-        if (!next_lag) {
-          return false;
-        }
-        lag_ = *next_lag;
+      if (last_refresh_ && !held_refresh_delta_valid(repeats_, static_cast<std::uint32_t>(refresh_count - *last_refresh_))) {
+        return false;
       }
       last_refresh_ = refresh_count;
       left_ = !left_;
@@ -836,7 +800,6 @@ namespace platf::dxgi::detail {
   private:
     unsigned repeats_;
     bool left_ = true;
-    shutter_refresh_lag_t lag_ {};
     std::optional<std::uint32_t> last_refresh_;
   };
 }  // namespace platf::dxgi::detail
