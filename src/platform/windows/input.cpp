@@ -17,6 +17,7 @@
 
 // local includes
 #include "ds5/ds5_controller_slot.h"
+#include "input_feedback_test.h"
 #include "keylayout.h"
 #include "misc.h"
 #include "src/config.h"
@@ -80,8 +81,8 @@ namespace platf {
     thread_pool_util::ThreadPool::task_id_t repeat_task {};
     std::chrono::steady_clock::time_point last_report_ts;
 
-    gamepad_feedback_msg_t last_rumble;
-    gamepad_feedback_msg_t last_rgb_led;
+    decltype(gamepad_feedback_msg_t {}.data.rumble) last_rumble {};
+    decltype(gamepad_feedback_msg_t {}.data.rgb_led) last_rgb_led {};
   };
 
   constexpr float EARTH_G = 9.80665f;
@@ -335,7 +336,7 @@ namespace platf {
           uint16_t normalizedSmallMotor = smallMotor << 8;
 
           // Don't resend duplicate rumble data
-          if (normalizedSmallMotor != gamepad.last_rumble.data.rumble.highfreq || normalizedLargeMotor != gamepad.last_rumble.data.rumble.lowfreq) {
+          if (normalizedSmallMotor != gamepad.last_rumble.highfreq || normalizedLargeMotor != gamepad.last_rumble.lowfreq) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(
               gamepad.client_relative_index,
@@ -343,7 +344,7 @@ namespace platf {
               normalizedSmallMotor
             );
             gamepad.feedback_queue->raise(msg);
-            gamepad.last_rumble = msg;
+            gamepad.last_rumble = msg.data.rumble;
           }
           return;
         }
@@ -363,11 +364,11 @@ namespace platf {
 
         if (gamepad.gp.get() == target) {
           // Don't resend duplicate RGB data
-          if (r != gamepad.last_rgb_led.data.rgb_led.r || g != gamepad.last_rgb_led.data.rgb_led.g || b != gamepad.last_rgb_led.data.rgb_led.b) {
+          if (r != gamepad.last_rgb_led.r || g != gamepad.last_rgb_led.g || b != gamepad.last_rgb_led.b) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rgb_led(gamepad.client_relative_index, r, g, b);
             gamepad.feedback_queue->raise(msg);
-            gamepad.last_rgb_led = msg;
+            gamepad.last_rgb_led = msg.data.rgb_led;
           }
           return;
         }
@@ -396,6 +397,47 @@ namespace platf {
 
     client_t client;
   };
+
+#ifdef SUNSHINE_TESTS
+  namespace detail {
+    struct vigem_feedback_test_t::impl_t {
+      vigem_t owner;
+    };
+
+    vigem_feedback_test_t::vigem_feedback_test_t(feedback_queue_t queue, std::uint8_t relative_index):
+        impl_(std::make_unique<impl_t>()) {
+      // No init: the sole slot, target and client remain value-initialized and device-free.
+      impl_->owner.gamepads.resize(1);
+      set_feedback_destination(std::move(queue), relative_index);
+    }
+
+    vigem_feedback_test_t::~vigem_feedback_test_t() = default;
+
+    void vigem_feedback_test_t::rumble(std::uint8_t large_motor, std::uint8_t small_motor) {
+      impl_->owner.rumble(nullptr, large_motor, small_motor);
+    }
+
+    void vigem_feedback_test_t::set_rgb_led(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+      impl_->owner.set_rgb_led(nullptr, r, g, b);
+    }
+
+    void vigem_feedback_test_t::set_feedback_destination(feedback_queue_t queue, std::uint8_t relative_index) {
+      auto &gamepad = impl_->owner.gamepads.front();
+      gamepad.feedback_queue = std::move(queue);
+      gamepad.client_relative_index = relative_index;
+    }
+
+    vigem_feedback_cache_sizes_t vigem_feedback_test_t::cache_sizes() {
+      return {
+        sizeof(gamepad_context_t {}.last_rumble),
+        sizeof(gamepad_context_t {}.last_rgb_led),
+        sizeof(gamepad_context_t),
+        sizeof(gamepad_feedback_msg_t),
+        MAX_GAMEPADS,
+      };
+    }
+  }  // namespace detail
+#endif
 
   void CALLBACK x360_notify(
     client_t::pointer client,
