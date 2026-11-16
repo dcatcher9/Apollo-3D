@@ -1097,6 +1097,8 @@ namespace platf::dxgi {
     // Kept so the destructor can revoke the raw-`this` handler before closing the pool.
     winrt::event_token frame_arrived_token {};
     winrt::Windows::Graphics::Capture::GraphicsCaptureSession capture_session {nullptr};
+    // Last successful cursor configuration for this session; capture health is checked separately.
+    std::optional<bool> cursor_capture_enabled;
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame produced_frame {nullptr}, consumed_frame {nullptr};
     // Capture thread only; see keep_frame().
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame kept_frame {nullptr};
@@ -1104,6 +1106,11 @@ namespace platf::dxgi {
     CONDITION_VARIABLE frame_present_cv;
 
     void on_frame_arrived(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const &sender, winrt::Windows::Foundation::IInspectable const &);
+    void assign_capture_session(winrt::Windows::Graphics::Capture::GraphicsCaptureSession session);
+
+#ifdef SUNSHINE_TESTS
+    friend struct wgc_capture_test_access;
+#endif
 
   public:
     wgc_capture_t();

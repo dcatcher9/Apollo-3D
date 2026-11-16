@@ -61,6 +61,11 @@ namespace platf::dxgi {
     InitializeConditionVariable(&frame_present_cv);
   }
 
+  void wgc_capture_t::assign_capture_session(winrt::GraphicsCaptureSession session) {
+    cursor_capture_enabled.reset();
+    capture_session = std::move(session);
+  }
+
   wgc_capture_t::~wgc_capture_t() {
     drop_kept_frame();
     // Close() can throw (for example after device loss); a destructor must not propagate it.
@@ -84,7 +89,7 @@ namespace platf::dxgi {
     produced_frame = nullptr;
     ReleaseSRWLockExclusive(&frame_lock);
     item = nullptr;
-    capture_session = nullptr;
+    assign_capture_session(nullptr);
     frame_pool = nullptr;
   }
 
@@ -93,6 +98,7 @@ namespace platf::dxgi {
    * @return 0 on success, -1 on failure.
    */
   int wgc_capture_t::init(display_base_t *display, const ::video::config_t &config) {
+    cursor_capture_enabled.reset();
     HRESULT status;
     dxgi::dxgi_t dxgi;
     winrt::com_ptr<::IInspectable> d3d_comhandle;
@@ -140,7 +146,7 @@ namespace platf::dxgi {
       // and produced_frame may hold another between ticks. The third is free for the newest
       // composition, so the frame copied when the export releases the output is never stale.
       frame_pool = winrt::Direct3D11CaptureFramePool::CreateFreeThreaded(uwp_device, static_cast<winrt::Windows::Graphics::DirectX::DirectXPixelFormat>(display->capture_format), 3, item.Size());
-      capture_session = frame_pool.CreateCaptureSession(item);
+      assign_capture_session(frame_pool.CreateCaptureSession(item));
       frame_arrived_token = frame_pool.FrameArrived({this, &wgc_capture_t::on_frame_arrived});
     } catch (winrt::hresult_error &e) {
       BOOST_LOG(error) << "Screen capture is not supported on this device for this release of Windows: failed to create capture session: [0x"sv << util::hex(e.code()).to_string_view() << ']';
@@ -293,12 +299,21 @@ namespace platf::dxgi {
   }
 
   int wgc_capture_t::set_cursor_visible(bool x) {
+    if (!capture_session) {
+      cursor_capture_enabled.reset();
+      return -1;
+    }
+    if (cursor_capture_enabled == x) {
+      return 0;
+    }
     try {
       if (capture_session.IsCursorCaptureEnabled() != x) {
         capture_session.IsCursorCaptureEnabled(x);
       }
+      cursor_capture_enabled = x;
       return 0;
     } catch (winrt::hresult_error &) {
+      cursor_capture_enabled.reset();
       return -1;
     }
   }
