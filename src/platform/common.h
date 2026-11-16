@@ -385,8 +385,6 @@ namespace platf {
     float x;
     float y;
     float pressureOrDistance;  // Distance for hover and pressure for contact
-    float contactAreaMajor;
-    float contactAreaMinor;
   };
 
   class deinit_t {

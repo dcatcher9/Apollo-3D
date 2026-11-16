@@ -840,14 +840,6 @@ namespace input {
       rotation %= 360;
     }
 
-    // Normalize the contact area based on the touchport
-    auto contact_area = scale_client_contact_area(
-      {from_clamped_netfloat(packet->contactAreaMajor, 0.0f, 1.0f) * 65535.f,
-       from_clamped_netfloat(packet->contactAreaMinor, 0.0f, 1.0f) * 65535.f},
-      rotation,
-      {abs_port.width / 65535.f, abs_port.height / 65535.f}
-    );
-
     platf::pen_input_t pen {
       packet->eventType,
       packet->toolType,
@@ -857,8 +849,6 @@ namespace input {
       coords->first,
       coords->second,
       from_clamped_netfloat(packet->pressureOrDistance, 0.0f, 1.0f),
-      contact_area.first,
-      contact_area.second,
     };
 
     platf::pen_update(input->client_context.get(), abs_port, pen);
