@@ -300,19 +300,50 @@ namespace platf {
       return left.left == right.left && left.top == right.top && left.right == right.right && left.bottom == right.bottom;
     }
 
+    // Names a window by class and program only. Titles can hold private content and stay out of the log.
+    std::string describe_window(const window_t &window) {
+      std::array<wchar_t, 256> class_name {};
+      GetClassNameW(window.hwnd, class_name.data(), static_cast<int>(class_name.size()));
+      std::wstring program = L"unknown";
+      if (const auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, window.pid)) {
+        std::array<wchar_t, 1024> image {};
+        DWORD length = static_cast<DWORD>(image.size());
+        if (QueryFullProcessImageNameW(process, 0, image.data(), &length)) {
+          const std::wstring_view path {image.data(), length};
+          const auto separator = path.find_last_of(L"\\/");
+          program = path.substr(separator == std::wstring_view::npos ? 0 : separator + 1);
+        }
+        CloseHandle(process);
+      }
+      return "program=" + to_utf8(program) + " class=" + to_utf8(class_name.data()) +
+             (window.minimized ? " minimized" : window.placement.showCmd == SW_SHOWMAXIMIZED ? " maximized" : " normal") +
+             (IsHungAppWindow(window.hwnd) ? " not-responding" : "");
+    }
+
     bool await_moves(const std::vector<window_t> &windows, RECT destination) {
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {500};
+      // A large desktop with many maximized or busy applications needs more than a few hundred
+      // milliseconds to acknowledge a move. The wait ends as soon as every window has arrived.
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {2000};
+      const auto arrived = [&](const auto &window) {
+        if (!same_identity(window)) {
+          return true;
+        }
+        const auto current = observe_window(window.hwnd, false);
+        return current && monitor_desktop_detail::contains_center(destination, current->desktop_rect) &&
+               (!window.visible ? !current->visible : window.minimized ? current->minimized : window.placement.showCmd != SW_SHOWMAXIMIZED || IsZoomed(window.hwnd));
+      };
       while (true) {
-        const bool complete = std::all_of(windows.begin(), windows.end(), [&](const auto &window) {
-          if (!same_identity(window)) {
-            return true;
+        const bool complete = std::all_of(windows.begin(), windows.end(), arrived);
+        if (complete) {
+          return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+          for (const auto &window : windows) {
+            if (!arrived(window)) {
+              BOOST_LOG(warning) << "Monitor desktop handoff: window did not arrive in time: " << describe_window(window);
+            }
           }
-          const auto current = observe_window(window.hwnd, false);
-          return current && monitor_desktop_detail::contains_center(destination, current->desktop_rect) &&
-                 (!window.visible ? !current->visible : window.minimized ? current->minimized : window.placement.showCmd != SW_SHOWMAXIMIZED || IsZoomed(window.hwnd));
-        });
-        if (complete || std::chrono::steady_clock::now() >= deadline) {
-          return complete;
+          return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds {10});
       }
@@ -571,6 +602,7 @@ namespace platf {
         window.moved = true;
         moving.push_back(first_activation ? window : *current);
       } else {
+        BOOST_LOG(warning) << "Monitor desktop handoff: window refused its move: " << describe_window(window);
         success = false;
       }
     }
