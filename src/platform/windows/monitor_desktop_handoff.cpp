@@ -340,7 +340,17 @@ namespace platf {
         if (std::chrono::steady_clock::now() >= deadline) {
           for (const auto &window : windows) {
             if (!arrived(window)) {
-              BOOST_LOG(warning) << "Monitor desktop handoff: window did not arrive in time: " << describe_window(window);
+              const auto text = [](RECT rect) {
+                return std::to_string(rect.left) + "," + std::to_string(rect.top) + "," + std::to_string(rect.right) + "," + std::to_string(rect.bottom);
+              };
+              const auto current = observe_window(window.hwnd, false);
+              MONITORINFOEXW monitor {};
+              monitor.cbSize = sizeof(monitor);
+              GetMonitorInfoW(MonitorFromWindow(window.hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
+              BOOST_LOG(warning) << "Monitor desktop handoff: window did not arrive in time: " << describe_window(window)
+                                 << " destination=" << text(destination) << " captured_normal=" << text(window.normal_rect)
+                                 << (current ? " now_screen=" + text(current->screen_rect) + " now_normal=" + text(current->normal_rect) + " now_owner=" + text(current->desktop_rect) + (current->minimized ? " now_minimized" : "") + (IsZoomed(window.hwnd) ? " now_maximized" : "") : std::string {" now=unobservable"})
+                                 << " on=" << to_utf8(monitor.szDevice) << " monitor=" << text(monitor.rcMonitor);
             }
           }
           return false;
