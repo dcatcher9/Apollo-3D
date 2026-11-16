@@ -507,10 +507,14 @@ namespace platf::dxgi {
     // TotalMetadataBufferSize is the API-provided capacity for both lists. Querying either method
     // with a null buffer is invalid on real drivers; follow the Desktop Duplication sample's
     // single-buffer order (moves first, then dirty rectangles in the remaining bytes).
-    std::vector<std::byte> metadata(frame_info.TotalMetadataBufferSize);
+    // Keep bounded transport scratch on the capture owner. Only this frame's reported byte
+    // counts below authorize reads; older bytes and the returned coverage have separate lifetimes.
+    if (damage_metadata_.size() < frame_info.TotalMetadataBufferSize) {
+      damage_metadata_.resize(frame_info.TotalMetadataBufferSize);
+    }
     UINT dirty_bytes = 0u;
     UINT move_bytes = 0u;
-    auto *move_rects = reinterpret_cast<DXGI_OUTDUPL_MOVE_RECT *>(metadata.data());
+    auto *move_rects = reinterpret_cast<DXGI_OUTDUPL_MOVE_RECT *>(damage_metadata_.data());
     auto status = dup->GetFrameMoveRects(
       frame_info.TotalMetadataBufferSize,
       move_rects,
@@ -523,7 +527,7 @@ namespace platf::dxgi {
       return {};
     }
     const auto dirty_capacity = frame_info.TotalMetadataBufferSize - move_bytes;
-    auto *dirty_rects = reinterpret_cast<RECT *>(metadata.data() + move_bytes);
+    auto *dirty_rects = reinterpret_cast<RECT *>(damage_metadata_.data() + move_bytes);
     if (dirty_capacity != 0u) {
       status = dup->GetFrameDirtyRects(dirty_capacity, dirty_rects, &dirty_bytes);
       if (

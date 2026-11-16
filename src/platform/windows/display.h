@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -1085,6 +1086,9 @@ namespace platf::dxgi {
     capture_e release_frame();
 
     ~duplication_t();
+
+  private:
+    std::vector<std::byte> damage_metadata_;
   };
 
   /**
