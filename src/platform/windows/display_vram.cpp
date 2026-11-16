@@ -71,6 +71,10 @@
 #include "video_dom_client.h"
 #include "video_player_context.h"
 
+#ifdef SUNSHINE_TESTS
+  #include "src/tracked_async_worker.h"
+#endif
+
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
   #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
 #endif
@@ -9120,8 +9124,46 @@ namespace platf::dxgi {
       // The destructor body runs before nvenc_d3d is destroyed. Do not let a hung NVENC teardown
       // retain the capture display and deadlock capture-thread reinitialization.
       base.release_capture_display();
+#ifdef SUNSHINE_TESTS
+      if (test_after_capture_release_) {
+        test_after_capture_release_();
+      }
+#endif
     }
 
+    static native_encode_owner_t create(
+      std::shared_ptr<platf::display_t> display,
+      adapter_t::pointer adapter,
+      const ::video::config_t &client_config,
+      const ::video::sunshine_colorspace_t &colorspace
+    ) {
+      auto candidate = std::make_unique<d3d_nvenc_encode_device_t>();
+      auto &device = *candidate;
+      native_encode_owner_t owner {std::move(candidate)};
+      const auto pix_fmt = colorspace.bit_depth == 10 ? pix_fmt_e::p010 : pix_fmt_e::nv12;
+      if (!device.init_device(display, adapter, pix_fmt)) {
+        return {};
+      }
+      device.colorspace = colorspace;
+      if (::video::colorspace_is_hdr(colorspace)) {
+        SS_HDR_METADATA metadata {};
+        if (display->get_hdr_metadata(metadata)) {
+          device.hdr_metadata = metadata;
+        } else {
+          BOOST_LOG(error) << "Couldn't get display HDR metadata for the native encoder bitstream."sv;
+        }
+      }
+      if (!device.init_encoder(client_config, colorspace)) {
+        return {};
+      }
+      return owner;
+    }
+
+    nvenc::nvenc_base &encoder() override {
+      return *nvenc_d3d;
+    }
+
+  private:
     bool init_device(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
       buffer_format = nvenc::nvenc_format_from_sunshine_format(pix_fmt);
       if (buffer_format == NV_ENC_BUFFER_FORMAT_UNDEFINED) {
@@ -9134,12 +9176,11 @@ namespace platf::dxgi {
       }
 
       nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_native>(base.device.get());
-      nvenc = nvenc_d3d.get();
 
       return true;
     }
 
-    bool init_encoder(const ::video::config_t &client_config, const ::video::sunshine_colorspace_t &colorspace) override {
+    bool init_encoder(const ::video::config_t &client_config, const ::video::sunshine_colorspace_t &colorspace) {
       if (!nvenc_d3d) {
         return false;
       }
@@ -9180,6 +9221,7 @@ namespace platf::dxgi {
              ) == 0;
     }
 
+  public:
     int convert(platf::img_t &img_base) override {
       return base.convert(img_base);
     }
@@ -9231,7 +9273,15 @@ namespace platf::dxgi {
     d3d_base_encode_device base;
     std::unique_ptr<nvenc::nvenc_d3d11_native> nvenc_d3d;
     NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
+#ifdef SUNSHINE_TESTS
+    friend struct native_capture_release_test_access;
+    std::function<void()> test_after_capture_release_;
+#endif
   };
+
+#ifdef SUNSHINE_TESTS
+  #include "display_vram_native_owner_test.inc"
+#endif
 
   bool set_cursor_texture(device_t::pointer device, gpu_cursor_t &cursor, const std::vector<std::uint8_t> &cursor_img, const sbs_cursor::shape_t &shape) {
     // This cursor image may not be used
@@ -10210,12 +10260,11 @@ namespace platf::dxgi {
     return boost::algorithm::ends_with(name, "_nvenc");
   }
 
-  std::unique_ptr<nvenc_encode_device_t> display_vram_t::make_nvenc_encode_device(pix_fmt_e pix_fmt) {
-    auto device = std::make_unique<d3d_nvenc_encode_device_t>();
-    if (!device->init_device(shared_from_this(), adapter.get(), pix_fmt)) {
-      return nullptr;
-    }
-    return device;
+  native_encode_owner_t display_vram_t::make_nvenc_encode_device(
+    const ::video::config_t &client_config,
+    const ::video::sunshine_colorspace_t &colorspace
+  ) {
+    return d3d_nvenc_encode_device_t::create(shared_from_this(), adapter.get(), client_config, colorspace);
   }
 
   int init() {

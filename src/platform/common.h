@@ -29,6 +29,7 @@
 // local includes
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/native_encode_owner.h"
 #include "src/stream_gamma.h"
 #include "src/thread_safe.h"
 #include "src/utility.h"
@@ -524,9 +525,7 @@ namespace platf {
   };
 
   struct nvenc_encode_device_t: encode_device_t {
-    virtual bool init_encoder(const video::config_t &client_config, const video::sunshine_colorspace_t &colorspace) = 0;
-
-    nvenc::nvenc_base *nvenc = nullptr;
+    virtual nvenc::nvenc_base &encoder() = 0;
     std::optional<SS_HDR_METADATA> hdr_metadata;
   };
 
@@ -617,8 +616,12 @@ namespace platf {
 
     virtual int dummy_img(img_t *img) = 0;
 
-    virtual std::unique_ptr<nvenc_encode_device_t> make_nvenc_encode_device(pix_fmt_e pix_fmt) {
-      return nullptr;
+    /** Return a fully initialized backend; partial construction retires through its owner. */
+    virtual native_encode_owner_t make_nvenc_encode_device(
+      const video::config_t &,
+      const video::sunshine_colorspace_t &
+    ) {
+      return {};
     }
 
     virtual bool is_hdr() {

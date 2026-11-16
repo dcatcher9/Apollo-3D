@@ -1011,7 +1011,10 @@ namespace platf::dxgi {
 
     bool is_codec_supported(std::string_view name, const ::video::config_t &config) override;
 
-    std::unique_ptr<nvenc_encode_device_t> make_nvenc_encode_device(pix_fmt_e pix_fmt) override;
+    native_encode_owner_t make_nvenc_encode_device(
+      const video::config_t &client_config,
+      const video::sunshine_colorspace_t &colorspace
+    ) override;
 
     std::atomic<uint32_t> next_image_id;
   };
@@ -1216,4 +1219,21 @@ namespace platf::dxgi {
    * SBS mode uses the same matched-frame depth and warp implementation as the encoder path.
    */
   local_presenter_result_e run_local_presenter(const local_presenter_config_t &config, std::stop_token stop_token);
+#ifdef SUNSHINE_TESTS
+  struct native_capture_release_report_t {
+    bool valid = false;
+    bool gate_entered = false;
+    bool owner_consumed = false;
+    bool retirement_pending_before_release = false;
+    bool display_expired_before_release = false;
+    bool completed_after_release = false;
+    bool gate_timed_out = false;
+    std::uint64_t own_token = 0;
+    std::uint64_t foreign_token = 0;
+    std::uint64_t claim_after_capture_release = 0;
+    std::uint64_t final_claim = 0;
+  };
+
+  native_capture_release_report_t native_capture_release_for_test(bool foreign);
+#endif
 }  // namespace platf::dxgi

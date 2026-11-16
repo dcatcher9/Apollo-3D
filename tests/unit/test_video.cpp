@@ -7171,7 +7171,7 @@ TEST(EffectiveVideoModePublisherTests, PublishesOnlyCoherentProvenPacingPairs) {
   EXPECT_EQ(pacing.framerate_millihz, 60000);
 
   // Constructing a speculative request cannot affect packet pacing. Production performs the same
-  // separation by publishing only after make_encode_device() returns a real encoder.
+  // separation by publishing only after make_encode_session() returns a ready session.
   const video::effective_video_mode_t unproven {3840, 2160, 9000, 50000};
   pacing = publisher.pacing();
   EXPECT_EQ(pacing.bitrate, 20000);
@@ -7220,60 +7220,29 @@ TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitializa
   ASSERT_FALSE(source.empty());
 
   const auto capture_begin = source.find("void capture_async(");
-  const auto hdr_snapshot = source.find(
-    "hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);",
-    capture_begin
-  );
-  const auto hdr_device_read = source.find(
-    "colorspace_is_hdr(encode_device->colorspace)",
-    hdr_snapshot
-  );
-  const auto encoder_init = source.find(
-    "auto encode_session = make_encode_session(",
-    capture_begin
-  );
-  const auto encode_device_transfer = source.find(
-    "std::move(encode_device)",
-    encoder_init
-  );
-  const auto capture_end = source.find(
-    "\n  void capture(",
-    encode_device_transfer
-  );
-  const auto post_transfer_device_read = source.find(
-    "encode_device->",
-    encode_device_transfer
-  );
-  const auto effective_publish = source.find(
-    "config.effective_mode->publish(effective_mode);",
-    encoder_init
-  );
-  const auto completion_publish = source.find(
-    "video_mode_applied_queue->raise(video_mode_applied_t",
-    effective_publish
-  );
-  const auto hdr_publish = source.find(
-    "hdr_event->raise(std::move(hdr_info));",
-    encoder_init
-  );
   ASSERT_NE(capture_begin, std::string::npos);
-  ASSERT_NE(hdr_snapshot, std::string::npos);
-  ASSERT_NE(hdr_device_read, std::string::npos);
-  ASSERT_NE(encoder_init, std::string::npos);
-  ASSERT_NE(encode_device_transfer, std::string::npos);
+  const auto capture_end = source.find("\n  void capture(", capture_begin);
   ASSERT_NE(capture_end, std::string::npos);
+  const auto capture = source.substr(capture_begin, capture_end - capture_begin);
+  // The factory owns initialization and failure retirement. This guard covers only the live
+  // caller's publication boundary; actual factory/owner fixtures exercise readiness and ownership.
+  const auto encoder_init = capture.find("auto encode_session = make_encode_session(");
+  const auto reject_failed_session = capture.find("if (!encode_session) {", encoder_init);
+  const auto hdr_snapshot = capture.find("auto hdr_info = encode_session->hdr_info();", reject_failed_session);
+  const auto effective_publish = capture.find("config.effective_mode->publish(effective_mode);", hdr_snapshot);
+  const auto completion_publish = capture.find("video_mode_applied_queue->raise(video_mode_applied_t", effective_publish);
+  const auto hdr_publish = capture.find("hdr_event->raise(std::move(hdr_info));", hdr_snapshot);
+  ASSERT_NE(hdr_snapshot, std::string::npos);
+  ASSERT_NE(encoder_init, std::string::npos);
+  ASSERT_NE(reject_failed_session, std::string::npos);
   ASSERT_NE(effective_publish, std::string::npos);
   ASSERT_NE(completion_publish, std::string::npos);
   ASSERT_NE(hdr_publish, std::string::npos);
-  EXPECT_LT(hdr_snapshot, encoder_init);
-  EXPECT_LT(hdr_device_read, encoder_init);
-  EXPECT_TRUE(
-    post_transfer_device_read == std::string::npos ||
-    post_transfer_device_read >= capture_end
-  );
-  EXPECT_LT(encoder_init, effective_publish);
+  EXPECT_LT(encoder_init, reject_failed_session);
+  EXPECT_LT(reject_failed_session, hdr_snapshot);
+  EXPECT_LT(hdr_snapshot, effective_publish);
   EXPECT_LT(effective_publish, completion_publish);
-  EXPECT_LT(encoder_init, hdr_publish);
+  EXPECT_LT(hdr_snapshot, hdr_publish);
 }
 
 TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAfterRollback) {
@@ -7289,9 +7258,10 @@ TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAf
   );
   const auto session_config = video_source.find("config_t session_config = config;", immutable_mode);
   const auto encoder_success = video_source.find("auto encode_session = make_encode_session(", session_config);
+  const auto reject_failed_session = video_source.find("if (!encode_session) {", encoder_success);
   const auto state_publish = video_source.find(
     "config.effective_mode->publish(effective_mode);",
-    encoder_success
+    reject_failed_session
   );
   const auto completion = video_source.find(
     "video_mode_applied_queue->raise(video_mode_applied_t",
@@ -7301,11 +7271,13 @@ TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAf
   ASSERT_NE(immutable_mode, std::string::npos);
   ASSERT_NE(session_config, std::string::npos);
   ASSERT_NE(encoder_success, std::string::npos);
+  ASSERT_NE(reject_failed_session, std::string::npos);
   ASSERT_NE(state_publish, std::string::npos);
   ASSERT_NE(completion, std::string::npos);
   EXPECT_LT(immutable_mode, session_config);
   EXPECT_LT(session_config, encoder_success);
-  EXPECT_LT(encoder_success, state_publish);
+  EXPECT_LT(encoder_success, reject_failed_session);
+  EXPECT_LT(reject_failed_session, state_publish);
   EXPECT_LT(state_publish, completion);
 
   const auto rollback_state = stream_source.find("bool rollback_restored_desktop = true;");
@@ -7718,7 +7690,14 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   ASSERT_NE(encode_run, std::string::npos);
   ASSERT_NE(capture_async, std::string::npos);
   const auto encode_scope = video_source.substr(encode_run, capture_async - encode_run);
-  EXPECT_NE(encode_scope.find("launch_async_teardown_worker(std::move(teardown))"), std::string::npos);
+  const auto retirement_guard = encode_scope.find("auto fail_guard = util::fail_guard(");
+  const auto recovery_receipt = encode_scope.find("recovery.start(std::move(*session).retire());", retirement_guard);
+  const auto retrieval_pipeline = encode_scope.find("std::optional<detail::encode_pipeline_t<encoded_frame_context_t>> pipeline;");
+  ASSERT_NE(retirement_guard, std::string::npos);
+  ASSERT_NE(recovery_receipt, std::string::npos);
+  ASSERT_NE(retrieval_pipeline, std::string::npos);
+  // Reverse local destruction drains/joins retrieval before the guard consumes the backend.
+  EXPECT_LT(retirement_guard, retrieval_pipeline);
   EXPECT_EQ(encode_scope.find(".detach()"), std::string::npos);
 
   const auto base_destructor = display.find("~d3d_base_encode_device()");
@@ -7737,11 +7716,6 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   EXPECT_NE(display.find("busy_retries="), std::string::npos);
   EXPECT_EQ(display.find("busy_drops="), std::string::npos)
     << "A retained source/backbuffer retry is not a dropped frame.";
-
-  const auto nvenc_destructor = display.find("~d3d_nvenc_encode_device_t() override");
-  const auto release_display = display.find("base.release_capture_display();", nvenc_destructor);
-  ASSERT_NE(nvenc_destructor, std::string::npos);
-  ASSERT_NE(release_display, std::string::npos);
 
   const auto normal_shutdown = main_source.find(
     "UI/API shutdown does not necessarily pass through the signal handler"

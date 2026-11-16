@@ -2174,7 +2174,7 @@ namespace proc {
 
     republish_display();
 
-    // HDR coherence is session-fatal: make_encode_device enforces the launch dynamic-range
+    // HDR coherence is session-fatal: make_encode_session enforces the launch dynamic-range
     // contract and kills the session when the display no longer matches it.
     if (!request_hdr_state(enable_hdr, 6s)) {
       BOOST_LOG(error) << "The virtual display did not reach its required HDR state after the live "

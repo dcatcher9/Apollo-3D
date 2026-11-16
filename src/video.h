@@ -816,6 +816,18 @@ namespace video {
 
   using hdr_info_t = std::unique_ptr<hdr_info_raw_t>;
 
+#ifdef SUNSHINE_TESTS
+  namespace detail {
+    std::unique_ptr<encode_session_t> make_native_encode_session_for_test(
+      platf::display_t &display,
+      const config_t &config,
+      bool enforce_launch_hdr_contract = false
+    );
+    hdr_info_t native_encode_session_hdr_info_for_test(const encode_session_t &session);
+    std::future<void> retire_native_encode_session_for_test(std::unique_ptr<encode_session_t> session);
+  }  // namespace detail
+#endif
+
   struct nvenc_capabilities_t {
     bool hevc;
     bool hevc_hdr;

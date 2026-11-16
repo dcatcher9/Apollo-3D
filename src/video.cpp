@@ -390,14 +390,12 @@ namespace video {
 
   class nvenc_encode_session_t: public encode_session_t {
   public:
-    nvenc_encode_session_t(std::unique_ptr<platf::nvenc_encode_device_t> encode_device):
-        device(std::move(encode_device)) {
+    explicit nvenc_encode_session_t(platf::native_encode_owner_t encode_device):
+        device(std::move(encode_device)),
+        encoder(device->encoder()) {
     }
 
     int convert(platf::img_t &img) override {
-      if (!device) {
-        return -1;
-      }
       return device->convert(img);
     }
 
@@ -405,48 +403,43 @@ namespace video {
       platf::img_t &img,
       const std::chrono::steady_clock::time_point next_encode_target
     ) override {
-      if (!device) {
-        return -1;
-      }
       return device->convert_with_encode_target(img, next_encode_target);
     }
 
     bool needs_conversion_poll() const override {
-      return device && device->needs_conversion_poll();
+      return device->needs_conversion_poll();
     }
 
     void set_external_frame_wake(std::function<void()> wake) {
-      if (device) {
-        device->set_external_frame_wake(std::move(wake));
-      }
+      device->set_external_frame_wake(std::move(wake));
     }
 
     bool conversion_kept_input() const {
-      return device && device->conversion_kept_input();
+      return device->conversion_kept_input();
     }
 
     bool external_frame_held() const {
-      return device && device->external_frame_held();
+      return device->external_frame_held();
     }
 
     bool set_stream_gamma(stream_gamma_mode_e mode) {
-      return device && device->set_stream_gamma(mode);
+      return device->set_stream_gamma(mode);
     }
 
     stream_gamma_mode_e stream_gamma_mode() const {
-      return device ? device->stream_gamma_mode() : stream_gamma_mode_e::windows_default;
+      return device->stream_gamma_mode();
     }
 
     float stream_gamma_white_nits() const {
-      return device ? device->stream_gamma_white_nits() : 203.0f;
+      return device->stream_gamma_white_nits();
     }
 
     bool stream_is_hdr() const {
-      return device && colorspace_is_hdr(device->colorspace);
+      return colorspace_is_hdr(device->colorspace);
     }
 
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const override {
-      return device ? device->rendered_content_timestamp() : std::nullopt;
+      return device->rendered_content_timestamp();
     }
 
     void request_idr_frame() override {
@@ -458,11 +451,7 @@ namespace video {
     }
 
     void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
-      if (!device || !device->nvenc) {
-        return;
-      }
-
-      if (!device->nvenc->invalidate_ref_frames(first_frame, last_frame)) {
+      if (!encoder.invalidate_ref_frames(first_frame, last_frame)) {
         force_idr = true;
       }
     }
@@ -470,23 +459,19 @@ namespace video {
     /** With pictures in flight: whether invalidate_ref_frames() must first wait for them, because it
      *  would invalidate (an already handled, malformed or too-large range is decided at once). */
     bool invalidation_needs_drain(int64_t first_frame, int64_t last_frame) const {
-      return device && device->nvenc && device->nvenc->frames_in_flight() != 0 &&
-             device->nvenc->would_invalidate_ref_frames(first_frame, last_frame);
+      return encoder.frames_in_flight() != 0 &&
+             encoder.would_invalidate_ref_frames(first_frame, last_frame);
     }
 
     bool reconfigure_bitrate(int bitrate_kbps) {
-      return device && device->nvenc && device->nvenc->reconfigure_bitrate(bitrate_kbps);
+      return encoder.reconfigure_bitrate(bitrate_kbps);
     }
 
     nvenc::nvenc_encoded_frame encode_frame(
       uint64_t frame_index,
       std::vector<std::uint8_t> &&frame_buffer
     ) {
-      if (!device || !device->nvenc) {
-        return {};
-      }
-
-      auto result = device->nvenc->encode_frame(
+      auto result = encoder.encode_frame(
         frame_index,
         force_idr,
         std::move(frame_buffer)
@@ -497,26 +482,23 @@ namespace video {
     }
 
     nvenc::nvenc_base::frame_timing_t last_frame_timing() const {
-      return device && device->nvenc ? device->nvenc->last_frame_timing() : nvenc::nvenc_base::frame_timing_t {};
+      return encoder.last_frame_timing();
     }
 
     /** This process's video memory on the encoder's adapter (nvenc_base::video_memory_diagnostics()). */
     std::string video_memory_diagnostics() const {
-      return device && device->nvenc ? device->nvenc->video_memory_diagnostics() : std::string {};
+      return encoder.video_memory_diagnostics();
     }
 
     /** NVENC pictures that may be in flight (nvenc_base::pipeline_depth()). */
     unsigned pipeline_depth() const {
-      return device && device->nvenc ? device->nvenc->pipeline_depth() : 1;
+      return encoder.pipeline_depth();
     }
 
     /** Encode thread, with pictures in flight: submit the converted input as the next picture.
      *  NVENC encodes from the picture's own copy, so the next frame may convert at once. */
     bool submit_frame(uint64_t frame_index) {
-      if (!device || !device->nvenc) {
-        return false;
-      }
-      const bool submitted = device->nvenc->submit_frame(frame_index, force_idr);
+      const bool submitted = encoder.submit_frame(frame_index, force_idr);
       force_idr = false;
       // Never blocks: the encode thread's fallback for export slots whose conversion reads
       // completed (the receiver's read-fence wait normally hands them back), and its diagnostics.
@@ -526,14 +508,28 @@ namespace video {
 
     /** Retrieving thread: the oldest submitted picture, waited for (nvenc_base::retrieve_frame()). */
     nvenc::nvenc_encoded_frame retrieve_frame() {
-      if (!device || !device->nvenc) {
-        return {};
-      }
-      return device->nvenc->retrieve_frame(acquire_frame_buffer());
+      return encoder.retrieve_frame(acquire_frame_buffer());
     }
 
     std::chrono::nanoseconds last_submit_timing() const {
-      return device && device->nvenc ? device->nvenc->last_submit_timing() : std::chrono::nanoseconds {};
+      return encoder.last_submit_timing();
+    }
+
+    hdr_info_t hdr_info() const {
+      auto info = std::make_unique<hdr_info_raw_t>(false);
+      if (colorspace_is_hdr(device->colorspace)) {
+        if (device->hdr_metadata) {
+          info->metadata = *device->hdr_metadata;
+          info->enabled = true;
+        } else {
+          BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
+        }
+      }
+      return info;
+    }
+
+    std::future<void> retire() && {
+      return std::move(device).retire();
     }
 
     std::vector<std::uint8_t> acquire_frame_buffer() {
@@ -549,7 +545,8 @@ namespace video {
     }
 
   private:
-    std::unique_ptr<platf::nvenc_encode_device_t> device;
+    platf::native_encode_owner_t device;
+    nvenc::nvenc_base &encoder;
     bool force_idr = false;
     std::shared_ptr<encoded_frame_buffer_pool_t> frame_buffer_pool =
       std::make_shared<encoded_frame_buffer_pool_t>();
@@ -1183,18 +1180,6 @@ namespace video {
     std::chrono::steady_clock::time_point next_log = std::chrono::steady_clock::now();
   };
 
-  std::unique_ptr<nvenc_encode_session_t> make_encode_session(const config_t &client_config, std::unique_ptr<platf::nvenc_encode_device_t> encode_device) {
-    if (!encode_device->init_encoder(client_config, encode_device->colorspace)) {
-      std::packaged_task<void()> teardown([device = std::move(encode_device)]() mutable {
-        device.reset();
-      });
-      launch_async_teardown_worker(std::move(teardown));
-      return nullptr;
-    }
-
-    return std::make_unique<nvenc_encode_session_t>(std::move(encode_device));
-  }
-
   void refresh_mouse_keys_if_due(std::chrono::steady_clock::time_point &next_refresh) {
     const auto now = std::chrono::steady_clock::now();
     if (now < next_refresh) {
@@ -1218,23 +1203,16 @@ namespace video {
     std::shared_ptr<void> channel_data,
     const std::function<void(const video_mode_change_t &)> &on_bitrate_reconfigured
   ) {
-    // Move expensive NVENC destruction off the encode thread so a reinit can proceed. The worker
-    // is process-owned rather than detached: it must drain while logging, CUDA, TensorRT, and D3D
-    // globals are still alive, under the application's forced-shutdown watchdog.
+    // All session exits retire their backend through its owner. Failed encoding additionally
+    // keeps the destruction receipt so capture can wait for the existing recovery gate.
     bool failed = true;
     auto fail_guard = util::fail_guard([&session, &recovery, &failed] {
-      std::packaged_task<void()> teardown([session = std::move(session)]() mutable {
-        BOOST_LOG(info) << "Starting async encoder teardown";
-        session.reset();
-        BOOST_LOG(info) << "Async encoder teardown complete";
-      });
       if (failed) {
         // A timeout keeps NVENC's global creation gate closed until its owner is destroyed.
         // Keep this completion so capture_async does not treat that temporary refusal as a
         // fatal encoder/configuration error. Ordinary mode changes still retire asynchronously.
-        recovery.start(teardown.get_future());
+        recovery.start(std::move(*session).retire());
       }
-      launch_async_teardown_worker(std::move(teardown));
     });
 
     // set max frame time based on client-requested target framerate; never shorter than its interval.
@@ -2051,7 +2029,7 @@ namespace video {
     };
   }
 
-  std::unique_ptr<platf::nvenc_encode_device_t> make_encode_device(
+  std::unique_ptr<nvenc_encode_session_t> make_encode_session(
     platf::display_t &disp,
     const config_t &config,
     bool enforce_launch_hdr_contract = false
@@ -2069,8 +2047,6 @@ namespace video {
 
     auto colorspace = colorspace_from_client_config(config, disp.is_hdr());
 
-    const auto pix_fmt = colorspace.bit_depth == 10 ? platf::pix_fmt_e::p010 : platf::pix_fmt_e::nv12;
-
     {
       const auto encoder_name = nvenc_codec_name(config.videoFormat);
 
@@ -2087,23 +2063,32 @@ namespace video {
       BOOST_LOG(info) << "Color range: " << (colorspace.full_range ? "JPEG" : "MPEG");
     }
 
-    auto result = disp.make_nvenc_encode_device(pix_fmt);
+    auto device = disp.make_nvenc_encode_device(config, colorspace);
+    if (!device) {
+      return nullptr;
+    }
+    return std::make_unique<nvenc_encode_session_t>(std::move(device));
+  }
 
-    if (result) {
-      result->colorspace = colorspace;
-      if (colorspace_is_hdr(colorspace)) {
-        SS_HDR_METADATA metadata {};
-        if (disp.get_hdr_metadata(metadata)) {
-          result->hdr_metadata = metadata;
-        } else {
-          BOOST_LOG(error)
-            << "Couldn't get display HDR metadata for the native encoder bitstream."sv;
-        }
-      }
+#ifdef SUNSHINE_TESTS
+  namespace detail {
+    std::unique_ptr<encode_session_t> make_native_encode_session_for_test(
+      platf::display_t &display,
+      const config_t &config,
+      bool enforce_launch_hdr_contract
+    ) {
+      return make_encode_session(display, config, enforce_launch_hdr_contract);
     }
 
-    return result;
-  }
+    hdr_info_t native_encode_session_hdr_info_for_test(const encode_session_t &session) {
+      return static_cast<const nvenc_encode_session_t &>(session).hdr_info();
+    }
+
+    std::future<void> retire_native_encode_session_for_test(std::unique_ptr<encode_session_t> session) {
+      return session ? std::move(static_cast<nvenc_encode_session_t &>(*session)).retire() : std::future<void> {};
+    }
+  }  // namespace detail
+#endif
 
   void capture_async(
     safe::mail_t mail,
@@ -2436,35 +2421,7 @@ namespace video {
         return;
       }
 
-      auto encode_device = make_encode_device(*display, session_config, true);
-      if (!encode_device) {
-        if (recover_failed_sbs_session()) {
-          continue;
-        }
-        if (revert_failed_live_video_mode()) {
-          continue;
-        }
-        return;
-      }
-
-      // Snapshot the HDR state while capture_async still owns the encode device. The device is
-      // transferred into the encode session below and must not be dereferenced after that move.
-      // Publication remains after successful encoder initialization so a failed candidate never
-      // advertises HDR state for a session that did not start.
-      hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
-      if (colorspace_is_hdr(encode_device->colorspace)) {
-        if (encode_device->hdr_metadata) {
-          hdr_info->metadata = *encode_device->hdr_metadata;
-          hdr_info->enabled = true;
-        } else {
-          BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
-        }
-      }
-
-      auto encode_session = make_encode_session(
-        session_config,
-        std::move(encode_device)
-      );
+      auto encode_session = make_encode_session(*display, session_config, true);
       if (!encode_session) {
         if (recover_failed_sbs_session()) {
           continue;
@@ -2475,9 +2432,9 @@ namespace video {
         return;
       }
 
-      // The requested geometry produced a fully initialized encoder, so it is now the safe
-      // fallback. Pacing publication and the worker completion must remain below this point:
-      // make_encode_device() alone has not yet called init_encoder() and can still fail here.
+      // Only the fully initialized session may publish HDR, become the safe mode fallback,
+      // or complete a live mode acknowledgement.
+      auto hdr_info = encode_session->hdr_info();
       proven_video_mode = video_mode_change_t {
         config.width,
         config.height,
@@ -2593,24 +2550,10 @@ namespace video {
   }
 
   int validate_config(std::shared_ptr<platf::display_t> disp, const config_t &config) {
-    auto encode_device = make_encode_device(*disp, config);
-    if (!encode_device) {
-      return -1;
-    }
-
-    auto session = make_encode_session(config, std::move(encode_device));
+    auto session = make_encode_session(*disp, config);
     if (!session) {
       return -1;
     }
-    // A probe can time out after NVENC accepted its image just like a live encode. Retain its
-    // complete owner on the same tracked teardown path; never release GPU input on this caller.
-    auto teardown_guard = util::fail_guard([&session] {
-      std::packaged_task<void()> teardown([session = std::move(session)]() mutable {
-        session.reset();
-      });
-      launch_async_teardown_worker(std::move(teardown));
-    });
-
     {
       // Image buffers are large, so we use a separate scope to free it immediately after convert()
       auto img = disp->alloc_img();
