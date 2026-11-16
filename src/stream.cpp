@@ -910,6 +910,10 @@ namespace stream {
       platf::feedback_queue_t feedback_queue;
       platf::feedback_queue_t haptics_feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+      // Own these posts across capture startup and encoder handoffs instead of resolving weak
+      // mail entries on every control iteration.
+      safe::mail_raw_t::event_t<int> depth_status_event;
+      safe::mail_raw_t::queue_t<video::video_mode_applied_t> video_mode_applied_queue;
       // mail_raw_t keeps only a weak reference to each post. Retain this queue for the full
       // session lifetime so worker/encode-thread replies cannot disappear between raise() and
       // the control thread's next drain.
@@ -2637,7 +2641,7 @@ namespace stream {
 
             // Drain depth-engine state to its latest phase. The event intentionally coalesces a
             // fast loading->ready transition so cached engines do not flash the client UI.
-            auto depth_status_event = session->mail->event<int>(mail::sbs_depth_status);
+            auto &depth_status_event = session->control.depth_status_event;
             std::optional<int> depth_phase;
             while (depth_status_event->peek()) {
               if (auto phase = depth_status_event->pop(0ms)) {
@@ -2683,7 +2687,7 @@ namespace stream {
 
             // Release the matching serialized live-mode transaction. The worker sends the plain
             // acknowledgement only after any failed-encoder desktop rollback has finished.
-            auto video_mode_applied_queue = session->mail->queue<video::video_mode_applied_t>(mail::video_mode_applied);
+            auto &video_mode_applied_queue = session->control.video_mode_applied_queue;
             while (video_mode_applied_queue->peek()) {
               if (auto applied = video_mode_applied_queue->pop(0ms)) {
                 complete_live_video_mode(*session, std::move(*applied));
@@ -4616,6 +4620,9 @@ namespace stream {
       session->control.haptics_feedback_queue =
         mail->queue<platf::gamepad_feedback_msg_t>(mail::ds5_haptics_feedback, 64);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
+      session->control.depth_status_event = mail->event<int>(mail::sbs_depth_status);
+      session->control.video_mode_applied_queue =
+        mail->queue<video::video_mode_applied_t>(mail::video_mode_applied);
       session->control.live_video_mode_ack_queue = mail->queue<live_video_mode_ack_t>(
         mail::live_video_mode_ack,
         LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT
