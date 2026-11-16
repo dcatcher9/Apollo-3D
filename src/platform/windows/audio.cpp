@@ -22,6 +22,7 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/windows/audio_endpoint_match.h"
 #include "src/platform/windows/audio_helpers.h"
 
 // Must be the last included file
@@ -251,6 +252,56 @@ namespace platf::audio {
     }
 
     PROPVARIANT prop;
+  };
+
+  class endpoint_match_reader_t {
+  public:
+    endpoint_match_reader_t(device_t device, wstring_t id):
+        device_(std::move(device)),
+        id_(std::move(id)) {
+    }
+
+    std::wstring_view id() const {
+      return id_.get();
+    }
+
+    bool matches(detail::endpoint_match_field_e field, std::wstring_view expected) {
+      if (!property_store_attempted_) {
+        property_store_attempted_ = true;
+        if (FAILED(device_->OpenPropertyStore(STGM_READ, &properties_))) {
+          properties_.reset();
+        }
+      }
+      if (!properties_) {
+        return false;
+      }
+
+      const PROPERTYKEY *key = nullptr;
+      switch (field) {
+        case detail::endpoint_match_field_e::device_friendly_name:
+          key = &PKEY_Device_FriendlyName;
+          break;
+        case detail::endpoint_match_field_e::adapter_friendly_name:
+          key = &PKEY_DeviceInterface_FriendlyName;
+          break;
+        case detail::endpoint_match_field_e::device_description:
+          key = &PKEY_Device_DeviceDesc;
+          break;
+        case detail::endpoint_match_field_e::device_id:
+        default:
+          return false;  // The selector compares IDs before requesting properties.
+      }
+
+      prop_var_t property;
+      const auto value = detail::endpoint_property_string(properties_->GetValue(*key, &property.prop), property.prop);
+      return value && *value == expected;
+    }
+
+  private:
+    device_t device_;
+    wstring_t id_;
+    prop_t properties_;
+    bool property_store_attempted_ = false;
   };
 
   struct format_t {
@@ -926,18 +977,18 @@ namespace platf::audio {
       // Prepare to search for the device_id of the virtual audio sink device,
       // this device can be either user-configured or
       // the Steam Streaming Speakers we use by default.
-      match_fields_list_t match_list;
+      detail::endpoint_match_list_t match_list;
       if (config::audio.virtual_sink.empty()) {
-        match_list = match_steam_speakers();
+        match_list = detail::match_steam_speakers();
       } else {
-        match_list = match_all_fields(from_utf8(config::audio.virtual_sink));
+        match_list = detail::match_all_fields(from_utf8(config::audio.virtual_sink));
       }
 
       // Search for the virtual audio sink device currently present in the system.
       auto matched = find_device_id(match_list);
       if (matched) {
         // Prepare to fill virtual audio sink names with device_id.
-        auto device_id = to_utf8(matched->second);
+        auto device_id = to_utf8(*matched);
         // Also prepend format name (basically channel layout at the moment)
         // because we don't want to extend the platform interface.
         sink.null = std::make_optional(sink_t::null_t {
@@ -950,12 +1001,6 @@ namespace platf::audio {
       }
 
       return sink;
-    }
-
-    bool is_sink_available(const std::string &sink) override {
-      const auto match_list = match_all_fields(from_utf8(sink));
-      const auto matched = find_device_id(match_list);
-      return static_cast<bool>(matched);
     }
 
     /**
@@ -1022,9 +1067,9 @@ namespace platf::audio {
         // Sink name does not begin with virtual-(format name), hence it's not a virtual sink
         // and we don't want to change playback format of the corresponding device.
         // Also need to perform matching, sink name is not necessarily device_id in this case.
-        auto matched = find_device_id(match_all_fields(from_utf8(sink)));
+        auto matched = find_device_id(detail::match_all_fields(from_utf8(sink)));
         if (matched) {
-          return matched->second;
+          return matched;
         } else {
           BOOST_LOG(error) << "Couldn't find audio sink " << sink;
           return std::nullopt;
@@ -1101,37 +1146,12 @@ namespace platf::audio {
       return failure;
     }
 
-    enum class match_field_e {
-      device_id,  ///< Match device_id
-      device_friendly_name,  ///< Match endpoint friendly name
-      adapter_friendly_name,  ///< Match adapter friendly name
-      device_description,  ///< Match endpoint description
-    };
-
-    using match_fields_list_t = std::vector<std::pair<match_field_e, std::wstring>>;
-    using matched_field_t = std::pair<match_field_e, std::wstring>;
-
-    audio_control_t::match_fields_list_t match_steam_speakers() {
-      return {
-        {match_field_e::adapter_friendly_name, L"Steam Streaming Speakers"}
-      };
-    }
-
-    audio_control_t::match_fields_list_t match_all_fields(const std::wstring &name) {
-      return {
-        {match_field_e::device_id, name},  // {0.0.0.00000000}.{29dd7668-45b2-4846-882d-950f55bf7eb8}
-        {match_field_e::device_friendly_name, name},  // Digital Audio (S/PDIF) (High Definition Audio Device)
-        {match_field_e::device_description, name},  // Digital Audio (S/PDIF)
-        {match_field_e::adapter_friendly_name, name},  // High Definition Audio Device
-      };
-    }
-
     /**
      * @brief Search for currently present audio device_id using multiple match fields.
      * @param match_list Pairs of match fields and values
-     * @return Optional pair of matched field and device_id
+     * @return Device ID, or no value when no requested field matches.
      */
-    std::optional<matched_field_t> find_device_id(const match_fields_list_t &match_list) {
+    std::optional<std::wstring> find_device_id(const detail::endpoint_match_list_t &match_list) {
       if (match_list.empty()) {
         return std::nullopt;
       }
@@ -1144,73 +1164,32 @@ namespace platf::audio {
       }
 
       UINT count = 0;
-      collection->GetCount(&count);
-
-      std::vector<std::wstring> matched(match_list.size());
-      for (auto x = 0; x < count; ++x) {
-        audio::device_t device;
-        collection->Item(x, &device);
-
-        audio::wstring_t wstring_id;
-        device->GetId(&wstring_id);
-        std::wstring device_id = wstring_id.get();
-
-        audio::prop_t prop;
-        device->OpenPropertyStore(STGM_READ, &prop);
-
-        prop_var_t adapter_friendly_name;
-        prop_var_t device_friendly_name;
-        prop_var_t device_desc;
-
-        prop->GetValue(PKEY_Device_FriendlyName, &device_friendly_name.prop);
-        prop->GetValue(PKEY_DeviceInterface_FriendlyName, &adapter_friendly_name.prop);
-        prop->GetValue(PKEY_Device_DeviceDesc, &device_desc.prop);
-
-        for (size_t i = 0; i < match_list.size(); i++) {
-          if (matched[i].empty()) {
-            const wchar_t *match_value = nullptr;
-            switch (match_list[i].first) {
-              case match_field_e::device_id:
-                match_value = device_id.c_str();
-                break;
-
-              case match_field_e::device_friendly_name:
-                match_value = device_friendly_name.prop.pwszVal;
-                break;
-
-              case match_field_e::adapter_friendly_name:
-                match_value = adapter_friendly_name.prop.pwszVal;
-                break;
-
-              case match_field_e::device_description:
-                match_value = device_desc.prop.pwszVal;
-                break;
-            }
-            if (match_value && std::wcscmp(match_value, match_list[i].second.c_str()) == 0) {
-              matched[i] = device_id;
-            }
-          }
-        }
+      if (FAILED(collection->GetCount(&count))) {
+        return std::nullopt;
       }
 
-      for (size_t i = 0; i < match_list.size(); i++) {
-        if (!matched[i].empty()) {
-          return matched_field_t(match_list[i].first, matched[i]);
+      return detail::find_endpoint_id(match_list, count, [&collection](std::size_t index) -> std::optional<endpoint_match_reader_t> {
+        device_t device;
+        if (FAILED(collection->Item(static_cast<UINT>(index), &device)) || !device) {
+          return std::nullopt;
         }
-      }
-
-      return std::nullopt;
+        wstring_t id;
+        if (FAILED(device->GetId(&id)) || !id) {
+          return std::nullopt;
+        }
+        return endpoint_match_reader_t {std::move(device), std::move(id)};
+      });
     }
 
     /**
      * @brief Resets the default audio device from Steam Streaming Speakers.
      */
     void reset_default_device() {
-      auto matched_steam = find_device_id(match_steam_speakers());
+      auto matched_steam = find_device_id(detail::match_steam_speakers());
       if (!matched_steam) {
         return;
       }
-      auto steam_device_id = matched_steam->second;
+      const auto &steam_device_id = *matched_steam;
 
       {
         // Get the current default audio device (if present)
@@ -1389,7 +1368,7 @@ namespace platf {
 
     // Install Steam Streaming Speakers if needed. We do this during audio_control() to ensure
     // the sink information returned includes the new Steam Streaming Speakers device.
-    if (!control->find_device_id(control->match_steam_speakers())) {
+    if (!control->find_device_id(audio::detail::match_steam_speakers())) {
       // This is best effort. Don't fail if it doesn't work.
       control->install_steam_audio_drivers();
     }
