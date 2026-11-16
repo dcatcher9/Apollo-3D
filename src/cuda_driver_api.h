@@ -38,7 +38,6 @@ typedef CUresult(__stdcall* PFN_cuDeviceGetName)(char* name, int len, CUdevice d
 typedef CUresult(__stdcall* PFN_cuDriverGetVersion)(int* driverVersion);
 typedef CUresult(__stdcall* PFN_cuDevicePrimaryCtxRetain)(CUcontext* pctx, CUdevice dev);
 typedef CUresult(__stdcall* PFN_cuDevicePrimaryCtxRelease)(CUdevice dev);
-typedef CUresult(__stdcall* PFN_cuCtxCreate)(CUcontext* pctx, unsigned int flags, CUdevice dev);
 typedef CUresult(__stdcall* PFN_cuCtxGetCurrent)(CUcontext* pctx);
 typedef CUresult(__stdcall* PFN_cuCtxSetCurrent)(CUcontext ctx);
 typedef CUresult(__stdcall* PFN_cuMemAlloc)(CUdeviceptr* dptr, size_t bytesize);
@@ -226,7 +225,6 @@ struct cuda_driver_api {
     PFN_cuDriverGetVersion cuDriverGetVersion = nullptr;
     PFN_cuDevicePrimaryCtxRetain cuDevicePrimaryCtxRetain = nullptr;
     PFN_cuDevicePrimaryCtxRelease cuDevicePrimaryCtxRelease = nullptr;
-    PFN_cuCtxCreate cuCtxCreate = nullptr;
     PFN_cuCtxGetCurrent cuCtxGetCurrent = nullptr;
     PFN_cuCtxSetCurrent cuCtxSetCurrent = nullptr;
     PFN_cuMemAlloc cuMemAlloc = nullptr;
@@ -367,7 +365,6 @@ struct cuda_driver_api {
                 api.cuDevicePrimaryCtxRetain = (PFN_cuDevicePrimaryCtxRetain)GetProcAddress(api.hMod, "cuDevicePrimaryCtxRetain");
                 api.cuDevicePrimaryCtxRelease = (PFN_cuDevicePrimaryCtxRelease)GetProcAddress(api.hMod, "cuDevicePrimaryCtxRelease_v2");
                 if (!api.cuDevicePrimaryCtxRelease) api.cuDevicePrimaryCtxRelease = (PFN_cuDevicePrimaryCtxRelease)GetProcAddress(api.hMod, "cuDevicePrimaryCtxRelease");
-                api.cuCtxCreate = (PFN_cuCtxCreate)GetProcAddress(api.hMod, "cuCtxCreate_v2");
                 api.cuCtxGetCurrent = (PFN_cuCtxGetCurrent)GetProcAddress(api.hMod, "cuCtxGetCurrent");
                 api.cuCtxSetCurrent = (PFN_cuCtxSetCurrent)GetProcAddress(api.hMod, "cuCtxSetCurrent");
                 api.cuMemAlloc = (PFN_cuMemAlloc)GetProcAddress(api.hMod, "cuMemAlloc_v2");
