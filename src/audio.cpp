@@ -226,9 +226,9 @@ namespace audio {
     });
 
     int samples_per_frame = frame_size * stream.channelCount;
+    std::vector<float> sample_buffer;
 
     while (!shutdown_event->peek()) {
-      std::vector<float> sample_buffer;
       sample_buffer.resize(samples_per_frame);
 
       auto status = mic->sample(sample_buffer);
