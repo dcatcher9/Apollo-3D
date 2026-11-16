@@ -696,6 +696,21 @@ namespace offline_sbs {
       return actual && *actual == identity;
     }
 
+    enum class staging_cleanup_e {
+      pending,
+      complete,
+    };
+
+    // Publishing the output and retiring its staging hard link are separate outcomes.
+    struct publication_outcome_t {
+      staging_cleanup_e staging_cleanup = staging_cleanup_e::pending;
+    };
+
+    enum class publication_origin_e {
+      worker,
+      recovery,
+    };
+
     class publication_file_t {
     public:
       ~publication_file_t() {
@@ -801,15 +816,11 @@ namespace offline_sbs {
         };
       }
 
-      bool publish_no_replace(
+      std::optional<publication_outcome_t> publish_no_replace(
         const fs::path &destination,
         std::string &error,
-        bool *staging_retired = nullptr,
         const bool force_staging_disposition_failure = false
       ) {
-        if (staging_retired) {
-          *staging_retired = false;
-        }
         // The legacy Windows rename-by-handle API can replace an existing leaf
         // despite FILE_RENAME_INFO::ReplaceIfExists being false on supported
         // filesystems. Publish as a hard link instead: CreateHardLinkW is
@@ -834,16 +845,13 @@ namespace offline_sbs {
               "(Windows error " +
               std::to_string(publish_error) + ")";
           }
-          return false;
+          return std::nullopt;
         }
         std::string retirement_error;
         const bool retired = retire_staging_link(
           retirement_error,
           force_staging_disposition_failure
         );
-        if (staging_retired) {
-          *staging_retired = retired;
-        }
         if (!retired) {
           // The exact output is already safely published. Preserve success and
           // retain the attested staging hard link for identity-checked restart
@@ -854,7 +862,9 @@ namespace offline_sbs {
                "staging link: "sv
             << retirement_error;
         }
-        return true;
+        return publication_outcome_t {
+          .staging_cleanup = retired ? staging_cleanup_e::complete : staging_cleanup_e::pending,
+        };
       }
 
       bool retire_staging_link(
@@ -2737,6 +2747,55 @@ namespace offline_sbs {
       compact["details_storage"] = "worker-artifacts";
       return compact;
     }
+
+    // The protected worker summary remains the sole publication state. This view
+    // centralizes its transitions without eagerly validating or normalizing retained
+    // contracts; file identity is checked only at the existing filesystem proof points.
+    class publication_transaction_t {
+    public:
+      explicit publication_transaction_t(job_snapshot_t &snapshot):
+          snapshot_(snapshot) {
+      }
+
+      bool published() const {
+        return snapshot_.worker_result.is_object() &&
+               snapshot_.worker_result.value("published", false);
+      }
+
+      bool cleanup_pending() const {
+        return snapshot_.worker_result.is_object() &&
+               snapshot_.worker_result.value("staging_cleanup_pending", false);
+      }
+
+      const nlohmann::json &identity() const {
+        return snapshot_.worker_result.at("publish_identity");
+      }
+
+      void prepare(nlohmann::json worker_summary, const nlohmann::json &identity) {
+        snapshot_.state = job_state_e::publishing;
+        snapshot_.progress.phase = "publishing";
+        snapshot_.error.clear();
+        snapshot_.worker_result = std::move(worker_summary);
+        snapshot_.worker_result["publish_identity"] = identity;
+      }
+
+      void complete(const fs::path &output, const publication_outcome_t outcome) {
+        snapshot_.worker_result["output"] = path_to_utf8(output);
+        snapshot_.worker_result["published"] = true;
+        set_staging_cleanup(outcome.staging_cleanup);
+        snapshot_.state = job_state_e::complete;
+        snapshot_.progress.phase = "complete";
+        snapshot_.error.clear();
+      }
+
+      void set_staging_cleanup(const staging_cleanup_e cleanup) {
+        snapshot_.worker_result["staging_cleanup_pending"] =
+          cleanup == staging_cleanup_e::pending;
+      }
+
+    private:
+      job_snapshot_t &snapshot_;
+    };
   }  // namespace
 
   namespace {
@@ -2869,6 +2928,34 @@ namespace offline_sbs {
     static void release_job_resources(record_t &record) {
       record.gpu_lease.reset();
       record.input_pins.clear();
+    }
+
+    void complete_publication_locked(
+      record_t &record,
+      const publication_outcome_t outcome,
+      const publication_origin_e origin
+    ) const {
+      publication_transaction_t {record.snapshot}.complete(*record.worker.final_output, outcome);
+      if (origin == publication_origin_e::recovery) {
+        record.snapshot.ended_at_unix_ms =
+          record.snapshot.ended_at_unix_ms.value_or(unix_time_ms());
+      }
+      std::string result_error;
+      if (!run_user_filesystem_action([&]() {
+            if (!write_json_atomically(
+                  record.worker.result_directory / "publication-contract.json",
+                  record.snapshot.worker_result,
+                  result_error
+                )) {
+              throw std::runtime_error(result_error);
+            }
+          },
+                                      result_error)) {
+        const auto message = origin == publication_origin_e::worker ?
+                               "Could not write published offline SBS contract ["sv :
+                               "Could not rewrite recovered offline SBS publication ["sv;
+        BOOST_LOG(warning) << message << record.snapshot.id << "]: "sv << result_error;
+      }
     }
 
     bool persist_locked(const record_t &record, std::string &error) const {
@@ -3174,13 +3261,13 @@ namespace offline_sbs {
       const std::shared_ptr<record_t> &record,
       std::string &error
     ) const {
+      publication_transaction_t transaction {record->snapshot};
       if (
         record->snapshot.state != job_state_e::complete ||
         record->snapshot.operation != operation_e::convert ||
         !record->worker.staging_output ||
         !record->worker.final_output ||
-        !record->snapshot.worker_result.is_object() ||
-        !record->snapshot.worker_result.value("published", false)
+        !transaction.published()
       ) {
         error = "completed publication contract is incomplete";
         return false;
@@ -3234,8 +3321,7 @@ namespace offline_sbs {
           }
 
           try {
-            const auto &identity =
-              record->snapshot.worker_result.at("publish_identity");
+            const auto &identity = transaction.identity();
             if (!identity.is_object()) {
               cleanup_error =
                 "completed publication identity is not an object";
@@ -3296,19 +3382,15 @@ namespace offline_sbs {
         error = "only a finished offline SBS job can be cleared";
         return false;
       }
-      const bool staging_cleanup_pending =
-        record->snapshot.worker_result.is_object() &&
-        record->snapshot.worker_result.value(
-          "staging_cleanup_pending",
-          false
-        );
+      publication_transaction_t transaction {record->snapshot};
+      const bool staging_cleanup_pending = transaction.cleanup_pending();
       if (staging_cleanup_pending) {
         std::string cleanup_error;
         if (!retire_completed_staging_locked(record, cleanup_error)) {
           error = "retained staging cleanup is not safe: " + cleanup_error;
           return false;
         }
-        record->snapshot.worker_result["staging_cleanup_pending"] = false;
+        transaction.set_staging_cleanup(staging_cleanup_e::complete);
         std::string persist_error;
         if (!persist_locked(*record, persist_error)) {
           error =
@@ -3349,13 +3431,7 @@ namespace offline_sbs {
           return false;
         }
       }
-      if (
-        record->snapshot.worker_result.is_object() &&
-        record->snapshot.worker_result.value(
-          "staging_cleanup_pending",
-          false
-        )
-      ) {
+      if (transaction.cleanup_pending()) {
         error =
           "staging cleanup remains pending because the protected publication "
           "contract is incomplete";
@@ -3585,6 +3661,7 @@ namespace offline_sbs {
           staging
         );
         record->state_path = entry.path() / "job.json";
+        publication_transaction_t transaction {record->snapshot};
         bool worker_paths_trusted = false;
         std::string worker_pin_error;
         const bool worker_paths_accessible =
@@ -3686,8 +3763,7 @@ namespace offline_sbs {
             return false;
           }
         } else if (record->snapshot.state == job_state_e::publishing) {
-          bool reconciled = false;
-          bool staging_cleanup_pending = false;
+          std::optional<publication_outcome_t> publication_outcome;
           std::string publish_error;
           if (!run_user_filesystem_action([&]() {
                 std::optional<std::vector<pinned_handle_t>> output_directory_pins;
@@ -3709,8 +3785,7 @@ namespace offline_sbs {
                   }
                 }
                 try {
-                  const auto &identity =
-                    record->snapshot.worker_result.at("publish_identity");
+                  const auto &identity = transaction.identity();
                   if (
                     !record->worker.staging_output ||
                     !record->worker.final_output ||
@@ -3731,13 +3806,15 @@ namespace offline_sbs {
                       &staging_missing
                     );
                     if (final_matches) {
-                      reconciled = true;
+                      publication_outcome = publication_outcome_t {
+                        .staging_cleanup = staging_cleanup_e::complete,
+                      };
                       if (staged_file) {
                         std::string retirement_error;
                         if (!staged_file->retire_staging_link(
                               retirement_error
                             )) {
-                          staging_cleanup_pending = true;
+                          publication_outcome->staging_cleanup = staging_cleanup_e::pending;
                           BOOST_LOG(warning)
                             << "Recovered offline SBS publication but could "
                                "not retire its exact staging link ["sv
@@ -3747,21 +3824,17 @@ namespace offline_sbs {
                         // The final identity proves publication succeeded, but
                         // the staging pathname now names something else or
                         // cannot be pinned. Never delete it by name.
-                        staging_cleanup_pending = true;
+                        publication_outcome->staging_cleanup = staging_cleanup_e::pending;
                         BOOST_LOG(warning)
                           << "Recovered offline SBS publication while "
                              "preserving an untrusted staging pathname ["sv
                           << id << "]: "sv << publish_error;
                       }
                     } else if (staged_file && !final_matches) {
-                      bool staging_retired = false;
-                      reconciled = staged_file->publish_no_replace(
+                      publication_outcome = staged_file->publish_no_replace(
                         *record->worker.final_output,
-                        publish_error,
-                        &staging_retired
+                        publish_error
                       );
-                      staging_cleanup_pending =
-                        reconciled && !staging_retired;
                     } else {
                       publish_error =
                         "publishing recovery found an ambiguous or mismatched "
@@ -3781,37 +3854,13 @@ namespace offline_sbs {
                     publish_error
                   )
                 ) {
-                  reconciled = false;
+                  publication_outcome.reset();
                 }
               }, publish_error)) {
-            reconciled = false;
+            publication_outcome.reset();
           }
-          if (reconciled) {
-            record->snapshot.state = job_state_e::complete;
-            record->snapshot.progress.phase = "complete";
-            record->snapshot.ended_at_unix_ms =
-              record->snapshot.ended_at_unix_ms.value_or(unix_time_ms());
-            record->snapshot.error.clear();
-            record->snapshot.worker_result["output"] =
-              path_to_utf8(*record->worker.final_output);
-            record->snapshot.worker_result["published"] = true;
-            record->snapshot.worker_result["staging_cleanup_pending"] =
-              staging_cleanup_pending;
-            std::string result_error;
-            if (!run_user_filesystem_action([&]() {
-                  if (!write_json_atomically(
-                        record->worker.result_directory /
-                          "publication-contract.json",
-                        record->snapshot.worker_result,
-                        result_error
-                      )) {
-                    throw std::runtime_error(result_error);
-                  }
-                }, result_error)) {
-              BOOST_LOG(warning)
-                << "Could not rewrite recovered offline SBS publication ["sv
-                << id << "]: "sv << result_error;
-            }
+          if (publication_outcome) {
+            complete_publication_locked(*record, *publication_outcome, publication_origin_e::recovery);
           } else {
             record->snapshot.state = job_state_e::interrupted;
             record->snapshot.progress.phase = "interrupted";
@@ -3850,8 +3899,7 @@ namespace offline_sbs {
           record->snapshot.operation == operation_e::convert &&
           record->worker.staging_output &&
           record->worker.final_output &&
-          record->snapshot.worker_result.is_object() &&
-          record->snapshot.worker_result.value("published", false)
+          transaction.published()
         ) {
           // A disposition failure after publication can leave a completed
           // record with two hard links. Retry cleanup on every restart using
@@ -3861,13 +3909,8 @@ namespace offline_sbs {
           std::string cleanup_error;
           const bool cleanup_pending =
             !retire_completed_staging_locked(record, cleanup_error);
-          const bool marker_changed =
-            record->snapshot.worker_result.value(
-              "staging_cleanup_pending",
-              false
-            ) != cleanup_pending;
-          record->snapshot.worker_result["staging_cleanup_pending"] =
-            cleanup_pending;
+          const bool marker_changed = transaction.cleanup_pending() != cleanup_pending;
+          transaction.set_staging_cleanup(cleanup_pending ? staging_cleanup_e::pending : staging_cleanup_e::complete);
           if (cleanup_pending) {
             BOOST_LOG(warning)
               << "Could not retire retained offline SBS staging link ["sv
@@ -4474,17 +4517,13 @@ namespace offline_sbs {
                   completion_error;
             } else {
               // Keep the exact attested file open without write/delete sharing
-              // across persistence and publication. The final rename is issued
-              // against this handle, never by re-resolving the staging pathname.
-              record->snapshot.state = job_state_e::publishing;
-              record->snapshot.progress.phase = "publishing";
-              record->snapshot.error.clear();
-              record->snapshot.worker_result = compact_worker_result(
-                std::move(outcome.result),
-                record->worker
+              // across persistence and publication, so the staging path cannot
+              // be replaced before its no-replace hard link is created.
+              publication_transaction_t transaction {record->snapshot};
+              transaction.prepare(
+                compact_worker_result(std::move(outcome.result), record->worker),
+                staged_output->identity()
               );
-              record->snapshot.worker_result["publish_identity"] =
-                staged_output->identity();
               std::string publishing_error;
               if (!persist_locked(*record, publishing_error)) {
                 record->snapshot.state = job_state_e::failed;
@@ -4492,8 +4531,7 @@ namespace offline_sbs {
                 record->snapshot.error =
                   "cannot persist pre-publish state: " + publishing_error;
               } else {
-                bool published = false;
-                bool staging_retired = false;
+                std::optional<publication_outcome_t> publication_outcome;
                 if (!run_user_filesystem_action([&]() {
                       if (
                         record->input_pins.empty() ||
@@ -4505,46 +4543,23 @@ namespace offline_sbs {
                       ) {
                         return;
                       }
-                      published = staged_output->publish_no_replace(
+                      publication_outcome = staged_output->publish_no_replace(
                         *record->worker.final_output,
-                        completion_error,
-                        &staging_retired
+                        completion_error
 #ifdef SUNSHINE_TESTS
                         ,
                         config.test_force_staging_disposition_failure
 #endif
                       );
                     }, completion_error)) {
-                  published = false;
+                  publication_outcome.reset();
                 }
-                if (!published) {
+                if (!publication_outcome) {
                   record->snapshot.state = job_state_e::failed;
                   record->snapshot.progress.phase = "failed";
                   record->snapshot.error = completion_error;
                 } else {
-                  record->snapshot.worker_result["output"] =
-                    path_to_utf8(*record->worker.final_output);
-                  record->snapshot.worker_result["published"] = true;
-                  record->snapshot.worker_result["staging_cleanup_pending"] =
-                    !staging_retired;
-                  record->snapshot.state = job_state_e::complete;
-                  record->snapshot.progress.phase = "complete";
-                  record->snapshot.error.clear();
-                  std::string result_error;
-                  if (!run_user_filesystem_action([&]() {
-                        if (!write_json_atomically(
-                              record->worker.result_directory /
-                                "publication-contract.json",
-                              record->snapshot.worker_result,
-                              result_error
-                            )) {
-                          throw std::runtime_error(result_error);
-                        }
-                      }, result_error)) {
-                    BOOST_LOG(warning)
-                      << "Could not write published offline SBS contract ["sv
-                      << record->snapshot.id << "]: "sv << result_error;
-                  }
+                  complete_publication_locked(*record, *publication_outcome, publication_origin_e::worker);
                 }
               }
             }

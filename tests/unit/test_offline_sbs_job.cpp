@@ -63,6 +63,33 @@ namespace {
     output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
   }
 
+  std::string read_bytes(const fs::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+      throw std::runtime_error("cannot read test artifact: " + path.generic_string());
+    }
+    return {std::istreambuf_iterator<char> {input}, std::istreambuf_iterator<char> {}};
+  }
+
+  nlohmann::json read_json(const fs::path &path) {
+    return nlohmann::json::parse(read_bytes(path));
+  }
+
+  void expect_persisted_snapshot(
+    const fs::path &state_path,
+    const offline_sbs::job_snapshot_t &snapshot
+  ) {
+    auto persisted = read_json(state_path);
+    ASSERT_TRUE(persisted.at("retention_sequence").is_number_unsigned());
+    EXPECT_GT(persisted.at("retention_sequence").get<std::uint64_t>(), 0u);
+    ASSERT_TRUE(persisted.at("worker").is_object());
+    // Only the durable record adds retention order and private worker bindings.
+    // Every public field, including the compact publication result, must agree.
+    persisted.erase("retention_sequence");
+    persisted.erase("worker");
+    EXPECT_EQ(persisted, snapshot.json());
+  }
+
   std::string sha256_hex(const std::string_view bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     const auto digest = crypto::hash(bytes);
@@ -277,6 +304,17 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   ASSERT_TRUE(fs::is_regular_file(state_path));
   EXPECT_FALSE(fs::exists(state_path.wstring() + L".part"));
   const auto persisted = nlohmann::json::parse(std::ifstream(state_path));
+  expect_persisted_snapshot(state_path, terminal);
+  const auto publication_path = tree.path / "worker" / "jobs" / terminal.id / "result" / "publication-contract.json";
+  EXPECT_EQ(read_json(publication_path), terminal.worker_result);
+  EXPECT_EQ(terminal.worker_result.at("output"), terminal.output_path->generic_string());
+  EXPECT_EQ(terminal.worker_result.at("published"), true);
+  EXPECT_EQ(terminal.worker_result.at("staging_cleanup_pending"), false);
+#ifdef _WIN32
+  const auto final_identity = windows_file_identity(*terminal.output_path);
+  EXPECT_EQ(terminal.worker_result.at("publish_identity"), final_identity);
+#endif
+  EXPECT_EQ(read_bytes(*terminal.output_path), "encoded-video");
   EXPECT_EQ(persisted["state"], "complete");
   EXPECT_EQ(persisted["output_location"], "input-directory");
   EXPECT_EQ(persisted["progress"]["processed_frames"], 12);
@@ -315,6 +353,10 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   EXPECT_FALSE(fs::exists(worker_path));
   EXPECT_TRUE(fs::is_regular_file(*terminal.output_path));
   EXPECT_EQ(fs::file_size(*terminal.output_path), 13u);
+  EXPECT_EQ(read_bytes(*terminal.output_path), "encoded-video");
+#ifdef _WIN32
+  EXPECT_EQ(windows_file_identity(*terminal.output_path), final_identity);
+#endif
   EXPECT_EQ(
     service.clear(terminal.id).code,
     offline_sbs::error_code_e::not_found
@@ -829,6 +871,9 @@ TEST(OfflineSbsJob, NeverDeletesAnUnattestedFailedStagingPath) {
   ASSERT_TRUE(created.ok) << created.error;
   const auto terminal = wait_for_terminal(service, created.job->id);
   ASSERT_EQ(terminal.state, offline_sbs::job_state_e::failed);
+  expect_persisted_snapshot(tree.path / "state" / "jobs" / terminal.id / "job.json", terminal);
+  EXPECT_FALSE(fs::exists(tree.path / "worker" / "jobs" / terminal.id / "result" / "publication-contract.json"));
+  EXPECT_TRUE(terminal.worker_result.is_null());
   const auto staging =
     input.parent_path() /
     (
@@ -849,12 +894,16 @@ TEST(OfflineSbsJob, ExactHandlePublicationNeverOverwritesALateDestination) {
   temporary_tree_t tree;
   const auto input = tree.path / "source.mkv";
   write_nonempty(input, "source");
+  nlohmann::json late_identity;
+  nlohmann::json staged_identity;
 
   offline_sbs::job_service_t service {
     service_config(tree.path),
-    [](const offline_sbs::worker_context_t &context, std::stop_token, const offline_sbs::progress_callback_t &) {
+    [&](const offline_sbs::worker_context_t &context, std::stop_token, const offline_sbs::progress_callback_t &) {
       write_nonempty(*context.staging_output, "encoded-video");
       write_nonempty(*context.final_output, "late-user-file");
+      late_identity = windows_file_identity(*context.final_output);
+      staged_identity = windows_file_identity(*context.staging_output);
       return offline_sbs::worker_outcome_t {
         .completed = true,
         .result = {
@@ -888,6 +937,15 @@ TEST(OfflineSbsJob, ExactHandlePublicationNeverOverwritesALateDestination) {
   EXPECT_NE(terminal.error.find("refusing to overwrite"), std::string::npos);
   EXPECT_EQ(terminal.worker_result.at("source").at("width"), 1920);
   EXPECT_EQ(terminal.worker_result.at("cache").at("peak_bytes"), 1024);
+  expect_persisted_snapshot(tree.path / "state" / "jobs" / terminal.id / "job.json", terminal);
+  EXPECT_FALSE(fs::exists(tree.path / "worker" / "jobs" / terminal.id / "result" / "publication-contract.json"));
+  EXPECT_EQ(terminal.worker_result.at("publish_identity"), staged_identity);
+  EXPECT_FALSE(terminal.worker_result.contains("published"));
+  EXPECT_FALSE(terminal.worker_result.contains("staging_cleanup_pending"));
+  EXPECT_EQ(windows_file_identity(input.parent_path() / "collision.mkv"), late_identity);
+  const auto staging = input.parent_path() / ("collision.sunshine3d-" + terminal.id + ".part.mkv");
+  EXPECT_EQ(windows_file_identity(staging), staged_identity);
+  EXPECT_EQ(read_bytes(staging), "encoded-video");
   expect_owned_job_list_summary(service, terminal);
   std::ifstream final(input.parent_path() / "collision.mkv", std::ios::binary);
   const std::string final_contents {
@@ -903,17 +961,19 @@ TEST(OfflineSbsJob, RejectsAStagingLeafSwappedAfterWorkerAttestation) {
   const auto input = tree.path / "source.mkv";
   write_nonempty(input, "source");
   fs::path retained_original;
+  nlohmann::json attested_identity;
+  nlohmann::json replacement_identity;
 
   offline_sbs::job_service_t service {
     service_config(tree.path),
-    [&retained_original](const offline_sbs::worker_context_t &context,
-                         std::stop_token,
-                         const offline_sbs::progress_callback_t &) {
+    [&](const offline_sbs::worker_context_t &context, std::stop_token, const offline_sbs::progress_callback_t &) {
       write_nonempty(*context.staging_output, "attested-video");
       const auto identity = windows_file_identity(*context.staging_output);
+      attested_identity = identity;
       retained_original = context.staging_output->wstring() + L".original";
       fs::rename(*context.staging_output, retained_original);
       write_nonempty(*context.staging_output, "replacement-data");
+      replacement_identity = windows_file_identity(*context.staging_output);
       return offline_sbs::worker_outcome_t {
         .completed = true,
         .result = {
@@ -936,13 +996,125 @@ TEST(OfflineSbsJob, RejectsAStagingLeafSwappedAfterWorkerAttestation) {
   const auto terminal = wait_for_terminal(service, created.job->id);
   EXPECT_EQ(terminal.state, offline_sbs::job_state_e::failed);
   EXPECT_NE(terminal.error.find("identity changed"), std::string::npos);
+  expect_persisted_snapshot(tree.path / "state" / "jobs" / terminal.id / "job.json", terminal);
+  EXPECT_TRUE(terminal.worker_result.is_null());
+  EXPECT_FALSE(fs::exists(tree.path / "worker" / "jobs" / terminal.id / "result" / "publication-contract.json"));
   EXPECT_FALSE(fs::exists(input.parent_path() / "swapped.mkv"));
   EXPECT_TRUE(fs::is_regular_file(retained_original));
   const auto current_staging =
     input.parent_path() /
     ("swapped.sunshine3d-" + created.job->id + ".part.mkv");
   EXPECT_TRUE(fs::is_regular_file(current_staging));
+  EXPECT_EQ(read_bytes(retained_original), "attested-video");
+  EXPECT_EQ(read_bytes(current_staging), "replacement-data");
+  EXPECT_EQ(windows_file_identity(retained_original), attested_identity);
+  EXPECT_EQ(windows_file_identity(current_staging), replacement_identity);
   service.shutdown();
+}
+
+TEST(OfflineSbsJob, PublicationContractWriteFailureDoesNotUndoPublishedOutput) {
+  temporary_tree_t tree;
+  const auto config = service_config(tree.path);
+  const auto input = tree.path / "source.mkv";
+  write_nonempty(input, "source");
+  nlohmann::json staged_identity;
+
+  offline_sbs::job_service_t service {
+    config,
+    [&](const offline_sbs::worker_context_t &context, std::stop_token, const offline_sbs::progress_callback_t &) {
+      write_nonempty(*context.staging_output, "encoded-video");
+      staged_identity = windows_file_identity(*context.staging_output);
+      // A real nonempty destination directory makes atomic artifact replacement fail.
+      write_nonempty(context.result_directory / "publication-contract.json" / "owned-sentinel", "block artifact replacement");
+      return offline_sbs::worker_outcome_t {
+        .completed = true,
+        .result = {{"schema", 1}, {"job_id", context.job_id}, {"status", "complete"}},
+      };
+    }
+  };
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({
+    .input_path = input,
+    .operation = offline_sbs::operation_e::convert,
+    .output_name = "artifact-warning.mkv",
+  });
+  ASSERT_TRUE(created.ok) << created.error;
+  const auto terminal = wait_for_terminal(service, created.job->id);
+  ASSERT_EQ(terminal.state, offline_sbs::job_state_e::complete);
+  EXPECT_TRUE(terminal.error.empty());
+  ASSERT_TRUE(terminal.output_path);
+  EXPECT_EQ(terminal.worker_result.at("published"), true);
+  EXPECT_EQ(terminal.worker_result.at("staging_cleanup_pending"), false);
+  EXPECT_EQ(terminal.worker_result.at("publish_identity"), staged_identity);
+  EXPECT_EQ(windows_file_identity(*terminal.output_path), staged_identity);
+  EXPECT_EQ(read_bytes(*terminal.output_path), "encoded-video");
+  const auto state_path = config.state_root / "jobs" / terminal.id / "job.json";
+  expect_persisted_snapshot(state_path, terminal);
+  const auto publication_path = config.worker_root / "jobs" / terminal.id / "result" / "publication-contract.json";
+  EXPECT_TRUE(fs::is_directory(publication_path));
+  EXPECT_EQ(read_bytes(publication_path / "owned-sentinel"), "block artifact replacement");
+  EXPECT_FALSE(fs::exists(publication_path.wstring() + L".part"));
+  EXPECT_FALSE(fs::exists(input.parent_path() / ("artifact-warning.sunshine3d-" + terminal.id + ".part.mkv")));
+  service.shutdown();
+  EXPECT_TRUE(fs::remove(publication_path / "owned-sentinel"));
+  EXPECT_TRUE(fs::remove(publication_path));
+}
+
+TEST(OfflineSbsJob, PrePublishStateWriteFailurePreventsPublication) {
+  temporary_tree_t tree;
+  const auto config = service_config(tree.path);
+  const auto input = tree.path / "source.mkv";
+  write_nonempty(input, "source");
+  nlohmann::json staged_identity;
+  std::string prior_running_state;
+
+  offline_sbs::job_service_t service {
+    config,
+    [&](const offline_sbs::worker_context_t &context, std::stop_token, const offline_sbs::progress_callback_t &) {
+      write_nonempty(*context.staging_output, "encoded-video");
+      staged_identity = windows_file_identity(*context.staging_output);
+      const auto state_path = config.state_root / "jobs" / context.job_id / "job.json";
+      prior_running_state = read_bytes(state_path);
+      // Atomic state writes cannot remove this nonempty temporary directory or open it as a file.
+      write_nonempty(fs::path {state_path.wstring() + L".part"} / "owned-sentinel", "block protected state write");
+      return offline_sbs::worker_outcome_t {
+        .completed = true,
+        .result = {{"schema", 1}, {"job_id", context.job_id}, {"status", "complete"}},
+      };
+    }
+  };
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({
+    .input_path = input,
+    .operation = offline_sbs::operation_e::convert,
+    .output_name = "not-published.mkv",
+  });
+  ASSERT_TRUE(created.ok) << created.error;
+  const auto terminal = wait_for_terminal(service, created.job->id);
+  ASSERT_EQ(terminal.state, offline_sbs::job_state_e::failed);
+  EXPECT_NE(terminal.error.find("cannot persist pre-publish state"), std::string::npos);
+  EXPECT_EQ(terminal.worker_result.at("publish_identity"), staged_identity);
+  EXPECT_FALSE(terminal.worker_result.contains("published"));
+  EXPECT_FALSE(terminal.worker_result.contains("staging_cleanup_pending"));
+  ASSERT_TRUE(terminal.output_path);
+  EXPECT_FALSE(fs::exists(*terminal.output_path));
+  const auto staging_path = input.parent_path() / ("not-published.sunshine3d-" + terminal.id + ".part.mkv");
+  EXPECT_EQ(windows_file_identity(staging_path), staged_identity);
+  EXPECT_EQ(read_bytes(staging_path), "encoded-video");
+  EXPECT_FALSE(fs::exists(config.worker_root / "jobs" / terminal.id / "result" / "publication-contract.json"));
+  const auto state_path = config.state_root / "jobs" / terminal.id / "job.json";
+  EXPECT_EQ(read_bytes(state_path), prior_running_state);
+  const auto durable = nlohmann::json::parse(prior_running_state);
+  EXPECT_EQ(durable.at("state"), "running");
+  EXPECT_TRUE(durable.at("worker_result").is_null());
+  // The terminal write also fails, leaving the last successfully persisted running state.
+  const auto blocker = fs::path {state_path.wstring() + L".part"};
+  EXPECT_EQ(read_bytes(blocker / "owned-sentinel"), "block protected state write");
+  service.shutdown();
+  EXPECT_TRUE(fs::remove(blocker / "owned-sentinel"));
+  EXPECT_TRUE(fs::remove(blocker));
 }
 
 TEST(OfflineSbsJob, RestartRetiresStagingAfterCrashFollowingFinalHardLink) {
@@ -982,6 +1154,7 @@ TEST(OfflineSbsJob, RestartRetiresStagingAfterCrashFollowingFinalHardLink) {
   service.shutdown();
 
   const auto final_output = input.parent_path() / "crash-window.mkv";
+  const auto final_identity = windows_file_identity(final_output);
   const auto staging_output =
     input.parent_path() /
     (
@@ -1008,6 +1181,8 @@ TEST(OfflineSbsJob, RestartRetiresStagingAfterCrashFollowingFinalHardLink) {
   persisted["state"] = "publishing";
   persisted["progress"]["phase"] = "publishing";
   persisted["ended_at_unix_ms"] = nullptr;
+  // Publishing recovery replaces the cleanup marker without interpreting its old type.
+  persisted["worker_result"]["staging_cleanup_pending"] = {{"old", "malformed"}};
   write_nonempty(state_path, persisted.dump(2));
 
   offline_sbs::job_service_t recovered {
@@ -1028,6 +1203,15 @@ TEST(OfflineSbsJob, RestartRetiresStagingAfterCrashFollowingFinalHardLink) {
   EXPECT_FALSE(
     snapshot.job->worker_result.value("staging_cleanup_pending", true)
   );
+  expect_persisted_snapshot(state_path, *snapshot.job);
+  const auto publication_path = config.worker_root / "jobs" / created.job->id / "result" / "publication-contract.json";
+  EXPECT_EQ(read_json(publication_path), snapshot.job->worker_result);
+  EXPECT_EQ(snapshot.job->worker_result.at("publish_identity"), final_identity);
+  EXPECT_EQ(snapshot.job->worker_result.at("published"), true);
+  EXPECT_EQ(snapshot.job->worker_result.at("output"), final_output.generic_string());
+  EXPECT_EQ(read_json(state_path).at("retention_sequence"), persisted.at("retention_sequence"));
+  EXPECT_EQ(windows_file_identity(final_output), final_identity);
+  EXPECT_EQ(read_bytes(final_output), "encoded-video");
   recovered.shutdown();
 }
 
@@ -1075,6 +1259,7 @@ TEST(OfflineSbsJob, RecoversLegacyUnmarkedPublicationInManagedExports) {
       "legacy-recovery.sunshine3d-" + created.job->id + ".part.mkv"
     );
   fs::rename(current_final, legacy_final);
+  const auto final_identity = windows_file_identity(legacy_final);
   ASSERT_TRUE(CreateHardLinkW(
     legacy_staging.c_str(),
     legacy_final.c_str(),
@@ -1112,6 +1297,16 @@ TEST(OfflineSbsJob, RecoversLegacyUnmarkedPublicationInManagedExports) {
   );
   EXPECT_FALSE(fs::exists(legacy_staging));
   EXPECT_TRUE(fs::is_regular_file(legacy_final));
+  expect_persisted_snapshot(state_path, *snapshot.job);
+  const auto publication_path = config.worker_root / "jobs" / created.job->id / "result" / "publication-contract.json";
+  EXPECT_EQ(read_json(publication_path), snapshot.job->worker_result);
+  EXPECT_EQ(snapshot.job->worker_result.at("output"), legacy_final.generic_string());
+  EXPECT_EQ(snapshot.job->worker_result.at("publish_identity"), final_identity);
+  EXPECT_EQ(snapshot.job->worker_result.at("published"), true);
+  EXPECT_EQ(snapshot.job->worker_result.at("staging_cleanup_pending"), false);
+  EXPECT_EQ(read_json(state_path).at("retention_sequence"), persisted.at("retention_sequence"));
+  EXPECT_EQ(windows_file_identity(legacy_final), final_identity);
+  EXPECT_EQ(read_bytes(legacy_final), "encoded-video");
   recovered.shutdown();
 }
 
@@ -1158,6 +1353,17 @@ TEST(OfflineSbsJob, RestartRetriesForcedStagingDispositionFailure) {
       "retry-disposition.sunshine3d-" + created.job->id + ".part.mkv"
     );
   ASSERT_TRUE(fs::is_regular_file(staging_output));
+  ASSERT_TRUE(terminal.output_path);
+  const auto final_identity = windows_file_identity(*terminal.output_path);
+  EXPECT_EQ(windows_file_identity(staging_output), final_identity);
+  EXPECT_EQ(terminal.worker_result.at("publish_identity"), final_identity);
+  EXPECT_EQ(read_bytes(staging_output), "encoded-video");
+  const auto state_path = config.state_root / "jobs" / terminal.id / "job.json";
+  const auto publication_path = config.worker_root / "jobs" / terminal.id / "result" / "publication-contract.json";
+  expect_persisted_snapshot(state_path, terminal);
+  const auto original_state = read_json(state_path);
+  const auto original_publication = read_bytes(publication_path);
+  EXPECT_EQ(nlohmann::json::parse(original_publication), terminal.worker_result);
 
   const auto quota_blocked = service.create({
     .input_path = input,
@@ -1168,6 +1374,10 @@ TEST(OfflineSbsJob, RestartRetriesForcedStagingDispositionFailure) {
   EXPECT_NE(quota_blocked.error.find("quota"), std::string::npos);
   service.shutdown();
 
+  auto state_without_cleanup_marker = original_state;
+  state_without_cleanup_marker["worker_result"].erase("staging_cleanup_pending");
+  const auto missing_marker_bytes = state_without_cleanup_marker.dump(2);
+  write_nonempty(state_path, missing_marker_bytes);
   config.test_force_staging_disposition_failure = false;
   offline_sbs::job_service_t recovered {
     config,
@@ -1192,6 +1402,16 @@ TEST(OfflineSbsJob, RestartRetriesForcedStagingDispositionFailure) {
   EXPECT_FALSE(
     snapshot.job->worker_result.value("staging_cleanup_pending", true)
   );
+  // Missing defaults to false: successful cleanup need not rewrite that absent durable field.
+  EXPECT_EQ(read_bytes(state_path), missing_marker_bytes);
+  EXPECT_FALSE(read_json(state_path).at("worker_result").contains("staging_cleanup_pending"));
+  EXPECT_EQ(windows_file_identity(*terminal.output_path), final_identity);
+  EXPECT_EQ(read_bytes(*terminal.output_path), "encoded-video");
+  auto expected_result = terminal.worker_result;
+  expected_result["staging_cleanup_pending"] = false;
+  EXPECT_EQ(snapshot.job->worker_result, expected_result);
+  // Completed-job cleanup updates the durable job, not its earlier publication artifact.
+  EXPECT_EQ(read_bytes(publication_path), original_publication);
 
   const auto admitted = recovered.create({
     .input_path = input,
@@ -1252,12 +1472,24 @@ TEST(OfflineSbsJob, ClearRetiresAttestedPendingStagingAndKeepsFinalOutput) {
     );
   ASSERT_TRUE(fs::is_regular_file(staging_output));
   ASSERT_TRUE(fs::is_regular_file(*terminal.output_path));
+  const auto final_identity = windows_file_identity(*terminal.output_path);
+  EXPECT_EQ(windows_file_identity(staging_output), final_identity);
+  const auto state_path = config.state_root / "jobs" / terminal.id / "job.json";
+  const auto publication_path = config.worker_root / "jobs" / terminal.id / "result" / "publication-contract.json";
+  expect_persisted_snapshot(state_path, terminal);
+  EXPECT_EQ(read_json(publication_path), terminal.worker_result);
 
   const auto cleared = service.clear(created.job->id);
   ASSERT_TRUE(cleared.ok) << cleared.error;
+  ASSERT_TRUE(cleared.job);
+  EXPECT_EQ(cleared.job->worker_result.at("staging_cleanup_pending"), false);
   EXPECT_FALSE(fs::exists(staging_output));
   EXPECT_TRUE(fs::is_regular_file(*terminal.output_path));
   EXPECT_EQ(fs::file_size(*terminal.output_path), 13u);
+  EXPECT_EQ(windows_file_identity(*terminal.output_path), final_identity);
+  EXPECT_EQ(read_bytes(*terminal.output_path), "encoded-video");
+  EXPECT_FALSE(fs::exists(state_path.parent_path()));
+  EXPECT_FALSE(fs::exists(publication_path.parent_path()));
   EXPECT_EQ(
     service.get(created.job->id).code,
     offline_sbs::error_code_e::not_found
@@ -1320,6 +1552,10 @@ TEST(OfflineSbsJob, ClearAcceptsStalePendingMarkerWhenBothOutputsAreGone) {
 
   const auto cleared = service.clear(created.job->id);
   ASSERT_TRUE(cleared.ok) << cleared.error;
+  ASSERT_TRUE(cleared.job);
+  EXPECT_EQ(cleared.job->worker_result.at("staging_cleanup_pending"), false);
+  EXPECT_FALSE(fs::exists(config.state_root / "jobs" / terminal.id));
+  EXPECT_FALSE(fs::exists(config.worker_root / "jobs" / terminal.id));
   EXPECT_EQ(
     service.get(created.job->id).code,
     offline_sbs::error_code_e::not_found
@@ -1371,6 +1607,12 @@ TEST(OfflineSbsJob, ClearPreservesPendingStagingWhenFinalOutputIsGone) {
       "keep-last-copy.sunshine3d-" + created.job->id + ".part.mkv"
     );
   ASSERT_TRUE(fs::is_regular_file(staging_output));
+  const auto staged_identity = windows_file_identity(staging_output);
+  const auto state_path = config.state_root / "jobs" / terminal.id / "job.json";
+  const auto publication_path = config.worker_root / "jobs" / terminal.id / "result" / "publication-contract.json";
+  expect_persisted_snapshot(state_path, terminal);
+  const auto original_state = read_bytes(state_path);
+  const auto original_publication = read_bytes(publication_path);
   ASSERT_TRUE(fs::remove(*terminal.output_path));
 
   const auto cleared = service.clear(created.job->id);
@@ -1379,6 +1621,12 @@ TEST(OfflineSbsJob, ClearPreservesPendingStagingWhenFinalOutputIsGone) {
   EXPECT_NE(cleared.error.find("last intact copy"), std::string::npos);
   EXPECT_TRUE(fs::is_regular_file(staging_output));
   EXPECT_TRUE(service.get(created.job->id).ok);
+  ASSERT_TRUE(cleared.job);
+  EXPECT_EQ(cleared.job->json(), terminal.json());
+  EXPECT_EQ(read_bytes(state_path), original_state);
+  EXPECT_EQ(read_bytes(publication_path), original_publication);
+  EXPECT_EQ(windows_file_identity(staging_output), staged_identity);
+  EXPECT_EQ(read_bytes(staging_output), "encoded-video");
   service.shutdown();
 #endif
 }
@@ -1414,10 +1662,15 @@ TEST(OfflineSbsJob, RecoveryNeverRetiresAReplacementStagingIdentity) {
     .output_name = "replacement.mkv",
   });
   ASSERT_TRUE(created.ok) << created.error;
-  ASSERT_EQ(
-    wait_for_terminal(service, created.job->id).state,
-    offline_sbs::job_state_e::complete
-  );
+  const auto terminal = wait_for_terminal(service, created.job->id);
+  ASSERT_EQ(terminal.state, offline_sbs::job_state_e::complete);
+  ASSERT_TRUE(terminal.output_path);
+  const auto final_identity = windows_file_identity(*terminal.output_path);
+  const auto state_path = config.state_root / "jobs" / terminal.id / "job.json";
+  const auto publication_path = config.worker_root / "jobs" / terminal.id / "result" / "publication-contract.json";
+  expect_persisted_snapshot(state_path, terminal);
+  const auto original_state = read_bytes(state_path);
+  const auto original_publication = read_bytes(publication_path);
   service.shutdown();
 
   const auto staging_output =
@@ -1427,6 +1680,8 @@ TEST(OfflineSbsJob, RecoveryNeverRetiresAReplacementStagingIdentity) {
     );
   ASSERT_TRUE(fs::remove(staging_output));
   write_nonempty(staging_output, "replacement-user-data");
+  const auto replacement_identity = windows_file_identity(staging_output);
+  EXPECT_NE(replacement_identity, final_identity);
 
   config.test_force_staging_disposition_failure = false;
   offline_sbs::job_service_t recovered {
@@ -1460,6 +1715,12 @@ TEST(OfflineSbsJob, RecoveryNeverRetiresAReplacementStagingIdentity) {
     << clear.error;
   EXPECT_TRUE(fs::is_regular_file(staging_output));
   EXPECT_TRUE(recovered.get(created.job->id).ok);
+  EXPECT_EQ(snapshot.job->json(), terminal.json());
+  EXPECT_EQ(read_bytes(state_path), original_state);
+  EXPECT_EQ(read_bytes(publication_path), original_publication);
+  EXPECT_EQ(windows_file_identity(staging_output), replacement_identity);
+  EXPECT_EQ(windows_file_identity(*terminal.output_path), final_identity);
+  EXPECT_EQ(read_bytes(*terminal.output_path), "encoded-video");
   recovered.shutdown();
 }
 
@@ -1500,6 +1761,9 @@ TEST(OfflineSbsJob, RestartRejectsFinalSymlinkToAttestedStagingIdentity) {
   service.shutdown();
 
   const auto final_output = input.parent_path() / "symlink-final.mkv";
+  const auto final_identity = windows_file_identity(final_output);
+  const auto publication_path = config.worker_root / "jobs" / created.job->id / "result" / "publication-contract.json";
+  const auto original_publication = read_bytes(publication_path);
   const auto staging_output =
     input.parent_path() /
     (
@@ -1569,6 +1833,10 @@ TEST(OfflineSbsJob, RestartRejectsFinalSymlinkToAttestedStagingIdentity) {
     recovered_final_attributes & FILE_ATTRIBUTE_REPARSE_POINT,
     0u
   );
+  expect_persisted_snapshot(state_path, *snapshot.job);
+  EXPECT_EQ(read_bytes(publication_path), original_publication);
+  EXPECT_EQ(windows_file_identity(staging_output), final_identity);
+  EXPECT_EQ(read_bytes(staging_output), "encoded-video");
   recovered.shutdown();
 }
 
@@ -1643,6 +1911,11 @@ TEST(OfflineSbsJob, RejectsPersistedInputDirectoryOutputThatWasRedirected) {
 
   const auto outside = config.exports_root / "redirected.mkv";
   write_nonempty(outside, "unrelated-user-file");
+  const auto outside_identity = windows_file_identity(outside);
+  const auto final_output = input.parent_path() / "redirected.mkv";
+  const auto final_identity = windows_file_identity(final_output);
+  const auto publication_path = config.worker_root / "jobs" / created.job->id / "result" / "publication-contract.json";
+  const auto original_publication = read_bytes(publication_path);
   const auto state_path =
     config.state_root / "jobs" / created.job->id / "job.json";
   auto persisted = nlohmann::json::parse(std::ifstream(state_path));
@@ -1666,6 +1939,11 @@ TEST(OfflineSbsJob, RejectsPersistedInputDirectoryOutputThatWasRedirected) {
     std::istreambuf_iterator<char> {},
   };
   EXPECT_EQ(outside_contents, "unrelated-user-file");
+  EXPECT_EQ(windows_file_identity(outside), outside_identity);
+  EXPECT_EQ(windows_file_identity(final_output), final_identity);
+  EXPECT_EQ(read_bytes(final_output), "encoded-video");
+  EXPECT_EQ(read_bytes(publication_path), original_publication);
+  EXPECT_FALSE(fs::exists(state_path.parent_path()));
   recovered.shutdown();
 }
 #endif
