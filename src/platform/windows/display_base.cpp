@@ -1055,9 +1055,7 @@ namespace platf::dxgi {
             continue;
           }
 
-          const bool backend_available = backend == capture_backend_e::wgc ||
-                                         test_dxgi_duplication(adapter_tmp, output_tmp, false);
-          if (desc.AttachedToDesktop && backend_available) {
+          if (desc.AttachedToDesktop && (backend == capture_backend_e::wgc || test_dxgi_duplication(adapter_tmp, output_tmp, false))) {
             output = std::move(output_tmp);
 
             offset_x = desc.DesktopCoordinates.left;
