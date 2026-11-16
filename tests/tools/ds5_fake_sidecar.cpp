@@ -3,6 +3,7 @@
  * @brief Minimal DS5 protocol peer that leaves the Core reader blocked until EOF.
  */
 #define WIN32_LEAN_AND_MEAN
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -13,6 +14,7 @@
 namespace {
   constexpr std::uint32_t MAGIC = 0x35534453;
   constexpr std::size_t HEADER_SIZE = 16;
+  bool fragment_replies = false;
 
   std::uint16_t read_u16(const std::uint8_t *p) {
     return static_cast<std::uint16_t>(p[0] | (p[1] << 8));
@@ -38,10 +40,20 @@ namespace {
   }
 
   bool transfer(HANDLE pipe, void *buffer, DWORD size, bool write) {
-    DWORD count = 0;
-    return (write ? WriteFile(pipe, buffer, size, &count, nullptr) :
-                    ReadFile(pipe, buffer, size, &count, nullptr)) &&
-           count == size;
+    DWORD offset = 0;
+    while (offset < size) {
+      const auto chunk = write && fragment_replies ? std::min<DWORD>(3, size - offset) : size - offset;
+      DWORD count = 0;
+      auto *bytes = static_cast<std::uint8_t *>(buffer) + offset;
+      if (!(write ? WriteFile(pipe, bytes, chunk, &count, nullptr) : ReadFile(pipe, bytes, chunk, &count, nullptr)) || count == 0) {
+        return false;
+      }
+      offset += count;
+      if (write && fragment_replies && offset < size) {
+        Sleep(1);
+      }
+    }
+    return true;
   }
 
   bool reply(HANDLE pipe, std::uint16_t type, std::uint32_t request_id, const std::vector<std::uint8_t> &payload) {
@@ -95,6 +107,13 @@ int main(int argc, char **argv) {
     GetEnvironmentVariableW(L"SUNSHINE_DS5_TEST_GENSHIN_COMPATIBILITY", nullptr, 0) > 0;
   const auto authored_feedback =
     GetEnvironmentVariableW(L"SUNSHINE_DS5_TEST_AUTHORED_FEEDBACK", nullptr, 0) > 0;
+  fragment_replies = GetEnvironmentVariableW(L"SUNSHINE_DS5_TEST_FRAGMENT_REPLIES", nullptr, 0) > 0;
+  const auto echo_input = GetEnvironmentVariableW(L"SUNSHINE_DS5_TEST_ECHO_INPUT", nullptr, 0) > 0;
+  const auto pause_reads = GetEnvironmentVariableW(L"SUNSHINE_DS5_TEST_PAUSE_READS", nullptr, 0) > 0;
+  const auto paused_name = L"Local\\sunshine-ds5-test-paused-" + event_suffix;
+  const auto paused_event = OpenEventW(EVENT_MODIFY_STATE, FALSE, paused_name.c_str());
+  const auto resume_name = L"Local\\sunshine-ds5-test-resume-" + event_suffix;
+  const auto resume_event = OpenEventW(SYNCHRONIZE, FALSE, resume_name.c_str());
   const auto policy_once_name = L"Local\\sunshine-ds5-test-policy-once-" + event_suffix;
   const auto policy_once_event = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, policy_once_name.c_str());
   const auto hid_fallback_name = L"Local\\sunshine-ds5-test-hid-fallback-" + event_suffix;
@@ -140,12 +159,17 @@ int main(int argc, char **argv) {
     return 4;
   }
 
+  std::array<std::uint8_t, 2> attached {};
+  std::array<unsigned, 4> data_messages {};
   while (true) {
     std::array<std::uint8_t, HEADER_SIZE> header {};
     if (!transfer(pipe, header.data(), static_cast<DWORD>(header.size()), false)) {
       break;
     }
     const auto size = read_u32(header.data() + 8);
+    if (read_u32(header.data()) != MAGIC || read_u16(header.data() + 4) != 1 || size > 1024 * 1024) {
+      break;
+    }
     std::vector<std::uint8_t> payload(size);
     if (size && !transfer(pipe, payload.data(), size, false)) {
       break;
@@ -153,6 +177,9 @@ int main(int argc, char **argv) {
     const auto type = read_u16(header.data() + 6);
     const auto request_id = read_u32(header.data() + 12);
     if (type == 1) {
+      if (payload.size() != 4) {
+        break;
+      }
       std::vector<std::uint8_t> capabilities(4);
       std::uint32_t advertised_capabilities = 0xff;
       if (genshin_compatibility) {
@@ -196,7 +223,26 @@ int main(int argc, char **argv) {
       }
     } else if (microphone_mode && type == 11) {
       break;
+    } else if (!microphone_mode && echo_input && type >= 7 && type <= 10) {
+      constexpr std::array<std::size_t, 4> sizes {20, 20, 16, 4};
+      if (payload.size() != sizes[type - 7] || payload[0] != attached[0] || request_id != 0) {
+        break;
+      }
+      ++data_messages[type - 7];
+      if (type == 7) {
+        if (data_messages[1] < data_messages[0] || data_messages[2] < data_messages[0] || data_messages[3] < data_messages[0]) {
+          break;
+        }
+        std::vector<std::uint8_t> echoed(6);
+        echoed[0] = attached[0];
+        echoed[1] = attached[1];
+        write_u32(echoed.data() + 2, read_u32(payload.data() + 4));
+        if (!reply(pipe, 101, 0, echoed)) {
+          break;
+        }
+      }
     } else if (type == 3 && payload.size() == 4) {
+      attached = {payload[0], payload[1]};
       if (interleave) {
         std::vector<std::uint8_t> early(6);
         early[0] = payload[0];
@@ -318,9 +364,24 @@ int main(int argc, char **argv) {
       if (marker_event) {
         SetEvent(marker_event);
       }
+      if (pause_reads) {
+        if (!paused_event || !resume_event) {
+          break;
+        }
+        SetEvent(paused_event);
+        if (WaitForSingleObject(resume_event, 5000) != WAIT_OBJECT_0) {
+          break;
+        }
+      }
     }
   }
 
+  if (resume_event) {
+    CloseHandle(resume_event);
+  }
+  if (paused_event) {
+    CloseHandle(paused_event);
+  }
   if (genshin_compatibility_event) {
     CloseHandle(genshin_compatibility_event);
   }

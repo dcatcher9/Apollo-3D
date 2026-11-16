@@ -89,42 +89,86 @@ namespace platf::ds5 {
     // failing the write lets the caller bail out instead of freezing.
     constexpr DWORD write_stall_timeout_ms = 250;
 
-    bool transfer_exact(HANDLE pipe, HANDLE stop_event, void *buffer, std::size_t size, bool write, DWORD wait_timeout = INFINITE) {
+    struct completion_event_t {
+      HANDLE handle = nullptr;
+#ifdef SUNSHINE_DS5_SIDECAR_TEST_HOOK
+      std::atomic<std::uint64_t> creations {0};
+      std::atomic<std::uint64_t> operations {0};
+      std::atomic<std::uint64_t> write_timeouts {0};
+      std::atomic<std::uint64_t> write_stop_cancels {0};
+      std::atomic<std::uint32_t> chunk_limit {0};
+#endif
+
+      completion_event_t() = default;
+      completion_event_t(const completion_event_t &) = delete;
+      completion_event_t &operator=(const completion_event_t &) = delete;
+
+      ~completion_event_t() {
+        if (handle) {
+          CloseHandle(handle);
+        }
+      }
+
+      bool prepare() {
+        if (!handle) {
+          handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+          if (!handle) {
+            return false;
+          }
+#ifdef SUNSHINE_DS5_SIDECAR_TEST_HOOK
+          creations.fetch_add(1, std::memory_order_relaxed);
+#endif
+        }
+        if (!ResetEvent(handle)) {
+          // The lane is idle here. Do not retain a failed event across transport recovery.
+          CloseHandle(handle);
+          handle = nullptr;
+          return false;
+        }
+        return true;
+      }
+    };
+
+    bool transfer_exact(HANDLE pipe, HANDLE stop_event, completion_event_t &completion_event, void *buffer, std::size_t size, bool write, DWORD wait_timeout = INFINITE) {
       std::size_t offset = 0;
       while (offset < size) {
         if (WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0) {
           return false;
         }
-        OVERLAPPED overlapped {};
-        overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (!overlapped.hEvent) {
+        if (!completion_event.prepare()) {
           return false;
         }
+        OVERLAPPED overlapped {};
+        overlapped.hEvent = completion_event.handle;
 
         DWORD count = 0;
         auto *bytes = static_cast<std::uint8_t *>(buffer) + offset;
-        const auto remaining = static_cast<DWORD>(size - offset);
+        auto remaining = static_cast<DWORD>(size - offset);
+#ifdef SUNSHINE_DS5_SIDECAR_TEST_HOOK
+        if (const auto limit = completion_event.chunk_limit.load(std::memory_order_relaxed)) {
+          remaining = std::min(remaining, static_cast<DWORD>(limit));
+        }
+        completion_event.operations.fetch_add(1, std::memory_order_relaxed);
+#endif
         const auto started = write ?
                                WriteFile(pipe, bytes, remaining, &count, &overlapped) :
                                ReadFile(pipe, bytes, remaining, &count, &overlapped);
         bool completed = started != FALSE;
         if (!completed && GetLastError() == ERROR_IO_PENDING) {
 #ifdef SUNSHINE_DS5_SIDECAR_TEST_HOOK
-          if (!write) {
-            std::array<wchar_t, 256> event_suffix_buffer {};
-            const auto event_suffix_size = GetEnvironmentVariableW(
-              L"SUNSHINE_DS5_TEST_EVENT_SUFFIX",
-              event_suffix_buffer.data(),
-              static_cast<DWORD>(event_suffix_buffer.size())
-            );
-            const auto event_suffix = event_suffix_size > 0 && event_suffix_size < event_suffix_buffer.size() ?
-                                        std::wstring(event_suffix_buffer.data(), event_suffix_size) :
-                                        std::to_wstring(GetCurrentProcessId());
-            const auto event_name = L"Local\\sunshine-ds5-test-reader-" + event_suffix;
-            if (const auto event = OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name.c_str())) {
-              SetEvent(event);
-              CloseHandle(event);
-            }
+          std::array<wchar_t, 256> event_suffix_buffer {};
+          const auto event_suffix_size = GetEnvironmentVariableW(
+            L"SUNSHINE_DS5_TEST_EVENT_SUFFIX",
+            event_suffix_buffer.data(),
+            static_cast<DWORD>(event_suffix_buffer.size())
+          );
+          const auto event_suffix = event_suffix_size > 0 && event_suffix_size < event_suffix_buffer.size() ?
+                                      std::wstring(event_suffix_buffer.data(), event_suffix_size) :
+                                      std::to_wstring(GetCurrentProcessId());
+          const auto event_name = std::wstring(write ? L"Local\\sunshine-ds5-test-writer-" : L"Local\\sunshine-ds5-test-reader-") + event_suffix;
+          if (const auto event = OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name.c_str())) {
+            SetEvent(event);
+            CloseHandle(event);
           }
 #endif
           const std::array waits {overlapped.hEvent, stop_event};
@@ -137,15 +181,25 @@ namespace platf::ds5 {
           if (wait_result == WAIT_OBJECT_0) {
             completed = GetOverlappedResult(pipe, &overlapped, &count, FALSE) != FALSE;
           } else {
+#ifdef SUNSHINE_DS5_SIDECAR_TEST_HOOK
+            if (write) {
+              if (wait_result == WAIT_TIMEOUT) {
+                completion_event.write_timeouts.fetch_add(1, std::memory_order_relaxed);
+              } else if (wait_result == WAIT_OBJECT_0 + 1) {
+                completion_event.write_stop_cancels.fetch_add(1, std::memory_order_relaxed);
+              }
+            }
+#endif
             // The persistent stop event also covers cancel-before-I/O races: if
             // shutdown wins just before ReadFile/WriteFile, this newly issued
             // operation still observes the signaled event and cancels itself.
             CancelIoEx(pipe, &overlapped);
-            WaitForSingleObject(overlapped.hEvent, INFINITE);
+            // Cancellation only requests completion. Drain it before the local OVERLAPPED is
+            // destroyed or the lane's event can be reset for a later operation.
+            GetOverlappedResult(pipe, &overlapped, &count, TRUE);
             completed = false;
           }
         }
-        CloseHandle(overlapped.hEvent);
         if (!completed || count == 0) {
           return false;
         }
@@ -154,14 +208,15 @@ namespace platf::ds5 {
       return true;
     }
 
-    bool read_exact(HANDLE pipe, HANDLE stop_event, std::span<std::uint8_t> destination, DWORD timeout = INFINITE) {
-      return transfer_exact(pipe, stop_event, destination.data(), destination.size(), false, timeout);
+    bool read_exact(HANDLE pipe, HANDLE stop_event, completion_event_t &completion_event, std::span<std::uint8_t> destination, DWORD timeout = INFINITE) {
+      return transfer_exact(pipe, stop_event, completion_event, destination.data(), destination.size(), false, timeout);
     }
 
-    bool write_exact(HANDLE pipe, HANDLE stop_event, std::span<const std::uint8_t> source) {
+    bool write_exact(HANDLE pipe, HANDLE stop_event, completion_event_t &completion_event, std::span<const std::uint8_t> source) {
       return transfer_exact(
         pipe,
         stop_event,
+        completion_event,
         const_cast<std::uint8_t *>(source.data()),
         source.size(),
         true,
@@ -338,6 +393,11 @@ namespace platf::ds5 {
     HANDLE stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     std::thread reader;
     std::mutex write_mutex;
+    // Attach/transact finishes before the sole reader starts; recovery reads on that same thread.
+    // Writes hold write_mutex. Each lane drains its operation before reusing its own event.
+    completion_event_t read_completion;
+    completion_event_t write_completion;
+    std::vector<std::uint8_t> send_frame;
     std::atomic_bool stopping {false};
     std::atomic_bool online {false};
     std::atomic_int global_index {-1};
@@ -350,6 +410,8 @@ namespace platf::ds5 {
     std::uint32_t next_request_id = 1;
 
     ~impl_t() {
+      // Join the reader and wait for the active writer via close_transport's write_mutex before
+      // the completion-event owners are destroyed. They also survive automatic reconnects.
       close();
       if (stop_event) {
         CloseHandle(stop_event);
@@ -360,19 +422,19 @@ namespace platf::ds5 {
       if (stopping) {
         return false;
       }
-      std::vector<std::uint8_t> frame(HEADER_SIZE + payload.size());
+      std::lock_guard lock(write_mutex);
+      if (stopping || pipe == INVALID_HANDLE_VALUE) {
+        return false;
+      }
+      send_frame.resize(HEADER_SIZE + payload.size());
       const auto header = virtual_device_host::protocol::encode_header(
         type,
         static_cast<std::uint32_t>(payload.size()),
         request_id
       );
-      std::copy(header.begin(), header.end(), frame.begin());
-      std::copy(payload.begin(), payload.end(), frame.begin() + HEADER_SIZE);
-      std::lock_guard lock(write_mutex);
-      if (stopping || pipe == INVALID_HANDLE_VALUE) {
-        return false;
-      }
-      if (write_exact(pipe, stop_event, frame)) {
+      std::copy(header.begin(), header.end(), send_frame.begin());
+      std::copy(payload.begin(), payload.end(), send_frame.begin() + HEADER_SIZE);
+      if (write_exact(pipe, stop_event, write_completion, send_frame)) {
         return true;
       }
       // The write stalled or the pipe broke: cancel the reader's pending read
@@ -384,7 +446,7 @@ namespace platf::ds5 {
 
     bool receive(message_t &message, DWORD timeout = INFINITE) {
       std::array<std::uint8_t, HEADER_SIZE> header {};
-      if (!read_exact(pipe, stop_event, header, timeout) || read_u32(header.data()) != MAGIC || read_u16(header.data() + 4) != VERSION) {
+      if (!read_exact(pipe, stop_event, read_completion, header, timeout) || read_u32(header.data()) != MAGIC || read_u16(header.data() + 4) != VERSION) {
         return false;
       }
       const auto payload_size = read_u32(header.data() + 8);
@@ -394,7 +456,7 @@ namespace platf::ds5 {
       message.type = static_cast<message_e>(read_u16(header.data() + 6));
       message.request_id = read_u32(header.data() + 12);
       message.payload.resize(payload_size);
-      return read_exact(pipe, stop_event, message.payload, timeout);
+      return read_exact(pipe, stop_event, read_completion, message.payload, timeout);
     }
 
     void dispatch(message_t &message) {
@@ -848,4 +910,26 @@ namespace platf::ds5 {
     };
     _impl->send(message_e::battery, 0, payload);
   }
+
+#ifdef SUNSHINE_DS5_SIDECAR_TEST_HOOK
+  completion_event_stats_t sidecar_client_t::completion_event_stats_for_test() const {
+    return {
+      _impl->read_completion.creations.load(std::memory_order_relaxed),
+      _impl->write_completion.creations.load(std::memory_order_relaxed),
+      _impl->read_completion.operations.load(std::memory_order_relaxed),
+      _impl->write_completion.operations.load(std::memory_order_relaxed),
+      _impl->write_completion.write_timeouts.load(std::memory_order_relaxed),
+      _impl->write_completion.write_stop_cancels.load(std::memory_order_relaxed),
+    };
+  }
+
+  void sidecar_client_t::set_transfer_chunk_limit_for_test(std::uint32_t maximum_bytes) {
+    _impl->read_completion.chunk_limit.store(maximum_bytes, std::memory_order_relaxed);
+    _impl->write_completion.chunk_limit.store(maximum_bytes, std::memory_order_relaxed);
+  }
+
+  void sidecar_client_t::close_transport_for_test() {
+    _impl->close();
+  }
+#endif
 }  // namespace platf::ds5

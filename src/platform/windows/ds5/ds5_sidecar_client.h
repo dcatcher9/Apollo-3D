@@ -6,6 +6,7 @@
 
 #include "src/platform/common.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -23,6 +24,17 @@ namespace platf::ds5 {
   /** Return the validated executable path used by virtual-device-host clients. */
   std::optional<std::filesystem::path> trusted_component_path();
 
+#ifdef SUNSHINE_DS5_SIDECAR_TEST_HOOK
+  struct completion_event_stats_t {
+    std::uint64_t read_creations;
+    std::uint64_t write_creations;
+    std::uint64_t read_operations;
+    std::uint64_t write_operations;
+    std::uint64_t write_timeouts;
+    std::uint64_t write_stop_cancels;
+  };
+#endif
+
   class sidecar_client_t {
   public:
     sidecar_client_t();
@@ -39,6 +51,14 @@ namespace platf::ds5 {
     void submit_touch(const gamepad_touch_t &touch);
     void submit_motion(const gamepad_motion_t &motion);
     void submit_battery(const gamepad_battery_t &battery);
+
+#ifdef SUNSHINE_DS5_SIDECAR_TEST_HOOK
+    completion_event_stats_t completion_event_stats_for_test() const;
+    // Configure before alloc(); zero retains ordinary transfer sizes.
+    void set_transfer_chunk_limit_for_test(std::uint32_t maximum_bytes);
+    // Stop the actual transport without replacing _impl while a test writer finishes.
+    void close_transport_for_test();
+#endif
 
   private:
     struct impl_t;
