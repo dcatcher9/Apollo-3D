@@ -624,10 +624,7 @@ namespace nvenc {
       }
     }
 
-    {
-      auto f = stat_trackers::two_digits_after_decimal();
-      BOOST_LOG(debug) << "NvEnc: requested encoded frame size " << f % (client_config.bitrate / 8. / client_config.framerate) << " kB";
-    }
+    BOOST_LOG(debug) << "NvEnc: requested encoded frame size " << stat_trackers::two_digits_after_decimal() % (client_config.bitrate / 8. / client_config.framerate) << " kB";
 
     {
       auto video_format_string = client_config.videoFormat == 0 ? "H.264 " :
