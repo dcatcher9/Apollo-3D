@@ -1115,14 +1115,8 @@ namespace platf::dxgi {
       D3D_FEATURE_LEVEL_9_1
     };
 
-    status = adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to query IDXGIAdapter interface"sv;
-      return -1;
-    }
-
     status = D3D11CreateDevice(
-      adapter_p,
+      adapter.get(),
       D3D_DRIVER_TYPE_UNKNOWN,
       nullptr,
       D3D11_CREATE_DEVICE_FLAGS,
@@ -1133,8 +1127,6 @@ namespace platf::dxgi {
       &feature_level,
       &device_ctx
     );
-
-    adapter_p->Release();
 
     if (FAILED(status)) {
       BOOST_LOG(error) << "Failed to create D3D11 device [0x"sv << util::hex(status).to_string_view() << ']';
