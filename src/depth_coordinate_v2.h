@@ -23,7 +23,7 @@ namespace models::depth_coordinate_v2 {
   // layout change must bump the relevant value without pretending the coordinate math changed.
   // Dump 3D retains the historical `shadow_*` filenames as a compatibility schema; these values
   // now describe production V2 evidence, not an alternate renderer.
-  inline constexpr std::uint32_t shadow_state_dump_schema = 18u;
+  inline constexpr std::uint32_t shadow_state_dump_schema = 19u;
   inline constexpr std::uint32_t shadow_frame_stats_dump_schema = 3u;
   inline constexpr std::uint32_t reserved_calibration_revision = 0xffffffffu;
 
@@ -210,14 +210,6 @@ namespace models::depth_coordinate_v2 {
   }
 
 
-
-  constexpr bool cut_generation_changed(
-    const std::uint32_t previous_count,
-    const std::uint32_t current_count,
-    const bool pulse
-  ) {
-    return pulse || current_count != previous_count;
-  }
 
   template<class CalibrationRange>
   constexpr const model_calibration_t *find_model_calibration_in(

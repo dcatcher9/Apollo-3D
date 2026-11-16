@@ -122,6 +122,38 @@ namespace {
   TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, StaleSctMarksReceiptUnavailableWithoutRelabelingLegacy) {
     identity[20]^=1u;upload();queue();expect(1,lm,1u);
   }
+  TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, DrawReceiptScopeRestoresOnlyItsSlotAndLeavesT8Untouched) {
+    queue();const auto views=output.views();
+    ID3D11ShaderResourceView *sentinels[2]{baseline.s.Get(),legacy.s.Get()};
+    context->PSSetShaderResources(7u,2u,sentinels);
+    const auto expect_slots=[&](ID3D11ShaderResourceView *receipt) {
+      ComPtr<ID3D11ShaderResourceView> actual_receipt,unrelated;
+      context->PSGetShaderResources(7u,1u,&actual_receipt);
+      context->PSGetShaderResources(8u,1u,&unrelated);
+      EXPECT_EQ(actual_receipt.Get(),receipt);EXPECT_EQ(unrelated.Get(),sentinels[1]);
+    };
+    {
+      selected::scoped_receipt_t scope;
+      ASSERT_TRUE(scope.bind(context.Get(),views.receipt.Get()));
+      expect_slots(views.receipt.Get());
+    }
+    expect_slots(sentinels[0]);
+    {
+      selected::scoped_receipt_t scope;
+      EXPECT_FALSE(scope.bind(context.Get(),nullptr));
+    }
+    expect_slots(sentinels[0]);
+    D3D11_QUERY_DESC desc{D3D11_QUERY_OCCLUSION_PREDICATE,0u};ComPtr<ID3D11Predicate> predicate;
+    ASSERT_TRUE(SUCCEEDED(device->CreatePredicate(&desc,&predicate)));
+    context->SetPredication(predicate.Get(),FALSE);
+    {
+      selected::scoped_receipt_t scope;
+      EXPECT_FALSE(scope.bind(context.Get(),views.receipt.Get()));
+    }
+    context->SetPredication(nullptr,FALSE);
+    expect_slots(sentinels[0]);
+    ID3D11ShaderResourceView *empty[2]{};context->PSSetShaderResources(7u,2u,empty);
+  }
   TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, MoveTransfersOwnerEmptiesSourceAndPreservesSelfMove) {
     queue();const auto before=read(output.views().matte.Get());selected::resources_t moved=std::move(output);EXPECT_FALSE(output.views().matte);EXPECT_FALSE(output.views().receipt);EXPECT_EQ(read(moved.views().matte.Get()),before);output=std::move(moved);EXPECT_FALSE(moved.views().matte);EXPECT_FALSE(moved.views().receipt);output=std::move(output);expect(3,cm);queue();expect(3,cm);
   }

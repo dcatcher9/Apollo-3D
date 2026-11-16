@@ -1437,18 +1437,15 @@ TEST(SbsTelemetryWireTests, EncodesEveryStateFieldAtItsFrozenLittleEndianOffset)
   state.snapshot.pop_ceiling = 2.0f;
   state.snapshot.effective_pop = 1.5f;
   state.snapshot.edge_fraction = 0.125f;
-  state.snapshot.change_fraction = 0.25f;
   state.snapshot.zero_anchor_shift_px = -2.5f;
   state.snapshot.subject_depth = 0.5f;
   state.snapshot.valid_depth_fraction = 0.75f;
   state.snapshot.effective_range_width = 0.0625f;
-  state.snapshot.scene_age = 0x01020304;
-  state.snapshot.hard_cut_count = 0x11121314;
-  state.snapshot.external_cut_count = 0x21222324;
   state.snapshot.empty_raw_count = 0x31323334;
   state.snapshot.collapsed_raw_count = 0x41424344;
   state.snapshot.sampled_frame_id = 0xDEADBEEF;
 
+  // Offsets 44..47 and 64..75 are reserved wire fields and stay zero.
   const std::array<std::uint8_t, stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE> expected {
     0x02,
     0x02,
@@ -1496,8 +1493,8 @@ TEST(SbsTelemetryWireTests, EncodesEveryStateFieldAtItsFrozenLittleEndianOffset)
     0x3E,
     0x00,
     0x00,
-    0x80,
-    0x3E,
+    0x00,
+    0x00,
     0x00,
     0x00,
     0x20,
@@ -1514,18 +1511,18 @@ TEST(SbsTelemetryWireTests, EncodesEveryStateFieldAtItsFrozenLittleEndianOffset)
     0x00,
     0x80,
     0x3D,
-    0x04,
-    0x03,
-    0x02,
-    0x01,
-    0x14,
-    0x13,
-    0x12,
-    0x11,
-    0x24,
-    0x23,
-    0x22,
-    0x21,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
     0x34,
     0x33,
     0x32,

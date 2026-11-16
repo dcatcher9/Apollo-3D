@@ -541,24 +541,39 @@ namespace proc {
             success = true;
             break;
           }
-          if (!VDISPLAY::setDisplayHDR(current_target->adapter_id, current_target->target_id, desired_hdr)) {
-            if (wait_before_retry(100ms)) {
-              break;
+          // Apply and verify inside one display transaction. An exclusive session records the
+          // color state of its virtual display, and display-change reconciliation restores what
+          // is recorded: a change it does not know about is undone by the next reconciliation,
+          // and each such toggle makes Windows re-apply its own remembered layout.
+          enum class change_result_e {
+            rejected,
+            superseded,
+            unverified,
+            verified,
+          };
+          auto result = change_result_e::rejected;
+          platf::primary_display::change_virtual_display_color(current_device, [&]() {
+            if (!VDISPLAY::setDisplayHDR(current_target->adapter_id, current_target->target_id, desired_hdr)) {
+              return false;
             }
-            continue;
-          }
-
-          // The API can accept the request before the topology reports the new state. Verify it
-          // instead of acknowledging a warm resume with the wrong dynamic-range contract.
-          if (wait_before_retry(100ms)) {
+            // The API can accept the request before the topology reports the new state. Verify
+            // it instead of acknowledging a warm resume with the wrong dynamic-range contract.
+            if (wait_before_retry(100ms)) {
+              result = change_result_e::superseded;
+              return false;
+            }
+            const auto verified_target = platf::display_config::resolve_display_target(current_device);
+            observed_hdr = verified_target ?
+                             VDISPLAY::queryDisplayHDR(verified_target->adapter_id, verified_target->target_id) :
+                             std::nullopt;
+            result = observed_hdr && *observed_hdr == desired_hdr ? change_result_e::verified : change_result_e::unverified;
+            return result == change_result_e::verified;
+          });
+          if (result == change_result_e::verified) {
+            success = true;
             break;
           }
-          const auto verified_target = platf::display_config::resolve_display_target(current_device);
-          observed_hdr = verified_target ?
-                           VDISPLAY::queryDisplayHDR(verified_target->adapter_id, verified_target->target_id) :
-                           std::nullopt;
-          if (observed_hdr && *observed_hdr == desired_hdr) {
-            success = true;
+          if (result == change_result_e::superseded || (result == change_result_e::rejected && wait_before_retry(100ms))) {
             break;
           }
         }
@@ -994,6 +1009,54 @@ namespace proc {
     // Keep the recovery snapshot until mode, HDR and final topology promotion also succeed.
     BOOST_LOG(info) << "Retained virtual display reactivated before remote resume: " << display_name;
     return true;
+  }
+
+  bool proc_t::prepare_retained_display_after_settle() {
+    // Restoring the physical desktop makes Windows re-detect its monitors, and for a few seconds
+    // it can keep changing the active outputs by itself: a display query fails, or the detached
+    // virtual display is active again in a different mode. A resume that arrives in that window
+    // fails although nothing is wrong with the retained session. Return to the paused desktop,
+    // let the topology settle, and try again before reporting the failure to the client.
+    constexpr auto settle_window = 6s;
+    constexpr auto settle_delay = 500ms;
+    // Only a resume that started from a verified paused desktop retries. A pause that is itself
+    // still unverified keeps its single attempt and its existing maintenance retry.
+    const bool started_paused = _display_session.pause_requested() && _display_session.paused();
+    if (prepare_retained_display_for_resume()) {
+      return true;
+    }
+    if (!started_paused) {
+      return false;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + settle_window;
+    for (int retry_count = 1;; ++retry_count) {
+      if (!_display_session.owns_display() || _display_session.retiring() || !_display_session.has_retained()) {
+        return false;
+      }
+      // The next attempt repeats this pause when it could not be verified yet.
+      pause_display_for_resume();
+  #ifdef SUNSHINE_TESTS
+      const bool wait_for_settle = !_display_topology_test_hook;
+  #else
+      const bool wait_for_settle = true;
+  #endif
+      if (wait_for_settle) {
+        std::this_thread::sleep_for(settle_delay);
+      }
+      if (prepare_retained_display_for_resume()) {
+        BOOST_LOG(info) << "Retained virtual display reactivated after "sv
+                        << retry_count << " topology-settle retry attempt(s)."sv;
+        return true;
+      }
+  #ifdef SUNSHINE_TESTS
+      if (_display_topology_test_hook && retry_count >= 3) {
+        return false;  // Tests do not wait, so they bound the retries by count.
+      }
+  #endif
+      if (std::chrono::steady_clock::now() + settle_delay >= deadline) {
+        return false;
+      }
+    }
   }
 
   bool proc_t::promote_virtual_display(
@@ -1500,7 +1563,7 @@ namespace proc {
     };
     bool hdr_configured_by_recreation = false;
     if (_virtual_display) {
-      if (!prepare_retained_display_for_resume()) {
+      if (!prepare_retained_display_after_settle()) {
         BOOST_LOG(error) << "Could not restore, reactivate, and bind the retained virtual display for resume."sv;
         return 503;
       }
@@ -1743,7 +1806,30 @@ namespace proc {
     // Promote only a successful reconnect, before capture starts using the new topology.
     // Windows can briefly publish incomplete CCD readback after restore; the durable display
     // journal makes this bounded promotion replay safe.
-    if (_virtual_display && !promote_virtual_display(launch_session->enable_hdr, 1500ms)) {
+    const auto promote_at_requested_mode = [&]() {
+      if (!promote_virtual_display(launch_session->enable_hdr, 1500ms)) {
+        return false;
+      }
+      // Promotion keeps the mode it finds. Windows can replace the reactivated layout with its
+      // own remembered one after the mode check above, which also retimes the virtual display;
+      // promotion accepts that layout, so the requested mode has to be applied once more.
+      const auto promoted = query_virtual_display_mode();
+      if (!promoted || live_display_mode_matches(*promoted, render_size->width, render_size->height, launch_session->fps)) {
+        return true;
+      }
+      BOOST_LOG(info) << "Restoring the requested virtual-display mode after promotion: Windows changed it to "sv
+                      << promoted->dmPelsWidth << 'x' << promoted->dmPelsHeight << " @ "sv
+                      << promoted->dmDisplayFrequency << " Hz while the display was being reactivated."sv;
+      return configure_display_mode(
+               _display_session.binding().display_name.c_str(),
+               render_size->width,
+               render_size->height,
+               launch_session->fps,
+               false
+             ) == DISP_CHANGE_SUCCESSFUL &&
+             promote_virtual_display(launch_session->enable_hdr, 1500ms);
+    };
+    if (_virtual_display && !promote_at_requested_mode()) {
       // An unchanged source can be paused and retried even if Windows has not published its
       // promoted GDI binding yet. Changed modes must first restore the retained contract.
       bool rollback_succeeded = true;
@@ -1817,8 +1903,15 @@ namespace proc {
       return _display_mode_change_test_hook(name, width, height, fps_millihz, probe);
     }
   #endif
-    return probe ? VDISPLAY::testDisplaySettings(name, width, height, fps_millihz) :
-                   VDISPLAY::changeDisplaySettings(name, width, height, fps_millihz, false);
+    if (probe) {
+      return VDISPLAY::testDisplaySettings(name, width, height, fps_millihz);
+    }
+    // The mode set queries the active topology and re-applies it. Hold the display transaction
+    // so the display-change worker's reconcile cannot interleave with that pair, as local AR
+    // does through run_local_exclusive_update().
+    return platf::primary_display::run_serialized_mode_change([&]() -> long {
+      return VDISPLAY::changeDisplaySettings(name, width, height, fps_millihz, false);
+    });
   }
 
   bool proc_t::display_settings_unavailable() {
@@ -3085,7 +3178,7 @@ namespace proc {
     };
   }
 
-  void refresh(const std::string &file_name, bool needs_terminate) {
+  void refresh(const std::string &file_name, bool needs_terminate, bool wait_for_display_driver) {
     std::lock_guard lock(process_state_mutex);
     if (needs_terminate) {
       proc.terminate(false, false);
@@ -3098,15 +3191,20 @@ namespace proc {
       BOOST_LOG(warning) << "Deferring app configuration refresh while virtual-display cleanup remains owned by the process."sv;
       return;
     }
+    // This holds process_state_mutex. Without the wait it is one attempt and no sleep; the
+    // launch path initializes the driver again when a session actually needs it.
+    const size_t attempts = wait_for_display_driver ? 5 : 1;
     size_t fail_count = 0;
-    while (fail_count < 5 && vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
+    while (fail_count < attempts && vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
       initVDisplayDriver();
       if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
         break;
       }
 
       fail_count += 1;
-      std::this_thread::sleep_for(1s);
+      if (fail_count < attempts) {
+        std::this_thread::sleep_for(1s);
+      }
     }
 #endif
 

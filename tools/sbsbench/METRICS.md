@@ -16,14 +16,14 @@ Every entry in [thresholds.json](thresholds.json) has one scope and one role:
 |---|---|
 | `scope: style` | Describes visible stereo volume; never an unbounded reward |
 | `scope: perceptual` | Candidate viewing-risk evidence; experimental until headset-qualified |
-| `scope: conformance` | Exact renderer, transport, and state contract evidence |
+| `scope: conformance` | Exact renderer and transport contract evidence |
 | `scope: gt-only` | Requires authenticated depth/disparity or authored-region reference |
 | `scope: temporal-only` | Requires a sequence and does not become a single-frame model label |
 | `role: hard` | Non-tradeable fail-closed constraint |
 | `role: primary` | Independent quality axis used in a decision |
 | `role: diagnostic` | Supports interpretation but cannot decide alone |
 
-The current compact policy exposes 55 metrics: 22 hard constraints, four primary axes, and 29
+The current compact policy exposes 40 metrics: 12 hard constraints, four primary axes, and 24
 diagnostics. There are no qualified training labels. A metric must explicitly declare both a
 training label and `label_status: qualified`; all current perceptual candidates remain
 experimental, so label export abstains.
@@ -90,15 +90,9 @@ container; a frame-global effective-gain reduction is a conformance failure, not
 | `exact_polarity_ok` | Correct global warp ordering |
 | `exact_local_polarity_component_pct` | Local polarity diagnostic |
 | `vmisalign_p99_pct` | At most 0.1% texture-supported vertical mismatch |
-| `shot_state_pulse_mismatch` | No missing or extra authenticated cut pulse |
-| `shot_state_trace_inconsistent` | No invalid cut/camera state transition |
-| `shot_state_initialized_ok` | Startup state initializes as declared |
-| `shot_state_relative_escape_ok` | Sustained-motion escape behaves as declared |
-| `shot_state_accepted_pulse`, `shot_state_expected_pulse` | Diagnostic accepted/expected pulse counts |
 
-Conformance proves that the renderer reproduced its selected coordinate and that the scene-cut
-state followed its declared schedule. It does not prove that the monocular depth or selected
-disparity is perceptually ideal.
+Conformance proves that the renderer reproduced its selected coordinate. It does not prove that
+the monocular depth or selected disparity is perceptually ideal.
 
 Vertical alignment uses exact per-eye source-map references on overlapping texture tiles. Each
 tile first ranks all finite, nondegenerate vertical NCC candidates, then applies the existing
@@ -231,8 +225,7 @@ The retired V1 baseline set is not valid V2 evidence. Until a reviewed V2 baseli
 use `--comparison-only` for authenticated matched A/Bs. A future committed baseline represents the
 canonical production configuration and must bind the clip hash, evaluator schema,
 metric/threshold contract, V2 calibration, stepping semantics, model, and runtime provenance.
-`conformance-only` fixtures remain exempt from numeric baselines because exact hard invariants
-decide them directly.
+Every scored clip requires a committed baseline.
 
 Use `compare_runs.py` rather than hand-averaging. It intersects finite evidence from identical
 clips and exposes category splits. A report permits a changed executable, model, or configuration

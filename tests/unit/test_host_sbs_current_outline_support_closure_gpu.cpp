@@ -63,6 +63,7 @@ namespace {
   static_assert(probability_width == 960u && probability_height == 160u);
   constexpr const char *compiled_ring_helper_pin = subtitle_test_source_pins::current_outline_support;
   constexpr const char *compiled_hole_helper_pin = subtitle_test_source_pins::current_mask_holes;
+  constexpr const char *compiled_foreground_helper_pin = subtitle_test_source_pins::current_foreground_edge;
   constexpr const char *compiled_enclosure_helper_pin = subtitle_test_source_pins::current_black_enclosure;
   constexpr const char *compiled_baseline_helper_pin = subtitle_test_source_pins::global_colour_validation;
 
@@ -294,6 +295,26 @@ namespace {
         for (UINT i = 0u; i < coverage_shaders_.size(); ++i) program_.coverage_shaders[i] = coverage_shaders_[i].Get();
         program_.coverage_diagnostics = true; // Native truth/export fixtures opt in; production stays off.
         RecordProperty("stroke_coverage_source_closure", coverage_closure_);
+      }
+      const auto *foreground_root=std::getenv("SUNSHINE_TEST_FOREGROUND_EDGE_SHADER_ROOT");
+      const auto *foreground_pin=std::getenv("SUNSHINE_TEST_FOREGROUND_EDGE_SHADER_PIN");
+      if(foreground_root||foreground_pin) {
+        require(foreground_root&&foreground_pin);
+        load_shaders(foreground_root,foreground_pin,models::current_outline_runtime::foreground_edge_specs,foreground_edge_shaders_);
+        foreground_edge_closure_=foreground_pin;
+        RecordProperty("foreground_edge_source_closure",foreground_edge_closure_);
+        RecordProperty("foreground_edge_helper_source_pin",compiled_foreground_helper_pin);
+        if(const auto *pin=std::getenv("SUNSHINE_TEST_FOREGROUND_EDGE_HEADER_PIN"))require(std::string(pin)==compiled_foreground_helper_pin);
+        // Loading makes the optional shader available; old fixtures stay OFF.
+        // New owner tests and the explicit Saved FG replay opt in separately.
+      }
+      const auto *trusted_root = std::getenv("SUNSHINE_TEST_TRUSTED_INNER_SHADER_ROOT");
+      const auto *trusted_pin = std::getenv("SUNSHINE_TEST_TRUSTED_INNER_SHADER_PIN");
+      if (trusted_root || trusted_pin) {
+        require(trusted_root && trusted_pin);
+        load_shaders(trusted_root, trusted_pin, models::current_outline_runtime::trusted_inner_specs, trusted_inner_shaders_);
+        RecordProperty("trusted_inner_source_closure", trusted_pin);
+        // Availability alone keeps every older native fixture on its exact old route.
       }
       require(hp && std::string(hp) == compiled_ring_helper_pin);
       RecordProperty("outline_source_closure", ring_closure_);
@@ -1945,6 +1966,8 @@ namespace {
 
     void saved();
     void saved_current(bool sdr);
+    #include "current_outline_foreground_edge_fixture.inc"
+    #include "current_outline_trusted_inner_authored_fixture.inc"
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
     ring::resources_t helper_;
@@ -1974,9 +1997,13 @@ namespace {
     std::array<ComPtr<ID3D11ComputeShader>, models::host_sbs_current_mask_holes_gpu::shader_count> hole_shaders_;
     std::string hole_closure_;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> coverage_shaders_;
+    std::array<ComPtr<ID3D11ComputeShader>, 1u> trusted_inner_shaders_;
     std::string coverage_closure_;
     nlohmann::json adapter_;
   };
+
+  #include "current_outline_foreground_edge_tests.inc"
+  #include "current_outline_trusted_inner_authored_tests.inc"
 
   TEST_F(HostSbsCurrentOutlineSupportClosureGpuTest, InsideProgramIsRequiredAndFreshFinalizerPublishesVersionedReady) {
     for (auto *shader : program_.inside_shaders) ASSERT_NE(shader, nullptr);
@@ -3990,8 +4017,25 @@ namespace {
     ASSERT_TRUE(output_env && *output_env);
     const auto *graph_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_OUTLINE_GRAPH_SNAPSHOTS");
     const bool graph_diagnostics = graph_env && *graph_env;
+    const auto *foreground_env=std::getenv("SUNSHINE_TEST_SAVED_CURRENT_FOREGROUND_EDGE");
+    const bool foreground_replay=foreground_env&&*foreground_env;
+    if(foreground_replay){ASSERT_STREQ(foreground_env,"1");ASSERT_TRUE(sdr);ASSERT_FALSE(graph_diagnostics);ASSERT_FALSE(foreground_edge_closure_.empty());}
     if (graph_diagnostics) {
       ASSERT_STREQ(graph_env, "1");
+    }
+    const auto *inner_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_INNER_SOURCE_DIAGNOSTICS");
+    const bool inner_diagnostics = inner_env && *inner_env;
+    if (inner_diagnostics) {
+      ASSERT_STREQ(inner_env, "1");
+      ASSERT_FALSE(graph_diagnostics);
+      ASSERT_FALSE(foreground_replay);
+      ASSERT_FALSE(sdr);
+    }
+    const auto *trusted_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_TRUSTED_INNER_DIAGNOSTICS");
+    const bool trusted_diagnostics = trusted_env && *trusted_env;
+    if (trusted_diagnostics) {
+      ASSERT_STREQ(trusted_env, "1");ASSERT_FALSE(sdr);ASSERT_FALSE(graph_diagnostics);
+      ASSERT_FALSE(inner_diagnostics);ASSERT_FALSE(foreground_replay);
     }
     namespace fs = std::filesystem;
     namespace runtime = models::current_outline_runtime;
@@ -4002,7 +4046,7 @@ namespace {
     const auto specification_bytes = file_bytes(input);
     const auto spec = json::parse(specification_bytes.begin(), specification_bytes.end());
     ASSERT_EQ(spec.at("schema"), 1u);
-    if(sdr){ASSERT_EQ(spec.at("diagnostic_role"),"same-published-sdr-source5-inputs");ASSERT_TRUE(graph_diagnostics)<<"SDRdiagnostic requires graph snapshots and strict production parity";}
+    if(sdr){ASSERT_EQ(spec.at("diagnostic_role"),"same-published-sdr-source5-inputs");if(!foreground_replay)ASSERT_TRUE(graph_diagnostics)<<"SDRdiagnostic requires graph snapshots and strict production parity";}
     ASSERT_EQ(spec.at("driver"), hardware_ ? "hardware" : "warp");
     const auto &cases = spec.at("cases");
     ASSERT_TRUE(cases.is_array());
@@ -4016,10 +4060,21 @@ namespace {
     ASSERT_TRUE(programs.load(device_.Get(), runtime_root, error_)) << error_;
     ASSERT_TRUE(programs.stability_ready()) << programs.stability_error();
     auto effective_composition = programs.composition_program();
+    // Historical native controls stay OFF even when the new production loader
+    // makes FG available. The explicit replay below runs a second fresh ON owner.
+    effective_composition.outline.foreground_edge_shaders={};
+    if (inner_diagnostics) {
+      ASSERT_TRUE(std::all_of(effective_composition.outline.trusted_inner_publish_shaders.begin(),
+        effective_composition.outline.trusted_inner_publish_shaders.end(), [](auto *shader) { return shader == nullptr; }))
+        << "Strict captured-baseline inner diagnostics require the original route; trusted-inner treatment is incompatible";
+    }
+    if (trusted_diagnostics) ASSERT_TRUE(programs.trusted_inner_ready());
+    if(foreground_replay){ASSERT_TRUE(programs.foreground_edge_ready());ASSERT_EQ(foreground_edge_closure_,runtime::foreground_edge_closure);}
     // Saved/native output diagnostics explicitly request the independent offer plane.
     effective_composition.outline.coverage_diagnostics = true;
     const auto *fixture_f2_env = std::getenv("SUNSHINE_TEST_SAVED_CURRENT_OUTLINE_FIXTURE_F2");
     const bool fixture_f2 = fixture_f2_env && *fixture_f2_env;
+    if(foreground_replay)ASSERT_FALSE(fixture_f2)<<"FG port parity requires canonical production arrays";
     std::array<ComPtr<ID3D11ComputeShader>, 3u> fixture_stability;
     const char *fixture_outline_root = nullptr, *fixture_stability_root = nullptr, *fixture_stability_pin = nullptr;
     if (fixture_f2) {
@@ -4071,10 +4126,17 @@ namespace {
       {"hole_policy", {{"compiled_source_closure",runtime::hole_closure},{"production_program_ready",programs.hole_ready()},
         {"compiled_helper_pin",compiled_hole_helper_pin}}},
       {"coverage_policy", {{"compiled_source_closure",runtime::coverage_closure},{"production_program_ready",programs.coverage_ready()}}},
+      {"foreground_edge_policy", {{"compiled_source_closure",runtime::foreground_edge_closure},{"production_program_ready",programs.foreground_edge_ready()},
+        {"requested",foreground_replay},{"baseline_arrays_foreground_edge_OFF",true},{"scope","Explicit ON arrays are prefixed foreground_edge_; baseline current arrays remain OFF"}}},
+      {"trusted_inner_policy", {{"compiled_source_closure",runtime::trusted_inner_closure},{"production_program_ready",programs.trusted_inner_ready()},
+        {"production_route_enabled",effective_composition.outline.trusted_inner_publish_shaders[0u]!=nullptr},
+        {"scope","Current production route; captured expected-M binding and equality remain independently reported"}}},
       {"scope", "Actual production Source5/CBC/Raw/F2 and selected-matte GPU programs; no CPU mask reconstruction"},
       {"history", "New owner per case; prior live strong/weak/AA private history is unavailable and is not synthesized"},
       {"parent_descriptor_scope", "Saved full shape/format/ROI/transfer; undumped descriptor flags are not claimed byteexact, and the GPU proof describes the replay allocation"},
       {"single_unit_graph_diagnostics_requested", graph_diagnostics},
+      {"inner_source_diagnostics_requested", inner_diagnostics},
+      {"trusted_inner_diagnostics_requested", trusted_diagnostics},
       {"performance_claim", false}, {"cases", json::array()}};
     report["closures"]["hole"] = programs.hole_ready() ? std::string(runtime::hole_closure) : std::string();
     report["closures"]["coverage"] = programs.coverage_ready() ? std::string(runtime::coverage_closure) : std::string();
@@ -4217,6 +4279,10 @@ namespace {
         {"CBC_M.u32", read(bundle.enclosure.matte.Get())}, {"Raw_M.u32", read(bundle.ring.matte.Get())},
         {"F2_M.u32", read(bundle.outline.matte.Get())}, {"selected_M.u32", read(selected_views.matte.Get())},
         {"selected_receipt.u32", read(selected_views.receipt.Get())}, {"numeric_proof.u32", read(bundle.numeric_proof.Get())}};
+      if (bundle.enclosure.trusted_inner_bits) {
+        arrays.emplace("trusted_inner_bits.u32", read(bundle.enclosure.trusted_inner_bits.Get()));
+        arrays.emplace("trusted_publication_arguments.u32", read(bundle.enclosure.trusted_publication_arguments.Get()));
+      }
       const auto selected_receipt = words(arrays.at("selected_receipt.u32"));
       ASSERT_EQ(selected_receipt.size(), 64u);
       EXPECT_EQ(selected_receipt[0u], selector::tag);EXPECT_EQ(selected_receipt[1u], selector::schema);
@@ -4260,6 +4326,8 @@ namespace {
           ADD_FAILURE()<<"SDR replay must match current production CBC/Raw/F2/M before graph interpretation";continue;
         }
       }
+      json foreground_case=nullptr;
+      #include "current_outline_foreground_edge_saved.inc"
       json graph_report = nullptr;
       if (graph_diagnostics) {
         // The composition intentionally hides mutable scratch and accepts no diagnostic
@@ -4346,6 +4414,10 @@ namespace {
           {"domain_scope", "Only current own CoverBits/unit ROI establishes graph membership; exported whole resources do not authorize unused pixels"},
           {"history_restored", false}, {"rendering_authority", false}};
       }
+      json inner_report = nullptr;
+      #include "current_outline_inner_source_saved.inc"
+      json trusted_report = nullptr;
+      #include "current_outline_trusted_inner_saved.inc"
       const auto case_output = output / ("case_" + std::to_string(index));fs::create_directory(case_output);
       json outputs = json::object();
       for (const auto &[name, bytes] : arrays) outputs[name] = store(case_output / name, bytes);
@@ -4358,6 +4430,9 @@ namespace {
           exact ? "captured-current-mask-exact-with-fresh-history" : "fresh-history-current-producer-only-mask-differs"},
         {"history_restored", false}, {"model_rgb_origin", "exact joined display_snapshot; parent raw texels never sampled"}};
       if (graph_diagnostics) result["single_unit_graph_diagnostics"] = std::move(graph_report);
+      if (inner_diagnostics) result["inner_source_diagnostics"] = std::move(inner_report);
+      if (trusted_diagnostics) result["trusted_inner_diagnostics"] = std::move(trusted_report);
+      if(foreground_replay)result["foreground_edge_production_diagnostic"]=std::move(foreground_case);
       if(sdr){result["expected_production_parity"]=production_parity;result["trace_authorized"]=true;result["source5_reference_band_rect"]={0u,shape[2],shape[0],shape[1]};}
       if (entry.contains("provenance")) result["provenance"] = entry.at("provenance");
       report["cases"].push_back(std::move(result));

@@ -15,7 +15,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = (
-    ROOT / "tools" / "sbsbench" / "contracts" / "sbs-adaptive-state-v6.json"
+    ROOT / "tools" / "sbsbench" / "contracts" / "sbs-adaptive-state-v8.json"
 )
 CPP_TARGET = ROOT / "src" / "generated" / "sbs_adaptive_state_contract.h"
 HLSL_TARGET = (
@@ -91,7 +91,7 @@ def validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
 
     required_root = {
         "schema", "source", "capture", "counter_max", "header_keys", "config_keys", "frame_keys",
-        "cut_flag_bits", "analysis_flag_bits", "compact_cut_trace", "fields",
+        "fields",
     }
     if not isinstance(contract, dict) or set(contract) != required_root:
         raise ValueError("adaptive-state manifest has missing or unknown root keys")
@@ -153,55 +153,13 @@ def validate_contract(contract: dict[str, Any]) -> dict[str, Any]:
     if (
         len(tag_fields) != 1 or
         tag_fields[0].get("index") != 0 or
-        tag_fields[0].get("name") != "cut_contract_tag_bits" or
+        tag_fields[0].get("name") != "contract_tag_bits" or
         tag_fields[0].get("type") != "uint32" or
         tag_fields[0].get("gpu_encoding") != "uint_bits"
     ):
         raise ValueError(
-            "cut_contract_tag_bits must be the sole contract tag sentinel at word zero"
+            "contract_tag_bits must be the sole contract tag sentinel at word zero"
         )
-
-    for section in ("cut_flag_bits", "analysis_flag_bits"):
-        bits = contract.get(section)
-        if not isinstance(bits, dict) or not bits:
-            raise ValueError(f"manifest {section} must be a non-empty object")
-        generated_names: list[str] = []
-        values: list[int] = []
-        for name, bit in bits.items():
-            if not isinstance(name, str) or not name:
-                raise ValueError(f"manifest {section} names must be non-empty strings")
-            generated_names.append(_identifier(name))
-            if (not isinstance(bit, int) or isinstance(bit, bool) or
-                    bit < 0 or bit >= 32):
-                raise ValueError(f"manifest {section} values must be uint32 bit indices")
-            values.append(bit)
-        if len(set(values)) != len(values) or len(set(generated_names)) != len(generated_names):
-            raise ValueError(f"manifest {section} entries must be unique")
-
-    compact = contract.get("compact_cut_trace")
-    if not isinstance(compact, dict) or set(compact) != {"fields", "roles"}:
-        raise ValueError("compact_cut_trace must contain exact fields and roles")
-    compact_fields = compact["fields"]
-    if (not isinstance(compact_fields, list) or not compact_fields or
-            any(name not in field_names for name in compact_fields) or
-            len(set(compact_fields)) != len(compact_fields)):
-        raise ValueError("compact cut-trace fields must be a unique adaptive-field projection")
-    roles = compact["roles"]
-    if not isinstance(roles, dict) or set(roles) != {"production", "gpu_replay"}:
-        raise ValueError("compact cut-trace roles must be production and gpu_replay")
-    role_schemas: list[int] = []
-    for role_name, role in roles.items():
-        if not isinstance(role, dict) or set(role) != {"schema", "source", "capture"}:
-            raise ValueError(f"compact cut-trace role {role_name} has the wrong schema")
-        schema = role["schema"]
-        if not isinstance(schema, int) or isinstance(schema, bool) or schema <= 0:
-            raise ValueError(f"compact cut-trace role {role_name} needs a positive schema")
-        role_schemas.append(schema)
-        for name in ("source", "capture"):
-            if not isinstance(role[name], str) or not role[name]:
-                raise ValueError(f"compact cut-trace role {role_name} needs {name}")
-    if len(set(role_schemas)) != len(role_schemas):
-        raise ValueError("compact cut-trace role schemas must be distinct")
 
     contract_tag(contract)
     return contract
@@ -215,13 +173,13 @@ def _load() -> dict[str, Any]:
 
 def _initial_float_cpp(field: dict[str, Any]) -> str:
     if field["initial"] == CONTRACT_TAG_SENTINEL:
-        return "std::bit_cast<float>(cut_contract_tag)"
+        return "std::bit_cast<float>(contract_tag)"
     return _float_literal(field["initial"])
 
 
 def _initial_word_cpp(field: dict[str, Any]) -> str:
     if field["initial"] == CONTRACT_TAG_SENTINEL:
-        return "cut_contract_tag"
+        return "contract_tag"
     if field["gpu_encoding"] == "uint_bits":
         return f"{int(field['initial'])}u"
     return f"std::bit_cast<std::uint32_t>({_float_literal(field['initial'])})"
@@ -238,13 +196,11 @@ def _render_string_array(name: str, values: list[str]) -> list[str]:
 
 def render_cpp(contract: dict[str, Any]) -> str:
     fields = contract["fields"]
-    cut_bits = contract["cut_flag_bits"]
-    analysis_bits = contract["analysis_flag_bits"]
     tag = contract_tag(contract)
     digest = contract_digest(contract)
     lines = [
         "// Generated by tools/sbsbench/generate_adaptive_state_contract.py.",
-        "// Edit tools/sbsbench/contracts/sbs-adaptive-state-v6.json instead.",
+        "// Edit tools/sbsbench/contracts/sbs-adaptive-state-v8.json instead.",
         "#pragma once",
         "",
         "#include <array>",
@@ -255,7 +211,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "",
         "namespace sbs_adaptive_state {",
         f"  inline constexpr std::uint32_t schema_version = {contract['schema']}u;",
-        f"  inline constexpr std::uint32_t cut_contract_tag = 0x{tag:08X}u;",
+        f"  inline constexpr std::uint32_t contract_tag = 0x{tag:08X}u;",
         f"  inline constexpr std::uint32_t counter_max = {contract['counter_max']}u;",
         f'  inline constexpr std::string_view contract_canonical_sha256 = "{digest}";',
         f'  inline constexpr std::string_view source = "{contract["source"]}";',
@@ -340,84 +296,18 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "",
         "  static_assert(word_count % 4u == 0u);",
         "  static_assert(field_layout_matches_indices());",
-        "  static_assert(cut_contract_tag != 0u);",
-        "  static_assert(((cut_contract_tag >> 23u) & 0xffu) > 0u);",
-        "  static_assert(((cut_contract_tag >> 23u) & 0xffu) < 0xffu);",
-        "  static_assert(initial_words[index(word_e::cut_contract_tag_bits)] ==",
-        "                cut_contract_tag);",
-        "",
-        "  struct named_bit_t {",
-        "    std::string_view name;",
-        "    std::uint32_t bit;",
-        "    std::uint32_t mask;",
-        "  };",
+        "  static_assert(contract_tag != 0u);",
+        "  static_assert(((contract_tag >> 23u) & 0xffu) > 0u);",
+        "  static_assert(((contract_tag >> 23u) & 0xffu) < 0xffu);",
+        "  static_assert(initial_words[index(word_e::contract_tag_bits)] ==",
+        "                contract_tag);",
         "",
     ])
-    for name, bit in cut_bits.items():
-        lines.append(
-            f"  inline constexpr std::uint32_t cut_flag_{_identifier(name)} = "
-            f"1u << {bit}u;"
-        )
-    lines.extend([
-        f"  inline constexpr std::uint32_t known_cut_flag_mask = "
-        f"{sum(1 << int(bit) for bit in cut_bits.values())}u;",
-        f"  inline constexpr std::array<named_bit_t, {len(cut_bits)}> cut_flag_bits {{{{",
-    ])
-    lines.extend(
-        f'    {{"{name}", {bit}u, cut_flag_{_identifier(name)}}},'
-        for name, bit in cut_bits.items()
-    )
-    lines.extend(["  }};", ""])
-    for name, bit in analysis_bits.items():
-        lines.append(
-            f"  inline constexpr std::uint32_t analysis_flag_{_identifier(name)} = "
-            f"1u << {bit}u;"
-        )
-    lines.extend([
-        f"  inline constexpr std::uint32_t known_analysis_flag_mask = "
-        f"{sum(1 << int(bit) for bit in analysis_bits.values())}u;",
-        f"  inline constexpr std::array<named_bit_t, {len(analysis_bits)}> "
-        "analysis_flag_bits {{",
-    ])
-    lines.extend(
-        f'    {{"{name}", {bit}u, analysis_flag_{_identifier(name)}}},'
-        for name, bit in analysis_bits.items()
-    )
-    lines.extend(["  }};", ""])
     lines.extend(_render_string_array("header_keys", contract["header_keys"]))
     lines.append("")
     lines.extend(_render_string_array("config_keys", contract["config_keys"]))
     lines.append("")
     lines.extend(_render_string_array("frame_keys", contract["frame_keys"]))
-    lines.extend([
-        "",
-        "  struct compact_cut_trace_contract_t {",
-        "    std::uint32_t schema;",
-        "    std::string_view source;",
-        "    std::string_view capture;",
-        "  };",
-        "",
-    ])
-    for role_name, role in contract["compact_cut_trace"]["roles"].items():
-        lines.extend([
-            f"  inline constexpr compact_cut_trace_contract_t {_identifier(role_name)}_cut_trace_contract {{",
-            f"    {role['schema']}u,",
-            f'    "{role["source"]}",',
-            f'    "{role["capture"]}",',
-            "  };",
-        ])
-    lines.append("")
-    lines.extend(_render_string_array(
-        "compact_cut_trace_fields", contract["compact_cut_trace"]["fields"]))
-    lines.extend([
-        "",
-        "  inline constexpr std::array compact_cut_trace_words {",
-    ])
-    lines.extend(
-        f"    word_e::{_identifier(name)},"
-        for name in contract["compact_cut_trace"]["fields"]
-    )
-    lines.append("  };")
     reserved = [field for field in fields if field["name"].startswith("reserved_")]
     lines.extend([
         "",
@@ -437,12 +327,12 @@ def render_hlsl(contract: dict[str, Any]) -> str:
     tag = contract_tag(contract)
     lines = [
         "// Generated by tools/sbsbench/generate_adaptive_state_contract.py.",
-        "// Edit tools/sbsbench/contracts/sbs-adaptive-state-v6.json instead.",
+        "// Edit tools/sbsbench/contracts/sbs-adaptive-state-v8.json instead.",
         "#ifndef SBS_ADAPTIVE_STATE_CONTRACT_GENERATED_HLSL",
         "#define SBS_ADAPTIVE_STATE_CONTRACT_GENERATED_HLSL",
         "",
         f"#define SBS_ADAPTIVE_STATE_SCHEMA {contract['schema']}u",
-        f"#define SBS_CUT_CONTRACT_TAG 0x{tag:08X}u",
+        f"#define SBS_ADAPTIVE_STATE_CONTRACT_TAG 0x{tag:08X}u",
         f"#define SBS_ADAPTIVE_STATE_COUNTER_MAX {contract['counter_max']}u",
         f"#define SBS_ADAPTIVE_STATE_WORD_COUNT {len(fields)}u",
         f"#define SBS_ADAPTIVE_STATE_VECTOR_COUNT {len(fields) // 4}u",
@@ -457,20 +347,12 @@ def render_hlsl(contract: dict[str, Any]) -> str:
             f"#define SBS_STATE_VECTOR_{upper} {vector}u",
             f"#define SBS_STATE_{upper}(value) ((value).{component})",
         ])
-    lines.append("")
-    for name, bit in contract["cut_flag_bits"].items():
-        lines.append(f"#define CUT_FLAG_{_upper_identifier(name)} {1 << int(bit)}u")
-    lines.append("")
-    for name, bit in contract["analysis_flag_bits"].items():
-        lines.append(
-            f"#define ANALYSIS_FLAG_{_upper_identifier(name)} {1 << int(bit)}u"
-        )
     lines.extend(["", "float4 SbsAdaptiveStateInitialVector(uint index) {"])
     for vector in range(len(fields) // 4):
         values = []
         for field in fields[vector * 4:(vector + 1) * 4]:
             if field["initial"] == CONTRACT_TAG_SENTINEL:
-                values.append("asfloat(SBS_CUT_CONTRACT_TAG)")
+                values.append("asfloat(SBS_ADAPTIVE_STATE_CONTRACT_TAG)")
             elif field["gpu_encoding"] == "uint_bits":
                 values.append(f"asfloat({int(field['initial'])}u)")
             else:

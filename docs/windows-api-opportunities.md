@@ -18,7 +18,6 @@ it links to the owning document instead of restating it, per the convention in
 Owning documents an implementer should read first:
 
 - [Host SBS pipeline](host-sbs.md) — live/offline geometry and the HDR contract.
-- [Host SBS scene cuts](host-sbs-scene-cuts.md) — cut evidence, state, acceptance.
 - [Offline Host 3D conversion](whole-clip-sbs-pipeline.md) — the causal offline media/HDR contract.
 - [SBS 3D status and roadmap](sbs-3d-roadmap.md) — current limitations and active work.
 - [sbsbench](../tools/sbsbench/README.md) — the evaluation workflow and its metric/dump contracts.
@@ -57,7 +56,7 @@ that semantic source has priority. Otherwise a lightweight Win32/DWM observer ma
 foreground root client. Either ROI copies that authority rectangle whole and fits it into the
 session's fixed authenticated tensor with a deterministic centered integer contain-fit. It never
 crops or stretches source pixels; tensor padding replicates the nearest content edge and is excluded
-from depth statistics, scene cuts, history, and OCR. A selected client that maps exactly
+from depth statistics, history, and OCR. A selected client that maps exactly
 to the capture canonicalizes to ordinary full-frame V2. Null/shell/desktop/self,
 hidden/minimized/cloaked or excluded windows, invalid/stale geometry, WGC, non-identity rotation, and
 off-output or spanning rectangles all retain ordinary full-frame V2; the route never switches
@@ -79,8 +78,8 @@ bottom-band OCR8 detection and compact SLR13 final-field conditioning → an 11-
 inverse warp → SBS packing → NVENC. The retired generic overlay sanitizer/exclusion graph is not in
 this path.
 
-Only two configuration keys survive on this surface: `sbs_3d_pop_strength` and
-`sbs_3d_max_encode_width`. Do not reintroduce removed keys; the deletion was
+Only three configuration keys survive on this surface: `sbs_3d_pop_strength`,
+`sbs_3d_subtitle_apps` and `sbs_3d_max_encode_width`. Do not reintroduce removed keys; the deletion was
 deliberate.
 
 ### A resolution constraint that will bite ROI work
@@ -106,7 +105,7 @@ retained full matched texture, including every source pixel, and an arbitrary as
 admitted. A deterministic centered integer contain-fit maps that logical source into a half-open
 content rectangle inside the fixed tensor without further cropping or stretching.
 Any tensor cells outside the content rectangle replicate the nearest content edge, but remain
-synthetic support: they are excluded from depth statistics, scene-cut evidence, temporal
+synthetic support: they are excluded from depth statistics, temporal
 history, and OCR authority. Invalid source geometry still selects ordinary full-frame V2; it does
 not turn an otherwise supported Host SBS stream flat.
 
@@ -261,18 +260,16 @@ deterministic contract tests rather than a substitute for a real-video distribut
 ### W3. Overlay-mask reuse in scene evidence (deferred)
 
 The current OCR8/SLR13 route does not sanitize DAV2 input and does not feed subtitle rectangles into
-scene-cut evidence, V2 moments, or scene-center latching. It changes only the authenticated final
-field. A confirmed cut is handled by the SLR13 transaction itself; no generic exclusion mask is
-published.
+V2 moments or the adaptive zero plane. It changes only the authenticated final field; no generic
+exclusion mask is published.
 
 Do not feed a subtitle box, cursor mask, HWND rectangle, browser chrome, or broad UI classifier into
-cut/geometry reductions without authenticated traces proving that specific defect. Broad masks can
-hide a genuine localized player cut, and text-box evidence alone does not establish that the
-underlying scene evidence is invalid.
+geometry reductions without authenticated traces proving that specific defect. Text-box evidence
+alone does not establish that the underlying scene evidence is invalid.
 
 **Acceptance for any future reuse.** Show on real and deterministic conformance traces that the
-proposed evidence source prevents the targeted false transition without hiding a localized player
-cut or changing ordinary V2 outside its authenticated scope. Until then this item has no production
+proposed evidence source prevents the targeted defect without changing ordinary V2 outside its
+authenticated scope. Until then this item has no production
 authority.
 
 ---
@@ -447,9 +444,9 @@ windowed slot selects the complete video rectangle, and the generic foreground-c
 selects the complete root client. Either arbitrary-aspect logical source uses the current full-frame
 authenticated tensor and a deterministic centered integer contain-fit. The source is never stretched
 or further cropped. Tensor cells outside the integer content rectangle replicate the nearest content
-edge and are excluded from depth statistics, scene cuts, history comparison/authority, and OCR. The
+edge and are excluded from depth statistics, history comparison/authority, and OCR. The
 fused map copies their raw padded tuple with exclusion `1`; DAV2 and OCR address the exact rectangle
-directly inside the retained matched full texture; scene analysis remains ROI-local. There is no ordinary live
+directly inside the retained matched full texture; analysis remains ROI-local. There is no ordinary live
 ROI allocation or copy. Dump 3D may reconstruct a same-format crop only after the completed frame is
 known and live timing has closed. The full captured texture remains the renderer color source.
 After V2, local parallax is multiplied by `ROI_width / source_width` to preserve pixel shift, and an
@@ -505,7 +502,7 @@ external DOM rectangle that Sunshine can query.
 - **Aspect adaptation preserves the complete source.** See
   [the resolution constraint](#a-resolution-constraint-that-will-bite-roi-work). Any admitted ROI
   aspect uses a deterministic centered integer contain-fit inside the fixed authenticated tensor.
-  Nearest-edge replicated padding is synthetic and cannot contribute depth, cut, history
+  Nearest-edge replicated padding is synthetic and cannot contribute depth, history
   comparison/authority, or OCR evidence, although the fused map copies its raw excluded tuple.
 - **Motion is exact-frame attributed.** Rendering consumes only the rectangle attached to the same
   private color/depth slot. Analysis-domain changes reset temporal/camera state, while a pure
@@ -706,7 +703,7 @@ For accepted ROIs, verify that the exact authority rectangle is sampled whole by
 offsets and an arbitrary aspect uses the current authenticated tensor with a deterministic centered
 integer contain-fit. Source pixels must never be further cropped or stretched. Nearest-edge
 replicated padding must be excluded from
-depth statistics, cut evidence, history, and OCR. Inspect both disparity signs at all four
+depth statistics, history, and OCR. Inspect both disparity signs at all four
 edges: the ROI interior must remain unchanged, the outside-only collar must respect the production
 slope limits, and the farther surround must be exactly zero. A pure window
 translation must retain scene state; ROI/full, authority, identity, size, and transfer-domain changes
@@ -720,7 +717,7 @@ identity beyond the conservative collar. The ROI-local final field alone is not 
 |---|---|---|
 | 1.1 | [W1 — cursor after the warp](#w1-composite-the-cursor-after-the-warp-candidate-defect) | Medium cross-backend change: first create an independent WGC cursor layer, then build the post-warp compositor. |
 | 1.2 | [W2a — burned-in subtitles](#w2a-burned-in-subtitles--adaptive-constant-plane-mask) | Current work is the bounded OCR-box/final-field route described above. The retired general overlay detector, inference sanitizer, and component-local mask graph are no longer production or replay dependencies. Semantic, cross-GPU, real-video, and headset qualification remain required. |
-| 1.3 | [W3 — overlay-mask reuse (deferred)](#w3-overlay-mask-reuse-in-scene-evidence-deferred) | No OCR8/SLR13 mask currently enters cut evidence or scene-center moments; any future reuse remains evidence-gated. |
+| 1.3 | [W3 — overlay-mask reuse (deferred)](#w3-overlay-mask-reuse-in-scene-evidence-deferred) | No OCR8/SLR13 mask currently enters V2 moments; any future reuse remains evidence-gated. |
 | 1.4 | [W12 — foreground/media classifier](#w12-foreground-process-and-media-state-classifier) | Evidence source only; it may choose a validated route but may not silently change V2 strength. |
 | 1.5 | [W13 — damage-guided depth reuse](#w13-damage-guided-depth-reuse-new-review-addition) | Start only with cursor-only reuse after W1. Broader reuse remains gated on move metadata and independent damage classification. |
 

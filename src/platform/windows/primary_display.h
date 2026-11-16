@@ -40,6 +40,13 @@ namespace platf::primary_display {
    */
   bool run_local_exclusive_update(std::wstring_view source_device_path, const std::function<bool()> &update);
 
+  /** Serialize a remote session's mode set with display-notification reconciliation, so the
+   * reconcile worker cannot apply a topology between this change's query and its apply (or the
+   * reverse). Unlike the local update above it neither promotes nor verifies: the caller settles
+   * and rolls back itself. The callback must not call this namespace.
+   */
+  long run_serialized_mode_change(const std::function<long()> &change);
+
   /** Bind a prepared baseline to the exact published AddVirtualDisplay identity.
    * Call before mode changes. Idempotent for an already-bound identity or no pending journal.
    */
@@ -84,11 +91,21 @@ namespace platf::primary_display {
   void restore_retained_cursor(const retained_display_ptr &retained);
 
   /** True while the active desktop is still the user's own topology around this bound display:
-   * every recorded original output is active and the original primary is at the desktop origin.
-   * Without a recovery record no host topology is applied; the display must then not be primary
+   * the original primary is at the desktop origin and every active output is a recorded original
+   * one. A recorded output that Windows switched off by itself does not change that. Without a
+   * recovery record no host topology is applied; the display must then not be primary
    * unless it is the only active output. Unreadable or unexpected state returns false. Read-only.
    */
   bool baseline_topology_active(std::wstring_view device_path);
+
+  /** Run the session's own change to its virtual display's color state (HDR on or off) as one
+   * display transaction and record the state it produced as the exclusive session's state.
+   * Promotion and display-change reconciliation restore the recorded state after a topology
+   * change, so a change that is not recorded is undone by the next of them, and the session
+   * and the reconciliation then keep toggling the display between the two states. The callback
+   * applies and verifies the change and must not call this namespace. Returns its result.
+   */
+  bool change_virtual_display_color(std::wstring_view device_path, const std::function<bool()> &change);
 
   /** Recover an interrupted transaction on startup, before creating another virtual display. */
   bool recover();
@@ -193,6 +210,25 @@ namespace platf::primary_display {
       std::vector<std::optional<display_config::advanced_color_state_t>> colors;
     };
 
+    /** Process-local suppression of repeated mode sets which reached the same failed state.
+     * The durable journal owns recovery intent; this cache only defers another identical
+     * mutation until fresh active, available-target or desired observations change.
+     */
+    class restore_observation_cache_t {
+    public:
+      bool unchanged_failure(const snapshot_t &current, const snapshot_t &desired, const snapshot_t &available) const;
+      void remember_failure(const snapshot_t &observed, const snapshot_t &desired, const snapshot_t &available);
+      void clear();
+
+    private:
+      struct failure_t {
+        snapshot_t observed;
+        snapshot_t desired;
+        snapshot_t available;
+      };
+      std::optional<failure_t> failure_;
+    };
+
     struct journal_t {
       std::wstring original_primary;
       std::wstring promoted_primary;
@@ -238,7 +274,7 @@ namespace platf::primary_display {
 
     class manager_t {
     public:
-      explicit manager_t(io_t io);
+      explicit manager_t(io_t io, restore_observation_cache_t *restore_observations = nullptr);
       bool prepare(bool exclusive = false, std::wstring_view local_sink = {}, bool monitor_replacement = false);
       bool is_local_exclusive(std::wstring_view source_device_path);
       bool bind_pending(std::wstring_view device_path);
@@ -248,11 +284,15 @@ namespace platf::primary_display {
       bool reactivate(const retained_display_ptr &retained, bool exclusive);
       void restore_retained_cursor(const retained_display_ptr &retained);
       bool baseline_topology_active(std::wstring_view device_path);
+      bool adopt_virtual_color(std::wstring_view device_path);
       bool reconcile_active_exclusive(std::wstring_view device_path);
       bool recover_inactive_exclusive();
 
     private:
       io_t io_;
+      // Production managers share one owner under transaction_mutex. Independent transaction
+      // adapters may omit it when testing their individual journal/API failure transitions.
+      restore_observation_cache_t *restore_observations_;
       bool apply_verified(const snapshot_t &before, const layout_t &desired);
       bool promote_exclusive(std::wstring_view device_path, bool reconcile_active_source = false);
       bool promote_monitor(std::wstring_view device_path);

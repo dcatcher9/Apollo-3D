@@ -14,8 +14,8 @@
         <p class="apollo-eyebrow">Offline Host SBS</p>
         <h1>Offline 3D Conversion</h1>
         <p class="apollo-page-intro">
-          Analyze or convert with the same causal Host SBS estimator, camera, cut detection,
-          conditioning, and renderer used online. Offline work is not playback-paced: frames run
+          Analyze or convert with the same causal Host SBS estimator, camera, conditioning,
+          and renderer used online. Offline work is not playback-paced: frames run
           in source order as fast as the decoder, GPU, and encoder permit.
         </p>
       </div>
@@ -170,7 +170,7 @@
                   value="evaluate">
                 <span class="offline-codec-copy">
                   <strong>Analyze only</strong>
-                  <small>Inspect the same causal cut and adaptive state without encoding video</small>
+                  <small>Run the same causal pass and its source checks without encoding video</small>
                 </span>
               </label>
             </div>
@@ -383,10 +383,6 @@
               <dd>{{ frameProgress(selectedJob) }}</dd>
             </div>
             <div>
-              <dt>Current scene</dt>
-              <dd>{{ currentSceneLabel(selectedJob) }}</dd>
-            </div>
-            <div>
               <dt>Codec</dt>
               <dd>
                 {{
@@ -421,38 +417,6 @@
             <i class="fa-solid fa-circle-exclamation" aria-hidden="true"></i>
             <p>{{ jobError(selectedJob) }}</p>
           </div>
-
-          <section v-if="isTerminal(selectedJob)" class="offline-recovery-card" aria-label="Scene diagnostics">
-            <h4>Scene diagnostics</h4>
-            <button class="btn btn-apollo-quiet" type="button" :disabled="auditBusy" @click="loadSceneAudit">
-              {{ auditBusy ? 'Loading diagnostics…' : 'Show available diagnostics' }}
-            </button>
-            <p v-if="auditError" role="alert">{{ auditError }}</p>
-            <template v-if="sceneAudit">
-              <p v-if="sceneAudit.document_kind === 'manifest'">
-                {{ sceneAudit.storage.scene_count }} scenes in {{ sceneAudit.pages.length }} pages.
-                The manifest lists coverage and page digests; download the pages for the scene records.
-                {{ sceneAudit.availability === 'partial' ? 'These diagnostics cover only the work completed before the job stopped.' : '' }}
-              </p>
-              <button class="btn btn-apollo-quiet" type="button" :disabled="auditBusy" @click="downloadSceneAudit()">
-                {{ sceneAudit.document_kind === 'manifest' ? 'Download manifest' : 'Download full audit' }}
-              </button>
-              <div v-if="sceneAudit.document_kind === 'manifest'">
-                <ul>
-                  <li v-for="page in visibleAuditPages" :key="page.index">
-                    <button class="btn btn-link" type="button" :disabled="auditBusy" @click="downloadSceneAudit(page.index)">
-                      Download page {{ page.index + 1 }} — scenes {{ page.first_scene_id }}–{{ page.first_scene_id + page.scene_count - 1 }}
-                    </button>
-                  </li>
-                </ul>
-                <div v-if="sceneAudit.pages.length > 50">
-                  <button class="btn btn-apollo-quiet" type="button" :disabled="auditListPage === 0" @click="auditListPage--">Previous pages</button>
-                  <span>{{ auditListPage + 1 }} / {{ Math.ceil(sceneAudit.pages.length / 50) }}</span>
-                  <button class="btn btn-apollo-quiet" type="button" :disabled="(auditListPage + 1) * 50 >= sceneAudit.pages.length" @click="auditListPage++">Next pages</button>
-                </div>
-              </div>
-            </template>
-          </section>
 
           <div v-if="isInterrupted(selectedJob)" class="offline-recovery-card">
             <div>
@@ -709,8 +673,6 @@
     createOfflineSbsJob,
     getOfflineSbsJob,
     getOfflineSbsOverview,
-    getOfflineSbsSceneAudit,
-    downloadOfflineSbsSceneAudit,
   } from './offline-sbs-api'
 
   const ACTIVE_STATUSES = new Set([
@@ -736,7 +698,6 @@
   let overviewAbortController = null
   let detailAbortController = null
   let pickerAbortController = null
-  let auditAbortController = null
 
   function normalizedStatus(job) {
     return String(job?.status || job?.state || 'unknown').trim().toLowerCase()
@@ -764,10 +725,6 @@
         jobs: [],
         selectedJobId: '',
         selectedJobDetail: null,
-        sceneAudit: null,
-        auditBusy: false,
-        auditError: '',
-        auditListPage: 0,
         apiError: '',
         pollWarning: '',
         actionError: '',
@@ -796,9 +753,6 @@
       }
     },
     computed: {
-      visibleAuditPages() {
-        return (this.sceneAudit?.pages || []).slice(this.auditListPage * 50, (this.auditListPage + 1) * 50)
-      },
       selectedJobSummary() {
         return this.jobs.find(job => this.jobId(job) === this.selectedJobId) || null
       },
@@ -886,7 +840,6 @@
       this.refreshTimer = window.setInterval(() => this.loadJobs(true), 2000)
     },
     beforeUnmount() {
-      auditAbortController?.abort()
       if (this.refreshTimer) window.clearInterval(this.refreshTimer)
       overviewAbortController?.abort()
       detailAbortController?.abort()
@@ -901,11 +854,6 @@
       },
       selectedJobId(jobId) {
         this.selectedJobDetail = null
-        auditAbortController?.abort()
-        this.sceneAudit = null
-        this.auditError = ''
-        this.auditBusy = false
-        this.auditListPage = 0
         detailAbortController?.abort()
         if (jobId) {
           this.loadSelectedJob(jobId, false)
@@ -915,51 +863,6 @@
       },
     },
     methods: {
-      isTerminal(job) {
-        return TERMINAL_STATUSES.has(normalizedStatus(job))
-      },
-      async loadSceneAudit() {
-        const id = this.selectedJobId
-        auditAbortController?.abort()
-        const controller = new AbortController()
-        auditAbortController = controller
-        this.auditBusy = true
-        this.auditError = ''
-        try {
-          const audit = await getOfflineSbsSceneAudit(id, { signal: controller.signal })
-          if (id === this.selectedJobId && !controller.signal.aborted) {
-            this.sceneAudit = audit
-            this.auditListPage = 0
-          }
-        } catch (error) {
-          if (!controller.signal.aborted && id === this.selectedJobId) this.auditError = error.message
-        } finally {
-          if (auditAbortController === controller) this.auditBusy = false
-        }
-      },
-      async downloadSceneAudit(page) {
-        const id = this.selectedJobId
-        const controller = new AbortController()
-        auditAbortController?.abort()
-        auditAbortController = controller
-        this.auditBusy = true
-        this.auditError = ''
-        try {
-          const blob = await downloadOfflineSbsSceneAudit(id, { signal: controller.signal, page })
-          if (controller.signal.aborted || id !== this.selectedJobId) return
-          const url = URL.createObjectURL(blob)
-          const link = document.createElement('a')
-          link.href = url
-          const suffix = page === undefined ? (this.sceneAudit?.document_kind === 'manifest' ? '-manifest' : '') : `-page-${page}`
-          link.download = `scene-audit-${id}${suffix}.json`
-          link.click()
-          setTimeout(() => URL.revokeObjectURL(url), 1000)
-        } catch (error) {
-          if (!controller.signal.aborted && id === this.selectedJobId) this.auditError = error.message
-        } finally {
-          if (auditAbortController === controller) this.auditBusy = false
-        }
-      },
       jobId(job) {
         return String(job?.id ?? job?.job_id ?? '')
       },
@@ -1260,27 +1163,6 @@
         if (total === null || total <= 0) return `${Math.max(processed ?? 0, 0)} processed`
         return `${Math.max(processed ?? 0, 0)} / ${total}`
       },
-      currentSceneLabel(job) {
-        const current =
-          job?.current_scene ??
-          job?.progress?.current_scene ??
-          job?.current_scene_id
-        if (current && typeof current === 'object') {
-          const id = current.scene_id ?? current.id
-          const start = current.start_sequence
-          return id ? `#${id}${start ? ` · starts at ${start}` : ''}` : 'Resolving'
-        }
-        if (current !== null && current !== undefined && current !== '') {
-          return `#${current}`
-        }
-        const committedScenes = finiteNumber(job?.progress?.scene_count)
-        if (this.isActive(job) && committedScenes !== null) {
-          return committedScenes > 0 ?
-            `Resolving after #${committedScenes}` :
-            'Resolving first scene'
-        }
-        return this.isActive(job) ? 'Detecting' : '—'
-      },
       jobSettings(job) {
         const settings = job?.settings || job?.request || {}
         const outputPath = settings.output_path ?? job?.output_path ?? ''
@@ -1441,7 +1323,10 @@
         }
       },
       apiMessage(error) {
-        if (error instanceof OfflineSbsApiError && error.status === 404) {
+        // A 404 with a JSON body is the job manager answering (for example an unknown or
+        // pruned job); only a bodiless 404 means the route itself is missing.
+        const answered = error?.payload && Object.keys(error.payload).length > 0
+        if (error instanceof OfflineSbsApiError && error.status === 404 && !answered) {
           return 'This build does not expose the built-in /api/offline-sbs/jobs job manager.'
         }
         return error?.message || 'The built-in offline job manager could not be reached.'
@@ -1486,7 +1371,7 @@
       },
       async cancelJob(job) {
         const id = this.jobId(job)
-        if (!id || !window.confirm('Cancel this offline job? Completed scene output remains subject to the native cleanup contract.')) {
+        if (!id || !window.confirm('Cancel this offline job? Output already written remains subject to the native cleanup contract.')) {
           return
         }
         this.actionError = ''

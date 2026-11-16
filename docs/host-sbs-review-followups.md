@@ -5,7 +5,7 @@ This tracks the static review supplied in `CODEX_HANDOFF.md` on
 The original confidence labels are retained: V = independently verified in that review,
 R = reviewer-confirmed, U = unverified, X = rejected. They are not claims of a local GPU
 reproduction. This is a work tracker, not an alternative algorithm contract; policy remains in
-[Host SBS](host-sbs.md) and [scene cuts](host-sbs-scene-cuts.md).
+[Host SBS](host-sbs.md).
 
 ## Priority repairs
 
@@ -1054,3 +1054,310 @@ results do not measure live startup latency or FPS. Live XR startup evidence rem
 The superseded deferred-loader checkpoint and its thirteen passing mechanism tests remain
 external historical evidence, not validation of this final shared-only cleanup. The
 mask-recovery goal remains open separately.
+
+### P19 foreground edges and integer clearance goals
+
+Two bounded changes address missing text edges and unnecessary background deformation. The
+foreground pass uses an immutable post-Inside/C7/G1 mask, current qualified foreground donors and
+one shared RGB blend interval with the current learned outline colour. It preserves source RGB
+and generates no outlines. The UI-plane controller searches the same cover population and
+clearance budgets on a one-source-pixel grid, while retaining the public four-pixel diagnostic
+index, cap, clock rules and symmetric continuation filter.
+
+The foreground hypothesis was measured on nine previously exposed authored development first
+cues, using actual D3D production-mask readbacks and independent original RGBA alpha. It recovers
+392 visible inner-edge pixels and 16 visible outer-edge pixels; no new zero-alpha background or
+original-ink withdrawal occurs. One of the additional three cases has valid EMPTY OCR and remains
+a full missed-ink case in the score. The six-case fixed-plane stereo replay improves 291
+foreground pixels with none worse; five cases are byte-identical. Background error improves on
+142 pixels and worsens on 48, with at most one RGB8 level of mean-channel error increase. This
+does not solve detached unseeded punctuation, broad glow, or the existing false foreground
+families. Native-scale OCR crops also fail to recover the 74 recorded punctuation misses.
+
+The integer-goal study retains all fourteen authored geometry cases, all source-only budget
+checks and twelve actual GPU route/reference positions. Every foreground-cohort mean error,
+both source/layer references and left/right eyes improve or tie; both local and full-frame
+background means improve or tie. Kai moves from eight to seven pixels: foreground MAE improves
+from 8.252 to 6.791 RGB8 and local background from 1.308 to 1.011. The checker case moves from
+twelve to eleven: foreground improves from 15.630 to 14.432 and local background from 1.469 to
+0.020. The other twelve cases tie these primary means. All fourteen integer candidates pass
+the original 20% cover/2% content conflict budgets and native field invariants.
+
+These are finite mean/percentile improvements, not pointwise or XR-comfort guarantees. Kai has
+927 background pixels with worse error and 4,525 with better error; its worst channel error
+increases from 190 to 202, while p99 decreases from 50 to 38. The checker maximum decreases
+from 209 to 7. Continuous fractional goals and preservation of an unrelated supplied phase were
+rejected after foreground/background regressions. A separate exact vertical-exterior colour
+veto stayed inactive on all six cases and is not integrated.
+
+The external evidence root is `E:\ApolloDev\subtitle-mask-background-20261104`. The nine-case
+alpha receipts are `private-resume-v1/fg-edge-all6-quality-v3.json` and
+`private-resume-v1/fg-family-def-quality-v2.json`; the two fixed-plane RGB receipts are
+`private-resume-v1/fg-fixed-{original,supplemental}-RGB-quality-v1.json`. Integer source-only
+feasibility is `integer-plane-v6/integer-validation-v6.json`; the complete measurement is
+`integer-plane-quality-v6/report.json` (SHA256
+`2ea5465a9728bee0305cc87ff856a2f3397cefa29c10b0bcd7ef8fccee8c44e6`).
+All stages use the same recorded machine evaluation interpreter and package fingerprint. No
+captured state was retagged and no CPU mask candidate or renderer supplied these measurements.
+
+The production port passes all nine saved composition replays against the actual GPU hypothesis
+masks, including the 392-pixel mixed-width recovery. All 55 controller GPU tests pass, including
+four new regressions covering integer goals, coarse-tail compatibility, cap edges, ROI union,
+invalid input, clocks and empty reset. The five optional-program runtime tests and five shared-warp
+ownership tests also pass.
+
+Five foreground-owner GPU regressions pass. Two use explicitly authored current records to isolate
+overlap accounting, immutable donors and disabled/zero-dispatch/stale-context behavior; the other
+three exercise the production composition snapshot, binding restoration and foreign-device
+rejection. The nine saved replays above supply the separate real-producer mask-parity evidence.
+
+The actual main executable passes schema-6 qualification for 54 observations across nine source
+sequences. Applied planes use the finer targets and every final blank publishes canonical zero.
+The Latin control has identical source/timeline bytes; its finer continuation moves below the old
+twelve-pixel target. This proves integration, not isolated stereo quality: the RGB evidence above
+comes from the fourteen native renderer cases. The external actual-main integration audit is
+`actual-main-plane-integration-v1.json` (SHA256
+`1ca386738ad03eae0e168aa4da951b4aec6f0c9aa6140a5de1275ab6fdbfeeab`).
+
+Packaged qualification and the requested combined live build are tracked separately from these
+development measurements. Live headset acceptance remains pending; shader availability by itself
+proves neither execution nor a visible gain.
+
+### P20 ordinary Base rendering and render-binding cleanup
+
+Ordinary live, queued and diagnostic shaders now call the canonical Base inverse directly.
+The analytic subtitle shader include is removed. Shared current-glyph pinning and current-RGB
+revocation retain their existing equations. Missing shared preparation or invalid selected
+authority preserves ordinary Base with subtitle permission disabled; unavailable or invalid depth
+retains the independent flat renderer. Render-only t8 leases, receipt backup and dump evidence are
+removed. Raw and original masks still used by construction and maintained diagnostics remain.
+
+Follow conversion now records the actual shared draw, with ordinary Base fallback. Its normal
+path records one SBS draw and performs no qualification observer or diagnostic readback. Ordinary
+evaluation and retained scene-cache replay use Base. Coordinate contract 128, selected-map 2,
+Dump 3D 51, actual-draw evidence 2, qualification 7 and scene-cache contract 5 explicitly describe
+these roles; the six-payload tuple format remains 1. Historical captures are not retagged.
+
+On the same nine source sequences and clocks, all 54 actual selected RGBA images and selected
+masks are byte-identical to the preceding e3495a54 build. The six-frame follow conversion also
+matches the new selected qualification output exactly. The evidence is in
+`E:\ApolloDev\cln1\runs\cleanup-main54-v1\comparison.json` (SHA256
+`013a2427b7a13bfdcb3908a04a3f8f0d29bd7ba524614925b98efb15fa68997b`) and
+`follow-latin-v1/comparison.json` (SHA256
+`226769c105ec6889933c0ab970c2480b331a5f0cd6bcf97cffaf1c17eb5cf297`).
+The evaluator suite passes 975 tests with 13 platform skips. Native gates pass 305 mandatory
+tests; six external replay diagnostics have no supplied inputs and are explicitly skipped.
+These are functional and finite output-parity checks, not live FPS or headset-comfort evidence.
+
+The first live package omitted `video-dom-info.exe`, leaving browser subtitle admission disabled
+despite resident OCR. The corrected immutable package and subsequent publication checks require
+that helper; bounded helper failures are logged independently of context transitions. A separate
+physical-display fix preserves the last verified recovery target when a retained virtual display
+returns beside only part of the physical desktop. Three simulated CCD regressions cover partial
+wake, delayed availability and deliberate user disable. The driver's virtual-display reactivation
+and physical settling still require live validation.
+
+### P21 static-review fix series
+
+This series works through the numbered static-review list on `claude/intelligent-feynman-d45yhh`.
+It runs in a dedicated worktree with a fresh RelWithDebInfo build. Model and TensorRT engine
+assets were copied from the main development build; the exact AGENTS.md interpreter is used for
+every evaluator stage. Earlier dumps are replay inputs only, since the producer closure changed.
+
+The two fixes merged without compilation in PR #1 build and pass on the local RTX 5080:
+`HostSbsOcrGpuTest.AssistedEntryKeepsItsEpisodeForTheFirstTrustedObservation`, all eleven
+`HostSbsSelectedMatteGpuTest` cases and all eight `HostSbsCurrentOutlineSelectedMatteGpuTest`
+cases. The wider OCR, selected-matte and current-outline groups pass 162 tests with the private
+shader roots and closure pins taken from the current tree. The black-ring and black-enclosure
+fixture suites expect frozen historical shader roots, cannot be pointed at the current tree, and
+are not part of this gate.
+
+Fix 1, diagnostic-only conditioning passes, is kept. Live streaming no longer runs the field-pin
+projection, the two native distance passes, the proposal writer, the compatibility vertical copy
+or the subtitle horizontal guard unless the completing observation is snapshotted for Dump 3D.
+Other observations publish exact Base through the distinct Final texture. The four renderer
+presence gates test Base. The harness, conversion worker and native tests keep the always-on
+default, so their artifacts are unchanged. The current policy is described in
+[Host SBS](host-sbs.md#native-subtitle-contours-and-ui-plane).
+
+- A fresh `control` covers all 19 core clips and 480 frames on the unmodified binary. It reports
+  one existing named issue, `subtitle_cjk_highres_transitions.subtitle_glyph_soft_plane_inlier_pct`
+  at 62.678, which every later run reproduces unchanged.
+- `fix1-treatment`, bound with `--report-control`, is `screen_neutral`. All 3,973 SBS, depth,
+  raw, model-input, warp-map, structure, mask, cut-state, contract and receipt files are
+  byte-identical; only timing JSON and the aggregate result file differ.
+- `fix1-livepolicy` repeats the run with `--subtitle-conditioning-live-policy`, which really
+  skips the passes. The same 3,973 files are byte-identical to the control.
+- `TensorRtOcrAvailabilityGpuTest` now also checks that the live policy publishes Final equal to
+  Base, keeps the result authenticated, clears the diagnostics-current flag, and sets it again
+  when the completion is snapshotted for a dump. It passes.
+
+The ordinary evaluator renders Base with the legacy matte compositor, so this is parity of the
+shared depth, Base and matte path rather than of the selected shared-warp draw. The skipped
+passes write only the field mask, distance, Gaussian tuple and Final, none of which that draw
+binds. No shader source changed, so no closure pin or contract identity moved. No timing claim
+is made, and a live Dump 3D capture with the new policy has not been taken.
+
+Later fixes in this series use a reduced gate at the owner's request: the subtitle GPU suites,
+the four subtitle clips of the ordinary evaluator compared byte-for-byte with the same
+`control`, and the 24-frame actual selected-compositor qualification on
+`subtitle_cjk_highres_transitions`, compared byte-for-byte with a `q-control` captured from the
+tree before fix 2. No full native suite and no full 19-clip paired report was run for them.
+`q-control` reproduces the recorded mask counts: 153,796 true-positive, 23,625 false-positive
+and zero false-negative pixels.
+
+Fix 2, RGB history and probability-change cue, is kept as a removal. The review's premise holds
+for genuine observations: every eligible one has a positive count, so the two-pixel neighbour
+correspondence and the per-core probability-change reductions could not change support. They
+did change which counts exceed one, and a count above one is what lets a duplicate delivery keep
+a pixel whose RGB is close but not bit-identical. That duplicate rule is unchanged; only pixels
+that had reached a higher count through a neighbour, and then met a non-identical duplicate,
+can differ. Word 21 stays in the layout as zero, and the contract keeps the two retired
+constants. Seven contour tests and seven locator tests that specified the retired behaviour
+are removed and three are updated; the affected suites pass 280 tests. All 24 selected masks,
+48 stereo images and the CBC, Raw and F2 buffers are byte-identical to `q-control`, as are the
+792 artifacts of the four subtitle clips.
+
+Fix 3, dispatch count (HSR-10), is measured and not changed. The chain is recorded once into a
+command list, so issuing it costs about 0.04 ms of CPU per observation. Its GPU floor on the
+eight empty frames is about 1.4 ms for CBC plus 2.4 ms for F2; with captions the medians are
+about 2.6 ms and 3.4 ms. These are functional intervals on a shared GPU, not idle-GPU timing.
+Inactive units and modes already issue zero-group indirect dispatches. D3D11 cannot skip the
+calls themselves without the CPU knowing the unit count, which exists only on the GPU, and a
+compacted argument list would still need the full worst-case loop to keep masks identical.
+Reducing the floor needs either a late CPU hint, which can be one observation stale, or a
+redesign that merges the per-mode graph steps; neither is byte-identical by construction.
+
+Fix 4, shared validation (HSR-11), is kept for the outline band shader only. Its four per-pixel
+entry points now take the echo and header proof from lane zero of their group. Output is
+byte-identical to `q-control` and 85 current-outline GPU tests pass. Stage timing is unchanged
+within run-to-run noise, so this is a redundancy removal without a measured gain. The raw,
+hole, foreground-edge, selector and enclosure shaders are untouched; a cross-stage ready word
+would add a dispatch and storage to each closure and has no measurement to justify it.
+
+Fix 5, minor C++, is kept. Hole proof, parent, flags and argument storage start as zero. The
+trusted-inner latch stays, because `ensure()` replaces the owner and its latch on every device
+or shape change; retrying on every observation would repeat a full-plane allocation.
+
+Fix 6, detector dead code, is kept in part. The unused `score` parameter and two duplicated
+helpers are removed with byte-identical output on the four subtitle clips and 66 passing OCR
+GPU tests. The second reference-centre test is not dead, because ribbons skip the first one.
+Raw slots 8--15 are record layout rather than code and stay. The publish-time evidence check
+cannot fail but supplies the score, so it stays with a comment.
+
+Fix 7, centring union, is kept. When the full group union fails the two-percent midpoint rule,
+the union of only its independently horizontal members is tested, and only those members are
+published. `UnknownPieceCannotPushACenteredHorizontalLineOffCenter` fails on the previous
+shader, where the blob removes the caption, and passes now. The existing negatives pass
+unchanged, including `SeparatedStrongFragmentsRequireTheirGroupToBeCentered`. The four subtitle
+clips and the 24-frame selected qualification are byte-identical to their controls, so the
+authored clips show no regression and no gain; the road-marking false positive is unchanged.
+The remaining risk is a scene line whose horizontal part is centred on its own while a weaker
+part is not; that part alone was already admissible before whenever the weaker part was absent.
+
+Fix 8, short-line slope gate, is kept. A line whose 10th and 90th percentile envelopes each
+move by at most one detector row across its populated bins is independently horizontal. The
+tolerance is tested on the actual envelope range rather than the fitted rise, because a
+least-squares fit of a one-row step reports about 1.33 rows. `ShortLineWithOneRowEnvelopeStepIsHorizontal`
+fails on the previous shader for its one-row case and passes now; its two-row twin stays
+rejected. The 68-test OCR suite passes, and the four subtitle clips and the selected
+qualification are byte-identical to their controls. The authored clips contain no such short
+line, so they show no regression and no gain. A short scene mark that is centred within two
+percent and one row flat can now be independent evidence; the centring and span rules are the
+remaining guard.
+
+Fix 9, orientation-fit foreign pixels, is confirmed and not changed. The second classification
+runs after ordinary merging, so `ActivePixelsInRow` does count every active pixel in the merged
+bounding rectangle, including pieces too small to queue and pieces whose class kept them out of
+the merge. Those pixels are confined to the union's own rows, and a least-squares fit gives
+central bins little leverage. Several authored attempts to flip a merged line's class with
+foreign pixels stayed within the two-degree bound, so there is no failing case to fix against.
+Restricting the count to members needs per-member rectangles in a single-lane, already
+quadratic path (HSR-15). It stays open as a low-priority accuracy item.
+
+Fix 10, prior learning, is kept: ribbons no longer teach. A ribbon's core is its whole broad
+bottom run, it is exempt from the centre-span rule, and its height is not a caption height, yet
+an independently horizontal ribbon set the position votes and the single trusted height.
+`BottomRibbonTopologyIsPublishedWithPairedCappedCover` now also requires an untouched prior
+after a published ribbon; that assertion fails on the previous shader. The ribbon is still
+published with its paired cover. The OCR suite passes 68 tests, and the four subtitle clips and
+the selected qualification are byte-identical to their controls.
+
+Fix 15, plane controller, is evaluated and reverted. The time step is capped at 50 ms, so at a
+100 ms observation cadence the filter and the 30 pixel-per-second slew act at half their
+nominal rate. Raising the cap to 150 ms was tried on the selected qualification replayed at
+`--fps 10/1` (`q10-control` and `q10-fix15`). All 24 selected masks and stage buffers are
+identical and 14 stereo frames change. The applied plane does converge faster, but the
+per-observation goal on this clip moves by about one source pixel in alternating directions,
+and the faster controller follows it: mean plane motion between consecutive captioned
+observations rises from about 0.88 to 1.40 source pixels, with single steps above two pixels
+where the control stays near one. That is more visible caption depth motion for no demonstrated
+benefit, so the 50 ms cap stays; in practice it is part of the smoothing. A cap change should
+follow a steadier goal, not precede it.
+
+The second half of the item is not attempted. One clearance histogram spans the union of
+current covers, so a false cover over near foreground can raise the shared plane. Separating
+it needs a per-cover goal and a rule for combining them inside the fixed 40-word UIP state,
+which is a controller redesign rather than a bounded fix, and the authored clips have no
+false-cover case to measure it against.
+
+Items 11 to 14 and 16 are not attempted in this series:
+
+- Item 11, whole-frame mask swap. Containing a single unit's fault needs either per-unit proof
+  words through the selected receipt or a retained previous mask with its own authority. Both
+  change what the selector authenticates, and no saved input here reproduces a one-unit fault.
+- Item 12, single empty detection (HSR-05). An exit hold has to be coordinated across cover,
+  plane and mask, and needs appearance and disappearance evidence that the authored clips do
+  not supply. HSR-05's earlier disposition stands.
+- Item 13, vertical row behaviour. A cover-bounded vertical close of row authority needs the
+  clean-background stress cases from the P14 comparison to judge scene deformation; those are
+  external fixtures bound to an older contract and were not rebuilt here.
+- Item 14, revocation flicker. Hysteresis or per-component revocation adds temporal state to a
+  per-draw rule, and there is no captured sequence showing the toggle to measure against.
+- Item 16, completion-stage ablation, depends on item 13.
+
+Closing state of the series: both generators pass `--check`, evaluator discovery passes 979
+tests with 13 skips, and the OCR, selected-matte, current-outline, contour, locator, cohort,
+matte-guard, trajectory, topology and seeded-component GPU suites pass 357 tests with 38
+opt-in skips.
+
+The full native suite was then run once at the series head with the private shader-root
+environment set: 2,279 tests pass, 145 skip and 118 fail. None of the 118 is caused by this
+series:
+
+- 71 `HostSbsCurrentOutlineSupportClosureGpuTest`, 9 `HostSbsSubtitleInnerColourGpuTest`, 3
+  `HostSbsInnerColourHelperGpuTest` and 7 `HostSbsInnerColourRecordedHelperGpuTest` failures
+  are environment conflicts. These suites share the same root and pin variables but hash
+  different entry-point lists, and the inner-colour suites expect the default shader
+  directory rather than the frozen `current_outline/colour` copy. Each suite passes when run
+  alone with the roots and pins it expects (support closure with the runtime closure pins;
+  the three inner-colour suites with the default roots, 9 and 10 tests).
+- `HostSbsCurrentBlackEnclosureGpuTest` passes 20 tests once its pin is computed over its own
+  fifteen entry points instead of the runtime closure.
+- 11 `HostSbsCurrentBlackRingGpuTest` failures need `host_sbs_current_black_ring_cs.hlsl`, and
+  11 `HostSbsInnerColourGlobalValidationGpuTest` failures need the external `original6750`
+  source root. Neither is in this repository, so these suites cannot run here.
+- Six source-text tests are stale and search for strings that `master` does not contain
+  either: `DirectxShaderSourceTest.SubtitleResolveBindsExactOcrRecordAndConditionParams`,
+  two `OfflineSbsWorker` cases, two `ParallaxV2ContractTest` cases (they still expect contract
+  schema 121 and dump schema 50) and
+  `SbsDebugDumpAsyncTest.Schema49PackagesCompleteContourTupleAndNoScalarPreviews`. Each
+  failed on a single outdated expectation (contract schema 121 and OCR contract schema 33,
+  dump schema 50, the contour call without `perf_slot`, the narrower harness snapshot
+  condition and the Final-bound harness field read). The six tests are deleted at the owner's
+  direction; their four suites pass the remaining 88 tests. The deletion removes the other,
+  still-valid source-text assertions those tests carried, including the 287-line production
+  contract constant check.
+
+`V2_SUBTITLE_CONTOUR_HISTORY_JITTER_RADIUS_SOURCE_PIXELS` is no longer read by any shader
+after fix 2. It is left in the contract deliberately: removing a contract constant regenerates
+the include copy inside every frozen runtime root and moves all of their closure pins for no
+behavioural gain.
+
+Fix 1's live dump path is confirmed on the host. The series build ran as the streaming host
+and a client-requested Dump 3D during subtitled video playback was written complete
+(`dump_20261114_093139_372_18e7f9ad46a62f28_0`, frame 4035, 54 files, no rejection or warning
+in the host log). The OCR record carries the same frame, the conditioned Final field differs
+from Base on 37,471 field samples, and that count equals the non-zero Gaussian weight samples,
+so the diagnostic conditioner ran for the dumped observation under the live policy. The owner
+watched the same session in the headset and reported that subtitles looked fine.

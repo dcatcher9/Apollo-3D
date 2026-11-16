@@ -8,6 +8,7 @@
 
   #include "src/crypto.h"
   #include "src/depth_coordinate_v2.h"
+  #include "src/generated/sbs_adaptive_state_contract.h"
   #include "src/host_sbs_resolution.h"
   #include "src/host_sbs_shader_cache.h"
   #include "src/platform/windows/sbs_debug_dump.h"
@@ -167,7 +168,6 @@ namespace {
     source_width, source_height, field_height, v2::subtitle_ocr_safe_row_top);
   constexpr std::uint32_t roi_bottom = subtitle_roi_edge(
     source_width, source_height, field_height, v2::subtitle_ocr_safe_row_bottom);
-  constexpr std::uint32_t cut_tag = 0x28632D48u;
 
   constexpr std::array<std::uint32_t, 4u> default_ocr_box(
     const std::uint32_t left,
@@ -238,7 +238,7 @@ namespace {
     std::int32_t line_center_twice_source;
     std::uint32_t line_reference_width;
     std::int32_t line_search_top_source;
-    std::uint32_t reserved = 0u;
+    std::uint32_t line_policy = 0u;
     std::array<std::uint32_t, 4u> observation {};
   };
 
@@ -586,7 +586,8 @@ namespace {
       const std::optional<std::uint32_t> line_reference_width = std::nullopt,
       const std::optional<std::int32_t> line_search_top_source = std::nullopt,
       const std::optional<std::uint64_t> observation_timestamp_us = std::nullopt,
-      const bool input_domain_reset = false
+      const bool input_domain_reset = false,
+      const std::uint32_t line_policy = 0u
     ) {
       if (!cells_ || !boxes_ || probability.size() != ocr_pixels) {
         return false;
@@ -620,7 +621,7 @@ namespace {
         line_center_twice_source.value_or(static_cast<std::int32_t>(source_w)),
         line_reference_width.value_or(source_w),
         line_search_top_source.value_or(static_cast<std::int32_t>(subtitle_search_top(source_h))),
-        0u,
+        line_policy,
         {static_cast<std::uint32_t>(source_clock), static_cast<std::uint32_t>(source_clock >> 32u),
           input_domain_reset ? 1u : 0u, 0u},
       };
@@ -730,7 +731,7 @@ namespace {
       context_->CSSetShader(locator_resolve_.Get(), nullptr, 0u);
       std::array<ID3D11ShaderResourceView *, 8u> resolve_srvs {
         geometry_state_srv_.Get(),
-        cut_srv_.Get(),
+        health_srv_.Get(),
         base_srv_.Get(),
         nullptr,
         nullptr,
@@ -764,7 +765,7 @@ namespace {
       );
       std::array<ID3D11ShaderResourceView *, 8u> condition_srvs {
         geometry_state_srv_.Get(),
-        cut_srv_.Get(),
+        health_srv_.Get(),
         base_srv_.Get(),
         state_srv_.Get(),
         condition_params_srv_.Get(),
@@ -881,7 +882,7 @@ namespace {
       identity[0u] = v2::subtitle_contour_schema;
       identity[1u] = v2::subtitle_contour_history_tag;
       identity[2u] = current_valid ? 1u : 0u;
-      identity[3u] = current_valid ? state_[v2::subtitle_plane_cut_epoch_word] : 0u;
+      identity[3u] = 0u;
       std::copy(constants.frame.begin(), constants.frame.end(), identity.begin() + 4u);
       identity[8u] = source_width;
       identity[9u] = source_height;
@@ -986,16 +987,15 @@ namespace {
         return false;
       }
 
-      std::array<std::uint32_t, 32u> cut_words {};
-      cut_words[0u] = cut_tag;
+      const auto health_words = sbs_adaptive_state::initial_words;
       if (!create_structured_buffer(
             device_.Get(),
-            cut_words.data(),
-            sizeof(cut_words),
+            health_words.data(),
+            sizeof(health_words),
             4u * sizeof(std::uint32_t),
             D3D11_BIND_SHADER_RESOURCE,
-            cut_buffer_,
-            &cut_srv_,
+            health_buffer_,
+            &health_srv_,
             nullptr
           )) {
         return false;
@@ -1180,8 +1180,8 @@ namespace {
     ComPtr<ID3D11UnorderedAccessView> gaussian_control_uav_;
     ComPtr<ID3D11Texture2D> gaussian_weight_texture_;
     ComPtr<ID3D11UnorderedAccessView> gaussian_weight_uav_;
-    ComPtr<ID3D11Buffer> cut_buffer_;
-    ComPtr<ID3D11ShaderResourceView> cut_srv_;
+    ComPtr<ID3D11Buffer> health_buffer_;
+    ComPtr<ID3D11ShaderResourceView> health_srv_;
     ComPtr<ID3D11Buffer> geometry_state_buffer_;
     ComPtr<ID3D11ShaderResourceView> geometry_state_srv_;
     ComPtr<ID3D11Texture2D> base_texture_;
@@ -2448,6 +2448,42 @@ namespace {
     }
   }
 
+  TEST(HostSbsOcrGpuTest, AssistedEntryKeepsItsEpisodeForTheFirstTrustedObservation) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    std::vector<float> strong(ocr_pixels, 0.0f), glyph(ocr_pixels, 0.0f), empty(ocr_pixels, 0.0f);
+    paint_rectangle(strong, 240u, 100u, 720u, 115u);
+    paint_envelope_line(glyph, 390u, 95, 180u, 20, 8, 0);
+    ASSERT_TRUE(learn_three_layout_entries(fixture, strong));
+    const auto trusted = classifier_history(fixture.record());
+    ASSERT_TRUE(observe_classifier(fixture, empty, 6u, 1'500'000u));
+    // The cue enters through the prior alone. It cannot teach, and it must not spend the
+    // independent entry that its own later trusted observation is entitled to.
+    ASSERT_TRUE(observe_classifier(fixture, glyph, 7u, 1'600'000u));
+    ASSERT_EQ(fixture.record()[4u], 1u);
+    const auto assisted = classifier_history(fixture.record());
+    EXPECT_EQ(assisted[3u], trusted[3u]);
+    EXPECT_EQ(assisted[23u], 0u);
+    EXPECT_EQ(assisted[24u], 1u);
+    EXPECT_EQ(assisted[25u], 1'500'000u);
+    EXPECT_EQ(assisted[26u], 0u);
+    for (std::size_t word = 27u; word < trusted.size(); ++word)
+      EXPECT_EQ(assisted[word], trusted[word]);
+    ASSERT_TRUE(observe_classifier(fixture, strong, 8u, 1'700'000u));
+    const auto taught = classifier_history(fixture.record());
+    EXPECT_EQ(taught[3u], trusted[3u] + 1u);
+    EXPECT_EQ(taught[23u], 1u);
+    EXPECT_EQ(taught[24u], 0u);
+    EXPECT_EQ(taught[25u], 0u);
+    // The same cue remains one episode: later static frames add nothing.
+    ASSERT_TRUE(observe_classifier(fixture, strong, 9u, 1'800'000u));
+    const auto held = classifier_history(fixture.record());
+    EXPECT_EQ(held[3u], taught[3u]);
+    for (std::size_t word = 32u; word < taught.size(); ++word)
+      EXPECT_EQ(held[word], taught[word]);
+  }
+
   TEST(HostSbsOcrGpuTest, QualifiedPriorKeepsUnknownNarrowGlyphsSeparateFromOrientationVeto) {
     ocr_warp_fixture_t fixture;
     std::string error;
@@ -2627,6 +2663,44 @@ namespace {
     const auto history = classifier_history(fixture.record());
     EXPECT_EQ(history[3u], 1u);
     EXPECT_LT(*std::max_element(history.begin() + 32u, history.end()), 8u);
+  }
+
+  TEST(HostSbsOcrGpuTest, UnknownPieceCannotPushACenteredHorizontalLineOffCenter) {
+    // The caption is exactly centered. A same-height unknown blob inside the unchanged
+    // four-height line gap makes the group union about 3.9% off-center, beyond the 2% rule.
+    // The caption's own horizontal union still qualifies; the blob is not published with it.
+    for (const auto with_blob : {false, true}) {
+      SCOPED_TRACE(with_blob);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> cue(ocr_pixels, 0.0f);
+      paint_rectangle(cue, 330u, 90u, 630u, 120u);
+      if (with_blob) paint_rectangle(cue, 700u, 90u, 704u, 120u);
+      ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1'000'000u));
+      ASSERT_EQ(fixture.record()[4u], 1u);
+      EXPECT_EQ(read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+        default_ocr_box(330u, 90u, 630u, 120u));
+      EXPECT_EQ(classifier_history(fixture.record())[3u], 1u);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, ShortLineWithOneRowEnvelopeStepIsHorizontal) {
+    // A 30-pixel centered line whose right half sits one detector row lower. The one-row step
+    // is pure quantization, yet over this width its fitted slope exceeds the two-degree bound.
+    // A two-row step on the same short line is real tilt and stays outside independent text.
+    for (const auto step : {1u, 2u}) {
+      SCOPED_TRACE(step);
+      ocr_warp_fixture_t fixture;
+      std::string error;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      std::vector<float> cue(ocr_pixels, 0.0f);
+      paint_rectangle(cue, 465u, 100u, 480u, 115u);
+      paint_rectangle(cue, 480u, 100u + step, 495u, 115u + step);
+      ASSERT_TRUE(observe_classifier(fixture, cue, 1u, 1'000'000u));
+      EXPECT_EQ(fixture.record()[4u], step == 1u ? 1u : 0u);
+      EXPECT_EQ(classifier_history(fixture.record())[3u], step == 1u ? 1u : 0u);
+    }
   }
 
   TEST(HostSbsOcrGpuTest, ExplicitDomainAndAnalysisGenerationChangesClearTheLayoutPrior) {
@@ -3024,6 +3098,134 @@ namespace {
         std::vector<ocr_native_pair_t> {});
       EXPECT_EQ(classifier_history(fixture.record())[3u], exact_center ? 1u : 0u);
     }
+  }
+
+  TEST(HostSbsOcrGpuTest, ApplicationTextPolicyAdmitsTheSameOffCenterLineVideoRejects) {
+    // One short horizontal line anchored left of the reference center, as a 2D game draws its
+    // dialogue: it neither spans the center nor has a centered midpoint.
+    const std::vector<ocr_candidate_patch_t> left_anchored {
+      {{120u, 60u, 400u, 90u}},
+    };
+    ocr_warp_fixture_t expected_fixture;
+    std::string error;
+    ASSERT_TRUE(expected_fixture.initialize(error, false, true, false)) << error;
+    std::vector<ocr_native_pair_t> expected_pairs;
+    ASSERT_TRUE(capture_native_pairs(expected_fixture, left_anchored, expected_pairs));
+    ASSERT_EQ(expected_pairs.size(), 1u);
+    std::vector<float> probability(ocr_pixels, 0.0f);
+    paint_candidate_patches(probability, left_anchored);
+    const auto run = [&](ocr_warp_fixture_t &fixture, const std::uint32_t policy) {
+      return fixture.run_boxes(
+        probability, 40u, 77u, source_width, source_height, field_width, field_height,
+        source_crop_top, source_crop_height, roi_top, roi_bottom, {}, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, false, policy);
+    };
+    {
+      ocr_warp_fixture_t fixture;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      ASSERT_TRUE(run(fixture, 0u));
+      expect_retained_native_pairs(fixture.record(), {});
+    }
+    {
+      ocr_warp_fixture_t fixture;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      ASSERT_TRUE(run(fixture, 1u));
+      expect_retained_native_pairs(fixture.record(), expected_pairs);
+    }
+    {
+      // A line that types out starts as one glyph. The detector rounds a blob's ends, so its
+      // envelopes diverge and it has no orientation of its own. After one trusted line at the
+      // same baseline the application rule admits it; video still wants several cues.
+      const auto paint_line = [](std::vector<float> &map) {
+        paint_rectangle(map, 300u, 60u, 660u, 75u);
+      };
+      const auto paint_first_glyph = [](std::vector<float> &map) {
+        paint_rectangle(map, 474u, 60u, 488u, 75u);
+        paint_rectangle(map, 470u, 65u, 474u, 70u);
+      };
+      // A droplet-sized blob at another height and baseline is not dialogue.
+      const auto paint_speck = [](std::vector<float> &map) {
+        paint_rectangle(map, 478u, 120u, 483u, 126u);
+      };
+      const auto run_policy = [&](ocr_warp_fixture_t &fixture, const std::vector<float> &map,
+                                  const std::uint64_t frame, const std::uint32_t policy) {
+        return fixture.run_boxes(
+          map, frame, 77u, source_width, source_height, field_width, field_height,
+          source_crop_top, source_crop_height, roi_top, roi_bottom, {}, std::nullopt,
+          std::nullopt, std::nullopt, std::nullopt, false, policy);
+      };
+      for (const auto policy : {0u, 1u}) {
+        SCOPED_TRACE(policy);
+        std::vector<float> line(ocr_pixels, 0.0f), glyph(ocr_pixels, 0.0f), speck(ocr_pixels, 0.0f);
+        paint_line(line);
+        paint_first_glyph(glyph);
+        paint_speck(speck);
+        ocr_warp_fixture_t unlearned;
+        ASSERT_TRUE(unlearned.initialize(error, false, true, false)) << error;
+        ASSERT_TRUE(run_policy(unlearned, glyph, 40u, policy));
+        EXPECT_EQ(unlearned.record()[2u], 1u);
+        EXPECT_EQ(unlearned.record()[3u], 0u);  // No line has been seen in this context yet.
+        ocr_warp_fixture_t fixture;
+        ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+        ASSERT_TRUE(run_policy(fixture, line, 40u, policy));
+        ASSERT_EQ(fixture.record()[3u], 1u);
+        ASSERT_EQ(classifier_history(fixture.record())[3u], 1u);
+        ASSERT_TRUE(run_policy(fixture, glyph, 41u, policy));
+        EXPECT_EQ(fixture.record()[3u], policy == 0u ? 0u : 1u);
+        ASSERT_TRUE(run_policy(fixture, speck, 42u, policy));
+        EXPECT_EQ(fixture.record()[3u], 0u);
+      }
+    }
+    {
+      // An unknown policy value is an invalid request, never a third rule.
+      ocr_warp_fixture_t fixture;
+      ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+      ASSERT_TRUE(run(fixture, 2u));
+      EXPECT_EQ(fixture.record()[2u], 0u);
+    }
+  }
+
+  TEST(HostSbsOcrGpuTest, ApplicationTextCoverSpansItsDialogueLineFromTheBlockMargin) {
+    // Row A holds two pieces separated by far more than the four-height word gap, as when the
+    // detector skips a run of symbols. Row B starts further left and ends earlier.
+    std::vector<float> probability(ocr_pixels, 0.0f);
+    paint_rectangle(probability, 200u, 60u, 320u, 75u);
+    paint_rectangle(probability, 600u, 60u, 760u, 75u);
+    paint_rectangle(probability, 150u, 100u, 400u, 115u);
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
+    ASSERT_TRUE(fixture.run_boxes(
+      probability, 40u, 77u, source_width, source_height, field_width, field_height,
+      source_crop_top, source_crop_height, roi_top, roi_bottom, {}, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, false, 1u));
+    const auto record = fixture.record();
+    ASSERT_EQ(record[2u], 1u);
+    ASSERT_EQ(record[3u], 3u);
+    const auto box = [&](const std::uint32_t offset, const std::uint32_t slot) {
+      const auto base = offset + slot * v2::subtitle_ocr_box_word_count;
+      return std::array<std::uint32_t, 4u> {record[base], record[base + 1u], record[base + 2u], record[base + 3u]};
+    };
+    const auto core_a1 = box(v2::subtitle_ocr_raw_box_offset, 0u);
+    const auto core_a2 = box(v2::subtitle_ocr_raw_box_offset, 1u);
+    const auto core_b = box(v2::subtitle_ocr_raw_box_offset, 2u);
+    const auto cover_a1 = box(v2::subtitle_ocr_final_box_offset, 0u);
+    const auto cover_a2 = box(v2::subtitle_ocr_final_box_offset, 1u);
+    const auto cover_b = box(v2::subtitle_ocr_final_box_offset, 2u);
+    // The tight cores stay the detector's own pieces.
+    EXPECT_LT(core_a1[2u], core_a2[0u]);
+    EXPECT_LT(core_b[0u], core_a1[0u]);
+    // Both pieces of row A search the same span: bridged to each other, and started at the
+    // block's left margin, which row B supplies.
+    EXPECT_EQ(cover_a1[0u], cover_a2[0u]);
+    EXPECT_EQ(cover_a1[2u], cover_a2[2u]);
+    EXPECT_LE(cover_a1[0u], core_b[0u]);
+    EXPECT_GE(cover_a1[2u], core_a2[2u]);
+    // Row B is not extended to the right by another row's longer line.
+    EXPECT_LE(cover_b[0u], core_b[0u]);
+    EXPECT_LT(cover_b[2u], core_a2[0u]);
+    // The vertical extent of a cover is still its own row.
+    EXPECT_LT(cover_a1[3u], core_b[3u]);
   }
 
   TEST(HostSbsOcrGpuTest, DistantSameHeightColumnsCannotBorrowEachOthersCenter) {
@@ -3716,6 +3918,12 @@ namespace {
       static_cast<std::uint32_t>(islands.size())
     );
     EXPECT_EQ(record[v2::subtitle_ocr_final_box_offset + 7u], 4u);
+    // A published ribbon is not an ordinary caption line: it teaches neither the position
+    // prior nor the trusted height.
+    const auto ribbon_history = classifier_history(record);
+    EXPECT_EQ(ribbon_history[3u], 0u);
+    EXPECT_EQ(ribbon_history[27u], 0u);
+    for (std::size_t word = 32u; word < ribbon_history.size(); ++word) EXPECT_EQ(ribbon_history[word], 0u);
 
     // The exact classifier boundary is SAFE_ROW_BOTTOM(155) - tolerance(2). An otherwise
     // identical segmented/wide run ending at detector row 153 is a ribbon; row 152 is ordinary.

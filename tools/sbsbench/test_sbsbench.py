@@ -342,150 +342,47 @@ class EvalContractTests(unittest.TestCase):
                 json.dump({"content_type": "synthetic"}, fh)
             self.assertNotEqual(capture_hashes, run_eval.source_evidence_digests(clip))
 
-    def test_clip_hash_excludes_labels_but_authenticates_shot_state_semantics(self):
+    def test_clip_hash_excludes_labels_but_authenticates_scoring_semantics(self):
         with tempfile.TemporaryDirectory() as clip:
             for frame_id in (1, 2):
                 Image.fromarray(np.zeros((8, 12, 3), np.uint8)).save(
                     os.path.join(clip, f"frame_{frame_id:05d}.png"))
             meta_path = os.path.join(clip, "meta.json")
-            contract = {
-                "kind": "hard-cut", "monitor_from_frame": 2,
-                "expected_pulse_frames": [2],
-            }
             with open(meta_path, "w", encoding="utf-8") as fh:
                 json.dump({
                     "name": "human label A", "description": "wording A",
-                    "content_type": "synthetic", "shot_state_contract": contract,
+                    "content_type": "synthetic", "expected_flat": False,
                 }, fh)
             original = run_eval.source_evidence_digests(clip)
             with open(meta_path, "w", encoding="utf-8") as fh:
                 json.dump({
                     "name": "human label B", "description": "wording B",
-                    "content_type": "synthetic", "shot_state_contract": contract,
+                    "content_type": "synthetic", "expected_flat": False,
                 }, fh)
             self.assertEqual(original, run_eval.source_evidence_digests(clip))
-            contract["expected_pulse_frames"] = []
             with open(meta_path, "w", encoding="utf-8") as fh:
                 json.dump({
                     "name": "human label B", "description": "wording B",
-                    "content_type": "synthetic", "shot_state_contract": contract,
+                    "content_type": "synthetic", "expected_flat": True,
                 }, fh)
             self.assertNotEqual(original, run_eval.source_evidence_digests(clip))
 
-    def test_exposure_probe_is_reproducible_and_pixel_authenticated(self):
+    def assert_synthetic_stimulus_is_reproducible(self, clip_name, source_anchors=()):
+        """Regenerate one stimulus in isolation and require the committed bytes and metadata."""
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        committed = os.path.join(
-            repo, "tools", "sbsbench", "clips", "exposure_flash_strobe")
+        committed = os.path.join(repo, "tools", "sbsbench", "clips", clip_name)
         committed_meta = run_eval.load_clip_metadata(committed, suite="core")
         self.assertEqual(committed_meta["content_type"], "synthetic")
-        self.assertEqual(committed_meta["evaluation_role"], "conformance-only")
-        self.assertEqual(
-            committed_meta["shot_state_contract"]["monitor_from_frame"], 2)
-        self.assertEqual(
-            committed_meta["shot_state_contract"]["stable_from_frame"], 10)
+        self.assertNotIn("evaluation_role", committed_meta)
+        self.assertNotIn("shot_state_contract", committed_meta)
         self.assertFalse(os.path.exists(os.path.join(committed, "gt_depth")))
         committed_frames = sbsbench.indexed_files(
             os.path.join(committed, "frame_*.*"), "frame_")
-        sbsbench.validate_exposure_only_source(
-            committed_frames, committed_meta["shot_state_contract"])
 
         with tempfile.TemporaryDirectory() as generated_root, mock.patch.object(
                 make_synth_clips, "CLIPS", generated_root):
-            make_synth_clips.exposure_flash_strobe()
-            make_synth_clips.write_meta(
-                "exposure_flash_strobe",
-                **make_synth_clips.clip_metadata("exposure_flash_strobe"))
-            generated = os.path.join(generated_root, "exposure_flash_strobe")
-            generated_meta = run_eval.load_clip_metadata(generated, suite="core")
-            generated_frames = sbsbench.indexed_files(
-                os.path.join(generated, "frame_*.*"), "frame_")
-            self.assertEqual(generated_meta, committed_meta)
-            self.assertEqual(set(generated_frames), set(committed_frames))
-            for frame_id in generated_frames:
-                with open(generated_frames[frame_id], "rb") as actual, open(
-                        committed_frames[frame_id], "rb") as expected:
-                    self.assertEqual(actual.read(), expected.read(), frame_id)
-
-            # A single non-exposure pixel invalidates the semantic contract before state metrics.
-            tampered = np.asarray(Image.open(generated_frames[12]).convert("RGB")).copy()
-            tampered[0, 0, 0] ^= 1
-            Image.fromarray(tampered).save(generated_frames[12])
-            with self.assertRaisesRegex(ValueError, "global-RGB-gain"):
-                sbsbench.validate_exposure_only_source(
-                    generated_frames, generated_meta["shot_state_contract"])
-
-    def test_sustained_motion_cut_is_reproducible_and_source_authenticated(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        committed = os.path.join(
-            repo, "tools", "sbsbench", "clips", "sustained_motion_scene_cut")
-        committed_meta = run_eval.load_clip_metadata(committed, suite="core")
-        contract = committed_meta["shot_state_contract"]
-        self.assertEqual(committed_meta["evaluation_role"], "conformance-only")
-        self.assertEqual(contract["kind"], "latched-motion-hard-cut")
-        self.assertEqual(contract["monitor_from_frame"], 2)
-        self.assertEqual(contract["expected_pulse_frames"], [11, 28])
-        self.assertEqual(contract["escape_candidate_frame"], 27)
-        self.assertEqual(contract["escape_pulse_frame"], 28)
-        committed_frames = sbsbench.indexed_files(
-            os.path.join(committed, "frame_*.*"), "frame_")
-        sbsbench.validate_latched_motion_hard_cut_source(
-            committed_frames, contract)
-
-        with tempfile.TemporaryDirectory() as generated_root, mock.patch.object(
-                make_synth_clips, "CLIPS", generated_root):
-            # The generator reads its two source anchors from the clip root, so copy only those
-            # authenticated inputs into the isolated regeneration tree.
-            for source, frame in (("c841", 1), ("c647", 13)):
-                source_dir = os.path.join(generated_root, source)
-                os.makedirs(source_dir)
-                shutil.copyfile(
-                    os.path.join(repo, "tools", "sbsbench", "clips", source,
-                                 f"frame_{frame:05d}.jpg"),
-                    os.path.join(source_dir, f"frame_{frame:05d}.jpg"))
-            make_synth_clips.sustained_motion_scene_cut()
-            make_synth_clips.write_meta(
-                "sustained_motion_scene_cut",
-                **make_synth_clips.clip_metadata("sustained_motion_scene_cut"))
-            generated = os.path.join(generated_root, "sustained_motion_scene_cut")
-            generated_meta = run_eval.load_clip_metadata(generated, suite="core")
-            generated_frames = sbsbench.indexed_files(
-                os.path.join(generated, "frame_*.*"), "frame_")
-            self.assertEqual(generated_meta, committed_meta)
-            self.assertEqual(set(generated_frames), set(committed_frames))
-            for frame_id in generated_frames:
-                with open(generated_frames[frame_id], "rb") as actual, open(
-                        committed_frames[frame_id], "rb") as expected:
-                    self.assertEqual(actual.read(), expected.read(), frame_id)
-
-            tampered = np.asarray(Image.open(generated_frames[18]).convert("RGB")).copy()
-            tampered[0, 0, 0] ^= 1
-            Image.fromarray(tampered).save(generated_frames[18])
-            with self.assertRaisesRegex(ValueError, "horizontal-roll"):
-                sbsbench.validate_latched_motion_hard_cut_source(
-                    generated_frames, generated_meta["shot_state_contract"])
-
-    def assert_structureless_bridge_is_reproducible_and_source_authenticated(
-            self, clip_name, uniform_rgb):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        committed = os.path.join(
-            repo, "tools", "sbsbench", "clips", clip_name)
-        committed_meta = run_eval.load_clip_metadata(committed, suite="core")
-        contract = committed_meta["shot_state_contract"]
-        self.assertEqual(committed_meta["evaluation_role"], "conformance-only")
-        self.assertEqual(contract["kind"], "structureless-history-bridge")
-        self.assertEqual(contract["expected_pulse_frames"], [18, 22])
-        self.assertEqual(contract["uniform_rgb"], list(uniform_rgb))
-        committed_frames = sbsbench.indexed_files(
-            os.path.join(committed, "frame_*.*"), "frame_")
-        run_eval.validate_structureless_history_bridge_source(
-            committed, contract)
-
-        with tempfile.TemporaryDirectory() as generated_root, mock.patch.object(
-                make_synth_clips, "CLIPS", generated_root):
-            source_anchors = (
-                make_synth_clips.BRIDGE_SCENE_A_BY_CLIP[clip_name],
-                make_synth_clips.BRIDGE_SCENE_B,
-            )
+            # A generator reads its source anchors from the clip root, so copy only those
+            # inputs into the isolated regeneration tree.
             for source, frame in source_anchors:
                 source_dir = os.path.join(generated_root, source)
                 os.makedirs(source_dir, exist_ok=True)
@@ -506,273 +403,57 @@ class EvalContractTests(unittest.TestCase):
                 with open(generated_frames[frame_id], "rb") as actual, open(
                         committed_frames[frame_id], "rb") as expected:
                     self.assertEqual(actual.read(), expected.read(), frame_id)
+        return committed_frames
 
-            tampered = np.asarray(Image.open(generated_frames[18]).convert("RGB")).copy()
-            tampered[0, 0, 0] = 1
-            Image.fromarray(tampered).save(generated_frames[18])
-            with self.assertRaisesRegex(ValueError, "structureless-history"):
-                run_eval.validate_structureless_history_bridge_source(
-                    generated, generated_meta["shot_state_contract"])
+    def test_exposure_probe_is_reproducible_and_exposure_only(self):
+        frames = self.assert_synthetic_stimulus_is_reproducible("exposure_flash_strobe")
+        self.assertEqual(len(frames), len(make_synth_clips.EXPOSURE_GAINS_PERCENT))
+        with Image.open(frames[1]) as image:
+            base = np.asarray(image.convert("RGB"), dtype=np.uint32)
+        for frame_id, gain_percent in enumerate(make_synth_clips.EXPOSURE_GAINS_PERCENT, 1):
+            expected = np.minimum((base * gain_percent + 50) // 100, 255).astype(np.uint8)
+            with Image.open(frames[frame_id]) as image:
+                self.assertTrue(
+                    np.array_equal(np.asarray(image.convert("RGB")), expected), frame_id)
 
-    def test_black_structureless_bridge_is_reproducible_and_source_authenticated(self):
-        self.assert_structureless_bridge_is_reproducible_and_source_authenticated(
-            "structureless_history_bridge", (0, 0, 0))
+    def test_sustained_motion_clip_is_reproducible(self):
+        frames = self.assert_synthetic_stimulus_is_reproducible(
+            "sustained_motion_scene_cut", (("c841", 1), ("c647", 13)))
+        self.assertEqual(len(frames), make_synth_clips.SUSTAINED_FRAME_COUNT)
 
-    def test_white_structureless_bridge_is_reproducible_and_source_authenticated(self):
-        self.assert_structureless_bridge_is_reproducible_and_source_authenticated(
-            "structureless_white_history_bridge", (255, 255, 255))
+    def test_structureless_bridges_are_reproducible(self):
+        for clip_name, uniform_rgb in make_synth_clips.BRIDGE_UNIFORM_RGB_BY_CLIP.items():
+            with self.subTest(clip=clip_name):
+                frames = self.assert_synthetic_stimulus_is_reproducible(clip_name, (
+                    make_synth_clips.BRIDGE_SCENE_A_BY_CLIP[clip_name],
+                    make_synth_clips.BRIDGE_SCENE_B,
+                ))
+                self.assertEqual(len(frames), make_synth_clips.BRIDGE_FRAME_COUNT)
+                uniform_ids = [make_synth_clips.BRIDGE_FLASH_FRAME, *range(
+                    make_synth_clips.BRIDGE_SLATE_FRAME,
+                    make_synth_clips.BRIDGE_NEW_SCENE_FRAME)]
+                for frame_id in uniform_ids:
+                    with Image.open(frames[frame_id]) as image:
+                        pixels = np.asarray(image.convert("RGB"))
+                    self.assertTrue(np.all(pixels == np.asarray(uniform_rgb, np.uint8)), frame_id)
 
-    @staticmethod
-    def cut_state(age, flags, history=1.0):
-        return {
-            "cut_contract_tag_bits": sbsbench.cut_state_contract.CUT_CONTRACT_TAG,
-            "scene_age": float(age),
-            "reserved_cut_bridge_2": 0.0, "initialized": 1.0,
-            "reserved_cut_bridge_4": 0.0, "reserved_cut_bridge_5": 0.0,
-            "depth_change_baseline_ema": 0.08, "reserved_cut_bridge_7": 0.0,
-            "reserved_cut_bridge_8": 0.0, "reserved_cut_bridge_9": 0.0,
-            "cut_flags": float(flags), "model_input_history_state": float(history),
-        }
-
-    def test_shot_state_contract_observes_exactly_one_real_cut(self):
-        rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
-        trace = {
-            1: self.cut_state(0, 3),
-            2: self.cut_state(1, 3),
-            3: self.cut_state(2, 3),
-            4: self.cut_state(0, 16),
-            5: self.cut_state(1, 16),
-            6: self.cut_state(2, 16),
-        }
-        summary = sbsbench.apply_shot_state_contract(
-            rows, list(range(1, 7)), trace, {
-                "kind": "hard-cut", "monitor_from_frame": 2,
-                "expected_pulse_frames": [4],
-            })
-        self.assertEqual(summary["shot_state_accepted_pulse"], 1.0)
-        self.assertEqual(summary["shot_state_expected_pulse"], 1.0)
-        self.assertEqual(max(row.get("shot_state_pulse_mismatch", 0.0) for row in rows), 0.0)
-        self.assertEqual(
-            max(row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
-        self.assertEqual(
-            sbsbench.aggregate(rows)["shot_state_accepted_pulse"], 1.0)
-
-    def test_flat_transition_metadata_distinguishes_source_cut_from_confirmation(self):
-        self.assertEqual(make_synth_clips.SHOT_CUT_FRAME, 13)
-        for clip, expected_pulses in (("flat_transition", [14]), ("scene_cut", [13])):
+    def test_committed_synthetic_metadata_matches_generator(self):
+        for clip in make_synth_clips.GENERATORS:
             with self.subTest(clip=clip):
+                with open(os.path.join(make_synth_clips.CLIPS, clip, "meta.json"),
+                          encoding="utf-8") as stream:
+                    committed = json.load(stream)
                 generated = make_synth_clips.clip_metadata(clip)
-                committed = run_eval.load_clip_metadata(
-                    os.path.join(make_synth_clips.CLIPS, clip), suite="core")
-                self.assertEqual(
-                    generated["shot_state_contract"], committed["shot_state_contract"])
-                self.assertEqual(
-                    committed["shot_state_contract"]["expected_pulse_frames"],
-                    expected_pulses)
+                self.assertEqual(committed["name"], clip)
                 self.assertEqual(committed["description"], make_synth_clips.DESC[clip])
-
-    def test_flat_transition_requires_exact_confirmed_pulse(self):
-        contract = run_eval.load_clip_metadata(
-            os.path.join(make_synth_clips.CLIPS, "flat_transition"),
-            suite="core")["shot_state_contract"]
-        # Real geometry-only event sequence: source replacement is pending at 13,
-        # confirmation emits one pulse at 14, then the flat scene rearms normally.
-        trace = {
-            frame_id: self.cut_state(frame_id - 1, 0 if frame_id < 9 else 3)
-            for frame_id in range(1, 13)
-        }
-        trace.update({
-            13: self.cut_state(12, 67, history=4),
-            14: self.cut_state(0, 16),
-            15: self.cut_state(1, 28),
-            16: self.cut_state(2, 19),
-        })
-        cases = (
-            ("confirmed", {}, []),
-            ("premature", {
-                13: self.cut_state(0, 16), 14: self.cut_state(1, 16),
-                15: self.cut_state(2, 28), 16: self.cut_state(3, 19),
-            }, [13, 14]),
-            ("missing", {
-                14: self.cut_state(13, 67, history=4),
-                15: self.cut_state(14, 3), 16: self.cut_state(15, 3),
-            }, [14]),
-            ("duplicate", {16: self.cut_state(0, 16)}, [16]),
-        )
-        for name, overrides, expected_mismatches in cases:
-            with self.subTest(sequence=name):
-                rows = [{"_frame_id": frame_id} for frame_id in range(1, 17)]
-                sbsbench.apply_shot_state_contract(
-                    rows, list(range(1, 17)), {**trace, **overrides}, contract)
-                self.assertEqual([
-                    row["_frame_id"] for row in rows
-                    if row.get("shot_state_pulse_mismatch", 0) != 0
-                ], expected_mismatches)
-                self.assertEqual(max(
-                    row.get("shot_state_trace_inconsistent", 0) for row in rows), 0)
-
-    def test_v2_cut_state_requires_model_input_history(self):
-        rows = [{"_frame_id": frame_id} for frame_id in range(1, 5)]
-        trace = {
-            frame_id: self.cut_state(frame_id - 1, 3)
-            for frame_id in range(1, 5)
-        }
-        sbsbench.apply_shot_state_contract(
-            rows, list(range(1, 5)), trace, {
-                "kind": "hard-cut", "monitor_from_frame": 2,
-                "expected_pulse_frames": [],
-            })
-        self.assertEqual(
-            min(row["shot_state_initialized_ok"] for row in rows
-                if "shot_state_initialized_ok" in row), 100.0)
-        uninitialized_rows = [{"_frame_id": frame_id} for frame_id in range(1, 5)]
-        trace[3] = dict(trace[3], model_input_history_state=0.0)
-        sbsbench.apply_shot_state_contract(
-            uninitialized_rows, list(range(1, 5)), trace, {
-                "kind": "hard-cut", "monitor_from_frame": 2,
-                "expected_pulse_frames": [],
-            })
-        broken = next(row for row in uninitialized_rows if row["_frame_id"] == 3)
-        self.assertEqual(broken["shot_state_initialized_ok"], 0.0)
-
-    def test_structureless_bridge_contract_observes_bounded_slate_and_return_cuts(self):
-        rows = [{"_frame_id": frame_id} for frame_id in range(1, 23)]
-        trace = {
-            frame_id: self.cut_state(frame_id - 1, 3)
-            for frame_id in range(1, 18)
-        }
-        trace[18] = self.cut_state(0, 16)
-        trace[19] = self.cut_state(1, 16)
-        trace[20] = self.cut_state(2, 19)
-        trace[21] = self.cut_state(0, 16)
-        trace[22] = self.cut_state(1, 16)
-        contract = {
-            "kind": "structureless-history-bridge", "monitor_from_frame": 2,
-            "expected_pulse_frames": [18, 21], "flash_frame": 11,
-            "flash_return_frame": 12, "slate_frame": 17,
-            "persistent_frame": 18, "new_scene_frame": 21,
-        }
-        summary = sbsbench.apply_shot_state_contract(
-            rows, list(range(1, 23)), trace, contract)
-        self.assertEqual(summary["shot_state_accepted_pulse"], 2.0)
-        self.assertEqual(max(
-            row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
-
-    def test_exposure_contract_rejects_relatched_state_and_latch_drift(self):
-        rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
-        trace = {frame_id: self.cut_state(frame_id - 1, 3)
-                 for frame_id in range(1, 7)}
-        contract = {
-            "kind": "exposure-only", "monitor_from_frame": 2,
-            "stable_from_frame": 3,
-            "expected_pulse_frames": [],
-        }
-        summary = sbsbench.apply_shot_state_contract(
-            rows, list(range(1, 7)), trace, contract)
-        self.assertEqual(summary["shot_state_accepted_pulse"], 0.0)
-        reset_rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
-        trace[5] = self.cut_state(0, 16)
-        sbsbench.apply_shot_state_contract(
-            reset_rows, list(range(1, 7)), trace, contract)
-        reset = next(row for row in reset_rows if row["_frame_id"] == 5)
-        self.assertEqual(reset["shot_state_pulse_mismatch"], 1.0)
-
-    def test_exposure_pulse_monitoring_cannot_hide_startup_relatched_state(self):
-        rows = [{"_frame_id": frame_id} for frame_id in range(1, 6)]
-        trace = {
-            1: self.cut_state(1, 3),
-            2: self.cut_state(0, 16),
-            3: self.cut_state(1, 16),
-            4: self.cut_state(2, 16),
-            5: self.cut_state(3, 16),
-        }
-        summary = sbsbench.apply_shot_state_contract(
-            rows, list(range(1, 6)), trace, {
-                "kind": "exposure-only", "monitor_from_frame": 2,
-                "stable_from_frame": 4, "expected_pulse_frames": [],
-            })
-        self.assertEqual(summary["shot_state_accepted_pulse"], 1.0)
-        startup = next(row for row in rows if row["_frame_id"] == 2)
-        self.assertEqual(startup["shot_state_pulse_mismatch"], 1.0)
-
-    def test_shot_trace_recognizes_later_cut_after_independent_rearm(self):
-        rows = [{"_frame_id": frame_id} for frame_id in range(1, 9)]
-        trace = {
-            1: self.cut_state(0, 3),
-            2: self.cut_state(1, 3),
-            3: self.cut_state(2, 3),
-            4: self.cut_state(0, 16),
-            5: self.cut_state(1, 17),
-            6: self.cut_state(2, 19),
-            7: self.cut_state(0, 16),
-            8: self.cut_state(1, 16),
-        }
-        summary = sbsbench.apply_shot_state_contract(
-            rows, list(range(1, 9)), trace, {
-                "kind": "hard-cut", "monitor_from_frame": 2,
-                "expected_pulse_frames": [4, 7],
-            })
-        self.assertEqual(summary["shot_state_accepted_pulse"], 2.0)
-        self.assertEqual(
-            sbsbench.aggregate(rows)["shot_state_accepted_pulse"], 2.0)
-        self.assertEqual(max(
-            row.get("shot_state_pulse_mismatch", 0.0) for row in rows), 0.0)
-        self.assertEqual(max(
-            row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
-
-    def test_shot_trace_accepts_relative_cut_with_latched_flags_unchanged(self):
-        rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
-        trace = {
-            1: self.cut_state(0, 3),
-            2: self.cut_state(1, 3),
-            3: self.cut_state(0, 16),
-        }
-        for frame_id in range(4, 11):
-            trace[frame_id] = self.cut_state(frame_id - 3, 16)
-        trace[11] = self.cut_state(8, 80, history=4.0)
-        trace[12] = self.cut_state(0, 16)
-        summary = sbsbench.apply_shot_state_contract(
-            rows, list(range(1, 13)), trace, {
-                "kind": "hard-cut", "monitor_from_frame": 2,
-                "expected_pulse_frames": [3, 12],
-            })
-        self.assertEqual(summary["shot_state_accepted_pulse"], 2.0)
-        self.assertEqual(max(
-            row.get("shot_state_pulse_mismatch", 0.0) for row in rows), 0.0)
-        self.assertEqual(max(
-            row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
-
-    def test_latched_motion_contract_proves_relative_escape_precondition(self):
-        rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
-        trace = {
-            1: self.cut_state(0, 3),
-            2: self.cut_state(1, 3),
-            3: self.cut_state(0, 16),
-        }
-        for frame_id in range(4, 11):
-            trace[frame_id] = self.cut_state(frame_id - 3, 16)
-        trace[11] = self.cut_state(8, 80, history=4.0)
-        trace[12] = self.cut_state(0, 16)
-        contract = {
-            "kind": "latched-motion-hard-cut", "monitor_from_frame": 2,
-            "expected_pulse_frames": [3, 12],
-            "setup_pulse_frame": 3,
-            "persistent_motion_frames": [3, 11],
-            "escape_candidate_frame": 11,
-            "escape_pulse_frame": 12,
-        }
-        summary = sbsbench.apply_shot_state_contract(
-            rows, list(range(1, 13)), trace, contract)
-        self.assertEqual(summary["shot_state_relative_escape_ok"], 100.0)
-        self.assertEqual(min(
-            row.get("shot_state_relative_escape_ok", 100.0)
-            for row in rows if row["_frame_id"] >= 2), 100.0)
-
-        trace[11] = self.cut_state(8, 16)
-        failed_rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
-        failed = sbsbench.apply_shot_state_contract(
-            failed_rows, list(range(1, 13)), trace, contract)
-        self.assertEqual(failed["shot_state_relative_escape_ok"], 0.0)
+                self.assertEqual(
+                    {key: value for key, value in committed.items() if key not in {
+                        "name", "description", "content_type", "provenance_note"}},
+                    generated)
+                self.assertNotIn("shot_state_contract", committed)
+                self.assertNotIn("evaluation_role", committed)
+                run_eval.load_clip_metadata(
+                    os.path.join(make_synth_clips.CLIPS, clip), suite="core")
 
     def test_unattributed_core_clips_are_explicitly_unclassified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -817,8 +498,7 @@ class EvalContractTests(unittest.TestCase):
             "sbs_interocular_phase_chroma.py",
             "sbs_interocular_photometric_rivalry.py", "sbs_stereo_window_metrics.py",
             "sbs_subtitle_metrics.py", "sbs_warp_shear_metrics.py",
-            "direct_geometry_contract.py",
-            "cut_state_contract.py", "thresholds.json",
+            "direct_geometry_contract.py", "thresholds.json",
         })
 
     def test_label_contract_covers_parallel_result_association(self):
@@ -1499,6 +1179,13 @@ class EvalContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "explicit content_type"):
                 run_eval.load_clip_metadata(clip)
             with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "content_type": "synthetic", "evaluation_role": "conformance-only",
+                }, fh)
+            with self.assertRaisesRegex(
+                    ValueError, "evaluation_role must be ground-truth or reference-only"):
+                run_eval.load_clip_metadata(clip)
+            with open(meta_path, "w", encoding="utf-8") as fh:
                 json.dump({"dataset": "public"}, fh)
             with self.assertRaisesRegex(ValueError, "consumed depth/flow GT"):
                 run_eval.load_clip_metadata(clip, suite="extended")
@@ -1733,7 +1420,7 @@ class EvalContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "baseline CUDA graph.*differs"):
             run_eval.validate_cuda_graph_execution_mode(True, True, False)
 
-    def test_only_conformance_only_clips_are_exempt_from_committed_baselines(self):
+    def test_every_scored_clip_requires_a_committed_baseline(self):
         clips = ["decisive", "reference", "probe"]
         metadata = {
             "decisive": {"content_type": "real-capture"},
@@ -1741,26 +1428,12 @@ class EvalContractTests(unittest.TestCase):
                 "content_type": "animation",
                 "evaluation_role": "reference-only",
             },
-            "probe": {
-                "content_type": "synthetic",
-                "evaluation_role": "conformance-only",
-                "shot_state_contract": {"kind": "hard-cut"},
-            },
+            "probe": {"content_type": "synthetic"},
         }
         self.assertEqual(
-            run_eval.clips_requiring_committed_baselines(clips, metadata),
-            ["decisive", "reference"])
-        metadata["probe"]["evaluation_role"] = "ground-truth"
-        self.assertEqual(
-            run_eval.clips_requiring_committed_baselines(clips, metadata),
-            clips)
+            run_eval.clips_requiring_committed_baselines(clips, metadata), clips)
         del metadata["reference"]
         with self.assertRaisesRegex(ValueError, "missing source metadata"):
-            run_eval.clips_requiring_committed_baselines(clips, metadata)
-
-        metadata["reference"] = {"evaluation_role": "reference-only"}
-        metadata["probe"] = {"evaluation_role": "conformance-only"}
-        with self.assertRaisesRegex(ValueError, "no authenticated hard contract"):
             run_eval.clips_requiring_committed_baselines(clips, metadata)
 
     def test_baseline_snapshot_exactly_covers_only_required_clips(self):
@@ -1980,7 +1653,9 @@ class EvalContractTests(unittest.TestCase):
         with open(live_shader_path, encoding="utf-8") as fh:
             live_shader = fh.read()
         self.assertIn("Texture2D<float> BaseParallax : register(t1);", live_shader)
-        self.assertIn('include/host_sbs_subtitle_render.hlsl', live_shader)
+        self.assertNotIn('include/host_sbs_subtitle_render.hlsl', live_shader)
+        self.assertNotIn('SelectSourceUV', live_shader)
+        self.assertIn('float2 sample_uv = ReprojectIfAuthorized(source_uv, eye_sign);', live_shader)
         self.assertNotIn("pop_strength", live_shader)
         self.assertNotIn("adaptive_ratio", live_shader)
 
@@ -2004,10 +1679,10 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             executor = fh.read()
         self.assertIn("bool record_map_history(", executor)
-        self.assertIn("ID3D11ShaderResourceView *inputs[8]", executor)
-        self.assertIn("ID3D11UnorderedAccessView *outputs[6]", executor)
-        self.assertIn("CSSetShaderResources(0u, 8u, inputs)", executor)
-        self.assertIn("CSSetUnorderedAccessViews(0u, 6u, outputs, nullptr)", executor)
+        self.assertIn("ID3D11ShaderResourceView *inputs[7]", executor)
+        self.assertIn("ID3D11UnorderedAccessView *outputs[5]", executor)
+        self.assertIn("CSSetShaderResources(0u, 7u, inputs)", executor)
+        self.assertIn("CSSetUnorderedAccessViews(0u, 5u, outputs, nullptr)", executor)
 
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
                                   "directx")
@@ -2057,9 +1732,7 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(shader_dir, "depth_coordinate_v2_map_cs.hlsl"),
                   encoding="utf-8") as fh:
             history = fh.read()
-        self.assertIn(
-            "DepthValidHistoryAdvances(MinMaxEma[0].w, history_state)",
-            history)
+        self.assertIn("DepthValidHistoryAdvances(MinMaxEma[0].w)", history)
         self.assertIn("PreviousModelInput[raw_index + 2u * plane]", history)
         self.assertIn("NearIdenticalHistoryOwnerOutput", history)
 
@@ -2095,7 +1768,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('raw_reproject_source_u_normalized', harness)
         self.assertIn('live_sample_transform', harness)
         self.assertIn('\\"warp_mapping\\"', harness)
-        self.assertIn('fs::path(o.out) / "cut_state.json"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
                   encoding="utf-8") as fh:
@@ -2119,9 +1791,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('.retained_history = false', harness)
         self.assertIn('offline_sbs::wire::whole_clip_contract_t', harness)
         self.assertIn('offline_sbs::wire::to_json(', harness)
-        whole_contract = harness[harness.index(
-            'offline_sbs::wire::whole_clip_resolved_runtime_t'):]
-        self.assertNotIn('"cut_state"', whole_contract)
+        self.assertIn('offline_sbs::wire::whole_clip_resolved_runtime_t', harness)
 
         with open(os.path.join(repo, "src", "offline_sbs_worker.cpp"),
                   encoding="utf-8") as fh:
@@ -2151,7 +1821,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('depth_step = "current-once"', evaluator)
         self.assertGreaterEqual(
             evaluator.count("whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA"), 2)
-        self.assertIn('"cut_state.json"', evaluator)
         self.assertIn('"warp_map_*.f32"', evaluator)
         self.assertIn('expected_mapping_bytes = width * height * 4', evaluator)
 

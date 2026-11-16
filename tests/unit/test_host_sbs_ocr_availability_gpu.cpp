@@ -301,6 +301,41 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
       }));
     }
     EXPECT_TRUE(estimator.publication_is_current(completed.publication));
+    // The default (harness/test) policy runs the conditioned-field diagnostics every time.
+    EXPECT_TRUE(completed.subtitle_conditioning_diagnostics_current);
+  }
+
+  // Live policy: an ordinary observation skips the diagnostic conditioner, publishes exact Base
+  // through the distinct Final texture, and stays authenticated for the Base-bound renderer.
+  // Completing an observation for a Dump 3D snapshot runs the diagnostics again.
+  estimator.set_subtitle_conditioning_diagnostics_always(false);
+  for (std::uint64_t observation = 3u; observation <= 4u; ++observation) {
+    const bool dump_snapshot = observation == 4u;
+    const auto frame = 0x100000000ull + observation, clock = 0x200000000ull + observation * 33333u;
+    SCOPED_TRACE(frame);
+    const auto reusable_deadline = std::chrono::steady_clock::now() + std::chrono::seconds {2};
+    while (!estimator.can_accept_frame() && !estimator.has_terminal_failure() &&
+           std::chrono::steady_clock::now() < reusable_deadline) {
+      std::this_thread::yield();
+    }
+    ASSERT_TRUE(estimator.can_accept_frame());
+    const auto submitted = estimator.estimate_depth(source.Get(), models::input_color_space::srgb, frame, false, {}, models::depth_optional_work_mode_e::ordinary, {.observation_timestamp_us = clock}, 1u);
+    ASSERT_TRUE(submitted.inference_enqueued);
+    const auto completed = estimator.finish_pending_depth_for_evaluation(models::input_color_space::srgb, dump_snapshot);
+    ASSERT_FALSE(estimator.has_terminal_failure());
+    ASSERT_TRUE(completed.completed_frame_valid);
+    EXPECT_EQ(completed.completed_frame_id, frame);
+    ASSERT_TRUE(models::parallax_v2_result_is_authenticated(completed));
+    EXPECT_EQ(completed.subtitle_conditioning_diagnostics_current, dump_snapshot);
+    std::vector<std::uint32_t> base, final;
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.shadow_base_final_parallax.Get(), base));
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.shadow_final_parallax.Get(), final));
+    EXPECT_EQ(final, base);
+    std::vector<std::uint32_t> matte;
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.research_selected_matte.Get(), matte));
+    EXPECT_TRUE(std::all_of(matte.begin(), matte.end(), [](auto word) {
+      return word == 0u;
+    }));
   }
 }
 #endif

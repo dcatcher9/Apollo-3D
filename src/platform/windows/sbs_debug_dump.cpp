@@ -237,6 +237,7 @@ namespace platf::sbs_debug {
           {"host_model_policy", {
             {"mode", 3u}, {"maximum_plane_source_u", direct_container_limit},
             {"candidate_step_per_eye_source_pixels", 4u},
+            {"candidate_step_scope", "serialized-coarse-diagnostic-index"},
             {"last_candidate", "exact-representation-cap"},
             {"maximum_candidate_index", "ceil-analysis-source-width-over-100"},
             {"core_range_per_eye_source_pixels", 0u},
@@ -256,7 +257,8 @@ namespace platf::sbs_debug {
           {"units", "one-eye-analysis-source-U"},
           {"selection", "authenticated-current-cover-conflict-histogram"},
           {"forward_policy", subtitle_ui_plane_policy},
-          {"candidate_step_per_eye_source_pixels", 4u},
+          {"candidate_step_per_eye_source_pixels", 1u},
+          {"coarse_diagnostic_step_per_eye_source_pixels", 4u},
           {"clearance_per_eye_source_pixels", 2u},
           {"approach_dwell_us", 0u},
           {"retreat_dwell_us", 0u},
@@ -604,8 +606,7 @@ namespace platf::sbs_debug {
     bool subtitle_records_match_frame(
       const std::vector<std::uint8_t> &ocr,
       const std::vector<std::uint8_t> &plane,
-      const frame &completed,
-      const std::uint32_t confirmed_cut_count
+      const frame &completed
     ) {
       namespace ui = models::host_sbs_subtitle_plane;
       if (!joint_plane_mode_word_is_valid(completed.parallax_v2_joint_plane_mode) ||
@@ -620,7 +621,6 @@ namespace platf::sbs_debug {
           ui::join(words.data() + subtitle_plane_frame_offset) != completed.matched_frame_id ||
           ui::join(words.data() + subtitle_plane_analysis_generation_offset) != completed.depth_input_region.analysis_generation ||
           ui::join(words.data() + subtitle_plane_observation_timestamp_offset) != completed.matched_observation_timestamp_us ||
-          words[subtitle_plane_cut_epoch_word] != confirmed_cut_count ||
           words[subtitle_plane_source_extent_offset] != completed.depth_input_region.width() ||
           words[subtitle_plane_source_extent_offset + 1u] != completed.depth_input_region.height() ||
           words[subtitle_plane_field_extent_offset] != static_cast<std::uint32_t>(completed.field_width) ||
@@ -834,10 +834,9 @@ namespace platf::sbs_debug {
               !ui::condition_words_match_plane(condition, plane, true)) return false;
           // A standalone snapshot cannot distinguish a genuine empty from a clock-fault
           // redispatch with held hidden state. Only a proven new current observation (or an
-          // explicit domain/cut reset) must have cleared that invisible plane immediately.
+          // explicit domain reset) must have cleared that invisible plane immediately.
           const bool explicit_reset = (flags & input_domain_reset) != 0u ||
-            (previous_ui_plane && (previous_ui_domain_tag != domain_tag ||
-              (*previous_ui_plane)[subtitle_plane_cut_epoch_word] != plane[subtitle_plane_cut_epoch_word]));
+            (previous_ui_plane && previous_ui_domain_tag != domain_tag);
           const bool genuinely_newer = previous_ui_plane &&
             previous_ui_domain_tag == domain_tag &&
             published_frame != ui::join(previous_ui_plane->data() + subtitle_plane_frame_offset) &&
@@ -886,13 +885,10 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &ocr,
       const std::vector<std::uint8_t> &locator,
       const std::vector<std::uint8_t> &ring,
-      const frame &completed,
-      const std::uint32_t confirmed_cut_count
+      const frame &completed
     ) {
       using namespace models::host_sbs_gpu_trace;
-      if (subtitle_records_match_frame(
-            ocr, locator, completed, confirmed_cut_count
-          )) {
+      if (subtitle_records_match_frame(ocr, locator, completed)) {
         if (!completed.gpu_undecided_completion ||
             !gpu_trace_ring_is_canonical(ring, completed)) {
           return true;
@@ -936,9 +932,7 @@ namespace platf::sbs_debug {
           held.matched_observation_timestamp_us > completed.matched_observation_timestamp_us) return false;
       held.input_domain_reset = false;
       held.gpu_undecided_completion = false;
-      if (!subtitle_records_match_frame(
-            ocr, locator, held, confirmed_cut_count
-          )) {
+      if (!subtitle_records_match_frame(ocr, locator, held)) {
         return false;
       }
 
@@ -1085,20 +1079,30 @@ namespace platf::sbs_debug {
       std::size_t row_bytes = 0;
     };
 
-    // Preserve the original nine artifact names/order; append optional shared-warp operands.
-    constexpr std::array<const char *, 15u> actual_draw_artifacts {{
-      "actual_draw_M.u32", "actual_original_legacy_M.u32", "actual_background.rgba32f",
+    // Schema 2 records only maintained bindings; the unused legacy t8 mask is retired.
+    constexpr std::array<const char *, 14u> actual_draw_artifacts {{
+      "actual_draw_M.u32", "actual_background.rgba32f",
       "actual_selected_receipt.u32", "actual_background_proof.u32", "actual_background_expected.u32",
       "actual_source_C24.u32", "actual_geometry_constants.u32", "actual_subtitle_constants.u32",
       "actual_shared_pin_weights.f32", "actual_shared_pin_field.f32", "actual_shared_pin_rows.u32",
       "actual_shared_pin_geometry.u32", "actual_shared_pin_map.rgba32f", "actual_shared_pin_boundary.rgba32f",
     }};
     constexpr bool actual_draw_is_texture(std::size_t index) {
-      return index < 3u || (index >= 9u && index <= 11u) || index >= 13u;
+      return index < 2u || (index >= 8u && index <= 10u) || index >= 12u;
     }
     constexpr std::size_t actual_draw_storage_index(std::size_t index) {
-      return index < 3u ? index : index < 9u ? index - 3u : index < 12u ? index - 6u : index == 12u ? 6u : index - 7u;
+      return index < 2u ? index : index < 8u ? index - 2u : index < 11u ? index - 6u : index == 11u ? 6u : index - 7u;
     }
+    static_assert([] {
+      std::array<bool, 7u> textures {}, buffers {};
+      for (std::size_t index = 0u; index < actual_draw_artifacts.size(); ++index) {
+        const auto storage = actual_draw_storage_index(index);
+        auto &slots = actual_draw_is_texture(index) ? textures : buffers;
+        if (storage >= slots.size() || slots[storage]) return false;
+        slots[storage] = true;
+      }
+      return true;
+    }());
 
     /**
      * CPU-owned copy of one authenticated render pair. D3D11 resources are read while the
@@ -1116,7 +1120,7 @@ namespace platf::sbs_debug {
       const models::depth_coordinate_v2::model_preprocess_contract_t *preprocess = nullptr;
 
       normalization_state normalization {};
-      bool scene_cut_bridge_state_available = false;
+      bool depth_health_state_available = false;
       std::vector<std::uint8_t> adaptive_state;
 
       texture_snapshot source;
@@ -1152,7 +1156,7 @@ namespace platf::sbs_debug {
       texture_snapshot warp_map;
       bool warp_mask_available = false;
       texture_snapshot warp_mask;
-      std::array<texture_snapshot, 8u> actual_draw_textures;
+      std::array<texture_snapshot, 7u> actual_draw_textures;
       std::array<std::vector<std::uint8_t>, 7u> actual_draw_buffers;
       std::array<bool, actual_draw_artifacts.size()> actual_draw_available {};
       std::array<std::string, actual_draw_artifacts.size()> actual_draw_unavailable;
@@ -1279,7 +1283,7 @@ namespace platf::sbs_debug {
       staged_texture warp_mask;
       staged_buffer depth_frame_state;
       staged_buffer adaptive_state;
-      std::array<staged_texture, 8u> actual_draw_textures;
+      std::array<staged_texture, 7u> actual_draw_textures;
       std::array<staged_buffer, 7u> actual_draw_buffers;
       std::size_t actual_draw_collection_index = 0u;
 
@@ -1289,7 +1293,7 @@ namespace platf::sbs_debug {
       bool subtitle_plane_active = false;
       bool gpu_trace_requested = false;
       bool depth_input_source_available = false;
-      bool scene_cut_bridge_requested = false;
+      bool depth_health_state_requested = false;
       bool gpu_ready = false;
       std::uint64_t retry_token = 0;
       std::chrono::steady_clock::time_point submitted_at {};
@@ -2252,12 +2256,10 @@ namespace platf::sbs_debug {
         completed.parallax_v2_requested_gain : 0.0f;
       const float latched_scale_value = camera_initialized ?
         1.0f / state[inverse_scale] : 0.0f;
-      const auto confirmed_cut_count_value = state_words[confirmed_cut_count];
       const nlohmann::json decoded {
         {"frame_valid", state_frame_valid},
         {"camera_valid", camera_initialized},
         {"calibration_revision", calibration_revision_value},
-        {"confirmed_cut_count", confirmed_cut_count_value},
         {"contract_tag", contract_tag},
         {"requested_gain", completed.parallax_v2_requested_gain},
         {"requested_pop_strength", completed.parallax_v2_requested_pop_strength},
@@ -2308,7 +2310,7 @@ namespace platf::sbs_debug {
         {"decoded", decoded},
         {"adaptation_semantics", {
                                     {"coordinate", "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference"},
-                                    {"convergence_curve", "continuously-tracked-mean-is-zero-plane-no-cut-latch"},
+                                    {"convergence_curve", "continuously-tracked-mean-is-zero-plane"},
                                     {"requested_gain", "immutable-cfg-pop-strength-independent-of-display-limit"},
                                     {"container_scale", "abi-retained-identity-mode3-hard-representation-cap"},
                                     {"near_curve", "linear-coordinate-no-depth-curve-before-hard-representation-cap"},
@@ -2444,65 +2446,23 @@ namespace platf::sbs_debug {
       }
 
       using sbs_adaptive_state::word_e;
-      const auto scalar = [&](const word_e word) {
-        return scalars[sbs_adaptive_state::index(word)];
-      };
-      const float cut_flags_value = scalar(word_e::cut_flags);
-      const float analysis_flags_value = scalar(word_e::analysis_flags);
-      if (
-        cut_flags_value < 0.0f ||
-        cut_flags_value >
-          static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) ||
-        std::trunc(cut_flags_value) != cut_flags_value ||
-        analysis_flags_value < 0.0f ||
-        analysis_flags_value >
-          static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) ||
-        std::trunc(analysis_flags_value) != analysis_flags_value
-      ) {
-        return false;
-      }
-      const auto cut_flags = static_cast<std::uint32_t>(cut_flags_value);
-      const auto analysis_flags =
-        static_cast<std::uint32_t>(analysis_flags_value);
-      nlohmann::json decoded_cut_flags = nlohmann::json::object();
-      for (const auto &bit : sbs_adaptive_state::cut_flag_bits) {
-        decoded_cut_flags[std::string(bit.name)] = (cut_flags & bit.mask) != 0u;
-      }
-      nlohmann::json decoded_analysis_flags = nlohmann::json::object();
-      for (const auto &bit : sbs_adaptive_state::analysis_flag_bits) {
-        decoded_analysis_flags[std::string(bit.name)] =
-          (analysis_flags & bit.mask) != 0u;
-      }
       adaptive_summary = {
         {"schema", sbs_adaptive_state::schema_version},
         {"source", std::string(sbs_adaptive_state::source)},
         {"capture", std::string(sbs_adaptive_state::capture)},
-        {"role", "comparison-only scene-cut bridge evidence; no live V2 geometry authority"},
+        {"role", "comparison-only depth-health state; no live V2 geometry authority"},
         {"matched_frame_id", completed.matched_frame_id},
         {"depth_model", completed.depth_model},
         {"fields", std::move(fields)},
         {"values", std::move(values)},
         {"named_values", std::move(named_values)},
         {"decoded", {
-                      {"cut_flags", {
-                                      {"value", cut_flags},
-                                      {"known_mask", sbs_adaptive_state::known_cut_flag_mask},
-                                      {"bits", std::move(decoded_cut_flags)},
-                                    }},
-                      {"analysis_flags", {
-                                           {"value", analysis_flags},
-                                           {"known_mask", sbs_adaptive_state::known_analysis_flag_mask},
-                                           {"bits", std::move(decoded_analysis_flags)},
-                                         }},
-                      {"hard_cut_pulse", scalar(word_e::hard_cut_pulse) > 0.5f},
-                      {"hard_cut_count", words[sbs_adaptive_state::index(word_e::hard_cut_count)]},
-                      {"reserved_cut_bridge_17", words[sbs_adaptive_state::index(word_e::reserved_cut_bridge_17)]},
                       {"empty_raw_count", words[sbs_adaptive_state::index(word_e::empty_raw_count)]},
                       {"collapsed_raw_count", words[sbs_adaptive_state::index(word_e::collapsed_raw_count)]},
                       {"geometry_authority", false},
                     }},
         {"normalization", {
-                            {"role", "comparison-only scene-cut bridge evidence"},
+                            {"role", "comparison-only depth normalization state"},
                             {"effective_lower", normalization.lower},
                             {"effective_upper", normalization.upper},
                             {"initialized", normalization.initialized > 0.5f},
@@ -2575,8 +2535,7 @@ namespace platf::sbs_debug {
           {"model_input_width", completed.model_width},
           {"model_input_height", completed.model_height},
           {"cuda_graph_active", completed.cuda_graph_active},
-          {"cut_analysis", {
-            {"mode", "cut-only"},
+          {"normalization_analysis", {
             {"depth_ema", config::host_sbs_v2_live_calibration::depth_ema},
             {"ema_edge_change", config::host_sbs_v2_live_calibration::edge_change},
             {"ema_edge_gradient", config::host_sbs_v2_live_calibration::edge_gradient},
@@ -2653,9 +2612,9 @@ namespace platf::sbs_debug {
       const auto &c24 = job.actual_draw_buffers[3];
       const bool c24_comparable = c24.size() == 96u && receipt.size() == 256u;
       const nlohmann::json metadata {
-        {"diagnostic_only", true}, {"captured", e.captured},
+        {"schema", 2u}, {"diagnostic_only", true}, {"captured", e.captured},
         {"unavailable_reason", e.unavailable_reason},
-        {"observation_point", "PSGet bindings inside recorder immediately before Draw and cleanup, inside selected/shared/background scopes"},
+        {"observation_point", "PSGet bindings inside recorder immediately before Draw and cleanup, inside selected/shared scopes"},
         {"snapshot_order", "same immediate-context conversion; copies precede terminal dump event and next live reuse"},
         {"conversion_frame", e.conversion_frame}, {"model_frame", e.model_frame}, {"observation_us", e.observation_us},
         {"program", e.program}, {"selected_shader", e.selected_shader}, {"queued_geometry", e.queued_geometry},
@@ -2668,15 +2627,13 @@ namespace platf::sbs_debug {
           {"map_artifact", "actual_shared_pin_map.rgba32f"}, {"boundary_artifact", "actual_shared_pin_boundary.rgba32f"},
           {"map_layout", "packed-output row-major float32-le RGBA: sourceU,sourceV,pinnedRow,contentValid"},
           {"boundary_layout", "packed-output row-major float32-le RGBA: finiteSourceBoundary,0,0,1"},
-          {"map_authority", "same-draw shared-field inverse before native source clamp; legacy warp_map.f32 remains a separate analytic diagnostic"},
+          {"map_authority", "same-draw shared-field inverse before native source clamp; warp_map.f32 remains a separate ordinary Base diagnostic"},
           {"replay", "native field, current authorized weights, rows/header and exact b6 are literal GPU readbacks; no CPU pin-field replica"},
         }},
-        {"fallback_policy", e.shared_pin_selected ?
-          "Invalid selected receipt delegates to original legacy M t8; empty or revoked pin rows preserve Base. Shared warp reconstructs no RGB. Binding flags alone do not establish GPU authorization." :
-          "Invalid selected receipt delegates to original legacy M t8; unavailable BG delegates to old selected behavior. Binding flags alone do not establish GPU authorization."},
-        {"legacy_compatibility_artifact", "subtitle_glyph_matte.u32 remains the published legacy matte; actual_draw_M.u32 is observed t3, actual_original_legacy_M.u32 is observed t8"},
+        {"fallback_policy", "Unavailable shared preparation or invalid selected authority preserves authenticated ordinary Base with subtitle permission disabled; empty or revoked pin rows also preserve Base. Independent flat rendering is reserved for invalid or unavailable depth. Binding flags alone do not establish GPU authorization."},
+        {"published_matte_artifact", "subtitle_glyph_matte.u32 remains an independent mask-construction diagnostic; actual_draw_M.u32 is observed t3"},
         {"binding_roles", {{"t3", "actual_draw_M.u32"}, {"t7", "actual_selected_receipt.u32"},
-          {"t8", "actual_original_legacy_M.u32"}, {"t9", "actual_background.rgba32f"},
+          {"t9", "actual_background.rgba32f"},
           {"t11", "actual_background_proof.u32"}, {"b4", "actual_background_expected.u32"},
           {"t12", "actual_shared_pin_weights.f32"}, {"t13", "actual_shared_pin_field.f32"},
           {"t14", "actual_shared_pin_rows.u32"}, {"b6", "actual_shared_pin_geometry.u32"}}},
@@ -2698,7 +2655,7 @@ namespace platf::sbs_debug {
       const auto digest = written ? models::file_sha256_hex(path) : std::string {};
       const bool available = written && !digest.empty();
       auto descriptor = hashed_artifact_description(available, false,
-        "actual draw binding observation", "Optional literal selected/shared/BG evidence; does not replace tuple authentication.", digest);
+        "actual draw binding observation", "Optional schema-2 literal selected/shared bindings; does not replace tuple authentication.", digest);
       descriptor["unavailable_reason"] = available ? "" : "optional metadata write/hash failed";
       artifacts["actual_draw_evidence.json"] = std::move(descriptor);
     }
@@ -3113,7 +3070,6 @@ namespace platf::sbs_debug {
             {"flags", {{"value", plane_flags}, {"current_valid", (plane_flags & subtitle_plane_current_valid_flag) != 0u}}},
             {"current_slot_mask", slot_mask}, {"current_count", std::popcount(slot_mask)},
             {"target", target}, {"target_bits", target_bits},
-            {"cut_epoch", locator_word(subtitle_plane_cut_epoch_word)},
             {"analysis_generation", join_u64(locator_word(subtitle_plane_analysis_generation_offset), locator_word(subtitle_plane_analysis_generation_offset + 1u))},
             {"frame_id", join_u64(locator_word(subtitle_plane_frame_offset), locator_word(subtitle_plane_frame_offset + 1u))},
             {"observation_timestamp_us", join_u64(locator_word(subtitle_plane_observation_timestamp_offset), locator_word(subtitle_plane_observation_timestamp_offset + 1u))},
@@ -3800,25 +3756,23 @@ namespace platf::sbs_debug {
       frame published = completed;
       published.matched_frame_id = owner_frame;
       published.matched_observation_timestamp_us = clock;
-      if (!subtitle_records_match_frame(ocr, locator, published, subtitle_word(locator, subtitle_plane_cut_epoch_word))) return false;
+      if (!subtitle_records_match_frame(ocr, locator, published)) return false;
       const bool snapshot_valid = source_width <= subtitle_contour_source_max_extent &&
                                   source_height <= subtitle_contour_source_max_extent &&
                                   state[frame_valid] == 1.0f && clock == owner_clock &&
                                   subtitle_word(ocr, 2u) == 1u;
       if (word(subtitle_contour_history_snapshot_valid_word) != static_cast<std::uint32_t>(snapshot_valid) ||
-          word(3u) != (snapshot_valid ? geometry[confirmed_cut_count] : 0u)) return false;
+          word(3u) != 0u || geometry[control_reserved_0] != 0u) return false;
       const auto plane = subtitle_plane_words(locator);
       // The caller authenticates the complete sealed camera state before this artifact join.
       // Its ready publication and actual current OCR verdict must grant every current slot,
       // including valid empty. An invalid Base probe only suppresses conditioning below.
       const bool geometry_ready = state[frame_valid] == 1.0f &&
         geometry[renderer_authorization_bits] == contract_tag &&
-        geometry[joint_plane_mode_bits] == adaptive_policy_id && clock == owner_clock &&
-        geometry[confirmed_cut_count] == plane[subtitle_plane_cut_epoch_word];
+        geometry[joint_plane_mode_bits] == adaptive_policy_id && clock == owner_clock;
       const bool expected_current_valid = geometry_ready && subtitle_word(ocr, 2u) == 1u;
       if ((plane[subtitle_plane_flags_word] == subtitle_plane_current_valid_flag) != expected_current_valid) return false;
-      const bool pin_authority = snapshot_valid &&
-        word(3u) == plane[subtitle_plane_cut_epoch_word] && subtitle_word(ocr, 4u) != 0u &&
+      const bool pin_authority = snapshot_valid && subtitle_word(ocr, 4u) != 0u &&
         plane[subtitle_plane_flags_word] == subtitle_plane_current_valid_flag &&
         models::host_sbs_subtitle_plane::current_count(plane) == subtitle_word(ocr, 4u) &&
         plane[subtitle_plane_adaptive_offset] == 1u && plane[subtitle_plane_adaptive_offset + 15u] == 0u;
@@ -4646,8 +4600,8 @@ namespace platf::sbs_debug {
     bool success = false;
     try {
       const auto &normalization = job.normalization;
-      const bool scene_cut_bridge_state_available =
-        job.scene_cut_bridge_state_available;
+      const bool depth_health_state_available =
+        job.depth_health_state_available;
 
       if (
         !std::filesystem::create_directories(job.root, error) && error
@@ -4915,7 +4869,7 @@ namespace platf::sbs_debug {
 
         nlohmann::json adaptive = nullptr;
         bool adaptive_available = false;
-        if (scene_cut_bridge_state_available) {
+        if (depth_health_state_available) {
           try {
             adaptive_available = dump_adaptive_state(
               job.adaptive_state,
@@ -4925,7 +4879,7 @@ namespace platf::sbs_debug {
               adaptive
             );
           } catch (...) {
-            // Scene-cut bridge evidence is optional and has no live V2 geometry authority.
+            // Depth-health state evidence is optional and has no live V2 geometry authority.
           }
         }
         // The completion ring is optional diagnostic evidence. Missing resources, a torn ring,
@@ -5349,10 +5303,10 @@ namespace platf::sbs_debug {
         artifacts["adaptive_state.json"] = artifact_description(
           adaptive_available,
           false,
-          "scene-cut bridge comparison state",
+          "depth-health comparison state",
           adaptive_available ?
-            "Comparison-only cut flags, counters, and normalization state; no live V2 geometry authority." :
-            "Unavailable; scene-cut bridge evidence never gates an authenticated live V2 dump."
+            "Comparison-only depth-health counters and normalization state; no live V2 geometry authority." :
+            "Unavailable; depth-health evidence never gates an authenticated live V2 dump."
         );
         artifacts["window_region.json"] = video_region ?
           hashed_artifact_description(
@@ -5591,8 +5545,8 @@ namespace platf::sbs_debug {
             {"validity", {
               {"content", "derive from content_scale_x/content_scale_y and packed output coordinate"},
               {"inverse", video_region ?
-                "selected pre-clamp U from crop-local Base inverse with depth_input_region embedding or analytic UI plane via native glyph matte" :
-                "selected pre-clamp U from ordinary Base inverse or analytic UI plane via native glyph matte"},
+                "pre-clamp U from crop-local ordinary Base inverse with depth_input_region embedding" :
+                "pre-clamp U from ordinary Base inverse"},
               {"mask", "warp_mask.png red marks finite-source boundary extrapolation; V2 has no internal owner or synthetic-fill path"},
             }},
             {"live_sample_source_u_normalized", "clamp(raw_reproject_source_u_normalized, 0, 1)"},
@@ -5607,7 +5561,7 @@ namespace platf::sbs_debug {
         auto selected_map = nlohmann::json::parse(models::depth_coordinate_v2::selected_map_contract_json);
         selected_map["render_enabled"] = completed.subtitle_render_enabled;
         nlohmann::json manifest {
-          {"schema", 50},
+          {"schema", 52},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -5628,23 +5582,24 @@ namespace platf::sbs_debug {
           }},
           {"renderer", {
                          {"authority", video_region ?
-                           "authenticated Base inverse plus analytic UI glyph selector and depth-input-region embedding" :
-                           "authenticated-base-inverse-plus-analytic-ui-glyph-selector"},
+                           "authenticated ordinary Base inverse with depth-input-region embedding" :
+                           "authenticated-ordinary-base-inverse"},
                          {"parallax_v2_render_requested", true},
                          {"parallax_v2_render_selected", true},
                          {"mapping_artifacts_match_selected_renderer", !completed.actual_draw.shared_pin_selected && warp_map_available && warp_mask_available},
                          {"actual_draw_renderer", {
-                           {"kind", completed.actual_draw.shared_pin_selected ? "shared-ui-pin-v1" : "legacy-analytic-v1"},
+                           {"schema", 2u},
+                           {"kind", completed.actual_draw.shared_pin_selected ? "shared-ui-pin-v1" : "ordinary-base-v1"},
                            {"source_closure_sha256", completed.actual_draw.shared_pin_selected ? completed.actual_draw.shared_pin_source_closure : std::string {}},
-                           {"legacy_mapping_role", completed.actual_draw.shared_pin_selected ? "independent analytic diagnostic; does not describe rendered shared warp" : "selected analytic renderer diagnostic"},
+                           {"mapping_role", completed.actual_draw.shared_pin_selected ? "independent Base diagnostic; does not describe rendered shared warp" : "authenticated Base inverse diagnostic"},
                            {"evidence_artifact", "actual_draw_evidence.json"},
                          }},
-                         {"parallax_v2_position_field", video_region ? "ordinary Base inverse + optional analytic UI glyph selector + depth_input_region embedding" : "ordinary Base inverse + optional analytic UI glyph selector"},
+                         {"parallax_v2_position_field", video_region ? "ordinary Base inverse + depth_input_region embedding" : "ordinary Base inverse"},
                          {"parallax_v2_coordinate_role", "shadow_coordinate is diagnostic only; it has no renderer authority"},
                          {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= max_vertical_shear/content_width; diagnostic evidence only"},
                          {"parallax_v2_vertical_conditioned_role", "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and feeds the row majorant"},
-                         {"parallax_v2_conditioner_role", "ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering"},
-                         {"parallax_v2_inverse", "at-most-11-step Base inverse plus analytic UI glyph selection; selected map may be discontinuous; no synthetic fill"},
+                         {"parallax_v2_conditioner_role", "ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; shared pin field alone adds subtitle displacement"},
+                         {"parallax_v2_inverse", "at-most-11-step authenticated Base inverse; no subtitle selector or synthetic fill"},
                          {"collar_defocus", nlohmann::json {
                               {"enabled", false},
                               {"role", "disabled after live hand-boundary halo regression; live color uses one linear sample at the inverse-warped coordinate"},
@@ -5689,11 +5644,11 @@ namespace platf::sbs_debug {
             {"current_rgb_policy", std::string {
               models::depth_coordinate_v2::final_parallax_current_rgb_policy
             }},
-            {"warp_relation", "independent diagnostic; selected map consumes Base and the joined analytic glyph tuple"},
+            {"warp_relation", "independent diagnostic; ordinary mapping consumes immutable Base only"},
           }},
           {"normalization", adaptive_available ?
              nlohmann::json {
-               {"role", "comparison-only scene-cut bridge evidence; no live V2 geometry authority"},
+               {"role", "comparison-only depth-health state; no live V2 geometry authority"},
                {"effective_lower", normalization.lower},
                {"effective_upper", normalization.upper},
                {"initialized", normalization.initialized > 0.5f},
@@ -5804,7 +5759,7 @@ namespace platf::sbs_debug {
              << '\n'
              << "raw_depth_min=" << raw_stats.minimum << '\n'
              << "raw_depth_max=" << raw_stats.maximum << '\n'
-             << "cut_bridge_diagnostics_available="
+             << "depth_health_diagnostics_available="
              << (adaptive_available ? "true" : "false") << '\n'
              << "normalization_effective_lower=" << normalization.lower << '\n'
              << "normalization_effective_upper=" << normalization.upper << '\n'
@@ -5830,8 +5785,8 @@ namespace platf::sbs_debug {
              << "parallax_v2_render_selected=true\n"
              << "renderer_authority="
              << (video_region ?
-                   "authenticated Base inverse plus analytic UI glyph selector and depth-input-region embedding" :
-                   "authenticated-base-inverse-plus-analytic-ui-glyph-selector")
+                   "authenticated ordinary Base inverse with depth-input-region embedding" :
+                   "authenticated-ordinary-base-inverse")
              << '\n'
              << "final_parallax_warp_relation=independent-diagnostic-no-render-authority\n"
              << "collar_defocus_enabled=false\n"
@@ -6258,14 +6213,7 @@ namespace platf::sbs_debug {
                   job.subtitle_ocr_record,
                   job.subtitle_locator_state,
                   job.gpu_trace_ring,
-                  job.completed,
-                  [&job]() {
-                    models::depth_coordinate_v2::state_words_t state_words {};
-                    std::memcpy(
-                      state_words.data(), job.shadow_state.data(), sizeof(state_words)
-                    );
-                    return state_words[models::depth_coordinate_v2::confirmed_cut_count];
-                  }()
+                  job.completed
                 )) {
               finish_poll();
               fail_capture("OCR8/UIP4 record identity or layout is invalid", false);
@@ -6282,7 +6230,7 @@ namespace platf::sbs_debug {
             break;
 
           case stage_e::scene_normalization:
-            if (!pending.scene_cut_bridge_requested) {
+            if (!pending.depth_health_state_requested) {
               pending.collection_stage = stage_e::model_input;
               break;
             }
@@ -6296,7 +6244,7 @@ namespace platf::sbs_debug {
               if (status == collect_status_e::ready) {
                 pending.collection_stage = stage_e::scene_adaptive;
               } else if (status == collect_status_e::failed) {
-                pending.scene_cut_bridge_requested = false;
+                pending.depth_health_state_requested = false;
                 pending.depth_frame_state.resource.Reset();
                 pending.adaptive_state.resource.Reset();
                 pending.normalization_state_bytes.clear();
@@ -6320,7 +6268,7 @@ namespace platf::sbs_debug {
               if (status == collect_status_e::ready) {
                 pending.collection_stage = stage_e::scene_decode;
               } else if (status == collect_status_e::failed) {
-                pending.scene_cut_bridge_requested = false;
+                pending.depth_health_state_requested = false;
                 pending.adaptive_state.resource.Reset();
                 pending.normalization_state_bytes.clear();
                 job.adaptive_state.clear();
@@ -6333,14 +6281,14 @@ namespace platf::sbs_debug {
             break;
 
           case stage_e::scene_decode:
-            // The retained scene-cut bridge is optional comparison evidence. Malformed bytes do
+            // The retained depth-health state is optional comparison evidence. Malformed bytes do
             // not reject the exact-frame core package.
-            job.scene_cut_bridge_state_available =
+            job.depth_health_state_available =
               decode_normalization_state(
                 pending.normalization_state_bytes, job.normalization
               ) == depth_dumpability::valid;
             pending.normalization_state_bytes.clear();
-            if (!job.scene_cut_bridge_state_available) {
+            if (!job.depth_health_state_available) {
               job.adaptive_state.clear();
             }
             pending.collection_stage = stage_e::model_input;
@@ -6731,6 +6679,9 @@ namespace platf::sbs_debug {
         BOOST_LOG(warning)
           << "SBS debug dump: production V2 resources do not resolve to exactly one "sv
              "authenticated model/preprocess/shape calibration; dump rejected."sv;
+        // Back off like every sibling rejection: the request latch is restored on return, so
+        // without it this warning and the snapshot arming would repeat on every frame.
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
       if (!parallax_v2_shader_identity_matches_contract(
@@ -6739,6 +6690,7 @@ namespace platf::sbs_debug {
         BOOST_LOG(warning)
           << "SBS debug dump: production V2 resources have missing or mismatched "sv
              "shader-source provenance; dump rejected."sv;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
 
@@ -6947,7 +6899,7 @@ namespace platf::sbs_debug {
       }
 
       if (completed.adaptive_state && completed.depth_frame_state) {
-        pending->scene_cut_bridge_requested =
+        pending->depth_health_state_requested =
           stage_buffer(
             device,
             ctx,
@@ -6962,7 +6914,7 @@ namespace platf::sbs_debug {
             sbs_adaptive_state::word_count * sizeof(std::uint32_t),
             pending->adaptive_state
           );
-        if (!pending->scene_cut_bridge_requested) {
+        if (!pending->depth_health_state_requested) {
           pending->depth_frame_state = {};
           pending->adaptive_state = {};
         }
@@ -6970,12 +6922,12 @@ namespace platf::sbs_debug {
 
       if (completed.actual_draw.requested) {
         const auto &e = completed.actual_draw;
-        const std::array<ID3D11ShaderResourceView *, 8u> textures {
-          e.matte.Get(), e.legacy_matte.Get(), e.background.Get(),
+        const std::array<ID3D11ShaderResourceView *, 7u> textures {
+          e.matte.Get(), e.background.Get(),
           e.shared_pin_weights.Get(), e.shared_pin_field.Get(), e.shared_pin_rows.Get(),
           e.shared_pin_mapping.Get(), e.shared_pin_boundary.Get()
         };
-        const std::array<std::size_t, 8u> texture_artifacts {0u, 1u, 2u, 9u, 10u, 11u, 13u, 14u};
+        const std::array<std::size_t, 7u> texture_artifacts {0u, 1u, 8u, 9u, 10u, 12u, 13u};
         for (std::size_t i = 0u; i < textures.size(); ++i) {
           const auto artifact = texture_artifacts[i];
           job.actual_draw_available[artifact] = e.captured && textures[i] &&
@@ -6986,15 +6938,15 @@ namespace platf::sbs_debug {
         const std::array<ID3D11ShaderResourceView *, 2u> records {e.selected_receipt.Get(), e.background_proof.Get()};
         const std::array<std::size_t, 2u> record_words {64u, 96u};
         for (std::size_t i = 0u; i < records.size(); ++i) {
-          job.actual_draw_available[3u + i] = e.captured && records[i] &&
+          job.actual_draw_available[2u + i] = e.captured && records[i] &&
             stage_exact_scalar_buffer(device, ctx, records[i], record_words[i], pending->actual_draw_buffers[i]);
-          if (!job.actual_draw_available[3u + i]) job.actual_draw_unavailable[3u + i] = !e.captured ? e.unavailable_reason :
+          if (!job.actual_draw_available[2u + i]) job.actual_draw_unavailable[2u + i] = !e.captured ? e.unavailable_reason :
             !records[i] ? "not bound by observed draw" : "optional structured-buffer layout/staging failed";
         }
         const std::array<ID3D11Buffer *, 5u> constants {e.expected.Get(), e.source_c24.Get(), e.geometry_constants.Get(), e.subtitle_constants.Get(), e.shared_pin_geometry.Get()};
         const std::array<UINT, 5u> constant_bytes {64u, 96u, 48u, 32u, 16u};
         for (std::size_t i = 0u; i < constants.size(); ++i) {
-          const auto artifact = i < 4u ? 5u + i : 12u;
+          const auto artifact = i < 4u ? 4u + i : 11u;
           job.actual_draw_available[artifact] = e.captured && constants[i] &&
             stage_exact_constants(device, ctx, constants[i], constant_bytes[i], pending->actual_draw_buffers[2u + i]);
           if (!job.actual_draw_available[artifact]) job.actual_draw_unavailable[artifact] = !e.captured ? e.unavailable_reason :

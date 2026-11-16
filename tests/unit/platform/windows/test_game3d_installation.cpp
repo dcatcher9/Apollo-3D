@@ -78,6 +78,8 @@ namespace {
 
   TEST_F(Game3DInstallation, AntiCheatMarkersInTheGameFolderOrItsParentsRefuseAFreshRuntime) {
     const auto title = game.parent_path();
+    // A fresh folder: once a marker is gone, nothing else stands in the way of the offer.
+    fs::remove(title / "dxgi.dll");
     const auto unreal_game = title / "Project" / "Binaries" / "Win64" / "Project-Win64-Shipping.exe";
     fs::create_directories(unreal_game.parent_path());
     write(unreal_game, "unreal shipping executable");
@@ -248,10 +250,31 @@ namespace {
   }
 
   TEST_F(Game3DInstallation, RequiresRuntimeIdentityAndConfiguration) {
-    EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::missing_reshade);
+    // A ReShade proxy without ReShade.ini is not an installation, and the runtime installer
+    // would refuse the existing proxy: setup is not offered rather than offered and failed.
+    auto status = game3d::inspect_installation(game, bundle);
+    EXPECT_EQ(status.state, state::unavailable);
+    EXPECT_FALSE(status.reshade_present);
+    EXPECT_NE(status.detail.find("dxgi.dll"), std::string::npos) << status.detail;
     configure();
     fs::remove(game.parent_path() / "dxgi.dll");
+    // ReShade.ini alone blocks a fresh runtime in the same way.
+    status = game3d::inspect_installation(game, bundle);
+    EXPECT_EQ(status.state, state::unavailable);
+    EXPECT_NE(status.detail.find("ReShade.ini"), std::string::npos) << status.detail;
+    // Another injector's proxy (an upscaler mod, for example) is never treated as ReShade.
     write(game.parent_path() / "dxgi.dll", "some other graphics proxy");
+    status = game3d::inspect_installation(game, bundle);
+    EXPECT_EQ(status.state, state::unavailable);
+    EXPECT_FALSE(status.reshade_present);
+    fs::remove(game.parent_path() / "dxgi.dll");
+    fs::remove(game.parent_path() / "ReShade.ini");
+    write(game.parent_path() / "version.dll", "some other injector");
+    status = game3d::inspect_installation(game, bundle);
+    EXPECT_EQ(status.state, state::unavailable);
+    EXPECT_NE(status.detail.find("version.dll"), std::string::npos) << status.detail;
+    // Only a folder the installer accepts is offered a fresh setup.
+    fs::remove(game.parent_path() / "version.dll");
     EXPECT_EQ(game3d::inspect_installation(game, bundle).state, state::missing_reshade);
   }
 
@@ -350,7 +373,10 @@ namespace {
   }
 
   TEST_F(Game3DInstallation, InvokesRuntimeInstallerWithoutShellWithQuotedGamePath) {
-    write(bundle / "install-runtime.ps1", "param([string] $GameExecutable)\n[IO.File]::WriteAllText((Join-Path (Split-Path -Parent $GameExecutable) 'ReShade.ini'), '[GENERAL]')\n");
+    // A fresh folder, as the real runtime installer requires; the stand-in publishes both the
+    // ReShade-identity proxy and ReShade.ini.
+    fs::remove(game.parent_path() / "dxgi.dll");
+    write(bundle / "install-runtime.ps1", "param([string] $GameExecutable)\n$directory = Split-Path -Parent $GameExecutable\nCopy-Item -LiteralPath '" + fs::path(SUNSHINE_TEST_RESHADE_DLL).string() + "' -Destination (Join-Path $directory 'dxgi.dll')\n[IO.File]::WriteAllText((Join-Path $directory 'ReShade.ini'), '[GENERAL]')\n");
     const auto status = game3d::install_reshade_for_next_launch(game, bundle);
     EXPECT_EQ(status.state, state::installed) << status.detail;
     EXPECT_TRUE(status.reshade_present);
@@ -358,6 +384,7 @@ namespace {
   }
 
   TEST_F(Game3DInstallation, CapturesInstallerErrorWrittenImmediatelyBeforeExit) {
+    fs::remove(game.parent_path() / "dxgi.dll");
     write(bundle / "install-runtime.ps1", "param([string] $GameExecutable)\nWrite-Error 'installation-specific-error'\nexit 1\n");
     const auto status = game3d::install_reshade_for_next_launch(game, bundle);
     EXPECT_EQ(status.state, state::unavailable);

@@ -404,7 +404,7 @@ def build_report(
                 "V2 fixed-scale asymmetric curve, pointwise soft container, vertical "
                 "majorant/minorant blend, and horizontal majorant"),
             "excluded": [
-                "native adaptive camera state and cut handling",
+                "native adaptive camera state",
                 "temporal normalization, motion masks, depth reuse, and fallback",
                 "subtitle conditioning",
                 "live GPU arithmetic, renderer/reprojection, image quality, and latency",

@@ -209,14 +209,13 @@ namespace video {
     constexpr std::uint32_t config = 1u << 0;
     constexpr std::uint32_t effective_pop = 1u << 1;
     constexpr std::uint32_t edge = 1u << 2;
-    constexpr std::uint32_t change = 1u << 3;
     constexpr std::uint32_t anchor = 1u << 4;
     constexpr std::uint32_t subject = 1u << 5;
     constexpr std::uint32_t valid_fraction = 1u << 6;
     constexpr std::uint32_t range = 1u << 7;
-    constexpr std::uint32_t scene = 1u << 8;
-    constexpr std::uint32_t cuts = 1u << 9;
     constexpr std::uint32_t faults = 1u << 10;
+    /** Wire bits 3, 8 and 9 that protocol 13 clients parse and the host never sets. */
+    constexpr std::uint32_t reserved = (1u << 3) | (1u << 8) | (1u << 9);
   }  // namespace sbs_telemetry_valid_field
 
   namespace sbs_telemetry_runtime_flag {
@@ -224,11 +223,10 @@ namespace video {
     constexpr std::uint32_t adaptive_enabled = 1u << 1;
     constexpr std::uint32_t pop_classified = 1u << 2;
     constexpr std::uint32_t anchor_valid = 1u << 3;
-    constexpr std::uint32_t geometry_armed = 1u << 4;
-    constexpr std::uint32_t appearance_armed = 1u << 5;
     constexpr std::uint32_t range_collapsed = 1u << 6;
     constexpr std::uint32_t depth_ready = 1u << 7;
-    constexpr std::uint32_t hard_cut_pulse = 1u << 8;
+    /** Wire bits 4, 5 and 8 that protocol 13 clients parse and the host never sets. */
+    constexpr std::uint32_t reserved = (1u << 4) | (1u << 5) | (1u << 8);
   }  // namespace sbs_telemetry_runtime_flag
 
   /**
@@ -248,14 +246,10 @@ namespace video {
     float pop_ceiling = 0.0f;
     float effective_pop = 0.0f;
     float edge_fraction = -1.0f;
-    float change_fraction = 0.0f;
     float zero_anchor_shift_px = 0.0f;
     float subject_depth = 0.0f;
     float valid_depth_fraction = 0.0f;
     float effective_range_width = 0.0f;
-    std::uint32_t scene_age = 0;
-    std::uint32_t hard_cut_count = 0;
-    std::uint32_t external_cut_count = 0;
     std::uint32_t empty_raw_count = 0;
     std::uint32_t collapsed_raw_count = 0;
     std::uint32_t sampled_frame_id = 0;

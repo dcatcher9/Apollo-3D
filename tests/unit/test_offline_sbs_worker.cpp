@@ -87,7 +87,7 @@ namespace {
 
   nlohmann::json worker_spec_json() {
     return {
-      {"schema", 2},
+      {"schema", 3},
       {"job_id", "11111111-2222-3333-4444-555555555555"},
       {"operation", "convert"},
       {"input_path", "C:/media/source.mkv"},
@@ -114,7 +114,6 @@ namespace {
       {"codec", "hevc_nvenc"},
       {"pipeline", {
                       {"implementation", "native-causal-single-pass"},
-                      {"cut_state", "authenticated-online-pulse-count"},
                       {"lookahead", false},
                       {"scene_cache", false},
                       {"replay", false},
@@ -205,44 +204,8 @@ namespace {
   }
 }  // namespace
 
-TEST(OfflineSbsWorker, SharesBoundedLinearSceneAuditContract) {
+TEST(OfflineSbsWorker, SharesBoundedWorkerResultContract) {
   EXPECT_EQ(offline_sbs::worker_result_max_bytes, 16ull * 1024ull * 1024ull);
-  EXPECT_EQ(offline_sbs::scene_audit_max_bytes, 32ull * 1024ull * 1024ull);
-  EXPECT_EQ(offline_sbs::max_serialized_scene_count, 1920u);
-
-  std::size_t checkpoint_count = 0;
-  std::size_t checkpoint_prefix_sum = 0;
-  for (
-    std::size_t scenes = 1;
-    scenes <= offline_sbs::max_serialized_scene_count;
-    ++scenes
-  ) {
-    if (offline_sbs::is_scene_audit_checkpoint(scenes)) {
-      ++checkpoint_count;
-      checkpoint_prefix_sum += scenes;
-    }
-  }
-  EXPECT_EQ(checkpoint_count, 11u);
-  EXPECT_LT(
-    checkpoint_prefix_sum,
-    offline_sbs::max_serialized_scene_count * 2
-  );
-  EXPECT_TRUE(offline_sbs::is_scene_audit_checkpoint(1));
-  EXPECT_TRUE(offline_sbs::is_scene_audit_checkpoint(1024));
-  EXPECT_FALSE(offline_sbs::is_scene_audit_checkpoint(0));
-  EXPECT_FALSE(offline_sbs::is_scene_audit_checkpoint(1025));
-}
-
-TEST(OfflineSbsWorker, RejectsUnknownAdaptiveTraceFlagMeanings) {
-  EXPECT_TRUE(offline_sbs::adaptive_trace_flags_valid_for_test(0.0f, 0u));
-  EXPECT_TRUE(offline_sbs::adaptive_trace_flags_valid_for_test(127.0f, 255u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(128.0f, 0u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(0.0f, 256u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(1.5f, 0u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(
-    std::numeric_limits<float>::quiet_NaN(),
-    0u
-  ));
 }
 
 TEST(OfflineSbsWorker, ObservationTimelineRoundTripsAndRejectsRegression) {
@@ -339,7 +302,12 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
     direct.find("spec.operation == \"convert\" ? \"conversion\" : \"adaptive\""),
     std::string::npos
   );
-  EXPECT_NE(direct.find("causal_scene_tracker_t"), std::string::npos);
+  EXPECT_NE(
+    direct.find("validate_trace_frame(trace.read_frame(analysis, timing.sequence), timing)"),
+    std::string::npos
+  );
+  EXPECT_EQ(direct.find("scene_tracker"), std::string::npos);
+  EXPECT_EQ(direct.find("scene-audit"), std::string::npos);
   EXPECT_NE(
     direct.find("conversion_encoder->publish(timing.sequence, std::move(sbs))"),
     std::string::npos
@@ -354,14 +322,6 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
   EXPECT_EQ(direct.find("render_decoder"), std::string::npos);
   EXPECT_EQ(direct.find("render_scenes"), std::string::npos);
   EXPECT_EQ(direct.find("\"replay\""), std::string::npos);
-  EXPECT_NE(
-    direct.find("commit_scenes(finalized, timing.sequence)"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    direct.find("commit_scenes(finalized, media.frames.size())"),
-    std::string::npos
-  );
 }
 
 TEST(OfflineSbsWorker, OfflineOverlapHasFixedSmallCapacitiesAndByteBound) {
@@ -622,47 +582,6 @@ TEST(OfflineSbsWorker, RequiresSelectedInputFullFrameSourceScope) {
   EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(extended));
 }
 
-TEST(OfflineSbsWorker, HeadlessHarnessHasNoForegroundWindowObserver) {
-  std::ifstream stream(
-    fs::path(SUNSHINE_SOURCE_DIR) / "src/sbs_bench_harness.cpp",
-    std::ios::binary
-  );
-  ASSERT_TRUE(stream);
-  const std::string source {
-    std::istreambuf_iterator<char>(stream),
-    std::istreambuf_iterator<char>()
-  };
-
-  EXPECT_EQ(source.find("GetForegroundWindow("), std::string::npos);
-  EXPECT_EQ(source.find("capture_foreground_window_region"), std::string::npos);
-  EXPECT_EQ(source.find("foreground_window_region.h"), std::string::npos);
-  EXPECT_NE(
-    source.find("Bench/replay stays full-frame, so ROI is disabled"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("models::make_host_sbs_v2_full_frame_geometry("),
-    std::string::npos
-  );
-  EXPECT_EQ(source.find("float repro_params[8]"), std::string::npos);
-  EXPECT_EQ(source.find("video_roi_active = 1.0f"), std::string::npos);
-  EXPECT_NE(source.find("offline_full_frame_request"), std::string::npos);
-  EXPECT_NE(
-    source.find("depth_analysis_authority_e::full_source"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find(
-      "const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode;"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("load_png(std::string_view(exact_source_snapshot), img)"),
-    std::string::npos
-  );
-}
-
 TEST(OfflineSbsWorker, TransientConsumersRetrySameSnapshotWithoutReparse) {
   const auto worker = read_source_text("src/offline_sbs_worker.cpp");
   const auto harness = read_source_text("src/sbs_bench_harness.cpp");
@@ -847,97 +766,6 @@ TEST(OfflineSbsWorker, SharedRendererGeometryAbiIsFullFrameOnly) {
   EXPECT_EQ(geometry.tensor_content_top, 0u);
   EXPECT_EQ(geometry.tensor_content_right, 0u);
   EXPECT_EQ(geometry.tensor_content_bottom, 0u);
-}
-
-TEST(OfflineSbsWorker, DeviceConditionalReplayUsesSharedProductionTransactionPolicy) {
-  std::ifstream stream(
-    fs::path(SUNSHINE_SOURCE_DIR) / "src/sbs_bench_harness.cpp",
-    std::ios::binary
-  );
-  ASSERT_TRUE(stream);
-  std::string source {
-    std::istreambuf_iterator<char>(stream),
-    std::istreambuf_iterator<char>()
-  };
-  source.erase(std::remove(source.begin(), source.end(), '\r'), source.end());
-
-  EXPECT_NE(source.find("--device-conditional-replay"), std::string::npos);
-  EXPECT_NE(
-    source.find("--device-conditional-replay-control"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> device_conditional_publication"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("device_conditional_publication = publication_transport.current_publication"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("models::make_gpu_adaptive_request("),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    source.find("device_conditional_refresh_policy"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("models::classify_gpu_adaptive_submission("),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("estimator->publication_is_current(receipt->expected)"),
-    std::string::npos
-  );
-  EXPECT_EQ(source.find("device_conditional_baseline_is_opaque"), std::string::npos);
-  EXPECT_NE(
-    source.find(
-      "finish_pending_depth_for_evaluation(\n"
-      "          input_color,\n"
-      "          capture_convex2x_diagnostics\n"
-      "        )"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("only unavailable DDup/window/cadence admission is"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("validate_complete_gpu_trace_replay("),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("gpu_trace_source_closure_sha256"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("branch-dependent/frozen"),
-    std::string::npos
-  );
-  EXPECT_NE(source.find("final_parallax_"), std::string::npos);
-  EXPECT_NE(source.find("shadow_final_parallax"), std::string::npos);
-  EXPECT_NE(
-    source.find("static_cast<std::uint32_t>(est.field_width)"),
-    std::string::npos
-  );
-  EXPECT_NE(source.find("{\"field_width\", est.field_width}"), std::string::npos);
-  EXPECT_NE(source.find(".depth_width = est.field_width"), std::string::npos);
-  EXPECT_NE(
-    source.find("est.shadow_final_parallax->GetResource"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("final_parallax_publication_policy"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("final_parallax_reuse_policy"),
-    std::string::npos
-  );
-  EXPECT_EQ(source.find("display_parallax_"), std::string::npos);
-  EXPECT_EQ(source.find("shadow_target_final_parallax"), std::string::npos);
 }
 
 TEST(OfflineSbsWorker, ParsesNativeSpecAndNeverBuildsPythonCommands) {

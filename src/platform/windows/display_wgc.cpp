@@ -91,12 +91,26 @@ namespace platf::dxgi {
 
   wgc_capture_t::~wgc_capture_t() {
     drop_kept_frame();
-    if (capture_session) {
-      capture_session.Close();
+    // Close() can throw (for example after device loss); a destructor must not propagate it.
+    try {
+      if (frame_pool && frame_arrived_token) {
+        // The handler captures a raw `this`. Stop new deliveries before tearing anything down.
+        frame_pool.FrameArrived(frame_arrived_token);
+        frame_arrived_token = {};
+      }
+      if (capture_session) {
+        capture_session.Close();
+      }
+      if (frame_pool) {
+        frame_pool.Close();
+      }
+    } catch (winrt::hresult_error &e) {
+      BOOST_LOG(warning) << "Failed to close the capture session cleanly: [0x"sv << util::hex(e.code()).to_string_view() << ']';
     }
-    if (frame_pool) {
-      frame_pool.Close();
-    }
+    // A delivery that was already running finishes under the lock before this clears its frame.
+    AcquireSRWLockExclusive(&frame_lock);
+    produced_frame = nullptr;
+    ReleaseSRWLockExclusive(&frame_lock);
     item = nullptr;
     capture_session = nullptr;
     frame_pool = nullptr;
@@ -155,7 +169,7 @@ namespace platf::dxgi {
       // composition, so the frame copied when the export releases the output is never stale.
       frame_pool = winrt::Direct3D11CaptureFramePool::CreateFreeThreaded(uwp_device, static_cast<winrt::Windows::Graphics::DirectX::DirectXPixelFormat>(display->capture_format), 3, item.Size());
       capture_session = frame_pool.CreateCaptureSession(item);
-      frame_pool.FrameArrived({this, &wgc_capture_t::on_frame_arrived});
+      frame_arrived_token = frame_pool.FrameArrived({this, &wgc_capture_t::on_frame_arrived});
     } catch (winrt::hresult_error &e) {
       BOOST_LOG(error) << "Screen capture is not supported on this device for this release of Windows: failed to create capture session: [0x"sv << util::hex(e.code()).to_string_view() << ']';
       return -1;
@@ -241,18 +255,28 @@ namespace platf::dxgi {
       return capture_e::timeout;
     }
 
-    auto capture_access = consumed_frame.Surface().as<winrt::IDirect3DDxgiInterfaceAccess>();
-    if (capture_access == nullptr) {
+    // These WinRT calls throw on failure (a lost device, for example). Report that as a
+    // capture error so the caller reinitializes, instead of terminating the process.
+    try {
+      auto capture_access = consumed_frame.Surface().try_as<winrt::IDirect3DDxgiInterfaceAccess>();
+      if (capture_access == nullptr || FAILED(capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out)) || !*out) {
+        return capture_e::error;
+      }
+      out_time = consumed_frame.SystemRelativeTime();
+    } catch (winrt::hresult_error &e) {
+      BOOST_LOG(warning) << "Failed to read the captured frame: [0x"sv << util::hex(e.code()).to_string_view() << ']';
       return capture_e::error;
     }
-    capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out);
-    out_time = consumed_frame.SystemRelativeTime();
     return capture_e::ok;
   }
 
   capture_e wgc_capture_t::release_frame() {
     if (consumed_frame != nullptr) {
-      consumed_frame.Close();
+      try {
+        consumed_frame.Close();
+      } catch (winrt::hresult_error &) {
+        // Nothing more can be released; the frame object is dropped below either way.
+      }
       consumed_frame = nullptr;
     }
     return capture_e::ok;
@@ -271,18 +295,27 @@ namespace platf::dxgi {
     if (kept_frame == nullptr) {
       return false;
     }
-    auto capture_access = kept_frame.Surface().as<winrt::IDirect3DDxgiInterfaceAccess>();
-    if (capture_access == nullptr || FAILED(capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out))) {
+    try {
+      auto capture_access = kept_frame.Surface().try_as<winrt::IDirect3DDxgiInterfaceAccess>();
+      if (capture_access == nullptr || FAILED(capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out))) {
+        drop_kept_frame();
+        return false;
+      }
+      out_time = kept_frame.SystemRelativeTime();
+    } catch (winrt::hresult_error &) {
       drop_kept_frame();
       return false;
     }
-    out_time = kept_frame.SystemRelativeTime();
     return true;
   }
 
   void wgc_capture_t::drop_kept_frame() {
     if (kept_frame != nullptr) {
-      kept_frame.Close();
+      try {
+        kept_frame.Close();
+      } catch (winrt::hresult_error &) {
+        // As in release_frame(): the frame object is dropped below either way.
+      }
       kept_frame = nullptr;
     }
   }

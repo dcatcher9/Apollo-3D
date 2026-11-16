@@ -127,9 +127,13 @@ registry update with `CDS_NORESET`: nothing is applied, and the record holds no 
 state, or color depth. Windows does not document whether that update also records the active
 topology in its configuration database. The host therefore saves only before it promotes the
 display, after creation and after a mode-changing resume, and only while the desktop is still the
-user's own topology: every output in the [restoration](#display-restoration) record is active and
-the original primary is at the desktop origin. When Windows has already restored a remembered
-session topology, the host logs and skips the save. It does not repeat a save of the same mode.
+user's own topology: the original primary is at the desktop origin and every active output is one
+in the [restoration](#display-restoration) record. Windows can switch a recorded output off by
+itself, because it applies its own remembered layout for the monitor set when the display is added
+or reactivated; that layout is the one Windows already holds, so it does not block the save. When
+Windows has already restored a remembered session topology, with the virtual display primary or
+alone, or an unrecorded output is active, the host logs and skips the save. It does not repeat a
+save of the same mode.
 Live changes run on the promoted display, so their modes stay temporary. A failed save is logged
 and leaves the temporary mode in place.
 

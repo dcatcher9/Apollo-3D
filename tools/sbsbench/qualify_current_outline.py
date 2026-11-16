@@ -2,7 +2,8 @@
 """Run/validate file-fed actual completed current-outline compositor sidecars.
 
 This is a renderer qualification, not an extension of ordinary metric or live-capture authority.
-The native harness retains its legacy sbs_* metric images and writes the selected draw separately.
+The native harness writes ordinary Base metric images and selected shared draws separately.
+Historical schemas retain their original ordinary-renderer label and never qualify current policy.
 """
 from __future__ import annotations
 
@@ -143,10 +144,13 @@ def expected_closures(schema=1):
     return result
 
 
-def expected_composition_closures():
+def expected_composition_closures(schema=5):
     source = generator.CURRENT_OUTLINE_RUNTIME_HEADER.read_text(encoding="utf-8")
     result = {}
-    for role in COMPOSITION_ROLES:
+    roles = (*COMPOSITION_ROLES, "foreground_edge") if schema >= 6 else COMPOSITION_ROLES
+    if schema >= 8:
+        roles = (*roles, "trusted_inner")
+    for role in roles:
         match = re.search(rf'inline constexpr std::string_view {role}_closure="([0-9a-f]{{64}})";', source)
         _require(match is not None, f"native composition {role} closure is absent")
         result[role] = match[1]
@@ -199,7 +203,7 @@ def validate_producer_stages(frame, output):
     _require(cbc[16:40] == raw[12:36] == f2[8:32] == c24 and
              raw[36:52] == cbc[:16] and f2[32:48] == raw[:16], "producer stage current C24/header join differs")
     _require(cbc[4] == cbc[5] == cbc[9] == 1 and cbc[80] == frame["contour_identity"][3],
-             "producer stage current source/cut header differs")
+             "producer stage current source header differs")
     selected = frame["selected_receipt"]
     width, height, _, band = selected[4:8]
     _require(cbc[40:43] == (0x31434E45, 1, 1) and cbc[43] in {1, 2, 4} and
@@ -249,10 +253,18 @@ def _validate_frame(frame, ordinal, source, clock, output, scale, schema):
         fields.add("producer_stages")
         fields.add("hole_program_ready")
         fields.add("coverage_program_ready")
+    if schema >= 6:
+        fields.add("foreground_edge_program_ready")
+    if schema >= 8:
+        fields.add("trusted_inner_program_ready")
     _closed(frame, fields, "qualified frame")
     if schema >= 3:
         _require(frame["hole_program_ready"] is True, "current mask-hole programs were unavailable")
         _require(frame["coverage_program_ready"] is True, "current stroke-coverage programs were unavailable")
+    if schema >= 6:
+        _require(frame["foreground_edge_program_ready"] is True, "current foreground-edge program was unavailable")
+    if schema >= 8:
+        _require(frame["trusted_inner_program_ready"] is True, "current trusted-inner program was unavailable")
     source_id = FRAME_NAME.fullmatch(source.name)[1]
     _require(_uint(frame["observation_ordinal"], "observation ordinal", positive=True) == ordinal and
              _uint(frame["completed_frame_id"], "completed frame", positive=True) == ordinal,
@@ -312,7 +324,7 @@ def _validate_frame(frame, ordinal, source, clock, output, scale, schema):
              selected[24:28] == [1, policy["recipe"], 0, 0], "selected receipt options are invalid")
     if selected[3] == 0:
         _require(selected[28:60] == contour and contour[:2] == [policy["history_schema"], policy["history_tag"]] and
-                 contour[2] in {0, 1} and contour[3] == values["confirmed_cut_count"] and
+                 contour[2] in {0, 1} and contour[3] == 0 and
                  contour[4:8] == selected[16:20] and contour[8:20] == selected[4:16] and
                  contour[20:22] == selected[20:22] and contour[22:24] == [policy["recipe"], 1] and
                  contour[24:] == [0] * 8, "selected receipt/SCT owner join is invalid")
@@ -389,10 +401,15 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
         root_fields.add("composition_source_closures")
         root_fields.add("hole_program_ready")
         root_fields.add("coverage_program_ready")
+    if type(schema) is int and schema >= 6:
+        root_fields.add("foreground_edge_program_ready")
+    if type(schema) is int and schema >= 8:
+        root_fields.add("trusted_inner_program_ready")
     _closed(document, root_fields, "qualification manifest")
-    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4, 5} and
+    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4, 5, 6, 7, 8} and
              document["status"] == "COMPLETE" and document["role"] == ROLE and
-             document["ordinary_metric_artifacts"] == "unchanged-legacy-native-matte-renderer" and
+             document["ordinary_metric_artifacts"] == ("authenticated-ordinary-base-renderer-v1" if schema >= 7 else
+                                                        "unchanged-legacy-native-matte-renderer") and
              document["live_capture"] is False and document["source_transfer"] == "encoded-srgb" and
              document["scheduling_authority"] == "ordered-authored-full-source-observations",
              "qualification scope/version is unsupported")
@@ -406,8 +423,12 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
     if document["schema"] >= 3:
         _require(document["hole_program_ready"] is True, "current mask-hole programs were unavailable")
         _require(document["coverage_program_ready"] is True, "current stroke-coverage programs were unavailable")
-        _require(document["composition_source_closures"] == expected_composition_closures(),
+        _require(document["composition_source_closures"] == expected_composition_closures(document["schema"]),
                  "producer stage composition source closures differ")
+    if document["schema"] >= 6:
+        _require(document["foreground_edge_program_ready"] is True, "current foreground-edge program was unavailable")
+    if document["schema"] >= 8:
+        _require(document["trusted_inner_program_ready"] is True, "current trusted-inner program was unavailable")
     calibrations = [item for item in coordinate.MODEL_CALIBRATIONS if item.depth_model == document["model"] and
                     item.depth_model_url == document["model_url"] and item.onnx_sha256 == document["onnx_sha256"] and
                     item.raw_coordinate_scale == document["raw_coordinate_scale"]]
@@ -443,7 +464,7 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
                          if path.is_file()}
         _require(stages == actual_stages, "producer stage artifact coverage differs")
     return {"schema": 1, "status": "PASS", "frame_count": len(outcomes),
-            "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] == 5,
+            "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] == 8,
             "selected_current_frames": sum(item[3] == 3 for item in outcomes),
             "background_valid_frames": sum(item[4] == 1 for item in outcomes) if document["schema"] < 4 else 0,
             "shared_warp_frames": len(outcomes) if document["schema"] >= 4 else 0,

@@ -7770,6 +7770,54 @@ composited copy (byte-for-byte for SDR, R10G10B10A2 and FP16). The receiver vali
 the same reading slot as the texture. Invalid cursor metadata rejects that publication.
 Repeated presentation retains the original frame timestamp and matching UI displacement.
 
+## Text games
+
+A 2D text game (a visual novel) has no depth buffer and cannot load the add-on. Game 3D still
+serves it by the same division of work: the game supplies what it can, and the host supplies the
+rest. An add-on game supplies depth, its UI mask and the finished stereo. A text game supplies only
+where its text is; the host supplies depth from the picture, the stereo, and the text's place in
+depth.
+
+**Detection and consent.** The setup worker offers a 32-bit `.exe` outside the Windows directory
+whose foreground client lies wholly on the selected display (a window is enough: the host converts
+the captured picture) and that has both `dwrite.dll` and `d2d1.dll` loaded, after the same
+two-second confirmation as an add-on game and the same suppression list and anti-cheat refusal.
+Nothing is loaded until the owner confirms that game on the **Game 3D setup** card. The
+confirmation stands for later starts and can be withdrawn there at any time; **Never for this
+game** ends the offers. Nothing is ever written to the game's folder.
+
+**The text helper.** On every start of a confirmed game the host runs
+`sunshine-text-hook-inject32.exe`, which loads `SunshineTextHook32.dll` into that one process. The
+helper replaces the `DrawText`, `DrawTextLayout`, shared `DrawGlyphRun` and `EndDraw` entries of
+the Direct2D render-target vtables, forwards every call unchanged, and repeats each text draw, in
+the brush's own colour, into a private bitmap. It keeps and reports no text content. It publishes
+the boxes of the drawn pieces and that bitmap through two named sections whose layout
+[`tools/text_hook/text_hook_shared.h`](../tools/text_hook/text_hook_shared.h) owns; a line is
+published as one unit when the game ends the drawing it belongs to, or after 50 ms without a
+further text draw. The helper ends with the process.
+
+**Conversion.** The capture path treats the foreground process as a text game only while the
+owner's confirmation for that exact process (id and start time) stands and its helper section is
+current. It then reports the Game source ready, so the client makes its ordinary acknowledged
+transition to mode `3`, and converts the captured picture with the Host depth path instead of the
+flat fallback; any other window in front returns the session to the flat fallback. Earlier depth
+work is retired on each such switch. Dump 3D follows the route: with a text game in front the
+button produces the Host package. The pin itself is described under
+[Text-game pin](host-sbs.md#text-game-pin).
+
+**Text depth.** The text plane is chosen by the same policy as the add-on's UI
+(`tools/reshade/game3d_ui_adaptive.h`, [UI decision framework](#ui-decision-framework)): screen
+depth unless the scene under the glyphs is nearer, then one of its five levels, with its dwell and
+ramp rules. The host feeds it the scene field under the glyph texels on the policy's own 16-by-16
+grid of the game's picture, read back without waiting.
+
+**Limits.** The helper sees Direct2D text only. Anything the game composes by other means, such as
+a small image set among the text, is not in its picture and is held only by the pin's distance
+rule around the neighbouring glyphs. A game that draws its text any other way is detected but
+gets nothing from the helper; the picture-based Host subtitle protection then stays in force for
+it, as it does for every text game until the picture has first shown text in the colours the
+helper reported.
+
 ## Streamed Game provider contract
 
 Game provider v1 is negotiated alongside atomic presentation v2. Wire mode `2` arms discovery

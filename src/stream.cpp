@@ -584,12 +584,11 @@ namespace stream {
 
     const auto &snapshot = state.snapshot;
     const auto performance = snapshot.performance ? snapshot.performance->snapshot() : host_sbs_telemetry::sample {};
-    const std::array<float, 9> float_fields {
+    const std::array<float, 8> float_fields {
       snapshot.pop_floor,
       snapshot.pop_ceiling,
       snapshot.effective_pop,
       snapshot.edge_fraction,
-      snapshot.change_fraction,
       snapshot.zero_anchor_shift_px,
       snapshot.subject_depth,
       snapshot.valid_depth_fraction,
@@ -635,14 +634,13 @@ namespace stream {
     write_f32(32, snapshot.pop_ceiling);
     write_f32(36, snapshot.effective_pop);
     write_f32(40, snapshot.edge_fraction);
-    write_f32(44, snapshot.change_fraction);
+    // encoded[44..47] stays zero with valid bit 3 clear; protocol 13 clients parse a float there.
     write_f32(48, snapshot.zero_anchor_shift_px);
     write_f32(52, snapshot.subject_depth);
     write_f32(56, snapshot.valid_depth_fraction);
     write_f32(60, snapshot.effective_range_width);
-    write_u32(64, snapshot.scene_age);
-    write_u32(68, snapshot.hard_cut_count);
-    write_u32(72, snapshot.external_cut_count);
+    // encoded[64..75] stay zero with valid bits 8 and 9 clear; protocol 13 clients parse three
+    // uint32 words there.
     write_u32(76, snapshot.empty_raw_count);
     write_u32(80, snapshot.collapsed_raw_count);
     write_u32(84, snapshot.sampled_frame_id);
@@ -664,12 +662,6 @@ namespace stream {
     std::copy(encoded.begin(), encoded.end(), out);
     return true;
   }
-
-  constexpr std::size_t MAX_AUDIO_PACKET_SIZE = 1400;
-
-  using audio_aes_t = std::array<
-    char,
-    crypto::cipher::round_to_pkcs7_padded(MAX_AUDIO_PACKET_SIZE)>;
 
   using message_queue_t = std::shared_ptr<safe::queue_t<std::pair<udp::endpoint, std::string>>>;
 
@@ -922,6 +914,9 @@ namespace stream {
       // session lifetime so worker/encode-thread replies cannot disappear between raise() and
       // the control thread's next drain.
       safe::mail_raw_t::queue_t<live_video_mode_ack_t> live_video_mode_ack_queue;
+      // Retained for the same reason: a request committed before the encode loop has subscribed
+      // would otherwise be destroyed with the temporary post and never acknowledged.
+      safe::mail_raw_t::queue_t<video::video_mode_change_t> video_mode_queue;
       safe::mail_raw_t::queue_t<video::stream_gamma_request_t> stream_gamma_queue;
       safe::mail_raw_t::queue_t<video::stream_gamma_ack_t> stream_gamma_ack_queue;
       std::vector<video::stream_gamma_ack_t> deferred_stream_gamma_acks;
@@ -1373,8 +1368,8 @@ namespace stream {
   template<std::size_t max_payload_size>
   static inline std::string_view encode_control(session_t *session, const std::string_view &plaintext, std::array<std::uint8_t, max_payload_size> &tagged_cipher) {
     static_assert(
-      max_payload_size >= sizeof(control_encrypted_t) + sizeof(crypto::cipher::tag_size),
-      "max_payload_size >= sizeof(control_encrypted_t) + sizeof(crypto::cipher::tag_size)"
+      max_payload_size >= sizeof(control_encrypted_t) + crypto::cipher::tag_size,
+      "max_payload_size >= sizeof(control_encrypted_t) + crypto::cipher::tag_size"
     );
 
     auto seq = session->control.seq++;
@@ -2953,6 +2948,8 @@ namespace stream {
     auto timer = platf::create_high_precision_timer();
     if (!timer || !*timer) {
       BOOST_LOG(error) << "Failed to create timer, aborting video broadcast thread";
+      // Match the audio thread: a session without a video sender must end, not linger.
+      shutdown_event->raise(true);
       return;
     }
 
@@ -4641,6 +4638,8 @@ namespace stream {
         mail::live_video_mode_ack,
         LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT
       );
+      session->control.video_mode_queue =
+        mail->queue<video::video_mode_change_t>(mail::video_mode);
       session->control.stream_gamma_queue = mail->queue<video::stream_gamma_request_t>(
         mail::stream_gamma, STREAM_GAMMA_QUEUE_LIMIT
       );

@@ -13,7 +13,6 @@ owns evaluation commands and evidence formats, organized as follows:
 | [Datasets](DATASETS.md) | Core fixtures, public extended suite, metadata, and reference sidecars |
 | [Metrics and gates](METRICS.md) | Metric meanings, baseline policy, validators, and evidence floors |
 | [Optional oracles](ORACLES.md) | FLIP, RAFT-Stereo, SEA-RAFT, and iSQoE diagnostics |
-| [Host SBS scene cuts](../../docs/host-sbs-scene-cuts.md) | Normative cut evidence and state machine |
 
 The native harness and offline manager/worker share typed diagnostic and whole-clip wire codecs.
 Compatibility names such as `scene-cache` and `scene-plan` remain evaluator/harness contracts.
@@ -23,7 +22,7 @@ JSON is published atomically, duplicate keys and unknown fields fail closed on r
 dimensions are checked before byte-count arithmetic or GPU allocation. The Python evaluators
 consume those current documents without a second native-contract compatibility translator.
 Evaluator file-follow and raster artifacts remain available for reproducible scoring. Production
-conversion's raw frame transport and paged audits are owned by the linked conversion document.
+conversion's raw frame transport is owned by the linked conversion document.
 
 ## Required evaluation loop
 
@@ -111,17 +110,23 @@ Selected stereo images live separately in `current-outline/sbs_<id>.png`. The at
 `current_outline_qualification.json` binds each exact source snapshot, observation clock,
 publication receipt, selected/SCT/SCP/ParallaxState words, draw b3, native pin-band shape,
 per-draw serial, literal GPU row/header flags, output digest, executable and current source-closure
-pins. A pre-Draw observer verifies the actual shader, t0..t14 and b2/b3/b6 bindings, including
-the absence of background RGB/proof bindings. The Python reader independently validates those
+pins. A pre-Draw observer verifies the actual shader, consumed t0..t7/t12..t14 and b2/b3/b6
+bindings, including the absence of background RGB/proof bindings. The unused t8 alias no longer
+participates in rendering or binding acceptance. The Python reader independently validates those
 joins and rejects stale owners, corrupt hashes, unknown fields and incomplete frame coverage.
 It reports selected-current, shared-warp and active-pin frame counts, including explicit unavailable
 fallbacks. This file-fed full-source check establishes renderer wiring and provenance; it does
 not establish live capture eligibility, window-region behavior, visual quality or live timing.
 Ordinary metric PNGs, schemas and scores remain separate.
 
-Qualification schema5 binds the shared renderer without a retired completed-pixel-shader field.
-Schemas1–4 remain retired read-only formats and never qualify the current rendering policy;
-source, coordinate-contract and executable checks still apply.
+Qualification schema8 records `authenticated-ordinary-base-renderer-v1` for the ordinary metric
+artifacts, which now use only authenticated Base without an analytic subtitle selector. Selected
+shared output remains separate. Schema8 retains all thirteen composition closures and requires
+foreground-edge and trusted-inner shader availability at the root and every frame. Availability is
+not evidence of GPU execution. The shared renderer has no retired completed-pixel-shader field. Schemas1â€“7 remain
+read-only formats and never qualify the current rendering policy. Each original ordinary metric
+label is preserved; source, coordinate-contract and executable checks still apply, so older
+captures require their authenticated frozen contract/source reader. No captured evidence is retagged.
 
 Schema2 added a binding for
 `current-outline/selected_matte_<id>.u32`, the exact post-draw selected t3 input in little-endian
@@ -237,7 +242,7 @@ before the after-query; file output and hashing use those immutable CPU bytes af
 Inspect the invocation, completion, phase and raw artifact bindings together. Missing completion,
 an expired presentation owner, or a ready event before a required busy boundary is a failed or
 unavailable experiment. Preserved partial files do not establish a complete trajectory.
-This is bounded approximate presentation with an unknown current cut verdict. It creates no
+This is bounded approximate presentation. It creates no
 depth-reuse authorization or new OCR observation. Old-mask withdrawal cannot detect new glyphs,
 and unchanged background in an imprecise old mask can retain protection after text disappears.
 The live converter has not adopted this route; these captures do not qualify production latency.
@@ -317,7 +322,7 @@ unrecognized historical options fail argument parsing.
 The current dump reader accepts the authenticated OCR8 record, 40-word UIP4 source/controller state and
 complete joined native contour tuple as live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
-The current coordinate contract is schema 120/OCR 32/contour recipe 27. UIP4 remains 40 words and
+The current coordinate contract is schema 134/OCR 38/contour recipe 27. UIP4 remains 40 words and
 OCR8 remains 256 words. The UI plane keeps its immediate current entry floor, uses a 100 ms
 source-time exponential response toward the current release candidate, and clears invisible
 controller history on a genuinely newer valid-empty observation. Duplicate clocks and whole-tuple

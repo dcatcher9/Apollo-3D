@@ -64,6 +64,15 @@
       <a :href="primaryIssue.href">{{ primaryIssue.action }} <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></a>
     </div>
 
+    <div v-if="game3dSetupWaiting" class="apollo-notice is-warning" role="status">
+      <span class="apollo-notice-icon" aria-hidden="true"><i class="fa-solid fa-gamepad"></i></span>
+      <div>
+        <strong>{{ game3dSetup.game_name || 'A game' }} is waiting for your approval</strong>
+        <p>Game 3D found this game and does nothing with it until you choose.</p>
+      </div>
+      <a href="#game3d-setup" @click.prevent="showGame3dSetup">Review <i class="fa-solid fa-arrow-down" aria-hidden="true"></i></a>
+    </div>
+
     <div v-if="actionError" class="apollo-notice is-danger" role="alert">
       <span class="apollo-notice-icon" aria-hidden="true"><i class="fa-solid fa-circle-exclamation"></i></span>
       <div>
@@ -160,8 +169,10 @@
       </article>
     </section>
 
-    <Game3dSetup :setup="game3dSetup" @update="game3dSetup = $event"></Game3dSetup>
-    <LocalMonitorSession></LocalMonitorSession>
+    <!-- Kebab case: this template is parsed by the browser, which lowercases tag names, and
+         "game3dsetup" does not resolve to the Game3dSetup component. -->
+    <game3d-setup :setup="game3dSetup" @update="game3dSetup = $event"></game3d-setup>
+    <local-monitor-session></local-monitor-session>
 
     <footer class="apollo-overview-footer">
       <span>{{ pairedClients.length }} {{ pairedClients.length === 1 ? 'device' : 'devices' }} paired</span>
@@ -203,6 +214,9 @@
     },
     async created() {
       await this.loadOverview(true)
+      // The tray notice opens this page at the setup card, which does not exist until the first
+      // load has rendered it, so the browser's own jump to the anchor finds nothing.
+      if (window.location.hash === '#game3d-setup') this.$nextTick(() => this.showGame3dSetup())
       this.refreshTimer = window.setInterval(() => this.loadOverview(false), 5000)
       this.diagnosticsTimer = window.setInterval(() => this.loadDiagnostics(), 30000)
     },
@@ -211,6 +225,9 @@
       if (this.diagnosticsTimer) window.clearInterval(this.diagnosticsTimer)
     },
     computed: {
+      game3dSetupWaiting() {
+        return Boolean(this.game3dSetup?.detected && this.game3dSetup.state === 'ready_to_install' && this.game3dSetup.identity)
+      },
       hostName() {
         return this.config?.sunshine_name || 'Sunshine 3D'
       },
@@ -382,6 +399,9 @@
         const response = await fetch(url, { credentials: 'include' })
         if (!response.ok) throw new Error(`Sunshine 3D returned HTTP ${response.status}`)
         return response.json()
+      },
+      showGame3dSetup() {
+        document.getElementById('game3d-setup')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       },
       async loadOverview(includeDiagnostics = false) {
         if (this.refreshing) return

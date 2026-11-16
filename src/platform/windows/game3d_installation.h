@@ -42,6 +42,9 @@ namespace platf::game3d {
   // the library (EasyAntiCheat, BattlEye, EA AntiCheat, ...) return anti_cheat, and a folder that
   // cannot be checked returns unavailable, so Sunshine never creates a proxy DLL there. A folder
   // where ReShade is already installed is the user's own setup: its add-on is not refused.
+  // A folder that holds ReShade.ini or a proxy DLL without being a recognized ReShade
+  // installation (another injector, or a partial ReShade) also returns unavailable: the runtime
+  // installer never replaces those files, so a fresh setup is not offered there.
   installation_status inspect_installation(
     const std::filesystem::path &game_executable,
     const std::filesystem::path &bundle_directory = bundled_addon_directory()

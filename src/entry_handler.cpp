@@ -38,6 +38,7 @@ namespace args {
   int creds(const char *name, int argc, char *argv[]) {
     if (argc < 2 || argv[0] == "help"sv || argv[1] == "help"sv) {
       help(name);
+      return 1;
     }
 
     http::save_user_creds(config::sunshine.credentials_file, argv[0], argv[1]);

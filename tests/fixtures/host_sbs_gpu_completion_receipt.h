@@ -132,7 +132,7 @@ namespace host_sbs_gpu_completion_receipt_fixture {
     words[receipt::depth_frame_state_begin + 2u] = std::bit_cast<std::uint32_t>(1.0f);
     words[receipt::depth_frame_state_begin + 3u] = std::bit_cast<std::uint32_t>(1.0f);
     std::copy(sbs_adaptive_state::initial_words.begin(), sbs_adaptive_state::initial_words.end(),
-      words.begin() + receipt::cut_state_begin);
+      words.begin() + receipt::depth_health_state_begin);
     std::copy(models::host_sbs_gpu_outcomes::initial_words.begin(), models::host_sbs_gpu_outcomes::initial_words.end(),
       words.begin() + receipt::outcome_counts_begin);
     put_u64(words, receipt::outcome_counts_begin + 2u, 10u);

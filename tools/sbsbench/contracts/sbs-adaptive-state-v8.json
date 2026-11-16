@@ -1,0 +1,38 @@
+{
+  "schema": 8,
+  "source": "video_depth_estimator.DepthHealthState",
+  "capture": "every-source-frame-after-complete-estimator-update",
+  "counter_max": 4294967294,
+  "header_keys": [
+    "record",
+    "schema",
+    "source",
+    "capture",
+    "fields",
+    "config"
+  ],
+  "config_keys": [
+    "model",
+    "pop_strength",
+    "depth_reuse_interval"
+  ],
+  "frame_keys": [
+    "record",
+    "frame_id",
+    "source_index",
+    "depth_updated",
+    "empty_raw_count",
+    "collapsed_raw_count",
+    "values"
+  ],
+  "fields": [
+    {"index": 0, "name": "contract_tag_bits", "type": "uint32", "gpu_encoding": "uint_bits", "initial": "contract_tag"},
+    {"index": 1, "name": "empty_raw_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 2, "name": "collapsed_raw_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 3, "name": "reserved_3", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 4, "name": "valid_depth_fraction", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 5, "name": "effective_raw_range_width", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 6, "name": "range_collapsed", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 7, "name": "depth_ready", "type": "float32", "gpu_encoding": "float", "initial": 0.0}
+  ]
+}

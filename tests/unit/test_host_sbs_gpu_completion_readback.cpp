@@ -156,7 +156,7 @@ namespace {
     for (std::size_t i = 0u; i < observed.result.diagnostic_count; ++i) {
       const auto &diagnostic = observed.result.diagnostics[i];
       EXPECT_FALSE(diagnostic.failed);
-      ASSERT_TRUE(diagnostic.cut_state);
+      ASSERT_TRUE(diagnostic.depth_health_state);
       ASSERT_TRUE(diagnostic.outcome_counts);
       EXPECT_EQ(diagnostic.expected.publication_sequence, expected.publication_sequence + i);
       EXPECT_GE(diagnostic.sampled_at, before_copy);
@@ -181,7 +181,7 @@ namespace {
       for (std::size_t i = 0u; i < observed.result.diagnostic_count; ++i) {
         const auto &diagnostic = observed.result.diagnostics[i];
         EXPECT_FALSE(diagnostic.failed);
-        EXPECT_EQ(diagnostic.cut_state.has_value(), present.first);
+        EXPECT_EQ(diagnostic.depth_health_state.has_value(), present.first);
         EXPECT_EQ(diagnostic.outcome_counts.has_value(), present.second);
       }
     }
@@ -203,7 +203,7 @@ namespace {
     for (std::size_t i = 0u; i < observed.result.diagnostic_count; ++i) {
       const auto &diagnostic = observed.result.diagnostics[i];
       EXPECT_FALSE(diagnostic.failed);
-      ASSERT_TRUE(diagnostic.cut_state);
+      ASSERT_TRUE(diagnostic.depth_health_state);
       ASSERT_TRUE(diagnostic.outcome_counts);
       EXPECT_EQ(diagnostic.outcome_counts->invalid, 2u);
     }
@@ -211,9 +211,9 @@ namespace {
 
   TEST_F(HostSbsGpuCompletionReadbackTest, CorruptDiagnosticsDoNotRevokeRenderingOrTheOtherPayload) {
     const auto expected = fixture::expected();
-    for (const auto corrupt_cut : {false, true}) {
+    for (const auto corrupt_health : {false, true}) {
       auto snapshot = fixture::snapshot(expected);
-      snapshot[corrupt_cut ? receipt::cut_state_begin : receipt::outcome_counts_begin] ^= 1u;
+      snapshot[corrupt_health ? receipt::depth_health_state_begin : receipt::outcome_counts_begin] ^= 1u;
       const auto observed = models::detail::publication_receipt_readback_for_test(
         device.Get(), context.Get(), snapshot, expected
       );
@@ -226,8 +226,8 @@ namespace {
       for (std::size_t i = 0u; i < observed.result.diagnostic_count; ++i) {
         const auto &diagnostic = observed.result.diagnostics[i];
         EXPECT_TRUE(diagnostic.failed);
-        EXPECT_EQ(diagnostic.cut_state.has_value(), !corrupt_cut);
-        EXPECT_EQ(diagnostic.outcome_counts.has_value(), corrupt_cut);
+        EXPECT_EQ(diagnostic.depth_health_state.has_value(), !corrupt_health);
+        EXPECT_EQ(diagnostic.outcome_counts.has_value(), corrupt_health);
       }
     }
   }

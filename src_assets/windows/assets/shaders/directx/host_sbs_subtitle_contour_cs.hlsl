@@ -25,7 +25,7 @@ StructuredBuffer<uint> CurrentConditionParams : register(t3);
 Texture2D<uint> CurrentSupportRead : register(t5);
 Texture2D<float4> PreviousFeatures : register(t6); // fixed RGB anchor and exact valid/count/mask code
 StructuredBuffer<uint> PreviousIdentity : register(t7);
-StructuredBuffer<float4> CurrentCutBridge : register(t8);
+StructuredBuffer<float4> CurrentDepthHealth : register(t8);
 StructuredBuffer<uint> CurrentOcrRecord : register(t9);
 StructuredBuffer<uint4> CurrentGeometryState : register(t10);
 Texture2D<float4> NextFeaturesRead : register(t11); // immutable staged result before old history overwrite
@@ -43,12 +43,9 @@ static const uint RECIPE_SCHEMA = V2_SUBTITLE_CONTOUR_RECIPE;
 static const uint HISTORY_TAG = V2_SUBTITLE_CONTOUR_HISTORY_TAG;
 static const uint HISTORY_WORDS = V2_SUBTITLE_CONTOUR_HISTORY_WORD_COUNT;
 static const uint MAX_SOURCE_EXTENT = V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT;
-static const int HISTORY_JITTER_RADIUS = V2_SUBTITLE_CONTOUR_HISTORY_JITTER_RADIUS_SOURCE_PIXELS;
 
 groupshared uint CurrentGate;
 groupshared uint CurrentCount;
-groupshared uint CurrentEpoch;
-groupshared uint CurrentResetMask;
 groupshared int CurrentReferenceCenterTwice;
 groupshared uint4 CurrentCovers[V2_SUBTITLE_PLANE_COVER_CAPACITY];
 groupshared uint4 CurrentCores[V2_SUBTITLE_PLANE_COVER_CAPACITY];
@@ -147,15 +144,15 @@ bool CurrentGeometryReady() {
     camera.seed_values = CurrentGeometryState[6u];
     uint2 now = uint2(v2_joint_observation_timestamp_low, v2_joint_observation_timestamp_high);
     // A compact UI-plane timestamp is not an integrity seal for the current raw/Base publication.
-    // Use the same canonical state/clock/cut admission as the UI resolver and conditioner.
+    // Use the same canonical state/clock admission as the UI resolver and conditioner.
     return V2CameraStateWithAdaptiveStateValid(active, control, mapping, camera) &&
         V2_STATE_FRAME_VALID(control) == 1.0f &&
         mapping.y == V2_CONTRACT_TAG && mapping.z == V2_ADAPTIVE_POLICY_ID &&
         any(now != 0u) && all(camera.clock.xy == now) &&
-        asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(
-            CurrentCutBridge[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS])) == SBS_CUT_CONTRACT_TAG &&
-        asuint(V2_STATE_CONFIRMED_CUT_COUNT(control)) ==
-            asuint(SBS_STATE_HARD_CUT_COUNT(CurrentCutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]));
+        asuint(SBS_STATE_CONTRACT_TAG_BITS(
+            CurrentDepthHealth[SBS_STATE_VECTOR_CONTRACT_TAG_BITS])) ==
+            SBS_ADAPTIVE_STATE_CONTRACT_TAG &&
+        asuint(V2_STATE_CONTROL_RESERVED_0(control)) == 0u;
 }
 
 bool CurrentClassifierReferenceValid(out int reference_center) {
@@ -217,11 +214,11 @@ bool CurrentSnapshotEvidenceValid(out int reference_center) {
     // Current detector evidence includes a legal empty record. Plane/condition state is not
     // read here: this independent source/probability snapshot cannot authorize pins.
     uint band_w, band_h, probability_count, probability_stride;
-    uint ocr_words, ocr_stride, cut_vectors, cut_stride;
+    uint ocr_words, ocr_stride, health_vectors, health_stride;
     CurrentDisplayBand.GetDimensions(band_w, band_h);
     ProbabilityMap.GetDimensions(probability_count, probability_stride);
     CurrentOcrRecord.GetDimensions(ocr_words, ocr_stride);
-    CurrentCutBridge.GetDimensions(cut_vectors, cut_stride);
+    CurrentDepthHealth.GetDimensions(health_vectors, health_stride);
     if (contour_options.x != 1u || contour_options.y != RECIPE_SCHEMA ||
         any(contour_options.zw != 0u) || contour_observation.z > 1u ||
         contour_observation.w != 0u || !any(contour_frame.xy != 0u) ||
@@ -237,7 +234,7 @@ bool CurrentSnapshotEvidenceValid(out int reference_center) {
         contour_field.w > contour_content.w ||
         probability_count != V2_OCR_OUTPUT_WIDTH * V2_OCR_OUTPUT_HEIGHT || probability_stride != 4u ||
         ocr_words != V2_OCR_RECORD_WORD_COUNT || ocr_stride != 4u ||
-        cut_vectors != SBS_ADAPTIVE_STATE_VECTOR_COUNT || cut_stride != 16u) return false;
+        health_vectors != SBS_ADAPTIVE_STATE_VECTOR_COUNT || health_stride != 16u) return false;
     uint crop_top, crop_height, roi_top, roi_bottom;
     if (!V2SubtitleOcrComputeCrop(contour_source.x, contour_source.y, crop_top, crop_height) ||
         crop_top != contour_source.z || crop_height != contour_source.w ||
@@ -359,9 +356,8 @@ bool CurrentAdaptiveTailValid() {
         (((flags & 4u) != 0u) == (conflicts * 5u > covered || conflicts * 50u > area));
 }
 
-bool CurrentAuthorityValid(out uint current_count, out uint epoch) {
+bool CurrentAuthorityValid(out uint current_count) {
     current_count = 0u;
-    epoch = 0u;
     uint plane_words, plane_stride, param_words, param_stride;
     CurrentPlane.GetDimensions(plane_words, plane_stride);
     CurrentConditionParams.GetDimensions(param_words, param_stride);
@@ -369,10 +365,9 @@ bool CurrentAuthorityValid(out uint current_count, out uint epoch) {
         plane_words != V2_SUBTITLE_PLANE_STATE_WORD_COUNT || plane_stride != 4u ||
         param_words != V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT || param_stride != 4u) return false;
     // SnapshotGate already authenticates every current OCR8 pair, source/crop/ROI, and the
-    // sealed current geometry/cut publication. No historical rectangle grants authority.
+    // sealed current geometry publication. No historical rectangle grants authority.
     uint ocr_count = CurrentOcrRecord[4u];
     if (ocr_count == 0u || ocr_count > V2_SUBTITLE_PLANE_COVER_CAPACITY) return false;
-    epoch = asuint(SBS_STATE_HARD_CUT_COUNT(CurrentCutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]));
     uint kinds = 0u;
     [loop]
     for (uint slot = 0u; slot < ocr_count; ++slot) {
@@ -387,7 +382,7 @@ bool CurrentAuthorityValid(out uint current_count, out uint epoch) {
         CurrentPlane[V2_SUBTITLE_PLANE_FLAGS_WORD] != V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG ||
         CurrentPlane[V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD] != (1u << ocr_count) - 1u ||
         (CurrentPlane[V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD] & ~((1u << ocr_count) - 1u)) != 0u ||
-        CurrentPlane[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] != epoch ||
+        CurrentPlane[V2_SUBTITLE_PLANE_IDENTITY_RESERVED_WORD] != 0u ||
         !CurrentAdaptiveTailValid() ||
         CurrentPlane[adaptive + 15u] != 0u ||
         CurrentPlane[adaptive + 3u] != target_bits ||
@@ -493,18 +488,14 @@ uint4 CurrentOrdinarySupportSearch(uint slot) {
 
 void PrepareCurrentGate(uint group_index) {
     if (group_index == 0u) {
-        uint count, epoch;
+        uint count;
         int reference_center;
         SnapshotGate = CurrentSnapshotEvidenceValid(reference_center) ? 1u : 0u;
         CurrentReferenceCenterTwice = reference_center;
         // Pins and their published snapshot must share the same global source/OCR verdict.
-        // In particular, a rejected ribbon in epoch zero cannot borrow prior valid RGB.
-        CurrentGate = CurrentAuthorityValid(count, epoch) && SnapshotGate != 0u ? 1u : 0u;
+        // In particular, a rejected ribbon cannot borrow prior valid RGB.
+        CurrentGate = CurrentAuthorityValid(count) && SnapshotGate != 0u ? 1u : 0u;
         CurrentCount = CurrentGate != 0u ? count : 0u;
-        CurrentResetMask = CurrentGate != 0u ?
-            CurrentPlane[V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD] : 0u;
-        CurrentEpoch = SnapshotGate != 0u ?
-            asuint(SBS_STATE_HARD_CUT_COUNT(CurrentCutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT])) : 0u;
         [unroll]
         for (uint slot = 0u; slot < V2_SUBTITLE_PLANE_COVER_CAPACITY; ++slot) {
             CurrentCovers[slot] = CurrentGate != 0u && slot < count ?
@@ -526,7 +517,7 @@ bool PreviousAuthorityValid(out bool duplicate) {
     PreviousFeatures.GetDimensions(feature_w, feature_h);
     return CurrentGate != 0u && feature_w == contour_source.x && feature_h == contour_source.w &&
         V2SubtitleHistoryCompatible(PreviousIdentity, contour_source, contour_field, contour_content,
-            contour_frame, contour_observation.xy, contour_observation.z, CurrentEpoch, duplicate);
+            contour_frame, contour_observation.xy, contour_observation.z, duplicate);
 }
 
 void PrepareHistoryGate(uint group_index) {
@@ -583,18 +574,6 @@ bool SupportSearchSourcePixel(int2 p) {
     }
     return false;
 }
-
-bool ChangedCurrentCorePixel(int2 p) {
-    [unroll]
-    for (uint slot = 0u; slot < V2_SUBTITLE_PLANE_COVER_CAPACITY; ++slot) {
-        // Overlap uses only the union of flagged current raw/cores. An expanded cover or an
-        // unflagged core cannot recursively extend reset scope through another current box.
-        if (slot < CurrentCount && (CurrentResetMask & (1u << slot)) != 0u &&
-            SourcePixelInRect(p, CurrentCores[slot])) return true;
-    }
-    return false;
-}
-
 
 bool CurrentProbabilityEvidence(int2 p, out float probability) {
     probability = 0.0f;
@@ -814,9 +793,9 @@ void PrepareCurrentPalettes(uint group_index, uint2 dispatch_position) {
     }
 }
 
-bool CurrentPaletteMatches(uint slot, uint3 color) {
+bool CurrentPaletteMatches(uint slot, uint3 color, uint mode_count) {
     [loop]
-    for (uint mode = 0u; mode < PaletteCount[slot]; ++mode) {
+    for (uint mode = 0u; mode < mode_count; ++mode) {
         uint4 value = PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + mode];
         int3 delta = int3(color * value.w) - int3(value.xyz);
         uint distance = MaxChannel((uint3)abs(delta));
@@ -846,14 +825,31 @@ bool CurrentShortTangent(int2 p, float3 color, int2 direction, uint maximum) {
     return true;
 }
 
-bool CurrentOutlineNeighborMatches(int2 p, float3 color, uint slot) {
+// A cover normally reaches only a bounded pad past its detector piece. An application-text
+// cover also bridges the gaps to the other pieces of its line, where the detector saw no text.
+// The palette is learned from a piece's contrasting anchors, so it also holds background shades
+// that touch the glyph outlines; near the piece that is harmless, but across a bridged gap those
+// shades would turn every scene edge of the same colour into text. This reports the columns the
+// detector's own piece explains: its core widened by more than the largest ordinary cover pad.
+// A video cover never leaves this range, so the stricter bridged rule cannot change video.
+bool WithinOrdinaryReach(int2 p, uint slot) {
+    if (CurrentSlotRibbon(slot)) return true;
+    uint4 core = CurrentCores[slot], search = CurrentSupportSearch[slot];
+    uint content_width = contour_content.z - contour_content.x;
+    uint reach = (V2_OCR_ORDINARY_COVER_HORIZONTAL_GUARD_CELLS * 8u * content_width +
+        V2_OCR_OUTPUT_WIDTH - 1u) / V2_OCR_OUTPUT_WIDTH + (core.w - core.y);
+    uint left = core.x > contour_content.x + reach ? core.x - reach : contour_content.x;
+    return SourcePixelInRect(p, uint4(left, search.y, min(core.z + reach, contour_content.z), search.w));
+}
+
+bool CurrentOutlineNeighborMatches(int2 p, float3 color, uint slot, uint mode_count) {
     float3 neighbor;
     bool neighbor_valid = LoadDisplayColor(p, neighbor);
     if (!neighbor_valid) return false;
     float contrast = ColorDistance(color, neighbor);
     if (contrast <= V2_SUBTITLE_CONTOUR_SPATIAL_EDGE_RGB_DISTANCE) return false;
     uint3 neighbor_quantized = PaletteQuantize(neighbor);
-    return CurrentPaletteMatches(slot, neighbor_quantized);
+    return CurrentPaletteMatches(slot, neighbor_quantized, mode_count);
 }
 
 bool CurrentGlyphEvidence(int2 p, float3 color) {
@@ -864,7 +860,9 @@ bool CurrentGlyphEvidence(int2 p, float3 color) {
     [loop]
     for (uint slot = 0u; slot < CurrentCount; ++slot) {
         if (!SourcePixelInRect(p, CurrentSupportSearch[slot]) || PaletteCount[slot] == 0u) continue;
-        if (CurrentPaletteMatches(slot, q)) {
+        // Across a bridged gap only the brightest retained mode, the text fill, is evidence.
+        uint mode_count = WithinOrdinaryReach(p, slot) ? PaletteCount[slot] : 1u;
+        if (CurrentPaletteMatches(slot, q, mode_count)) {
             uint limit = (V2_SUBTITLE_CONTOUR_LONG_LINE_CORE_HEIGHT_NUMERATOR *
                 (CurrentCores[slot].w - CurrentCores[slot].y) * contour_source.y) /
                 (V2_SUBTITLE_CONTOUR_LONG_LINE_CORE_HEIGHT_DENOMINATOR * (contour_content.w - contour_content.y));
@@ -882,14 +880,14 @@ bool CurrentGlyphEvidence(int2 p, float3 color) {
         const int radius = (int)V2_SUBTITLE_CONTOUR_OUTLINE_PROBE_RADIUS_SOURCE_PIXELS;
         // Explicit calls preserve the exact eight-point set without nested unrolled
         // continue/early-return lowering in FXC.
-        if (CurrentOutlineNeighborMatches(p + int2(-radius, -radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(0, -radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(radius, -radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(-radius, 0), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(radius, 0), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(-radius, radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(0, radius), color, slot)) return true;
-        if (CurrentOutlineNeighborMatches(p + int2(radius, radius), color, slot)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(-radius, -radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(0, -radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(radius, -radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(-radius, 0), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(radius, 0), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(-radius, radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(0, radius), color, slot, mode_count)) return true;
+        if (CurrentOutlineNeighborMatches(p + int2(radius, radius), color, slot, mode_count)) return true;
     }
     return false;
 }
@@ -928,49 +926,18 @@ float4 AdvanceFeature(int2 p, float3 color, bool candidate) {
     }
     count = 1u;
     // Only a genuine newer observation reaches here. A qualifying same-pixel fixed reference
-    // wins even in a flagged current raw/core; duplicate/reuse consumed no confirmation above.
+    // keeps its anchor and streak; duplicate/reuse consumed no confirmation above.
     if (HistoryGate != 0u && PreviousIdentity[2u] == 1u) {
-        bool found = false;
         float4 same = PreviousFeatures.Load(int3(p, 0));
         uint same_count;
-        // Keep a valid fixed reference at this pixel. A closer colour in a newly admitted
-        // neighbour must not replace an already stable reference and restart its streak.
+        // Keep a valid fixed reference at this pixel.
         bool same_counted = DecodeFeature(same, same_count) && same_count != 0u;
         if (same_counted && ColorDistance(color, same.rgb) <= V2_SUBTITLE_CONTOUR_HISTORY_RGB_DISTANCE) {
-            found = true;
             anchor = same.rgb;
             count = min(same_count + 1u, V2_SUBTITLE_CONTOUR_HISTORY_CONFIRMATION_OBSERVATIONS);
         }
-        float best_color = 2.0f;
-        int best_space = 0;
-        // A coordinate previously outside current authority (count0) or invalid must acquire
-        // its own first observation. Nearby mature colors cannot preconfirm newly added covers.
-        // A flagged current raw/core mismatch starts at count1/current RGB without borrowing
-        // a mature neighbour. Otherwise counted coordinates retain bounded jitter correspondence.
-        if (!found && same_counted && !ChangedCurrentCorePixel(p)) {
-          [loop]
-          for (int dy = -HISTORY_JITTER_RADIUS; dy <= HISTORY_JITTER_RADIUS; ++dy) {
-            [loop]
-            for (int dx = -HISTORY_JITTER_RADIUS; dx <= HISTORY_JITTER_RADIUS; ++dx) {
-                int2 q = p + int2(dx, dy);
-                if (!BandPositionValid(q)) continue;
-                float4 prior = PreviousFeatures.Load(int3(q, 0));
-                uint prior_count;
-                if (!DecodeFeature(prior, prior_count) || prior_count == 0u) continue;
-                float distance = ColorDistance(color, prior.rgb);
-                int space = dx * dx + dy * dy;
-                // Select one correspondence, never pool counts or prefer the oldest candidate.
-                if (distance <= V2_SUBTITLE_CONTOUR_HISTORY_RGB_DISTANCE &&
-                    (!found || distance < best_color || (distance == best_color && space < best_space))) {
-                    found = true;
-                    best_color = distance;
-                    best_space = space;
-                    anchor = prior.rgb;
-                    count = min(prior_count + 1u, V2_SUBTITLE_CONTOUR_HISTORY_CONFIRMATION_OBSERVATIONS);
-                }
-            }
-          }
-        }
+        // No neighbour correspondence: a pixel whose own reference no longer matches starts a
+        // new count-one observation with its current colour. Support needs only count != 0.
     }
     uint code = V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_VALID_BIT |
         (count << V2_SUBTITLE_CONTOUR_HISTORY_FEATURE_COUNT_SHIFT) |
@@ -1172,7 +1139,6 @@ uint HistoryWord(uint word, bool valid) {
     if (word == 0u) return CONTOUR_SCHEMA;
     if (word == 1u) return HISTORY_TAG;
     if (word == 2u) return valid && CurrentGate != 0u ? 1u : 0u;
-    if (word == 3u) return valid ? CurrentEpoch : 0u;
     if (word >= 4u && word < 8u) return contour_frame[word - 4u];
     if (word >= 8u && word < 12u) return contour_source[word - 8u];
     if (word >= 12u && word < 16u) return contour_field[word - 12u];
@@ -1181,7 +1147,7 @@ uint HistoryWord(uint word, bool valid) {
     if (word == 21u) return contour_observation.y;
     if (word == 22u) return RECIPE_SCHEMA;
     if (word == V2_SUBTITLE_CONTOUR_HISTORY_SNAPSHOT_VALID_WORD) return valid ? 1u : 0u;
-    // SCT5 carries source/clock/cut identity only. Reserved24..31 are canonical zero;
+    // SCT5 carries source/clock identity only. Word 3 and reserved24..31 are canonical zero;
     // changing current OCR count, order, kinds or cover segmentation is not a history reset.
     return 0u;
 }

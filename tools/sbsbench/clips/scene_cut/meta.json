@@ -1,13 +1,6 @@
 {
   "name": "scene_cut",
-  "description": "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across cuts (A1). Shot-state expectations re-verified against the V2 cut-only analysis trace on 2026-08-04 (pulse schedule unchanged).",
-  "shot_state_contract": {
-    "kind": "hard-cut",
-    "monitor_from_frame": 2,
-    "expected_pulse_frames": [
-      13
-    ]
-  },
+  "description": "Hard cut spliced kitchen-vlog -> washerwoman-pond at frame 13: depth-normalization swim across an abrupt scene replacement (A1).",
   "content_type": "synthetic",
   "provenance_note": "Constructed probe: hard cut spliced from two committed clips by make_synth_clips.py."
 }

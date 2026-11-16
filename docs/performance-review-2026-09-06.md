@@ -1,7 +1,7 @@
 # Joint performance review — 2026-09-06
 
 This is a review and measurement record, not a new rendering contract. Host behavior remains owned
-by [Host SBS](host-sbs.md) and [scene cuts](host-sbs-scene-cuts.md); client rendering and measurement
+by [Host SBS](host-sbs.md); client rendering and measurement
 contracts remain in the companion Moonlight repository's `docs/android-xr-sbs.md` and
 `docs/client-sbs-evaluation.md`.
 

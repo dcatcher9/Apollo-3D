@@ -73,8 +73,6 @@ The field-level contract is documented in [Configuration](configuration.md).
 | `GET`, `POST` | `/api/offline-sbs/jobs` | List jobs or create a conversion |
 | `GET` | `/api/offline-sbs/jobs/{id}` | Read one job |
 | `POST` | `/api/offline-sbs/jobs/{id}/cancel` | Cancel one job |
-| `GET` | `/api/offline-sbs/jobs/{id}/scene-audit` | Download its scene-audit manifest, or the inline audit for an older retained job |
-| `GET` | `/api/offline-sbs/jobs/{id}/scene-audit?page={index}` | Download one authenticated page listed in the manifest; indices start at zero |
 
 The job schema, path restrictions, media behavior, and GPU lease are owned by
 [Offline Host 3D conversion](whole-clip-sbs-pipeline.md). Do not infer them from this route index.

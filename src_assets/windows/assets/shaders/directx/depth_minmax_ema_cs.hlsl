@@ -6,11 +6,12 @@
 RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialized,frame_state}
 RWByteAddressBuffer        MinMaxRaw : register(u1);  // min/max bits, valid + eligible counts
 RWStructuredBuffer<uint>   Histogram : register(u2);  // permanent P2/P98 histogram from the shared quantile resolve
-// Cut/health bridge. Geometry does not consume this state directly:
-//   [3].zw = valid-depth fraction, effective EMA range width
-//   [4].zw = empty-raw count, collapsed-raw count (stored as uint bits)
-//   [5].xy = current range-collapsed flag, depth-ready flag
-RWStructuredBuffer<float4> DiagnosticState : register(u3);
+// Tagged depth-health state. Geometry does not consume this state directly, and this pass is
+// its only producer: the tag and reserved word keep their CPU-initialized values.
+//   [0].yz = empty-raw count, collapsed-raw count (stored as uint bits)
+//   [1]    = valid-depth fraction, effective EMA range width, range-collapsed flag,
+//            depth-ready flag
+RWStructuredBuffer<float4> DepthHealthState : register(u3);
 
 #include "include/depth_constants.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
@@ -26,12 +27,10 @@ void main() {
     bool valid_bounds = eligible_count > 0u && valid_count == eligible_count &&
                         !isnan(new_min) && !isinf(new_min) &&
                         !isnan(new_max) && !isinf(new_max) && new_max >= new_min;
-    float4 telemetry =
-        DiagnosticState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION];
     uint4 health_counters =
-        asuint(DiagnosticState[SBS_STATE_VECTOR_HARD_CUT_COUNT]);
-    float4 telemetry_flags =
-        DiagnosticState[SBS_STATE_VECTOR_RANGE_COLLAPSED];
+        asuint(DepthHealthState[SBS_STATE_VECTOR_EMPTY_RAW_COUNT]);
+    float4 telemetry =
+        DepthHealthState[SBS_STATE_VECTOR_VALID_DEPTH_FRACTION];
 
     // Robust percentile bounds: replace the raw min/max with the permanent P2/P98 percentiles
     // scanned from the 256-bin histogram (shared scan, binned over the raw range). Outlier
@@ -115,13 +114,12 @@ void main() {
     MinMaxEma[0] = s;
     SBS_STATE_EFFECTIVE_RAW_RANGE_WIDTH(telemetry) =
         s.z > 0.5f ? max(s.y - s.x, 0.0f) : 0.0f;
-    SBS_STATE_RANGE_COLLAPSED(telemetry_flags) =
+    SBS_STATE_RANGE_COLLAPSED(telemetry) =
         range_collapsed ? 1.0f : 0.0f;
-    SBS_STATE_DEPTH_READY(telemetry_flags) = s.z > 0.5f ? 1.0f : 0.0f;
-    DiagnosticState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION] = telemetry;
-    DiagnosticState[SBS_STATE_VECTOR_HARD_CUT_COUNT] =
+    SBS_STATE_DEPTH_READY(telemetry) = s.z > 0.5f ? 1.0f : 0.0f;
+    DepthHealthState[SBS_STATE_VECTOR_EMPTY_RAW_COUNT] =
         asfloat(health_counters);
-    DiagnosticState[SBS_STATE_VECTOR_RANGE_COLLAPSED] = telemetry_flags;
+    DepthHealthState[SBS_STATE_VECTOR_VALID_DEPTH_FRACTION] = telemetry;
 
     // Leave a safe identity behind; the next fused frame resolve overwrites all four words.
     MinMaxRaw.Store(0, 0xFFFFFFFFu);

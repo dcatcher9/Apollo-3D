@@ -536,6 +536,10 @@
               setTimeout(() => {
                 this.closeAppStatus = null;
               }, 5000);
+            })
+            .catch((e) => {
+              console.error(e);
+              this.closeAppPressed = false;
             });
         },
         copyLogs() {
@@ -580,10 +584,13 @@
                 'Content-Type': 'application/json'
               }
             })
-            .then(() => {
+            .then((r) => {
+              // The host answers before it exits, so a 200 here is the success case.
               this.serverQuitting = false;
-              this.serverQuit = false;
-              alert("Exit failed!");
+              this.serverQuit = r.ok;
+              if (!r.ok) {
+                alert("Exit failed!");
+              }
             })
             .catch(() => {
               this.serverQuitting = false;

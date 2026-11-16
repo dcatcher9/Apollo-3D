@@ -279,6 +279,49 @@ namespace platf::primary_display {
       return same_modes(physical_only(current), physical_only(reference));
     }
 
+    // Windows does not keep the reactivated layout when it re-evaluates the monitors after the
+    // restored desktop wakes: it applies its own remembered layout for this monitor set, which
+    // can switch a recorded physical output off and move and retime the virtual display into the
+    // freed space. That layout is still this session's own. Every active output is a recorded
+    // one, at least one recorded output was dropped, and the physical outputs that remain keep
+    // their modes and their arrangement, so promoting loses no user arrangement and the recovery
+    // record still restores every recorded output. With every recorded output still active, a
+    // moved or edited output is a user edit and stays with the stricter rule above.
+    bool resume_layout_replaced_by_windows(const detail::snapshot_t &current, const detail::snapshot_t &reference, std::wstring_view virtual_identity) {
+      const auto live_layout = detail::inspect(current);
+      const auto pending_layout = detail::inspect(reference);
+      if (!live_layout || !pending_layout || !find_path(current, virtual_identity) || !find_path(reference, virtual_identity) ||
+          current.paths.size() >= reference.paths.size()) {
+        return false;
+      }
+      detail::snapshot_t live_physical, saved_physical;
+      live_physical.modes = current.modes;
+      saved_physical.modes = reference.modes;
+      std::optional<std::pair<int64_t, int64_t>> translation;
+      for (size_t i = 0; i < current.paths.size(); ++i) {
+        const auto &identity = current.device_paths[i];
+        if (same_device(identity, virtual_identity)) {
+          continue;
+        }
+        const auto saved = find_path(reference, identity);
+        const auto *live_position = find_position(*live_layout, identity);
+        const auto *saved_position = find_position(*pending_layout, identity);
+        if (!saved || !live_position || !saved_position) {
+          return false;
+        }
+        const auto delta = std::pair {static_cast<int64_t>(live_position->x) - saved_position->x, static_cast<int64_t>(live_position->y) - saved_position->y};
+        if (translation && *translation != delta) {
+          return false;
+        }
+        translation = delta;
+        live_physical.paths.push_back(current.paths[i]);
+        live_physical.device_paths.push_back(identity);
+        saved_physical.paths.push_back(reference.paths[*saved]);
+        saved_physical.device_paths.push_back(reference.device_paths[*saved]);
+      }
+      return same_modes(live_physical, saved_physical);
+    }
+
     struct display_spec_t {
       std::wstring identity;
       DISPLAYCONFIG_PATH_INFO path {};
@@ -1116,6 +1159,7 @@ namespace platf::primary_display {
 
     std::mutex transaction_mutex;
     detail::ownership_t process_ownership;
+    detail::restore_observation_cache_t restore_observations;
 
     detail::cursor_clip_manager_t &exclusive_cursor_clip() {
       static detail::cursor_clip_manager_t cursor_clip({
@@ -1235,7 +1279,7 @@ namespace platf::primary_display {
                                 },
                                 [](detail::snapshot_t snapshot) {
                                   return apply_snapshot(std::move(snapshot), true);
-                                }});
+                                }}, &restore_observations);
     }
   }  // namespace
 
@@ -1248,6 +1292,7 @@ namespace platf::primary_display {
     // Keep the last verified remote physical desktop after the durable transaction completes.
     // A monitor may briefly disappear while waking, leaving Windows on the retained VD again.
     std::optional<detail::journal_t> pause_recovery;
+    bool partial_wake_recovery = false;
   };
 
   namespace detail {
@@ -1549,8 +1594,60 @@ namespace platf::primary_display {
       }
     }
 
-    manager_t::manager_t(io_t io):
-        io_(std::move(io)) {}
+    bool restore_observation_cache_t::unchanged_failure(
+      const snapshot_t &current,
+      const snapshot_t &desired,
+      const snapshot_t &available
+    ) const {
+      if (!failure_ || !same_topology(current, failure_->observed) ||
+          !same_colors(current, failure_->observed) || !same_topology(desired, failure_->desired) ||
+          !same_colors(desired, failure_->desired) || available.paths.size() != failure_->available.paths.size() ||
+          available.paths.size() != available.device_paths.size() ||
+          failure_->available.paths.size() != failure_->available.device_paths.size()) {
+        return false;
+      }
+      // QDC_ALL_PATHS may reorder alternative routes or update transient IN_USE flags after
+      // our own apply. Compare the target/source route multiset, not mode indexes or status.
+      const auto same_route = [](const snapshot_t &a, size_t ai, const snapshot_t &b, size_t bi) {
+        const auto &ap = a.paths[ai];
+        const auto &bp = b.paths[bi];
+        return same_device(a.device_paths[ai], b.device_paths[bi]) &&
+               same_adapter(ap.sourceInfo.adapterId, bp.sourceInfo.adapterId) && ap.sourceInfo.id == bp.sourceInfo.id &&
+               same_adapter(ap.targetInfo.adapterId, bp.targetInfo.adapterId) && ap.targetInfo.id == bp.targetInfo.id &&
+               ap.targetInfo.targetAvailable == bp.targetInfo.targetAvailable;
+      };
+      std::vector<bool> used(failure_->available.paths.size(), false);
+      for (size_t i = 0; i < available.paths.size(); ++i) {
+        bool matched = false;
+        for (size_t j = 0; j < used.size(); ++j) {
+          if (!used[j] && same_route(available, i, failure_->available, j)) {
+            used[j] = true;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    void restore_observation_cache_t::remember_failure(
+      const snapshot_t &observed,
+      const snapshot_t &desired,
+      const snapshot_t &available
+    ) {
+      failure_ = failure_t {observed, desired, available};
+    }
+
+    void restore_observation_cache_t::clear() {
+      failure_.reset();
+    }
+
+    manager_t::manager_t(io_t io, restore_observation_cache_t *restore_observations):
+        io_(std::move(io)),
+        restore_observations_(restore_observations) {}
 
     bool manager_t::prepare(bool exclusive, std::wstring_view local_sink, bool monitor_replacement) {
       if ((!local_sink.empty() && !exclusive) || (monitor_replacement && (!exclusive || local_sink.empty()))) {
@@ -1713,11 +1810,44 @@ namespace platf::primary_display {
       if (!valid_journal(journal) || journal.prepared || !same_device(journal.promoted_primary, device_path)) {
         return false;
       }
+      // Every topology the host applies either moves the original primary off the origin or
+      // detaches this display, so the original primary at the origin beside this active display
+      // is not a host topology. Windows can still have switched a recorded output off by itself:
+      // it applies its own remembered layout for the monitor set inside Add and after a
+      // reactivation. That layout is the one Windows already holds, so it does not block the
+      // save. An output the record does not know is not the user's recorded desktop.
       const auto *primary = find_position(*current, journal.original_primary);
       return primary && primary->x == 0 && primary->y == 0 &&
-             std::ranges::all_of(journal.original, [&](const auto &entry) {
-               return find_position(*current, entry.device_path) != nullptr;
+             std::ranges::all_of(*current, [&](const auto &entry) {
+               return find_position(journal.original, entry.device_path) != nullptr;
              });
+    }
+
+    bool manager_t::adopt_virtual_color(std::wstring_view device_path) {
+      auto loaded = io_.load();
+      if (!loaded.success) {
+        return false;
+      }
+      // Only a remote exclusive session records a color state for its virtual display. A local
+      // presentation follows its physical sink, and anything else restores no recorded color.
+      if (!loaded.journal || !valid_journal(*loaded.journal) || !loaded.journal->exclusive || !loaded.journal->exclusive_topology ||
+          !loaded.journal->local_sink.empty() || !same_device(loaded.journal->promoted_primary, device_path)) {
+        return true;
+      }
+      auto journal = *loaded.journal;
+      const auto snapshot = io_.query();
+      const auto current = snapshot ? find_path(*snapshot, device_path) : std::nullopt;
+      const auto recorded = find_path(*journal.exclusive_topology, device_path);
+      if (!current || !recorded || *current >= snapshot->colors.size() || !snapshot->colors[*current] ||
+          *recorded >= journal.exclusive_topology->colors.size()) {
+        return false;
+      }
+      auto &recorded_color = journal.exclusive_topology->colors[*recorded];
+      if (recorded_color && color_matches(*snapshot->colors[*current], *recorded_color)) {
+        return true;
+      }
+      recorded_color = snapshot->colors[*current];
+      return valid_journal(journal) && io_.save(journal);
     }
 
     bool manager_t::apply_verified(const snapshot_t &before, const layout_t &desired) {
@@ -2048,7 +2178,8 @@ namespace platf::primary_display {
                                          ));
       const bool resuming_restore = journal.exclusive_started && journal.pending_restore &&
                                     (owned_subset(*snapshot, *journal.pending_restore) ||
-                                     same_layout_and_physical_modes(*snapshot, *journal.pending_restore, device_path));
+                                     same_layout_and_physical_modes(*snapshot, *journal.pending_restore, device_path) ||
+                                     resume_layout_replaced_by_windows(*snapshot, *journal.pending_restore, device_path));
       if (journal.exclusive_started && !remembered_exclusive && !continuing_exclusive && !resuming_restore) {
         return false;
       }
@@ -2209,6 +2340,43 @@ namespace platf::primary_display {
         // remaining ordinary monitors are still a complete physical destination for detachment.
         return restore_monitor(*retained->pause_recovery, false, retained);
       }
+      if (retained->pause_recovery && retained->pause_recovery->original_topology &&
+          (index || retained->partial_wake_recovery) &&
+          !current->paths.empty() && (!index || current->paths.size() > 1)) {
+        const auto &remembered = *retained->pause_recovery->original_topology;
+        const auto missing_remembered = [&](std::wstring_view identity) {
+          return !same_device(identity, device_path) && !find_path(*current, identity);
+        };
+        if (std::ranges::any_of(remembered.device_paths, missing_remembered)) {
+          const auto available = io_.query_all ? io_.query_all() : std::nullopt;
+          if (!available || available->paths.size() > max_available_paths || available->paths.size() != available->device_paths.size()) {
+            return false;
+          }
+          const bool missing_output_available = std::ranges::any_of(remembered.device_paths, [&](const auto &identity) {
+            if (!missing_remembered(identity)) {
+              return false;
+            }
+            for (size_t i = 0; i < available->paths.size(); ++i) {
+              if (available->paths[i].targetInfo.targetAvailable && same_device(available->device_paths[i], identity)) {
+                return true;
+              }
+            }
+            return false;
+          });
+          retained->partial_wake_recovery = true;
+          if (index || missing_output_available) {
+            // A wake can reattach our VD with only part of the restored physical desktop.
+            // Recover available remembered outputs through the existing transaction instead
+            // of replacing its baseline with that transient subset. Current physical edits
+            // still use restore_exclusive's ordinary user-desktop preservation rules.
+            return restore_exclusive(*retained->pause_recovery, false, retained);
+          }
+          // The VD is already detached and every absent remembered output is unavailable.
+          // Keep the usable physical desktop and its prior recovery bookmark without a CCD
+          // mutation; a later availability observation can recover a waking monitor.
+          return true;
+        }
+      }
       if (!index && !current->paths.empty()) {
         // A healthy disconnected desktop is user-owned. Remember its latest arrangement, modes
         // and color, including deliberate changes made after the first successful restore.
@@ -2222,11 +2390,13 @@ namespace platf::primary_display {
             return false;
           }
           retained->pause_recovery = std::move(recovery);
+          retained->partial_wake_recovery = false;
         }
         return true;
       }
       if (current->paths.empty() || (index && current->paths.size() == 1)) {
         if (retained->pause_recovery) {
+          retained->partial_wake_recovery = true;
           const auto available = io_.query_all ? io_.query_all() : std::nullopt;
           if (!available || available->paths.size() > max_available_paths || available->paths.size() != available->device_paths.size()) {
             return false;
@@ -2771,6 +2941,7 @@ namespace platf::primary_display {
         }
         if (retained) {
           retained->pause_recovery.reset();
+          retained->partial_wake_recovery = false;
         }
         return true;
       }
@@ -2972,22 +3143,38 @@ namespace platf::primary_display {
       if (!latest || !same_topology(*current, *latest)) {
         return false;
       }
+      const bool apply_needed = !same_topology(*current, *desired);
+      if (apply_needed && restore_observations_ && restore_observations_->unchanged_failure(*current, *desired, *available)) {
+        // One failed apply with a verified outcome is enough for this exact observation.
+        // Repeating it cannot supply new evidence and can flash a healthy physical monitor.
+        // Keep the journal and wake bookmark; raw WM_DISPLAYCHANGE alone grants no retry.
+        return false;
+      }
       log_restore_snapshot("before", *current);
       log_restore_snapshot("requested", *desired);
-      const bool apply_needed = !same_topology(*current, *desired);
       const auto apply_started = std::chrono::steady_clock::now();
+      bool applied = true;
       if (apply_needed) {
         const bool force_physical_restore = !keep_virtual_active && retained && retained->local_sink.empty() && io_.apply_physical_restore;
         if (force_physical_restore) {
           BOOST_LOG(info) << "Forcing the restored physical-display modes down to the driver while retaining the virtual-display device.";
         }
-        if (!(force_physical_restore ? io_.apply_physical_restore(*desired) : io_.apply(*desired))) {
-          return false;
-        }
+        applied = force_physical_restore ? io_.apply_physical_restore(*desired) : io_.apply(*desired);
       }
       const auto apply_finished = std::chrono::steady_clock::now();
+      if (!applied && !restore_observations_) {
+        return false;
+      }
       auto observed = io_.query();
-      if (!observed || !same_topology(*observed, *desired)) {
+      if (!applied || !observed || !same_topology(*observed, *desired)) {
+        if (apply_needed && restore_observations_) {
+          const bool observed_valid = observed && observed->colors.size() == observed->paths.size() &&
+                                      (observed->paths.empty() || inspect(*observed));
+          // If the immediate query is unavailable, retain the last valid pre-apply view.
+          // Suppression still requires a fresh next-call query to match that exact view.
+          restore_observations_->remember_failure(observed_valid ? *observed : *current, *desired, *available);
+          BOOST_LOG(warning) << "Display restore did not reach the requested topology; preserving recovery state and deferring identical mode sets until display observations change.";
+        }
         return false;
       }
       bool color_ok = true;
@@ -3033,14 +3220,19 @@ namespace platf::primary_display {
         BOOST_LOG(warning) << "Available physical displays are active; retaining exclusive-display recovery until their color settings are restored.";
         return false;
       }
+      const bool preserve_verified_pause_recovery = retained && retained->partial_wake_recovery && retained->pause_recovery && missing;
       if (missing || missing_local_sink) {
-        // All available outputs were restored and verified. An unplugged monitor must not
-        // hold future sessions hostage; its return starts from Windows' current layout.
-        BOOST_LOG(info) << "Restored available physical displays; absent monitors will use a fresh topology baseline on reconnect.";
+        // All available outputs were restored and verified; an unplugged monitor must not
+        // hold a durable transaction open. A prior verified pause bookmark still covers a
+        // transient wake failure, while an initially absent output starts fresh on reconnect.
+        BOOST_LOG(info) << (preserve_verified_pause_recovery ?
+                             "Restored available physical displays; retaining the last verified desktop for monitor-wake recovery." :
+                             "Restored available physical displays; absent monitors will use a fresh topology baseline on reconnect.");
       }
-      if (retained) {
-        // Retain only the desktop that actually completed recovery. Missing originals must not
-        // be resurrected later, and user edits accepted above become the next recovery baseline.
+      if (retained && !preserve_verified_pause_recovery) {
+        // The first completed recovery defines the pause baseline, and a later complete
+        // physical desktop adopts accepted user edits. A partial wake must not replace a
+        // previously verified desktop with its temporary subset.
         if (!rebase_recovery(journal, *observed, *observed)) {
           return false;
         }
@@ -3053,8 +3245,12 @@ namespace platf::primary_display {
       if (!io_.clear()) {
         return false;
       }
-      if (retained) {
+      if (retained && !preserve_verified_pause_recovery) {
         retained->pause_recovery = std::move(journal);
+        retained->partial_wake_recovery = false;
+      }
+      if (restore_observations_) {
+        restore_observations_->clear();
       }
       return true;
     }
@@ -3657,6 +3853,29 @@ namespace platf::primary_display {
       BOOST_LOG(error) << "Local AR display update failed: " << exception.what();
       return false;
     }
+  }
+
+  bool change_virtual_display_color(std::wstring_view device_path, const std::function<bool()> &change) {
+    // The callback can outlive the caller's view of a renumbered display.
+    const std::wstring identity(device_path);
+    std::lock_guard lock(transaction_mutex);
+    if (!change || !change()) {
+      return false;
+    }
+    try {
+      // Without a recorded exclusive state there is nothing to keep in step.
+      if (!identity.empty() && acquire_ownership() && !manager().adopt_virtual_color(identity)) {
+        BOOST_LOG(warning) << "The virtual display's new color state could not be recorded for its exclusive session; the next display change may restore the previous state."sv;
+      }
+    } catch (const std::exception &exception) {
+      BOOST_LOG(warning) << "Could not record the virtual display's color state: " << exception.what();
+    }
+    return true;
+  }
+
+  long run_serialized_mode_change(const std::function<long()> &change) {
+    std::lock_guard lock(transaction_mutex);
+    return change();
   }
 
   bool bind_pending(std::wstring_view device_path) {

@@ -98,7 +98,7 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     models::depth_input_region_t region {};
     models::depth_tensor_content_rect_t field_content {};
     std::uint32_t field_width = 0, field_height = 0;
-    // Selected DRAW source (null for packed-repeat), Base,state,M,RGB,SCP,SCT,OCR,UIP,cut,frame,EMA.
+    // Selected DRAW source (null for packed-repeat), Base,state,M,RGB,SCP,SCT,OCR,UIP,depth health,frame,EMA.
     std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 12> views;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_input;
     // b2,b3,b5,raw,args,depthCB,sourceRegionCB,contourCB. Export ACTUAL GetDesc byte lengths.

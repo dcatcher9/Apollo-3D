@@ -168,7 +168,8 @@ namespace sbs_bench::current_outline_qualification {
         ID3D11ShaderResourceView *actual[15u] {};
         context->PSGetShaderResources(0u, 15u, actual);
         for (std::size_t i = 0u; i < expected.resources.size(); ++i) {
-          expected.matched = expected.matched && actual[i] == expected.resources[i];
+          // t8 is unconsumed by the shared renderer and carries no draw authority.
+          if (i != 8u) expected.matched = expected.matched && actual[i] == expected.resources[i];
           if (actual[i]) {
             actual[i]->Release();
           }
@@ -201,10 +202,10 @@ namespace sbs_bench::current_outline_qualification {
       return estimator.configure_subtitle_selected_matte_research(config, error);
     }
 
-    bool record(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary, ID3D11RenderTargetView *output, const models::estimate_result &result, evidence_t &evidence, std::string &error) {
+    bool record(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary, ID3D11RenderTargetView *output, const models::estimate_result &result, ID3D11Buffer *subtitle_constants, evidence_t *evidence, std::string &error) {
       error.clear();
-      if (!device_ || !context || !output || !result.research_selected_matte || !result.research_selected_matte_receipt || !result.completed_frame_valid || !models::parallax_v2_result_is_authenticated(result) || result.input_region.is_video_region() || result.subtitle_work_suppressed) {
-        error = "current-outline qualification lacks its current completed full-source tuple";
+      if (!device_ || !context || !output || !subtitle_constants || !result.research_selected_matte || !result.research_selected_matte_receipt || !result.completed_frame_valid || !models::parallax_v2_result_is_authenticated(result) || result.input_region.is_video_region() || result.subtitle_work_suppressed) {
+        error = "shared subtitle draw lacks its current completed full-source tuple";
         return false;
       }
       auto draw = ordinary;
@@ -212,9 +213,14 @@ namespace sbs_bench::current_outline_qualification {
       draw.render_target_count = 1u;
       const auto program = programs_.program();
       draw.pixel_shader = program.pixel;
-      auto *legacy = ordinary.shader_resources[3u];
+      draw.subtitle_constants = subtitle_constants;
+      draw.bound_draw_observer_state = nullptr;
+      draw.observe_bound_draw = nullptr;
       auto *receipt = result.research_selected_matte_receipt.Get();
       draw.shader_resources[3u] = result.research_selected_matte.Get();
+      draw.shader_resources[4u] = result.subtitle_contour_source.Get();
+      draw.shader_resources[5u] = result.subtitle_condition_params.Get();
+      draw.shader_resources[6u] = result.subtitle_contour_identity.Get();
       const UINT width = result.input_region.width(), height = result.input_region.height();
       const UINT band = models::subtitle_ocr_source_crop_height(width, height);
       const UINT band_top = height - band;
@@ -226,7 +232,6 @@ namespace sbs_bench::current_outline_qualification {
       shared_warp::request_t request;
       std::copy(draw.shader_resources.begin(), draw.shader_resources.end(), request.draw_srvs.begin());
       request.draw_srvs[7u] = receipt;
-      request.draw_srvs[8u] = legacy;
       request.geometry_constants = draw.geometry_constants;
       request.subtitle_constants = draw.subtitle_constants;
       request.sampler = draw.sampler;
@@ -235,28 +240,30 @@ namespace sbs_bench::current_outline_qualification {
       }
       const auto views = shared_warp_.views();
       observer_t observer;
-      observer.pixel = draw.pixel_shader;
-      std::copy(draw.shader_resources.begin(), draw.shader_resources.end(), observer.resources.begin());
-      observer.resources[7u] = receipt;
-      observer.resources[8u] = legacy;
-      observer.resources[12u] = views.weights.Get();
-      observer.resources[13u] = views.field.Get();
-      observer.resources[14u] = views.rows.Get();
-      observer.geometry = draw.geometry_constants;
-      observer.subtitle = draw.subtitle_constants;
-      observer.shared_geometry = views.geometry.Get();
-      draw.bound_draw_observer_state = &observer;
-      draw.observe_bound_draw = &observer_t::observe;
+      if (evidence) {
+        observer.pixel = draw.pixel_shader;
+        std::copy(draw.shader_resources.begin(), draw.shader_resources.end(), observer.resources.begin());
+        observer.resources[7u] = receipt;
+        observer.resources[12u] = views.weights.Get();
+        observer.resources[13u] = views.field.Get();
+        observer.resources[14u] = views.rows.Get();
+        observer.geometry = draw.geometry_constants;
+        observer.subtitle = draw.subtitle_constants;
+        observer.shared_geometry = views.geometry.Get();
+        draw.bound_draw_observer_state = &observer;
+        draw.observe_bound_draw = &observer_t::observe;
+      }
       {
         models::research_current_outline_selected_matte_v2::scoped_receipt_t selected;
         shared_warp::scoped_binding_t shared;
-        if (!selected.bind(context, receipt, legacy) || !shared.bind(context, &views) || !platf::dxgi::record_host_sbs_v2_draw(context, draw) || !observer.matched) {
+        if (!selected.bind(context, receipt) || !shared.bind(context, &views) || !platf::dxgi::record_host_sbs_v2_draw(context, draw) || (evidence && !observer.matched)) {
           error = "current-outline qualification did not observe exact selected/shared-warp draw bindings";
           return false;
         }
       }
-      evidence.bindings_observed = observer.matched;
-      if (!read_words(context, receipt, evidence.selected) || !read_words(context, result.subtitle_contour_identity.Get(), evidence.contour) || !read_words(context, result.subtitle_condition_params.Get(), evidence.condition) || !read_words(context, result.shadow_state.Get(), evidence.state) || !read_words(context, draw.subtitle_constants, evidence.subtitle_constants) || !read_rows(context, views, evidence)) {
+      if (!evidence) return true; // Follow conversion adds no observer or diagnostic readback.
+      evidence->bindings_observed = observer.matched;
+      if (!read_words(context, receipt, evidence->selected) || !read_words(context, result.subtitle_contour_identity.Get(), evidence->contour) || !read_words(context, result.subtitle_condition_params.Get(), evidence->condition) || !read_words(context, result.shadow_state.Get(), evidence->state) || !read_words(context, draw.subtitle_constants, evidence->subtitle_constants) || !read_rows(context, views, *evidence)) {
         error = "current-outline qualification cannot read its exact post-draw evidence";
         return false;
       }

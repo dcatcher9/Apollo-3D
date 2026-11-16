@@ -12,11 +12,10 @@ import numpy as np
 from PIL import Image
 
 try:
-    from . import cut_state_contract, whole_clip_raw_contract
+    from . import whole_clip_raw_contract
     from .depth_coordinate_v2_contract import CALIBRATED_DEFAULTS, MODEL_CALIBRATIONS
     from .depth_mapping_v2_temporal import (
         _clip_sequence_input_contract,
-        _load_cut_indices,
         _load_run_model_contract,
         _load_shape,
         _raw_files,
@@ -26,12 +25,12 @@ try:
         GPU_INPUT_MANIFEST_MODE, GPU_INPUT_MANIFEST_SCHEMA,
         PRODUCER_EVIDENCE_BINDING, PRODUCER_EVIDENCE_SCHEMA,
         SEQUENCE_CONTRACT_SCHEMA,
-        FORBIDDEN_RENDERER_SCORE_PREFIXES, RENDERER_SCORECARD_FILE,
+        RENDERER_SCORECARD_FILE,
         RENDERER_SCORE_CONTRACT_FILE,
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
         _diagnostic_summary,
         _exact_source_capture_grid_kind,
-        _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
+        _materialize_gpu_replay_inputs,
         _record_native_geometry_audit,
         _materialize_producer_evidence_bundle,
         _metric_contract_evidence,
@@ -39,13 +38,11 @@ try:
         _validate_frame_source_attestation, _validate_gpu_input_manifest_evidence,
         _validate_metric_contract_evidence, _validate_producer_evidence_bundle)
 except ImportError:  # Direct execution from tools/sbsbench.
-    import cut_state_contract  # type: ignore
     import whole_clip_raw_contract  # type: ignore
     from depth_coordinate_v2_contract import (  # type: ignore
         CALIBRATED_DEFAULTS, MODEL_CALIBRATIONS)
     from depth_mapping_v2_temporal import (  # type: ignore
         _clip_sequence_input_contract,
-        _load_cut_indices,
         _load_run_model_contract,
         _load_shape,
         _raw_files,
@@ -55,12 +52,12 @@ except ImportError:  # Direct execution from tools/sbsbench.
         GPU_INPUT_MANIFEST_MODE, GPU_INPUT_MANIFEST_SCHEMA,
         PRODUCER_EVIDENCE_BINDING, PRODUCER_EVIDENCE_SCHEMA,
         SEQUENCE_CONTRACT_SCHEMA,
-        FORBIDDEN_RENDERER_SCORE_PREFIXES, RENDERER_SCORECARD_FILE,
+        RENDERER_SCORECARD_FILE,
         RENDERER_SCORE_CONTRACT_FILE,
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
         _diagnostic_summary,
         _exact_source_capture_grid_kind,
-        _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
+        _materialize_gpu_replay_inputs,
         _record_native_geometry_audit,
         _materialize_producer_evidence_bundle,
         _metric_contract_evidence,
@@ -85,7 +82,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             "final_horizontal_slope_max": 0.2,
             "final_vertical_shear_max": 0.3,
             "collapsed": False,
-            "confirmed_cut": False,
             "calibration_revision": 1,
         }
         active = dict(common, frame_valid=True, camera_valid=True)
@@ -95,7 +91,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
         cleared = dict(
             common, frame_valid=False, camera_valid=False, effective_gain=0.0,
             candidate_center_drift_u=0.0, predicted_zero_translation_source_u=0.0,
-            collapsed=True, confirmed_cut=True)
+            collapsed=True)
 
         summary = _diagnostic_summary([active, retained, cleared])
 
@@ -106,56 +102,8 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
         self.assertEqual(summary["retained_camera_unusable_frames"], 1)
         self.assertEqual(summary["camera_clear_unusable_frames"], 1)
         self.assertEqual(summary["collapsed_frames"], 1)
-        self.assertEqual(summary["confirmed_cuts"], 1)
         self.assertNotIn("maximum_abs_candidate_log_scale_drift", summary)
         self.assertNotIn("maximum_abs_candidate_scale_ratio_deviation", summary)
-
-    def test_native_cut_compatibility_trace_has_one_fail_closed_contract(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "cut_state.json"
-            values = [0] * len(cut_state_contract.FIELDS)
-            values[0] = cut_state_contract.CUT_CONTRACT_TAG
-            values[cut_state_contract.FIELDS.index("hard_cut_pulse")] = 1
-            values[cut_state_contract.FIELDS.index("hard_cut_count")] = 4
-            payload = {
-                "schema": cut_state_contract.SCHEMA,
-                "source": cut_state_contract.SOURCE,
-                "capture": cut_state_contract.CAPTURE,
-                "fields": list(cut_state_contract.FIELDS),
-                "frames": [{"frame_id": "00001", "values": values}],
-            }
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            trace = cut_state_contract.load_trace(str(path))
-            self.assertEqual(cut_state_contract.trace_schema(str(path)), 5)
-            self.assertEqual(trace[1]["hard_cut_pulse"], 1.0)
-            self.assertEqual(trace[1]["hard_cut_count"], 4.0)
-            self.assertEqual(
-                cut_state_contract.contract_reference(),
-                {"file": "cut_state.json", "schema": 5,
-                 "capture": cut_state_contract.CAPTURE},
-            )
-            self.assertEqual(
-                cut_state_contract.contract_reference(gpu_replay=True),
-                {"file": "cut_state.json", "schema": 6,
-                 "capture": cut_state_contract.GPU_REPLAY_CAPTURE},
-            )
-
-            payload.update({
-                "schema": cut_state_contract.GPU_REPLAY_SCHEMA,
-                "source": cut_state_contract.GPU_REPLAY_SOURCE,
-                "capture": cut_state_contract.GPU_REPLAY_CAPTURE,
-            })
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            self.assertEqual(cut_state_contract.trace_schema(str(path)), 6)
-            self.assertEqual(
-                cut_state_contract.load_trace(str(path))[1]["hard_cut_count"],
-                4.0,
-            )
-
-            payload["source"] = "depth_scene_cut_resolve_cs.WrongState"
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "invalid cut-state trace"):
-                cut_state_contract.load_trace(str(path))
 
     def test_implementation_hash_surface_covers_transitive_gpu_and_renderer_sources(self):
         self.assertEqual(len(IMPLEMENTATION_SOURCE_FILES), len(set(IMPLEMENTATION_SOURCE_FILES)))
@@ -169,7 +117,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             "src_assets/windows/assets/shaders/directx/sbs_direct_replay_ps.hlsl",
             "tools/sbsbench/direct_geometry_contract.py",
             "tools/sbsbench/run_eval.py",
-            "tools/sbsbench/cut_state_contract.py",
             "tools/sbsbench/whole_clip_raw_contract.py",
         }.issubset(IMPLEMENTATION_SOURCE_FILES))
 
@@ -209,16 +156,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
         (clip / "sbs_00001.png").write_bytes(b"sbs")
         (clip / "depth_00001.png").write_bytes(b"depth")
         np.zeros(width * height, dtype="<f4").tofile(clip / "warp_map_00001.f32")
-        (clip / "cut_state.json").write_text(json.dumps({
-            "schema": cut_state_contract.SCHEMA,
-            "source": cut_state_contract.SOURCE,
-            "capture": cut_state_contract.CAPTURE,
-            "fields": list(cut_state_contract.FIELDS),
-            "frames": [{"frame_id": "00001", "values": [
-                cut_state_contract.CUT_CONTRACT_TAG,
-                *([0] * (len(cut_state_contract.FIELDS) - 1)),
-            ]}],
-        }), encoding="utf-8")
         raw_manifest = whole_clip_raw_contract.build_manifest(clip, [1], {
             "model": calibration.depth_model,
             "depth_model_url": calibration.depth_model_url,
@@ -280,12 +217,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(
                 evidence["preprocess_source_closure_sha256"],
                 MODEL_CALIBRATIONS[0].preprocess.source_closure_sha256)
-            self.assertEqual(
-                evidence["cut_control_evidence"]["kind"],
-                "cut-state-hard-cut-generation")
-            self.assertEqual(evidence["cut_expectation_evidence"], {
-                "kind": "none", "sha256": None,
-            })
             width, height = MODEL_CALIBRATIONS[0].calibrated_input_shapes[0]
             self.assertEqual(evidence["raw_shape"], {"height": height, "width": width})
             self.assertRegex(evidence["sequence_input_sha256"], r"^[0-9a-f]{64}$")
@@ -661,16 +592,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             (unsupported / "depth_00001.png").write_bytes(b"depth")
             np.zeros(width * height, dtype="<f4").tofile(
                 unsupported / "warp_map_00001.f32")
-            (unsupported / "cut_state.json").write_text(json.dumps({
-                "schema": cut_state_contract.SCHEMA,
-                "source": cut_state_contract.SOURCE,
-                "capture": cut_state_contract.CAPTURE,
-                "fields": list(cut_state_contract.FIELDS),
-                "frames": [{"frame_id": "00001", "values": [
-                    cut_state_contract.CUT_CONTRACT_TAG,
-                    *([0] * (len(cut_state_contract.FIELDS) - 1)),
-                ]}],
-            }), encoding="utf-8")
             manifest = whole_clip_raw_contract.build_manifest(unsupported, [1], {
                 "model": calibration.depth_model,
                 "depth_model_url": calibration.depth_model_url,
@@ -716,54 +637,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lossless frame_<id>\\.png"):
                 _source_frames(root)
 
-    def test_cut_labels_never_control_replay_and_generation_recovers_missing_pulse(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            scene_cut = root / "scene_cut"
-            scene_cut.mkdir()
-            # The committed scene_cut metadata expects a pulse, but labels are scoring-only. With
-            # no live trace, the controller sees initialization and no invented cut.
-            cuts, counts, source = _load_cut_indices(scene_cut, [1, 2])
-            self.assertEqual(cuts, [True, False])
-            self.assertEqual(counts, [0, 0])
-            self.assertEqual(source, "first-frame-only")
-
-            # Persistent generation remains authoritative even if the one-frame pulse is absent.
-            values = [0] * len(cut_state_contract.FIELDS)
-            values[0] = cut_state_contract.CUT_CONTRACT_TAG
-            pulse_index = cut_state_contract.FIELDS.index("hard_cut_pulse")
-            count_index = cut_state_contract.FIELDS.index("hard_cut_count")
-            frames = []
-            for frame_id, count in ((1, 4), (2, 5), (3, 5)):
-                row = list(values)
-                row[pulse_index] = 0
-                row[count_index] = count
-                frames.append({"frame_id": f"{frame_id:05d}", "values": row})
-            (scene_cut / "cut_state.json").write_text(json.dumps({
-                "schema": cut_state_contract.SCHEMA,
-                "source": cut_state_contract.SOURCE,
-                "capture": cut_state_contract.CAPTURE,
-                "fields": list(cut_state_contract.FIELDS),
-                "frames": frames,
-            }), encoding="utf-8")
-            cuts, counts, source = _load_cut_indices(scene_cut, [1, 2, 3])
-            self.assertEqual(cuts, [True, True, False])
-            self.assertEqual(counts, [4, 5, 5])
-            self.assertEqual(source, "cut-state-hard-cut-generation")
-            self.assertEqual(
-                _load_authenticated_cut_pulses(scene_cut, [1, 2, 3], counts),
-                [False, False, False],
-            )
-
-            malformed = root / "unit_malformed_trace"
-            malformed.mkdir()
-            (malformed / "cut_state.json").write_text(
-                json.dumps({"schema": cut_state_contract.SCHEMA, "frames": []}),
-                encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "invalid cut-state trace"):
-                _load_cut_indices(malformed, [1])
-
-    def test_gpu_manifest_materializes_current_color_and_preserves_count_only_cut(self):
+    def test_gpu_manifest_materializes_current_color_with_exact_frame_keys(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "output"
@@ -798,9 +672,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 {1: source_one, 2: source_two},
                 {1: raw_one_path, 2: raw_two_path},
                 [1, 2],
-                [4, 5],
-                [False, False],
-                "cut-state-hard-cut-generation",
                 (height, width),
                 run_model,
                 MappingV2Config(
@@ -837,9 +708,9 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 manifest["model_identity"]["preprocess_source_closure_sha256"],
                 calibration.preprocess.source_closure_sha256)
             self.assertEqual(
-                [(frame["hard_cut_count"], frame["hard_cut_pulse"])
-                 for frame in manifest["frames"]],
-                [(4, False), (5, False)],
+                [sorted(frame) for frame in manifest["frames"]],
+                [["frame_id", "observation_timestamp_us", "raw_file", "raw_sha256",
+                  "source_sha256"]] * 2,
             )
             input_contract = {
                 "calibration_id": calibration.calibration_id,
@@ -863,11 +734,11 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             }
             validated = _validate_gpu_input_manifest_evidence(
                 output, reference, manifest["mapping_config"],
-                "cut-state-hard-cut-generation", input_contract)
+                input_contract)
             self.assertEqual(validated["schema"], GPU_INPUT_MANIFEST_SCHEMA)
             for name in (
                     "model", "shape", "frame_hash", "source_hash",
-                    "retired_color_field",
+                    "retired_color_field", "unknown_root_key", "unknown_frame_key",
                     "source_shape", "boolean_source_shape", "zero_source_shape",
                     "oversized_source_shape"):
                 with self.subTest(corruption=name):
@@ -882,6 +753,10 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                         corrupt["frames"][0]["source_sha256"] = "0" * 64
                     elif name == "retired_color_field":
                         corrupt["source_color_mode"] = 0
+                    elif name == "unknown_root_key":
+                        corrupt["unknown_key"] = "unknown"
+                    elif name == "unknown_frame_key":
+                        corrupt["frames"][1]["unknown_key"] = 0
                     elif name == "source_shape":
                         corrupt["source_shape"]["width"] += 1
                     elif name == "boolean_source_shape":
@@ -895,7 +770,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         _validate_gpu_input_manifest_evidence(
                             output, reference, manifest["mapping_config"],
-                            "cut-state-hard-cut-generation", input_contract)
+                            input_contract)
             raw_copy = output / "gpu_input" / "raw_00001.f32"
             original_raw = raw_copy.read_bytes()
             raw_copy.write_bytes(b"tampered")
@@ -904,7 +779,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "raw tensor"):
                 _validate_gpu_input_manifest_evidence(
                     output, reference, manifest["mapping_config"],
-                    "cut-state-hard-cut-generation", input_contract)
+                    input_contract)
             raw_copy.write_bytes(original_raw)
             stale = json.loads(manifest_path.read_text(encoding="utf-8"))
             stale["schema"] = 1
@@ -913,7 +788,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not bind"):
                 _validate_gpu_input_manifest_evidence(
                     output, reference, manifest["mapping_config"],
-                    "cut-state-hard-cut-generation", input_contract)
+                    input_contract)
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             mode3 = json.loads(json.dumps(manifest))
             mode3["mapping_config"]["joint_plane_mode"] = 3
@@ -923,7 +798,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             reference["sha256"] = whole_clip_raw_contract.file_sha256(manifest_path)
             _validate_gpu_input_manifest_evidence(
                 output, reference, mode3["mapping_config"],
-                "cut-state-hard-cut-generation", input_contract)
+                input_contract)
             for clock in (True, 1.0, -1, 0x10000000000000000, None):
                 corrupt = json.loads(json.dumps(mode3))
                 if clock is None:
@@ -935,14 +810,14 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 with self.subTest(clock=clock), self.assertRaises(ValueError):
                     _validate_gpu_input_manifest_evidence(
                         output, reference, mode3["mapping_config"],
-                        "cut-state-hard-cut-generation", input_contract)
+                        input_contract)
             mode3["mapping_config"].pop("joint_plane_mode")
             manifest_path.write_text(json.dumps(mode3), encoding="utf-8")
             reference["sha256"] = whole_clip_raw_contract.file_sha256(manifest_path)
             with self.assertRaises(ValueError):
                 _validate_gpu_input_manifest_evidence(
                     output, reference, mode3["mapping_config"],
-                    "cut-state-hard-cut-generation", input_contract)
+                    input_contract)
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             _validate_frame_source_attestation(output, rows[1], "00002")
             (output / "input_frames" / "frame_00002.png").write_bytes(
@@ -1000,7 +875,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "exact source-derived"):
                     _exact_source_capture_grid_kind(1920, 1080, width, height)
 
-    def test_producer_bundle_survives_source_deletion_and_authenticates_cut_authority(self):
+    def test_producer_bundle_survives_source_deletion(self):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
             eval_root = workspace / "eval"
@@ -1018,8 +893,8 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             calibration = MODEL_CALIBRATIONS[0]
             config = MappingV2Config(raw_coordinate_scale=calibration.raw_coordinate_scale)
             _, gpu_path = _materialize_gpu_replay_inputs(
-                output, {1: source}, dict(_raw_files(clip)), [1], [0], [False],
-                "cut-state-hard-cut-generation", shape, run_model, config,
+                output, {1: source}, dict(_raw_files(clip)), [1],
+                shape, run_model, config,
                 observation_timestamps_us=[1])
             gpu_reference = {
                 "file": "gpu_input/manifest.json", "schema": GPU_INPUT_MANIFEST_SCHEMA,
@@ -1027,37 +902,36 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             }
             gpu_manifest = _validate_gpu_input_manifest_evidence(
                 output, gpu_reference, json.loads(gpu_path.read_text())["mapping_config"],
-                "cut-state-hard-cut-generation", input_contract)
+                input_contract)
             validated = _validate_producer_evidence_bundle(
                 output, producer_reference, input_contract, gpu_manifest)
             self.assertEqual(validated["calibration_status"], "calibrated")
-            corrupt_cut = json.loads(json.dumps(gpu_manifest))
-            corrupt_cut["frames"][0]["hard_cut_count"] = 1
-            with self.assertRaisesRegex(ValueError, "cut evidence disagrees"):
-                _validate_producer_evidence_bundle(
-                    output, producer_reference, input_contract, corrupt_cut)
+            self.assertEqual(producer_reference["schema"], PRODUCER_EVIDENCE_SCHEMA)
 
             shutil.rmtree(eval_root)
             _validate_producer_evidence_bundle(
                 output, producer_reference, input_contract, gpu_manifest)
-            cut_path = output / producer_reference["cut_state"]["file"]
-            cut_path.write_text("{}", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "cut_state hash mismatch"):
+            with_unknown_key = dict(
+                producer_reference, unknown_key=dict(producer_reference["raw_shape"]))
+            with self.assertRaisesRegex(ValueError, "missing or unknown semantics"):
+                _validate_producer_evidence_bundle(
+                    output, with_unknown_key, input_contract, gpu_manifest)
+            shape_path = output / producer_reference["raw_shape"]["file"]
+            shape_path.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "raw_shape hash mismatch"):
                 _validate_producer_evidence_bundle(
                     output, producer_reference, input_contract, gpu_manifest)
 
-    def test_renderer_score_rejects_controller_state_instead_of_sanitizing(self):
+    def test_renderer_score_publication_rejects_unknown_scorecard_schema(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             score_path = output / RENDERER_SCORECARD_FILE
             score_path.write_text(json.dumps({
-                "aggregate": {
-                    "source_coverage_pct": 100.0,
-                    "shot_state_pulse_mismatch": 0.0,
-                },
+                "aggregate": {"source_coverage_pct": 100.0},
                 "frames": [{"_dump": "sbs_00001.png", "source_coverage_pct": 100.0}],
+                "controller_state": {},
             }), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "controller-state metrics"):
+            with self.assertRaisesRegex(ValueError, "unknown schema"):
                 _publish_renderer_quality_score(score_path, output)
             self.assertFalse((output / RENDERER_SCORE_CONTRACT_FILE).exists())
 
@@ -1075,9 +949,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(evidence["metric_contract"], _metric_contract_evidence())
             self.assertEqual(scope_contract["schema"], RENDERER_SCORE_CONTRACT_SCHEMA)
             self.assertEqual(scope_contract["metric_contract"], evidence["metric_contract"])
-            self.assertEqual(
-                scope_contract["forbidden_metric_prefixes"],
-                list(FORBIDDEN_RENDERER_SCORE_PREFIXES))
+            self.assertNotIn("forbidden_metric_prefixes", scope_contract)
             self.assertNotIn("excluded_metrics", scope_contract)
             self.assertNotIn("source_scorecard", scope_contract)
             self.assertEqual(json.loads(score_path.read_text()), scorecard)
@@ -1095,7 +967,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 "tools/sbsbench/sbs_subtitle_metrics.py",
                 "tools/sbsbench/sbs_warp_shear_metrics.py",
                 "tools/sbsbench/direct_geometry_contract.py",
-                "tools/sbsbench/cut_state_contract.py",
                 "tools/sbsbench/thresholds.json",
             ])
         self.assertRegex(evidence["sha256"], r"^[0-9a-f]{16}$")
@@ -1115,12 +986,12 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             output = Path(temporary)
             with self.assertRaisesRegex(ValueError, "explicit uint64 source timestamp"):
                 _materialize_gpu_replay_inputs(
-                    output, {}, {}, [1], [0], [False], "unit-cut", (1, 1), {},
+                    output, {}, {}, [1], (1, 1), {},
                     MappingV2Config(), joint_plane_mode=3)
             self.assertEqual(list(output.iterdir()), [])
             with self.assertRaisesRegex(ValueError, "invalid joint plane mode"):
                 _materialize_gpu_replay_inputs(
-                    output, {}, {}, [1], [0], [False], "unit-cut", (1, 1), {},
+                    output, {}, {}, [1], (1, 1), {},
                     MappingV2Config(), joint_plane_mode=0, observation_timestamps_us=[1])
 
 
@@ -1131,7 +1002,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             np.zeros((2, 2), dtype="<f4").tofile(output / "harness/depth_00001.f32")
             np.zeros((2, 2), dtype="<f4").tofile(output / "harness/parallax_00001.f32")
             document = _record_native_geometry_audit(
-                output, [np.zeros((2, 2))], [1], [False], [0], "unit-cut",
+                output, [np.zeros((2, 2))], [1],
                 MappingV2Config(), {"mapping_config": {"joint_plane_mode": 3}})
             self.assertIsNone(document["all_within_float32_tolerances"])
             self.assertEqual(document["role"], "not-applicable-mode-selected-native-only-v3")

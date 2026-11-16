@@ -21,6 +21,8 @@ ARTIFACTS = (
     "actual_shared_pin_map.rgba32f", "actual_shared_pin_boundary.rgba32f",
 )
 LEGACY_ROLE = "independent analytic diagnostic; does not describe rendered shared warp"
+SHARED_ROLE = "independent Base diagnostic; does not describe rendered shared warp"
+BASE_ROLE = "authenticated Base inverse diagnostic"
 
 
 def _expected_closure() -> str:
@@ -32,24 +34,38 @@ def _expected_closure() -> str:
 
 
 def validate_attribution(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Accept the optional extension without reinterpreting older schema-50 dumps."""
+    """Read schema-2 Base/shared attribution and retain historical unversioned attribution."""
+    if "schema" in manifest and type(manifest["schema"]) is not int:
+        raise ValueError("dump serialization schema must be an integer")
+    current_dump = manifest.get("schema", 0) >= 51
     value = manifest.get("renderer", {}).get("actual_draw_renderer")
     if value is None:
+        if current_dump:
+            raise ValueError("current dump requires versioned actual draw renderer attribution")
         return {"kind": "legacy-analytic-v1", "shared_pin_selected": False}
-    if not isinstance(value, dict) or set(value) != {
-            "kind", "source_closure_sha256", "legacy_mapping_role", "evidence_artifact"}:
+    if not isinstance(value, dict):
         raise ValueError("actual draw renderer attribution is malformed")
+    current = "schema" in value
+    expected_fields = {"kind", "source_closure_sha256", "evidence_artifact"}
+    expected_fields |= {"schema", "mapping_role"} if current else {"legacy_mapping_role"}
+    if (set(value) != expected_fields or
+            (current and (type(value["schema"]) is not int or value["schema"] != 2)) or
+            (current_dump and not current)):
+        raise ValueError("actual draw renderer attribution has an unknown schema")
     shared = value["kind"] == KIND
-    if (value["kind"] not in {KIND, "legacy-analytic-v1"} or
+    role = SHARED_ROLE if shared else BASE_ROLE
+    if not current:
+        role = LEGACY_ROLE if shared else "selected analytic renderer diagnostic"
+    if (value["kind"] not in {KIND, "ordinary-base-v1" if current else "legacy-analytic-v1"} or
             value["source_closure_sha256"] != (_expected_closure() if shared else "") or
-            value["legacy_mapping_role"] != (LEGACY_ROLE if shared else
-                "selected analytic renderer diagnostic") or
+            value["mapping_role" if current else "legacy_mapping_role"] != role or
             value["evidence_artifact"] != EVIDENCE):
         raise ValueError("actual draw renderer has an unknown source or map attribution")
     if shared and manifest["renderer"].get("mapping_artifacts_match_selected_renderer") is not False:
-        raise ValueError("legacy analytic map cannot claim shared-warp render authority")
+        raise ValueError("ordinary/legacy analytic map cannot claim shared-warp render authority")
     return {"kind": value["kind"], "shared_pin_selected": shared,
-            "source_closure_sha256": value["source_closure_sha256"]}
+            "source_closure_sha256": value["source_closure_sha256"],
+            "evidence_schema": 2 if current else 1}
 
 
 def _read(root: Path, manifest: dict[str, Any], name: str) -> bytes:
@@ -98,6 +114,14 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
         raise ValueError("actual draw evidence is invalid JSON") from error
     if not isinstance(evidence, dict):
         raise ValueError("actual draw evidence must be a JSON object")
+    if ((attribution["evidence_schema"] == 2 and
+            (type(evidence.get("schema")) is not int or evidence["schema"] != 2)) or
+            (attribution["evidence_schema"] == 1 and "schema" in evidence)):
+        raise ValueError("actual draw evidence schema disagrees with renderer attribution")
+    if attribution["evidence_schema"] == 2:
+        roles = evidence.get("binding_roles", {})
+        if not isinstance(roles, dict) or "t8" in roles:
+            raise ValueError("current actual draw evidence retains the retired legacy t8 mask")
     if evidence.get("captured") is False:
         return {**attribution, "actual_map_verified": False,
                 "unavailable_reason": "actual draw binding observation was unavailable"}, None
@@ -117,6 +141,10 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
     evidence_artifacts = evidence.get("artifacts")
     if not isinstance(evidence_artifacts, dict):
         raise ValueError("actual draw evidence artifacts must be an object")
+    if attribution["evidence_schema"] == 2 and (
+            "actual_original_legacy_M.u32" in evidence_artifacts or
+            "actual_original_legacy_M.u32" in manifest["artifacts"]):
+        raise ValueError("current actual draw evidence retains the retired legacy t8 mask")
     payloads = {}
     missing = []
     for name in ARTIFACTS:

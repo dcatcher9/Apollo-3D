@@ -48,6 +48,7 @@
   #include "platform/windows/ar_glasses.h"
   #include "platform/windows/open3d_emitter.h"
   #include "platform/windows/game3d_setup.h"
+  #include "platform/windows/host3d_subtitle_apps.h"
   #include "platform/windows/utils.h"
 #endif
 
@@ -124,12 +125,6 @@ namespace confighttp {
     }
     return WEB_UI_REQUEST_STREAM_MAX_BYTES;
   }
-
-  // Keep the base enum for client operations.
-  enum class op_e {
-    ADD,  ///< Add client
-    REMOVE  ///< Remove client
-  };
 
   // SESSION COOKIE
   static std::string sessionCookie;
@@ -1455,6 +1450,75 @@ namespace confighttp {
    *
    * @api_examples{/api/config| POST| {"key":"value"}}
    */
+#ifdef _WIN32
+  /**
+   * @brief List the applications Host 3D may protect subtitles in.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * Enabled applications, then applications recently seen in front of a Host 3D stream.
+   *
+   * @api_examples{/api/host3d/subtitle-apps| GET| null}
+   */
+  void getHost3dSubtitleApps(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["apps"] = nlohmann::json::array();
+    for (const auto &app : platf::host3d_subtitle_apps::list()) {
+      output_tree["apps"].push_back({
+        {"executable", app.executable},
+        {"name", app.name},
+        {"enabled", app.enabled},
+        {"recent", app.recent},
+      });
+    }
+    send_response(response, output_tree);
+  }
+
+  /**
+   * @brief Turn Host 3D subtitle protection on or off for one application.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * The running host changes at once and the selection is saved to the configuration file.
+   *
+   * @api_examples{/api/host3d/subtitle-apps| POST| {"executable":"C:/Games/Example/game.exe","enabled":true}}
+   */
+  void setHost3dSubtitleApp(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      std::stringstream body;
+      body << request->content.rdbuf();
+      const auto input = nlohmann::json::parse(body);
+      const auto executable = input.find("executable");
+      const auto enabled = input.find("enabled");
+      if (executable == input.end() || !executable->is_string() || enabled == input.end() || !enabled->is_boolean() ||
+          !platf::host3d_subtitle_apps::set_enabled(executable->get<std::string>(), enabled->get<bool>())) {
+        bad_request(response, request, "An absolute .exe path and a boolean 'enabled' are required");
+        return;
+      }
+      BOOST_LOG(info) << "Host 3D subtitle protection "sv << (enabled->get<bool>() ? "enabled"sv : "disabled"sv)
+                      << " for ["sv << executable->get<std::string>() << "] from the Web UI."sv;
+      // The live selection already changed. A failed save only loses it at the next start.
+      const bool saved = ar_glasses::persist_config_value(
+        platf::host3d_subtitle_apps::config_key, platf::host3d_subtitle_apps::serialize()
+      );
+      send_response(response, nlohmann::json {{"status", true}, {"saved", saved}});
+    } catch (const std::exception &error) {
+      bad_request(response, request, error.what());
+    }
+  }
+#endif
+
   void saveConfig(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
       return;
@@ -1472,6 +1536,15 @@ namespace confighttp {
       erase_retired_config_options(input_tree);
       // This option is live-managed by the AR display decision API rather than the general form.
       input_tree.erase("ar_glass_devices");
+#ifdef _WIN32
+      // The per-application subtitle selection is live-managed by its own API as well. Write the
+      // current selection so a general save cannot drop or revive an entry.
+      input_tree.erase(std::string {platf::host3d_subtitle_apps::config_key});
+      if (const auto subtitle_apps = nlohmann::json::parse(platf::host3d_subtitle_apps::serialize());
+          !subtitle_apps.empty()) {
+        input_tree[std::string {platf::host3d_subtitle_apps::config_key}] = subtitle_apps;
+      }
+#endif
       for (const auto &[k, v] : input_tree.items()) {
         if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
           continue;
@@ -2073,8 +2146,15 @@ namespace confighttp {
       }
 
       offline_sbs::create_request_t create;
-      create.input_path =
-        fs::path(input["input_path"].get<std::string>());
+      {
+        // The request is UTF-8. A narrow std::string would be decoded in the ANSI code page,
+        // so build the path the same way the browse endpoint does.
+        const auto input_path = input["input_path"].get<std::string>();
+        create.input_path = fs::path {std::u8string {
+          reinterpret_cast<const char8_t *>(input_path.data()),
+          reinterpret_cast<const char8_t *>(input_path.data() + input_path.size())
+        }};
+      }
       const auto operation = input.value("operation", std::string {"convert"});
       if (operation == "convert") {
         create.operation = offline_sbs::operation_e::convert;
@@ -2164,62 +2244,6 @@ namespace confighttp {
     );
   }
 
-  void getOfflineSbsSceneAudit(
-    resp_https_t response,
-    req_https_t request
-  ) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-    const auto job_id = request->path_match[1].str();
-    std::optional<std::uint32_t> page;
-    for (const auto &[name, value] : request->parse_query_string()) {
-      if (name != "page" || page || value.empty() || value.size() > 5 ||
-          value.find_first_not_of("0123456789") != std::string::npos) {
-        bad_request(response, request, "scene audit accepts one nonnegative page index");
-        return;
-      }
-      page = static_cast<std::uint32_t>(std::stoul(value));
-    }
-    const auto reply = offline_sbs::scene_audit(job_id, page);
-    if (!reply.ok) {
-      const offline_sbs::service_reply_t status_reply {
-        .ok = false,
-        .code = reply.code,
-        .error = reply.error,
-      };
-      send_json_response(
-        response,
-        offline_reply_status(
-          status_reply,
-          SimpleWeb::StatusCode::success_ok
-        ),
-        reply.json()
-      );
-      return;
-    }
-
-    // The route restricts job_id to hexadecimal UUID characters, so it is safe in
-    // this quoted attachment filename. Page indices resolve only through the
-    // authenticated manifest, never through a client-supplied filesystem path.
-    const SimpleWeb::CaseInsensitiveMultimap headers {
-      {"Content-Type", "application/json"},
-      {"Content-Disposition",
-       "attachment; filename=\"scene-audit-" + job_id +
-       (page ? "-page-" + std::to_string(*page) :
-         (reply.audit.value("document_kind", "") == "manifest" ? "-manifest" : "")) + ".json\""},
-      {"Cache-Control", "no-store"},
-      {"X-Content-Type-Options", "nosniff"},
-      {"X-Frame-Options", "DENY"},
-      {"Content-Security-Policy", "frame-ancestors 'none';"}
-    };
-    response->write(
-      SimpleWeb::StatusCode::success_ok,
-      reply.serialized_artifact ? *reply.serialized_artifact : reply.audit.dump(2),
-      headers
-    );
-  }
-
   void cancelOfflineSbsJob(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -2291,8 +2315,6 @@ namespace confighttp {
     server.resource["^/api/offline-sbs/jobs$"]["POST"] = createOfflineSbsJob;
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)/cancel$"]["POST"] =
       cancelOfflineSbsJob;
-    server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)/scene-audit$"]["GET"] =
-      getOfflineSbsSceneAudit;
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$"]["DELETE"] =
       clearOfflineSbsJob;
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$"]["GET"] =
@@ -2306,6 +2328,8 @@ namespace confighttp {
     server.resource["^/api/ar-glasses$"]["POST"] = setArGlassDevice;
     server.resource["^/api/local-monitor$"]["GET"] = getLocalMonitor;
     server.resource["^/api/local-monitor$"]["POST"] = setLocalMonitor;
+    server.resource["^/api/host3d/subtitle-apps$"]["GET"] = getHost3dSubtitleApps;
+    server.resource["^/api/host3d/subtitle-apps$"]["POST"] = setHost3dSubtitleApp;
 #endif
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = restart;

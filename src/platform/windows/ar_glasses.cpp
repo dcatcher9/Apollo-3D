@@ -1061,8 +1061,8 @@ namespace ar_glasses {
       return contents;
     }
 
-    std::string replace_managed_config_value(std::string contents, std::string_view value) {
-      const std::string replacement = std::string(managed_config_key) + " = " + std::string(value);
+    std::string replace_config_value(std::string contents, std::string_view key, std::string_view value) {
+      const std::string replacement = std::string(key) + " = " + std::string(value);
       size_t cursor = 0;
       while (cursor < contents.size()) {
         const auto newline = contents.find('\n', cursor);
@@ -1077,7 +1077,7 @@ namespace ar_glasses {
         const auto key_end = equals == std::string_view::npos ? equals : line.find_last_not_of(" \t", equals - 1);
         const bool managed_line = first != std::string_view::npos && equals != std::string_view::npos &&
                                   key_end != std::string_view::npos &&
-                                  line.substr(first, key_end - first + 1) == managed_config_key;
+                                  line.substr(first, key_end - first + 1) == key;
         if (managed_line) {
           contents.replace(cursor, line_end - cursor, replacement + (had_carriage_return ? "\r" : ""));
           return contents;
@@ -1094,6 +1094,10 @@ namespace ar_glasses {
       }
       contents.append(replacement).append(newline);
       return contents;
+    }
+
+    std::string replace_managed_config_value(std::string contents, std::string_view value) {
+      return replace_config_value(std::move(contents), managed_config_key, value);
     }
 
     bool write_config_atomically(std::string_view contents) {
@@ -2866,7 +2870,7 @@ namespace ar_glasses {
         const bool geometry_ready = VDISPLAY::getDeviceSettings(display_name.c_str(), mode) &&
                                     mode.dmPelsWidth == target_source_width(*physical_target) &&
                                     mode.dmPelsHeight == target_source_height(*physical_target);
-        const auto hdr_state = VDISPLAY::queryDisplayHDRByName(display_name.c_str());
+        const auto hdr_state = VDISPLAY::queryDisplayHDR(identity.AdapterLuid, identity.TargetId);
         const bool hdr_matches = hdr_state && *hdr_state == expected_hdr;
         if (geometry_ready && hdr_matches) {
           if (++stable_observations >= 3) {
@@ -2900,8 +2904,8 @@ namespace ar_glasses {
         }
         BOOST_LOG(warning) << "Local AR virtual display did not settle before HDR configuration."sv;
       }
-      if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), false)) {
-        const auto current_hdr = VDISPLAY::queryDisplayHDRByName(display_name.c_str());
+      if (!VDISPLAY::setDisplayHDR(identity.AdapterLuid, identity.TargetId, false)) {
+        const auto current_hdr = VDISPLAY::queryDisplayHDR(identity.AdapterLuid, identity.TargetId);
         if (!current_hdr || *current_hdr) {
           BOOST_LOG(error) << "Could not authoritatively reset the local AR virtual display to SDR before HDR setup."sv;
           return false;
@@ -2918,7 +2922,7 @@ namespace ar_glasses {
         return true;
       }
 
-      if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), true)) {
+      if (!VDISPLAY::setDisplayHDR(identity.AdapterLuid, identity.TargetId, true)) {
         BOOST_LOG(warning) << "Windows rejected HDR for the local AR virtual display; using color-managed SDR presentation."sv;
         return true;
       }
@@ -2927,7 +2931,7 @@ namespace ar_glasses {
           return false;
         }
         BOOST_LOG(warning) << "Local AR virtual display did not reach a stable HDR state; using color-managed SDR presentation."sv;
-        if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), false) || !wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
+        if (!VDISPLAY::setDisplayHDR(identity.AdapterLuid, identity.TargetId, false) || !wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
           BOOST_LOG(error) << "Local AR virtual display could not recover to SDR after HDR setup failed."sv;
           return false;
         }
@@ -3572,7 +3576,19 @@ namespace ar_glasses {
           // actually SDR, that mismatch makes the presenter reject every target generation. SDR is
           // the safe common contract and remains color-managed when the sink later proves to be HDR.
           const bool desired_virtual_hdr = target.hdr.known && target.hdr.active;
-          const auto current_virtual_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
+          // Address the owned source by its stable adapter/target identity. A GDI name such as
+          // DISPLAYn can be renumbered or reused by another display during a mode switch.
+          const auto query_source_hdr = [&]() -> std::optional<bool> {
+            const auto binding = virtual_display_binding();
+            return binding.identity ? VDISPLAY::queryDisplayHDR(binding.identity->AdapterLuid, binding.identity->TargetId) :
+                                      VDISPLAY::queryDisplayHDRByName(binding.display_name.c_str());
+          };
+          const auto set_source_hdr = [&](bool enabled) {
+            const auto binding = virtual_display_binding();
+            return binding.identity ? VDISPLAY::setDisplayHDR(binding.identity->AdapterLuid, binding.identity->TargetId, enabled) :
+                                      VDISPLAY::setDisplayHDRByName(binding.display_name.c_str(), enabled);
+          };
+          const auto current_virtual_hdr = query_source_hdr();
           if (!current_virtual_hdr) {
             return false;
           }
@@ -3582,7 +3598,7 @@ namespace ar_glasses {
               if (!refresh_virtual_display_reference()) {
                 continue;
               }
-              const auto observed_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
+              const auto observed_hdr = query_source_hdr();
               if (observed_hdr && *observed_hdr == expected_hdr) {
                 return true;
               }
@@ -3592,9 +3608,7 @@ namespace ar_glasses {
 
           bool configured_virtual_hdr = *current_virtual_hdr;
           if (configured_virtual_hdr != desired_virtual_hdr) {
-            const bool setting_accepted = VDISPLAY::setDisplayHDRByName(
-              virtual_display_binding().display_name.c_str(),
-              desired_virtual_hdr
+            const bool setting_accepted = set_source_hdr(desired_virtual_hdr
             );
             if (setting_accepted && wait_for_source_color(desired_virtual_hdr)) {
               configured_virtual_hdr = desired_virtual_hdr;
@@ -3603,19 +3617,15 @@ namespace ar_glasses {
               // swapchain when Windows/SudoVDA rejects source HDR. Never remove the desktop merely
               // because its virtual output cannot activate Advanced Color in this mode.
               BOOST_LOG(warning) << "Persistent local AR source HDR was unavailable after the mode switch; using color-managed SDR presentation."sv;
-              const auto fallback_state = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
+              const auto fallback_state = query_source_hdr();
               bool fallback_ready = fallback_state && !*fallback_state;
               if (!fallback_ready) {
-                const bool fallback_accepted = VDISPLAY::setDisplayHDRByName(
-                  virtual_display_binding().display_name.c_str(),
-                  false
+                const bool fallback_accepted = set_source_hdr(false
                 );
                 if (fallback_accepted) {
                   fallback_ready = wait_for_source_color(false);
                 } else {
-                  const auto observed_fallback = VDISPLAY::queryDisplayHDRByName(
-                    virtual_display_binding().display_name.c_str()
-                  );
+                  const auto observed_fallback = query_source_hdr();
                   fallback_ready = observed_fallback && !*observed_fallback;
                 }
               }
@@ -3637,7 +3647,7 @@ namespace ar_glasses {
             BOOST_LOG(warning) << "The new AR physical mode could not be safely re-isolated; preserving the virtual desktop for retry."sv;
             return false;
           }
-          const auto final_virtual_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_binding().display_name.c_str());
+          const auto final_virtual_hdr = query_source_hdr();
           if (!final_virtual_hdr || *final_virtual_hdr != virtual_hdr_active_) {
             BOOST_LOG(warning) << "The persistent local AR source color state changed during final isolation; retaining the desktop for a coherent retry."sv;
             return false;
@@ -4261,8 +4271,13 @@ namespace ar_glasses {
             if (presented_after - presented_before >= 60) {
               // Reset only after the attempt demonstrably presented a stable run of frames. Slow
               // initialization failures no longer evade the retry breaker merely by taking time.
-              reinit_window_started = now;
               consecutive_reinits = 0;
+            }
+            if (consecutive_reinits == 0) {
+              // The window measures the current run of failed attempts, from its first failure.
+              // Measured from thread start, one benign reinit (a stale output, a size change)
+              // after ten quiet seconds would already count as "did not recover".
+              reinit_window_started = now;
             }
             ++consecutive_reinits;
             if (consecutive_reinits >= 12 || now - reinit_window_started >= 10s) {
@@ -5748,6 +5763,22 @@ namespace ar_glasses {
     const auto friendly_name = platf::to_utf8(target_name.monitorFriendlyDeviceName);
     std::lock_guard lock(device_mutex);
     return preserve_during_remote_virtual_display_policy(model_id, friendly_name, known_devices);
+  }
+
+  bool persist_config_value(std::string_view key, std::string_view value) {
+    // device_mutex is the single writer lock for the configuration file.
+    std::lock_guard lock(device_mutex);
+    auto contents = read_config_file_strict();
+    if (!contents) {
+      BOOST_LOG(error) << "Could not read the complete configuration file; refusing to replace it while saving ["sv
+                       << key << "]."sv;
+      return false;
+    }
+    if (!write_config_atomically(replace_config_value(std::move(*contents), key, value))) {
+      BOOST_LOG(error) << "Could not save ["sv << key << "] to "sv << config::sunshine.config_file << '.';
+      return false;
+    }
+    return true;
   }
 
   bool write_config_with_devices(std::string_view contents) {

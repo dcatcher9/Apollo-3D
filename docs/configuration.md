@@ -61,6 +61,17 @@ Host AI 3D always uses continuous adaptive zero/amplitude, linear depth displace
 adaptive subtitle UI plane. Their [pipeline contract](host-sbs.md#adaptive-geometry-and-subtitle-plane)
 owns the policy. The former experiment selector has been retired.
 
+### sbs_3d_subtitle_apps
+
+<table>
+    <tr><td>Description</td><td>The applications whose bottom text live Host 3D detects and protects as subtitles, for example a 2D game. The value is a JSON array of absolute executable paths. It is managed from **Host 3D subtitles per app** on the Essentials page, which lists the applications recently in front of a Host 3D stream; a change there applies to a running stream immediately and is saved by the host. Protection is off for every application that is not listed. Browser videos and registered video players are always eligible and are not listed. For a listed application the caption centering rule is dropped and the first few characters of a line are accepted once one full line has been seen, because game dialogue is rarely centered and types out a few characters at a time, and the glyph search covers the whole dialogue line so that symbols the text detector skips are protected with the characters around them; the text must still be in the bottom subtitle region. Game 3D is unaffected.</td></tr>
+    <tr><td>Default</td><td><code>[]</code></td></tr>
+    <tr><td>Example</td><td><code>["C:/Games/Example/game.exe"]</code></td></tr>
+</table>
+
+The [subtitle admission contract](host-sbs.md#native-subtitle-contours-and-ui-plane) owns the
+eligibility rules.
+
 ## General
 
 ### locale

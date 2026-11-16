@@ -586,7 +586,7 @@ namespace models {
   engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model);
 
   /**
-   * @brief Result of one estimate call: private cut-analysis depth, cut state, and the
+   * @brief Result of one estimate call: private normalized depth, tagged depth-health state, and the
    *        authenticated Host SBS parallax field/state.
    */
   [[nodiscard]] constexpr bool ocr_signature_refresh_satisfied(
@@ -884,7 +884,7 @@ namespace models {
 
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Cut-analysis state shared with telemetry and coordinate production.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_health_state;  ///< Tagged depth-health state shared with telemetry and coordinate production.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Public model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
@@ -917,6 +917,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_base_final_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_final_parallax;
+    /// True only when this completion ran the diagnostic conditioner. Otherwise Final holds exact
+    /// Base and the field-pin, distance and Gaussian views are not current evidence.
+    bool subtitle_conditioning_diagnostics_current = false;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 only when subtitle_evidence_is_exact_frame() succeeds.
@@ -1078,7 +1081,7 @@ namespace models {
       const host_sbs_gpu_completion_receipt::snapshot_words_t &snapshot,
       const host_sbs_gpu_completion_receipt::expected_t &expected,
       std::uint64_t poll_estimator_generation = 0u,
-      bool cut_present = true,
+      bool depth_health_present = true,
       bool outcomes_present = true
     );
   }  // namespace detail
@@ -1187,44 +1190,33 @@ namespace models {
   }
 
   /**
-   * One opportunistic, nonblocking readback of the append-only diagnostic portion of
-   * cut-analysis state. Live samples may be skipped or coalesced while the GPU is busy; absence
-   * of a sample is not evidence that the detector did not update.
+   * One opportunistic, nonblocking readback of the tagged depth-health state. Live samples may
+   * be skipped or coalesced while the GPU is busy; absence of a sample is not evidence that the
+   * estimator did not update.
    */
   struct depth_telemetry_sample {
     int depth_width = 0;
     int depth_height = 0;
     float adaptive_pop_ratio = 1.0f;  ///< Retained wire field; V2 always publishes 1.
     float edge_fraction = -1.0f;  ///< Retained wire field; unavailable in V2.
-    float change_fraction = 0.0f;
     float zero_anchor_shift_px = 0.0f;  ///< Retained wire field; unavailable in V2.
     float subject_depth = 0.0f;  ///< Retained wire field; unavailable in V2.
     float valid_depth_fraction = 0.0f;
     float effective_range_width = 0.0f;
-    // Current-frame cut evidence used to distinguish detector state from incoming observations.
     float current_edge_fraction = -1.0f;
     float current_zero_anchor_candidate_shift_px = -1.0f;
-    float structural_change_fraction = -1.0f;
-    float raw_rgb_change_fraction = -1.0f;
-    std::uint32_t analysis_flags = 0;
-    std::uint32_t model_input_history_state = 0;
-    std::uint32_t scene_age = 0;
-    std::uint32_t cut_flags = 0;
-    std::uint32_t hard_cut_count = 0;
-    std::uint32_t external_cut_count = 0;
     std::uint32_t empty_raw_count = 0;
     std::uint32_t collapsed_raw_count = 0;
     // Latest authenticated completed transaction at copy submission. An opaque transaction may
     // retain the earlier real depth owner; this diagnostic ID never identifies that owner.
     std::uint64_t sampled_frame_id = 0;
-    // Wall-clock time of the shared snapshot submission that captured this CutBridge state. Readback may
-    // complete much later and must never make old motion evidence look fresh.
+    // Wall-clock time of the shared snapshot submission that captured this state. Readback may
+    // complete much later and must never make an old sample look fresh.
     std::chrono::steady_clock::time_point sampled_at {};
     bool profile_initialized = false;
     bool anchor_valid = false;
     bool range_collapsed = false;
     bool depth_ready = false;
-    bool hard_cut_pulse = false;
   };
 
   struct depth_telemetry_poll_result {
@@ -1393,6 +1385,8 @@ namespace models {
     bool pending_queued=false,baseline_current=false,temporal_commands=false,source_certificate_valid=false;
     bool current_outline_hole_program_ready=false; // Shader availability only, never GPU execution proof.
     bool current_outline_coverage_program_ready=false; // Shader availability only, never GPU execution proof.
+    bool current_outline_foreground_edge_program_ready=false; // Shader availability only, never GPU execution proof.
+    bool current_outline_trusted_inner_program_ready=false; // Availability only; zero indirect work is a valid observation.
     std::uint64_t current_outline_cbc_recordings=0u,current_outline_cbc_replays=0u,current_outline_cbc_allocations=0u;
     std::uint64_t current_outline_f2_recordings=0u,current_outline_f2_replays=0u,current_outline_f2_allocations=0u;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_matte,selected_receipt;
@@ -1436,6 +1430,13 @@ namespace models {
     ~video_depth_estimator();
     // Called on the owning render thread before the first submission. Null outside diagnostics.
     void set_telemetry_performance(std::shared_ptr<host_sbs_telemetry::collector> performance);
+
+    /** The field pin, native distance, Gaussian proposal and compatibility limiters reach only
+     * Dump 3D and harness artifacts; rendering binds Base. The default (true) runs them on every
+     * subtitle observation. Live streaming passes false so only a dump-forced observation runs
+     * them; every other observation publishes exact Base through the distinct Final texture.
+     */
+    void set_subtitle_conditioning_diagnostics_always(bool always) noexcept;
 
     /** Research harness only, default false; accepted only before the first input.
      * Runs private cohort/filter/M1 diagnostics without replacing production S/M or geometry.
@@ -1540,6 +1541,8 @@ namespace models {
      *        clears only subtitle history and forces inference; zero preserves offline behavior.
      *        If this call completes a prior frame, it returns that publication without enqueueing;
      *        submit the changed context again after consuming the returned frame.
+     * @param subtitle_line_policy Horizontal position rule for this submission's OCR line
+     *        classifier. It may change only together with the subtitle context generation.
      * @return estimate_result; all views are owned by the estimator and overwritten by later calls.
      */
     estimate_result estimate_depth(
@@ -1551,13 +1554,14 @@ namespace models {
       depth_optional_work_mode_e optional_work = depth_optional_work_mode_e::ordinary,
       gpu_adaptive_reuse_request adaptive_reuse = {},
       std::uint64_t subtitle_context_generation = 0u,
-      host_sbs_temporal_source_bridge::certificate_t source_observation = {}
+      host_sbs_temporal_source_bridge::certificate_t source_observation = {},
+      subtitle_line_policy_e subtitle_line_policy = subtitle_line_policy_e::video_caption
     );
 
     /**
      * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
      *
-     * It synchronizes the estimator stream and applies normalization, EMA, cut analysis, and
+     * It synchronizes the estimator stream and applies normalization, EMA, and
      * coordinate production exactly once without enqueueing another inference. This is an
      * offline-evaluation quality path; live capture uses only bounded/nonblocking completion polls.
      */

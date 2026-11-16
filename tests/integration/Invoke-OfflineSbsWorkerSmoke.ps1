@@ -6,9 +6,8 @@ Runs the production native offline-SBS worker end to end on a deterministic loca
 This is an opt-in GPU integration smoke test. It creates all artifacts below the repository's
 .offline-sbs-smoke directory, authenticates the exact worker specification with SHA-256, invokes
 the same sunshine.exe --offline-sbs-worker entry point used by the job manager, and verifies the
-worker result, full causal scene audit, compressed Matroska output, stream preservation, timestamps,
-attachment bytes, exact causal pulse/scene propagation, online flash-veto behavior, color tags, bit depth, and
-failed-job cleanup. The default fixture is SDR. Use -FixtureColor pq or -FixtureColor hlg to opt
+worker result, compressed Matroska output, stream preservation, timestamps, attachment bytes,
+color tags, bit depth, and failed-job cleanup. The default fixture is SDR. Use -FixtureColor pq or -FixtureColor hlg to opt
 into a tagged 10-bit BT.2020 HDR fixture; both HEVC and AV1 remain selectable with -Codec.
 
 No Python runtime or PATH-discovered media tool is used. Stop live streaming before running this
@@ -450,7 +449,7 @@ function New-WorkerSpec {
   New-Item -ItemType Directory -Path $JobDirectory -Force | Out-Null
 
   $spec = [ordered] @{
-    schema = 2
+    schema = 3
     job_id = $JobId
     operation = $Operation
     input_path = $InputPath
@@ -477,7 +476,6 @@ function New-WorkerSpec {
     codec = $Codec
     pipeline = [ordered] @{
       implementation = 'native-causal-single-pass'
-      cut_state = 'authenticated-online-pulse-count'
       lookahead = $false
       scene_cache = $false
       replay = $false
@@ -517,40 +515,6 @@ function Invoke-Worker {
       $Worker.SpecSha256
     ) `
     -WorkingDirectory (Split-Path -Parent $script:SunshinePath)
-}
-
-# This fixture has only 16 frames. Assemble its bounded audit in the test after
-# authenticating each page; production/UI always read one bounded page at a time.
-function Read-VerifiedAudit {
-  param([string] $Path, [string] $ExpectedHash)
-  Assert-Contract ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $ExpectedHash) 'audit manifest digest differs from worker attestation'
-  $manifest = Read-JsonFile -Path $Path
-  Assert-Contract ($manifest.schema -eq 4 -and $manifest.version -eq 'whole-clip-scene-audit-v4') 'paged audit contract changed'
-  Assert-Contract ([long] $manifest.storage.scene_count -le 16) 'smoke audit exceeds fixture bound'
-  $scenes = @()
-  $boundaries = @()
-  $nextScene = 1L
-  $nextSequence = 1L
-  $bytes = 0L
-  foreach ($descriptor in $manifest.pages) {
-    Assert-Contract ([long] $descriptor.index -ge 0 -and [long] $descriptor.index -lt 16) 'audit page index exceeds fixture bound'
-    $pagePath = Join-Path (Split-Path -Parent $Path) "scene-audit-page-$($descriptor.index).json"
-    $file = Get-Item -LiteralPath $pagePath
-    Assert-Contract ($file.Length -eq [long] $descriptor.bytes -and $file.Length -le 2L * 1024 * 1024) 'audit page bytes differ from manifest'
-    Assert-Contract ((Get-FileHash -LiteralPath $pagePath -Algorithm SHA256).Hash.ToLowerInvariant() -eq $descriptor.sha256) 'audit page digest differs from manifest'
-    $page = Read-JsonFile -Path $pagePath
-    Assert-Contract ([long] $descriptor.first_scene_id -eq $nextScene -and [long] $descriptor.start_sequence -eq $nextSequence) 'audit page coverage is not contiguous'
-    Assert-Contract (@($page.scenes).Count -eq [long] $descriptor.scene_count) 'audit page scene count differs from manifest'
-    $scenes += @($page.scenes)
-    $boundaries += @($page.boundary_revisions)
-    $nextScene += [long] $descriptor.scene_count
-    $nextSequence = [long] $descriptor.end_sequence_exclusive
-    $bytes += $file.Length
-  }
-  Assert-Contract ($nextScene - 1 -eq [long] $manifest.storage.scene_count -and $nextSequence -eq 17 -and $bytes -eq [long] $manifest.storage.total_page_bytes) 'audit manifest totals disagree with authenticated pages'
-  $manifest | Add-Member -NotePropertyName scenes -NotePropertyValue $scenes
-  $manifest | Add-Member -NotePropertyName boundary_revisions -NotePropertyValue $boundaries
-  return $manifest
 }
 
 function Assert-SourceFixture {
@@ -1090,7 +1054,7 @@ title=Smoke chapter
   }
 
   $result = Read-JsonFile -Path $successWorker.ResultPath
-  Assert-Contract ($result.schema -eq 3) 'worker result schema changed'
+  Assert-Contract ($result.schema -eq 4) 'worker result schema changed'
   Assert-Contract ($result.status -eq 'complete') 'worker result is not complete'
   Assert-Contract ($result.job_id -eq $successWorker.JobId) 'worker result job identity changed'
   Assert-Contract ($result.operation -eq 'convert') 'worker result operation changed'
@@ -1098,8 +1062,11 @@ title=Smoke chapter
   Assert-Contract ($result.worker_spec_sha256 -eq $successWorker.SpecSha256) 'worker did not attest the exact specification SHA-256'
   Assert-Contract ($result.python_dependency -eq $false) 'worker unexpectedly reports a Python dependency'
   Assert-Contract ([long] $result.source.frame_count -eq 16) 'worker source frame count changed'
-  Assert-Contract ([long] $result.scene_count -gt 0) 'worker committed no scenes'
-  Assert-Contract (@($result.scenes).Count -eq [math]::Min(32, [long] $result.scene_count)) 'worker result scene count is inconsistent'
+  foreach ($retiredField in @('scene_count', 'scenes', 'scene_audit', 'scene_audit_manifest_sha256')) {
+    Assert-Contract (
+      $result.PSObject.Properties.Name -notcontains $retiredField
+    ) "worker result still carries the retired '$retiredField' field"
+  }
   Assert-Contract (@($result.replay_contracts).Count -eq 0) 'direct conversion unexpectedly published replay contracts'
   Assert-Contract ([long] $result.cache.peak_bytes -eq 0) 'direct conversion unexpectedly wrote a scene cache'
   Assert-Contract ([long] $result.cache.remaining_bytes -eq 0) 'direct conversion retained cached frame bytes'
@@ -1224,81 +1191,12 @@ title=Smoke chapter
     (Get-Item -LiteralPath $successOutput).Length -gt 0
   ) 'worker produced no compressed Matroska output'
 
-  $auditPath = Join-Path $successWorker.ResultDirectory 'scene-audit.json'
-  $audit = Read-VerifiedAudit -Path $auditPath -ExpectedHash $result.scene_audit_manifest_sha256
-  Assert-Contract ($audit.schema -eq 4) 'scene audit schema changed'
-  Assert-Contract ($audit.version -eq 'whole-clip-scene-audit-v4') 'scene audit version changed'
-  Assert-Contract ($audit.status -eq 'complete') 'scene audit is not complete'
-  Assert-Contract (@($audit.scenes).Count -eq [long] $result.scene_count) 'full scene audit count differs from result'
-  Assert-Contract ($audit.claims.ground_truth -eq $false) 'scene audit incorrectly claims ground truth'
-  Assert-Contract ($audit.claims.best_parameters -eq $false) 'scene audit incorrectly claims globally best parameters'
+  $retainedSceneAudit = @(Get-ChildItem -LiteralPath (
+      $successWorker.ResultDirectory
+    ) -File | Where-Object { $_.Name -like 'scene-audit*' })
   Assert-Contract (
-    $audit.policy.implementation -eq 'native-causal-scene-tracker' -and
-    $audit.policy.version -eq 'causal-scene-epochs-v1' -and
-    $audit.policy.lookahead -eq $false -and
-    $audit.policy.boundary_only -eq $true -and
-    $audit.policy.python_dependency -eq $false
-  ) 'scene audit is not the causal online hard-cut epoch policy'
-  Assert-Contract ([long] $audit.cache.peak_bytes -eq 0) 'scene audit unexpectedly reports cached frames'
-  Assert-Contract (
-    [long] $audit.cache.peak_cache_plus_raster_bytes -le
-    [long] $audit.cache.hard_cap_bytes
-  ) 'scene audit reports a transient-raster hard-cap violation'
-  $boundaryRevisions = @($audit.boundary_revisions)
-  Assert-Contract (
-    $boundaryRevisions.Count -eq ([long] $result.scene_count - 1L)
-  ) 'causal scene count does not match the authenticated online pulse count'
-  $falseFlashCuts = @($boundaryRevisions | Where-Object {
-      $_.accepted -eq $true -and
-      $_.final_sequence -ge 9 -and $_.final_sequence -le 11
-    })
-  Assert-Contract (
-    $falseFlashCuts.Count -eq 0
-  ) 'online hard-cut state treated the one-frame exposure flash as a scene boundary'
-  $causalScenes = @($audit.scenes)
-  $appearanceVetoCount = 0L
-  foreach ($scene in $causalScenes) {
-    $appearanceVetoCount += [long] $scene.evidence.appearance_veto_count
-  }
-  Assert-Contract (
-    $appearanceVetoCount -gt 0
-  ) 'deterministic flash fixture did not exercise the online appearance-veto path'
-  $expectedSceneStart = 1L
-  for ($sceneIndex = 0; $sceneIndex -lt $causalScenes.Count; ++$sceneIndex) {
-    $scene = $causalScenes[$sceneIndex]
-    $terminalScene = $sceneIndex -eq ($causalScenes.Count - 1)
-    Assert-Contract (
-      [long] $scene.scene_id -eq ($sceneIndex + 1L) -and
-      [long] $scene.start_sequence -eq $expectedSceneStart -and
-      [long] $scene.end_sequence_exclusive -eq
-        ([long] $scene.start_sequence + [long] $scene.frame_count) -and
-      [long] $scene.cache_bytes -eq 0 -and
-      $scene.cut_state_semantics -eq 'causal-production-exact'
-    ) "causal scene $($sceneIndex + 1) is not a contiguous zero-cache online epoch"
-    if ($terminalScene) {
-      Assert-Contract (
-        [long] $scene.end_sequence_exclusive -eq 17 -and
-        $scene.boundary.accepted -eq $true -and
-        $scene.boundary.semantic_cut -eq $false -and
-        $scene.boundary.decision -eq 'end_of_stream'
-      ) 'final causal scene does not close exactly at source EOF'
-    } else {
-      $pulse = $boundaryRevisions[$sceneIndex]
-      Assert-Contract (
-        $scene.boundary.accepted -eq $true -and
-        $scene.boundary.semantic_cut -eq $true -and
-        $scene.boundary.decision -eq 'confirmed' -and
-        [long] $scene.boundary.final_sequence -eq
-          [long] $scene.end_sequence_exclusive -and
-        $pulse.accepted -eq $true -and
-        $pulse.semantic_cut -eq $true -and
-        $pulse.decision -eq 'confirmed' -and
-        [long] $pulse.final_sequence -eq
-          [long] $scene.end_sequence_exclusive
-      ) "causal scene $($sceneIndex + 1) does not end at its exact online hard-cut pulse"
-    }
-    $expectedSceneStart = [long] $scene.end_sequence_exclusive
-  }
+    $retainedSceneAudit.Count -eq 0
+  ) 'worker still published a scene-audit artifact'
 
   $adaptiveContract = $analysisContract.adaptive_state
   Assert-Contract (
@@ -1306,14 +1204,10 @@ title=Smoke chapter
     $adaptiveContract.retained_history -eq $false -and
     [long] $adaptiveContract.frame_count -eq 16
   ) 'offline analysis did not attest its bounded adaptive-state transport'
-  Assert-Contract (
-    $analysisContract.PSObject.Properties.Name -notcontains 'cut_state'
-  ) 'whole-clip contract still advertises the suppressed cut-state trace'
   $rawAdaptiveHistory = @(Get-ChildItem -LiteralPath (
       $nativeWork
     ) -Recurse -File | Where-Object {
-      $_.Name -eq 'adaptive_state.jsonl' -or
-      $_.Name -eq 'cut_state.json'
+      $_.Name -eq 'adaptive_state.jsonl'
     })
   Assert-Contract (
     $rawAdaptiveHistory.Count -eq 0
@@ -1411,7 +1305,7 @@ title=Smoke chapter
   $evaluationAnalysis = $evaluation.analysis_contract
   $evaluationRuntime = $evaluationAnalysis.resolved_runtime
   Assert-Contract (
-    $evaluation.schema -eq 3 -and
+    $evaluation.schema -eq 4 -and
     $evaluation.status -eq 'complete' -and
     $evaluation.operation -eq 'evaluate' -and
     $evaluation.worker_spec_sha256 -eq $evaluationWorker.SpecSha256 -and
@@ -1460,39 +1354,17 @@ title=Smoke chapter
     ))
   ) 'evaluation advertised a conversion timeline or mux artifact'
   Assert-Contract (
-    [long] $evaluation.scene_count -eq [long] $result.scene_count
-  ) 'evaluation and conversion disagreed on causal online scene count'
-  $evaluationScenes = @($evaluation.scenes)
-  Assert-Contract (
-    $evaluationScenes.Count -eq [math]::Min(32, [long] $evaluation.scene_count)
-  ) 'evaluation scene array disagrees with its declared causal scene count'
-  for ($sceneIndex = 0; $sceneIndex -lt $causalScenes.Count; ++$sceneIndex) {
-    Assert-Contract (
-      [long] $evaluationScenes[$sceneIndex].start_sequence -eq
-        [long] $causalScenes[$sceneIndex].start_sequence -and
-      [long] $evaluationScenes[$sceneIndex].end_sequence_exclusive -eq
-        [long] $causalScenes[$sceneIndex].end_sequence_exclusive -and
-      $evaluationScenes[$sceneIndex].boundary.decision -eq
-        $causalScenes[$sceneIndex].boundary.decision -and
-      $evaluationScenes[$sceneIndex].boundary.semantic_cut -eq
-        $causalScenes[$sceneIndex].boundary.semantic_cut
-    ) "evaluation and conversion disagreed on causal scene $($sceneIndex + 1)"
-  }
-  $evaluationAudit = Read-VerifiedAudit -Path (
-    Join-Path $evaluationWorker.ResultDirectory 'scene-audit.json'
-  ) -ExpectedHash $evaluation.scene_audit_manifest_sha256
-  Assert-Contract (
-    $evaluationAudit.schema -eq 4 -and
-    $evaluationAudit.policy.implementation -eq 'native-causal-scene-tracker' -and
-    $evaluationAudit.policy.lookahead -eq $false -and
-    @($evaluationAudit.scenes).Count -eq [long] $evaluation.scene_count
-  ) 'evaluation scene audit is not the same no-lookahead causal contract'
+    $evaluation.PSObject.Properties.Name -notcontains 'scene_count' -and
+    $evaluation.PSObject.Properties.Name -notcontains 'scenes' -and
+    @(Get-ChildItem -LiteralPath $evaluationWorker.ResultDirectory -File |
+      Where-Object { $_.Name -like 'scene-audit*' }).Count -eq 0
+  ) 'evaluation still published a scene list or scene-audit artifact'
 
   $succeeded = $true
   Write-Host (
-    "[offline-sbs-smoke] PASS: conversion + evaluation, $($result.scene_count) " +
-    "causal scene(s), 16 frames each, $Codec, $($FixtureColor.ToUpperInvariant()), " +
-    'flash not cut, no lookahead/cache/replay, exact authenticated worker contracts'
+    "[offline-sbs-smoke] PASS: conversion + evaluation, 16 frames each, " +
+    "$Codec, $($FixtureColor.ToUpperInvariant()), " +
+    'no lookahead/cache/replay, exact authenticated worker contracts'
   )
 } catch {
   $scriptExitCode = 1

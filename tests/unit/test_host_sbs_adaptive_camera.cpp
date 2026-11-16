@@ -37,12 +37,12 @@ namespace {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11ComputeShader> state_shader, map_shader, horizontal_shader;
     ComPtr<ID3D11Buffer> constants, depth_constants, owner_constants;
-    gain_buffer_t state, stats, cut, raw, minmax, owner;
+    gain_buffer_t state, stats, health, raw, minmax, owner;
     ComPtr<ID3D11Texture2D> candidate, final, exclusion;
     ComPtr<ID3D11UnorderedAccessView> candidate_uav, final_uav;
     ComPtr<ID3D11ShaderResourceView> candidate_srv, exclusion_srv;
     v2::constants_t config {};
-    sbs_adaptive_state::words_t cut_words = sbs_adaptive_state::initial_words;
+    sbs_adaptive_state::words_t health_words = sbs_adaptive_state::initial_words;
     v2::state_words_t words = v2::state_initial_words;
 
     bool buffer(const void *data, UINT bytes, UINT stride, UINT flags, gain_buffer_t &out) {
@@ -85,10 +85,10 @@ namespace {
     }
 
     void unbind() {
-      ID3D11ShaderResourceView *srvs[8] {};
-      ID3D11UnorderedAccessView *uavs[6] {};
-      context->CSSetShaderResources(0u, 8u, srvs);
-      context->CSSetUnorderedAccessViews(0u, 6u, uavs, nullptr);
+      ID3D11ShaderResourceView *srvs[7] {};
+      ID3D11UnorderedAccessView *uavs[5] {};
+      context->CSSetShaderResources(0u, 7u, srvs);
+      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
     }
 
     void SetUp() override {
@@ -122,7 +122,7 @@ namespace {
         D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, state));
       ASSERT_TRUE(buffer(zero_stats.data(), sizeof(zero_stats), 16u,
         D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, stats));
-      ASSERT_TRUE(buffer(cut_words.data(), sizeof(cut_words), 16u, D3D11_BIND_SHADER_RESOURCE, cut));
+      ASSERT_TRUE(buffer(health_words.data(), sizeof(health_words), 16u, D3D11_BIND_SHADER_RESOURCE, health));
       ASSERT_TRUE(buffer(zero_minmax.data(), sizeof(zero_minmax), 16u, D3D11_BIND_SHADER_RESOURCE, minmax));
       ASSERT_TRUE(buffer(zero_raw.data(), sizeof(zero_raw), 4u, D3D11_BIND_SHADER_RESOURCE, raw));
       ASSERT_TRUE(buffer(zero_owner.data(), sizeof(zero_owner), 4u, D3D11_BIND_UNORDERED_ACCESS, owner));
@@ -254,7 +254,7 @@ namespace {
       return out.str();
     }
 
-    void observe(std::uint64_t timestamp_us, float low, float high, bool pulse = false,
+    void observe(std::uint64_t timestamp_us, float low, float high,
                  bool collapsed = false, bool quantile_valid = true) {
       config.joint_observation_timestamp_low = static_cast<std::uint32_t>(timestamp_us);
       config.joint_observation_timestamp_high = static_cast<std::uint32_t>(timestamp_us >> 32u);
@@ -269,13 +269,10 @@ namespace {
         frame[v2::frame_stat_percentile_bin_width] = (high - low) / 256.0f;
       }
       context->UpdateSubresource(stats.buffer.Get(), 0u, nullptr, frame.data(), 0u, 0u);
-      cut_words[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_pulse)] =
-        std::bit_cast<std::uint32_t>(pulse ? 1.0f : 0.0f);
-      if (pulse) ++cut_words[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_count)];
-      context->UpdateSubresource(cut.buffer.Get(), 0u, nullptr, cut_words.data(), 0u, 0u);
+      context->UpdateSubresource(health.buffer.Get(), 0u, nullptr, health_words.data(), 0u, 0u);
       ID3D11Buffer *cb = constants.Get();
       context->CSSetConstantBuffers(1u, 1u, &cb);
-      ID3D11ShaderResourceView *srvs[] {stats.srv.Get(), cut.srv.Get()};
+      ID3D11ShaderResourceView *srvs[] {stats.srv.Get(), health.srv.Get()};
       context->CSSetShaderResources(0u, 2u, srvs);
       ID3D11UnorderedAccessView *uav = state.uav.Get();
       context->CSSetUnorderedAccessViews(0u, 1u, &uav, nullptr);
@@ -298,10 +295,10 @@ namespace {
       ID3D11Buffer *cbs[] {depth_constants.Get(), constants.Get(), owner_constants.Get()};
       context->CSSetConstantBuffers(0u, 3u, cbs);
       ID3D11ShaderResourceView *srvs[] {raw.srv.Get(), state.srv.Get(), exclusion_srv.Get(),
-        minmax.srv.Get(), nullptr, nullptr, cut.srv.Get(), nullptr};
-      context->CSSetShaderResources(0u, 8u, srvs);
-      ID3D11UnorderedAccessView *uavs[] {candidate_uav.Get(), nullptr, nullptr, nullptr, nullptr, owner.uav.Get()};
-      context->CSSetUnorderedAccessViews(0u, 6u, uavs, nullptr);
+        minmax.srv.Get(), nullptr, nullptr, health.srv.Get()};
+      context->CSSetShaderResources(0u, 7u, srvs);
+      ID3D11UnorderedAccessView *uavs[] {candidate_uav.Get(), nullptr, nullptr, nullptr, owner.uav.Get()};
+      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
       context->CSSetShader(map_shader.Get(), nullptr, 0u);
       context->Dispatch((width + 15u) / 16u, 1u, 1u);
       unbind();
@@ -353,7 +350,7 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, CapsCurrentNearPixelsWhileLogGainAndZeroAda
   }
 }
 
-TEST_F(HostSbsAdaptiveCameraGpuTest, GapCutAndBadClocksEarnNoCatchupAcrossLowWordRollover) {
+TEST_F(HostSbsAdaptiveCameraGpuTest, GapAndBadClocksEarnNoCatchupAcrossLowWordRollover) {
   const std::uint64_t first = 0xffffffffull - 350000ull;
   seed(0.0f, 4.0f, first);
   const auto last = first;
@@ -362,7 +359,7 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, GapCutAndBadClocksEarnNoCatchupAcrossLowWor
   observe(last + 300000u, 0.0f, 40.0f);
   EXPECT_FLOAT_EQ(scalar(v2::center), held_zero);
   EXPECT_FLOAT_EQ(scalar(v2::inverse_scale), held_gain);
-  observe(last + 400000u, 0.0f, 40.0f, true);
+  observe(last + 400000u, 0.0f, 40.0f);
   EXPECT_GT(scalar(v2::center), held_zero);
   EXPECT_LT(scalar(v2::inverse_scale), held_gain);
   held_zero = scalar(v2::center);
@@ -385,7 +382,7 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, CollapseFailsFlatAndSignedDepthRetainsCamer
   seed(-2.0f, 4.0f); // Finite negative values remain part of the mean zero.
   EXPECT_FLOAT_EQ(scalar(v2::center), 1.0f);
   const float held = scalar(v2::inverse_scale);
-  observe(950000u, 0.0f, 4.0f, false, true);
+  observe(950000u, 0.0f, 4.0f, true);
   EXPECT_FLOAT_EQ(scalar(v2::frame_valid), 0.0f);
   EXPECT_FLOAT_EQ(scalar(v2::inverse_scale), held);
   const auto field = map_and_limit(2.0f);
@@ -419,7 +416,7 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, TailTamperingCannotAuthorizeOrPreservePseud
 TEST_F(HostSbsAdaptiveCameraGpuTest, MissingQuantileAuthorityCannotFallBackToExtrema) {
   seed();
   const float held_zero = scalar(v2::center), held_inverse = scalar(v2::inverse_scale);
-  observe(200000u, -100.0f, 100.0f, false, false, false);
+  observe(200000u, -100.0f, 100.0f, false, false);
   EXPECT_FLOAT_EQ(scalar(v2::frame_valid), 0.0f);
   EXPECT_FLOAT_EQ(scalar(v2::center), held_zero);
   EXPECT_FLOAT_EQ(scalar(v2::inverse_scale), held_inverse);
@@ -462,11 +459,11 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, HostMeanAdapterStartsImmediatelyWithModelAm
   EXPECT_NEAR(foreground.front(), config.requested_gain / config.raw_coordinate_scale, 1.0e-7f);
 }
 
-TEST_F(HostSbsAdaptiveCameraGpuTest, HostMeanAdapterTracksAcrossCutsWithoutSpendingGapTime) {
+TEST_F(HostSbsAdaptiveCameraGpuTest, HostMeanAdapterTracksContentChangesWithoutSpendingGapTime) {
   config.joint_plane_mode = 3u;
   observe(100000u, 0.0f, 4.0f);
   const float original = scalar(v2::center);
-  observe(200000u, 10.0f, 14.0f, true);
+  observe(200000u, 10.0f, 14.0f);
   EXPECT_GT(scalar(v2::center), original);
   EXPECT_LE(scalar(v2::center) - original, .1f / scalar(v2::inverse_scale) + 1.0e-6f);
   const float held = scalar(v2::center);

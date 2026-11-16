@@ -1392,7 +1392,7 @@ namespace {
     id[0] = v2::subtitle_contour_schema;
     id[1] = v2::subtitle_contour_history_tag;
     id[2] = 1u;
-    id[3] = state[v2::confirmed_cut_count];
+    id[3] = 0u;
     id[4] = 1u;
     id[6] = 7u;
     id[8] = width;
@@ -1442,7 +1442,7 @@ namespace {
   bool selected_hardware(){const auto *h=std::getenv("SUNSHINE_TEST_PENDING_CURRENT_COLOUR_HARDWARE");return h&&std::string_view(h)=="1";}
   std::filesystem::path pending_root(){const auto *p=std::getenv("SUNSHINE_TEST_PENDING_CURRENT_COLOUR_SHADER_ROOT");return p?std::filesystem::path(p):std::filesystem::path{};}
   models::host_sbs_gpu_completion_receipt::expected_t owner_key(std::uint64_t frame=1u){models::host_sbs_gpu_completion_receipt::expected_t p;p.estimator_generation=11;p.publication_sequence=frame;p.frame_id=frame;p.observation_timestamp_us=1000u+frame;p.analysis_generation=7;p.domain_tag=31;p.transaction_token=0x12345000ull+frame;return p;}
-  std::vector<std::uint32_t> negative_packet(const nr::expected_t &e,std::uint32_t status,std::uint32_t best,std::uint32_t cut){std::vector<std::uint32_t> n(64);n[0]=nr::tag;n[1]=1;n[2]=status;n[4]=8;n[5]=best;n[6]=255;n[7]=5;std::memcpy(n.data()+8,&e,sizeof(e));n[48]=cut;return n;}
+  std::vector<std::uint32_t> negative_packet(const nr::expected_t &e,std::uint32_t status,std::uint32_t best,std::uint32_t identity_word){std::vector<std::uint32_t> n(64);n[0]=nr::tag;n[1]=1;n[2]=status;n[4]=8;n[5]=best;n[6]=255;n[7]=5;std::memcpy(n.data()+8,&e,sizeof(e));n[48]=identity_word;return n;}
   void configure_source_scope(live_v2_warp_fixture_t &f,const cs::constants_t &c,const nr::expected_t &e,const std::vector<std::uint32_t> &receipt,const std::vector<std::uint32_t> &negative){f.current_scope_cb=fixture_cb(f.device.Get(),c);f.negative_scope_cb=fixture_cb(f.device.Get(),e);f.current_scope_srv=words(f.device.Get(),receipt).srv;f.negative_scope_srv=words(f.device.Get(),negative).srv;f.pending_scope=true;}
 }
 
@@ -1467,8 +1467,8 @@ TEST(PendingCurrentColourGpu, UnknownAndPartialMatchPreserveLegacyRetiredUsesInd
   for(const auto mode:{0u,1u,2u}) {
     auto c=source_context(W,H);c.control[3]=mode;ui.constants.color_mode=mode;const auto e=nr::make_expected(c,owner_key());const auto receipt=source_receipt(c,W,H);
     const auto current_legacy=draw(legacy,&ui);
-    for(const auto status:{0u,1u}){SCOPED_TRACE("negative status "+std::to_string(status)+" colour "+std::to_string(mode));configure_source_scope(candidate,c,e,receipt,negative_packet(e,status,8,state[v2::confirmed_cut_count]));EXPECT_EQ(draw(candidate,&ui),current_legacy);}
-    configure_source_scope(candidate,c,e,receipt,negative_packet(e,2u,0,state[v2::confirmed_cut_count]));EXPECT_EQ(draw(candidate,&ui),scene);
+    for(const auto status:{0u,1u}){SCOPED_TRACE("negative status "+std::to_string(status)+" colour "+std::to_string(mode));configure_source_scope(candidate,c,e,receipt,negative_packet(e,status,8,state[v2::control_reserved_0]));EXPECT_EQ(draw(candidate,&ui),current_legacy);}
+    configure_source_scope(candidate,c,e,receipt,negative_packet(e,2u,0,state[v2::control_reserved_0]));EXPECT_EQ(draw(candidate,&ui),scene);
   }
   RecordProperty("negative_only_not_current_UI_or_EMPTY",true);RecordProperty("authored_packet_mechanics_not_model_receipt",true);RecordProperty("hardware",selected_hardware());
 }
@@ -1482,7 +1482,7 @@ TEST(PendingCurrentColourGpu, InvalidRootOrCurrentSourceCannotUseGeometryOrUi) {
   ASSERT_TRUE(flat.initialize(error,warp_shader_e::flat_main,false,selected_hardware()))<<error;
   ASSERT_TRUE(candidate.initialize(error,warp_shader_e::live_main,false,selected_hardware()))<<error;
   const auto draw=[&](live_v2_warp_fixture_t &f){std::vector<std::byte> out;pc_require(f.render(DXGI_FORMAT_R32G32B32A32_FLOAT,sizeof(rgba32f_t),W,H,current.data(),base,base,state,{},out,error,0,0,{},&ui),error.c_str());return out;};
-  const auto identity=draw(flat);const auto expected=models::research_queued_render_guard_v1::make_expected(owner_key().transaction_token,1,1001);const auto good=root_packet(expected,W,H);const auto c=source_context(W,H);const auto e=nr::make_expected(c,owner_key());const auto receipt=source_receipt(c,W,H);const auto n=negative_packet(e,0,8,state[v2::confirmed_cut_count]);
+  const auto identity=draw(flat);const auto expected=models::research_queued_render_guard_v1::make_expected(owner_key().transaction_token,1,1001);const auto good=root_packet(expected,W,H);const auto c=source_context(W,H);const auto e=nr::make_expected(c,owner_key());const auto receipt=source_receipt(c,W,H);const auto n=negative_packet(e,0,8,state[v2::control_reserved_0]);
   for(UINT bad=0;bad<8;++bad){SCOPED_TRACE(bad);auto root_e=expected;auto raw=good;auto context=c;auto r=receipt;
     if(bad==0)raw[6]=0;if(bad==1)raw[25]^=1;if(bad==2)root_e.control[0]=0;if(bad==3)r[2]=0;if(bad==4)r[3]=2;if(bad==5)r[24]^=1;if(bad==6)context.scope[2]^=1;if(bad==7)context.control[3]=3;
     ASSERT_TRUE(candidate.configure_private_guard(root,pending_ps_closure,&root_e,&raw,error,"sbs_reprojection_v2_pending_current_colour_ps.hlsl"))<<error;
@@ -1609,8 +1609,8 @@ TEST(PendingCurrentColourGpu, NonzeroRoiUsesExactCurrentRectangleAndPreservesOut
   const auto draw=[&](live_v2_warp_fixture_t &f,const subtitle_inputs_t *sub){std::vector<std::byte> out;pc_require(f.render(DXGI_FORMAT_R32G32B32A32_FLOAT,sizeof(rgba32f_t),W,H,current.data(),base,base,state,{},out,error,RW,RH,geometry,sub),error.c_str());return out;};
   const auto old=draw(legacy,&ui),scene=draw(legacy,nullptr);
   ASSERT_NE(old,scene);
-  configure_source_scope(candidate,c,e,receipt,negative_packet(e,1,8,state[v2::confirmed_cut_count]));EXPECT_EQ(draw(candidate,&ui),old);
-  configure_source_scope(candidate,c,e,receipt,negative_packet(e,2,0,state[v2::confirmed_cut_count]));EXPECT_EQ(draw(candidate,&ui),scene);
+  configure_source_scope(candidate,c,e,receipt,negative_packet(e,1,8,state[v2::control_reserved_0]));EXPECT_EQ(draw(candidate,&ui),old);
+  configure_source_scope(candidate,c,e,receipt,negative_packet(e,2,0,state[v2::control_reserved_0]));EXPECT_EQ(draw(candidate,&ui),scene);
   RecordProperty("nonzero_ROI_current_source_not_restamped_full_source",true);
 }
 

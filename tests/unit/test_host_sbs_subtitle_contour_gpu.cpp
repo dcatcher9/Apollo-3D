@@ -293,11 +293,11 @@ namespace {
       plane_ = {};
       params_ = {};
       ocr_ = {};
-      cut_ = {};
+      health_ = {};
       geometry_ = {};
       identity_ = {};
       completed_probability_ = {};
-      if (!create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE, display_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R32_UINT, both, support_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R32_UINT, both, matte_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R16G16B16A16_FLOAT, both, completed_display_) || !create_texture(device_.Get(), field_w_, field_h_, DXGI_FORMAT_R32_UINT, both, field_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R32G32B32A32_FLOAT, both, features_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R32G32B32A32_FLOAT, both, next_features_) || !create_buffer(device_.Get(), v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height * 4u, 4u, D3D11_BIND_SHADER_RESOURCE, probability_) || !create_buffer(device_.Get(), v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height * 4u, 4u, both, completed_probability_) || !create_buffer(device_.Get(), v2::subtitle_plane_state_word_count * 4u, 4u, D3D11_BIND_SHADER_RESOURCE, plane_) || !create_buffer(device_.Get(), v2::subtitle_condition_param_word_count * 4u, 4u, D3D11_BIND_SHADER_RESOURCE, params_) || !create_buffer(device_.Get(), v2::subtitle_ocr_record_word_count * 4u, 4u, D3D11_BIND_SHADER_RESOURCE, ocr_) || !create_buffer(device_.Get(), sbs_adaptive_state::word_count * 4u, 16u, D3D11_BIND_SHADER_RESOURCE, cut_) || !create_buffer(device_.Get(), sizeof(v2::state_words_t), 16u, D3D11_BIND_SHADER_RESOURCE, geometry_) || !create_buffer(device_.Get(), v2::subtitle_contour_history_word_count * 4u, 4u, both, identity_)) {
+      if (!create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE, display_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R32_UINT, both, support_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R32_UINT, both, matte_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R16G16B16A16_FLOAT, both, completed_display_) || !create_texture(device_.Get(), field_w_, field_h_, DXGI_FORMAT_R32_UINT, both, field_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R32G32B32A32_FLOAT, both, features_) || !create_texture(device_.Get(), width, crop_h_, DXGI_FORMAT_R32G32B32A32_FLOAT, both, next_features_) || !create_buffer(device_.Get(), v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height * 4u, 4u, D3D11_BIND_SHADER_RESOURCE, probability_) || !create_buffer(device_.Get(), v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height * 4u, 4u, both, completed_probability_) || !create_buffer(device_.Get(), v2::subtitle_plane_state_word_count * 4u, 4u, D3D11_BIND_SHADER_RESOURCE, plane_) || !create_buffer(device_.Get(), v2::subtitle_condition_param_word_count * 4u, 4u, D3D11_BIND_SHADER_RESOURCE, params_) || !create_buffer(device_.Get(), v2::subtitle_ocr_record_word_count * 4u, 4u, D3D11_BIND_SHADER_RESOURCE, ocr_) || !create_buffer(device_.Get(), sbs_adaptive_state::word_count * 4u, 16u, D3D11_BIND_SHADER_RESOURCE, health_) || !create_buffer(device_.Get(), sizeof(v2::state_words_t), 16u, D3D11_BIND_SHADER_RESOURCE, geometry_) || !create_buffer(device_.Get(), v2::subtitle_contour_history_word_count * 4u, 4u, both, identity_)) {
         return false;
       }
       const UINT zero[4] {};
@@ -397,7 +397,7 @@ namespace {
       return content_[1u] + static_cast<std::uint32_t>((numerator + denominator - 1u) / denominator);
     }
 
-    void make_authority(std::uint64_t frame, std::uint64_t timestamp, bool reset = false, std::uint64_t generation = 7u, std::uint32_t epoch = 3u) {
+    void make_authority(std::uint64_t frame, std::uint64_t timestamp, bool reset = false, std::uint64_t generation = 7u) {
       const auto roi_top = roi_edge(v2::subtitle_ocr_safe_row_top);
       const auto roi_bottom = roi_edge(v2::subtitle_ocr_safe_row_bottom);
       native_cover_ = {20u, (v2::subtitle_ocr_safe_row_top * crop_h_ + v2::subtitle_ocr_output_height - 1u) / v2::subtitle_ocr_output_height, source_w_ - 20u, v2::subtitle_ocr_safe_row_bottom * crop_h_ / v2::subtitle_ocr_output_height};
@@ -429,7 +429,7 @@ namespace {
       geometry_words_[v2::container_scale] = f(1.0f);
       geometry_words_[v2::calibration_revision] = 1u;
       geometry_words_[v2::frame_valid] = f(1.0f);
-      geometry_words_[v2::confirmed_cut_count] = epoch;
+      geometry_words_[v2::control_reserved_0] = 0u;
       geometry_words_[v2::contract_tag_bits] = v2::contract_tag;
       geometry_words_[v2::renderer_authorization_bits] = v2::contract_tag;
       geometry_words_[v2::gain_last_observation_low] = std::uint32_t(timestamp);
@@ -459,7 +459,7 @@ namespace {
         plane_words_[v2::subtitle_plane_roi_offset + lane] = constants_.field[2u + lane];
       }
       std::copy(content_.begin(), content_.end(), plane_words_.begin() + v2::subtitle_plane_content_offset);
-      plane_words_[v2::subtitle_plane_cut_epoch_word] = epoch;
+      plane_words_[v2::subtitle_plane_identity_reserved_word] = 0u;
       const auto adaptive = v2::subtitle_plane_adaptive_offset;
       plane_words_[adaptive] = 1u;
       plane_words_[adaptive + 1u] = 8u;
@@ -486,10 +486,7 @@ namespace {
         ocr_words_[offset + 4u] = f(.9f);
         ocr_words_[offset + 6u] = 1u;
       }
-      cut_words_.assign(sbs_adaptive_state::word_count, 0u);
-      cut_words_[sbs_adaptive_state::index(sbs_adaptive_state::word_e::cut_contract_tag_bits)] = sbs_adaptive_state::cut_contract_tag;
-      cut_words_[sbs_adaptive_state::index(sbs_adaptive_state::word_e::initialized)] = f(1.0f);
-      cut_words_[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_count)] = epoch;
+      health_words_.assign(sbs_adaptive_state::initial_words.begin(), sbs_adaptive_state::initial_words.end());
       probability_values_.assign(v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height, 0.0f);
       for (std::uint32_t y = 0u; y < v2::subtitle_ocr_output_height; ++y) {
         for (std::uint32_t x = 0u; x < v2::subtitle_ocr_output_width; ++x) {
@@ -521,7 +518,7 @@ namespace {
       context_->UpdateSubresource(plane_.buffer.Get(), 0u, nullptr, plane_words_.data(), 0u, 0u);
       context_->UpdateSubresource(params_.buffer.Get(), 0u, nullptr, params_words_.data(), 0u, 0u);
       context_->UpdateSubresource(ocr_.buffer.Get(), 0u, nullptr, ocr_words_.data(), 0u, 0u);
-      context_->UpdateSubresource(cut_.buffer.Get(), 0u, nullptr, cut_words_.data(), 0u, 0u);
+      context_->UpdateSubresource(health_.buffer.Get(), 0u, nullptr, health_words_.data(), 0u, 0u);
       context_->UpdateSubresource(geometry_.buffer.Get(), 0u, nullptr, geometry_words_.data(), 0u, 0u);
       context_->UpdateSubresource(geometry_cb_.Get(), 0u, nullptr, &geometry_constants_, 0u, 0u);
       context_->UpdateSubresource(contour_cb_.Get(), 0u, nullptr, &constants_, 0u, 0u);
@@ -549,7 +546,7 @@ namespace {
         baseline_support,
         features_.srv.Get(),
         identity_.srv.Get(),
-        cut_.srv.Get(),
+        health_.srv.Get(),
         ocr_.srv.Get(),
         geometry_.srv.Get(),
         nullptr,
@@ -809,7 +806,7 @@ namespace {
       ID3D11Buffer *cbuffers[3u] {depth_cb.Get(), geometry_cb_.Get(), locator_cb.Get()};
       context_->CSSetConstantBuffers(0u, 3u, cbuffers);
       ID3D11ShaderResourceView *condition_srvs[8u] {
-        geometry_.srv.Get(), cut_.srv.Get(), base.srv.Get(), plane_.srv.Get(),
+        geometry_.srv.Get(), health_.srv.Get(), base.srv.Get(), plane_.srv.Get(),
         params_.srv.Get(), q.srv.Get(), identity_.srv.Get(), ocr_.srv.Get(),
       };
       ID3D11UnorderedAccessView *condition_uavs[3u] {blend.uav.Get(), control.uav.Get(), weight.uav.Get()};
@@ -1090,13 +1087,13 @@ namespace {
     ComPtr<ID3D11ComputeShader> probability_probe_;
     ComPtr<ID3D11Buffer> contour_cb_, geometry_cb_, indirect_;
     texture_t display_, support_, matte_, field_, features_, next_features_, completed_display_;
-    buffer_t probability_, plane_, params_, ocr_, cut_, geometry_, identity_, completed_probability_;
+    buffer_t probability_, plane_, params_, ocr_, health_, geometry_, identity_, completed_probability_;
     std::uint32_t source_w_ {}, source_h_ {}, crop_h_ {}, crop_top_ {}, field_w_ {}, field_h_ {};
     uint4_t content_ {}, native_cover_ {}, field_cover_ {};
     contour_constants_t constants_ {};
     v2::constants_t geometry_constants_ {};
     v2::state_words_t geometry_words_ {};
-    std::vector<std::uint32_t> plane_words_, params_words_, ocr_words_, cut_words_;
+    std::vector<std::uint32_t> plane_words_, params_words_, ocr_words_, health_words_;
     std::vector<float> probability_values_;
     std::vector<pixel_t> pixels_;
     std::vector<half_pixel_t> imported_source_;
@@ -1268,7 +1265,6 @@ namespace {
       const auto frame = entry.at("frame").get<std::uint64_t>();
       const auto generation = entry.at("generation").get<std::uint64_t>();
       const auto timestamp = entry.at("observation_timestamp_us").get<std::uint64_t>();
-      const auto epoch = entry.at("cut_epoch").get<std::uint32_t>();
       const auto target_bits = entry.at("ui_target_bits").get<std::uint32_t>();
       const auto target = std::bit_cast<float>(target_bits);
       ASSERT_TRUE(std::isfinite(target) && target >= 0.0f && target <= v2::direct_container_limit);
@@ -1301,7 +1297,7 @@ namespace {
       ASSERT_EQ(record_bytes.size(), std::size_t(v2::subtitle_ocr_record_word_count) * sizeof(std::uint32_t));
       ASSERT_TRUE(resize(source[0u], source[1u], field[0u], field[1u], content));
       ASSERT_EQ(source_bytes.size(), std::size_t(source_w_) * crop_h_ * sizeof(half_pixel_t));
-      make_authority(frame, timestamp, true, generation, epoch);
+      make_authority(frame, timestamp, true, generation);
       imported_source_.resize(std::size_t(source_w_) * crop_h_);
       std::memcpy(imported_source_.data(), source_bytes.data(), source_bytes.size());
       std::memcpy(probability_values_.data(), probability_bytes.data(), probability_bytes.size());
@@ -1530,7 +1526,6 @@ namespace {
       const auto frame = entry.at("frame").get<std::uint64_t>();
       const auto generation = entry.at("generation").get<std::uint64_t>();
       const auto timestamp = entry.at("observation_timestamp_us").get<std::uint64_t>();
-      const auto epoch = entry.at("cut_epoch").get<std::uint32_t>();
       const auto target_bits = entry.at("ui_target_bits").get<std::uint32_t>();
       const auto target = std::bit_cast<float>(target_bits);
       ASSERT_TRUE(std::isfinite(target) && target >= 0.0f && target <= v2::direct_container_limit);
@@ -1566,7 +1561,7 @@ namespace {
       ASSERT_TRUE(resize(source[0u], source[1u], field[0u], field[1u], content));
       ASSERT_EQ(source_bytes.size(), std::size_t(source_w_) * crop_h_ * sizeof(half_pixel_t));
       ASSERT_EQ(eligibility_bytes.size(), std::size_t(source_w_) * crop_h_ * sizeof(std::uint32_t));
-      make_authority(frame, timestamp, true, generation, epoch);
+      make_authority(frame, timestamp, true, generation);
       imported_source_.resize(std::size_t(source_w_) * crop_h_);
       std::memcpy(imported_source_.data(), source_bytes.data(), source_bytes.size());
       std::memcpy(probability_values_.data(), probability_bytes.data(), probability_bytes.size());
@@ -2490,26 +2485,6 @@ namespace {
       << "published source is current RGB while history carries the fixed anchor";
   }
 
-  TEST_F(HostSbsSubtitleContourGpuTest, TwoPixelJitterCarriesOneReferenceAcrossFourGenuineFrames) {
-    const std::array colors {pixel_t {.875f, .625f, .3125f, 1.f}, pixel_t {.84375f, .59375f, .28125f, 1.f}, pixel_t {.90625f, .65625f, .34375f, 1.f}, pixel_t {.8125f, .5625f, .25f, 1.f}};
-    for (std::uint32_t frame = 1u; frame <= 4u; ++frame) {
-      clear_scene(.125f * float(frame - 1u));
-      const auto x = 50u + 2u * (frame - 1u);
-      pixels_[point_index(x)] = colors[frame - 1u];
-      paint_palette_anchor(colors[frame - 1u]);
-      ASSERT_TRUE(observe(frame));
-      expect_count(point_index(x), frame);
-      for (std::size_t lane = 0u; lane < 3u; ++lane) {
-        EXPECT_EQ(result_.features[point_index(x)][lane], colors[0u][lane]);
-      }
-    }
-    EXPECT_EQ(result_.support[point_index(50u)], 0u) << "uniform former glyph background has no current stroke";
-    EXPECT_EQ(result_.support[point_index(56u)], 1u);
-    EXPECT_EQ(result_.features[point_index(50u)], (pixel_t {.375f, .375f, .375f, feature_code(1u)}));
-    // This is an explicit <=2 per-observation correspondence chain, not four observations
-    // of one absolute source coordinate or semantic proof that the tracked color is text.
-  }
-
   TEST_F(HostSbsSubtitleContourGpuTest, MovementBeyondJitterRestartsFourObservationConfirmation) {
     clear_scene(0.f);
     paint_glyph_point(50u);
@@ -2556,19 +2531,6 @@ namespace {
     EXPECT_EQ(result_.support[point_index(60u)], 1u);
     expect_count(point_index(61u), 2u);
     EXPECT_EQ(result_.support[point_index(61u)], 1u);
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, EqualColorAndSpatialTiesUseScanOrderNotGreatestCount) {
-    paint_point(62u, .5f);
-    ASSERT_TRUE(observe(1u));
-    ASSERT_TRUE(observe(2u));
-    paint_point(58u, .5f);  // Four pixels from older anchor, so this is a genuine new streak1.
-    ASSERT_TRUE(observe(3u));
-    expect_count(point_index(58u), 1u);
-    expect_count(point_index(62u), 3u);
-    paint_point(60u, .5f);
-    ASSERT_TRUE(observe(4u));
-    expect_count(point_index(), 2u);  // Equal RGB/dist2 selects left anchor before count3 at right.
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, StableUniformZeroProbabilityBackgroundNeverAcquiresProtection) {
@@ -2639,7 +2601,7 @@ namespace {
       expect_count(point_index(), 0u);
       EXPECT_EQ(result_.identity[2u], 0u);
       EXPECT_EQ(result_.identity[snapshot_valid_word], 1u);
-      EXPECT_EQ(result_.identity[3u], 3u);
+      EXPECT_EQ(result_.identity[3u], 0u);
       expect_evidence_exact_copy();
       for (std::uint32_t frame = 2u; frame <= 5u; ++frame) {
         ASSERT_TRUE(observe(frame));
@@ -2814,137 +2776,6 @@ namespace {
     }
   }
 
-  TEST_F(HostSbsSubtitleContourGpuTest, FlaggedRgbMismatchBlocksAvailableMatureNeighborOnlyOnThatGenuineObservation) {
-    for (const bool flagged : {false, true}) {
-      SCOPED_TRACE(flagged);
-      ASSERT_TRUE(resize(160u, 90u));
-      clear_scene(.125f);
-      paint_point(60u, .75f);
-      paint_point(62u, .5f); // A genuinely acquired mature reference at the2px search boundary.
-      paint_point(85u, .9375f); // A stable same-pixel reference inside the same flagged core.
-      ASSERT_TRUE(mature_observations());
-      expect_count(point_index(62u), confirmation_count);
-      auto core = field_cover_;
-      core[0u] = source_x_edge(50u);
-      core[2u] = source_x_edge(90u);
-      paint_point(60u, .5625f); // Own anchor mismatch>.08, neighbor distance .0625<=.08.
-      for (std::uint32_t frame = 5u; frame <= 8u; ++frame) {
-        make_authority(frame, 1000001u + (frame - 1u) * 100000u);
-        current_cores({core});
-        plane_words_[v2::subtitle_plane_history_reset_mask_word] = flagged ? 1u : 0u;
-        ASSERT_TRUE(run());
-        expect_count(point_index(), flagged ? frame - 4u : confirmation_count);
-        EXPECT_EQ(result_.features[point_index()][0u], flagged ? .5625f : .5f);
-        expect_count(point_index(62u), confirmation_count);
-        expect_count(point_index(85u), confirmation_count);
-        EXPECT_EQ(result_.features[point_index(85u)][0u], .9375f);
-        expect_evidence_exact_copy();
-      }
-    }
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, CurrentResetIsLocalToFlaggedCoreInsideOverlappingExpandedCovers) {
-    const pixel_t left_rgb {.125f, .75f, .5f, 1.f}, right_rgb {.3125f, .25f, .9375f, 1.f};
-    auto left = field_cover_, right = field_cover_;
-    left[2u] = source_x_edge(105u);
-    right[0u] = source_x_edge(70u); // Expanded covers overlap well beyond the changed core.
-    auto left_core = left, right_core = right;
-    left_core[0u] = source_x_edge(40u);
-    left_core[2u] = source_x_edge(90u);
-    right_core[0u] = source_x_edge(100u);
-    right_core[2u] = source_x_edge(130u);
-    clear_scene(.5f); // Nearby background references mature alongside each tested coordinate.
-    pixels_[point_index(60u)] = pixels_[point_index(85u)] = pixels_[point_index(95u)] = left_rgb;
-    pixels_[point_index(110u)] = right_rgb;
-    for (std::uint32_t frame = 1u; frame <= 8u; ++frame) {
-      if (frame == 5u) {
-        // All three own anchors mismatch. Matching mature neighbors exist within2px, so the
-        // unflagged shared margin can borrow while the two flagged core coordinates cannot.
-        for (const auto x : {60u, 85u, 95u}) paint_point(x, .5f);
-      }
-      make_authority(frame, 1000001u + (frame - 1u) * 100000u);
-      current_covers(frame == 6u ? std::vector<uint4_t> {right, left} : std::vector<uint4_t> {left, right});
-      current_cores(frame == 6u ? std::vector<uint4_t> {right_core, left_core} : std::vector<uint4_t> {left_core, right_core});
-      if (frame == 5u) plane_words_[v2::subtitle_plane_history_reset_mask_word] = 1u;
-      ASSERT_TRUE(run());
-      const auto left_count = frame <= 4u ? frame : frame - 4u;
-      expect_count(point_index(60u), left_count);
-      expect_count(point_index(85u), left_count);
-      // Shared expanded-cover margins retain ordinary fallback despite an RGB mismatch.
-      expect_count(point_index(95u), std::min(frame, confirmation_count));
-      expect_count(point_index(110u), std::min(frame, confirmation_count));
-      EXPECT_EQ(result_.features[point_index(110u)][0u], right_rgb[0u]);
-      expect_evidence_exact_copy();
-    }
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, FlaggedCurrentCoreUnionResetsSharedPixelsWithoutExtendingExpandedCovers) {
-    for (const auto reset_mask : {1u, 2u, 3u}) {
-      SCOPED_TRACE(reset_mask);
-      ASSERT_TRUE(resize(160u, 90u));
-      clear_scene(.5f);
-      for (const auto x : {60u, 85u, 110u, 130u}) paint_point(x, .9375f);
-      ASSERT_TRUE(mature_observations());
-      auto left = field_cover_, right = field_cover_;
-      left[0u] = source_x_edge(40u);
-      left[2u] = source_x_edge(90u);
-      right[0u] = source_x_edge(70u);
-      right[2u] = source_x_edge(120u);
-      for (std::uint32_t frame = 5u; frame <= 8u; ++frame) {
-        // Own RGB mismatches; unchanged adjacent .5 references can preconfirm an unflagged
-        // coordinate. This makes the raw-core union assertions exercise the fallback veto.
-        if (frame == 5u) for (const auto x : {60u, 85u, 110u, 130u}) paint_point(x, .5f);
-        make_authority(frame, 1000001u + (frame - 1u) * 100000u);
-        current_covers({field_cover_, field_cover_});
-        current_cores(frame == 6u ? std::vector<uint4_t> {right, left} : std::vector<uint4_t> {left, right});
-        if (frame == 5u) plane_words_[v2::subtitle_plane_history_reset_mask_word] = reset_mask;
-        ASSERT_TRUE(run());
-        expect_count(point_index(60u), (reset_mask & 1u) != 0u ? frame - 4u : confirmation_count);
-        expect_count(point_index(85u), frame - 4u); // Inside both raw/cores, so either bit resets.
-        expect_count(point_index(110u), (reset_mask & 2u) != 0u ? frame - 4u : confirmation_count);
-        expect_count(point_index(130u), confirmation_count); // Expanded covers only: fallback allowed.
-        expect_evidence_exact_copy();
-      }
-    }
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, CurrentCoreResetUsesHalfOpenNativeCentersAcrossPaddedAwkwardCrops) {
-    // 161x91 gives the rounded 27-row bottom crop. The first padded content transform has
-    // exact center/edge equalities; the second has fractional centers in both dimensions.
-    const std::array contents {uint4_t {5u, 9u, 649u, 373u}, uint4_t {3u, 7u, 766u, 426u}};
-    const std::array cores {uint4_t {247u, 307u, 407u, 335u}, uint4_t {290u, 350u, 479u, 382u}};
-    for (std::size_t domain = 0u; domain < contents.size(); ++domain) {
-      SCOPED_TRACE(domain);
-      ASSERT_TRUE(resize(161u, 91u));
-      content_ = contents[domain];
-      clear_scene(.5f);
-      const std::array points {std::array {59u, 10u}, std::array {60u, 10u}, std::array {61u, 10u},
-        std::array {99u, 16u}, std::array {100u, 16u}, std::array {61u, 9u}, std::array {99u, 17u}};
-      for (const auto &p : points) pixels_[native_index(p[0u], p[1u])] = {.9375f, .9375f, .9375f, 1.f};
-      ASSERT_TRUE(mature_observations());
-      for (std::uint32_t frame = 5u; frame <= 8u; ++frame) {
-        // Each boundary coordinate mismatches its own anchor but has mature .5 neighbors.
-        // Outside the flagged half-open core the otherwise unchanged fallback must succeed.
-        if (frame == 5u) for (const auto &p : points) pixels_[native_index(p[0u], p[1u])] = {.5f, .5f, .5f, 1.f};
-        make_authority(frame, 1000001u + (frame - 1u) * 100000u);
-        current_cores({cores[domain]});
-        if (frame == 5u) plane_words_[v2::subtitle_plane_history_reset_mask_word] = 1u;
-        ASSERT_TRUE(run());
-        // In domain0, native center(60,10) equals the left/top raw edge and is included.
-        // Centers x100 and y17 equal the right/bottom edges and are excluded. Domain1 moves
-        // the first included x to61 through the fractional transform without rounding authority.
-        expect_count(native_index(59u, 10u), confirmation_count);
-        expect_count(native_index(60u, 10u), domain == 0u ? frame - 4u : confirmation_count);
-        expect_count(native_index(61u, 10u), frame - 4u);
-        expect_count(native_index(99u, 16u), frame - 4u);
-        expect_count(native_index(100u, 16u), confirmation_count);
-        expect_count(native_index(61u, 9u), confirmation_count);
-        expect_count(native_index(99u, 17u), confirmation_count);
-        expect_evidence_exact_copy();
-      }
-    }
-  }
-
   TEST_F(HostSbsSubtitleContourGpuTest, MalformedFlaggedCurrentCoreCannotUseMatureExpandedCoverHistory) {
     for (const auto fault : {0u, 1u, 2u, 3u, 4u, 5u}) {
       SCOPED_TRACE(fault);
@@ -2973,35 +2804,6 @@ namespace {
       ASSERT_TRUE(run());
       expect_cleared_snapshot();
     }
-  }
-
-  TEST_F(HostSbsSubtitleContourGpuTest, ChangedCoreBoundaryRgbRetainsExistingMatureMarginJitterCorrespondence) {
-    clear_scene(.125f);
-    paint_point(60u, .9375f);
-    ASSERT_TRUE(mature_observations());
-    auto core = field_cover_;
-    core[0u] = source_x_edge(60u);
-    core[2u] = source_x_edge(61u);
-    const auto y = body_y() + 5u;
-    const auto content_height = content_[3u] - content_[1u];
-    core[1u] = content_[1u] + std::uint32_t(std::uint64_t(crop_top_ + y) * content_height / source_h_);
-    core[3u] = content_[1u] + std::uint32_t(std::uint64_t(crop_top_ + y + 1u) * content_height / source_h_);
-    paint_point(60u, .75f); // A true same-pixel mismatch from the mature .9375 fixed anchor.
-    make_authority(5u, 1400001u);
-    current_cores({core});
-    plane_words_[v2::subtitle_plane_history_reset_mask_word] = 1u;
-    ASSERT_TRUE(run());
-    expect_count(point_index(60u), 1u);
-    expect_count(point_index(59u), confirmation_count);
-    // This next genuine observation changes RGB beyond the reset pixel's fixed-anchor bound.
-    // The unchanged2px fallback can choose an unreset mature margin anchor. Four observations
-    // after a flagged mismatch are not guaranteed for arbitrary later matched references.
-    paint_point(60u, .125f);
-    make_authority(6u, 1500001u);
-    current_cores({core});
-    ASSERT_TRUE(run());
-    expect_count(point_index(60u), confirmation_count);
-    EXPECT_EQ(result_.features[point_index(60u)][0u], .125f);
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, ResetUsesOnlyCurrentCoreAcrossExpansionShrinkAndReplacement) {
@@ -3146,7 +2948,7 @@ namespace {
     }
   }
 
-  TEST_F(HostSbsSubtitleContourGpuTest, BothSourceFrameAndClockMustAdvanceBeforeCountFourAcrossCutsAndDomains) {
+  TEST_F(HostSbsSubtitleContourGpuTest, BothSourceFrameAndClockMustAdvanceBeforeCountFourAcrossDomains) {
     for (std::uint32_t fault = 0u; fault < 10u; ++fault) {
       SCOPED_TRACE(fault);
       ASSERT_TRUE(resize(160u, 90u));
@@ -3166,10 +2968,10 @@ namespace {
           make_authority(4u, 1100001u);
           break;
         case 4u:
-          make_authority(4u, 1300001u, false, 7u, 4u);
+          make_authority(4u, 1300001u);
           break;
         case 5u:
-          make_authority(4u, 1300001u, false, 8u, 3u);
+          make_authority(4u, 1300001u, false, 8u);
           break;
         case 6u:
           make_authority(4u, 1300001u, true);
@@ -3192,7 +2994,8 @@ namespace {
           }
       }
       ASSERT_TRUE(run());
-      expect_count(point_index(), fault == 0u ? 3u : 1u);
+      // Fault 4 is an ordinary next observation, which continues pixel history.
+      expect_count(point_index(), fault == 0u ? 3u : fault == 4u ? 4u : 1u);
       EXPECT_EQ(result_.support[point_index()], 1u) << "current evidence is independent of diagnostic clock resets";
     }
   }
@@ -3394,10 +3197,10 @@ namespace {
           params_words_[4u] = 1u;
           break;
         case 5u:
-          cut_words_[sbs_adaptive_state::index(sbs_adaptive_state::word_e::cut_contract_tag_bits)] ^= 1u;
+          health_words_[sbs_adaptive_state::index(sbs_adaptive_state::word_e::contract_tag_bits)] ^= 1u;
           break;
         case 6u:
-          plane_words_[v2::subtitle_plane_cut_epoch_word] += 1u;
+          plane_words_[v2::subtitle_plane_identity_reserved_word] += 1u;
           break;
         case 7u:
           constants_.options[3u] = 1u;
@@ -3489,10 +3292,9 @@ namespace {
     const auto distant_node = std::size_t(point_y) * field_w_ + 100u;
     for (std::uint32_t frame = 1u; frame <= 10u; ++frame) {
       SCOPED_TRACE(frame);
-      // Epoch2 old text is mature before a valid epoch3 cut. No input-domain reset is used.
-      const auto epoch = frame < 5u ? 2u : 3u;
+      // Only the changed ink at frame 6 restarts confirmation. No input-domain reset is used.
       if (frame == 6u) pixels_[ink_index] = {.5f,.5f,.5f,1.f};
-      make_authority(frame, 1000001u + (frame - 1u) * 100000u, false, 7u, epoch);
+      make_authority(frame, 1000001u + (frame - 1u) * 100000u);
       std::fill(probability_values_.begin(), probability_values_.end(), 1.f);
       if (frame >= 6u) {
         for (std::uint32_t y = 0u; y < v2::subtitle_ocr_output_height; ++y)
@@ -3511,7 +3313,7 @@ namespace {
       const std::array<ID3D11Buffer *, 3u> locator_cbs {depth_cb.Get(), geometry_cb_.Get(), locator_cb.Get()};
       context_->CSSetConstantBuffers(0u, locator_cbs.size(), locator_cbs.data());
       const std::array<ID3D11ShaderResourceView *, 10u> resolve_inputs {
-        geometry_.srv.Get(), cut_.srv.Get(), base.srv.Get(), nullptr, nullptr, nullptr,
+        geometry_.srv.Get(), health_.srv.Get(), base.srv.Get(), nullptr, nullptr, nullptr,
         identity_.srv.Get(), ocr_.srv.Get(), probability_.srv.Get(), completed_probability_.srv.Get()
       };
       const std::array<ID3D11UnorderedAccessView *, 3u> resolve_outputs {plane_.uav.Get(), nullptr, params_.uav.Get()};
@@ -3526,14 +3328,14 @@ namespace {
       ASSERT_EQ(params_words_[4u], v2::subtitle_condition_param_fully_active_value);
       ASSERT_EQ(plane_words_[v2::subtitle_plane_current_slot_mask_word], 1u);
       ASSERT_TRUE(run()); // The actual temporal/history/snapshot entries consume the resolved plane.
-      const auto expected_count = frame < 5u ? std::min(frame, confirmation_count) :
-        frame == 5u ? 1u : std::min(frame - 5u, confirmation_count);
+      const auto expected_count = frame <= 5u ? std::min(frame, confirmation_count) :
+        std::min(frame - 5u, confirmation_count);
       expect_count(ink_index, expected_count);
       const auto remaining = plane_words_[v2::subtitle_plane_warmup_word] & v2::subtitle_plane_warmup_remaining_mask;
       EXPECT_EQ(plane_words_[v2::subtitle_plane_warmup_word], 0u);
       if (frame >= 5u) {
         EXPECT_EQ(remaining, 0u);
-        EXPECT_EQ(plane_words_[v2::subtitle_plane_history_reset_mask_word], frame == 6u ? 1u : 0u);
+        EXPECT_EQ(plane_words_[v2::subtitle_plane_history_reset_mask_word], 0u);
       }
       const std::array distance_words {constants_.source, uint4_t {field_w_, field_h_, 0u, 0u}, content_};
       context_->UpdateSubresource(distance_cb.Get(), 0u, nullptr, distance_words.data(), 0u, 0u);
@@ -3551,7 +3353,7 @@ namespace {
       unbind();
       context_->CSSetConstantBuffers(0u, locator_cbs.size(), locator_cbs.data());
       const std::array<ID3D11ShaderResourceView *, 8u> condition_inputs {
-        geometry_.srv.Get(), cut_.srv.Get(), base.srv.Get(), plane_.srv.Get(), params_.srv.Get(),
+        geometry_.srv.Get(), health_.srv.Get(), base.srv.Get(), plane_.srv.Get(), params_.srv.Get(),
         native_q.srv.Get(), identity_.srv.Get(), ocr_.srv.Get()
       };
       const std::array<ID3D11UnorderedAccessView *, 3u> condition_outputs {proposal.uav.Get(), control.uav.Get(), weight.uav.Get()};
@@ -3598,7 +3400,7 @@ namespace {
           geometry_constants_.joint_observation_timestamp_low -= 1u;
           break;
         case 3u:
-          geometry_words_[v2::confirmed_cut_count] += 1u;
+          geometry_words_[v2::control_reserved_0] += 1u;
           break;
         case 4u:
           geometry_words_[v2::frame_valid] = 0u;
@@ -3661,7 +3463,7 @@ namespace {
     ASSERT_TRUE(mature_observations());
     const auto held = result_;
     ASSERT_GT(pin_count(held.support), 0u);
-    make_authority(99u, 9900001u, true, 123u, 55u);
+    make_authority(99u, 9900001u, true, 123u);
     clear_scene(.95f);
     geometry_words_[v2::camera_center_integrity_bits] ^= 1u;
     ASSERT_TRUE(run(true));
@@ -3692,7 +3494,7 @@ namespace {
           } else if (step == 6u) {
             clock = 1100001u;  // Regressed clocks restart the diagnostic correspondence.
           }
-          make_authority(frame, clock, step == 12u, step >= 11u ? 8u : 7u, step >= 10u ? 4u : 3u);
+          make_authority(frame, clock, step == 12u, step >= 11u ? 8u : 7u);
           clear_scene();
           paint_glyph_point(60u, step == 4u ? .71875f : .75f);
           if (step == 8u) without_current_authority(true);
@@ -3753,7 +3555,7 @@ namespace {
     context_->ClearUnorderedAccessViewFloat(next_features_.uav.Get(), poison);
     std::vector<pixel_t> inactive_before, inactive_after;
     ASSERT_TRUE(read_texture(device_.Get(), context_.Get(), next_features_.texture.Get(), inactive_before));
-    make_authority(99u, 9900001u, true, 123u, 55u);
+    make_authority(99u, 9900001u, true, 123u);
     clear_scene(.95f);
     geometry_words_[v2::camera_center_integrity_bits] ^= 1u;
     ASSERT_TRUE(run(true, nullptr, nullptr, true));
@@ -3798,7 +3600,8 @@ namespace {
     paint({1002u, top + 2u, 1102u, top + 62u}, {.28125f, .71875f, .53125f, 1.f});
     paint_palette_anchor({.28125f,.71875f,.53125f,1.f});
     ASSERT_TRUE(observe(4u));
-    expect_flat_patch({1002u, top + 2u, 1102u, top + 62u}, 4u, original);
+    // Without neighbour correspondence only pixels that keep their own reference continue the streak.
+    expect_flat_patch({1002u, top + 2u, 1100u, top + 60u}, 4u, original);
     EXPECT_LT(pin_count(result_.support), 6000u) << "a flat interior cannot become a binary glyph seed from P alone";
     EXPECT_EQ(result_.support[native_index(1050u, top + 30u)], 0u);
     EXPECT_EQ(result_.support[native_index(1002u, top + 30u)], 1u);
@@ -3889,22 +3692,23 @@ namespace {
       replace_prior_identity(prior);
       make_authority(4u, 1300001u);
       ASSERT_TRUE(run());
-      expect_count(point_index(), 1u);
+      // Identity word 3 (fault 3) is a reserved word and is not a compatibility key.
+      expect_count(point_index(), fault == 3u ? 4u : 1u);
       EXPECT_EQ(result_.support[point_index()], 1u) << "malformed diagnostic history cannot delay valid current text evidence";
     }
   }
 
-  TEST_F(HostSbsSubtitleContourGpuTest, InvalidNarrowRibbonAtEpochZeroCannotBorrowThreeObservationHistory) {
+  TEST_F(HostSbsSubtitleContourGpuTest, InvalidNarrowRibbonCannotBorrowThreeObservationHistory) {
     paint_glyph_point();
     for (std::uint32_t frame = 1u; frame <= 3u; ++frame) {
-      make_authority(frame, 1000001u + (frame - 1u) * 100000u, false, 7u, 0u);
+      make_authority(frame, 1000001u + (frame - 1u) * 100000u);
       ASSERT_TRUE(run());
       ASSERT_EQ(result_.support[point_index()], 1u);
       expect_count(point_index(), frame);
     }
     ASSERT_EQ(result_.identity[3u], 0u);
     ASSERT_EQ(result_.identity[snapshot_valid_word], 1u);
-    make_authority(4u, 1300001u, false, 7u, 0u);
+    make_authority(4u, 1300001u);
     const auto cw = content_[2u] - content_[0u];
     const uint4_t core {content_[0u] + cw / 3u, constants_.field[2u], content_[0u] + cw / 2u, constants_.field[3u]};
     const uint4_t cover {content_[0u], constants_.field[2u], content_[2u], content_[3u]};

@@ -14,10 +14,31 @@
     <article class="apollo-readiness-card game3d-setup-card" :class="`is-${status.tone}`">
       <h3>{{ setup?.detected ? setup.game_name || 'Detected game' : 'Launch a game in Game 3D mode' }}</h3>
       <p v-if="setup?.detected && setup.executable" class="game3d-executable">{{ setup.executable }}</p>
-      <p v-if="gameDirectory" class="game3d-executable">Setup folder: <code>{{ gameDirectory }}</code></p>
+      <p v-if="gameDirectory && !isTextGame" class="game3d-executable">Setup folder: <code>{{ gameDirectory }}</code></p>
       <p>{{ status.description }}</p>
 
-      <template v-if="canDecide">
+      <template v-if="canDecide && isTextGame">
+        <p v-if="!textGameApproved" class="game3d-hint">
+          This is a 2D text game, so it has no depth of its own. Sunshine 3D converts it with its own depth and uses a small
+          text helper, loaded into the game only while it runs, to keep the game's text readable. Nothing is written into the
+          game's folder. Choose it only for an application you recognize as a single-player game. It takes effect at once and
+          again each time the game starts.
+        </p>
+        <div class="game3d-actions">
+          <button v-if="!textGameApproved" class="btn btn-apollo-primary" type="button" :disabled="Boolean(busy)" @click="decide('install')">
+            {{ busy === 'install' ? 'Saving…' : 'Use the text helper for this game' }}
+          </button>
+          <button v-if="setup.state !== 'declined'" class="btn btn-apollo-quiet" type="button" :disabled="Boolean(busy)" @click="decide('never')">
+            {{ busy === 'never' ? 'Saving…' : textGameApproved ? 'Stop for this game' : 'Never for this game' }}
+          </button>
+        </div>
+        <p v-if="setup.state === 'current'" class="game3d-hint">
+          Stopping applies from the game's next start; the helper already loaded stays until the game closes.
+        </p>
+        <p v-if="error" class="game3d-error" role="alert">{{ error }}</p>
+      </template>
+
+      <template v-else-if="canDecide">
         <p v-if="needsReShade" class="game3d-hint">
           Installing writes ReShade 6.8.0 with full add-on support (<code>dxgi.dll</code>, <code>ReShade.ini</code>) and the
           Sunshine 3D add-on into the setup folder above, for this executable only. Choose it only for an application you
@@ -41,7 +62,7 @@
         <p v-if="error" class="game3d-error" role="alert">{{ error }}</p>
       </template>
 
-      <p v-if="setup?.detected && !['anti_cheat', 'ready_to_install', 'declined'].includes(setup.state)" class="game3d-hint">
+      <p v-if="setup?.detected && !isTextGame && !['anti_cheat', 'ready_to_install', 'declined'].includes(setup.state)" class="game3d-hint">
         Setup leaves your running game open. New or updated components take effect the next time you launch the game.
       </p>
 
@@ -63,7 +84,7 @@
         <p>Launch the game again after setup. In ReShade, open Add-ons → Sunshine 3D and check Enable Game 3D if stereo remains unavailable.</p>
       </details>
 
-      <p v-else-if="setup?.detected && ['current', 'updated'].includes(setup.state)" class="game3d-hint">
+      <p v-else-if="setup?.detected && !isTextGame && ['current', 'updated'].includes(setup.state)" class="game3d-hint">
         If the game remains 2D after its next launch, confirm ReShade has full add-on support and Enable Game 3D is selected under Add-ons → Sunshine 3D.
       </p>
     </article>
@@ -80,6 +101,12 @@ export default {
     return { busy: '', error: '' }
   },
   computed: {
+    isTextGame() {
+      return this.setup?.detected && this.setup.kind === 'text_hook'
+    },
+    textGameApproved() {
+      return this.isTextGame && ['current', 'installed'].includes(this.setup.state)
+    },
     needsReShade() {
       return this.setup?.detected && ['ready_to_install', 'declined'].includes(this.setup.state) && !this.setup.reshade_present
     },
@@ -87,10 +114,12 @@ export default {
       return this.setup?.detected && (this.setup.state === 'missing_addon' || (this.setup.state === 'ready_to_install' && this.setup.reshade_present))
     },
     canDecide() {
-      return this.setup?.detected && ['ready_to_install', 'declined'].includes(this.setup.state) && Boolean(this.setup.identity)
+      // A text game's confirmation stands for every start, so its active state can still be withdrawn.
+      const states = this.isTextGame ? ['ready_to_install', 'declined', 'current', 'installed'] : ['ready_to_install', 'declined']
+      return this.setup?.detected && states.includes(this.setup.state) && Boolean(this.setup.identity)
     },
     showManualSetup() {
-      return this.setup?.detected && ['ready_to_install', 'declined', 'missing_addon', 'update_pending', 'unavailable'].includes(this.setup.state)
+      return this.setup?.detected && !this.isTextGame && ['ready_to_install', 'declined', 'missing_addon', 'update_pending', 'unavailable'].includes(this.setup.state)
     },
     showRuntimeFallback() {
       return this.setup?.detected && (this.needsReShade || this.setup.state === 'unavailable')
@@ -135,6 +164,15 @@ export default {
         update_available: { label: 'Update available', tone: 'warning', description: 'A matching bundled add-on update is available for this game.' },
         update_pending: { label: 'Update pending', tone: 'warning', description: 'The matching bundled add-on update will be applied when its files are available. It will activate the next time you launch the game.' },
         updated: { label: 'Add-on updated', tone: 'success', description: 'The Sunshine 3D add-on was updated from this host’s bundled copy. It will activate the next time you launch the game.' },
+      }
+      if (this.isTextGame) {
+        Object.assign(states, {
+          ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can use its text helper for this game. Nothing is loaded until you confirm.' },
+          declined: { label: 'Not set up', tone: 'neutral', description: 'You chose not to set up this game. Sunshine 3D loads nothing into it.' },
+          anti_cheat: { label: 'Not offered', tone: 'neutral', description: 'Anti-cheat detected, so Sunshine 3D loads nothing into this game.' },
+          current: { label: 'Text helper active', tone: 'success', description: 'The text helper is running in this game.' },
+          installed: { label: 'Approved', tone: 'success', description: 'The text helper loads the next time this game starts.' },
+        })
       }
       const status = states[this.setup.state] || { label: 'Checking', tone: 'neutral', description: 'Checking setup for the detected game.' }
       return { ...status, description: this.setup.detail || status.description }

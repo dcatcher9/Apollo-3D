@@ -6,6 +6,7 @@
 
 namespace {
   using platf::game3d::detail::is_game_candidate;
+  using platf::game3d::detail::is_text_game_candidate;
   using platf::game3d::detected_game;
   using platf::game3d::detection_confirmation;
   namespace foreground = platf::foreground_window;
@@ -195,5 +196,40 @@ namespace {
       EXPECT_FALSE(confirmation.observe(candidate, selected_capture, start));
       EXPECT_FALSE(confirmation.observe(candidate, selected_capture, start + 2s));
     }
+  }
+  TEST(Game3dDetection, TextGameNeedsDirectWriteTextAndAClientOnTheOutput) {
+    const std::array<std::filesystem::path, 3> direct_write {L"d3d11.dll", L"DWrite.dll", L"d2d1.dll"};
+    const std::array<std::filesystem::path, 2> without_direct2d {L"d3d11.dll", L"dwrite.dll"};
+    const std::array<std::filesystem::path, 1> graphics_only {L"d3d11.dll"};
+    const std::filesystem::path game = LR"(D:\Games\Novel\novel.exe)";
+    EXPECT_TRUE(is_text_game_candidate(game, direct_write, game_window(), capture));
+    // The host converts a text game from the captured picture, so a window qualifies too,
+    // which an add-on game never does.
+    EXPECT_TRUE(is_text_game_candidate(game, direct_write, windowed_game_window(), capture));
+    EXPECT_FALSE(is_game_candidate(game, direct_write, windowed_game_window(), capture));
+    // A window reaching past the captured output is not wholly on it.
+    auto off_output = windowed_game_window();
+    off_output.client_screen_rect = {1500, 100, 2140, 580};
+    EXPECT_FALSE(is_text_game_candidate(game, direct_write, off_output, capture));
+    auto other_output = windowed_game_window();
+    other_output.client_screen_rect = {2000, 100, 2640, 580};
+    EXPECT_FALSE(is_text_game_candidate(game, direct_write, other_output, capture));
+    // The helper observes Direct2D text drawing; without both libraries it would see nothing.
+    EXPECT_FALSE(is_text_game_candidate(game, without_direct2d, game_window(), capture));
+    EXPECT_FALSE(is_text_game_candidate(game, graphics_only, game_window(), capture));
+    // The exclusion list applies to both kinds.
+    EXPECT_FALSE(is_text_game_candidate(LR"(C:\Program Files (x86)\Steam\steam.exe)", direct_write, game_window(), capture));
+  }
+
+  TEST(Game3dDetection, AKindChangeRestartsConfirmation) {
+    detection_confirmation confirmation;
+    auto game = generic_game();
+    EXPECT_FALSE(confirmation.observe(game, capture, start));
+    game.kind = platf::game3d::game_kind_e::text_hook;
+    // The same process reported as another kind is a new candidate and waits again.
+    EXPECT_FALSE(confirmation.observe(game, capture, start + 3s));
+    const auto confirmed = confirmation.observe(game, capture, start + 5s);
+    ASSERT_TRUE(confirmed);
+    EXPECT_EQ(confirmed->kind, platf::game3d::game_kind_e::text_hook);
   }
 }  // namespace

@@ -8,6 +8,7 @@
 // standard includes
 #include <array>
 #include <atomic>
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -219,7 +220,7 @@ namespace nvhttp {
   void reload_apps(const std::string &file_name) {
     std::lock_guard launch_lock(launch_request_mutex);
     terminate_active_session_locked();
-    proc::refresh(file_name, false);
+    proc::refresh(file_name, false, false);
   }
 
   void prune_pairing_sessions_locked(std::chrono::steady_clock::time_point now) {
@@ -315,11 +316,6 @@ namespace nvhttp {
   using resp_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response>;
   using req_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Request>;
 
-  enum class op_e {
-    ADD,  ///< Add certificate
-    REMOVE  ///< Remove certificate
-  };
-
   static std::string get_arg(const args_t &args, const char *name, const char *default_value = nullptr) {
     auto it = args.find(name);
     if (it == std::end(args)) {
@@ -354,9 +350,16 @@ namespace nvhttp {
         nlohmann::json named_cert_node = nlohmann::json::object();
         std::string base_name = named_cert_p->name;
         // Remove any pending id suffix (e.g., " (2)") if present.
-        const size_t pos = base_name.find(" (");
-        if (pos != std::string::npos) {
-          base_name = base_name.substr(0, pos);
+        // Only the generated form is a suffix: digits in parentheses at the very end. A name the
+        // user chose, such as "Quest (bedroom)", must survive a restart unchanged.
+        const size_t pos = base_name.rfind(" (");
+        if (pos != std::string::npos && base_name.size() > pos + 3 && base_name.back() == ')') {
+          const std::string_view digits {base_name.data() + pos + 2, base_name.size() - pos - 3};
+          if (std::all_of(digits.begin(), digits.end(), [](unsigned char ch) {
+                return std::isdigit(ch) != 0;
+              })) {
+            base_name = base_name.substr(0, pos);
+          }
         }
         const int count = name_counts[base_name]++;
         std::string final_name = base_name;
@@ -2086,6 +2089,7 @@ namespace nvhttp {
 
       response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
       response->close_connection_after_response = true;
+      return;
     }
 
     response->write();

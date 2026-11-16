@@ -48,19 +48,9 @@
 
 #include "logging.h"
 
-#ifdef _WIN32
   #include <fcntl.h>
   #include <io.h>
   #include <windows.h>
-#else
-  #include <fcntl.h>
-  #include <sys/stat.h>
-  #include <unistd.h>
-
-  #ifndef AT_EMPTY_PATH
-    #define AT_EMPTY_PATH 0x1000
-  #endif
-#endif
 
 using namespace std::literals;
 
@@ -77,11 +67,7 @@ namespace offline_sbs {
     constexpr std::uint64_t retained_staging_minimum_charge_bytes =
       1ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_contract_bytes = 16ull * 1024ull * 1024ull;
-    constexpr std::uintmax_t max_scene_audit_bytes = 32ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_progress_contract_bytes = 256ull * 1024ull;
-    constexpr std::size_t max_current_scene_bytes = 16ull * 1024ull;
-    constexpr std::size_t max_scene_count = max_paged_scene_count;
-    constexpr std::size_t max_progress_scene_decisions = 64;
     constexpr std::size_t max_browse_entries = 4096;
     constexpr std::size_t max_browse_path_components = 256;
     constexpr std::size_t max_browse_response_bytes = 512ull * 1024ull;
@@ -99,7 +85,6 @@ namespace offline_sbs {
       max_native_worker_log_bytes - native_worker_log_limit_marker.size();
 
     static_assert(max_contract_bytes == worker_result_max_bytes);
-    static_assert(max_scene_audit_bytes == scene_audit_max_bytes);
     static_assert(
       native_worker_log_limit_marker.size() < max_native_worker_log_bytes
     );
@@ -261,13 +246,7 @@ namespace offline_sbs {
       return fs::path(utf8);
     }
 
-#ifndef _WIN32
-    bool is_already_exists_error(const std::error_code &error) {
-      return error == std::errc::file_exists;
-    }
-#endif
 
-#ifdef _WIN32
     class directory_creation_pins_t {
     public:
       directory_creation_pins_t() = default;
@@ -318,13 +297,9 @@ namespace offline_sbs {
     };
 
     directory_creation_pins_t create_user_directory(
-#else
-    void create_user_directory(
-#endif
       const fs::path &directory,
       const std::string_view description
     ) {
-#ifdef _WIN32
       // MinGW's recursive create_directories() can incorrectly return the
       // native ERROR_ALREADY_EXISTS for an existing intermediate component
       // while leaving the requested leaf absent. Create and validate each
@@ -455,68 +430,6 @@ namespace offline_sbs {
         }
       }
       return pins;
-#else
-      std::error_code create_error;
-      fs::create_directories(directory, create_error);
-      if (!create_error) {
-        return;
-      }
-
-      // Re-stat while the caller is still impersonating the bound standard
-      // user. ERROR_ALREADY_EXISTS is benign only when the exact requested
-      // object is an actual directory; a file, symlink, or uninspectable
-      // object is a path conflict and must fail closed.
-      std::error_code status_error;
-      const auto status = fs::symlink_status(directory, status_error);
-      bool real_directory =
-        !status_error && status.type() == fs::file_type::directory;
-#ifdef _WIN32
-      if (real_directory) {
-        const auto attributes = GetFileAttributesW(directory.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES) {
-          status_error = std::error_code {
-            static_cast<int>(GetLastError()),
-            std::system_category(),
-          };
-          real_directory = false;
-        } else {
-          real_directory =
-            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-        }
-      }
-#endif
-      if (is_already_exists_error(create_error)) {
-        if (real_directory) {
-          return;
-        }
-        if (status_error) {
-          throw std::runtime_error(
-            "cannot verify existing " + std::string {description} + " [" +
-            path_to_utf8(directory) + "]: " + status_error.message()
-          );
-        }
-      }
-      if (
-        !real_directory &&
-        !status_error &&
-        status.type() != fs::file_type::not_found &&
-        status.type() != fs::file_type::none
-      ) {
-        // MinGW may report not_a_directory instead of file_exists when the
-        // target itself is a file. The observed object type is authoritative
-        // for this conflict, but a real directory with an unrelated create
-        // failure must retain the original access/I/O diagnostic.
-        throw std::runtime_error(
-          std::string {description} + " path already exists but is not a "
-          "real directory [" + path_to_utf8(directory) + "]"
-        );
-      }
-      throw std::runtime_error(
-        "cannot create " + std::string {description} + " [" +
-        path_to_utf8(directory) + "]: " + create_error.message()
-      );
-#endif
     }
 
     std::string sha256_hex(const std::string_view bytes) {
@@ -604,7 +517,6 @@ namespace offline_sbs {
       const fs::path &left,
       const fs::path &right
     ) {
-#ifdef _WIN32
       auto left_native = left.native();
       auto right_native = right.native();
       std::ranges::transform(left_native, left_native.begin(), [](const wchar_t c) {
@@ -614,9 +526,6 @@ namespace offline_sbs {
         return static_cast<wchar_t>(std::towlower(c));
       });
       return left_native == right_native;
-#else
-      return left == right;
-#endif
     }
 
     bool path_is_same_or_ancestor(
@@ -718,7 +627,6 @@ namespace offline_sbs {
              fs::file_size(path, ec) > 0 && !ec;
     }
 
-#ifdef _WIN32
     bool windows_publish_identity_attributes_accepted(
       const DWORD attributes,
       const std::uint64_t size
@@ -727,13 +635,11 @@ namespace offline_sbs {
              (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
              (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
     }
-#endif
 
     std::optional<nlohmann::json> file_publish_identity(
       const fs::path &path,
       std::string &error
     ) {
-#ifdef _WIN32
       const HANDLE handle = CreateFileW(
         path.c_str(),
         FILE_READ_ATTRIBUTES,
@@ -778,39 +684,6 @@ namespace offline_sbs {
         {"file_index_low", information.nFileIndexLow},
         {"size_bytes", size},
       };
-#else
-      const int fd = ::open(
-        path.c_str(),
-        O_RDONLY | O_CLOEXEC | O_NOFOLLOW
-      );
-      if (fd < 0) {
-        error =
-          "cannot open output for identity attestation: " +
-          std::string {std::strerror(errno)};
-        return std::nullopt;
-      }
-      struct stat information {};
-      if (::fstat(fd, &information) != 0) {
-        const auto inspect_error = errno;
-        ::close(fd);
-        error =
-          "cannot attest output identity: " +
-          std::string {std::strerror(inspect_error)};
-        return std::nullopt;
-      }
-      if (!S_ISREG(information.st_mode) || information.st_size <= 0) {
-        ::close(fd);
-        error = "output is not a non-empty regular file";
-        return std::nullopt;
-      }
-      const auto identity = nlohmann::json {
-        {"device", static_cast<std::uint64_t>(information.st_dev)},
-        {"inode", static_cast<std::uint64_t>(information.st_ino)},
-        {"size_bytes", static_cast<std::uint64_t>(information.st_size)},
-      };
-      ::close(fd);
-      return identity;
-#endif
     }
 
     bool file_matches_publish_identity(
@@ -825,15 +698,9 @@ namespace offline_sbs {
     class publication_file_t {
     public:
       ~publication_file_t() {
-#ifdef _WIN32
         if (handle_ != INVALID_HANDLE_VALUE) {
           CloseHandle(handle_);
         }
-#else
-        if (fd_ >= 0) {
-          ::close(fd_);
-        }
-#endif
       }
 
       publication_file_t(const publication_file_t &) = delete;
@@ -842,27 +709,16 @@ namespace offline_sbs {
       publication_file_t(publication_file_t &&other) noexcept:
           source_(std::move(other.source_)),
           identity_(std::move(other.identity_))
-#ifdef _WIN32
           , handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE))
-#else
-          , fd_(std::exchange(other.fd_, -1))
-#endif
       {
       }
 
       publication_file_t &operator=(publication_file_t &&other) noexcept {
         if (this != &other) {
-#ifdef _WIN32
           if (handle_ != INVALID_HANDLE_VALUE) {
             CloseHandle(handle_);
           }
           handle_ = std::exchange(other.handle_, INVALID_HANDLE_VALUE);
-#else
-          if (fd_ >= 0) {
-            ::close(fd_);
-          }
-          fd_ = std::exchange(other.fd_, -1);
-#endif
           source_ = std::move(other.source_);
           identity_ = std::move(other.identity_);
         }
@@ -882,7 +738,6 @@ namespace offline_sbs {
         if (missing) {
           *missing = false;
         }
-#ifdef _WIN32
         const HANDLE handle = CreateFileW(
           source.c_str(),
           FILE_READ_ATTRIBUTES | DELETE,
@@ -943,49 +798,6 @@ namespace offline_sbs {
           std::move(identity),
           handle
         };
-#else
-        const int fd = ::open(
-          source.c_str(),
-          O_RDONLY | O_CLOEXEC | O_NOFOLLOW
-        );
-        if (fd < 0) {
-          if (missing && errno == ENOENT) {
-            *missing = true;
-          }
-          error =
-            "cannot pin the staged output for publication: " +
-            std::string {std::strerror(errno)};
-          return std::nullopt;
-        }
-        struct stat information {};
-        if (
-          ::fstat(fd, &information) != 0 ||
-          !S_ISREG(information.st_mode) ||
-          information.st_size <= 0
-        ) {
-          const auto inspect_error = errno;
-          ::close(fd);
-          error =
-            "staged output is not a non-empty, non-link regular file: " +
-            std::string {std::strerror(inspect_error)};
-          return std::nullopt;
-        }
-        nlohmann::json identity {
-          {"device", static_cast<std::uint64_t>(information.st_dev)},
-          {"inode", static_cast<std::uint64_t>(information.st_ino)},
-          {"size_bytes", static_cast<std::uint64_t>(information.st_size)},
-        };
-        if (expected_identity && identity != *expected_identity) {
-          ::close(fd);
-          error = "staged output identity changed after worker attestation";
-          return std::nullopt;
-        }
-        return publication_file_t {
-          source,
-          std::move(identity),
-          fd
-        };
-#endif
       }
 
       bool publish_no_replace(
@@ -997,7 +809,6 @@ namespace offline_sbs {
         if (staging_retired) {
           *staging_retired = false;
         }
-#ifdef _WIN32
         // The legacy Windows rename-by-handle API can replace an existing leaf
         // despite FILE_RENAME_INFO::ReplaceIfExists being false on supported
         // filesystems. Publish as a hard link instead: CreateHardLinkW is
@@ -1043,44 +854,12 @@ namespace offline_sbs {
             << retirement_error;
         }
         return true;
-#else
-        (void) force_staging_disposition_failure;
-        // AT_EMPTY_PATH binds the new destination link to this exact open inode,
-        // while linkat's normal EEXIST behavior provides atomic no-replace
-        // publication. Do not unlink the old pathname by name afterward: a
-        // same-user rename race could otherwise make cleanup delete an unrelated
-        // file. Linux currently exposes this feature as unavailable, so the safe
-        // retained staging link is preferable to an unsafe cleanup fallback.
-        if (
-          ::linkat(
-            fd_,
-            "",
-            AT_FDCWD,
-            destination.c_str(),
-            AT_EMPTY_PATH
-          ) != 0
-        ) {
-          const auto publish_error = errno;
-          if (publish_error == EEXIST) {
-            error =
-              "final output appeared while the job was running; refusing to "
-              "overwrite it";
-          } else {
-            error =
-              "cannot atomically publish the pinned conversion output: " +
-              std::string {std::strerror(publish_error)};
-          }
-          return false;
-        }
-        return true;
-#endif
       }
 
       bool retire_staging_link(
         std::string &error,
         const bool force_failure = false
       ) {
-#ifdef _WIN32
         if (force_failure) {
           error = "injected staging disposition failure";
           return false;
@@ -1101,16 +880,9 @@ namespace offline_sbs {
           return false;
         }
         return true;
-#else
-        (void) force_failure;
-        error =
-          "exact staging-link retirement is unavailable on this platform";
-        return false;
-#endif
       }
 
     private:
-#ifdef _WIN32
       publication_file_t(
         fs::path source,
         nlohmann::json identity,
@@ -1120,25 +892,10 @@ namespace offline_sbs {
           identity_(std::move(identity)),
           handle_(handle) {
       }
-#else
-      publication_file_t(
-        fs::path source,
-        nlohmann::json identity,
-        const int fd
-      ):
-          source_(std::move(source)),
-          identity_(std::move(identity)),
-          fd_(fd) {
-      }
-#endif
 
       fs::path source_;
       nlohmann::json identity_;
-#ifdef _WIN32
       HANDLE handle_ = INVALID_HANDLE_VALUE;
-#else
-      int fd_ = -1;
-#endif
     };
 
     bool validate_local_path_syntax(
@@ -1156,7 +913,6 @@ namespace offline_sbs {
         error = std::string {purpose} + " contains an embedded null";
         return false;
       }
-#ifdef _WIN32
       // MinGW's std::filesystem::path::is_absolute() does not classify every
       // Windows UNC spelling consistently. Check the required drive-root form
       // directly so UNC/device/extended paths always reach the same fail-closed
@@ -1187,16 +943,6 @@ namespace offline_sbs {
           " must be on a fixed or removable local drive";
         return false;
       }
-#else
-      if (!path.is_absolute()) {
-        error = std::string {purpose} + " must be absolute";
-        return false;
-      }
-      if (native.starts_with("//")) {
-        error = "network " + std::string {purpose} + "s are not accepted";
-        return false;
-      }
-#endif
       if (std::ranges::any_of(
             path.relative_path(),
             [](const fs::path &component) {
@@ -1216,7 +962,6 @@ namespace offline_sbs {
       return validate_local_path_syntax(path, "input path", error);
     }
 
-#ifdef _WIN32
     struct pinned_identity_t {
       DWORD volume_serial = 0;
       DWORD file_index_high = 0;
@@ -1604,13 +1349,11 @@ namespace offline_sbs {
         error
       );
     }
-#endif
 
     std::optional<std::uint64_t> retained_staging_charge(
       const fs::path &path,
       std::string &error
     ) {
-#ifdef _WIN32
       const HANDLE handle = CreateFileW(
         path.c_str(),
         FILE_READ_ATTRIBUTES,
@@ -1692,23 +1435,6 @@ namespace offline_sbs {
       const auto size =
         (static_cast<std::uint64_t>(information.nFileSizeHigh) << 32u) |
         information.nFileSizeLow;
-#else
-      struct stat information {};
-      if (::lstat(path.c_str(), &information) != 0) {
-        if (errno == ENOENT) {
-          return 0;
-        }
-        error =
-          "cannot inspect retained input-directory staging output: " +
-          std::string {std::strerror(errno)};
-        return std::nullopt;
-      }
-      if (!S_ISREG(information.st_mode)) {
-        error = "retained input-directory staging output is not a plain file";
-        return std::nullopt;
-      }
-      const auto size = static_cast<std::uint64_t>(information.st_size);
-#endif
       return std::max(size, retained_staging_minimum_charge_bytes);
     }
 
@@ -1734,7 +1460,6 @@ namespace offline_sbs {
     }
 
     std::optional<bool> inspect_browse_entry(const fs::path &path) {
-#ifdef _WIN32
       const HANDLE handle = CreateFileW(
         path.c_str(),
         FILE_READ_ATTRIBUTES,
@@ -1759,17 +1484,6 @@ namespace offline_sbs {
       }
       return
         (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-#else
-      std::error_code error;
-      const auto status = fs::symlink_status(path, error);
-      if (
-        error || fs::is_symlink(status) ||
-        (!fs::is_directory(status) && !fs::is_regular_file(status))
-      ) {
-        return std::nullopt;
-      }
-      return fs::is_directory(status);
-#endif
     }
 
     void sort_browse_entries(std::vector<browse_entry_record_t> &entries) {
@@ -1777,7 +1491,6 @@ namespace offline_sbs {
         if (left.directory != right.directory) {
           return left.directory;
         }
-#ifdef _WIN32
         auto left_folded = left.path.filename().native();
         auto right_folded = right.path.filename().native();
         std::ranges::transform(
@@ -1795,25 +1508,6 @@ namespace offline_sbs {
         if (left_folded != right_folded) {
           return left_folded < right_folded;
         }
-#else
-        auto left_folded = left.name;
-        auto right_folded = right.name;
-        std::ranges::transform(
-          left_folded,
-          left_folded.begin(),
-          [](const unsigned char character) {
-          return static_cast<char>(std::tolower(character));
-        });
-        std::ranges::transform(
-          right_folded,
-          right_folded.begin(),
-          [](const unsigned char character) {
-          return static_cast<char>(std::tolower(character));
-        });
-        if (left_folded != right_folded) {
-          return left_folded < right_folded;
-        }
-#endif
         if (left.name != right.name) {
           return left.name < right.name;
         }
@@ -1825,7 +1519,6 @@ namespace offline_sbs {
       std::string &error
     ) {
       std::vector<browse_entry_record_t> roots;
-#ifdef _WIN32
       const DWORD required = GetLogicalDriveStringsW(0, nullptr);
       if (required == 0) {
         error =
@@ -1860,13 +1553,6 @@ namespace offline_sbs {
           .directory = true,
         });
       }
-#else
-      roots.push_back({
-        .name = "/",
-        .path = fs::path {"/"},
-        .directory = true,
-      });
-#endif
       sort_browse_entries(roots);
       return roots;
     }
@@ -1902,7 +1588,6 @@ namespace offline_sbs {
       temporary += L".part";
       std::error_code ignored;
       fs::remove(temporary, ignored);
-#ifdef _WIN32
       HANDLE handle = CreateFileW(
         temporary.c_str(),
         GENERIC_WRITE,
@@ -1945,44 +1630,6 @@ namespace offline_sbs {
         error = "cannot atomically replace durable job state";
         return false;
       }
-#else
-      const int fd = ::open(
-        temporary.c_str(),
-        O_CREAT | O_TRUNC | O_WRONLY,
-        0600
-      );
-      if (fd < 0) {
-        error = "cannot create atomic state temporary file";
-        return false;
-      }
-      bool ok = true;
-      std::size_t offset = 0;
-      while (offset < contents.size()) {
-        const auto written = ::write(
-          fd,
-          contents.data() + offset,
-          contents.size() - offset
-        );
-        if (written <= 0) {
-          ok = false;
-          break;
-        }
-        offset += static_cast<std::size_t>(written);
-      }
-      ok = ok && ::fsync(fd) == 0;
-      ::close(fd);
-      if (!ok) {
-        fs::remove(temporary, ignored);
-        error = "cannot durably write job state";
-        return false;
-      }
-      fs::rename(temporary, path, ignored);
-      if (ignored) {
-        fs::remove(temporary, ignored);
-        error = "cannot atomically replace durable job state";
-        return false;
-      }
-#endif
       return true;
     }
 
@@ -1998,16 +1645,12 @@ namespace offline_sbs {
       const fs::path &path,
       std::string &error,
       const std::uintmax_t max_bytes = max_contract_bytes,
-      std::string *content_sha256 = nullptr,
-      bool *acquisition_failed = nullptr,
-      std::uintmax_t *content_bytes = nullptr,
-      std::string *content_serialized = nullptr
+      bool *acquisition_failed = nullptr
     ) {
       if (acquisition_failed) {
         *acquisition_failed = false;
       }
       std::string serialized;
-#ifdef _WIN32
       const HANDLE handle = CreateFileW(
         path.c_str(),
         GENERIC_READ,
@@ -2099,145 +1742,17 @@ namespace offline_sbs {
         return std::nullopt;
       }
       CloseHandle(handle);
-#else
-      const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-      if (fd < 0) {
-        if (acquisition_failed) {
-          *acquisition_failed = true;
-        }
-        error =
-          "cannot open contract without following links: " +
-          std::string {std::strerror(errno)};
-        return std::nullopt;
-      }
-      struct stat information {};
-      const int inspect_status = ::fstat(fd, &information);
-      if (
-        inspect_status != 0 ||
-        !S_ISREG(information.st_mode)
-      ) {
-        const auto inspect_error = errno;
-        ::close(fd);
-        if (inspect_status != 0 && acquisition_failed) {
-          *acquisition_failed = true;
-        }
-        error =
-          "contract is not a no-follow regular file: " +
-          std::string {std::strerror(inspect_error)};
-        return std::nullopt;
-      }
-      if (
-        information.st_size <= 0 ||
-        static_cast<std::uintmax_t>(information.st_size) > max_bytes
-      ) {
-        ::close(fd);
-        error = "contract size is invalid";
-        return std::nullopt;
-      }
-      serialized.resize(static_cast<std::size_t>(information.st_size));
-      std::size_t offset = 0;
-      while (offset < serialized.size()) {
-        const auto read = ::read(
-          fd,
-          serialized.data() + offset,
-          serialized.size() - offset
-        );
-        if (read <= 0) {
-          const auto read_error = errno;
-          ::close(fd);
-          if (acquisition_failed) {
-            *acquisition_failed = true;
-          }
-          error =
-            "cannot read the pinned contract: " +
-            std::string {std::strerror(read_error)};
-          return std::nullopt;
-        }
-        offset += static_cast<std::size_t>(read);
-      }
-      struct stat final_information {};
-      if (::fstat(fd, &final_information) != 0) {
-        const auto inspect_error = errno;
-        ::close(fd);
-        if (acquisition_failed) {
-          *acquisition_failed = true;
-        }
-        error =
-          "cannot re-inspect the pinned contract: " +
-          std::string {std::strerror(inspect_error)};
-        return std::nullopt;
-      }
-      if (final_information.st_size != information.st_size) {
-        ::close(fd);
-        if (acquisition_failed) {
-          *acquisition_failed = true;
-        }
-        error = "contract size changed while it was being read";
-        return std::nullopt;
-      }
-      ::close(fd);
-#endif
       try {
         auto value = wire::parse_json_without_duplicate_keys(serialized);
         if (!value.is_object()) {
           error = "contract root is not an object";
           return std::nullopt;
         }
-        if (content_sha256) {
-          *content_sha256 = sha256_hex(serialized);
-        }
-        if (content_bytes) *content_bytes = serialized.size();
-        if (content_serialized) *content_serialized = std::move(serialized);
         return value;
       } catch (const std::exception &exception) {
         error = std::string {"cannot parse contract: "} + exception.what();
         return std::nullopt;
       }
-    }
-
-    std::optional<nlohmann::json> read_audit_page_checked(
-      const fs::path &directory, const wire::scene_audit_contract_t &manifest,
-      const std::uint32_t index, std::string &error,
-      std::string *serialized = nullptr
-    ) {
-      if (!manifest.paged || index >= manifest.pages.size()) {
-        error = "scene audit page was not found";
-        return std::nullopt;
-      }
-      const auto &descriptor = manifest.pages[index];
-      std::string digest;
-      std::uintmax_t bytes = 0;
-      auto page = read_json_contract(directory / wire::scene_audit_page_filename(index),
-        error, scene_audit_page_max_bytes, &digest, nullptr, &bytes, serialized);
-      if (!page) return std::nullopt;
-      try {
-        if (digest != descriptor.sha256 || bytes != descriptor.bytes) {
-          throw std::runtime_error("scene audit page identity differs from its manifest");
-        }
-        wire::validate_scene_audit_page(wire::parse_scene_audit_page(*page), descriptor,
-          manifest.status == "complete" && index + 1 == manifest.pages.size());
-        return page;
-      } catch (const std::exception &exception) {
-        error = exception.what();
-        return std::nullopt;
-      }
-    }
-
-    bool validate_audit_pages(const fs::path &directory,
-                              const wire::scene_audit_contract_t &manifest,
-                              std::string &error,
-                              std::vector<scene_plan_t> *recent = nullptr) {
-      for (const auto &descriptor : manifest.pages) {
-        const auto page = read_audit_page_checked(directory, manifest, descriptor.index, error);
-        if (!page) return false;
-        if (recent) {
-          for (const auto &scene : page->at("scenes")) {
-            recent->push_back(wire::parse_scene_record(scene));
-            if (recent->size() > scene_audit_recent_scenes) recent->erase(recent->begin());
-          }
-        }
-      }
-      return true;
     }
 
     std::string quote_windows_process_argument(const std::string_view argument) {
@@ -2282,11 +1797,7 @@ namespace offline_sbs {
     }
 
     FILE *open_binary_log(const fs::path &path) {
-#ifdef _WIN32
       return _wfopen(path.c_str(), L"wb");
-#else
-      return std::fopen(path.c_str(), "wb");
-#endif
     }
 
     /**
@@ -2379,7 +1890,6 @@ namespace offline_sbs {
       ) = delete;
 
       bool initialize(std::string &error) {
-#ifdef _WIN32
         HANDLE read_handle = INVALID_HANDLE_VALUE;
         HANDLE write_handle = INVALID_HANDLE_VALUE;
         if (
@@ -2413,37 +1923,6 @@ namespace offline_sbs {
           error = "cannot open bounded native worker diagnostic stream";
           return false;
         }
-#else
-        int descriptors[2] {-1, -1};
-        if (::pipe(descriptors) != 0) {
-          error =
-            "cannot create bounded native worker diagnostic pipe: " +
-            std::generic_category().message(errno);
-          return false;
-        }
-        read_descriptor_ = descriptors[0];
-        const auto flags = ::fcntl(read_descriptor_, F_GETFL, 0);
-        if (
-          flags == -1 ||
-          ::fcntl(read_descriptor_, F_SETFL, flags | O_NONBLOCK) == -1
-        ) {
-          ::close(descriptors[1]);
-          close_read_handle();
-          error =
-            "cannot make native worker diagnostic pipe non-blocking: " +
-            std::generic_category().message(errno);
-          return false;
-        }
-        child_stream_ = ::fdopen(descriptors[1], "wb");
-        if (!child_stream_) {
-          ::close(descriptors[1]);
-          close_read_handle();
-          error =
-            "cannot open bounded native worker diagnostic stream: " +
-            std::generic_category().message(errno);
-          return false;
-        }
-#endif
 
         writer_ = std::make_unique<bounded_native_worker_log_writer_t>(
           [this](const std::string_view bytes) {
@@ -2519,15 +1998,9 @@ namespace offline_sbs {
         if (error == 0) {
           return {};
         }
-#ifdef _WIN32
         return
           "native worker diagnostic pipe failed (Windows error " +
           std::to_string(error) + ")";
-#else
-        return
-          "native worker diagnostic pipe failed: " +
-          std::generic_category().message(error);
-#endif
       }
 
     private:
@@ -2536,7 +2009,6 @@ namespace offline_sbs {
       void drain(const std::stop_token stop) noexcept {
         std::array<char, 64u * 1024u> buffer {};
         while (!stop.stop_requested()) {
-#ifdef _WIN32
           DWORD available = 0;
           if (
             !PeekNamedPipe(
@@ -2591,46 +2063,14 @@ namespace offline_sbs {
           writer_->append(
             std::string_view {buffer.data(), static_cast<std::size_t>(bytes_read)}
           );
-#else
-          const auto bytes_read =
-            ::read(read_descriptor_, buffer.data(), buffer.size());
-          if (bytes_read > 0) {
-            writer_->append(
-              std::string_view {
-                buffer.data(),
-                static_cast<std::size_t>(bytes_read),
-              }
-            );
-            continue;
-          }
-          if (bytes_read == 0) {
-            break;
-          }
-          if (errno == EINTR) {
-            continue;
-          }
-          if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            std::this_thread::sleep_for(reader_idle_poll);
-            continue;
-          }
-          pipe_error_.store(errno, std::memory_order_release);
-          break;
-#endif
         }
       }
 
       void close_read_handle() noexcept {
-#ifdef _WIN32
         if (read_handle_ != INVALID_HANDLE_VALUE) {
           CloseHandle(read_handle_);
           read_handle_ = INVALID_HANDLE_VALUE;
         }
-#else
-        if (read_descriptor_ != -1) {
-          ::close(read_descriptor_);
-          read_descriptor_ = -1;
-        }
-#endif
       }
 
       std::unique_ptr<FILE, decltype(&std::fclose)> output_ {
@@ -2641,11 +2081,7 @@ namespace offline_sbs {
       std::unique_ptr<bounded_native_worker_log_writer_t> writer_;
       std::jthread reader_;
       std::atomic<int> pipe_error_ {0};
-#ifdef _WIN32
       HANDLE read_handle_ = INVALID_HANDLE_VALUE;
-#else
-      int read_descriptor_ = -1;
-#endif
     };
 
     fs::path staging_path_for(
@@ -2677,7 +2113,6 @@ namespace offline_sbs {
         candidates.push_back(*trusted_override);
       } else {
         const auto installation = config.sunshine_executable.parent_path();
-#ifdef _WIN32
         candidates.push_back(
           installation / path_from_utf8(std::string {tool_name} + ".exe")
         );
@@ -2685,12 +2120,6 @@ namespace offline_sbs {
           installation / "tools" /
           path_from_utf8(std::string {tool_name} + ".exe")
         );
-#else
-        candidates.push_back(installation / path_from_utf8(std::string {tool_name}));
-        candidates.push_back(
-          installation / "tools" / path_from_utf8(std::string {tool_name})
-        );
-#endif
       }
 
       for (const auto &candidate : candidates) {
@@ -2703,11 +2132,7 @@ namespace offline_sbs {
         std::transform(name.begin(), name.end(), name.begin(), [](const unsigned char c) {
           return static_cast<char>(std::tolower(c));
         });
-#ifdef _WIN32
         if (name != std::string {tool_name} + ".exe") {
-#else
-        if (name != tool_name) {
-#endif
           error =
             "trusted media-tool executable must be named " +
             std::string {tool_name};
@@ -2800,7 +2225,6 @@ namespace offline_sbs {
     }
 
     bool harden_worker_process_group(bp::group &group, std::string &error) {
-#ifdef _WIN32
       if (!group.valid()) {
         error = "native worker process group is invalid";
         return false;
@@ -2833,9 +2257,6 @@ namespace offline_sbs {
           std::to_string(GetLastError()) + ")";
         return false;
       }
-#else
-      (void) group;
-#endif
       return true;
     }
 
@@ -2863,7 +2284,8 @@ namespace offline_sbs {
       }
       auto environment = boost::this_process::environment();
       boost::filesystem::path working_directory {
-        config.sunshine_executable.parent_path().string()
+        // Native wide path, so an installation folder outside the ANSI code page still works.
+        config.sunshine_executable.parent_path().wstring()
       };
       bp::group group;
       std::string group_error;
@@ -3130,35 +2552,6 @@ namespace offline_sbs {
         }
         progress.source_duration_seconds = number;
       }
-      if (value.contains("scene_count") && !value["scene_count"].is_null()) {
-        progress.scene_count = value["scene_count"].get<std::uint64_t>();
-        if (*progress.scene_count > max_scene_count) {
-          throw std::runtime_error("worker progress scene count exceeds the serialized contract");
-        }
-      }
-      if (value.contains("current_scene") && !value["current_scene"].is_null()) {
-        if (
-          !value["current_scene"].is_object() ||
-          value["current_scene"].dump().size() > max_current_scene_bytes
-        ) {
-          throw std::runtime_error("worker current scene is invalid");
-        }
-        progress.current_scene = value["current_scene"];
-      }
-      if (value.contains("scene_decisions")) {
-        const auto &decisions = value["scene_decisions"];
-        if (
-          !decisions.is_array() ||
-          decisions.size() > max_progress_scene_decisions ||
-          decisions.dump().size() > max_progress_contract_bytes ||
-          !std::ranges::all_of(decisions, [](const auto &decision) {
-            return decision.is_object();
-          })
-        ) {
-          throw std::runtime_error("worker scene decisions are invalid");
-        }
-        progress.scene_decisions = decisions;
-      }
       return progress;
     }
 
@@ -3204,14 +2597,6 @@ namespace offline_sbs {
           error = "worker result identity/configuration attestation mismatch";
           return false;
         }
-        const auto scene_count = typed_result.total_scene_count.value_or(typed_result.scenes.size());
-        if (
-          scene_count == 0 ||
-          scene_count > max_scene_count
-        ) {
-          error = "worker result scene count is invalid";
-          return false;
-        }
         const auto &source = typed_result.source;
         if (
           source.width == 0 || source.height == 0 || source.frame_count == 0 ||
@@ -3223,46 +2608,15 @@ namespace offline_sbs {
         }
         const auto expected_source_contract =
           (context.result_directory / "source-contract.json").lexically_normal();
-        const auto expected_scene_audit =
-          (context.result_directory / "scene-audit.json").lexically_normal();
         if (
           path_from_utf8(source.contract_path)
               .lexically_normal() != expected_source_contract ||
-          path_from_utf8(typed_result.scene_audit_path)
-              .lexically_normal() != expected_scene_audit ||
-          !regular_nonempty_file(expected_source_contract) ||
-          !regular_nonempty_file(expected_scene_audit)
+          !regular_nonempty_file(expected_source_contract)
         ) {
           error = "worker result artifact paths are invalid";
           return false;
         }
         const auto &cache = typed_result.cache;
-        if (typed_result.total_scene_count) {
-          std::string digest;
-          const auto document = read_json_contract(expected_scene_audit, error, max_scene_audit_bytes, &digest);
-          if (!document || digest != typed_result.scene_audit_manifest_sha256) {
-            error = "worker scene audit manifest identity is invalid: " + error;
-            return false;
-          }
-          const auto manifest = wire::parse_scene_audit_contract(*document);
-          std::vector<scene_plan_t> recent;
-          if (!manifest.paged || manifest.status != "complete" || manifest.scene_count != scene_count ||
-              manifest.covered_end_sequence != source.frame_count + 1 ||
-              !validate_audit_pages(context.result_directory, manifest, error, &recent)) {
-            error = "worker paged audit coverage is invalid: " + error;
-            return false;
-          }
-          if (recent.size() != typed_result.scenes.size()) {
-            error = "worker recent scene tail disagrees with its audit";
-            return false;
-          }
-          for (std::size_t i = 0; i < recent.size(); ++i) {
-            if (wire::scene_record_json(recent[i]) != wire::scene_record_json(typed_result.scenes[i])) {
-              error = "worker recent scene evidence disagrees with its audit";
-              return false;
-            }
-          }
-        }
         if (
           cache.hard_cap_bytes != context.scene_cache_max_bytes ||
           cache.remaining_bytes != 0 ||
@@ -3308,10 +2662,9 @@ namespace offline_sbs {
       const nlohmann::json &result,
       const worker_context_t &context
     ) {
-      // The child-owned worker result and scene-audit manifest/pages retain the complete
-      // per-scene causal evidence. Durable service state stays deliberately small so
-      // listing jobs cannot deep-copy a multi-hour clip's full report under the service
-      // mutex and job.json remains bounded and restart-safe.
+      // The child-owned worker result retains the complete attestation. Durable service
+      // state stays deliberately small so listing jobs cannot deep-copy a full report
+      // under the service mutex and job.json remains bounded and restart-safe.
       nlohmann::json compact = nlohmann::json::object();
       constexpr std::array scalar_fields {
         "schema"sv,
@@ -3321,9 +2674,6 @@ namespace offline_sbs {
         "codec"sv,
         "worker_spec_sha256"sv,
         "python_dependency"sv,
-        "scene_count"sv,
-        "scene_audit"sv,
-        "scene_audit_manifest_sha256"sv,
         "output"sv,
       };
       for (const auto field : scalar_fields) {
@@ -3384,8 +2734,6 @@ namespace offline_sbs {
         }
       );
       compact["full_result_contract"] = path_to_utf8(context.worker_result);
-      compact["scene_decisions_contract"] =
-        path_to_utf8(context.result_directory / "scene-audit.json");
       compact["details_storage"] = "worker-artifacts";
       return compact;
     }
@@ -3395,13 +2743,6 @@ namespace offline_sbs {
     wire::job_snapshot_contract_t job_snapshot_wire_contract(
       const job_snapshot_t &snapshot
     ) {
-      std::vector<nlohmann::json> decisions;
-      if (snapshot.progress.scene_decisions.is_array()) {
-        decisions.assign(
-          snapshot.progress.scene_decisions.begin(),
-          snapshot.progress.scene_decisions.end()
-        );
-      }
       return {
       .id = snapshot.id,
       .state = to_string(snapshot.state),
@@ -3426,13 +2767,6 @@ namespace offline_sbs {
         .total_frames = snapshot.progress.total_frames,
         .source_time_seconds = snapshot.progress.source_time_seconds,
         .source_duration_seconds = snapshot.progress.source_duration_seconds,
-        .scene_count = snapshot.progress.scene_count,
-        .current_scene = snapshot.progress.current_scene.is_object() ?
-                           std::optional<nlohmann::json> {
-                             snapshot.progress.current_scene
-                           } :
-                           std::nullopt,
-        .scene_decisions = std::move(decisions),
       },
       .created_at_unix_ms = snapshot.created_at_unix_ms,
       .started_at_unix_ms = snapshot.started_at_unix_ms,
@@ -3456,15 +2790,6 @@ namespace offline_sbs {
       {"error_code", to_string(code)},
       {"error", error.empty() ? nlohmann::json(nullptr) : nlohmann::json(error)},
       {"job", job ? job->json() : nlohmann::json(nullptr)},
-    };
-  }
-
-  nlohmann::json scene_audit_reply_t::json() const {
-    return {
-      {"status", ok},
-      {"error_code", to_string(code)},
-      {"error", error.empty() ? nlohmann::json(nullptr) : nlohmann::json(error)},
-      {"audit", ok ? audit : nlohmann::json(nullptr)},
     };
   }
 
@@ -3495,16 +2820,12 @@ namespace offline_sbs {
       // first, then erase the durable service-owned state. These flags keep a
       // failed pass retryable without re-resolving a released child pin.
       bool worker_artifacts_pruned = false;
-#ifdef _WIN32
       bool worker_result_pin_released_for_prune = false;
-#endif
       mutable std::mutex artifact_mutex;
-#ifdef _WIN32
       std::vector<pinned_handle_t> input_pins;
       // The job root is owned by worker_tree. Retain an additional result-directory
-      // identity pin until pruning/shutdown so audit reads cannot be redirected.
+      // identity pin until pruning/shutdown so the retained artifacts cannot be redirected.
       std::vector<pinned_handle_t> worker_path_pins;
-#endif
     };
 
     service_config_t config;
@@ -3525,11 +2846,9 @@ namespace offline_sbs {
     std::jthread supervisor;
     bool started = false;
     bool stopping = false;
-#ifdef _WIN32
     // Every component is held without FILE_SHARE_DELETE for the whole manager
     // lifetime. Revalidation compares the current pathname to the pinned file IDs.
     std::vector<pinned_handle_t> managed_root_pins;
-#endif
 
     explicit impl_t(service_config_t value, worker_runner_t worker):
         config(std::move(value)),
@@ -3549,9 +2868,7 @@ namespace offline_sbs {
 
     static void release_job_resources(record_t &record) {
       record.gpu_lease.reset();
-#ifdef _WIN32
       record.input_pins.clear();
-#endif
     }
 
     bool persist_locked(const record_t &record, std::string &error) const {
@@ -3653,24 +2970,25 @@ namespace offline_sbs {
         snapshot.error = contract.error.value_or("");
         if (contract.worker_result) {
           snapshot.worker_result = *contract.worker_result;
+          // A job retained by a release that published the diagnostic scene audit still
+          // names it here. Those references are dropped on read and never written back;
+          // the audit files themselves stay in the job's result directory until the job
+          // is cleared or pruned.
+          for (const auto retired : {
+                 "scene_count",
+                 "scene_audit",
+                 "scene_audit_manifest_sha256",
+                 "scene_audit_sha256",
+                 "scene_decisions_contract",
+               }) {
+            snapshot.worker_result.erase(retired);
+          }
         }
         snapshot.progress.phase = contract.progress.phase;
         snapshot.progress.processed_frames = contract.progress.processed_frames;
         snapshot.progress.total_frames = contract.progress.total_frames;
         snapshot.progress.source_time_seconds = contract.progress.source_time_seconds;
         snapshot.progress.source_duration_seconds = contract.progress.source_duration_seconds;
-        snapshot.progress.scene_count = contract.progress.scene_count;
-        if (contract.progress.current_scene) {
-          if (contract.progress.current_scene->dump().size() > max_current_scene_bytes) {
-            throw std::runtime_error("persisted current scene is too large");
-          }
-          snapshot.progress.current_scene = *contract.progress.current_scene;
-        }
-        snapshot.progress.scene_decisions = contract.progress.scene_decisions;
-        if (snapshot.progress.scene_decisions.dump().size() >
-            max_progress_contract_bytes) {
-          throw std::runtime_error("persisted scene decisions are too large");
-        }
         return snapshot;
       } catch (const std::exception &exception) {
         error = std::string {"invalid persisted job: "} + exception.what();
@@ -3852,7 +3170,6 @@ namespace offline_sbs {
       return total;
     }
 
-#ifdef _WIN32
     bool retire_completed_staging_locked(
       const std::shared_ptr<record_t> &record,
       std::string &error
@@ -3970,7 +3287,6 @@ namespace offline_sbs {
       error.clear();
       return true;
     }
-#endif
 
     bool clear_terminal_record_locked(
       const std::shared_ptr<record_t> &record,
@@ -3980,7 +3296,6 @@ namespace offline_sbs {
         error = "only a finished offline SBS job can be cleared";
         return false;
       }
-#ifdef _WIN32
       const bool staging_cleanup_pending =
         record->snapshot.worker_result.is_object() &&
         record->snapshot.worker_result.value(
@@ -4001,7 +3316,6 @@ namespace offline_sbs {
           return false;
         }
       }
-#endif
       if (
         record->snapshot.output_location ==
           output_location_e::input_directory &&
@@ -4035,7 +3349,6 @@ namespace offline_sbs {
           return false;
         }
       }
-#ifdef _WIN32
       if (
         record->snapshot.worker_result.is_object() &&
         record->snapshot.worker_result.value(
@@ -4048,10 +3361,8 @@ namespace offline_sbs {
           "contract is incomplete";
         return false;
       }
-#endif
 
       std::lock_guard artifact_lock {record->artifact_mutex};
-#ifdef _WIN32
       if (!revalidate_pins(
             managed_root_pins,
             "offline managed roots",
@@ -4059,9 +3370,7 @@ namespace offline_sbs {
           )) {
         return false;
       }
-#endif
       if (!record->worker_artifacts_pruned) {
-#ifdef _WIN32
         if (!record->worker_result_pin_released_for_prune) {
           if (record->worker_path_pins.empty()) {
             error = "worker result path is not identity-pinned";
@@ -4077,18 +3386,15 @@ namespace offline_sbs {
             return false;
           }
         }
-#endif
         if (!record->worker_tree) {
           error = "offline SBS worker tree is not identity-pinned";
           return false;
         }
-#ifdef _WIN32
         // Release the child result pin before the retained tree removes that
         // exact child by handle. The job-root removal pin remains continuously
         // held, and a failed pass records the release so it can be retried.
         record->worker_path_pins.clear();
         record->worker_result_pin_released_for_prune = true;
-#endif
         if (!run_user_filesystem_action([&]() {
               if (!record->worker_tree->remove(error)) {
                 throw std::runtime_error(error);
@@ -4272,8 +3578,6 @@ namespace offline_sbs {
         }
         auto record = std::make_shared<record_t>();
         record->snapshot = std::move(*snapshot);
-        const bool persisted_terminal_state =
-          is_terminal(record->snapshot.state);
         record->retention_sequence = retention_sequence;
         record->worker = worker_context_for(
           record->snapshot,
@@ -4352,13 +3656,10 @@ namespace offline_sbs {
               // later locked sibling. Keep the surviving root handle as a
               // cleanup-only terminal record so restart can finish phase one.
               record->worker_tree.emplace(std::move(*worker_tree));
-#ifdef _WIN32
               record->worker_result_pin_released_for_prune = true;
-#endif
               worker_paths_trusted = true;
               return;
             }
-#ifdef _WIN32
             auto result_pin = pin_managed_directory(
               record->worker.result_directory,
               "retained offline worker result directory",
@@ -4368,7 +3669,6 @@ namespace offline_sbs {
               return;
             }
             record->worker_path_pins.emplace_back(std::move(*result_pin));
-#endif
             record->worker_tree.emplace(std::move(*worker_tree));
             worker_paths_trusted = true;
           }, worker_pin_error);
@@ -4390,7 +3690,6 @@ namespace offline_sbs {
           bool staging_cleanup_pending = false;
           std::string publish_error;
           if (!run_user_filesystem_action([&]() {
-#ifdef _WIN32
                 std::optional<std::vector<pinned_handle_t>> output_directory_pins;
                 if (
                   record->snapshot.output_location ==
@@ -4409,7 +3708,6 @@ namespace offline_sbs {
                     return;
                   }
                 }
-#endif
                 try {
                   const auto &identity =
                     record->snapshot.worker_result.at("publish_identity");
@@ -4436,7 +3734,6 @@ namespace offline_sbs {
                       reconciled = true;
                       if (staged_file) {
                         std::string retirement_error;
-#ifdef _WIN32
                         if (!staged_file->retire_staging_link(
                               retirement_error
                             )) {
@@ -4446,9 +3743,6 @@ namespace offline_sbs {
                                "not retire its exact staging link ["sv
                             << id << "]: "sv << retirement_error;
                         }
-#else
-                        staging_cleanup_pending = true;
-#endif
                       } else if (!staging_missing) {
                         // The final identity proves publication succeeded, but
                         // the staging pathname now names something else or
@@ -4479,7 +3773,6 @@ namespace offline_sbs {
                     std::string {"invalid persisted publishing contract: "} +
                     exception.what();
                 }
-#ifdef _WIN32
                 if (
                   output_directory_pins &&
                   !revalidate_pins(
@@ -4490,7 +3783,6 @@ namespace offline_sbs {
                 ) {
                   reconciled = false;
                 }
-#endif
               }, publish_error)) {
             reconciled = false;
           }
@@ -4553,7 +3845,6 @@ namespace offline_sbs {
             error = "cannot persist publication recovery: " + read_error;
             return false;
           }
-#ifdef _WIN32
         } else if (
           record->snapshot.state == job_state_e::complete &&
           record->snapshot.operation == operation_e::convert &&
@@ -4590,7 +3881,6 @@ namespace offline_sbs {
               "cannot persist recovered staging cleanup state: " + read_error;
             return false;
           }
-#endif
         } else if (!is_terminal(record->snapshot.state)) {
           record->snapshot.state = job_state_e::interrupted;
           record->snapshot.progress.phase = "interrupted";
@@ -4621,43 +3911,6 @@ namespace offline_sbs {
           if (!persist_locked(*record, read_error)) {
             error = "cannot persist restart recovery: " + read_error;
             return false;
-          }
-        }
-        if (
-          !persisted_terminal_state &&
-          is_terminal(record->snapshot.state) &&
-          worker_paths_trusted &&
-          !record->worker_artifacts_pruned
-        ) {
-          std::string audit_hash;
-          std::string audit_error;
-          bool audit_attested = false;
-          run_user_filesystem_action([&]() {
-            auto audit = read_json_contract(
-              record->worker.result_directory / "scene-audit.json",
-              audit_error,
-              max_scene_audit_bytes,
-              &audit_hash
-            );
-            if (audit) {
-              try {
-                const auto manifest = wire::parse_scene_audit_contract(*audit);
-                audit_attested = validate_audit_pages(record->worker.result_directory, manifest, audit_error);
-              } catch (const std::exception &) { audit_attested = false; }
-            }
-          }, audit_error);
-          if (audit_attested) {
-            if (!record->snapshot.worker_result.is_object()) {
-              record->snapshot.worker_result = nlohmann::json::object();
-            }
-            record->snapshot.worker_result["scene_audit_sha256"] =
-              std::move(audit_hash);
-            if (!persist_locked(*record, read_error)) {
-              error =
-                "cannot persist recovered scene-audit identity: " +
-                read_error;
-              return false;
-            }
           }
         }
         if (
@@ -4739,7 +3992,8 @@ namespace offline_sbs {
       }
       auto environment = boost::this_process::environment();
       boost::filesystem::path working_directory {
-        config.sunshine_executable.parent_path().string()
+        // Native wide path, so an installation folder outside the ANSI code page still works.
+        config.sunshine_executable.parent_path().wstring()
       };
       bp::group group;
       std::string group_error;
@@ -4819,7 +4073,6 @@ namespace offline_sbs {
                 context.worker_progress,
                 contract_error,
                 max_progress_contract_bytes,
-                nullptr,
                 &acquisition_failure
               );
               if (value || !acquisition_failure) {
@@ -4893,7 +4146,7 @@ namespace offline_sbs {
 
       // The child can atomically publish its final progress and exit between two
       // polling ticks. Drain that last contract before terminalizing the job so
-      // finalized scene decisions are not lost on fast success or failure exits.
+      // its final progress is not lost on fast success or failure exits.
       if (const auto progress_error = consume_progress_update(true)) {
         std::string cleanup_error;
         terminate_worker(cleanup_error);
@@ -4967,28 +4220,6 @@ namespace offline_sbs {
       progress_t progress
     ) {
       std::lock_guard lock {mutex};
-      if (
-        (
-          progress.scene_count &&
-          *progress.scene_count > max_scene_count
-        ) ||
-        !progress.scene_decisions.is_array() ||
-        progress.scene_decisions.size() > max_progress_scene_decisions ||
-        progress.scene_decisions.dump().size() >
-          max_progress_contract_bytes ||
-        (
-          !progress.current_scene.is_null() &&
-          (
-            !progress.current_scene.is_object() ||
-            progress.current_scene.dump().size() > max_current_scene_bytes
-          )
-        )
-      ) {
-        BOOST_LOG(error)
-          << "Discarding invalid offline SBS progress decision window ["sv
-          << id << ']';
-        return;
-      }
       const auto iterator = jobs.find(id);
       if (
         iterator == jobs.end() ||
@@ -5088,7 +4319,6 @@ namespace offline_sbs {
           };
           bool worker_identity_valid = record->worker_tree.has_value();
           std::string identity_error;
-#ifdef _WIN32
           if (worker_identity_valid) {
             bool pins_valid = false;
             const bool pins_accessible = run_user_filesystem_action([&]() {
@@ -5112,13 +4342,32 @@ namespace offline_sbs {
             }, identity_error);
             worker_identity_valid = pins_accessible && pins_valid;
           }
-#endif
           if (!worker_identity_valid) {
             outcome.error =
               identity_error.empty() ?
                 "offline worker tree identity pin is missing before worker launch" :
                 "offline managed path attestation failed before worker launch: " +
                   identity_error;
+          } else if (
+            std::string codec_probe_error;
+            // Hardware NVENC probing is itself GPU work. It runs only once a user has
+            // started a conversion, under the same exclusive lease as the worker, so host
+            // startup can never race a fast live-stream connection.
+            record->snapshot.operation == operation_e::convert &&
+            config.probe_media_tools &&
+            !probe_ffmpeg_codec_runtime(
+              config,
+              ffmpeg,
+              record->snapshot.codec,
+              codec_probe_error
+            )
+          ) {
+            outcome.error =
+              "the requested 10-bit NVIDIA encoder failed its runtime preflight: " +
+              codec_probe_error;
+          } else if (job_stop.stop_requested()) {
+            // Canceled or shut down during the preflight: do not launch the worker at all.
+            outcome.canceled = true;
           } else
             outcome = runner ?
                         runner(record->worker, job_stop, callback) :
@@ -5246,7 +4495,6 @@ namespace offline_sbs {
                 bool published = false;
                 bool staging_retired = false;
                 if (!run_user_filesystem_action([&]() {
-#ifdef _WIN32
                       if (
                         record->input_pins.empty() ||
                         !revalidate_pins(
@@ -5257,7 +4505,6 @@ namespace offline_sbs {
                       ) {
                         return;
                       }
-#endif
                       published = staged_output->publish_no_replace(
                         *record->worker.final_output,
                         completion_error,
@@ -5309,43 +4556,6 @@ namespace offline_sbs {
               std::move(outcome.result),
               record->worker
             );
-          }
-          // Bind any retained audit to the exact bounded bytes observed after
-          // the worker process has exited. Later HTTP reads use a no-follow
-          // handle and must reproduce this digest, so a same-user leaf swap or
-          // in-place rewrite cannot masquerade as the worker's audit.
-          std::string audit_hash;
-          std::string audit_attestation_error;
-          bool audit_attested = false;
-          run_user_filesystem_action([&]() {
-            auto audit = read_json_contract(
-              record->worker.result_directory / "scene-audit.json",
-              audit_attestation_error,
-              max_scene_audit_bytes,
-              &audit_hash
-            );
-            if (audit) {
-              try {
-                const auto manifest = wire::parse_scene_audit_contract(*audit);
-                const auto expected = record->snapshot.worker_result.is_object() ?
-                  record->snapshot.worker_result.value("scene_audit_manifest_sha256", std::string {}) : std::string {};
-                if (!expected.empty()) {
-                  // Native acceptance already checked every page before publication.
-                  // Recheck its compact manifest identity without re-reading up to
-                  // 1 GiB under the service lock, or rebinding a changed manifest.
-                  audit_attested = manifest.paged && audit_hash == expected;
-                } else {
-                  audit_attested = validate_audit_pages(record->worker.result_directory, manifest, audit_attestation_error);
-                }
-              } catch (const std::exception &) { audit_attested = false; }
-            }
-          }, audit_attestation_error);
-          if (audit_attested) {
-            if (!record->snapshot.worker_result.is_object()) {
-              record->snapshot.worker_result = nlohmann::json::object();
-            }
-            record->snapshot.worker_result["scene_audit_sha256"] =
-              std::move(audit_hash);
           }
           // Never remove a failed/canceled staging pathname from the manager. The
           // native worker reserves its file identity and performs handle-based cleanup;
@@ -5429,7 +4639,6 @@ namespace offline_sbs {
     }
 
     std::error_code ec;
-#ifdef _WIN32
     directory_creation_pins_t state_creation_pins;
     try {
       state_creation_pins = create_user_directory(
@@ -5465,18 +4674,10 @@ namespace offline_sbs {
       error = state_pin_error;
       return false;
     }
-#else
-    fs::create_directories(impl_->config.state_root / "jobs", ec);
-    if (ec) {
-      error = "cannot create offline SBS state root: " + ec.message();
-      return false;
-    }
-#endif
     if (!run_bound_user_filesystem_action(
           impl_->config.expected_user_id,
           [&]() {
           std::error_code user_ec;
-#ifdef _WIN32
           auto worker_creation_pins = create_user_directory(
             impl_->config.worker_root / "jobs",
             "offline SBS worker root"
@@ -5485,17 +4686,6 @@ namespace offline_sbs {
             impl_->config.exports_root,
             "offline SBS exports root"
           );
-#else
-          create_user_directory(
-            impl_->config.worker_root / "jobs",
-            "offline SBS worker root"
-          );
-          create_user_directory(
-            impl_->config.exports_root,
-            "offline SBS exports root"
-          );
-#endif
-#ifdef _WIN32
           std::string pin_error;
           worker_root_pins = pin_managed_root_components(
             impl_->config.worker_root,
@@ -5529,7 +4719,6 @@ namespace offline_sbs {
           if (!exports_root_child_pin) {
             throw std::runtime_error(pin_error);
           }
-#endif
           impl_->config.worker_root =
             fs::canonical(impl_->config.worker_root, user_ec);
           if (user_ec) {
@@ -5549,7 +4738,6 @@ namespace offline_sbs {
         }, error)) {
       return false;
     }
-#ifdef _WIN32
     impl_->managed_root_pins.clear();
     impl_->managed_root_pins.reserve(
       state_root_pins->size() +
@@ -5582,7 +4770,6 @@ namespace offline_sbs {
     impl_->managed_root_pins.emplace_back(
       std::move(*exports_root_child_pin)
     );
-#endif
     impl_->config.state_root = fs::canonical(impl_->config.state_root, ec);
     if (ec) {
       error = "cannot canonicalize offline SBS state root: " + ec.message();
@@ -5710,15 +4897,11 @@ namespace offline_sbs {
       std::lock_guard lock {impl_->mutex};
       if (!impl_->started) {
         for (auto &entry : impl_->jobs) {
-#ifdef _WIN32
           entry.second->input_pins.clear();
           entry.second->worker_path_pins.clear();
-#endif
           entry.second->worker_tree.reset();
         }
-#ifdef _WIN32
         impl_->managed_root_pins.clear();
-#endif
         return;
       }
       impl_->stopping = true;
@@ -5760,15 +4943,11 @@ namespace offline_sbs {
       for (auto &entry : impl_->jobs) {
         auto &record = entry.second;
         std::lock_guard artifact_lock {record->artifact_mutex};
-#ifdef _WIN32
         record->input_pins.clear();
         record->worker_path_pins.clear();
-#endif
         record->worker_tree.reset();
       }
-#ifdef _WIN32
       impl_->managed_root_pins.clear();
-#endif
     }
   }
 
@@ -5788,7 +4967,6 @@ namespace offline_sbs {
           .job = impl_->jobs.at(*impl_->active_id)->snapshot,
         };
       }
-#ifdef _WIN32
       std::string root_error;
       if (!revalidate_pins(
             impl_->managed_root_pins,
@@ -5800,7 +4978,6 @@ namespace offline_sbs {
           .error = root_error,
         };
       }
-#endif
     }
     if (
       request.scene_cache_max_bytes < min_cache_bytes ||
@@ -5834,19 +5011,15 @@ namespace offline_sbs {
       };
     }
     std::optional<fs::path> input;
-#ifdef _WIN32
     std::optional<std::vector<pinned_handle_t>> input_pins;
-#endif
     if (!run_bound_user_filesystem_action(
           impl_->config.expected_user_id,
           [&]() {
-#ifdef _WIN32
           input_pins =
             pin_no_reparse_components(normalized_input, path_error);
           if (!input_pins) {
             throw std::runtime_error(path_error);
           }
-#endif
           input = canonical_regular_file(
             normalized_input,
             path_error
@@ -5977,28 +5150,9 @@ namespace offline_sbs {
           "offline conversion cannot start while a live streaming session is active",
       };
     }
-    if (
-      request.operation == operation_e::convert &&
-      impl_->config.probe_media_tools
-    ) {
-      // Hardware NVENC probing is itself GPU work. Defer it until a user
-      // explicitly starts conversion and hold the same exclusive lease as the
-      // worker, so host startup can never race a fast live-stream connection.
-      std::string codec_probe_error;
-      if (!probe_ffmpeg_codec_runtime(
-            impl_->config,
-            impl_->ffmpeg,
-            effective_codec,
-            codec_probe_error
-          )) {
-        return {
-          .code = error_code_e::unavailable,
-          .error =
-            "the requested 10-bit NVIDIA encoder failed its runtime preflight: " +
-            codec_probe_error,
-        };
-      }
-    }
+    // The hardware NVENC runtime preflight is GPU work that can take several seconds. It runs
+    // on the job's supervisor thread under this lease (see worker_loop), not here: this call
+    // is made on the Web UI's only request thread while holding the lifecycle mutex.
 
     job_snapshot_t snapshot;
     snapshot.state = job_state_e::queued;
@@ -6102,9 +5256,7 @@ namespace offline_sbs {
     }
 
     std::optional<safe_filesystem::pinned_tree_t> worker_tree_pin;
-#ifdef _WIN32
     std::optional<pinned_handle_t> worker_result_pin;
-#endif
     if (!run_bound_user_filesystem_action(
           impl_->config.expected_user_id,
           [&]() {
@@ -6154,7 +5306,6 @@ namespace offline_sbs {
                 pin_error
             );
           }
-#ifdef _WIN32
           worker_result_pin = pin_managed_directory(
             worker_job_directory / "result",
             "offline worker result directory",
@@ -6163,11 +5314,8 @@ namespace offline_sbs {
           if (!worker_result_pin) {
             throw std::runtime_error(pin_error);
           }
-#endif
         }, path_error)) {
-#ifdef _WIN32
       worker_result_pin.reset();
-#endif
       const auto admission_error = path_error;
       std::string cleanup_error;
       if (!run_bound_user_filesystem_action(
@@ -6224,10 +5372,8 @@ namespace offline_sbs {
     record->state_path = state_job_directory / "job.json";
     record->gpu_lease = std::move(gpu_lease);
     record->worker_tree.emplace(std::move(*worker_tree_pin));
-#ifdef _WIN32
     record->input_pins = std::move(*input_pins);
     record->worker_path_pins.emplace_back(std::move(*worker_result_pin));
-#endif
     std::string write_error;
     const auto worker_spec_bytes =
       worker_spec_json(record->worker).dump(2) + "\n";
@@ -6245,9 +5391,7 @@ namespace offline_sbs {
       write_error = path_error;
     }
     if (!worker_spec_written || !impl_->persist_locked(*record, write_error)) {
-#ifdef _WIN32
       record->worker_path_pins.clear();
-#endif
       std::string worker_cleanup_error;
       if (!run_bound_user_filesystem_action(
             impl_->config.expected_user_id,
@@ -6287,9 +5431,7 @@ namespace offline_sbs {
     const auto [inserted, accepted] =
       impl_->jobs.emplace(snapshot.id, record);
     if (!accepted) {
-#ifdef _WIN32
       record->worker_path_pins.clear();
-#endif
       std::string worker_cleanup_error;
       if (!run_bound_user_filesystem_action(
             impl_->config.expected_user_id,
@@ -6457,184 +5599,6 @@ namespace offline_sbs {
     };
   }
 
-  scene_audit_reply_t job_service_t::scene_audit(
-    const std::string_view id,
-    const std::optional<std::uint32_t> page
-  ) const {
-    std::shared_ptr<impl_t::record_t> record;
-    job_state_e state_at_lookup = job_state_e::queued;
-    std::optional<std::uint64_t> expected_scene_count;
-    std::optional<std::string> expected_audit_sha256;
-    {
-      std::lock_guard lock {impl_->mutex};
-      if (!impl_->started) {
-        return {
-          .code = error_code_e::not_initialized,
-          .error = "offline SBS job manager is not running",
-        };
-      }
-      const auto iterator = impl_->jobs.find(std::string {id});
-      if (iterator == impl_->jobs.end()) {
-        return {
-          .code = error_code_e::not_found,
-          .error = "offline SBS job was not found",
-        };
-      }
-      record = iterator->second;
-      state_at_lookup = record->snapshot.state;
-      expected_scene_count = record->snapshot.progress.scene_count;
-      if (
-        record->snapshot.worker_result.is_object() &&
-        record->snapshot.worker_result.contains("scene_audit_sha256") &&
-        record->snapshot.worker_result["scene_audit_sha256"].is_string()
-      ) {
-        expected_audit_sha256 =
-          record->snapshot.worker_result["scene_audit_sha256"]
-            .get<std::string>();
-      }
-    }
-    if (!is_terminal(state_at_lookup)) {
-      return {
-        .code = error_code_e::conflict,
-        .error = "scene audit is available only after the job becomes terminal",
-      };
-    }
-    const bool completed_job = state_at_lookup == job_state_e::complete;
-    if (
-      !expected_audit_sha256 ||
-      expected_audit_sha256->size() != 64
-    ) {
-      return {
-        .code = error_code_e::io_error,
-        .error =
-          "scene audit is unavailable because its terminal identity was not "
-          "attested",
-      };
-    }
-
-    // Never accept an artifact path from HTTP or from the child result document.
-    // The only readable path is the manager-owned path fixed when this job was admitted.
-    std::lock_guard artifact_lock {record->artifact_mutex};
-    if (!record->worker_tree) {
-      return {
-        .code = error_code_e::io_error,
-        .error = "scene audit worker tree is not identity-pinned",
-      };
-    }
-#ifdef _WIN32
-    std::string identity_error;
-    if (
-      !revalidate_pins(
-        impl_->managed_root_pins,
-        "offline managed roots",
-        identity_error
-      ) ||
-      record->worker_path_pins.empty() ||
-      !revalidate_pins(
-        record->worker_path_pins,
-        "offline worker job paths",
-        identity_error
-      )
-    ) {
-      return {
-        .code = error_code_e::io_error,
-        .error =
-          identity_error.empty() ?
-            "scene audit path is not identity-pinned" :
-            identity_error,
-      };
-    }
-#endif
-    const auto audit_path =
-      record->worker.result_directory / "scene-audit.json";
-    std::optional<nlohmann::json> audit;
-    std::string read_error;
-    std::string observed_audit_sha256;
-    std::string serialized_artifact;
-    bool exact_artifact = false;
-    if (!run_bound_user_filesystem_action(
-          impl_->config.expected_user_id,
-          [&]() {
-          audit = read_json_contract(
-            audit_path,
-            read_error,
-            max_scene_audit_bytes,
-            &observed_audit_sha256,
-            nullptr, nullptr, &serialized_artifact
-          );
-        }, read_error)) {
-      return {
-        .code = error_code_e::io_error,
-        .error = read_error,
-      };
-    }
-    if (!audit) {
-      return {
-        .code = error_code_e::io_error,
-        .error = "scene audit is unavailable: " + read_error,
-      };
-    }
-    if (observed_audit_sha256 != *expected_audit_sha256) {
-      return {
-        .code = error_code_e::io_error,
-        .error =
-          "scene audit identity changed after the worker became terminal",
-      };
-    }
-    try {
-      const auto typed_audit = wire::parse_scene_audit_contract(*audit);
-      exact_artifact = typed_audit.paged;
-      const bool complete_audit = typed_audit.status == "complete";
-      const bool partial_audit = typed_audit.status == "running";
-      if (
-        (
-          completed_job ?
-            !complete_audit :
-            !(complete_audit || partial_audit)
-        ) ||
-        (
-          complete_audit &&
-          expected_scene_count &&
-          (typed_audit.paged ? typed_audit.scene_count : typed_audit.scenes.size()) != *expected_scene_count
-        )
-      ) {
-        return {
-          .code = error_code_e::io_error,
-          .error = "scene audit contract is invalid",
-        };
-      }
-      if (page) {
-        if (!typed_audit.paged || *page >= typed_audit.pages.size()) {
-          return {.code = error_code_e::not_found, .error = "scene audit page was not found"};
-        }
-        std::optional<nlohmann::json> page_document;
-        if (!run_bound_user_filesystem_action(impl_->config.expected_user_id, [&]() {
-              page_document = read_audit_page_checked(record->worker.result_directory, typed_audit, *page, read_error, &serialized_artifact);
-            }, read_error) || !page_document) {
-          return {.code = error_code_e::io_error, .error = "scene audit page is unavailable: " + read_error};
-        }
-        audit = std::move(page_document);
-        (*audit)["document_kind"] = "page";
-      } else {
-        (*audit)["document_kind"] = typed_audit.paged ? "manifest" : "inline-audit";
-      }
-      (*audit)["availability"] = complete_audit ? "complete" : "partial";
-      (*audit)["job_terminal_state"] = to_string(state_at_lookup);
-    } catch (const std::exception &exception) {
-      return {
-        .code = error_code_e::io_error,
-        .error =
-          std::string {"scene audit contract is invalid: "} +
-          exception.what(),
-      };
-    }
-    return {
-      .ok = true,
-      .audit = std::move(*audit),
-      .serialized_artifact = exact_artifact ? std::optional {std::move(serialized_artifact)} : std::nullopt,
-    };
-  }
-
   browse_reply_t job_service_t::browse(
     const browse_request_t &request
   ) const {
@@ -6717,7 +5681,6 @@ namespace offline_sbs {
             return;
           }
 
-#ifdef _WIN32
           std::string bound_syntax_error;
           if (!validate_local_path_syntax(
                 requested_path,
@@ -6744,36 +5707,6 @@ namespace offline_sbs {
             }
             requested_file = true;
           }
-#else
-          bool requested_file = false;
-          auto current = requested_path.root_path();
-          for (const auto &component : requested_path.relative_path()) {
-            if (component == fs::path {"."}) {
-              continue;
-            }
-            current /= component;
-            std::error_code status_error;
-            const auto status = fs::symlink_status(current, status_error);
-            if (status_error || fs::is_symlink(status)) {
-              action_error =
-                "browse path must exist without symbolic links";
-              throw std::runtime_error(action_error);
-            }
-            if (current == requested_path) {
-              if (fs::is_regular_file(status)) {
-                requested_file = true;
-              } else if (!fs::is_directory(status)) {
-                action_error =
-                  "browse path must be an existing file or directory";
-                throw std::runtime_error(action_error);
-              }
-            } else if (!fs::is_directory(status)) {
-              action_error =
-                "browse path contains a non-directory component";
-              throw std::runtime_error(action_error);
-            }
-          }
-#endif
 
           std::error_code canonical_error;
           const auto resolved_request = fs::canonical(
@@ -6872,11 +5805,9 @@ namespace offline_sbs {
               throw std::runtime_error(action_error);
             }
           }
-#ifdef _WIN32
           if (!revalidate_pins(*path_pins, "browse path", action_error)) {
             throw std::runtime_error(action_error);
           }
-#endif
         }, action_error)) {
       return {
         .code = action_invoked ? action_error_code : error_code_e::unavailable,
@@ -6917,9 +5848,8 @@ namespace offline_sbs {
     values.reserve(impl_->jobs.size());
     for (const auto &[id, record] : impl_->jobs) {
       // The Web UI polls this collection. Keep it bounded per retained job; the
-      // selected-job endpoint supplies its recent decisions and worker result.
+      // selected-job endpoint supplies its worker result.
       auto summary = record->snapshot;
-      summary.progress.scene_decisions = nlohmann::json::array();
       summary.worker_result = nullptr;
       values.push_back(std::move(summary));
     }
@@ -7195,21 +6125,6 @@ namespace offline_sbs {
     return service->get(id);
   }
 
-  scene_audit_reply_t scene_audit(const std::string_view id, const std::optional<std::uint32_t> page) {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-    }
-    if (!service) {
-      return {
-        .code = error_code_e::not_initialized,
-        .error = "offline SBS job manager is not initialized",
-      };
-    }
-    return service->scene_audit(id, page);
-  }
-
   browse_reply_t browse(const browse_request_t &request) {
     std::shared_ptr<job_service_t> service;
     {
@@ -7359,7 +6274,6 @@ namespace offline_sbs {
       return false;
     }
 
-#ifdef _WIN32
     const auto source_handle = reinterpret_cast<HANDLE>(
       _get_osfhandle(_fileno(pipe.child_stream()))
     );
@@ -7385,19 +6299,6 @@ namespace offline_sbs {
     pipe.close_parent_writer();
     pipe.abort();
     CloseHandle(duplicate_handle);
-#else
-    const auto duplicate_descriptor = ::dup(::fileno(pipe.child_stream()));
-    if (duplicate_descriptor == -1) {
-      error =
-        "cannot duplicate test worker diagnostic writer: " +
-        std::generic_category().message(errno);
-      pipe.abort();
-      return false;
-    }
-    pipe.close_parent_writer();
-    pipe.abort();
-    ::close(duplicate_descriptor);
-#endif
 
     if (pipe.failed()) {
       error = pipe.failure();
@@ -7424,13 +6325,11 @@ namespace offline_sbs {
     );
   }
 
-#ifdef _WIN32
   bool windows_publish_identity_attributes_accepted_for_test(
     const std::uint32_t attributes,
     const std::uint64_t size
   ) {
     return windows_publish_identity_attributes_accepted(attributes, size);
   }
-#endif
 #endif
 }  // namespace offline_sbs

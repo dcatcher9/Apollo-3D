@@ -7,6 +7,9 @@ install(FILES
         "${SUNSHINE_GAME3D_BUILD_DIR}/package/install.ps1"
         "${SUNSHINE_GAME3D_BUILD_DIR}/package/install-runtime.ps1"
         DESTINATION "tools/reshade" COMPONENT application)
+if(SUNSHINE_TEXT_HOOK_FILES)
+    install(FILES ${SUNSHINE_TEXT_HOOK_FILES} DESTINATION "tools/text-hook" COMPONENT application)
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/windows_tensorrt_archive.cmake")
 

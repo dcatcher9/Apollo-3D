@@ -16,7 +16,7 @@ try:
     from .depth_mapping_v2 import DIRECT_PARALLAX_SOURCE_U_LIMIT, MappingV2Config, linear_relative_coordinate
     from .depth_coordinate_v2_contract import (CALIBRATED_DEFAULTS as V2_DEFAULTS,
         CONTRACT_CANONICAL_SHA256, CONTRACT_PATH, CONTRACT_SCHEMA, MODEL_CALIBRATIONS)
-    from . import cut_state_contract, whole_clip_raw_contract
+    from . import whole_clip_raw_contract
     from . import depth_coordinate_v2_dump_contract as dump_contract
     from . import prod_zipdepth_convex2x as convex2x_contract
     from . import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics
@@ -24,15 +24,15 @@ except ImportError:
     from depth_mapping_v2 import DIRECT_PARALLAX_SOURCE_U_LIMIT, MappingV2Config, linear_relative_coordinate
     from depth_coordinate_v2_contract import (CALIBRATED_DEFAULTS as V2_DEFAULTS,
         CONTRACT_CANONICAL_SHA256, CONTRACT_PATH, CONTRACT_SCHEMA, MODEL_CALIBRATIONS)
-    import cut_state_contract, whole_clip_raw_contract
+    import whole_clip_raw_contract
     import depth_coordinate_v2_dump_contract as dump_contract
     import prod_zipdepth_convex2x as convex2x_contract
     import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics
 
 RAW_PATTERN = re.compile(r"raw_(\d+)\.f32$")
-V2_STATE_TRACE_SCHEMA = 22
+V2_STATE_TRACE_SCHEMA = 23
 V2_STATE_TRACE_POLICY = (
-    "authenticated-adaptive-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v22"
+    "authenticated-adaptive-camera-host-robust-linear-hard-cap-vertical-share75-row-majorant-v23"
 )
 V2_GPU_SHADER_SEQUENCE = (
     "depth_coordinate_v2_moments_cs.hlsl",
@@ -52,9 +52,6 @@ V2_STATE_TRACE_FIELDS = (
     "input_source_frame_id",
     "rendered_source_frame_id",
     "calibration_revision",
-    "confirmed_cut_count",
-    "confirmed_cut",
-    "cut_attribution",
     "input_valid",
     "frame_valid",
     "camera_valid",
@@ -113,7 +110,7 @@ def _trace_adaptation_semantics(mode: int) -> Dict[str, str]:
         raise ValueError("v2 trace requires adaptive policy identity 3")
     return {
         "coordinate": "bounded-source-time-linear-raw-mean-and-robust-amplitude-reference",
-        "convergence_curve": "continuously-tracked-mean-is-zero-plane-no-cut-latch",
+        "convergence_curve": "continuously-tracked-mean-is-zero-plane",
         "near_curve": "linear-coordinate-no-depth-curve-before-hard-representation-cap",
     }
 
@@ -124,7 +121,7 @@ def validate_v2_state_trace(
     """Fail closed unless every row proves the simplified persistent-camera contract."""
 
     root_keys = {
-        "schema", "policy", "calibration_contract", "cut_source", "diagnostic_role",
+        "schema", "policy", "calibration_contract", "diagnostic_role",
         "diagnostic_method", "mapping_config", "adaptation_semantics",
         "frame_fields", "frames", "producer",
     }
@@ -136,8 +133,7 @@ def validate_v2_state_trace(
             trace.get("diagnostic_method") not in {
                 "frame-moment-proxies-not-matched-pixel-affine-v2",
                 "gpu-frame-moments-and-rendered-fields-v6"} or
-            trace.get("frame_fields") != list(V2_STATE_TRACE_FIELDS) or
-            not isinstance(trace.get("cut_source"), str) or not trace["cut_source"]):
+            trace.get("frame_fields") != list(V2_STATE_TRACE_FIELDS)):
         raise ValueError("v2 state trace has missing or unknown semantics")
     contract = trace.get("calibration_contract")
     expected_contract = {
@@ -224,7 +220,6 @@ def validate_v2_state_trace(
     if not isinstance(rows, list) or len(rows) != len(expected_ids):
         raise ValueError("v2 state trace frame count does not match the replay sequence")
     prior_revision = 0
-    prior_cut_count: Optional[int] = None
     prior_camera_initialized = False
     prior_center = 0.0
     prior_inverse_scale = 0.0
@@ -256,20 +251,17 @@ def validate_v2_state_trace(
         for key in ("center", "inverse_scale", "convergence_curve", "container_scale"):
             if np.float32(row[key]) != np.float32(native_state[key]):
                 raise ValueError(f"v2 state trace {frame_id} {key} disagrees with authenticated state")
-        for key in ("calibration_revision", "confirmed_cut_count"):
-            if row[key] != native_state[key]:
-                raise ValueError(f"v2 state trace {frame_id} {key} disagrees with authenticated state")
+        if row["calibration_revision"] != native_state["calibration_revision"]:
+            raise ValueError(
+                f"v2 state trace {frame_id} calibration_revision disagrees with authenticated state")
         if row["frame_valid"] != (native_state["frame_valid"] == 1.0):
             raise ValueError(f"v2 state trace {frame_id} validity disagrees with authenticated state")
-        for key in ("calibration_revision", "confirmed_cut_count"):
-            if type(row[key]) is not int or row[key] < 0 or row[key] > 0xFFFFFFFE:
-                raise ValueError(f"v2 state trace {frame_id} has an invalid {key}")
-        for key in ("confirmed_cut", "input_valid", "frame_valid", "camera_valid",
-                    "collapsed"):
+        if (type(row["calibration_revision"]) is not int or
+                not 0 <= row["calibration_revision"] <= 0xFFFFFFFE):
+            raise ValueError(f"v2 state trace {frame_id} has an invalid calibration_revision")
+        for key in ("input_valid", "frame_valid", "camera_valid", "collapsed"):
             if type(row[key]) is not bool:
                 raise ValueError(f"v2 state trace {frame_id} has an invalid {key}")
-        if not isinstance(row["cut_attribution"], str):
-            raise ValueError(f"v2 state trace {frame_id} has invalid attribution")
         for key in (
                 "center", "inverse_scale", "latched_scale", "convergence_curve",
                 "requested_gain", "container_scale", "effective_gain",
@@ -357,14 +349,6 @@ def validate_v2_state_trace(
                 raise ValueError(f"v2 state trace {frame_id} has invalid {key}")
 
         revision = row["calibration_revision"]
-        cut_count = row["confirmed_cut_count"]
-        if prior_cut_count is not None:
-            cut_delta = cut_count - prior_cut_count
-            if cut_delta not in (0, 1):
-                raise ValueError(f"v2 state trace {frame_id} cut generation is inconsistent")
-            if not row["confirmed_cut"] and cut_delta != 0:
-                raise ValueError(
-                    f"v2 state trace {frame_id} changed cut generation without a cut")
         camera_initialized = bool(
             row["inverse_scale"] > 0.0 and row["calibration_revision"] > 0)
         if row["camera_valid"] != camera_initialized:
@@ -374,12 +358,6 @@ def validate_v2_state_trace(
                              if published else prior_revision)
         if revision != expected_revision:
             raise ValueError(f"v2 state trace {frame_id} calibration revision is inconsistent")
-        expected_attribution = (
-            "initialization" if index == 0 else
-            trace["cut_source"] if row["confirmed_cut"] else "none"
-        )
-        if row["cut_attribution"] != expected_attribution:
-            raise ValueError(f"v2 state trace {frame_id} cut attribution is inconsistent")
         if row["container_scale"] != 1.0:
             raise ValueError(f"v2 state trace {frame_id} has non-identity container scale")
         if requested_gain is None:
@@ -460,7 +438,6 @@ def validate_v2_state_trace(
             raise ValueError(f"v2 state trace {frame_id} exceeded the vertical shear bound")
 
         prior_revision = revision
-        prior_cut_count = cut_count
         prior_camera_initialized = camera_initialized
         prior_center = row["center"]
         prior_inverse_scale = row["inverse_scale"]
@@ -498,39 +475,6 @@ def _raw_files(clip_dir: Path) -> List[Tuple[int, Path]]:
                 f"{by_id[frame_id].name}, {path.name}")
         by_id[frame_id] = path
     return sorted(by_id.items())
-
-
-def _load_cut_indices(
-        clip_dir: Path,
-        frame_ids: Sequence[int]) -> Tuple[List[bool], List[int], str]:
-    cuts = [False] * len(frame_ids)
-    counts = [0] * len(frame_ids)
-    if cuts:
-        cuts[0] = True
-    # Controller evidence must be the detector state that production actually emitted. Committed
-    # expected_pulse_frames are ground truth for scoring only: allowing labels to drive this list
-    # would make a missed or late live cut look perfect in the v2 replay.
-    state_path = clip_dir / "cut_state.json"
-    if not state_path.exists():
-        return cuts, counts, "first-frame-only"
-    trace = cut_state_contract.load_trace(str(state_path))
-    if set(trace) != set(frame_ids):
-        raise ValueError(
-            f"{state_path}: trace/raw frame IDs disagree: "
-            f"trace={sorted(trace)} raw={sorted(frame_ids)}")
-    previous_count: Optional[int] = None
-    for index, frame_id in enumerate(frame_ids):
-        count = int(trace[frame_id]["hard_cut_count"])
-        counts[index] = count
-        pulse = trace[frame_id]["hard_cut_pulse"] > 0.5
-        if previous_count is not None:
-            if count < previous_count or count - previous_count > 1:
-                raise ValueError(
-                    f"{state_path}: hard-cut generation must advance by zero or one at frame "
-                    f"{frame_id}, got {previous_count} -> {count}")
-            cuts[index] = pulse or count != previous_count
-        previous_count = count
-    return cuts, counts, "cut-state-hard-cut-generation"
 
 
 def _load_run_model_contract(run_root: Path) -> Dict[str, object]:
@@ -757,7 +701,7 @@ def _clip_sequence_input_contract(
         frame_ids: Sequence[int],
         shape: Tuple[int, int],
         run_model: Dict[str, object]) -> Dict[str, object]:
-    """Bind ordered raw bytes, shape, model, cut evidence, and selected output IDs."""
+    """Bind ordered raw bytes, shape, model, and selected output IDs."""
 
     contract_path = clip_dir / "contract.json"
     try:
@@ -795,13 +739,6 @@ def _clip_sequence_input_contract(
     }
     mismatched = {name: sorted(ids) for name, ids in artifact_sets.items()
                   if ids != expected_ids}
-    state_path = clip_dir / "cut_state.json"
-    if not state_path.exists():
-        mismatched["cut_state"] = []
-    else:
-        state_ids = set(cut_state_contract.load_trace(str(state_path)))
-        if state_ids != expected_ids:
-            mismatched["cut_state"] = sorted(state_ids)
     if mismatched:
         raise ValueError(
             f"{clip_dir}: selected raw IDs do not equal complete output identities: {mismatched}")
@@ -834,16 +771,6 @@ def _clip_sequence_input_contract(
         {"frame_id": row["frame_id"], "sha256": row["sha256"]}
         for row in manifest_frames
     ]
-    committed_meta = Path(__file__).resolve().parent / "clips" / clip_dir.name / "meta.json"
-    cut_control_evidence = {
-        "kind": "cut-state-hard-cut-generation",
-        "sha256": _file_sha256(state_path),
-    }
-    cut_expectation_evidence = (
-        {"kind": "committed-meta-scoring-only", "sha256": _file_sha256(committed_meta)}
-        if committed_meta.exists() else
-        {"kind": "none", "sha256": None}
-    )
     selected = [f"{frame_id:05d}" for frame_id in frame_ids]
     evidence: Dict[str, object] = {
         "contract_json_sha256": _file_sha256(contract_path),
@@ -874,8 +801,6 @@ def _clip_sequence_input_contract(
         "raw_shape_json_sha256": _file_sha256(raw_shape_path),
         "selected_frame_ids": selected,
         "ordered_raw_fields": raw_fields,
-        "cut_control_evidence": cut_control_evidence,
-        "cut_expectation_evidence": cut_expectation_evidence,
     }
     canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
     evidence["sequence_input_sha256"] = hashlib.sha256(canonical).hexdigest()

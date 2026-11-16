@@ -42,9 +42,9 @@ namespace models::host_sbs_gpu_completion_receipt {
   inline constexpr std::size_t parallax_state_word_count = v2::state_float_count;
   inline constexpr std::size_t depth_frame_state_begin = parallax_state_begin + parallax_state_word_count;
   inline constexpr std::size_t depth_frame_state_word_count = 4u;
-  inline constexpr std::size_t cut_state_begin = depth_frame_state_begin + depth_frame_state_word_count;
-  inline constexpr std::size_t cut_state_word_count = sbs_adaptive_state::word_count;
-  inline constexpr std::size_t outcome_counts_begin = cut_state_begin + cut_state_word_count;
+  inline constexpr std::size_t depth_health_state_begin = depth_frame_state_begin + depth_frame_state_word_count;
+  inline constexpr std::size_t depth_health_state_word_count = sbs_adaptive_state::word_count;
+  inline constexpr std::size_t outcome_counts_begin = depth_health_state_begin + depth_health_state_word_count;
   inline constexpr std::size_t outcome_counts_word_count = host_sbs_gpu_outcomes::word_count;
   inline constexpr std::size_t snapshot_word_count = outcome_counts_begin + outcome_counts_word_count;
   inline constexpr std::size_t snapshot_byte_count = snapshot_word_count * sizeof(std::uint32_t);
@@ -104,17 +104,17 @@ namespace models::host_sbs_gpu_completion_receipt {
   struct diagnostic_sample_t {
     expected_t expected;
     std::chrono::steady_clock::time_point sampled_at {};
-    std::optional<sbs_adaptive_state::words_t> cut_state;
+    std::optional<sbs_adaptive_state::words_t> depth_health_state;
     std::optional<host_sbs_gpu_outcomes::counts_t> outcome_counts;
     bool failed = false;
   };
 
-  [[nodiscard]] inline bool valid_cut_state_words(const sbs_adaptive_state::words_t &words) noexcept {
+  [[nodiscard]] inline bool valid_depth_health_words(const sbs_adaptive_state::words_t &words) noexcept {
     using sbs_adaptive_state::word_e;
     const auto scalar = [&](const word_e word) {
       return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
     };
-    if (words[sbs_adaptive_state::index(word_e::cut_contract_tag_bits)] != sbs_adaptive_state::cut_contract_tag) {
+    if (words[sbs_adaptive_state::index(word_e::contract_tag_bits)] != sbs_adaptive_state::contract_tag) {
       return false;
     }
     for (const auto &field : sbs_adaptive_state::fields) {
@@ -124,35 +124,23 @@ namespace models::host_sbs_gpu_completion_receipt {
         return false;
       }
     }
-    const float cut_flags = scalar(word_e::cut_flags);
-    const float analysis_flags = scalar(word_e::analysis_flags);
-    const float history_state = scalar(word_e::model_input_history_state);
-    const float cut_pulse = scalar(word_e::hard_cut_pulse);
-    return scalar(word_e::scene_age) >= 0.0f &&
-           cut_flags >= 0.0f && cut_flags <= static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) &&
-           std::trunc(cut_flags) == cut_flags &&
-           analysis_flags >= 0.0f && analysis_flags <= static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) &&
-           std::trunc(analysis_flags) == analysis_flags &&
-           history_state >= 0.0f && history_state <= 4.0f && std::trunc(history_state) == history_state &&
-           (cut_pulse == 0.0f || cut_pulse == 1.0f) &&
-           words[sbs_adaptive_state::index(word_e::hard_cut_count)] <= sbs_adaptive_state::counter_max &&
-           words[sbs_adaptive_state::index(word_e::empty_raw_count)] <= sbs_adaptive_state::counter_max &&
+    return words[sbs_adaptive_state::index(word_e::empty_raw_count)] <= sbs_adaptive_state::counter_max &&
            words[sbs_adaptive_state::index(word_e::collapsed_raw_count)] <= sbs_adaptive_state::counter_max;
   }
 
   [[nodiscard]] inline diagnostic_sample_t decode_diagnostics(
     const snapshot_words_t &words,
     const expected_t &expected,
-    const bool cut_present,
+    const bool depth_health_present,
     const bool outcomes_present,
     const std::chrono::steady_clock::time_point sampled_at
   ) noexcept {
     diagnostic_sample_t result {.expected = expected, .sampled_at = sampled_at};
-    if (cut_present) {
-      sbs_adaptive_state::words_t cut {};
-      std::copy_n(words.begin() + cut_state_begin, cut.size(), cut.begin());
-      if (valid_cut_state_words(cut)) {
-        result.cut_state = cut;
+    if (depth_health_present) {
+      sbs_adaptive_state::words_t health {};
+      std::copy_n(words.begin() + depth_health_state_begin, health.size(), health.begin());
+      if (valid_depth_health_words(health)) {
+        result.depth_health_state = health;
       } else {
         result.failed = true;
       }
@@ -306,10 +294,11 @@ namespace models::host_sbs_gpu_completion_receipt {
       const auto geometry_timestamp = trace::join_u64(
         state[v2::gain_last_observation_low], state[v2::gain_last_observation_high]);
       // The full controller and current source domain are part of the completion proof.
-      // Diagnostic CutBridge bytes cannot grant authority; reuse retains its original clock.
+      // Diagnostic depth-health bytes cannot grant authority; reuse retains its original clock.
       const bool subtitle_geometry_ready = std::bit_cast<float>(state[v2::frame_valid]) == 1.0f &&
         subtitle_timestamp != 0u &&
-        geometry_timestamp == subtitle_timestamp && state[v2::confirmed_cut_count] == plane[v2::subtitle_plane_cut_epoch_word];
+        geometry_timestamp == subtitle_timestamp && state[v2::control_reserved_0] == 0u &&
+        plane[v2::subtitle_plane_identity_reserved_word] == 0u;
       if ((plane[v2::subtitle_plane_flags_word] != 0u && !subtitle_geometry_ready) ||
           !host_sbs_subtitle_plane::condition_words_match_plane(condition, plane,
             subtitle_geometry_ready, !current_subtitle)) {
@@ -349,7 +338,7 @@ namespace models::host_sbs_gpu_completion_receipt {
     std::optional<expected_t> pending_;
   };
 
-  static_assert(snapshot_byte_count == 768u);
+  static_assert(snapshot_byte_count == 672u);
   static_assert(transaction_word_count == trace::transaction_word_count);
   static_assert(subtitle_locator_word_count == v2::subtitle_plane_state_word_count);
   static_assert(parallax_state_word_count == v2::state_words_t {}.size());

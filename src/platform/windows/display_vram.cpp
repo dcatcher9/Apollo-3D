@@ -35,6 +35,8 @@
 #include "subtitle_context_policy.h"
 #include "game3d_debug_dump.h"
 #include "game3d_setup.h"
+#include "game3d_text_hook.h"
+#include "tools/reshade/game3d_ui_adaptive.h"
 #include "host_sbs_v2_renderer.h"
 #include "misc.h"
 #include "local_monitor_pointer_geometry.h"
@@ -75,6 +77,7 @@
 #include "src/video.h"
 #include "src/video_depth_estimator.h"
 #include "video_dom_client.h"
+#include "host3d_subtitle_apps.h"
 #include "video_player_context.h"
 
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
@@ -429,10 +432,6 @@ namespace platf::dxgi {
     return compile_shader(file, "main_vs", "vs_5_0");
   }
 
-  blob_t compile_compute_shader(LPCSTR file) {
-    return compile_shader(file, "main", "cs_5_0");
-  }
-
   struct selected_matte_programs_t {
     models::host_sbs_shared_ui_warp::programs_t shared_warp;
     models::subtitle_selected_matte_research_configuration_t configuration;
@@ -456,8 +455,12 @@ namespace platf::dxgi {
     }
     if (!estimator.configure_subtitle_selected_matte_research(configuration, result.error)) return result;
     result.configured = true;
-    result.ready = result.shared_warp.load(device,
-      std::filesystem::path(configuration.current_outline_shader_root).parent_path(), result.error);
+    const auto shader_root = std::filesystem::path(configuration.current_outline_shader_root).parent_path();
+    result.ready = result.shared_warp.load(device, shader_root, result.error);
+    // The Game 3D text-game route is optional and independent of the subtitle routes.
+    if (std::string text_game_error; result.ready && !result.shared_warp.load_text_game(device, shader_root, text_game_error)) {
+      BOOST_LOG(warning) << "Game 3D text-game pin unavailable; a text game keeps the picture-based protection: " << text_game_error;
+    }
     return result;
   }
 
@@ -664,7 +667,13 @@ namespace platf::dxgi {
         if (!external_frame_wake || game_dumper.needs_conversion_poll()) {
           return true;
         }
-        return (reshade_receiver->frame_held() && !reshade_receiver->frame_wake_active()) || reshade_receiver->frame_pending();
+        if ((reshade_receiver->frame_held() && !reshade_receiver->frame_wake_active()) || reshade_receiver->frame_pending()) {
+          return true;
+        }
+        // A text game is converted by the Host AI path, whose completed depth must be drawn even
+        // while the game shows a still picture. Without such a game in front this stays false,
+        // so the flat fallback is never repeated at stream cadence.
+        return text_game_ai_active && depth_work_needs_service();
       }
       if (white_query_due) {
         return true;
@@ -674,6 +683,10 @@ namespace platf::dxgi {
         // streaming loop refreshes that on captures and keepalives; Local AR keeps polling.
         return !external_frame_wake || game_dumper.needs_conversion_poll();
       }
+      return depth_work_needs_service();
+    }
+
+    bool depth_work_needs_service() const {
       // This predicate is sampled on the normal D3D owner: the encode thread for streaming,
       // or the capture/presentation thread for Local AR. Drain completed publications there
       // without creating conversion demand or changing the caller's wait policy.
@@ -698,6 +711,245 @@ namespace platf::dxgi {
 
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const {
       return rendered_content_timestamp_;
+    }
+
+    /**
+     * The text helper of the application in front on this display, as a game source identity.
+     * Opening its shared section is not free and the stream converts at up to its frame rate, so
+     * the answer is refreshed a few times a second.
+     */
+    std::optional<::video::game_source_identity_t> observe_text_game() {
+      using namespace std::chrono_literals;
+      const auto now = std::chrono::steady_clock::now();
+      if (text_game_checked_at != std::chrono::steady_clock::time_point {} && now - text_game_checked_at < 250ms) {
+        return text_game_source;
+      }
+      text_game_checked_at = now;
+      text_game_source.reset();
+      const auto foreground = foreground_window::sample();
+      const auto &client = foreground.client_screen_rect;
+      std::uint64_t creation_time = 0u;
+      if (foreground_window::carries_geometry(foreground.status) && foreground.process_id && client.valid() &&
+          client.left >= display->offset_x && client.top >= display->offset_y &&
+          client.right <= display->offset_x + display->width && client.bottom <= display->offset_y + display->height) {
+        if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, foreground.process_id)) {
+          FILETIME created {}, exited {}, kernel {}, user {};
+          if (GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+            creation_time = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32u) | created.dwLowDateTime;
+          }
+          CloseHandle(process);
+        }
+      }
+      // The owner's approval comes first: a helper section alone is not one.
+      if (creation_time == 0u || !platf::game3d::text_hook::consented(foreground.process_id, creation_time) ||
+          !platf::game3d::text_hook::loaded(foreground.process_id)) {
+        // The reader's own handles would keep an exited game's sections alive, and with them the
+        // appearance of a running helper.
+        text_game_reader.close();
+        text_game_coverage_uploaded = false;
+        return std::nullopt;
+      }
+      text_game_client = {client.left - display->offset_x, client.top - display->offset_y, client.right - display->offset_x, client.bottom - display->offset_y};
+      const ::video::game_source_identity_t identity {foreground.process_id, creation_time, 0u};
+      if (!text_game_helper_identity || *text_game_helper_identity != identity) {
+        text_game_helper_identity = identity;
+        text_game_helper_sees_text = false;
+        text_game_band = {};
+      }
+      text_game_source = identity;
+      return text_game_source;
+    }
+
+    /** Collect the verdict of an earlier draw if it is ready, and stage the one just queued. */
+    void service_text_game_verdict() {
+      namespace adaptive = sunshine_game3d::ui_adaptive;
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (text_game_verdict_staged && SUCCEEDED(device_ctx->Map(text_game_verdict_staging.get(), 0u, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) {
+        const auto *words = static_cast<const std::uint32_t *>(mapped.pData);
+        std::memcpy(text_game_verdict.data(), words, sizeof(text_game_verdict));
+        // The same rule as the shader's. Only text the picture has shown in the helper's colours
+        // proves that the helper serves this game; until then the picture-based search stays.
+        const auto kind_shown = [](const std::uint32_t cores, const std::uint32_t shown) {
+          return cores < 16u || shown * 16u >= cores;
+        };
+        if (text_game_verdict[0] + text_game_verdict[2] >= 16u && kind_shown(text_game_verdict[0], text_game_verdict[1]) &&
+            kind_shown(text_game_verdict[2], text_game_verdict[3])) {
+          text_game_helper_sees_text = true;
+        }
+        // The policy asks for at most one observation every 100 ms.
+        const auto &origin = text_game_plane_staged;
+        if (origin.eligible && origin.tick_ms >= text_game_plane_observed_ms + adaptive::probe_interval_ms) {
+          adaptive::sample sample;
+          sample.provenance = origin;
+          sample.width = origin.viewport >> 16u;
+          sample.height = origin.viewport & 0xffffu;
+          for (unsigned index = 0u; index < sample.tiles.size(); ++index) {
+            const unsigned x = index % 16u, y = index / 16u;
+            auto &tile = sample.tiles[index];
+            tile.pixels = ((x + 1u) * sample.width / 16u - x * sample.width / 16u) * ((y + 1u) * sample.height / 16u - y * sample.height / 16u);
+            const auto *counts = words + 4u + index * 6u;
+            // The picture may be scaled into the source, so a count can exceed the tile's size
+            // in the game's own pixels. Scale all six alike; only their ratios are judged.
+            const std::uint32_t covered = counts[0];
+            const double scale = covered > tile.pixels && covered != 0u ? static_cast<double>(tile.pixels) / covered : 1.0;
+            tile.covered = static_cast<std::uint32_t>(covered * scale);
+            std::uint32_t previous = tile.covered;
+            for (unsigned level = 0u; level < tile.bad.size(); ++level) {
+              previous = tile.bad[level] = std::min(previous, static_cast<std::uint32_t>(counts[1u + level] * scale));
+            }
+          }
+          const auto read_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+          if (text_game_plane.observe(sample, read_ms)) {
+            text_game_plane_observed_ms = origin.tick_ms;
+          }
+        }
+        device_ctx->Unmap(text_game_verdict_staging.get(), 0u);
+        text_game_verdict_staged = false;
+      }
+      if (text_game_verdict_staged) {
+        return;
+      }
+      if (!text_game_verdict_staging) {
+        D3D11_BUFFER_DESC desc {};
+        desc.ByteWidth = static_cast<UINT>(models::host_sbs_shared_ui_warp::text_game_verdict_words * 4u);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(device->CreateBuffer(&desc, nullptr, &text_game_verdict_staging))) {
+          return;
+        }
+      }
+      if (auto *verdict = text_game_shared_warp.text_game_verdict()) {
+        device_ctx->CopyResource(text_game_verdict_staging.get(), verdict);
+        text_game_verdict_staged = true;
+        text_game_plane_staged = text_game_plane_live;
+      }
+    }
+
+    void reset_text_game_pin() {
+      text_game_reader.close();
+      text_game_helper_sees_text = false;
+      text_game_helper_identity.reset();
+      text_game_band = {};
+      text_game_coverage_srv.reset();
+      text_game_coverage_texture.reset();
+      text_game_coverage_uploaded = false;
+      text_game_pin_cbuffer.reset();
+      text_game_verdict_staging.reset();
+      text_game_verdict_staged = false;
+      text_game_plane.reset();
+      text_game_plane_observed_ms = 0u;
+      text_game_shared_warp = {};
+    }
+
+    /**
+     * Bring the text the game's helper reports onto this device and describe where it lies in the
+     * source about to be drawn. Returns false, changing nothing that is drawn, whenever there is
+     * no text or any part of it cannot be trusted; the draw then keeps its ordinary geometry.
+     */
+    bool prepare_text_game_pin(const D3D11_TEXTURE2D_DESC &colour, std::array<UINT, 4u> &shape) {
+      namespace hook = platf::game3d::text_hook;
+      const auto &client = text_game_client;
+      if (!text_game_source || !client.valid() || client.left < 0 || client.top < 0 ||
+          client.right > static_cast<LONG>(colour.Width) || client.bottom > static_cast<LONG>(colour.Height)) {
+        return false;
+      }
+      hook::text_t text;
+      if (!text_game_reader.read(text_game_source->process_id, text) || text.top >= text.bottom) {
+        return false;
+      }
+      D3D11_TEXTURE2D_DESC current {};
+      if (text_game_coverage_texture) {
+        text_game_coverage_texture->GetDesc(&current);
+      }
+      if (!text_game_coverage_srv || current.Width != text.surface_width || current.Height != text.surface_height) {
+        text_game_coverage_srv.reset();
+        text_game_coverage_texture.reset();
+        text_game_coverage_uploaded = false;
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = text.surface_width;
+        desc.Height = text.surface_height;
+        desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1u;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &text_game_coverage_texture)) ||
+            FAILED(device->CreateShaderResourceView(text_game_coverage_texture.get(), nullptr, &text_game_coverage_srv))) {
+          text_game_coverage_srv.reset();
+          text_game_coverage_texture.reset();
+          return false;
+        }
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (!text_game_coverage_uploaded || text_game_coverage_sequence != text.sequence) {
+        // Only the rows with text are read from the game and only those rows are consulted below.
+        const D3D11_BOX rows {0u, text.top, 0u, text.surface_width, text.bottom, 1u};
+        const UINT pitch = text.surface_width * 4u;
+        device_ctx->UpdateSubresource(text_game_coverage_texture.get(), 0u, &rows, text.pixels + static_cast<std::size_t>(text.top) * pitch, pitch, 0u);
+        // The game may have drawn meanwhile. Those pixels are then a mix of two moments: usable
+        // for this frame, and read again for the next one.
+        text_game_coverage_uploaded = true;
+        text_game_coverage_sequence = text_game_reader.still_current(text) ? text.sequence : text.sequence - 1u;
+      }
+      const float scale_y = static_cast<float>(client.bottom - client.top) / static_cast<float>(text.surface_height);
+      models::host_sbs_shared_ui_warp::text_game_constants_t constants;
+      // The coverage picture was read for the surface rows [top, bottom) only. One source row is
+      // left out at each end, where a scaled sample would reach into a row that was not read.
+      const float text_first = std::ceil(static_cast<float>(client.top) + static_cast<float>(text.top) * scale_y) + 1.0f;
+      const float text_end = std::floor(static_cast<float>(client.top) + static_cast<float>(text.bottom) * scale_y) - 1.0f;
+      if (!(text_end > text_first) || text_first < 0.0f) {
+        return false;
+      }
+      constants.text_top = static_cast<std::uint32_t>(text_first);
+      constants.text_bottom = static_cast<std::uint32_t>(text_end);
+      // The scene's positive display bound in the scale of the game's picture.
+      constants.front_cap = 0.04f * static_cast<float>(client.right - client.left) / static_cast<float>(colour.Width);
+      // The pinned rows are the text and as far above and below it as the distance rule can still
+      // bound the scene. The field lies within the display bound of zero and the plane within
+      // the policy's ceiling, so they differ by at most their sum, which the rule's slope of half
+      // a pixel per pixel covers in twice that many pixels.
+      const float reach = 2.0f * (constants.front_cap + sunshine_game3d::ui_adaptive::comfort_cap_uv) * static_cast<float>(colour.Width) + 2.0f;
+      const auto first = static_cast<LONG>(std::floor(text_first - reach)) - 1;
+      const auto last = static_cast<LONG>(std::ceil(text_end + reach)) + 1;
+      UINT band_top = static_cast<UINT>(std::clamp<LONG>(first, client.top, client.bottom)) / 16u * 16u;
+      UINT band_end = std::min<UINT>(colour.Height, (static_cast<UINT>(std::clamp<LONG>(last, client.top, client.bottom)) + 15u) / 16u * 16u);
+      if (band_top >= band_end) {
+        return false;
+      }
+      // The band only grows while the game's picture stays where it is: one, two and three lines
+      // of dialogue then share one set of pin planes instead of reallocating them line by line.
+      if (text_game_band.client == client && text_game_band.width == colour.Width && text_game_band.height == colour.Height) {
+        band_top = std::min(band_top, text_game_band.top);
+        band_end = std::max(band_end, text_game_band.end);
+      }
+      text_game_band = {client, colour.Width, colour.Height, band_top, band_end};
+      shape = {colour.Width, colour.Height, band_top, band_end - band_top};
+      constants.left = static_cast<float>(client.left);
+      constants.top = static_cast<float>(client.top);
+      constants.inverse_width = 1.0f / static_cast<float>(client.right - client.left);
+      constants.inverse_height = 1.0f / static_cast<float>(client.bottom - client.top);
+      constants.enabled = 1u;
+      // The policy holds the text at screen depth and moves it forward only as far as the scene
+      // under it requires.
+      auto &live = text_game_plane_live;
+      live = {};
+      live.now_ms = live.tick_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+      live.epoch = 1u;
+      live.source_id = (static_cast<std::uint64_t>(text_game_source->process_id) << 32u) ^ text_game_source->creation_time;
+      live.sequence = ++text_game_plane_sequence;
+      live.viewport = (static_cast<std::uint32_t>(client.right - client.left) << 16u) ^ static_cast<std::uint32_t>(client.bottom - client.top);
+      live.eligible = true;
+      live.front_cap_uv = constants.front_cap;
+      constants.plane = text_game_plane.prepare(live).applied_uv;
+      if (!text_game_pin_cbuffer) {
+        D3D11_BUFFER_DESC desc {};
+        desc.ByteWidth = sizeof(constants);
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        const D3D11_SUBRESOURCE_DATA initial {&constants, 0u, 0u};
+        return SUCCEEDED(device->CreateBuffer(&desc, &initial, &text_game_pin_cbuffer));
+      }
+      device_ctx->UpdateSubresource(text_game_pin_cbuffer.get(), 0u, nullptr, &constants, 0u, 0u);
+      return true;
     }
 
     void publish_game_source_status(const std::optional<::video::game_source_identity_t> &source) {
@@ -783,6 +1035,35 @@ namespace platf::dxgi {
             // Game mono never shows the export: observe it without becoming its consumer, so the
             // game neither allocates the shared ring nor packs stereo that would go unread.
             game_source = ::video::game_source_identity_t {status->producer_process_id, status->producer_creation_time, status->resource_generation};
+          }
+        }
+        // Without an add-on export, the game in front may be a text game. It is reported ready
+        // only while this session can really convert it, so the client never widens for nothing.
+        bool text_game_in_front = false;
+        if (!game_source && text_game_eligible && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
+          game_source = observe_text_game();
+          text_game_in_front = game_source.has_value();
+        }
+        text_game_ai_active = sbs_mode == ::video::SBS_GAME_SBS && text_game_in_front;
+        if (sbs_mode == ::video::SBS_GAME_SBS) {
+          // The client stays in packed Game 3D while games come and go, so one encoder session
+          // moves between the Host AI path and the export or flat path. Both draw into the same
+          // packed intermediate and encoder input: pixels and geometry of one route must never
+          // be repeated or reused as the other's.
+          const auto route = text_game_ai_active ? packed_route_e::depth : packed_route_e::external_or_flat;
+          if (route != packed_route) {
+            matched_presentation_cache.reset();
+            latest_v2_lineage.reset();
+            host_sbs_encoder_input_state.reset();
+            // Depth work submitted before the switch is not serviced while the other route
+            // draws. Whatever completes meanwhile is retired, not shown, when this route resumes.
+            subtitle_context.revoke();
+            subtitle_context_reprocess_pending = true;
+            packed_route = route;
+            // Dump 3D follows the route: a text game is converted by the Host path, so its dump
+            // is the Host package; an add-on game's is the add-on's own.
+            game_dumper.set_button_request(text_game_ai_active ? nullptr : dump_button_request);
+            sbs_dumper.set_button_request(text_game_ai_active ? dump_button_request : nullptr);
           }
         }
         publish_game_source_status(game_source);
@@ -959,7 +1240,7 @@ namespace platf::dxgi {
           return recorded;
         };
 
-        if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
+        if (reshade_receiver && ::video::is_packed_mode(sbs_mode) && !text_game_ai_active) {
           ID3D11Texture2D *packed_texture = nullptr;
           ID3D11ShaderResourceView *packed_view = nullptr;
           bool packed_linear = false;
@@ -1075,8 +1356,10 @@ namespace platf::dxgi {
               cursor_patch.reset();
             }
           } else {
-            // An unavailable, incompatible, or unfocused publisher never selects Host AI.
-            // Keep the ordinary desktop usable by duplicating it into two flat eyes.
+            // An unavailable, incompatible, or unfocused add-on publisher never selects Host AI,
+            // and neither does the desktop: only a text game in front, which took the branch
+            // below, is converted by the host. Keep everything else usable by duplicating it
+            // into two flat eyes.
             packed_linear = img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
             if (!ensure_sbs_intermediate_storage(packed_linear)) {
               return -1;
@@ -1138,7 +1421,7 @@ namespace platf::dxgi {
               }
             }
           }
-        } else if (sbs_mode == ::video::SBS_AI) {
+        } else if (sbs_mode == ::video::SBS_AI || text_game_ai_active) {
           const bool input_is_linear =
             img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
@@ -1329,11 +1612,6 @@ namespace platf::dxgi {
               return false;
             }
             if (est.input_domain_reset) {
-              // Cut counters and scene-camera history are domain-scoped. The first ROI/full/
-              // transfer completion starts a fresh telemetry sample without pretending the rearm
-              // was an editorial cut.
-              sbs_telemetry_has_sample = false;
-              sbs_telemetry_last_hard_cut_count = 0;
               sbs_telemetry_min_frame_id = std::max(
                 sbs_telemetry_min_frame_id,
                 est.completed_frame_id
@@ -1642,7 +1920,7 @@ namespace platf::dxgi {
               depth_reuse_authorization,
               latest_v2_lineage.slot.frame_id,
               frame_id,
-              latest_v2_lineage.estimate.shadow_final_parallax &&
+              latest_v2_lineage.estimate.shadow_base_final_parallax &&
                 latest_v2_lineage.estimate.shadow_state
             );
           if (depth_estimator && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
@@ -1864,7 +2142,8 @@ namespace platf::dxgi {
                   optional_work,
                   adaptive_request,
                   matched_candidate_slot->subtitle_context_generation,
-                  matched_candidate_slot->temporal_source
+                  matched_candidate_slot->temporal_source,
+                  matched_candidate_slot->subtitle_line_policy
                 );
                 const bool submitted_refined_geometry = submitted.refined_live_geometry_active;
                 if (completion_finalized_before_admission &&
@@ -2301,7 +2580,7 @@ namespace platf::dxgi {
               post_completion_reuse_authorization,
               latest_v2_lineage.slot.frame_id,
               frame_id,
-              latest_v2_lineage.estimate.shadow_final_parallax &&
+              latest_v2_lineage.estimate.shadow_base_final_parallax &&
                 latest_v2_lineage.estimate.shadow_state
             );
           if (
@@ -2552,7 +2831,7 @@ namespace platf::dxgi {
               << "Host SBS lost authenticated live-warp authority after parallax-v2 was active"
               << " (result_authenticated=" << (v2_result_authenticated ? "true" : "false")
               << ", live_shader=" << (sbs_reprojection_v2_live_ps ? "present" : "missing")
-              << ", final_field=" << (est.shadow_final_parallax ? "present" : "missing")
+              << ", base_field=" << (est.shadow_base_final_parallax ? "present" : "missing")
               << ", state=" << (est.shadow_state ? "present" : "missing")
               << "); rendering current-frame flat identity. Further warnings are suppressed for "
                  "this stream.";
@@ -2661,8 +2940,8 @@ namespace platf::dxgi {
             models::host_sbs_subtitle_render_constants_t subtitle_constants;
             if (v2_draw_selected) {
               const bool complete_ui = queued_geometry_selected ?
-                                         queued_geometry->glyph_matte && queued_geometry->display_band && queued_geometry->condition_params && queued_geometry->contour_identity :
-                                         !est.subtitle_work_suppressed && est.subtitle_glyph_matte && est.subtitle_contour_source &&
+                                         queued_geometry->display_band && queued_geometry->condition_params && queued_geometry->contour_identity :
+                                         !est.subtitle_work_suppressed && est.subtitle_contour_source &&
                                            est.subtitle_condition_params && est.subtitle_contour_identity;
               subtitle_constants.enabled = draw_source_slot->subtitle_context_eligible &&
                                                subtitle_context.matches(draw_source_slot->subtitle_context_generation) &&
@@ -2687,8 +2966,7 @@ namespace platf::dxgi {
               warp_depth,
               queued_geometry_selected ? queued_geometry->state.Get() : v2_live_warp_selected ? est.shadow_state.Get() :
                                                                                         nullptr,
-              queued_geometry_selected ? queued_geometry->glyph_matte.Get() : v2_live_warp_selected ? est.subtitle_glyph_matte.Get() :
-                                                                                              nullptr,
+              nullptr, // Only a selected shared draw binds a native render mask below.
               queued_geometry_selected ? queued_geometry->display_band.Get() : v2_live_warp_selected ? est.subtitle_contour_source.Get() :
                                                                                                nullptr,
               queued_geometry_selected ? queued_geometry->condition_params.Get() : v2_live_warp_selected ? est.subtitle_condition_params.Get() :
@@ -2700,11 +2978,28 @@ namespace platf::dxgi {
             // Current-outline selected rendering uses only the authenticated
             // shared warp. Pending current-colour research is not this route.
             ID3D11ShaderResourceView *selected_receipt=nullptr;
-            ID3D11ShaderResourceView *selected_original_legacy=dump_warp_inputs[3];
             bool selected_unpredicated=true;
             if(selected_matte_ready){Microsoft::WRL::ComPtr<ID3D11Predicate> p;BOOL value=FALSE;device_ctx->GetPredication(&p,&value);selected_unpredicated=!p;}
-            const bool selected_supported=selected_matte_ready&&
-              selected_shared_warp_programs.ready()&&
+            // A text game's own text takes the place of the picture-based protection whenever its
+            // helper reports text for this frame; without any, that protection stays as it was.
+            std::array<UINT, 4u> text_pin_shape {};
+            bool text_pin_selected = false;
+            if (text_game_ai_active && selected_shared_warp_programs.text_game_ready() && v2_live_warp_selected &&
+                !queued_geometry_selected && !pending_current_colour_selected && render_input_srv) {
+              Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
+              BOOL predicate_value = FALSE;
+              device_ctx->GetPredication(&predicate, &predicate_value);
+              Microsoft::WRL::ComPtr<ID3D11Resource> colour_resource;
+              Microsoft::WRL::ComPtr<ID3D11Texture2D> colour_texture;
+              render_input_srv->GetResource(&colour_resource);
+              if (!predicate && SUCCEEDED(colour_resource.As(&colour_texture))) {
+                D3D11_TEXTURE2D_DESC colour_desc {};
+                colour_texture->GetDesc(&colour_desc);
+                text_pin_selected = prepare_text_game_pin(colour_desc, text_pin_shape);
+              }
+            }
+            const bool selected_supported=selected_matte_ready&&!text_pin_selected&&
+              selected_shared_warp_programs.ready(queued_geometry_selected)&&
               v2_draw_selected&&!pending_current_colour_selected&&
               selected_unpredicated;
             if(selected_supported){
@@ -2729,7 +3024,7 @@ namespace platf::dxgi {
                 out_Y_or_YUV_rtv != nullptr
               );
             const bool p010_y_mrt_selected =
-              !selected_draw && p010_y_mrt_authorized && qualify_p010_y_mrt_targets();
+              !selected_draw && !text_pin_selected && p010_y_mrt_authorized && qualify_p010_y_mrt_targets();
             if (p010_y_mrt_selected && diagnostics_enabled) {
               ++matched_stats_output_p010_y_mrt;
             }
@@ -2776,7 +3071,6 @@ namespace platf::dxgi {
               shared_warp::request_t request;
               std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
               request.draw_srvs[7u] = selected_receipt;
-              request.draw_srvs[8u] = selected_original_legacy;
               request.geometry_constants = draw_command.geometry_constants;
               request.subtitle_constants = draw_command.subtitle_constants;
               request.sampler = draw_command.sampler;
@@ -2785,7 +3079,7 @@ namespace platf::dxgi {
               request.queued_guard_transaction = draw_command.queued_guard_transaction;
               return request;
             };
-            if (selected_draw && subtitle_constants.enabled == 1u && selected_shared_warp_programs.ready()) {
+            if (selected_draw && subtitle_constants.enabled == 1u && selected_shared_warp_programs.ready(queued_geometry_selected)) {
               Microsoft::WRL::ComPtr<ID3D11Resource> matte_resource;
               Microsoft::WRL::ComPtr<ID3D11Texture2D> matte_texture;
               dump_warp_inputs[3]->GetResource(&matte_resource);
@@ -2815,12 +3109,11 @@ namespace platf::dxgi {
             }
             if (!shared_warp_selected) {
               // Shared programs being ready does not guarantee THIS frame's
-              // preparation. Keep the original legacy M bound for the ABI,
-              // but disable its old subtitle UI permission: this draw uses
-              // only ordinary authenticated Base geometry and current RGB.
+              // preparation. This draw uses ordinary authenticated Base geometry
+              // and current RGB, with no native render mask or subtitle permission.
               // Finalize before receipt scopes, recorder binding and evidence.
-              dump_warp_inputs[3u] = selected_original_legacy;
-              draw_command.shader_resources[3u] = selected_original_legacy;
+              dump_warp_inputs[3u] = nullptr;
+              draw_command.shader_resources[3u] = nullptr;
               draw_command.pixel_shader = ordinary_pixel_shader;
               selected_receipt = nullptr;
               selected_draw = false;
@@ -2830,15 +3123,55 @@ namespace platf::dxgi {
               draw_command.subtitle_constants = dump_subtitle_constants;
               dump_subtitle_render_enabled = false;
             }
+            shared_warp::views_t text_pin_views;
+            if (text_pin_selected) {
+              shared_warp::request_t request;
+              for (std::size_t slot = 0u; slot < 3u; ++slot) {
+                request.draw_srvs[slot] = draw_command.shader_resources[slot];
+              }
+              request.geometry_constants = draw_command.geometry_constants;
+              request.subtitle_constants = draw_command.subtitle_constants;
+              request.sampler = draw_command.sampler;
+              request.text_game = true;
+              request.text_game_coverage = text_game_coverage_srv.get();
+              request.text_game_constants = text_game_pin_cbuffer.get();
+              const auto program = selected_shared_warp_programs.text_game_program();
+              std::string text_pin_error;
+              text_pin_selected = text_game_shared_warp.ensure(device.get(), text_pin_shape, text_pin_error) &&
+                                  text_game_shared_warp.queue(device_ctx.get(), program, request, text_pin_error) &&
+                                  text_game_shared_warp.matches(device_ctx.get(), request);
+              if (text_pin_selected) {
+                text_pin_views = text_game_shared_warp.views();
+                draw_command.pixel_shader = program.pixel;
+              }
+              if (text_pin_selected) {
+                service_text_game_verdict();
+              }
+              if (diagnostics_enabled) {
+                ++(text_pin_selected ? text_game_pin_draws : text_game_pin_misses);
+                const auto log_now = std::chrono::steady_clock::now();
+                if (log_now - text_game_logged_at >= std::chrono::seconds(5)) {
+                  text_game_logged_at = log_now;
+                  BOOST_LOG(info) << "Game 3D text pin: draws="sv << text_game_pin_draws << " failed="sv << text_game_pin_misses
+                                  << " rows="sv << text_pin_shape[2] << '+' << text_pin_shape[3]
+                                  << " plane="sv << text_game_plane.current().applied_uv << '>' << text_game_plane.current().target_uv
+                                  << '(' << text_game_plane.current().status << ')'
+                                  << " shown light="sv << text_game_verdict[1] << '/' << text_game_verdict[0]
+                                  << " dark="sv << text_game_verdict[3] << '/' << text_game_verdict[2]
+                                  << (text_pin_error.empty() ? ""s : " error="s + text_pin_error);
+                  text_game_pin_draws = text_game_pin_misses = 0u;
+                }
+              }
+            }
             bool draw_recorded = false;
             {
               models::research_pending_current_colour_v1::scoped_negative_t negative;
               const bool bound = !pending_current_colour_selected || negative.bind(device_ctx.get(), pending_colour_lane.negative_expected(), pending_colour_lane.negative_receipt(), pending_colour_lane.current_constants().Get(), pending_colour_lane.current_snapshot().receipt.Get());
               models::research_current_outline_selected_matte_v2::scoped_receipt_t outline_scope;
-              const bool selected_bound = !selected_draw || outline_scope.bind(device_ctx.get(), selected_receipt, selected_original_legacy);
+              const bool selected_bound = !selected_draw || outline_scope.bind(device_ctx.get(), selected_receipt);
               shared_warp::scoped_binding_t shared_scope;
-              const bool shared_bound = !selected_draw ||
-                                        shared_scope.bind(device_ctx.get(), shared_warp_selected ? &current_shared_warp : nullptr);
+              const bool shared_bound = !(selected_draw || text_pin_selected) ||
+                                        shared_scope.bind(device_ctx.get(), shared_warp_selected ? &current_shared_warp : text_pin_selected ? &text_pin_views : nullptr);
               auto observe_dump_bindings = [&](ID3D11DeviceContext *observed_context) noexcept {
                 if (!dump_actual_draw && !(probe_observer.record && shared_warp_selected)) {
                   return;
@@ -2913,7 +3246,6 @@ namespace platf::dxgi {
                   }
                   e.matte = actual[3];
                   e.selected_receipt = actual[7];
-                  e.legacy_matte = actual[8];
                   e.background = actual[9];
                   e.background_proof = actual[11];
                   if (e.shared_pin_selected) {
@@ -2926,8 +3258,8 @@ namespace platf::dxgi {
                   e.geometry_constants = constants[0];
                   e.subtitle_constants = constants[1];
                   e.expected = constants[2];
-                  // Retired repair ownership fields retain their unavailable defaults. Actual
-                  // legacy slots above remain observed so diagnostics cannot invent absence.
+                  // Retired repair ownership fields retain their unavailable defaults. The
+                  // unused repair slots above remain observed so diagnostics cannot invent absence.
                   e.owner_serial = e.shared_pin_selected ? current_shared_warp.serial : 0u;
                   e.colour_key = {frame_id, draw_source_slot ? draw_source_slot->frame_id : 0u, draw_source_slot ? static_cast<std::uint64_t>(draw_source_slot->captured_at.time_since_epoch().count()) : 0u, static_cast<std::uint64_t>(subtitle_constants.color_mode)};
                   e.analysis_source_rect = {subtitle_constants.source_left, subtitle_constants.source_top, subtitle_constants.source_width, subtitle_constants.source_height};
@@ -3197,6 +3529,7 @@ namespace platf::dxgi {
               matched_render_slot && dump_warp_depth && est.model_input_snapshot &&
               est.raw_model_depth_snapshot && est.raw_model_provenance &&
               est.shadow_final_parallax &&
+              (est.subtitle_conditioning_diagnostics_current || est.subtitle_work_suppressed) &&
               v2_renderer_selected &&
               models::parallax_v2_result_is_authenticated(est);
             ID3D11ShaderResourceView *dump_depth_input_source =
@@ -3274,7 +3607,7 @@ namespace platf::dxgi {
                 dump_frame.model_input = est.model_input_snapshot.Get();
                 dump_frame.raw_depth = est.raw_model_depth_snapshot.Get();
                 dump_frame.warp_depth = dump_warp_depth;
-                dump_frame.adaptive_state = est.cut_state.Get();
+                dump_frame.adaptive_state = est.depth_health_state.Get();
                 dump_frame.depth_frame_state = est.depth_frame_state.Get();
                 dump_frame.warp_map =
                   geometry_available ? sbs_debug_mapping_srv.Get() : nullptr;
@@ -3525,7 +3858,9 @@ namespace platf::dxgi {
       if (stream_gamma_transform && mode == ::video::stream_gamma_mode_e::windows_default && stream_gamma_mode_ == mode) {
         return true;
       }
-      float white_nits = 203.0f;
+      // A transient query failure (for example during a mode change) keeps the level already in
+      // use; falling back to the 203-nit default would be a visible white-level jump.
+      float white_nits = stream_gamma_transform && stream_gamma_white_nits_ > 0.0f ? stream_gamma_white_nits_ : 203.0f;
       if (display) {
         const auto queried = display->get_sdr_white_nits();
         if (queried && std::isfinite(*queried) && *queried > 0.0f) {
@@ -3727,6 +4062,15 @@ namespace platf::dxgi {
       if (!enable || !depth_estimator) { return false; }
       if (queued_live_ready) { return true; }
 
+      // Optional queued shaders are prepared only for this explicit route. Their failure
+      // leaves the completed subtitle programs and ordinary depth renderer available.
+      if (selected_matte_ready) {
+        std::string shared_error;
+        if (!selected_shared_warp_programs.load_queued(device.get(), selected_shared_warp_root, shared_error)) {
+          BOOST_LOG(warning) << "Queued subtitle shared renderer unavailable; completed protection remains available: " << shared_error;
+        }
+      }
+
       namespace cache = models::host_sbs_shader_cache;
       const auto queued_sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, cache::parallax_v2_queued_renderer_specs);
       const bool queued_source_exact = queued_sources &&
@@ -3842,7 +4186,7 @@ namespace platf::dxgi {
       // resource creation the constructor does (it makes no immediate-context calls). Capture
       // owning ComPtrs so a presentation-session teardown never has to wait for construction.
       auto sbs_cfg = sbs_config;
-      // Every estimator consumer uses the authenticated Host SBS tensor shapes and private cut
+      // Every estimator consumer uses the authenticated Host SBS tensor shapes and private
       // analysis contract.
       BOOST_LOG(info) << "Host SBS enabled; initializing the per-stream GPU pipeline for resident model \""sv
                       << active.name
@@ -3863,6 +4207,8 @@ namespace platf::dxgi {
           sbs_cfg,
           active
         );
+        // Live rendering binds Base. Conditioned-field diagnostics run only for Dump 3D.
+        result.estimator->set_subtitle_conditioning_diagnostics_always(false);
         if (prepare_live_outline && result.estimator->is_valid() &&
             !result.estimator->has_terminal_failure()) {
           namespace outline = models::current_outline_runtime;
@@ -4022,9 +4368,7 @@ namespace platf::dxgi {
       snapshot.valid_fields =
         ::video::sbs_telemetry_valid_field::config |
         ::video::sbs_telemetry_valid_field::effective_pop |
-        ::video::sbs_telemetry_valid_field::change |
         ::video::sbs_telemetry_valid_field::valid_fraction |
-        ::video::sbs_telemetry_valid_field::cuts |
         ::video::sbs_telemetry_valid_field::faults;
       snapshot.depth_width = static_cast<std::uint16_t>(std::clamp(
         sample.depth_width,
@@ -4038,37 +4382,17 @@ namespace platf::dxgi {
       ));
       snapshot.effective_pop = snapshot.pop_floor;
       snapshot.edge_fraction = sample.edge_fraction;
-      snapshot.change_fraction = sample.change_fraction;
       snapshot.zero_anchor_shift_px = sample.zero_anchor_shift_px;
       snapshot.subject_depth = sample.subject_depth;
       snapshot.valid_depth_fraction = sample.valid_depth_fraction;
       snapshot.effective_range_width = sample.effective_range_width;
-      snapshot.scene_age = sample.scene_age;
-      snapshot.hard_cut_count = sample.hard_cut_count;
-      snapshot.external_cut_count = sample.external_cut_count;
       snapshot.empty_raw_count = sample.empty_raw_count;
       snapshot.collapsed_raw_count = sample.collapsed_raw_count;
       snapshot.sampled_frame_id = static_cast<std::uint32_t>(sample.sampled_frame_id);
 
       if (sample.profile_initialized) {
         snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::profile_initialized;
-        snapshot.valid_fields |= ::video::sbs_telemetry_valid_field::scene;
       }
-      if (
-        (sample.cut_flags & sbs_adaptive_state::cut_flag_geometry_armed) != 0
-      ) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::geometry_armed;
-      }
-      if (
-        (sample.cut_flags & sbs_adaptive_state::cut_flag_appearance_armed) != 0
-      ) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::appearance_armed;
-      }
-      if (detail::host_sbs_telemetry_cut_pulse(sbs_telemetry_has_sample, sbs_telemetry_last_hard_cut_count, sample.hard_cut_count, sample.hard_cut_pulse)) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::hard_cut_pulse;
-      }
-      sbs_telemetry_last_hard_cut_count = sample.hard_cut_count;
-      sbs_telemetry_has_sample = true;
       sbs_telemetry_event->raise(std::move(snapshot));
     }
 
@@ -4498,6 +4822,8 @@ namespace platf::dxgi {
       // Semantic retention during a freshly verified modal loop permits no positioned glyph
       // authority. Keep it separate from the normal per-frame eligibility used by rendering.
       bool subtitle_context_suppression_eligible = false;
+      // Submitted with the same context generation, so it cannot change within one context.
+      models::subtitle_line_policy_e subtitle_line_policy = models::subtitle_line_policy_e::video_caption;
       std::uint64_t probe_instance = 0u;
       // CPU-owned submission class authenticates matched completion metadata. The exact final
       // publication receipt independently reports the actual infer/reuse branch and depth owner.
@@ -4550,7 +4876,7 @@ namespace platf::dxgi {
         event.views[3]=result->subtitle_glyph_matte; event.views[4]=result->subtitle_contour_source;
         event.views[5]=result->subtitle_condition_params; event.views[6]=result->subtitle_contour_identity;
         event.views[7]=result->ocr_box_record; event.views[8]=result->subtitle_locator_state;
-        event.views[9]=result->cut_state; event.views[10]=result->depth_frame_state; event.views[11]=result->ema_motion_mask;
+        event.views[9]=result->depth_health_state; event.views[10]=result->depth_frame_state; event.views[11]=result->ema_motion_mask;
         if (const auto w=depth_estimator->ocr_working_views_for_evaluation(result->completed_frame_id)) {
           event.buffers[3]=w->transaction; event.buffers[4]=w->dispatch_arguments;
         }
@@ -4636,7 +4962,7 @@ namespace platf::dxgi {
         const bool current_interactive_move_size
       ) const noexcept {
         return authenticated && estimate.completed_frame_valid &&
-               estimate.completed_frame_id == slot.frame_id && estimate.shadow_final_parallax &&
+               estimate.completed_frame_id == slot.frame_id && estimate.shadow_base_final_parallax &&
                estimate.shadow_state && estimate.input_region.valid() &&
                depth_completion_region_matches_submission(
                  estimate,
@@ -4718,6 +5044,7 @@ namespace platf::dxgi {
       destination.subtitle_context_generation = source.subtitle_context_generation;
       destination.subtitle_context_eligible = source.subtitle_context_eligible;
       destination.subtitle_context_suppression_eligible = source.subtitle_context_suppression_eligible;
+      destination.subtitle_line_policy = source.subtitle_line_policy;
       destination.probe_instance = source.probe_instance;
       destination.gpu_undecided_transaction = source.gpu_undecided_transaction;
       destination.pending = false;
@@ -5021,7 +5348,7 @@ namespace platf::dxgi {
       }
       latest_v2_lineage.estimate = estimate;
       // A reused presentation is not a new inference/completion transition. Preserve the completed
-      // geometry identity while preventing reset/cut side effects from replaying on every cursor
+      // geometry identity while preventing reset side effects from replaying on every cursor
       // delivery that shares the same DDup desktop-content clock.
       latest_v2_lineage.estimate.inference_enqueued = false;
       latest_v2_lineage.estimate.gpu_undecided_transaction_enqueued = false;
@@ -5221,6 +5548,41 @@ namespace platf::dxgi {
       video_dom::snapshot_ptr browser_snapshot;
       std::optional<browser_live_authority_key_t> browser_authority;
       std::uint64_t browser_authority_epoch = 0u;
+    };
+
+    struct subtitle_admission_diagnostic_key_t {
+      std::uint64_t context_generation = 0u;
+      std::string_view reason;
+      foreground_window::status_e foreground_status {};
+      foreground_window::mapping_status_e foreground_mapping_status {};
+      video_dom::status_e browser_status {};
+      video_dom::mapping_status_e browser_mapping_status {};
+      std::uint64_t foreground_window = 0u;
+      std::uint32_t foreground_process = 0u;
+      std::uint64_t browser_window = 0u;
+      std::uint32_t browser_process = 0u;
+      std::int32_t browser_document = 0;
+      std::int32_t browser_video = 0;
+      bool foreground_root = false;
+      bool foreground_region = false;
+      bool foreground_target_usable = false;
+      bool foreground_usable = false;
+      bool content_timestamp_available = false;
+      bool browser_snapshot = false;
+      bool browser_heartbeat_fresh = false;
+      bool browser_after_move = false;
+      bool browser_authority = false;
+      bool browser_identity_matches = false;
+      bool browser_usable = false;
+      bool mapping_attempted = false;
+      bool mapping_succeeded = false;
+      bool fullscreen_checked = false;
+      bool fullscreen_match = false;
+      bool registered_player_candidate = false;
+      bool registry_ready = false;
+      bool retained_for_interactive_move_size = false;
+
+      bool operator==(const subtitle_admission_diagnostic_key_t &) const = default;
     };
 
     void observe_live_browser_authority(
@@ -5530,77 +5892,167 @@ namespace platf::dxgi {
       const bool browser_video = admission.browser_key.kind == kind_e::browser_video;
       if (browser_video) {
         next = admission.browser_key;
-      } else if (admission.registered_player_candidate && video_player_registry &&
-                 video_player_registry->contains_process(foreground.process_id)) {
-        next = {kind_e::registered_video_player, foreground.window, foreground.process_id};
+      } else if (admission.registered_player_candidate) {
+        // Registration is checked first so a player keeps its identity. Any other application
+        // is admitted only when its owner enabled that executable; the check runs on every
+        // observation, so the Web UI changes a running stream at once.
+        const bool registered = video_player_registry && video_player_registry->contains_process(foreground.process_id);
+        // A Game 3D text game is an application its owner approved for exactly this purpose. The
+        // approval names that process: the game's answer is refreshed a few times a second, so
+        // another window that has just come in front must not inherit it meanwhile.
+        // Until its helper has shown that it sees the text, the picture-based search covers it.
+        const bool approved_text_game = text_game_ai_active && !text_game_helper_sees_text && text_game_source &&
+                                        text_game_source->process_id == foreground.process_id;
+        next = {native_kind(registered, !registered && (approved_text_game || host3d_subtitle_apps::observe_process(foreground.process_id))),
+          foreground.window, foreground.process_id};
       }
-      if (subtitle_context.update(next)) {
+      const bool context_changed = subtitle_context.update(next);
+      if (context_changed) {
         // Revoke even full-source completions and already-packed output. The generation survives
         // busy drops, so returning to the same video cannot revive pre-transition protection.
         matched_presentation_cache.reset();
         latest_v2_lineage.reset();
         subtitle_context_reprocess_pending = true;
-        const char *reason = "no-video-authority";
-        if (subtitle_context.kind() == kind_e::browser_video) reason = "browser-video-authorized";
-        else if (subtitle_context.kind() == kind_e::registered_video_player) reason = "registered-player-authorized";
-        else if (!live_window_authority) reason = "foreground-root-unavailable";
-        else if (!foreground_usable) reason = "foreground-unusable-for-content";
-        else if (!admission.foreground_target_usable) reason = "foreground-target-unavailable";
-        else if (!foreground_region_present && !browser_identity_matches) reason = "foreground-region-unavailable";
-        else if (!browser) reason = "browser-snapshot-unavailable";
-        else if (!live_browser_authority) reason = "browser-authority-unavailable";
-        else if (!browser_identity_matches) reason = "browser-identity-mismatch";
-        else if (!browser_usable) reason = "browser-unusable-for-content";
-        else if (!mapping_succeeded) reason = "browser-mapping-failed";
-        else if (!fullscreen_match) reason = "browser-fullscreen-mismatch";
-        else if (browser_video) reason = "browser-key-rejected";
-        const bool heartbeat_age_available = browser &&
-          browser->received_at.time_since_epoch().count() != 0;
-        const double heartbeat_age_ms = heartbeat_age_available ?
-          std::chrono::duration<double, std::milli>(now - browser->received_at).count() : 0.0;
-        const bool geometry_content_delta_available = browser && content_timestamp &&
-          browser->geometry_valid_since.time_since_epoch().count() != 0;
-        const double content_minus_geometry_ms = geometry_content_delta_available ?
-          std::chrono::duration<double, std::milli>(*content_timestamp - browser->geometry_valid_since).count() : 0.0;
-        BOOST_LOG(info) << "Host SBS subtitle context="sv
-                        << kind_name(subtitle_context.kind())
-                        << " generation="sv << subtitle_context.generation() << '.'
-                        << " reason="sv << reason
-                        << " foreground_root="sv << static_cast<bool>(live_window_authority)
-                        << " foreground_region="sv << foreground_region_present
-                        << " foreground_target_usable="sv << admission.foreground_target_usable
-                        << " foreground_mapping_status="sv << foreground_window::mapping_status_name(foreground_mapping.status)
-                        << " foreground_usable="sv << foreground_usable
-                        << " foreground_hwnd=0x"sv << util::hex(foreground.window).to_string_view()
-                        << " foreground_pid="sv << foreground.process_id
-                        << " foreground_generation="sv << foreground.generation
-                        << " content_timestamp_available="sv << content_timestamp.has_value()
-                        << " browser_snapshot="sv << static_cast<bool>(browser)
-                        << " browser_status="sv << (browser ? video_dom::status_name(browser->status) : "none")
-                        << " live_browser_authority="sv << static_cast<bool>(live_browser_authority)
-                        << " browser_epoch="sv << live_browser_authority_epoch
-                        << " browser_identity_checked="sv << (foreground_usable && admission.foreground_target_usable)
-                        << " browser_identity_match="sv << browser_identity_matches
-                        << " browser_usable_checked="sv << (foreground_usable && browser_identity_matches)
-                        << " browser_usable="sv << browser_usable
-                        << " mapping_attempted="sv << mapping_attempted
-                        << " mapping_status="sv << (mapping_attempted ? video_dom::mapping_status_name(mapping_status) : "not-evaluated")
-                        << " fullscreen_checked="sv << fullscreen_check_evaluated
-                        << " fullscreen_match="sv << fullscreen_match
-                        << " browser_sequence="sv << (browser ? browser->helper_sequence : 0u)
-                        << " browser_hwnd=0x"sv << util::hex(browser ? browser->window : 0u).to_string_view()
-                        << " browser_pid="sv << (browser ? browser->process_id : 0u)
-                        << " browser_document="sv << (browser ? browser->document_id : 0)
-                        << " browser_video="sv << (browser ? browser->video_id : 0)
-                        << " browser_rect="sv << (browser ? browser->screen_rect.left : 0) << ':'
-                        << (browser ? browser->screen_rect.top : 0) << '-'
-                        << (browser ? browser->screen_rect.right : 0) << ':'
-                        << (browser ? browser->screen_rect.bottom : 0)
-                        << " heartbeat_age_available="sv << heartbeat_age_available
-                        << " heartbeat_age_ms="sv << heartbeat_age_ms
-                        << " geometry_content_delta_available="sv << geometry_content_delta_available
-                        << " content_minus_geometry_ms="sv << content_minus_geometry_ms;
       }
+      const char *reason = "no-video-authority";
+      if (subtitle_context.kind() == kind_e::browser_video) {
+        reason = "browser-video-authorized";
+      } else if (subtitle_context.kind() == kind_e::registered_video_player) {
+        reason = "registered-player-authorized";
+      } else if (subtitle_context.kind() == kind_e::foreground_app) {
+        reason = "foreground-app-authorized";
+      } else if (!live_window_authority) {
+        reason = "foreground-root-unavailable";
+      } else if (!foreground_usable) {
+        reason = "foreground-unusable-for-content";
+      } else if (!admission.foreground_target_usable) {
+        reason = "foreground-target-unavailable";
+      } else if (!foreground_region_present && !browser_identity_matches) {
+        reason = "foreground-region-unavailable";
+      } else if (!browser) {
+        reason = "browser-snapshot-unavailable";
+      } else if (!live_browser_authority) {
+        reason = "browser-authority-unavailable";
+      } else if (!browser_identity_matches) {
+        reason = "browser-identity-mismatch";
+      } else if (!browser_usable) {
+        reason = "browser-unusable-for-content";
+      } else if (!mapping_succeeded) {
+        reason = "browser-mapping-failed";
+      } else if (!fullscreen_match) {
+        reason = "browser-fullscreen-mismatch";
+      } else if (browser_video) {
+        reason = "browser-key-rejected";
+      }
+      const bool heartbeat_age_available = browser &&
+                                           browser->received_at.time_since_epoch().count() != 0;
+      const bool browser_heartbeat_fresh = heartbeat_age_available && now >= browser->received_at &&
+                                           now - browser->received_at <= std::chrono::milliseconds {2500};
+      const bool browser_after_move = browser && browser->received_at >= browser_roi_not_before;
+      const subtitle_admission_diagnostic_key_t diagnostic_key {
+        .context_generation = subtitle_context.generation(),
+        .reason = reason,
+        .foreground_status = foreground.status,
+        .foreground_mapping_status = foreground_mapping.status,
+        .browser_status = browser ? browser->status : video_dom::status_e::stopped,
+        .browser_mapping_status = mapping_status,
+        .foreground_window = foreground.window,
+        .foreground_process = foreground.process_id,
+        .browser_window = browser ? browser->window : 0u,
+        .browser_process = browser ? browser->process_id : 0u,
+        .browser_document = browser ? browser->document_id : 0,
+        .browser_video = browser ? browser->video_id : 0,
+        .foreground_root = static_cast<bool>(live_window_authority),
+        .foreground_region = foreground_region_present,
+        .foreground_target_usable = admission.foreground_target_usable,
+        .foreground_usable = foreground_usable,
+        .content_timestamp_available = content_timestamp.has_value(),
+        .browser_snapshot = static_cast<bool>(browser),
+        .browser_heartbeat_fresh = browser_heartbeat_fresh,
+        .browser_after_move = browser_after_move,
+        .browser_authority = static_cast<bool>(live_browser_authority),
+        .browser_identity_matches = browser_identity_matches,
+        .browser_usable = browser_usable,
+        .mapping_attempted = mapping_attempted,
+        .mapping_succeeded = mapping_succeeded,
+        .fullscreen_checked = fullscreen_check_evaluated,
+        .fullscreen_match = fullscreen_match,
+        .registered_player_candidate = admission.registered_player_candidate,
+        .registry_ready = video_player_registry_ready_observed,
+        .retained_for_interactive_move_size = admission.retained_for_interactive_move_size,
+      };
+      // Admission can change between disabled reasons without changing semantic context. Keep
+      // that evidence visible without resetting history or logging every heartbeat/geometry tick.
+      // Rapid nonsemantic fluctuations coalesce to the latest state at most once per second;
+      // actual context transitions retain their immediate log and existing revocation semantics.
+      if (!context_changed && last_subtitle_admission_diagnostic &&
+          (*last_subtitle_admission_diagnostic == diagnostic_key ||
+           now - last_subtitle_admission_diagnostic_at < std::chrono::seconds {1})) {
+        return;
+      }
+      last_subtitle_admission_diagnostic = diagnostic_key;
+      last_subtitle_admission_diagnostic_at = now;
+      const double heartbeat_age_ms = heartbeat_age_available ?
+                                        std::chrono::duration<double, std::milli>(now - browser->received_at).count() :
+                                        0.0;
+      const bool geometry_content_delta_available = browser && content_timestamp &&
+                                                    browser->geometry_valid_since.time_since_epoch().count() != 0;
+      const double content_minus_geometry_ms = geometry_content_delta_available ?
+                                                 std::chrono::duration<double, std::milli>(*content_timestamp - browser->geometry_valid_since).count() :
+                                                 0.0;
+      BOOST_LOG(info) << "Host SBS subtitle context="sv
+                      << kind_name(subtitle_context.kind())
+                      << " generation="sv << subtitle_context.generation() << '.'
+                      << " reason="sv << reason
+                      << " context_changed="sv << context_changed
+                      << " foreground_status="sv << foreground_window::status_name(foreground.status)
+                      << " foreground_root="sv << static_cast<bool>(live_window_authority)
+                      << " foreground_region="sv << foreground_region_present
+                      << " foreground_target_usable="sv << admission.foreground_target_usable
+                      << " foreground_mapping_status="sv << foreground_window::mapping_status_name(foreground_mapping.status)
+                      << " foreground_usable="sv << foreground_usable
+                      << " foreground_hwnd=0x"sv << util::hex(foreground.window).to_string_view()
+                      << " foreground_pid="sv << foreground.process_id
+                      << " foreground_generation="sv << foreground.generation
+                      << " foreground_client="sv << foreground.client_screen_rect.left << ':'
+                      << foreground.client_screen_rect.top << '-'
+                      << foreground.client_screen_rect.right << ':' << foreground.client_screen_rect.bottom
+                      << " capture="sv << output.DesktopCoordinates.left << ':'
+                      << output.DesktopCoordinates.top << '-' << output.DesktopCoordinates.right << ':'
+                      << output.DesktopCoordinates.bottom
+                      << " source="sv << source.Width << 'x' << source.Height
+                      << " content_timestamp_available="sv << content_timestamp.has_value()
+                      << " content_age_ms="sv << (content_timestamp ? std::chrono::duration<double, std::milli>(now - *content_timestamp).count() : 0.0)
+                      << " browser_snapshot="sv << static_cast<bool>(browser)
+                      << " browser_status="sv << (browser ? video_dom::status_name(browser->status) : "none")
+                      << " live_browser_authority="sv << static_cast<bool>(live_browser_authority)
+                      << " browser_heartbeat_fresh="sv << browser_heartbeat_fresh
+                      << " browser_after_move="sv << browser_after_move
+                      << " browser_epoch="sv << live_browser_authority_epoch
+                      << " browser_identity_checked="sv << (foreground_usable && admission.foreground_target_usable)
+                      << " browser_identity_match="sv << browser_identity_matches
+                      << " browser_usable_checked="sv << (foreground_usable && browser_identity_matches)
+                      << " browser_usable="sv << browser_usable
+                      << " mapping_attempted="sv << mapping_attempted
+                      << " mapping_status="sv << (mapping_attempted ? video_dom::mapping_status_name(mapping_status) : "not-evaluated")
+                      << " fullscreen_checked="sv << fullscreen_check_evaluated
+                      << " fullscreen_match="sv << fullscreen_match
+                      << " registered_player_candidate="sv << admission.registered_player_candidate
+                      << " registry_ready="sv << video_player_registry_ready_observed
+                      << " retained_for_interactive_move_size="sv << admission.retained_for_interactive_move_size
+                      << " browser_sequence="sv << (browser ? browser->helper_sequence : 0u)
+                      << " browser_hwnd=0x"sv << util::hex(browser ? browser->window : 0u).to_string_view()
+                      << " browser_pid="sv << (browser ? browser->process_id : 0u)
+                      << " browser_document="sv << (browser ? browser->document_id : 0)
+                      << " browser_video="sv << (browser ? browser->video_id : 0)
+                      << " browser_rect="sv << (browser ? browser->screen_rect.left : 0) << ':'
+                      << (browser ? browser->screen_rect.top : 0) << '-'
+                      << (browser ? browser->screen_rect.right : 0) << ':'
+                      << (browser ? browser->screen_rect.bottom : 0)
+                      << " heartbeat_age_available="sv << heartbeat_age_available
+                      << " heartbeat_age_ms="sv << heartbeat_age_ms
+                      << " geometry_content_delta_available="sv << geometry_content_delta_available
+                      << " content_minus_geometry_ms="sv << content_minus_geometry_ms;
     }
 
     bool window_region_matches_live_authority(
@@ -6024,7 +6476,7 @@ namespace platf::dxgi {
               << " tensor="sv << plan.tensor_shape.width << 'x'
               << plan.tensor_shape.height << " letterbox_padding_pct="sv
               << plan.padded_area_fraction * 100.0f
-              << "; scene cuts and scene center are region-local."sv;
+              << "; the scene center is region-local."sv;
           } else if (
             region.left == 0 && region.top == 0 &&
             region.right == region.source_width &&
@@ -6319,6 +6771,10 @@ namespace platf::dxgi {
       slot.subtitle_context_suppression_eligible =
         slot.observed_interactive_move_size && subtitle_context.eligible();
       slot.probe_instance = probe_context ? probe_context->instance : 0u;
+      slot.subtitle_line_policy =
+        models::host_subtitle_context::requires_centered_lines(subtitle_context.kind()) ?
+          models::subtitle_line_policy_e::video_caption :
+          models::subtitle_line_policy_e::application_text;
       slot.subtitle_context_eligible = probe_context ?
         subtitle_context.eligible() && source_desc.Width == probe_context->width && source_desc.Height == probe_context->height :
         subtitle_context.eligible() && slot.window_region &&
@@ -6340,13 +6796,11 @@ namespace platf::dxgi {
       ) {
         // Stop an old-domain staging readback from publishing while the renderer is deliberately
         // flat and waiting for this newly observed ROI/full/transfer domain. The first completion
-        // in the new domain establishes the new cut-counter baseline.
+        // in the new domain establishes the new health-counter baseline.
         sbs_telemetry_input_region = slot.depth_input_region;
         sbs_telemetry_input_color_space = slot.color_space;
         sbs_telemetry_input_domain_valid = true;
         sbs_telemetry_min_frame_id = frame_id;
-        sbs_telemetry_has_sample = false;
-        sbs_telemetry_last_hard_cut_count = 0;
       }
       slot.gpu_undecided_transaction = false;
       slot.pending = false;
@@ -6706,13 +7160,15 @@ namespace platf::dxgi {
       sbs_telemetry_subscription = std::move(telemetry_subscription);
       sbs_telemetry_performance = diagnostics_enabled ? std::move(telemetry_performance) : nullptr;
       game_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? sbs_debug_dump_request : nullptr);
-      sbs_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? nullptr : std::move(sbs_debug_dump_request));
+      sbs_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? nullptr : sbs_debug_dump_request);
+      dump_button_request = std::move(sbs_debug_dump_request);
       sbs_flat_identity_ps.reset();
       sbs_packed_resample_ps.reset();
       sbs_packed_resample_pq_ps.reset();
       cursor_scissor_raster.Reset();
       sbs_reprojection_v2_live_ps.reset();
       selected_shared_warp={};
+      reset_text_game_pin();
       queued_live_ready = false;
       queued_render_guard_cbuffer.reset();
       sbs_reprojection_v2_queued_ps.reset();
@@ -6733,8 +7189,6 @@ namespace platf::dxgi {
       sbs_telemetry_sequence = 0;
       sbs_telemetry_sample_gate.reset();
       sbs_telemetry_min_frame_id = 0;
-      sbs_telemetry_last_hard_cut_count = 0;
-      sbs_telemetry_has_sample = false;
       sbs_telemetry_input_region = {};
       sbs_telemetry_input_color_space = models::input_color_space::srgb;
       sbs_telemetry_input_domain_valid = false;
@@ -6749,6 +7203,8 @@ namespace platf::dxgi {
       live_browser_authority_epoch = 0u;
       subtitle_context = {};
       subtitle_context_reprocess_pending = false;
+      last_subtitle_admission_diagnostic.reset();
+      last_subtitle_admission_diagnostic_at = {};
       video_player_registry_ready_observed = false;
       interactive_move_size_observed = false;
       browser_roi_not_before = {};
@@ -6827,6 +7283,14 @@ namespace platf::dxgi {
             static_cast<std::uint32_t>(display->height)
           ) :
           std::string_view {"source extent is empty"};
+      // A text game needs the same depth path as Host AI. A surface that path rejects simply
+      // makes this Game 3D session unable to convert one; it stays valid for add-on games.
+      text_game_eligible = ::video::is_game_mode(sbs_mode) && game_source_supported && host_sbs_rejection.empty() && !probe_context;
+      text_game_ai_active = false;
+      text_game_source.reset();
+      text_game_checked_at = {};
+      packed_route = packed_route_e::none;
+      const bool depth_path_on = ai_on || (sbs_mode == ::video::SBS_GAME_SBS && text_game_eligible);
       if (ai_on && !host_sbs_rejection.empty()) {
         // Launch, RTSP, and live controls have already preflighted the negotiated mode. Reaching
         // this guard therefore means capture attached to a different surface/topology; never let
@@ -6929,7 +7393,7 @@ namespace platf::dxgi {
           return -1;
         }
       }
-      if (ai_on) {
+      if (depth_path_on) {
         HRESULT v2_pixel_status = E_FAIL;
         if (sbs_reprojection_v2_live_ps_hlsl) {
           v2_pixel_status = device->CreatePixelShader(
@@ -7089,7 +7553,7 @@ namespace platf::dxgi {
       // Size the intermediate to the full encoded output. The warp renders directly at the
       // (possibly capped) encode resolution and applies identical aspect-fit bars inside each eye.
       if (sbs_on) {
-        if (ai_on) {
+        if (depth_path_on) {
           initialize_sbs_gpu_timers();
           BOOST_LOG(info)
             << "Host SBS warp: authenticated Depth Coordinate V2 contractive renderer, fixed pop "
@@ -7429,8 +7893,6 @@ namespace platf::dxgi {
       return 0;
     }
 
-    ::video::color_t *color_p;
-
     buf_t subsample_offset;
     buf_t color_matrix;
     buf_t sdr_color_transform;
@@ -7515,6 +7977,56 @@ namespace platf::dxgi {
     std::shared_ptr<::video::effective_video_mode_publisher_t> game_effective_mode;
     ::video::game_source_tracker_t game_source_tracker;
     bool game_source_supported = false;
+    // A Game 3D text game has no depth and publishes no stereo of its own. It supplies where its
+    // text is, through the text helper loaded into it, and the host supplies the rest: while such
+    // a game is in front, packed Game 3D converts the captured picture with the Host AI path.
+    bool text_game_eligible = false;  ///< This session can convert a text game; decided at init.
+    bool text_game_ai_active = false;  ///< The current frame takes the Host AI path for one.
+    std::optional<::video::game_source_identity_t> text_game_source;
+    std::chrono::steady_clock::time_point text_game_checked_at {};
+    enum class packed_route_e : std::uint8_t {
+      none,
+      depth,  ///< Host AI path for a text game.
+      external_or_flat,  ///< An add-on export, or duplicate flat eyes without one.
+    };
+    packed_route_e packed_route = packed_route_e::none;
+    std::shared_ptr<std::atomic<bool>> dump_button_request;
+    // Where the text game's picture is in the captured source, and the text its helper reports.
+    foreground_window::rect_t text_game_client {};
+    struct text_game_band_t {
+      foreground_window::rect_t client {};
+      UINT width = 0u, height = 0u;
+      UINT top = 0u, end = 0u;
+    };
+    text_game_band_t text_game_band;  ///< The pinned rows used so far for this picture.
+    // The picture has shown text in the colours the helper reported, so the helper serves this
+    // game. From then on the picture-based subtitle search has nothing to add and is not run for
+    // it: it costs more GPU time than the depth model itself.
+    bool text_game_helper_sees_text = false;
+    std::optional<::video::game_source_identity_t> text_game_helper_identity;
+    platf::game3d::text_hook::reader_t text_game_reader;
+    texture2d_t text_game_coverage_texture;
+    shader_res_t text_game_coverage_srv;
+    std::uint32_t text_game_coverage_sequence = 0u;
+    bool text_game_coverage_uploaded = false;
+    buf_t text_game_pin_cbuffer;
+    // The GPU's observation of each pinned draw, read back a frame or two late and never waited
+    // for: whether the picture shows the text (the shader decides that for itself; this copy is
+    // for the log) and the scene under the text, which places the text plane.
+    buf_t text_game_verdict_staging;
+    bool text_game_verdict_staged = false;
+    std::array<std::uint32_t, 4u> text_game_verdict {};  ///< light cores, of them shown, dark cores, of them shown
+    // Where the text sits in depth: the Game 3D add-on's own UI plane policy, fed with the scene
+    // under the glyphs. Screen depth unless the scene there is nearer; then one of its levels.
+    sunshine_game3d::ui_adaptive::policy text_game_plane;
+    sunshine_game3d::ui_adaptive::source text_game_plane_live;  ///< Provenance of the draw being prepared.
+    sunshine_game3d::ui_adaptive::source text_game_plane_staged;  ///< Provenance of the staged observation.
+    std::uint64_t text_game_plane_sequence = 0u;
+    std::uint64_t text_game_plane_observed_ms = 0u;
+    std::chrono::steady_clock::time_point text_game_logged_at {};
+    unsigned text_game_pin_draws = 0u;
+    unsigned text_game_pin_misses = 0u;
+    models::host_sbs_shared_ui_warp::resources_t text_game_shared_warp;
     int game_source_width = 0;
     bool temporal_source_bridge_enabled=false,temporal_source_domain_active=false;
     models::host_sbs_temporal_source_bridge::ledger_t temporal_source_ledger;
@@ -7538,8 +8050,6 @@ namespace platf::dxgi {
     std::uint32_t sbs_telemetry_sequence = 0;
     detail::host_sbs_telemetry_sample_gate_t sbs_telemetry_sample_gate;
     std::uint64_t sbs_telemetry_min_frame_id = 0;
-    std::uint32_t sbs_telemetry_last_hard_cut_count = 0;
-    bool sbs_telemetry_has_sample = false;
     models::depth_input_region_t sbs_telemetry_input_region {};
     models::input_color_space sbs_telemetry_input_color_space =
       models::input_color_space::srgb;
@@ -7601,6 +8111,8 @@ namespace platf::dxgi {
     std::unique_ptr<video_player::registry_t> video_player_registry;
     bool video_player_registry_ready_observed = false;
     models::host_subtitle_context::tracker_t subtitle_context;
+    std::optional<subtitle_admission_diagnostic_key_t> last_subtitle_admission_diagnostic;
+    std::chrono::steady_clock::time_point last_subtitle_admission_diagnostic_at {};
     const actual_converter_probe_v1::context_t *probe_context = nullptr;
     actual_converter_probe_v1::observer_t probe_observer {};
     // Same-TU research actor only; no UI/config/default activation.
@@ -11511,6 +12023,20 @@ namespace platf::dxgi {
     img->dummy = dummy;
     img->format = (capture_format == DXGI_FORMAT_UNKNOWN) ? DXGI_FORMAT_B8G8R8A8_UNORM : capture_format;
 
+    // The early-out above treats a set capture_texture as a complete image. A failure part-way
+    // must therefore leave none of it behind, or a reused pooled image would be accepted with a
+    // null render target, keyed mutex or shared handle.
+    auto incomplete = util::fail_guard([img]() {
+      img->capture_texture.reset();
+      img->capture_rt.reset();
+      img->capture_mutex.reset();
+      img->data = nullptr;
+      if (img->encoder_texture_handle) {
+        CloseHandle(img->encoder_texture_handle);
+        img->encoder_texture_handle = nullptr;
+      }
+    });
+
     D3D11_TEXTURE2D_DESC t {};
     t.Width = img->width;
     t.Height = img->height;
@@ -11557,6 +12083,7 @@ namespace platf::dxgi {
 
     img->data = (std::uint8_t *) img->capture_texture.get();
 
+    incomplete.disable();
     return 0;
   }
 
@@ -11631,9 +12158,6 @@ namespace platf::dxgi {
     return -1;
 #define compile_pixel_shader_helper(x) \
   if (!(x##_hlsl = compile_pixel_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
-    return -1;
-#define compile_compute_shader_helper(x) \
-  if (!(x##_hlsl = compile_compute_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
     return -1;
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps);
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear);
@@ -11779,7 +12303,6 @@ namespace platf::dxgi {
 
 #undef compile_vertex_shader_helper
 #undef compile_pixel_shader_helper
-#undef compile_compute_shader_helper
 
     return 0;
   }

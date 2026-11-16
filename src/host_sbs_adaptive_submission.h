@@ -89,6 +89,12 @@ namespace models {
     disable_subtitle,  ///< Publish Base without subtitle work outside an eligible video context.
   };
 
+  /** Line admission rule the OCR line classifier applies; the wire value is the enumerator. */
+  enum class subtitle_line_policy_e : std::uint32_t {
+    video_caption = 0u,  ///< Centered on the reference; short pieces need several learned cues.
+    application_text = 1u,  ///< Owner-enabled foreground app: any horizontal position; one learned line admits short pieces.
+  };
+
   [[nodiscard]] constexpr bool depth_optional_work_suppresses_subtitle(
     const depth_optional_work_mode_e work
   ) noexcept {

@@ -31,8 +31,6 @@ def authored_trace():
         row.update(frame_id=f"{index + 1:05d}", observation_timestamp_us=1 + index * 33333,
                    joint_plane_mode=3, input_source_frame_id=f"{index + 1:05d}",
                    rendered_source_frame_id=f"{index + 1:05d}", calibration_revision=index + 1,
-                   confirmed_cut_count=index, confirmed_cut=bool(index),
-                   cut_attribution="authored-cut" if index else "initialization",
                    input_valid=True, frame_valid=True, camera_valid=True, collapsed=False,
                    center=3.5, inverse_scale=f32(0.4), latched_scale=f32(2.5),
                    convergence_curve=0.0, requested_gain=f32(config.parallax_gain),
@@ -44,7 +42,7 @@ def authored_trace():
         values = {field["name"]: 0 for field in descriptors}
         values.update(center=3.5, inverse_scale=f32(.4), convergence_curve=0.0,
                       container_scale=1.0, calibration_revision=index + 1,
-                      frame_valid=1.0, confirmed_cut_count=index, contract_tag_bits=tag,
+                      frame_valid=1.0, contract_tag_bits=tag,
                       renderer_authorization_bits=tag, joint_plane_mode_bits=3,
                       gain_last_observation_low=row["observation_timestamp_us"],
                       gain_clock_armed=1, gain_seed_count=1, gain_target_zero=3.5,
@@ -68,7 +66,7 @@ def authored_trace():
             "schema": coordinate.CONTRACT_SCHEMA,
             "sha256": hashlib.sha256(coordinate.CONTRACT_PATH.read_bytes()).hexdigest(),
         },
-        "cut_source": "authored-cut", "diagnostic_role": "non-controlling-mode-selected-camera-audit-v6",
+        "diagnostic_role": "non-controlling-mode-selected-camera-audit-v6",
         "diagnostic_method": "gpu-frame-moments-and-rendered-fields-v6",
         "mapping_config": {**asdict(config), "joint_plane_mode": 3},
         "adaptation_semantics": temporal._trace_adaptation_semantics(3),
@@ -88,9 +86,18 @@ class NativeAdaptiveTraceTests(unittest.TestCase):
     def setUp(self):
         self.trace = authored_trace()
 
-    def test_native_admission_keeps_camera_across_a_confirmed_cut(self):
+    def test_native_admission_accepts_the_authored_trace(self):
         temporal.validate_v2_state_trace(self.trace, [1, 2])
         self.assertEqual(self.trace["frames"][0]["center"], self.trace["frames"][1]["center"])
+
+    def test_nonzero_reserved_control_word_is_rejected(self):
+        bad = copy.deepcopy(self.trace)
+        index = [
+            field["name"] for field in coordinate.load_contract()["shadow_state"]["fields"]
+        ].index("control_reserved_0")
+        bad["frames"][1]["state_words_u32"][index] = 1
+        with self.assertRaises(ValueError):
+            temporal.validate_v2_state_trace(bad, [1, 2])
 
     def test_removed_pipeline_cannot_be_admitted_as_another_mode(self):
         for mode in (0, 1, 2, 4, True):
@@ -120,7 +127,7 @@ class NativeAdaptiveTraceTests(unittest.TestCase):
             temporal.validate_v2_state_trace(bad, [1, 2])
 
     def test_current_json_view_must_match_sealed_gpu_words(self):
-        for key in ("center", "inverse_scale", "calibration_revision", "confirmed_cut_count"):
+        for key in ("center", "inverse_scale", "calibration_revision"):
             bad = copy.deepcopy(self.trace)
             bad["frames"][0][key] += 1
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, "authenticated state"):

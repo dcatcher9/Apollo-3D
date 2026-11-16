@@ -129,7 +129,7 @@ Confirmed worn state reactivates that retained source and reapplies the display 
 new source after grace expiry, once display/GPU ownership is available. The controller keeps the
 sensor monitor alive across off-head suspension and remote handoff, so putting
 the glasses on can start the next session without unplugging them. The sensor gate adds no Host
-SBS inference, reuse, scene-cut, geometry, or temporal rule.
+SBS inference, reuse, geometry, or temporal rule.
 
 While worn, supported 2D/3D mode changes still retain the existing virtual desktop as described
 above. While off-head, mode changes do not create a virtual desktop. A true Windows display unplug

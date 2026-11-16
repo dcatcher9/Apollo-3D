@@ -81,7 +81,6 @@ Use that exact executable for tests and every stage of an evaluation:
 Read these owners before changing Host SBS:
 
 - [Host SBS pipeline](docs/host-sbs.md) owns the live/offline geometry and HDR contract.
-- [Host SBS scene cuts](docs/host-sbs-scene-cuts.md) owns cut evidence, state, and acceptance.
 - [SBS 3D status and roadmap](docs/sbs-3d-roadmap.md) owns current limitations and active work.
 - [sbsbench](tools/sbsbench/README.md) owns the evaluation workflow and links its non-overlapping
   [dump](tools/sbsbench/DUMP_FORMAT.md), [dataset](tools/sbsbench/DATASETS.md),

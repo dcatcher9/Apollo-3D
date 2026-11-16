@@ -105,8 +105,14 @@
               }
             });
           } else {
-            this.error = "Internal Server Error";
+            // Validation failures arrive as HTTP 400 with the reason in `error`.
+            r.json().catch(() => ({})).then((rj) => {
+              this.error = rj.error || `Request failed (HTTP ${r.status})`;
+            });
           }
+        }).catch((e) => {
+          this.loading = false;
+          this.error = `Could not reach Sunshine 3D: ${e.message || e}`;
         });
       },
     },

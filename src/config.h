@@ -20,7 +20,7 @@ namespace config {
   inline constexpr bool default_local_ar_virtual_display_only = true;
 
   // Authenticated Host SBS V2 policy: the fixed inference-shape budget and the private
-  // normalized-depth analysis used by scene cuts. This calibration is not configurable; every
+  // normalized-depth analysis and its health reduction. This calibration is not configurable; every
   // depth estimator (live, offline conversion, and the evaluation harness) uses these values.
   namespace host_sbs_v2_live_calibration {
     inline constexpr double depth_ema = 0.5;

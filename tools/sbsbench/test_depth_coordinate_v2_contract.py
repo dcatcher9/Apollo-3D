@@ -168,22 +168,42 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Native foreground-client pictures share Chromium's crop-local subtitle reference.
             126: "9229139554b939eab1f9d33660122770106cdca38af601256d967fa5107dca0c",
             # Authenticated identity-only history publication for force-infer feature owners.
-            127: "b3768340a2953943fce4173ba84d07f6bd6d22e2a4004dcb34b3294238058c8a",
+            # Reviewed producer-body refresh for the integer-pixel clearance search; the
+            # separately asserted public tag, layout and timing semantics remain unchanged.
+            127: "dc007fd6ab26b4a5acd0809d7a2e9e9a65b56b4efd94f287bbb7297a5f7d3e85",
+            # Ordinary rendering now has only authenticated Base; the analytic selector is retired.
+            128: "6eb37c930253ff3f5d114cb3ab5e41af392772c212ccf8e4eaa4130bb095022a",
+            # Independent repeated-colour current fill, preserving the original outline path.
+            129: "084289418305d5e20c32abe893fc1a8f92446762f4fac8e91ccd54ec81c12494",
+            # Unique repeated fill, independent of old support, with cropped-cover publication.
+            130: "cf4df4bfd198df89a10619049289dee64399c563d82971b8a0d460ff14586979",
+            # OCR resolve word 19 becomes the line-center policy: an owner-enabled foreground
+            # application accepts off-center horizontal lines; video keeps both center rules.
+            131: "e96fe7e252a2525e055fd8779a19951a655400bf2c8c124764e1abf2edc47f76",
+            # Word 6 of the V2 state and UIP4 word 20 are reserved zero; the depth-health state
+            # is the 8-word schema-8 contract.
+            132: "0d140f857343932b01d3d33f8c66768cc4c807ed377811282c7bf1c7d72c903e",
+            # Under the owner-enabled application-text policy one learned line admits short
+            # pieces, so later dialogue lines are admitted from their first typed glyph.
+            133: "e631beffe7a464126eb883e9a7f169a70227a30b2688990827834f9ced96e052",
+            # Application text searches a whole dialogue line: covers bridge the gaps between
+            # detected pieces, and across a bridged gap only the text fill colour is evidence.
+            134: "f175f90f992f9656efc5dac470d08bd4d405720fe976cff733b304e1deedcf69",
         }
         contract = generator.load_contract()
         self.assertEqual(
             expected_digest_by_schema.get(contract["schema"]),
             generator.contract_digest(contract),
-            "v2 semantics changed without a reviewed schema version",
+            "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x2B6FE941)
+        self.assertEqual(generator.contract_tag(contract), 0xAE886945)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "2b6fe94121f5c8d36b7498a9cc4a5d918c2a68e0cb0feb54258f741f66e41586",
+            "ae886945c41afa13d0e74d76ac99201ffeee804e10dced23c1c294a443d0ebd9",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "10bde01f74c90532a705986fdc175bf95d291889f52e49175bf60578c320e2d3",
+            "f3e2861b7a6976a42897e9c1523aabf7e2bb120815a5967ddb3472c89acf4614",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -194,6 +214,22 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             f'contract_canonical_sha256 = "{python_contract.CONTRACT_CANONICAL_SHA256}"',
             generator.render_cpp(contract),
         )
+
+    def test_ordinary_base_contract_cannot_reintroduce_the_analytic_selector(self):
+        contract = generator.load_contract()
+        self.assertEqual(contract["selected_map"]["schema"], 2)
+        self.assertNotIn("selector", contract["selected_map"])
+        self.assertEqual(contract["selected_map"]["invalid_depth_policy"],
+                         "independent-flat-identity-renderer")
+        for change in ({"schema": 1}, {"selector": "legacy-ui-footprint-selector"},
+                       {"sample_policy": "sample-at-selected-ui-or-base-coordinate"}):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                altered = copy.deepcopy(contract)
+                altered["selected_map"].update(change)
+                path = Path(temporary) / "contract.json"
+                path.write_text(json.dumps(altered), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "ordinary authenticated Base inverse"):
+                    generator.load_contract(path, verify_shader_source_closure=False)
 
     def test_manifest_pins_every_cross_language_layout(self):
         contract = generator.load_contract()
@@ -223,7 +259,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             [field["name"] for field in fields],
             [
                 "center", "inverse_scale", "convergence_curve", "container_scale",
-                "calibration_revision", "frame_valid", "confirmed_cut_count", "contract_tag_bits",
+                "calibration_revision", "frame_valid", "control_reserved_0", "contract_tag_bits",
                 "camera_center_integrity_bits", "renderer_authorization_bits",
                 "joint_plane_mode_bits", "mapping_state_reserved_2",
                 "gain_last_observation_low", "gain_last_observation_high",
@@ -239,7 +275,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             [(field["name"], field["initial"]) for field in uint_fields],
             [
                 ("calibration_revision", 0),
-                ("confirmed_cut_count", 0),
+                ("control_reserved_0", 0),
                 ("contract_tag_bits", generator.CONTRACT_TAG_SENTINEL),
                 ("camera_center_integrity_bits", generator.load_contract()["shadow_state"]["fields"][8]["initial"]),
                 ("renderer_authorization_bits", 0),
@@ -302,7 +338,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744")
+            "23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
@@ -418,7 +454,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("before-classified-capacity", ocr.line_group_policy)
         self.assertIn("full-screen", ocr.line_center_reference)
         self.assertIn("chromium-video-or-foreground-client-roi", ocr.line_center_reference)
-        self.assertIn("prefix20", ocr.line_center_reference_params)
+        self.assertIn("prefix19-then-line-policy", ocr.line_center_reference_params)
         self.assertIn("source-clock-low-high-domain-reset", ocr.line_center_reference_params)
         self.assertIn("96bytes", ocr.line_center_reference_params)
         self.assertGreater(ocr.text_join_gap_cells, 0)
@@ -452,7 +488,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 127u',
+                'contract_schema = 134u',
                 'final_parallax_contract_schema = 4u',
                 'final_parallax_authority = '
                 '"authenticated-subtitle-conditioned-r32f-diagnostic-only"',
@@ -552,7 +588,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 127u',
+                '#define V2_CONTRACT_SCHEMA 134u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS 28u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG 1u',
                 '#define V2_SUBTITLE_CONTOUR_RECIPE 27u',
@@ -644,7 +680,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             "current_slot_mask_word": 3, "frame_offset": 4,
             "analysis_generation_offset": 6, "observation_timestamp_offset": 8,
             "source_extent_offset": 10, "field_extent_offset": 12,
-            "roi_offset": 14, "content_offset": 16, "cut_epoch_word": 20,
+            "roi_offset": 14, "content_offset": 16, "identity_reserved_word": 20,
             "history_reset_mask_word": 21, "warmup_word": 22, "warmup_observations": 4,
             "warmup_cue_bit": 8, "reserved_offset": 23, "reserved_word_count": 1,
             "adaptive_offset": 24, "adaptive_word_count": 16,

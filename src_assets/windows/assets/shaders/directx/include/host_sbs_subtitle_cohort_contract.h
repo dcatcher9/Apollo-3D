@@ -21,7 +21,7 @@
 #define SBC_H_TAG 0u
 #define SBC_H_SCHEMA 1u
 #define SBC_H_VALID 2u
-#define SBC_H_CUT 3u
+#define SBC_H_RESERVED_3 3u
 #define SBC_H_FRAME 4u
 #define SBC_H_GENERATION 6u
 #define SBC_H_CLOCK 8u

@@ -978,4 +978,23 @@ namespace {
       foreground::mapping_status_e::invalid_observation
     );
   }
+
+  TEST(ForegroundWindowMapping, ValidatesCaptureTargetBeforeReportingMonitorMismatch) {
+    const auto snapshot = available_snapshot();
+    foreground::capture_target_t target {
+      .screen_rect = {0, 0, 1920, 1080},
+      .width = 1920,
+      .height = 1080,
+      .monitor = 0x300u,
+    };
+    ASSERT_EQ(foreground::map_to_capture(snapshot, target).status, foreground::mapping_status_e::monitor_mismatch);
+    target.width--;
+    EXPECT_EQ(foreground::map_to_capture(snapshot, target).status, foreground::mapping_status_e::invalid_capture_target);
+    target.width++;
+    target.monitor = 0u;
+    EXPECT_EQ(foreground::map_to_capture(snapshot, target).status, foreground::mapping_status_e::invalid_capture_target);
+    target.monitor = 0x300u;
+    target.identity_orientation = false;
+    EXPECT_EQ(foreground::map_to_capture(snapshot, target).status, foreground::mapping_status_e::unsupported_orientation);
+  }
 }  // namespace

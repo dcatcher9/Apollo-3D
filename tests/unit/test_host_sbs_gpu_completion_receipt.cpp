@@ -251,7 +251,7 @@ namespace {
     }
   }
 
-  TEST(HostSbsGpuCompletionReceipt, CurrentAndHeldCoverageRequireTheGeometryCutEpoch) {
+  TEST(HostSbsGpuCompletionReceipt, CurrentAndHeldCoverageRequireZeroReservedIdentityWords) {
     const auto expected = fixture::expected();
     for (const auto branch : {graph::branch_e::infer, graph::branch_e::reuse}) {
       SCOPED_TRACE(branch == graph::branch_e::infer ? "current infer" : "held reuse");
@@ -259,22 +259,23 @@ namespace {
       publish_retained_coverage(words);
       publish_active_condition(words);
       ASSERT_TRUE(receipt::decode(words, expected));
-      // Mandatory geometry and locator words own this relation. Diagnostic CutBridge bytes
+      // Mandatory geometry and locator words own this relation. Diagnostic depth-health bytes
       // deliberately remain unchanged, so they cannot supply or revoke functional authority.
-      words[receipt::parallax_state_begin + v2::confirmed_cut_count] = 1u;
+      words[receipt::parallax_state_begin + v2::control_reserved_0] = 1u;
       EXPECT_FALSE(receipt::decode(words, expected));
       publish_zero_condition(words);
       EXPECT_TRUE(receipt::decode(words, expected));
-      words[receipt::subtitle_locator_begin + v2::subtitle_plane_cut_epoch_word] = 1u;
+      words[receipt::parallax_state_begin + v2::control_reserved_0] = 0u;
+      words[receipt::subtitle_locator_begin + v2::subtitle_plane_identity_reserved_word] = 1u;
       publish_active_condition(words);
-      EXPECT_TRUE(receipt::decode(words, expected));
+      EXPECT_FALSE(receipt::decode(words, expected));
     }
   }
 
-  TEST(HostSbsGpuCompletionReceipt, CurrentActiveCoverageUsesV2ValidityWithoutCutNormalizationAuthority) {
+  TEST(HostSbsGpuCompletionReceipt, CurrentActiveCoverageUsesV2ValidityWithoutNormalizationAuthority) {
     const auto expected = fixture::expected(graph::work_flag_e::optional_ocr);
     auto words = fixture::snapshot(expected, graph::branch_e::infer);
-    // Signed finite raw depth can initialize V2 while the independent nonnegative cut/history
+    // Signed finite raw depth can initialize V2 while the independent nonnegative normalization
     // population is unavailable. That bars comparison reuse, but does not bar the UI conditioner.
     words[receipt::history_owner_begin] = 0u;
     words[receipt::depth_frame_state_begin + 3u] = std::bit_cast<std::uint32_t>(0.0f);
@@ -695,9 +696,9 @@ namespace {
     EXPECT_FALSE(diagnostics.failed);
     EXPECT_EQ(diagnostics.expected, expected);
     EXPECT_EQ(diagnostics.sampled_at, sampled_at);
-    ASSERT_TRUE(diagnostics.cut_state);
+    ASSERT_TRUE(diagnostics.depth_health_state);
     ASSERT_TRUE(diagnostics.outcome_counts);
-    EXPECT_EQ(*diagnostics.cut_state, sbs_adaptive_state::initial_words);
+    EXPECT_EQ(*diagnostics.depth_health_state, sbs_adaptive_state::initial_words);
     EXPECT_EQ(diagnostics.outcome_counts->infer, 10u);
     EXPECT_EQ(diagnostics.outcome_counts->reuse, 7u);
     EXPECT_EQ(diagnostics.outcome_counts->invalid, 2u);
@@ -708,13 +709,13 @@ namespace {
     auto words = fixture::snapshot(expected);
     auto diagnostic = receipt::decode_diagnostics(words, expected, false, false, {});
     EXPECT_FALSE(diagnostic.failed);
-    EXPECT_FALSE(diagnostic.cut_state);
+    EXPECT_FALSE(diagnostic.depth_health_state);
     EXPECT_FALSE(diagnostic.outcome_counts);
-    words[receipt::cut_state_begin] ^= 1u;
+    words[receipt::depth_health_state_begin] ^= 1u;
     words[receipt::outcome_counts_begin] ^= 1u;
     diagnostic = receipt::decode_diagnostics(words, expected, false, false, {});
     EXPECT_FALSE(diagnostic.failed);
-    EXPECT_FALSE(diagnostic.cut_state);
+    EXPECT_FALSE(diagnostic.depth_health_state);
     EXPECT_FALSE(diagnostic.outcome_counts);
     EXPECT_TRUE(receipt::decode(words, expected));
   }
@@ -727,16 +728,16 @@ namespace {
     EXPECT_FALSE(receipt::decode(words, expected));
     auto diagnostic = receipt::decode_diagnostics(words, expected, true, true, {});
     EXPECT_FALSE(diagnostic.failed);
-    EXPECT_TRUE(diagnostic.cut_state);
+    EXPECT_TRUE(diagnostic.depth_health_state);
     ASSERT_TRUE(diagnostic.outcome_counts);
     EXPECT_EQ(diagnostic.outcome_counts->invalid, 2u);
 
     words = good;
-    words[receipt::cut_state_begin] ^= 1u;
+    words[receipt::depth_health_state_begin] ^= 1u;
     EXPECT_TRUE(receipt::decode(words, expected));
     diagnostic = receipt::decode_diagnostics(words, expected, true, true, {});
     EXPECT_TRUE(diagnostic.failed);
-    EXPECT_FALSE(diagnostic.cut_state);
+    EXPECT_FALSE(diagnostic.depth_health_state);
     EXPECT_TRUE(diagnostic.outcome_counts);
 
     words = good;
@@ -744,33 +745,31 @@ namespace {
     EXPECT_TRUE(receipt::decode(words, expected));
     diagnostic = receipt::decode_diagnostics(words, expected, true, true, {});
     EXPECT_TRUE(diagnostic.failed);
-    EXPECT_TRUE(diagnostic.cut_state);
+    EXPECT_TRUE(diagnostic.depth_health_state);
     EXPECT_FALSE(diagnostic.outcome_counts);
   }
 
-  TEST(HostSbsGpuCompletionReceipt, CutDiagnosticsUseTheExistingFiniteReservedAndCounterContract) {
+  TEST(HostSbsGpuCompletionReceipt, DepthHealthDiagnosticsUseTheFiniteReservedAndCounterContract) {
     const auto expected = fixture::expected();
     const auto good = fixture::snapshot(expected);
     using sbs_adaptive_state::word_e;
-    for (const auto field : {word_e::reserved_cut_bridge_2, word_e::hard_cut_pulse,
-                            word_e::model_input_history_state, word_e::analysis_flags,
-                            word_e::cut_flags, word_e::scene_age}) {
+    for (const auto field : {word_e::reserved_3}) {
       auto words = good;
-      words[receipt::cut_state_begin + sbs_adaptive_state::index(field)] = std::bit_cast<std::uint32_t>(-1.0f);
+      words[receipt::depth_health_state_begin + sbs_adaptive_state::index(field)] = std::bit_cast<std::uint32_t>(-1.0f);
       const auto diagnostic = receipt::decode_diagnostics(words, expected, true, true, {});
       EXPECT_TRUE(diagnostic.failed);
-      EXPECT_FALSE(diagnostic.cut_state);
+      EXPECT_FALSE(diagnostic.depth_health_state);
       EXPECT_TRUE(diagnostic.outcome_counts);
       EXPECT_TRUE(receipt::decode(words, expected));
     }
     auto words = good;
-    words[receipt::cut_state_begin + sbs_adaptive_state::index(word_e::current_depth_change_fraction)] =
+    words[receipt::depth_health_state_begin + sbs_adaptive_state::index(word_e::valid_depth_fraction)] =
       std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());
-    EXPECT_FALSE(receipt::decode_diagnostics(words, expected, true, false, {}).cut_state);
+    EXPECT_FALSE(receipt::decode_diagnostics(words, expected, true, false, {}).depth_health_state);
     words = good;
-    words[receipt::cut_state_begin + sbs_adaptive_state::index(word_e::hard_cut_count)] =
+    words[receipt::depth_health_state_begin + sbs_adaptive_state::index(word_e::empty_raw_count)] =
       std::numeric_limits<std::uint32_t>::max();
-    EXPECT_FALSE(receipt::decode_diagnostics(words, expected, true, false, {}).cut_state);
+    EXPECT_FALSE(receipt::decode_diagnostics(words, expected, true, false, {}).depth_health_state);
   }
 
   TEST(HostSbsGpuCompletionReceipt, CumulativeDiagnosticsRetainEventsAcrossSkippedReceipts) {

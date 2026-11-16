@@ -45,7 +45,7 @@ struct operands {
     state[v2::center]=std::bit_cast<UINT>(.25f);state[v2::inverse_scale]=std::bit_cast<UINT>(1.0f/v2::model_calibrations.front().raw_coordinate_scale);
     state[v2::convergence_curve]=std::bit_cast<UINT>(v2::convergence_curve_default);state[v2::container_scale]=std::bit_cast<UINT>(1.0f);
     state[v2::calibration_revision]=1u;state[v2::frame_valid]=std::bit_cast<UINT>(1.0f);state[v2::contract_tag_bits]=v2::contract_tag;
-    state[v2::renderer_authorization_bits]=v2::contract_tag;state[v2::confirmed_cut_count]=3u;host_sbs_test::seal_adaptive_camera(state);
+    state[v2::renderer_authorization_bits]=v2::contract_tag;state[v2::control_reserved_0]=3u;host_sbs_test::seal_adaptive_camera(state);
     state[v2::gain_last_observation_low]=1000u;state[v2::gain_last_observation_high]=0u;state[v2::camera_center_integrity_bits]=v2::camera_center_integrity_for_state_words(state);
     source[Y*W+X]={1,1,1,1};oldM[Y*W+X]=currentM[Y*W+X]=1u;oldRGB[Y*W+X]=currentRGB[Y*W+X]={0x3c00u,0x3c00u,0x3c00u,0x3c00u};
     scp={v2::subtitle_condition_param_schema,v2::subtitle_condition_param_tag,1u,0u,v2::subtitle_condition_param_fully_active_value,std::bit_cast<UINT>(2.0f/W)};

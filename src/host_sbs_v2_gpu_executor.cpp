@@ -179,7 +179,7 @@ namespace models::host_sbs_v2_gpu {
     if (!context || !command.constants.valid() || !command.shader || !command.dispatch.valid()) {
       return false;
     }
-    if (!command.frame_stats || !command.cut_bridge_state || !command.state_output) {
+    if (!command.frame_stats || !command.depth_health_state || !command.state_output) {
       return false;
     }
 
@@ -187,7 +187,7 @@ namespace models::host_sbs_v2_gpu {
     context->CSSetShader(command.shader, nullptr, 0u);
     ID3D11ShaderResourceView *inputs[2] = {
       command.frame_stats,
-      command.cut_bridge_state,
+      command.depth_health_state,
     };
     context->CSSetShaderResources(0u, 2u, inputs);
     context->CSSetUnorderedAccessViews(0u, 1u, &command.state_output, nullptr);
@@ -208,13 +208,11 @@ namespace models::host_sbs_v2_gpu {
     }
     if (!command.raw_depth || !command.state || !command.tensor_exclusion ||
         !command.minmax_ema || !command.current_model_input ||
-        !command.current_appearance_ordinal || !command.cut_bridge_state ||
-        !command.current_depth) {
+        !command.current_appearance_ordinal || !command.depth_health_state) {
       return false;
     }
     if (!command.candidate_output || !command.previous_model_input_output ||
         !command.previous_appearance_ordinal_output ||
-        !command.previous_reliable_depth_output ||
         !command.previous_tensor_exclusion_output ||
         !command.history_owner_output) {
       return false;
@@ -222,33 +220,31 @@ namespace models::host_sbs_v2_gpu {
 
     bind_stage_constants(context, command.constants, command.near_identical_constants);
     context->CSSetShader(command.shader, nullptr, 0u);
-    ID3D11ShaderResourceView *inputs[8] = {
+    ID3D11ShaderResourceView *inputs[7] = {
       command.raw_depth,
       command.state,
       command.tensor_exclusion,
       command.minmax_ema,
       command.current_model_input,
       command.current_appearance_ordinal,
-      command.cut_bridge_state,
-      command.current_depth,
+      command.depth_health_state,
     };
-    ID3D11UnorderedAccessView *outputs[6] = {
+    ID3D11UnorderedAccessView *outputs[5] = {
       command.candidate_output,
       command.previous_model_input_output,
       command.previous_appearance_ordinal_output,
-      command.previous_reliable_depth_output,
       command.previous_tensor_exclusion_output,
       command.history_owner_output,
     };
-    context->CSSetShaderResources(0u, 8u, inputs);
-    context->CSSetUnorderedAccessViews(0u, 6u, outputs, nullptr);
+    context->CSSetShaderResources(0u, 7u, inputs);
+    context->CSSetUnorderedAccessViews(0u, 5u, outputs, nullptr);
     (void) record_dispatch(context, command.dispatch);
 
     // This full unbind is the cross-dispatch publication boundary for the history tuple/owner.
-    ID3D11ShaderResourceView *null_inputs[8] = {};
-    ID3D11UnorderedAccessView *null_outputs[6] = {};
-    context->CSSetShaderResources(0u, 8u, null_inputs);
-    context->CSSetUnorderedAccessViews(0u, 6u, null_outputs, nullptr);
+    ID3D11ShaderResourceView *null_inputs[7] = {};
+    ID3D11UnorderedAccessView *null_outputs[5] = {};
+    context->CSSetShaderResources(0u, 7u, null_inputs);
+    context->CSSetUnorderedAccessViews(0u, 5u, null_outputs, nullptr);
     return true;
   }
 

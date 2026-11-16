@@ -8,7 +8,7 @@
 #include "include/host_sbs_subtitle_history_compatibility.hlsl"
 
 StructuredBuffer<uint4> GeometryState : register(t0);
-StructuredBuffer<float4> CutBridge : register(t1);
+StructuredBuffer<float4> DepthHealth : register(t1);
 Texture2D<float> BaseField : register(t2);
 StructuredBuffer<uint> LocatorStateRead : register(t3);
 StructuredBuffer<uint> ConditionParams : register(t4);
@@ -37,17 +37,15 @@ static const uint ADAPTIVE_CLOCK = 8u;
 // Survives abstention, unlike the current mask: clock rearm is not a new cue.
 static const uint ADAPTIVE_PRESENTED = V2_SUBTITLE_PLANE_ADAPTIVE_PRESENTED_FLAG;
 static const uint ADAPTIVE_HOST_MAX_SOURCE_WIDTH = 5120u;
-static const uint ADAPTIVE_COUNT_WORDS = 56u;
+// At width5120, fine index205 plus population/invalid/overflow uses209 words.
+// The256-lane group still clears the complete histogram in one pass.
+static const uint ADAPTIVE_COUNT_WORDS = 209u;
 groupshared uint PreviousState[V2_SUBTITLE_PLANE_STATE_WORD_COUNT];
 groupshared uint ConditionStateSnapshot[V2_SUBTITLE_PLANE_STATE_WORD_COUNT];
 groupshared uint AdaptiveReset, AdaptiveDistinct, AdaptiveOcrValid;
 groupshared uint AdaptiveDomainValid, AdaptiveGeometryReady, AdaptiveCurrentCount;
 groupshared uint AdaptiveCounts[ADAPTIVE_COUNT_WORDS];
 groupshared uint4 AdaptiveCurrentCovers[MAX_LINES];
-groupshared uint ProbabilityResetGate;
-groupshared uint ProbabilityResetMask;
-groupshared uint4 ProbabilitySource;
-groupshared uint4 ProbabilityCoreBounds;
 groupshared float2 ProbabilityMass;
 groupshared float2 ProbabilitySums[256];
 groupshared uint ProbabilityInvalid[256];
@@ -90,16 +88,21 @@ bool GeometryPublicationReady() {
         V2_STATE_FRAME_VALID(control) == 1.0f &&
         mapping.y == V2_CONTRACT_TAG && mapping.z == V2_ADAPTIVE_POLICY_ID &&
         any(now != 0u) && all(camera.clock.xy == now) &&
-        asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(
-            CutBridge[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS])) == SBS_CUT_CONTRACT_TAG &&
-        asuint(V2_STATE_CONFIRMED_CUT_COUNT(control)) ==
-            asuint(SBS_STATE_HARD_CUT_COUNT(CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]));
+        asuint(SBS_STATE_CONTRACT_TAG_BITS(
+            DepthHealth[SBS_STATE_VECTOR_CONTRACT_TAG_BITS])) == SBS_ADAPTIVE_STATE_CONTRACT_TAG &&
+        asuint(V2_STATE_CONTROL_RESERVED_0(control)) == 0u;
 }
 
 uint AdaptiveMaximumIndex() {
     // .04 source U / (4/source_width) equals source_width/100. Integer ceil keeps the level
     // bound independent of SM5 division rounding; the last candidate returns the cap exactly.
     return (locator_source.x + 99u) / 100u;
+}
+
+uint AdaptiveFineMaximumIndex() {
+    // .04 source U in one-source-pixel steps. The final candidate returns the
+    // cap exactly, including widths whose cap is a fractional source pixel.
+    return (locator_source.x + 24u) / 25u;
 }
 
 uint AdaptiveRead(bool previous, uint word) {
@@ -347,20 +350,16 @@ void ResolveObservation() {
     [loop]
     for (uint word = 0u; word < V2_SUBTITLE_PLANE_STATE_WORD_COUNT; ++word)
         PreviousState[word] = LocatorState[word];
-    bool cut_valid = asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(
-        CutBridge[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS])) == SBS_CUT_CONTRACT_TAG;
-    uint epoch = cut_valid ? asuint(SBS_STATE_HARD_CUT_COUNT(
-        CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT])) : 0u;
+    bool health_valid = asuint(SBS_STATE_CONTRACT_TAG_BITS(
+        DepthHealth[SBS_STATE_VECTOR_CONTRACT_TAG_BITS])) == SBS_ADAPTIVE_STATE_CONTRACT_TAG;
     bool domain_valid = LocatorDomainGeometryValid();
     bool old_valid = domain_valid && StateHeaderValid(true, false);
-    bool hard_cut = old_valid && cut_valid &&
-        PreviousState[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] != epoch;
-    AdaptiveReset = !old_valid || locator_source.w != 0u || hard_cut ||
+    AdaptiveReset = !old_valid || locator_source.w != 0u ||
         PreviousState[ADAPTIVE] != 1u ? 1u : 0u;
     AdaptiveDistinct = !old_valid ||
         PreviousState[V2_SUBTITLE_PLANE_FRAME_OFFSET] != locator_frame.x ||
         PreviousState[V2_SUBTITLE_PLANE_FRAME_OFFSET + 1u] != locator_frame.y ? 1u : 0u;
-    AdaptiveDomainValid = domain_valid && cut_valid ? 1u : 0u;
+    AdaptiveDomainValid = domain_valid && health_valid ? 1u : 0u;
     AdaptiveGeometryReady = AdaptiveDomainValid != 0u && GeometryPublicationReady() ? 1u : 0u;
     uint count;
     AdaptiveOcrValid = ValidateOcrRecord(count) ? 1u : 0u;
@@ -396,7 +395,6 @@ void ResolveObservation() {
         [unroll]
         for (uint component = 0u; component < 4u; ++component)
             LocatorState[V2_SUBTITLE_PLANE_CONTENT_OFFSET + component] = locator_content[component];
-        LocatorState[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] = epoch;
     }
     [unroll]
     for (uint word = 0u; word < V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT; ++word)
@@ -408,8 +406,7 @@ bool ConditionStateValid(out uint count, out uint kinds, out float target) {
     if (!LocatorGeometryValid() || !GeometryPublicationReady() ||
         !StateHeaderValid(false, true) ||
         ConditionStateSnapshot[V2_SUBTITLE_PLANE_FLAGS_WORD] != V2_SUBTITLE_PLANE_CURRENT_VALID_FLAG ||
-        ConditionStateSnapshot[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] !=
-            asuint(SBS_STATE_HARD_CUT_COUNT(CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT]))) return false;
+        ConditionStateSnapshot[V2_SUBTITLE_PLANE_IDENTITY_RESERVED_WORD] != 0u) return false;
     uint current_count;
     if (!ValidateOcrRecord(current_count) ||
         ConditionStateSnapshot[V2_SUBTITLE_PLANE_CURRENT_SLOT_MASK_WORD] != SlotMask(current_count)) return false;
@@ -444,6 +441,11 @@ float AdaptiveCandidate(uint index, float limit) {
     return min((4.0f * (float)index) / (float)locator_source.x, limit);
 }
 
+float AdaptiveFineCandidate(uint index, float limit) {
+    if (index == AdaptiveFineMaximumIndex()) return limit;
+    return min((float)index / (float)locator_source.x, limit);
+}
+
 bool AdaptiveBudgetPass(uint bad, uint covered, uint content) {
     if (covered == 0u) return true;
     // Calibrated field sizes keep these integer products below 2^32. Equality passes.
@@ -474,7 +476,7 @@ void AdaptiveAdvance() {
     [unroll]
     for (uint word = 0u; word < 16u; ++word) tail[word] = LocatorState[ADAPTIVE + word];
     if (AdaptiveDomainValid == 0u) {
-        // No calibrated source/cut domain exists in which to label a cap or retain timed evidence.
+        // No calibrated source domain exists in which to label a cap or retain timed evidence.
         // Publish a canonical inactive tail; the empty current mask remains exact Base.
         [unroll]
         for (uint word = 0u; word < V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT; ++word) {
@@ -515,7 +517,7 @@ void AdaptiveAdvance() {
 
     uint covered = AdaptiveCounts[0u];
     uint content_area = LocatorContentWidth() * (locator_content.w - locator_content.y);
-    uint maximum_index = AdaptiveMaximumIndex();
+    uint maximum_index = AdaptiveFineMaximumIndex();
     uint required = maximum_index;
     bool required_found = false;
     [loop]
@@ -564,9 +566,10 @@ void AdaptiveAdvance() {
     }
 
     // Current clearance is a diagnostic goal, not a presentation lower bound.
-    uint goal = required;
+    // UIP4 keeps its existing4px diagnostic bucket; only the applied goal is fine.
+    uint goal = (required + 3u) / 4u;
     AdaptiveDisarm(flags, tail);
-    precise float current_goal = AdaptiveCandidate(required, limit);
+    precise float current_goal = AdaptiveFineCandidate(required, limit);
     if ((flags & ADAPTIVE_PRESENTED) == 0u) {
         // No frame confirmation or temporal wait on first visible entry/reentry.
         applied = current_goal;
@@ -590,19 +593,19 @@ void AdaptiveAdvance() {
     AdaptivePublish(tail);
 }
 
-uint AdaptiveFirstNonconflictingIndex(float desired, float limit, uint maximum_index) {
+uint AdaptiveFineFirstNonconflictingIndex(float desired, float limit, uint maximum_index) {
     if (desired <= 0.0f) return 0u;
     if (desired > limit) return maximum_index + 1u;
-    uint index = min((uint)ceil(desired * (float)locator_source.x * 0.25f), maximum_index);
+    uint index = min((uint)ceil(desired * (float)locator_source.x), maximum_index);
     // The arithmetic estimate can straddle a level by one FP32 ULP. Compare against the actual
     // shader candidates so histogram bins retain the strict conflict predicate.
-    if (index != 0u && desired <= AdaptiveCandidate(index - 1u, limit)) --index;
-    if (desired > AdaptiveCandidate(index, limit)) ++index;
+    if (index != 0u && desired <= AdaptiveFineCandidate(index - 1u, limit)) --index;
+    if (desired > AdaptiveFineCandidate(index, limit)) ++index;
     return index;
 }
 
 void AdaptiveResolveHistogram() {
-    uint maximum_index = AdaptiveMaximumIndex();
+    uint maximum_index = AdaptiveFineMaximumIndex();
     uint conflicts = AdaptiveCounts[1u] + AdaptiveCounts[3u + maximum_index];
     // Bucket k names the first candidate that can clear a sample; only buckets above a level
     // conflict with it. The extra bucket above the last level is explicitly unclearable.
@@ -620,7 +623,7 @@ void AdaptiveProbe(uint lane) {
     uint invalid = 0u;
     float limit = AdaptiveMaximumPlane();
     float clearance = 2.0f / (float)locator_source.x;
-    uint maximum_index = AdaptiveMaximumIndex();
+    uint maximum_index = AdaptiveFineMaximumIndex();
     uint pending_bucket = 0xffffffffu;
     uint pending_count = 0u;
     uint current_count = AdaptiveCurrentCount;
@@ -661,7 +664,7 @@ void AdaptiveProbe(uint lane) {
             if (!finite) ++invalid;
             if (finite) {
                 precise float desired = base + clearance;
-                uint bucket = AdaptiveFirstNonconflictingIndex(desired, limit, maximum_index);
+                uint bucket = AdaptiveFineFirstNonconflictingIndex(desired, limit, maximum_index);
                 if (bucket != pending_bucket && pending_count != 0u) {
                     InterlockedAdd(AdaptiveCounts[2u + pending_bucket], pending_count);
                     pending_count = 0u;
@@ -678,196 +681,13 @@ void AdaptiveProbe(uint lane) {
     }
 }
 
-bool ProbabilityUnitValid(float value) {
-    return FiniteFloat(value) && value >= 0.0f && value <= 1.0f;
-}
-
-bool ProbabilityPairAtSourceCenter(uint2 position, out float current, out float previous) {
-    current = 0.0f;
-    previous = 0.0f;
-    float2 detector = (float2(position) + 0.5f) *
-        float2((float)V2_OCR_OUTPUT_WIDTH / (float)ProbabilitySource.x,
-               (float)V2_OCR_OUTPUT_HEIGHT / (float)ProbabilitySource.w) - 0.5f;
-    int2 lo = int2(floor(detector));
-    float2 blend = frac(detector);
-    int2 a = clamp(lo, int2(0, 0), int2(V2_OCR_OUTPUT_WIDTH - 1u, V2_OCR_OUTPUT_HEIGHT - 1u));
-    int2 b = clamp(lo + int2(1, 1), int2(0, 0),
-                  int2(V2_OCR_OUTPUT_WIDTH - 1u, V2_OCR_OUTPUT_HEIGHT - 1u));
-    uint4 indices = uint4((uint)a.y * V2_OCR_OUTPUT_WIDTH + (uint)a.x,
-                         (uint)a.y * V2_OCR_OUTPUT_WIDTH + (uint)b.x,
-                         (uint)b.y * V2_OCR_OUTPUT_WIDTH + (uint)a.x,
-                         (uint)b.y * V2_OCR_OUTPUT_WIDTH + (uint)b.x);
-    float4 now = float4(CurrentProbability[indices.x], CurrentProbability[indices.y],
-                       CurrentProbability[indices.z], CurrentProbability[indices.w]);
-    float4 old = float4(PreviousProbability[indices.x], PreviousProbability[indices.y],
-                       PreviousProbability[indices.z], PreviousProbability[indices.w]);
-    if (!ProbabilityUnitValid(now.x) || !ProbabilityUnitValid(now.y) ||
-        !ProbabilityUnitValid(now.z) || !ProbabilityUnitValid(now.w) ||
-        !ProbabilityUnitValid(old.x) || !ProbabilityUnitValid(old.y) ||
-        !ProbabilityUnitValid(old.z) || !ProbabilityUnitValid(old.w)) return false;
-    current = lerp(lerp(now.x, now.y, blend.x), lerp(now.z, now.w, blend.x), blend.y);
-    previous = lerp(lerp(old.x, old.y, blend.x), lerp(old.z, old.w, blend.x), blend.y);
-    return true;
-}
-
-uint ProbabilitySourceEdge(uint edge, uint content_begin, uint content_extent, uint source_extent) {
-    // First source center at or beyond this field edge, with exact half-open membership.
-    // Source/field extents are bounded before this integer arithmetic is reached.
-    uint scaled_edge = 2u * (edge - content_begin) * source_extent;
-    uint denominator = 2u * content_extent;
-    if (scaled_edge <= content_extent) return 0u;
-    return min((scaled_edge - content_extent + denominator - 1u) / denominator, source_extent);
-}
-
-uint4 ProbabilityCoreSourceBounds(uint slot) {
-    uint offset = V2_OCR_RAW_BOX_OFFSET + slot * V2_OCR_BOX_WORD_COUNT;
-    uint4 core = uint4(OcrRecord[offset], OcrRecord[offset + 1u],
-                      OcrRecord[offset + 2u], OcrRecord[offset + 3u]);
-    uint content_width = locator_content.z - locator_content.x;
-    uint content_height = locator_content.w - locator_content.y;
-    uint left = ProbabilitySourceEdge(core.x, locator_content.x, content_width, ProbabilitySource.x);
-    uint right = ProbabilitySourceEdge(core.z, locator_content.x, content_width, ProbabilitySource.x);
-    uint top = ProbabilitySourceEdge(core.y, locator_content.y, content_height, ProbabilitySource.y);
-    uint bottom = ProbabilitySourceEdge(core.w, locator_content.y, content_height, ProbabilitySource.y);
-    top = clamp(top, ProbabilitySource.z, ProbabilitySource.z + ProbabilitySource.w);
-    bottom = clamp(bottom, ProbabilitySource.z, ProbabilitySource.z + ProbabilitySource.w);
-    return uint4(left, top - ProbabilitySource.z, right, bottom - ProbabilitySource.z);
-}
-
-void PrepareProbabilityReset() {
-    ProbabilityResetGate = 0u;
-    ProbabilityResetMask = 0u;
-    ProbabilitySource = uint4(0u, 0u, 0u, 0u);
-    uint count, kinds, crop_top, crop_height;
-    float target;
-    if (AdaptiveReset != 0u || !ConditionStateValid(count, kinds, target) || count == 0u ||
-        any(locator_source.xy > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT) ||
-        !V2SubtitleOcrComputeCrop(locator_source.x, locator_source.y, crop_top, crop_height)) return;
-    uint now_words, now_stride, old_words, old_stride;
-    CurrentProbability.GetDimensions(now_words, now_stride);
-    PreviousProbability.GetDimensions(old_words, old_stride);
-    if (now_words != V2_OCR_OUTPUT_WIDTH * V2_OCR_OUTPUT_HEIGHT || now_stride != 4u ||
-        old_words != now_words || old_stride != 4u) return;
-    uint4 source = uint4(locator_source.xy, crop_top, crop_height);
-    bool duplicate;
-    if (!V2SubtitleHistoryCompatible(ContourIdentity, source, locator_field, locator_content,
-            locator_frame, locator_observation.xy, locator_source.w,
-            ConditionStateSnapshot[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD], duplicate) || duplicate ||
-        ContourIdentity[2u] != 1u) return;
-    ProbabilitySource = source;
-    ProbabilityResetGate = 1u;
-}
-
 void ResolveProbabilityReset(uint lane) {
-    if (lane == 0u) PrepareProbabilityReset();
-    GroupMemoryBarrierWithGroupSync();
-    // The gate and count are uniform for this single 256-lane observation group.
-    if (ProbabilityResetGate == 0u) return;
-    [loop]
-    for (uint slot = 0u; slot < AdaptiveCurrentCount; ++slot) {
-        if (lane == 0u) ProbabilityCoreBounds = ProbabilityCoreSourceBounds(slot);
-        GroupMemoryBarrierWithGroupSync();
-        uint width = ProbabilityCoreBounds.z - ProbabilityCoreBounds.x;
-        uint area = width * (ProbabilityCoreBounds.w - ProbabilityCoreBounds.y);
-        precise float current_mass = 0.0f;
-        precise float previous_mass = 0.0f;
-        uint invalid = 0u;
-        if (width != 0u) {
-            uint position_y = lane / width;
-            uint position_x = lane - position_y * width;
-            uint stride_y = 256u / width;
-            uint stride_x = 256u - stride_y * width;
-            [loop]
-            for (uint cell = lane; cell < area; cell += 256u) {
-                uint2 position = ProbabilityCoreBounds.xy + uint2(position_x, position_y);
-                position_x += stride_x;
-                position_y += stride_y;
-                if (position_x >= width) {
-                    position_x -= width;
-                    ++position_y;
-                }
-                float current, previous;
-                if (!ProbabilityPairAtSourceCenter(position, current, previous)) {
-                    invalid = 1u;
-                } else {
-                    current_mass += current;
-                    previous_mass += previous;
-                }
-            }
-        }
-        ProbabilitySums[lane] = float2(current_mass, previous_mass);
-        ProbabilityInvalid[lane] = invalid;
-        GroupMemoryBarrierWithGroupSync();
-        [unroll]
-        for (uint step = 128u; step != 0u; step >>= 1u) {
-            if (lane < step) {
-                ProbabilitySums[lane] += ProbabilitySums[lane + step];
-                ProbabilityInvalid[lane] |= ProbabilityInvalid[lane + step];
-            }
-            GroupMemoryBarrierWithGroupSync();
-        }
-        if (lane == 0u) ProbabilityMass = ProbabilitySums[0u];
-        GroupMemoryBarrierWithGroupSync();
-        // Every lane takes the same mass-validity branch. Normalize only positive complete
-        // masses, then revisit exactly the same native centers and bilinear contributors.
-        bool mass_valid = ProbabilityInvalid[0u] == 0u &&
-            FiniteFloat(ProbabilityMass.x) && FiniteFloat(ProbabilityMass.y) &&
-            ProbabilityMass.x >= 0.0f && ProbabilityMass.y >= 0.0f;
-        // Capture the shared validity in every lane before the second pass reuses its scratch.
-        GroupMemoryBarrierWithGroupSync();
-        if (mass_valid && ProbabilityMass.x > 0.0f && ProbabilityMass.y > 0.0f) {
-            precise float difference = 0.0f;
-            invalid = 0u;
-            uint position_y = lane / width;
-            uint position_x = lane - position_y * width;
-            uint stride_y = 256u / width;
-            uint stride_x = 256u - stride_y * width;
-            [loop]
-            for (uint cell = lane; cell < area; cell += 256u) {
-                uint2 position = ProbabilityCoreBounds.xy + uint2(position_x, position_y);
-                position_x += stride_x;
-                position_y += stride_y;
-                if (position_x >= width) {
-                    position_x -= width;
-                    ++position_y;
-                }
-                float current, previous;
-                if (!ProbabilityPairAtSourceCenter(position, current, previous)) {
-                    invalid = 1u;
-                } else {
-                    precise float current_unit = current / ProbabilityMass.x;
-                    precise float previous_unit = previous / ProbabilityMass.y;
-                    difference += abs(current_unit - previous_unit);
-                }
-            }
-            ProbabilitySums[lane] = float2(difference, 0.0f);
-            ProbabilityInvalid[lane] = invalid;
-            GroupMemoryBarrierWithGroupSync();
-            [unroll]
-            for (uint step = 128u; step != 0u; step >>= 1u) {
-                if (lane < step) {
-                    ProbabilitySums[lane].x += ProbabilitySums[lane + step].x;
-                    ProbabilityInvalid[lane] |= ProbabilityInvalid[lane + step];
-                }
-                GroupMemoryBarrierWithGroupSync();
-            }
-            if (lane == 0u && ProbabilityInvalid[0u] == 0u &&
-                FiniteFloat(ProbabilitySums[0u].x)) {
-                precise float score = 0.5f * ProbabilitySums[0u].x;
-                if (score > V2_SUBTITLE_CONTOUR_PROBABILITY_CHANGE_RATIO)
-                    ProbabilityResetMask |= 1u << slot;
-            }
-        } else if (lane == 0u && mass_valid &&
-                   (ProbabilityMass.x > 0.0f || ProbabilityMass.y > 0.0f)) {
-            // Exactly one zero mass has total variation one; both zero masses set no bit.
-            if (1.0f > V2_SUBTITLE_CONTOUR_PROBABILITY_CHANGE_RATIO)
-                ProbabilityResetMask |= 1u << slot;
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
+    // The spatial probability-change cue is retired: support needs only a positive history
+    // count, and no rendered path consumed the per-slot mask. The word stays in the UIP layout
+    // as canonical zero so every reader's subset-of-current-slots check is unchanged.
     if (lane == 0u) {
-        LocatorState[V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD] = ProbabilityResetMask;
-        ConditionStateSnapshot[V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD] = ProbabilityResetMask;
+        LocatorState[V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD] = 0u;
+        ConditionStateSnapshot[V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD] = 0u;
     }
 }
 
@@ -929,7 +749,7 @@ bool ContourIdentityValid(uint current_count, uint current_kinds) {
         ContourIdentity[1u] != V2_SUBTITLE_CONTOUR_HISTORY_TAG || ContourIdentity[2u] != 1u ||
         ContourIdentity[22u] != V2_SUBTITLE_CONTOUR_RECIPE ||
         ContourIdentity[V2_SUBTITLE_CONTOUR_HISTORY_SNAPSHOT_VALID_WORD] != 1u ||
-        ContourIdentity[3u] != ConditionStateSnapshot[V2_SUBTITLE_PLANE_CUT_EPOCH_WORD] ||
+        ContourIdentity[3u] != 0u ||
         ContourIdentity[8u] != locator_source.x || ContourIdentity[9u] != locator_source.y ||
         ContourIdentity[20u] != locator_observation.x || ContourIdentity[21u] != locator_observation.y)
         return false;

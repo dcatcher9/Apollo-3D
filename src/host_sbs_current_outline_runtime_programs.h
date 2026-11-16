@@ -36,7 +36,7 @@ inline constexpr std::array<cache::shader_spec, 5u> colour_specs{{
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","accumulate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","validate_main","cs_5_0"},
 }};
-inline constexpr std::string_view colour_closure="b552e6baf062949d10c8126624639ef507c7d12f6d5844e4f581ec90e9addbf0";
+inline constexpr std::string_view colour_closure="3dc3494fba1ec0e265000a762711158fbad809de52751efa9f3d76b8a657a53a";
 inline constexpr std::array<cache::shader_spec, 6u> components_specs{{
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","init_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","union_main","cs_5_0"},
@@ -60,7 +60,7 @@ inline constexpr std::array<cache::shader_spec, 12u> enclosure_specs{{
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","select_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","publish_main","cs_5_0"},
 }};
-inline constexpr std::string_view enclosure_closure="dd741387dc01e6322bab274b9604e1116c803f60faf30b189c16df28c81b8fdf";
+inline constexpr std::string_view enclosure_closure="57f6050be0531a15d2bce1a21e2185e8b7c1c2b770493b803d2712cdf401fcf7";
 // One canonical ROI owner; the historical enclosure-local file remains for its independently
 // pinned enclosure/ring fixtures. Production loads this group once.
 inline constexpr std::array<cache::shader_spec, 3u> roi_specs{{
@@ -86,13 +86,13 @@ inline constexpr std::array<cache::shader_spec, 15u> outline_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","aggregate_support_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","publish_closure_main","cs_5_0"},
 }};
-inline constexpr std::string_view outline_closure="168e96aa498fc93d01d9fb2f159b05997abb50a06d24d86909e85e037cf8d5cd";
+inline constexpr std::string_view outline_closure="77ef293359988b8b6b762b1ff286e299746f244cd237d56874b172eaf563c9a5";
 inline constexpr std::array<cache::shader_spec, 3u> stability_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_begin_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_validate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_commit_main","cs_5_0"},
 }};
-inline constexpr std::string_view stability_closure="3dc538f969b95ce0b4bbbc54f786b7db449135b95139178fa057de382cf1ff2a";
+inline constexpr std::string_view stability_closure="e79498f8dadd4ea1c652471241417bc82002d0725246e3de75ee09f045cd5a49";
 inline constexpr std::array<cache::shader_spec, 9u> hole_specs{{
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","clear_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","capture_unit_main","cs_5_0"},
@@ -111,6 +111,14 @@ inline constexpr std::array<cache::shader_spec, 3u> coverage_specs{{
   cache::shader_spec{"host_sbs_current_stroke_coverage_cs.hlsl","support_main","cs_5_0"},
 }};
 inline constexpr std::string_view coverage_closure="185fbaed311da1c2f55ad6dfa8fbdf922da8a973e32926cf8ab8032819eb8f8d";
+inline constexpr std::array<cache::shader_spec, 1u> foreground_edge_specs{{
+  cache::shader_spec{"host_sbs_current_foreground_edge_cs.hlsl","foreground_edge_main","cs_5_0"},
+}};
+inline constexpr std::string_view foreground_edge_closure="70df7262ab4819474c8f436682eed0de1832b85898e88809d9045374e891af16";
+inline constexpr std::array<cache::shader_spec, 1u> trusted_inner_specs{{
+  cache::shader_spec{"host_sbs_current_foreground_edge_cs.hlsl","trusted_inner_publish_main","cs_5_0"},
+}};
+inline constexpr std::string_view trusted_inner_closure="63b229b7a1a99bd18f7c04795c5429349c411bb6bb15a606987c23330e3125d9";
 inline constexpr std::array<cache::shader_spec, 4u> inside_specs{{
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","prepare_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","emit_init_main","cs_5_0"},
@@ -122,7 +130,7 @@ inline constexpr std::array<cache::shader_spec, 2u> selector_specs{{
   cache::shader_spec{"host_sbs_selected_matte_cs.hlsl","prepare_main","cs_5_0"},
   cache::shader_spec{"host_sbs_selected_matte_cs.hlsl","select_main","cs_5_0"},
 }};
-inline constexpr std::string_view selector_closure="a79bf728bc9f25c73bd745b4783664047bde3435d5f342d1b6ba21848ec40f63";
+inline constexpr std::string_view selector_closure="3bb92b4c79c5317ff105e05365a673c5be1d4443d641640aa7b1ba8d27253dec";
 inline std::filesystem::path selector_root(const std::filesystem::path&p){return p/"selector";}
 
 // The mandatory roles share one ROI implementation. Each optional role owns a fixed,
@@ -132,9 +140,11 @@ inline constexpr std::size_t required_compute_shader_count=source5_specs.size()+
 inline constexpr std::size_t stability_compute_shader_offset=required_compute_shader_count;
 inline constexpr std::size_t hole_compute_shader_offset=stability_compute_shader_offset+stability_specs.size();
 inline constexpr std::size_t coverage_compute_shader_offset=hole_compute_shader_offset+hole_specs.size();
-inline constexpr std::size_t unique_compute_shader_count=coverage_compute_shader_offset+coverage_specs.size();
+inline constexpr std::size_t foreground_edge_compute_shader_offset=coverage_compute_shader_offset+coverage_specs.size();
+inline constexpr std::size_t trusted_inner_compute_shader_offset=foreground_edge_compute_shader_offset+foreground_edge_specs.size();
+inline constexpr std::size_t unique_compute_shader_count=trusted_inner_compute_shader_offset+trusted_inner_specs.size();
 static_assert(required_compute_shader_count==51u&&hole_compute_shader_offset==54u&&
-              coverage_compute_shader_offset==63u&&unique_compute_shader_count==66u);
+              coverage_compute_shader_offset==63u&&foreground_edge_compute_shader_offset==66u&&trusted_inner_compute_shader_offset==67u&&unique_compute_shader_count==68u);
 
 namespace detail {
   inline constexpr std::size_t maximum_bytecode_workers = 4u;
@@ -300,6 +310,8 @@ class programs_t {
   std::string stability_error_;
   std::string hole_error_;
   std::string coverage_error_;
+  std::string foreground_edge_error_;
+  std::string trusted_inner_error_;
 
 public:
   bool load(ID3D11Device *device, const std::filesystem::path &parent_root, std::string &error) {
@@ -344,6 +356,18 @@ public:
       } catch (const std::exception &e) {
         next.coverage_error_ = e.what();
       }
+      detail::bytecode_group_t foreground_edge;
+      try {
+        foreground_edge = detail::authenticate_group("foreground_edge", parent_root / "hole", foreground_edge_specs, foreground_edge_closure, bytecodes);
+      } catch (const std::exception &e) {
+        next.foreground_edge_error_ = e.what();
+      }
+      detail::bytecode_group_t trusted_inner;
+      try {
+        trusted_inner = detail::authenticate_group("trusted_inner", parent_root / "hole", trusted_inner_specs, trusted_inner_closure, bytecodes);
+      } catch (const std::exception &e) {
+        next.trusted_inner_error_ = e.what();
+      }
       detail::prepare_bytecodes(bytecodes);
       auto compile = [&]<std::size_t N>(const detail::bytecode_group_t &group, const std::array<cache::shader_spec, N> &) {
         return detail::create_compute_group<N>(device, group, bytecodes, next.shaders_, at);
@@ -375,6 +399,10 @@ public:
         hole_compute_shader_offset, next.composition_.outline.hole_shaders, next.hole_error_);
       detail::create_optional_compute_group(device, coverage, bytecodes, next.shaders_,
         coverage_compute_shader_offset, next.composition_.outline.coverage_shaders, next.coverage_error_);
+      detail::create_optional_compute_group(device, foreground_edge, bytecodes, next.shaders_,
+        foreground_edge_compute_shader_offset, next.composition_.outline.foreground_edge_shaders, next.foreground_edge_error_);
+      detail::create_optional_compute_group(device, trusted_inner, bytecodes, next.shaders_,
+        trusted_inner_compute_shader_offset, next.composition_.outline.trusted_inner_publish_shaders, next.trusted_inner_error_);
       next.ready_ = true;
       *this = std::move(next);
       return true;
@@ -417,6 +445,16 @@ public:
   [[nodiscard]] const std::string &coverage_error() const noexcept {
     return coverage_error_;
   }
+
+  [[nodiscard]] bool foreground_edge_ready() const noexcept {
+    return std::all_of(composition_.outline.foreground_edge_shaders.begin(), composition_.outline.foreground_edge_shaders.end(), [](auto *s) { return s != nullptr; });
+  }
+
+  [[nodiscard]] const std::string &foreground_edge_error() const noexcept { return foreground_edge_error_; }
+  [[nodiscard]] bool trusted_inner_ready() const noexcept {
+    return composition_.outline.trusted_inner_publish_shaders[0u] != nullptr;
+  }
+  [[nodiscard]] const std::string &trusted_inner_error() const noexcept { return trusted_inner_error_; }
 
   [[nodiscard]] composition::program_t composition_program() const {
     return composition_;

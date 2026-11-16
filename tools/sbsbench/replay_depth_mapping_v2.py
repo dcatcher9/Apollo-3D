@@ -114,7 +114,6 @@ def _inspect_optional_shadow_state(dump: Path) -> Dict[str, Any]:
         "camera_valid": bool(
             state["inverse_scale"] > 0.0 and state["calibration_revision"] > 0),
         "calibration_revision": state["calibration_revision"],
-        "confirmed_cut_count": state["confirmed_cut_count"],
         "frame_stats_valid": bool(stats["valid"] > 0.5),
         "raw_coordinate_scale": v2_dump_contract.shadow_state_constant_float32(
             state_document, "raw_coordinate_scale"),

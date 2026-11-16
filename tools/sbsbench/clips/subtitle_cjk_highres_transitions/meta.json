@@ -97,13 +97,6 @@
       "warm-interior"
     ]
   },
-  "shot_state_contract": {
-    "kind": "hard-cut",
-    "monitor_from_frame": 2,
-    "expected_pulse_frames": [
-      21
-    ]
-  },
   "source_artifacts": [
     "Authored three-pixel CJK strokes with a two-pixel dark outline; empty frames have exact zero subtitle-region and tight overlay masks. The authenticated subtitle-free RGB sidecar is the exact pre-composite movie plate."
   ],

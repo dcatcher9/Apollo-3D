@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Analyze a continuous Host SBS V2 cut-state trace.
+"""Analyze a continuous Host SBS V2 depth-health trace.
 
 The native ``--sbs-bench`` whole-clip mode writes ``adaptive_state.jsonl``.  Its first
 record freezes the exact GPU state layout and relevant Host SBS configuration; every later
 record contains one source-frame sample.  This module validates that contract, joins source
-presentation timing, segments the clip on the detector's explicit hard-cut pulse, and writes
-machine-readable CSV/JSON plus a self-contained HTML report.
+presentation timing, and writes machine-readable CSV/JSON plus a self-contained HTML report.
 
-The report is deliberately diagnostic. It describes cut proposals, accepted boundaries, detector
-arming, and model-health counters; it does not claim authority over V2 geometry or camera policy.
+The report is deliberately diagnostic. It describes depth readiness, valid-depth support, raw
+range width, and model-health counters; it does not claim authority over V2 geometry or camera
+policy.
 """
 
 from __future__ import annotations
@@ -26,17 +26,9 @@ from typing import Any, Iterable
 
 if __package__:
     from .adaptive_state_contract import (
-        ANALYSIS_FLAG_BITS,
         CONFIG_KEYS,
         COUNTER_MAX,
-        CUT_CONTRACT_TAG,
-        CUT_FLAG_APPEARANCE_ARMED,
-        CUT_FLAG_APPEARANCE_QUIET_ONCE,
-        CUT_FLAG_APPEARANCE_RECOVERY,
-        CUT_FLAG_GEOMETRY_ARMED,
-        CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING,
-        CUT_FLAG_GEOMETRY_LOW_ONCE,
-        CUT_FLAG_LATCHED,
+        CONTRACT_TAG,
         FIELD_DESCRIPTORS,
         FIELD_ENCODINGS,
         FIELD_NAMES,
@@ -44,25 +36,15 @@ if __package__:
         FRAME_KEYS,
         HEADER_KEYS,
         INITIAL_VALUES,
-        KNOWN_ANALYSIS_FLAG_MASK,
-        KNOWN_CUT_FLAG_MASK,
         TRACE_CAPTURE,
         TRACE_SCHEMA,
         TRACE_SOURCE,
     )
 else:
     from adaptive_state_contract import (
-        ANALYSIS_FLAG_BITS,
         CONFIG_KEYS,
         COUNTER_MAX,
-        CUT_CONTRACT_TAG,
-        CUT_FLAG_APPEARANCE_ARMED,
-        CUT_FLAG_APPEARANCE_QUIET_ONCE,
-        CUT_FLAG_APPEARANCE_RECOVERY,
-        CUT_FLAG_GEOMETRY_ARMED,
-        CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING,
-        CUT_FLAG_GEOMETRY_LOW_ONCE,
-        CUT_FLAG_LATCHED,
+        CONTRACT_TAG,
         FIELD_DESCRIPTORS,
         FIELD_ENCODINGS,
         FIELD_NAMES,
@@ -70,15 +52,10 @@ else:
         FRAME_KEYS,
         HEADER_KEYS,
         INITIAL_VALUES,
-        KNOWN_ANALYSIS_FLAG_MASK,
-        KNOWN_CUT_FLAG_MASK,
         TRACE_CAPTURE,
         TRACE_SCHEMA,
         TRACE_SOURCE,
     )
-CUT_BURST_DEPTH_UPDATES = 8
-LONG_DISARMED_SECONDS = 2.0
-LONG_DISARMED_SOURCE_FRAMES = 60
 UINT64_MAX = (1 << 64) - 1
 _UINT64_MAX_DECIMAL = str(UINT64_MAX)
 
@@ -172,7 +149,6 @@ def _validate_header(payload: Any) -> dict[str, Any]:
         "source": TRACE_SOURCE,
         "capture": TRACE_CAPTURE,
         "fields": list(FIELD_DESCRIPTORS),
-        "analysis_flag_bits": ANALYSIS_FLAG_BITS,
     }
     mismatches = {
         key: (value, payload.get(key))
@@ -214,9 +190,9 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
             if encoding in {"uint_bits", "uint_valued_float"} else
             _finite_number(value, description)
         )
-    if decoded["cut_contract_tag_bits"] != CUT_CONTRACT_TAG:
+    if decoded["contract_tag_bits"] != CONTRACT_TAG:
         raise TraceContractError(
-            f"trace cut contract tag at line {line_number} is not schema-{TRACE_SCHEMA}"
+            f"trace contract tag at line {line_number} is not schema-{TRACE_SCHEMA}"
         )
 
     depth_updated = _boolean(
@@ -228,54 +204,7 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
         if name.startswith("reserved_") and decoded[name] != initial:
             raise TraceContractError(
                 f"trace reserved field {name} at line {line_number} is non-default")
-    derived_bools = {
-        name: _boolean(payload[name], f"trace {name} at line {line_number}")
-        for name in (
-            "geometry_armed",
-            "appearance_armed",
-            "geometry_low_once",
-            "appearance_quiet_once",
-            "cut_latched",
-            "appearance_recovery",
-            "geometry_confirmation_pending",
-            "hard_cut_pulse",
-        )
-    }
-    cut_flags_value = float(decoded["cut_flags"])
-    if (cut_flags_value < 0.0 or
-            abs(cut_flags_value - round(cut_flags_value)) > 1e-6):
-        raise TraceContractError(
-            f"trace cut_flags at line {line_number} must be a non-negative integer-valued float")
-    cut_flags = int(round(cut_flags_value))
-    if cut_flags & ~KNOWN_CUT_FLAG_MASK:
-        raise TraceContractError(
-            f"trace cut_flags at line {line_number} contains unknown schema bits")
-    analysis_flags = int(decoded["analysis_flags"])
-    if analysis_flags & ~KNOWN_ANALYSIS_FLAG_MASK:
-        raise TraceContractError(
-            f"trace analysis_flags at line {line_number} contains unknown schema bits")
-    hard_cut_pulse = float(decoded["hard_cut_pulse"])
-    if hard_cut_pulse not in (0.0, 1.0):
-        raise TraceContractError(
-            f"trace hard_cut_pulse at line {line_number} must be exactly 0 or 1")
-    expected_bools = {
-        "geometry_armed": bool(cut_flags & CUT_FLAG_GEOMETRY_ARMED),
-        "appearance_armed": bool(cut_flags & CUT_FLAG_APPEARANCE_ARMED),
-        "geometry_low_once": bool(cut_flags & CUT_FLAG_GEOMETRY_LOW_ONCE),
-        "appearance_quiet_once": bool(cut_flags & CUT_FLAG_APPEARANCE_QUIET_ONCE),
-        "cut_latched": bool(cut_flags & CUT_FLAG_LATCHED),
-        "appearance_recovery": bool(cut_flags & CUT_FLAG_APPEARANCE_RECOVERY),
-        "geometry_confirmation_pending": bool(
-            cut_flags & CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING
-        ),
-        "hard_cut_pulse": hard_cut_pulse > 0.5,
-    }
-    for key, expected in expected_bools.items():
-        if derived_bools[key] != expected:
-            raise TraceContractError(
-                f"trace {key} duplicate disagrees with values at line {line_number}")
     for name in (
-        "hard_cut_count",
         "empty_raw_count",
         "collapsed_raw_count",
     ):
@@ -292,10 +221,6 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
         "source_index": source_index,
         "depth_updated": depth_updated,
         **decoded,
-        # The positional ABI stores these flags as float32, but downstream policy consumes the
-        # independently authenticated JSON booleans. Keep the typed values authoritative after
-        # expanding decoded fields with overlapping names such as hard_cut_pulse.
-        **derived_bools,
     }
 
 
@@ -369,7 +294,7 @@ class IncrementalTraceDecoder:
 
 
 def load_trace(path: str | os.PathLike[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Load and validate an exact schema-6 adaptive JSONL trace."""
+    """Load and validate an exact current-schema adaptive JSONL trace."""
     trace_path = Path(path)
     decoder = IncrementalTraceDecoder()
     frames: list[dict[str, Any]] = []
@@ -566,10 +491,6 @@ def _frame_end(frame: dict[str, Any]) -> float:
     return float(frame["timestamp_seconds"]) + float(frame["duration_seconds"])
 
 
-def _cut_event(frame: dict[str, Any]) -> bool:
-    return bool(frame["hard_cut_pulse"])
-
-
 def _counter_delta(previous: int, current: int) -> int:
     # Native counters saturate instead of wrapping. A decrease means this purportedly continuous
     # trace crossed an estimator reset without a new contract.
@@ -596,46 +517,6 @@ def _contiguous_runs(
     return runs
 
 
-def segment_shots(frames: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Split at every explicit hard-cut pulse, including a latched 16 -> 16 escape."""
-    shots: list[list[dict[str, Any]]] = [[]]
-    for frame in frames:
-        if _cut_event(frame) and shots[-1]:
-            shots.append([])
-        shots[-1].append(frame)
-    return [shot for shot in shots if shot]
-
-
-def _shot_summary(
-    shot_number: int,
-    shot: list[dict[str, Any]],
-) -> dict[str, Any]:
-    first, last = shot[0], shot[-1]
-    valid_fractions = [
-        float(frame["valid_depth_fraction"]) for frame in shot
-        if frame["depth_updated"]
-    ]
-    return {
-        "shot": shot_number,
-        "start_frame_id": first["frame_id"],
-        "end_frame_id": last["frame_id"],
-        "start_source_index": first["source_index"],
-        "end_source_index": last["source_index"],
-        "start_seconds": float(first["timestamp_seconds"]),
-        "end_seconds": _frame_end(last),
-        "duration_seconds": max(0.0, _frame_end(last) -
-                                float(first["timestamp_seconds"])),
-        "source_frames": len(shot),
-        "depth_updates": sum(bool(frame["depth_updated"]) for frame in shot),
-        "starts_with_cut": _cut_event(first),
-        "hard_cut_count_at_start": int(first["hard_cut_count"]),
-        "min_valid_depth_fraction": min(valid_fractions) if valid_fractions else None,
-        "max_depth_change_fraction": max(
-            float(frame["current_depth_change_fraction"]) for frame in shot
-        ),
-    }
-
-
 def _anomaly(
     kind: str,
     severity: str,
@@ -658,34 +539,33 @@ def _anomaly(
     return item
 
 
-def find_anomalies(
-    frames: list[dict[str, Any]],
-    shots: list[list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
+def find_anomalies(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
     anomalies: list[dict[str, Any]] = []
-    initialized = [frame for frame in frames if frame["initialized"] > 0.5]
-    if not initialized:
+    ready = [frame for frame in frames if frame["depth_ready"] > 0.5]
+    if not ready:
         anomalies.append(_anomaly(
-            "initialization_failure",
+            "depth_never_ready",
             "error",
-            "The depth/cut state never initialized.",
+            "The depth state never became ready.",
             frames[0],
         ))
-    elif initialized[0]["source_index"] > 1:
+    elif ready[0]["source_index"] > 1:
         anomalies.append(_anomaly(
-            "initialization_delay",
+            "depth_ready_delay",
             "warning",
-            "Depth/cut-state initialization took more than two source frames.",
-            initialized[0],
-            delayed_source_frames=initialized[0]["source_index"],
+            "Depth readiness took more than two source frames.",
+            ready[0],
+            delayed_source_frames=ready[0]["source_index"],
         ))
 
+    first_ready_index = ready[0]["source_index"] if ready else None
     for run in _contiguous_runs(
             frames,
-            lambda frame: frame["initialized"] > 0.5 and
+            lambda frame: first_ready_index is not None and
+            frame["source_index"] > first_ready_index and
             frame["depth_updated"] and frame["depth_ready"] <= 0.5):
         anomalies.append(_anomaly(
-            "depth_not_ready_after_initialization",
+            "depth_not_ready_after_ready",
             "error",
             f"Depth readiness was lost for {len(run)} depth update(s).",
             run[0],
@@ -694,15 +574,6 @@ def find_anomalies(
                                  float(run[0]["timestamp_seconds"])),
         ))
 
-    if any(int(frames[0][name]) != 0 for name in (
-            "hard_cut_count",
-    )):
-        anomalies.append(_anomaly(
-            "nonzero_initial_counter",
-            "error",
-            "A fresh whole-clip trace began with a nonzero cut counter.",
-            frames[0],
-        ))
     for counter, kind, message in (
         ("empty_raw_count", "empty_raw_depth",
          "The first model result was empty/invalid raw depth."),
@@ -719,29 +590,9 @@ def find_anomalies(
                 count_delta=initial_count,
                 cumulative_count=initial_count,
             ))
-    if _cut_event(frames[0]):
-        anomalies.append(_anomaly(
-            "initial_hard_cut_pulse",
-            "error",
-            "A fresh uninitialized trace began with a hard-cut pulse.",
-            frames[0],
-        ))
 
     previous = frames[0]
     for frame in frames[1:]:
-        hard_delta = _counter_delta(
-            int(previous["hard_cut_count"]), int(frame["hard_cut_count"]))
-        previous_hard_saturated = int(previous["hard_cut_count"]) >= 0xFFFFFFFE
-        if (not previous_hard_saturated and
-                ((hard_delta == 1) != _cut_event(frame) or hard_delta > 1)):
-            anomalies.append(_anomaly(
-                "hard_cut_counter_pulse_mismatch",
-                "error",
-                "The hard-cut pulse and cumulative hard-cut counter disagree.",
-                frame,
-                counter_delta=hard_delta,
-                pulse=_cut_event(frame),
-            ))
         for counter, kind, message in (
             ("empty_raw_count", "empty_raw_depth",
              "The model produced an empty/invalid raw depth result."),
@@ -770,61 +621,6 @@ def find_anomalies(
             run[0],
             end_frame_id=run[-1]["frame_id"],
         ))
-
-    pulses = [frame for frame in frames if _cut_event(frame)]
-    depth_update_ordinal: dict[int, int] = {}
-    update_number = 0
-    for frame in frames:
-        if frame["depth_updated"]:
-            depth_update_ordinal[frame["source_index"]] = update_number
-            update_number += 1
-    for before, after in zip(pulses, pulses[1:]):
-        if (before["source_index"] in depth_update_ordinal and
-                after["source_index"] in depth_update_ordinal):
-            update_gap = (
-                depth_update_ordinal[after["source_index"]] -
-                depth_update_ordinal[before["source_index"]]
-            )
-        else:
-            update_gap = after["source_index"] - before["source_index"]
-        if update_gap < CUT_BURST_DEPTH_UPDATES:
-            anomalies.append(_anomaly(
-                "cut_burst",
-                "warning",
-                "Two accepted cuts arrived before the normal settle window completed.",
-                after,
-                previous_frame_id=before["frame_id"],
-                depth_update_gap=update_gap,
-                seconds_since_previous=(
-                    float(after["timestamp_seconds"]) -
-                    float(before["timestamp_seconds"])
-                ),
-            ))
-
-    disarmed_runs = _contiguous_runs(
-        frames,
-        lambda frame: (
-            frame["initialized"] > 0.5 and frame["cut_latched"] and
-            not frame["geometry_armed"] and not frame["appearance_armed"]
-        ),
-    )
-    for run in disarmed_runs:
-        duration = max(
-            0.0,
-            _frame_end(run[-1]) - float(run[0]["timestamp_seconds"]),
-        )
-        if (duration >= LONG_DISARMED_SECONDS or
-                len(run) >= LONG_DISARMED_SOURCE_FRAMES):
-            anomalies.append(_anomaly(
-                "both_cut_arms_disarmed_long",
-                "warning",
-                "Both ordinary cut proposal arms remained disarmed for a long interval; "
-                "the relative-geometry escape remains available.",
-                run[0],
-                end_frame_id=run[-1]["frame_id"],
-                source_frames=len(run),
-                duration_seconds=duration,
-            ))
     return anomalies
 
 
@@ -833,28 +629,18 @@ def analyze_trace(
     frames: list[dict[str, Any]],
     timing: dict[str, Any],
     source_name: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build aggregate, per-shot, and anomaly results from validated samples."""
-    shots = segment_shots(frames)
-    shot_rows = [
-        _shot_summary(index, shot) for index, shot in enumerate(shots, 1)
-    ]
-    shot_by_index: dict[int, int] = {}
-    for shot_index, shot in enumerate(shots, 1):
-        for frame in shot:
-            shot_by_index[frame["source_index"]] = shot_index
-    for frame in frames:
-        frame["shot"] = shot_by_index[frame["source_index"]]
-        frame["accepted_cut_event"] = _cut_event(frame)
-        frame["geometry_armed"] = bool(frame["geometry_armed"])
-        frame["appearance_armed"] = bool(frame["appearance_armed"])
-
-    anomalies = find_anomalies(frames, shots)
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build aggregate and anomaly results from validated samples."""
+    anomalies = find_anomalies(frames)
 
     first, last = frames[0], frames[-1]
     config = dict(header["config"])
+    valid_fractions = [
+        float(frame["valid_depth_fraction"]) for frame in frames
+        if frame["depth_updated"]
+    ]
     summary = {
-        "schema": 1,
+        "schema": 2,
         "source_name": source_name,
         "generated_utc": _datetime.datetime.now(
             _datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -870,8 +656,7 @@ def analyze_trace(
         "depth_update_count": sum(bool(frame["depth_updated"]) for frame in frames),
         "duration_seconds": max(
             0.0, _frame_end(last) - float(first["timestamp_seconds"])),
-        "shot_count": len(shot_rows),
-        "hard_cut_pulse_count": sum(_cut_event(frame) for frame in frames),
+        "min_valid_depth_fraction": min(valid_fractions) if valid_fractions else None,
         "empty_raw_count": int(last["empty_raw_count"]),
         "collapsed_raw_count": int(last["collapsed_raw_count"]),
         "anomaly_count": len(anomalies),
@@ -880,9 +665,8 @@ def analyze_trace(
             for kind in sorted({item["kind"] for item in anomalies})
         },
         "anomalies": anomalies,
-        "shots": shot_rows,
     }
-    return summary, shot_rows, anomalies
+    return summary, anomalies
 
 
 def _csv_value(value: Any) -> Any:
@@ -901,34 +685,8 @@ FRAME_CSV_FIELDS = (
     "source_pts_seconds",
     "timestamp_seconds",
     "duration_seconds",
-    "shot",
     "depth_updated",
-    "accepted_cut_event",
-    "geometry_armed",
-    "appearance_armed",
-    "geometry_low_once",
-    "appearance_quiet_once",
-    "cut_latched",
-    "appearance_recovery",
-    "geometry_confirmation_pending",
     *FIELD_NAMES,
-)
-
-SHOT_CSV_FIELDS = (
-    "shot",
-    "start_frame_id",
-    "end_frame_id",
-    "start_source_index",
-    "end_source_index",
-    "start_seconds",
-    "end_seconds",
-    "duration_seconds",
-    "source_frames",
-    "depth_updates",
-    "starts_with_cut",
-    "hard_cut_count_at_start",
-    "min_valid_depth_fraction",
-    "max_depth_change_fraction",
 )
 
 
@@ -963,15 +721,12 @@ def _chart_svg(
     key: str,
     label: str,
     color: str,
-    *,
-    ignore_negative: bool = False,
 ) -> str:
     sampled = _sample_for_chart(frames)
     points = [
         (float(frame["timestamp_seconds"]), float(frame[key]))
         for frame in sampled
-        if frame.get(key) is not None and
-        (not ignore_negative or float(frame[key]) >= 0.0)
+        if frame.get(key) is not None
     ]
     if not points:
         return (
@@ -997,13 +752,6 @@ def _chart_svg(
         return pad_t + (max_y - value) / (max_y - min_y) * (height - pad_t - pad_b)
 
     polyline = " ".join(f"{x(time):.2f},{y(value):.2f}" for time, value in points)
-    cuts = "".join(
-        f'<line class="cut" x1="{x(float(frame["timestamp_seconds"])):.2f}" '
-        f'x2="{x(float(frame["timestamp_seconds"])):.2f}" y1="{pad_t}" '
-        f'y2="{height - pad_b}"><title>cut at '
-        f'{float(frame["timestamp_seconds"]):.3f}s</title></line>'
-        for frame in frames if frame["accepted_cut_event"]
-    )
     return (
         f'<section class="chart"><h3>{html.escape(label)}</h3>'
         f'<svg viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
@@ -1011,7 +759,7 @@ def _chart_svg(
         f'<line class="axis" x1="{pad_l}" x2="{pad_l}" y1="{pad_t}" '
         f'y2="{height - pad_b}"/><line class="axis" x1="{pad_l}" '
         f'x2="{width - pad_r}" y1="{height - pad_b}" y2="{height - pad_b}"/>'
-        f'{cuts}<polyline points="{polyline}" fill="none" stroke="{color}" '
+        f'<polyline points="{polyline}" fill="none" stroke="{color}" '
         'stroke-width="2" vector-effect="non-scaling-stroke"/>'
         f'<text x="6" y="{pad_t + 10}">{max_y:.3g}</text>'
         f'<text x="6" y="{height - pad_b}">{min_y:.3g}</text>'
@@ -1025,7 +773,6 @@ def _write_html(
     path: Path,
     summary: dict[str, Any],
     frames: list[dict[str, Any]],
-    shots: list[dict[str, Any]],
     anomalies: list[dict[str, Any]],
 ) -> None:
     config = summary["config"]
@@ -1039,33 +786,20 @@ def _write_html(
         "</tr>"
         for item in anomalies
     ) or '<tr><td colspan="4" class="ok">No configured anomalies detected.</td></tr>'
-    shot_rows = "".join(
-        "<tr>"
-        f"<td>{row['shot']}</td><td>{_fmt(row['start_seconds'])}</td>"
-        f"<td>{_fmt(row['duration_seconds'])}</td><td>{row['source_frames']}</td>"
-        f"<td>{row['depth_updates']}</td>"
-        f"<td>{_fmt(row['min_valid_depth_fraction'], 4)}</td>"
-        f"<td>{_fmt(row['max_depth_change_fraction'], 4)}</td>"
-        "</tr>"
-        for row in shots
-    )
     charts = "".join((
         _chart_svg(
-            frames, "current_depth_change_fraction", "Current depth-change fraction",
-            "#f06e9c"),
-        _chart_svg(
-            frames, "structural_change_fraction", "Structural change fraction",
-            "#f5b942", ignore_negative=True),
-        _chart_svg(
-            frames, "raw_rgb_change_fraction", "Raw RGB change fraction",
-            "#64d3ff", ignore_negative=True),
-        _chart_svg(
             frames, "valid_depth_fraction", "Valid depth fraction", "#9be564"),
+        _chart_svg(
+            frames, "effective_raw_range_width", "Effective raw range width", "#64d3ff"),
+        _chart_svg(
+            frames, "depth_ready", "Depth ready", "#f5b942"),
+        _chart_svg(
+            frames, "range_collapsed", "Raw range collapsed", "#f06e9c"),
     ))
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Host SBS whole-clip cut-state report</title>
+<title>Host SBS whole-clip depth-health report</title>
 <style>
 :root{{--bg:#0b1017;--panel:#131b25;--line:#283747;--ink:#edf6ff;--muted:#94a8ba;
 --accent:#64d3ff;--ok:#74d89b;--warn:#f5b942;--error:#ff7383}}
@@ -1078,7 +812,7 @@ gap:12px;margin-top:20px}}.card,.chart,.notice{{background:var(--panel);
 border:1px solid var(--line);border-radius:12px;padding:16px}}.card b{{display:block;
 font-size:23px;margin-top:4px}}.charts{{display:grid;grid-template-columns:1fr 1fr;gap:14px}}
 .chart svg{{display:block;width:100%;height:auto;background:#0d141d;border-radius:7px}}
-.axis{{stroke:#526579;stroke-width:1}}.cut{{stroke:#ff7383;stroke-width:1;stroke-dasharray:4 3}}
+.axis{{stroke:#526579;stroke-width:1}}
 svg text{{fill:#91a7b9;font:11px ui-monospace,Consolas,monospace}}
 .notice{{border-left:4px solid var(--warn)}}table{{width:100%;border-collapse:collapse;
 background:var(--panel);border:1px solid var(--line)}}th,td{{padding:9px 10px;
@@ -1088,25 +822,21 @@ text-transform:uppercase}}.severity.warning{{background:#4a3916;color:#ffd979}}
 .severity.error{{background:#4b2029;color:#ff9dab}}.ok{{color:var(--ok)}}
 @media(max-width:850px){{.cards,.charts{{grid-template-columns:1fr}}main{{padding:18px}}}}
 </style></head><body><main>
-<h1>Host SBS whole-clip cut-state report</h1>
+<h1>Host SBS whole-clip depth-health report</h1>
 <p class="muted">{html.escape(summary['source_name'])} · generated
 {html.escape(summary['generated_utc'])}</p>
 <div class="cards">
 <div class="card">Frames<b>{summary['frame_count']}</b></div>
 <div class="card">Duration<b>{_fmt(summary['duration_seconds'], 2, ' s')}</b></div>
-<div class="card">Shots<b>{summary['shot_count']}</b></div>
+<div class="card">Depth updates<b>{summary['depth_update_count']}</b></div>
 <div class="card">Flagged intervals/events<b>{summary['anomaly_count']}</b></div>
 </div>
 <h2>Trace configuration</h2>
 <div class="notice"><b>{html.escape(config['model'])}</b> · configured pop
 {_fmt(config['pop_strength'], 2)} · depth interval {config['depth_reuse_interval']}
-<p>This trace reports V2 cut detection and model health. It does not infer or override geometry.</p></div>
-<h2>Cut-state timeline</h2><p class="muted">Red dashed lines are accepted hard-cut pulses.</p>
+<p>This trace reports V2 depth and model health. It does not infer or override geometry.</p></div>
+<h2>Depth-health timeline</h2>
 <div class="charts">{charts}</div>
-<h2>Shots</h2><div style="overflow:auto"><table><thead><tr>
-<th>Shot</th><th>Start (s)</th><th>Duration (s)</th><th>Frames</th>
-<th>Depth updates</th><th>Min valid depth</th><th>Max depth change</th>
-</tr></thead><tbody>{shot_rows}</tbody></table></div>
 <h2>Anomalies</h2><div style="overflow:auto"><table><thead><tr>
 <th>Severity</th><th>Kind</th><th>Time (s)</th><th>Observation</th>
 </tr></thead><tbody>{anomaly_rows}</tbody></table></div>
@@ -1122,7 +852,7 @@ def generate_outputs(
     timeline: Any = None,
     source_name: str | None = None,
 ) -> dict[str, Any]:
-    """Validate a trace and emit ``frames.csv``, ``shots.csv``, JSON, and HTML.
+    """Validate a trace and emit ``frames.csv``, JSON, and HTML.
 
     This is the stable wrapper-facing entry point. ``timeline`` may be the wrapper's schema-1
     object, a direct list of timing rows, a path to either JSON form, or ``None``.
@@ -1130,22 +860,21 @@ def generate_outputs(
     header, raw_frames = load_trace(trace_path)
     frames, timing = join_timeline(raw_frames, timeline)
     name = source_name or Path(trace_path).parent.name or Path(trace_path).stem
-    summary, shots, anomalies = analyze_trace(header, frames, timing, name)
+    summary, anomalies = analyze_trace(header, frames, timing, name)
 
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
     _write_csv(output / "frames.csv", FRAME_CSV_FIELDS, frames)
-    _write_csv(output / "shots.csv", SHOT_CSV_FIELDS, shots)
     with (output / "summary.json").open("w", encoding="utf-8") as stream:
         json.dump(summary, stream, indent=2, allow_nan=False)
         stream.write("\n")
-    _write_html(output / "report.html", summary, frames, shots, anomalies)
+    _write_html(output / "report.html", summary, frames, anomalies)
     return summary
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate a Host SBS whole-clip cut-state report.")
+        description="Generate a Host SBS whole-clip depth-health report.")
     parser.add_argument("trace", help="adaptive_state.jsonl from the native harness")
     parser.add_argument("--out", required=True, help="report output directory")
     parser.add_argument("--timeline", help="optional schema-1 source PTS manifest")
@@ -1162,7 +891,7 @@ def main() -> int:
         parser.error(str(exc))
     print(f"wrote {Path(args.out) / 'report.html'}")
     print(
-        f"{summary['frame_count']} frames, {summary['shot_count']} shots, "
+        f"{summary['frame_count']} frames, {summary['depth_update_count']} depth updates, "
         f"{summary['anomaly_count']} flagged observations")
     return 0
 

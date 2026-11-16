@@ -52,25 +52,6 @@ bool RootTyped() {
     if(marker==0u&&any(Root.Load4(224u)!=uint4(1u,1u,1u,0u)))return false;
     return true;
 }
-bool CurrentTyped() {
-    uint n,s;SelectedReceipt.GetDimensions(n,s);if(n!=64u||s!=4u)return false;
-    SCT.GetDimensions(n,s);if(n!=32u||s!=4u)return false;
-    uint w,h;SelectedM.GetDimensions(w,h);
-    if(any(Source.xy==0u)||Source.x>5120u||Source.y>5120u||Source.z>Source.y||Source.w==0u||Source.w>Source.y-Source.z||
-       w!=Source.x||h!=Source.w||!SizeMatches(LegacyM))return false;
-    if(any(Field.xy==0u)||Field.z>=Field.w||Field.w>Field.y||any(Content.xy>=Content.zw)||any(Content.zw>Field.xy)||
-       all(Model.xy==0u)||all(Observation.xy==0u)||Observation.z>1u||Observation.w!=0u||any(Options!=uint4(1u,27u,0u,0u)))return false;
-    // snapshot-valid is independent of active CurrentGate. Authenticated current empty may
-    // have SCT2=0/SCT23=1; the existing SCP/UI gate (not this receipt) controls presentation.
-    if(SCT[0u]!=5u||SCT[1u]!=0x35544353u||SCT[2u]>1u||SCT[22u]!=27u||SCT[23u]!=1u)return false;
-    if(any(uint4(SCT[4u],SCT[5u],SCT[6u],SCT[7u])!=Model)||
-       any(uint4(SCT[8u],SCT[9u],SCT[10u],SCT[11u])!=Source)||
-       any(uint4(SCT[12u],SCT[13u],SCT[14u],SCT[15u])!=Field)||
-       any(uint4(SCT[16u],SCT[17u],SCT[18u],SCT[19u])!=Content)||
-       any(uint2(SCT[20u],SCT[21u])!=Observation.xy))return false;
-    [unroll]for(uint i=24u;i<32u;++i)if(SCT[i]!=0u)return false;
-    return RootTyped();
-}
 bool LegacyContextTyped() {
     uint n,s;SelectedReceipt.GetDimensions(n,s);if(n!=64u||s!=4u)return false;
     SCT.GetDimensions(n,s);if(n!=32u||s!=4u)return false;
@@ -90,6 +71,8 @@ bool LegacyContextTyped() {
     [unroll]for(uint i=24u;i<32u;++i)if(SCT[i]!=0u)return false;
     return true;
 }
+// Current authority is the legacy context proof plus the typed transaction root.
+bool CurrentTyped() { return LegacyContextTyped() && RootTyped(); }
 
 bool BaselineTyped() {
     uint n,s;NumericProof.GetDimensions(n,s);if(n!=32u||s!=4u||!SizeMatches(BaselineM))return false;

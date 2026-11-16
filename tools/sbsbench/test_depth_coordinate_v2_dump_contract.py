@@ -62,8 +62,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         changed = copy.deepcopy(self.manifest)
         closure = "a" * 64
         changed["renderer"]["actual_draw_renderer"] = {
-            "kind": pin.KIND, "source_closure_sha256": closure,
-            "legacy_mapping_role": pin.LEGACY_ROLE, "evidence_artifact": pin.EVIDENCE}
+            "schema": 2, "kind": pin.KIND, "source_closure_sha256": closure,
+            "mapping_role": pin.SHARED_ROLE, "evidence_artifact": pin.EVIDENCE}
         with mock.patch.object(pin, "_expected_closure", return_value=closure):
             summary = dump_contract.validate_v2_dump_manifest_document(changed)
             self.assertTrue(summary["actual_draw_renderer"]["shared_pin_selected"])
@@ -81,6 +81,29 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             r'\{"entrypoint", "([^"]+)"\},\s*'
             r'\{"target", "([^"]+)"\}', resolver))
         self.assertEqual(native_specs, dump_contract._SUBTITLE_PLANE_SHADER_SPECS)
+
+    def test_live_dump_resolver_step_metadata_matches_canonical_reader(self):
+        source = (REPO / "src/platform/windows/sbs_debug_dump.cpp").read_text()
+        resolver = source.split("nlohmann::json subtitle_plane_resolver_contract_json(", 1)[1]
+        resolver = resolver.split("bool subtitle_target_is_representable(", 1)[0]
+        expected = dump_contract._subtitle_plane_resolver_contract()
+        policies = (
+            ("host_model_policy", expected["adaptive_ui"]["host_model_policy"], (
+                "candidate_step_per_eye_source_pixels", "candidate_step_scope")),
+            ("target_policy", expected["target_policy"], (
+                "candidate_step_per_eye_source_pixels",
+                "coarse_diagnostic_step_per_eye_source_pixels")),
+        )
+        for name, canonical, fields in policies:
+            block = resolver.split('{"' + name + '", {', 1)[1].split("}}", 1)[0]
+            for field in fields:
+                with self.subTest(policy=name, field=field):
+                    literals = re.findall(
+                        r'\{"' + re.escape(field) + r'",\s*("[^"]*"|\d+u)\}', block)
+                    self.assertEqual(len(literals), 1, "native descriptor field missing or repeated")
+                    literal = literals[0]
+                    value = json.loads(literal) if literal.startswith('"') else int(literal[:-1])
+                    self.assertEqual(value, canonical[field])
 
     def test_renderer_closure_constants_match_native_authenticated_pins(self):
         pins = generator.validate_renderer_source_closure_pins()
@@ -217,7 +240,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "container_scale": 1.0,
             "calibration_revision": 4,
             "frame_valid": 1.0,
-            "confirmed_cut_count": 3,
+            "control_reserved_0": 0,
             "contract_tag_bits": tag,
             "camera_center_integrity_bits": 0,
             "renderer_authorization_bits": tag,
@@ -297,7 +320,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "frame_valid": True,
                 "camera_valid": True,
                 "calibration_revision": values["calibration_revision"],
-                "confirmed_cut_count": values["confirmed_cut_count"],
                 "contract_tag": tag,
                 "requested_gain": constants["requested_gain"],
                 "requested_pop_strength": constants["requested_pop_strength"],
@@ -377,11 +399,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "subtitle_conditioning": subtitle_none,
             "renderer": {
                 "authority":
-                    "authenticated-base-inverse-plus-analytic-ui-glyph-selector",
+                    "authenticated-ordinary-base-inverse",
                 "parallax_v2_render_requested": True,
                 "parallax_v2_render_selected": True,
                 "mapping_artifacts_match_selected_renderer": False,
-                "parallax_v2_position_field": 'ordinary Base inverse + optional analytic UI glyph selector',
+                "actual_draw_renderer": {"schema": 2, "kind": "ordinary-base-v1",
+                    "source_closure_sha256": "", "mapping_role": "authenticated Base inverse diagnostic",
+                    "evidence_artifact": "actual_draw_evidence.json"},
+                "parallax_v2_position_field": 'ordinary Base inverse',
                 "parallax_v2_coordinate_role":
                     "shadow_coordinate is diagnostic only; it has no renderer authority",
                 "parallax_v2_vertical_majorant_role":
@@ -392,9 +417,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "fixed 75/25 share of column upper/lower envelopes; may raise or lower "
                     "candidate and feeds the row majorant",
                 "parallax_v2_conditioner_role":
-                    'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering',
+                    'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; shared pin field alone adds subtitle displacement',
                 "parallax_v2_inverse":
-                    "at-most-11-step Base inverse plus analytic UI glyph selection; selected map may be discontinuous; no synthetic fill",
+                    "at-most-11-step authenticated Base inverse; no subtitle selector or synthetic fill",
                 "collar_defocus": {
                     "enabled": False,
                     "role": ("disabled after live hand-boundary halo regression; live color "
@@ -516,7 +541,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "reuse_policy": coordinate.FINAL_PARALLAX.reuse_policy,
                 "invalid_policy": coordinate.FINAL_PARALLAX.invalid_policy,
                 "current_rgb_policy": coordinate.FINAL_PARALLAX.current_rgb_policy,
-                "warp_relation": "independent diagnostic; selected map consumes Base and the joined analytic glyph tuple",
+                "warp_relation": "independent diagnostic; ordinary mapping consumes immutable Base only",
             },
             "selected_map": dict(coordinate.SELECTED_MAP, render_enabled=True),
             "warp_map_contract": {
@@ -658,8 +683,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertTrue(decoded["rendered_output_selected"])
         self.assertTrue(decoded["vertical_majorant_available"])
         self.assertTrue(decoded["vertical_conditioned_available"])
-        self.assertEqual(decoded["position_field"], "ordinary Base inverse + optional analytic UI glyph selector")
+        self.assertEqual(decoded["position_field"], "ordinary Base inverse")
         self.assertFalse(decoded["mapping_artifacts_match_selected_renderer"])
+
+    def test_current_manifest_rejects_retired_render_only_legacy_mask(self):
+        changed = copy.deepcopy(self.manifest)
+        changed["artifacts"]["actual_original_legacy_M.u32"] = {"available": False}
+        with self.assertRaisesRegex(ValueError, "retired render-only legacy t8"):
+            dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_manifest_accepts_exact_native_capture_color_format_allowlist(self):
         for name, value in (
@@ -985,7 +1016,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "description": "authored selected-map metadata", "sha256": "0" * 64,
                 "byte_count": byte_count}
         manifest["renderer"]["parallax_v2_conditioner_role"] = (
-            'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering')
+            'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; shared pin field alone adds subtitle displacement')
         payload = json.dumps(subtitle).encode("utf-8")
         manifest["artifacts"]["subtitle_conditioning.json"]["sha256"] = (
             hashlib.sha256(payload).hexdigest())
@@ -1261,7 +1292,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         words = [dump_contract.SUBTITLE_PLANE_STATE_SCHEMA, dump_contract.SUBTITLE_PLANE_STATE_TAG,
                  int(current_valid), mask, frame & 0xffffffff, frame >> 32,
                  generation & 0xffffffff, generation >> 32, timestamp & 0xffffffff, timestamp >> 32,
-                 *source, *field, *roi, *content, 3, 0, 0, 0,
+                 *source, *field, *roi, *content, 0, 0, 0, 0,
                  1, 8, 0, target, timestamp & 0xffffffff, timestamp >> 32, 0, 0, 0, 0,
                  0, 0, limit, max(count, invalid_probe), 0, invalid_probe]
         assert len(words) == 40
@@ -1273,7 +1304,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "source_width": source[0], "source_height": source[1],
                 "field_width": field[0], "field_height": field[1],
                 "tensor_content": (0, 0, *field) if content is None else content,
-                "expected_scene_epoch": 3,
                 "expected_observation_timestamp_us": 1000001}
 
     def _parse_uip1_ocr_pairs(self, pairs=(), *, authoritative=True,
@@ -2126,7 +2156,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         distance = dump_contract._subtitle_contour_slope_budget(
             support != 0, source_width, source_height, crop_top, field_width, field_height, content).astype("<f4")
         timestamp = manifest["matched_observation_timestamp_us"]
-        identity = [policy["history_schema"], policy["history_tag"], int(valid), locator[20] if snapshot_gate else 0,
+        identity = [policy["history_schema"], policy["history_tag"], int(valid), 0,
                     ocr[5], ocr[6], ocr[7], ocr[8], source_width, source_height, crop_top, crop_height,
                     field_width, field_height, ocr[13], ocr[14], *content,
                     timestamp & 0xffffffff, timestamp >> 32, policy["recipe"], int(snapshot_gate), *([0] * 8)]
@@ -2230,12 +2260,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         manifest["depth_input_region"]["mode"] = "window-region"
         manifest["renderer"].update({
             "authority":
-                "authenticated Base inverse plus analytic UI glyph selector and depth-input-region embedding",
+                "authenticated ordinary Base inverse with depth-input-region embedding",
             "mapping_artifacts_match_selected_renderer": True,
             "parallax_v2_position_field":
-                'ordinary Base inverse + optional analytic UI glyph selector + depth_input_region embedding',
+                'ordinary Base inverse + depth_input_region embedding',
             "parallax_v2_conditioner_role":
-                'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; analytic glyph selector owns rendering',
+                'ordinary Base retains its existing slope bounds; protected Final is an independent diagnostic; shared pin field alone adds subtitle displacement',
         })
         manifest["dimensions"].update({
             "source": {
@@ -2446,8 +2476,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "content":
                     "derive from content_scale_x/content_scale_y and packed output coordinate",
                 "inverse":
-                    "selected pre-clamp U from crop-local Base inverse with depth_input_region "
-                    "embedding or analytic UI plane via native glyph matte",
+                    "pre-clamp U from crop-local ordinary Base inverse with depth_input_region embedding",
                 "mask": (
                     "warp_mask.png red marks finite-source boundary extrapolation; V2 has no "
                     "internal owner or synthetic-fill path"),
@@ -2729,7 +2758,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest, _ = self._write_synthetic_geometry_dump(root)
-            manifest["parallax_v2_shadow"]["state"]["confirmed_cut_count"] += 1
+            manifest["parallax_v2_shadow"]["state"]["calibration_revision"] += 1
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "summary disagrees"):
@@ -2966,7 +2995,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.verify_v2_dump_geometry(root)
 
 
-    def test_roi_warp_map_accepts_literal_cpp_exported_selected_map_contract(self):
+    def test_roi_warp_map_preserves_and_rejects_historical_analytic_export(self):
         # Literal Build122 schema50 exporter dictionary (3840x2160 ROI capture).
         # This checks manifest semantics only, not availability/authenticity of its pixels.
         exported = json.loads(r'''
@@ -3049,24 +3078,31 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
   }
 }
 ''')
+        with self.assertRaisesRegex(ValueError, "warp-map semantics"):
+            dump_contract._validate_warp_map_manifest(
+                exported, exported["artifacts"], exported["dimensions"], "window-region")
+        # A separately authored current contract preserves the literal historical export above.
+        current = copy.deepcopy(exported)
+        current["warp_map_contract"]["validity"]["inverse"] = (
+            "pre-clamp U from crop-local ordinary Base inverse with depth_input_region embedding")
         value = dump_contract._validate_warp_map_manifest(
-            exported, exported["artifacts"], exported["dimensions"], "window-region")
+            current, current["artifacts"], current["dimensions"], "window-region")
         self.assertTrue(value["available"])
         self.assertEqual((value["width"], value["height"]), (7680, 2160))
-        self.assertIn(exported["warp_map_contract"]["validity"]["inverse"],
+        self.assertIn(current["warp_map_contract"]["validity"]["inverse"],
                       (REPO / "src/platform/windows/sbs_debug_dump.cpp").read_text())
         mutations = {
             "retired-pure-inverse": lambda c: c["validity"].update({"inverse":
                 "11-step contractive fixed-point solution of crop-local q embedded by "
                 "depth_input_region.json scale and outside-only zero-plane collar"}),
-            "missing-ui-selection": lambda c: c["validity"].update({"inverse": "ordinary Base only"}),
+            "unknown-inverse": lambda c: c["validity"].update({"inverse": "ordinary Base only"}),
             "extra-validity": lambda c: c["validity"].update({"unknown": True}),
             "extra-root": lambda c: c.update({"unknown": True}),
             "changed-channel": lambda c: c.update({"channels": ["source_u"]}),
         }
         for name, mutate in mutations.items():
             with self.subTest(fault=name):
-                changed = copy.deepcopy(exported)
+                changed = copy.deepcopy(current)
                 mutate(changed["warp_map_contract"])
                 with self.assertRaisesRegex(ValueError, "unknown warp-map semantics"):
                     dump_contract._validate_warp_map_manifest(
@@ -3434,7 +3470,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(summary["capacity"], 300)
         self.assertEqual(dump_contract.GPU_TRACE_RING_SCHEMA, 5)
         self.assertEqual(dump_contract.GPU_TRACE_CONTRACT_SCHEMA, 6)
-        self.assertEqual(dump_contract.GPU_TRACE_DECODED_SCHEMA, 7)
+        self.assertEqual(dump_contract.GPU_TRACE_DECODED_SCHEMA, 8)
         self.assertEqual(summary["record_words"], 136)
         self.assertEqual(dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_locator_begin"], 88)
         self.assertEqual(dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_condition_begin"], 128)
@@ -4108,7 +4144,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 writer_state = copy.deepcopy(self.state)
                 writer_state["units"] = units
                 decoded = dump_contract.validate_shadow_state_document(writer_state)
-                self.assertEqual(decoded["confirmed_cut_count"], 3)
+                self.assertEqual(decoded["calibration_revision"], 4)
 
     def test_host_linear_state_requires_coordinate_units_and_hard_cap_semantics(self):
         state = self._host_adapter_state()
@@ -4616,7 +4652,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.validate_shadow_frame_stats_document(changed)
 
 
-    def test_schema50_dense_matte_is_same_observation_bounded_and_clears_empty(self):
+    def test_schema51_dense_matte_is_same_observation_bounded_and_clears_empty(self):
         import numpy as np
         source = np.full((21, 25, 4), np.float16(.8), dtype="<f2")
         source[..., 3] = np.float16(1)
@@ -4640,7 +4676,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "literal zero or one"):
             dump_contract.subtitle_dense_glyph_matte(support, source)
 
-    def test_schema50_brightness_barrier_limits_body_but_keeps_native_collar(self):
+    def test_schema51_brightness_barrier_limits_body_but_keeps_native_collar(self):
         import numpy as np
         source = np.full((9, 19, 4), np.float16(.3), dtype="<f2")
         source[..., 3] = np.float16(1)
@@ -4651,13 +4687,13 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(dense[4, 10], 1)
         self.assertEqual(dense[4, 11], 0)
 
-    def test_schema50_rejects_unknown_selected_map_even_with_valid_final_diagnostic(self):
+    def test_schema51_rejects_unknown_selected_map_even_with_valid_final_diagnostic(self):
         manifest = copy.deepcopy(self.manifest)
         manifest["selected_map"]["combined_map"] = "continuous-final-inverse"
         with self.assertRaisesRegex(ValueError, "selected-map contract"):
             dump_contract.validate_v2_dump_manifest_document(manifest)
 
-    def test_schema50_render_permission_is_required_boolean_and_independent_of_tuple(self):
+    def test_schema51_render_permission_is_required_boolean_and_independent_of_tuple(self):
         for value in (None, 0, 1, "true", [], {}):
             with self.subTest(value=value):
                 manifest = copy.deepcopy(self.manifest)
@@ -4677,7 +4713,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 self.assertTrue(decoded["subtitle_conditioning"]["live"])
                 self.assertNotIn("shadow_final_parallax", decoded["position_authority"])
 
-    def test_schema50_selected_map_metadata_requires_exported_byte_counts(self):
+    def test_schema51_selected_map_metadata_requires_exported_byte_counts(self):
         names = ("subtitle_glyph_matte.json", "subtitle_condition_params.json", "render_source.bin")
         valid = self._active_uip1_manifest(self.manifest)
         dump_contract.validate_v2_dump_manifest_document(valid)
@@ -4706,7 +4742,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract._required_hashed_artifact(
                 {"other.json": dict(descriptor, byte_count=1)}, "other.json", "other")
 
-    def test_schema50_selected_map_metadata_authenticates_actual_length_and_hash(self):
+    def test_schema51_selected_map_metadata_authenticates_actual_length_and_hash(self):
         payloads = {
             "subtitle_glyph_matte.json": b'{"schema": 1}\n',
             "subtitle_condition_params.json": b'{"artifact": "subtitle_condition_params.u32"}\n',
@@ -4737,7 +4773,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "content hash mismatch"):
                         dump_contract._read_hashed_artifact(root, artifacts, name)
 
-    def test_schema50_analytic_inputs_reject_independently_rehashed_corruption(self):
+    def test_schema51_analytic_inputs_reject_independently_rehashed_corruption(self):
         import tempfile
         from pathlib import Path
         corruptions = {
@@ -4849,7 +4885,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         common = {"evidence_frame_id": 17, "analysis_generation": (1 << 32) + 2,
                   "source_width": source_width, "source_height": source_height,
                   "field_width": field_width, "field_height": field_height, "tensor_content": content,
-                  "roi_top": 2, "roi_bottom": 5, "scene_epoch": 7,
+                  "roi_top": 2, "roi_bottom": 5,
                   "observation_timestamp_us": (1 << 32) + 1234,
                   "geometry_ready": geometry_ready, "ocr_authoritative": ocr_authoritative,
                   "current_rectangles": ([{"left": 2, "top": 3, "right": 5, "bottom": 5}]
@@ -4862,7 +4898,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
             "current_rectangles": copy.deepcopy(common["current_rectangles"]),
             "matched_frame_id": common["evidence_frame_id"],
             "observation_timestamp_us": common["observation_timestamp_us"],
-            "analysis_generation": common["analysis_generation"], "scene_epoch": common["scene_epoch"],
+            "analysis_generation": common["analysis_generation"],
             "source_width": source_width, "source_height": source_height,
             "field_width": field_width, "field_height": field_height, "tensor_content_rect": content,
             "adaptive": {"invalid_count": int(invalid_probe)},
@@ -4870,7 +4906,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         # This authored contour fixture uses equal raw cores/covers. Integration fixtures pass
         # the independently decoded OCR raw cores, including their narrower vertical search.
         common["current_cores"] = copy.deepcopy(common["current_rectangles"])
-        identity = [policy["history_schema"], policy["history_tag"], int(valid), 7 if snapshot else 0,
+        identity = [policy["history_schema"], policy["history_tag"], int(valid), 0,
                     17, 0, 2, 1, source_width, source_height, crop_top, crop_height, 7, 6, 2, 5,
                     *content, 1234, 1, policy["recipe"], int(snapshot), *([0] * 8)]
         payloads = {"contour_support": support.tobytes(), "contour_field_pin": pin.tobytes(),
@@ -4921,7 +4957,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "eleven"):
             dump_contract.validate_subtitle_contour_tuple(changed, **common)
 
-    def test_every_sct5_identity_word_binds_source_clock_shape_cut_roi_recipe_snapshot_and_reserved_zero(self):
+    def test_every_sct5_identity_word_binds_source_clock_shape_roi_recipe_snapshot_and_reserved_zero(self):
         payloads, common = self._tuple()
         words = list(struct.unpack("<32I", payloads["contour_identity"]))
         for index in range(32):
@@ -4960,7 +4996,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         mutations = {"no-ocr-geometry": ("cover_geometry_verified", False),
                      "frame": ("matched_frame_id", 18),
                      "clock": ("observation_timestamp_us", (1 << 32) + 1235),
-                     "generation": ("analysis_generation", 3), "cut": ("scene_epoch", 8),
+                     "generation": ("analysis_generation", 3),
                      "source": ("source_width", 25), "field": ("field_height", 7),
                      "content": ("tensor_content_rect", (0, 1, 6, 5)),
                      "count": ("current_count", 0), "mask": ("current_slot_mask", 2),
@@ -5042,7 +5078,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         self.assertTrue(result["snapshot_gate_valid"])
         self.assertEqual(result["history_rgb_valid_pixels"], 96)
         identity = struct.unpack("<32I", payloads["contour_identity"])
-        self.assertEqual((identity[2], identity[3], identity[23]), (0, 7, 1))
+        self.assertEqual((identity[2], identity[3], identity[23]), (0, 0, 1))
         self.assertEqual(result["probability_nonfinite_words"], 3)
         self.assertEqual(result["probability_out_of_range_finite_words"], 2)
         self.assertTrue(np.array_equal(np.frombuffer(payloads["ocr_probability"], dtype="<u4")[:5], fault_words))
@@ -5672,7 +5708,7 @@ class SubtitleContourTupleContractTests(unittest.TestCase):
         native = np.zeros((4,24), dtype=bool)
         native[1,12] = True
         distance = dump_contract._subtitle_contour_slope_budget(native,24,12,8,7,12,(1,0,6,12))
-        # Global centers are7,9,11 after the existing virtual±2 cross. RadiusY is1+3.
+        # Global centers are7,9,11 after the existing virtualÂ±2 cross. RadiusY is1+3.
         # Row3 touches the lower exact rectangle boundary; row2 has no eligible center.
         self.assertTrue(np.isposinf(distance[2]).all())
         self.assertTrue(np.isfinite(distance[3,1:6]).all())

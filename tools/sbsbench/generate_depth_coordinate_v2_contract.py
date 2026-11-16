@@ -68,9 +68,9 @@ CURRENT_OUTLINE_RUNTIME_HEADER = ROOT / "src" / "host_sbs_current_outline_runtim
 CURRENT_BACKGROUND_RUNTIME_HEADER = ROOT / "src" / "host_sbs_selected_glyph_push_pull_runtime.h"
 CURRENT_SHARED_UI_WARP_RUNTIME_HEADER = ROOT / "src" / "host_sbs_shared_ui_warp_runtime.h"
 CURRENT_OUTLINE_RUNTIME_ROOTS = {
-    name: ("outline" if name == "stability" else "hole" if name == "coverage" else name)
+    name: ("outline" if name == "stability" else "hole" if name in {"coverage", "foreground_edge", "trusted_inner"} else name)
     for name in ("source5", "colour", "components", "enclosure", "roi", "outline", "stability",
-                 "inside", "selector", "hole", "coverage")
+                 "inside", "selector", "hole", "coverage", "foreground_edge", "trusted_inner")
 }
 # Lines of LIMITER_SERIAL_MAX_LINES cells or fewer keep the serial float recurrence. Longer
 # lines are scanned in LIMITER_LINE_CHUNKS Q30 chunks, LIMITER_GROUP_LINES adjacent lines per
@@ -130,17 +130,14 @@ EXPECTED_SHADER_IMPLEMENTATION_KEYS = {
 EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
-CANONICAL_SELECTED_MAP = {'schema': 1,
- 'authority': 'base-inverse-plus-analytic-ui-glyph-selector-v1',
+CANONICAL_SELECTED_MAP = {'schema': 2,
+ 'authority': 'authenticated-ordinary-base-inverse-v2',
  'base_inverse': 'at-most-11-step-contractive-fixed-point-on-ordinary-base-with-existing-roi-embedding',
- 'ui_source_u': 'destination-source-u-plus-eye-sign-times-scp-target-times-analysis-width-over-full-source-width',
- 'ui_source_v': 'unchanged-source-v',
- 'selector': 'ui-if-either-base-or-ui-bilinear-color-footprint-has-any-surviving-native-glyph-contributor-otherwise-base',
- 'contributor_policy': 'saturate-u-then-clamp-finite-image-indices-positive-bilinear-weights-only',
- 'current_rgb_revocation': 'same-native-texel-display-srgb-fp16-roundtrip-linf-at-most-contour-history-rgb-distance-no-new-support',
- 'combined_map': 'potentially-discontinuous-selected-map-no-monotonicity-or-final-field-inverse-claim',
- 'sample_policy': 'one-native-bilinear-color-sample-at-selected-uv',
- 'invalid_subtitle_policy': 'preserve-authorized-base',
+ 'sample_policy': 'one-native-bilinear-color-sample-at-authenticated-base-uv',
+ 'subtitle_policy': 'ordinary-renderers-have-no-subtitle-selector',
+ 'shared_map': 'separate-authenticated-same-draw-native-shared-pin-field-and-inverse-not-this-base-diagnostic',
+ 'invalid_subtitle_policy': 'preserve-authorized-base-with-subtitle-permission-disabled',
+ 'invalid_depth_policy': 'independent-flat-identity-renderer',
  'empty_policy': 'joined-new-empty-matte-zero-scp-inactive-immediate-base-no-added-frame-delay'}
 CANONICAL_FINAL_PARALLAX = {'schema': 4,
  'authority': 'authenticated-subtitle-conditioned-r32f-diagnostic-only',
@@ -214,7 +211,7 @@ CANONICAL_SUBTITLE_OCR = {'schema': 38,
                   'line_search_region': 'lower-quarter-of-center-reference-intersect-existing-safe-detector-crop-v1',
                   'line_group_policy': 'local-column-island-row-components-true-piece-bounds-fixed-span-ordinary-aggregation-then-centered-native-line-union-before-classified-capacity-v3',
                   'line_center_reference': 'chromium-video-or-foreground-client-roi-otherwise-full-screen-horizontal-center-and-width-in-analysis-source-pixels-v2',
-                  'line_center_reference_params': 'ocr-resolve-prefix20-then-source-clock-low-high-domain-reset-reserved-96bytes-v2',
+                  'line_center_reference_params': 'ocr-resolve-prefix19-then-line-policy-source-clock-low-high-domain-reset-reserved-96bytes-v3',
                   'ribbon_join_gap_cells': 12,
                   'ribbon_structural_gap_min_cells': 3,
                   'ribbon_min_structural_gaps': 3,
@@ -250,7 +247,7 @@ CANONICAL_SUBTITLE_OCR = {'schema': 38,
                       'fully_active_value': 2,
                       'target_word': 5,
                       'tag': 877675347},
- 'geometry_authority': 'native-glyph-matte-selects-analytic-ui-otherwise-ordinary-base-inverse-v1',
+ 'geometry_authority': 'current-native-glyph-authorized-shared-ui-pin-field-with-ordinary-base-on-subtitle-failure-and-independent-flat-on-invalid-depth-v2',
  'ui_plane_policy': 'current-clearance-goal-first-visible-immediate-symmetric-source-time-exponential-native-slew-empty-reset-v3',
  'contour_policy': {'schema': 5,
                     'recipe': 27,
@@ -264,7 +261,7 @@ CANONICAL_SUBTITLE_OCR = {'schema': 38,
                     'probability_sampling_arithmetic': 'precise-fp32-divide-center-multiply-subtract-floor-fraction-separated-lerp-delta-multiply-add-no-contraction-no-support-epsilon-v1',
                     'diagnostic_snapshot_policy': 'same-joined-valid-ocr-geometry-source-clock-copy-before-next-admission-clear-invalid-whole-reuse-hold-v1',
                     'native_support': 'r32u-binary-current-classified-centered-bounded-search-valid-current-peak-ink-color-short-stroke-or-local-dark-outline-positive-diagnostic-count-v6',
-                    'authority': 'current-ocr8-uip4-scp4-cut-source-clock-and-current-signed-reference-geometry-no-history-vote-authority-v3',
+                    'authority': 'current-ocr8-uip4-scp4-source-clock-and-current-signed-reference-geometry-no-history-vote-authority-v4',
                     'projection': 'native-visible-support-to-all-bilinear-field-nodes-integer-footprint-v1',
                     'history': 'diagnostic-current-cover-fixed-rgb-anchor-four-genuine-observations-same-pixel-first-cue-blocks-neighbor-fallback-no-four-count-render-gate-v5',
                     'history_schema': 5,
@@ -277,7 +274,7 @@ CANONICAL_SUBTITLE_OCR = {'schema': 38,
                     'history_feature_valid_bit': 2,
                     'history_feature_mask_bit': 1,
                     'history_rgb_distance': 0.08,
-                    'mask_evidence_policy': 'current-core-strong-probability-edge-anchors-64x8-brightest-actual-center-rgb-representatives-hue-dedup-strict-color-stroke-or-eight-explicit-local-dark-outline-neighbors-no-probability-only-bypass-v13',
+                    'mask_evidence_policy': 'original-current-core-palette-black-witness-outline-path-plus-independent-unique-dominant-repeated-current-fill-late-union-no-probability-only-bypass-v15',
                     'history_confirmation_observations': 4,
                     'history_feature_count_shift': 2,
                     'history_anchor_policy': 'same-pixel-qualified-fixed-anchor-first-even-with-current-core-probability-cue-otherwise-unflagged-min-rgb-distance-then-squared-spatial-distance-then-scan-order-v3',
@@ -328,6 +325,10 @@ CANONICAL_SUBTITLE_OCR = {'schema': 38,
                     'ordinary_search_center_bias_detector_pixels': 8,
                     'palette_representative_policy': 'max-key-q16-max-channel-shift10-or-1023-minus-grid-index-reload-actual-valid-center-anchor-no-neighbor-endpoint-no-mean-color-v1',
                     'palette_merge_policy': 'greedy-dimmer-representative-q12-normalized-rgb-nearest-integer-max-channel-distance-three-twentieths-from-retained-brighter-mode-v1',
+                    'trusted_inner_palette_policy': 'independent-current-core-unique-64x8-grid-exact-rgb8-repeated-prototypes-at-least-two-samples-current-seed-required-frequency-descending-rgb-lexicographic-first-unrepeated-shell-zero-through64-or65-radius-complete-native-search-perimeter-valid-and-interval-absent-unique-maximum-frequency-after-boundary-veto-ties-abstain-no-coarse-bin-brightness-or-hue-pruning-v2',
+                    'trusted_inner_seed_policy': 'own-current-core-finite-probability-above-point-two-native-contrast-and-existing-three-core-height-tangent-no-old-palette-support-or-black-neighbor-witness-v2',
+                    'trusted_inner_component_policy': 'same-modal-rgb8-linf-radius-current-own-search-four-connected-seeded-boundary-free-component-body-only-no-box3-collar-v1',
+                    'trusted_inner_publication_policy': 'independent-unit-bits-late-or-after-inside-coverage-and-foreground-edge-unique-add-f2-counters-current-own-cover-without-whole-legacy-cover-observation-no-original-body-cbc-raw-style-history-feedback-optional-failure-preserves-existing-mask-v2',
                     'ordinary_search_reference_policy': 'current-canonical-scl1-clock-frame-generation-source-crop-field-content-bounded-signed-reference-only-zero48-source-center-fallback-invalid-nonzero-fail-closed-never-layout-votes-v1',
                     'ordinary_search_inset_preserves_core': True,
                     'distance_row_policy': 'inclusive-exact-integer-rational-field-node-center-plus-minus-source-height-over-content-height-plus-completion-native-row-membership-v1',
@@ -346,7 +347,7 @@ CANONICAL_SUBTITLE_OCR = {'schema': 38,
                  'field_extent_offset': 12,
                  'roi_offset': 14,
                  'content_offset': 16,
-                 'cut_epoch_word': 20,
+                 'identity_reserved_word': 20,
                  'reserved_offset': 23,
                  'reserved_word_count': 1,
                  'adaptive_offset': 24,
@@ -396,7 +397,7 @@ CANONICAL_SUBTITLE_OCR = {'schema': 38,
                 'max_height_ratio': 2.0,
                 'learning_policy': 'independent-current-horizontal-entry-after-authoritative-blank-not-per-frame-assisted-candidates-never-teach-v1',
                 'release_policy': 'current-classified-covers-only-empty-current-clears-mask-immediately-layout-never-authorizes-pixels-v1',
-                'reset_policy': 'domain-context-source-field-content-reference-or-invalid-clock-clears-prior-layout-survives-scene-cuts-v1',
+                'reset_policy': 'domain-context-source-field-content-reference-or-invalid-clock-clears-prior-layout-v2',
                 'unknown_policy': 'current-compatible-line-or-qualified-position-height-prior-required-no-fixed-frame-wait-v1',
                 'prior_geometry_policy': 'ambiguous-prior-requires-both-envelopes-within-scene-angle-and-either-one-horizontal-or-coherent-same-direction-moderate-slopes-unknown-separate-v1',
                 'prior_only_group_center_policy': 'current-half-open-group-must-contain-signed-reference-center-without-borrowing-prior-location-as-current-line-evidence-v1',
@@ -451,7 +452,7 @@ EXPECTED_SHADOW_STATE_FIELD_NAMES = (
     "container_scale",
     "calibration_revision",
     "frame_valid",
-    "confirmed_cut_count",
+    "control_reserved_0",
     "contract_tag_bits",
     "camera_center_integrity_bits",
     "renderer_authorization_bits",
@@ -614,7 +615,7 @@ def validate_contract(
         if type(contract["subtitle_ocr"]["contour_policy"][name]) is not int:
             raise ValueError("subtitle_ocr.contour_policy layout words must be exact integers")
     if contract.get("selected_map") != CANONICAL_SELECTED_MAP:
-        raise ValueError("selected_map must exactly match the authenticated analytic glyph selector")
+        raise ValueError("selected_map must exactly match the ordinary authenticated Base inverse")
     if contract.get("final_parallax") != CANONICAL_FINAL_PARALLAX:
         raise ValueError(
             "final_parallax must exactly match the authenticated direct-render contract")
@@ -1245,7 +1246,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"  inline constexpr std::uint32_t subtitle_plane_field_extent_offset = {plane_state['field_extent_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_plane_roi_offset = {plane_state['roi_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_plane_content_offset = {plane_state['content_offset']}u;",
-        f"  inline constexpr std::uint32_t subtitle_plane_cut_epoch_word = {plane_state['cut_epoch_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_plane_identity_reserved_word = {plane_state['identity_reserved_word']}u;",
         "  // Legacy reset-mask name: current-core probability cues block neighbor fallback only.",
         f"  inline constexpr std::uint32_t subtitle_plane_history_reset_mask_word = {plane_state['history_reset_mask_word']}u;",
         f"  inline constexpr std::uint32_t subtitle_plane_warmup_word = {plane_state['warmup_word']}u;",
@@ -1968,7 +1969,7 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SUBTITLE_PLANE_FIELD_EXTENT_OFFSET {plane_state['field_extent_offset']}u",
         f"#define V2_SUBTITLE_PLANE_ROI_OFFSET {plane_state['roi_offset']}u",
         f"#define V2_SUBTITLE_PLANE_CONTENT_OFFSET {plane_state['content_offset']}u",
-        f"#define V2_SUBTITLE_PLANE_CUT_EPOCH_WORD {plane_state['cut_epoch_word']}u",
+        f"#define V2_SUBTITLE_PLANE_IDENTITY_RESERVED_WORD {plane_state['identity_reserved_word']}u",
         "// Legacy reset-mask name: current-core probability cues block neighbor fallback only.",
         f"#define V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD {plane_state['history_reset_mask_word']}u",
         f"#define V2_SUBTITLE_PLANE_WARMUP_WORD {plane_state['warmup_word']}u",
@@ -2162,7 +2163,7 @@ def render_hlsl_ocr_assertions() -> str:
  '    V2_SUBTITLE_PLANE_OBSERVATION_TIMESTAMP_OFFSET != 8u || V2_SUBTITLE_PLANE_SOURCE_EXTENT_OFFSET != 10u '
  '|| \\',
  '    V2_SUBTITLE_PLANE_FIELD_EXTENT_OFFSET != 12u || V2_SUBTITLE_PLANE_ROI_OFFSET != 14u || \\',
- '    V2_SUBTITLE_PLANE_CONTENT_OFFSET != 16u || V2_SUBTITLE_PLANE_CUT_EPOCH_WORD != 20u || \\',
+ '    V2_SUBTITLE_PLANE_CONTENT_OFFSET != 16u || V2_SUBTITLE_PLANE_IDENTITY_RESERVED_WORD != 20u || \\',
  '    V2_SUBTITLE_PLANE_HISTORY_RESET_MASK_WORD != 21u || V2_SUBTITLE_PLANE_WARMUP_WORD != 22u || V2_SUBTITLE_PLANE_WARMUP_OBSERVATIONS != 4u || V2_SUBTITLE_PLANE_WARMUP_OBSERVATIONS != V2_SUBTITLE_CONTOUR_HISTORY_CONFIRMATION_OBSERVATIONS || V2_SUBTITLE_PLANE_WARMUP_CUE_BIT != 8u || V2_SUBTITLE_PLANE_WARMUP_REMAINING_MASK != 7u || V2_SUBTITLE_PLANE_RESERVED_OFFSET != 23u || V2_SUBTITLE_PLANE_RESERVED_WORD_COUNT != 1u || \\',
  '    V2_SUBTITLE_PLANE_ADAPTIVE_OFFSET != 24u || V2_SUBTITLE_PLANE_ADAPTIVE_WORD_COUNT != 16u || \\',
  '    V2_SUBTITLE_PLANE_STATE_WORD_COUNT != V2_SUBTITLE_PLANE_ADAPTIVE_OFFSET + '
@@ -2292,7 +2293,8 @@ def shared_ui_warp_runtime_closures(
     """Calculate the two confined Host adapters from their one runtime specification owner."""
     source = header.read_text(encoding="utf-8")
     result = {}
-    for name, array_name in (("closure", "specs"), ("diagnostic_closure", "diagnostic_specs")):
+    for name, array_name in (("closure", "specs"), ("diagnostic_closure", "diagnostic_specs"),
+                             ("text_game_closure", "text_game_specs")):
         array = re.search(
             rf"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+{array_name}\s*\{{\{{(.*?)\}}\}};",
             source, re.DOTALL)

@@ -33,6 +33,7 @@ namespace models::host_sbs_subtitle_plane {
     const auto warmup = words[v2::subtitle_plane_warmup_word];
     constexpr auto capacity_mask = (1u << v2::subtitle_plane_cover_capacity) - 1u;
     if (warmup != 0u || (resets & ~mask) != 0u ||
+        words[v2::subtitle_plane_identity_reserved_word] != 0u ||
         words[0u] != v2::subtitle_plane_state_schema || words[1u] != v2::subtitle_plane_state_tag ||
         (flags & ~v2::subtitle_plane_current_valid_flag) != 0u ||
         (mask & ~capacity_mask) != 0u || (mask & (mask + 1u)) != 0u ||

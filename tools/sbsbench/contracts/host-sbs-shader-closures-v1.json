@@ -23,18 +23,6 @@
       "source_target": "cs_5_0"
     },
     {
-      "name": "depth_scene_cut_evidence",
-      "source_file": "depth_scene_cut_evidence_cs.hlsl",
-      "source_entrypoint": "main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "depth_scene_cut_resolve",
-      "source_file": "depth_scene_cut_resolve_cs.hlsl",
-      "source_entrypoint": "main",
-      "source_target": "cs_5_0"
-    },
-    {
       "name": "depth_coordinate_v2_moments",
       "source_file": "depth_coordinate_v2_moments_cs.hlsl",
       "source_entrypoint": "main",
@@ -188,12 +176,6 @@
       "name": "host_sbs_near_identical_resolve",
       "source_file": "host_sbs_near_identical_detector_cs.hlsl",
       "source_entrypoint": "resolve_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_near_identical_scene_seed",
-      "source_file": "host_sbs_near_identical_detector_cs.hlsl",
-      "source_entrypoint": "scene_seed_main",
       "source_target": "cs_5_0"
     },
     {
@@ -423,6 +405,18 @@
       "source_file": "current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl",
       "source_entrypoint": "support_main",
       "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_current_foreground_edge",
+      "source_file": "current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
+      "source_entrypoint": "foreground_edge_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_current_trusted_inner",
+      "source_file": "current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
+      "source_entrypoint": "trusted_inner_publish_main",
+      "source_target": "cs_5_0"
     }
   ],
   "groups": [
@@ -432,7 +426,7 @@
       "specs": [
         "host_sbs_near_identical_fused_preprocess"
       ],
-      "source_closure_sha256": "943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744"
+      "source_closure_sha256": "23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd"
     },
     {
       "name": "parallax_v2_producer",
@@ -442,8 +436,6 @@
         "buffer_to_tex",
         "buffer_to_tex_pad",
         "depth_minmax_ema",
-        "depth_scene_cut_evidence",
-        "depth_scene_cut_resolve",
         "depth_coordinate_v2_moments",
         "depth_coordinate_v2_frame_resolve",
         "depth_coordinate_v2_histogram",
@@ -468,7 +460,7 @@
         "host_sbs_subtitle_gaussian_vertical_limit",
         "host_sbs_subtitle_gaussian_horizontal_limit"
       ],
-      "source_closure_sha256": "10bde01f74c90532a705986fdc175bf95d291889f52e49175bf60578c320e2d3"
+      "source_closure_sha256": "f3e2861b7a6976a42897e9c1523aabf7e2bb120815a5967ddb3472c89acf4614"
     },
     {
       "name": "parallax_v2_coordinate_diagnostic",
@@ -476,18 +468,17 @@
       "specs": [
         "depth_coordinate_v2_coordinate_diagnostic"
       ],
-      "source_closure_sha256": "1ed356a5904c324842a493f14758ed04d8b05bad9e9ca03375ef8a534dee4a9c"
+      "source_closure_sha256": "89906733ecd581f6a6292c65f70c1f20ef83e16c70159eb4f294c5ce6cf5c392"
     },
     {
       "name": "near_identical_detector",
-      "description": "Mandatory GPU reuse arbitration, scene seeding, finalization, and reuse-depth closure.",
+      "description": "Mandatory GPU reuse arbitration, finalization, and reuse-depth closure.",
       "specs": [
         "host_sbs_near_identical_resolve",
-        "host_sbs_near_identical_scene_seed",
         "host_sbs_near_identical_finalize",
         "host_sbs_near_identical_reuse_depth"
       ],
-      "source_closure_sha256": "ba5f8ca3ca402a7fff876e974c0775c28e5391ddc5841aa423d3b2d328295831"
+      "source_closure_sha256": "613c4377bc2305150fbddf43a23cdc0cbf30713af07297c3a195c4906ef3e827"
     },
     {
       "name": "gpu_trace",
@@ -495,7 +486,7 @@
       "specs": [
         "host_sbs_gpu_trace"
       ],
-      "source_closure_sha256": "783a932493b2060c26735dc8bb14fcc785c6c2451b830f7d730e57437383ec08"
+      "source_closure_sha256": "bca09a68950934ec3f4a733bbd738b24ed768a1f15713c770c42425ebb936217"
     },
     {
       "name": "parallax_v2_live_renderer",
@@ -504,7 +495,7 @@
         "parallax_v2_live_renderer",
         "sbs_reprojection_vertex"
       ],
-      "source_closure_sha256": "fc12a023a3b930001d746622aecf5ceac11604aea033d9da0914ccaa845689b0"
+      "source_closure_sha256": "007e12071be4aff26bb562e2feda038e905b02aca48fd1c7d12f7be9cdc91843"
     },
     {
       "name": "parallax_v2_p010_y",
@@ -512,7 +503,7 @@
       "specs": [
         "parallax_v2_p010_y_renderer"
       ],
-      "source_closure_sha256": "52c9752f0c9759a41c2e0f767fee1369b1e0c34be2f92f8c40a9c5b3ff6fe89a"
+      "source_closure_sha256": "5d15b4f9959a51a83b407e49721137d38907620aa7f88b17e9371e06d02acc0d"
     },
     {
       "name": "sbs_flat_fallback",
@@ -530,7 +521,7 @@
         "parallax_v2_live_mapping",
         "parallax_v2_live_mask"
       ],
-      "source_closure_sha256": "113dee041c3cbb0cf14b09bb31bfa1843f2eeb6faf280c93af9a33fea6246210"
+      "source_closure_sha256": "f7c24b0d863ec04d61041012cc94bcd886ebf4181e5d2473a661a74f0ceea285"
     },
     {
       "name": "subtitle_cohort_prototype_research",
@@ -540,7 +531,7 @@
         "host_sbs_subtitle_cohort_members",
         "host_sbs_subtitle_cohort_filter"
       ],
-      "source_closure_sha256": "13827867460a6e47543a95244536d3b27a5a9c7583eab19c880ad2237c5a3b84"
+      "source_closure_sha256": "b9573e7fd5d4dccd449b4facd081ea1bbde4b910ba4ab4b4d6bafcef92b003dc"
     },
     {
       "name": "subtitle_cohort_research",
@@ -551,7 +542,7 @@
         "host_sbs_subtitle_cohort_filter",
         "host_sbs_subtitle_cohort_snapshot"
       ],
-      "source_closure_sha256": "b01a1b250e23fc43a6cc3126745335577a9d808e6c27abe310d5a3227d42a909"
+      "source_closure_sha256": "3bc295ddc5b5d4a328a279dc83c07c7adf2d405e50f60e531ec836278344eb59"
     },
     {
       "name": "subtitle_inner_colour_research",
@@ -563,7 +554,7 @@
         "host_sbs_subtitle_inner_colour_research_accumulate",
         "host_sbs_subtitle_inner_colour_research_validate"
       ],
-      "source_closure_sha256": "9aa49deee394a05395a7d685a34648c8a41bbd200fd6d3ebe1d9c0fafec27cd5"
+      "source_closure_sha256": "92c656329fa8a5f29c461e06fc0584a7c2f4e8113071e1f97ed847982a8d74f9"
     },
     {
       "name": "subtitle_inner_components_research",
@@ -584,7 +575,7 @@
       "specs": [
         "host_sbs_subtitle_matte_guard"
       ],
-      "source_closure_sha256": "e47e00b30cffdba1e7c7a85b7348f798cfc8025c670c12eb355e1b5fc30549fa"
+      "source_closure_sha256": "b8f3af2b2a7a2f38528dcf590d8875745dada0f2204788f949af9b5850860d0c"
     },
     {
       "name": "parallax_v2_queued_renderer",
@@ -592,7 +583,7 @@
       "specs": [
         "parallax_v2_queued_renderer"
       ],
-      "source_closure_sha256": "1058907ac7dca7cc73ee5beb20d318e8ab760a36e7b7503bbe2a8d69d7a23d52"
+      "source_closure_sha256": "cda6b066629de7513a0c089c38f8cf68a843b170d7d2b633197213c6494bdbdf"
     },
     {
       "name": "current_mask_holes",
@@ -619,6 +610,22 @@
         "host_sbs_current_stroke_coverage_support"
       ],
       "source_closure_sha256": "1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063"
+    },
+    {
+      "name": "current_foreground_edge",
+      "description": "Optional current-source foreground antialias recovery from an immutable post-completion mask, current qualified foreground seeds and a common foreground/outline RGB interval. Failure preserves the existing mask.",
+      "specs": [
+        "host_sbs_current_foreground_edge"
+      ],
+      "source_closure_sha256": "4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c"
+    },
+    {
+      "name": "current_trusted_inner",
+      "description": "Optional current-source repeated-colour inner-fill recovery, independently accumulated and published after existing outline and foreground-edge completion. Failure preserves the existing mask.",
+      "specs": [
+        "host_sbs_current_trusted_inner"
+      ],
+      "source_closure_sha256": "86c990d49f0946e1d79730c42f629ef89076cb95b552225847671d0ef5ac47e7"
     }
   ]
 }

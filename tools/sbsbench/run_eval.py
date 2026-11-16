@@ -64,7 +64,6 @@ from source_observation_timeline import (  # noqa: E402
 import sbsbench  # noqa: E402  (metric implementations)
 import eval_parallel  # noqa: E402  (evaluator scheduling; deliberately not metric math)
 import direct_geometry_contract as direct_geometry  # noqa: E402
-import cut_state_contract  # noqa: E402
 import whole_clip_raw_contract  # noqa: E402
 import prod_zipdepth_convex2x as prod_convex2x  # noqa: E402
 import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics  # noqa: E402
@@ -230,10 +229,10 @@ def scored_artifact_digests(directory):
     scored_fixed = {
         "contract.json", "sbs_perf.json", "warp_map_shape.json", "hdr_output_stats.json",
         "observation.timeline",
-        "cut_state.json", "direct_parallax_manifest.json",
+        "direct_parallax_manifest.json",
         convex2x_diagnostics.SIDECAR_FILENAME,
     }
-    numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json", "cut_state.json"}
+    numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json"}
     frame_pattern = re.compile(
         r"^(?:sbs|depth|structure|parallax|warp_map|warp_mask)_\d+\.(?:png|f32)$")
     # Schema 2 has one high input (model_input_) and reuses raw_ as its sole output. Retain the
@@ -397,7 +396,6 @@ def metric_contract_files():
         os.path.join(SCRIPT_DIR, "sbs_subtitle_metrics.py"),
         os.path.join(SCRIPT_DIR, "sbs_warp_shear_metrics.py"),
         os.path.join(SCRIPT_DIR, "direct_geometry_contract.py"),
-        os.path.join(SCRIPT_DIR, "cut_state_contract.py"),
         os.path.join(SCRIPT_DIR, "thresholds.json"),
     ]
 
@@ -439,64 +437,6 @@ def label_contract_sha():
     Runtime shader/executable/model/config/source hashes are recorded separately in the context.
     """
     return sha256_files(label_contract_files())
-
-
-def validate_structureless_history_bridge_source(path, contract):
-    """Authenticate a lossless A->uniform->A flash and A->uniform->B bridge.
-
-    This is source-contract validation, not a pixel metric. Keeping it in the runner preserves the
-    numeric metric hash used by committed baselines while the stricter label/source contract still
-    invalidates reusable labels.
-    """
-    src_by_id = sbsbench.indexed_files(
-        os.path.join(path, "frame_*.*"), "frame_")
-    frame_ids = sorted(src_by_id)
-    flash = contract.get("flash_frame")
-    flash_return = contract.get("flash_return_frame")
-    slate = contract.get("slate_frame")
-    persistent = contract.get("persistent_frame")
-    new_scene = contract.get("new_scene_frame")
-    uniform_rgb = contract.get("uniform_rgb")
-    if frame_ids != list(range(1, len(frame_ids) + 1)):
-        raise ValueError(
-            "structureless-history bridge requires contiguous one-based source frame ids")
-    if (not all(isinstance(frame, int) and not isinstance(frame, bool)
-                for frame in (flash, flash_return, slate, persistent, new_scene)) or
-            flash_return != flash + 1 or persistent != slate + 1 or
-            not 2 <= flash < flash_return < slate < persistent < new_scene <= len(frame_ids) or
-            not isinstance(uniform_rgb, list) or len(uniform_rgb) != 3 or
-            any(not isinstance(value, int) or isinstance(value, bool) or
-                not 0 <= value <= 255 for value in uniform_rgb)):
-        raise ValueError("structureless-history source schedule is invalid")
-    if any(os.path.splitext(src_by_id[frame_id])[1].lower() != ".png"
-           for frame_id in frame_ids):
-        raise ValueError("structureless-history bridge frames must use lossless PNG")
-
-    with Image.open(src_by_id[1]) as image:
-        scene_a = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    with Image.open(src_by_id[new_scene]) as image:
-        scene_b = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    if (scene_a.shape != scene_b.shape or
-            not np.any(scene_a != scene_a[0, 0]) or
-            not np.any(scene_b != scene_b[0, 0]) or
-            np.array_equal(scene_a, scene_b)):
-        raise ValueError(
-            "structureless-history bridge endpoints must be equal-size distinct structured scenes")
-    uniform = np.empty_like(scene_a)
-    uniform[...] = np.asarray(uniform_rgb, dtype=np.uint8)
-
-    for frame_id in frame_ids:
-        if frame_id == flash or slate <= frame_id < new_scene:
-            expected = uniform
-        elif frame_id < new_scene:
-            expected = scene_a
-        else:
-            expected = scene_b
-        with Image.open(src_by_id[frame_id]) as image:
-            actual = np.asarray(image.convert("RGB"), dtype=np.uint8)
-        if actual.shape != expected.shape or not np.array_equal(actual, expected):
-            raise ValueError(
-                f"frame {frame_id} violates the declared structureless-history source contract")
 
 
 def label_context_sha(meta):
@@ -1085,20 +1025,15 @@ def load_clip_metadata(path, suite=None, required=True):
         raise ValueError(
             f"invalid clip metadata {meta_path}: reference_stereo_available must be boolean")
     if "evaluation_role" in meta and meta["evaluation_role"] not in {
-            "ground-truth", "reference-only", "conformance-only"}:
+            "ground-truth", "reference-only"}:
         raise ValueError(
-            f"invalid clip metadata {meta_path}: evaluation_role must be ground-truth, "
-            "reference-only, or conformance-only")
+            f"invalid clip metadata {meta_path}: evaluation_role must be ground-truth or "
+            "reference-only")
     content_type = meta.get("content_type")
     if content_type is not None and content_type not in CONTENT_TYPES:
         raise ValueError(
             f"invalid clip metadata {meta_path}: content_type {content_type!r} is not one of "
             f"{sorted(CONTENT_TYPES)!r}")
-    if (meta.get("evaluation_role") == "conformance-only" and
-            any(meta.get(key) is True for key in requirement_keys)):
-        raise ValueError(
-            f"invalid clip metadata {meta_path}: conformance-only clips cannot declare "
-            "consumed depth/flow ground truth or subtitle-region ground truth")
     if suite == "extended":
         if not isinstance(meta.get("dataset"), str) or not meta["dataset"].strip():
             raise ValueError(f"invalid extended clip metadata {meta_path}: dataset is required")
@@ -1107,10 +1042,6 @@ def load_clip_metadata(path, suite=None, required=True):
                 "evaluation_role" not in meta):
             meta["evaluation_role"] = "reference-only"
         is_reference_only = meta.get("evaluation_role") == "reference-only"
-        if meta.get("evaluation_role") == "conformance-only":
-            raise ValueError(
-                f"invalid extended clip metadata {meta_path}: conformance-only is reserved for "
-                "deterministic core probes")
         if not has_consumed_gt and not (
                 is_reference_only and meta.get("reference_stereo_available") is True):
             raise ValueError(
@@ -1129,149 +1060,6 @@ def load_clip_metadata(path, suite=None, required=True):
     if required and content_type is None:
         raise ValueError(
             f"invalid clip metadata {meta_path}: explicit content_type classification is required")
-    shot_contract = meta.get("shot_state_contract")
-    if meta.get("evaluation_role") == "conformance-only" and shot_contract is None:
-        raise ValueError(
-            f"invalid clip metadata {meta_path}: conformance-only requires an authenticated "
-            "shot_state_contract hard invariant")
-    if shot_contract is not None:
-        if not isinstance(shot_contract, dict):
-            raise ValueError(
-                f"invalid clip metadata {meta_path}: shot_state_contract must be an object")
-        common_keys = {"kind", "monitor_from_frame", "expected_pulse_frames"}
-        kind = shot_contract.get("kind")
-        kind_keys = {
-            "hard-cut": set(),
-            "exposure-only": {
-                "stable_from_frame", "base_frame", "gain_percent_by_frame",
-                "rgb_transform",
-            },
-            "latched-motion-hard-cut": {
-                "setup_pulse_frame", "persistent_motion_frames",
-                "escape_candidate_frame", "escape_pulse_frame",
-                "source_base_frame_by_frame",
-                "horizontal_roll_px_by_frame", "rgb_transform",
-            },
-            "structureless-history-bridge": {
-                "flash_frame", "flash_return_frame", "slate_frame",
-                "persistent_frame", "new_scene_frame", "uniform_rgb", "rgb_transform",
-            },
-        }
-        expected_keys = common_keys | kind_keys.get(kind, set())
-        if kind not in kind_keys or set(shot_contract) != expected_keys:
-            raise ValueError(
-                f"invalid clip metadata {meta_path}: unsupported or incomplete "
-                f"shot_state_contract {shot_contract!r}")
-        monitor_from = shot_contract.get("monitor_from_frame")
-        pulses = shot_contract.get("expected_pulse_frames")
-        if monitor_from != 2 or isinstance(monitor_from, bool):
-            raise ValueError(
-                f"invalid clip metadata {meta_path}: monitor_from_frame must be exactly 2 "
-                "so startup pulses cannot be hidden")
-        if (not isinstance(pulses, list) or
-                any(not isinstance(frame, int) or isinstance(frame, bool) or frame < monitor_from
-                    for frame in pulses) or len(set(pulses)) != len(pulses)):
-            raise ValueError(
-                f"invalid clip metadata {meta_path}: expected_pulse_frames must be unique "
-                "integer frame numbers inside the monitored interval")
-        frame_count = len(glob.glob(os.path.join(path, "frame_*.*")))
-        if monitor_from > frame_count or any(frame > frame_count for frame in pulses):
-            raise ValueError(
-                f"invalid clip metadata {meta_path}: shot-state frame contract exceeds "
-                f"the {frame_count}-frame clip")
-        if kind == "exposure-only":
-            gains = shot_contract.get("gain_percent_by_frame")
-            base_frame = shot_contract.get("base_frame")
-            stable_from = shot_contract.get("stable_from_frame")
-            if pulses:
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: exposure-only stimulus cannot expect "
-                    "a shot pulse")
-            if (not isinstance(stable_from, int) or isinstance(stable_from, bool) or
-                    not monitor_from <= stable_from <= frame_count):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: stable_from_frame must be inside "
-                    "the monitored source interval")
-            if (not isinstance(base_frame, int) or isinstance(base_frame, bool) or
-                    not 1 <= base_frame <= frame_count):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: base_frame is outside the clip")
-            if (not isinstance(gains, list) or len(gains) != frame_count or
-                    any(not isinstance(gain, int) or isinstance(gain, bool) or gain <= 0
-                        for gain in gains)):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: gain_percent_by_frame must contain "
-                    "one positive integer per source frame")
-            if shot_contract.get("rgb_transform") != (
-                    "min(255, (base_rgb * gain_percent + 50) // 100)"):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: unknown exposure RGB transform")
-        if kind == "latched-motion-hard-cut":
-            setup = shot_contract.get("setup_pulse_frame")
-            persistent = shot_contract.get("persistent_motion_frames")
-            candidate = shot_contract.get("escape_candidate_frame")
-            escape = shot_contract.get("escape_pulse_frame")
-            base_frames = shot_contract.get("source_base_frame_by_frame")
-            shifts = shot_contract.get("horizontal_roll_px_by_frame")
-            if (not isinstance(setup, int) or isinstance(setup, bool) or
-                    not isinstance(candidate, int) or isinstance(candidate, bool) or
-                    not isinstance(escape, int) or isinstance(escape, bool) or
-                    not monitor_from <= setup < candidate < escape <= frame_count or
-                    escape != candidate + 1 or
-                    pulses != [setup, escape]):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: latched-motion pulse schedule must "
-                    "contain the setup cut and the one-update-confirmed escape cut")
-            if (not isinstance(persistent, list) or persistent != [setup, candidate]):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: persistent_motion_frames must span "
-                    "from the setup cut through the held escape candidate")
-            if (not isinstance(base_frames, list) or len(base_frames) != frame_count or
-                    any(not isinstance(frame, int) or isinstance(frame, bool) or
-                        not 1 <= frame <= frame_count for frame in base_frames)):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: source_base_frame_by_frame must "
-                    "contain one valid source frame id per frame")
-            if (not isinstance(shifts, list) or len(shifts) != frame_count or
-                    any(not isinstance(shift, int) or isinstance(shift, bool)
-                        for shift in shifts)):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: horizontal_roll_px_by_frame must "
-                    "contain one integer shift per frame")
-            if shot_contract.get("rgb_transform") != (
-                    "np.roll(base_rgb, horizontal_shift_px, axis=1)"):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: unknown latched-motion RGB transform")
-        if kind == "structureless-history-bridge":
-            flash = shot_contract.get("flash_frame")
-            flash_return = shot_contract.get("flash_return_frame")
-            slate = shot_contract.get("slate_frame")
-            persistent = shot_contract.get("persistent_frame")
-            new_scene = shot_contract.get("new_scene_frame")
-            schedule = (flash, flash_return, slate, persistent, new_scene)
-            if (any(not isinstance(frame, int) or isinstance(frame, bool)
-                    for frame in schedule) or
-                    not monitor_from <= flash or flash_return != flash + 1 or
-                    persistent != slate + 1 or
-                    not flash_return < slate < persistent < new_scene <= frame_count or
-                    # new-scene pulse arrives one frame after the content cut: the V2
-                    # resolver confirms a post-bridge structured return over two updates.
-                    pulses != [persistent, new_scene + 1]):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: structureless-history bridge must "
-                    "contain one-frame flash, a bounded persistent-slate pulse, and a "
-                    "new-scene pulse")
-            uniform = shot_contract.get("uniform_rgb")
-            if (not isinstance(uniform, list) or len(uniform) != 3 or
-                    any(not isinstance(value, int) or isinstance(value, bool) or
-                        not 0 <= value <= 255 for value in uniform)):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: uniform_rgb must contain three bytes")
-            if shot_contract.get("rgb_transform") != (
-                    "scene_a; one uniform flash; scene_a; uniform slate; scene_b"):
-                raise ValueError(
-                    f"invalid clip metadata {meta_path}: unknown structureless bridge transform")
-            validate_structureless_history_bridge_source(path, shot_contract)
     reference_patterns = {
         "required_gt_depth": os.path.join(path, "gt_depth", "frame_*.*"),
         "required_gt_flow": os.path.join(path, "gt_flow", "frame_*.npz"),
@@ -1345,7 +1133,7 @@ def published_clip_metadata(source_meta):
         "subtitle_transition_contract",
         "dataset", "homepage", "citation",
         "license_note", "content_type", "evaluation_role", "source_url", "source_window",
-        "source_artifacts", "shot_state_contract",
+        "source_artifacts",
     )
     published = {key: source_meta[key] for key in keys if key in source_meta}
     if "suite" in source_meta:
@@ -1384,7 +1172,7 @@ def source_evidence_digests(path):
                                      "required_gt_subtitle_sanitizer_oracle",
                                      "subtitle_transition_contract",
                                      "reference_stereo_available", "evaluation_role",
-                                     "content_type", "shot_state_contract", "fps") if k in meta}
+                                     "content_type", "fps") if k in meta}
     semantic_bytes = json.dumps(semantic, sort_keys=True).encode()
     legacy.update(semantic_bytes)
     full.update(semantic_bytes)
@@ -1455,26 +1243,14 @@ def preflight_baselines(base_dir, clips, required_common, clip_hashes):
 def clips_requiring_committed_baselines(clips, clip_metadata):
     """Return the scored clips whose decision authority includes a numeric baseline.
 
-    ``conformance-only`` core probes are decided by authenticated hard invariants (for example,
-    an exact production shot-state pulse schedule), not by tolerance against yesterday's value.
-    Every other role remains fail-closed: omitting or misspelling a role cannot waive its
-    committed baseline.
+    Every scored clip requires one, and every scored clip must carry source metadata: no
+    evaluation role waives its committed baseline.
     """
     missing_metadata = [clip for clip in clips if clip not in clip_metadata]
     if missing_metadata:
         raise ValueError(
             f"missing source metadata for scored clip(s): {missing_metadata}")
-    invalid_exemptions = [
-        clip for clip in clips
-        if clip_metadata[clip].get("evaluation_role") == "conformance-only" and
-        not isinstance(clip_metadata[clip].get("shot_state_contract"), dict)
-    ]
-    if invalid_exemptions:
-        raise ValueError(
-            "conformance-only clip(s) have no authenticated hard contract: "
-            f"{invalid_exemptions}")
-    return [clip for clip in clips
-            if clip_metadata[clip].get("evaluation_role") != "conformance-only"]
+    return list(clips)
 
 
 def build_baseline_snapshot(base_dir, baselines):
@@ -2234,9 +2010,6 @@ def authoritative_remeasurement_clip_meta(
                     if path.lower().endswith((".png", ".jpg", ".jpeg"))}
     if not source_files:
         raise ValueError(f"clips.{clip}: source has no decodable image frames")
-    if source_meta.get("shot_state_contract"):
-        sbsbench.validate_shot_state_source(
-            source_files, source_meta["shot_state_contract"])
 
     artifact_dir = os.path.join(run_dir, clip)
     direct_parallax_run = run_meta.get("warp_input") == direct_geometry.WARP_INPUT
@@ -2342,25 +2115,11 @@ def authoritative_remeasurement_clip_meta(
         if key not in contract:
             raise ValueError(f"clips.{clip}: harness contract is missing {key}")
     gpu_replay_descriptor = contract.get("depth_coordinate_v2_gpu")
-    if gpu_replay_descriptor is None:
-        gpu_replay = False
-    elif (not isinstance(gpu_replay_descriptor, dict) or
-          gpu_replay_descriptor.get("enabled") is not True):
+    if gpu_replay_descriptor is not None and (
+            not isinstance(gpu_replay_descriptor, dict) or
+            gpu_replay_descriptor.get("enabled") is not True):
         raise ValueError(
             f"clips.{clip}: depth_coordinate_v2_gpu must be an enabled object when present")
-    else:
-        gpu_replay = True
-    expected_cut_state = cut_state_contract.contract_reference(
-        gpu_replay=gpu_replay)
-    if contract.get("cut_state") != expected_cut_state:
-        raise ValueError(
-            f"clips.{clip}: missing/unknown cut-state trace contract")
-    state_trace = sbsbench.load_cut_state_trace(
-        os.path.join(artifact_dir, expected_cut_state["file"]))
-    if set(state_trace) != source_ids:
-        raise ValueError(
-            f"clips.{clip}: cut-state/source frame-id mismatch: "
-            f"state={sorted(state_trace)}, source={sorted(source_ids)}")
     for key in ("model", "warp_input", "cuda_graph", "pop_strength",
                 "parallax_v2_shadow", "parallax_v2_render", "depth_step",
                 "depth_reuse_interval"):
@@ -2875,8 +2634,12 @@ def sunshine_running():
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq sunshine.exe", "/NH"],
                              capture_output=True, text=True, timeout=15).stdout
         return "sunshine.exe" in out
-    except Exception:
-        return False
+    except Exception as exc:
+        # Unknown is treated as contended: the perf gate is skipped and a baseline update is
+        # refused, rather than trusting timings that may have shared the GPU with a live host.
+        print(f"run_eval: WARNING cannot tell whether sunshine.exe is running ({exc}); "
+              "assuming GPU contention.")
+        return True
 
 
 def file_sha256(path):
@@ -3267,6 +3030,11 @@ def main():
         fail("--direct-parallax-root is reference-only and requires --comparison-only")
     if direct_parallax_root and not os.path.isdir(direct_parallax_root):
         fail(f"--direct-parallax-root is not a directory: {direct_parallax_root}")
+    # The harness takes the last occurrence of a flag. These inputs are the evaluator's own:
+    # overriding them would score a different source or location than the one hashed here.
+    evaluator_owned = sorted({"--frames", "--out", "--capabilities"} & set(args.extra))
+    if evaluator_owned:
+        fail(f"--extra may not override evaluator-owned harness arguments: {', '.join(evaluator_owned)}")
     if "--cuda-graph" in args.extra:
         fail("--cuda-graph was removed; inference-producing runs always require the joined "
              "DAV2/OCR conditional wrapper")
@@ -3557,13 +3325,10 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         gpu_replay_descriptor = contract.get("depth_coordinate_v2_gpu")
-        if gpu_replay_descriptor is None:
-            gpu_replay = False
-        elif (not isinstance(gpu_replay_descriptor, dict) or
-              gpu_replay_descriptor.get("enabled") is not True):
+        if gpu_replay_descriptor is not None and (
+                not isinstance(gpu_replay_descriptor, dict) or
+                gpu_replay_descriptor.get("enabled") is not True):
             fail(f"{clip}: depth_coordinate_v2_gpu must be an enabled object when present")
-        else:
-            gpu_replay = True
         expected_contract = {
             "schema": (direct_geometry.CONTRACT_SCHEMA if direct_parallax_root else
                        whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA),
@@ -3576,8 +3341,6 @@ def main():
             "parallax_v2_shadow": expected_v2_shadow,
             "parallax_v2_render": expected_v2_render,
             "cuda_graph_captured": expected_cuda_graph,
-            "cut_state": cut_state_contract.contract_reference(
-                gpu_replay=gpu_replay),
         }
         if direct_parallax_root:
             expected_contract.update({
@@ -3632,14 +3395,6 @@ def main():
             os.path.join(clip_dir, "frame_*.*"), "frame_")
         source_ids = set(source_by_id)
         clip_meta["source_frame_count"] = len(source_ids)
-        try:
-            state_trace = sbsbench.load_cut_state_trace(
-                os.path.join(out_dir, contract["cut_state"]["file"]))
-        except ValueError as exc:
-            fail(f"{clip}: {exc}")
-        if set(state_trace) != source_ids:
-            fail(f"{clip}: cut-state/source frame-id mismatch "
-                 f"state={sorted(state_trace)} source={sorted(source_ids)}")
         sbs_by_id = sbsbench.indexed_files(os.path.join(out_dir, "sbs_*.png"), "sbs_")
         sbs_ids = set(sbs_by_id)
         depth_by_id = sbsbench.indexed_files(
@@ -4088,8 +3843,18 @@ def main():
         print(f"  report: {report_path}")
     if args.update_baselines:
         print(f"  baselines updated in {base_dir} -- commit them with the change that justified it.")
-    sys.exit(1 if regressions or hard_failures or evidence_failures else 0)
+    # 1 is reserved for a named regression. Missing or unauthenticated evidence on its own is
+    # the documented "invalid or incomplete evidence" outcome, not a quality verdict.
+    if regressions or hard_failures:
+        sys.exit(1)
+    sys.exit(2 if evidence_failures else 0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:  # noqa: BLE001 - an unexpected fault is a setup failure, never a verdict
+        import traceback
+        traceback.print_exc()
+        print("run_eval: unexpected error; no verdict was produced", file=sys.stderr)
+        sys.exit(2)

@@ -105,7 +105,13 @@ cbuffer OcrResolveConstants : register(b0) {
     int line_center_twice_source;
     uint line_reference_width;
     int line_search_top_source;
-    uint line_reserved;
+    // 0: video captions must be centered on the reference.
+    // 1: the owner has declared this application's bottom text to be dialogue. It may sit at
+    // any horizontal position. A line that types out starts as one or two glyphs whose blob
+    // has no measurable orientation, so one learned line is enough position memory here and a
+    // short piece's envelope shape cannot veto it. The bottom search region, the first line's
+    // own proof of horizontality, scene-text rejection and every other rule are unchanged.
+    uint line_policy;
     uint2 source_clock_us;
     uint input_domain_reset;
     uint classifier_reserved;
@@ -217,7 +223,7 @@ bool ResolveGeometryValid() {
         line_center_twice_source > (int)line_reference_width ||
         line_search_top_source < -(int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         line_search_top_source > (int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
-        line_reserved != 0u || classifier_reserved != 0u || input_domain_reset > 1u ||
+        line_policy > 1u || classifier_reserved != 0u || input_domain_reset > 1u ||
         source_width > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         source_height > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         source_width == 0u || source_height == 0u || field_width == 0u || field_height == 0u ||
@@ -428,8 +434,11 @@ bool CandidateEvidenceValid(CandidateStats stats, out float score) {
     return FiniteFloat(score) && score >= V2_OCR_MIN_MEAN_SCORE;
 }
 
+// line_span is the horizontal extent, in detector pixels, the ordinary cover must reach. For
+// video it is the candidate's own tight extent, which leaves the cover exactly as before.
 bool PrepareCandidateBoxes(
-    CandidateStats stats, uint kind_flags, out uint4 tight_box, out uint4 expanded_box) {
+    CandidateStats stats, uint kind_flags, uint2 line_span,
+    out uint4 tight_box, out uint4 expanded_box) {
     uint tight_width = stats.tight_right - stats.tight_left;
     uint tight_height = stats.tight_bottom - stats.tight_top;
     tight_box = MapBox(
@@ -455,10 +464,11 @@ bool PrepareCandidateBoxes(
         V2_OCR_ORDINARY_COVER_VERTICAL_GUARD_HEIGHT_DENOMINATOR - 1u) /
         V2_OCR_ORDINARY_COVER_VERTICAL_GUARD_HEIGHT_DENOMINATOR;
     uint vertical_pad = pad + (kind_flags == V2_OCR_BOX_FLAG_RIBBON ? 0u : vertical_guard);
-    uint expanded_left = stats.tight_left > horizontal_pad ?
-        stats.tight_left - horizontal_pad : 0u;
+    uint span_left = kind_flags == V2_OCR_BOX_FLAG_RIBBON ? stats.tight_left : line_span.x;
+    uint span_right = kind_flags == V2_OCR_BOX_FLAG_RIBBON ? stats.tight_right : line_span.y;
+    uint expanded_left = span_left > horizontal_pad ? span_left - horizontal_pad : 0u;
     uint expanded_top = stats.tight_top > vertical_pad ? stats.tight_top - vertical_pad : 0u;
-    uint expanded_right = min(stats.tight_right + horizontal_pad, OCR_WIDTH);
+    uint expanded_right = min(span_right + horizontal_pad, OCR_WIDTH);
     uint expanded_bottom = min(stats.tight_bottom + vertical_pad, OCR_HEIGHT);
     if (min(expanded_right - expanded_left, expanded_bottom - expanded_top) < 5u) return false;
 
@@ -473,11 +483,16 @@ bool PrepareCandidateBoxes(
     return true;
 }
 
+uint CandidatePriorBin(CandidateStats stats) {
+    return min(V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT - 1u,
+        (stats.tight_bottom - 1u) * V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT / OCR_HEIGHT);
+}
+
 void PublishCandidate(
     CandidateStats stats, float score, uint kind_flags, bool independently_strong,
-    inout uint raw_total, inout uint final_total) {
+    uint2 line_span, inout uint raw_total, inout uint final_total) {
     uint4 tight_box, expanded_box;
-    if (!PrepareCandidateBoxes(stats, kind_flags, tight_box, expanded_box)) return;
+    if (!PrepareCandidateBoxes(stats, kind_flags, line_span, tight_box, expanded_box)) return;
     uint pair_capacity = min(OCR8_RAW_CAPACITY, OCR8_FINAL_CAPACITY);
     uint pair_index = final_total;
     if (final_total < pair_capacity) {
@@ -520,15 +535,18 @@ void PublishCandidate(
     StoreBox(
         OCR8_FINAL_OFFSET, pair_index, expanded_box, score,
         kind_flags, stats.island_count, stats.structural_gap_count);
-    uint bin = min(V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT - 1u,
-        (stats.tight_bottom - 1u) * V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT / OCR_HEIGHT);
-    RetainedTrusted[pair_index] = independently_strong ?
+    uint bin = CandidatePriorBin(stats);
+    // A ribbon's tight core is its whole broad bottom run, with its own extent policy and no
+    // center-span requirement. Its row and height are not an ordinary caption line, so it is
+    // published but never teaches the position prior or the single trusted height.
+    RetainedTrusted[pair_index] =
+        independently_strong && (kind_flags & V2_OCR_BOX_FLAG_RIBBON) == 0u ?
         uint4(1u << bin, stats.active_pixels, stats.tight_top, stats.tight_bottom) :
         uint4(0u, 0u, 0u, 0u);
 }
 
 bool QueueLineCandidate(
-    CandidateStats stats, float score, uint kind_flags, inout uint candidate_count) {
+    CandidateStats stats, uint kind_flags, inout uint candidate_count) {
     // A band of height h has <=60 column islands and <=floor((h+1)/4) valid local row spans
     // per island (height>=3 and at least one blank row between). For B disjoint global bands,
     // sum(h)+(B-1)<=131, so sum(floor((h+1)/4))<=33. Thus 60*33 bounds the WHOLE observation,
@@ -670,6 +688,8 @@ uint ClassifyCurrentGeometry(CandidateStats stats, out float low_slope, out floa
     float sum_high = 0.0f;
     float sum_xlow = 0.0f;
     float sum_xhigh = 0.0f;
+    uint2 low_rows = uint2(0xffffffffu, 0u);
+    uint2 high_rows = uint2(0xffffffffu, 0u);
     [loop]
     for (uint bin = 0u; bin < V2_OCR_CLASSIFIER_X_BINS; ++bin) {
         uint left = stats.tight_left + bin * width / V2_OCR_CLASSIFIER_X_BINS;
@@ -705,6 +725,8 @@ uint ClassifyCurrentGeometry(CandidateStats stats, out float low_slope, out floa
         float high_y = ((float)(high - stats.tight_top) + 0.5f) *
             (float)crop_height_pixels / (float)OCR_HEIGHT;
         ++populated;
+        low_rows = uint2(min(low_rows.x, low), max(low_rows.y, low));
+        high_rows = uint2(min(high_rows.x, high), max(high_rows.y, high));
         sum_x += x;
         sum_xx += x * x;
         sum_low += low_y;
@@ -721,6 +743,11 @@ uint ClassifyCurrentGeometry(CandidateStats stats, out float low_slope, out floa
     if (!FiniteFloat(low_slope) || !FiniteFloat(high_slope)) return CLASS_UNKNOWN;
     if (abs(low_slope) <= V2_OCR_CLASSIFIER_HORIZONTAL_TAN &&
         abs(high_slope) <= V2_OCR_CLASSIFIER_HORIZONTAL_TAN) return CLASS_HORIZONTAL;
+    // Envelope rows are whole detector rows. When each envelope moves by at most one row
+    // across all populated bins, the fit cannot distinguish tilt from row quantization: on a
+    // short line that single step alone exceeds the angle bound. Longer lines with the same
+    // one-row range already satisfy the bound above.
+    if (low_rows.y - low_rows.x <= 1u && high_rows.y - high_rows.x <= 1u) return CLASS_HORIZONTAL;
     if ((low_slope > V2_OCR_CLASSIFIER_SCENE_TAN &&
          high_slope > V2_OCR_CLASSIFIER_SCENE_TAN) ||
         (low_slope < -V2_OCR_CLASSIFIER_SCENE_TAN &&
@@ -800,14 +827,7 @@ void AttachContainedPunctuation(uint candidate_begin, uint candidate_end) {
 }
 
 bool SameTextLine(CandidateStats candidate, uint2 anchor, uint4 bounds) {
-    uint intersection_top = max(candidate.tight_top, anchor.x);
-    uint intersection_bottom = min(candidate.tight_bottom, anchor.y);
-    if (intersection_top >= intersection_bottom) return false;
-    uint union_height = max(candidate.tight_bottom, anchor.y) -
-        min(candidate.tight_top, anchor.x);
-    if ((intersection_bottom - intersection_top) *
-        V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_DENOMINATOR <
-        union_height * V2_OCR_LINE_GROUP_MIN_VERTICAL_IOU_NUMERATOR) return false;
+    if (!SpanHasHalfIoU(candidate.tight_top, candidate.tight_bottom, anchor)) return false;
     // Compare native-source lengths, including rounded or height-clipped OCR crops. A row
     // at the same height in a distant column cannot lend this line a false centered union.
     uint gap_begin = max(candidate.tight_left, bounds.x);
@@ -822,6 +842,7 @@ bool SameTextLine(CandidateStats candidate, uint2 anchor, uint4 bounds) {
 }
 
 bool LineIsCentered(uint4 bounds) {
+    if (line_policy != 0u) return true;
     // Native extents/reference are bounded to 5120. Even the largest signed difference times
     // the tolerance denominator is <=737,280,000: exact int32 comparison keeps both edges equal.
     int delta = (int)(bounds.x + bounds.z) * (int)source_width -
@@ -832,6 +853,7 @@ bool LineIsCentered(uint4 bounds) {
 }
 
 bool LineSpansReferenceCenter(uint4 bounds) {
+    if (line_policy != 0u) return true;
     // Position/height memory cannot independently authorize a small fragment merely because
     // its midpoint lies in the broad center tolerance. Require the current bounded line group
     // to contain the signed reference center in its half-open horizontal span. All products
@@ -1015,15 +1037,17 @@ void BeginClassifierHistory() {
     StampClassifierIdentity();
 }
 
-uint CandidatePriorBin(CandidateStats stats) {
-    return min(V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT - 1u,
-        (stats.tight_bottom - 1u) * V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT / OCR_HEIGHT);
-}
-
 bool CandidateHasQualifiedPrior(uint candidate) {
-    if ((OcrCandidateScratch[ScratchBase(candidate) + 3u].x &
-         CANDIDATE_PRIOR_GEOMETRY_ALLOWED) == 0u || ClassifierClockValid == 0u ||
+    // Application text repeats at one baseline and height, so the first trusted line already
+    // identifies it; video keeps the several-cue vote. The detector rounds both ends of a
+    // blob, which makes a single glyph's envelopes diverge without being an object edge, so
+    // the envelope veto applies to video only. Scene text never reaches this function.
+    bool application_text = line_policy != 0u;
+    if ((!application_text && (OcrCandidateScratch[ScratchBase(candidate) + 3u].x &
+         CANDIDATE_PRIOR_GEOMETRY_ALLOWED) == 0u) || ClassifierClockValid == 0u ||
         ClassifierHistory[2u] != V2_OCR_CLASSIFIER_HISTORY_KNOWN_FLAGS) return false;
+    uint required_votes = application_text ?
+        V2_OCR_CLASSIFIER_PRIOR_INCREMENT : V2_OCR_CLASSIFIER_PRIOR_ASSIST;
     CandidateStats stats = LoadCandidate(candidate);
     float trusted_height = asfloat(ClassifierHistory[27u]);
     float height = (float)(stats.tight_bottom - stats.tight_top);
@@ -1035,7 +1059,7 @@ bool CandidateHasQualifiedPrior(uint candidate) {
     uint end = min(bin + 1u, V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT - 1u);
     [loop]
     for (uint current = begin; current <= end; ++current) {
-        if (ClassifierHistory[32u + current] >= V2_OCR_CLASSIFIER_PRIOR_ASSIST) return true;
+        if (ClassifierHistory[32u + current] >= required_votes) return true;
     }
     return false;
 }
@@ -1073,7 +1097,8 @@ void FinishClassifierHistory(uint final_total) {
             bool separated_episode = ClassifierHistory[23u] == 0u &&
                 ClassifierHistory[24u] != 0u && LearningGapElapsed(source_clock_us,
                     uint2(ClassifierHistory[25u], ClassifierHistory[26u]));
-            if (TrustedCurrentBins != 0u && (first_episode || separated_episode)) {
+            bool can_teach = first_episode || separated_episode;
+            if (TrustedCurrentBins != 0u && can_teach) {
                 [unroll]
                 for (uint bin = 0u; bin < V2_OCR_CLASSIFIER_PRIOR_BIN_COUNT; ++bin) {
                     uint vote = ClassifierHistory[32u + bin];
@@ -1091,16 +1116,46 @@ void FinishClassifierHistory(uint final_total) {
                 ClassifierHistory[28u] = TrustedCurrentSpan.x;
                 ClassifierHistory[29u] = TrustedCurrentSpan.y;
             }
-            ClassifierHistory[23u] = 1u;
-            ClassifierHistory[24u] = 0u;
-            ClassifierHistory[25u] = 0u;
-            ClassifierHistory[26u] = 0u;
+            // An eligible entry without trusted pairs (prior-assisted or attached text only)
+            // keeps its pending episode, so the cue's first trusted observation still teaches.
+            if (TrustedCurrentBins != 0u || !can_teach) {
+                ClassifierHistory[23u] = 1u;
+                ClassifierHistory[24u] = 0u;
+                ClassifierHistory[25u] = 0u;
+                ClassifierHistory[26u] = 0u;
+            }
         }
     }
     [loop]
     for (uint word = 0u; word < V2_OCR_CLASSIFIER_HISTORY_WORD_COUNT; ++word) {
         OcrBoxRecord[V2_OCR_CLASSIFIER_HISTORY_OFFSET + word] = ClassifierHistory[word];
     }
+}
+
+// The text detector fires on runs of ordinary characters and skips the symbols between them,
+// so one dialogue line of an application arrives as separate pieces with unsearched gaps. For
+// application text the native glyph search of a published piece therefore spans every piece on
+// its own row, bridging those gaps, and starts at the left margin of the whole text block; it
+// still reaches no further past the outermost pieces than the ordinary cover pad. Scene text is not part of a line. Video keeps each piece's own extent.
+uint2 CandidateLineSpan(uint candidate, uint candidate_count, CandidateStats stats) {
+    uint2 span = uint2(stats.tight_left, stats.tight_right);
+    if (line_policy == 0u) return span;
+    uint2 rows = uint2(stats.tight_top, stats.tight_bottom);
+    [loop]
+    for (uint other = 0u; other < candidate_count; ++other) {
+        if (other == candidate || !CandidateEnabled(other) ||
+            OcrCandidateScratch[ScratchBase(other) + 5u].z == CLASS_SCENE) continue;
+        CandidateStats member = LoadCandidate(other);
+        float member_score;
+        if (!CandidateEvidenceValid(member, member_score)) continue;
+        // Dialogue lines share one left margin, so a line whose opening symbols went
+        // undetected still starts where the other lines of the block start.
+        span.x = min(span.x, member.tight_left);
+        if (SpanHasHalfIoU(member.tight_top, member.tight_bottom, rows)) {
+            span.y = max(span.y, member.tight_right);
+        }
+    }
+    return span;
 }
 
 void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint final_total) {
@@ -1125,6 +1180,18 @@ void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint
         OcrCandidateScratch[ScratchBase(candidate) + 3u] = meta;
         uint4 bounds = uint4(stats.tight_left, stats.tight_top, stats.tight_right, stats.tight_bottom);
         uint4 anchor = OcrCandidateScratch[ScratchBase(group) + 5u];
+        bool horizontal_member =
+            OcrCandidateScratch[ScratchBase(candidate) + 5u].z == CLASS_HORIZONTAL;
+        // Word 2's merge anchor is finished; reuse it for the union of the group's
+        // independently horizontal members. An empty union keeps left > right.
+        uint4 horizontal_bounds = group == candidate ?
+            uint4(0xffffffffu, 0xffffffffu, 0u, 0u) :
+            OcrCandidateScratch[ScratchBase(group) + 2u];
+        if (horizontal_member) {
+            horizontal_bounds = uint4(
+                min(horizontal_bounds.xy, bounds.xy), max(horizontal_bounds.zw, bounds.zw));
+        }
+        OcrCandidateScratch[ScratchBase(group) + 2u] = horizontal_bounds;
         if (group == candidate) {
             anchor.xy = uint2(stats.tight_top, stats.tight_bottom);
             anchor.w = anchor.z == CLASS_HORIZONTAL ? 1u : 0u;
@@ -1133,7 +1200,7 @@ void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint
             uint4 previous_bounds = OcrCandidateScratch[ScratchBase(group) + 4u];
             OcrCandidateScratch[ScratchBase(group) + 4u] = uint4(
                 min(previous_bounds.xy, bounds.xy), max(previous_bounds.zw, bounds.zw));
-            if (OcrCandidateScratch[ScratchBase(candidate) + 5u].z == CLASS_HORIZONTAL) {
+            if (horizontal_member) {
                 anchor.w = 1u;
             }
         }
@@ -1144,26 +1211,40 @@ void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint
         if (!CandidateEnabled(candidate) || !CandidateCanJoinClassifiedLine(candidate)) continue;
         uint base = ScratchBase(candidate);
         uint group = OcrCandidateScratch[base + 3u].z;
-        if (!LineIsCentered(OcrCandidateScratch[ScratchBase(group) + 4u])) continue;
+        uint4 line_bounds = OcrCandidateScratch[ScratchBase(group) + 4u];
+        uint classification = OcrCandidateScratch[base + 5u].z;
+        if (!LineIsCentered(line_bounds)) {
+            // A weak or unknown piece within the join gap must not push a real caption off
+            // center. When the whole group fails, its independently horizontal members may
+            // still qualify on their own union, and only those members are published; the
+            // pieces that broke the center test gain nothing. A group of horizontal members
+            // alone has the same two unions, so off-center scene text stays rejected.
+            uint4 horizontal_bounds = OcrCandidateScratch[ScratchBase(group) + 2u];
+            if (classification != CLASS_HORIZONTAL ||
+                horizontal_bounds.x >= horizontal_bounds.z ||
+                !LineIsCentered(horizontal_bounds)) continue;
+            line_bounds = horizontal_bounds;
+        }
         // Ordinary subtitle groups must straddle the actual reference center,
         // including strong/current-line paths. Expanded covers are never evidence.
         // Keep the existing ribbon classification/publication path separate.
         uint kind_flags = OcrCandidateScratch[base + 3u].y;
         if ((kind_flags & V2_OCR_BOX_FLAG_RIBBON) == 0u &&
-            !LineSpansReferenceCenter(OcrCandidateScratch[ScratchBase(group) + 4u])) continue;
+            !LineSpansReferenceCenter(line_bounds)) continue;
         CandidateStats stats = LoadCandidate(candidate);
-        uint classification = OcrCandidateScratch[base + 5u].z;
         bool strong = classification == CLASS_HORIZONTAL;
         bool current_line = classification == CLASS_STACK_ASSISTED ||
             (classification == CLASS_UNKNOWN &&
              OcrCandidateScratch[ScratchBase(group) + 5u].w != 0u);
         if (!strong && !current_line) {
             if (!CandidateHasQualifiedPrior(candidate) ||
-                !LineSpansReferenceCenter(OcrCandidateScratch[ScratchBase(group) + 4u])) continue;
+                !LineSpansReferenceCenter(line_bounds)) continue;
         }
+        // Queueing already validated these exact stored statistics; this recomputes the score.
         float score;
         if (!CandidateEvidenceValid(stats, score)) continue;
         PublishCandidate(stats, score, OcrCandidateScratch[base + 3u].y, strong,
+                         CandidateLineSpan(candidate, candidate_count, stats),
                          raw_total, final_total);
     }
 }
@@ -1321,7 +1402,7 @@ void resolve_main(uint3 group_thread_id : SV_GroupThreadID) {
                     broad.structural_gap_count >= V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS;
             }
             if (broad_is_ribbon) {
-                if (!QueueLineCandidate(broad, broad_score, V2_OCR_BOX_FLAG_RIBBON, candidate_count)) {
+                if (!QueueLineCandidate(broad, V2_OCR_BOX_FLAG_RIBBON, candidate_count)) {
                     ClearAndPublishInvalidRecord();
                     return;
                 }
@@ -1383,7 +1464,7 @@ void resolve_main(uint3 group_thread_id : SV_GroupThreadID) {
                         // Queue mutates scratch/count. Keep the evidence gate as control flow;
                         // HLSL may evaluate both sides of a logical && expression.
                         if (CandidateEvidenceValid(piece, piece_score)) {
-                            if (!QueueLineCandidate(piece, piece_score, 0u, candidate_count)) {
+                            if (!QueueLineCandidate(piece, 0u, candidate_count)) {
                                 ClearAndPublishInvalidRecord();
                                 return;
                             }

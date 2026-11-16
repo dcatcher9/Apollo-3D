@@ -1,4 +1,4 @@
-// Production Host SBS renderer: bounded Base inverse plus native glyph UI-plane selection.
+// Ordinary queued Host SBS renderer: authenticated bounded Base inverse.
 //
 // The producer supplies a signed, one-eye displacement in source-U units whose horizontal slope
 // is strictly below one. Each eye map therefore has one inverse; an at-most-11-step fixed-point
@@ -214,8 +214,6 @@ float2 ReprojectIfAuthorized(float2 source_uv, float eye_sign) {
     return sample_uv;
 }
 
-#include "include/host_sbs_subtitle_render.hlsl"
-
 float4 main_ps(PS_INPUT input) : SV_TARGET {
     float2 source_uv;
     float eye_sign;
@@ -225,7 +223,7 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
 
     // Null/uninitialized buffers read as an invalid contract. Keep the exact current color frame
     // live while the producer starts or after it fails terminally.
-    float2 sample_uv = SelectSourceUV(source_uv, eye_sign);
+    float2 sample_uv = ReprojectIfAuthorized(source_uv, eye_sign);
     sample_uv.x = saturate(sample_uv.x);
     return SourceColor.Sample(LinearSampler, sample_uv);
 }

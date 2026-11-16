@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <limits>
 #include <string>
 #include <vector>
 #include <Windows.h>
@@ -89,6 +90,23 @@ namespace {
     EXPECT_EQ(game_files(), before);
     // Offering records nothing either; only the user's choice is persisted.
     EXPECT_FALSE(fs::exists(choices));
+  }
+
+  TEST_F(Game3DSetup, ForeignProxyIsNeitherOfferedNorRetriedAfterAnEarlierConfirmation) {
+    game3d::detail::setup_decisions decisions {choices};
+    // Confirmed while the folder was fresh; another injector's proxy arrived afterwards.
+    ASSERT_TRUE(decisions.record(game, game3d::file_identity(game), decision::install));
+    write(game.parent_path() / "dxgi.dll", "an upscaler mod's proxy");
+    const auto before = game_files();
+    for (int launch = 0; launch < 2; ++launch) {
+      const auto outcome = apply(decisions);
+      EXPECT_EQ(outcome.installation.state, state::unavailable);
+      EXPECT_EQ(outcome.state, "");
+      EXPECT_NE(outcome.installation.detail.find("dxgi.dll"), std::string::npos) << outcome.installation.detail;
+    }
+    // No installer ran and nothing was written or replaced.
+    EXPECT_TRUE(progress.empty());
+    EXPECT_EQ(game_files(), before);
   }
 
   TEST_F(Game3DSetup, DeclinedExecutableIsNeverWrittenEvenWhereReShadeExists) {
@@ -287,5 +305,171 @@ namespace {
     EXPECT_EQ(restarted.lookup(game, identity), decision::never);
     EXPECT_EQ(restarted.lookup(other, {}), decision::none);
     EXPECT_FALSE(fs::exists(choices.parent_path() / "game3d_setup.json.tmp"));
+  }
+  // A text game: nothing is written, the helper is loaded only after a confirmation, and the
+  // confirmation stands for later starts until the user withdraws it.
+  TEST_F(Game3DSetup, TextGameLoadsItsHelperOnlyAfterAStandingConfirmation) {
+    game3d::detail::setup_decisions decisions(choices);
+    int loads = 0;
+    const auto no_anti_cheat = [](const fs::path &) {
+      return false;
+    };
+    const auto load = [&] {
+      ++loads;
+      return game3d::text_hook::load_result {game3d::text_hook::load_state_e::loaded, "running"};
+    };
+    const auto before = read(game);
+
+    auto offered = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
+    EXPECT_EQ(offered.state, "ready_to_install");
+    EXPECT_FALSE(offered.identity.empty());
+    EXPECT_EQ(loads, 0);
+
+    ASSERT_TRUE(decisions.record(game, offered.identity, decision::install));
+    for (int start = 1; start <= 2; ++start) {
+      // Every start of the game loads the helper again without asking again.
+      const auto active = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
+      EXPECT_TRUE(active.state.empty());
+      EXPECT_EQ(active.installation.state, state::current);
+      EXPECT_EQ(loads, start);
+      EXPECT_EQ(decisions.lookup(game, offered.identity), decision::install);
+    }
+
+    ASSERT_TRUE(decisions.record(game, offered.identity, decision::never));
+    const auto declined = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
+    EXPECT_EQ(declined.state, "declined");
+    EXPECT_EQ(loads, 2);
+    // Nothing was written beside the game at any point.
+    EXPECT_EQ(read(game), before);
+    EXPECT_EQ(std::distance(fs::directory_iterator(game.parent_path()), fs::directory_iterator {}), 1);
+  }
+
+  TEST_F(Game3DSetup, TextGameIsRefusedWithAntiCheatAndReportsAFailedLoad) {
+    game3d::detail::setup_decisions decisions(choices);
+    int loads = 0;
+    const auto load = [&] {
+      ++loads;
+      return game3d::text_hook::load_result {game3d::text_hook::load_state_e::failed, "refused"};
+    };
+    const auto identity = game3d::file_identity(game);
+    ASSERT_TRUE(decisions.record(game, identity, decision::install));
+    // A confirmation never overrides the anti-cheat refusal.
+    const auto refused = game3d::detail::apply_text_hook_setup(game, decisions, [](const fs::path &) {
+      return true;
+    }, load);
+    EXPECT_EQ(refused.installation.state, state::anti_cheat);
+    EXPECT_EQ(loads, 0);
+    const auto failed = game3d::detail::apply_text_hook_setup(game, decisions, [](const fs::path &) {
+      return false;
+    }, load);
+    EXPECT_EQ(failed.installation.state, state::unavailable);
+    EXPECT_EQ(failed.installation.detail, "refused");
+    EXPECT_EQ(loads, 1);
+    // A changed executable is a different file: its confirmation no longer applies.
+    write(game, "a different build of the game, with a different size");
+    const auto changed = game3d::detail::apply_text_hook_setup(game, decisions, [](const fs::path &) {
+      return false;
+    }, load);
+    EXPECT_EQ(changed.state, "ready_to_install");
+    EXPECT_EQ(loads, 1);
+  }
+
+  TEST(Game3DTextHook, LoadSkipsARunningHelperAndRequiresItToReportIn) {
+    namespace hook = game3d::text_hook;
+    int runs = 0;
+    const auto yes = [] {
+      return true;
+    };
+    const auto no = [] {
+      return false;
+    };
+    // Already running: the injector is not started again.
+    auto result = hook::detail::load_with(yes, yes, [&] {
+      ++runs;
+      return 0u;
+    });
+    EXPECT_EQ(result.state, hook::load_state_e::loaded);
+    EXPECT_EQ(runs, 0);
+    // A build without the 32-bit helper offers nothing to run.
+    result = hook::detail::load_with(no, no, [&] {
+      ++runs;
+      return 0u;
+    });
+    EXPECT_EQ(result.state, hook::load_state_e::unavailable);
+    EXPECT_EQ(runs, 0);
+    // An injector failure is reported with its reason.
+    result = hook::detail::load_with(no, yes, [&] {
+      ++runs;
+      return 3u;
+    });
+    EXPECT_EQ(result.state, hook::load_state_e::failed);
+    EXPECT_EQ(result.detail, hook::detail::injector_failure(3u));
+    EXPECT_EQ(runs, 1);
+    // The helper reports in shortly after the injector returns.
+    int polls = 0;
+    result = hook::detail::load_with([&] {
+      return ++polls >= 3;
+    }, yes, [&] {
+      ++runs;
+      return 0u;
+    });
+    EXPECT_EQ(result.state, hook::load_state_e::loaded);
+    EXPECT_EQ(runs, 2);
+    // A game closed before its approval is not a failure, and nothing is started for it.
+    result = hook::detail::load_with(no, yes, [&] {
+      ++runs;
+      return 0u;
+    }, no);
+    EXPECT_EQ(result.state, hook::load_state_e::not_running);
+    EXPECT_EQ(runs, 2);
+  }
+
+  TEST(Game3DTextHook, ConsentNamesOneRunningProcessAndCanBeWithdrawn) {
+    namespace hook = platf::game3d::text_hook;
+    constexpr std::uint32_t process = 0x7ffffff1u;
+    EXPECT_FALSE(hook::consented(process, 100u));
+    hook::set_consent(process, 100u, true);
+    EXPECT_TRUE(hook::consented(process, 100u));
+    // Another process that reuses the id later is a different game.
+    EXPECT_FALSE(hook::consented(process, 101u));
+    EXPECT_FALSE(hook::consented(process + 1u, 100u));
+    hook::set_consent(process, 101u, true);
+    EXPECT_FALSE(hook::consented(process, 100u));
+    EXPECT_TRUE(hook::consented(process, 101u));
+    hook::set_consent(process, 101u, false);
+    EXPECT_FALSE(hook::consented(process, 101u));
+    // No process and no start time are never a consent.
+    hook::set_consent(0u, 100u, true);
+    hook::set_consent(process, 0u, true);
+    EXPECT_FALSE(hook::consented(0u, 100u));
+    EXPECT_FALSE(hook::consented(process, 0u));
+  }
+
+  TEST(Game3DTextHook, TextBoundsCoverEveryUsableBoxAndStayOnTheSurface) {
+    namespace hook = platf::game3d::text_hook;
+    EXPECT_TRUE(hook::detail::text_bounds(nullptr, 0u, 1920u, 1080u).empty());
+    // Two lines; an empty box and a damaged one are skipped.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float boxes[] {
+      100.0f, 900.5f, 400.0f, 940.0f,
+      120.0f, 950.0f, 300.0f, 989.25f,
+      0.0f, 500.0f, 10.0f, 500.0f,
+      0.0f, nan, 10.0f, 20.0f,
+    };
+    auto bounds = hook::detail::text_bounds(boxes, 4u, 1920u, 1080u);
+    EXPECT_FLOAT_EQ(bounds.left, 100.0f);
+    EXPECT_FLOAT_EQ(bounds.top, 900.5f);
+    EXPECT_FLOAT_EQ(bounds.right, 400.0f);
+    EXPECT_FLOAT_EQ(bounds.bottom, 989.25f);
+    EXPECT_FLOAT_EQ(bounds.line_height, 39.25f);
+    // Text partly off the surface is clipped to it; text wholly outside is no text.
+    const float edges[] {-20.0f, -30.0f, 10.0f, 1.0f, 1900.0f, 1079.0f, 2000.0f, 1200.0f};
+    bounds = hook::detail::text_bounds(edges, 2u, 1920u, 1080u);
+    EXPECT_FLOAT_EQ(bounds.left, 0.0f);
+    EXPECT_FLOAT_EQ(bounds.top, 0.0f);
+    EXPECT_FLOAT_EQ(bounds.right, 1920.0f);
+    EXPECT_FLOAT_EQ(bounds.bottom, 1080.0f);
+    const float outside[] {0.0f, 1100.0f, 10.0f, 1150.0f};
+    EXPECT_TRUE(hook::detail::text_bounds(outside, 1u, 1920u, 1080u).empty());
   }
 }  // namespace

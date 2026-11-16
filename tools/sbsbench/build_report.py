@@ -1294,10 +1294,6 @@ HARD_DISPLAY = (
     ("image_integrity_worst_patch_bad_pct", "Worst localized texture damage", "%"),
     ("depth_gt_polarity_ok", "Authenticated GT depth polarity", "%"),
     ("subtitle_glyph_sample_visibility_pct", "Subtitle glyph visibility", "%"),
-    ("shot_state_pulse_mismatch", "Shot pulse contract mismatch", ""),
-    ("shot_state_trace_inconsistent", "Shot trace consistency", ""),
-    ("shot_state_initialized_ok", "Shot state initialized", "%"),
-    ("shot_state_relative_escape_ok", "Latched relative escape", "%"),
 )
 
 HARD_SUPPORT_KEYS = {
@@ -1312,10 +1308,6 @@ HARD_SUPPORT_KEYS = {
     "source_coverage_worst_patch_bad_pct": "source_fidelity_support_pct",
     "image_integrity_worst_patch_bad_pct": "image_integrity_support",
     "subtitle_glyph_sample_visibility_pct": "subtitle_glyph_authored_count",
-    "shot_state_pulse_mismatch": "shot_state_contract_support",
-    "shot_state_trace_inconsistent": "shot_state_contract_support",
-    "shot_state_initialized_ok": "shot_state_contract_support",
-    "shot_state_relative_escape_ok": "latched_motion_contract_support",
 }
 
 SUPPORTING_HEATMAP_AXES = (
@@ -1346,8 +1338,6 @@ SUPPORTING_HEATMAP_AXES = (
     ("exact_disparity_plateau_near_depth_span_pct", "near plateau span"),
     # Evidence behind depth_gt_edge_f1, which only gates at or above 1.0% support.
     ("depth_gt_edge_support_pct", "GT edge support"),
-    ("shot_state_accepted_pulse", "accepted shot pulses"),
-    ("shot_state_expected_pulse", "expected shot pulses"),
 )
 
 
@@ -1857,24 +1847,6 @@ METRIC_DEFS = [
          "lower = less binocular colour rivalry; experimental"),
     ("depth_gt_polarity_ok", "gt_polarity",
          "Explicit prediction-to-GT sign check; a negative fit is a catastrophic near/far inversion.",
-         "must remain 100%"),
-    ("shot_state_accepted_pulse", "shot_pulses",
-         "Accepted production shot-state pulses reconstructed from initialized scene-age resets in the benchmark-only GPU cut-state trace.",
-         "must match the clip contract"),
-    ("shot_state_expected_pulse", "expected_shot_pulses",
-         "Expected shot-pulse count declared by the authenticated synthetic clip contract.",
-         "context for accepted shot pulses"),
-    ("shot_state_pulse_mismatch", "shot_pulse_mismatch",
-         "Per-frame disagreement between accepted production shot pulses and the authenticated expected-pulse schedule.",
-         "must remain zero"),
-    ("shot_state_trace_inconsistent", "shot_trace_consistency",
-         "Disagreement between an initialized scene-age reset and entry into the production cut-latched state flag.",
-         "must remain zero"),
-    ("shot_state_initialized_ok", "shot_state_initialized",
-         "The monitored trace has initialized cut state and available matched model-input history.",
-         "must remain 100%"),
-    ("shot_state_relative_escape_ok", "relative_escape",
-         "The setup cut remains latched with both proposal arms closed through persistent motion, then the later accepted cut arrives only after the relative-geometry refractory window.",
          "must remain 100%"),
 ]
 _ROLE_ORDER = {"hard": 0, "primary": 1, "diagnostic": 2, "reported": 3}

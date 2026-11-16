@@ -1,4 +1,4 @@
-// Host adaptive raw-depth scan, shared by geometry P05/P95 and cut-normalization P02/P98.
+// Host adaptive raw-depth scan, shared by geometry P05/P95 and normalization P02/P98.
 // Every reduction group overwrites two independent 256-bin populations. Only the raw/exclusion
 // traversal is shared: signed finite geometry bounds and nonnegative normalization bounds retain
 // their exact, distinct validity and bin arithmetic. No clear, readback or reuse dispatch is needed.

@@ -1,7 +1,7 @@
 # Dump 3D format
 
 Dump 3D is one atomic, matched-frame diagnostic package for the authenticated Host SBS V2 path.
-The canonical geometry/metric reader accepts schema 50 only. Earlier schemas 44/45/46/47/48/49 and presentation-experiment
+The canonical geometry/metric reader accepts schema 52 only. Earlier schemas 44/45/46/47/48/49/50/51 and presentation-experiment
 schemas 41/42/43 remain historical artifacts and are rejected by the current reader. Retired SLR3--SLR9,
 GST/OGR/ORS, and offline overlay-detector packages are intentionally unsupported.
 
@@ -55,7 +55,7 @@ The core package contains:
 | `gpu_trace_contract.json` | Optional exact trace offsets, enums, receipt ABI, and shader provenance |
 
 Scalar `.f32` files are little-endian float32; `.u32`, `.rgba32f`, and `.rgba16f` contain raw
-little-endian uint32, float32 RGBA, and float16 RGBA respectively. Schema 50 accepts the canonical
+little-endian uint32, float32 RGBA, and float16 RGBA respectively. Schema 52 accepts the canonical
 inactive descriptor or the one current `subtitle-contours-v1` package. It binds the exact current generated Depth Coordinate V2
 identity, producer and renderer closures, OCR model provenance, entrypoints, the four existing artifact
 roles (OCR record, locator state, Base field, atomic final field), all eleven diagnostic contour roles, and both analytic-render tuple roles with
@@ -71,7 +71,7 @@ owns their exact names, order and meaning. The tail is the GPU histogram result,
 recomputed by the dump writer; unavailable tail authority is canonical zero. This frame-statistics
 schema is separate from the shared `warp_map_contract` schema described below.
 
-Schema 50 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
+Schema 52 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
 production package uses one exact supported convex-2x high shape; halving both dimensions must
 recover an exact calibrated embedded DAV2 shape. The capture-time model provenance continues to authenticate that embedded DAV2
 identity and derived coarse calibration, while the public numeric artifacts remain high-resolution.
@@ -80,15 +80,13 @@ half-shape relation is rejected rather than reinterpreted.
 
 ## Selected map and independent Final diagnostic
 
-The required `selected_map` object binds schema 1's Base inverse plus analytic UI glyph selector.
-For a shared-warp draw it describes the retained independent diagnostic, not the rendered map.
-Its required boolean `render_enabled` records the exact b3 permission for this draw independently
-of retained OCR/SCP authority; false permission selects Base even when the retained tuple is active.
-The combined map can be discontinuous; readers must never infer a continuous Final inverse or
-global monotonicity. `warp_map_contract` schema 3 names actual selected pre-clamp U, and
-`warp_mask.png` classifies the boundary from that same U. Registration metrics continue to use
-valid monotonic runs and report ambiguous/folded samples conservatively; the version change does
-not waive ordinary geometry or image-quality checks.
+The required `selected_map` object binds schema 2's ordinary authenticated Base inverse.
+It describes `warp_map.f32`, which is an independent Base diagnostic when the actual draw uses
+the shared subtitle field. Its required boolean `render_enabled` records the observed shared
+subtitle permission independently of retained OCR/SCP authority; it does not add a selector to
+ordinary rendering. `warp_map_contract` schema 3 retains the normalized pre-clamp U encoding,
+and `warp_mask.png` classifies the boundary from that same ordinary Base U. Registration metrics
+retain their existing geometry and image-quality checks.
 
 The `final_parallax` object binds diagnostic schema 4. Its `warp_input_artifact` is null and its
 relation explicitly denies render authority. The verifier still replays the ordinary limiter and
@@ -106,11 +104,19 @@ and inactive SCP4 immediately. No extra observation wait is added.
 
 ### Actual shared UI warp observation
 
-Schema 50 adds an optional `renderer.actual_draw_renderer` extension. Older packages without it
-retain their original analytic attribution. A `shared-ui-pin-v1` value binds the production shared
-shader closure and `actual_draw_evidence.json`; `mapping_artifacts_match_selected_renderer` is
-false, and the legacy `warp_map.f32` is explicitly an independent diagnostic. Its geometry-chain
-and ROI exterior checks remain useful but cannot score or explain the actual shared render.
+Schema 52 requires version 2 of `renderer.actual_draw_renderer`. Its `ordinary-base-v1`
+kind names the authenticated ordinary Base diagnostic. A `shared-ui-pin-v1` kind binds the
+production shared shader closure and schema-2 `actual_draw_evidence.json`;
+`mapping_artifacts_match_selected_renderer` is false because `warp_map.f32` remains the independent
+Base diagnostic. Its geometry-chain and ROI exterior checks cannot score or explain the actual
+shared render. Historical schema-50 exports and their unversioned analytic attribution remain
+unchanged; the standalone shared reader can inspect that format without relabelling it as current.
+The current canonical reader rejects older dump schemas.
+
+Schema-2 draw evidence removes the unused `t8` role and `actual_original_legacy_M.u32` artifact.
+Raw and legacy masks required by mask construction or independent diagnostics remain available.
+Failure to prepare shared subtitles, or invalid selected authority, preserves usable ordinary Base
+with subtitle permission disabled. Invalid or unavailable depth retains the independent flat path.
 
 The actual recorder observes PS bindings immediately before Draw. Requested dumps stage these
 additional immutable operands on that same immediate context, before the next draw can overwrite
@@ -143,7 +149,7 @@ replay of this captured compositor; its capture summary retains the shared-rende
 
 ## Diagnostic GPU completion trace
 
-Schema 50 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
+Schema 52 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
 depth roots, not source frames, presentation frames, busy drops, or every captured desktop update.
 Each 136-word (544-byte) record binds an exact trace ordinal, matched frame, analysis generation,
 analysis-domain tag, transaction token, analysis-source and live-field extents, the immutable
@@ -178,11 +184,11 @@ For non-suppressed subtitle publications, UIP4 and SCP4 are captured after the o
 resolver and conditioner. A held reuse records the identical prior tuple, including the
 original publication frame and source clock. When the predecessor is still in the ring, both
 tuples must be byte-identical. The raw ring is schema5, its contract schema6, and the decoded
-JSON schema7. The 40 UIP4 words contain current source/domain identity and the independent
+JSON schema8. The 40 UIP4 words contain current source/domain identity and the independent
 16-word adaptive controller; they contain no historical OCR rectangles. Historical trace rows
 authenticate controller structure and condition parameters, not missing OCR geometry or camera
 validity. The matched package separately joins the actual OCR8 paired covers, geometry, contour
-snapshots, original source clock and cut epoch.
+snapshots and original source clock.
 
 Dispatched SCP4 always has its schema/tag. Its payload is either the exact current count/kind
 mask, full-strength value2 and bit-identical applied UI plane, or positive-zero words2..5 when
@@ -201,7 +207,7 @@ CPU map, readback, query, or synchronization and has no rendering authority.
 
 ## OCR8 and UIP4 records
 
-Coordinate schema 121/OCR 33/contour recipe 27 publishes only classified current subtitle pairs.
+Coordinate schema 134/OCR 38/contour recipe 27 publishes only classified current subtitle pairs.
 Its schema-4 OCR8 buffer is 256 words:
 the original 208-word header/core/cover prefix plus a 48-word classifier history tail. Both producer
 and resolver descriptors bind the complete generated classifier policy. The tail's SCL1 identity
@@ -276,7 +282,8 @@ collapsed or stale geometry preserves the controller plane/goal but clears grant
 slots, timing authority and conditioning. A valid OCR8 record may still contain covers;
 those are not usable protection authority without the current geometry join.
 
-The reader validates exact source/frame/generation/time/cut/ROI/content identity, current slot
+The reader validates exact source/frame/generation/time/ROI/content identity, zero reserved
+identity words (UIP4 word 20 and the state's `control_reserved_0`), current slot
 mask, reserved words, complete controller and SCP4 parameters. Current covers come from the
 actual captured OCR8 record. Historical trace rows have no OCR8 payload and therefore cannot
 prove exact historical cover geometry. See the
@@ -295,7 +302,7 @@ analysis generation, the exact uncropped source rectangle, tensor extent, center
 contain-fit `tensor_content_rect_px`, edge-replicated excluded padding fraction, unit conversion,
 and outside-only video-inverse collar in `depth_input_region.json` schema `4`. The source rectangle is never
 stretched or trimmed: a wider region pads above/below and a taller region pads left/right. Padding
-does not participate in model statistics, scene-cut evidence, OCR, or subtitle state;
+does not participate in model statistics, OCR, or subtitle state;
 ordinary published fields extend the nearest content boundary through it. The renderer clamps
 sampling to centers of the real-content rectangle, so synthetic padding cannot change edge-video
 geometry. Crop-local depth must never be interpreted as a full-source field. Ordinary required
@@ -317,7 +324,7 @@ Older with-curve experiment artifacts retain their original geometry identity an
 cannot be relabeled as the linear candidate.
 
 All current ROI packages use `warp_map_contract` schema `3`.
-The map is the actual selected Base inverse or analytic UI coordinate embedded into the full capture.
+The map is the ordinary authenticated Base inverse embedded into the full capture.
 Base retains its slope-limited outside-only collar. `warp_mask.png` red marks finite-source
 boundary extrapolation; green and blue are zero. There are no source-kind or visibility flags,
 static-rim samples, or synthetic interior fill paths. Nearby browser pixels may move within the
@@ -382,7 +389,7 @@ The maintained reader:
    closure and ABI document, chronological wrap/commit structure, raw branch/OCR proof, matched
    analysis domain, and bit-for-bit decoded JSON. An unavailable trace remains valid optional state.
 
-Use `.f32` artifacts for quantitative work. Schema 50 does not package scalar/heat preview PNGs or
+Use `.f32` artifacts for quantitative work. Schema 52 does not package scalar/heat preview PNGs or
 per-field shape sidecars. The sole retained shape sidecar, `model_input_shape.json`, is calibrated
 preprocess authority rather than a preview description. On a fused capture it describes the sole
 high input; the embedded DAV2 calibration is derived from its exact half shape. Float dimensions live in

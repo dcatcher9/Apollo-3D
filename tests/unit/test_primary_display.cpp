@@ -749,6 +749,19 @@ TEST(PrimaryDisplay, BaselineTopologyGateAcceptsOnlyTheUsersOwnDesktop) {
     EXPECT_TRUE(manager.baseline_topology_active(L"virtual"));
     EXPECT_FALSE(manager.baseline_topology_active(L"unrelated"));
 
+    // Windows applies its own remembered layout for the monitor set and switches a recorded
+    // output off. The original primary is still primary, so this is not a host topology.
+    const auto extended = fake.current;
+    fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 1920, -200}});
+    EXPECT_TRUE(manager.baseline_topology_active(L"virtual"));
+    // An output the record does not know is not the user's recorded desktop.
+    fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 1920, -200}, {L"unknown", 3840, 0}});
+    EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
+    // Nor is a layout where the original primary lost the origin or went dark.
+    fake.current = make_snapshot({{L"physical-left", 0, 0}, {L"virtual", 1920, -200}});
+    EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
+    fake.current = extended;
+
     // Promotion makes the virtual display primary and, when exclusive, disables physical outputs.
     ASSERT_TRUE(manager.promote(L"virtual", exclusive));
     EXPECT_FALSE(manager.baseline_topology_active(L"virtual"));
@@ -937,6 +950,202 @@ TEST(PrimaryDisplayExclusive, GraceRecheckDetachesReappearedTargetAndKeepsCurren
   ASSERT_EQ(fake.cursor_sets.size(), 1u);
   EXPECT_EQ(fake.cursor_sets[0].x, 1800);
   EXPECT_EQ(fake.cursor_sets[0].y, 900);
+}
+
+TEST(PrimaryDisplayExclusive, GraceRecheckRecoversInactivePrimaryBesideAReattachedVirtualAndSecondary) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"physical-left", -3840, 0}, {L"virtual", 5120, 0}});
+  set_display_mode(fake.current, L"physical-primary", 5120, 2160, 165);
+  set_display_mode(fake.current, L"physical-left", 3840, 2160, 120);
+  auto &hdr = *fake.current.colors[named_index(fake.current, L"physical-primary")];
+  hdr.hdr_user_enabled = hdr.advanced_color_active = hdr.advanced_color_enabled = true;
+  hdr.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  fake.catalog = fake.current;
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  set_display_mode(fake.current, L"virtual", 3840, 2160, 90);
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  const auto bookmark = retained;
+  ASSERT_EQ(fake.current.device_paths.size(), 2u);
+
+  // The live failure returned to VD+secondary at 60Hz after both physical displays had
+  // already verified restored. The primary is still available, but no longer active.
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"physical-left", 3840, 0}});
+  set_display_mode(fake.current, L"virtual", 3840, 2160, 90);
+  set_display_mode(fake.current, L"physical-left", 3840, 2160, 60);
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"virtual"), 0);
+  ASSERT_EQ(fake.current.device_paths.size(), 2u);
+  const auto primary = named_index(fake.current, L"physical-primary");
+  const auto &mode = fake.current.modes[fake.current.paths[primary].sourceInfo.sourceModeInfoIdx].sourceMode;
+  EXPECT_EQ(mode.width, 5120u);EXPECT_EQ(mode.height, 2160u);
+  EXPECT_EQ(fake.current.paths[primary].targetInfo.refreshRate.Numerator, 165u);
+  EXPECT_TRUE(fake.current.colors[primary]->hdr_user_enabled);
+  EXPECT_EQ(fake.current.colors[primary]->active_mode, DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR);
+  // Recovery preserves the currently usable secondary mode rather than claiming a user edit.
+  EXPECT_EQ(fake.current.paths[named_index(fake.current, L"physical-left")].targetInfo.refreshRate.Numerator, 60u);
+  EXPECT_EQ(retained, bookmark);EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, GracePartialWakeKeepsVerifiedBookmarkUntilMissingPhysicalBecomesAvailable) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  restore_observation_cache_t observations;
+  manager_t manager(fake.io(), &observations);
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  const auto bookmark = retained;
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"physical-left", 1920, 0}});
+  set_display_mode(fake.current, L"physical-left", 2560, 1440, 120);
+  const auto primary = named_index(fake.catalog, L"physical-primary");
+  fake.catalog.paths[primary].targetInfo.targetAvailable = FALSE;
+
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-left", 0, 0}});
+  EXPECT_FALSE(fake.journal);EXPECT_EQ(retained, bookmark);
+  const auto applies = std::ranges::count(fake.events, "apply");
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+  EXPECT_FALSE(fake.journal);EXPECT_EQ(retained, bookmark);
+
+  // The VD remains detached; availability alone must now restore the remembered output.
+  fake.catalog.paths[primary].targetInfo.targetAvailable = TRUE;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"virtual"), 0);
+  ASSERT_EQ(fake.current.device_paths.size(), 2u);
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"physical-primary"), 1);
+  const auto secondary = named_index(fake.current, L"physical-left");
+  const auto &mode = fake.current.modes[fake.current.paths[secondary].sourceInfo.sourceModeInfoIdx].sourceMode;
+  EXPECT_EQ(mode.width, 2560u);EXPECT_EQ(mode.height, 1440u);
+  EXPECT_EQ(fake.current.paths[secondary].targetInfo.refreshRate.Numerator, 120u);
+  EXPECT_FALSE(fake.journal);EXPECT_EQ(retained, bookmark);
+}
+
+TEST(PrimaryDisplayExclusive, GracePhysicalOnlyUserDisableDoesNotBecomeAMonitorWakeRecovery) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  restore_observation_cache_t observations;
+  manager_t manager(fake.io(), &observations);
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  // No VD returned and no all-path loss was observed: the current physical desktop remains
+  // user-owned, even if an available physical output was deliberately disabled.
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  const auto applies = std::ranges::count(fake.events, "apply");
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+  EXPECT_FALSE(fake.journal);
+  // Its accepted baseline is also retained if Windows subsequently reattaches the VD.
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, UnchangedFailedRestoreDoesNotReapplyAcrossNotificationAndRetirementManagers) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  fake.ignore_apply = true; // Windows accepts the call but never activates the available TV.
+  restore_observation_cache_t observations;
+  auto io = fake.io();
+  const auto apply = io.apply;
+  std::optional<snapshot_t> requested;
+  io.apply = [&](snapshot_t desired) {
+    requested = desired;
+    return apply(std::move(desired));
+  };
+  const auto applies_before = std::ranges::count(fake.events, "apply");
+  EXPECT_FALSE(manager_t(io, &observations).restore(L"virtual"));
+  ASSERT_TRUE(requested);
+  const auto tv = named_index(*requested, L"physical-left");
+  EXPECT_NE(requested->paths[tv].flags & DISPLAYCONFIG_PATH_ACTIVE, 0u);
+  EXPECT_EQ(requested->paths[tv].targetInfo.statusFlags, 0u)
+    << "Target status copied from an inactive available route is not desired activation policy";
+  ASSERT_TRUE(fake.journal);
+  const auto original = serialize(*fake.journal);
+  platf::primary_display::retained_display_ptr retained;
+  for (unsigned notification = 0; notification < 32; ++notification) {
+    // A late self-generated WM can start a new scheduler cycle, and the independent
+    // retirement worker creates another manager. Neither supplies new display evidence.
+    manager_t worker(io, &observations);
+    EXPECT_FALSE(notification % 2u ? worker.pause(L"virtual", retained) : worker.restore(L"virtual"));
+    expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+    ASSERT_TRUE(fake.journal);
+    EXPECT_EQ(serialize(*fake.journal), original);
+  }
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies_before + 1);
+
+  // The requested physical topology can settle after the failed immediate query. Its
+  // successful verification bypasses the no-progress budget and needs no second apply.
+  fake.current = *requested;
+  ASSERT_TRUE(manager_t(io, &observations).restore(L"virtual"));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies_before + 1);
+  EXPECT_FALSE(fake.journal);
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"physical-left", -1920, 120}});
+}
+
+TEST(PrimaryDisplayExclusive, FailedRestoreRearmsWhenAvailableTargetsChange) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  fake.ignore_apply = true;
+  restore_observation_cache_t observations;
+  EXPECT_FALSE(manager_t(fake.io(), &observations).restore(L"virtual"));
+  const auto applies = std::ranges::count(fake.events, "apply");
+  EXPECT_FALSE(manager_t(fake.io(), &observations).restore(L"virtual"));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+
+  // An available route is now a different driver target. This is fresh device evidence,
+  // unlike notification count, route order, mode indexes or IN_USE status flag churn.
+  fake.catalog.paths[named_index(fake.catalog, L"physical-left")].targetInfo.id += 1u;
+  fake.ignore_apply = false;
+  ASSERT_TRUE(manager_t(fake.io(), &observations).restore(L"virtual"));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies + 1);
+  EXPECT_FALSE(fake.journal);
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"physical-left"), 1);
+}
+
+TEST(PrimaryDisplayExclusive, AvailableInactiveTargetOutsideOriginalBaselineStaysDisabled) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  restore_observation_cache_t observations;
+  manager_t manager(fake.io(), &observations);
+  ASSERT_TRUE(manager.prepare(true));
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 1920, 0}});
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"physical-left"), 0);
+}
+
+TEST(PrimaryDisplayRestoreObservation, ComparesMaterialRoutesAndIgnoresOwnApplyMetadataChurn) {
+  const auto current = make_snapshot({{L"physical-primary", 0, 0}});
+  const auto desired = make_snapshot({{L"physical-primary", 0, 0}, {L"physical-left", -1920, 0}});
+  auto available = desired;
+  restore_observation_cache_t observations;
+  observations.remember_failure(current, desired, available);
+  available.paths[1].targetInfo.statusFlags ^= DISPLAYCONFIG_TARGET_IN_USE;
+  available.paths[1].sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+  std::swap(available.paths[0], available.paths[1]);
+  std::swap(available.device_paths[0], available.device_paths[1]);
+  EXPECT_TRUE(observations.unchanged_failure(current, desired, available));
+  available.paths[0].targetInfo.targetAvailable = FALSE;
+  EXPECT_FALSE(observations.unchanged_failure(current, desired, available));
+  available.paths[0].targetInfo.targetAvailable = TRUE;
+  auto changed = current;
+  set_display_mode(changed, L"physical-primary", 2560, 1440, 120);
+  EXPECT_FALSE(observations.unchanged_failure(changed, desired, available));
+  changed = desired;
+  set_display_mode(changed, L"physical-left", 2560, 1440, 120);
+  EXPECT_FALSE(observations.unchanged_failure(current, changed, available));
+  observations.clear();
+  EXPECT_FALSE(observations.unchanged_failure(current, desired, available));
 }
 
 TEST(PrimaryDisplayExclusive, GraceRecheckKeepsTheOnlyUsableRetainedDisplay) {
@@ -1304,6 +1513,69 @@ TEST(PrimaryDisplayExclusive, ReactivatedVirtualModeChangeCannotClaimPhysicalEdi
     } else {
       const auto index = named_index(fake.current, L"virtual");
       fake.current.modes[fake.current.paths[index].sourceInfo.sourceModeInfoIdx].sourceMode.position.y += 100;
+    }
+    const auto before = fake.current;
+    fake.events.clear();
+    EXPECT_FALSE(manager.promote(L"virtual", true));
+    EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+    expect_positions(fake.current, *inspect(before));
+    EXPECT_TRUE(fake.journal);
+  }
+}
+
+namespace {
+  // What Windows does shortly after a reactivation when it applies its own remembered layout:
+  // one recorded physical output goes dark and the virtual display is moved and retimed.
+  void replace_reactivated_layout(snapshot_t &snapshot, std::wstring_view dropped) {
+    const auto index = static_cast<std::ptrdiff_t>(named_index(snapshot, dropped));
+    snapshot.paths.erase(snapshot.paths.begin() + index);
+    snapshot.device_paths.erase(snapshot.device_paths.begin() + index);
+    snapshot.colors.erase(snapshot.colors.begin() + index);
+    set_display_mode(snapshot, L"virtual", 3840, 2160, 90);
+    const auto &path = snapshot.paths[named_index(snapshot, L"virtual")];
+    snapshot.modes[path.sourceInfo.sourceModeInfoIdx].sourceMode.position = {-3840, 0};
+  }
+}  // namespace
+
+TEST(PrimaryDisplayExclusive, ReactivatedLayoutReplacedByWindowsCanStillPromoteAndRestoreEveryOutput) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  set_display_mode(fake.current, L"virtual", 1920, 1080, 30);
+  manager_t manager(fake.io());
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  const auto physical_baseline = fake.current;
+  ASSERT_EQ(physical_baseline.paths.size(), 2u);
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_EQ(fake.current.paths.size(), 3u);
+
+  replace_reactivated_layout(fake.current, L"physical-left");
+  ASSERT_TRUE(inspect(fake.current));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+
+  // The dropped output is still part of the recovery record.
+  retained.reset();
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  expect_positions(fake.current, *inspect(physical_baseline));
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, ReplacedReactivatedLayoutCannotClaimPhysicalEditsOrUnknownIdentity) {
+  for (const auto mutation : {0, 1}) {
+    SCOPED_TRACE(mutation);
+    fake_io_t fake;
+    start_exclusive(fake);
+    set_display_mode(fake.current, L"virtual", 1920, 1080, 30);
+    manager_t manager(fake.io());
+    platf::primary_display::retained_display_ptr retained;
+    ASSERT_TRUE(manager.pause(L"virtual", retained));
+    ASSERT_TRUE(manager.reactivate(retained, true));
+    replace_reactivated_layout(fake.current, L"physical-left");
+    if (mutation == 0) {
+      set_display_mode(fake.current, L"physical-primary", 1280, 720, 60);
+    } else {
+      fake.current.device_paths[named_index(fake.current, L"physical-primary")] = L"unknown-physical";
     }
     const auto before = fake.current;
     fake.events.clear();
@@ -2346,6 +2618,86 @@ TEST(PrimaryDisplayExclusive, TopologyTransitionsPreserveCurrentVirtualHdrState)
   EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"virtual")]->hdr_user_enabled);
   EXPECT_EQ(fake.current.modes[fake.current.paths[named_index(fake.current, L"virtual")].sourceInfo.sourceModeInfoIdx].sourceMode.width, 3840u);
   EXPECT_FALSE(fake.journal);
+}
+
+namespace {
+  platf::display_config::advanced_color_state_t hdr_state(bool enabled) {
+    return {
+      platf::display_config::advanced_color_api_e::modern,
+      false,
+      true,
+      enabled,
+      false,
+      enabled,
+      false,
+      static_cast<UINT32>(enabled ? 10 : 8),
+      enabled ? DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR : DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
+    };
+  }
+}  // namespace
+
+TEST(PrimaryDisplayExclusive, SessionHdrChangeIsRecordedAndSurvivesPromotionAndReconciliation) {
+  for (const bool windows_replaces_layout : {false, true}) {
+    SCOPED_TRACE(windows_replaces_layout);
+    fake_io_t fake;
+    fake.current.colors[2] = hdr_state(true);
+    start_exclusive(fake);
+    ASSERT_TRUE(fake.current.colors[0]->hdr_user_enabled);
+
+    // The session switches its virtual display to SDR and records the result.
+    fake.current.colors[0] = hdr_state(false);
+    manager_t manager(fake.io());
+    ASSERT_TRUE(manager.adopt_virtual_color(L"virtual"));
+    ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+    EXPECT_FALSE(fake.journal->exclusive_topology->colors[named_index(*fake.journal->exclusive_topology, L"virtual")]->hdr_user_enabled);
+
+    if (windows_replaces_layout) {
+      // The toggle makes Windows re-apply its remembered layout: the physical outputs return.
+      fake.current = make_snapshot(baseline);
+      fake.current.colors[2] = hdr_state(false);
+    }
+    fake.events.clear();
+    ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+    ASSERT_TRUE(manager.promote(L"virtual", true));
+    expect_positions(fake.current, {{L"virtual", 0, 0}});
+    EXPECT_FALSE(fake.current.colors.front()->hdr_user_enabled);
+    EXPECT_EQ(std::ranges::count(fake.events, "set_color"), 0);
+  }
+}
+
+TEST(PrimaryDisplayExclusive, UnrecordedHdrChangeIsStillRestoredToTheRecordedState) {
+  // Windows resets color state on some topology changes, so an unexplained difference is
+  // restored. Only the session's own recorded change above replaces the recorded state.
+  fake_io_t fake;
+  fake.current.colors[2] = hdr_state(true);
+  start_exclusive(fake);
+  fake.current.colors[0] = hdr_state(false);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_TRUE(fake.current.colors.front()->hdr_user_enabled);
+}
+
+TEST(PrimaryDisplayExclusive, RecordingVirtualColorNeedsARecordedRemoteExclusiveSession) {
+  // No recovery record: nothing to keep in step, and nothing is written.
+  fake_io_t idle;
+  manager_t idle_manager(idle.io());
+  EXPECT_TRUE(idle_manager.adopt_virtual_color(L"virtual"));
+  EXPECT_FALSE(idle.journal);
+
+  // Another display's session is not touched.
+  fake_io_t fake;
+  fake.current.colors[2] = hdr_state(true);
+  start_exclusive(fake);
+  fake.current.colors[0] = hdr_state(false);
+  manager_t manager(fake.io());
+  fake.events.clear();
+  EXPECT_TRUE(manager.adopt_virtual_color(L"physical-left"));
+  EXPECT_EQ(std::ranges::count(fake.events, "save"), 0);
+
+  // A failed save is reported and leaves the recorded state unchanged.
+  fake.save_ok = false;
+  EXPECT_FALSE(manager.adopt_virtual_color(L"virtual"));
+  EXPECT_TRUE(fake.journal->exclusive_topology->colors[named_index(*fake.journal->exclusive_topology, L"virtual")]->hdr_user_enabled);
 }
 
 TEST(PrimaryDisplayExclusive, ExactAddBindingRecoversWindowsRememberedVirtualOnlyTopology) {

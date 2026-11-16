@@ -287,7 +287,7 @@ namespace proc {
 #endif
 
   private:
-    friend void refresh(const std::string &file_name, bool needs_terminate);
+    friend void refresh(const std::string &file_name, bool needs_terminate, bool wait_for_display_driver);
 #ifdef SUNSHINE_TESTS
     friend struct process_test_access;
 #endif
@@ -371,6 +371,7 @@ namespace proc {
      */
     bool save_virtual_display_session_mode(int width, int height, int fps_millihz);
     bool prepare_retained_display_for_resume();
+    bool prepare_retained_display_after_settle();
     bool promote_virtual_display(
       bool enable_hdr,
       std::chrono::milliseconds topology_retry_window = std::chrono::milliseconds::zero()
@@ -417,7 +418,9 @@ namespace proc {
   std::tuple<std::string, std::string> calculate_app_id(const std::string &app_name, std::string app_image_path, int index);
 
   std::string validate_app_image_path(std::string app_image_path);
-  void refresh(const std::string &file_name, bool needs_terminate = true);
+  // wait_for_display_driver retries a not-yet-ready virtual-display driver for a few seconds.
+  // Host startup wants that; a Web UI save, which runs on the only request thread, does not.
+  void refresh(const std::string &file_name, bool needs_terminate = true, bool wait_for_display_driver = true);
   void migrate_apps(nlohmann::json *fileTree_p, nlohmann::json *inputTree_p);
   std::optional<proc::proc_t> parse(const std::string &file_name);
 
