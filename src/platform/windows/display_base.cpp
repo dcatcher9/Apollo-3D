@@ -823,8 +823,10 @@ namespace platf::dxgi {
    * @param adapter The DXGI adapter to use for capture.
    * @param output The DXGI output to capture.
    * @param enumeration_only Specifies whether this test is occurring for display enumeration.
+   * @param tested_device Receives the device the test succeeded with, so the caller can capture
+   * with it instead of paying for a second device creation. Left untouched on failure.
    */
-  bool test_dxgi_duplication(adapter_t &adapter, output_t &output, bool enumeration_only) {
+  bool test_dxgi_duplication(adapter_t &adapter, output_t &output, bool enumeration_only, device_t *tested_device = nullptr) {
     D3D_FEATURE_LEVEL featureLevels[] {
       D3D_FEATURE_LEVEL_11_1,
       D3D_FEATURE_LEVEL_11_0,
@@ -873,6 +875,11 @@ namespace platf::dxgi {
 
       status = output1->DuplicateOutput((IUnknown *) device.get(), &dup);
       if (SUCCEEDED(status)) {
+        if (tested_device) {
+          // The test duplication must be gone before the caller opens its own on this device.
+          dup.reset();
+          *tested_device = std::move(device);
+        }
         return true;
       }
 
@@ -983,10 +990,12 @@ namespace platf::dxgi {
             continue;
           }
 
+          device_t tested_device;
           const bool backend_available = backend == capture_backend_e::wgc ||
-                                         test_dxgi_duplication(adapter_tmp, output_tmp, false);
+                                         test_dxgi_duplication(adapter_tmp, output_tmp, false, std::addressof(tested_device));
           if (desc.AttachedToDesktop && backend_available) {
             output = std::move(output_tmp);
+            device = std::move(tested_device);
 
             offset_x = desc.DesktopCoordinates.left;
             offset_y = desc.DesktopCoordinates.top;
@@ -1043,26 +1052,35 @@ namespace platf::dxgi {
       D3D_FEATURE_LEVEL_9_1
     };
 
-    status = adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to query IDXGIAdapter interface"sv;
-      return -1;
+    // The Desktop Duplication test above already created a device on this adapter with these
+    // parameters. Creating a device is the slowest step of opening a display, so capture with
+    // that one; only a backend that skipped the test still needs its own.
+    if (device) {
+      device->GetImmediateContext(&device_ctx);
+      feature_level = device->GetFeatureLevel();
+      status = S_OK;
+    } else {
+      status = adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Failed to query IDXGIAdapter interface"sv;
+        return -1;
+      }
+
+      status = D3D11CreateDevice(
+        adapter_p,
+        D3D_DRIVER_TYPE_UNKNOWN,
+        nullptr,
+        D3D11_CREATE_DEVICE_FLAGS,
+        featureLevels,
+        sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
+        D3D11_SDK_VERSION,
+        &device,
+        &feature_level,
+        &device_ctx
+      );
+
+      adapter_p->Release();
     }
-
-    status = D3D11CreateDevice(
-      adapter_p,
-      D3D_DRIVER_TYPE_UNKNOWN,
-      nullptr,
-      D3D11_CREATE_DEVICE_FLAGS,
-      featureLevels,
-      sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
-      D3D11_SDK_VERSION,
-      &device,
-      &feature_level,
-      &device_ctx
-    );
-
-    adapter_p->Release();
 
     if (FAILED(status)) {
       BOOST_LOG(error) << "Failed to create D3D11 device [0x"sv << util::hex(status).to_string_view() << ']';
