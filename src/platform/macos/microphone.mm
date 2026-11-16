@@ -18,7 +18,7 @@ namespace platf {
       [av_audio_capture release];
     }
 
-    capture_e sample(std::vector<float> &sample_in) override {
+    capture_e sample(std::span<float> sample_in) override {
       auto sample_size = sample_in.size();
 
       uint32_t length = 0;

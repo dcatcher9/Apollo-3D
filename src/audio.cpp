@@ -11,6 +11,7 @@
 
 // local includes
 #include "audio.h"
+#include "audio_capture.h"
 #include "config.h"
 #include "globals.h"
 #include "logging.h"
@@ -21,7 +22,7 @@
 namespace audio {
   using namespace std::literals;
   using opus_t = util::safe_ptr<OpusMSEncoder, opus_multistream_encoder_destroy>;
-  using sample_queue_t = std::shared_ptr<safe::queue_t<std::vector<float>>>;
+  using sample_queue_t = std::shared_ptr<detail::pcm_queue_t>;
 
   static int start_audio_control(audio_ctx_t &ctx);
   static void stop_audio_control(audio_ctx_t &);
@@ -130,7 +131,7 @@ namespace audio {
     while (auto sample = samples->pop()) {
       buffer_t packet {1400};
 
-      int bytes = opus_multistream_encode_float(opus.get(), sample->data(), frame_size, std::begin(packet), packet.size());
+      int bytes = opus_multistream_encode_float(opus.get(), sample.get(), frame_size, std::begin(packet), packet.size());
       if (bytes < 0) {
         BOOST_LOG(error) << "Couldn't encode audio: "sv << opus_strerror(bytes);
         packets->stop();
@@ -226,12 +227,10 @@ namespace audio {
     });
 
     int samples_per_frame = frame_size * stream.channelCount;
-    std::vector<float> sample_buffer;
+    detail::pcm_frame_t sample_buffer;
 
     while (!shutdown_event->peek()) {
-      sample_buffer.resize(samples_per_frame);
-
-      auto status = mic->sample(sample_buffer);
+      auto status = detail::capture_pcm_frame(*mic, sample_buffer, samples_per_frame, *samples);
       switch (status) {
         case platf::capture_e::ok:
           break;
@@ -251,8 +250,6 @@ namespace audio {
         default:
           return;
       }
-
-      samples->raise(std::move(sample_buffer));
     }
   }
 

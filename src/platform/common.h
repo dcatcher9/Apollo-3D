@@ -14,6 +14,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 
 // lib includes
@@ -654,7 +655,12 @@ namespace platf {
 
   class mic_t {
   public:
-    virtual capture_e sample(std::vector<float> &frame_buffer) = 0;
+    /**
+     * Fill a caller-owned PCM frame whose extent is fixed for this call. Never retain the
+     * borrowed storage or resize it. `ok` means the entire frame was written; on any other
+     * result, the caller must not publish the frame's contents.
+     */
+    virtual capture_e sample(std::span<float> frame_buffer) = 0;
 
     virtual ~mic_t() = default;
   };

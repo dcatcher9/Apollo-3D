@@ -596,7 +596,7 @@ namespace platf::audio {
 
   class mic_wasapi_t: public mic_t {
   public:
-    capture_e sample(std::vector<float> &sample_out) override {
+    capture_e sample(std::span<float> sample_out) override {
       auto sample_size = sample_out.size();
 
       // Refill the sample buffer if needed
