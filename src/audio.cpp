@@ -103,8 +103,7 @@ namespace audio {
     return select_stream_config(channels, high_quality).bitrate / 1000;
   }
 
-  void encodeThread(sample_queue_t samples, config_t config, std::shared_ptr<void> channel_data) {
-    auto packets = mail::man->queue<packet_t>(mail::audio_packets);
+  void encodeThread(sample_queue_t samples, config_t config, packet_queue_t packets) {
     const auto &stream = select_stream_config(config.channels, config.flags[config_t::HIGH_QUALITY]);
 
     // Encoding takes place on this thread
@@ -140,11 +139,11 @@ namespace audio {
       }
 
       packet.fake_resize(bytes);
-      packets->raise(channel_data, std::move(packet));
+      packets->raise(std::move(packet));
     }
   }
 
-  void capture(safe::mail_t mail, config_t config, std::shared_ptr<void> channel_data) {
+  void capture(safe::mail_t mail, config_t config, packet_queue_t packets) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     const auto &stream = select_stream_config(config.channels, config.flags[config_t::HIGH_QUALITY]);
 
@@ -217,7 +216,7 @@ namespace audio {
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
     auto samples = std::make_shared<sample_queue_t::element_type>(30);
-    std::thread thread {encodeThread, samples, config, channel_data};
+    std::thread thread {encodeThread, samples, config, std::move(packets)};
 
     auto fg = util::fail_guard([&]() {
       samples->stop();

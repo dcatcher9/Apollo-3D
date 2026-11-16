@@ -1207,8 +1207,7 @@ namespace video {
     nvenc::nvenc_encoded_frame &&encoded_frame,
     const encoded_frame_context_t &frame,
     nvenc_encode_session_t &session,
-    safe::mail_raw_t::queue_t<packet_t> &packets,
-    const std::shared_ptr<void> &channel_data,
+    packet_queue_t &packets,
     encode_stage_diagnostics_t *diagnostics
   ) {
     if (diagnostics) {
@@ -1236,7 +1235,6 @@ namespace video {
       encoded_frame.idr,
       session.frame_pool()
     );
-    packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame.frame_timestamp;
     packet->content_timestamp = frame.content_timestamp;
@@ -1267,13 +1265,12 @@ namespace video {
   /** One picture at a time: submit, wait for and publish it on the encode thread. */
   encoded_packet_publish_result_t encode(
     nvenc_encode_session_t &session,
-    safe::mail_raw_t::queue_t<packet_t> &packets,
-    const std::shared_ptr<void> &channel_data,
+    packet_queue_t &packets,
     const encoded_frame_context_t &frame,
     encode_stage_diagnostics_t *diagnostics
   ) {
     auto encoded_frame = session.encode_frame(frame.frame_nr, session.acquire_frame_buffer());
-    return publish_encoded_frame(std::move(encoded_frame), frame, session, packets, channel_data, diagnostics);
+    return publish_encoded_frame(std::move(encoded_frame), frame, session, packets, diagnostics);
   }
 
   /** Encoded-queue backpressure, on whichever thread publishes packets: a dropped delta frame asks
@@ -1334,7 +1331,7 @@ namespace video {
     std::unique_ptr<nvenc_encode_session_t> session,
     safe::signal_t &reinit_event,
     detail::encoder_recovery_t &recovery,
-    std::shared_ptr<void> channel_data,
+    packet_queue_t packets,
     const std::function<void(const video_mode_change_t &)> &on_bitrate_reconfigured
   ) {
     // All session exits retire their backend through its owner. Failed encoding additionally
@@ -1359,10 +1356,6 @@ namespace video {
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
-    auto packets = mail::man->queue<packet_t>(
-      mail::video_packets,
-      ENCODED_PACKET_QUEUE_LIMIT
-    );
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
     // Atomic client-requested mode/geometry/cadence/bitrate changes arrive on one queue.
@@ -1517,7 +1510,7 @@ namespace video {
             drop_report.record_awaiting_idr();
             return true;
           }
-          const auto result = publish_encoded_frame(std::move(encoded_frame), frame, *session, packets, channel_data, encode_diagnostics ? &*encode_diagnostics : nullptr);
+          const auto result = publish_encoded_frame(std::move(encoded_frame), frame, *session, packets, encode_diagnostics ? &*encode_diagnostics : nullptr);
           if (result.failed) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
             return false;
@@ -2078,7 +2071,7 @@ namespace video {
           loop_stats->encoded(new_loop_content, std::chrono::steady_clock::now() - *encode_started, session->last_submit_timing(), *completion_finished - *encode_started);
         }
       } else {
-        const auto publish_result = encode(*session, packets, channel_data, frame, encode_diagnostics ? &*encode_diagnostics : nullptr);
+        const auto publish_result = encode(*session, packets, frame, encode_diagnostics ? &*encode_diagnostics : nullptr);
         encoded = !publish_result.failed;
         if (loop_stats) {
           const auto timing = session->last_frame_timing();
@@ -2227,7 +2220,7 @@ namespace video {
   void capture_async(
     safe::mail_t mail,
     config_t &config,
-    std::shared_ptr<void> channel_data
+    packet_queue_t packets
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
@@ -2640,7 +2633,7 @@ namespace video {
         std::move(encode_session),
         capture_session.reinit_event(),
         recovery,
-        channel_data,
+        packets,
         [&](const video_mode_change_t &mode) {
           // Keep every rebuild/fallback owner on the bitrate NVENC actually accepted. Without
           // this callback, a later SBS toggle or display reinitialization would reconstruct the
@@ -2657,12 +2650,12 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    std::shared_ptr<void> channel_data
+    packet_queue_t packets
   ) {
     // Initialize this stream's depth status independently of every other session.
     mail->event<int>(mail::sbs_depth_status)->raise(0);
     mail->event<bool>(mail::idr)->raise(true);
-    capture_async(std::move(mail), config, channel_data);
+    capture_async(std::move(mail), config, std::move(packets));
   }
 
   int validate_config(std::shared_ptr<platf::display_t> disp, const config_t &config) {
@@ -2680,12 +2673,9 @@ namespace video {
 
     session->request_idr_frame();
 
-    auto packets = mail::man->queue<packet_t>(
-      mail::video_packets,
-      ENCODED_PACKET_QUEUE_LIMIT
-    );
+    auto packets = std::make_shared<packet_queue_t::element_type>(ENCODED_PACKET_QUEUE_LIMIT);
     while (!packets->peek()) {
-      if (encode(*session, packets, nullptr, make_encoded_frame_context(1, {}, {}, nullptr, true, {}, true), nullptr).failed) {
+      if (encode(*session, packets, make_encoded_frame_context(1, {}, {}, nullptr, true, {}, true), nullptr).failed) {
         return -1;
       }
     }

@@ -179,6 +179,13 @@ TEST(SessionWorkerStartTest, RollsBackWhenSecondThreadCannotStart) {
   EXPECT_TRUE(stream::session::worker_start_rollback_for_test());
 }
 
+TEST(SessionWorkerStartTest, RollsBackEveryPreparedWorkerAtEachConstructionFailure) {
+  for (const auto index : {0u, 1u, 2u, 3u}) {
+    SCOPED_TRACE(index);
+    EXPECT_TRUE(stream::session::worker_start_rollback_for_test(index));
+  }
+}
+
 TEST(SessionWorkerStartTest, ControlConnectionGetsFullWindowAfterSlowPlatformPreparation) {
   for (const auto preparation : {0ms, 11500ms, 120000ms}) {
     SCOPED_TRACE(preparation.count());
@@ -187,7 +194,7 @@ TEST(SessionWorkerStartTest, ControlConnectionGetsFullWindowAfterSlowPlatformPre
     EXPECT_EQ(result.expired_before_publication, preparation > 10s);
     EXPECT_EQ(result.clock_samples, 1);
     EXPECT_EQ(result.remaining_ping_budget, 10s);
-    EXPECT_EQ(result.ready_workers, 2) << "Both workers must observe registration and its fresh deadline";
+    EXPECT_EQ(result.ready_workers, 4) << "All four workers must observe registration and its fresh deadline";
   }
 }
 

@@ -43,6 +43,9 @@ extern "C" {
 #include "session_join_watchdog.h"
 #include "session_resume_lifecycle.h"
 #include "stream.h"
+#ifdef SUNSHINE_TESTS
+  #include "stream_media_test.h"
+#endif
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -774,9 +777,8 @@ namespace stream {
     av_ping_route_queue_t av_ping_route_updates;
 
     std::thread recv_thread;
-    std::thread video_thread;
-    std::thread audio_thread;
     std::thread control_thread;
+    std::chrono::steady_clock::time_point video_epoch;
 
     asio::io_context io_context;
 
@@ -786,9 +788,7 @@ namespace stream {
     control_server_t control_server;
   };
 
-  // Encoded packets may outlive their RTSP session while waiting in the global broadcast queues.
-  // Keep the exact send-side state alive independently; retaining session_t itself would create a
-  // cycle through session_t::broadcast_ref and could run broadcast teardown on a broadcast worker.
+  // Each sender is bound to its session's send-side state until that sender has joined.
   struct video_channel_t {
     int packet_size;
     int min_required_fec_packets;
@@ -838,6 +838,60 @@ namespace stream {
     util::buffer_t<uint8_t *> shard_ptrs;
     audio_fec_packet_t fec_packet;
     std::unique_ptr<platf::deinit_t> qos;
+  };
+
+  class session_media_senders_t {
+  public:
+    session_media_senders_t() = default;
+
+    ~session_media_senders_t() {
+      stop_and_join();
+    }
+
+    session_media_senders_t(const session_media_senders_t &) = delete;
+    session_media_senders_t &operator=(const session_media_senders_t &) = delete;
+    session_media_senders_t(session_media_senders_t &&) = delete;
+    session_media_senders_t &operator=(session_media_senders_t &&) = delete;
+
+    const video::packet_queue_t &video_packets() const noexcept {
+      return video_packets_;
+    }
+
+    const audio::packet_queue_t &audio_packets() const noexcept {
+      return audio_packets_;
+    }
+
+    void adopt_video(std::thread worker) noexcept {
+      video_thread_ = std::move(worker);
+    }
+
+    void adopt_audio(std::thread worker) noexcept {
+      audio_thread_ = std::move(worker);
+    }
+
+    void stop_and_join() {
+      if (video_packets_) {
+        video_packets_->stop();
+      }
+      if (audio_packets_) {
+        audio_packets_->stop();
+      }
+      if (video_thread_.joinable()) {
+        video_thread_.join();
+      }
+      if (audio_thread_.joinable()) {
+        audio_thread_.join();
+      }
+      // A stopped queue retains unread packets. Release them even if session_t is retained.
+      video_packets_.reset();
+      audio_packets_.reset();
+    }
+
+  private:
+    video::packet_queue_t video_packets_ = std::make_shared<safe::queue_t<video::packet_t>>(video::ENCODED_PACKET_QUEUE_LIMIT);
+    audio::packet_queue_t audio_packets_ = std::make_shared<safe::queue_t<audio::packet_t>>(audio::ENCODED_PACKET_QUEUE_LIMIT);
+    std::thread video_thread_;
+    std::thread audio_thread_;
   };
 
   // Everything needed to finish or reject one asynchronous live display-mode request. These
@@ -953,13 +1007,16 @@ namespace stream {
 
     // The client can send its audio/video UDP ping while platform resume work is still changing
     // the display topology, and before ENet publishes the local source address. Capture must not
-    // feed the broadcast queues until both halves of session startup are complete.
+    // feed the session media queues until both halves of session startup are complete.
     safe::signal_t startup_ready;
     safe::signal_t control_ready;
 
     std::mutex stop_mutex;
     std::atomic_bool graceful_stop_requested {false};
     std::atomic<session::state_e> state;
+
+    // Join senders before their channels, mail and shared socket owner can be destroyed.
+    session_media_senders_t media_senders;
 
     // Keep this last: member destruction runs in reverse declaration order, so its defensive
     // destructor joins before any mail/video state captured by the worker can be destroyed.
@@ -2882,14 +2939,26 @@ namespace stream {
     }
   }
 
-  void videoBroadcastThread(udp::socket &sock) {
-    auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
-    auto packets = mail::man->queue<video::packet_t>(
-      mail::video_packets,
-      video::ENCODED_PACKET_QUEUE_LIMIT
-    );
-    auto video_epoch = std::chrono::steady_clock::now();
+#ifdef SUNSHINE_TESTS
+  struct media_sender_test_hooks_t {
+    std::function<void()> ready;
+    std::function<void()> before_admission;
+    std::function<void()> processed;
+    std::optional<int> video_fec_percentage;
+  };
+#endif
 
+  void run_video_sender(
+    udp::socket &sock,
+    video::packet_queue_t packets,
+    std::shared_ptr<video_channel_t> channel,
+    safe::mail_raw_t::event_t<bool> shutdown_event,
+    std::chrono::steady_clock::time_point video_epoch
+#ifdef SUNSHINE_TESTS
+    ,
+    media_sender_test_hooks_t *test_hooks = nullptr
+#endif
+  ) {
     // Video traffic is sent on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
@@ -2936,14 +3005,27 @@ namespace stream {
     auto timer = platf::create_high_precision_timer();
     if (!timer || !*timer) {
       BOOST_LOG(error) << "Failed to create timer, aborting video broadcast thread";
-      // Match the audio thread: a session without a video sender must end, not linger.
-      shutdown_event->raise(true);
       return;
     }
 
     auto ratecontrol_next_frame_start = std::chrono::steady_clock::now();
 
+#ifdef SUNSHINE_TESTS
+    if (test_hooks && test_hooks->ready) {
+      test_hooks->ready();
+    }
+#endif
     while (auto packet = packets->pop()) {
+#ifdef SUNSHINE_TESTS
+      auto report_processed = util::fail_guard([test_hooks] {
+        if (test_hooks && test_hooks->processed) {
+          test_hooks->processed();
+        }
+      });
+      if (test_hooks && test_hooks->before_admission) {
+        test_hooks->before_admission();
+      }
+#endif
       auto release_oversized_workspaces = util::fail_guard([&]() {
         if (packetization_storage.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
           std::vector<std::uint8_t>().swap(packetization_storage);
@@ -2956,7 +3038,6 @@ namespace stream {
 
       frame_network_latency_logger.first_point_now();
 
-      auto channel = std::static_pointer_cast<video_channel_t>(packet->channel_data);
       if (!channel || !channel->active.load(std::memory_order_acquire)) {
         continue;
       }
@@ -3045,6 +3126,11 @@ namespace stream {
       }
 
       auto fecPercentage = config::stream.fec_percentage;
+#ifdef SUNSHINE_TESTS
+      if (test_hooks && test_hooks->video_fec_percentage) {
+        fecPercentage = *test_hooks->video_fec_percentage;
+      }
+#endif
 
       const auto packetization_started = video::detail::diagnostic_timestamp(
         stage_diagnostics.has_value(),
@@ -3364,21 +3450,24 @@ namespace stream {
         std::this_thread::sleep_for(100ms);
       }
     }
-
-    shutdown_event->raise(true);
   }
 
-  void audioBroadcastThread(udp::socket &sock) {
-    auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
-    auto packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
-
+  void run_audio_sender(
+    udp::socket &sock,
+    audio::packet_queue_t packets,
+    std::shared_ptr<audio_channel_t> channel,
+    safe::mail_raw_t::event_t<bool> shutdown_event
+#ifdef SUNSHINE_TESTS
+    ,
+    media_sender_test_hooks_t *test_hooks = nullptr
+#endif
+  ) {
     audio_packet_t audio_packet;
     fec::rs_t rs {reed_solomon_new(RTPA_DATA_SHARDS, RTPA_FEC_SHARDS)};
     crypto::aes_t iv(16);
 
     if (!rs) {
       BOOST_LOG(error) << "Failed to allocate audio Reed-Solomon context"sv;
-      shutdown_event->raise(true);
       return;
     }
 
@@ -3397,13 +3486,27 @@ namespace stream {
     // Audio traffic is sent on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
+#ifdef SUNSHINE_TESTS
+    if (test_hooks && test_hooks->ready) {
+      test_hooks->ready();
+    }
+#endif
     while (auto packet = packets->pop()) {
+#ifdef SUNSHINE_TESTS
+      auto report_processed = util::fail_guard([test_hooks] {
+        if (test_hooks && test_hooks->processed) {
+          test_hooks->processed();
+        }
+      });
+      if (test_hooks && test_hooks->before_admission) {
+        test_hooks->before_admission();
+      }
+#endif
       if (shutdown_event->peek()) {
         break;
       }
 
-      TUPLE_2D_REF(channel_data, packet_data, *packet);
-      auto channel = std::static_pointer_cast<audio_channel_t>(channel_data);
+      auto &packet_data = *packet;
       if (!channel || !channel->active.load(std::memory_order_acquire)) {
         continue;
       }
@@ -3485,9 +3588,11 @@ namespace stream {
         std::this_thread::sleep_for(100ms);
       }
     }
-
-    shutdown_event->raise(true);
   }
+
+#ifdef SUNSHINE_TESTS
+  #include "stream_media_test.inc"
+#endif
 
   int start_broadcast(broadcast_ctx_t &ctx) {
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
@@ -3556,8 +3661,7 @@ namespace stream {
       end_broadcast(ctx);
     });
 
-    ctx.video_thread = std::thread {videoBroadcastThread, std::ref(ctx.video_sock)};
-    ctx.audio_thread = std::thread {audioBroadcastThread, std::ref(ctx.audio_sock)};
+    ctx.video_epoch = std::chrono::steady_clock::now();
     ctx.control_thread = std::thread {controlBroadcastThread, &ctx.control_server};
 
     ctx.recv_thread = std::thread {recvThread, std::ref(ctx)};
@@ -3571,16 +3675,6 @@ namespace stream {
 
     broadcast_shutdown_event->raise(true);
 
-    auto video_packets = mail::man->queue<video::packet_t>(
-      mail::video_packets,
-      video::ENCODED_PACKET_QUEUE_LIMIT
-    );
-    auto audio_packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
-
-    // Minimize delay stopping video/audio threads
-    video_packets->stop();
-    audio_packets->stop();
-
     if (ctx.av_ping_route_updates) {
       ctx.av_ping_route_updates->stop();
     }
@@ -3590,20 +3684,9 @@ namespace stream {
     ctx.video_sock.close(ec);
     ctx.audio_sock.close(ec);
 
-    video_packets.reset();
-    audio_packets.reset();
-
     BOOST_LOG(debug) << "Waiting for main listening thread to end..."sv;
     if (ctx.recv_thread.joinable()) {
       ctx.recv_thread.join();
-    }
-    BOOST_LOG(debug) << "Waiting for main video thread to end..."sv;
-    if (ctx.video_thread.joinable()) {
-      ctx.video_thread.join();
-    }
-    BOOST_LOG(debug) << "Waiting for main audio thread to end..."sv;
-    if (ctx.audio_thread.joinable()) {
-      ctx.audio_thread.join();
     }
     BOOST_LOG(debug) << "Waiting for main control thread to end..."sv;
     if (ctx.control_thread.joinable()) {
@@ -3686,7 +3769,7 @@ namespace stream {
     session->video->qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video->peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
-    video::capture(session->mail, session->config.monitor, session->video);
+    video::capture(session->mail, session->config.monitor, session->media_senders.video_packets());
   }
 
   void audioThread(session_t *session) {
@@ -3711,14 +3794,14 @@ namespace stream {
     session->audio->qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio->peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Audio"sv;
-    audio::capture(session->mail, session->config.audio, session->audio);
+    audio::capture(session->mail, session->config.audio, session->media_senders.audio_packets());
   }
 
   namespace session {
     namespace {
-      // Construct both per-session workers behind a shared gate. If creating either std::thread
-      // throws, the already-created worker is released as a no-op and joined before its thread
-      // object is destroyed. This keeps a resource-exhaustion failure from terminating the host.
+      // Construct all four per-session workers behind a shared gate. If creating any std::thread
+      // throws, already-created workers are released as no-ops and joined before their thread
+      // objects are destroyed. This keeps a resource-exhaustion failure from terminating the host.
       class pending_session_workers_t {
       public:
         ~pending_session_workers_t() {
@@ -3733,18 +3816,29 @@ namespace stream {
         bool prepare(
           std::function<void()> audio_entry,
           std::function<void()> video_entry,
-          bool fail_before_video_for_test = false,
+          std::function<void()> video_sender_entry,
+          std::function<void()> audio_sender_entry,
+          std::size_t fail_before_worker_for_test = std::numeric_limits<std::size_t>::max(),
           std::function<void()> failure_handler = {}
         ) noexcept {
           try {
             gate_ = std::make_shared<std::promise<bool>>();
             auto ready = gate_->get_future().share();
-            auto start_worker = [ready, failure_handler](std::string_view name, std::function<void()> entry) {
+            auto start_worker = [ready, failure_handler, fail_before_worker_for_test](std::size_t index, std::string_view name, std::function<void()> entry) {
+#ifdef SUNSHINE_TESTS
+              if (fail_before_worker_for_test == index) {
+                throw std::runtime_error {"injected session-worker start failure"};
+              }
+#else
+              (void) index;
+              (void) fail_before_worker_for_test;
+#endif
               return std::thread {[ready, failure_handler, name, entry = std::move(entry)]() mutable {
                 try {
-                  if (ready.get()) {
-                    entry();
+                  if (!ready.get()) {
+                    return;
                   }
+                  entry();
                 } catch (const std::future_error &) {
                   // A broken startup gate is equivalent to a cancelled session.
                   return;
@@ -3759,24 +3853,17 @@ namespace stream {
                 }
               }};
             };
-            audio_ = start_worker("Audio"sv, std::move(audio_entry));
-
-#ifdef SUNSHINE_TESTS
-            if (fail_before_video_for_test) {
-              throw std::runtime_error {"injected second session-worker start failure"};
-            }
-#else
-            (void) fail_before_video_for_test;
-#endif
-
-            video_ = start_worker("Video"sv, std::move(video_entry));
+            audio_ = start_worker(0, "Audio"sv, std::move(audio_entry));
+            video_ = start_worker(1, "Video"sv, std::move(video_entry));
+            video_sender_ = start_worker(2, "Video sender"sv, std::move(video_sender_entry));
+            audio_sender_ = start_worker(3, "Audio sender"sv, std::move(audio_sender_entry));
             return true;
           } catch (const std::exception &exception) {
-            if (!fail_before_video_for_test) {
+            if (fail_before_worker_for_test == std::numeric_limits<std::size_t>::max()) {
               BOOST_LOG(error) << "Failed to create streaming session workers: "sv << exception.what();
             }
           } catch (...) {
-            if (!fail_before_video_for_test) {
+            if (fail_before_worker_for_test == std::numeric_limits<std::size_t>::max()) {
               BOOST_LOG(error) << "Failed to create streaming session workers with an unknown error."sv;
             }
           }
@@ -3788,11 +3875,19 @@ namespace stream {
         void commit(session_t &session) noexcept {
           session.audioThread = std::move(audio_);
           session.videoThread = std::move(video_);
+          session.media_senders.adopt_video(std::move(video_sender_));
+          session.media_senders.adopt_audio(std::move(audio_sender_));
           resolve(true);
         }
 
         void cancel() noexcept {
           resolve(false);
+          if (audio_sender_.joinable()) {
+            audio_sender_.join();
+          }
+          if (video_sender_.joinable()) {
+            video_sender_.join();
+          }
           if (video_.joinable()) {
             video_.join();
           }
@@ -3802,7 +3897,7 @@ namespace stream {
         }
 
         [[nodiscard]] bool has_joinable_worker() const noexcept {
-          return audio_.joinable() || video_.joinable();
+          return audio_.joinable() || video_.joinable() || video_sender_.joinable() || audio_sender_.joinable();
         }
 
       private:
@@ -3822,6 +3917,8 @@ namespace stream {
         std::shared_ptr<std::promise<bool>> gate_;
         std::thread audio_;
         std::thread video_;
+        std::thread video_sender_;
+        std::thread audio_sender_;
       };
 
       template<class Clock>
@@ -4222,17 +4319,18 @@ namespace stream {
       check_platform_stop_locked(generation);
     }
 
-    bool worker_start_rollback_for_test() {
+    bool worker_start_rollback_for_test(std::size_t fail_before_worker) {
       std::atomic_int executed {};
       pending_session_workers_t workers;
+      const auto entry = [&executed]() {
+        ++executed;
+      };
       const bool prepared = workers.prepare(
-        [&executed]() {
-          ++executed;
-        },
-        [&executed]() {
-          ++executed;
-        },
-        true
+        entry,
+        entry,
+        entry,
+        entry,
+        fail_before_worker
       );
       return !prepared && executed.load() == 0 && !workers.has_joinable_worker();
     }
@@ -4258,7 +4356,7 @@ namespace stream {
           ++ready_workers;
         }
       };
-      result.workers_prepared = workers.prepare(observe_registration, observe_registration);
+      result.workers_prepared = workers.prepare(observe_registration, observe_registration, observe_registration, observe_registration);
       if (!result.workers_prepared) {
         return result;
       }
@@ -4272,6 +4370,7 @@ namespace stream {
       }
       session.audioThread.join();
       session.videoThread.join();
+      session.media_senders.stop_and_join();
       result.ready_workers = ready_workers.load();
       return result;
     }
@@ -4452,9 +4551,10 @@ namespace stream {
           BOOST_LOG(debug) << "Resetting Input..."sv;
           input::reset(session.input).wait();
         },
-        []() {
+        [&session]() {
           // Worker shutdown is complete and its watchdog is disarmed. App exit, undo commands
           // and display restoration have separate bounds and may legitimately take longer.
+          session.media_senders.stop_and_join();
           // Keep the active slot until this lock is held so a successor cannot overlap teardown.
           std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
           if (!remote_session_active) {
@@ -4514,7 +4614,24 @@ namespace stream {
             [&session]() {
               videoThread(&session);
             },
-            false,
+            [&session]() {
+              run_video_sender(
+                session.broadcast_ref->video_sock,
+                session.media_senders.video_packets(),
+                session.video,
+                session.shutdown_event,
+                session.broadcast_ref->video_epoch
+              );
+            },
+            [&session]() {
+              run_audio_sender(
+                session.broadcast_ref->audio_sock,
+                session.media_senders.audio_packets(),
+                session.audio,
+                session.shutdown_event
+              );
+            },
+            std::numeric_limits<std::size_t>::max(),
             [&session]() {
               stop(session);
             }
@@ -4523,7 +4640,7 @@ namespace stream {
         return -1;
       }
 
-      // Publish the raw control registration only after platform startup and both worker-thread
+      // Publish the raw control registration only after platform startup and all worker-thread
       // constructions succeed. Its owner remains the RTSP slot; controlEnd is the lifetime barrier.
       {
         auto slot_lock = session.broadcast_ref->control_server._session.lock();

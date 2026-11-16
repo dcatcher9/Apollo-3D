@@ -9016,17 +9016,37 @@ TEST(EncodeDimensionLimitsTest, HostSbsAndOrdinaryClampShareRuntimeCeilings) {
   EXPECT_LE(packed.height, 2800);
 }
 
-TEST(VideoPacketLifetimeTest, RetainsBroadcastStateUntilPacketIsConsumed) {
-  auto channel = std::make_shared<int>(42);
-  std::weak_ptr<int> weak_channel = channel;
-  video::packet_raw_generic packet {{0x01}, 1, true};
-  packet.channel_data = channel;
-
-  channel.reset();
-  EXPECT_FALSE(weak_channel.expired());
-
-  packet.channel_data.reset();
-  EXPECT_TRUE(weak_channel.expired());
+TEST(VideoPacketLifetimeTest, QueuedPacketRetainsOriginatingPoolUntilConsumption) {
+  auto packets = std::make_shared<safe::queue_t<video::packet_t>>(video::ENCODED_PACKET_QUEUE_LIMIT);
+  std::weak_ptr<video::encoded_frame_buffer_pool_t> pool;
+  const std::uint8_t *storage = nullptr;
+  std::size_t capacity = 0;
+  {
+    auto producer_pool = std::make_shared<video::encoded_frame_buffer_pool_t>();
+    pool = producer_pool;
+    std::vector<std::uint8_t> produced(256, 0x5A);
+    storage = produced.data();
+    capacity = produced.capacity();
+    packets->raise(std::make_unique<video::packet_raw_generic>(std::move(produced), 7, true, producer_pool));
+  }
+  EXPECT_FALSE(pool.expired());
+  auto consumed = packets->pop(0ms);
+  ASSERT_TRUE(consumed);
+  packets->stop();
+  packets.reset();
+  EXPECT_EQ(consumed->data(), storage);
+  EXPECT_EQ(consumed->data_size(), 256u);
+  EXPECT_TRUE(std::all_of(consumed->data(), consumed->data() + consumed->data_size(), [](auto byte) {
+    return byte == 0x5A;
+  }));
+  auto retained_pool = pool.lock();
+  ASSERT_TRUE(retained_pool);
+  consumed.reset();
+  auto recycled = retained_pool->acquire();
+  EXPECT_TRUE(recycled.empty());
+  EXPECT_GE(recycled.capacity(), capacity);
+  retained_pool.reset();
+  EXPECT_TRUE(pool.expired());
 }
 
 TEST(EncodePipelineWiringTest, ExitsRecoveryAndInvalidationKeepTheirOneAtATimeGuarantees) {

@@ -704,10 +704,6 @@ namespace video {
 
     virtual size_t data_size() = 0;
 
-    // Retain only the network-send state needed by the broadcast worker. This deliberately does
-    // not own the stream session (which owns the broadcast context), avoiding both dangling raw
-    // pointers and a session -> broadcast -> queued packet -> session ownership cycle.
-    std::shared_ptr<void> channel_data;
     bool after_ref_frame_invalidation = false;
     // Presentation/cadence time. This is the only timestamp used to derive the monotonic RTP PTS.
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
@@ -801,6 +797,7 @@ namespace video {
   };
 
   using packet_t = std::unique_ptr<packet_raw_t>;
+  using packet_queue_t = std::shared_ptr<safe::queue_t<packet_t>>;
 
   struct hdr_info_raw_t {
     explicit hdr_info_raw_t(bool enabled):
@@ -841,7 +838,7 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    std::shared_ptr<void> channel_data
+    packet_queue_t packets
   );
 
   /**

@@ -66,10 +66,12 @@ namespace audio {
   };
 
   using buffer_t = util::buffer_t<std::uint8_t>;
-  using packet_t = std::pair<std::shared_ptr<void>, buffer_t>;
+  using packet_t = buffer_t;
+  using packet_queue_t = std::shared_ptr<safe::queue_t<packet_t>>;
+  constexpr std::uint32_t ENCODED_PACKET_QUEUE_LIMIT = 32;
   using audio_ctx_ref_t = safe::shared_t<audio_ctx_t>::ptr_t;
 
-  void capture(safe::mail_t mail, config_t config, std::shared_ptr<void> channel_data);
+  void capture(safe::mail_t mail, config_t config, packet_queue_t packets);
 
   /**
    * @brief Get the reference to the audio context.

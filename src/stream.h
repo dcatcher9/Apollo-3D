@@ -793,7 +793,7 @@ namespace stream {
     std::uint64_t platform_lifecycle_generation_for_test();
     std::optional<std::chrono::steady_clock::time_point> platform_stop_deadline_for_test();
     void check_platform_stop_for_test(std::optional<std::uint64_t> dispatched_generation = std::nullopt);
-    bool worker_start_rollback_for_test();
+    bool worker_start_rollback_for_test(std::size_t fail_before_worker = 1);
 
     struct control_registration_test_result_t {
       bool workers_prepared = false;
