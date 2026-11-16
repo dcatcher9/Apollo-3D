@@ -2943,39 +2943,27 @@ namespace proc {
     return ss.str();
   }
 
-  uint32_t calculate_crc32(const std::string &input) {
-    boost::crc_32_type result;
-    result.process_bytes(input.data(), input.length());
-    return result.checksum();
-  }
-
   std::tuple<std::string, std::string> calculate_app_id(const std::string &app_name, std::string app_image_path, int index) {
     // Generate id by hashing name with image data if present
-    std::vector<std::string> to_hash;
-    to_hash.push_back(app_name);
-    auto file_path = validate_app_image_path(app_image_path);
+    boost::crc_32_type result;
+    result.process_bytes(app_name.data(), app_name.size());
+    auto file_path = validate_app_image_path(std::move(app_image_path));
     if (file_path != DEFAULT_APP_IMAGE_PATH) {
       auto file_hash = calculate_sha256(file_path);
-      if (file_hash) {
-        to_hash.push_back(file_hash.value());
-      } else {
-        // Fallback to just hashing image path
-        to_hash.push_back(file_path);
-      }
+      // Fall back to hashing the validated path if the image digest is unavailable.
+      const auto &image_material = file_hash ? file_hash.value() : file_path;
+      result.process_bytes(image_material.data(), image_material.size());
     }
 
-    // Create combined strings for hash
-    std::stringstream ss;
-    for_each(to_hash.begin(), to_hash.end(), [&ss](const std::string &s) {
-      ss << s;
-    });
-    auto input_no_index = ss.str();
-    ss << index;
-    auto input_with_index = ss.str();
-
     // CRC32 then truncate to signed 32-bit range due to client limitations
-    auto id_no_index = std::to_string(abs((int32_t) calculate_crc32(input_no_index)));
-    auto id_with_index = std::to_string(abs((int32_t) calculate_crc32(input_with_index)));
+    auto id_no_index = std::to_string(abs((int32_t) result.checksum()));
+
+    // Keep the original locale-sensitive index formatting without copying or rehashing the prefix.
+    std::stringstream index_stream;
+    index_stream << index;
+    const auto index_text = index_stream.str();
+    result.process_bytes(index_text.data(), index_text.size());
+    auto id_with_index = std::to_string(abs((int32_t) result.checksum()));
 
     return std::make_tuple(id_no_index, id_with_index);
   }
