@@ -97,8 +97,11 @@ blocking call, which can consume more than a shutter interval under load. If a d
 a flush for every feedback update, the live wait times out and follows quiet recovery instead.
 
 Once armed, each confirmed image may have been held for between the configured eye interval and
-four times that interval. Its raw refresh-counter difference and QPC elapsed time must agree
-within 100 µs, and its exact next present identity and current-frame freshness remain mandatory.
+four times that interval. Its raw refresh-counter difference must be exact, and its QPC elapsed
+time must agree with that difference within 500 µs or a quarter of one refresh period, whichever
+is smaller; the timestamp Windows attaches to a refresh can be late by a few hundred microseconds
+under load without the image being on a different refresh. Its exact next present identity and
+current-frame freshness remain mandatory.
 The emitter has averaging disabled and receives explicit finite left/right commands: no command
 is replayed for held refreshes, and eye phase advances once per confirmed image, independent of
 the number or parity of refreshes. This tolerates an occasional held image without rebuilding
@@ -112,7 +115,7 @@ A read-only settings query on the
 same serial connection acts as a firmware processing barrier; the complete verified profile must
 match before the finite-pulse drain can begin. It then reacquires 13 strict samples with no eye
 commands and resumes a fresh left/right cycle on that pair. This preserves the desktop during a
-short interruption. Recovery allows at most two attempts in ten seconds, with a shared 1.5-second
+short interruption. Recovery allows at most six attempts in ten seconds, with a shared 1.5-second
 USB barrier deadline, a finite-pulse drain, and a two-second clock-acquisition budget per attempt.
 A failed barrier, persistent timing fault, display/device change, or Windows security transition
 returns to 2D. Recovery never infers eye parity or adjusts raw present IDs or refresh counters.

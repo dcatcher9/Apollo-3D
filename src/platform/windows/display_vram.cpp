@@ -9812,10 +9812,18 @@ namespace platf::dxgi {
         // without a disjoint HRESULT. Establish twelve consecutive intervals before any IR.
         constexpr unsigned acquisition_samples = 13;
         constexpr std::int64_t cadence_tolerance_us = 100;
+        // Armed images are identified by their exact refresh-count difference. Their timestamp
+        // only has to rule out a neighbouring refresh, so allow up to 500 us of timestamp
+        // lateness, never more than a quarter of one refresh period.
+        const std::int64_t armed_cadence_tolerance_us = std::clamp<std::int64_t>(
+          250000000LL / config.target_refresh_millihz,
+          cadence_tolerance_us,
+          500
+        );
         const auto make_feedback_tracker = [&]() {
           return detail::shutter_feedback_tracker_t {
             static_cast<unsigned>(eye_repeats), config.target_refresh_millihz, qpc_frequency.QuadPart,
-            host_age_budget_us, cadence_tolerance_us, acquisition_samples,
+            host_age_budget_us, cadence_tolerance_us, acquisition_samples, armed_cadence_tolerance_us,
           };
         };
         auto feedback_tracker = make_feedback_tracker();
@@ -9996,7 +10004,7 @@ namespace platf::dxgi {
             return false;
           }
           if (!recovery_budget.begin(std::chrono::steady_clock::now())) {
-            BOOST_LOG(warning) << "Local shutter clock recovery exhausted its two attempts per ten seconds."sv;
+            BOOST_LOG(warning) << "Local shutter clock recovery exhausted its six attempts per ten seconds."sv;
             return false;
           }
           BOOST_LOG(warning) << "Local shutter clock lost; holding presentation while the emitter drains: "sv << reason;
@@ -10328,7 +10336,8 @@ namespace platf::dxgi {
               BOOST_LOG(info) << "Local shutter monitor clock acquired: unsignalled_presents="sv << acquisition_presents
                               << " stable_intervals="sv << acquisition_samples - 1
                               << " host_age_budget_us="sv << host_age_budget_us
-                              << " cadence_tolerance_us="sv << cadence_tolerance_us << '.';
+                              << " cadence_tolerance_us="sv << cadence_tolerance_us
+                              << " armed_cadence_tolerance_us="sv << armed_cadence_tolerance_us << '.';
             }
             // Hold the same left image and immutable pair while acquiring. The first eye must
             // then continue this exact clock; startup never sends an emitter eye command.

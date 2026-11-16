@@ -394,15 +394,21 @@ namespace platf::dxgi::detail {
         if (now - attempts_.front() < retry_window) {
           return false;
         }
-        attempts_.front() = attempts_.back();
+        for (std::size_t index = 1; index < attempts_.size(); ++index) {
+          attempts_[index - 1] = attempts_[index];
+        }
         --count_;
       }
       attempts_[count_++] = now;
       return true;
     }
 
+    // A recovery holds the picture for a fraction of a second. Six in ten seconds is still a
+    // visible disturbance, but a rare late timestamp no longer ends the whole session.
+    static constexpr std::size_t maximum_attempts = 6;
+
   private:
-    std::array<clock::time_point, 2> attempts_ {};
+    std::array<clock::time_point, maximum_attempts> attempts_ {};
     std::size_t count_ = 0;
   };
 
@@ -439,12 +445,18 @@ namespace platf::dxgi::detail {
       std::int64_t qpc_frequency,
       std::int64_t host_age_budget_us,
       std::int64_t cadence_tolerance_us,
-      unsigned required_samples = 13
+      unsigned required_samples = 13,
+      // Once armed, the exact refresh-count difference already proves which refresh displayed
+      // the image. The timestamp Windows attaches to that refresh can be several hundred
+      // microseconds late under load, so the armed check may be wider than cold acquisition.
+      // A negative value keeps the acquisition tolerance.
+      std::int64_t armed_cadence_tolerance_us = -1
     ) noexcept:
         repeats_(repeats),
         qpc_frequency_(qpc_frequency),
         host_age_budget_us_(host_age_budget_us),
         cadence_tolerance_us_(cadence_tolerance_us),
+        armed_cadence_tolerance_us_(armed_cadence_tolerance_us < 0 ? cadence_tolerance_us : armed_cadence_tolerance_us),
         required_samples_(required_samples) {
       failed_ = repeats < 1 || repeats > 4 || refresh_millihz <= 0 || qpc_frequency <= 0 ||
                 host_age_budget_us < 0 || cadence_tolerance_us < 0 || required_samples == 0;
@@ -572,7 +584,7 @@ namespace platf::dxgi::detail {
         return false;
       }
       const auto error_ticks = std::fabs(static_cast<long double>(present_qpc - *last_present_qpc_) - refresh_ticks_ * refresh_delta);
-      return error_ticks * 1000000.0L / qpc_frequency_ <= cadence_tolerance_us_;
+      return error_ticks * 1000000.0L / qpc_frequency_ <= (armed_ ? armed_cadence_tolerance_us_ : cadence_tolerance_us_);
     }
 
     shutter_feedback_tracker_status_e invalidate() noexcept {
@@ -589,6 +601,7 @@ namespace platf::dxgi::detail {
     std::int64_t qpc_frequency_;
     std::int64_t host_age_budget_us_;
     std::int64_t cadence_tolerance_us_;
+    std::int64_t armed_cadence_tolerance_us_;
     unsigned required_samples_;
     long double refresh_ticks_ = 0;
     unsigned streak_ = 0;

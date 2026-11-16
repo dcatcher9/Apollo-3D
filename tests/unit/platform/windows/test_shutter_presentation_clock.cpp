@@ -11,13 +11,14 @@ TEST(ShutterRecoveryBudget, AllowsTwoTransientLossesButBoundsARepeatedFailureLoo
   using namespace std::chrono_literals;
   budget_t budget;
   const budget_t::clock::time_point start {};
-  EXPECT_TRUE(budget.begin(start));
-  EXPECT_TRUE(budget.begin(start + 500ms));
+  for (int attempt = 0; attempt < static_cast<int>(budget_t::maximum_attempts); ++attempt) {
+    EXPECT_TRUE(budget.begin(start + attempt * 100ms));
+  }
   EXPECT_FALSE(budget.begin(start + 9999ms));
   EXPECT_TRUE(budget.begin(start + 10s));
   // Expiring the first attempt does not expire the newer second attempt.
-  EXPECT_FALSE(budget.begin(start + 10499ms));
-  EXPECT_TRUE(budget.begin(start + 10500ms));
+  EXPECT_FALSE(budget.begin(start + 10099ms));
+  EXPECT_TRUE(budget.begin(start + 10100ms));
 }
 
 TEST(ShutterRecoveryBudget, ClockRegressionCannotResetTheFailureLimit) {
@@ -27,7 +28,9 @@ TEST(ShutterRecoveryBudget, ClockRegressionCannotResetTheFailureLimit) {
   const auto start = budget_t::clock::time_point {} + 10s;
   EXPECT_TRUE(budget.begin(start));
   EXPECT_FALSE(budget.begin(start - 1ms));
-  EXPECT_TRUE(budget.begin(start));
+  for (std::size_t attempt = 1; attempt < budget_t::maximum_attempts; ++attempt) {
+    EXPECT_TRUE(budget.begin(start));
+  }
   EXPECT_FALSE(budget.begin(start));
 }
 
@@ -392,6 +395,27 @@ namespace {
     ASSERT_TRUE(tracker.arm());
   }
 }  // namespace
+
+TEST(ShutterFeedbackTracker, ArmedTimestampJitterIsToleratedOnlyWithAnExactRefreshCount) {
+  // 12 ticks per microsecond: 3600 ticks = 300 us, 7200 ticks = 600 us.
+  tracker_t tracker(1, 120000, tracker_frequency, 2000, 100, 2, 500);
+  acquire_tracker(tracker);
+  const auto late = tracker_origin + 2 * tracker_refresh_ticks + 3600;
+  EXPECT_EQ(tracker.observe(12, tracker_feedback(12, 1002, late), late + 1200), tracker_status::accepted);
+  // The following timestamp back on the nominal grid makes a 300 us short interval.
+  const auto nominal = tracker_origin + 3 * tracker_refresh_ticks;
+  EXPECT_EQ(tracker.observe(13, tracker_feedback(13, 1003, nominal), nominal + 1200), tracker_status::accepted);
+  const auto too_late = tracker_origin + 4 * tracker_refresh_ticks + 7200;
+  EXPECT_EQ(tracker.observe(14, tracker_feedback(14, 1004, too_late), too_late + 1200), tracker_status::rejected);
+}
+
+TEST(ShutterFeedbackTracker, ColdAcquisitionKeepsItsStrictCadenceWhenTheArmedToleranceIsWider) {
+  tracker_t tracker(1, 120000, tracker_frequency, 2000, 100, 2, 500);
+  ASSERT_EQ(tracker.observe(10, tracker_feedback(10, 1000, tracker_origin), tracker_origin + 1200), tracker_status::acquiring);
+  const auto late = tracker_origin + tracker_refresh_ticks + 3600;
+  EXPECT_EQ(tracker.observe(11, tracker_feedback(11, 1001, late), late + 1200), tracker_status::acquiring);
+  EXPECT_FALSE(tracker.arm());
+}
 
 TEST(ShutterFeedbackTracker, RequiresTwelveMeasuredIntervalsAndExplicitArmingBeforeAnEye) {
   tracker_t tracker(1, 120000, tracker_frequency, 2000, 100);
