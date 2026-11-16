@@ -378,20 +378,42 @@ namespace platf::dxgi::detail {
     return repeats >= 1 && repeats <= 4 && delta >= repeats && delta <= 4 * repeats;
   }
 
-  // An image that reaches the screen late does not move the schedule of the image after it:
-  // DXGI still shows that one at its original refresh, so the late image is on screen for
-  // fewer refreshes and the next boundary arrives early by exactly the refreshes the late image
-  // lost. Such a boundary is an exactly identified image on the unchanged schedule. It is
-  // accepted only directly after a late image and only while the two images together still
-  // span at least two eye intervals; a short interval in any other position is a fault.
-  constexpr bool catch_up_refresh_delta_valid(unsigned repeats, std::uint32_t delta, std::uint32_t late_refreshes) noexcept {
-    return repeats >= 2 && repeats <= 4 && late_refreshes >= 1 && late_refreshes <= 3 * repeats &&
-           delta >= 1 && delta < repeats && delta + late_refreshes >= repeats;
-  }
+  // An image that reaches the screen late does not move the schedule of the images after it:
+  // DXGI keeps their original refreshes. The sequence can stay behind for several images and is
+  // then made up by one image that is on screen for fewer refreshes, so its successor's boundary
+  // arrives early by exactly the refreshes still owed. That boundary is an exactly identified
+  // image on the unchanged schedule, not a lost eye.
+  //
+  // The lag is the number of refreshes an armed sequence is behind. It grows with every late
+  // image, is spent by an early boundary, and expires after a few on-time images so an old
+  // delay can never excuse an unrelated short interval. A short interval that exceeds the
+  // outstanding lag, or arrives with none, remains a fault.
+  struct shutter_refresh_lag_t {
+    std::uint32_t refreshes = 0;
+    std::uint32_t images_left = 0;
+  };
 
-  // Refreshes by which an accepted armed image exceeded its eye interval.
-  constexpr std::uint32_t late_refreshes_after(unsigned repeats, std::uint32_t delta) noexcept {
-    return delta > repeats ? delta - repeats : 0;
+  inline constexpr std::uint32_t shutter_refresh_lag_window = 8;
+
+  constexpr std::optional<shutter_refresh_lag_t> advance_refresh_lag(unsigned repeats, std::uint32_t delta, shutter_refresh_lag_t lag) noexcept {
+    if (repeats < 1 || repeats > 4) {
+      return std::nullopt;
+    }
+    if (delta >= repeats && delta <= 4 * repeats) {
+      if (delta > repeats) {
+        const auto owed = lag.refreshes + (delta - repeats);
+        return shutter_refresh_lag_t {owed < 3 * repeats ? owed : 3 * repeats, shutter_refresh_lag_window};
+      }
+      if (lag.refreshes && lag.images_left > 1) {
+        return shutter_refresh_lag_t {lag.refreshes, lag.images_left - 1};
+      }
+      return shutter_refresh_lag_t {};
+    }
+    if (repeats >= 2 && delta >= 1 && delta < repeats && lag.refreshes >= repeats - delta) {
+      const auto remaining = lag.refreshes - (repeats - delta);
+      return shutter_refresh_lag_t {remaining, remaining ? lag.images_left : 0};
+    }
+    return std::nullopt;
   }
 
   // A transient path change may be reacquired with the emitter quiet. Repeated losses must
@@ -469,7 +491,10 @@ namespace platf::dxgi::detail {
       // the image. The timestamp Windows attaches to that refresh can be several hundred
       // microseconds late under load, so the armed check may be wider than cold acquisition.
       // A negative value keeps the acquisition tolerance.
-      std::int64_t armed_cadence_tolerance_us = -1
+      std::int64_t armed_cadence_tolerance_us = -1,
+      // Windows can publish a present slightly before the refresh timestamp it carries. Once
+      // armed, a boundary no further ahead of the query clock than this is a current image.
+      std::int64_t armed_future_tolerance_us = 0
     ) noexcept:
         repeats_(repeats),
         qpc_frequency_(qpc_frequency),
@@ -478,8 +503,10 @@ namespace platf::dxgi::detail {
         armed_cadence_tolerance_us_(armed_cadence_tolerance_us < 0 ? cadence_tolerance_us : armed_cadence_tolerance_us),
         required_samples_(required_samples) {
       failed_ = repeats < 1 || repeats > 4 || refresh_millihz <= 0 || qpc_frequency <= 0 ||
-                host_age_budget_us < 0 || cadence_tolerance_us < 0 || required_samples == 0;
+                host_age_budget_us < 0 || cadence_tolerance_us < 0 || required_samples == 0 ||
+                armed_future_tolerance_us < 0 || armed_future_tolerance_us > 1000;
       if (!failed_) {
+        armed_future_ticks_ = static_cast<std::int64_t>(static_cast<long double>(armed_future_tolerance_us) * qpc_frequency / 1000000.0L);
         refresh_ticks_ = static_cast<long double>(qpc_frequency) * 1000.0L / refresh_millihz;
         // All later integer offsets must fit before conversion/addition. A QPC frequency too
         // coarse to distinguish this eye interval cannot establish scanout continuity either.
@@ -498,14 +525,14 @@ namespace platf::dxgi::detail {
         return status_e::rejected;
       }
       const auto present_qpc = reconstruct(requested_id, feedback);
-      if (!present_qpc || feedback.sync_qpc > query_qpc || !fresh(*present_qpc, query_qpc)) {
+      if (!present_qpc || feedback.sync_qpc - future_ticks() > query_qpc || !fresh(*present_qpc, query_qpc)) {
         return invalidate();
       }
       const auto refresh_delta = static_cast<std::uint32_t>(feedback.refresh_count - last_refresh_);
+      const auto next_lag = armed_ ? advance_refresh_lag(repeats_, refresh_delta, lag_) : std::nullopt;
       const bool continuous = last_present_qpc_ &&
                               requested_id == static_cast<std::uint32_t>(last_present_id_ + 1u) &&
-                              (armed_ ? held_refresh_delta_valid(repeats_, refresh_delta) || catch_up_refresh_delta_valid(repeats_, refresh_delta, late_refreshes_) :
-                                        refresh_delta == repeats_) &&
+                              (armed_ ? next_lag.has_value() : refresh_delta == repeats_) &&
                               cadence_matches(*present_qpc, refresh_delta);
       if (last_present_qpc_ && !continuous) {
         if (armed_) {
@@ -514,7 +541,7 @@ namespace platf::dxgi::detail {
         // This is a valid boundary in a new sequence, not evidence that the old eye continued.
         streak_ = 0;
       }
-      late_refreshes_ = armed_ && continuous ? late_refreshes_after(repeats_, refresh_delta) : 0;
+      lag_ = armed_ && continuous ? *next_lag : shutter_refresh_lag_t {};
       last_present_id_ = requested_id;
       last_refresh_ = feedback.refresh_count;
       last_present_qpc_ = *present_qpc;
@@ -553,12 +580,12 @@ namespace platf::dxgi::detail {
       std::int64_t now_qpc
     ) const noexcept {
       if (!armed_ || failed_ || !last_present_qpc_ || requested_id != last_present_id_ ||
-          feedback.refresh_count != last_refresh_ || feedback.sync_qpc > now_qpc ||
+          feedback.refresh_count != last_refresh_ || feedback.sync_qpc - future_ticks() > now_qpc ||
           !fresh(*last_present_qpc_, now_qpc)) {
         return false;
       }
       const auto present_qpc = reconstruct(requested_id, feedback);
-      if (!present_qpc || *present_qpc > now_qpc) {
+      if (!present_qpc || *present_qpc - future_ticks() > now_qpc) {
         return false;
       }
       // Both boundaries are positive, so their signed difference cannot overflow.
@@ -595,9 +622,17 @@ namespace platf::dxgi::detail {
       return feedback.sync_qpc + shift;
     }
 
+    // Zero until armed: cold acquisition never accepts a boundary ahead of the query clock.
+    std::int64_t future_ticks() const noexcept {
+      return armed_ ? armed_future_ticks_ : 0;
+    }
+
     bool fresh(std::int64_t present_qpc, std::int64_t now_qpc) const noexcept {
-      return now_qpc >= present_qpc &&
-             static_cast<long double>(now_qpc - present_qpc) * 1000000.0L / qpc_frequency_ <= host_age_budget_us_;
+      if (now_qpc < present_qpc) {
+        // Both values are positive, so their signed difference cannot overflow.
+        return present_qpc - now_qpc <= future_ticks();
+      }
+      return static_cast<long double>(now_qpc - present_qpc) * 1000000.0L / qpc_frequency_ <= host_age_budget_us_;
     }
 
     bool cadence_matches(std::int64_t present_qpc, std::uint32_t refresh_delta) const noexcept {
@@ -623,12 +658,13 @@ namespace platf::dxgi::detail {
     std::int64_t host_age_budget_us_;
     std::int64_t cadence_tolerance_us_;
     std::int64_t armed_cadence_tolerance_us_;
+    std::int64_t armed_future_ticks_ = 0;
     unsigned required_samples_;
     long double refresh_ticks_ = 0;
     unsigned streak_ = 0;
     std::uint32_t last_present_id_ = 0;
     std::uint32_t last_refresh_ = 0;
-    std::uint32_t late_refreshes_ = 0;
+    shutter_refresh_lag_t lag_ {};
     std::optional<std::int64_t> last_present_qpc_;
     bool armed_ = false;
     bool failed_ = false;
@@ -760,11 +796,11 @@ namespace platf::dxgi::detail {
         return false;
       }
       if (last_refresh_) {
-        const auto delta = static_cast<std::uint32_t>(refresh_count - *last_refresh_);
-        if (!held_refresh_delta_valid(repeats_, delta) && !catch_up_refresh_delta_valid(repeats_, delta, late_refreshes_)) {
+        const auto next_lag = advance_refresh_lag(repeats_, static_cast<std::uint32_t>(refresh_count - *last_refresh_), lag_);
+        if (!next_lag) {
           return false;
         }
-        late_refreshes_ = late_refreshes_after(repeats_, delta);
+        lag_ = *next_lag;
       }
       last_refresh_ = refresh_count;
       left_ = !left_;
@@ -774,7 +810,7 @@ namespace platf::dxgi::detail {
   private:
     unsigned repeats_;
     bool left_ = true;
-    std::uint32_t late_refreshes_ = 0;
+    shutter_refresh_lag_t lag_ {};
     std::optional<std::uint32_t> last_refresh_;
   };
 }  // namespace platf::dxgi::detail

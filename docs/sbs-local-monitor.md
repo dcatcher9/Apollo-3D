@@ -98,20 +98,23 @@ a flush for every feedback update, the live wait times out and follows quiet rec
 
 Once armed, each confirmed image may have been held for between the configured eye interval and
 four times that interval. Its raw refresh-counter difference must be exact, and its QPC elapsed
-time must agree with that difference within 500 µs or a quarter of one refresh period, whichever
-is smaller; the timestamp Windows attaches to a refresh can be late by a few hundred microseconds
-under load without the image being on a different refresh. Its exact next present identity and
-current-frame freshness remain mandatory.
+time must agree with that difference within 750 µs or a quarter of one refresh period, whichever
+is smaller; the timestamp Windows attaches to a refresh can be off by several hundred microseconds
+under load without the image being on a different refresh. Windows can also publish a present
+slightly before the refresh timestamp it carries, so an armed boundary up to 250 µs ahead of the
+query clock counts as current. Its exact next present identity and current-frame freshness remain
+mandatory. Cold acquisition accepts neither allowance.
 The emitter has averaging disabled and receives explicit finite left/right commands: no command
 is replayed for held refreshes, and eye phase advances once per confirmed image, independent of
 the number or parity of refreshes. This tolerates an occasional held image without rebuilding
-the desktop; it does not recover a stale frame. An image that reached the screen late is shown
-for correspondingly fewer refreshes, because the image after it keeps its original refresh. That
-early boundary is accepted only directly after a late image and only while the two images still
-span at least two eye intervals; any other shorter interval is a fault. The late image keeps its
-eye command, so its shutter window can overlap the start of the next scanout for that one
-opening. Cold acquisition still requires 13 consecutive samples at the exact configured minimum
-cadence.
+the desktop; it does not recover a stale frame. A late image does not move the schedule of the
+images after it, so the sequence can run behind for several images until one image is shown for
+fewer refreshes and the following boundary arrives early. The presenter tracks the refreshes an
+armed sequence is behind: an early boundary is accepted only up to that amount, and the amount
+expires after eight on-time images. Any other shorter interval is a fault. The shortened image
+keeps its eye command, so its shutter window can overlap the start of the next scanout for that
+one opening. Cold acquisition still requires 13 consecutive samples at the exact configured
+minimum cadence.
 
 Windows can report a present as displayed a moment before it fills in the refresh counters and
 timestamp. The presenter polls up to eight more 200 µs samples for the completed statistics

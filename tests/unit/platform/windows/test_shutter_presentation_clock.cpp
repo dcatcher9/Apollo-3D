@@ -109,6 +109,39 @@ TEST(ShutterPresentationClock, CatchUpNeverShortensTwoImagesBelowTwoEyeIntervals
   }
 }
 
+TEST(ShutterPresentationClock, LagIsCarriedAcrossOnTimeImagesAndThenExpires) {
+  {
+    shutter_presentation_clock_t clock(3);
+    ASSERT_TRUE(clock.observe_displayed(100));
+    ASSERT_TRUE(clock.observe_displayed(104));  // One refresh late.
+    ASSERT_TRUE(clock.observe_displayed(107));  // Still one behind.
+    ASSERT_TRUE(clock.observe_displayed(110));
+    ASSERT_TRUE(clock.observe_displayed(112));  // Made up three images later.
+    EXPECT_FALSE(clock.observe_displayed(114));  // Nothing is owed any more.
+  }
+  {
+    shutter_presentation_clock_t clock(3);
+    ASSERT_TRUE(clock.observe_displayed(100));
+    ASSERT_TRUE(clock.observe_displayed(104));
+    std::uint32_t refresh = 104;
+    for (unsigned image = 0; image < platf::dxgi::detail::shutter_refresh_lag_window; ++image) {
+      refresh += 3;
+      ASSERT_TRUE(clock.observe_displayed(refresh));
+    }
+    // The delay was never made up within the window, so it cannot excuse a later short image.
+    EXPECT_FALSE(clock.observe_displayed(refresh + 2));
+  }
+  {
+    shutter_presentation_clock_t clock(3);
+    ASSERT_TRUE(clock.observe_displayed(100));
+    ASSERT_TRUE(clock.observe_displayed(104));
+    ASSERT_TRUE(clock.observe_displayed(108));  // Two behind in total.
+    ASSERT_TRUE(clock.observe_displayed(110));  // One made up.
+    ASSERT_TRUE(clock.observe_displayed(112));  // And the other.
+    EXPECT_FALSE(clock.observe_displayed(114));
+  }
+}
+
 TEST(ShutterPresentationClock, RefreshCounterWrapPreservesPhase) {
   shutter_presentation_clock_t clock(2);
   ASSERT_TRUE(clock.observe_displayed(UINT32_MAX - 1));
@@ -688,6 +721,58 @@ TEST(ShutterFeedbackTracker, ArmedCatchUpStillRequiresExactIdentityAndMeasuredCa
     ASSERT_EQ(tracker.observe(12, tracker_feedback(12, 1007, at(1007)), at(1007) + 1200), tracker_status::accepted);
     EXPECT_EQ(tracker.observe(14, tracker_feedback(14, 1009, at(1009)), at(1009) + 1200), tracker_status::rejected);  // Skipped ID.
   }
+}
+
+TEST(ShutterFeedbackTracker, ArmedLagIsCarriedAcrossOnTimeImagesAndExpires) {
+  const auto at = [](std::uint32_t refresh) {
+    return tracker_origin + static_cast<std::int64_t>(refresh - 1000u) * tracker_refresh_ticks;
+  };
+  {
+    tracker_t tracker(3, 120000, tracker_frequency, 2000, 100, 2);
+    acquire_tracker(tracker, 3);  // 1000, 1003.
+    std::uint32_t id = 12;
+    for (std::uint32_t refresh : {1007u, 1010u, 1013u, 1015u}) {  // Late, on time, on time, made up.
+      EXPECT_EQ(tracker.observe(id, tracker_feedback(id, refresh, at(refresh)), at(refresh) + 1200), tracker_status::accepted);
+      ++id;
+    }
+    EXPECT_EQ(tracker.observe(id, tracker_feedback(id, 1017, at(1017)), at(1017) + 1200), tracker_status::rejected);
+  }
+  {
+    tracker_t tracker(3, 120000, tracker_frequency, 2000, 100, 2);
+    acquire_tracker(tracker, 3);
+    std::uint32_t id = 12;
+    std::uint32_t refresh = 1007;
+    ASSERT_EQ(tracker.observe(id, tracker_feedback(id, refresh, at(refresh)), at(refresh) + 1200), tracker_status::accepted);
+    for (unsigned image = 0; image < shutter::shutter_refresh_lag_window; ++image) {
+      refresh += 3;
+      ++id;
+      ASSERT_EQ(tracker.observe(id, tracker_feedback(id, refresh, at(refresh)), at(refresh) + 1200), tracker_status::accepted);
+    }
+    refresh += 2;
+    ++id;
+    EXPECT_EQ(tracker.observe(id, tracker_feedback(id, refresh, at(refresh)), at(refresh) + 1200), tracker_status::rejected);
+  }
+}
+
+TEST(ShutterFeedbackTracker, ArmedBoundarySlightlyAheadOfTheQueryClockIsCurrentOnlyWithinItsTolerance) {
+  // 12 ticks per microsecond: 250 us = 3000 ticks.
+  tracker_t tracker(1, 120000, tracker_frequency, 2000, 100, 2, 100, 250);
+  acquire_tracker(tracker);
+  const auto next = tracker_origin + 2 * tracker_refresh_ticks;
+  EXPECT_EQ(tracker.observe(12, tracker_feedback(12, 1002, next), next - 3000), tracker_status::accepted);
+  EXPECT_TRUE(tracker.fresh_for_emit(next - 3000));
+  const auto after = tracker_origin + 3 * tracker_refresh_ticks;
+  EXPECT_EQ(tracker.observe(13, tracker_feedback(13, 1003, after), after - 3001), tracker_status::rejected);
+  EXPECT_TRUE(tracker.failed());
+}
+
+TEST(ShutterFeedbackTracker, ColdAcquisitionNeverAcceptsABoundaryAheadOfTheQueryClock) {
+  tracker_t tracker(1, 120000, tracker_frequency, 2000, 100, 2, 100, 250);
+  ASSERT_EQ(tracker.observe(10, tracker_feedback(10, 1000, tracker_origin), tracker_origin + 1200), tracker_status::acquiring);
+  const auto next = tracker_origin + tracker_refresh_ticks;
+  EXPECT_EQ(tracker.observe(11, tracker_feedback(11, 1001, next), next - 1), tracker_status::acquiring);
+  EXPECT_FALSE(tracker.arm());
+  EXPECT_TRUE(tracker_t(1, 120000, tracker_frequency, 2000, 100, 2, 100, 1001).failed());
 }
 
 TEST(ShutterFeedbackTracker, HeldRefreshesCannotHideSkippedIdsClockDomainChangesOrExpiredFrames) {
