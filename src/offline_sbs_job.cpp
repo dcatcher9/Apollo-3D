@@ -5849,9 +5849,24 @@ namespace offline_sbs {
     for (const auto &[id, record] : impl_->jobs) {
       // The Web UI polls this collection. Keep it bounded per retained job; the
       // selected-job endpoint supplies its worker result.
-      auto summary = record->snapshot;
-      summary.worker_result = nullptr;
-      values.push_back(std::move(summary));
+      const auto &snapshot = record->snapshot;
+      values.push_back({
+        .id = snapshot.id,
+        .state = snapshot.state,
+        .operation = snapshot.operation,
+        .input_path = snapshot.input_path,
+        .output_path = snapshot.output_path,
+        .output_location = snapshot.output_location,
+        .codec = snapshot.codec,
+        .scene_cache_max_bytes = snapshot.scene_cache_max_bytes,
+        .cache_budget_policy = snapshot.cache_budget_policy,
+        .progress = snapshot.progress,
+        .created_at_unix_ms = snapshot.created_at_unix_ms,
+        .started_at_unix_ms = snapshot.started_at_unix_ms,
+        .ended_at_unix_ms = snapshot.ended_at_unix_ms,
+        .error = snapshot.error,
+        .worker_result = nullptr,
+      });
     }
     std::ranges::sort(values, [](const auto &left, const auto &right) {
       return left.created_at_unix_ms > right.created_at_unix_ms;

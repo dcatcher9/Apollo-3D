@@ -25,7 +25,8 @@ namespace {
   class temporary_tree_t {
   public:
     temporary_tree_t() {
-      path = fs::temp_directory_path() /
+      temp_base_ = fs::weakly_canonical(fs::temp_directory_path());
+      path = temp_base_ /
              ("sunshine3d-offline-job-" +
               std::to_string(
                 std::chrono::steady_clock::now().time_since_epoch().count()
@@ -35,10 +36,23 @@ namespace {
 
     ~temporary_tree_t() {
       std::error_code ignored;
-      fs::remove_all(path, ignored);
+      const auto resolved_base = fs::weakly_canonical(temp_base_, ignored);
+      if (ignored) {
+        ADD_FAILURE() << "Cannot resolve the owned temporary base: " << ignored.message();
+        return;
+      }
+      const auto resolved_target = fs::weakly_canonical(path, ignored);
+      if (ignored || !resolved_target.is_absolute() || resolved_target.parent_path() != resolved_base || !resolved_target.filename().string().starts_with("sunshine3d-offline-job-")) {
+        ADD_FAILURE() << "Refusing recursive cleanup outside the owned temporary child: " << path;
+        return;
+      }
+      fs::remove_all(resolved_target, ignored);
     }
 
     fs::path path;
+
+  private:
+    fs::path temp_base_;
   };
 
   void write_nonempty(const fs::path &path, const std::string_view contents = "x") {
@@ -139,6 +153,51 @@ namespace {
     }
     throw std::runtime_error("timed out waiting for offline job");
   }
+
+  void expect_owned_job_list_summary(
+    offline_sbs::job_service_t &service,
+    const offline_sbs::job_snapshot_t &terminal
+  ) {
+    const auto original_detail = terminal.json();
+    {
+      auto summaries = service.list();
+      ASSERT_EQ(summaries.size(), 1u);
+      EXPECT_TRUE(summaries.front().worker_result.is_null());
+      auto detail = service.get(terminal.id);
+      ASSERT_TRUE(detail.ok);
+      ASSERT_TRUE(detail.job);
+      EXPECT_EQ(detail.job->json(), original_detail);
+      auto summary_metadata = summaries.front().json();
+      auto detail_metadata = detail.job->json();
+      summary_metadata.erase("worker_result");
+      detail_metadata.erase("worker_result");
+      EXPECT_EQ(summary_metadata, detail_metadata);
+
+      summaries.front().id.assign(256, 'i');
+      summaries.front().input_path = "caller-edited-input";
+      summaries.front().output_path = fs::path {"caller-edited-output"};
+      summaries.front().codec.assign(256, 'c');
+      summaries.front().progress.phase.assign(256, 'p');
+      summaries.front().error.assign(256, 'e');
+      summaries.front().worker_result = {{"caller", "summary-only"}};
+      detail.job->worker_result["source"]["width"] = 1;
+      detail.job->worker_result["cache"]["peak_bytes"] = 1;
+    }
+    // Both returned containers have been mutated and destroyed. Neither operation can alter
+    // the canonical metadata or the compact nested result retained for the selected job.
+    const auto detail = service.get(terminal.id);
+    ASSERT_TRUE(detail.ok);
+    ASSERT_TRUE(detail.job);
+    EXPECT_EQ(detail.job->json(), original_detail);
+    const auto summaries = service.list();
+    ASSERT_EQ(summaries.size(), 1u);
+    EXPECT_TRUE(summaries.front().worker_result.is_null());
+    auto summary_metadata = summaries.front().json();
+    auto detail_metadata = detail.job->json();
+    summary_metadata.erase("worker_result");
+    detail_metadata.erase("worker_result");
+    EXPECT_EQ(summary_metadata, detail_metadata);
+  }
 }  // namespace
 
 TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
@@ -148,9 +207,7 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
 
   offline_sbs::job_service_t service {
     service_config(tree.path),
-    [](const offline_sbs::worker_context_t &context,
-       std::stop_token,
-       const offline_sbs::progress_callback_t &progress) {
+    [](const offline_sbs::worker_context_t &context, std::stop_token, const offline_sbs::progress_callback_t &progress) {
       std::ifstream spec_stream(context.worker_spec, std::ios::binary);
       const std::string spec_bytes {
         std::istreambuf_iterator<char> {spec_stream},
@@ -159,9 +216,11 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
       EXPECT_EQ(context.worker_spec_sha256, sha256_hex(spec_bytes));
       progress({
         .phase = "render",
-         .processed_frames = 12,
-         .total_frames = 12,
-       });
+        .processed_frames = 12,
+        .total_frames = 12,
+        .source_time_seconds = 0.5,
+        .source_duration_seconds = 0.5,
+      });
       write_nonempty(*context.staging_output, "encoded-video");
       return offline_sbs::worker_outcome_t {
         .completed = true,
@@ -169,6 +228,16 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
+          {"source", {
+                       {"width", 1920},
+                       {"height", 1080},
+                       {"frame_count", 12},
+                       {"duration_seconds", 0.5},
+                       {"variable_frame_rate", false},
+                       {"color_mode", "sdr"},
+                       {"contract", "source-contract.json"},
+                     }},
+          {"cache", {{"hard_cap_bytes", 4096}, {"peak_bytes", 1024}, {"remaining_bytes", 3072}}},
         },
       };
     }
@@ -197,14 +266,9 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   EXPECT_FALSE(terminal.worker_result.contains("scene_count"));
   EXPECT_FALSE(terminal.worker_result.contains("scene_decisions_contract"));
   EXPECT_FALSE(terminal.worker_result.contains("scene_audit_sha256"));
-
-  const auto summaries = service.list();
-  ASSERT_EQ(summaries.size(), 1u);
-  EXPECT_TRUE(summaries.front().worker_result.is_null());
-  const auto detail = service.get(terminal.id);
-  ASSERT_TRUE(detail.ok);
-  ASSERT_TRUE(detail.job);
-  EXPECT_EQ(detail.job->worker_result["status"], "complete");
+  EXPECT_EQ(terminal.worker_result.at("source").at("width"), 1920);
+  EXPECT_EQ(terminal.worker_result.at("cache").at("peak_bytes"), 1024);
+  expect_owned_job_list_summary(service, terminal);
 
   const auto state_path =
     tree.path / "state" / "jobs" / terminal.id / "job.json";
@@ -786,9 +850,7 @@ TEST(OfflineSbsJob, ExactHandlePublicationNeverOverwritesALateDestination) {
 
   offline_sbs::job_service_t service {
     service_config(tree.path),
-    [](const offline_sbs::worker_context_t &context,
-       std::stop_token,
-       const offline_sbs::progress_callback_t &) {
+    [](const offline_sbs::worker_context_t &context, std::stop_token, const offline_sbs::progress_callback_t &) {
       write_nonempty(*context.staging_output, "encoded-video");
       write_nonempty(*context.final_output, "late-user-file");
       return offline_sbs::worker_outcome_t {
@@ -797,6 +859,16 @@ TEST(OfflineSbsJob, ExactHandlePublicationNeverOverwritesALateDestination) {
           {"schema", 1},
           {"job_id", context.job_id},
           {"status", "complete"},
+          {"source", {
+                       {"width", 1920},
+                       {"height", 1080},
+                       {"frame_count", 12},
+                       {"duration_seconds", 0.5},
+                       {"variable_frame_rate", false},
+                       {"color_mode", "sdr"},
+                       {"contract", "source-contract.json"},
+                     }},
+          {"cache", {{"hard_cap_bytes", 4096}, {"peak_bytes", 1024}, {"remaining_bytes", 3072}}},
         },
       };
     }
@@ -812,6 +884,9 @@ TEST(OfflineSbsJob, ExactHandlePublicationNeverOverwritesALateDestination) {
   const auto terminal = wait_for_terminal(service, created.job->id);
   EXPECT_EQ(terminal.state, offline_sbs::job_state_e::failed);
   EXPECT_NE(terminal.error.find("refusing to overwrite"), std::string::npos);
+  EXPECT_EQ(terminal.worker_result.at("source").at("width"), 1920);
+  EXPECT_EQ(terminal.worker_result.at("cache").at("peak_bytes"), 1024);
+  expect_owned_job_list_summary(service, terminal);
   std::ifstream final(input.parent_path() / "collision.mkv", std::ios::binary);
   const std::string final_contents {
     std::istreambuf_iterator<char> {final},
