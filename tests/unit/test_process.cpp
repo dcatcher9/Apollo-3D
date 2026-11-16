@@ -9,8 +9,11 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/process/v1/environment.hpp>
@@ -2347,3 +2350,97 @@ TEST(ProcessTest, AddsCanonicalVirtualDisplayTileWhenDriverIsReady) {
   EXPECT_NE(desktop_app->id, virtual_app->id);
 }
 #endif
+
+namespace {
+  proc::ctx_t lookup_app(int id, std::string uuid, std::string name) {
+    proc::ctx_t app {};
+    app.id = std::to_string(id);
+    app.uuid = std::move(uuid);
+    app.name = std::move(name);
+    app.detached = {"original detached command"};
+    return app;
+  }
+
+  proc::proc_t lookup_process(std::vector<proc::ctx_t> apps) {
+    return {boost::process::v1::environment {}, std::move(apps)};
+  }
+}  // namespace
+
+TEST(ProcessAppLookupTest, ResolvesIdUuidAndAgreedIdentifiers) {
+  const auto process = lookup_process({lookup_app(7, "abc-def", "selected"), lookup_app(8, "other", "other")});
+  struct query_t {
+    std::optional<int> id;
+    std::string uuid;
+  };
+  const query_t queries[] = {{7, ""}, {std::nullopt, "ABC-DEF"}, {7, "AbC-dEf"}};
+
+  for (const auto &query : queries) {
+    const auto result = process.resolve_app(query.id, query.uuid);
+    EXPECT_EQ(result.status, proc::app_lookup_status_e::found);
+    ASSERT_TRUE(result.app);
+    EXPECT_EQ(result.app->name, "selected");
+  }
+}
+
+TEST(ProcessAppLookupTest, MissingIdentifierTakesPrecedenceOverMismatch) {
+  const auto process = lookup_process({lookup_app(7, "first", "first"), lookup_app(8, "second", "second")});
+  struct query_t {
+    std::optional<int> id;
+    std::string uuid;
+  };
+  const query_t queries[] = {
+    {std::nullopt, ""}, {99, ""}, {std::nullopt, "missing"}, {99, "first"}, {7, "missing"}, {99, "missing"},
+  };
+
+  for (const auto &query : queries) {
+    const auto result = process.resolve_app(query.id, query.uuid);
+    EXPECT_EQ(result.status, proc::app_lookup_status_e::not_found);
+    EXPECT_FALSE(result.app);
+  }
+}
+
+TEST(ProcessAppLookupTest, ConflictingExistingIdentifiersAreDistinctFromMissing) {
+  const auto process = lookup_process({lookup_app(7, "first", "first"), lookup_app(8, "second", "second")});
+
+  const auto result = process.resolve_app(7, "SECOND");
+
+  EXPECT_EQ(result.status, proc::app_lookup_status_e::identity_mismatch);
+  EXPECT_FALSE(result.app);
+}
+
+TEST(ProcessAppLookupTest, DuplicateIdentifiersKeepIndependentFirstMatches) {
+  const auto process = lookup_process({
+    lookup_app(7, "shared", "first"), lookup_app(7, "other", "duplicate ID"), lookup_app(8, "shared", "duplicate UUID"),
+  });
+
+  for (const auto &result : {process.resolve_app(7, ""), process.resolve_app(std::nullopt, "SHARED"), process.resolve_app(7, "shared")}) {
+    EXPECT_EQ(result.status, proc::app_lookup_status_e::found);
+    ASSERT_TRUE(result.app);
+    EXPECT_EQ(result.app->name, "first");
+  }
+  // Each later duplicate satisfies both values itself, but the independent first
+  // matches identify different entries, exactly as the HTTP handler did before.
+  EXPECT_EQ(process.resolve_app(7, "other").status, proc::app_lookup_status_e::identity_mismatch);
+  EXPECT_EQ(process.resolve_app(8, "shared").status, proc::app_lookup_status_e::identity_mismatch);
+}
+
+TEST(ProcessAppLookupTest, SelectedSnapshotOwnsItsStringsAndNestedCommands) {
+  std::optional<proc::ctx_t> retained;
+  {
+    const auto process = lookup_process({lookup_app(7, "selected", "original")});
+    auto result = process.resolve_app(7, "selected");
+    ASSERT_TRUE(result.app);
+    result.app->name = "changed snapshot";
+    result.app->detached.at(0) = "changed detached command";
+
+    const auto next = process.resolve_app(7, "selected");
+    ASSERT_TRUE(next.app);
+    EXPECT_EQ(next.app->name, "original");
+    EXPECT_EQ(next.app->detached.at(0), "original detached command");
+    retained = std::move(result.app);
+  }
+
+  ASSERT_TRUE(retained);
+  EXPECT_EQ(retained->name, "changed snapshot");
+  EXPECT_EQ(retained->detached.at(0), "changed detached command");
+}

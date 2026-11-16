@@ -1516,8 +1516,6 @@ namespace nvhttp {
         requested_appid = *parsed_appid;
       }
     }
-    const int appid = requested_appid.value_or(0);
-
     BOOST_LOG(verbose) << "Launching app [" << appid_str << "] with UUID [" << appuuid_str << "]";
     // BOOST_LOG(verbose) << "QS: " << request->query_string;
 
@@ -1537,33 +1535,19 @@ namespace nvhttp {
       return;
     }
 
-    const auto apps = proc::proc.get_apps();
-    auto app_by_id = apps.end();
-    auto app_by_uuid = apps.end();
-    if (requested_appid) {
-      app_by_id = std::find_if(apps.begin(), apps.end(), [appid](const auto &candidate) {
-        return candidate.id == std::to_string(appid);
-      });
-    }
-    if (!appuuid_str.empty()) {
-      app_by_uuid = std::find_if(apps.begin(), apps.end(), [&appuuid_str](const auto &candidate) {
-        return boost::iequals(candidate.uuid, appuuid_str);
-      });
-    }
-    if ((requested_appid && app_by_id == apps.end()) || (!appuuid_str.empty() && app_by_uuid == apps.end())) {
+    const auto selected_app = proc::proc.resolve_app(requested_appid, appuuid_str);
+    if (selected_app.status == proc::app_lookup_status_e::not_found) {
       tree.put("root.<xmlattr>.status_code", 404);
       tree.put("root.<xmlattr>.status_message", "Cannot find requested application");
       tree.put("root.gamesession", 0);
       return;
     }
-    if (requested_appid && !appuuid_str.empty() && app_by_id != app_by_uuid) {
+    if (selected_app.status == proc::app_lookup_status_e::identity_mismatch) {
       tree.put("root.<xmlattr>.status_code", 400);
       tree.put("root.<xmlattr>.status_message", "Application ID and UUID identify different applications");
       tree.put("root.gamesession", 0);
       return;
     }
-    const auto app_iter = !appuuid_str.empty() ? app_by_uuid : app_by_id;
-
     // From this point through RTSP publication, grace expiry and sole-session startup are
     // serialized with process/display mutation. Rejected paths release the guard without
     // changing the existing grace deadline.
@@ -1615,7 +1599,7 @@ namespace nvhttp {
       return;
     }
 
-    auto err = proc::proc.execute(*app_iter, launch_session, true);
+    auto err = proc::proc.execute(*selected_app.app, launch_session, true);
     if (err) {
       tree.put("root.<xmlattr>.status_code", err);
       tree.put(

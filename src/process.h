@@ -19,6 +19,7 @@
 #include <functional>
 #include <optional>
 #include <stop_token>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 
@@ -140,6 +141,17 @@ namespace proc {
     std::chrono::seconds exit_timeout;
   };
 
+  enum class app_lookup_status_e {
+    found,
+    not_found,
+    identity_mismatch,
+  };
+
+  struct app_lookup_result_t {
+    app_lookup_status_e status = app_lookup_status_e::not_found;
+    std::optional<ctx_t> app;
+  };
+
   struct process_status_t {
     int app_id;
     std::string app_name;
@@ -220,6 +232,8 @@ namespace proc {
     ~proc_t();
 
     std::vector<ctx_t> get_apps() const;
+    // Resolve both identifiers against one locked list, copying only the selected entry.
+    app_lookup_result_t resolve_app(std::optional<int> app_id, std::string_view app_uuid) const;
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
     std::string get_running_app_uuid();

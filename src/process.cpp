@@ -2719,6 +2719,34 @@ namespace proc {
     return _apps;
   }
 
+  app_lookup_result_t proc_t::resolve_app(std::optional<int> app_id, std::string_view app_uuid) const {
+    if (!app_id && app_uuid.empty()) {
+      return {};
+    }
+    const auto id = app_id ? std::to_string(*app_id) : std::string {};
+    std::lock_guard lock(process_state_mutex);
+    auto app_by_id = _apps.end();
+    auto app_by_uuid = _apps.end();
+    if (app_id) {
+      app_by_id = std::find_if(_apps.begin(), _apps.end(), [&id](const auto &candidate) {
+        return candidate.id == id;
+      });
+    }
+    if (!app_uuid.empty()) {
+      app_by_uuid = std::find_if(_apps.begin(), _apps.end(), [app_uuid](const auto &candidate) {
+        return boost::iequals(candidate.uuid, app_uuid);
+      });
+    }
+    if ((app_id && app_by_id == _apps.end()) || (!app_uuid.empty() && app_by_uuid == _apps.end())) {
+      return {};
+    }
+    if (app_id && !app_uuid.empty() && app_by_id != app_by_uuid) {
+      return {app_lookup_status_e::identity_mismatch, std::nullopt};
+    }
+    const auto selected = !app_uuid.empty() ? app_by_uuid : app_by_id;
+    return {app_lookup_status_e::found, *selected};
+  }
+
   // Gets application image from application list.
   // Returns image from assets directory if found there.
   // Returns default image if image configuration is not set.
