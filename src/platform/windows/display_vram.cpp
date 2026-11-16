@@ -9890,6 +9890,45 @@ namespace platf::dxgi {
             schedule_probe.media.Reset();
           }
         }
+        // Independent view of the selected output's vertical blanks: a time-critical thread
+        // wakes on every blank and records when. A blank whose wake-up is late shows that the
+        // system delivered that interrupt late, which is one way a queued image misses its
+        // refresh; blanks that arrive on time around a missed refresh clear that path.
+        struct vblank_watch_t {
+          std::mutex mutex;
+          std::array<std::int64_t, 8192> wake_qpc {};
+          std::size_t next = 0, count = 0;
+          std::uint64_t intervals = 0, late_intervals = 0;
+          long double max_error_us = 0;
+        };
+        const auto vblank_watch = std::make_shared<vblank_watch_t>();
+        std::jthread vblank_thread;
+        if (shutter_slot_timing) {
+          const long double period_us = 1000000000.0L / config.target_refresh_millihz;
+          vblank_thread = std::jthread([output = target_output, watch = vblank_watch, qpc_now, period_us, frequency = qpc_frequency.QuadPart](std::stop_token stop) {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            std::int64_t previous = 0;
+            while (!stop.stop_requested()) {
+              if (FAILED(output->WaitForVBlank())) {
+                std::this_thread::sleep_for(1ms);
+                previous = 0;
+                continue;
+              }
+              const auto now = qpc_now();
+              std::lock_guard lock(watch->mutex);
+              watch->wake_qpc[watch->next] = now;
+              watch->next = (watch->next + 1) % watch->wake_qpc.size();
+              watch->count = std::min(watch->count + 1, watch->wake_qpc.size());
+              if (previous) {
+                const auto error_us = std::fabs(static_cast<long double>(now - previous) * 1000000.0L / frequency - period_us);
+                ++watch->intervals;
+                watch->late_intervals += error_us > 500.0L;
+                watch->max_error_us = std::max(watch->max_error_us, error_us);
+              }
+              previous = now;
+            }
+          });
+        }
         const auto poll_schedule_probe = [&]() {
           if (schedule_probe.gpu_pending && schedule_probe.gpu_event) {
             BOOL done = FALSE;
@@ -10544,6 +10583,21 @@ namespace platf::dxgi {
                               << " displayed_after_target_us="sv << to_us(boundary_qpc - target_qpc)
                               << " present_call_us="sv << to_us(present_end_qpc - present_start_qpc)
                               << " pair_age_at_submit_us="sv << to_us(present_end_qpc - schedule_probe.pair_acquired_qpc);
+              {
+                // Every blank the watcher woke on from just before the previous boundary to just
+                // after this one, as microseconds after the previous boundary.
+                std::ostringstream wakes;
+                std::lock_guard lock(vblank_watch->mutex);
+                const auto size = vblank_watch->wake_qpc.size();
+                const auto margin = target_qpc - schedule_probe.previous_boundary_qpc;
+                for (std::size_t back = vblank_watch->count; back > 0; --back) {
+                  const auto wake = vblank_watch->wake_qpc[(vblank_watch->next + size - back) % size];
+                  if (wake >= schedule_probe.previous_boundary_qpc - margin / 2 && wake <= boundary_qpc + margin / 2) {
+                    wakes << ' ' << static_cast<std::int64_t>(to_us(wake - schedule_probe.previous_boundary_qpc));
+                  }
+                }
+                BOOST_LOG(info) << "Local shutter schedule probe blanks: wake_after_previous_boundary_us="sv << wakes.str() << '.';
+              }
               DWM_TIMING_INFO dwm {};
               dwm.cbSize = sizeof(dwm);
               if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &dwm))) {
@@ -10820,6 +10874,14 @@ namespace platf::dxgi {
                               << "; composed_images="sv << schedule_probe.composed_images << '.';
               schedule_probe.gpu = {};
               schedule_probe.composed_images = 0;
+              {
+                std::lock_guard lock(vblank_watch->mutex);
+                BOOST_LOG(info) << "Local shutter schedule probe blanks minute: intervals="sv << vblank_watch->intervals
+                                << " off_by_more_than_500us="sv << vblank_watch->late_intervals
+                                << " max_error_us="sv << vblank_watch->max_error_us << '.';
+                vblank_watch->intervals = vblank_watch->late_intervals = 0;
+                vblank_watch->max_error_us = 0;
+              }
               const auto output_refreshes = static_cast<std::uint32_t>(schedule_probe.minute_last_refresh - schedule_probe.minute_first_refresh);
               const auto output_ticks = schedule_probe.minute_last_qpc - schedule_probe.minute_first_qpc;
               const long double output_hz = output_ticks > 0 ? static_cast<long double>(output_refreshes) * qpc_frequency.QuadPart / output_ticks : 0.0L;
