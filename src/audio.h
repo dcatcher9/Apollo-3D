@@ -54,7 +54,6 @@ namespace audio {
 
     int packetDuration;
     int channels;
-    int mask;
 
     std::bitset<MAX_FLAGS> flags;
   };

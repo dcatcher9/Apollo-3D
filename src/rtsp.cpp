@@ -1432,7 +1432,8 @@ namespace rtsp_stream {
       };
 
       config.audio.channels = required_int(detail::announce_int_field::audio_channels, "x-nv-audio.surround.numChannels"sv);
-      config.audio.mask = required_int(detail::announce_int_field::audio_channel_mask, "x-nv-audio.surround.channelMask"sv);
+      // The negotiated profile owns channel mapping; still validate the required wire field.
+      required_int(detail::announce_int_field::audio_channel_mask, "x-nv-audio.surround.channelMask"sv);
       config.audio.packetDuration = required_int(detail::announce_int_field::audio_packet_duration, "x-nv-aqos.packetDuration"sv);
 
       config.audio.flags[audio::config_t::HIGH_QUALITY] =

@@ -106,7 +106,6 @@ namespace rtsp_stream {
     int fps;
     int surround_info;
     bool enable_hdr;
-    bool enable_sops;
     bool virtual_display;
     bool virtual_display_only = false;  ///< Client-owned preference for this launch or resume.
     uint32_t scale_factor;

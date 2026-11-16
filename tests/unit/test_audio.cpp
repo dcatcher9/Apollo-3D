@@ -41,9 +41,9 @@ INSTANTIATE_TEST_SUITE_P(
   Configurations,
   AudioTest,
   testing::Values(
-    std::make_tuple("HIGH_STEREO", config_t {5, 2, 0x3, config_flags(config_t::HIGH_QUALITY)}),
-    std::make_tuple("SURROUND51", config_t {5, 6, 0x3F, config_flags()}),
-    std::make_tuple("SURROUND71", config_t {5, 8, 0x63F, config_flags()})
+    std::make_tuple("HIGH_STEREO", config_t {5, 2, config_flags(config_t::HIGH_QUALITY)}),
+    std::make_tuple("SURROUND51", config_t {5, 6, config_flags()}),
+    std::make_tuple("SURROUND71", config_t {5, 8, config_flags()})
   ),
   [](const auto &info) {
     return std::string(std::get<0>(info.param));

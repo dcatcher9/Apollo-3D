@@ -823,7 +823,6 @@ namespace nvhttp {
       return nullptr;
     }
 
-    launch_session->enable_sops = *enable_sops;
     launch_session->host_audio = *host_audio;
     launch_session->surround_info = *surround_info;
     launch_session->enable_hdr = *enable_hdr;
