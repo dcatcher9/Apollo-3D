@@ -42,11 +42,11 @@ namespace microphone {
       return read_le16(data, offset) | (static_cast<std::uint32_t>(read_le16(data, offset + 2)) << 16);
     }
 
-    std::string normalized_address(boost::asio::ip::address address) {
+    boost::asio::ip::address normalized_address(boost::asio::ip::address address) {
       if (address.is_v6() && address.to_v6().is_v4_mapped()) {
-        return boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, address.to_v6()).to_string();
+        return boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, address.to_v6());
       }
-      return address.to_string();
+      return address;
     }
   }  // namespace
 
@@ -246,7 +246,8 @@ namespace microphone {
           ready.set_value("Microphone bind address cannot receive the client's address family");
           return;
         }
-        options.remote_address = normalized_address(remote);
+        const auto normalized_remote = normalized_address(remote);
+        options.remote_address = normalized_remote.to_string();
         packet_decoder_t decoder(options);
         if (!decoder.valid()) {
           ready.set_value("Microphone decoder or session ping is unavailable");
@@ -295,7 +296,11 @@ namespace microphone {
               break;
             }
             if (activated.load() || (received == 20 && CRYPTO_memcmp(buffer.data(), options.ping_payload.data(), 16) == 0)) {
-              decoder.receive(std::span(buffer).first(received), normalized_address(peer.address()), peer.port());
+              // Keep endpoint comparison numeric; only the worker normalizes mapped IPv4.
+              // Native IPv6 retains its scope, and the decoder still owns nonce/port binding.
+              if (normalized_address(peer.address()) == normalized_remote) {
+                decoder.receive(std::span(buffer).first(received), options.remote_address, peer.port());
+              }
             }
           }
           const auto now = clock_t::now();
