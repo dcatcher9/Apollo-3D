@@ -105,8 +105,17 @@ current-frame freshness remain mandatory.
 The emitter has averaging disabled and receives explicit finite left/right commands: no command
 is replayed for held refreshes, and eye phase advances once per confirmed image, independent of
 the number or parity of refreshes. This tolerates an occasional held image without rebuilding
-the desktop; it does not recover a stale frame or authorize a shorter shutter interval. Cold
-acquisition still requires 13 consecutive samples at the exact configured minimum cadence.
+the desktop; it does not recover a stale frame. An image that reached the screen late is shown
+for correspondingly fewer refreshes, because the image after it keeps its original refresh. That
+early boundary is accepted only directly after a late image and only while the two images still
+span at least two eye intervals; any other shorter interval is a fault. The late image keeps its
+eye command, so its shutter window can overlap the start of the next scanout for that one
+opening. Cold acquisition still requires 13 consecutive samples at the exact configured minimum
+cadence.
+
+Windows can report a present as displayed a moment before it fills in the refresh counters and
+timestamp. The presenter polls up to eight more 200 µs samples for the completed statistics
+before handing the sample to the same validation as any other.
 
 A missing/invalid present, counter-domain discontinuity, excessive hold, or invalid timestamp
 immediately stops eye commands. For a timing-only interruption, the presenter freezes image

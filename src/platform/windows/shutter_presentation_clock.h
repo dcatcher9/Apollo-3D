@@ -378,6 +378,22 @@ namespace platf::dxgi::detail {
     return repeats >= 1 && repeats <= 4 && delta >= repeats && delta <= 4 * repeats;
   }
 
+  // An image that reaches the screen late does not move the schedule of the image after it:
+  // DXGI still shows that one at its original refresh, so the late image is on screen for
+  // fewer refreshes and the next boundary arrives early by exactly the refreshes the late image
+  // lost. Such a boundary is an exactly identified image on the unchanged schedule. It is
+  // accepted only directly after a late image and only while the two images together still
+  // span at least two eye intervals; a short interval in any other position is a fault.
+  constexpr bool catch_up_refresh_delta_valid(unsigned repeats, std::uint32_t delta, std::uint32_t late_refreshes) noexcept {
+    return repeats >= 2 && repeats <= 4 && late_refreshes >= 1 && late_refreshes <= 3 * repeats &&
+           delta >= 1 && delta < repeats && delta + late_refreshes >= repeats;
+  }
+
+  // Refreshes by which an accepted armed image exceeded its eye interval.
+  constexpr std::uint32_t late_refreshes_after(unsigned repeats, std::uint32_t delta) noexcept {
+    return delta > repeats ? delta - repeats : 0;
+  }
+
   // A transient path change may be reacquired with the emitter quiet. Repeated losses must
   // still return to 2D instead of keeping the desktop indefinitely in a dark recovery loop.
   class shutter_recovery_budget_t {
@@ -488,7 +504,8 @@ namespace platf::dxgi::detail {
       const auto refresh_delta = static_cast<std::uint32_t>(feedback.refresh_count - last_refresh_);
       const bool continuous = last_present_qpc_ &&
                               requested_id == static_cast<std::uint32_t>(last_present_id_ + 1u) &&
-                              (armed_ ? held_refresh_delta_valid(repeats_, refresh_delta) : refresh_delta == repeats_) &&
+                              (armed_ ? held_refresh_delta_valid(repeats_, refresh_delta) || catch_up_refresh_delta_valid(repeats_, refresh_delta, late_refreshes_) :
+                                        refresh_delta == repeats_) &&
                               cadence_matches(*present_qpc, refresh_delta);
       if (last_present_qpc_ && !continuous) {
         if (armed_) {
@@ -497,6 +514,7 @@ namespace platf::dxgi::detail {
         // This is a valid boundary in a new sequence, not evidence that the old eye continued.
         streak_ = 0;
       }
+      late_refreshes_ = armed_ && continuous ? late_refreshes_after(repeats_, refresh_delta) : 0;
       last_present_id_ = requested_id;
       last_refresh_ = feedback.refresh_count;
       last_present_qpc_ = *present_qpc;
@@ -610,6 +628,7 @@ namespace platf::dxgi::detail {
     unsigned streak_ = 0;
     std::uint32_t last_present_id_ = 0;
     std::uint32_t last_refresh_ = 0;
+    std::uint32_t late_refreshes_ = 0;
     std::optional<std::int64_t> last_present_qpc_;
     bool armed_ = false;
     bool failed_ = false;
@@ -661,6 +680,12 @@ namespace platf::dxgi::detail {
     using result_e = shutter_feedback_wait_status_e;
     const auto deadline = io.now() + timeout;
     constexpr auto poll_interval = std::chrono::microseconds {200};
+    // Windows can publish the requested present a moment before it fills in which refresh
+    // displayed it: the count matches while the refresh counters and timestamp are all zero.
+    // Poll a bounded number of times for the completed sample; if it stays empty, return it
+    // as before so the caller's own validation rejects it.
+    constexpr unsigned maximum_empty_samples = 8;
+    unsigned empty_samples = 0;
     bool flushed = false;
     shutter_feedback_wait_result_t result {result_e::unsupported};
     const auto finish = [&](result_e status) {
@@ -684,7 +709,8 @@ namespace platf::dxgi::detail {
         return finish(result_e::timeout);
       }
       if (feedback.status == shutter_feedback_status_e::available) {
-        if (feedback.present_count == requested_present) {
+        const bool empty = feedback.refresh_count == 0 && feedback.sync_refresh_count == 0 && feedback.sync_qpc == 0;
+        if (feedback.present_count == requested_present && (!empty || ++empty_samples > maximum_empty_samples)) {
           return finish(result_e::displayed);
         }
         if (static_cast<std::int32_t>(feedback.present_count - requested_present) > 0) {
@@ -730,9 +756,15 @@ namespace platf::dxgi::detail {
     }
 
     bool observe_displayed(std::uint32_t refresh_count) noexcept {
-      if (repeats_ < 1 || repeats_ > 4 ||
-          (last_refresh_ && !held_refresh_delta_valid(repeats_, static_cast<std::uint32_t>(refresh_count - *last_refresh_)))) {
+      if (repeats_ < 1 || repeats_ > 4) {
         return false;
+      }
+      if (last_refresh_) {
+        const auto delta = static_cast<std::uint32_t>(refresh_count - *last_refresh_);
+        if (!held_refresh_delta_valid(repeats_, delta) && !catch_up_refresh_delta_valid(repeats_, delta, late_refreshes_)) {
+          return false;
+        }
+        late_refreshes_ = late_refreshes_after(repeats_, delta);
       }
       last_refresh_ = refresh_count;
       left_ = !left_;
@@ -742,6 +774,7 @@ namespace platf::dxgi::detail {
   private:
     unsigned repeats_;
     bool left_ = true;
+    std::uint32_t late_refreshes_ = 0;
     std::optional<std::uint32_t> last_refresh_;
   };
 }  // namespace platf::dxgi::detail

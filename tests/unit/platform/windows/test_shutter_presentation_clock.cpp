@@ -74,6 +74,41 @@ TEST(ShutterPresentationClock, ShortRepeatedBackwardsAndUnboundedHoldsDoNotAdvan
   }
 }
 
+TEST(ShutterPresentationClock, AnImageAfterALateOneMayArriveEarlyByTheRefreshesTheLateOneLost) {
+  shutter_presentation_clock_t clock(3);
+  ASSERT_TRUE(clock.observe_displayed(100));
+  ASSERT_TRUE(clock.observe_displayed(104));  // One refresh late.
+  EXPECT_TRUE(clock.left_eye());
+  ASSERT_TRUE(clock.observe_displayed(106));  // Original schedule: the late image lasted two refreshes.
+  EXPECT_FALSE(clock.left_eye());
+  // The debt is spent: another short interval is a fault and consumes nothing.
+  EXPECT_FALSE(clock.observe_displayed(108));
+  EXPECT_FALSE(clock.left_eye());
+  ASSERT_TRUE(clock.observe_displayed(109));
+  EXPECT_TRUE(clock.left_eye());
+}
+
+TEST(ShutterPresentationClock, CatchUpNeverShortensTwoImagesBelowTwoEyeIntervalsOrASingleRefreshEye) {
+  {
+    shutter_presentation_clock_t clock(3);
+    ASSERT_TRUE(clock.observe_displayed(100));
+    ASSERT_TRUE(clock.observe_displayed(104));  // One refresh late.
+    EXPECT_FALSE(clock.observe_displayed(105));  // Two short: the pair would span five refreshes.
+  }
+  {
+    shutter_presentation_clock_t clock(3);
+    ASSERT_TRUE(clock.observe_displayed(100));
+    ASSERT_TRUE(clock.observe_displayed(105));  // Two refreshes late.
+    ASSERT_TRUE(clock.observe_displayed(106));  // The pair still spans six refreshes.
+  }
+  {
+    shutter_presentation_clock_t clock(1);
+    ASSERT_TRUE(clock.observe_displayed(100));
+    ASSERT_TRUE(clock.observe_displayed(102));
+    EXPECT_FALSE(clock.observe_displayed(102));  // One refresh per eye has nothing to give back.
+  }
+}
+
 TEST(ShutterPresentationClock, RefreshCounterWrapPreservesPhase) {
   shutter_presentation_clock_t clock(2);
   ASSERT_TRUE(clock.observe_displayed(UINT32_MAX - 1));
@@ -155,6 +190,44 @@ TEST(ShutterPresentFeedback, LateMetadataDoesNotSpendAnotherRefreshForSingleOrRe
       EXPECT_EQ(wait, 200us);
     }
   }
+}
+
+TEST(ShutterPresentFeedback, AnEmptySampleForTheRequestedPresentIsPolledUntilItsRefreshDataArrives) {
+  feedback_probe_t probe;
+  probe.now = probe.feedback_at;
+  auto io = probe.io();
+  unsigned empty_left = 3;
+  io.query = [&]() {
+    ++probe.queries;
+    if (empty_left) {
+      --empty_left;
+      return shutter::shutter_feedback_t {shutter::shutter_feedback_status_e::available, probe.present_id, 0, 0, 0};
+    }
+    return shutter::shutter_feedback_t {shutter::shutter_feedback_status_e::available, probe.present_id, probe.refresh, probe.refresh, 123456};
+  };
+  const auto result = shutter::await_shutter_present(io, probe.present_id, false);
+  EXPECT_EQ(result.status, shutter::shutter_feedback_wait_status_e::displayed);
+  EXPECT_EQ(result.feedback.refresh_count, probe.refresh);
+  EXPECT_EQ(result.feedback.sync_qpc, 123456);
+  EXPECT_EQ(probe.queries, 4u);
+  EXPECT_EQ(probe.waits.size(), 3u);
+  EXPECT_EQ(probe.flushes, 0u);
+}
+
+TEST(ShutterPresentFeedback, APersistentlyEmptySampleIsReturnedAfterABoundedPollForTheCallerToReject) {
+  feedback_probe_t probe;
+  probe.now = probe.feedback_at;
+  auto io = probe.io();
+  io.query = [&]() {
+    ++probe.queries;
+    return shutter::shutter_feedback_t {shutter::shutter_feedback_status_e::available, probe.present_id, 0, 0, 0};
+  };
+  const auto started = probe.now;
+  const auto result = shutter::await_shutter_present(io, probe.present_id, false);
+  EXPECT_EQ(result.status, shutter::shutter_feedback_wait_status_e::displayed);
+  EXPECT_EQ(result.feedback.sync_qpc, 0);
+  EXPECT_EQ(probe.queries, 9u);
+  EXPECT_EQ(probe.now - started, 1600us);  // Eight 200 us polls, far inside the 250 ms timeout.
 }
 
 TEST(ShutterPresentFeedback, ReadyFeedbackDoesNotFlushOrWaitAgain) {
@@ -573,6 +646,47 @@ TEST(ShutterFeedbackTracker, ArmedHoldsRejectShortRepeatedBackwardsAndExcessiveR
       EXPECT_TRUE(tracker.failed());
       EXPECT_FALSE(tracker.fresh_for_emit(boundary + 1200));
     }
+  }
+}
+
+TEST(ShutterFeedbackTracker, ArmedCatchUpAfterALateImageIsAcceptedOnceAndOnlyOnTheOriginalSchedule) {
+  tracker_t tracker(3, 120000, tracker_frequency, 2000, 100, 2);
+  acquire_tracker(tracker, 3);  // Boundaries at refresh 1000 and 1003.
+  const auto at = [](std::uint32_t refresh) {
+    return tracker_origin + static_cast<std::int64_t>(refresh - 1000u) * tracker_refresh_ticks;
+  };
+  EXPECT_EQ(tracker.observe(12, tracker_feedback(12, 1007, at(1007)), at(1007) + 1200), tracker_status::accepted);  // One late.
+  EXPECT_EQ(tracker.observe(13, tracker_feedback(13, 1009, at(1009)), at(1009) + 1200), tracker_status::accepted);  // Catch-up.
+  EXPECT_TRUE(tracker.fresh_for_emit(at(1009) + 1200));
+  EXPECT_EQ(tracker.observe(14, tracker_feedback(14, 1012, at(1012)), at(1012) + 1200), tracker_status::accepted);
+  // No late image precedes this one, so the same short interval is a fault.
+  EXPECT_EQ(tracker.observe(15, tracker_feedback(15, 1014, at(1014)), at(1014) + 1200), tracker_status::rejected);
+  EXPECT_TRUE(tracker.failed());
+}
+
+TEST(ShutterFeedbackTracker, ArmedCatchUpStillRequiresExactIdentityAndMeasuredCadence) {
+  const auto at = [](std::uint32_t refresh) {
+    return tracker_origin + static_cast<std::int64_t>(refresh - 1000u) * tracker_refresh_ticks;
+  };
+  {
+    tracker_t tracker(3, 120000, tracker_frequency, 2000, 100, 2);
+    acquire_tracker(tracker, 3);
+    ASSERT_EQ(tracker.observe(12, tracker_feedback(12, 1007, at(1007)), at(1007) + 1200), tracker_status::accepted);
+    // Counter says two refreshes, clock says three: not the claimed boundary.
+    EXPECT_EQ(tracker.observe(13, tracker_feedback(13, 1009, at(1010)), at(1010) + 1200), tracker_status::rejected);
+  }
+  {
+    tracker_t tracker(3, 120000, tracker_frequency, 2000, 100, 2);
+    acquire_tracker(tracker, 3);
+    ASSERT_EQ(tracker.observe(12, tracker_feedback(12, 1007, at(1007)), at(1007) + 1200), tracker_status::accepted);
+    // One refresh late cannot pay for an image two refreshes short.
+    EXPECT_EQ(tracker.observe(13, tracker_feedback(13, 1008, at(1008)), at(1008) + 1200), tracker_status::rejected);
+  }
+  {
+    tracker_t tracker(3, 120000, tracker_frequency, 2000, 100, 2);
+    acquire_tracker(tracker, 3);
+    ASSERT_EQ(tracker.observe(12, tracker_feedback(12, 1007, at(1007)), at(1007) + 1200), tracker_status::accepted);
+    EXPECT_EQ(tracker.observe(14, tracker_feedback(14, 1009, at(1009)), at(1009) + 1200), tracker_status::rejected);  // Skipped ID.
   }
 }
 

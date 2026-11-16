@@ -9844,6 +9844,8 @@ namespace platf::dxgi {
         std::array<unsigned, 6> acquisition_wait_counts {};
         unsigned acquisition_maximum_streak = 0;
         std::uint64_t confirmed_eye_commands = 0, held_eye_images = 0, extra_held_refreshes = 0;
+        std::uint64_t short_eye_images = 0, clock_recoveries = 0;
+        auto next_progress_log = std::chrono::steady_clock::now() + 60s;
         std::uint64_t muted_eye_commands = 0;
         std::uint32_t maximum_confirmed_refresh_delta = 0;
         std::optional<detail::shutter_feedback_t> first_feedback;
@@ -10007,6 +10009,7 @@ namespace platf::dxgi {
             BOOST_LOG(warning) << "Local shutter clock recovery exhausted its six attempts per ten seconds."sv;
             return false;
           }
+          ++clock_recoveries;
           BOOST_LOG(warning) << "Local shutter clock lost; holding presentation while the emitter drains: "sv << reason;
           if (lookahead_active && pending_present.pending()) {
             const auto &queued = *pending_present.pending();
@@ -10639,6 +10642,14 @@ namespace platf::dxgi {
           if (confirmed_refresh_delta > static_cast<unsigned>(eye_repeats)) {
             ++held_eye_images;
             extra_held_refreshes += confirmed_refresh_delta - eye_repeats;
+          } else if (confirmed_refresh_delta < static_cast<unsigned>(eye_repeats)) {
+            ++short_eye_images;
+          }
+          if (const auto now = std::chrono::steady_clock::now(); now >= next_progress_log) {
+            next_progress_log = now + 60s;
+            BOOST_LOG(info) << "Local shutter progress: confirmed_eye_commands="sv << confirmed_eye_commands
+                            << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
+                            << " short_eye_images="sv << short_eye_images << " clock_recoveries="sv << clock_recoveries << '.';
           }
           has_displayed = true;
           if (config.presented_frames) {
@@ -10647,6 +10658,7 @@ namespace platf::dxgi {
         }
         BOOST_LOG(info) << "Local shutter presentation summary: confirmed_eye_commands="sv << confirmed_eye_commands
                         << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
+                        << " short_eye_images="sv << short_eye_images << " clock_recoveries="sv << clock_recoveries
                         << " maximum_refresh_delta="sv << maximum_confirmed_refresh_delta << " repeats="sv << eye_repeats << '.';
         if (shutter_muted_slot) {
           BOOST_LOG(info) << "Local shutter single-slot diagnostic summary: muted_logical_slot="sv << (*shutter_muted_slot == 0u ? 'L' : 'R')
