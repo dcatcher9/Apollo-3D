@@ -16,59 +16,15 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/Simple-Web-Server")
 # needs a stricter offline-API body cap without regressing existing app/config/cover payloads.
 # Generate a patched header overlay in the build tree so the upstream submodule stays immutable
 # and a clean checkout contains the complete, reproducible change.
-find_package(Git REQUIRED)
+include(dependencies/simple_web_server_overlay)
 set(SIMPLE_WEB_SERVER_OVERLAY_INCLUDE_DIR
     "${CMAKE_BINARY_DIR}/generated")
 set(SIMPLE_WEB_SERVER_OVERLAY_DIR
     "${SIMPLE_WEB_SERVER_OVERLAY_INCLUDE_DIR}/Simple-Web-Server")
-set(SIMPLE_WEB_SERVER_REQUEST_LIMIT_PATCH
-    "${CMAKE_SOURCE_DIR}/cmake/patches/simple-web-server-request-limit.patch")
-file(MAKE_DIRECTORY "${SIMPLE_WEB_SERVER_OVERLAY_DIR}")
-set(SIMPLE_WEB_SERVER_HEADERS
-    asio_compatibility.hpp
-    client_http.hpp
-    client_https.hpp
-    crypto.hpp
-    mutex.hpp
-    server_http.hpp
-    server_https.hpp
-    status_code.hpp
-    utility.hpp)
-foreach(SIMPLE_WEB_SERVER_HEADER IN LISTS SIMPLE_WEB_SERVER_HEADERS)
-    configure_file(
-        "${CMAKE_SOURCE_DIR}/third-party/Simple-Web-Server/${SIMPLE_WEB_SERVER_HEADER}"
-        "${SIMPLE_WEB_SERVER_OVERLAY_DIR}/${SIMPLE_WEB_SERVER_HEADER}"
-        COPYONLY)
-endforeach()
-set_property(
-    DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${SIMPLE_WEB_SERVER_REQUEST_LIMIT_PATCH}")
-file(REMOVE_RECURSE "${SIMPLE_WEB_SERVER_OVERLAY_DIR}/.git")
-execute_process(
-    COMMAND "${GIT_EXECUTABLE}" init --quiet
-    WORKING_DIRECTORY "${SIMPLE_WEB_SERVER_OVERLAY_DIR}"
-    RESULT_VARIABLE SIMPLE_WEB_SERVER_INIT_RESULT
-    OUTPUT_VARIABLE SIMPLE_WEB_SERVER_INIT_OUTPUT
-    ERROR_VARIABLE SIMPLE_WEB_SERVER_INIT_ERROR)
-if(NOT SIMPLE_WEB_SERVER_INIT_RESULT EQUAL 0)
-    message(FATAL_ERROR
-            "Could not initialize the Simple-Web-Server overlay.\n"
-            "${SIMPLE_WEB_SERVER_INIT_OUTPUT}${SIMPLE_WEB_SERVER_INIT_ERROR}")
-endif()
-execute_process(
-    COMMAND "${GIT_EXECUTABLE}" apply --whitespace=nowarn
-            "${SIMPLE_WEB_SERVER_REQUEST_LIMIT_PATCH}"
-    WORKING_DIRECTORY "${SIMPLE_WEB_SERVER_OVERLAY_DIR}"
-    RESULT_VARIABLE SIMPLE_WEB_SERVER_PATCH_RESULT
-    OUTPUT_VARIABLE SIMPLE_WEB_SERVER_PATCH_OUTPUT
-    ERROR_VARIABLE SIMPLE_WEB_SERVER_PATCH_ERROR)
-file(REMOVE_RECURSE "${SIMPLE_WEB_SERVER_OVERLAY_DIR}/.git")
-if(NOT SIMPLE_WEB_SERVER_PATCH_RESULT EQUAL 0)
-    message(FATAL_ERROR
-            "Could not build the Simple-Web-Server request-limit overlay. "
-            "The upstream header may have changed.\n"
-            "${SIMPLE_WEB_SERVER_PATCH_OUTPUT}${SIMPLE_WEB_SERVER_PATCH_ERROR}")
-endif()
+sunshine_prepare_simple_web_server_overlay(
+    "${CMAKE_SOURCE_DIR}/third-party/Simple-Web-Server"
+    "${CMAKE_SOURCE_DIR}/cmake/patches/simple-web-server-request-limit.patch"
+    "${SIMPLE_WEB_SERVER_OVERLAY_DIR}")
 add_library(sunshine-simple-web-overlay INTERFACE)
 target_include_directories(
     sunshine-simple-web-overlay BEFORE INTERFACE

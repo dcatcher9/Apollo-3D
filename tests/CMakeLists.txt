@@ -7,6 +7,12 @@ include_directories("${CMAKE_SOURCE_DIR}")
 
 enable_testing()
 
+add_test(NAME simple_web_server_overlay
+        COMMAND "${CMAKE_COMMAND}"
+                "-DREPO_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+                "-DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/simple-web-overlay-test"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_simple_web_server_overlay.cmake")
+
 # Add GoogleTest directory to the project
 set(GTEST_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/googletest")
 set(INSTALL_GTEST OFF)
