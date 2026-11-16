@@ -39,8 +39,10 @@ namespace platf::dxgi::detail {
   // the existing exact-display checks. The caller retains its keyed tuple through both eyes.
   class shutter_pending_present_ledger_t {
   public:
-    explicit shutter_pending_present_ledger_t(std::uint64_t epoch = 1) noexcept:
-        epoch_(epoch), accepting_(epoch != 0) {}
+    // present_stride is the number of presents each eye submits. An eye is identified by its
+    // first present, so consecutive eyes are exactly one stride of present IDs apart.
+    explicit shutter_pending_present_ledger_t(std::uint64_t epoch = 1, unsigned present_stride = 1) noexcept:
+        epoch_(epoch), accepting_(epoch != 0 && present_stride >= 1 && present_stride <= 4), present_stride_(present_stride) {}
 
     shutter_pending_present_ledger_t(const shutter_pending_present_ledger_t &) = delete;
     shutter_pending_present_ledger_t &operator=(const shutter_pending_present_ledger_t &) = delete;
@@ -48,7 +50,7 @@ namespace platf::dxgi::detail {
     bool commit(const shutter_queued_present_t &current, const shutter_queued_present_t &next) noexcept {
       if (!accepting_ || pending_ || current.epoch != epoch_ || next.epoch != epoch_ ||
           !valid(current) || !valid(next) || current.left_eye == next.left_eye ||
-          next.present_id != static_cast<std::uint32_t>(current.present_id + 1u) ||
+          next.present_id != static_cast<std::uint32_t>(current.present_id + present_stride_) ||
           next.present_begin_qpc < current.present_end_qpc) {
         return reject();
       }
@@ -118,6 +120,7 @@ namespace platf::dxgi::detail {
 
     std::uint64_t epoch_;
     bool accepting_;
+    unsigned present_stride_ = 1;
     std::optional<shutter_queued_present_t> pending_;
   };
 
@@ -494,17 +497,22 @@ namespace platf::dxgi::detail {
       std::int64_t armed_cadence_tolerance_us = -1,
       // Windows can publish a present slightly before the refresh timestamp it carries. Once
       // armed, a boundary no further ahead of the query clock than this is a current image.
-      std::int64_t armed_future_tolerance_us = 0
+      std::int64_t armed_future_tolerance_us = 0,
+      // Presents each eye submits. The eye is identified by its first present, so the next
+      // eye's identity is exactly this many present IDs later.
+      unsigned present_stride = 1
     ) noexcept:
         repeats_(repeats),
         qpc_frequency_(qpc_frequency),
         host_age_budget_us_(host_age_budget_us),
         cadence_tolerance_us_(cadence_tolerance_us),
         armed_cadence_tolerance_us_(armed_cadence_tolerance_us < 0 ? cadence_tolerance_us : armed_cadence_tolerance_us),
-        required_samples_(required_samples) {
+        required_samples_(required_samples),
+        present_stride_(present_stride) {
       failed_ = repeats < 1 || repeats > 4 || refresh_millihz <= 0 || qpc_frequency <= 0 ||
                 host_age_budget_us < 0 || cadence_tolerance_us < 0 || required_samples == 0 ||
-                armed_future_tolerance_us < 0 || armed_future_tolerance_us > 1000;
+                armed_future_tolerance_us < 0 || armed_future_tolerance_us > 1000 ||
+                present_stride < 1 || present_stride > 4;
       if (!failed_) {
         armed_future_ticks_ = static_cast<std::int64_t>(static_cast<long double>(armed_future_tolerance_us) * qpc_frequency / 1000000.0L);
         refresh_ticks_ = static_cast<long double>(qpc_frequency) * 1000.0L / refresh_millihz;
@@ -531,7 +539,7 @@ namespace platf::dxgi::detail {
       const auto refresh_delta = static_cast<std::uint32_t>(feedback.refresh_count - last_refresh_);
       const auto next_lag = armed_ ? advance_refresh_lag(repeats_, refresh_delta, lag_) : std::nullopt;
       const bool continuous = last_present_qpc_ &&
-                              requested_id == static_cast<std::uint32_t>(last_present_id_ + 1u) &&
+                              requested_id == static_cast<std::uint32_t>(last_present_id_ + present_stride_) &&
                               (armed_ ? next_lag.has_value() : refresh_delta == repeats_) &&
                               cadence_matches(*present_qpc, refresh_delta);
       if (last_present_qpc_ && !continuous) {
@@ -660,6 +668,7 @@ namespace platf::dxgi::detail {
     std::int64_t armed_cadence_tolerance_us_;
     std::int64_t armed_future_ticks_ = 0;
     unsigned required_samples_;
+    unsigned present_stride_ = 1;
     long double refresh_ticks_ = 0;
     unsigned streak_ = 0;
     std::uint32_t last_present_id_ = 0;

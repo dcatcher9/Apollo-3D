@@ -54,7 +54,11 @@ Unlock Windows and dismiss its lock or sign-in screen before starting 3D. A lock
 permission-screen transition stops the monitor session and restores 2D. Start 3D again after
 returning to the ordinary desktop.
 
-**Refreshes per eye** controls how many physical refreshes repeat one eye before switching.
+**Refreshes per eye** controls how many physical refreshes repeat one eye before switching. The
+presenter shows an eye by presenting it again on every one of those refreshes, each for exactly
+one refresh; it does not ask Windows to hold a single present for several refreshes, because
+Windows was measured to hold a finished image one refresh too long about every ten seconds at
+330 Hz. The first present of an eye identifies it and marks its boundary.
 For example, a 330 Hz monitor with two refreshes per eye switches eyes at 165 Hz and presents
 82.5 complete stereo pairs per second. Repeated refreshes provide a longer stable image for
 calibration. This setting does not add black frames or change the monitor's Windows mode.

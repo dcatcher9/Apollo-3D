@@ -1606,3 +1606,38 @@ TEST(ShutterFeedbackReproof, ColdUnarmedAndFailedTrackersCannotProveAnEye) {
   ASSERT_TRUE(tracker.failed());
   EXPECT_FALSE(tracker.confirmed_feedback_matches(11, raw, boundary + 1200));
 }
+
+TEST(ShutterPendingPresentLedger, ConsecutiveEyesAreOnePresentStrideApart) {
+  pending_ledger_t ledger {1, 3};
+  const auto current = queued_present(40, false, 10);
+  EXPECT_FALSE(ledger.commit(current, queued_present(41, true, 11, 2000)));
+  pending_ledger_t stride_ledger {1, 3};
+  EXPECT_TRUE(stride_ledger.commit(current, queued_present(43, true, 11, 2000)));
+  EXPECT_FALSE(pending_ledger_t(1, 0).commit(current, queued_present(40, true, 11, 2000)));
+  EXPECT_FALSE(pending_ledger_t(1, 5).commit(current, queued_present(45, true, 11, 2000)));
+}
+
+TEST(ShutterFeedbackTracker, AnEyeOfSeveralPresentsIsIdentifiedByItsFirstPresentOneStrideLater) {
+  // Three presents per eye: eyes are 10, 13, 16 and each spans three refreshes.
+  tracker_t tracker(3, 120000, tracker_frequency, 2000, 100, 2, 100, 0, 3);
+  const auto at = [](std::uint32_t refresh) {
+    return tracker_origin + static_cast<std::int64_t>(refresh - 1000u) * tracker_refresh_ticks;
+  };
+  ASSERT_EQ(tracker.observe(10, tracker_feedback(10, 1000, at(1000)), at(1000) + 1200), tracker_status::acquiring);
+  ASSERT_EQ(tracker.observe(13, tracker_feedback(13, 1003, at(1003)), at(1003) + 1200), tracker_status::ready);
+  ASSERT_TRUE(tracker.arm());
+  EXPECT_EQ(tracker.observe(16, tracker_feedback(16, 1006, at(1006)), at(1006) + 1200), tracker_status::accepted);
+  // The second present of that eye is not an eye boundary.
+  EXPECT_EQ(tracker.observe(17, tracker_feedback(17, 1007, at(1007)), at(1007) + 1200), tracker_status::rejected);
+  EXPECT_TRUE(tracker.failed());
+  EXPECT_TRUE(tracker_t(3, 120000, tracker_frequency, 2000, 100, 2, 100, 0, 0).failed());
+  EXPECT_TRUE(tracker_t(3, 120000, tracker_frequency, 2000, 100, 2, 100, 0, 5).failed());
+}
+
+TEST(ShutterFeedbackTracker, ColdAcquisitionWithAPresentStrideRejectsTheOldSingleStep) {
+  tracker_t tracker(3, 120000, tracker_frequency, 2000, 100, 2, 100, 0, 3);
+  ASSERT_EQ(tracker.observe(10, tracker_feedback(10, 1000, tracker_origin), tracker_origin + 1200), tracker_status::acquiring);
+  const auto next = tracker_origin + 3 * tracker_refresh_ticks;
+  EXPECT_EQ(tracker.observe(11, tracker_feedback(11, 1003, next), next + 1200), tracker_status::acquiring);
+  EXPECT_FALSE(tracker.arm());
+}

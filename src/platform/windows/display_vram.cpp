@@ -9589,7 +9589,13 @@ namespace platf::dxgi {
                                          DXGI_FORMAT_B8G8R8A8_UNORM;
     swapchain_desc.SampleDesc.Count = 1;
     swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapchain_desc.BufferCount = 2;
+    // The shutter presenter shows an eye by presenting it again on every refresh instead of
+    // asking Windows to hold one present for several refreshes: Windows was measured to hold a
+    // finished image one refresh too long about every ten seconds. The remaining presents of the
+    // displayed eye and all presents of the next eye are queued together, so the queue is two
+    // eyes deep: one buffer per queued present, one on screen and one being drawn.
+    const UINT shutter_queue_depth = config.frame_sequential ? static_cast<UINT>(2 * eye_repeats) : 1u;
+    swapchain_desc.BufferCount = config.frame_sequential ? shutter_queue_depth + 2u : 2u;
     swapchain_desc.Scaling = DXGI_SCALING_STRETCH;
     swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     swapchain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
@@ -9612,7 +9618,7 @@ namespace platf::dxgi {
     Microsoft::WRL::ComPtr<IDXGISwapChain2> swapchain2;
     status = swapchain.As(&swapchain2);
     if (SUCCEEDED(status)) {
-      status = swapchain2->SetMaximumFrameLatency(1);
+      status = swapchain2->SetMaximumFrameLatency(shutter_queue_depth);
     }
     if (FAILED(status)) {
       BOOST_LOG(error) << "Local AR presenter could not configure bounded frame latency: "sv
@@ -9732,7 +9738,7 @@ namespace platf::dxgi {
           return shutter_stop.stop_requested() || stop_token.stop_requested() || !IsWindow(window);
         };
         const bool lookahead_active = shutter_phase_lookahead && (emit_phase_us[0] > 0 || emit_phase_us[1] > 0);
-        detail::shutter_pending_present_ledger_t pending_present;
+        detail::shutter_pending_present_ledger_t pending_present {1, static_cast<unsigned>(eye_repeats)};
         detail::shutter_frame_admission_t frame_admission;
         struct lookahead_counts_t {
           std::uint64_t attempts = 0, readiness_polls = 0, busy_polls = 0, queued = 0, consumed = 0;
@@ -9826,7 +9832,7 @@ namespace platf::dxgi {
           return detail::shutter_feedback_tracker_t {
             static_cast<unsigned>(eye_repeats), config.target_refresh_millihz, qpc_frequency.QuadPart,
             host_age_budget_us, cadence_tolerance_us, acquisition_samples, armed_cadence_tolerance_us,
-            armed_future_tolerance_us,
+            armed_future_tolerance_us, static_cast<unsigned>(eye_repeats),
           };
         };
         auto feedback_tracker = make_feedback_tracker();
@@ -9964,11 +9970,7 @@ namespace platf::dxgi {
           HRESULT prior_count_result = S_FALSE, result = S_FALSE, count_result = S_FALSE;
           bool admission_valid = true;
         };
-        const auto submit_eye = [&](bool left_eye, UINT flags) {
-          submission_t submission;
-          submission.present.epoch = pending_present.epoch();
-          submission.present.tuple_group = held_tuple_group;
-          submission.present.left_eye = left_eye;
+        const auto draw_eye = [&](bool left_eye) {
           if (shutter_test_pattern) {
             constexpr FLOAT red[4] {1.0f, 0.0f, 0.0f, 1.0f};
             constexpr FLOAT blue[4] {0.0f, 0.0f, 1.0f, 1.0f};
@@ -9981,6 +9983,16 @@ namespace platf::dxgi {
             const D3D11_BOX eye_box {left, 0, 0, left + static_cast<UINT>(output_width), static_cast<UINT>(output_height), 1};
             shutter_context->CopySubresourceRegion(backbuffer.Get(), 0, 0, 0, 0, pair, 0, &eye_box);
           }
+        };
+        // One eye is eye_repeats presents of the same image, each for exactly one refresh. The
+        // first identifies the eye and marks its boundary; the others keep it on screen. Every
+        // present after a flip-discard needs the image drawn again into the new back buffer.
+        const auto submit_eye = [&](bool left_eye, UINT flags) {
+          submission_t submission;
+          submission.present.epoch = pending_present.epoch();
+          submission.present.tuple_group = held_tuple_group;
+          submission.present.left_eye = left_eye;
+          draw_eye(left_eye);
           if (schedule_probe.gpu_event) {
             shutter_context->End(schedule_probe.gpu_event.Get());
             schedule_probe.gpu_pending = true;
@@ -9991,7 +10003,7 @@ namespace platf::dxgi {
           submission.prior_count_result = swapchain->GetLastPresentCount(&submission.prior_count);
           DXGI_PRESENT_PARAMETERS parameters {};
           submission.present.present_begin_qpc = qpc_now();
-          submission.result = swapchain->Present1(eye_repeats, flags, &parameters);
+          submission.result = swapchain->Present1(1, flags, &parameters);
           submission.present.present_end_qpc = qpc_now();
           if (submission.result == S_OK) {
             // A known nonaccepted DO_NOT_WAIT attempt retains its already-owned admission.
@@ -10000,6 +10012,28 @@ namespace platf::dxgi {
               submission.admission_valid = frame_admission.consume();
             }
             submission.count_result = swapchain->GetLastPresentCount(&submission.present.present_id);
+            for (int repeat = 1; repeat < eye_repeats && submission.result == S_OK; ++repeat) {
+              // The queue is two eyes deep, so a slot is normally free at once. A slot that
+              // does not appear means the output stopped retiring images.
+              if (WaitForSingleObject(frame_latency_waitable, 100) != WAIT_OBJECT_0) {
+                submission.result = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+                break;
+              }
+              draw_eye(left_eye);
+              const auto repeated = swapchain->Present1(1, DXGI_PRESENT_RESTRICT_TO_OUTPUT, &parameters);
+              if (repeated != S_OK) {
+                // Occlusion is a success code; an eye that is only partly queued is a failure.
+                submission.result = FAILED(repeated) ? repeated : E_FAIL;
+              }
+            }
+            if (submission.result == S_OK && SUCCEEDED(submission.count_result)) {
+              UINT last_present = 0;
+              const auto last_result = swapchain->GetLastPresentCount(&last_present);
+              if (FAILED(last_result) || last_present != static_cast<UINT>(submission.present.present_id + static_cast<UINT>(eye_repeats) - 1u)) {
+                // Another present entered the sequence, so the eye's identity stride is unknown.
+                submission.count_result = FAILED(last_result) ? last_result : E_UNEXPECTED;
+              }
+            }
           }
           return submission;
         };
