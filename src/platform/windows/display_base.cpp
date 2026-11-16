@@ -29,6 +29,7 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
   D3DKMT_GPU_PREFERENCE_STATE_USER_SPECIFIED_GPU  ///< A specific GPU is preferred.
 } D3DKMT_GPU_PREFERENCE_QUERY_STATE;
 
+#include "capture_dxgi_device.h"
 #include "display.h"
 #include "misc.h"
 #include "src/config.h"
@@ -45,6 +46,31 @@ namespace platf {
 namespace platf::dxgi {
 
   namespace detail {
+    bool configure_capture_dxgi_device(IUnknown *device) {
+      dxgi1_t dxgi {};
+      auto status = device->QueryInterface(IID_IDXGIDevice1, (void **) &dxgi);
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
+        return false;
+      }
+
+      // Keep the boost relative to the process policy selected before this call.
+      // Absolute priority 30 is non-yielding hard realtime and bypasses the HAGS workaround.
+      status = dxgi->SetGPUThreadPriority(7);
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "Failed to request relative capture GPU thread priority. Please run application as administrator for optimal performance.";
+      } else {
+        BOOST_LOG(info) << "Capture GPU context uses relative priority 7; process scheduling policy retained.";
+      }
+
+      status = dxgi->SetMaximumFrameLatency(1);
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "Failed to set maximum frame latency [0x"sv << util::hex(status).to_string_view() << ']';
+      }
+
+      return true;
+    }
+
     namespace {
       [[nodiscard]] bool valid_damage_rect(
         const RECT &rect,
@@ -1070,10 +1096,9 @@ namespace platf::dxgi {
       return -1;
     }
 
-    auto description = to_utf8(adapter_desc.Description);
     BOOST_LOG(info)
       << std::endl
-      << "Device Description : " << description << std::endl
+      << "Device Description : " << to_utf8(adapter_desc.Description) << std::endl
       << "Device Vendor ID   : 0x"sv << util::hex(adapter_desc.VendorId).to_string_view() << std::endl
       << "Device Device ID   : 0x"sv << util::hex(adapter_desc.DeviceId).to_string_view() << std::endl
       << "Device Video Mem   : "sv << adapter_desc.DedicatedVideoMemory / 1048576 << " MiB"sv << std::endl
@@ -1168,35 +1193,8 @@ namespace platf::dxgi {
         }
       }
 
-      dxgi::dxgi_t dxgi;
-      status = device->QueryInterface(IID_IDXGIDevice, (void **) &dxgi);
-      if (FAILED(status)) {
-        BOOST_LOG(warning) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
+      if (!detail::configure_capture_dxgi_device(device.get())) {
         return -1;
-      }
-
-      // Keep the boost relative to the process policy selected above. Absolute
-      // priority 30 is non-yielding hard realtime and bypasses the HAGS workaround.
-      status = dxgi->SetGPUThreadPriority(7);
-      if (FAILED(status)) {
-        BOOST_LOG(warning) << "Failed to request relative capture GPU thread priority. Please run application as administrator for optimal performance.";
-      } else {
-        BOOST_LOG(info) << "Capture GPU context uses relative priority 7; process scheduling policy retained.";
-      }
-    }
-
-    // Try to reduce latency
-    {
-      dxgi::dxgi1_t dxgi {};
-      status = device->QueryInterface(IID_IDXGIDevice, (void **) &dxgi);
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
-        return -1;
-      }
-
-      status = dxgi->SetMaximumFrameLatency(1);
-      if (FAILED(status)) {
-        BOOST_LOG(warning) << "Failed to set maximum frame latency [0x"sv << util::hex(status).to_string_view() << ']';
       }
     }
 
