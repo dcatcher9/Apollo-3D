@@ -2330,19 +2330,22 @@ TEST(ProcessTest, AddsCanonicalVirtualDisplayTileWhenDriverIsReady) {
 
   auto parsed = proc::parse(apps_path.string());
   ASSERT_TRUE(parsed.has_value());
-  const auto apps = parsed->get_apps();
+  const auto apps = parsed->get_app_list();
   ASSERT_EQ(apps.size(), 2u);
 
-  const auto virtual_app = std::find_if(apps.begin(), apps.end(), [](const proc::ctx_t &app) {
+  const auto virtual_app = std::find_if(apps.begin(), apps.end(), [](const auto &app) {
     return app.uuid == VIRTUAL_DISPLAY_UUID;
   });
   ASSERT_NE(virtual_app, apps.end());
   EXPECT_EQ(virtual_app->name, "Virtual Display");
   EXPECT_EQ(virtual_app->image_path, "virtual_desktop.png");
   EXPECT_TRUE(virtual_app->synthetic_virtual_display);
-  EXPECT_TRUE(virtual_app->cmd.empty());
+  const auto virtual_launch = parsed->resolve_app(std::nullopt, virtual_app->uuid);
+  ASSERT_EQ(virtual_launch.status, proc::app_lookup_status_e::found);
+  ASSERT_TRUE(virtual_launch.app);
+  EXPECT_TRUE(virtual_launch.app->cmd.empty());
 
-  const auto desktop_app = std::find_if(apps.begin(), apps.end(), [](const proc::ctx_t &app) {
+  const auto desktop_app = std::find_if(apps.begin(), apps.end(), [](const auto &app) {
     return app.name == "Desktop";
   });
   ASSERT_NE(desktop_app, apps.end());
@@ -2443,4 +2446,107 @@ TEST(ProcessAppLookupTest, SelectedSnapshotOwnsItsStringsAndNestedCommands) {
   ASSERT_TRUE(retained);
   EXPECT_EQ(retained->name, "changed snapshot");
   EXPECT_EQ(retained->detached.at(0), "changed detached command");
+}
+
+TEST(ProcessAppListTest, PreservesMetadataOrderDuplicatesAndOpaqueIds) {
+  auto first = lookup_app(7, "shared-UUID", "first title");
+  first.idx = "index-z";
+  first.id = "not-a-numeric-id";
+  first.image_path = "first-cover.png";
+  auto second = lookup_app(8, "second-UUID", "second title");
+  second.idx = "index-a";
+  second.id = first.id;
+  second.image_path = "nested/second-cover.png";
+  auto third = lookup_app(9, first.uuid, "third title");
+  third.idx = "42";
+  third.id = "0009";
+  third.image_path = "virtual_desktop.png";
+  third.synthetic_virtual_display = true;
+  const std::array expected {first, second, third};
+  const auto process = lookup_process({first, second, third});
+
+  const auto listing = process.get_app_list();
+
+  ASSERT_EQ(listing.size(), expected.size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_EQ(listing[index].idx, expected[index].idx);
+    EXPECT_EQ(listing[index].uuid, expected[index].uuid);
+    EXPECT_EQ(listing[index].name, expected[index].name);
+    EXPECT_EQ(listing[index].image_path, expected[index].image_path);
+    EXPECT_EQ(listing[index].id, expected[index].id);
+    EXPECT_EQ(listing[index].synthetic_virtual_display, expected[index].synthetic_virtual_display);
+  }
+}
+
+TEST(ProcessAppListTest, EmptyProcessReturnsAnEmptyOwnedListing) {
+  const auto process = lookup_process({});
+
+  EXPECT_TRUE(process.get_app_list().empty());
+}
+
+TEST(ProcessAppListTest, ListingsAndSelectedLaunchOwnTheirDataAcrossProcessReplacementAndDestruction) {
+  auto original = lookup_app(7, "owned-" + std::string(256, 'u'), std::string(4096, 'n'));
+  original.idx = std::string(1024, 'i');
+  original.image_path = std::string(2048, 'p') + ".png";
+  original.cmd = std::string(8192, 'c');
+  original.working_dir = std::string(1024, 'w');
+  original.output = std::string(1024, 'o');
+  original.prep_cmds.emplace_back(std::string(4096, 'd'), std::string(2048, 'r'), true);
+  original.detached = {std::string(4096, 'a'), std::string(4096, 'b')};
+  original.elevated = true;
+  original.auto_detach = true;
+  original.wait_all = true;
+  original.exit_timeout = std::chrono::seconds {17};
+  std::vector<proc::app_list_entry_t> retained_listing;
+  std::optional<proc::ctx_t> retained_launch;
+  {
+    auto process = lookup_process({original});
+    retained_listing = process.get_app_list();
+    ASSERT_EQ(retained_listing.size(), 1u);
+
+    auto edited_listing = process.get_app_list();
+    ASSERT_EQ(edited_listing.size(), 1u);
+    edited_listing.front().name.assign(8192, 'x');
+    edited_listing.front().uuid = "edited-listing-uuid";
+    const auto next_listing = process.get_app_list();
+    ASSERT_EQ(next_listing.size(), 1u);
+    EXPECT_EQ(next_listing.front().name, original.name);
+    EXPECT_EQ(next_listing.front().uuid, original.uuid);
+
+    auto selected = process.resolve_app(7, original.uuid);
+    ASSERT_EQ(selected.status, proc::app_lookup_status_e::found);
+    ASSERT_TRUE(selected.app);
+    retained_launch = std::move(selected.app);
+
+    process = lookup_process({lookup_app(8, "replacement-uuid", "replacement title")});
+    const auto replacement = process.get_app_list();
+    ASSERT_EQ(replacement.size(), 1u);
+    EXPECT_EQ(replacement.front().name, "replacement title");
+    EXPECT_EQ(replacement.front().uuid, "replacement-uuid");
+    EXPECT_EQ(process.resolve_app(7, original.uuid).status, proc::app_lookup_status_e::not_found);
+  }
+
+  ASSERT_EQ(retained_listing.size(), 1u);
+  EXPECT_EQ(retained_listing.front().idx, original.idx);
+  EXPECT_EQ(retained_listing.front().uuid, original.uuid);
+  EXPECT_EQ(retained_listing.front().name, original.name);
+  EXPECT_EQ(retained_listing.front().image_path, original.image_path);
+  EXPECT_EQ(retained_listing.front().id, original.id);
+  EXPECT_EQ(retained_listing.front().synthetic_virtual_display, original.synthetic_virtual_display);
+  ASSERT_TRUE(retained_launch);
+  EXPECT_EQ(retained_launch->name, original.name);
+  EXPECT_EQ(retained_launch->uuid, original.uuid);
+  EXPECT_EQ(retained_launch->cmd, original.cmd);
+  EXPECT_EQ(retained_launch->working_dir, original.working_dir);
+  EXPECT_EQ(retained_launch->output, original.output);
+  EXPECT_EQ(retained_launch->detached, original.detached);
+  ASSERT_EQ(retained_launch->prep_cmds.size(), original.prep_cmds.size());
+  EXPECT_EQ(retained_launch->prep_cmds.front().do_cmd, original.prep_cmds.front().do_cmd);
+  EXPECT_EQ(retained_launch->prep_cmds.front().undo_cmd, original.prep_cmds.front().undo_cmd);
+  EXPECT_EQ(retained_launch->prep_cmds.front().elevated, original.prep_cmds.front().elevated);
+  EXPECT_EQ(retained_launch->elevated, original.elevated);
+  EXPECT_EQ(retained_launch->auto_detach, original.auto_detach);
+  EXPECT_EQ(retained_launch->wait_all, original.wait_all);
+  EXPECT_EQ(retained_launch->exit_timeout, original.exit_timeout);
 }

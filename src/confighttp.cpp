@@ -815,7 +815,7 @@ namespace confighttp {
       // them separately so the Library can show them without allowing an edit, delete, or
       // reorder operation to create a duplicate persisted entry.
       file_tree["builtin_apps"] = nlohmann::json::array();
-      for (const auto &app : proc::proc.get_apps()) {
+      for (const auto &app : proc::proc.get_app_list()) {
         if (!app.synthetic_virtual_display) {
           continue;
         }

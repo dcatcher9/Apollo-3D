@@ -1442,7 +1442,7 @@ namespace nvhttp {
       return;
     }
     if (!!(named_cert_p->perm & PERM::_all_actions)) {
-      auto app_list = proc::proc.get_apps();
+      auto app_list = proc::proc.get_app_list();
       const auto codec_capabilities = video::nvenc_capabilities_snapshot();
 
       for (const auto &app : app_list) {

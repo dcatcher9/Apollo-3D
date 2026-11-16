@@ -2714,9 +2714,21 @@ namespace proc {
   }
 #endif
 
-  std::vector<ctx_t> proc_t::get_apps() const {
+  std::vector<app_list_entry_t> proc_t::get_app_list() const {
     std::lock_guard lock(process_state_mutex);
-    return _apps;
+    std::vector<app_list_entry_t> entries;
+    entries.reserve(_apps.size());
+    for (const auto &app : _apps) {
+      entries.push_back({
+        app.idx,
+        app.uuid,
+        app.name,
+        app.image_path,
+        app.id,
+        app.synthetic_virtual_display,
+      });
+    }
+    return entries;
   }
 
   app_lookup_result_t proc_t::resolve_app(std::optional<int> app_id, std::string_view app_uuid) const {

@@ -141,6 +141,16 @@ namespace proc {
     std::chrono::seconds exit_timeout;
   };
 
+  /** Owned metadata for application listings, independent of launch commands and policy. */
+  struct app_list_entry_t {
+    std::string idx;
+    std::string uuid;
+    std::string name;
+    std::string image_path;
+    std::string id;
+    bool synthetic_virtual_display = false;
+  };
+
   enum class app_lookup_status_e {
     found,
     not_found,
@@ -231,7 +241,7 @@ namespace proc {
 
     ~proc_t();
 
-    std::vector<ctx_t> get_apps() const;
+    std::vector<app_list_entry_t> get_app_list() const;
     // Resolve both identifiers against one locked list, copying only the selected entry.
     app_lookup_result_t resolve_app(std::optional<int> app_id, std::string_view app_uuid) const;
     std::string get_app_image(int app_id);
