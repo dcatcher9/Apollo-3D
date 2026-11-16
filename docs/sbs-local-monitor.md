@@ -254,40 +254,6 @@ It does not guarantee operating-system dispatch deadlines. Calibrate one logical
 lenses, held-refresh counts and neighboring-slot submission timing. A passing host deadline does
 not establish a clean optical window or unchanged behavior of the other lens.
 
-The internal `SUNSHINE_LOCAL_MONITOR_PHASE_LOOKAHEAD` flag is disabled by default. Set it to
-exactly `1` to test one-image lookahead with a positive logical-slot phase; `0` or an absent flag
-preserves the serial presentation policy. Both zero phases keep immediate emission and the
-ordinary submission path even when the flag is enabled. The flag is read once per presenter
-initialization and malformed values fail before emitter configuration.
-
-For a phased current image, lookahead admits and submits at most one next image before waiting
-for the current command's phase. Admission retries only the zero-time readiness event, for at
-most 500 µs after feedback receipt and only before the phase target minus 250 µs. There is one
-GPU attempt. Its first present uses `DO_NOT_WAIT`; once that is accepted, the eye's remaining
-single-refresh presents are queued normally, which the two-eye queue depth admits without
-waiting in normal operation. The next iteration
-consumes its saved present identity and timestamps once; it does not reacquire a stereo packet,
-wait for another admission, or render and submit that image again. A queued R retains its L's
-tuple; a queued new L may acquire the next tuple only after the old R's copy was actually
-displayed, and retains that new tuple through R and any cold recovery.
-
-Immediately before the phased command, a non-consuming query must still identify the accepted
-current eye: its first present with the same reconstructed boundary, or a later present of that
-eye exactly as many refreshes after it. Freshness and the actual `WriteFile` deadline
-remain mandatory. A known queued image appearing early, an unavailable admission, a nonaccepted
-busy Present, or a missed phase stops commands and uses bounded quiet recovery. There is no
-serial emission fallback for a failed lookahead attempt. An unexpected submitted/displayed
-identity or ownership mismatch stops after the emitter drain and returns to 2D.
-
-Recovery inhibits the pending ledger before serial work, stops new image submissions, verifies
-the same-handle FIFO barrier and finite-pulse drain, then starts a new metadata epoch and 13
-unsignalled left samples. One already-submitted image can appear during the drain; clearing a
-CPU descriptor cannot cancel it. A readiness signal consumed without an accepted Present stays
-owned through recovery and is used once for the first cold submission. Timing summaries report
-negative write-end-to-next-submission intervals as valid signed overlaps. This experiment can
-remove a host submission dependency; it does not establish unchanged panel phase, USB arrival,
-or a clean optical window for either lens.
-
 To separate glasses behaviour from host timing, the internal
 `SUNSHINE_LOCAL_MONITOR_MUTE_SLOT` flag accepts exactly `L` or `R` and is absent by default. The
 named logical slot keeps its image, presentation checks and timing gates but sends no USB eye
