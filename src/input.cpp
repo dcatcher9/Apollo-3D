@@ -129,7 +129,6 @@ namespace input {
 
   enum class button_state_e {
     NONE,  ///< No button state
-    DOWN,  ///< Button is down
     UP  ///< Button is up
   };
 
@@ -991,12 +990,6 @@ namespace input {
           gamepad.back_button_state = button_state_e::NONE;
         }
         gamepad_state.buttonFlags &= ~platf::BACK;
-        break;
-      case button_state_e::DOWN:
-        if (platf::BACK & bf_new) {
-          gamepad.back_button_state = button_state_e::NONE;
-        }
-        gamepad_state.buttonFlags |= platf::BACK;
         break;
       case button_state_e::NONE:
         break;
