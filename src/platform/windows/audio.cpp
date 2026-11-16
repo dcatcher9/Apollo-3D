@@ -24,6 +24,7 @@
 #include "src/platform/common.h"
 #include "src/platform/windows/audio_endpoint_match.h"
 #include "src/platform/windows/audio_helpers.h"
+#include "src/platform/windows/audio_pcm_staging.h"
 
 // Must be the last included file
 // clang-format off
@@ -597,22 +598,13 @@ namespace platf::audio {
   class mic_wasapi_t: public mic_t {
   public:
     capture_e sample(std::span<float> sample_out) override {
-      auto sample_size = sample_out.size();
-
       // Refill the sample buffer if needed
-      while (sample_buf_pos - std::begin(sample_buf) < sample_size) {
+      while (!sample_buf.read_into(sample_out)) {
         auto capture_result = _fill_buffer();
         if (capture_result != capture_e::ok) {
           return capture_result;
         }
       }
-
-      // Fill the output buffer with samples
-      std::copy_n(std::begin(sample_buf), sample_size, std::begin(sample_out));
-
-      // Move any excess samples to the front of the buffer
-      std::move(&sample_buf[sample_size], sample_buf_pos, std::begin(sample_buf));
-      sample_buf_pos -= sample_size;
 
       return capture_e::ok;
     }
@@ -701,8 +693,7 @@ namespace platf::audio {
       }
 
       // *2 --> needs to fit double
-      sample_buf = util::buffer_t<float> {std::max(frames, frame_size) * 2 * channels_out};
-      sample_buf_pos = std::begin(sample_buf);
+      sample_buf.reset(std::max(frames, frame_size) * 2 * channels_out);
 
       status = audio_client->GetService(IID_IAudioCaptureClient, (void **) &audio_capture);
       if (FAILED(status)) {
@@ -835,7 +826,6 @@ namespace platf::audio {
 
       // Total number of samples
       struct sample_aligned_t {
-        std::uint32_t uninitialized;
         float *samples;
       } sample_aligned;
 
@@ -900,21 +890,16 @@ namespace platf::audio {
           BOOST_LOG(debug) << "Audio capture signaled buffer discontinuity";
         }
 
-        sample_aligned.uninitialized = std::end(sample_buf) - sample_buf_pos;
-        auto n = std::min(sample_aligned.uninitialized, block_aligned.audio_sample_size * channels);
+        auto n = sample_buf.append_packet(
+          sample_aligned.samples,
+          block_aligned.audio_sample_size * channels,
+          (buffer_flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0,
+          endpoint_gain
+        );
 
         if (n < block_aligned.audio_sample_size * channels) {
           BOOST_LOG(warning) << "Audio capture buffer overflow";
         }
-
-        if (buffer_flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-          std::fill_n(sample_buf_pos, n, 0);
-        } else {
-          std::copy_n(sample_aligned.samples, n, sample_buf_pos);
-          detail::apply_endpoint_volume(std::span<float> {sample_buf_pos, n}, endpoint_gain);
-        }
-
-        sample_buf_pos += n;
 
         audio_capture->ReleaseBuffer(block_aligned.audio_sample_size);
       }
@@ -949,8 +934,7 @@ namespace platf::audio {
     float endpoint_gain {1.0f};
     bool post_volume_loopback {};
 
-    util::buffer_t<float> sample_buf;
-    float *sample_buf_pos;
+    detail::pcm_staging_t sample_buf;
     int channels;
 
     HANDLE mmcss_task_handle = nullptr;
