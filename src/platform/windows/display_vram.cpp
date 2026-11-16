@@ -9858,7 +9858,16 @@ namespace platf::dxgi {
           Microsoft::WRL::ComPtr<IDXGISwapChainMedia> media;
           bool gpu_pending = false, new_pair = false;
           std::int64_t gpu_done_qpc = 0, previous_boundary_qpc = 0;
-          std::uint64_t last_tuple_group = std::numeric_limits<std::uint64_t>::max();
+          // Stereo pairs are counted where they are acquired; the tuple group only advances
+          // with phase lookahead.
+          std::uint64_t pair_serial = 0, last_pair_serial = std::numeric_limits<std::uint64_t>::max();
+          std::int64_t pair_acquired_qpc = 0;
+          // Two independent clock measurements per minute: the selected output from its own
+          // confirmed refresh counter, and the desktop compositor from its timing report.
+          std::uint32_t minute_first_refresh = 0, minute_last_refresh = 0;
+          std::int64_t minute_first_qpc = 0, minute_last_qpc = 0;
+          std::uint64_t dwm_first_refresh = 0, dwm_first_frame = 0;
+          std::int64_t dwm_first_qpc = 0;
           struct bucket_t {
             std::uint64_t count = 0, unfinished = 0;
             long double sum_us = 0, max_us = 0;
@@ -9976,8 +9985,8 @@ namespace platf::dxgi {
             shutter_context->End(schedule_probe.gpu_event.Get());
             schedule_probe.gpu_pending = true;
             schedule_probe.gpu_done_qpc = 0;
-            schedule_probe.new_pair = held_tuple_group != schedule_probe.last_tuple_group;
-            schedule_probe.last_tuple_group = held_tuple_group;
+            schedule_probe.new_pair = schedule_probe.pair_serial != schedule_probe.last_pair_serial;
+            schedule_probe.last_pair_serial = schedule_probe.pair_serial;
           }
           submission.prior_count_result = swapchain->GetLastPresentCount(&submission.prior_count);
           DXGI_PRESENT_PARAMETERS parameters {};
@@ -10155,6 +10164,8 @@ namespace platf::dxgi {
           // refreshes. Publishing another capture can never change the second eye of this pair.
           if (!prefetched && (!pair || (has_displayed && eye_clock.starts_pair()))) {
             pair = shutter_frames.acquire_pair();
+            ++schedule_probe.pair_serial;
+            schedule_probe.pair_acquired_qpc = qpc_now();
             if (lookahead_active && pair) {
               if (held_tuple_group == std::numeric_limits<std::uint64_t>::max()) {
                 fail("the stereo-pair ownership generation overflowed");
@@ -10473,6 +10484,12 @@ namespace platf::dxgi {
             }
             const bool composed = composition_mode != static_cast<UINT>(DXGI_FRAME_PRESENTATION_MODE_OVERLAY) && composition_mode != 255;
             schedule_probe.composed_images += composed;
+            if (!schedule_probe.minute_first_qpc) {
+              schedule_probe.minute_first_refresh = confirmation.feedback.refresh_count;
+              schedule_probe.minute_first_qpc = boundary_qpc;
+            }
+            schedule_probe.minute_last_refresh = confirmation.feedback.refresh_count;
+            schedule_probe.minute_last_qpc = boundary_qpc;
             const bool off_schedule = previous_displayed_refresh && confirmed_refresh_delta != static_cast<unsigned>(eye_repeats);
             if ((off_schedule || composed) && schedule_probe.off_schedule_logged < 2000 && schedule_probe.previous_boundary_qpc) {
               ++schedule_probe.off_schedule_logged;
@@ -10486,7 +10503,18 @@ namespace platf::dxgi {
                               << " gpu_done_after_submit_us="sv << (schedule_probe.gpu_done_qpc ? to_us(schedule_probe.gpu_done_qpc - present_end_qpc) : -1.0L)
                               << " gpu_done_before_target_us="sv << (schedule_probe.gpu_done_qpc ? to_us(target_qpc - schedule_probe.gpu_done_qpc) : -1.0L)
                               << " displayed_after_target_us="sv << to_us(boundary_qpc - target_qpc)
-                              << " present_call_us="sv << to_us(present_end_qpc - present_start_qpc) << '.';
+                              << " present_call_us="sv << to_us(present_end_qpc - present_start_qpc)
+                              << " pair_age_at_submit_us="sv << to_us(present_end_qpc - schedule_probe.pair_acquired_qpc);
+              DWM_TIMING_INFO dwm {};
+              dwm.cbSize = sizeof(dwm);
+              if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &dwm))) {
+                // Where the compositor's own refresh clock stands relative to this output's boundary.
+                BOOST_LOG(info) << "Local shutter schedule probe compositor: vblank_minus_boundary_us="sv
+                                << to_us(static_cast<std::int64_t>(dwm.qpcVBlank) - boundary_qpc)
+                                << " compose_minus_vblank_us="sv << to_us(static_cast<std::int64_t>(dwm.qpcCompose) - static_cast<std::int64_t>(dwm.qpcVBlank))
+                                << " refresh_period_us="sv << to_us(static_cast<std::int64_t>(dwm.qpcRefreshPeriod))
+                                << " refresh="sv << dwm.cRefresh << " frame="sv << dwm.cFrame << '.';
+              }
             }
             schedule_probe.previous_boundary_qpc = boundary_qpc;
           }
@@ -10753,6 +10781,29 @@ namespace platf::dxgi {
                               << "; composed_images="sv << schedule_probe.composed_images << '.';
               schedule_probe.gpu = {};
               schedule_probe.composed_images = 0;
+              const auto output_refreshes = static_cast<std::uint32_t>(schedule_probe.minute_last_refresh - schedule_probe.minute_first_refresh);
+              const auto output_ticks = schedule_probe.minute_last_qpc - schedule_probe.minute_first_qpc;
+              const long double output_hz = output_ticks > 0 ? static_cast<long double>(output_refreshes) * qpc_frequency.QuadPart / output_ticks : 0.0L;
+              DWM_TIMING_INFO dwm {};
+              dwm.cbSize = sizeof(dwm);
+              if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &dwm))) {
+                const auto dwm_qpc = static_cast<std::int64_t>(dwm.qpcVBlank);
+                long double dwm_hz = 0, dwm_frames_per_second = 0;
+                if (schedule_probe.dwm_first_qpc && dwm_qpc > schedule_probe.dwm_first_qpc) {
+                  const auto seconds = static_cast<long double>(dwm_qpc - schedule_probe.dwm_first_qpc) / qpc_frequency.QuadPart;
+                  dwm_hz = static_cast<long double>(dwm.cRefresh - schedule_probe.dwm_first_refresh) / seconds;
+                  dwm_frames_per_second = static_cast<long double>(dwm.cFrame - schedule_probe.dwm_first_frame) / seconds;
+                }
+                BOOST_LOG(info) << "Local shutter schedule probe clocks: output_measured_hz="sv << std::fixed << std::setprecision(4) << output_hz
+                                << " compositor_measured_hz="sv << dwm_hz << " compositor_frames_per_second="sv << dwm_frames_per_second
+                                << " compositor_reported_refresh="sv << dwm.rateRefresh.uiNumerator << '/' << dwm.rateRefresh.uiDenominator
+                                << " compositor_reported_compose="sv << dwm.rateCompose.uiNumerator << '/' << dwm.rateCompose.uiDenominator
+                                << std::defaultfloat << std::setprecision(6) << '.';
+                schedule_probe.dwm_first_qpc = dwm_qpc;
+                schedule_probe.dwm_first_refresh = dwm.cRefresh;
+                schedule_probe.dwm_first_frame = dwm.cFrame;
+              }
+              schedule_probe.minute_first_qpc = 0;
             }
           }
           has_displayed = true;
