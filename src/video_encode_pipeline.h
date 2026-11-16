@@ -35,7 +35,7 @@ namespace video::detail {
     using clock_t = std::chrono::steady_clock;
     using retire_t = std::function<bool(Frame &)>;
 
-    /** Totals since the last take_stats(). */
+    /** Totals since the last take_stats(), or zero when collection is disabled. */
     struct stats_t {
       std::uint64_t pushed = 0;
       std::uint64_t pushed_behind = 0;  ///< Pushed while an earlier picture was still in flight.
@@ -44,9 +44,10 @@ namespace video::detail {
       std::chrono::nanoseconds latency_max {};
     };
 
-    /** `on_start` runs first on the retiring thread (for example to raise its priority). */
-    encode_pipeline_t(unsigned depth, retire_t retire, std::function<void()> on_failure = {}, std::function<void()> on_start = {}):
+    /** Statistics are optional. `on_start` runs first on the retiring thread. */
+    encode_pipeline_t(unsigned depth, retire_t retire, bool collect_stats, std::function<void()> on_failure = {}, std::function<void()> on_start = {}):
         depth_(std::max(depth, 1u)),
+        collect_stats_(collect_stats),
         retire_(std::move(retire)),
         on_failure_(std::move(on_failure)),
         on_start_(std::move(on_start)),
@@ -86,11 +87,13 @@ namespace video::detail {
     void push(Frame frame) {
       {
         std::lock_guard lock(mutex_);
-        ++stats_.pushed;
-        if (in_flight_locked() > 0) {
-          ++stats_.pushed_behind;
+        if (collect_stats_) {
+          ++stats_.pushed;
+          if (in_flight_locked() > 0) {
+            ++stats_.pushed_behind;
+          }
         }
-        queued_.push_back({std::move(frame), clock_t::now()});
+        queued_.push_back({std::move(frame), collect_stats_ ? clock_t::now() : clock_t::time_point {}});
       }
       condition_.notify_all();
     }
@@ -146,15 +149,15 @@ namespace video::detail {
         retiring_ = true;
         lock.unlock();
         const bool retired = retire_(entry.frame);
-        const auto latency = clock_t::now() - entry.pushed_at;
+        const auto latency = collect_stats_ ? clock_t::now() - entry.pushed_at : clock_t::duration {};
         lock.lock();
         retiring_ = false;
-        if (retired) {
+        if (!retired) {
+          failed_ = true;
+        } else if (collect_stats_) {
           ++stats_.retired;
           stats_.latency_total += latency;
           stats_.latency_max = std::max(stats_.latency_max, std::chrono::duration_cast<std::chrono::nanoseconds>(latency));
-        } else {
-          failed_ = true;
         }
         condition_.notify_all();
         if (!retired && on_failure_) {
@@ -166,6 +169,7 @@ namespace video::detail {
     }
 
     const unsigned depth_;
+    const bool collect_stats_;
     retire_t retire_;
     std::function<void()> on_failure_;
     std::function<void()> on_start_;

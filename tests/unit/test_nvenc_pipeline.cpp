@@ -634,7 +634,8 @@ TEST(NvencPipelineTest, PicturesRetrievedOnASecondThreadWhileTheNextIsSubmitted)
       }
       retrieved.push_back(encoded.frame_index);
       return true;
-    });
+    },
+                                                             false);
     for (std::uint64_t frame = 1; frame <= 500; ++frame) {
       ASSERT_TRUE(pipeline.acquire());
       ASSERT_TRUE(probe.submit_frame(frame, frame == 1));

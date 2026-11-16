@@ -1364,7 +1364,7 @@ namespace video {
     }
     // Where this loop's time goes (holds, waits, conversion, encode), one line every 20 s.
     auto loop_stats = detail::make_diagnostic_state<detail::encode_loop_stats_t>(config::sunshine.diagnostics_enabled);
-    auto loop_stats_since = std::chrono::steady_clock::now();
+    auto loop_stats_since = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
     detail::diagnostic_content_tracker_t loop_content;
     // Every bounded image wait (a pending capture's target, a retained-source poll, the keepalive)
     // ends at the first of a capture, a wake and its bound, and that bound on this high-resolution
@@ -1419,6 +1419,7 @@ namespace video {
           }
           return true;
         },
+        loop_stats.has_value(),
         [images]() {
           // The loop notices the failure at its next iteration.
           images->wake();
@@ -1586,12 +1587,12 @@ namespace video {
 
     while (true) {
       if (loop_stats) {
-        if (const auto now = std::chrono::steady_clock::now(); now - loop_stats_since >= 20s) {
+        if (const auto now = std::chrono::steady_clock::now(); now - *loop_stats_since >= 20s) {
           if (pipeline) {
             const auto pictures = pipeline->take_stats();
             loop_stats->pictures(pictures.pushed_behind, pictures.retired, pictures.latency_total, pictures.latency_max);
           }
-          BOOST_LOG(info) << loop_stats->report(now - loop_stats_since) << session->video_memory_diagnostics();
+          BOOST_LOG(info) << loop_stats->report(now - *loop_stats_since) << session->video_memory_diagnostics();
           loop_stats->reset();
           loop_stats_since = now;
         }
@@ -1714,10 +1715,10 @@ namespace video {
         }
         bool captured = false;
         const auto image_wait = detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready, conversion_poll_pending, pending_source_wait);
-        const auto image_wait_started = std::chrono::steady_clock::now();
+        const auto image_wait_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
         auto img = detail::pop_encode_image(*images, image_wait, image_deadline_waiter.get());
         if (loop_stats && !safe::no_wait(image_wait)) {
-          loop_stats->waited(std::chrono::duration_cast<std::chrono::nanoseconds>(image_wait), std::chrono::steady_clock::now() - image_wait_started);
+          loop_stats->waited(std::chrono::duration_cast<std::chrono::nanoseconds>(image_wait), std::chrono::steady_clock::now() - *image_wait_started);
         }
         if (img) {
           // Metadata for pixels an external provider owns, with an unchanged cursor, only
@@ -1938,7 +1939,7 @@ namespace video {
       // New content is told by its identity, as for the packets: a keepalive or poll that
       // re-renders an unchanged export converts again but encodes a repeat.
       const bool new_loop_content = loop_stats && loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content;
-      const auto encode_started = std::chrono::steady_clock::now();
+      const auto encode_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
       auto frame = make_encoded_frame_context(
         frame_nr++,
         frame_timestamp,
@@ -1956,20 +1957,20 @@ namespace video {
         // ClaimingAtThePollTargetKeepsTheCadenceWhenEveryPictureIsInFlight). The picture is
         // published by the retrieving thread when it completes.
         encoded = pipeline->acquire();
-        const auto completion_wait = std::chrono::steady_clock::now() - encode_started;
+        const auto completion_finished = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
         encoded = encoded && session->submit_frame(frame.frame_nr);
         if (encoded) {
           pipeline->push(std::move(frame));
         }
         if (loop_stats) {
-          loop_stats->encoded(new_loop_content, std::chrono::steady_clock::now() - encode_started, session->last_submit_timing(), completion_wait);
+          loop_stats->encoded(new_loop_content, std::chrono::steady_clock::now() - *encode_started, session->last_submit_timing(), *completion_finished - *encode_started);
         }
       } else {
         const auto publish_result = encode(*session, packets, channel_data, frame, encode_diagnostics ? &*encode_diagnostics : nullptr);
         encoded = !publish_result.failed;
         if (loop_stats) {
           const auto timing = session->last_frame_timing();
-          const auto call = std::chrono::steady_clock::now() - encode_started;
+          const auto call = std::chrono::steady_clock::now() - *encode_started;
           loop_stats->encoded(new_loop_content, call, timing.submit, timing.completion_wait);
           if (encoded) {
             loop_stats->pictures(0, 1, call, call);
