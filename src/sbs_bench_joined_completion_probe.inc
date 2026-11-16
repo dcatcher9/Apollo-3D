@@ -295,7 +295,7 @@
           if(!view)throw std::runtime_error("Actual readback SRV missing");ComPtr<ID3D11Resource> resource;view->GetResource(&resource);capture_resource(capture,index,resource.Get());
         };
         probe::callbacks_t callbacks;
-        callbacks.production_draw_and_GPU_readback=[&](ID3D11ShaderResourceView *current,const models::estimate_result &owner,const probe::phase_record_t &row) {
+        callbacks.production_draw_and_GPU_readback=[&](ID3D11ShaderResourceView *current,const models::depth_observation_views_t &owner,const probe::phase_record_t &row) {
           const auto name=jp_phase(row.phase);
           auto &capture=captures.at(static_cast<std::size_t>(row.phase));
           if(capture.readback_complete)throw std::runtime_error("Duplicate immutable phase capture");

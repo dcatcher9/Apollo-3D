@@ -44,6 +44,7 @@
 #include "src/game_source_tracker.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/host_sbs_drawn_source_order.h"
+#include "src/host_sbs_observation_handoff.h"
 #include "src/host_sbs_packed_presentation_clock.h"
 #include "host_sbs_actual_converter_probe.h"
 #include <fstream>
@@ -267,7 +268,7 @@ namespace platf::dxgi {
 
   /** Exact completion-to-color binding, including the estimator-owned model-grid raster. */
   [[nodiscard]] static bool depth_completion_region_matches_submission(
-    const models::estimate_result &estimate,
+    const models::depth_observation_views_t &estimate,
     const models::depth_input_region_t &submitted_region
   ) noexcept {
     const bool fused_runtime = estimate.composite_depth_runtime_provenance != nullptr;
@@ -1212,8 +1213,10 @@ namespace platf::dxgi {
           ID3D11ShaderResourceView *render_input_srv = img_ctx->encoder_input_res.get();
           matched_frame_slot_t *matched_render_slot = nullptr;
           matched_frame_slot_t *matched_candidate_slot = nullptr;
-          models::estimate_result est;
-          // Planned working views are local to this convert call, never an estimate_result.
+          host_sbs::observation_handoff_t handoff;
+          auto &depth_step = handoff.step();
+          auto &est = depth_step.observation;
+          // Planned working views are local to this convert call, never a completed observation.
           std::optional<models::queued_same_source_gpu_continuation_research_views_t> queued_draw;
           matched_frame_slot_t *queued_source_slot = nullptr;
           bool queued_refined_geometry = false;
@@ -1269,7 +1272,7 @@ namespace platf::dxgi {
             if (!subtitle_context.matches(matched_render_slot->subtitle_context_generation)) {
               // Normal focus/video transitions retire old work without displaying its protected field.
               matched_render_slot = nullptr;
-              est = {};
+              handoff.reset();
               render_input_srv = img_ctx->encoder_input_res.get();
               matched_presentation_cache.invalidate();
               return false;
@@ -1288,7 +1291,7 @@ namespace platf::dxgi {
                    "does not match its exact buffered color frame; "sv
                    "rendering current-frame identity."sv;
               matched_render_slot = nullptr;
-              est = {};
+              handoff.reset();
               render_input_srv = img_ctx->encoder_input_res.get();
               matched_presentation_cache.invalidate();
               return false;
@@ -1304,7 +1307,7 @@ namespace platf::dxgi {
                 matched_presentation_cache.reset();
                 latest_v2_lineage.reset();
                 matched_render_slot = nullptr;
-                est = {};
+                handoff.reset();
                 render_input_srv = img_ctx->encoder_input_res.get();
                 return false;
               }
@@ -1322,7 +1325,7 @@ namespace platf::dxgi {
             if (!matched_render_slot) {
               return false;
             }
-            if (est.input_domain_reset) {
+            if (depth_step.completion.input_domain_reset) {
               sbs_telemetry_min_frame_id = std::max(
                 sbs_telemetry_min_frame_id,
                 est.completed_frame_id
@@ -1337,7 +1340,7 @@ namespace platf::dxgi {
               if (failed_renderer != host_sbs_renderer) {
                 fail_depth_pipeline_flat();
                 matched_render_slot = nullptr;
-                est = {};
+                handoff.reset();
                 render_input_srv = img_ctx->encoder_input_res.get();
                 BOOST_LOG(error)
                   << "Host SBS parallax-v2 producer reported a terminal CUDA/TensorRT failure; "sv
@@ -1385,7 +1388,7 @@ namespace platf::dxgi {
                   << ")."sv;
                 fail_depth_pipeline_flat();
                 matched_render_slot = nullptr;
-                est = {};
+                handoff.reset();
                 render_input_srv = img_ctx->encoder_input_res.get();
                 return false;
               }
@@ -1403,6 +1406,7 @@ namespace platf::dxgi {
             }
             (void) retain_latest_v2_lineage(
               est,
+              depth_step.status,
               *matched_render_slot,
               completed_source_desc,
               live_source_desc,
@@ -1467,16 +1471,16 @@ namespace platf::dxgi {
               if (polled.ready) {
                 latest_v2_lineage.reset();
                 depth_completion_poll_pending = false;
-                if (!polled.result.completed_frame_valid) {
+                if (!polled.result.observation.completed_frame_valid) {
                   for (auto &slot : matched_frame_slots) {
                     slot.pending = false;
                   }
                   block_current_submission_after_early_poll = true;
                 } else {
                   auto *completed_slot =
-                    find_pending_matched_slot(polled.result.completed_frame_id);
+                    find_pending_matched_slot(polled.result.observation.completed_frame_id);
                   if (!completed_slot) {
-                    release_unknown_completion(polled.result.completed_frame_id, nullptr);
+                    release_unknown_completion(polled.result.observation.completed_frame_id, nullptr);
                     block_current_submission_after_early_poll = true;
                   } else {
                     completed_slot->pending = false;
@@ -1485,7 +1489,7 @@ namespace platf::dxgi {
                     }
                     matched_render_slot = completed_slot;
                     render_input_srv = completed_slot->srv.get();
-                    est = std::move(polled.result);
+                    handoff.select(std::move(polled.result));
                     if (probe_observer.record) {
                       actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::ack;
                       emit_converter_probe(std::move(e),matched_render_slot,&est,nullptr,render_input_srv,img_ctx->encoder_input_res.get(),frame_id);
@@ -1694,15 +1698,15 @@ namespace platf::dxgi {
                 // not retain resource aliases authenticated before that state transition.
                 latest_v2_lineage.reset();
                 depth_completion_poll_pending = false;
-                if (!polled.result.completed_frame_valid) {
+                if (!polled.result.observation.completed_frame_valid) {
                   // The verified slot represented the estimator's sole pending inference. A ready
                   // empty/failure result has consumed or invalidated that ownership too; retaining
                   // the bit would suppress every later submission indefinitely.
                   unchanged_input_pending_slot->pending = false;
                 }
-                if (polled.result.completed_frame_valid) {
+                if (polled.result.observation.completed_frame_valid) {
                   auto *completed_slot =
-                    find_pending_matched_slot(polled.result.completed_frame_id);
+                    find_pending_matched_slot(polled.result.observation.completed_frame_id);
                   if (completed_slot == unchanged_input_pending_slot) {
                     completed_slot->pending = false;
                     if (!completed_slot->depth_input_region.is_video_region()) {
@@ -1714,7 +1718,7 @@ namespace platf::dxgi {
                       current_input_reuse_kind(*completed_slot);
                     force_fresh_current_color =
                       completed_reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none;
-                    est = std::move(polled.result);
+                    handoff.select(std::move(polled.result));
                     if (probe_observer.record) {
                       actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::ack;
                       emit_converter_probe(std::move(e),matched_render_slot,&est,nullptr,render_input_srv,img_ctx->encoder_input_res.get(),frame_id);
@@ -1734,7 +1738,7 @@ namespace platf::dxgi {
                       }
                     }
                   } else {
-                    release_unknown_completion(polled.result.completed_frame_id, nullptr);
+                    release_unknown_completion(polled.result.observation.completed_frame_id, nullptr);
                   }
                 }
               }
@@ -1802,7 +1806,7 @@ namespace platf::dxgi {
                 // and delivery now. A route mismatch cannot restore publication authority.
                 latest_v2_lineage.reset();
                 matched_render_slot = nullptr;
-                est = {};
+                handoff.reset();
                 render_input_srv = img_ctx->encoder_input_res.get();
                 completion_finalized_before_admission = false;
               }
@@ -1856,13 +1860,13 @@ namespace platf::dxgi {
                   matched_candidate_slot->temporal_source,
                   matched_candidate_slot->subtitle_line_position
                 );
-                const bool submitted_refined_geometry = submitted.refined_live_geometry_active;
+                const bool submitted_refined_geometry = submitted.observation.refined_live_geometry_active;
                 if (completion_finalized_before_admission &&
                     !depth_estimator->publication_is_current(est.publication)) {
                   // Admission can reset subtitle state without changing the depth domain.
                   // Borrowed views from the early completion no longer authorize this draw.
                   matched_render_slot = nullptr;
-                  est = {};
+                  handoff.reset();
                   render_input_srv = img_ctx->encoder_input_res.get();
                   matched_presentation_cache.reset();
                   latest_v2_lineage.reset();
@@ -1871,29 +1875,15 @@ namespace platf::dxgi {
                 if (
                   diagnostics_enabled &&
                   matched_candidate_slot->depth_input_region.is_video_region() &&
-                  (submitted.inference_enqueued ||
-                   submitted.gpu_undecided_transaction_enqueued)
+                  (submitted.submission.inference_enqueued ||
+                   submitted.submission.gpu_undecided_transaction_enqueued)
                 ) {
                   ++matched_stats_roi_direct_inputs;
                 }
-                if (
-                  completion_finalized_before_admission && est.completed_frame_valid &&
-                  !submitted.completed_frame_valid
-                ) {
-                  // Preserve the already-authenticated prior completion for this draw while the
-                  // current call's submission flags retain ownership of the new matched slot.
-                  // The wrapper result owns no per-enqueue resources beyond these call metadata.
-                  est.inference_enqueued = submitted.inference_enqueued;
-                  est.gpu_undecided_transaction_enqueued =
-                    submitted.gpu_undecided_transaction_enqueued;
-                  est.subtitle_ocr_inference_enqueued =
-                    submitted.subtitle_ocr_inference_enqueued;
-                  est.cuda_graph_active =
-                    est.cuda_graph_active || submitted.cuda_graph_active;
-                } else {
-                  est = std::move(submitted);
-                  completion_finalized_before_admission = false;
-                }
+                completion_finalized_before_admission = handoff.accept_submission(
+                  std::move(submitted),
+                  completion_finalized_before_admission
+                );
                 if (
                   est.completed_frame_valid &&
                   !completion_finalized_before_admission
@@ -1923,8 +1913,8 @@ namespace platf::dxgi {
                   }
                 }
                 const bool gpu_undecided_transaction_enqueued =
-                  est.gpu_undecided_transaction_enqueued;
-                const bool force_infer_transaction_enqueued = est.inference_enqueued;
+                  depth_step.submission.gpu_undecided_transaction_enqueued;
+                const bool force_infer_transaction_enqueued = depth_step.submission.inference_enqueued;
                 const bool depth_transaction_enqueued =
                   force_infer_transaction_enqueued || gpu_undecided_transaction_enqueued;
                 const auto adaptive_submission_class =
@@ -2051,7 +2041,7 @@ namespace platf::dxgi {
                       matched_render_slot = nullptr;
                       completion_finalized_before_admission = false;
                       queued_refined_geometry = submitted_refined_geometry;
-                      est = {};
+                      handoff.reset();
                       render_input_srv = img_ctx->encoder_input_res.get();
                       // Slots keep the calibrated DAV2 submission raster; the ticket owns
                       // the estimator's authenticated realized field, as ordinary completions do.
@@ -2087,7 +2077,7 @@ namespace platf::dxgi {
                       // No ticket is used, and this call renders current identity.
                       queued_attempt_failed_flat = true;
                       matched_render_slot = nullptr;
-                      est = {};
+                      handoff.reset();
                       render_input_srv = img_ctx->encoder_input_res.get();
                     }
                   }
@@ -2122,8 +2112,8 @@ namespace platf::dxgi {
 
                   const auto completion = detail::host_sbs_same_frame_completion(
                     polled.ready,
-                    polled.result.completed_frame_valid,
-                    polled.result.completed_frame_id,
+                    polled.result.observation.completed_frame_valid,
+                    polled.result.observation.completed_frame_id,
                     matched_candidate_slot->frame_id
                   );
                   const auto poll_outcome = detail::host_sbs_same_frame_poll_outcome(
@@ -2202,7 +2192,7 @@ namespace platf::dxgi {
                     depth_completion_poll_pending = false;
                     matched_render_slot = nullptr;
                     render_input_srv = img_ctx->encoder_input_res.get();
-                    est = {};
+                    handoff.reset();
                     completion_finalized_before_admission = false;
                     if (
                       completion ==
@@ -2214,7 +2204,7 @@ namespace platf::dxgi {
                       }
                       matched_render_slot = matched_candidate_slot;
                       render_input_srv = matched_candidate_slot->srv.get();
-                      est = std::move(polled.result);
+                      handoff.select(std::move(polled.result));
                       if (probe_observer.record) {
                         actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::ack;
                         emit_converter_probe(std::move(e),matched_render_slot,&est,nullptr,render_input_srv,img_ctx->encoder_input_res.get(),frame_id);
@@ -2238,9 +2228,9 @@ namespace platf::dxgi {
                       // A ready empty/failure result consumed or invalidated B. Clear its exact
                       // slot and let the existing terminal-flat/authentication path decide output.
                       matched_candidate_slot->pending = false;
-                      if (polled.result.completed_frame_valid) {
+                      if (polled.result.observation.completed_frame_valid) {
                         release_unknown_completion(
-                          polled.result.completed_frame_id,
+                          polled.result.observation.completed_frame_id,
                           nullptr
                         );
                       }
@@ -2296,10 +2286,10 @@ namespace platf::dxgi {
             );
           if (
             !matched_render_slot && post_completion_cache_render_allowed &&
-            (unchanged_content_submission_suppressed || est.inference_enqueued ||
-             est.gpu_undecided_transaction_enqueued)
+            (unchanged_content_submission_suppressed || depth_step.submission.inference_enqueued ||
+             depth_step.submission.gpu_undecided_transaction_enqueued)
           ) {
-            est = latest_v2_lineage.estimate;
+            handoff.select(host_sbs::observation_handoff_t::repeat(latest_v2_lineage.estimate, latest_v2_lineage.status));
             copy_matched_frame_attribution(
               current_color_reuse_slot,
               latest_v2_lineage.slot
@@ -2373,7 +2363,7 @@ namespace platf::dxgi {
               latest_v2_lineage.reset();
             }
             matched_render_slot = nullptr;
-            est = {};
+            handoff.reset();
             render_input_srv = img_ctx->encoder_input_res.get();
             completion_finalized_before_admission = false;
           } else if (!completion_finalized_before_admission && matched_render_slot) {
@@ -2388,7 +2378,7 @@ namespace platf::dxgi {
             if (failed_renderer != host_sbs_renderer) {
               fail_depth_pipeline_flat();
               matched_render_slot = nullptr;
-              est = {};
+              handoff.reset();
               render_input_srv = img_ctx->encoder_input_res.get();
               BOOST_LOG(error)
                 << "Host SBS parallax-v2 producer reported a terminal CUDA/TensorRT failure; "sv
@@ -2415,7 +2405,7 @@ namespace platf::dxgi {
           // cached-current RGB reuse. Reject a late private B only after a newer source was drawn.
           if (matched_render_slot && !cached_current_color_warp && !same_source(matched_render_slot->source_timestamp, current_source_timestamp) && !drawn_source_order.permits(matched_render_slot->frame_id)) {
             matched_render_slot = nullptr;
-            est = {};
+            handoff.reset();
             render_input_srv = img_ctx->encoder_input_res.get();
           }
           const auto repeat_now = std::chrono::steady_clock::now();
@@ -2423,7 +2413,7 @@ namespace platf::dxgi {
           if (matched_render_slot && host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 && !models::host_sbs_matched_completion_is_current(same_source(matched_render_slot->source_timestamp, current_source_timestamp), repeat_now - matched_render_slot->captured_at)) {
             stale_v2_completion = true;
             matched_render_slot = nullptr;
-            est = {};
+            handoff.reset();
             render_input_srv = img_ctx->encoder_input_res.get();
           }
           if (matched_render_slot) {
@@ -2612,7 +2602,7 @@ namespace platf::dxgi {
             // ordinary completion renders its private matched color; an authorized cache reuse
             // deliberately renders current color/cursor with authenticated cached geometry.
             if (!matched_render_slot && !queued_geometry_selected) {
-              est = {};
+              handoff.reset();
               render_input_srv = img_ctx->encoder_input_res.get();
             }
 
@@ -3317,7 +3307,7 @@ namespace platf::dxgi {
                   est.publication.observation_timestamp_us;
                 dump_frame.depth_input_region = est.input_region;
                 dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
-                dump_frame.input_domain_reset = est.input_domain_reset;
+                dump_frame.input_domain_reset = depth_step.completion.input_domain_reset;
                 dump_frame.gpu_undecided_completion =
                   est.gpu_undecided_completion;
                 dump_frame.subtitle_work_suppressed =
@@ -3327,7 +3317,7 @@ namespace platf::dxgi {
                   matched_render_slot->window_region_observer_status;
                 dump_frame.window_region_mapping_status =
                   matched_render_slot->window_region_mapping_status;
-                dump_frame.cuda_graph_active = est.cuda_graph_active;
+                dump_frame.cuda_graph_active = depth_step.status.cuda_graph_active;
                 dump_frame.parallax_v2_producer_active =
                   est.parallax_v2_producer_active;
                 dump_frame.parallax_v2_render_selected =
@@ -4489,11 +4479,7 @@ namespace platf::dxgi {
       }
     };
 
-    void emit_converter_probe(actual_converter_probe_v1::event_t event,
-      const matched_frame_slot_t *slot, const models::estimate_result *result,
-      const models::queued_same_source_gpu_continuation_research_views_t *ticket,
-      ID3D11ShaderResourceView *selected, ID3D11ShaderResourceView *current,
-      std::uint64_t conversion) noexcept {
+    void emit_converter_probe(actual_converter_probe_v1::event_t event, const matched_frame_slot_t *slot, const models::depth_observation_views_t *result, const models::queued_same_source_gpu_continuation_research_views_t *ticket, ID3D11ShaderResourceView *selected, ID3D11ShaderResourceView *current, std::uint64_t conversion) noexcept {
       if (!probe_observer.record) { return; }
       const auto now = std::chrono::steady_clock::now();
       event.host_event_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
@@ -4580,7 +4566,8 @@ namespace platf::dxgi {
     }
 
     struct latest_v2_lineage_t {
-      models::estimate_result estimate;
+      models::depth_observation_views_t estimate;
+      models::depth_call_status_t status;
       matched_frame_slot_t slot;
       std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> receipt;
 
@@ -4792,7 +4779,7 @@ namespace platf::dxgi {
     }
 
     [[nodiscard]] static bool gpu_transaction_class_matches(
-      const models::estimate_result &estimate,
+      const models::depth_observation_views_t &estimate,
       const matched_frame_slot_t &slot
     ) noexcept {
       return estimate.gpu_undecided_completion == slot.gpu_undecided_transaction;
@@ -4960,7 +4947,8 @@ namespace platf::dxgi {
     }
 
     [[nodiscard]] bool retain_latest_v2_lineage(
-      const models::estimate_result &estimate,
+      const models::depth_observation_views_t &estimate,
+      const models::depth_call_status_t &status,
       const matched_frame_slot_t &slot,
       const D3D11_TEXTURE2D_DESC &completed_source_desc,
       const D3D11_TEXTURE2D_DESC &current_source_desc,
@@ -4997,13 +4985,9 @@ namespace platf::dxgi {
         latest_v2_lineage.receipt.reset();
       }
       latest_v2_lineage.estimate = estimate;
-      // A reused presentation is not a new inference/completion transition. Preserve the completed
-      // geometry identity while preventing reset side effects from replaying on every cursor
-      // delivery that shares the same DDup desktop-content clock.
-      latest_v2_lineage.estimate.inference_enqueued = false;
-      latest_v2_lineage.estimate.gpu_undecided_transaction_enqueued = false;
-      latest_v2_lineage.estimate.input_domain_reset = false;
-      latest_v2_lineage.estimate.subtitle_ocr_inference_enqueued = false;
+      // Retain observation views and diagnostic status only. Repeated presentation cannot
+      // replay a submission or a completion event because neither belongs to this cache.
+      latest_v2_lineage.status = status;
       // The cache renders current color, never the old private color copy. Retain only the scalar
       // attribution needed by the V2 renderer; matched slots own move-only D3D resources.
       copy_matched_frame_attribution(latest_v2_lineage.slot, slot);

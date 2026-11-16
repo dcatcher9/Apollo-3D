@@ -199,7 +199,7 @@ int run_independent_ocr_raw_probe(const opts &o, const std::vector<fs::path> &fr
       return est.estimate_depth(input[i], models::input_color_space::srgb, frame, false, {}, models::depth_optional_work_mode_e::ordinary, force, 0);
     };
     const auto finish_depth = [&](std::uint64_t frame, std::uint64_t observation) {
-      auto r = est.finish_pending_depth_for_evaluation(models::input_color_space::srgb, false);
+      auto r = est.finish_pending_depth_for_evaluation(models::input_color_space::srgb, false).observation;
       util::require(r.completed_frame_valid && r.completed_frame_id == frame && r.publication.observation_timestamp_us == observation && models::parallax_v2_result_is_authenticated(r), "Raw OCR proof depth owner ACK failed");
       return r;
     };
@@ -225,9 +225,9 @@ int run_independent_ocr_raw_probe(const opts &o, const std::vector<fs::path> &fr
       }
     } release {est};
 
-    util::require(submit_depth(2, 1, 1).inference_enqueued, "Raw empty depth warmup enqueue failed");
+    util::require(submit_depth(2, 1, 1).submission.inference_enqueued, "Raw empty depth warmup enqueue failed");
     auto warm = finish_depth(1, 1);
-    util::require(submit_depth(0, 2, 33334).inference_enqueued, "Raw A depth enqueue failed");
+    util::require(submit_depth(0, 2, 33334).submission.inference_enqueued, "Raw A depth enqueue failed");
     auto A = finish_depth(2, 33334);
     diagnostic["warmup_publication"] = jp_publication(warm.publication);
     diagnostic["A_publication"] = jp_publication(A.publication);
@@ -244,7 +244,7 @@ int run_independent_ocr_raw_probe(const opts &o, const std::vector<fs::path> &fr
         const auto input_index = p + 1u;
         const std::uint64_t frame = p + 3u;
         const std::uint64_t observation = p == 0 ? 66667u : 100000u;
-        util::require(submit_depth(input_index, frame, observation).inference_enqueued, "Ordinary control OCR enqueue failed");
+        util::require(submit_depth(input_index, frame, observation).submission.inference_enqueued, "Ordinary control OCR enqueue failed");
         auto owner = finish_depth(frame, observation);
         const auto views = est.completed_ocr_conditioner_working_views_for_evaluation(owner.publication);
         util::require(views.has_value(), "Ordinary same-current OCR snapshot unavailable");
@@ -310,7 +310,7 @@ int run_independent_ocr_raw_probe(const opts &o, const std::vector<fs::path> &fr
     const char *availability = "UNAVAILABLE";
     try {
       C_attempt.stage = c_attempt_stage_t::depth_B_submit;
-      util::require(submit_depth(1, 3, 66667).inference_enqueued, "Actual B depth submit failed");
+      util::require(submit_depth(1, 3, 66667).submission.inference_enqueued, "Actual B depth submit failed");
       C_attempt.stage = c_attempt_stage_t::wait_B_gate;
       const auto wait_limit = std::chrono::steady_clock::now() + std::chrono::seconds {30};
       while (!util::status(est).callback_entered && std::chrono::steady_clock::now() < wait_limit) {
@@ -422,7 +422,7 @@ int run_independent_ocr_raw_probe(const opts &o, const std::vector<fs::path> &fr
     }
     // Independent OS release remains effective even if any CUDA/D3D call above stalled.
     est.release_joined_completion_gate_for_benchmark();
-    models::estimate_result B;
+    models::depth_observation_views_t B;
     if (!est.has_terminal_failure()) {
       B = finish_depth(3u, 66667u);
     }

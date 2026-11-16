@@ -202,7 +202,7 @@ namespace sbs_bench::current_outline_qualification {
       return estimator.configure_subtitle_selected_matte_research(config, error);
     }
 
-    bool record(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary, ID3D11RenderTargetView *output, const models::estimate_result &result, ID3D11Buffer *subtitle_constants, evidence_t *evidence, std::string &error) {
+    bool record(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary, ID3D11RenderTargetView *output, const models::depth_observation_views_t &result, ID3D11Buffer *subtitle_constants, evidence_t *evidence, std::string &error) {
       error.clear();
       if (!device_ || !context || !output || !subtitle_constants || !result.research_selected_matte || !result.research_selected_matte_receipt || !result.completed_frame_valid || !models::parallax_v2_result_is_authenticated(result) || result.input_region.is_video_region() || result.subtitle_work_suppressed) {
         error = "shared subtitle draw lacks its current completed full-source tuple";

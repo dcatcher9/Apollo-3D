@@ -2422,7 +2422,7 @@ namespace sbs_bench {
     }
 
     bool cache_glyph_tuple_atomically(ID3D11Device *dev, ID3D11DeviceContext *ctx,
-                                       const models::estimate_result &result,
+                                       const models::depth_observation_views_t &result,
                                        const fs::path &directory, const std::string &stem,
                                        const scene_cache_metadata &metadata) {
       ComPtr<ID3D11Resource> resource;
@@ -2472,7 +2472,7 @@ namespace sbs_bench {
     bool restore_cached_glyph_tuple(ID3D11Device *dev, const fs::path &directory,
                                      const std::string &stem, const scene_cache_metadata &metadata,
                                      const render_state_words_t &state,
-                                     models::estimate_result &result) {
+                                     models::depth_observation_views_t &result) {
       nlohmann::json commit;
       if (!read_cached_glyph_commit(directory, stem, metadata, commit)) return false;
       const auto width = commit.at("native_width").get<UINT>();
@@ -4595,7 +4595,8 @@ namespace sbs_bench {
     nlohmann::json ocr_working_frames = nlohmann::json::array();
     std::vector<std::uint64_t> captured_ocr_working_observations;
     const auto write_ocr_working_diagnostics = [&](
-      const models::estimate_result &result,
+      const models::depth_observation_views_t &result,
+      const models::depth_completion_events_t &completion,
       const std::string &output_id,
       const std::size_t global_sequence,
       const UINT frame_width,
@@ -4686,7 +4687,7 @@ namespace sbs_bench {
                      result.field_content.right, result.field_content.bottom}},
         {"source_band_width", source_desc.Width}, {"source_band_height", source_desc.Height},
         {"crop_geometry_source", "resolve_constants.u32 words8-11; band shape is actual allocation"},
-        {"input_domain_reset", result.input_domain_reset},
+        {"input_domain_reset", completion.input_domain_reset},
         {"subtitle_work_suppressed", result.subtitle_work_suppressed},
         {"exact_subtitle_evidence", models::subtitle_evidence_is_exact_frame(result)},
         {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema},
@@ -4711,7 +4712,7 @@ namespace sbs_bench {
     nlohmann::json inner_research_frames = nlohmann::json::array();
     std::vector<std::uint64_t> captured_inner_research_observations;
     const auto write_subtitle_inner_colour_research = [&](
-      const models::estimate_result &result, const std::string &output_id,
+      const models::depth_observation_views_t &result, const std::string &output_id,
       const std::uint64_t ordinal
     ) {
       if (!estimator || !result.completed_frame_valid || result.completed_frame_id != ordinal ||
@@ -4825,7 +4826,7 @@ namespace sbs_bench {
     nlohmann::json cohort_research_frames = nlohmann::json::array();
     std::vector<std::uint64_t> captured_cohort_research_observations;
     const auto write_subtitle_cohort_research = [&](
-      const models::estimate_result &result, const std::string &output_id,
+      const models::depth_observation_views_t &result, const std::string &output_id,
       const std::uint64_t ordinal
     ) {
       if (!estimator || !result.completed_frame_valid || result.completed_frame_id != ordinal ||
@@ -4954,7 +4955,8 @@ namespace sbs_bench {
     // One native writer serves full legacy exports and selected pre-render snapshots.
     // Each staging holder is reused synchronously before the next source observation.
     const auto write_subtitle_plane_diagnostics = [&](
-      const models::estimate_result &result,
+      const models::depth_observation_views_t &result,
+      const models::depth_completion_events_t &completion,
       const std::string &output_id,
       const std::size_t global_sequence,
       const UINT frame_width,
@@ -5040,7 +5042,7 @@ namespace sbs_bench {
         {"requested_gain", result.parallax_v2_requested_gain},
         {"requested_pop_strength", result.parallax_v2_requested_pop_strength},
         {"joint_plane_mode", result.parallax_v2_joint_plane_mode},
-        {"input_domain_reset", result.input_domain_reset},
+        {"input_domain_reset", completion.input_domain_reset},
         {"subtitle_work_suppressed", result.subtitle_work_suppressed},
         {"exact_subtitle_evidence", exact_subtitle},
         {"contour_schema", models::depth_coordinate_v2::subtitle_contour_schema},
@@ -5085,7 +5087,9 @@ namespace sbs_bench {
     uint64_t hdr_nonfinite = 0;
 
     int written = 0;
-    models::estimate_result est;
+    models::depth_observation_views_t est;
+    models::depth_completion_events_t completion;
+    models::depth_call_status_t call_status;
     bool cuda_graph_captured = false;
     std::size_t tensorrt_enqueue_count = 0;
     std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> device_conditional_publication;
@@ -5121,7 +5125,7 @@ namespace sbs_bench {
       }
     };
     nlohmann::json pfm_joined_frames = nlohmann::json::array();
-    const auto write_pfm_joined_diagnostics = [&](const models::estimate_result &result,
+    const auto write_pfm_joined_diagnostics = [&](const models::depth_observation_views_t &result,
       ID3D11ShaderResourceView *raw_source, const fs::path &source_path,
       const std::string &source_sha256, const std::string &output_id,
       const std::size_t sequence, const UINT width, const UINT height) {
@@ -6077,9 +6081,9 @@ namespace sbs_bench {
           o.subtitle_any_horizontal_lines ? models::subtitle_line_position_e::any_horizontal :
                                             models::subtitle_line_position_e::centered
         );
-        const bool submitted_force = submitted.inference_enqueued;
+        const bool submitted_force = submitted.submission.inference_enqueued;
         const bool submitted_gpu_undecided =
-          submitted.gpu_undecided_transaction_enqueued;
+          submitted.submission.gpu_undecided_transaction_enqueued;
         const auto replay_submission_class =
           o.device_conditional_replay ?
             models::classify_gpu_adaptive_submission(
@@ -6100,10 +6104,13 @@ namespace sbs_bench {
             << " violated the shared production adaptive transaction policy";
           return 6;
         }
-        est = estimator->finish_pending_depth_for_evaluation(
+        auto finished = estimator->finish_pending_depth_for_evaluation(
           input_color,
           capture_convex2x_diagnostics
         );
+        est = std::move(finished.observation);
+        completion = finished.completion;
+        call_status = finished.status;
         if (o.pfm_joined_diagnostics &&
             (!est.completed_frame_valid || est.completed_frame_id != estimator_frame_id ||
              estimator->has_terminal_failure() || !models::parallax_v2_result_is_authenticated(est)) &&
@@ -6264,7 +6271,7 @@ namespace sbs_bench {
             << output_id;
           return 6;
         }
-        cuda_graph_captured = cuda_graph_captured || est.cuda_graph_active;
+        cuda_graph_captured = cuda_graph_captured || call_status.cuda_graph_active;
         ++tensorrt_enqueue_count;
       }
 
@@ -6586,7 +6593,7 @@ namespace sbs_bench {
              *o.subtitle_plane_diagnostic_ranges, global_sequence
            )) &&
           !write_ocr_working_diagnostics(
-            est, output_id, global_sequence, frame_width, frame_height
+            est, completion, output_id, global_sequence, frame_width, frame_height
           )) {
         BOOST_LOG(error) << "sbs-bench: working OCR diagnostic did not bind the current "
                          << "completed observation " << global_sequence;
@@ -6621,7 +6628,7 @@ namespace sbs_bench {
         if (!est.completed_frame_valid || est.completed_frame_id != global_sequence ||
             !models::parallax_v2_result_is_authenticated(est) ||
             !write_subtitle_plane_diagnostics(
-              est, output_id, global_sequence, frame_width, frame_height
+              est, completion, output_id, global_sequence, frame_width, frame_height
             )) {
           BOOST_LOG(error) << "sbs-bench: selected subtitle diagnostic did not publish "
                            << "the current authenticated observation " << global_sequence;
@@ -7132,7 +7139,7 @@ namespace sbs_bench {
 
             if (o.subtitle_plane_diagnostics && !o.subtitle_plane_diagnostic_ranges &&
                 !write_subtitle_plane_diagnostics(
-                  est, output_id, global_sequence, frame_width, frame_height
+                  est, completion, output_id, global_sequence, frame_width, frame_height
                 )) {
               return 6;
             }
@@ -7334,7 +7341,7 @@ namespace sbs_bench {
             est.input_region.source_height,
             static_cast<std::uint32_t>(est.field_width),
             static_cast<std::uint32_t>(est.field_height),
-            est.input_domain_reset,
+            completion.input_domain_reset,
             trace_summary
           )) {
         BOOST_LOG(error)
@@ -7379,7 +7386,7 @@ namespace sbs_bench {
           {"field_width", est.field_width},
           {"field_height", est.field_height},
           {"domain_tag", trace_domain},
-          {"input_domain_reset", est.input_domain_reset},
+          {"input_domain_reset", completion.input_domain_reset},
         }},
         {"submission_counts", {
           {"force", device_conditional_force_submissions},

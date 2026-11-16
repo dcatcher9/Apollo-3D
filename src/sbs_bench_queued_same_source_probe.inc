@@ -89,15 +89,15 @@
             .shader_resources={color,base,state,matte,display,scp,sct},.geometry_constants=b2.Get(),.subtitle_constants=b3.Get()};
           qrg::scoped_binding_t binding;if(!binding.bind(ctx,expected,transaction)||!platf::dxgi::record_host_sbs_v2_draw(ctx,command))throw std::runtime_error("Guarded shared recorder failed");
         };
-        const auto normal_draw=[&](ID3D11ShaderResourceView *color,const models::estimate_result &r,ID3D11PixelShader *pixel,ID3D11RenderTargetView *target){draw(color,r.shadow_base_final_parallax.Get(),r.shadow_state.Get(),r.subtitle_glyph_matte.Get(),r.subtitle_contour_source.Get(),r.subtitle_condition_params.Get(),r.subtitle_contour_identity.Get(),r.input_region.analysis_generation,pixel,target,nullptr,nullptr);};
+        const auto normal_draw=[&](ID3D11ShaderResourceView *color,const models::depth_observation_views_t &r,ID3D11PixelShader *pixel,ID3D11RenderTargetView *target){draw(color,r.shadow_base_final_parallax.Get(),r.shadow_state.Get(),r.subtitle_glyph_matte.Get(),r.subtitle_contour_source.Get(),r.subtitle_condition_params.Get(),r.subtitle_contour_identity.Get(),r.input_region.analysis_generation,pixel,target,nullptr,nullptr);};
         util::require(est.set_completed_ocr_conditioner_research_enabled(true),"Completed conditioner diagnostic flag unavailable");
         if(treatment)util::require(est.set_queued_same_source_gpu_continuation_research_enabled(true),"Queued API pre-input flag failed");
         gate::configuration_t configuration;configuration.enabled=true;configuration.placement=gate::placement_e::before_interop_unmaps;configuration.target_frame_id=3;configuration.hold_after_callback_enter_ms=120;configuration.callback_entry_timeout_ms=30000;configuration.callback_safety_timeout_ms=500;
         util::require(est.configure_joined_completion_gate_for_benchmark(configuration),"Pre-unmap gate configuration failed");
         const auto submit=[&](std::size_t i,std::uint64_t frame,std::uint64_t observation){const models::gpu_adaptive_reuse_request force{.observation_timestamp_us=observation};return est.estimate_depth(input[i],models::input_color_space::srgb,frame,false,{},models::depth_optional_work_mode_e::ordinary,force,0);};
-        const auto finish=[&](std::uint64_t frame,std::uint64_t observation){auto r=est.finish_pending_depth_for_evaluation(models::input_color_space::srgb,false);util::require(r.completed_frame_valid&&r.completed_frame_id==frame&&r.publication.observation_timestamp_us==observation&&models::parallax_v2_result_is_authenticated(r),"Genuine exact-frame ACK failed");return r;};
-        util::require(submit(2,1,1).inference_enqueued,"Warmup failed");auto warm=finish(1,1);const auto warm_receipt=util::receipt(est,warm);
-        util::require(submit(0,2,33334).inference_enqueued,"A failed");auto A=finish(2,33334);const auto A_receipt=util::receipt(est,A);
+        const auto finish=[&](std::uint64_t frame,std::uint64_t observation){auto r=est.finish_pending_depth_for_evaluation(models::input_color_space::srgb,false).observation;util::require(r.completed_frame_valid&&r.completed_frame_id==frame&&r.publication.observation_timestamp_us==observation&&models::parallax_v2_result_is_authenticated(r),"Genuine exact-frame ACK failed");return r;};
+        util::require(submit(2,1,1).submission.inference_enqueued,"Warmup failed");auto warm=finish(1,1);const auto warm_receipt=util::receipt(est,warm);
+        util::require(submit(0,2,33334).submission.inference_enqueued,"A failed");auto A=finish(2,33334);const auto A_receipt=util::receipt(est,A);
         auto A_views=est.completed_ocr_conditioner_working_views_for_evaluation(A.publication);util::require(A_views.has_value(),"Genuine A diagnostic resources unavailable");
         const std::array<ID3D11ShaderResourceView *,slots> A_srv{{packed.srv.Get(),input[0],A.shadow_base_final_parallax.Get(),A.shadow_state.Get(),A.subtitle_glyph_matte.Get(),A.subtitle_contour_source.Get(),A.subtitle_condition_params.Get(),A.subtitle_contour_identity.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,A.ocr_box_record.Get(),A.subtitle_locator_state.Get(),A.depth_health_state.Get(),A.depth_frame_state.Get(),A.ema_motion_mask.Get()}};
         // Storage-only handles: never reuse A's semantic clock/publication as B authority.
@@ -110,7 +110,7 @@
         normal_draw(input[0],A,ordinary_ps,rtv.Get());srv_copy(0,0,packed.srv.Get());
         normal_draw(input[0],A,guarded_ps.Get(),warm_rtv.Get());srv_copy(3,0,private_warm.srv.Get());
         util::require(captures[0].bytes[0]==captures[3].bytes[0],"Disabled QRG warm-A differs from literal ordinary renderer");captures[3].copied[0]=false;
-        const auto capture_normal=[&](std::size_t p,ID3D11ShaderResourceView *color,const models::estimate_result &r){
+        const auto capture_normal=[&](std::size_t p,ID3D11ShaderResourceView *color,const models::depth_observation_views_t &r){
           auto views=est.completed_ocr_conditioner_working_views_for_evaluation(r.publication);util::require(views.has_value(),"Own completed diagnostic getter failed");
           const std::array<ID3D11ShaderResourceView *,slots> reads{{packed.srv.Get(),color,r.shadow_base_final_parallax.Get(),r.shadow_state.Get(),r.subtitle_glyph_matte.Get(),r.subtitle_contour_source.Get(),r.subtitle_condition_params.Get(),r.subtitle_contour_identity.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,r.ocr_box_record.Get(),r.subtitle_locator_state.Get(),r.depth_health_state.Get(),r.depth_frame_state.Get(),r.ema_motion_mask.Get()}};
           for(std::size_t k=0;k<slots;++k)if(reads[k]&&!captures[p].copied[k])srv_copy(p,k,reads[k]);
@@ -135,7 +135,7 @@
         // B epoch starts here. No caller allocation/JIT/hash/JSON/Map until release.
         const auto epoch=util::now_us();
         try {
-          util::require(submit(1,3,66667).inference_enqueued,"B failed");
+          util::require(submit(1,3,66667).submission.inference_enqueued,"B failed");
           const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
           do{before_queue=util::status(est);if(before_queue.callback_entered)break;std::this_thread::yield();}while(std::chrono::steady_clock::now()<deadline);
           util::require(before_queue.callback_entered&&!before_queue.released,"Controlled B callback window unavailable");
@@ -155,7 +155,7 @@
             draw_return=util::now_us();ctx->Flush();flush_return=util::now_us();after_record=util::status(est);
             if(!after_record.released){after_query_issued=true;const auto after=est.try_finish_pending_depth_nonblocking(models::input_color_space::srgb,false);after_record_query=util::status(est);after_busy=!after.ready&&after.query_count>0&&after_record_query.last_actual_event_query==CUDA_ERROR_NOT_READY&&!after_record_query.released;
               if(after.ready){est.release_joined_completion_gate_for_benchmark();diagnostic["availability"]="POST_RECORD_QUERY_ALREADY_CONSUMED_READY_B_NO_TICKET_READBACK";
-                diagnostic["after_record"]=pu_gate(after_record);diagnostic["after_record_query"]=pu_gate(after_record_query);diagnostic["ready_query_actual_publication"]=jp_publication(after.result.publication);
+                diagnostic["after_record"]=pu_gate(after_record);diagnostic["after_record_query"]=pu_gate(after_record_query);diagnostic["ready_query_actual_publication"]=jp_publication(after.result.observation.publication);
                 throw std::runtime_error("Post-record query consumed ready B; ticket lifetime expired, scheduling proof unavailable");}}
             if(after_queue.released)availability="QUEUE_API_RETURNED_AFTER_RELEASE";
             else if(after_record.released)availability="DRAW_OR_FLUSH_RETURNED_AFTER_RELEASE";
@@ -178,8 +178,8 @@
             captures[1].metadata["same_allocation_as_actual_ACK_verified"]=true;}
           // Actual ACK consumed the pending unit. No-pending finish must return no NEW completion.
           const auto no_pending=est.finish_pending_depth_for_evaluation(models::input_color_space::srgb,false);
-          util::require(!no_pending.completed_frame_valid&&!no_pending.inference_enqueued&&!no_pending.gpu_undecided_transaction_enqueued&&
-            no_pending.publication==models::host_sbs_gpu_completion_receipt::expected_t{}&&est.publication_is_current(B.publication),"No-pending finish created completion/publication or invalidated B");
+          util::require(!no_pending.observation.completed_frame_valid&&!no_pending.submission.inference_enqueued&&!no_pending.submission.gpu_undecided_transaction_enqueued&&
+            no_pending.observation.publication==models::host_sbs_gpu_completion_receipt::expected_t{}&&est.publication_is_current(B.publication),"No-pending finish created completion/publication or invalidated B");
           normal_draw(input[1],B,ordinary_ps,rtv.Get());capture_normal(3,input[1],B);
           // Retained physical CB storage is diagnostic only after the ticket lease expires at ACK.
           if(ticket){copy(3,14,queued_depth_storage.Get());copy(3,15,queued_source_storage.Get());}
@@ -188,14 +188,14 @@
             util::require(captures[1].bytes[14]==captures[2].bytes[14]&&captures[1].bytes[15]==captures[2].bytes[15],"ACK changed queued actual CBs");
             for(std::size_t k=16;k<slots;++k)util::require(captures[1].bytes[k]==captures[2].bytes[k],"ACK changed unpublished OCR/UIP/depth-health/minmaxEMA/motion storage");
             util::require(ticket->planned_publication==B.publication,"Planned queued identity differs from own genuine ACK");}
-          util::require(submit(2,4,100000).inference_enqueued,"C failed");auto C=finish(4,100000);normal_draw(input[2],C,ordinary_ps,rtv.Get());capture_normal(4,input[2],C);
+          util::require(submit(2,4,100000).submission.inference_enqueued,"C failed");auto C=finish(4,100000);normal_draw(input[2],C,ordinary_ps,rtv.Get());capture_normal(4,input[2],C);
           const auto &m=captures[4].bytes[4];util::require(std::all_of(m.begin(),m.end(),[](char x){return x==0;}),"Genuine current empty C did not clear M");
           diagnostic["B_epoch_wall_us"]=epoch;diagnostic["availability"]=availability;diagnostic["before_queue_actual_busy"]=before_busy;diagnostic["after_record_actual_busy"]=after_busy;diagnostic["after_record_query_issued"]=after_query_issued;
           diagnostic["old_A_current_after_queue"]=old_A_current_after_queue;diagnostic["planned_current_after_queue"]=planned_current_after_queue;
           diagnostic["before_queue"]=pu_gate(before_queue);if(treatment){diagnostic["after_queue"]=pu_gate(after_queue);diagnostic["after_record"]=pu_gate(after_record);diagnostic["after_record_query"]=pu_gate(after_record_query);}
           diagnostic["queue_begin_wall_us"]=queue_begin;diagnostic["queue_return_wall_us"]=queue_return;diagnostic["draw_begin_wall_us"]=draw_begin;diagnostic["draw_return_wall_us"]=draw_return;diagnostic["flush_return_wall_us"]=flush_return;
           diagnostic["final_gate"]=pu_gate(util::status(est));diagnostic["B_publication"]=jp_publication(B.publication);diagnostic["C_publication"]=jp_publication(C.publication);
-          diagnostic["no_pending_finish_completed_frame_valid"]=no_pending.completed_frame_valid;diagnostic["no_pending_finish_publication"]=jp_publication(no_pending.publication);
+          diagnostic["no_pending_finish_completed_frame_valid"]=no_pending.observation.completed_frame_valid;diagnostic["no_pending_finish_publication"]=jp_publication(no_pending.observation.publication);
           diagnostic["B_full_bytes_unchanged_after_no_pending_finish"]=true;diagnostic["current_model_C_M_literal_zero"]=true;diagnostic["semantic_current_cue_or_EMPTY_authority_from_ticket"]=false;
           est.release_joined_completion_gate_for_benchmark();flush();jp_json(root/"result.json",diagnostic);return 0;
         }catch(...){est.release_joined_completion_gate_for_benchmark();try{flush();}catch(...){}throw;}

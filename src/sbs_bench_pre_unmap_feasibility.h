@@ -18,7 +18,7 @@ namespace external_pre_unmap_feasibility_v1 {
     require(s.has_value(), "Actual private estimator gate unavailable"); return *s;
   }
   inline models::host_sbs_gpu_completion_receipt::receipt_t receipt(
-    models::video_depth_estimator &est, const models::estimate_result &owner) {
+    models::video_depth_estimator &est, const models::depth_observation_views_t &owner) {
     const auto deadline = clock_t::now() + std::chrono::milliseconds {250};
     do {
       const auto p = est.poll_publication_receipts();
@@ -29,7 +29,7 @@ namespace external_pre_unmap_feasibility_v1 {
     throw std::runtime_error("Genuine completed-owner receipt unavailable");
   }
   struct result_t {
-    models::estimate_result warmup, A, B;
+    models::depth_observation_views_t warmup, A, B;
     models::host_sbs_gpu_completion_receipt::receipt_t warmup_receipt, A_receipt, B_receipt;
     gate::snapshot_t before_B, at_submit_return, after_first_real_poll, final_gate;
     std::int64_t B_submit_begin_us = 0, B_submit_return_us = 0;
@@ -61,17 +61,17 @@ namespace external_pre_unmap_feasibility_v1 {
       return est.estimate_depth(source[input], models::input_color_space::srgb, frame, false, {},
                                models::depth_optional_work_mode_e::ordinary, force, 0);
     };
-    const auto validate = [](const models::estimate_result &r, std::uint64_t frame, std::uint64_t obs) {
+    const auto validate = [](const models::depth_observation_views_t &r, std::uint64_t frame, std::uint64_t obs) {
       require(r.completed_frame_valid && r.completed_frame_id == frame &&
               r.publication.observation_timestamp_us == obs && models::parallax_v2_result_is_authenticated(r),
               "Genuine exact-frame completion failed");
     };
     try {
-      require(submit(2,1,1).inference_enqueued, "Actual empty warmup did not enqueue");
-      out.warmup = est.finish_pending_depth_for_evaluation(models::input_color_space::srgb,false);
+      require(submit(2,1,1).submission.inference_enqueued, "Actual empty warmup did not enqueue");
+      out.warmup = est.finish_pending_depth_for_evaluation(models::input_color_space::srgb,false).observation;
       validate(out.warmup,1,1); out.warmup_receipt = receipt(est,out.warmup);
-      require(submit(0,2,33334).inference_enqueued, "Actual normal A did not enqueue");
-      out.A = est.finish_pending_depth_for_evaluation(models::input_color_space::srgb,false);
+      require(submit(0,2,33334).submission.inference_enqueued, "Actual normal A did not enqueue");
+      out.A = est.finish_pending_depth_for_evaluation(models::input_color_space::srgb,false).observation;
       validate(out.A,2,33334); out.A_receipt = receipt(est,out.A);
       out.before_B = status(est);
       require(!out.before_B.attempted && !out.before_B.queued && !out.before_B.released &&
@@ -82,14 +82,14 @@ namespace external_pre_unmap_feasibility_v1 {
       const auto submitted = submit(1,3,66667);
       out.B_submit_return_us = now_us();
       out.at_submit_return = status(est);
-      require(submitted.inference_enqueued && !est.has_terminal_failure(), "Actual B submission failed");
+      require(submitted.submission.inference_enqueued && !est.has_terminal_failure(), "Actual B submission failed");
       out.first_poll_begin_us = now_us();
       const auto poll = est.try_finish_pending_depth_nonblocking(models::input_color_space::srgb,false);
       out.first_poll_return_us = now_us();
       out.first_poll_ready = poll.ready; out.first_poll_query_count = poll.query_count;
       out.after_first_real_poll = status(est);
-      if (poll.ready) out.B = poll.result;
-      else out.B = est.finish_pending_depth_for_evaluation(models::input_color_space::srgb,false);
+      if (poll.ready) out.B = poll.result.observation;
+      else out.B = est.finish_pending_depth_for_evaluation(models::input_color_space::srgb,false).observation;
       validate(out.B,3,66667); out.B_receipt = receipt(est,out.B);
       out.final_gate = status(est);
       const auto &s = out.at_submit_return; const auto &f = out.final_gate;

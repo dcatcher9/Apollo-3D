@@ -47,7 +47,7 @@ namespace external_actual_async_caption_probe {
     // old joined tuple, then complete a real GPU output readback+hash before returning. For held
     // phases apply typed alive_action to separate scratchM (owner M/SCT never modified). Existing
     // shader authentication/current-RGB match remain. No estimator call inside this callback.
-    std::function<void(ID3D11ShaderResourceView *, const models::estimate_result &,
+    std::function<void(ID3D11ShaderResourceView *, const models::depth_observation_views_t &,
                        const phase_record_t &)> production_draw_and_GPU_readback;
     std::function<void(const phase_record_t &)> append_immutable_trace;
     // Persist all actual policy inputs and selected route BEFORE a rejection can throw.
@@ -71,7 +71,7 @@ namespace external_actual_async_caption_probe {
     ~always_release_t() { est.release_joined_completion_gate_for_benchmark(); }
   };
   inline models::host_sbs_gpu_completion_receipt::receipt_t prior_receipt(
-    models::video_depth_estimator &est, const models::estimate_result &owner
+    models::video_depth_estimator &est, const models::depth_observation_views_t &owner
   ) {
     const auto deadline=clock_t::now()+std::chrono::milliseconds {250};
     do {
@@ -96,7 +96,7 @@ namespace external_actual_async_caption_probe {
       "Actual estimator cuEventQuery did not report CUDA_ERROR_NOT_READY");
     return after;
   }
-  inline lane::geometry_owner_t make_owner(const models::estimate_result &result,
+  inline lane::geometry_owner_t make_owner(const models::depth_observation_views_t &result,
     const std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> &receipt, const frame_t &colour,
     clock_t::time_point accepted_at, const lane::domain_t &domain) {
     lane::geometry_owner_t owner;
@@ -114,7 +114,7 @@ namespace external_actual_async_caption_probe {
 
   struct prepared_t {
     models::video_depth_estimator *estimator = nullptr;
-    models::estimate_result actual_warmup;
+    models::depth_observation_views_t actual_warmup;
     models::host_sbs_gpu_completion_receipt::receipt_t actual_warmup_receipt;
     models::joined_completion_gate_benchmark::snapshot_t actual_gate_after_prepare;
     clock_t::time_point real_prepare_completed_at {};
@@ -132,9 +132,9 @@ namespace external_actual_async_caption_probe {
     try {
       const models::gpu_adaptive_reuse_request force {.observation_timestamp_us=1};
       require(est.estimate_depth(immutable_empty_source,options.colour_space,1,false,{},
-        models::depth_optional_work_mode_e::ordinary,force,options.subtitle_context_generation).inference_enqueued,
+        models::depth_optional_work_mode_e::ordinary,force,options.subtitle_context_generation).submission.inference_enqueued,
         "Actual empty warmup did not enqueue");
-      auto warmup=est.finish_pending_depth_for_evaluation(options.colour_space,false);
+      auto warmup=est.finish_pending_depth_for_evaluation(options.colour_space,false).observation;
       require(warmup.completed_frame_valid && warmup.completed_frame_id==1 &&
         warmup.publication.observation_timestamp_us==1 && models::parallax_v2_result_is_authenticated(warmup),
         "Actual warmup completion authentication failed");
@@ -192,8 +192,8 @@ namespace external_actual_async_caption_probe {
     };
     std::this_thread::sleep_until(frames[0].authored_capture_source_stamp);
     const auto accepted_A_at=clock_t::now();
-    require(submit(0).inference_enqueued,"A force-infer did not enqueue");
-    auto A=est.finish_pending_depth_for_evaluation(options.colour_space,false);
+    require(submit(0).submission.inference_enqueued,"A force-infer did not enqueue");
+    auto A=est.finish_pending_depth_for_evaluation(options.colour_space,false).observation;
     require(A.completed_frame_valid&&A.completed_frame_id==frames[0].estimator_frame_id&&models::parallax_v2_result_is_authenticated(A),"A genuine completion unavailable");
     phase_record_t a;a.phase=phase_e::matched_A;a.current_colour_frame=1;a.completed_geometry_frame=A.completed_frame_id;
     a.current_colour_conversion_serial=frames[0].conversion_serial;a.geometry_completed_conversion_serial=frames[0].conversion_serial;
@@ -209,7 +209,7 @@ namespace external_actual_async_caption_probe {
     require(lane_state.reset_pipeline(current_owner.estimator_generation),"Cannot initialise genuine estimator generation");
     require(lane_state.adopt_completed(current_owner),"Cannot adopt authentic A owner");
     std::this_thread::sleep_until(frames[1].authored_capture_source_stamp);
-    const auto accepted_B_at=clock_t::now();require(submit(1).inference_enqueued,"B force-infer did not enqueue");
+    const auto accepted_B_at=clock_t::now();require(submit(1).submission.inference_enqueued,"B force-infer did not enqueue");
     const auto entry_deadline=clock_t::now()+std::chrono::milliseconds {options.setup_timeout_ms};
     auto gate=checked_gate(est);
     while(!gate.callback_entered && clock_t::now()<entry_deadline) {
@@ -219,7 +219,7 @@ namespace external_actual_async_caption_probe {
     require(gate.callback_entered&&!gate.released,"Actual callback-entry proof unavailable");
     const auto empty_due=clock_t::time_point {std::chrono::microseconds {gate.entered_wall_us}}+
       std::chrono::milliseconds {options.empty_capture_after_entry_ms};
-    const auto held_draw=[&](std::size_t source_index,const models::estimate_result &owner,
+    const auto held_draw=[&](std::size_t source_index,const models::depth_observation_views_t &owner,
       const std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> &owner_receipt,phase_e phase,bool must_be_actual_busy) {
       phase_record_t row;row.phase=phase;row.current_colour_frame=source_index+1;row.completed_geometry_frame=owner.completed_frame_id;
       row.current_colour_conversion_serial=frames[source_index].conversion_serial;row.geometry_completed_conversion_serial=current_owner.completed_colour_conversion_serial;
@@ -263,16 +263,16 @@ namespace external_actual_async_caption_probe {
       if(completed.ready) break;
       std::this_thread::sleep_for(std::chrono::milliseconds {1});
     } while(clock_t::now()<completion_deadline);
-    require(completed.ready&&completed.result.completed_frame_valid&&completed.result.completed_frame_id==frames[1].estimator_frame_id,"Real B completion unavailable after independent release");
-    auto B=completed.result;require(models::parallax_v2_result_is_authenticated(B),"B completion failed authentication");
+    require(completed.ready&&completed.result.observation.completed_frame_valid&&completed.result.observation.completed_frame_id==frames[1].estimator_frame_id,"Real B completion unavailable after independent release");
+    auto B=completed.result.observation;require(models::parallax_v2_result_is_authenticated(B),"B completion failed authentication");
     // A's borrowed aliases may now contain B. Never draw A again after this normalization.
     // Keep GPU Base clock diagnostic unknown until after this actual C-colour draw. Never
     // fabricate a B receipt or stall fresh colour to synchronously read a clock before drawing.
     current_owner=make_owner(B,std::nullopt,frames[1],accepted_B_at,domain);
     require(lane_state.adopt_completed(current_owner),"Cannot adopt authentic B owner");
     held_draw(2,B,std::nullopt,phase_e::late_B_geometry_current_empty,false);
-    require(submit(2).inference_enqueued,"C force-infer did not enqueue after B retired");
-    auto C=est.finish_pending_depth_for_evaluation(options.colour_space,false);
+    require(submit(2).submission.inference_enqueued,"C force-infer did not enqueue after B retired");
+    auto C=est.finish_pending_depth_for_evaluation(options.colour_space,false).observation;
     require(C.completed_frame_valid&&C.completed_frame_id==frames[2].estimator_frame_id&&models::parallax_v2_result_is_authenticated(C),"Current empty C completion failed");
     phase_record_t c;c.phase=phase_e::matched_empty_C;c.current_colour_frame=3;c.completed_geometry_frame=C.completed_frame_id;
     c.current_colour_conversion_serial=frames[2].conversion_serial;c.geometry_completed_conversion_serial=frames[2].conversion_serial;c.geometry_publication=C.publication;c.current_colour_source_stamp=frames[2].authored_capture_source_stamp;c.source_file_sha256=frames[2].source_file_sha256;

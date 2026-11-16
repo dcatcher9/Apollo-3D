@@ -107,6 +107,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/prod_zipdepth_convex2x.h"
         "${CMAKE_SOURCE_DIR}/src/video_depth_estimator.cpp"
         "${CMAKE_SOURCE_DIR}/src/video_depth_estimator.h"
+        "${CMAKE_SOURCE_DIR}/src/host_sbs_observation_handoff.h"
         "${CMAKE_SOURCE_DIR}/src/sbs_perf.cpp"
         "${CMAKE_SOURCE_DIR}/src/sbs_perf.h"
         "${CMAKE_SOURCE_DIR}/src/sbs_bench_harness.cpp"

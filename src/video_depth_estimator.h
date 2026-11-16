@@ -882,7 +882,13 @@ namespace models {
     return hash != 0u ? hash : 1u;
   }
 
-  struct estimate_result {
+  /** Borrowed GPU views plus copied observation identity and calibration metadata.
+   *
+   * This value grants neither immutable contents nor publication authority. In particular,
+   * raw_model_depth can change during subsequent inference and gpu_trace_ring is rolling
+   * storage. Consumers must still validate the exact current publication before rendering.
+   */
+  struct depth_observation_views_t {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_health_state;  ///< Tagged depth-health state shared with telemetry and coordinate production.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
@@ -962,14 +968,11 @@ namespace models {
     // the previous matched color/depth output.
     bool completed_frame_valid = false;
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
-    bool inference_enqueued = false;  ///< This call submitted a force-infer wrapper transaction for the supplied input frame.
-    bool gpu_undecided_transaction_enqueued = false;  ///< This call submitted a GPU-conditional depth transaction; its branch remains device-owned.
     bool gpu_undecided_completion = false;  ///< Conditional completion; its branch is unknown until an exact final-publication receipt is consumed.
     // Identity of the final D3D publication, distinct from CUDA execution readiness. A later
     // asynchronous receipt may authenticate its branch; it never extends borrowed final views
     // or authenticates mutable raw-model/preprocess buffers.
     host_sbs_gpu_completion_receipt::expected_t publication {};
-    bool cuda_graph_active = false;  ///< The mandatory DAV2 wrapper is ready and owns its embedded inference child.
     bool parallax_v2_producer_active = false;  ///< All production V2 producer shaders/resources are active.
     float parallax_v2_raw_coordinate_scale = 0.0f;  ///< Fixed authenticated model/shape coordinate scale.
     float parallax_v2_requested_pop_strength = 0.0f;  ///< Fixed V2 request from cfg.pop_strength only; no legacy adaptive ratio or ceiling is consumed.
@@ -977,9 +980,32 @@ namespace models {
     std::uint32_t parallax_v2_joint_plane_mode = models::depth_coordinate_v2::adaptive_policy_id;  ///< Fixed adaptive policy identity sealed in the completed GPU state.
     depth_input_region_t input_region {};  ///< Exact source domain that owns this completion.
     input_color_space color_space = input_color_space::srgb;  ///< Exact transfer domain used for this completion.
-    bool input_domain_reset = false;  ///< Temporal/camera state was reset before this completion.
     bool subtitle_work_suppressed = false;  ///< This completion published Base without a subtitle observation.
-    bool subtitle_ocr_inference_enqueued = false;  ///< This call requested OCR participation under the shared depth/subtitle inference decision.
+  };
+
+  struct depth_submission_t {
+    bool inference_enqueued = false;  ///< This call submitted a force-infer wrapper transaction.
+    bool gpu_undecided_transaction_enqueued = false;  ///< This call submitted a GPU-conditional transaction; its branch remains device-owned.
+    bool subtitle_ocr_inference_enqueued = false;  ///< This call requested OCR participation in the shared inference decision.
+  };
+
+  struct depth_completion_events_t {
+    bool input_domain_reset = false;  ///< One-shot reset belonging to completed observation N, never submission N+1.
+  };
+
+  struct depth_call_status_t {
+    bool cuda_graph_active = false;  ///< Current wrapper readiness, not completed-publication or GPU-branch proof.
+  };
+
+  /** One estimator call may complete observation N and submit N+1 independently.
+   * Observation views retain their existing populated-default semantics even when no new
+   * completion is returned. Completion events must not replay with retained observations.
+   */
+  struct depth_step_result_t {
+    depth_observation_views_t observation;
+    depth_submission_t submission;
+    depth_completion_events_t completion;
+    depth_call_status_t status;
   };
 
   /** PRIVATE bench-only QUEUED working views. Never a completed/publication/cache proof.
@@ -1029,7 +1055,7 @@ namespace models {
   };
 
   [[nodiscard]] inline bool subtitle_evidence_is_exact_frame(
-    const estimate_result &result
+    const depth_observation_views_t &result
   ) noexcept {
     return result.completed_frame_valid && !result.gpu_undecided_completion &&
            !result.subtitle_work_suppressed &&
@@ -1038,7 +1064,7 @@ namespace models {
   }
 
   struct pending_depth_poll_result {
-    estimate_result result;
+    depth_step_result_t result;
     bool ready = false;  ///< Joined query proved completion; result may still report a failure.
     bool wait_attempted = false;  ///< At least one yielded repeat was attempted after the initial query.
     bool timed_out = false;  ///< The exact pending unit remained busy at the deadline/query fuse.
@@ -1099,7 +1125,7 @@ namespace models {
    * Reuse holds the complete prior analysis bundle. Callers gate diagnostic and baseline uses on
    * subtitle_evidence_is_exact_frame(); the completed receipt and GPU trace identify the outcome.
    */
-  bool parallax_v2_result_is_authenticated(const estimate_result &result);
+  bool parallax_v2_result_is_authenticated(const depth_observation_views_t &result);
 
   enum class host_sbs_renderer_e {
     awaiting_v2,
@@ -1543,9 +1569,10 @@ namespace models {
      *        submit the changed context again after consuming the returned frame.
      * @param subtitle_line_position Horizontal position rule for this submission's OCR line
      *        classifier. It may change only together with the subtitle context generation.
-     * @return estimate_result; all views are owned by the estimator and overwritten by later calls.
+     * @return Separate observation views, submission outcome, completion events and call status.
+     *         Views are owned by the estimator and may be overwritten by later calls.
      */
-    estimate_result estimate_depth(
+    depth_step_result_t estimate_depth(
       ID3D11ShaderResourceView *input_srv,
       input_color_space color_space = input_color_space::srgb,
       std::uint64_t frame_id = 0,
@@ -1565,7 +1592,7 @@ namespace models {
      * coordinate production exactly once without enqueueing another inference. This is an
      * offline-evaluation quality path; live capture uses only bounded/nonblocking completion polls.
      */
-    estimate_result finish_pending_depth_for_evaluation(
+    depth_step_result_t finish_pending_depth_for_evaluation(
       input_color_space color_space = input_color_space::srgb,
       bool snapshot_debug_inputs = false
     );
