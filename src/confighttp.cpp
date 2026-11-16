@@ -1101,9 +1101,8 @@ namespace confighttp {
 
     print_req(request);
 
-    nlohmann::json named_certs = nvhttp::get_all_clients();
     nlohmann::json output_tree;
-    output_tree["named_certs"] = named_certs;
+    output_tree["named_certs"] = nvhttp::get_all_clients();
 #ifdef _WIN32
     output_tree["platform"] = "windows";
 #endif

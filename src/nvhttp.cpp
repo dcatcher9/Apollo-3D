@@ -396,7 +396,7 @@ namespace nvhttp {
     root.erase("root");
     root["root"] = nlohmann::json::object();
     root["root"]["uniqueid"] = http::unique_id;
-    root["root"]["named_devices"] = named_cert_nodes;
+    root["root"]["named_devices"] = std::move(named_cert_nodes);
 
     try {
       std::ofstream out(config::nvhttp.file_state);
@@ -437,7 +437,7 @@ namespace nvhttp {
     http::uuid = uuid_util::uuid_t::parse(uid);
     http::unique_id = uid;
 
-    nlohmann::json root = tree["root"];
+    const auto &root = tree["root"];
     client_t client;  // Local client to load into
     std::unordered_set<std::string> loaded_certificates;
 
@@ -1412,7 +1412,7 @@ namespace nvhttp {
 
       named_cert_node["connected"] = connected_uuid && *connected_uuid == named_cert->uuid;
 
-      named_cert_nodes.push_back(named_cert_node);
+      named_cert_nodes.push_back(std::move(named_cert_node));
     }
 
     return named_cert_nodes;
