@@ -1229,7 +1229,7 @@ namespace video {
       BOOST_LOG(error) << "NvENC frame index mismatch " << frame.frame_nr << " " << encoded_frame.frame_index;
     }
 
-    auto packet = std::make_unique<packet_raw_generic>(
+    auto packet = std::make_unique<encoded_packet_t>(
       std::move(encoded_frame.data),
       encoded_frame.frame_index,
       encoded_frame.idr,

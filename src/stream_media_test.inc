@@ -294,7 +294,7 @@ namespace testing {
     if (!impl_->media_senders.video_packets()) {
       return false;
     }
-    auto encoded = std::make_unique<::video::packet_raw_generic>(
+    auto encoded = std::make_unique<::video::encoded_packet_t>(
       std::move(packet.bytes),
       packet.index,
       packet.idr,

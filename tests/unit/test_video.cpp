@@ -7132,7 +7132,7 @@ TEST(EncodedFrameBufferPoolTests, PacketDestructionReturnsStorageToPool) {
   std::vector<std::uint8_t> storage(4096, 0x3C);
   const auto capacity = storage.capacity();
   {
-    video::packet_raw_generic packet {std::move(storage), 7, false, pool};
+    video::encoded_packet_t packet {std::move(storage), 7, false, pool};
     EXPECT_EQ(packet.data_size(), 4096u);
   }
 
@@ -9027,7 +9027,7 @@ TEST(VideoPacketLifetimeTest, QueuedPacketRetainsOriginatingPoolUntilConsumption
     std::vector<std::uint8_t> produced(256, 0x5A);
     storage = produced.data();
     capacity = produced.capacity();
-    packets->raise(std::make_unique<video::packet_raw_generic>(std::move(produced), 7, true, producer_pool));
+    packets->raise(std::make_unique<video::encoded_packet_t>(std::move(produced), 7, true, producer_pool));
   }
   EXPECT_FALSE(pool.expired());
   auto consumed = packets->pop(0ms);
@@ -9047,6 +9047,79 @@ TEST(VideoPacketLifetimeTest, QueuedPacketRetainsOriginatingPoolUntilConsumption
   EXPECT_GE(recycled.capacity(), capacity);
   retained_pool.reset();
   EXPECT_TRUE(pool.expired());
+}
+
+TEST(VideoPacketLifetimeTest, OverflowDiscardRecyclesEveryPacketToItsOriginatingPool) {
+  constexpr auto packet_count = static_cast<std::size_t>(video::ENCODED_PACKET_QUEUE_LIMIT) + 1;
+  std::array<std::shared_ptr<video::encoded_frame_buffer_pool_t>, packet_count> pools;
+  std::array<const std::uint8_t *, packet_count> storage {};
+  std::array<std::size_t, packet_count> capacities {};
+  auto packets = std::make_shared<safe::queue_t<video::packet_t>>(video::ENCODED_PACKET_QUEUE_LIMIT);
+  const auto make_packet = [&](std::size_t index) {
+    pools[index] = std::make_shared<video::encoded_frame_buffer_pool_t>();
+    std::vector<std::uint8_t> produced(256 + index * 64, static_cast<std::uint8_t>(index + 1));
+    storage[index] = produced.data();
+    capacities[index] = produced.capacity();
+    return std::make_unique<video::encoded_packet_t>(std::move(produced), index + 1, false, pools[index]);
+  };
+  for (std::size_t index = 0; index < video::ENCODED_PACKET_QUEUE_LIMIT; ++index) {
+    packets->raise(make_packet(index));
+  }
+
+  // The rejected temporary is destroyed at this statement's end, like a discarded producer packet.
+  const auto result = packets->raise_with_overflow_policy(false, make_packet(packet_count - 1));
+  EXPECT_FALSE(result.queued);
+  EXPECT_EQ(result.dropped, video::ENCODED_PACKET_QUEUE_LIMIT);
+  EXPECT_TRUE(packets->running());
+  EXPECT_FALSE(packets->peek());
+  EXPECT_FALSE(packets->pop(0ms));
+  packets.reset();
+
+  for (std::size_t index = 0; index < pools.size(); ++index) {
+    SCOPED_TRACE(index);
+    auto recycled = pools[index]->acquire();
+    EXPECT_TRUE(recycled.empty());
+    EXPECT_EQ(recycled.data(), storage[index]);
+    EXPECT_EQ(recycled.capacity(), capacities[index]);
+    const auto duplicate = pools[index]->acquire();
+    EXPECT_TRUE(duplicate.empty());
+    EXPECT_EQ(duplicate.capacity(), 0u);
+  }
+}
+
+TEST(VideoPacketLifetimeTest, StoppedNonemptyQueueRetainsPacketsUntilQueueDestruction) {
+  std::array<std::shared_ptr<video::encoded_frame_buffer_pool_t>, 2> pools;
+  std::array<const std::uint8_t *, 2> storage {};
+  std::array<std::size_t, 2> capacities {};
+  auto packets = std::make_shared<safe::queue_t<video::packet_t>>(video::ENCODED_PACKET_QUEUE_LIMIT);
+  for (std::size_t index = 0; index < pools.size(); ++index) {
+    pools[index] = std::make_shared<video::encoded_frame_buffer_pool_t>();
+    std::vector<std::uint8_t> produced(384 + index * 64, static_cast<std::uint8_t>(index + 1));
+    storage[index] = produced.data();
+    capacities[index] = produced.capacity();
+    packets->raise(std::make_unique<video::encoded_packet_t>(std::move(produced), index + 1, true, pools[index]));
+  }
+  ASSERT_TRUE(packets->peek());
+  packets->stop();
+  EXPECT_FALSE(packets->running());
+  EXPECT_FALSE(packets->pop(0ms));
+  for (const auto &pool : pools) {
+    const auto premature = pool->acquire();
+    EXPECT_TRUE(premature.empty());
+    EXPECT_EQ(premature.capacity(), 0u);
+  }
+
+  packets.reset();
+  for (std::size_t index = 0; index < pools.size(); ++index) {
+    SCOPED_TRACE(index);
+    auto recycled = pools[index]->acquire();
+    EXPECT_TRUE(recycled.empty());
+    EXPECT_EQ(recycled.data(), storage[index]);
+    EXPECT_EQ(recycled.capacity(), capacities[index]);
+    const auto duplicate = pools[index]->acquire();
+    EXPECT_TRUE(duplicate.empty());
+    EXPECT_EQ(duplicate.capacity(), 0u);
+  }
 }
 
 TEST(EncodePipelineWiringTest, ExitsRecoveryAndInvalidationKeepTheirOneAtATimeGuarantees) {
