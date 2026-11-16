@@ -276,7 +276,9 @@ namespace platf {
              static_cast<ATOM>(GetClassLongPtrW(window.hwnd, GCW_ATOM)) == window.window_class;
     }
 
-    bool move_window(const window_t &window, RECT normal_rect, RECT destination, const std::wstring &property, HANDLE token) {
+    // restore_first: a window that is already maximized keeps its monitor when only its placement
+    // is rewritten. Restoring it onto the destination first lets the maximize that follows land there.
+    bool move_window(const window_t &window, RECT normal_rect, RECT destination, const std::wstring &property, HANDLE token, bool restore_first = false) {
       if (!same_identity(window) || GetPropW(window.hwnd, property.c_str()) != token) {
         return false;
       }
@@ -285,7 +287,16 @@ namespace platf {
         return false;
       }
       const auto placement = monitor_desktop_detail::placement_for_move(window.placement, translated(normal_rect, *destination_workspace, true), window.minimized, window.visible);
-      return placement && !security_surface_window(window.hwnd) && SetWindowPlacement(window.hwnd, &*placement);
+      if (!placement || security_surface_window(window.hwnd)) {
+        return false;
+      }
+      if (restore_first && placement->showCmd == SW_SHOWMAXIMIZED) {
+        auto restored = *placement;
+        restored.showCmd = SW_SHOWNOACTIVATE;
+        // Both placements are queued to the window's own thread in order.
+        (void) SetWindowPlacement(window.hwnd, &restored);
+      }
+      return SetWindowPlacement(window.hwnd, &*placement);
     }
 
     void retain_foreground(HWND foreground) {
@@ -643,7 +654,7 @@ namespace platf {
       if (round) {
         for (std::size_t index = 0; index < moving.size(); ++index) {
           if (!window_arrived(moving[index], virtual_source_rect)) {
-            (void) move_window(moving[index], moving_normal[index], virtual_source_rect, impl_->property, impl_->token());
+            (void) move_window(moving[index], moving_normal[index], virtual_source_rect, impl_->property, impl_->token(), true);
           }
         }
       }
