@@ -115,3 +115,30 @@ TEST(ThreadPool, KeepsRunningAfterATaskThrows) {
   ASSERT_EQ(status, std::future_status::ready);
   EXPECT_EQ(result.get(), 42);
 }
+
+TEST(ThreadPool, StopDuringACallbackDrainsQueuedImmediateTasks) {
+  thread_pool_util::ThreadPool pool;
+  std::promise<void> entered;
+  auto started = entered.get_future();
+  std::promise<void> release;
+  auto resume = release.get_future();
+  std::promise<void> drained;
+  auto completed = drained.get_future();
+  pool.push([&entered, &resume]() {
+    entered.set_value();
+    resume.wait();
+  });
+  pool.push([&drained]() {
+    drained.set_value();
+  });
+  pool.start(1);
+
+  const auto started_status = started.wait_for(2s);
+  pool.stop();
+  // Release and join before asserting, including when the worker missed the deadline.
+  release.set_value();
+  pool.join();
+
+  ASSERT_EQ(started_status, std::future_status::ready);
+  EXPECT_EQ(completed.wait_for(0s), std::future_status::ready);
+}

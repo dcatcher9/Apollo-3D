@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -26,7 +27,7 @@ namespace thread_pool_util {
     std::condition_variable _cv;
     std::mutex _lock;
 
-    bool _continue;
+    std::atomic_bool _continue;
 
   public:
     ThreadPool():
