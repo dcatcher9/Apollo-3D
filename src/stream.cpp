@@ -3866,33 +3866,32 @@ namespace stream {
 
       void schedule_primary_restore_locked(detail::primary_display_restore_retry_t retry) {
         pending_primary_restore = task_pool.pushDelayed(
-                                             [retry]() {
-                                               std::lock_guard delayed_lock(platform_lifecycle_mutex);
-                                               // A cancelled callback may already be waiting on the lock. Never clear a new
-                                               // generation's task handle, or restore its pending/active session's display.
-                                               if (retry.generation != platform_lifecycle_generation) {
-                                                 return;
-                                               }
-                                               pending_primary_restore = nullptr;
-                                               const auto action = retry.next_action(
-                                                 platform_lifecycle_generation,
-                                                 proc::proc.get_host_session_id(),
-                                                 warm_process_instance,
-                                                 remote_session_active,
-                                                 !rtsp_stream::launch_session_available(),
-                                                 platform_streaming_warm && pending_platform_stop
-                                               );
-                                               if (action == detail::primary_display_restore_retry_t::action_e::stop) {
-                                                 return;
-                                               }
-                                               if (action == detail::primary_display_restore_retry_t::action_e::wait || !proc::proc.pause_display_for_resume()) {
-                                                 // The existing grace timer remains authoritative; retries never extend it.
-                                                 schedule_primary_restore_locked(retry);
-                                               }
-                                             },
-                                             1s
-        )
-                                    .task_id;
+          [retry]() {
+            std::lock_guard delayed_lock(platform_lifecycle_mutex);
+            // A cancelled callback may already be waiting on the lock. Never clear a new
+            // generation's task handle, or restore its pending/active session's display.
+            if (retry.generation != platform_lifecycle_generation) {
+              return;
+            }
+            pending_primary_restore = nullptr;
+            const auto action = retry.next_action(
+              platform_lifecycle_generation,
+              proc::proc.get_host_session_id(),
+              warm_process_instance,
+              remote_session_active,
+              !rtsp_stream::launch_session_available(),
+              platform_streaming_warm && pending_platform_stop
+            );
+            if (action == detail::primary_display_restore_retry_t::action_e::stop) {
+              return;
+            }
+            if (action == detail::primary_display_restore_retry_t::action_e::wait || !proc::proc.pause_display_for_resume()) {
+              // The existing grace timer remains authoritative; retries never extend it.
+              schedule_primary_restore_locked(retry);
+            }
+          },
+          1s
+        );
       }
 
       void stop_warm_platform_locked() {
@@ -3976,11 +3975,10 @@ namespace stream {
         const auto remaining = *platform_resume_state.deadline() - std::chrono::steady_clock::now();
         const auto delay = std::clamp<std::chrono::steady_clock::duration>(remaining, 0s, 1s);
         pending_platform_stop = task_pool.pushDelayed([generation]() {
-                                           std::lock_guard delayed_lock(platform_lifecycle_mutex);
-                                           check_platform_stop_locked(generation);
-                                         },
-                                                      delay)
-                                  .task_id;
+          std::lock_guard delayed_lock(platform_lifecycle_mutex);
+          check_platform_stop_locked(generation);
+        },
+                                                      delay);
       }
 
       void schedule_platform_stop_locked(std::chrono::steady_clock::duration delay) {
@@ -4406,7 +4404,7 @@ namespace stream {
       {
         const detail::session_join_watchdog_t mode_worker_watchdog {
           [](std::function<void()> expired) {
-            return task_pool.pushDelayed(std::move(expired), 30s).task_id;
+            return task_pool.pushDelayed(std::move(expired), 30s);
           },
           [](auto task_id) {
             task_pool.cancel(task_id);
@@ -4427,7 +4425,7 @@ namespace stream {
         []() {
           return detail::session_join_watchdog_t {
             [](std::function<void()> expired) {
-              return task_pool.pushDelayed(std::move(expired), 10s).task_id;
+              return task_pool.pushDelayed(std::move(expired), 10s);
             },
             [](auto task_id) {
               task_pool.cancel(task_id);

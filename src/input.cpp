@@ -461,7 +461,7 @@ namespace input {
         mouse_press[BUTTON_LEFT] = false;
       };
 
-    input->mouse_left_button_timeout = task_pool.pushDelayed(std::move(f), 10ms).task_id;
+    input->mouse_left_button_timeout = task_pool.pushDelayed(std::move(f), 10ms);
 
       return;
     }
@@ -603,7 +603,7 @@ namespace input {
       flags,
       synthetic_modifiers,
       generation
-    ).task_id;
+    );
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_KEYBOARD_PACKET packet) {
@@ -656,7 +656,7 @@ namespace input {
             packet->flags,
             synthetic_modifiers,
             repeat_generation
-          ).task_id;
+          );
         }
       } else {
         // Already released
@@ -1061,10 +1061,10 @@ namespace input {
               gamepad.gamepad_state.buttonFlags &= ~platf::HOME;
               platf::gamepad_update(platf_input, gamepad.id, gamepad.gamepad_state);
             };
-            gamepad.home_release_id = task_pool.pushDelayed(std::move(release_home), 100ms).task_id;
+            gamepad.home_release_id = task_pool.pushDelayed(std::move(release_home), 100ms);
           };
 
-          gamepad.back_timeout_id = task_pool.pushDelayed(std::move(f), config::input.back_button_timeout).task_id;
+          gamepad.back_timeout_id = task_pool.pushDelayed(std::move(f), config::input.back_button_timeout);
         }
       } else if (gamepad.back_timeout_id || gamepad.home_release_id) {
         task_pool.cancel(gamepad.back_timeout_id);

@@ -582,13 +582,13 @@ namespace platf {
     void delayed_refresh() {
       refresh();
 
-      refresh_task_id = task_pool.pushDelayed(&shm_attr_t::delayed_refresh, 2s, this).task_id;
+      refresh_task_id = task_pool.pushDelayed(&shm_attr_t::delayed_refresh, 2s, this);
     }
 
     shm_attr_t(mem_type_e mem_type):
         x11_attr_t(mem_type),
         shm_xdisplay {x11::OpenDisplay(nullptr)} {
-      refresh_task_id = task_pool.pushDelayed(&shm_attr_t::delayed_refresh, 2s, this).task_id;
+      refresh_task_id = task_pool.pushDelayed(&shm_attr_t::delayed_refresh, 2s, this);
     }
 
     ~shm_attr_t() override {

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -688,7 +689,7 @@ int main(int argc, char *argv[]) {
         logging::log_flush();
         lifetime::debug_trap();
       };
-      force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+      force_shutdown = task_pool.pushDelayed(task, 10s);
     }
 
     if (session_monitor_hwnd_future.wait_for(1s) != std::future_status::ready) {
@@ -719,7 +720,7 @@ int main(int argc, char *argv[]) {
       lifetime::debug_trap();
     };
 
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+    force_shutdown = task_pool.pushDelayed(task, 10s);
 
     shutdown_event->raise(true);
   });
@@ -732,7 +733,7 @@ int main(int argc, char *argv[]) {
       logging::log_flush();
       lifetime::debug_trap();
     };
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+    force_shutdown = task_pool.pushDelayed(task, 10s);
 
     shutdown_event->raise(true);
   });
@@ -775,7 +776,7 @@ int main(int argc, char *argv[]) {
         logging::log_flush();
         lifetime::debug_trap();
       };
-      force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+      force_shutdown = task_pool.pushDelayed(task, 10s);
     }
     video::drain_async_teardown_workers();
   });
@@ -1032,7 +1033,7 @@ int main(int argc, char *argv[]) {
       logging::log_flush();
       lifetime::debug_trap();
     };
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+    force_shutdown = task_pool.pushDelayed(task, 10s);
   }
 
   // RTSP shutdown above has stopped and joined capture, encode, audio, control, and input. Only

@@ -820,7 +820,7 @@ namespace platf {
       BOOST_LOG(warning) << "Failed to refresh virtual touch input: "sv << err;
     }
 
-    raw->touchRepeatTask = task_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw).task_id;
+    raw->touchRepeatTask = task_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw);
   }
 
   /**
@@ -833,7 +833,7 @@ namespace platf {
       BOOST_LOG(warning) << "Failed to refresh virtual pen input: "sv << err;
     }
 
-    raw->penRepeatTask = task_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw).task_id;
+    raw->penRepeatTask = task_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw);
   }
 
   /**
@@ -984,7 +984,7 @@ namespace platf {
 
     // If we still have an active touch, refresh the touch state periodically
     if (raw->activeTouchSlots > 1 || touchInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
-      raw->touchRepeatTask = task_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw).task_id;
+      raw->touchRepeatTask = task_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw);
     }
   }
 
@@ -1095,7 +1095,7 @@ namespace platf {
 
     // If we still have an active pen interaction, refresh the pen state periodically
     if (penInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
-      raw->penRepeatTask = task_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw).task_id;
+      raw->penRepeatTask = task_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw);
     }
   }
 
@@ -1467,7 +1467,7 @@ namespace platf {
 
       // Repeat at least every 100ms to keep the 16-bit timestamp field from overflowing
       gamepad.last_report_ts = now;
-      gamepad.repeat_task = task_pool.pushDelayed(ds4_update_ts_and_send, 100ms, vigem, nr).task_id;
+      gamepad.repeat_task = task_pool.pushDelayed(ds4_update_ts_and_send, 100ms, vigem, nr);
     }
   }
 
