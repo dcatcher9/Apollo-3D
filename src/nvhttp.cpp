@@ -34,6 +34,7 @@
 #include "file_handler.h"
 #include "globals.h"
 #include "host_sbs_resolution.h"
+#include "http_request_logging.h"
 #include "httpcommon.h"
 #include "logging.h"
 #include "network.h"
@@ -1048,22 +1049,7 @@ namespace nvhttp {
 
   template<class T>
   void print_req(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
-    BOOST_LOG(debug) << "TUNNEL :: "sv << tunnel<T>::to_string;
-
-    BOOST_LOG(debug) << "METHOD :: "sv << request->method;
-    BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
-
-    for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << http::redact_request_header(name, val);
-    }
-
-    BOOST_LOG(debug) << " [--] "sv;
-
-    for (auto &[name, val] : request->parse_query_string()) {
-      BOOST_LOG(debug) << name << " -- " << http::redact_query_parameter(name, val);
-    }
-
-    BOOST_LOG(debug) << " [--] "sv;
+    http::log_request_debug(*request, tunnel<T>::to_string);
   }
 
   template<class T>

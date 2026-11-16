@@ -5,12 +5,22 @@
 // test imports
 #include "../tests_common.h"
 
+// standard imports
+#include <array>
+#include <sstream>
+#include <string_view>
+#include <utility>
+
 // lib imports
+#include <boost/log/expressions.hpp>
+#include <boost/make_shared.hpp>
 #include <curl/curl.h>
 
 // local imports
 #include <src/confighttp.h>
+#include <src/http_request_logging.h>
 #include <src/httpcommon.h>
+#include <src/utility.h>
 
 struct UrlEscapeTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
 
@@ -209,6 +219,99 @@ TEST(HttpRequestLoggingTest, RedactsGameStreamSecretsCaseInsensitively) {
     EXPECT_EQ(http::redact_query_parameter(name, "top-secret"), "CREDENTIALS REDACTED");
   }
   EXPECT_EQ(http::redact_query_parameter("mode", "1920x1080x60"), "1920x1080x60");
+}
+
+namespace {
+  struct request_log_probe_t {
+    std::string_view method = "GET";
+    std::string_view path = "/launch";
+    std::array<std::pair<std::string_view, std::string_view>, 2> header {{
+      {"Cookie", "header-secret"},
+      {"User-Agent", "Artemis"},
+    }};
+    mutable unsigned query_parses = 0;
+
+    auto parse_query_string() const {
+      ++query_parses;
+      return std::array<std::pair<std::string_view, std::string_view>, 2> {{
+        {"rikey", "query-secret"},
+        {"mode", "1920x1080x60"},
+      }};
+    }
+  };
+
+  class request_log_capture_t {
+  public:
+    explicit request_log_capture_t(int minimum_severity):
+        output_(boost::make_shared<std::ostringstream>()),
+        sink_(boost::make_shared<sink_t>()) {
+      sink_->locked_backend()->add_stream(output_);
+      sink_->set_formatter(boost::log::expressions::stream << boost::log::expressions::smessage);
+      // The native harness also has a diagnostic sink accepting every level. Apply the
+      // temporary admission filter at the core so that sink cannot admit rejected debug lines.
+      boost::log::core::get()->set_filter(boost::log::expressions::attr<int>("Severity") >= minimum_severity);
+      boost::log::core::get()->add_sink(sink_);
+    }
+
+    ~request_log_capture_t() {
+      boost::log::core::get()->remove_sink(sink_);
+      boost::log::core::get()->reset_filter();
+    }
+
+    std::string output() const {
+      return output_->str();
+    }
+
+  private:
+    using sink_t = boost::log::sinks::synchronous_sink<boost::log::sinks::text_ostream_backend>;
+    boost::shared_ptr<std::ostringstream> output_;
+    boost::shared_ptr<sink_t> sink_;
+  };
+}  // namespace
+
+TEST(HttpRequestLoggingTest, RejectedDebugDoesNotParseQueriesOrEmitAdmissionRecords) {
+  const auto old_level = config::sunshine.min_log_level;
+  const auto restore_level = util::fail_guard([old_level]() {
+    config::sunshine.min_log_level = old_level;
+  });
+  config::sunshine.min_log_level = debug.default_severity();
+  request_log_capture_t capture(debug.default_severity() + 1);
+  request_log_probe_t request;
+
+  http::log_request_debug(request);
+  http::log_request_debug(request, "HTTPS");
+
+  EXPECT_EQ(request.query_parses, 0u);
+  EXPECT_TRUE(capture.output().empty());
+}
+
+TEST(HttpRequestLoggingTest, AdmittedDebugParsesOnceAndPreservesRedactedLinesAndTunnel) {
+  const auto old_level = config::sunshine.min_log_level;
+  const auto restore_level = util::fail_guard([old_level]() {
+    config::sunshine.min_log_level = old_level;
+  });
+  config::sunshine.min_log_level = debug.default_severity() + 1;
+  const std::string expected =
+    "METHOD :: GET\n"
+    "DESTINATION :: /launch\n"
+    "Cookie -- CREDENTIALS REDACTED\n"
+    "User-Agent -- Artemis\n"
+    " [--] \n"
+    "rikey -- CREDENTIALS REDACTED\n"
+    "mode -- 1920x1080x60\n"
+    " [--] \n";
+
+  for (const auto tunnel : std::array<std::optional<std::string_view>, 3> {std::nullopt, "NONE", "HTTPS"}) {
+    SCOPED_TRACE(tunnel.value_or("Web UI"));
+    request_log_capture_t capture(debug.default_severity());
+    request_log_probe_t request;
+
+    http::log_request_debug(request, tunnel);
+
+    EXPECT_EQ(request.query_parses, 1u);
+    const auto prefix = tunnel ? "TUNNEL :: " + std::string(*tunnel) + "\n" : std::string {};
+    EXPECT_EQ(capture.output(), prefix + expected);
+  }
 }
 
 TEST(AuthCookieTest, UsesBrowserHardeningAndServerLifetime) {

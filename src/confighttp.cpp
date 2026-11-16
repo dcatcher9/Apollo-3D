@@ -32,6 +32,7 @@
 #include "crypto.h"
 #include "file_handler.h"
 #include "globals.h"
+#include "http_request_logging.h"
 #include "httpcommon.h"
 #include "logging.h"
 #include "network.h"
@@ -144,16 +145,7 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void print_req(const req_https_t &request) {
-    BOOST_LOG(debug) << "METHOD :: "sv << request->method;
-    BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
-    for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << http::redact_request_header(name, val);
-    }
-    BOOST_LOG(debug) << " [--] "sv;
-    for (auto &[name, val] : request->parse_query_string()) {
-      BOOST_LOG(debug) << name << " -- " << http::redact_query_parameter(name, val);
-    }
-    BOOST_LOG(debug) << " [--] "sv;
+    http::log_request_debug(*request);
   }
 
   /**
