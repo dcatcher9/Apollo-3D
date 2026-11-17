@@ -14,6 +14,10 @@ namespace platf::video_player {
   public:
     // Census registry data once on a worker; an unavailable or incomplete result grants nothing.
     registry_t() noexcept;
+#ifdef SUNSHINE_TESTS
+    // Finite census result for an owned CPU/GPU fixture; never starts native discovery.
+    explicit registry_t(std::shared_future<std::vector<std::wstring>> executables) noexcept;
+#endif
     [[nodiscard]] bool ready() const noexcept;
     // The caller owns foreground HWND/PID validation. Never caches a PID or discovers a window.
     [[nodiscard]] bool contains_process(std::uint32_t process_id) const noexcept;

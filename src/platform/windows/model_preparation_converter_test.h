@@ -7,6 +7,7 @@
   #include <cstdint>
   #include <dxgi1_4.h>
   #include <filesystem>
+  #include <future>
   #include <memory>
   #include <string>
   #include <string_view>
@@ -38,6 +39,9 @@ namespace platf::dxgi::testing {
     std::uint32_t height = 0;
     std::vector<std::uint8_t> bgra;
     std::filesystem::path output_root;
+    // Opt-in original consumer path for registry readiness; default preserves the B41 fixture.
+    bool production_observer_path = false;
+    std::shared_future<std::vector<std::wstring>> registry_executables;
   };
 
   struct model_preparation_artifact_t {
@@ -78,6 +82,19 @@ namespace platf::dxgi::testing {
     RECT setup_watch_rect {};
     bool setup_watch_present = false;
     bool receiver_present = false;
+    bool production_observer_path = false;
+    bool registry_present = false;
+    bool registry_ready = false;
+    bool registry_ready_observed = false;
+    std::uint64_t registry_factory_calls = 0;
+    bool registry_consumption_eligible = false;
+    bool pipeline_enabled = false;
+    bool depth_completion_pending = false;
+    bool authority_reprocess_pending = false;
+    bool subtitle_reprocess_pending = false;
+    bool dump_pending = false;
+    bool gamma_pending = false;
+    bool gamma_white_query_due = false;
     bool last_draw_present = false;
     bool last_draw_flat = false;
     bool last_draw_repeat = false;

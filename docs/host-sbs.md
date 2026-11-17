@@ -2481,6 +2481,13 @@ completion notification. Receipt readiness alone does not request conversion, an
 diagnostic receipts do not keep a faster retry active. A completed near-identical reuse may remain
 idle with its older analysis owner; no final or periodic inference is required for unchanged input.
 
+The bounded application-registration census still starts as background prefetch at the first
+production AI conversion. Its ready result requests retained-source conversion only when the
+depth estimator exists and the renderer can run the foreground/subtitle observer. Until then,
+census readiness stays unconsumed and by itself does not shorten the ordinary idle wait. Global
+preparation ready/failure, the device-build completion event, and existing depth, authority, dump,
+and gamma work retain their independent service paths.
+
 ### Client exact-repeat transport
 
 The optional `SOURCE_FRAME_ID_V1` capability carries a conservative encoder-input identity to

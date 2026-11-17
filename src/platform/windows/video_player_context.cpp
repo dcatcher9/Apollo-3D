@@ -224,6 +224,11 @@ namespace platf::video_player {
     }
   }
 
+#ifdef SUNSHINE_TESTS
+  registry_t::registry_t(std::shared_future<std::vector<std::wstring>> executables) noexcept:
+      executables_(std::move(executables)) {}
+#endif
+
   bool registry_t::ready() const noexcept {
     try {
       return executables_.valid() && executables_.wait_for(std::chrono::seconds {0}) == std::future_status::ready;

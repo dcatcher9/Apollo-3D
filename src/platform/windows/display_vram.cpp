@@ -76,6 +76,7 @@
 #ifdef SUNSHINE_TESTS
   #include "src/tracked_async_worker.h"
   #include "model_preparation_converter_test.h"
+  #include "conversion_poll_test.h"
 #endif
 
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
@@ -542,6 +543,29 @@ namespace platf::dxgi {
     }
   }  // namespace
 #endif
+#ifdef SUNSHINE_TESTS
+  namespace {
+    struct conversion_poll_model_read_t {
+      const std::function<models::engine_build_status()> &read;
+      std::uint32_t calls = 0;
+    };
+
+    thread_local conversion_poll_model_read_t *active_conversion_poll_model_read = nullptr;
+
+    class conversion_poll_model_read_scope_t {
+    public:
+      explicit conversion_poll_model_read_scope_t(conversion_poll_model_read_t &read):
+          previous_(std::exchange(active_conversion_poll_model_read, &read)) {}
+
+      ~conversion_poll_model_read_scope_t() {
+        active_conversion_poll_model_read = previous_;
+      }
+
+    private:
+      conversion_poll_model_read_t *previous_;
+    };
+  }  // namespace
+#endif
   class d3d_base_encode_device final {
   public:
     ~d3d_base_encode_device() {
@@ -706,11 +730,21 @@ namespace platf::dxgi {
         .pipeline_build_pending = depth_estimator_build.valid(),
         .depth_completion_pending = depth_completion_poll_pending,
         .authority_reprocess_pending = depth_authority_reprocess_pending || subtitle_context_reprocess_pending ||
-          (sbs_mode != ::video::SBS_OFF && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer) &&
-           video_player_registry && !video_player_registry_ready_observed && video_player_registry->ready()),
+                                       (sbs_mode != ::video::SBS_OFF &&
+                                        detail::host_sbs_window_authority_observation_needed(
+                                          depth_estimator != nullptr,
+                                          models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)
+                                        ) &&
+                                        video_player_registry && !video_player_registry_ready_observed && video_player_registry->ready()),
         .dump_pending = sbs_dumper.needs_conversion_poll(),
       };
       return work.needs_service([]() {
+#ifdef SUNSHINE_TESTS
+        if (active_conversion_poll_model_read) {
+          ++active_conversion_poll_model_read->calls;
+          return active_conversion_poll_model_read->read();
+        }
+#endif
         return models::tensorrt_model_prepare_status(::video::host_sbs_v2_depth_model());
       });
     }
@@ -3773,7 +3807,16 @@ namespace platf::dxgi {
         return false;
       }
       if (!video_player_registry && !probe_context) {
+#ifdef SUNSHINE_TESTS
+        if (test_registry_executables.valid()) {
+          video_player_registry = std::make_unique<video_player::registry_t>(test_registry_executables);
+          ++test_registry_factory_calls;
+        } else {
+          video_player_registry = std::make_unique<video_player::registry_t>();
+        }
+#else
         video_player_registry = std::make_unique<video_player::registry_t>();
+#endif
       }
       if (depth_estimator) {
         return true;
@@ -7705,6 +7748,10 @@ namespace platf::dxgi {
     D3D11_VIEWPORT sbs_viewport;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
     std::optional<video_dom::lease_t> video_dom_lease;
+#ifdef SUNSHINE_TESTS
+    std::shared_future<std::vector<std::wstring>> test_registry_executables;
+    std::uint64_t test_registry_factory_calls = 0;
+#endif
     std::unique_ptr<video_player::registry_t> video_player_registry;
     bool video_player_registry_ready_observed = false;
     models::host_subtitle_context::tracker_t subtitle_context;
@@ -7913,7 +7960,12 @@ namespace platf::dxgi {
         preparation_probe_require(converter_->init(display_, adapter.Get(), pix_fmt_e::nv12) == 0, "Preparation actual converter initialization failed");
         preparation_probe_device_adapter(converter_->device.get(), request_.adapter);
         probe_context_ = {width, height, 0x5052455041524531ull};
-        converter_->probe_context = &probe_context_;
+        if (request_.production_observer_path) {
+          preparation_probe_require(request_.registry_executables.valid(), "Production-observer probe requires its finite registry future");
+          converter_->test_registry_executables = request_.registry_executables;
+        } else {
+          converter_->probe_context = &probe_context_;
+        }
         converter_->probe_observer = {this, &impl_t::record};
 
         image_ = display_->alloc_img();
@@ -8008,6 +8060,24 @@ namespace platf::dxgi {
         result.setup_watch_rect = watch_probe_.last_rect;
         result.setup_watch_present = static_cast<bool>(converter_->game_setup_watch);
         result.receiver_present = static_cast<bool>(converter_->reshade_receiver);
+        result.production_observer_path = converter_->probe_context == nullptr;
+        result.registry_present = static_cast<bool>(converter_->video_player_registry);
+        result.registry_ready = result.registry_present && converter_->video_player_registry->ready();
+        result.registry_ready_observed = converter_->video_player_registry_ready_observed;
+        result.registry_factory_calls = converter_->test_registry_factory_calls;
+        result.registry_consumption_eligible = detail::host_sbs_window_authority_observation_needed(
+          result.estimator_present,
+          models::host_sbs_renderer_uses_depth_pipeline(converter_->host_sbs_renderer)
+        );
+        result.pipeline_enabled = converter_->sbs_mode != ::video::SBS_OFF && models::host_sbs_renderer_uses_depth_pipeline(converter_->host_sbs_renderer);
+        result.depth_completion_pending = converter_->depth_completion_poll_pending;
+        result.authority_reprocess_pending = converter_->depth_authority_reprocess_pending;
+        result.subtitle_reprocess_pending = converter_->subtitle_context_reprocess_pending;
+        result.dump_pending = converter_->sbs_dumper.needs_conversion_poll();
+        result.gamma_pending = converter_->stream_gamma_conversion_pending;
+        result.gamma_white_query_due =
+          converter_->stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default &&
+          std::chrono::steady_clock::now() >= converter_->stream_gamma_white_query_at;
         return result;
       }
 
@@ -8136,6 +8206,108 @@ namespace platf::dxgi {
     model_preparation_artifact_t model_preparation_converter_t::snapshot_output(std::string_view label) { return impl_->snapshot_output(label); }
     model_preparation_artifact_t model_preparation_converter_t::source_artifact() const { return impl_->source_artifact(); }
     model_preparation_memory_t model_preparation_converter_t::memory() const { return impl_->memory(); }
+  }  // namespace testing
+#endif
+
+#ifdef SUNSHINE_TESTS
+  namespace testing {
+    class conversion_poll_probe_t::impl_t {
+    public:
+      explicit impl_t(std::optional<std::shared_future<std::vector<std::wstring>>> registry_future) {
+        const char *dump_directory = std::getenv("APOLLO_SBS_DUMP");
+        if (dump_directory && *dump_directory && config::sunshine.diagnostics_enabled) {
+          throw std::invalid_argument("CPU conversion-poll probe requires diagnostic file triggers disabled");
+        }
+        // No init method is called: all D3D handles and the estimator remain empty.
+        converter_ = std::make_unique<d3d_base_encode_device>();
+        if (registry_future) {
+          converter_->video_player_registry = std::make_unique<video_player::registry_t>(std::move(*registry_future));
+        }
+        converter_->sbs_dumper.set_button_request(button_);
+      }
+
+      ~impl_t() {
+        clear_build();
+      }
+
+      conversion_poll_snapshot_t observe(
+        const conversion_poll_inputs_t &inputs,
+        const std::function<models::engine_build_status()> &read_model_status
+      ) {
+        if (!read_model_status) {
+          throw std::invalid_argument("CPU conversion-poll probe requires a finite model-status reader");
+        }
+        if (converter_->device || converter_->device_ctx || converter_->depth_estimator) {
+          throw std::logic_error("CPU conversion-poll probe acquired a graphics owner");
+        }
+        clear_build();
+        if (inputs.build != conversion_poll_build_e::absent) {
+          build_completion_.emplace();
+          converter_->depth_estimator_build = build_completion_->get_future();
+          if (inputs.build == conversion_poll_build_e::ready) {
+            build_completion_->set_value({});
+          }
+        }
+        converter_->sbs_mode = inputs.mode;
+        converter_->host_sbs_renderer = inputs.renderer;
+        converter_->video_player_registry_ready_observed = inputs.registry_ready_observed;
+        converter_->depth_completion_poll_pending = inputs.depth_completion_pending;
+        converter_->depth_authority_reprocess_pending = inputs.depth_authority_reprocess_pending;
+        converter_->subtitle_context_reprocess_pending = inputs.subtitle_context_reprocess_pending;
+        converter_->stream_gamma_conversion_pending = inputs.stream_gamma_conversion_pending;
+        converter_->stream_gamma_mode_ = inputs.white_query_due ? ::video::stream_gamma_mode_e::gamma_2_2 : ::video::stream_gamma_mode_e::windows_default;
+        converter_->stream_gamma_white_query_at = inputs.white_query_due.value_or(false) ?
+                                                    std::chrono::steady_clock::time_point::min() :
+                                                    std::chrono::steady_clock::time_point::max();
+        button_->store(inputs.dump_button_requested, std::memory_order_release);
+
+        conversion_poll_model_read_t model_read {read_model_status};
+        conversion_poll_model_read_scope_t scope {model_read};
+        const bool needs_conversion = converter_->needs_conversion_poll();
+        const bool build_valid = converter_->depth_estimator_build.valid();
+        return {
+          .needs_conversion = needs_conversion,
+          .registry_present = static_cast<bool>(converter_->video_player_registry),
+          .registry_ready = converter_->video_player_registry && converter_->video_player_registry->ready(),
+          .registry_ready_observed = converter_->video_player_registry_ready_observed,
+          .build_valid = build_valid,
+          .build_ready = build_valid && converter_->depth_estimator_build.wait_for(std::chrono::seconds {0}) == std::future_status::ready,
+          .estimator_present = static_cast<bool>(converter_->depth_estimator),
+          .device_present = static_cast<bool>(converter_->device),
+          .context_present = static_cast<bool>(converter_->device_ctx),
+          .model_status_reads = model_read.calls,
+        };
+      }
+
+    private:
+      void clear_build() {
+        if (converter_ && converter_->depth_estimator_build.valid()) {
+          if (converter_->depth_estimator_build.wait_for(std::chrono::seconds {0}) != std::future_status::ready) {
+            build_completion_->set_value({});
+          }
+          // Consume the actual empty future before the real converter destructor: it must not
+          // hand test-owned work to the process-lifetime estimator retirement service.
+          (void) converter_->depth_estimator_build.get();
+        }
+        build_completion_.reset();
+      }
+
+      std::shared_ptr<std::atomic<bool>> button_ = std::make_shared<std::atomic<bool>>(false);
+      std::optional<std::promise<depth_pipeline_build_result_t>> build_completion_;
+      std::unique_ptr<d3d_base_encode_device> converter_;
+    };
+
+    conversion_poll_probe_t::conversion_poll_probe_t(std::optional<std::shared_future<std::vector<std::wstring>>> registry_future):
+        impl_(std::make_unique<impl_t>(std::move(registry_future))) {}
+
+    conversion_poll_probe_t::~conversion_poll_probe_t() = default;
+
+    conversion_poll_snapshot_t conversion_poll_probe_t::observe(
+      const conversion_poll_inputs_t &inputs,
+      const std::function<models::engine_build_status()> &read_model_status
+    ) {
+      return impl_->observe(inputs, read_model_status);
+    }
   }  // namespace testing
 #endif
 
