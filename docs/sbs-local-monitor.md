@@ -38,7 +38,12 @@ keeps its original primary-display role. The physical sink is parked outside the
 for stereo scanout: up and to the right of the desktop, sharing a single pixel of edge at the
 top-right corner. Beside the desktop along a whole edge, a pop-up that hangs over that edge, such
 as another program's tray menu, would land on the sink above the presenter; Windows then composes
-the presenter instead of showing it directly and local 3D loses its refresh clock. Other monitors remain usable in their existing positions. Sunshine transfers
+the presenter instead of showing it directly and local 3D loses its refresh clock. Other monitors remain usable in their existing positions.
+The pointer cannot enter the sink: Windows would carry a pointer pushed past an outer desktop edge
+over to it, so Sunshine finishes every pointer movement that ends on no monitor in use at the
+nearest point of those monitors, and the pointer slides along the edge as on a single monitor.
+While monitor 3D runs, Windows therefore does not carry the pointer across a gap between monitors.
+The presenter window is excluded from the taskbar's window preview, which would otherwise hide it. Sunshine transfers
 the selected monitor's windows and cursor to the private source automatically; you do not need to
 drag applications to a separate virtual screen.
 
