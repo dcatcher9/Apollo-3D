@@ -898,8 +898,18 @@ namespace platf {
     }
     const auto destination = restore_destination(restored_physical_rect);
     if (!destination) {
-      BOOST_LOG(warning) << "Monitor desktop handoff has no remaining physical display for window restoration.";
-      return false;
+      // No physical display is left to return the windows to. Windows places them itself when
+      // the private display is removed or a monitor returns; waiting here would hold the private
+      // display, and the next remote session, indefinitely.
+      BOOST_LOG(warning) << "Monitor desktop handoff has no remaining physical display; leaving window placement to Windows.";
+      impl_->active = false;
+      impl_->captured = false;
+      impl_->release_properties();
+      impl_->restoring.clear();
+      impl_->restore_prepared = false;
+      impl_->restore_cursor_placed = false;
+      impl_->restore_attempts = 0;
+      return true;
     }
     const HWND foreground = GetForegroundWindow();
     impl_->discard_security_windows();

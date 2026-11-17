@@ -2721,9 +2721,25 @@ namespace platf::primary_display {
           wanted.push_back(display_spec(*current, i));
         }
       }
-      // Never remove the sole surviving interactive source from a headless machine. Keep the
-      // durable transaction until Windows can restore an actual physical desktop.
-      if (wanted.empty() || !normalize_monitor_desktop(wanted, journal.original_primary)) {
+      if (wanted.empty()) {
+        const bool physical_available = std::ranges::any_of(available->paths, [&](const auto &path) {
+          const auto i = static_cast<size_t>(&path - available->paths.data());
+          return path.targetInfo.targetAvailable && !same_device(available->device_paths[i], journal.promoted_primary);
+        });
+        if (physical_available) {
+          // An output exists but is not yet part of a restorable desktop. Keep the durable
+          // transaction until Windows can restore an actual physical desktop.
+          return false;
+        }
+        // Every physical output is gone, as on a single-monitor PC whose 3D monitor was unplugged
+        // or powered off. As with unplugged glasses, the PC is intentionally headless and there
+        // is nothing to restore; waiting here would block the next remote session indefinitely.
+        if (retained) {
+          retained->pause_recovery.reset();
+        }
+        return io_.clear();
+      }
+      if (!normalize_monitor_desktop(wanted, journal.original_primary)) {
         return false;
       }
       if (!monitor_desktop_connected(wanted)) {

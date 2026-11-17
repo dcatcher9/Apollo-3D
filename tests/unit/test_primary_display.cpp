@@ -4313,6 +4313,27 @@ TEST(PrimaryDisplayMonitorReplacement, PausedSourceReactivationCanDetachAfterSel
   expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
 }
 
+TEST(PrimaryDisplayMonitorReplacement, RestoreFinishesWhenNoPhysicalOutputRemains) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"monitor", 0, 0}});
+  set_display_mode(fake.current, L"monitor", 2560, 1440, 165);
+  fake.catalog = make_snapshot({{L"monitor", 0, 0}, {L"virtual", 2560, 0}});
+  set_display_mode(fake.catalog, L"monitor", 2560, 1440, 165);
+  set_display_mode(fake.catalog, L"virtual", 2560, 1440, 165);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(fake.journal);
+  // The only monitor is unplugged while its 3D desktop is live: nothing physical is left.
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  set_display_mode(fake.current, L"virtual", 2560, 1440, 165);
+  fake.available_override = fake.current;
+  EXPECT_TRUE(manager.restore(L"virtual"));
+  EXPECT_FALSE(fake.journal);
+}
+
 TEST(PrimaryDisplayMonitorReplacement, FailedApplyThenNeighborModeHdrAndHotplugCannotAuthorizeTheAddPosition) {
   fake_io_t fake;
   monitor_baseline(fake, true);

@@ -48,7 +48,9 @@ Returning to 2D stops local capture, restores the selected physical monitor, and
 and cursor back through the shared display lifecycle. A connecting or active remote session takes
 priority over local presentation. Use borderless fullscreen for games so their windows follow the
 desktop handoff. A game tied to an exclusive physical output may need a switch to borderless or
-windowed mode before entering local 3D.
+windowed mode before entering local 3D. If no physical display is left when 3D ends, for example
+after the only monitor is unplugged, there is nothing to restore: Sunshine releases the private
+source and leaves window placement to Windows, so a remote session can still start.
 
 Unlock Windows and dismiss its lock or sign-in screen before starting 3D. A lock, sign-in, or
 permission-screen transition stops the monitor session and restores 2D. Start 3D again after

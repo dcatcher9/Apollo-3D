@@ -3430,29 +3430,24 @@ namespace ar_glasses {
         return resumed;
       }
 
-      void refresh_pointer_isolation() {
-        if (monitor_surface_ && desktop_handoff_ && live_target_ && running_.load()) {
-          const auto source = refresh_virtual_display_reference();
-          if (source) {
-            RECT sink_rect {};
-            {
-              std::lock_guard lock(live_target_->mutex);
-              sink_rect = live_target_->rect;
-            }
-            if (desktop_handoff_->refresh(sink_rect, source->rect)) {
-              handoff_refresh_unready_started_.reset();
-            } else {
-              const auto now = std::chrono::steady_clock::now();
-              if (!handoff_refresh_unready_started_) {
-                handoff_refresh_unready_started_ = now;
-              } else if (now - *handoff_refresh_unready_started_ >= 2s) {
-                std::lock_guard lock(physical_monitor_error_mutex);
-                physical_monitor_error = "An application could not enter the monitor's 3D desktop. Switch it to a normal or borderless window, then start 3D again.";
-                physical_monitor_requested.store(false);
-              }
-            }
-          }
+      // A window that opens on the parked physical output while Monitor 3D is presenting would sit
+      // behind the presenter. Send it to the 3D desktop; one that will not go is left where it is
+      // by the handoff itself, and the session continues.
+      void refresh_monitor_windows() {
+        if (!monitor_surface_ || !desktop_handoff_ || !live_target_ || !running_.load()) {
+          return;
         }
+        if (const auto source = refresh_virtual_display_reference()) {
+          RECT sink_rect {};
+          {
+            std::lock_guard lock(live_target_->mutex);
+            sink_rect = live_target_->rect;
+          }
+          (void) desktop_handoff_->refresh(sink_rect, source->rect);
+        }
+      }
+
+      void refresh_pointer_isolation() {
         if (exclusive_) {
           if (!monitor_surface_) {
             platf::primary_display::refresh_exclusive_cursor_clip();
@@ -4148,7 +4143,6 @@ namespace ar_glasses {
 
       void start_presenter(const target_state_t &presentation_target) {
         stop_presenter();
-        handoff_refresh_unready_started_.reset();
         if (!live_target_) {
           live_target_ = std::make_shared<platf::dxgi::local_presenter_config_t::target_t>();
         }
@@ -4316,7 +4310,6 @@ namespace ar_glasses {
       bool exclusive_;
       bool monitor_surface_ = false;
       std::shared_ptr<platf::monitor_desktop_handoff_t> desktop_handoff_;
-      std::optional<std::chrono::steady_clock::time_point> handoff_refresh_unready_started_;
       int source_width_ = source_width;
       int source_height_ = source_height;
       std::function<bool()> session_requested_;
@@ -4889,6 +4882,8 @@ namespace ar_glasses {
             }
             if (transition_presenter_paused_ && session_) {
               session_->refresh_pointer_isolation();
+            } else if (session_) {
+              session_->refresh_monitor_windows();
             }
             std::this_thread::sleep_for(topology_poll_interval);
             continue;
@@ -4932,6 +4927,8 @@ namespace ar_glasses {
           }
           if (transition_presenter_paused_ && session_) {
             session_->refresh_pointer_isolation();
+          } else if (session_) {
+            session_->refresh_monitor_windows();
           }
           if (session_ && !wear_allows_session()) {
             // Extended-mode recovery may still need a durable sink-mode rebase. Never restart
