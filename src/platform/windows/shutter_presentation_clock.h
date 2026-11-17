@@ -17,6 +17,13 @@ namespace platf::dxgi::detail {
     return repeats >= 1 && repeats <= 4 && delta >= repeats && delta <= 4 * repeats;
   }
 
+  // The same bound for an eye that follows one the presenter deliberately showed for fewer
+  // refreshes, to repay a late image: that earlier eye lasted previous_presents refreshes.
+  constexpr bool eye_refresh_delta_valid(unsigned repeats, unsigned previous_presents, std::uint32_t delta) noexcept {
+    return repeats >= 1 && repeats <= 4 && previous_presents >= 1 && previous_presents <= repeats &&
+           delta >= previous_presents && delta <= 4 * repeats;
+  }
+
   // A transient path change may be reacquired with the emitter quiet. Repeated losses must
   // still return to 2D instead of keeping the desktop indefinitely in a dark recovery loop.
   class shutter_recovery_budget_t {
@@ -121,23 +128,32 @@ namespace platf::dxgi::detail {
       }
     }
 
+    // previous_eye_presents: how many presents the eye before this one submitted, when the
+    // presenter shortened it to repay a late image. Zero means the usual present_stride.
     shutter_feedback_tracker_status_e observe(
       std::uint32_t requested_id,
       const shutter_feedback_t &feedback,
-      std::int64_t query_qpc
+      std::int64_t query_qpc,
+      unsigned previous_eye_presents = 0
     ) noexcept {
       using status_e = shutter_feedback_tracker_status_e;
       if (failed_) {
         return status_e::rejected;
       }
+      // Only an armed sequence may contain a shortened eye; acquisition measures whole eyes.
+      if (previous_eye_presents > present_stride_ || (previous_eye_presents != 0 && previous_eye_presents != present_stride_ && !armed_)) {
+        return invalidate();
+      }
+      const unsigned stride = previous_eye_presents == 0 ? present_stride_ : previous_eye_presents;
+      const unsigned shortest_delta = previous_eye_presents == 0 ? repeats_ : std::min(repeats_, previous_eye_presents);
       const auto present_qpc = reconstruct(requested_id, feedback);
       if (!present_qpc || feedback.sync_qpc - future_ticks() > query_qpc || !fresh(*present_qpc, query_qpc)) {
         return invalidate();
       }
       const auto refresh_delta = static_cast<std::uint32_t>(feedback.refresh_count - last_refresh_);
       const bool continuous = last_present_qpc_ &&
-                              requested_id == static_cast<std::uint32_t>(last_present_id_ + present_stride_) &&
-                              (armed_ ? held_refresh_delta_valid(repeats_, refresh_delta) : refresh_delta == repeats_) &&
+                              requested_id == static_cast<std::uint32_t>(last_present_id_ + stride) &&
+                              (armed_ ? eye_refresh_delta_valid(repeats_, shortest_delta, refresh_delta) : refresh_delta == repeats_) &&
                               cadence_matches(*present_qpc, refresh_delta);
       if (last_present_qpc_ && !continuous) {
         if (armed_) {
@@ -391,11 +407,13 @@ namespace platf::dxgi::detail {
       return left_;
     }
 
-    bool observe_displayed(std::uint32_t refresh_count) noexcept {
-      if (repeats_ < 1 || repeats_ > 4) {
+    // previous_eye_presents as for the feedback tracker: zero means a whole eye.
+    bool observe_displayed(std::uint32_t refresh_count, unsigned previous_eye_presents = 0) noexcept {
+      if (repeats_ < 1 || repeats_ > 4 || previous_eye_presents > repeats_) {
         return false;
       }
-      if (last_refresh_ && !held_refresh_delta_valid(repeats_, static_cast<std::uint32_t>(refresh_count - *last_refresh_))) {
+      const unsigned shortest_delta = previous_eye_presents == 0 ? repeats_ : previous_eye_presents;
+      if (last_refresh_ && !eye_refresh_delta_valid(repeats_, shortest_delta, static_cast<std::uint32_t>(refresh_count - *last_refresh_))) {
         return false;
       }
       last_refresh_ = refresh_count;

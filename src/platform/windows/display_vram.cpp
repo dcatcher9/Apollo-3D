@@ -10189,6 +10189,14 @@ namespace platf::dxgi {
         std::array<unsigned, 6> acquisition_wait_counts {};
         unsigned acquisition_maximum_streak = 0;
         std::uint64_t confirmed_eye_commands = 0, held_eye_images = 0, extra_held_refreshes = 0;
+        // An averaging emitter keeps its own rhythm, so a late image leaves the picture whole
+        // refreshes behind it. The presenter repays them by showing following eyes for fewer
+        // refreshes, which needs no pause. These count the refreshes still owed, the presents
+        // of the eye now being shown, and those of the eye before it.
+        std::uint64_t absorbed_late_images = 0;
+        unsigned owed_refreshes = 0;
+        unsigned eye_presents = static_cast<unsigned>(eye_repeats);
+        unsigned previous_eye_presents = static_cast<unsigned>(eye_repeats);
         std::uint64_t clock_recoveries = 0;
         std::uint64_t muted_eye_commands = 0;
         std::uint32_t maximum_confirmed_refresh_delta = 0;
@@ -10259,7 +10267,8 @@ namespace platf::dxgi {
         // One eye is eye_repeats presents of the same image, each for exactly one refresh. The
         // first identifies the eye and marks its boundary; the others keep it on screen. Every
         // present after a flip-discard needs the image drawn again into the new back buffer.
-        const auto submit_eye = [&](bool left_eye) {
+        // An eye that repays a late image submits fewer presents.
+        const auto submit_eye = [&](bool left_eye, unsigned presents) {
           submission_t submission;
           draw_eye(left_eye);
           submission.prior_count_result = swapchain->GetLastPresentCount(&submission.prior_count);
@@ -10269,7 +10278,7 @@ namespace platf::dxgi {
           submission.present_end_qpc = qpc_now();
           if (submission.result == S_OK) {
             submission.count_result = swapchain->GetLastPresentCount(&submission.present_id);
-            for (int repeat = 1; repeat < eye_repeats && submission.result == S_OK; ++repeat) {
+            for (unsigned repeat = 1; repeat < presents && submission.result == S_OK; ++repeat) {
               // The queue is two eyes deep, so a slot is normally free at once. A slot that
               // does not appear means the output stopped retiring images.
               if (WaitForSingleObject(frame_latency_waitable, 100) != WAIT_OBJECT_0) {
@@ -10286,7 +10295,7 @@ namespace platf::dxgi {
             if (submission.result == S_OK && SUCCEEDED(submission.count_result)) {
               UINT last_present = 0;
               const auto last_result = swapchain->GetLastPresentCount(&last_present);
-              if (FAILED(last_result) || last_present != static_cast<UINT>(submission.present_id + static_cast<UINT>(eye_repeats) - 1u)) {
+              if (FAILED(last_result) || last_present != static_cast<UINT>(submission.present_id + static_cast<UINT>(presents) - 1u)) {
                 // Another present entered the sequence, so the eye's identity stride is unknown.
                 submission.count_result = FAILED(last_result) ? last_result : E_UNEXPECTED;
               }
@@ -10372,6 +10381,8 @@ namespace platf::dxgi {
           // firmware drain authorize a wholly new clock; never repair IDs or infer eye parity.
           feedback_tracker = make_feedback_tracker();
           eye_clock = detail::shutter_presentation_clock_t {static_cast<unsigned>(eye_repeats)};
+          owed_refreshes = 0;
+          eye_presents = previous_eye_presents = static_cast<unsigned>(eye_repeats);
           has_displayed = false;
           recovering_clock = true;
           previous_displayed_refresh.reset();
@@ -10472,7 +10483,14 @@ namespace platf::dxgi {
           if (stopped()) {
             break;
           }
-          submission = submit_eye(left_eye);
+          eye_presents = static_cast<unsigned>(eye_repeats);
+          if (owed_refreshes != 0 && has_displayed && eye_presents > 1) {
+            // Keep at least one present, which identifies the eye.
+            const unsigned repaid = std::min(owed_refreshes, eye_presents - 1);
+            eye_presents -= repaid;
+            owed_refreshes -= repaid;
+          }
+          submission = submit_eye(left_eye, eye_presents);
           const auto before_present_count = submission.prior_count;
           const auto before_count_result = submission.prior_count_result;
           const auto present_start_qpc = submission.present_begin_qpc;
@@ -10576,7 +10594,7 @@ namespace platf::dxgi {
             ++acquisition_presents;
             if (recovering_clock && confirmation.status != detail::shutter_feedback_wait_status_e::displayed &&
                 !detail::shutter_feedback_is_timing_interruption(confirmation) &&
-                !detail::shutter_feedback_superseded_within_eye(confirmation, requested_present, static_cast<unsigned>(eye_repeats))) {
+                !detail::shutter_feedback_superseded_within_eye(confirmation, requested_present, eye_presents)) {
               log_feedback_failure();
               fail("presentation feedback failed while reacquiring the shutter clock");
               break;
@@ -10623,7 +10641,7 @@ namespace platf::dxgi {
                 recover_clock("presentation feedback interrupted"sv)) {
               continue;
             }
-            if (detail::shutter_feedback_superseded_within_eye(confirmation, requested_present, static_cast<unsigned>(eye_repeats)) &&
+            if (detail::shutter_feedback_superseded_within_eye(confirmation, requested_present, eye_presents) &&
                 recover_clock("the eye's first present was superseded before its feedback was read"sv)) {
               continue;
             }
@@ -10634,7 +10652,7 @@ namespace platf::dxgi {
             break;
           }
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::tracker_rejected);
-          if (feedback_tracker.observe(requested_present, confirmation.feedback, confirmation_qpc) != detail::shutter_feedback_tracker_status_e::accepted) {
+          if (feedback_tracker.observe(requested_present, confirmation.feedback, confirmation_qpc, previous_eye_presents) != detail::shutter_feedback_tracker_status_e::accepted) {
             log_feedback_failure();
             if (recover_clock("displayed-eye identity, cadence or freshness changed"sv)) {
               continue;
@@ -10649,7 +10667,7 @@ namespace platf::dxgi {
             timing_sample->boundary = feedback_tracker.last_present_qpc().value_or(0);
           }
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::eye_clock_rejected);
-          if (!eye_clock.observe_displayed(confirmation.feedback.refresh_count)) {
+          if (!eye_clock.observe_displayed(confirmation.feedback.refresh_count, previous_eye_presents)) {
             log_feedback_failure();
             if (recover_clock("eye scanout cadence interrupted"sv)) {
               continue;
@@ -10708,19 +10726,27 @@ namespace platf::dxgi {
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::signalled);
           ++confirmed_eye_commands;
           maximum_confirmed_refresh_delta = std::max(maximum_confirmed_refresh_delta, confirmed_refresh_delta);
-          const bool late_image = confirmed_refresh_delta > static_cast<unsigned>(eye_repeats);
+          // The eye before this one was meant to last previous_eye_presents refreshes.
+          const bool late_image = has_displayed && confirmed_refresh_delta > previous_eye_presents;
+          const unsigned late_refreshes = late_image ? confirmed_refresh_delta - previous_eye_presents : 0;
           if (late_image) {
             ++held_eye_images;
-            extra_held_refreshes += confirmed_refresh_delta - eye_repeats;
+            extra_held_refreshes += late_refreshes;
           }
           has_displayed = true;
+          previous_eye_presents = eye_presents;
           if (config.presented_frames) {
-            config.presented_frames->fetch_add(eye_repeats, std::memory_order_relaxed);
+            config.presented_frames->fetch_add(eye_presents, std::memory_order_relaxed);
           }
-          if (late_image && emitter_settings.averaging) {
-            // A late image moves every later eye by whole refreshes. An averaging emitter keeps
-            // its earlier rhythm and its firmware ignores so large a correction, so the lenses
-            // would stay out of step with the picture. Start the rhythm again.
+          // A late image moves every later eye by whole refreshes. An averaging emitter keeps
+          // its earlier rhythm and its firmware ignores so large a correction, so the lenses
+          // would stay out of step with the picture. Repay the refreshes by shortening the
+          // following eyes; if that is not possible or too many are owed, start the rhythm again.
+          if (late_image && emitter_settings.averaging && eye_repeats > 1 &&
+              owed_refreshes + late_refreshes <= 2u * static_cast<unsigned>(eye_repeats)) {
+            owed_refreshes += late_refreshes;
+            ++absorbed_late_images;
+          } else if (late_image && emitter_settings.averaging) {
             if (recover_clock("a late image moved the eye rhythm away from the averaging emitter"sv)) {
               continue;
             }
@@ -10733,6 +10759,7 @@ namespace platf::dxgi {
         }
         BOOST_LOG(info) << "Local shutter presentation summary: confirmed_eye_commands="sv << confirmed_eye_commands
                         << " held_eye_images="sv << held_eye_images << " extra_held_refreshes="sv << extra_held_refreshes
+                        << " absorbed_late_images="sv << absorbed_late_images
                         << " clock_recoveries="sv << clock_recoveries
                         << " maximum_refresh_delta="sv << maximum_confirmed_refresh_delta << " repeats="sv << eye_repeats << '.';
         if (shutter_muted_slot) {

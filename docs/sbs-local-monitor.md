@@ -186,8 +186,10 @@ correction larger than about 0.6 ms, so an occasional late command changes nothi
 Two consequences follow from the emitter running by itself:
 
 - A late image moves every later eye by a whole refresh, which the firmware would ignore. The
-  presenter therefore restarts the rhythm after a late image: it stops the emitter, re-acquires its
-  clock and starts again, which shows as a short pause of the glasses.
+  presenter repays those refreshes by showing the following eyes for fewer refreshes, so the picture
+  returns to the emitter's rhythm within a few eyes and the glasses do not pause. This needs at
+  least two refreshes per eye; with one, or when more than a whole left/right cycle is owed, the
+  presenter restarts the rhythm instead, which shows as a short pause of the glasses.
 - After the last eye command the firmware continues for a bounded number of signals. The presenter
   stops it explicitly when it pauses or ends; if the host process is killed, the firmware stops by
   itself after about a second.

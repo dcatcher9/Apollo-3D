@@ -846,3 +846,52 @@ TEST(ShutterPresentFeedback, AnEmptySampleFollowedByALaterPresentOfTheEyeIsAReco
   EXPECT_TRUE(shutter::shutter_feedback_superseded_within_eye(result, probe.present_id, 3));
   EXPECT_FALSE(shutter::shutter_feedback_superseded_within_eye(result, probe.present_id, 1));
 }
+
+TEST(ShutterFeedbackTracker, AnArmedSequenceAcceptsAnEyeShortenedToRepayALateImage) {
+  // Two presents per eye. Eyes 10, 12 are on time; eye 14 is shown one refresh late; eye 16 is
+  // then shortened to one present, so eye 17 follows it one present and one refresh later.
+  tracker_t tracker(2, 120000, tracker_frequency, 2000, 100, 2, 100, 0, 2);
+  const auto at = [](std::uint32_t refresh) {
+    return tracker_origin + static_cast<std::int64_t>(refresh - 1000u) * tracker_refresh_ticks;
+  };
+  ASSERT_EQ(tracker.observe(10, tracker_feedback(10, 1000, at(1000)), at(1000) + 1200), tracker_status::acquiring);
+  ASSERT_EQ(tracker.observe(12, tracker_feedback(12, 1002, at(1002)), at(1002) + 1200), tracker_status::ready);
+  ASSERT_TRUE(tracker.arm());
+  EXPECT_EQ(tracker.observe(14, tracker_feedback(14, 1005, at(1005)), at(1005) + 1200, 2), tracker_status::accepted);
+  EXPECT_EQ(tracker.observe(16, tracker_feedback(16, 1007, at(1007)), at(1007) + 1200, 2), tracker_status::accepted);
+  EXPECT_EQ(tracker.observe(17, tracker_feedback(17, 1008, at(1008)), at(1008) + 1200, 1), tracker_status::accepted);
+  EXPECT_EQ(tracker.observe(19, tracker_feedback(19, 1010, at(1010)), at(1010) + 1200, 2), tracker_status::accepted);
+  // Without being told, the same short step is a broken sequence.
+  EXPECT_EQ(tracker.observe(20, tracker_feedback(20, 1011, at(1011)), at(1011) + 1200), tracker_status::rejected);
+  EXPECT_TRUE(tracker.failed());
+}
+
+TEST(ShutterFeedbackTracker, AShortenedEyeIsNeverPartOfAcquisitionOrLongerThanAWholeEye) {
+  const auto at = [](std::uint32_t refresh) {
+    return tracker_origin + static_cast<std::int64_t>(refresh - 1000u) * tracker_refresh_ticks;
+  };
+  tracker_t cold(2, 120000, tracker_frequency, 2000, 100, 2, 100, 0, 2);
+  ASSERT_EQ(cold.observe(10, tracker_feedback(10, 1000, at(1000)), at(1000) + 1200), tracker_status::acquiring);
+  EXPECT_NE(cold.observe(11, tracker_feedback(11, 1001, at(1001)), at(1001) + 1200, 1), tracker_status::ready);
+  EXPECT_FALSE(cold.arm());
+
+  tracker_t armed(2, 120000, tracker_frequency, 2000, 100, 2, 100, 0, 2);
+  ASSERT_EQ(armed.observe(10, tracker_feedback(10, 1000, at(1000)), at(1000) + 1200), tracker_status::acquiring);
+  ASSERT_EQ(armed.observe(12, tracker_feedback(12, 1002, at(1002)), at(1002) + 1200), tracker_status::ready);
+  ASSERT_TRUE(armed.arm());
+  EXPECT_EQ(armed.observe(15, tracker_feedback(15, 1005, at(1005)), at(1005) + 1200, 3), tracker_status::rejected);
+}
+
+TEST(ShutterPresentationClock, TheEyeAfterAShortenedEyeMayFollowSooner) {
+  shutter::shutter_presentation_clock_t clock(2);
+  ASSERT_TRUE(clock.observe_displayed(1000));
+  ASSERT_TRUE(clock.observe_displayed(1002));
+  EXPECT_TRUE(clock.observe_displayed(1003, 1));
+  EXPECT_FALSE(clock.left_eye());
+  // One refresh after a whole eye is still not an eye.
+  EXPECT_FALSE(clock.observe_displayed(1004));
+  EXPECT_FALSE(shutter::shutter_presentation_clock_t(2).observe_displayed(1000, 3));
+  static_assert(shutter::eye_refresh_delta_valid(2, 1, 1));
+  static_assert(!shutter::eye_refresh_delta_valid(2, 2, 1));
+  static_assert(!shutter::eye_refresh_delta_valid(2, 3, 3));
+}
