@@ -8629,7 +8629,57 @@ namespace platf::dxgi {
         return fallback;
       }
 
+      // Every monitor of the desktop, in physical pixels.
+      static std::optional<std::vector<RECT>> desktop_monitor_rects() {
+        const auto previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        auto restore_dpi = util::fail_guard([previous_dpi]() {
+          if (previous_dpi) {
+            SetThreadDpiAwarenessContext(previous_dpi);
+          }
+        });
+        if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+          return std::nullopt;
+        }
+        std::vector<RECT> monitors;
+        const auto enumerated = EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM parameter) -> BOOL {
+          MONITORINFO info {sizeof(MONITORINFO)};
+          if (!GetMonitorInfoW(monitor, &info)) {
+            return FALSE;
+          }
+          reinterpret_cast<std::vector<RECT> *>(parameter)->push_back(info.rcMonitor);
+          return TRUE;
+        }, reinterpret_cast<LPARAM>(&monitors));
+        if (!enumerated) {
+          return std::nullopt;
+        }
+        return monitors;
+      }
+
       clip_request_t desired_clip() const {
+        if (park_only) {
+          // Monitor presentation parks only its physical sink; every other monitor stays in
+          // use. Keep the pointer inside the rectangle around those monitors whenever the sink
+          // lies wholly outside it. Moving the pointer back after it entered the sink is not
+          // enough: Windows carries a pointer pushed against an outer edge over to the nearest
+          // other monitor, which is the sink, and it would come back at the sink's corner
+          // instead of where it left.
+          const auto sink = current_target_rect();
+          const auto monitors = desktop_monitor_rects();
+          if (!valid_local_presenter_rect(sink) || !monitors) {
+            return {};
+          }
+          std::optional<RECT> bounds;
+          for (const auto &monitor : *monitors) {
+            if (same_local_presenter_rect(monitor, sink)) {
+              continue;
+            }
+            bounds = bounds ? RECT {std::min(bounds->left, monitor.left), std::min(bounds->top, monitor.top), std::max(bounds->right, monitor.right), std::max(bounds->bottom, monitor.bottom)} : monitor;
+          }
+          if (!bounds || !valid_local_presenter_rect(*bounds) || intersect_local_presenter_rects(*bounds, sink)) {
+            return {true, std::nullopt};
+          }
+          return {true, bounds};
+        }
         const auto source_rect = current_source_rect();
         const auto target_rect = current_target_rect();
         if (!valid_local_presenter_rect(source_rect) || !valid_local_presenter_rect(target_rect)) {
@@ -8654,7 +8704,7 @@ namespace platf::dxgi {
       }
 
       void acquire_clip() {
-        if (park_only || !cursor_clip || std::chrono::steady_clock::now() < cursor_clip->retry_after) {
+        if (!cursor_clip || std::chrono::steady_clock::now() < cursor_clip->retry_after) {
           return;
         }
         if (!deferred_cursor_restore_manager().ready_for_new_owner()) {
@@ -8749,7 +8799,7 @@ namespace platf::dxgi {
       }
 
       void refresh_clip() {
-        if (park_only || !cursor_clip) {
+        if (!cursor_clip) {
           return;
         }
         if (!cursor_clip->owns_clip) {
@@ -8823,8 +8873,8 @@ namespace platf::dxgi {
 
       bool clamp_pointer_to_source_edge() const {
         if (park_only) {
-          // Monitor presentation parks only its physical scanout sink. Every other output remains
-          // interactive; a global rectangular clip would incorrectly exclude those monitors.
+          // The fallback where no rectangle can keep the pointer off the sink, for example
+          // with monitors on two sides of it: move a pointer that entered the sink back out.
           const auto previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
           auto restore_dpi = util::fail_guard([previous_dpi]() {
             if (previous_dpi) {
@@ -8839,19 +8889,11 @@ namespace platf::dxgi {
           if (!valid_local_presenter_rect(sink) || !GetCursorPos(&cursor) || !PtInRect(&sink, cursor)) {
             return false;
           }
-          std::vector<RECT> interactive_monitors;
-          const auto enumerated = EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM parameter) -> BOOL {
-            MONITORINFO info {sizeof(MONITORINFO)};
-            if (!GetMonitorInfoW(monitor, &info)) {
-              return FALSE;
-            }
-            reinterpret_cast<std::vector<RECT> *>(parameter)->push_back(info.rcMonitor);
-            return TRUE;
-          }, reinterpret_cast<LPARAM>(&interactive_monitors));
-          if (!enumerated) {
+          const auto monitors = desktop_monitor_rects();
+          if (!monitors) {
             return false;
           }
-          const auto clamped = detail::nearest_interactive_pointer_point(cursor, sink, interactive_monitors);
+          const auto clamped = detail::nearest_interactive_pointer_point(cursor, sink, *monitors);
           return clamped && SetCursorPos(clamped->x, clamped->y) != FALSE;
         }
         const auto source_rect = current_source_rect();
