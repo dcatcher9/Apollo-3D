@@ -10726,9 +10726,11 @@ namespace platf::dxgi {
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::signalled);
           ++confirmed_eye_commands;
           maximum_confirmed_refresh_delta = std::max(maximum_confirmed_refresh_delta, confirmed_refresh_delta);
-          // The eye before this one was meant to last previous_eye_presents refreshes.
-          const bool late_image = has_displayed && confirmed_refresh_delta > previous_eye_presents;
-          const unsigned late_refreshes = late_image ? confirmed_refresh_delta - previous_eye_presents : 0;
+          // The eye before this one was meant to last previous_eye_presents refreshes. Elapsed
+          // time decides how long it did last; Windows' refresh counter can trail it by one.
+          const auto elapsed_refresh_delta = std::max(confirmed_refresh_delta, feedback_tracker.interval_refreshes());
+          const bool late_image = has_displayed && elapsed_refresh_delta > previous_eye_presents;
+          const unsigned late_refreshes = late_image ? elapsed_refresh_delta - previous_eye_presents : 0;
           if (late_image) {
             ++held_eye_images;
             extra_held_refreshes += late_refreshes;

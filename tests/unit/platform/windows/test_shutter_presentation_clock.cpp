@@ -706,7 +706,8 @@ TEST(ShutterFeedbackTracker, EveryArmedFeedbackViolationLatchesInsteadOfReacquir
       case fault::unsupported: feedback.status = shutter::shutter_feedback_status_e::unsupported; break;
       case fault::wrong_id: feedback.present_count = 13; break;
       case fault::unmeasured_refresh: ++feedback.refresh_count; ++feedback.sync_refresh_count; break;
-      case fault::wrong_cadence: feedback.sync_qpc += tracker_refresh_ticks; query += tracker_refresh_ticks; break;
+      // A boundary that is not a whole number of refresh periods after the last one.
+      case fault::wrong_cadence: feedback.sync_qpc += tracker_refresh_ticks / 2; query += tracker_refresh_ticks / 2; break;
       case fault::zero_qpc: feedback.sync_qpc = 0; break;
       case fault::future_present: query = next - 1; break;
       case fault::future_sync: feedback.sync_qpc += tracker_refresh_ticks; ++feedback.sync_refresh_count; break;
@@ -894,4 +895,34 @@ TEST(ShutterPresentationClock, TheEyeAfterAShortenedEyeMayFollowSooner) {
   static_assert(shutter::eye_refresh_delta_valid(2, 1, 1));
   static_assert(!shutter::eye_refresh_delta_valid(2, 2, 1));
   static_assert(!shutter::eye_refresh_delta_valid(2, 3, 3));
+}
+
+TEST(ShutterFeedbackTracker, AnArmedSequenceMeasuresALateImageByElapsedTimeWhenTheCounterTrails) {
+  // Windows was measured to count two refreshes while three refresh periods elapsed.
+  tracker_t tracker(2, 120000, tracker_frequency, 4000, 100, 2, 100, 0, 2);
+  const auto at = [](std::uint32_t refresh) {
+    return tracker_origin + static_cast<std::int64_t>(refresh - 1000u) * tracker_refresh_ticks;
+  };
+  ASSERT_EQ(tracker.observe(10, tracker_feedback(10, 1000, at(1000)), at(1000) + 1200), tracker_status::acquiring);
+  ASSERT_EQ(tracker.observe(12, tracker_feedback(12, 1002, at(1002)), at(1002) + 1200), tracker_status::ready);
+  ASSERT_TRUE(tracker.arm());
+  EXPECT_EQ(tracker.observe(14, tracker_feedback(14, 1004, at(1005)), at(1005) + 1200), tracker_status::accepted);
+  EXPECT_EQ(tracker.interval_refreshes(), 3u);
+  EXPECT_EQ(tracker.observe(16, tracker_feedback(16, 1006, at(1007)), at(1007) + 1200), tracker_status::accepted);
+  EXPECT_EQ(tracker.interval_refreshes(), 2u);
+  // The counter may trail the time, never lead it.
+  EXPECT_EQ(tracker.observe(18, tracker_feedback(18, 1009, at(1009)), at(1009) + 1200), tracker_status::rejected);
+  EXPECT_TRUE(tracker.failed());
+}
+
+TEST(ShutterFeedbackTracker, ColdAcquisitionStillNeedsCounterAndTimeToAgree) {
+  tracker_t tracker(2, 120000, tracker_frequency, 4000, 100, 3, 100, 0, 2);
+  const auto at = [](std::uint32_t refresh) {
+    return tracker_origin + static_cast<std::int64_t>(refresh - 1000u) * tracker_refresh_ticks;
+  };
+  ASSERT_EQ(tracker.observe(10, tracker_feedback(10, 1000, at(1000)), at(1000) + 1200), tracker_status::acquiring);
+  ASSERT_EQ(tracker.observe(12, tracker_feedback(12, 1002, at(1002)), at(1002) + 1200), tracker_status::acquiring);
+  EXPECT_EQ(tracker.observe(14, tracker_feedback(14, 1004, at(1005)), at(1005) + 1200), tracker_status::acquiring);
+  EXPECT_EQ(tracker.streak(), 1u);
+  EXPECT_FALSE(tracker.arm());
 }

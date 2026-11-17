@@ -190,6 +190,10 @@ Two consequences follow from the emitter running by itself:
   returns to the emitter's rhythm within a few eyes and the glasses do not pause. This needs at
   least two refreshes per eye; with one, or when more than a whole left/right cycle is owed, the
   presenter restarts the rhythm instead, which shows as a short pause of the glasses.
+  Once its clock is established the presenter measures how many refreshes passed between two eyes
+  from their timestamps: Windows' refresh counter was measured to advance by one fewer than the
+  elapsed refresh periods for many late images. The counter may trail the time by up to two but
+  never lead it, and an interval that is not a whole number of refresh periods is still a lost clock.
 - After the last eye command the firmware continues for a bounded number of signals. The presenter
   stops it explicitly when it pauses or ends; if the host process is killed, the firmware stops by
   itself after about a second.

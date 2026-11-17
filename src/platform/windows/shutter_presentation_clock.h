@@ -151,10 +151,17 @@ namespace platf::dxgi::detail {
         return invalidate();
       }
       const auto refresh_delta = static_cast<std::uint32_t>(feedback.refresh_count - last_refresh_);
+      // Once armed, the time between two boundaries says how many refreshes passed. Windows'
+      // refresh counter was measured to advance by one fewer than the elapsed refresh periods
+      // when an image is shown late, so the counter may trail the time by a little but never
+      // lead it. Cold acquisition still requires counter and time to agree exactly.
+      const auto timed_delta = armed_ && last_present_qpc_ ? timed_refreshes(*present_qpc) : std::nullopt;
       const bool continuous = last_present_qpc_ &&
                               requested_id == static_cast<std::uint32_t>(last_present_id_ + stride) &&
-                              (armed_ ? eye_refresh_delta_valid(repeats_, shortest_delta, refresh_delta) : refresh_delta == repeats_) &&
-                              cadence_matches(*present_qpc, refresh_delta);
+                              (armed_ ? timed_delta && eye_refresh_delta_valid(repeats_, shortest_delta, *timed_delta) &&
+                                          refresh_delta >= 1 && refresh_delta <= *timed_delta && *timed_delta - refresh_delta <= 2 :
+                                        refresh_delta == repeats_ && cadence_matches(*present_qpc, refresh_delta));
+      interval_refreshes_ = continuous ? (armed_ ? *timed_delta : refresh_delta) : 0;
       if (last_present_qpc_ && !continuous) {
         if (armed_) {
           return invalidate();
@@ -193,6 +200,9 @@ namespace platf::dxgi::detail {
     }
 
     [[nodiscard]] unsigned streak() const noexcept { return streak_; }
+    // Refreshes between the last accepted boundary and the one before it, by elapsed time once
+    // armed. Zero when the last observation did not continue a sequence.
+    [[nodiscard]] std::uint32_t interval_refreshes() const noexcept { return interval_refreshes_; }
     [[nodiscard]] std::optional<std::int64_t> last_present_qpc() const noexcept { return last_present_qpc_; }
     [[nodiscard]] bool armed() const noexcept { return armed_; }
     [[nodiscard]] bool failed() const noexcept { return failed_; }
@@ -234,6 +244,23 @@ namespace platf::dxgi::detail {
       return static_cast<long double>(now_qpc - present_qpc) * 1000000.0L / qpc_frequency_ <= host_age_budget_us_;
     }
 
+    // The whole number of refresh periods since the last boundary, if the elapsed time is one.
+    std::optional<std::uint32_t> timed_refreshes(std::int64_t present_qpc) const noexcept {
+      if (present_qpc <= *last_present_qpc_) {
+        return std::nullopt;
+      }
+      const auto elapsed = static_cast<long double>(present_qpc - *last_present_qpc_);
+      const auto periods = std::round(elapsed / refresh_ticks_);
+      if (periods < 1.0L || periods > 4.0L * repeats_) {
+        return std::nullopt;
+      }
+      const auto error_ticks = std::fabs(elapsed - refresh_ticks_ * periods);
+      if (error_ticks * 1000000.0L / qpc_frequency_ > armed_cadence_tolerance_us_) {
+        return std::nullopt;
+      }
+      return static_cast<std::uint32_t>(periods);
+    }
+
     bool cadence_matches(std::int64_t present_qpc, std::uint32_t refresh_delta) const noexcept {
       if (present_qpc <= *last_present_qpc_) {
         return false;
@@ -264,6 +291,7 @@ namespace platf::dxgi::detail {
     unsigned streak_ = 0;
     std::uint32_t last_present_id_ = 0;
     std::uint32_t last_refresh_ = 0;
+    std::uint32_t interval_refreshes_ = 0;
     std::optional<std::int64_t> last_present_qpc_;
     bool armed_ = false;
     bool failed_ = false;
