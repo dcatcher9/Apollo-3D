@@ -730,8 +730,8 @@ namespace platf::dxgi {
       const auto &client = foreground.client_screen_rect;
       std::uint64_t creation_time = 0u;
       if (foreground_window::carries_geometry(foreground.status) && foreground.process_id && client.valid() &&
-          client.left >= display->offset_x && client.top >= display->offset_y &&
-          client.right <= display->offset_x + display->width && client.bottom <= display->offset_y + display->height) {
+          client.left >= display->screen_x && client.top >= display->screen_y &&
+          client.right <= display->screen_x + display->width && client.bottom <= display->screen_y + display->height) {
         if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, foreground.process_id)) {
           FILETIME created {}, exited {}, kernel {}, user {};
           if (GetProcessTimes(process, &created, &exited, &kernel, &user)) {
@@ -749,7 +749,7 @@ namespace platf::dxgi {
         text_game_coverage_uploaded = false;
         return std::nullopt;
       }
-      text_game_client = {client.left - display->offset_x, client.top - display->offset_y, client.right - display->offset_x, client.bottom - display->offset_y};
+      text_game_client = {client.left - display->screen_x, client.top - display->screen_y, client.right - display->screen_x, client.bottom - display->screen_y};
       const ::video::game_source_identity_t identity {foreground.process_id, creation_time, 0u};
       if (!text_game_helper_identity || *text_game_helper_identity != identity) {
         text_game_helper_identity = identity;
@@ -994,8 +994,7 @@ namespace platf::dxgi {
         // Missing depth/exports are diagnostic use cases too. Poll before the blank-image
         // guard and without sharing the AI dumper's request/retry ownership.
         game_dumper.poll(device.get(), device_ctx.get(),
-          RECT {display->offset_x, display->offset_y,
-            display->offset_x + display->width, display->offset_y + display->height},
+          display->screen_rect(),
           game_source_width, game_source_height, sbs_mode);
       }
       auto converted_content_timestamp =
@@ -1012,12 +1011,7 @@ namespace platf::dxgi {
         std::optional<platf::reshade_bridge::frame_t> external;
         std::optional<::video::game_source_identity_t> game_source;
         if (reshade_receiver) {
-          const RECT source_rect {
-            display->offset_x,
-            display->offset_y,
-            display->offset_x + display->width,
-            display->offset_y + display->height,
-          };
+          const RECT source_rect = display->screen_rect();
           const int export_width = ::video::is_game_mode(sbs_mode) ? game_source_width * 2 : display->width * 2;
           const int export_height = ::video::is_game_mode(sbs_mode) ? game_source_height : display->height;
           if (::video::is_packed_mode(sbs_mode)) {
@@ -7114,7 +7108,7 @@ namespace platf::dxgi {
                               (display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ||
                                display->display_rotation == DXGI_MODE_ROTATION_IDENTITY);
       game_setup_watch = ::video::is_game_mode(sbs_mode) ?
-                           platf::game3d::watch_game_setup({display->offset_x, display->offset_y, display->offset_x + display->width, display->offset_y + display->height}) :
+                           platf::game3d::watch_game_setup(display->screen_rect()) :
                            nullptr;
       // This converter is used by live local/remote presentation only. The offline worker and
       // benchmark own their independent AI renderer and never instantiate this receiver.

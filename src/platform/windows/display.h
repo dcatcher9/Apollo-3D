@@ -955,6 +955,16 @@ namespace platf::dxgi {
     int display_refresh_rate_rounded;
 
     DXGI_MODE_ROTATION display_rotation = DXGI_MODE_ROTATION_UNSPECIFIED;
+    // Where this output is on the Windows desktop, in the coordinates windows are reported in.
+    // offset_x/offset_y are not that: they are shifted so the whole desktop starts at 0x0 for
+    // touch input, and differ as soon as another output lies above or left of the primary one.
+    int screen_x = 0;
+    int screen_y = 0;
+
+    [[nodiscard]] RECT screen_rect() const {
+      return {screen_x, screen_y, screen_x + width, screen_y + height};
+    }
+
     int width_before_rotation;
     int height_before_rotation;
 

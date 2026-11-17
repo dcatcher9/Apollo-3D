@@ -999,6 +999,8 @@ namespace platf::dxgi {
 
             offset_x = desc.DesktopCoordinates.left;
             offset_y = desc.DesktopCoordinates.top;
+            screen_x = offset_x;
+            screen_y = offset_y;
             width = desc.DesktopCoordinates.right - offset_x;
             height = desc.DesktopCoordinates.bottom - offset_y;
 
