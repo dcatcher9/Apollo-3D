@@ -1325,6 +1325,7 @@ namespace confighttp {
         {"local_monitor_signal_spacing_us", running.signal_spacing_us},
         {"local_monitor_flip_eyes", flag(running.flip_eyes)},
         {"local_monitor_eye_repeats", running.eye_repeats},
+        {"local_monitor_emitter_averaging", flag(running.emitter_averaging)},
       };
     }
     for (const int protocol : platf::open3d::limits::supported_protocols) {

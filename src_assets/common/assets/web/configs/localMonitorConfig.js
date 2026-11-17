@@ -4,7 +4,7 @@ export const settingEnabled = value => value === true || value === 1 || ['enable
 // local_monitor_enabled switch is not part of it; local_display_surface replaced it.
 export const localMonitorFingerprint = config => JSON.stringify(Object.keys(config || {})
   .filter(key => key === 'local_display_surface' || (key.startsWith('local_monitor_') && key !== 'local_monitor_enabled')).sort().map(key => [key,
-    key === 'local_monitor_flip_eyes' ? (settingEnabled(config[key]) ? 'enabled' : 'disabled') : String(config[key])]))
+    key === 'local_monitor_flip_eyes' || key === 'local_monitor_emitter_averaging' ? (settingEnabled(config[key]) ? 'enabled' : 'disabled') : String(config[key])]))
 
 export const shutterMonitorSelected = config => config?.local_display_surface === 'shutter_monitor'
 

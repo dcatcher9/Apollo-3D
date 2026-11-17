@@ -171,6 +171,27 @@ display session or sending eye commands.
 The `30` µs minimum spacing is a conservative host floor for the firmware's greater-than-`5` µs
 gap-arm lead and observed `17` µs service overhead.
 
+## Emitter averaging
+
+By default every eye command fires its own shutter signal, so the glasses receive each signal as
+late as its command left the host. The host confirms an eye on screen before it sends the command,
+and that confirmation is usually a few hundred microseconds after the picture and occasionally more
+than a millisecond. At a long eye interval this does not matter. At a short one, such as two
+refreshes per eye at 330 Hz, glasses were observed to drop single openings about once a second.
+
+With `local_monitor_emitter_averaging = enabled` the emitter firmware keeps its own even rhythm at
+the eye interval and uses each eye command only to correct that rhythm. The firmware ignores a
+correction larger than about 0.6 ms, so an occasional late command changes nothing.
+
+Two consequences follow from the emitter running by itself:
+
+- A late image moves every later eye by a whole refresh, which the firmware would ignore. The
+  presenter therefore restarts the rhythm after a late image: it stops the emitter, re-acquires its
+  clock and starts again, which shows as a short pause of the glasses.
+- After the last eye command the firmware continues for a bounded number of signals. The presenter
+  stops it explicitly when it pauses or ends; if the host process is killed, the firmware stops by
+  itself after about a second.
+
 ## Live qualification
 
 Native tests exercise the shared converter, immutable stereo packets, delayed presentation

@@ -65,6 +65,7 @@ namespace config {
       int signal_spacing_us = 30;  ///< Must leave room for the protocol's longest IR token.
       bool flip_eyes = false;
       int eye_repeats = 1;  ///< Number of physical refreshes assigned to each eye.
+      bool emitter_averaging = false;  ///< The emitter keeps an even rhythm and eye commands only correct it.
     };
 
     local_monitor_t local_monitor;

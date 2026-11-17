@@ -732,6 +732,7 @@ namespace config {
     integer("local_monitor_signal_spacing_us", result.signal_spacing_us, platf::open3d::limits::minimum_timing_us, platf::open3d::limits::maximum_signal_spacing_us);
     boolean("local_monitor_flip_eyes", result.flip_eyes);
     integer("local_monitor_eye_repeats", result.eye_repeats, 1, 4);
+    boolean("local_monitor_emitter_averaging", result.emitter_averaging);
     const auto timing = platf::open3d::timing_limits(result.ir_protocol, result.signal_spacing_us);
     if (!timing) {
       invalid(platf::open3d::limits::finite_close_protocol(result.ir_protocol) ? "local_monitor_signal_spacing_us" : "local_monitor_ir_protocol");

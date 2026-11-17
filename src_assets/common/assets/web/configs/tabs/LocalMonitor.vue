@@ -10,6 +10,7 @@ const devices = computed(() => props.status?.devices || [])
 const ports = computed(() => props.status?.ports || [])
 const timingProfiles = computed(() => props.status?.timing_limits || [])
 const flipEyes = computed(() => settingEnabled(props.config.local_monitor_flip_eyes))
+const emitterAveraging = computed(() => settingEnabled(props.config.local_monitor_emitter_averaging))
 const selectedDevice = computed(() => devices.value.find(device => device.id === props.config.local_monitor_display_id))
 const missingDevice = computed(() => props.config.local_monitor_display_id && !selectedDevice.value)
 const timing = computed(() => timingProfiles.value.find(profile => Number(profile.protocol) === Number(props.config.local_monitor_ir_protocol) && validLocalMonitorTimingLimits(profile)))
@@ -111,6 +112,11 @@ const displayLabel = device => `${device.name || 'Physical monitor'} · ${device
         <input id="local_monitor_flip_eyes" class="form-check-input" type="checkbox" :checked="flipEyes" @change="setEnabled('local_monitor_flip_eyes', $event)" />
         {{ $t('config.local_monitor_flip_eyes') }}
       </label>
+      <label class="monitor-flip" for="local_monitor_emitter_averaging">
+        <input id="local_monitor_emitter_averaging" class="form-check-input" type="checkbox" :checked="emitterAveraging" @change="setEnabled('local_monitor_emitter_averaging', $event)" />
+        {{ $t('config.local_monitor_emitter_averaging') }}
+      </label>
+      <p class="form-text">{{ $t('config.local_monitor_emitter_averaging_desc') }}</p>
     </details>
 
     <div v-if="validation.length" class="alert alert-warning mt-3" role="alert">

@@ -10116,6 +10116,7 @@ namespace platf::dxgi {
           .signal_spacing_us = config.monitor_config.signal_spacing_us,
           .flip_eyes = config.monitor_config.flip_eyes,
           .target_frametime_us = *emitter_eye_period,
+          .averaging = config.monitor_config.emitter_averaging,
         };
         const auto feedback_budget = platf::open3d::detail::host_feedback_budget_us(emitter_settings);
         if (!feedback_budget) {
@@ -10702,13 +10703,27 @@ namespace platf::dxgi {
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::signalled);
           ++confirmed_eye_commands;
           maximum_confirmed_refresh_delta = std::max(maximum_confirmed_refresh_delta, confirmed_refresh_delta);
-          if (confirmed_refresh_delta > static_cast<unsigned>(eye_repeats)) {
+          const bool late_image = confirmed_refresh_delta > static_cast<unsigned>(eye_repeats);
+          if (late_image) {
             ++held_eye_images;
             extra_held_refreshes += confirmed_refresh_delta - eye_repeats;
           }
           has_displayed = true;
           if (config.presented_frames) {
             config.presented_frames->fetch_add(eye_repeats, std::memory_order_relaxed);
+          }
+          if (late_image && emitter_settings.averaging) {
+            // A late image moves every later eye by whole refreshes. An averaging emitter keeps
+            // its earlier rhythm and its firmware ignores so large a correction, so the lenses
+            // would stay out of step with the picture. Start the rhythm again.
+            if (recover_clock("a late image moved the eye rhythm away from the averaging emitter"sv)) {
+              continue;
+            }
+            if (stopped()) {
+              break;
+            }
+            fail("the averaging emitter could not be restarted after a late image");
+            break;
           }
         }
         BOOST_LOG(info) << "Local shutter presentation summary: confirmed_eye_commands="sv << confirmed_eye_commands

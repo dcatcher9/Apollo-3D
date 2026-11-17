@@ -1054,6 +1054,12 @@ scanout; other monitors stay usable. See
 |---|---|
 | `disabled` | Swap left/right shutter assignment. Values: `enabled`, `disabled`. |
 
+### local_monitor_emitter_averaging
+
+| Default | Description |
+|---|---|
+| `disabled` | Use the emitter firmware's averaging mode. The emitter keeps an even shutter rhythm at the eye interval and each eye command only corrects it. Requires an eye interval of at most `65535` µs. Values: `enabled`, `disabled`. See [Local monitor 3D](sbs-local-monitor.md). |
+
 ### local_monitor_eye_repeats
 
 | Default | Description |

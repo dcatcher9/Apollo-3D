@@ -448,6 +448,44 @@ namespace {
     EXPECT_FALSE(emitter.healthy());
     EXPECT_FALSE(emitter.signal(true));
   }
+
+  TEST(Open3DEmitter, AveragingWritesTheEyeIntervalAndQuiescingTurnsItOff) {
+    auto previous = detail::parse_parameters(std::string(parameters) + ",42,99");
+    ASSERT_TRUE(previous);
+    settings_t settings;
+    settings.port = "COM12";
+    settings.protocol = 5;
+    settings.frame_delay_us = 350;
+    settings.frame_duration_us = 1800;
+    settings.signal_spacing_us = 40;
+    settings.target_frametime_us = 6061;
+    settings.averaging = true;
+    const auto command = detail::configuration_command(*previous, settings);
+    ASSERT_TRUE(command);
+    const auto applied = detail::parse_parameters("parameters 20" + command->substr(1));
+    ASSERT_TRUE(applied);
+    EXPECT_EQ(applied->values[14], 1);
+    EXPECT_EQ(applied->values[15], 6061);
+    EXPECT_EQ(applied->values[16], 1);
+    EXPECT_TRUE(detail::configuration_matches(*applied, *previous, settings));
+
+    // The quiet profile keeps protocol and timings and only stops the firmware's own rhythm.
+    const auto quiet_command = detail::quiesce_command(*applied);
+    ASSERT_TRUE(quiet_command);
+    const auto quiet = detail::parse_parameters("parameters 20" + quiet_command->substr(1));
+    ASSERT_TRUE(quiet);
+    EXPECT_EQ(quiet->values[14], 0);
+    EXPECT_EQ(quiet->values[1], 350);
+    EXPECT_TRUE(detail::quiesce_matches(*quiet, *applied));
+
+    // The firmware holds the eye interval in sixteen bits.
+    settings.target_frametime_us = 65536;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.target_frametime_us = 0;
+    EXPECT_FALSE(detail::valid_settings(settings));
+    settings.averaging = false;
+    EXPECT_TRUE(detail::valid_settings(settings));
+  }
 }  // namespace
 
 #endif

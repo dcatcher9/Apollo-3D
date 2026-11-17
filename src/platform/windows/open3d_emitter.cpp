@@ -67,12 +67,14 @@ namespace platf::open3d {
       values[2] = settings.frame_duration_us;
       values[3] = settings.signal_spacing_us;
       values[12] = settings.flip_eyes ? 1 : 0;
-      // Every eye boundary is explicitly acknowledged by the presenter. Disable autonomous
-      // averaging so a stalled/closed presenter cannot leave a free-running shutter sequence.
-      values[14] = 0;
-      // The firmware's averaging filter is uint16, but averaging is disabled. Keep its value
-      // zero and validate the actual host eye interval independently, including slow repeats.
-      values[15] = 0;
+      // Without averaging every eye boundary is explicitly acknowledged by the presenter, and a
+      // stalled or closed presenter cannot leave a free-running shutter sequence. With averaging
+      // the firmware continues by itself for a bounded number of signals after the last command;
+      // quiesce() and close() stop that explicitly.
+      values[14] = settings.averaging ? 1 : 0;
+      // The firmware's averaging filter is uint16 and is given the eye interval only when it is
+      // used. Otherwise it stays zero and the host eye interval is validated independently.
+      values[15] = settings.averaging ? settings.target_frametime_us : 0;
       return values;
     }
   }  // namespace
@@ -95,6 +97,10 @@ namespace platf::open3d {
     bool valid_settings(const settings_t &settings) {
       const auto timing = timing_limits(settings.protocol, settings.signal_spacing_us);
       if (!normalize_port(settings.port) || !timing || settings.frame_delay_us < timing->min_delay_us || settings.frame_delay_us > timing->max_delay_us || settings.frame_duration_us < timing->min_duration_us || settings.frame_duration_us > timing->max_duration_us || settings.target_frametime_us < 0) {
+        return false;
+      }
+      // The averaging filter holds the eye interval in sixteen bits.
+      if (settings.averaging && (settings.target_frametime_us <= 0 || settings.target_frametime_us > 65535)) {
         return false;
       }
       const int window_end_us = settings.frame_delay_us + settings.frame_duration_us;
@@ -211,6 +217,7 @@ namespace platf::open3d {
     std::array<char, 4> signal_bytes {};
     bool signal_pending = false;
     std::optional<detail::parameters_t> configured_parameters;
+    settings_t configured_settings;
     std::int64_t qpc_frequency = 0;
 
     bool transfer(bool write, void *bytes, DWORD length, DWORD &transferred, std::chrono::steady_clock::time_point deadline) {
@@ -374,6 +381,46 @@ namespace platf::open3d {
       return false;
     }
 
+    // With averaging the firmware keeps signalling after the last eye command. Stop it by
+    // writing the same profile with averaging off, let scheduled signals drain, then write the
+    // averaging profile again so the next eye commands start a new rhythm from nothing.
+    bool restart_averaging() {
+      const auto deadline = std::chrono::steady_clock::now() + transaction_timeout;
+      const auto averaging = *configured_parameters;
+      const auto quiet_command = detail::quiesce_command(averaging);
+      std::vector<std::string> response;
+      if (!finish_signal(deadline) || !quiet_command || !transaction(*quiet_command, response)) {
+        return false;
+      }
+      const auto quiet = read_parameters();
+      if (!quiet || !detail::quiesce_matches(*quiet, averaging) || !settle()) {
+        return false;
+      }
+      const auto command = detail::configuration_command(*quiet, configured_settings);
+      if (!command || !transaction(*command, response)) {
+        return false;
+      }
+      const auto actual = read_parameters();
+      if (!actual || !detail::configuration_matches(*actual, *quiet, configured_settings) || closing.load()) {
+        return false;
+      }
+      configured_parameters = *actual;
+      return true;
+    }
+
+    // Best effort before the port closes; if it fails the firmware still stops by itself after
+    // its bounded number of signals without a command.
+    void stop_averaging() {
+      if (!ready.load() || !configured_parameters || !configured_settings.averaging) {
+        return;
+      }
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {150};
+      std::vector<std::string> response;
+      if (const auto quiet_command = detail::quiesce_command(*configured_parameters); quiet_command && finish_signal(deadline)) {
+        (void) transaction(*quiet_command, response, deadline);
+      }
+    }
+
     void close_locked() {
       ready.store(false);
       configured_parameters.reset();
@@ -495,10 +542,11 @@ namespace platf::open3d {
       return false;
     }
     impl_->configured_parameters = *actual;
+    impl_->configured_settings = settings;
     LARGE_INTEGER frequency {};
     impl_->qpc_frequency = QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0 ? frequency.QuadPart : 0;
     impl_->ready.store(true);
-    BOOST_LOG(info) << "Open3DOLED emitter ready on " << normalized << ", firmware " << actual->firmware_version << " (volatile PC serial mode).";
+    BOOST_LOG(info) << "Open3DOLED emitter ready on " << normalized << ", firmware " << actual->firmware_version << (settings.averaging ? " (volatile PC serial mode, firmware averaging)." : " (volatile PC serial mode).");
     return true;
   }
 
@@ -515,8 +563,9 @@ namespace platf::open3d {
       .read_parameters = [this](auto deadline) { return impl_->read_parameters(deadline); },
       .wait_until = [this](auto until) { return impl_->wait_until(until); },
     };
-    if (!was_ready || !impl_->configured_parameters ||
-        !detail::quiesce_with_io(*impl_->configured_parameters, io) || impl_->closing.load()) {
+    const bool quiet = was_ready && impl_->configured_parameters &&
+                       (impl_->configured_settings.averaging ? impl_->restart_averaging() : detail::quiesce_with_io(*impl_->configured_parameters, io));
+    if (!quiet || impl_->closing.load()) {
       impl_->closing.store(true);
       impl_->close_locked();
       return false;
@@ -585,10 +634,16 @@ namespace platf::open3d {
   }
 
   void emitter_t::close() {
+    {
+      std::unique_lock lock(impl_->mutex, std::try_to_lock);
+      if (lock && !impl_->closing.load()) {
+        impl_->stop_averaging();
+      }
+    }
     impl_->closing.store(true);
     // The setup wait observes this flag at least every 50 ms and cancels its own operation.
     // Close/cancel the handle only under the mutex, so concurrent teardown cannot race a recycled
-    // Windows HANDLE. No averaging is enabled: the last configured finite shutter pulse expires.
+    // Windows HANDLE. Without averaging the last configured finite shutter pulse expires.
     std::lock_guard lock(impl_->mutex);
     impl_->close_locked();
   }

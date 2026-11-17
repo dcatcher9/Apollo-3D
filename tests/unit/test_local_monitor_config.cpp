@@ -206,3 +206,16 @@ TEST(LocalDisplaySurface, AnInvalidChoiceOrMonitorCannotStartAnything) {
   EXPECT_FALSE(config::parse_local_monitor_config(incomplete, &surface).enabled);
   EXPECT_EQ(surface, surface_e::off);
 }
+
+TEST(LocalMonitorConfig, EmitterAveragingIsOffUnlessEnabled) {
+  auto values = enabled_monitor();
+  EXPECT_FALSE(config::parse_local_monitor_config(values).emitter_averaging);
+  values = enabled_monitor();
+  values["local_monitor_emitter_averaging"] = "enabled";
+  const auto monitor = config::parse_local_monitor_config(values);
+  EXPECT_TRUE(monitor.enabled);
+  EXPECT_TRUE(monitor.emitter_averaging);
+  values = enabled_monitor();
+  values["local_monitor_emitter_averaging"] = "perhaps";
+  EXPECT_FALSE(config::parse_local_monitor_config(values).enabled);
+}

@@ -119,7 +119,11 @@ namespace platf::open3d {
     int frame_duration_us = 2000;
     int signal_spacing_us = 30;
     bool flip_eyes = false;
-    int target_frametime_us = 0;  // Host eye interval only; the disabled firmware averaging filter receives zero.
+    int target_frametime_us = 0;  // Host eye interval. The firmware receives it only when averaging is on.
+    // Firmware averaging: the emitter keeps its own even shutter rhythm at the eye interval and
+    // uses each eye command only to correct that rhythm, so a command that leaves the host late
+    // does not reach the glasses as a late signal. Off, every command fires its own signal.
+    bool averaging = false;
   };
 
   // Optional host-call timing only: neither WriteFile return nor these timestamps prove USB
