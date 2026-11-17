@@ -571,6 +571,26 @@ namespace platf::primary_display {
       return true;
     }
 
+    // The physical sink of a monitor session shows only the presenter. Beside the desktop along a
+    // whole edge, any pop-up that hangs over that edge lands on the sink above the presenter:
+    // a tray menu of another program was measured 28 pixels over it. Windows then composes the
+    // presenter instead of showing it directly, its images are no longer paced by the sink's
+    // refresh, and local 3D loses its clock. So the sink is parked up and to the right of the
+    // desktop, sharing a single pixel of edge at the top-right corner, which keeps the layout
+    // connected for Windows and leaves nothing beside it for a window to hang over.
+    bool park_sink_at_desktop_corner(display_spec_t &sink, const std::vector<display_spec_t> &desktop) {
+      if (!park_beside_desktop(sink, desktop)) {
+        return false;
+      }
+      constexpr LONG shared_edge_pixels = 1;
+      const auto y = static_cast<std::int64_t>(sink.source.position.y) - sink.source.height + shared_edge_pixels;
+      if (sink.source.height < static_cast<UINT32>(shared_edge_pixels) || y < std::numeric_limits<LONG>::min()) {
+        return false;
+      }
+      sink.source.position.y = static_cast<LONG>(y);
+      return true;
+    }
+
     bool monitor_pair_placement_matches(const detail::snapshot_t &current, const detail::snapshot_t &reference,
       std::wstring_view source, std::wstring_view sink) {
       const auto current_source = find_path(current, source);
@@ -2005,7 +2025,7 @@ namespace platf::primary_display {
         BOOST_LOG(warning) << "Local monitor physical-baseline reconstruction: " << reconstruction_failure << '.';
         return reject("physical recovery baseline reconstruction");
       }
-      if (!park_beside_desktop(sink, wanted)) {
+      if (!park_sink_at_desktop_corner(sink, wanted)) {
         return reject("physical sink parking");
       }
       wanted.push_back(sink);

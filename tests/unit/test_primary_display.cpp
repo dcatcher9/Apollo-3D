@@ -3956,6 +3956,8 @@ namespace {
   }
 }  // namespace
 
+// The physical sink is parked up and to the right of the desktop, sharing one pixel of edge with
+// it: a 1440-line sink beside a desktop whose right edge is 4480 sits at (4480, -1439).
 TEST(PrimaryDisplayMonitorReplacement, PrimaryMonitorKeepsOtherDesktopOutputsAndNativeRaster) {
   fake_io_t fake;
   monitor_baseline(fake, true);
@@ -3970,7 +3972,7 @@ TEST(PrimaryDisplayMonitorReplacement, PrimaryMonitorKeepsOtherDesktopOutputsAnd
   fake.current = fake.catalog;
   ASSERT_TRUE(manager.bind_pending(L"virtual"));
   ASSERT_TRUE(manager.promote(L"virtual", true));
-  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"monitor", 4480, -1439}});
   EXPECT_TRUE(std::ranges::all_of(clips, [](auto bounds) {
     return !bounds;
   }));
@@ -3990,7 +3992,7 @@ TEST(PrimaryDisplayMonitorReplacement, SecondaryMonitorDoesNotStealThePhysicalPr
   fake.current = fake.catalog;
   ASSERT_TRUE(manager.bind_pending(L"virtual"));
   ASSERT_TRUE(manager.promote(L"virtual", true));
-  expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+  expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, -1439}});
   const auto encoded = serialize(*fake.journal);
   ASSERT_FALSE(encoded.empty());
   auto roundtrip = deserialize(encoded);
@@ -4010,7 +4012,7 @@ TEST(PrimaryDisplayMonitorReplacement, ConnectedInactiveSecondary4kTvUsesRecorde
   secondary_tv_inactive_after_add(fake);
   ASSERT_TRUE(manager.bind_pending(L"virtual"));
   ASSERT_TRUE(manager.promote(L"virtual", true));
-  expect_positions(fake.current, {{L"virtual", -3840, 0}, {L"UltraGear", 0, 0}, {L"TV", 5120, 0}});
+  expect_positions(fake.current, {{L"virtual", -3840, 0}, {L"UltraGear", 0, 0}, {L"TV", 5120, -2159}});
   const auto tv = named_index(fake.current, L"TV");
   const auto &tv_path = fake.current.paths[tv];
   EXPECT_EQ(fake.current.modes[tv_path.sourceInfo.sourceModeInfoIdx].sourceMode.width, 3840u);
@@ -4053,7 +4055,7 @@ TEST(PrimaryDisplayMonitorReplacement, InactiveTvRecoveryPreservesConvergedSourc
   // Exercise explicit color restoration too: a topology apply may reset every output to SDR.
   fake.reset_colors_on_apply = true;
   ASSERT_TRUE(manager.promote(L"virtual", true));
-  expect_positions(fake.current, {{L"virtual", -3840, 0}, {L"UltraGear", 0, 0}, {L"TV", 5120, 0}});
+  expect_positions(fake.current, {{L"virtual", -3840, 0}, {L"UltraGear", 0, 0}, {L"TV", 5120, -2159}});
   for (const auto identity : {L"virtual", L"TV", L"UltraGear"}) {
     SCOPED_TRACE(identity);
     const auto index = named_index(fake.current, identity);
@@ -4163,7 +4165,7 @@ TEST(PrimaryDisplayMonitorReplacement, PauseResumeReplacesTheSameSecondaryWithou
   ASSERT_TRUE(manager.reactivate(retained, true));
   ASSERT_TRUE(fake.journal && fake.journal->monitor_replacement);
   ASSERT_TRUE(manager.promote(L"virtual", true));
-  expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+  expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, -1439}});
 }
 
 TEST(PrimaryDisplayMonitorReplacement, ReconcileRetainsOtherMonitorModeColorAndUserPosition) {
@@ -4247,7 +4249,7 @@ TEST(PrimaryDisplayMonitorReplacement, RetryAfterUnappliedPromotionDoesNotAdoptT
   EXPECT_FALSE(manager.promote(L"virtual", true));
   fake.ignore_apply = false;
   ASSERT_TRUE(manager.promote(L"virtual", true));
-  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"monitor", 4480, -1439}});
   ASSERT_TRUE(manager.restore(L"virtual"));
   expect_positions(fake.current, {{L"monitor", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"virtual", 4480, 0}});
 }
@@ -4310,7 +4312,7 @@ TEST(PrimaryDisplayMonitorReplacement, PausedSourceReactivationCanDetachAfterSel
   ASSERT_TRUE(manager.reactivate(retained, true));
   ASSERT_TRUE(fake.journal && fake.journal->monitor_replacement);
   ASSERT_TRUE(manager.promote(L"virtual", true));
-  expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, 0}});
+  expect_positions(fake.current, {{L"virtual", 1920, 0}, {L"other", 0, 0}, {L"left", -1920, 0}, {L"monitor", 4480, -1439}});
 }
 
 TEST(PrimaryDisplayMonitorReplacement, RestoreFinishesWhenNoPhysicalOutputRemains) {
@@ -4352,7 +4354,7 @@ TEST(PrimaryDisplayMonitorReplacement, FailedApplyThenNeighborModeHdrAndHotplugC
   color.advanced_color_enabled = color.hdr_user_enabled = color.advanced_color_active = true;
   color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
   ASSERT_TRUE(manager.promote(L"virtual", true));
-  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"hotplug", 0, -1080}, {L"monitor", 4480, 0}});
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"hotplug", 0, -1080}, {L"monitor", 4480, -1439}});
   ASSERT_TRUE(manager.restore(L"virtual"));
   EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"other")]->hdr_user_enabled);
   const auto &other = fake.current.paths[named_index(fake.current, L"other")];

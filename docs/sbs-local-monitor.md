@@ -35,7 +35,10 @@ capability is enabled. If another application has reserved one, use the tray or 
 Start creates a private virtual desktop on the monitor's GPU at its native per-eye dimensions.
 The private source replaces the selected monitor at that monitor's original desktop rectangle and
 keeps its original primary-display role. The physical sink is parked outside the interactive row
-for stereo scanout. Other monitors remain usable in their existing positions. Sunshine transfers
+for stereo scanout: up and to the right of the desktop, sharing a single pixel of edge at the
+top-right corner. Beside the desktop along a whole edge, a pop-up that hangs over that edge, such
+as another program's tray menu, would land on the sink above the presenter; Windows then composes
+the presenter instead of showing it directly and local 3D loses its refresh clock. Other monitors remain usable in their existing positions. Sunshine transfers
 the selected monitor's windows and cursor to the private source automatically; you do not need to
 drag applications to a separate virtual screen.
 
