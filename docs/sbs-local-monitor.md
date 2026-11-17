@@ -152,18 +152,8 @@ shared pipeline contracts.
 
 ## Configuration
 
-| Option | Default | Meaning |
-|---|---|---|
-| `local_monitor_enabled` | `disabled` | Allow explicitly requested monitor sessions |
-| `local_monitor_display_id` | empty | Exact physical Windows monitor device path |
-| `local_monitor_mode` | `host` | `host` or `game` |
-| `local_monitor_emitter_port` | empty | Open3DOLED COM port, such as `COM3` |
-| `local_monitor_ir_protocol` | `6` | Finite-window protocol: NVIDIA 3D Vision (`2`), Sony (`4`), Panasonic (`5`), or Panasonic custom firmware (`6`) |
-| `local_monitor_frame_delay_us` | `500` | Delay from sync to shutter window; minimum `150` µs for protocol `2`, `100` µs for `4`/`5`/`6`; maximum `32767` µs |
-| `local_monitor_frame_duration_us` | `2000` | Shutter-open duration; minimum configured spacing plus `300` µs for protocol `2`, `640` µs for `4`, or `320` µs for `5`/`6`; maximum `32767` µs |
-| `local_monitor_signal_spacing_us` | `30` | IR signal spacing; `30`–`882` µs for protocol `2`, `30`–`483` µs for `4`, or `30`–`803` µs for `5`/`6` |
-| `local_monitor_flip_eyes` | `disabled` | Swap left/right shutter assignment |
-| `local_monitor_eye_repeats` | `1` | Consecutive refreshes per eye, `1`–`4` |
+The ten `local_monitor_*` options, their defaults, and the per-protocol timing limits are owned by
+[Configuration](configuration.md).
 
 Invalid mode, boolean, timing, protocol, or repeat values disable the monitor capability during
 configuration loading. An enabled configuration also requires both a physical monitor selection

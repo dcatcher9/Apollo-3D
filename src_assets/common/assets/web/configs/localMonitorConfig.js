@@ -1,7 +1,8 @@
 export const settingEnabled = value => value === true || value === 1 || ['enabled', 'on', 'true', '1'].includes(value)
 
 export const localMonitorFingerprint = config => JSON.stringify(Object.keys(config || {})
-  .filter(key => key.startsWith('local_monitor_')).sort().map(key => [key, String(config[key])]))
+  .filter(key => key.startsWith('local_monitor_')).sort().map(key => [key,
+    key === 'local_monitor_enabled' || key === 'local_monitor_flip_eyes' ? (settingEnabled(config[key]) ? 'enabled' : 'disabled') : String(config[key])]))
 
 // The settings component and global Save supply API inventory. The shared validator uses those
 // observed rates; the driver still validates the actual selected target before activation.

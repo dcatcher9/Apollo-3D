@@ -54,7 +54,7 @@ const receiveStatus = body => {
     </header>
     <p class="text-body-secondary">Save and restart Sunshine 3D to apply changes. Remote streaming temporarily takes priority over local presentation.</p>
     <p class="text-body-secondary">Your selected monitor keeps its desktop position. Sunshine transfers its windows and cursor automatically for 3D and back for 2D; other monitors stay usable. Use borderless fullscreen for games that need to follow this handoff.</p>
-    <LocalMonitorSession ref="session" :show-when-disabled="true" :can-start="!props.settingsChanged && !runningDiffers && validation.length === 0" @status="receiveStatus" />
+    <LocalMonitorSession ref="session" :show-when-disabled="true" :can-start="(running ? !runningDiffers : !props.settingsChanged) && validation.length === 0" @status="receiveStatus" />
 
     <label class="monitor-enable" for="local_monitor_enabled">
       <span><strong>{{ $t('config.local_monitor_enabled') }}</strong><small>{{ $t('config.local_monitor_enabled_desc') }}</small></span>

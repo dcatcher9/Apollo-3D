@@ -37,11 +37,11 @@ const refresh = async (force = false) => {
   }
 }
 // The status read enumerates displays and serial ports on the host. Read briskly only while a
-// session is starting or running or the settings page is showing the panel; otherwise slowly,
-// and not at all while the page is hidden.
+// session is starting or the settings page is showing the panel with no session running;
+// otherwise slowly, so a running presenter is left alone, and not at all while the page is hidden.
 const schedule = () => {
   if (unmounted) return
-  const brisk = props.showWhenDisabled || status.value?.requested || status.value?.active
+  const brisk = !status.value?.active && (props.showWhenDisabled || status.value?.requested)
   refreshTimer = window.setTimeout(async () => {
     if (!document.hidden) await refresh()
     schedule()

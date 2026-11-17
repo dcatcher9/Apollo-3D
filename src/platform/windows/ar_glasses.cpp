@@ -4368,7 +4368,10 @@ namespace ar_glasses {
             if (desktop_synced && (!toggle_registered || !stop_registered)) {
               BOOST_LOG(warning) << "A local-monitor shortcut is already reserved. Use the web UI or tray to stop 3D."sv;
             }
-            const auto presentation_desktop = desktop_object_name(GetThreadDesktop(GetCurrentThreadId()));
+            // The presenter always works on the application desktop. This thread's own desktop is
+            // whichever one had input when the host started, which is the sign-in desktop for a
+            // host started before sign-in, so it must not stand in for the presenter's.
+            constexpr std::wstring_view presentation_desktop = L"Default";
             auto next_desktop_check = std::chrono::steady_clock::now();
             while (!stop_token.stop_requested()) {
               if (monitor_requested() && std::chrono::steady_clock::now() >= next_desktop_check) {

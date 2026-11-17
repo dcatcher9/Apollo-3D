@@ -46,9 +46,9 @@
 
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
-  #include "platform/windows/open3d_emitter.h"
   #include "platform/windows/game3d_setup.h"
   #include "platform/windows/host3d_subtitle_apps.h"
+  #include "platform/windows/open3d_emitter.h"
   #include "platform/windows/utils.h"
 #endif
 

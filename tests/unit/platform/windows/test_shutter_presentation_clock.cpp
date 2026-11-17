@@ -299,7 +299,7 @@ TEST(ShutterPresentFeedback, UnsupportedFeedbackRetainsTheRawFailureWithoutPubli
   EXPECT_EQ(result.waits, 0u);
 }
 
-TEST(ShutterPresentFeedback, OnlyTimeoutOrRawDisjointCanEnterQuietClockRecovery) {
+TEST(ShutterPresentFeedback, TimeoutAndRawDisjointAreTimingInterruptions) {
   using status_e = shutter::shutter_feedback_wait_status_e;
   shutter::shutter_feedback_wait_result_t result {status_e::timeout};
   EXPECT_TRUE(shutter::shutter_feedback_is_timing_interruption(result));
