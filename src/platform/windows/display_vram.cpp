@@ -8607,6 +8607,48 @@ namespace platf::dxgi {
       std::shared_ptr<local_presenter_config_t::target_t> live_target;
       std::shared_ptr<local_presenter_cursor_clip_t> cursor_clip;
       bool park_only = false;
+      // Monitor presentation only: the sink as the mouse hook sees it, and the last pointer
+      // position outside it.
+      mutable std::mutex hook_mutex;
+      mutable RECT hook_sink {};
+      mutable std::optional<POINT> last_interactive_point;
+
+      void refresh_hook_sink() const {
+        const auto sink = current_target_rect();
+        std::lock_guard lock(hook_mutex);
+        hook_sink = sink;
+        if (last_interactive_point && PtInRect(&hook_sink, *last_interactive_point)) {
+          last_interactive_point.reset();
+        }
+      }
+
+      // Called for every mouse movement with the position the pointer is about to take. Returns
+      // true when the movement must not happen. Windows carries a pointer pushed against an
+      // outer desktop edge over to the nearest other monitor; with the sink parked at a corner
+      // that is the sink. Refusing the movement leaves the pointer at the edge where it was.
+      bool refuse_pointer_move(POINT destination) const {
+        POINT stay {};
+        {
+          std::lock_guard lock(hook_mutex);
+          if (!valid_local_presenter_rect(hook_sink)) {
+            return false;
+          }
+          if (!PtInRect(&hook_sink, destination)) {
+            last_interactive_point = destination;
+            return false;
+          }
+          if (!last_interactive_point) {
+            return false;
+          }
+          stay = *last_interactive_point;
+        }
+        const auto previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        SetCursorPos(stay.x, stay.y);
+        if (previous_dpi) {
+          SetThreadDpiAwarenessContext(previous_dpi);
+        }
+        return true;
+      }
 
       RECT current_source_rect() const {
         if (const auto rect = query_local_presenter_display_rect(source_display_name)) {
@@ -8656,30 +8698,6 @@ namespace platf::dxgi {
       }
 
       clip_request_t desired_clip() const {
-        if (park_only) {
-          // Monitor presentation parks only its physical sink; every other monitor stays in
-          // use. Keep the pointer inside the rectangle around those monitors whenever the sink
-          // lies wholly outside it. Moving the pointer back after it entered the sink is not
-          // enough: Windows carries a pointer pushed against an outer edge over to the nearest
-          // other monitor, which is the sink, and it would come back at the sink's corner
-          // instead of where it left.
-          const auto sink = current_target_rect();
-          const auto monitors = desktop_monitor_rects();
-          if (!valid_local_presenter_rect(sink) || !monitors) {
-            return {};
-          }
-          std::optional<RECT> bounds;
-          for (const auto &monitor : *monitors) {
-            if (same_local_presenter_rect(monitor, sink)) {
-              continue;
-            }
-            bounds = bounds ? RECT {std::min(bounds->left, monitor.left), std::min(bounds->top, monitor.top), std::max(bounds->right, monitor.right), std::max(bounds->bottom, monitor.bottom)} : monitor;
-          }
-          if (!bounds || !valid_local_presenter_rect(*bounds) || intersect_local_presenter_rects(*bounds, sink)) {
-            return {true, std::nullopt};
-          }
-          return {true, bounds};
-        }
         const auto source_rect = current_source_rect();
         const auto target_rect = current_target_rect();
         if (!valid_local_presenter_rect(source_rect) || !valid_local_presenter_rect(target_rect)) {
@@ -8704,7 +8722,7 @@ namespace platf::dxgi {
       }
 
       void acquire_clip() {
-        if (!cursor_clip || std::chrono::steady_clock::now() < cursor_clip->retry_after) {
+        if (park_only || !cursor_clip || std::chrono::steady_clock::now() < cursor_clip->retry_after) {
           return;
         }
         if (!deferred_cursor_restore_manager().ready_for_new_owner()) {
@@ -8799,7 +8817,7 @@ namespace platf::dxgi {
       }
 
       void refresh_clip() {
-        if (!cursor_clip) {
+        if (park_only || !cursor_clip) {
           return;
         }
         if (!cursor_clip->owns_clip) {
@@ -8873,8 +8891,10 @@ namespace platf::dxgi {
 
       bool clamp_pointer_to_source_edge() const {
         if (park_only) {
-          // The fallback where no rectangle can keep the pointer off the sink, for example
-          // with monitors on two sides of it: move a pointer that entered the sink back out.
+          // Monitor presentation parks only its physical scanout sink. Every other output remains
+          // interactive; a global rectangular clip would incorrectly exclude those monitors, and
+          // Windows drops a clip whenever another program comes to the front. The mouse hook
+          // refuses entry; this moves back a pointer that got in while no hook was installed.
           const auto previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
           auto restore_dpi = util::fail_guard([previous_dpi]() {
             if (previous_dpi) {
@@ -8892,6 +8912,12 @@ namespace platf::dxgi {
           const auto monitors = desktop_monitor_rects();
           if (!monitors) {
             return false;
+          }
+          {
+            std::lock_guard lock(hook_mutex);
+            if (last_interactive_point && !PtInRect(&sink, *last_interactive_point)) {
+              return SetCursorPos(last_interactive_point->x, last_interactive_point->y) != FALSE;
+            }
           }
           const auto clamped = detail::nearest_interactive_pointer_point(cursor, sink, *monitors);
           return clamped && SetCursorPos(clamped->x, clamped->y) != FALSE;
@@ -8973,6 +8999,9 @@ namespace platf::dxgi {
         case WM_WINDOWPOSCHANGED:
           if (pointer_isolation) {
             pointer_isolation->refresh_clip();
+            if (pointer_isolation->park_only) {
+              pointer_isolation->refresh_hook_sink();
+            }
           }
           break;
         case WM_LBUTTONUP:
@@ -9005,6 +9034,19 @@ namespace platf::dxgi {
           break;
       }
       return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+
+    std::atomic<const local_presenter_pointer_isolation_t *> hooked_pointer_isolation {nullptr};
+
+    LRESULT CALLBACK local_presenter_mouse_hook(int code, WPARAM wparam, LPARAM lparam) {
+      if (code == HC_ACTION && wparam == WM_MOUSEMOVE) {
+        const auto *isolation = hooked_pointer_isolation.load();
+        const auto *info = reinterpret_cast<const MSLLHOOKSTRUCT *>(lparam);
+        if (isolation && info && isolation->refuse_pointer_move(info->pt)) {
+          return 1;
+        }
+      }
+      return CallNextHookEx(nullptr, code, wparam, lparam);
     }
 
     bool register_local_presenter_window_class() {
@@ -9774,10 +9816,27 @@ namespace platf::dxgi {
       std::stop_callback stop_window(window_stop_token, [created_window]() {
         PostMessageW(created_window, WM_CLOSE, 0, 0);
       });
+      // A low-level mouse hook is called on the thread that installed it, through its message
+      // loop. This thread does nothing else, so it answers at once.
+      HHOOK mouse_hook = nullptr;
+      if (pointer_isolation.park_only) {
+        pointer_isolation.refresh_hook_sink();
+        hooked_pointer_isolation.store(&pointer_isolation);
+        mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, local_presenter_mouse_hook, GetModuleHandleW(nullptr), 0);
+        if (!mouse_hook) {
+          hooked_pointer_isolation.store(nullptr);
+          BOOST_LOG(warning) << "Local shutter monitor could not watch pointer movement ("sv << GetLastError()
+                             << "); the pointer may jump to the desktop corner at an outer edge."sv;
+        }
+      }
       MSG message {};
       while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);
         DispatchMessageW(&message);
+      }
+      if (mouse_hook) {
+        UnhookWindowsHookEx(mouse_hook);
+        hooked_pointer_isolation.store(nullptr);
       }
       if (IsWindow(created_window)) {
         DestroyWindow(created_window);
