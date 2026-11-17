@@ -24,6 +24,7 @@
 // platform includes
 #include <d3dcompiler.h>
 #include <DirectXMath.h>
+#include <dwmapi.h>
 
 // lib includes
 #include <boost/algorithm/string/predicate.hpp>
@@ -1037,6 +1038,12 @@ namespace platf::dxgi {
         if (!game_source && text_game_eligible && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
           game_source = observe_text_game();
           text_game_in_front = game_source.has_value();
+        }
+        // Building the depth pipeline is a burst of GPU work. Local presentation follows the
+        // display's own refresh clock and loses it under such a burst, so build the pipeline when
+        // the session starts, as Host 3D does, and not when the first text game is detected.
+        if (local_presentation && text_game_eligible && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
+          ensure_depth_estimator();
         }
         text_game_ai_active = sbs_mode == ::video::SBS_GAME_SBS && text_game_in_front;
         if (sbs_mode == ::video::SBS_GAME_SBS) {
@@ -7097,6 +7104,7 @@ namespace platf::dxgi {
       }
       sbs_mode = sbs_mode_param;
       sbs_config = settings;
+      local_presentation = rgb_only;
       game_source_status_event = std::move(game_status_event);
       game_effective_mode = std::move(effective_mode);
       game_source_width = game_width;
@@ -7976,6 +7984,7 @@ namespace platf::dxgi {
     // a game is in front, packed Game 3D converts the captured picture with the Host AI path.
     bool text_game_eligible = false;  ///< This session can convert a text game; decided at init.
     bool text_game_ai_active = false;  ///< The current frame takes the Host AI path for one.
+    bool local_presentation = false;  ///< Output goes to a local display, not to an encoder.
     std::optional<::video::game_source_identity_t> text_game_source;
     std::chrono::steady_clock::time_point text_game_checked_at {};
     enum class packed_route_e : std::uint8_t {
@@ -9821,6 +9830,11 @@ namespace platf::dxgi {
       );
       const DWORD create_error = created_window ? ERROR_SUCCESS : GetLastError();
       if (created_window) {
+        // Hovering a taskbar thumbnail makes Windows hide every other window to preview that
+        // one. The presenter is the 3D picture itself, not a window of the desktop: hidden, it
+        // would leave the bare physical output with an empty frame where the picture was.
+        BOOL excluded = TRUE;
+        DwmSetWindowAttribute(created_window, DWMWA_EXCLUDED_FROM_PEEK, &excluded, sizeof(excluded));
         pointer_isolation.acquire_clip();
       }
       ready.set_value({created_window, create_error});
