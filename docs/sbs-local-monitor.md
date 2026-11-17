@@ -52,10 +52,6 @@ windowed mode before entering local 3D. If no physical display is left when 3D e
 after the only monitor is unplugged, there is nothing to restore: Sunshine releases the private
 source and leaves window placement to Windows, so a remote session can still start.
 
-While local 3D is on, clicking the Sunshine tray icon opens the web page instead of the tray menu.
-An open tray menu makes Sunshine the foreground program, and Windows then stops updating the refresh
-timing it reports for the presenter, which ends 3D. The page and the shortcuts offer the same controls.
-
 Unlock Windows and dismiss its lock or sign-in screen before starting 3D. A lock, sign-in, or
 permission-screen transition stops the monitor session and restores 2D. Start 3D again after
 returning to the ordinary desktop.
