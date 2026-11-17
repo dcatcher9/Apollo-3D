@@ -9164,6 +9164,12 @@ namespace platf::dxgi {
     // Two GPU-owned packets bound publication: capture never overwrites the stereo pair whose
     // left/right eyes are being scanned out. Each device has its own immediate context; keyed
     // mutexes carry GPU completion between them without a CPU readback or context-thread race.
+    //
+    // A keyed mutex changes hands as soon as the producer has submitted its commands, not when
+    // the GPU has executed them. A consumer that then reads the packet waits on the GPU for the
+    // whole conversion behind it, and so does the eye it is about to present. The producer
+    // therefore signals a fence after each packet, and the consumer takes a packet only once
+    // that fence has completed; until then it keeps scanning out the pair it already owns.
     class local_shutter_frame_ring_t {
     public:
       struct slot_t {
@@ -9174,11 +9180,18 @@ namespace platf::dxgi {
         Microsoft::WRL::ComPtr<IDXGIKeyedMutex> consumer_mutex;
         enum class state_e { free, producing, pending, current } state = state_e::free;
         std::uint64_t sequence = 0;
+        // The producer fence value that marks this packet as executed; 0 when none was signalled.
+        std::uint64_t completion = 0;
       };
 
       bool init(ID3D11Device *producer, ID3D11Device *consumer, UINT width, UINT height, DXGI_FORMAT format) {
         Microsoft::WRL::ComPtr<ID3D11Device1> consumer1;
         if (FAILED(consumer->QueryInterface(IID_PPV_ARGS(&consumer1)))) {
+          return false;
+        }
+        Microsoft::WRL::ComPtr<ID3D11Device5> producer5;
+        if (FAILED(producer->QueryInterface(IID_PPV_ARGS(&producer5))) ||
+            FAILED(producer5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&completion_fence_)))) {
           return false;
         }
         D3D11_TEXTURE2D_DESC desc {};
@@ -9230,8 +9243,17 @@ namespace platf::dxgi {
         return nullptr;
       }
 
-      bool publish(slot_t &slot, bool converted) {
+      // Submits the producer's commands for this packet, followed by its completion signal.
+      bool publish(slot_t &slot, bool converted, ID3D11DeviceContext *producer_context) {
         std::lock_guard lock(mutex_);
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext4> producer_context4;
+        if (FAILED(producer_context->QueryInterface(IID_PPV_ARGS(&producer_context4))) ||
+            FAILED(producer_context4->Signal(completion_fence_.Get(), completion_ + 1))) {
+          failed_ = true;
+          return false;
+        }
+        slot.completion = ++completion_;
+        producer_context->Flush();
         if (FAILED(slot.producer_mutex->ReleaseSync(converted ? 1 : 0))) {
           failed_ = true;
           return false;
@@ -9243,9 +9265,12 @@ namespace platf::dxgi {
 
       ID3D11Texture2D *acquire_pair() {
         std::lock_guard lock(mutex_);
+        // A removed device reports UINT64_MAX, which releases every packet to the failure path.
+        const auto completed = completion_fence_->GetCompletedValue();
         slot_t *newest = nullptr;
         for (auto &slot : slots_) {
-          if (slot.state == slot_t::state_e::pending && (!newest || slot.sequence > newest->sequence)) {
+          if (slot.state == slot_t::state_e::pending && slot.completion <= completed &&
+              (!newest || slot.sequence > newest->sequence)) {
             newest = &slot;
           }
         }
@@ -9271,7 +9296,8 @@ namespace platf::dxgi {
         // Only startup can have two pending packets. Retire the older one before the producer
         // runs again; subsequent cycles always have one current and at most one pending packet.
         for (auto &slot : slots_) {
-          if (slot.state == slot_t::state_e::pending && slot.consumer_mutex->AcquireSync(1, 0) == S_OK) {
+          if (slot.state == slot_t::state_e::pending && slot.sequence < current_->sequence &&
+              slot.consumer_mutex->AcquireSync(1, 0) == S_OK) {
             if (FAILED(slot.consumer_mutex->ReleaseSync(0))) {
               failed_ = true;
             }
@@ -9295,6 +9321,8 @@ namespace platf::dxgi {
       std::array<slot_t, 2> slots_;
       std::mutex mutex_;
       std::uint64_t sequence_ = 0;
+      Microsoft::WRL::ComPtr<ID3D11Fence> completion_fence_;
+      std::uint64_t completion_ = 0;
       slot_t *current_ = nullptr;
       std::atomic<bool> failed_ = false;
     };
@@ -9330,8 +9358,7 @@ namespace platf::dxgi {
         return false;
       }
       producer_context->UpdateSubresource(slot->producer_texture.Get(), 0, nullptr, pixels.data(), 4 * sizeof(std::uint32_t), 0);
-      producer_context->Flush();
-      return frames.publish(*slot, true);
+      return frames.publish(*slot, true, producer_context.Get());
     };
     const auto wait_pair = [&]() {
       ID3D11Texture2D *pair = nullptr;
@@ -11060,8 +11087,7 @@ namespace platf::dxgi {
                                  slot->producer_texture.Get(), slot->producer_target.Get(),
                                  config.hdr, deadline
                                ) == 0;
-        converter.device_ctx->Flush();
-        if (!shutter_frames.publish(*slot, converted) || !converted) {
+        if (!shutter_frames.publish(*slot, converted, converter.device_ctx.get()) || !converted) {
           BOOST_LOG(error) << "Local shutter monitor failed to publish a complete stereo pair."sv;
           return false;
         }
