@@ -31,6 +31,9 @@
 
   // standard includes
   #include <atomic>
+  #include <chrono>
+  #include <future>
+  #include <memory>
   #include <mutex>
   #include <string>
   #include <thread>
@@ -61,6 +64,8 @@ namespace system_tray {
   // Threading variables for all platforms
   static std::thread tray_thread;
   static std::atomic tray_thread_should_exit = false;
+  // The tray thread's Windows identity, for reaching its windows when the tray is closed.
+  static std::atomic<unsigned long> tray_thread_id = 0;
   static std::mutex tray_lifecycle_mutex;
 
   void tray_open_ui_cb([[maybe_unused]] struct tray_menu *item) {
@@ -453,6 +458,9 @@ namespace system_tray {
   // Threading functions available on all platforms
   static void tray_thread_worker() {
     BOOST_LOG(info) << "System tray thread started"sv;
+  #ifdef _WIN32
+    tray_thread_id = GetCurrentThreadId();
+  #endif
 
     // Initialize the tray in this thread
     if (init_tray() != 0) {
@@ -462,8 +470,9 @@ namespace system_tray {
       return;
     }
 
-    // Block for tray events until end_tray() wakes the loop.
-    while (process_tray_events() == 0);
+    // Block for tray events until end_tray() wakes the loop. Once the tray window is gone the
+    // loop call returns at once without a quit message, so the exit flag ends the loop too.
+    while (!tray_thread_should_exit && process_tray_events() == 0);
 
     BOOST_LOG(info) << "System tray thread ended"sv;
   }
@@ -500,9 +509,50 @@ namespace system_tray {
 
     BOOST_LOG(info) << "Stopping system tray thread"sv;
     tray_thread_should_exit = true;
-    end_tray();
 
-    tray_thread.join();
+  #ifdef _WIN32
+    // A tray menu that is still open keeps the tray thread inside the menu's own message loop.
+    // Close it first, by asking each of that thread's windows to leave any modal state.
+    EnumThreadWindows(
+      tray_thread_id.load(),
+      [](HWND window, LPARAM) -> BOOL {
+        PostMessageW(window, WM_CANCELMODE, 0, 0);
+        return TRUE;
+      },
+      0
+    );
+  #endif
+
+    // Closing the tray sends a message to its thread and waits for the answer, and the thread
+    // itself may be inside a menu or a callback. The host is exiting or restarting, so neither
+    // may hold it: wait a bounded time for each, then leave the thread behind.
+    constexpr auto patience = 2s;
+    auto closed = std::make_shared<std::promise<void>>();
+    auto closed_future = closed->get_future();
+    std::thread closer([closed]() {
+      end_tray();
+      closed->set_value();
+    });
+    if (closed_future.wait_for(patience) != std::future_status::ready) {
+      BOOST_LOG(warning) << "System tray did not close in time; continuing without it"sv;
+      closer.detach();
+      tray_thread.detach();
+      return 0;
+    }
+    closer.join();
+
+    auto ended = std::make_shared<std::promise<void>>();
+    auto ended_future = ended->get_future();
+    std::thread joiner([ended]() {
+      tray_thread.join();
+      ended->set_value();
+    });
+    if (ended_future.wait_for(patience) != std::future_status::ready) {
+      BOOST_LOG(warning) << "System tray thread did not end in time; continuing without it"sv;
+      joiner.detach();
+      return 0;
+    }
+    joiner.join();
 
     BOOST_LOG(info) << "System tray thread stopped"sv;
     return 0;
