@@ -235,7 +235,7 @@ namespace {
         if (execute_result_ != 0) {
           return execute_result_;
         }
-        process_access::seed(proc::proc, std::move(selected), candidate_, fresh_token, candidate_->virtual_display, [this] {
+        process_access::seed(proc::proc, std::move(selected), candidate_, fresh_token, candidate_->display_context->virtual_display, [this] {
           edge("primary");
         });
         fail_publication_if_requested();
@@ -256,7 +256,7 @@ namespace {
           return reconfigure_result_;
         }
         // Native success commits its own contract before HTTP attempts RTSP publication.
-        candidate_->virtual_display = proc::proc.get_status().virtual_display;
+        candidate_->display_context->virtual_display = proc::proc.get_status().virtual_display;
         process_access::publish_resume(proc::proc, *candidate_);
         fail_publication_if_requested();
         return 0;
@@ -335,12 +335,12 @@ namespace {
     void retain(bool virtual_display) {
       original_ = std::make_shared<launch_t>();
       original_->id = 0x70000001U;
-      original_->width = 1280;
-      original_->height = 720;
-      original_->fps = 30000;
-      original_->scale_factor = 100;
-      original_->unique_id = identity_->uuid;
-      original_->virtual_display = virtual_display;
+      original_->display_context->width = 1280;
+      original_->display_context->height = 720;
+      original_->display_context->fps = 30000;
+      original_->display_context->scale_factor = 100;
+      original_->display_context->unique_id = identity_->uuid;
+      original_->display_context->virtual_display = virtual_display;
       process_access::seed(proc::proc, app_, original_, retained_token, virtual_display, [this] {
         edge("primary");
       });
@@ -528,9 +528,9 @@ TEST_F(NvHttpLaunchTransactionTest, FreshSuccessPublishesTheSameEncryptedLaunchA
   EXPECT_TRUE(candidate_->rtsp_cipher);
   EXPECT_EQ(candidate_->gcm_key.size(), 16U);
   EXPECT_EQ(candidate_->av_ping_payload.size(), 16U);
-  EXPECT_EQ(candidate_->width, 1920);
-  EXPECT_EQ(candidate_->height, 1080);
-  EXPECT_EQ(candidate_->fps, 60000);
+  EXPECT_EQ(candidate_->display_context->width, 1920);
+  EXPECT_EQ(candidate_->display_context->height, 1080);
+  EXPECT_EQ(candidate_->display_context->fps, 60000);
   ASSERT_TRUE(candidate_->pending_live_gpu_lease);
   EXPECT_TRUE(stream::session::platform_stop_deadline_for_test());
   EXPECT_TRUE(stream::session::platform_lifecycle_lock_available_for_test());
@@ -553,7 +553,7 @@ TEST_F(NvHttpLaunchTransactionTest, PhysicalProbeFailureLeavesRetainedContractAn
   EXPECT_EQ(stream::session::platform_stop_deadline_for_test(), deadline);
   EXPECT_EQ(proc::proc.get_host_session_id(), retained_token);
   EXPECT_EQ(process_access::active_transport(proc::proc), original_->id);
-  EXPECT_EQ(original_->width, 1280);
+  EXPECT_EQ(original_->display_context->width, 1280);
 }
 
 TEST_F(NvHttpLaunchTransactionTest, VirtualArAdmissionFailureDoesNotPauseOrReleaseAnUnreservedArLease) {
@@ -564,7 +564,7 @@ TEST_F(NvHttpLaunchTransactionTest, VirtualArAdmissionFailureDoesNotPauseOrRelea
   expect_events({"ar-start"});
   expect_unpublished();
   EXPECT_EQ(stream::session::platform_stop_deadline_for_test(), deadline);
-  EXPECT_EQ(process_access::retained_launch(proc::proc), original_);
+  EXPECT_EQ(process_access::retained_display_context(proc::proc), original_->display_context);
 }
 
 TEST_F(NvHttpLaunchTransactionTest, FailedVirtualReconfigurePausesWithGpuHeldThenEndsArAfterUnlock) {
@@ -576,7 +576,7 @@ TEST_F(NvHttpLaunchTransactionTest, FailedVirtualReconfigurePausesWithGpuHeldThe
   expect_unpublished();
   EXPECT_EQ(stream::session::platform_stop_deadline_for_test(), deadline);
   EXPECT_EQ(proc::proc.get_host_session_id(), retained_token);
-  EXPECT_EQ(original_->width, 1280);
+  EXPECT_EQ(original_->display_context->width, 1280);
   EXPECT_EQ(process_access::active_transport(proc::proc), original_->id);
 }
 
@@ -589,11 +589,11 @@ TEST_F(NvHttpLaunchTransactionTest, RejectedResumePublicationKeepsTheNewContract
   expect_unpublished();
   ASSERT_TRUE(candidate_);
   EXPECT_EQ(candidate_->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
-  EXPECT_EQ(process_access::retained_launch(proc::proc), original_);
+  EXPECT_EQ(process_access::retained_display_context(proc::proc), original_->display_context);
   EXPECT_EQ(proc::proc.get_host_session_id(), retained_token);
-  EXPECT_EQ(original_->width, 1920);
-  EXPECT_EQ(original_->height, 1080);
-  EXPECT_EQ(original_->fps, 60000);
+  EXPECT_EQ(original_->display_context->width, 1920);
+  EXPECT_EQ(original_->display_context->height, 1080);
+  EXPECT_EQ(original_->display_context->fps, 60000);
   EXPECT_EQ(process_access::active_transport(proc::proc), candidate_->id);
   EXPECT_EQ(stream::session::platform_stop_deadline_for_test(), deadline);
 }
@@ -606,7 +606,7 @@ TEST_F(NvHttpLaunchTransactionTest, RivalHandshakeDefersResumePrimaryRollbackAnd
   // The real guard defers primary recovery while any validated handshake is pending.
   expect_events({"ar-start", "reconfigure", "ar-await", "ar-end"});
   EXPECT_EQ(stream::session::platform_stop_deadline_for_test(), deadline);
-  EXPECT_EQ(original_->width, 1920);
+  EXPECT_EQ(original_->display_context->width, 1920);
   ASSERT_TRUE(candidate_);
   EXPECT_EQ(process_access::active_transport(proc::proc), candidate_->id);
   EXPECT_FALSE(candidate_->pending_live_gpu_lease);
@@ -633,8 +633,8 @@ TEST_F(NvHttpLaunchTransactionTest, ResumeSuccessUsesRetainedDisplayKindAndRenew
       expect_events({"probe", "reconfigure"});
     }
     ASSERT_TRUE(candidate_);
-    EXPECT_EQ(candidate_->virtual_display, virtual_display);
-    EXPECT_EQ(process_access::retained_launch(proc::proc), original_);
+    EXPECT_EQ(candidate_->display_context->virtual_display, virtual_display);
+    EXPECT_EQ(process_access::retained_display_context(proc::proc), original_->display_context);
     EXPECT_EQ(process_access::active_transport(proc::proc), candidate_->id);
     EXPECT_EQ(proc::proc.get_host_session_id(), retained_token);
     EXPECT_TRUE(candidate_->pending_live_gpu_lease);

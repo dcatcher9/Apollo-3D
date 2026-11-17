@@ -29,6 +29,7 @@
 // local includes
 #include "src/config.h"
 #include "src/process.h"
+#include "src/rtsp.h"
 #include "src/stream.h"
 #include "src/uuid.h"
 
@@ -41,12 +42,12 @@ namespace proc {
       process.placebo = false;
       process._app_id = 1;
       process._host_session_id = 1234;
-      process._launch_session = launch;
+      process._display_context = launch->display_context;
       process._active_launch_session_id = launch->id;
 #ifdef _WIN32
-      process._virtual_display_only = launch->virtual_display_only;
+      process._virtual_display_only = launch->display_context->virtual_display_only;
       process._display_session.commit_resume();
-      process._display_session.set_exclusive(launch->virtual_display_only);
+      process._display_session.set_exclusive(launch->display_context->virtual_display_only);
 #endif
     }
 #ifdef _WIN32
@@ -115,13 +116,13 @@ namespace proc {
           return false;
         };
         process._display_mode_query_test_hook = [&process](std::wstring_view) -> std::optional<DEVMODEW> {
-          if (!process._launch_session) {
+          if (!process._display_context) {
             return std::nullopt;
           }
           DEVMODEW mode {};
-          mode.dmPelsWidth = process._launch_session->width;
-          mode.dmPelsHeight = process._launch_session->height;
-          mode.dmDisplayFrequency = (process._launch_session->fps + 500) / 1000;
+          mode.dmPelsWidth = process._display_context->width;
+          mode.dmPelsHeight = process._display_context->height;
+          mode.dmDisplayFrequency = (process._display_context->fps + 500) / 1000;
           return mode;
         };
         VDISPLAY::creation_result_t binding;
@@ -131,8 +132,8 @@ namespace proc {
         binding.identity.emplace();
         VDISPLAY::display_spec_t spec;
         spec.exclusive = process._virtual_display_only;
-        if (process._launch_session) {
-          spec.guid = process._launch_session->display_guid;
+        if (process._display_context) {
+          spec.guid = process._display_context->display_guid;
         }
         process._display_session.adopt(std::move(spec), std::move(binding));
         // Like adopt_virtual_display(), a bound display publishes its capture target.
@@ -255,7 +256,7 @@ namespace proc {
       process._app_id = 0;
       process._host_session_id = 0;
       process._active_launch_session_id = 0;
-      process._launch_session.reset();
+      process._display_context.reset();
 #ifdef _WIN32
       process._display_topology_test_hook = {};
       mark_virtual(process, false);
@@ -317,9 +318,9 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto original = std::make_shared<rtsp_stream::launch_session_t>();
   original->id = 11;
-  original->width = 1920;
-  original->height = 1080;
-  original->fps = 60000;
+  original->display_context->width = 1920;
+  original->display_context->height = 1080;
+  original->display_context->fps = 60000;
   proc::process_test_access::retain(process, original);
   auto cleanup = util::fail_guard([&]() {
     proc::process_test_access::clear(process);
@@ -327,11 +328,11 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
 
   auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
   resumed->id = 22;
-  resumed->width = 1920;
-  resumed->height = 1080;
-  resumed->fps = 60000;
-  resumed->scale_factor = 100;
-  EXPECT_EQ(process.reconfigure_retained_session(resumed), 0);
+  resumed->display_context->width = 1920;
+  resumed->display_context->height = 1080;
+  resumed->display_context->fps = 60000;
+  resumed->display_context->scale_factor = 100;
+  EXPECT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   EXPECT_EQ(process.get_host_session_id(), 1234U);
   EXPECT_EQ(original->id, 11U);
 #ifdef _WIN32
@@ -345,10 +346,10 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
 #endif
   auto invalid = std::make_shared<rtsp_stream::launch_session_t>();
   invalid->id = 33;
-  invalid->width = 1;
-  invalid->height = 1;
-  invalid->scale_factor = 20;
-  EXPECT_EQ(process.reconfigure_retained_session(invalid), 400);
+  invalid->display_context->width = 1;
+  invalid->display_context->height = 1;
+  invalid->display_context->scale_factor = 20;
+  EXPECT_EQ(process.reconfigure_retained_session(invalid->display_context, invalid->id), 400);
 #ifdef _WIN32
   proc::process_test_access::mark_virtual(process, true);
   EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 22), proc::live_video_mode_result_e::unchanged);
@@ -361,10 +362,10 @@ TEST(ProcessTest, RepeatedLiveRequestLeavesAnApplicationChosenDisplayModeAlone) 
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto launch = std::make_shared<rtsp_stream::launch_session_t>();
   launch->id = 41;
-  launch->width = 3840;
-  launch->height = 2160;
-  launch->fps = 90000;
-  launch->scale_factor = 100;
+  launch->display_context->width = 3840;
+  launch->display_context->height = 2160;
+  launch->display_context->fps = 90000;
+  launch->display_context->scale_factor = 100;
   proc::process_test_access::retain(process, launch);
   auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
   proc::process_test_access::mark_virtual(process, true);
@@ -391,7 +392,7 @@ TEST(ProcessTest, RepeatedLiveRequestLeavesAnApplicationChosenDisplayModeAlone) 
   // Neither the hint nor the apply queries, probes, or applies a display mode.
   EXPECT_EQ(queries, 0);
   EXPECT_TRUE(mode_requests.empty());
-  EXPECT_EQ(launch->fps, 90000);  // The game never changed the accepted client request.
+  EXPECT_EQ(launch->display_context->fps, 90000);  // The game never changed the accepted client request.
 
   // The request alone decides: another drifted geometry is left alone too.
   observed.dmPelsWidth = 1920;
@@ -403,7 +404,7 @@ TEST(ProcessTest, RepeatedLiveRequestLeavesAnApplicationChosenDisplayModeAlone) 
 
   // Refresh rates are compared at the live wire's 0.01 Hz: any wire rate that differs is a real
   // change, while a launch rate finer than the wire is repeated by its nearest wire rate.
-  launch->fps = 59940;
+  launch->display_context->fps = 59940;
   EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, 59940));
   EXPECT_EQ(process.apply_live_video_mode(3840, 2160, 59940, 41), proc::live_video_mode_result_e::unchanged);
   EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, 60000));
@@ -412,11 +413,11 @@ TEST(ProcessTest, RepeatedLiveRequestLeavesAnApplicationChosenDisplayModeAlone) 
   EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 1080, 59940));
   for (const auto &[launch_fps, wire_fps] : {std::pair {59997, 60000}, std::pair {23976, 23980}, std::pair {119880, 119880}}) {
     SCOPED_TRACE(launch_fps);
-    launch->fps = launch_fps;
+    launch->display_context->fps = launch_fps;
     EXPECT_FALSE(process.live_video_mode_needs_display_change(3840, 2160, wire_fps));
     EXPECT_EQ(process.apply_live_video_mode(3840, 2160, wire_fps, 41), proc::live_video_mode_result_e::unchanged);
     EXPECT_TRUE(process.live_video_mode_needs_display_change(3840, 2160, wire_fps + 10));
-    EXPECT_EQ(launch->fps, launch_fps);
+    EXPECT_EQ(launch->display_context->fps, launch_fps);
   }
   EXPECT_EQ(queries, 0);
   EXPECT_TRUE(mode_requests.empty());
@@ -430,10 +431,10 @@ TEST(ProcessTest, LiveModeResolvesOwnedIdentityBeforeUsingRenamedOrReusedDisplay
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto launch = std::make_shared<rtsp_stream::launch_session_t>();
   launch->id = 41;
-  launch->width = 3840;
-  launch->height = 2160;
-  launch->fps = 90000;
-  launch->scale_factor = 100;
+  launch->display_context->width = 3840;
+  launch->display_context->height = 2160;
+  launch->display_context->fps = 90000;
+  launch->display_context->scale_factor = 100;
   proc::process_test_access::retain(process, launch);
   auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
   bool owned_present = true;
@@ -488,7 +489,7 @@ TEST(ProcessTest, LiveModeResolvesOwnedIdentityBeforeUsingRenamedOrReusedDisplay
   EXPECT_EQ(configured_names, (std::vector<std::wstring> {owned_name, owned_name}));
   EXPECT_GT(observed_queries, 0u);
   EXPECT_EQ(owned_hz, 60u);
-  EXPECT_EQ(launch->fps, 60000);
+  EXPECT_EQ(launch->display_context->fps, 60000);
 
   // Neither a repeated nor a changed request is acknowledged or probed through the stale GDI name
   // of a vanished/unresolved owned identity.
@@ -509,7 +510,7 @@ TEST(ProcessTest, LiveModeResolvesOwnedIdentityBeforeUsingRenamedOrReusedDisplay
   EXPECT_EQ(process.get_display_name(), "renamed-again-owned-display");
   EXPECT_EQ(observed_queries, prior_queries);
   EXPECT_TRUE(configured_names.empty());
-  EXPECT_EQ(launch->fps, 60000);
+  EXPECT_EQ(launch->display_context->fps, 60000);
 }
 
 namespace {
@@ -558,9 +559,9 @@ namespace {
 
       original_ = std::make_shared<rtsp_stream::launch_session_t>();
       original_->id = 11;
-      original_->width = 1920;
-      original_->height = 1080;
-      original_->fps = 60000;
+      original_->display_context->width = 1920;
+      original_->display_context->height = 1080;
+      original_->display_context->fps = 60000;
       proc::process_test_access::retain(proc::proc, original_);
     }
 
@@ -594,8 +595,8 @@ namespace {
       saved_output_ = config::video.output_name;
       process_.initial_display = saved_output_;
       original_ = make_launch(11);
-      original_->sbs_mode = 1;
-      original_->display_guid.Data1 = 0x12345678;
+      original_->display_context->sbs_mode = 1;
+      original_->display_context->display_guid.Data1 = 0x12345678;
       proc::process_test_access::retain(process_, original_);
       proc::process_test_access::mark_virtual(process_, true, true);
       proc::process_test_access::set_display_topology_hook(process_, [&](operation_e operation, bool) {
@@ -612,12 +613,12 @@ namespace {
     static std::shared_ptr<rtsp_stream::launch_session_t> make_launch(std::uint32_t id) {
       auto launch = std::make_shared<rtsp_stream::launch_session_t>();
       launch->id = id;
-      launch->width = 1920;
-      launch->height = 1080;
-      launch->fps = 60000;
-      launch->scale_factor = 100;
-      launch->virtual_display = true;
-      launch->virtual_display_only = true;
+      launch->display_context->width = 1920;
+      launch->display_context->height = 1080;
+      launch->display_context->fps = 60000;
+      launch->display_context->scale_factor = 100;
+      launch->display_context->virtual_display = true;
+      launch->display_context->virtual_display_only = true;
       return launch;
     }
 
@@ -632,7 +633,7 @@ namespace {
 TEST_F(RetainedDisplayPauseTest, RestoresAndDetachesEveryVirtualPolicyBeforeReactivatingTheSameSession) {
   for (const bool exclusive : {false, true}) {
     SCOPED_TRACE(exclusive);
-    original_->virtual_display_only = exclusive;
+    original_->display_context->virtual_display_only = exclusive;
     proc::process_test_access::retain(process_, original_);
     operations_.clear();
     ASSERT_TRUE(process_.pause_display_for_resume());
@@ -645,8 +646,8 @@ TEST_F(RetainedDisplayPauseTest, RestoresAndDetachesEveryVirtualPolicyBeforeReac
 
     operations_.clear();
     auto resumed = make_launch(22);
-    resumed->virtual_display_only = exclusive;
-    ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+    resumed->display_context->virtual_display_only = exclusive;
+    ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
     EXPECT_EQ(operations_, (std::vector<operation_e> {
                              operation_e::reactivate,
                              operation_e::refresh_binding,
@@ -661,16 +662,16 @@ TEST_F(RetainedDisplayPauseTest, RestoresAndDetachesEveryVirtualPolicyBeforeReac
     EXPECT_EQ(process_.get_host_session_id(), 1234U);
     EXPECT_EQ(process_.get_status().app_id, 1);
     EXPECT_EQ(original_->id, 11U);
-    EXPECT_EQ(resumed->display_guid.Data1, 0x12345678U);
+    EXPECT_EQ(resumed->display_context->display_guid.Data1, 0x12345678U);
     EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
     EXPECT_TRUE(proc::process_test_access::has_virtual_identity(process_));
   }
 }
 
 TEST_F(RetainedDisplayPauseTest, ResumeRepairsObservedFullscreenModeWithoutChangingRequestedContract) {
-  original_->width = 3840;
-  original_->height = 2160;
-  original_->fps = 90000;
+  original_->display_context->width = 3840;
+  original_->display_context->height = 2160;
+  original_->display_context->fps = 90000;
   for (const auto observed : {std::array<DWORD, 3> {4800, 2700, 90}, std::array<DWORD, 3> {3840, 2160, 72}}) {
     SCOPED_TRACE(observed[0]);
     SCOPED_TRACE(observed[2]);
@@ -698,10 +699,10 @@ TEST_F(RetainedDisplayPauseTest, ResumeRepairsObservedFullscreenModeWithoutChang
     });
     ASSERT_TRUE(process_.pause_display_for_resume());
     auto resumed = make_launch(22);
-    resumed->width = original_->width;
-    resumed->height = original_->height;
-    resumed->fps = original_->fps;
-    ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+    resumed->display_context->width = original_->display_context->width;
+    resumed->display_context->height = original_->display_context->height;
+    resumed->display_context->fps = original_->display_context->fps;
+    ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
     EXPECT_EQ(mode_requests, (std::vector<bool> {true, false}));
     EXPECT_EQ(current.dmPelsWidth, 3840U);
     EXPECT_EQ(current.dmPelsHeight, 2160U);
@@ -714,7 +715,7 @@ TEST_F(RetainedDisplayPauseTest, ResumeRepairsObservedFullscreenModeWithoutChang
 
 TEST_F(RetainedDisplayPauseTest, UnchangedResumeChecksActualModeWithoutResettingIt) {
   // The same integer-Hz tolerance as live changes accepts fractional requested refresh rates.
-  original_->fps = 59940;
+  original_->display_context->fps = 59940;
   int queries = 0;
   proc::process_test_access::observe_display_mode(process_, [&](std::wstring_view) {
     ++queries;
@@ -731,8 +732,8 @@ TEST_F(RetainedDisplayPauseTest, UnchangedResumeChecksActualModeWithoutResetting
   });
   ASSERT_TRUE(process_.pause_display_for_resume());
   auto resumed = make_launch(22);
-  resumed->fps = original_->fps;
-  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  resumed->display_context->fps = original_->display_context->fps;
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   // Once after reactivation and once after promotion.
   EXPECT_EQ(queries, 2);
   EXPECT_EQ(mode_requests, 0);
@@ -760,7 +761,8 @@ TEST_F(RetainedDisplayPauseTest, ResumeReappliesTheRequestedModeWindowsReplacedD
   });
   ASSERT_TRUE(process_.pause_display_for_resume());
   operations_.clear();
-  ASSERT_EQ(process_.reconfigure_retained_session(make_launch(22)), 0);
+  const auto resume_request = make_launch(22);
+  ASSERT_EQ(process_.reconfigure_retained_session(resume_request->display_context, resume_request->id), 0);
   EXPECT_EQ(mode_requests, (std::vector<std::tuple<int, int, int, bool>> {{1920, 1080, 60000, false}}));
   EXPECT_EQ(std::ranges::count(operations_, operation_e::promote), 2);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
@@ -774,7 +776,8 @@ TEST_F(RetainedDisplayPauseTest, UnobservableUnchangedModeKeepsResumeRetryableWi
     return DISP_CHANGE_SUCCESSFUL;
   });
   ASSERT_TRUE(process_.pause_display_for_resume());
-  EXPECT_EQ(process_.reconfigure_retained_session(make_launch(22)), 503);
+  const auto resume_request = make_launch(22);
+  EXPECT_EQ(process_.reconfigure_retained_session(resume_request->display_context, resume_request->id), 503);
   EXPECT_EQ(mode_requests, 0);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 11U);
   EXPECT_TRUE(proc::process_test_access::display_pause_pending(process_));
@@ -801,9 +804,9 @@ namespace {
 }  // namespace
 
 TEST_F(RetainedDisplayPauseTest, ResumeSavesTheSessionModeBeforePromotionForTheVirtualDisplayOnly) {
-  original_->width = 3840;
-  original_->height = 2160;
-  original_->fps = 90000;
+  original_->display_context->width = 3840;
+  original_->display_context->height = 2160;
+  original_->display_context->fps = 90000;
   DEVMODEW current {};
   current.dmPelsWidth = 3840;
   current.dmPelsHeight = 2160;
@@ -837,10 +840,10 @@ TEST_F(RetainedDisplayPauseTest, ResumeSavesTheSessionModeBeforePromotionForTheV
   ASSERT_TRUE(process_.pause_display_for_resume());
   operations_.clear();
   auto resumed = make_launch(22);
-  resumed->width = 3840;
-  resumed->height = 2160;
-  resumed->fps = 90000;
-  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  resumed->display_context->width = 3840;
+  resumed->display_context->height = 2160;
+  resumed->display_context->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   EXPECT_EQ(mode_requests, (std::vector<bool> {true, false}));
   ASSERT_EQ(saves.size(), 1u);
   expect_virtual_display_only_record(saves.front(), 3840, 2160, 90);
@@ -860,10 +863,10 @@ TEST_F(RetainedDisplayPauseTest, ResumeSavesTheSessionModeBeforePromotionForTheV
   current.dmDisplayFrequency = 72;
   ASSERT_TRUE(process_.pause_display_for_resume());
   auto drifted = make_launch(33);
-  drifted->width = 3840;
-  drifted->height = 2160;
-  drifted->fps = 90000;
-  ASSERT_EQ(process_.reconfigure_retained_session(drifted), 0);
+  drifted->display_context->width = 3840;
+  drifted->display_context->height = 2160;
+  drifted->display_context->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(drifted->display_context, drifted->id), 0);
   EXPECT_EQ(mode_requests, (std::vector<bool> {true, false}));
   EXPECT_EQ(current.dmDisplayFrequency, 90u);
   EXPECT_TRUE(saves.empty());
@@ -872,17 +875,17 @@ TEST_F(RetainedDisplayPauseTest, ResumeSavesTheSessionModeBeforePromotionForTheV
   // An unchanged resume verifies the mode but does not save.
   ASSERT_TRUE(process_.pause_display_for_resume());
   auto unchanged = make_launch(44);
-  unchanged->width = 3840;
-  unchanged->height = 2160;
-  unchanged->fps = 90000;
-  ASSERT_EQ(process_.reconfigure_retained_session(unchanged), 0);
+  unchanged->display_context->width = 3840;
+  unchanged->display_context->height = 2160;
+  unchanged->display_context->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(unchanged->display_context, unchanged->id), 0);
   EXPECT_TRUE(saves.empty());
 }
 
 TEST_F(RetainedDisplayPauseTest, SessionTopologyOrRejectedSaveKeepsResumeTemporaryAndNonFatal) {
-  original_->width = 3840;
-  original_->height = 2160;
-  original_->fps = 90000;
+  original_->display_context->width = 3840;
+  original_->display_context->height = 2160;
+  original_->display_context->fps = 90000;
   DEVMODEW current {};
   current.dmPelsWidth = 3840;
   current.dmPelsHeight = 2160;
@@ -913,10 +916,10 @@ TEST_F(RetainedDisplayPauseTest, SessionTopologyOrRejectedSaveKeepsResumeTempora
   // nothing is written, and the resume still applies its temporary mode.
   ASSERT_TRUE(process_.pause_display_for_resume());
   auto first = make_launch(22);
-  first->width = 3840;
-  first->height = 2160;
-  first->fps = 90000;
-  ASSERT_EQ(process_.reconfigure_retained_session(first), 0);
+  first->display_context->width = 3840;
+  first->display_context->height = 2160;
+  first->display_context->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(first->display_context, first->id), 0);
   EXPECT_EQ(current.dmDisplayFrequency, 90u);
   EXPECT_EQ(writes, 0);
   EXPECT_FALSE(proc::process_test_access::saved_session_mode(process_));
@@ -927,19 +930,19 @@ TEST_F(RetainedDisplayPauseTest, SessionTopologyOrRejectedSaveKeepsResumeTempora
   current.dmDisplayFrequency = 72;
   ASSERT_TRUE(process_.pause_display_for_resume());
   auto second = make_launch(33);
-  second->width = 3840;
-  second->height = 2160;
-  second->fps = 90000;
-  ASSERT_EQ(process_.reconfigure_retained_session(second), 0);
+  second->display_context->width = 3840;
+  second->display_context->height = 2160;
+  second->display_context->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(second->display_context, second->id), 0);
   EXPECT_EQ(current.dmDisplayFrequency, 90u);
   EXPECT_EQ(writes, 1);
   EXPECT_FALSE(proc::process_test_access::saved_session_mode(process_));
 }
 
 TEST_F(RetainedDisplayPauseTest, LiveModeChangesFollowRequestEdgesAndStayTemporary) {
-  original_->width = 3840;
-  original_->height = 2160;
-  original_->fps = 90000;
+  original_->display_context->width = 3840;
+  original_->display_context->height = 2160;
+  original_->display_context->fps = 90000;
   proc::process_test_access::retain(process_, original_);
   DEVMODEW current {};
   current.dmPelsWidth = 3840;
@@ -979,7 +982,7 @@ TEST_F(RetainedDisplayPauseTest, LiveModeChangesFollowRequestEdgesAndStayTempora
   EXPECT_TRUE(process_.live_video_mode_needs_display_change(3840, 2160, 72000));
   EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::applied);
   EXPECT_EQ(mode_requests, applied_72);
-  EXPECT_EQ(original_->fps, 72000);
+  EXPECT_EQ(original_->display_context->fps, 72000);
 
   // An exclusive-fullscreen application then moved the display to another rate. The client's
   // repeated request is not a mode change: it is acknowledged without querying, probing, or
@@ -993,7 +996,7 @@ TEST_F(RetainedDisplayPauseTest, LiveModeChangesFollowRequestEdgesAndStayTempora
   EXPECT_TRUE(mode_requests.empty());
   EXPECT_EQ(queries, 0);
   EXPECT_EQ(current.dmDisplayFrequency, 60u);
-  EXPECT_EQ(original_->fps, 72000);
+  EXPECT_EQ(original_->display_context->fps, 72000);
   // Only the exact binding is refreshed: no HDR request or topology promotion either.
   EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::refresh_binding, operation_e::refresh_binding}));
 
@@ -1002,7 +1005,7 @@ TEST_F(RetainedDisplayPauseTest, LiveModeChangesFollowRequestEdgesAndStayTempora
   EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 90000, 11), result_e::applied);
   EXPECT_EQ(mode_requests, applied_90);
   EXPECT_EQ(current.dmDisplayFrequency, 90u);
-  EXPECT_EQ(original_->fps, 90000);
+  EXPECT_EQ(original_->display_context->fps, 90000);
   // The promoted display's mode is never saved: not even the topology gate is consulted.
   EXPECT_EQ(saves, 0);
   EXPECT_FALSE(proc::process_test_access::saved_session_mode(process_));
@@ -1016,16 +1019,16 @@ TEST_F(RetainedDisplayPauseTest, LiveModeChangesFollowRequestEdgesAndStayTempora
   EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::failed);
   EXPECT_TRUE(mode_requests.empty());
   EXPECT_EQ(current.dmDisplayFrequency, 60u);
-  EXPECT_EQ(original_->fps, 90000);
+  EXPECT_EQ(original_->display_context->fps, 90000);
   EXPECT_EQ(saves, 0);
   EXPECT_EQ(std::ranges::count(operations_, operation_e::restore), 0);
   EXPECT_EQ(std::ranges::count(operations_, operation_e::retire), 0);
 }
 
 TEST_F(RetainedDisplayPauseTest, ResumeRestoresTheRequestedModeThatRepeatedLiveRequestsLeaveAlone) {
-  original_->width = 3840;
-  original_->height = 2160;
-  original_->fps = 90000;
+  original_->display_context->width = 3840;
+  original_->display_context->height = 2160;
+  original_->display_context->fps = 90000;
   proc::process_test_access::retain(process_, original_);
   DEVMODEW current {};
   current.dmPelsWidth = 3840;
@@ -1054,19 +1057,19 @@ TEST_F(RetainedDisplayPauseTest, ResumeRestoresTheRequestedModeThatRepeatedLiveR
   // A resume is a new start: the same requested mode is applied to the drifted display.
   ASSERT_TRUE(process_.pause_display_for_resume());
   auto resumed = make_launch(22);
-  resumed->width = 3840;
-  resumed->height = 2160;
-  resumed->fps = 90000;
-  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  resumed->display_context->width = 3840;
+  resumed->display_context->height = 2160;
+  resumed->display_context->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   EXPECT_EQ(mode_requests, (std::vector<std::pair<bool, int>> {{true, 90000}, {false, 90000}}));
   EXPECT_EQ(current.dmDisplayFrequency, 90u);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
 }
 
 TEST_F(RetainedDisplayPauseTest, UnprovenLiveChangeRequiresReconnectForEveryRequestUntilResume) {
-  original_->width = 3840;
-  original_->height = 2160;
-  original_->fps = 90000;
+  original_->display_context->width = 3840;
+  original_->display_context->height = 2160;
+  original_->display_context->fps = 90000;
   proc::process_test_access::retain(process_, original_);
   DEVMODEW current {};
   current.dmPelsWidth = 3840;
@@ -1108,7 +1111,7 @@ TEST_F(RetainedDisplayPauseTest, UnprovenLiveChangeRequiresReconnectForEveryRequ
   failing_sets = {72000, 90000};
   EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 72000, 11), result_e::needs_reconnect);
   EXPECT_EQ(mode_requests, (std::vector<std::pair<bool, int>> {{true, 72000}, {false, 72000}, {false, 90000}}));
-  EXPECT_EQ(original_->fps, 90000);
+  EXPECT_EQ(original_->display_context->fps, 90000);
 
   // Neither a repeated request of the session's mode nor a changed one is acknowledged on that
   // display, and neither queries, probes, nor sets a mode.
@@ -1125,10 +1128,10 @@ TEST_F(RetainedDisplayPauseTest, UnprovenLiveChangeRequiresReconnectForEveryRequ
   failing_sets.clear();
   ASSERT_TRUE(process_.pause_display_for_resume());
   auto resumed = make_launch(22);
-  resumed->width = 3840;
-  resumed->height = 2160;
-  resumed->fps = 90000;
-  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  resumed->display_context->width = 3840;
+  resumed->display_context->height = 2160;
+  resumed->display_context->fps = 90000;
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   mode_requests.clear();
   EXPECT_FALSE(process_.live_video_mode_needs_display_change(3840, 2160, 90000));
   EXPECT_EQ(process_.apply_live_video_mode(3840, 2160, 90000, 22), result_e::unchanged);
@@ -1138,10 +1141,10 @@ TEST_F(RetainedDisplayPauseTest, UnprovenLiveChangeRequiresReconnectForEveryRequ
 TEST_F(RetainedDisplayPauseTest, LiveRequestsUseTheSessionRenderScaleAndWirePrecision) {
   // The client streams 2560x1440 at a 150% render scale, and its launch rate is finer than the
   // live wire's 0.01 Hz.
-  original_->width = 3840;
-  original_->height = 2160;
-  original_->fps = 59997;
-  original_->scale_factor = 150;
+  original_->display_context->width = 3840;
+  original_->display_context->height = 2160;
+  original_->display_context->fps = 59997;
+  original_->display_context->scale_factor = 150;
   proc::process_test_access::retain(process_, original_);
   DEVMODEW current {};
   current.dmPelsWidth = 3840;
@@ -1166,16 +1169,16 @@ TEST_F(RetainedDisplayPauseTest, LiveRequestsUseTheSessionRenderScaleAndWirePrec
   EXPECT_FALSE(process_.live_video_mode_needs_display_change(2560, 1440, 60000));
   EXPECT_EQ(process_.apply_live_video_mode(2560, 1440, 60000, 11), result_e::unchanged);
   EXPECT_TRUE(mode_requests.empty());
-  EXPECT_EQ(original_->width, 3840);
-  EXPECT_EQ(original_->fps, 59997);
+  EXPECT_EQ(original_->display_context->width, 3840);
+  EXPECT_EQ(original_->display_context->fps, 59997);
 
   // A real change renders at the same scale: a 1920x1080 stream gets a 2880x1620 display.
   EXPECT_TRUE(process_.live_video_mode_needs_display_change(1920, 1080, 60000));
   EXPECT_EQ(process_.apply_live_video_mode(1920, 1080, 60000, 11), result_e::applied);
   EXPECT_EQ(mode_requests, (std::vector<std::array<int, 4>> {{1, 2880, 1620, 60000}, {0, 2880, 1620, 60000}}));
-  EXPECT_EQ(original_->width, 2880);
-  EXPECT_EQ(original_->height, 1620);
-  EXPECT_EQ(original_->fps, 60000);
+  EXPECT_EQ(original_->display_context->width, 2880);
+  EXPECT_EQ(original_->display_context->height, 1620);
+  EXPECT_EQ(original_->display_context->fps, 60000);
 
   // Its own reconfirm is again a repeat.
   mode_requests.clear();
@@ -1225,7 +1228,7 @@ TEST(ProcessDisplayModeContract, SessionModeIsSavedOnlyBeforePromotionAndModeSet
   ASSERT_NE(created, std::string::npos);
   const auto applied = source.find("VDISPLAY::changeDisplaySettings(created_display.display_name.c_str()", created);
   const auto saved = source.find("save_virtual_display_session_mode(render_width, render_height, target_fps);", created);
-  const auto promoted = source.find("promote_virtual_display(launch_session->enable_hdr)", created);
+  const auto promoted = source.find("promote_virtual_display(display_context->enable_hdr)", created);
   ASSERT_NE(applied, std::string::npos);
   ASSERT_NE(saved, std::string::npos);
   ASSERT_NE(promoted, std::string::npos);
@@ -1236,7 +1239,7 @@ TEST(ProcessDisplayModeContract, SessionModeIsSavedOnlyBeforePromotionAndModeSet
   const auto resume = source.find("int proc_t::reconfigure_retained_session(");
   ASSERT_NE(resume, std::string::npos);
   const auto resume_save = source.find(save_call, resume);
-  const auto resume_promote = source.find("promote_virtual_display(launch_session->enable_hdr, 1500ms)", resume);
+  const auto resume_promote = source.find("promote_virtual_display(display_context->enable_hdr, 1500ms)", resume);
   ASSERT_NE(resume_save, std::string::npos);
   ASSERT_NE(resume_promote, std::string::npos);
   EXPECT_LT(resume_save, resume_promote);
@@ -1282,13 +1285,14 @@ TEST_F(RetainedDisplayPauseTest, FailedPhysicalRestorePreventsReactivationHdrAnd
   ASSERT_FALSE(process_.pause_display_for_resume());
   EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause}));
   operations_.clear();
-  EXPECT_EQ(process_.reconfigure_retained_session(make_launch(22)), 503);
+  const auto resume_request = make_launch(22);
+  EXPECT_EQ(process_.reconfigure_retained_session(resume_request->display_context, resume_request->id), 503);
   EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::pause}));
   EXPECT_TRUE(proc::process_test_access::display_pause_pending(process_));
   EXPECT_TRUE(proc::process_test_access::has_virtual_identity(process_));
   EXPECT_EQ(process_.get_host_session_id(), 1234U);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 11U);
-  EXPECT_EQ(original_->sbs_mode, 1);
+  EXPECT_EQ(original_->display_context->sbs_mode, 1);
 }
 
 TEST_F(RetainedDisplayPauseTest, FailedReactivationLeavesExactSessionRetryable) {
@@ -1296,7 +1300,7 @@ TEST_F(RetainedDisplayPauseTest, FailedReactivationLeavesExactSessionRetryable) 
   failed_operation_ = operation_e::reactivate;
   operations_.clear();
   auto resumed = make_launch(22);
-  EXPECT_EQ(process_.reconfigure_retained_session(resumed), 503);
+  EXPECT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 503);
   // The resume returns to the paused desktop and retries while the topology may still be
   // settling. Its final rollback pauses once more, and each completed pause wakes the display.
   std::vector<operation_e> expected;
@@ -1306,18 +1310,18 @@ TEST_F(RetainedDisplayPauseTest, FailedReactivationLeavesExactSessionRetryable) 
   EXPECT_EQ(operations_, expected);
   EXPECT_EQ(process_.get_host_session_id(), 1234U);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 11U);
-  EXPECT_EQ(original_->sbs_mode, 1);
+  EXPECT_EQ(original_->display_context->sbs_mode, 1);
   EXPECT_TRUE(proc::process_test_access::display_pause_pending(process_));
   EXPECT_TRUE(proc::process_test_access::has_virtual_identity(process_));
 
   failed_operation_.reset();
   operations_.clear();
-  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   EXPECT_EQ(operations_.front(), operation_e::reactivate);
   EXPECT_EQ(operations_[1], operation_e::refresh_binding);
   EXPECT_EQ(process_.get_host_session_id(), 1234U);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
-  EXPECT_EQ(original_->sbs_mode, 0);
+  EXPECT_EQ(original_->display_context->sbs_mode, 0);
 }
 
 TEST_F(RetainedDisplayPauseTest, TransientReactivationFailureIsRetriedWithinTheSameResume) {
@@ -1333,7 +1337,7 @@ TEST_F(RetainedDisplayPauseTest, TransientReactivationFailureIsRetriedWithinTheS
     return true;
   });
   auto resumed = make_launch(22);
-  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   ASSERT_GE(operations_.size(), 8U);
   EXPECT_EQ(std::vector<operation_e>(operations_.begin(), operations_.begin() + 8), (std::vector<operation_e> {
                                                                                       operation_e::reactivate,
@@ -1348,7 +1352,7 @@ TEST_F(RetainedDisplayPauseTest, TransientReactivationFailureIsRetriedWithinTheS
   EXPECT_EQ(std::ranges::count(operations_, operation_e::reactivate), 3);
   EXPECT_EQ(process_.get_host_session_id(), 1234U);
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
-  EXPECT_EQ(original_->sbs_mode, 0);
+  EXPECT_EQ(original_->display_context->sbs_mode, 0);
 }
 
 TEST_F(RetainedDisplayPauseTest, FailedHdrAfterReactivationKeepsRecoveryUntilSuccessfulRetry) {
@@ -1367,7 +1371,7 @@ TEST_F(RetainedDisplayPauseTest, FailedHdrAfterReactivationKeepsRecoveryUntilSuc
     return true;
   });
   auto resumed = make_launch(22);
-  EXPECT_EQ(process_.reconfigure_retained_session(resumed), 503);
+  EXPECT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 503);
   EXPECT_TRUE(proc::process_test_access::display_pause_pending(process_));
   EXPECT_TRUE(proc::process_test_access::has_retained_display(process_));
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 11U);
@@ -1376,7 +1380,7 @@ TEST_F(RetainedDisplayPauseTest, FailedHdrAfterReactivationKeepsRecoveryUntilSuc
   operations_.clear();
   EXPECT_TRUE(process_.pause_display_for_resume());
   EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause}));
-  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   EXPECT_FALSE(proc::process_test_access::has_retained_display(process_));
   EXPECT_EQ(proc::process_test_access::active_transport(process_), 22U);
 }
@@ -1410,7 +1414,7 @@ TEST_F(RetainedDisplayPauseTest, RecheckFailureDoesNotRepeatWakeButCompletedResu
   EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::pause}));
 
   auto resumed = make_launch(22);
-  ASSERT_EQ(process_.reconfigure_retained_session(resumed), 0);
+  ASSERT_EQ(process_.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   operations_.clear();
   ASSERT_TRUE(process_.pause_display_for_resume());
   EXPECT_EQ(operations_, (std::vector<operation_e> {operation_e::pause, operation_e::wake}));
@@ -1453,7 +1457,7 @@ TEST_F(IdleProcessLifecycleTest, ExitedAppIsCleanedAfterMediaStopsBeforeWarmRete
 
 TEST_F(IdleProcessLifecycleTest, FailedRetirementPreservesOwnerAcrossRefreshAndNewLaunch) {
   using operation_e = proc::display_topology_test_operation_e;
-  original_->virtual_display = true;
+  original_->display_context->virtual_display = true;
   proc::process_test_access::mark_virtual(proc::proc, true, true);
   bool allow_retirement = false;
   proc::process_test_access::set_display_topology_hook(proc::proc, [&](operation_e operation, bool) {
@@ -1478,9 +1482,9 @@ TEST_F(IdleProcessLifecycleTest, FailedRetirementPreservesOwnerAcrossRefreshAndN
   auto next_launch = std::make_shared<rtsp_stream::launch_session_t>();
   // Cleanup admission precedes even input validation. Invalid geometry also keeps this negative
   // test away from platform acquisition if the guard regresses.
-  next_launch->width = next_launch->height = 1;
-  next_launch->scale_factor = 20;
-  EXPECT_EQ(proc::proc.execute(std::move(next_app), next_launch, false), 503);
+  next_launch->display_context->width = next_launch->display_context->height = 1;
+  next_launch->display_context->scale_factor = 20;
+  EXPECT_EQ(proc::proc.execute(std::move(next_app), next_launch->display_context, proc::launch_options_t {next_launch->id, next_launch->host_audio, next_launch->surround_info}, false), 503);
   expect_app_unchanged(next_app, expected_app);
   EXPECT_TRUE(proc::proc.get_status().app_name.empty());
   EXPECT_TRUE(proc::proc.get_last_run_app_name().empty());
@@ -1503,7 +1507,7 @@ TEST_F(IdleProcessLifecycleTest, PhysicalDesktopRestoresBeforeBoundedUndoCleanup
   });
   proc::process_test_access::set_child(proc::proc, exited_test_child());
   proc::process_test_access::mark_virtual(proc::proc, true, true);
-  original_->virtual_display = true;
+  original_->display_context->virtual_display = true;
   bool paused = false;
   proc::process_test_access::set_display_topology_hook(proc::proc, [&](auto operation, bool) {
     if (operation == proc::display_topology_test_operation_e::pause) {
@@ -1528,7 +1532,7 @@ TEST_F(IdleProcessLifecycleTest, IdleAdmissionReapsAnAppThatExitedDuringReconnec
   EXPECT_EQ(proc::proc.get_status().app_id, 0);
   EXPECT_EQ(proc::proc.get_host_session_id(), 0U);
   auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
-  EXPECT_EQ(proc::proc.reconfigure_retained_session(resumed), 409);
+  EXPECT_EQ(proc::proc.reconfigure_retained_session(resumed->display_context, resumed->id), 409);
 }
 
 TEST_F(IdleProcessLifecycleTest, LiveCommandKeepsItsIdentityAndExistingGraceDeadline) {
@@ -1736,7 +1740,7 @@ TEST_F(IdleProcessLifecycleTest, PendingAndClaimedRtspReservationsRejectFreshRep
     SCOPED_TRACE(claimed);
     auto pending = std::make_shared<rtsp_stream::launch_session_t>();
     pending->id = claimed ? 91002 : 91001;
-    pending->unique_id = "fresh-replacement-reservation-test";
+    pending->display_context->unique_id = "fresh-replacement-reservation-test";
     pending->gcm_key.assign(16, 0);
     pending->rtsp_cipher.emplace(pending->gcm_key, false);
     pending->av_ping_payload = "0123456789abcdef";
@@ -1802,12 +1806,12 @@ TEST_F(IdleProcessLifecycleTest, FailedPhysicalHdrRollbackClearsUnprovenSession)
   });
   auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
   resumed->id = 22;
-  resumed->width = 1920;
-  resumed->height = 1080;
-  resumed->fps = 60000;
-  resumed->scale_factor = 100;
-  resumed->enable_hdr = true;
-  EXPECT_EQ(proc::proc.reconfigure_retained_session(resumed), 503);
+  resumed->display_context->width = 1920;
+  resumed->display_context->height = 1080;
+  resumed->display_context->fps = 60000;
+  resumed->display_context->scale_factor = 100;
+  resumed->display_context->enable_hdr = true;
+  EXPECT_EQ(proc::proc.reconfigure_retained_session(resumed->display_context, resumed->id), 503);
   EXPECT_EQ(requests, (std::vector<bool> {true, false}));
   EXPECT_EQ(proc::proc.get_status().app_id, 0);
   EXPECT_EQ(proc::proc.get_host_session_id(), 0U);
@@ -1819,10 +1823,10 @@ TEST(ProcessTest, PhysicalResumeAppliesChangedHdrBeforePublishingItsContract) {
     proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
     auto original = std::make_shared<rtsp_stream::launch_session_t>();
     original->id = 11;
-    original->width = 1920;
-    original->height = 1080;
-    original->fps = 60000;
-    original->enable_hdr = previous_hdr;
+    original->display_context->width = 1920;
+    original->display_context->height = 1080;
+    original->display_context->fps = 60000;
+    original->display_context->enable_hdr = previous_hdr;
     proc::process_test_access::retain(process, original);
     auto cleanup = util::fail_guard([&]() {
       proc::process_test_access::clear(process);
@@ -1836,12 +1840,12 @@ TEST(ProcessTest, PhysicalResumeAppliesChangedHdrBeforePublishingItsContract) {
     });
     auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
     resumed->id = 22;
-    resumed->width = 1920;
-    resumed->height = 1080;
-    resumed->fps = 60000;
-    resumed->scale_factor = 100;
-    resumed->enable_hdr = !previous_hdr;
-    EXPECT_EQ(process.reconfigure_retained_session(resumed), 0);
+    resumed->display_context->width = 1920;
+    resumed->display_context->height = 1080;
+    resumed->display_context->fps = 60000;
+    resumed->display_context->scale_factor = 100;
+    resumed->display_context->enable_hdr = !previous_hdr;
+    EXPECT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
     EXPECT_EQ(requests, (std::vector<bool> {!previous_hdr}));
     EXPECT_EQ(process.get_status().enable_hdr, !previous_hdr);
     EXPECT_EQ(process.get_host_session_id(), 1234U);
@@ -1854,10 +1858,10 @@ TEST(ProcessTest, FailedPhysicalHdrResumeRestoresPreviousHdrAndTransportIdentity
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto original = std::make_shared<rtsp_stream::launch_session_t>();
   original->id = 11;
-  original->width = 1920;
-  original->height = 1080;
-  original->fps = 60000;
-  original->scale_factor = 100;
+  original->display_context->width = 1920;
+  original->display_context->height = 1080;
+  original->display_context->fps = 60000;
+  original->display_context->scale_factor = 100;
   proc::process_test_access::retain(process, original);
   auto cleanup = util::fail_guard([&]() {
     proc::process_test_access::clear(process);
@@ -1871,12 +1875,12 @@ TEST(ProcessTest, FailedPhysicalHdrResumeRestoresPreviousHdrAndTransportIdentity
   });
   auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
   resumed->id = 22;
-  resumed->width = 1920;
-  resumed->height = 1080;
-  resumed->fps = 60000;
-  resumed->scale_factor = 100;
-  resumed->enable_hdr = true;
-  EXPECT_EQ(process.reconfigure_retained_session(resumed), 503);
+  resumed->display_context->width = 1920;
+  resumed->display_context->height = 1080;
+  resumed->display_context->fps = 60000;
+  resumed->display_context->scale_factor = 100;
+  resumed->display_context->enable_hdr = true;
+  EXPECT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 503);
   EXPECT_EQ(requests, (std::vector<bool> {true, false}));
   EXPECT_FALSE(process.get_status().enable_hdr);
   EXPECT_EQ(process.get_host_session_id(), 1234U);
@@ -1899,10 +1903,10 @@ TEST(ProcessTest, RetainedDisplayPolicyFollowsEachAcceptedClientResume) {
     proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
     auto original = std::make_shared<rtsp_stream::launch_session_t>();
     original->id = 11;
-    original->width = 1920;
-    original->height = 1080;
-    original->fps = 60000;
-    original->virtual_display_only = captured_policy;
+    original->display_context->width = 1920;
+    original->display_context->height = 1080;
+    original->display_context->fps = 60000;
+    original->display_context->virtual_display_only = captured_policy;
     proc::process_test_access::retain(process, original);
     auto cleanup = util::fail_guard([&]() {
       proc::process_test_access::clear(process);
@@ -1912,31 +1916,31 @@ TEST(ProcessTest, RetainedDisplayPolicyFollowsEachAcceptedClientResume) {
     // client policy lifetime without any CCD call.
     auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
     resumed->id = 22;
-    resumed->width = 1920;
-    resumed->height = 1080;
-    resumed->fps = 60000;
-    resumed->scale_factor = 100;
-    resumed->virtual_display_only = !captured_policy;
-    ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
+    resumed->display_context->width = 1920;
+    resumed->display_context->height = 1080;
+    resumed->display_context->fps = 60000;
+    resumed->display_context->scale_factor = 100;
+    resumed->display_context->virtual_display_only = !captured_policy;
+    ASSERT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
     EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !captured_policy);
 
     auto rejected = std::make_shared<rtsp_stream::launch_session_t>();
     rejected->id = 23;
-    rejected->width = 1920;
-    rejected->height = 1080;
-    rejected->fps = 60000;
-    rejected->scale_factor = 100;
-    rejected->virtual_display = true;
-    rejected->virtual_display_only = captured_policy;
-    EXPECT_EQ(process.reconfigure_retained_session(rejected), 409);
+    rejected->display_context->width = 1920;
+    rejected->display_context->height = 1080;
+    rejected->display_context->fps = 60000;
+    rejected->display_context->scale_factor = 100;
+    rejected->display_context->virtual_display = true;
+    rejected->display_context->virtual_display_only = captured_policy;
+    EXPECT_EQ(process.reconfigure_retained_session(rejected->display_context, rejected->id), 409);
     EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !captured_policy);
 
     auto invalid = std::make_shared<rtsp_stream::launch_session_t>();
-    invalid->width = 1;
-    invalid->height = 1;
-    invalid->scale_factor = 20;
-    invalid->virtual_display_only = captured_policy;
-    EXPECT_EQ(process.reconfigure_retained_session(invalid), 400);
+    invalid->display_context->width = 1;
+    invalid->display_context->height = 1;
+    invalid->display_context->scale_factor = 20;
+    invalid->display_context->virtual_display_only = captured_policy;
+    EXPECT_EQ(process.reconfigure_retained_session(invalid->display_context, invalid->id), 400);
     EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !captured_policy);
 
     process.terminate(false, false);
@@ -1953,11 +1957,11 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeCommitsPolicyAfterPromotionAndRebi
     proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
     auto original = std::make_shared<rtsp_stream::launch_session_t>();
     original->id = 11;
-    original->width = 1920;
-    original->height = 1080;
-    original->fps = 60000;
-    original->virtual_display = true;
-    original->virtual_display_only = previous_policy;
+    original->display_context->width = 1920;
+    original->display_context->height = 1080;
+    original->display_context->fps = 60000;
+    original->display_context->virtual_display = true;
+    original->display_context->virtual_display_only = previous_policy;
     proc::process_test_access::retain(process, original);
     proc::process_test_access::mark_virtual(process, true);
     auto cleanup = util::fail_guard([&]() {
@@ -1975,12 +1979,12 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeCommitsPolicyAfterPromotionAndRebi
 
     auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
     resumed->id = 22;
-    resumed->width = 1920;
-    resumed->height = 1080;
-    resumed->fps = 60000;
-    resumed->scale_factor = 100;
-    resumed->virtual_display_only = !previous_policy;
-    ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
+    resumed->display_context->width = 1920;
+    resumed->display_context->height = 1080;
+    resumed->display_context->fps = 60000;
+    resumed->display_context->scale_factor = 100;
+    resumed->display_context->virtual_display_only = !previous_policy;
+    ASSERT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
 
     ASSERT_EQ(operations.size(), 6U);
     EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, !previous_policy}));
@@ -1991,8 +1995,8 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeCommitsPolicyAfterPromotionAndRebi
     // The promoted display's mode is read back once more.
     EXPECT_EQ(operations[5], (std::pair {operation_e::refresh_binding, !previous_policy}));
     EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !previous_policy);
-    EXPECT_EQ(original->virtual_display_only, !previous_policy);
-    EXPECT_TRUE(resumed->virtual_display);
+    EXPECT_EQ(original->display_context->virtual_display_only, !previous_policy);
+    EXPECT_TRUE(resumed->display_context->virtual_display);
     EXPECT_EQ(process.get_host_session_id(), 1234U);
   }
 }
@@ -2003,11 +2007,11 @@ TEST(ProcessTest, RestorePrimaryDisplayPreservesRetainedVirtualDisplayForResume)
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto original = std::make_shared<rtsp_stream::launch_session_t>();
   original->id = 11;
-  original->width = 1920;
-  original->height = 1080;
-  original->fps = 60000;
-  original->virtual_display = true;
-  original->virtual_display_only = true;
+  original->display_context->width = 1920;
+  original->display_context->height = 1080;
+  original->display_context->fps = 60000;
+  original->display_context->virtual_display = true;
+  original->display_context->virtual_display_only = true;
   proc::process_test_access::retain(process, original);
   proc::process_test_access::mark_virtual(process, true);
   auto cleanup = util::fail_guard([&]() {
@@ -2034,12 +2038,12 @@ TEST(ProcessTest, RestorePrimaryDisplayPreservesRetainedVirtualDisplayForResume)
   operations.clear();
   auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
   resumed->id = 22;
-  resumed->width = 1920;
-  resumed->height = 1080;
-  resumed->fps = 60000;
-  resumed->scale_factor = 100;
-  resumed->virtual_display_only = true;
-  ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
+  resumed->display_context->width = 1920;
+  resumed->display_context->height = 1080;
+  resumed->display_context->fps = 60000;
+  resumed->display_context->scale_factor = 100;
+  resumed->display_context->virtual_display_only = true;
+  ASSERT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
 
   ASSERT_EQ(operations.size(), 6U);
   EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, true}));
@@ -2059,12 +2063,12 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeRetriesPromotionWhileWindowsTopolo
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto original = std::make_shared<rtsp_stream::launch_session_t>();
   original->id = 11;
-  original->width = 1920;
-  original->height = 1080;
-  original->fps = 60000;
-  original->sbs_mode = 1;
-  original->virtual_display = true;
-  original->virtual_display_only = true;
+  original->display_context->width = 1920;
+  original->display_context->height = 1080;
+  original->display_context->fps = 60000;
+  original->display_context->sbs_mode = 1;
+  original->display_context->virtual_display = true;
+  original->display_context->virtual_display_only = true;
   proc::process_test_access::retain(process, original);
   proc::process_test_access::mark_virtual(process, true);
   auto cleanup = util::fail_guard([&]() {
@@ -2086,13 +2090,13 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeRetriesPromotionWhileWindowsTopolo
 
   auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
   resumed->id = 22;
-  resumed->width = 1920;
-  resumed->height = 1080;
-  resumed->fps = 60000;
-  resumed->scale_factor = 100;
-  resumed->sbs_mode = 0;
-  resumed->virtual_display_only = true;
-  ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
+  resumed->display_context->width = 1920;
+  resumed->display_context->height = 1080;
+  resumed->display_context->fps = 60000;
+  resumed->display_context->scale_factor = 100;
+  resumed->display_context->sbs_mode = 0;
+  resumed->display_context->virtual_display_only = true;
+  ASSERT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
 
   EXPECT_EQ(operations, (std::vector<std::pair<operation_e, bool>> {
                           {operation_e::refresh_binding, true},
@@ -2106,7 +2110,7 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeRetriesPromotionWhileWindowsTopolo
   EXPECT_EQ(process.get_host_session_id(), 1234U);
   EXPECT_EQ(process.get_status().app_id, 1);
   EXPECT_TRUE(process.get_status().virtual_display);
-  EXPECT_EQ(original->sbs_mode, resumed->sbs_mode);
+  EXPECT_EQ(original->display_context->sbs_mode, resumed->display_context->sbs_mode);
   EXPECT_EQ(original->id, 11U);
 }
 
@@ -2122,11 +2126,11 @@ TEST(ProcessTest, FailedPostPromotionRebindPausesAndPreservesExactSessionForRetr
   process.initial_display = saved_output;
   auto original = std::make_shared<rtsp_stream::launch_session_t>();
   original->id = 11;
-  original->width = 1920;
-  original->height = 1080;
-  original->fps = 60000;
-  original->virtual_display = true;
-  original->virtual_display_only = false;
+  original->display_context->width = 1920;
+  original->display_context->height = 1080;
+  original->display_context->fps = 60000;
+  original->display_context->virtual_display = true;
+  original->display_context->virtual_display_only = false;
   proc::process_test_access::retain(process, original);
   proc::process_test_access::mark_virtual(process, true, true);
   auto cleanup = util::fail_guard([&]() {
@@ -2151,12 +2155,12 @@ TEST(ProcessTest, FailedPostPromotionRebindPausesAndPreservesExactSessionForRetr
 
   auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
   resumed->id = 22;
-  resumed->width = 1920;
-  resumed->height = 1080;
-  resumed->fps = 60000;
-  resumed->scale_factor = 100;
-  resumed->virtual_display_only = true;
-  EXPECT_EQ(process.reconfigure_retained_session(resumed), 503);
+  resumed->display_context->width = 1920;
+  resumed->display_context->height = 1080;
+  resumed->display_context->fps = 60000;
+  resumed->display_context->scale_factor = 100;
+  resumed->display_context->virtual_display_only = true;
+  EXPECT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 503);
 
   ASSERT_EQ(operations.size(), 7U);
   EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, true}));
@@ -2169,7 +2173,7 @@ TEST(ProcessTest, FailedPostPromotionRebindPausesAndPreservesExactSessionForRetr
   EXPECT_EQ(operations[5], (std::pair {operation_e::pause, false}));
   EXPECT_EQ(operations[6], (std::pair {operation_e::wake, false}));
   EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
-  EXPECT_FALSE(original->virtual_display_only);
+  EXPECT_FALSE(original->display_context->virtual_display_only);
   EXPECT_EQ(process.get_host_session_id(), 1234U);
   const auto status = process.get_status();
   EXPECT_EQ(status.app_id, 1);
@@ -2180,7 +2184,7 @@ TEST(ProcessTest, FailedPostPromotionRebindPausesAndPreservesExactSessionForRetr
 
   fail_rebind = false;
   operations.clear();
-  ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
+  ASSERT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   ASSERT_GE(operations.size(), 2U);
   EXPECT_EQ(operations[0].first, operation_e::reactivate);
   EXPECT_EQ(operations[1].first, operation_e::refresh_binding);
@@ -2198,7 +2202,7 @@ TEST(ProcessTest, RejectedNewLaunchClearsPreviousClientDisplayPolicy) {
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto previous = std::make_shared<rtsp_stream::launch_session_t>();
   previous->id = 11;
-  previous->virtual_display_only = true;
+  previous->display_context->virtual_display_only = true;
   proc::process_test_access::retain(process, previous);
   auto cleanup = util::fail_guard([&]() {
     proc::process_test_access::clear(process);
@@ -2207,11 +2211,11 @@ TEST(ProcessTest, RejectedNewLaunchClearsPreviousClientDisplayPolicy) {
   auto app = rejected_launch_app();
   const auto expected_app = app;
   auto invalid = std::make_shared<rtsp_stream::launch_session_t>();
-  invalid->width = 1;
-  invalid->height = 1;
-  invalid->scale_factor = 20;
-  invalid->virtual_display_only = true;
-  EXPECT_EQ(process.execute(std::move(app), invalid, false), 400);
+  invalid->display_context->width = 1;
+  invalid->display_context->height = 1;
+  invalid->display_context->scale_factor = 20;
+  invalid->display_context->virtual_display_only = true;
+  EXPECT_EQ(process.execute(std::move(app), invalid->display_context, proc::launch_options_t {invalid->id, invalid->host_audio, invalid->surround_info}, false), 400);
   expect_app_unchanged(app, expected_app);
   EXPECT_TRUE(process.get_status().app_name.empty());
   EXPECT_TRUE(process.get_last_run_app_name().empty());
@@ -2244,12 +2248,12 @@ TEST(ProcessTest, InvalidRenderSizeLeavesProcessIdle) {
   const auto expected_app = app;
 
   auto launch = std::make_shared<rtsp_stream::launch_session_t>();
-  launch->width = 1;
-  launch->height = 1;
-  launch->fps = 60000;
-  launch->scale_factor = 20;
+  launch->display_context->width = 1;
+  launch->display_context->height = 1;
+  launch->display_context->fps = 60000;
+  launch->display_context->scale_factor = 20;
 
-  EXPECT_EQ(process.execute(std::move(app), launch, false), 400);
+  EXPECT_EQ(process.execute(std::move(app), launch->display_context, proc::launch_options_t {launch->id, launch->host_audio, launch->surround_info}, false), 400);
   expect_app_unchanged(app, expected_app);
   const auto status = process.get_status();
   EXPECT_EQ(status.app_id, 0);

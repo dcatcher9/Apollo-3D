@@ -34,7 +34,7 @@ namespace {
   ) {
     auto session = std::make_shared<rtsp_stream::launch_session_t>();
     session->id = id;
-    session->unique_id = unique_id;
+    session->display_context->unique_id = unique_id;
     session->gcm_key.assign(16, 0);
     session->rtsp_cipher.emplace(session->gcm_key, false);
     session->rtsp_iv_counter = 0;

@@ -413,8 +413,8 @@ namespace {
     stream::config_t stream_config {};
     rtsp_stream::launch_session_t launch_session {};
     launch_session.id = id;
-    launch_session.unique_id = std::move(uuid);
-    launch_session.device_name = std::move(name);
+    launch_session.display_context->unique_id = std::move(uuid);
+    launch_session.display_context->device_name = std::move(name);
     launch_session.perm = permissions;
     launch_session.gcm_key.resize(16);
     launch_session.iv.resize(16);

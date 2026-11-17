@@ -136,6 +136,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/common.h"
         "${CMAKE_SOURCE_DIR}/src/process.cpp"
         "${CMAKE_SOURCE_DIR}/src/process.h"
+        "${CMAKE_SOURCE_DIR}/src/process_display_context.h"
         "${CMAKE_SOURCE_DIR}/src/network.cpp"
         "${CMAKE_SOURCE_DIR}/src/network.h"
         "${CMAKE_SOURCE_DIR}/src/system_tray.cpp"

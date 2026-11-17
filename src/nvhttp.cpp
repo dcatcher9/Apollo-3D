@@ -794,12 +794,12 @@ namespace nvhttp {
       BOOST_LOG(warning) << "Rejecting invalid display mode for client ["sv << named_cert_p->name << ']';
       return nullptr;
     }
-    launch_session->width = parsed_mode->width;
-    launch_session->height = parsed_mode->height;
-    launch_session->fps = parsed_mode->fps;
+    launch_session->display_context->width = parsed_mode->width;
+    launch_session->display_context->height = parsed_mode->height;
+    launch_session->display_context->fps = parsed_mode->fps;
 
-    launch_session->device_name = named_cert_p->name.empty() ? "ApolloDisplay"s : named_cert_p->name;
-    launch_session->unique_id = named_cert_p->uuid;
+    launch_session->display_context->device_name = named_cert_p->name.empty() ? "ApolloDisplay"s : named_cert_p->name;
+    launch_session->display_context->unique_id = named_cert_p->uuid;
     launch_session->perm = named_cert_p->perm;
     const auto enable_sops = parse_launch_int(launch_int_field::binary_option, get_arg(args, "sops"));
     const auto host_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
@@ -839,14 +839,14 @@ namespace nvhttp {
 
     launch_session->host_audio = *host_audio;
     launch_session->surround_info = *surround_info;
-    launch_session->enable_hdr = *enable_hdr;
-    launch_session->virtual_display = display_options->virtual_display;
-    launch_session->virtual_display_only = display_options->virtual_display_only;
-    launch_session->scale_factor = display_options->scale_factor;
-    launch_session->sbs_mode = display_options->sbs_mode;
+    launch_session->display_context->enable_hdr = *enable_hdr;
+    launch_session->display_context->virtual_display = display_options->virtual_display;
+    launch_session->display_context->virtual_display_only = display_options->virtual_display_only;
+    launch_session->display_context->scale_factor = display_options->scale_factor;
+    launch_session->display_context->sbs_mode = display_options->sbs_mode;
     launch_session->stream_gamma = static_cast<video::stream_gamma_mode_e>(*stream_gamma);
 
-    if (!proc::calculate_render_size(launch_session->width, launch_session->height, launch_session->scale_factor)) {
+    if (!proc::calculate_render_size(launch_session->display_context->width, launch_session->display_context->height, launch_session->display_context->scale_factor)) {
       BOOST_LOG(warning) << "Rejecting a launch whose scaled display dimensions are invalid."sv;
       return nullptr;
     }
@@ -1531,8 +1531,8 @@ namespace nvhttp {
             platform_->restore_primary_display();
           }
           if (phase_ != phase_e::validating) {
-            // proc_t can retain launch_ even after rejection, so shared_ptr destruction alone
-            // cannot release an unpublished live-GPU reservation.
+            // Preserve the explicit admission boundary even if transport/socket references
+            // retain an unpublished live-GPU reservation.
             launch_->release_unpublished_live_gpu();
           }
         }
@@ -1579,7 +1579,15 @@ namespace nvhttp {
 #ifdef SUNSHINE_TESTS
           launch_native_hooks ? launch_native_hooks->execute(std::move(app), launch_, true) :
 #endif
-                                proc::proc.execute(std::move(app), launch_, true);
+                                proc::proc.execute(
+                                  std::move(app),
+                                  launch_->display_context,
+                                  proc::launch_options_t {
+                                    .launch_session_id = launch_->id,
+                                    .host_audio = launch_->host_audio,
+                                    .surround_info = launch_->surround_info,
+                                  },
+                                  true);
         if (error) {
           return error_t {failure_e::process_start, error};
         }
@@ -1629,7 +1637,7 @@ namespace nvhttp {
 #ifdef SUNSHINE_TESTS
               launch_native_hooks ? launch_native_hooks->reconfigure(launch_) :
 #endif
-                                    proc::proc.reconfigure_retained_session(launch_)) {
+                                    proc::proc.reconfigure_retained_session(launch_->display_context, launch_->id)) {
           return error_t {failure_e::retained_reconfiguration, error};
         }
 #ifdef _WIN32
@@ -1943,15 +1951,15 @@ namespace nvhttp {
       return;
     }
 
-    const bool requested_virtual_display_only = launch_session->virtual_display_only;
-    launch_session->virtual_display_only = detail::resolve_resume_virtual_display_only(
+    const bool requested_virtual_display_only = launch_session->display_context->virtual_display_only;
+    launch_session->display_context->virtual_display_only = detail::resolve_resume_virtual_display_only(
       requested_virtual_display_only,
       process_status.virtual_display_only,
       process_status.client_uuid,
       named_cert_p->uuid,
       named_cert_p->perm
     );
-    if (launch_session->virtual_display_only != requested_virtual_display_only) {
+    if (launch_session->display_context->virtual_display_only != requested_virtual_display_only) {
       BOOST_LOG(warning) << "Ignoring a virtual-display-only policy change from view-only client ["
                          << named_cert_p->name << "]; retaining the current session policy."sv;
     }

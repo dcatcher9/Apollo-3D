@@ -4706,8 +4706,8 @@ namespace stream {
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
-      session->device_name = launch_session.device_name;
-      session->device_uuid = launch_session.unique_id;
+      session->device_name = launch_session.display_context->device_name;
+      session->device_uuid = launch_session.display_context->unique_id;
       session->client_policy_generation = 0;
       session->permission.store(launch_session.perm, std::memory_order_relaxed);
 

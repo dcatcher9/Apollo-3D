@@ -46,6 +46,8 @@
 
 #ifdef SUNSHINE_TESTS
   #include "nvhttp_launch_test.h"
+  #include "process_display_context_test.h"
+  #include <stdexcept>
 #endif
 
 #ifdef _WIN32
@@ -86,7 +88,7 @@ namespace proc {
     // and a launch or resume may carry any millihertz rate. Compare in the session's units at the
     // wire's precision, so a client repeating its mode is never mistaken for a mode change.
     bool live_request_repeats_session_mode(
-      const rtsp_stream::launch_session_t &session,
+      const process_display_context_t &session,
       const render_size_t &requested,
       int fps_millihz
     ) {
@@ -433,9 +435,9 @@ namespace proc {
       _app.uuid,
       _virtual_display,
       _host_session_id,
-      _launch_session && _launch_session->enable_hdr,
-      _launch_session ? _launch_session->unique_id : std::string {},
-      _launch_session && _launch_session->virtual_display_only,
+      _display_context && _display_context->enable_hdr,
+      _display_context ? _display_context->unique_id : std::string {},
+      _display_context && _display_context->virtual_display_only,
     };
   }
 
@@ -447,7 +449,7 @@ namespace proc {
     process._app_id = 0;
     process._host_session_id = 0;
     process._active_launch_session_id = 0;
-    process._launch_session.reset();
+    process._display_context.reset();
     process._virtual_display = false;
     process.display_name.clear();
   #ifdef _WIN32
@@ -474,11 +476,11 @@ namespace proc {
     process._app_id = util::from_view(process._app.id);
     process._host_session_id = host_session_id;
     process._active_launch_session_id = launch->id;
-    process._launch_session = std::move(launch);
+    process._display_context = launch->display_context;
     process.placebo = true;
     process._virtual_display = virtual_display;
   #ifdef _WIN32
-    process._virtual_display_only = process._launch_session->virtual_display_only;
+    process._virtual_display_only = process._display_context->virtual_display_only;
     if (virtual_display) {
       VDISPLAY::session_io_t io;
       io.prepare = [](const auto &) {
@@ -548,31 +550,118 @@ namespace proc {
   void launch_transaction_test_access::publish_resume(proc_t &process, const rtsp_stream::launch_session_t &launch) {
     std::lock_guard lock(process_state_mutex);
     // Stand in only for the native edge's successful contract publication, not its validation.
-    auto &retained = *process._launch_session;
-    retained.width = launch.width;
-    retained.height = launch.height;
-    retained.fps = launch.fps;
-    retained.enable_hdr = launch.enable_hdr;
-    retained.virtual_display_only = launch.virtual_display_only;
-    retained.scale_factor = launch.scale_factor;
-    retained.sbs_mode = launch.sbs_mode;
+    auto &retained = *process._display_context;
+    retained.width = launch.display_context->width;
+    retained.height = launch.display_context->height;
+    retained.fps = launch.display_context->fps;
+    retained.enable_hdr = launch.display_context->enable_hdr;
+    retained.virtual_display_only = launch.display_context->virtual_display_only;
+    retained.scale_factor = launch.display_context->scale_factor;
+    retained.sbs_mode = launch.display_context->sbs_mode;
     process._active_launch_session_id = launch.id;
   #ifdef _WIN32
-    process._virtual_display_only = launch.virtual_display_only;
-    process._display_session.set_exclusive(launch.virtual_display_only);
+    process._virtual_display_only = launch.display_context->virtual_display_only;
+    process._display_session.set_exclusive(launch.display_context->virtual_display_only);
     process._display_session.commit_resume();
   #endif
   }
 
-  std::shared_ptr<rtsp_stream::launch_session_t> launch_transaction_test_access::retained_launch(const proc_t &process) {
+  std::shared_ptr<process_display_context_t> launch_transaction_test_access::retained_display_context(const proc_t &process) {
     std::lock_guard lock(process_state_mutex);
-    return process._launch_session;
+    return process._display_context;
   }
 
   std::uint32_t launch_transaction_test_access::active_transport(const proc_t &process) {
     std::lock_guard lock(process_state_mutex);
     return process._active_launch_session_id;
   }
+  #ifdef _WIN32
+  void process_display_context_test_access::configure(proc_t &process, const testing::native_edges_t &edges) {
+    std::lock_guard lock(process_state_mutex);
+    const auto &io = edges.display_io;
+    if (!edges.encoder_probing_allowed || !edges.recover_primary || !edges.remote_starting || !edges.remote_awaiting || !edges.remote_ended || !edges.map_display_name || !edges.capture_display_names || !edges.start_hdr_worker || !edges.topology || !edges.query_mode || !edges.change_mode || !edges.record_mode || !edges.baseline_active || !edges.settings_unavailable || !io.prepare || !io.create || !io.bind || !io.promote || !io.restore || !io.pause || !io.reactivate || !io.query || !io.query_retirement || !io.remove || !io.now || !io.sleep || !io.restore_cursor) {
+      throw std::invalid_argument("A process display fixture must replace every native edge");
+    }
+    process._display_context_test_edges = &edges;
+    process._display_topology_test_hook = edges.topology;
+    process._display_mode_query_test_hook = edges.query_mode;
+    process._display_mode_change_test_hook = edges.change_mode;
+    process._display_mode_record_test_hook = edges.record_mode;
+    process._display_baseline_test_hook = edges.baseline_active;
+    process._display_settings_unavailable_test_hook = edges.settings_unavailable;
+  }
+
+  int process_display_context_test_access::execute(proc_t &process, ctx_t app, const std::shared_ptr<rtsp_stream::launch_session_t> &launch) {
+    return process.execute(
+      std::move(app),
+      launch->display_context,
+      launch_options_t {
+        .launch_session_id = launch->id,
+        .host_audio = launch->host_audio,
+        .surround_info = launch->surround_info,
+      },
+      false);
+  }
+
+  int process_display_context_test_access::reconfigure(proc_t &process, const std::shared_ptr<rtsp_stream::launch_session_t> &launch) {
+    return process.reconfigure_retained_session(launch ? launch->display_context : nullptr, launch ? launch->id : 0);
+  }
+
+  namespace {
+    testing::display_snapshot_t snapshot_display_context(const process_display_context_t &context) {
+      return {
+        context.device_name,
+        context.unique_id,
+        context.width,
+        context.height,
+        context.fps,
+        context.enable_hdr,
+        context.virtual_display,
+        context.virtual_display_only,
+        context.scale_factor,
+        context.sbs_mode,
+        context.display_guid};
+    }
+  }  // namespace
+
+  testing::display_snapshot_t process_display_context_test_access::display(const rtsp_stream::launch_session_t &launch) {
+    return snapshot_display_context(*launch.display_context);
+  }
+
+  void process_display_context_test_access::set_display(rtsp_stream::launch_session_t &launch, const testing::display_snapshot_t &display) {
+    launch.display_context->device_name = display.device_name;
+    launch.display_context->unique_id = display.unique_id;
+    launch.display_context->width = display.width;
+    launch.display_context->height = display.height;
+    launch.display_context->fps = display.fps;
+    launch.display_context->enable_hdr = display.enable_hdr;
+    launch.display_context->virtual_display = display.virtual_display;
+    launch.display_context->virtual_display_only = display.virtual_display_only;
+    launch.display_context->scale_factor = display.scale_factor;
+    launch.display_context->sbs_mode = display.sbs_mode;
+    launch.display_context->display_guid = display.display_guid;
+  }
+
+  std::optional<testing::display_snapshot_t> process_display_context_test_access::retained(const proc_t &process) {
+    std::lock_guard lock(process_state_mutex);
+    return process._display_context ? std::optional {snapshot_display_context(*process._display_context)} : std::nullopt;
+  }
+
+  bool process_display_context_test_access::shares_display_context(const proc_t &process, const rtsp_stream::launch_session_t &launch) {
+    std::lock_guard lock(process_state_mutex);
+    return process._display_context == launch.display_context;
+  }
+
+  std::string process_display_context_test_access::environment(proc_t &process, const std::string &key) {
+    std::lock_guard lock(process_state_mutex);
+    return process._env[key].to_string();
+  }
+
+  std::uint32_t process_display_context_test_access::active_transport(const proc_t &process) {
+    std::lock_guard lock(process_state_mutex);
+    return process._active_launch_session_id;
+  }
+  #endif
 #endif
 
 #ifdef _WIN32
@@ -587,6 +676,12 @@ namespace proc {
   }
 
   void proc_t::start_hdr_worker(bool enable_hdr) {
+  #ifdef SUNSHINE_TESTS
+    if (_display_context_test_edges) {
+      _display_context_test_edges->start_hdr_worker(enable_hdr);
+      return;
+    }
+  #endif
     stop_hdr_worker();
 
     auto state = std::make_shared<hdr_worker_state_t>();
@@ -776,10 +871,15 @@ namespace proc {
     const std::optional<LUID> &render_adapter
   ) {
     VDISPLAY::session_t owner;
-    if (_launch_session) {
+  #ifdef SUNSHINE_TESTS
+    if (_display_context_test_edges) {
+      owner = VDISPLAY::session_t {_display_context_test_edges->display_io};
+    }
+  #endif
+    if (_display_context) {
       VDISPLAY::display_spec_t spec;
-      spec.client_uid = _launch_session->unique_id;
-      spec.client_name = _launch_session->device_name;
+      spec.client_uid = _display_context->unique_id;
+      spec.client_name = _display_context->device_name;
       spec.guid = guid;
       spec.width = width;
       spec.height = height;
@@ -1256,14 +1356,20 @@ namespace proc {
     _virtual_display_retirement_handed_off = false;
     _virtual_display = true;
     set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
-    config::video.output_name = display_device::map_display_name(display_name);
+  #ifdef SUNSHINE_TESTS
+    if (_display_context_test_edges) {
+      config::video.output_name = _display_context_test_edges->map_display_name(display_name);
+    } else
+  #endif
+      config::video.output_name = display_device::map_display_name(display_name);
     start_hdr_worker(enable_hdr);
   }
 #endif
 
   int proc_t::execute(
     ctx_t &&app,
-    std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
+    std::shared_ptr<process_display_context_t> display_context,
+    launch_options_t launch_options,
     bool probe_encoder
   ) {
     std::lock_guard lock(process_state_mutex);
@@ -1276,30 +1382,30 @@ namespace proc {
     }
 #endif
 
-    const uint32_t client_width = launch_session->width ? launch_session->width : 1920;
-    const uint32_t client_height = launch_session->height ? launch_session->height : 1080;
-    const auto render_size = calculate_render_size(client_width, client_height, launch_session->scale_factor);
+    const uint32_t client_width = display_context->width ? display_context->width : 1920;
+    const uint32_t client_height = display_context->height ? display_context->height : 1080;
+    const auto render_size = calculate_render_size(client_width, client_height, display_context->scale_factor);
     if (!render_size) {
       BOOST_LOG(error) << "Requested client mode and render scale produce an invalid render size."sv;
       return 400;
     }
     const uint32_t render_width = render_size->width;
     const uint32_t render_height = render_size->height;
-    const int scale_factor = launch_session->scale_factor;
+    const int scale_factor = display_context->scale_factor;
 
     // Do not publish process ownership until every side-effect-free request validation has passed.
     // In particular, a tiny scaled mode can floor to zero after enforcing even dimensions; that
     // must leave the host idle rather than advertising an app that was never launched.
     _app = std::move(app);
     _app_id = util::from_view(_app.id);
-    _launch_session = launch_session;
-    _active_launch_session_id = launch_session->id;
+    _display_context = display_context;
+    _active_launch_session_id = launch_options.launch_session_id;
 #ifdef _WIN32
-    _virtual_display_only = launch_session->virtual_display_only;
+    _virtual_display_only = display_context->virtual_display_only;
 #endif
 
-    launch_session->width = render_width;
-    launch_session->height = render_height;
+    display_context->width = render_width;
+    display_context->height = render_height;
 
     this->initial_display = config::video.output_name;
     // Executed when returning from function
@@ -1309,34 +1415,54 @@ namespace proc {
       terminate();
 #ifdef _WIN32
       // Also cancel a pre-creation journal when Add never published an identity.
-      platf::primary_display::recover();
+  #ifdef SUNSHINE_TESTS
+      if (_display_context_test_edges) {
+        _display_context_test_edges->recover_primary();
+      } else
+  #endif
+        platf::primary_display::recover();
 #endif
     });
 
 #ifdef _WIN32
     const bool needs_virtual_display =
-      launch_session->virtual_display  // User requested virtual display
+      display_context->virtual_display  // User requested virtual display
       || _app.synthetic_virtual_display  // Apollo's generated Virtual Display tile
+  #ifdef SUNSHINE_TESTS
+      || !(_display_context_test_edges ? _display_context_test_edges->encoder_probing_allowed() : video::allow_encoder_probing());
+  #else
       || !video::allow_encoder_probing();  // No active display presents
+  #endif
     if (needs_virtual_display) {
+  #ifdef SUNSHINE_TESTS
+      const bool remote_started = _display_context_test_edges ?
+                                    _display_context_test_edges->remote_starting(launch_options.launch_session_id, config::stream.ping_timeout, true) :
+                                    ar_glasses::remote_virtual_display_starting(launch_options.launch_session_id, config::stream.ping_timeout, true);
+      if (!remote_started) {
+  #else
       if (!ar_glasses::remote_virtual_display_starting(
-            launch_session->id,
+            launch_options.launch_session_id,
             config::stream.ping_timeout,
             true
           )) {
+  #endif
         BOOST_LOG(error) << "Timed out waiting for local AR to release virtual-display ownership."sv;
-        launch_session->virtual_display = false;
+        display_context->virtual_display = false;
         return 503;
       }
-      _remote_virtual_display_lease = launch_session->id;
+      _remote_virtual_display_lease = launch_options.launch_session_id;
       if (!wait_for_retired_virtual_display(3s)) {
         BOOST_LOG(error) << "Timed out waiting for the previous virtual display to leave the Windows topology."sv;
-        launch_session->virtual_display = false;
+        display_context->virtual_display = false;
         return 503;
       }
+  #ifdef SUNSHINE_TESTS
+      if (!(_display_context_test_edges ? _display_context_test_edges->recover_primary() : platf::primary_display::recover())) {
+  #else
       if (!platf::primary_display::recover()) {
+  #endif
         BOOST_LOG(error) << "Cannot start a virtual display while the previous display-configuration restoration is unresolved."sv;
-        launch_session->virtual_display = false;
+        display_context->virtual_display = false;
         return 503;
       }
       if (vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
@@ -1345,16 +1471,16 @@ namespace proc {
       }
 
       if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
-        auto device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
-        memcpy(&launch_session->display_guid, &device_uuid, sizeof(GUID));
-        int target_fps = launch_session->fps ? launch_session->fps : 60000;
+        auto device_uuid = uuid_util::uuid_t::parse(display_context->unique_id);
+        memcpy(&display_context->display_guid, &device_uuid, sizeof(GUID));
+        int target_fps = display_context->fps ? display_context->fps : 60000;
         if (target_fps < 1000) {
           target_fps *= 1000;
         }
         VDISPLAY::display_spec_t spec;
-        spec.client_uid = launch_session->unique_id;
-        spec.client_name = launch_session->device_name;
-        spec.guid = launch_session->display_guid;
+        spec.client_uid = display_context->unique_id;
+        spec.client_name = display_context->device_name;
+        spec.guid = display_context->display_guid;
         spec.width = render_width;
         spec.height = render_height;
         spec.refresh_millihz = target_fps;
@@ -1362,9 +1488,14 @@ namespace proc {
         spec.exclusive = _virtual_display_only;
         // The owner saves the baseline before Add, and records Add identity before binding.
         _saved_virtual_display_mode.reset();
+  #ifdef SUNSHINE_TESTS
+        if (_display_context_test_edges) {
+          _display_session = VDISPLAY::session_t {_display_context_test_edges->display_io};
+        }
+  #endif
         const bool acquired = _display_session.acquire(std::move(spec));
         const auto &created_display = _display_session.binding();
-        launch_session->virtual_display = _display_session.owns_display();
+        display_context->virtual_display = _display_session.owns_display();
         _virtual_display_retirement_handed_off = false;
         if (!acquired) {
           BOOST_LOG(error) << "Could not acquire and bind the virtual display; retaining any created device for cleanup."sv;
@@ -1375,9 +1506,17 @@ namespace proc {
           BOOST_LOG(info) << "Virtual Display created at " << created_display.display_name;
 
           // Don't change display settings when no params are given
-          if (launch_session->width && launch_session->height && launch_session->fps) {
+          if (display_context->width && display_context->height && display_context->fps) {
             // Apply display settings
-            if (VDISPLAY::changeDisplaySettings(created_display.display_name.c_str(), render_width, render_height, target_fps, false) != DISP_CHANGE_SUCCESSFUL) {
+  #ifdef SUNSHINE_TESTS
+            if (_display_context_test_edges) {
+              if (_display_context_test_edges->change_mode(created_display.display_name, render_width, render_height, target_fps, false) != DISP_CHANGE_SUCCESSFUL) {
+                BOOST_LOG(error) << "Windows did not accept the requested virtual-display mode."sv;
+                return 503;
+              }
+            } else
+  #endif
+              if (VDISPLAY::changeDisplaySettings(created_display.display_name.c_str(), render_width, render_height, target_fps, false) != DISP_CHANGE_SUCCESSFUL) {
               BOOST_LOG(error) << "Windows did not accept the requested virtual-display mode."sv;
               return 503;
             }
@@ -1392,26 +1531,46 @@ namespace proc {
           // So we always set output_name to the newly created virtual display as a workaround for
           // empty name when probing graphics cards.
 
-          config::video.output_name = display_device::map_display_name(this->display_name);
-          if (!promote_virtual_display(launch_session->enable_hdr)) {
+  #ifdef SUNSHINE_TESTS
+          if (_display_context_test_edges) {
+            config::video.output_name = _display_context_test_edges->map_display_name(this->display_name);
+          } else
+  #endif
+            config::video.output_name = display_device::map_display_name(this->display_name);
+          if (!promote_virtual_display(display_context->enable_hdr)) {
             BOOST_LOG(error) << "Could not apply the requested virtual-display topology; rolling back the launch."sv;
             return 503;
           }
         } else {
           BOOST_LOG(error) << (created_display.added() ? "Virtual display was added, but Windows did not publish its display name in time." : "Virtual display creation failed.");
-          ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
+  #ifdef SUNSHINE_TESTS
+          if (_display_context_test_edges) {
+            _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
+          } else
+  #endif
+            ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
           _remote_virtual_display_lease.reset();
           return 503;
         }
       } else {
         BOOST_LOG(error) << "A virtual display is required, but the SudoVDA driver is unavailable."sv;
-        launch_session->virtual_display = false;
-        ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
+        display_context->virtual_display = false;
+  #ifdef SUNSHINE_TESTS
+        if (_display_context_test_edges) {
+          _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
+        } else
+  #endif
+          ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
         _remote_virtual_display_lease.reset();
         return 503;
       }
       if (!_virtual_display) {
-        ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
+  #ifdef SUNSHINE_TESTS
+        if (_display_context_test_edges) {
+          _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
+        } else
+  #endif
+          ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
         _remote_virtual_display_lease.reset();
       }
     }
@@ -1428,7 +1587,7 @@ namespace proc {
 
     std::string fps_str;
     char fps_buf[8];
-    snprintf(fps_buf, sizeof(fps_buf), "%.3f", (float) launch_session->fps / 1000.0f);
+    snprintf(fps_buf, sizeof(fps_buf), "%.3f", (float) display_context->fps / 1000.0f);
     fps_str = fps_buf;
 
     // Add stream-specific environment variables for application and preparation commands.
@@ -1436,18 +1595,18 @@ namespace proc {
     _env["APOLLO_APP_NAME"] = _app.name;
     _env["APOLLO_APP_UUID"] = _app.uuid;
     _env["APOLLO_APP_STATUS"] = "STARTING";
-    _env["APOLLO_CLIENT_UUID"] = launch_session->unique_id;
-    _env["APOLLO_CLIENT_NAME"] = launch_session->device_name;
+    _env["APOLLO_CLIENT_UUID"] = display_context->unique_id;
+    _env["APOLLO_CLIENT_NAME"] = display_context->device_name;
     _env["APOLLO_CLIENT_WIDTH"] = std::to_string(render_width);
     _env["APOLLO_CLIENT_HEIGHT"] = std::to_string(render_height);
-    _env["APOLLO_CLIENT_RENDER_WIDTH"] = std::to_string(launch_session->width);
-    _env["APOLLO_CLIENT_RENDER_HEIGHT"] = std::to_string(launch_session->height);
+    _env["APOLLO_CLIENT_RENDER_WIDTH"] = std::to_string(display_context->width);
+    _env["APOLLO_CLIENT_RENDER_HEIGHT"] = std::to_string(display_context->height);
     _env["APOLLO_CLIENT_SCALE_FACTOR"] = std::to_string(scale_factor);
     _env["APOLLO_CLIENT_FPS"] = fps_str;
-    _env["APOLLO_CLIENT_HDR"] = launch_session->enable_hdr ? "true" : "false";
-    _env["APOLLO_CLIENT_HOST_AUDIO"] = launch_session->host_audio ? "true" : "false";
+    _env["APOLLO_CLIENT_HDR"] = display_context->enable_hdr ? "true" : "false";
+    _env["APOLLO_CLIENT_HOST_AUDIO"] = launch_options.host_audio ? "true" : "false";
 
-    int channelCount = launch_session->surround_info & 65535;
+    int channelCount = launch_options.surround_info & 65535;
     switch (channelCount) {
       case 2:
         _env["APOLLO_CLIENT_AUDIO_CONFIGURATION"] = "2.0";
@@ -1562,8 +1721,8 @@ namespace proc {
     } while (_host_session_id == 0);
 
 #ifdef _WIN32
-    start_hdr_worker(launch_session->enable_hdr);
-    if (_virtual_display && !request_hdr_state(launch_session->enable_hdr, 6s)) {
+    start_hdr_worker(display_context->enable_hdr);
+    if (_virtual_display && !request_hdr_state(display_context->enable_hdr, 6s)) {
       BOOST_LOG(error) << "The virtual display did not reach the requested HDR state."sv;
       return 503;
     }
@@ -1571,10 +1730,15 @@ namespace proc {
       // Virtual-display creation, encoder probing, and application prep can take longer than the
       // original client-connect reservation. Renew it while process_state_mutex is still held so
       // local AR cannot claim and destroy this display in the gap before RTSP calls resume().
-      ar_glasses::remote_virtual_display_awaiting_client(
-        *_remote_virtual_display_lease,
-        config::stream.ping_timeout
-      );
+  #ifdef SUNSHINE_TESTS
+      if (_display_context_test_edges) {
+        _display_context_test_edges->remote_awaiting(*_remote_virtual_display_lease, config::stream.ping_timeout);
+      } else
+  #endif
+        ar_glasses::remote_virtual_display_awaiting_client(
+          *_remote_virtual_display_lease,
+          config::stream.ping_timeout
+        );
     }
 #endif
 
@@ -1647,16 +1811,19 @@ namespace proc {
     return _host_session_id;
   }
 
-  int proc_t::reconfigure_retained_session(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+  int proc_t::reconfigure_retained_session(
+    std::shared_ptr<process_display_context_t> display_context,
+    std::uint32_t launch_session_id
+  ) {
     std::lock_guard lock(process_state_mutex);
-    if (!launch_session || _app_id <= 0 || _host_session_id == 0 || !_launch_session) {
+    if (!display_context || _app_id <= 0 || _host_session_id == 0 || !_display_context) {
       return 409;
     }
 
     const auto render_size = calculate_render_size(
-      launch_session->width,
-      launch_session->height,
-      launch_session->scale_factor
+      display_context->width,
+      display_context->height,
+      display_context->scale_factor
     );
     if (!render_size) {
       return 400;
@@ -1664,9 +1831,9 @@ namespace proc {
 
 #ifdef _WIN32
     const bool previous_virtual_display_only = _virtual_display_only;
-    _virtual_display_only = launch_session->virtual_display_only;
+    _virtual_display_only = display_context->virtual_display_only;
     auto virtual_display_policy_rollback = util::fail_guard([&]() {
-      if (_app_id > 0 && _launch_session) {
+      if (_app_id > 0 && _display_context) {
         _virtual_display_only = previous_virtual_display_only;
         _display_session.set_exclusive(previous_virtual_display_only);
       }
@@ -1676,7 +1843,7 @@ namespace proc {
     // A retained physical-desktop process cannot be converted into a virtual-display process
     // without changing desktop ownership. A process whose virtual display was forced because no
     // physical output existed remains virtual even if the client again sends virtualDisplay=0.
-    if (launch_session->virtual_display && !_virtual_display) {
+    if (display_context->virtual_display && !_virtual_display) {
       BOOST_LOG(warning) << "A warm resume cannot change a physical-desktop process into a virtual-display process."sv;
       return 409;
     }
@@ -1689,12 +1856,12 @@ namespace proc {
       pause_display_for_resume();
     });
 
-    const auto old_width = static_cast<std::uint32_t>(_launch_session->width);
-    const auto old_height = static_cast<std::uint32_t>(_launch_session->height);
-    const auto old_fps = _launch_session->fps;
-    const bool old_hdr = _launch_session->enable_hdr;
+    const auto old_width = static_cast<std::uint32_t>(_display_context->width);
+    const auto old_height = static_cast<std::uint32_t>(_display_context->height);
+    const auto old_fps = _display_context->fps;
+    const bool old_hdr = _display_context->enable_hdr;
     bool display_mode_changed = _virtual_display &&
-                                (old_width != render_size->width || old_height != render_size->height || old_fps != launch_session->fps);
+                                (old_width != render_size->width || old_height != render_size->height || old_fps != display_context->fps);
 
 #ifdef _WIN32
     auto configure_display_mode = [&](const wchar_t *name, int width, int height, int fps, bool probe) {
@@ -1716,19 +1883,19 @@ namespace proc {
           BOOST_LOG(warning) << "Could not verify the retained virtual-display mode after reactivation; retry the resume."sv;
           return 503;
         }
-        display_mode_changed = !live_display_mode_matches(*current, render_size->width, render_size->height, launch_session->fps);
+        display_mode_changed = !live_display_mode_matches(*current, render_size->width, render_size->height, display_context->fps);
         if (display_mode_changed) {
           const session_display_mode_t requested {
             static_cast<int>(render_size->width),
             static_cast<int>(render_size->height),
-            launch_session->fps,
+            display_context->fps,
           };
           // The host cannot tell whether the application or Windows chose the drifted mode.
           BOOST_LOG(info) << "Restoring the requested virtual-display mode on resume after external drift from "sv
                           << current->dmPelsWidth << 'x' << current->dmPelsHeight << " @ "sv
                           << current->dmDisplayFrequency << " Hz (set by an application or by Windows) to "sv
                           << render_size->width << 'x' << render_size->height << " @ "sv
-                          << static_cast<double>(launch_session->fps) / 1000.0
+                          << static_cast<double>(display_context->fps) / 1000.0
                           << " Hz; session mode saved as default: "sv
                           << (_saved_virtual_display_mode == requested ? "yes"sv : "no"sv) << '.';
         }
@@ -1739,7 +1906,7 @@ namespace proc {
           _display_session.binding().display_name.c_str(),
           render_size->width,
           render_size->height,
-          launch_session->fps,
+          display_context->fps,
           true
         );
         const bool fast_path_attempted = requested_mode_test == DISP_CHANGE_SUCCESSFUL;
@@ -1749,7 +1916,7 @@ namespace proc {
             _display_session.binding().display_name.c_str(),
             render_size->width,
             render_size->height,
-            launch_session->fps,
+            display_context->fps,
             false
           ) == DISP_CHANGE_SUCCESSFUL;
 
@@ -1853,7 +2020,13 @@ namespace proc {
             const auto candidate_display_name = platf::to_utf8(candidate.binding().display_name);
             bool capture_ready = false;
             for (int attempt = 0; attempt < 3 && !capture_ready; ++attempt) {
+  #ifdef SUNSHINE_TESTS
+              const auto capturable_displays = _display_context_test_edges ?
+                                                 _display_context_test_edges->capture_display_names() :
+                                                 platf::display_names();
+  #else
               const auto capturable_displays = platf::display_names();
+  #endif
               capture_ready = std::find(
                                 capturable_displays.begin(),
                                 capturable_displays.end(),
@@ -1891,8 +2064,8 @@ namespace proc {
           const auto target_result = recreate_mode(
             render_size->width,
             render_size->height,
-            launch_session->fps,
-            launch_session->enable_hdr
+            display_context->fps,
+            display_context->enable_hdr
           );
           if (target_result != recreation_result_e::success) {
             if (target_result == recreation_result_e::clean_failure) {
@@ -1911,7 +2084,7 @@ namespace proc {
           hdr_configured_by_recreation = true;
           BOOST_LOG(info) << "Retained virtual display recreated at "
                           << render_size->width << 'x' << render_size->height
-                          << " @ " << static_cast<double>(launch_session->fps) / 1000.0 << " Hz."sv;
+                          << " @ " << static_cast<double>(display_context->fps) / 1000.0 << " Hz."sv;
         }
       }
     }
@@ -1919,8 +2092,8 @@ namespace proc {
     // Physical displays keep their HDR worker across disconnect. Update that existing worker,
     // preserving its pre-launch HDR baseline, before publishing a changed reconnect contract.
     const bool needs_hdr_request = !hdr_configured_by_recreation &&
-                                   (_virtual_display || old_hdr != launch_session->enable_hdr);
-    if (needs_hdr_request && !request_hdr_state(launch_session->enable_hdr, 6s)) {
+                                   (_virtual_display || old_hdr != display_context->enable_hdr);
+    if (needs_hdr_request && !request_hdr_state(display_context->enable_hdr, 6s)) {
       bool rollback_succeeded = true;
       if (display_mode_changed && configure_display_mode(_display_session.binding().display_name.c_str(), old_width, old_height, old_fps, false) != DISP_CHANGE_SUCCESSFUL) {
         BOOST_LOG(error) << "Failed to roll back the retained virtual-display mode after HDR reconfiguration failed."sv;
@@ -1939,21 +2112,21 @@ namespace proc {
     // Save a changed session mode while the reactivated display still extends the user's own
     // desktop; promotion below makes it primary and may disable the physical displays.
     if (_virtual_display && display_mode_changed) {
-      save_virtual_display_session_mode(static_cast<int>(render_size->width), static_cast<int>(render_size->height), launch_session->fps);
+      save_virtual_display_session_mode(static_cast<int>(render_size->width), static_cast<int>(render_size->height), display_context->fps);
     }
     // Failed reconfiguration/rollback paths above leave the disconnected desktop restored.
     // Promote only a successful reconnect, before capture starts using the new topology.
     // Windows can briefly publish incomplete CCD readback after restore; the durable display
     // journal makes this bounded promotion replay safe.
     const auto promote_at_requested_mode = [&]() {
-      if (!promote_virtual_display(launch_session->enable_hdr, 1500ms)) {
+      if (!promote_virtual_display(display_context->enable_hdr, 1500ms)) {
         return false;
       }
       // Promotion keeps the mode it finds. Windows can replace the reactivated layout with its
       // own remembered one after the mode check above, which also retimes the virtual display;
       // promotion accepts that layout, so the requested mode has to be applied once more.
       const auto promoted = query_virtual_display_mode();
-      if (!promoted || live_display_mode_matches(*promoted, render_size->width, render_size->height, launch_session->fps)) {
+      if (!promoted || live_display_mode_matches(*promoted, render_size->width, render_size->height, display_context->fps)) {
         return true;
       }
       BOOST_LOG(info) << "Restoring the requested virtual-display mode after promotion: Windows changed it to "sv
@@ -1963,16 +2136,16 @@ namespace proc {
                _display_session.binding().display_name.c_str(),
                render_size->width,
                render_size->height,
-               launch_session->fps,
+               display_context->fps,
                false
              ) == DISP_CHANGE_SUCCESSFUL &&
-             promote_virtual_display(launch_session->enable_hdr, 1500ms);
+             promote_virtual_display(display_context->enable_hdr, 1500ms);
     };
     if (_virtual_display && !promote_at_requested_mode()) {
       // An unchanged source can be paused and retried even if Windows has not published its
       // promoted GDI binding yet. Changed modes must first restore the retained contract.
       bool rollback_succeeded = true;
-      if (display_mode_changed || old_hdr != launch_session->enable_hdr) {
+      if (display_mode_changed || old_hdr != display_context->enable_hdr) {
         rollback_succeeded = refresh_virtual_display_binding();
         if (rollback_succeeded && display_mode_changed) {
           rollback_succeeded = configure_display_mode(_display_session.binding().display_name.c_str(), old_width, old_height, old_fps, false) == DISP_CHANGE_SUCCESSFUL;
@@ -1992,23 +2165,23 @@ namespace proc {
     // Commit only after every fallible display operation succeeds. The new object keeps its own
     // RTSP encryption and transport lease, while the process-owned launch record retains its
     // original identity/GUID and stable host-session token.
-    launch_session->width = render_size->width;
-    launch_session->height = render_size->height;
-    launch_session->virtual_display = _virtual_display;
+    display_context->width = render_size->width;
+    display_context->height = render_size->height;
+    display_context->virtual_display = _virtual_display;
 #ifdef _WIN32
-    launch_session->display_guid = _launch_session->display_guid;
+    display_context->display_guid = _display_context->display_guid;
 #endif
-    _launch_session->width = launch_session->width;
-    _launch_session->height = launch_session->height;
-    _launch_session->fps = launch_session->fps;
-    _launch_session->enable_hdr = launch_session->enable_hdr;
-    _launch_session->virtual_display_only = launch_session->virtual_display_only;
-    _launch_session->scale_factor = launch_session->scale_factor;
-    _launch_session->sbs_mode = launch_session->sbs_mode;
-    _active_launch_session_id = launch_session->id;
+    _display_context->width = display_context->width;
+    _display_context->height = display_context->height;
+    _display_context->fps = display_context->fps;
+    _display_context->enable_hdr = display_context->enable_hdr;
+    _display_context->virtual_display_only = display_context->virtual_display_only;
+    _display_context->scale_factor = display_context->scale_factor;
+    _display_context->sbs_mode = display_context->sbs_mode;
+    _active_launch_session_id = launch_session_id;
 #ifdef _WIN32
     if (_virtual_display) {
-      _display_session.update_mode(launch_session->width, launch_session->height, launch_session->fps);
+      _display_session.update_mode(display_context->width, display_context->height, display_context->fps);
       _display_session.commit_resume();
     }
     // A resume is a new start that has proven the display's mode, HDR state, and topology again.
@@ -2133,7 +2306,7 @@ namespace proc {
     }
 
 #ifdef _WIN32
-    if (!_virtual_display || !_launch_session) {
+    if (!_virtual_display || !_display_context) {
       return false;
     }
     // The apply path answers every request on an unproven display with a reconnect.
@@ -2142,8 +2315,8 @@ namespace proc {
     }
     // Display modes follow edges of the client's requested mode. A request that repeats it never
     // changes the display mode, even if an application or Windows has since changed it.
-    const auto requested = calculate_render_size(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), _launch_session->scale_factor);
-    if (!requested || !live_request_repeats_session_mode(*_launch_session, *requested, fps_millihz)) {
+    const auto requested = calculate_render_size(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), _display_context->scale_factor);
+    if (!requested || !live_request_repeats_session_mode(*_display_context, *requested, fps_millihz)) {
       return true;
     }
     // A capture target that differs from the exact owned binding, because Windows renamed the
@@ -2164,7 +2337,7 @@ namespace proc {
     if (width <= 0 || height <= 0 || fps_millihz <= 0) {
       return live_video_mode_result_e::needs_reconnect;
     }
-    if (!_launch_session || _active_launch_session_id == 0 || _active_launch_session_id != expected_launch_session_id || _app_id <= 0 || _host_session_id == 0) {
+    if (!_display_context || _active_launch_session_id == 0 || _active_launch_session_id != expected_launch_session_id || _app_id <= 0 || _host_session_id == 0) {
       return live_video_mode_result_e::needs_reconnect;
     }
 
@@ -2183,18 +2356,18 @@ namespace proc {
 
     // A live request carries the client's source size. The display renders it at the session's
     // scale exactly like launch and resume, so the edge rule and every mode set use that size.
-    const auto render_size = calculate_render_size(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), _launch_session->scale_factor);
+    const auto render_size = calculate_render_size(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), _display_context->scale_factor);
     if (!render_size) {
       return live_video_mode_result_e::needs_reconnect;
     }
-    const bool repeated = live_request_repeats_session_mode(*_launch_session, *render_size, fps_millihz);
+    const bool repeated = live_request_repeats_session_mode(*_display_context, *render_size, fps_millihz);
     width = static_cast<int>(render_size->width);
     height = static_cast<int>(render_size->height);
 
-    const auto old_width = static_cast<std::uint32_t>(_launch_session->width);
-    const auto old_height = static_cast<std::uint32_t>(_launch_session->height);
-    const auto old_fps = _launch_session->fps;
-    const bool enable_hdr = _launch_session->enable_hdr;
+    const auto old_width = static_cast<std::uint32_t>(_display_context->width);
+    const auto old_height = static_cast<std::uint32_t>(_display_context->height);
+    const auto old_fps = _display_context->fps;
+    const bool enable_hdr = _display_context->enable_hdr;
 
     // Refresh and publish the exact owned binding before acknowledging a no-op
     // or probing a changed mode. An unresolved identity is a retryable failure.
@@ -2264,7 +2437,12 @@ namespace proc {
     // actually carries the mode, then bring the HDR worker back up on that name.
     auto republish_display = [&]() {
       set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
-      config::video.output_name = display_device::map_display_name(display_name);
+  #ifdef SUNSHINE_TESTS
+      if (_display_context_test_edges) {
+        config::video.output_name = _display_context_test_edges->map_display_name(display_name);
+      } else
+  #endif
+        config::video.output_name = display_device::map_display_name(display_name);
   #ifdef SUNSHINE_TESTS
       if (_display_topology_test_hook) {
         return;  // The test owns HDR state through request_hdr_state().
@@ -2336,9 +2514,9 @@ namespace proc {
 
     // Commit last, exactly like reconfigure_retained_session: every fallible display operation has
     // already succeeded, so the recorded contract now matches what Windows is presenting.
-    _launch_session->width = width;
-    _launch_session->height = height;
-    _launch_session->fps = fps_millihz;
+    _display_context->width = width;
+    _display_context->height = height;
+    _display_context->fps = fps_millihz;
     _display_session.update_mode(width, height, fps_millihz);
     _live_display_unproven = false;
     BOOST_LOG(info) << "Virtual display resized live to "sv << width << 'x' << height
@@ -2353,16 +2531,21 @@ namespace proc {
   bool proc_t::activate_remote_virtual_display_lease(std::uint64_t lease) {
     std::lock_guard lock(process_state_mutex);
 #ifdef _WIN32
-    if (_launch_session && _launch_session->virtual_display) {
+    if (_display_context && _display_context->virtual_display) {
       if (lease == 0 || !ar_glasses::remote_virtual_display_active(lease)) {
         BOOST_LOG(error) << "Remote virtual-display activation did not match its ownership lease."sv;
         return false;
       }
       _remote_virtual_display_lease = lease;
-      if ((_display_session.pause_requested() && !prepare_retained_display_for_resume()) || !promote_virtual_display(_launch_session->enable_hdr)) {
+      if ((_display_session.pause_requested() && !prepare_retained_display_for_resume()) || !promote_virtual_display(_display_context->enable_hdr)) {
         BOOST_LOG(error) << "Remote virtual display does not match its required Windows display topology."sv;
         pause_display_for_resume();
-        ar_glasses::remote_virtual_display_ended(lease);
+  #ifdef SUNSHINE_TESTS
+        if (_display_context_test_edges) {
+          _display_context_test_edges->remote_ended(lease);
+        } else
+  #endif
+          ar_glasses::remote_virtual_display_ended(lease);
         _remote_virtual_display_lease.reset();
         return false;
       }
@@ -2531,7 +2714,12 @@ namespace proc {
 
 #ifdef _WIN32
     if (_remote_virtual_display_lease) {
-      ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
+  #ifdef SUNSHINE_TESTS
+      if (_display_context_test_edges) {
+        _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
+      } else
+  #endif
+        ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
       _remote_virtual_display_lease.reset();
     }
 
@@ -2587,7 +2775,7 @@ namespace proc {
 
     // CCD detachment remains available even if the SudoVDA watchdog/IOCTL handle failed. Preserve
     // shell state first and let autonomous retirement observe the driver's eventual lease cleanup.
-    bool used_virtual_display = _launch_session && _launch_session->virtual_display;
+    bool used_virtual_display = _display_context && _display_context->virtual_display;
     if (used_virtual_display || _display_session.prepared()) {
       if (_display_session.owns_display() || _display_session.prepared()) {
         if (retire_virtual_display(_display_session, 6s, true, true, config::sunshine.virtual_display_restart_explorer)) {
@@ -2648,7 +2836,7 @@ namespace proc {
     _active_launch_session_id = 0;
     display_name.clear();
     initial_display.clear();
-    _launch_session.reset();
+    _display_context.reset();
 #ifdef _WIN32
     // An unresolved owner stays in its deferred retirement slot across process refresh.
     if (!_display_session.owns_display() && !_display_session.prepared()) {
@@ -2818,7 +3006,7 @@ namespace proc {
       BOOST_LOG(warning) << "Local AR is waiting for the original display configuration to be restored."sv;
       return local_ar_handoff_e::cleanup_timeout;
     }
-    if (!_launch_session || !_launch_session->virtual_display) {
+    if (!_display_context || !_display_context->virtual_display) {
       release_claim.disable();
       return local_ar_handoff_e::ready;
     }

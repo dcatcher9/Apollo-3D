@@ -37,7 +37,7 @@ namespace proc {
     static void seed(proc_t &process, ctx_t app, std::shared_ptr<rtsp_stream::launch_session_t> launch, std::uint64_t host_session_id, bool virtual_display, std::function<void()> primary_restored = {});
     static void clear(proc_t &process);
     static void publish_resume(proc_t &process, const rtsp_stream::launch_session_t &launch);
-    static std::shared_ptr<rtsp_stream::launch_session_t> retained_launch(const proc_t &process);
+    static std::shared_ptr<process_display_context_t> retained_display_context(const proc_t &process);
     static std::uint32_t active_transport(const proc_t &process);
   };
 }  // namespace proc
