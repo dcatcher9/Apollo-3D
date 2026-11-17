@@ -10299,7 +10299,6 @@ namespace platf::dxgi {
           };
         };
         auto feedback_tracker = make_feedback_tracker();
-        detail::shutter_recovery_budget_t recovery_budget;
         const auto acquisition_wait = std::chrono::milliseconds {
           std::clamp<std::int64_t>((static_cast<std::int64_t>(*emitter_eye_period) * 3 + 999) / 1000, 25, 250)
         };
@@ -10483,10 +10482,6 @@ namespace platf::dxgi {
             BOOST_LOG(warning) << "Local shutter clock recovery rejected a changed display, device or desktop context."sv;
             return false;
           }
-          if (!recovery_budget.begin(std::chrono::steady_clock::now())) {
-            BOOST_LOG(warning) << "Local shutter clock recovery exhausted its six attempts per ten seconds."sv;
-            return false;
-          }
           ++clock_recoveries;
           BOOST_LOG(warning) << "Local shutter clock lost; holding presentation while the emitter drains: "sv << reason;
           if (slot_timing) {
@@ -10517,7 +10512,7 @@ namespace platf::dxgi {
           acquisition_history = {};
           acquisition_wait_counts = {};
           acquisition_maximum_streak = 0;
-          acquisition_deadline = std::chrono::steady_clock::now() + detail::shutter_recovery_budget_t::acquisition_timeout;
+          acquisition_deadline = std::chrono::steady_clock::now() + detail::shutter_acquisition_timeout;
           BOOST_LOG(info) << "Local shutter emitter quiet; reacquiring an unsignalled left-eye clock without changing the desktop."sv;
           return true;
         };
@@ -10548,7 +10543,7 @@ namespace platf::dxgi {
           }
           if (acquiring) {
             if (!acquisition_deadline) {
-              acquisition_deadline = std::chrono::steady_clock::now() + detail::shutter_recovery_budget_t::acquisition_timeout;
+              acquisition_deadline = std::chrono::steady_clock::now() + detail::shutter_acquisition_timeout;
             }
             if (std::chrono::steady_clock::now() >= *acquisition_deadline) {
               log_acquisition_history();

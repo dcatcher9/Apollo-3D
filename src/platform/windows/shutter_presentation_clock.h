@@ -24,42 +24,13 @@ namespace platf::dxgi::detail {
            delta >= previous_presents && delta <= 4 * repeats;
   }
 
-  // A transient path change may be reacquired with the emitter quiet. Repeated losses must
-  // still return to 2D instead of keeping the desktop indefinitely in a dark recovery loop.
-  class shutter_recovery_budget_t {
-  public:
-    using clock = std::chrono::steady_clock;
-    // Windows can withhold or blank presentation statistics for a few seconds while it
-    // rearranges composition. No eye command is sent during acquisition, so waiting longer
-    // only extends a pause that would otherwise end the session.
-    static constexpr auto acquisition_timeout = std::chrono::seconds {6};
-    static constexpr auto retry_window = std::chrono::seconds {10};
-
-    bool begin(clock::time_point now) noexcept {
-      if (count_ && now < attempts_[count_ - 1]) {
-        return false;
-      }
-      if (count_ == attempts_.size()) {
-        if (now - attempts_.front() < retry_window) {
-          return false;
-        }
-        for (std::size_t index = 1; index < attempts_.size(); ++index) {
-          attempts_[index - 1] = attempts_[index];
-        }
-        --count_;
-      }
-      attempts_[count_++] = now;
-      return true;
-    }
-
-    // A recovery holds the picture for a fraction of a second. Six in ten seconds is still a
-    // visible disturbance, but a rare late timestamp no longer ends the whole session.
-    static constexpr std::size_t maximum_attempts = 6;
-
-  private:
-    std::array<clock::time_point, maximum_attempts> attempts_ {};
-    std::size_t count_ = 0;
-  };
+  // A lost clock is reacquired with the emitter quiet, as often as it is lost: each recovery
+  // holds the picture for a fraction of a second, and ending the session instead would turn a
+  // disturbed few seconds, such as a program starting, into losing 3D altogether. What ends
+  // the session is a clock that cannot be reacquired. Windows can withhold or blank
+  // presentation statistics for a few seconds while it rearranges composition, and no eye
+  // command is sent during acquisition, so the wait for one is generous.
+  inline constexpr auto shutter_acquisition_timeout = std::chrono::seconds {6};
 
   enum class shutter_feedback_status_e {
     available,

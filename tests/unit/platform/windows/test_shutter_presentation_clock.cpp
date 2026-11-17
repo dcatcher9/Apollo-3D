@@ -6,34 +6,6 @@
 
 using platf::dxgi::detail::shutter_presentation_clock_t;
 
-TEST(ShutterRecoveryBudget, AllowsAFewTransientLossesButBoundsARepeatedFailureLoop) {
-  using budget_t = platf::dxgi::detail::shutter_recovery_budget_t;
-  using namespace std::chrono_literals;
-  budget_t budget;
-  const budget_t::clock::time_point start {};
-  for (int attempt = 0; attempt < static_cast<int>(budget_t::maximum_attempts); ++attempt) {
-    EXPECT_TRUE(budget.begin(start + attempt * 100ms));
-  }
-  EXPECT_FALSE(budget.begin(start + 9999ms));
-  EXPECT_TRUE(budget.begin(start + 10s));
-  // Expiring the first attempt does not expire the newer second attempt.
-  EXPECT_FALSE(budget.begin(start + 10099ms));
-  EXPECT_TRUE(budget.begin(start + 10100ms));
-}
-
-TEST(ShutterRecoveryBudget, ClockRegressionCannotResetTheFailureLimit) {
-  using budget_t = platf::dxgi::detail::shutter_recovery_budget_t;
-  using namespace std::chrono_literals;
-  budget_t budget;
-  const auto start = budget_t::clock::time_point {} + 10s;
-  EXPECT_TRUE(budget.begin(start));
-  EXPECT_FALSE(budget.begin(start - 1ms));
-  for (std::size_t attempt = 1; attempt < budget_t::maximum_attempts; ++attempt) {
-    EXPECT_TRUE(budget.begin(start));
-  }
-  EXPECT_FALSE(budget.begin(start));
-}
-
 TEST(ShutterPresentationClock, HoldsOneStereoPairThroughRepeatedEyeScanouts) {
   shutter_presentation_clock_t clock(2);
   EXPECT_TRUE(clock.starts_pair());

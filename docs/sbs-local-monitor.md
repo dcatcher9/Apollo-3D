@@ -145,10 +145,11 @@ A read-only settings query on the
 same serial connection acts as a firmware processing barrier; the complete verified profile must
 match before the finite-pulse drain can begin. It then reacquires 13 strict samples with no eye
 commands and resumes a fresh left/right cycle on that pair. This preserves the desktop during a
-short interruption. Recovery allows at most six attempts in ten seconds, with a shared 1.5-second
-USB barrier deadline, a finite-pulse drain, and a six-second clock-acquisition budget per attempt.
-A failed barrier, persistent timing fault, display/device change, or Windows security transition
-returns to 2D. Recovery never infers eye parity or adjusts raw present IDs or refresh counters.
+short interruption. Recovery is repeated as often as the clock is lost, so a disturbed few
+seconds, such as a program starting, show as short holds and not as the end of 3D. Each attempt
+has a shared 1.5-second USB barrier deadline, a finite-pulse drain, and a six-second
+clock-acquisition budget. A failed barrier, a clock that cannot be reacquired within that budget,
+a display/device change, or a Windows security transition returns to 2D. Recovery never infers eye parity or adjusts raw present IDs or refresh counters.
 
 Each confirmed frame must also be recent enough for the configured delay, duration, spacing, and
 protocol close margin to fit the remaining eye interval. Freshness is checked again immediately
