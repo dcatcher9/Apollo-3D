@@ -77,7 +77,21 @@ export async function listOfflineSbsJobs({ signal } = {}) {
 }
 
 export async function getOfflineSbsOverview({ signal } = {}) {
-  const payload = await request(OFFLINE_SBS_JOBS_URL, { signal })
+  let payload
+  try {
+    payload = await request(OFFLINE_SBS_JOBS_URL, { signal })
+  } catch (error) {
+    const capabilities = error?.payload?.capabilities
+    if (
+      error instanceof OfflineSbsApiError &&
+      error.status === 503 &&
+      capabilities?.available === false &&
+      capabilities.initializing === true
+    ) {
+      return { jobs: [], capabilities }
+    }
+    throw error
+  }
   return {
     jobs: normalizeJobs(payload),
     capabilities:

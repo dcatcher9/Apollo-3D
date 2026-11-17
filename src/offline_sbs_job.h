@@ -259,7 +259,10 @@ namespace offline_sbs {
   /**
    * Process-global facade used by the HTTPS API and main shutdown path.
    */
-  bool initialize(service_config_t config, std::string &error);
+  // Capture the startup account/configuration without starting filesystem or tool work.
+  void configure_default_service();
+  // Explicit authorized offline demand; observations never call this implicitly.
+  void request_initialization();
   void shutdown();
   service_reply_t create(const create_request_t &request);
   service_reply_t cancel(std::string_view id);

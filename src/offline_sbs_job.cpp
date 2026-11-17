@@ -4,6 +4,10 @@
  */
 
 #include "offline_sbs_job.h"
+#include "offline_sbs_service_owner.h"
+#ifdef SUNSHINE_TESTS
+#include "offline_sbs_service_test.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -6016,91 +6020,229 @@ namespace offline_sbs {
     };
   }
 
-  namespace {
-    std::mutex global_mutex;
-    std::shared_ptr<job_service_t> global_service;
-    std::string global_initialization_error;
-    bool global_initializing = false;
-    bool global_shutdown_requested = false;
-  }
-
-  bool initialize(service_config_t config, std::string &error) {
-    {
-      std::lock_guard lock {global_mutex};
-      if (global_service || global_initializing) {
-        error = "offline SBS job manager is already initialized";
-        return false;
-      }
-      if (global_shutdown_requested) {
-        error =
-          "offline SBS job manager cannot initialize after shutdown began";
-        global_initialization_error = error;
-        return false;
-      }
-      global_initializing = true;
-      global_initialization_error.clear();
+  namespace detail {
+    service_owner_t::~service_owner_t() {
+      shutdown();
     }
 
-    auto candidate = std::make_shared<job_service_t>(std::move(config));
-    bool started = false;
-    try {
-      started = candidate->start(error);
-    } catch (const std::exception &exception) {
-      error =
-        "offline SBS job manager initialization failed: "s +
-        exception.what();
-    } catch (...) {
-      error = "offline SBS job manager initialization failed unexpectedly";
+    void service_owner_t::configure(service_config_t config) {
+      {
+        std::lock_guard lock {mutex_};
+        if (phase_ != phase_e::unconfigured) {
+          return;
+        }
+        config_.emplace(std::move(config));
+        phase_ = phase_e::dormant;
+      }
     }
-    if (!started) {
+
+    void service_owner_t::configuration_failed(std::string error) {
       if (error.empty()) {
         error = "offline SBS job manager initialization failed";
       }
-      std::lock_guard lock {global_mutex};
-      global_initializing = false;
-      global_initialization_error = error;
-      return false;
+      BOOST_LOG(warning) << "Offline SBS conversion is unavailable: "sv << error;
+      std::lock_guard lock {mutex_};
+      if (phase_ == phase_e::ready || phase_ == phase_e::closing || phase_ == phase_e::closed) {
+        return;
+      }
+      error_ = std::move(error);
+      config_.reset();
+      phase_ = phase_e::failed;
     }
 
-    bool shutdown_requested = false;
-    {
-      std::lock_guard lock {global_mutex};
-      global_initializing = false;
-      shutdown_requested = global_shutdown_requested;
-      if (shutdown_requested) {
-        error =
-          "offline SBS job manager initialization was canceled by shutdown";
-        global_initialization_error = error;
-      } else {
-        global_service = candidate;
-        global_initialization_error.clear();
+    void service_owner_t::request() {
+      std::string launch_error;
+      {
+        std::lock_guard lock {mutex_};
+        if (phase_ != phase_e::dormant || !config_) {
+          return;
+        }
+        phase_ = phase_e::initializing;
+        try {
+#ifdef SUNSHINE_TESTS
+          if (test_hooks_ && test_hooks_->before_thread_launch) {
+            test_hooks_->before_thread_launch();
+          }
+#endif
+          initializer_ = std::jthread([this, config = std::move(*config_)]() mutable {
+            initialize_worker(std::move(config));
+          });
+          config_.reset();
+        } catch (const std::exception &exception) {
+          launch_error = "offline SBS job manager initialization failed: "s + exception.what();
+          error_ = launch_error;
+          config_.reset();
+          phase_ = phase_e::failed;
+        } catch (...) {
+          launch_error = "offline SBS job manager initialization failed unexpectedly";
+          error_ = launch_error;
+          config_.reset();
+          phase_ = phase_e::failed;
+        }
+      }
+      if (!launch_error.empty()) {
+        BOOST_LOG(warning) << "Offline SBS conversion is unavailable: "sv << launch_error;
       }
     }
-    if (shutdown_requested) {
-      candidate->shutdown();
-      return false;
+
+    void service_owner_t::initialize_worker(service_config_t config) {
+      // Unlike the former std::async future, an owning thread must also catch construction
+      // failures before job_service_t::start() is entered.
+      try {
+#ifdef SUNSHINE_TESTS
+        if (test_hooks_ && test_hooks_->observe) {
+          test_hooks_->observe(testing::service_initialization_stage_e::worker_enter);
+        }
+        if (test_hooks_ && test_hooks_->before_service_allocation) {
+          test_hooks_->before_service_allocation();
+        }
+#endif
+        auto candidate = std::make_shared<job_service_t>(std::move(config));
+        std::string error;
+        bool started = false;
+        try {
+          started = candidate->start(error);
+        } catch (const std::exception &exception) {
+          error = "offline SBS job manager initialization failed: "s + exception.what();
+        } catch (...) {
+          error = "offline SBS job manager initialization failed unexpectedly";
+        }
+#ifdef SUNSHINE_TESTS
+        if (test_hooks_ && test_hooks_->observe) {
+          test_hooks_->observe(testing::service_initialization_stage_e::service_start_finished);
+        }
+#endif
+        if (!started) {
+          configuration_failed(std::move(error));
+        } else {
+          bool shutdown_requested = false;
+          {
+            std::lock_guard lock {mutex_};
+            shutdown_requested = phase_ == phase_e::closing || phase_ == phase_e::closed;
+            if (!shutdown_requested) {
+              service_ = candidate;
+              error_.clear();
+              phase_ = phase_e::ready;
+            }
+          }
+          if (shutdown_requested) {
+            candidate->shutdown();
+          }
+        }
+      } catch (const std::exception &exception) {
+        configuration_failed("offline SBS job manager initialization failed: "s + exception.what());
+      } catch (...) {
+        configuration_failed("offline SBS job manager initialization failed unexpectedly");
+      }
+#ifdef SUNSHINE_TESTS
+      if (test_hooks_ && test_hooks_->observe) {
+        // A faulty test observer cannot escape the owning thread.
+        try {
+          test_hooks_->observe(testing::service_initialization_stage_e::worker_exit);
+        } catch (...) {
+        }
+      }
+#endif
     }
-    return true;
+
+    std::shared_ptr<job_service_t> service_owner_t::ready_service() const {
+      std::lock_guard lock {mutex_};
+      return phase_ == phase_e::ready ? service_ : nullptr;
+    }
+
+    nlohmann::json service_owner_t::capabilities() const {
+      std::shared_ptr<job_service_t> service;
+      std::string error;
+      bool initializing = false;
+      {
+        std::lock_guard lock {mutex_};
+        if (phase_ == phase_e::ready) {
+          service = service_;
+        } else {
+          initializing = phase_ == phase_e::initializing;
+          error = phase_ == phase_e::closing || phase_ == phase_e::closed ?
+                    "offline SBS job manager is shutting down" :
+                    error_;
+        }
+      }
+      if (service) {
+        return service->capabilities();
+      }
+      return {
+        {"schema", 1},
+        {"available", false},
+        {"initializing", initializing},
+        {"python_dependency", false},
+        {"error", initializing ? "offline SBS job manager is initializing" : error.empty() ? "offline SBS job manager is not initialized" :
+                                                                                             error},
+      };
+    }
+
+    void service_owner_t::shutdown() {
+      std::shared_ptr<job_service_t> service;
+      std::jthread initializer;
+      {
+        std::lock_guard lock {mutex_};
+        if (phase_ == phase_e::closed) {
+          return;
+        }
+        phase_ = phase_e::closing;
+        config_.reset();
+        service = std::move(service_);
+        initializer = std::move(initializer_);
+      }
+      if (service) {
+        service->shutdown();
+      }
+      if (initializer.joinable()) {
+        initializer.join();
+      }
+      std::lock_guard lock {mutex_};
+      phase_ = phase_e::closed;
+    }
+  }  // namespace detail
+
+  namespace {
+    detail::service_owner_t global_service_owner;
+#ifdef SUNSHINE_TESTS
+    thread_local detail::service_owner_t *service_owner_override = nullptr;
+#endif
+
+    detail::service_owner_t &facade_owner() {
+#ifdef SUNSHINE_TESTS
+      if (service_owner_override) {
+        return *service_owner_override;
+      }
+#endif
+      return global_service_owner;
+    }
+  }  // namespace
+
+  void configure_default_service() {
+    // Freeze the interactive account and paths now. A late demand cannot rebind the service.
+    // Configuration capture used to run inside an unobserved std::async future; keep its
+    // failure local to offline availability rather than aborting host startup.
+    try {
+      facade_owner().configure(default_service_config());
+    } catch (const std::exception &exception) {
+      facade_owner().configuration_failed(
+        "offline SBS job manager configuration failed: "s + exception.what()
+      );
+    } catch (...) {
+      facade_owner().configuration_failed("offline SBS job manager configuration failed unexpectedly");
+    }
+  }
+
+  void request_initialization() {
+    facade_owner().request();
   }
 
   void shutdown() {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      global_shutdown_requested = true;
-      service = std::move(global_service);
-    }
-    if (service) {
-      service->shutdown();
-    }
+    facade_owner().shutdown();
   }
 
   service_reply_t create(const create_request_t &request) {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-    }
+    auto service = facade_owner().ready_service();
     if (!service) {
       return {
         .code = error_code_e::not_initialized,
@@ -6111,11 +6253,7 @@ namespace offline_sbs {
   }
 
   service_reply_t cancel(const std::string_view id) {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-    }
+    auto service = facade_owner().ready_service();
     if (!service) {
       return {
         .code = error_code_e::not_initialized,
@@ -6126,11 +6264,7 @@ namespace offline_sbs {
   }
 
   service_reply_t clear(const std::string_view id) {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-    }
+    auto service = facade_owner().ready_service();
     if (!service) {
       return {
         .code = error_code_e::not_initialized,
@@ -6141,11 +6275,7 @@ namespace offline_sbs {
   }
 
   service_reply_t get(const std::string_view id) {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-    }
+    auto service = facade_owner().ready_service();
     if (!service) {
       return {
         .code = error_code_e::not_initialized,
@@ -6156,11 +6286,7 @@ namespace offline_sbs {
   }
 
   browse_reply_t browse(const browse_request_t &request) {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-    }
+    auto service = facade_owner().ready_service();
     if (!service) {
       return {
         .code = error_code_e::not_initialized,
@@ -6171,53 +6297,57 @@ namespace offline_sbs {
   }
 
   std::vector<job_snapshot_t> list() {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-    }
+    auto service = facade_owner().ready_service();
     return service ? service->list() : std::vector<job_snapshot_t> {};
   }
 
   bool has_active_job() {
-    std::shared_ptr<job_service_t> service;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-    }
+    auto service = facade_owner().ready_service();
     return service && service->has_active_job();
   }
 
   nlohmann::json capabilities() {
-    std::shared_ptr<job_service_t> service;
-    std::string initialization_error;
-    bool initializing = false;
-    {
-      std::lock_guard lock {global_mutex};
-      service = global_service;
-      initialization_error = global_initialization_error;
-      initializing = global_initializing;
-    }
-    if (!service) {
-      return {
-        {"schema", 1},
-        {"available", false},
-        {"initializing", initializing},
-        {"python_dependency", false},
-        {
-          "error",
-          initializing ?
-            "offline SBS job manager is initializing" :
-            initialization_error.empty() ?
-              "offline SBS job manager is not initialized" :
-              initialization_error,
-        },
-      };
-    }
-    return service->capabilities();
+    return facade_owner().capabilities();
   }
 
 #ifdef SUNSHINE_TESTS
+  namespace testing {
+    scoped_service_owner_override_t::scoped_service_owner_override_t(detail::service_owner_t &owner):
+        previous_(service_owner_override) {
+      service_owner_override = &owner;
+    }
+
+    scoped_service_owner_override_t::~scoped_service_owner_override_t() {
+      service_owner_override = previous_;
+    }
+
+    std::unique_ptr<detail::service_owner_t> service_owner_test_access::create(
+      service_config_t config,
+      service_initialization_hooks_t hooks
+    ) {
+      auto owner = std::make_unique<detail::service_owner_t>();
+      owner->test_hooks_ = std::make_shared<const service_initialization_hooks_t>(std::move(hooks));
+      owner->configure(std::move(config));
+      return owner;
+    }
+
+    std::unique_ptr<detail::service_owner_t> service_owner_test_access::start(
+      service_config_t config,
+      service_initialization_hooks_t hooks
+    ) {
+      auto owner = create(std::move(config), std::move(hooks));
+      owner->request();
+      return owner;
+    }
+
+    void service_owner_test_access::join(detail::service_owner_t &owner) {
+      // Tests serialize this observational join with request and shutdown.
+      if (owner.initializer_.joinable()) {
+        owner.initializer_.join();
+      }
+    }
+  }  // namespace testing
+
   progress_t read_worker_progress_for_test(const worker_context_t &context) {
     std::string error;
     const auto value = read_json_contract(

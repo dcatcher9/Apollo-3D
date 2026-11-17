@@ -160,6 +160,15 @@ The native manager owns production conversion; Python and tools/sbsbench own eva
 FFmpeg/FFprobe must be the approved installation-local pair. One offline job may hold the GPU lease.
 Admission refuses work while streaming or local AR presentation owns it.
 
+The process facade captures its account and configuration at host startup, but starts the offline
+service only after an authorized, validated offline API request. Other host features do not create
+its job directories, run its media-tool checks, or start its supervisor. That first demand also
+runs retained-job recovery: interrupted-state marking and publication cleanup are deferred until
+then, and finish before any retained record is served or a new job is admitted. The offline
+overview reports initialization while this runs. Failed initialization stays unavailable until
+the host restarts; repeated status polling does not retry it. Shutdown closes new initialization
+requests, stops the service, and joins its initializer before process globals are released.
+
 The exact SHA-256 authenticates the worker specification. Job-root and staging-file identity pins
 constrain writes and cleanup. Cancellation terminates the entire worker process tree, including
 an unresponsive GPU owner and media children. Memory handoffs also wake on cancellation. Restart

@@ -856,24 +856,12 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  // Media-tool and NVENC capability probes are optional and can take several seconds on
-  // a cold driver/toolchain. They must not delay pairing, mDNS, RTSP, or the configuration
-  // UI. The process-global offline facade remains unavailable until this task commits a
-  // fully initialized service.
-  auto offline_sbs_initialization = std::async(std::launch::async, []() {
-    std::string error;
-    if (!offline_sbs::initialize(
-          offline_sbs::default_service_config(),
-          error
-        )) {
-      BOOST_LOG(warning)
-        << "Offline SBS conversion is unavailable: "sv << error;
-    }
-  });
+  // The offline facade owns its initializer and captures the startup account/configuration.
+  // Arm fallback cleanup before any later demand can launch its owning worker.
   auto offline_sbs_shutdown_guard = util::fail_guard([]() {
     offline_sbs::shutdown();
   });
-
+  offline_sbs::configure_default_service();
   std::unique_ptr<platf::deinit_t> mDNS;
   auto sync_mDNS = std::async(std::launch::async, [&mDNS]() {
     if (config::sunshine.enable_discovery) {
@@ -914,7 +902,6 @@ int main(int argc, char *argv[]) {
   rtspThread.join();
 
   offline_sbs::shutdown();
-  offline_sbs_initialization.wait();
   offline_sbs_shutdown_guard.disable();
 
   // A recent disconnect may have left Windows streaming state warm for fast reconnect. Flush it

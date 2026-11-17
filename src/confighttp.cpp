@@ -1778,6 +1778,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto capabilities = offline_sbs::capabilities();
     const bool available = capabilities.value("available", false);
     send_json_response(
@@ -1874,6 +1875,7 @@ namespace confighttp {
         return;
       }
 
+      offline_sbs::request_initialization();
       const auto reply = offline_sbs::browse(browse);
       send_json_response(
         response,
@@ -1889,6 +1891,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto capabilities = offline_sbs::capabilities();
     if (!capabilities.value("available", false)) {
       send_json_response(
@@ -2031,6 +2034,7 @@ namespace confighttp {
         return;
       }
 
+      offline_sbs::request_initialization();
       const auto reply = offline_sbs::create(create);
       send_json_response(
         response,
@@ -2049,6 +2053,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto reply = offline_sbs::get(request->path_match[1].str());
     send_json_response(
       response,
@@ -2061,6 +2066,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto reply = offline_sbs::cancel(request->path_match[1].str());
     send_json_response(
       response,
@@ -2073,6 +2079,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto reply = offline_sbs::clear(request->path_match[1].str());
     send_json_response(
       response,
