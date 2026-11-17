@@ -9793,6 +9793,20 @@ namespace platf::dxgi {
       return local_presenter_result_e::error;
     }
 
+    if (config.frame_sequential) {
+      // The shutter picture must reach the display on its exact refresh, every 3 ms at 330 Hz.
+      // A conversion pass of several milliseconds, such as picture-based subtitle protection,
+      // otherwise holds the GPU at the same priority and the picture arrives refreshes late.
+      // Let the presentation context, which stays at 7, outrank conversion.
+      dxgi::dxgi_t converter_dxgi;
+      if (SUCCEEDED(converter.device->QueryInterface(IID_IDXGIDevice, (void **) &converter_dxgi)) &&
+          SUCCEEDED(converter_dxgi->SetGPUThreadPriority(0))) {
+        BOOST_LOG(info) << "Local shutter conversion GPU context uses relative priority 0, below presentation."sv;
+      } else {
+        BOOST_LOG(warning) << "Local shutter conversion GPU priority could not be lowered below presentation."sv;
+      }
+    }
+
     DXGI_OUTPUT_DESC source_output_desc {};
     if (!dxgi_display->output || FAILED(dxgi_display->output->GetDesc(&source_output_desc))) {
       BOOST_LOG(error) << "Local AR presenter could not query the virtual source geometry."sv;
