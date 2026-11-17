@@ -786,6 +786,8 @@ namespace stream {
 
     state_e state(session_t &session);
 #ifdef SUNSHINE_TESTS
+    /** Observe lock availability from another thread without mutating platform lifecycle state. */
+    bool platform_lifecycle_lock_available_for_test();
     void set_state_for_test(session_t &session, state_e state);
     bool claim_active_slot_for_test();
     void release_active_slot_for_test();

@@ -44,6 +44,10 @@
 #include "uuid.h"
 #include "video.h"
 
+#ifdef SUNSHINE_TESTS
+  #include "nvhttp_launch_test.h"
+#endif
+
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
   // from_utf8() string conversion function
@@ -434,6 +438,142 @@ namespace proc {
       _launch_session && _launch_session->virtual_display_only,
     };
   }
+
+#ifdef SUNSHINE_TESTS
+  void launch_transaction_test_access::clear(proc_t &process) {
+    std::lock_guard lock(process_state_mutex);
+    process.placebo = false;
+    process._app = {};
+    process._app_id = 0;
+    process._host_session_id = 0;
+    process._active_launch_session_id = 0;
+    process._launch_session.reset();
+    process._virtual_display = false;
+    process.display_name.clear();
+  #ifdef _WIN32
+    // These fixtures never acquire a real monitor, process, HDR worker or remote AR lease.
+    auto discarded = std::move(process._display_session);
+    process._display_session = VDISPLAY::session_t {};
+    process._display_topology_test_hook = {};
+    process._virtual_display_only = false;
+    process._pause_wake_attempted = false;
+  #endif
+  }
+
+  void launch_transaction_test_access::seed(
+    proc_t &process,
+    ctx_t app,
+    std::shared_ptr<rtsp_stream::launch_session_t> launch,
+    std::uint64_t host_session_id,
+    bool virtual_display,
+    std::function<void()> primary_restored
+  ) {
+    std::lock_guard lock(process_state_mutex);
+    clear(process);
+    process._app = std::move(app);
+    process._app_id = util::from_view(process._app.id);
+    process._host_session_id = host_session_id;
+    process._active_launch_session_id = launch->id;
+    process._launch_session = std::move(launch);
+    process.placebo = true;
+    process._virtual_display = virtual_display;
+  #ifdef _WIN32
+    process._virtual_display_only = process._launch_session->virtual_display_only;
+    if (virtual_display) {
+      VDISPLAY::session_io_t io;
+      io.prepare = [](const auto &) {
+        return true;
+      };
+      io.create = [](const auto &) {
+        return VDISPLAY::creation_result_t {};
+      };
+      io.bind = [](auto) {
+        return true;
+      };
+      io.promote = [](auto, bool) {
+        return true;
+      };
+      io.restore = [](auto) {
+        return true;
+      };
+      io.pause = [primary_restored = std::move(primary_restored)](auto, auto &retained, auto) {
+        if (primary_restored) {
+          primary_restored();
+        }
+        auto storage = std::make_shared<int>(0);
+        retained = platf::primary_display::retained_display_ptr(
+          storage,
+          reinterpret_cast<platf::primary_display::retained_display_t *>(storage.get())
+        );
+        return true;
+      };
+      io.reactivate = [](const auto &, bool) {
+        return true;
+      };
+      io.query = [](const auto &) {
+        VDISPLAY::display_identity_query_t result;
+        result.state = VDISPLAY::display_identity_state_e::present;
+        result.display_name = L"launch-transaction-test-display";
+        result.device_path = L"launch-transaction-test-path";
+        return result;
+      };
+      io.query_retirement = [](const auto &) {
+        return VDISPLAY::display_identity_state_e::absent;
+      };
+      io.remove = [](const auto &) {
+        return true;
+      };
+      io.now = [] {
+        return std::chrono::steady_clock::now();
+      };
+      io.sleep = [](auto) {
+      };
+      io.restore_cursor = [](const auto &) {
+      };
+      process._display_session = VDISPLAY::session_t {std::move(io)};
+      VDISPLAY::creation_result_t binding;
+      binding.display_name = L"launch-transaction-test-display";
+      binding.device_path = L"launch-transaction-test-path";
+      binding.identity.emplace();
+      VDISPLAY::display_spec_t spec;
+      spec.exclusive = process._virtual_display_only;
+      process._display_session.adopt(std::move(spec), std::move(binding));
+      process._display_topology_test_hook = [](auto, bool) {
+        return true;
+      };
+    }
+  #endif
+  }
+
+  void launch_transaction_test_access::publish_resume(proc_t &process, const rtsp_stream::launch_session_t &launch) {
+    std::lock_guard lock(process_state_mutex);
+    // Stand in only for the native edge's successful contract publication, not its validation.
+    auto &retained = *process._launch_session;
+    retained.width = launch.width;
+    retained.height = launch.height;
+    retained.fps = launch.fps;
+    retained.enable_hdr = launch.enable_hdr;
+    retained.virtual_display_only = launch.virtual_display_only;
+    retained.scale_factor = launch.scale_factor;
+    retained.sbs_mode = launch.sbs_mode;
+    process._active_launch_session_id = launch.id;
+  #ifdef _WIN32
+    process._virtual_display_only = launch.virtual_display_only;
+    process._display_session.set_exclusive(launch.virtual_display_only);
+    process._display_session.commit_resume();
+  #endif
+  }
+
+  std::shared_ptr<rtsp_stream::launch_session_t> launch_transaction_test_access::retained_launch(const proc_t &process) {
+    std::lock_guard lock(process_state_mutex);
+    return process._launch_session;
+  }
+
+  std::uint32_t launch_transaction_test_access::active_transport(const proc_t &process) {
+    std::lock_guard lock(process_state_mutex);
+    return process._active_launch_session_id;
+  }
+#endif
 
 #ifdef _WIN32
   void proc_t::stop_hdr_worker() {

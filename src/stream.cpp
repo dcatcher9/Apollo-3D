@@ -4275,6 +4275,16 @@ namespace stream {
     }
 
 #ifdef SUNSHINE_TESTS
+    bool platform_lifecycle_lock_available_for_test() {
+      bool available = false;
+      std::thread probe([&]() {
+        std::unique_lock lock {platform_lifecycle_mutex, std::try_to_lock};
+        available = lock.owns_lock();
+      });
+      probe.join();
+      return available;
+    }
+
     void set_state_for_test(session_t &session, state_e state) {
       session.state.store(state, std::memory_order_relaxed);
     }

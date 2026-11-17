@@ -315,6 +315,7 @@ namespace proc {
     friend void refresh(const std::string &file_name, bool needs_terminate, bool wait_for_display_driver);
 #ifdef SUNSHINE_TESTS
     friend struct process_test_access;
+    friend struct launch_transaction_test_access;
 #endif
     int running_locked();
     bool stream_process_exited_locked();
