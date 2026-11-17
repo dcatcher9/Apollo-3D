@@ -136,21 +136,28 @@ namespace nvenc {
      *        No restrictions on the first frame index, but later frame indexes must be subsequent.
      * @param force_idr Whether to encode frame as forced IDR.
      * @param frame_buffer Recyclable storage for the copied bitstream.
+     * @param input_revision Conversion-owned target revision, never reused for different content
+     *        during the registered input's lifetime. Zero is unknown; eligible depth-2 submissions
+     *        always copy.
      * @return Encoded frame.
      */
     nvenc_encoded_frame encode_frame(
       uint64_t frame_index,
       bool force_idr,
-      std::vector<std::uint8_t> frame_buffer = {}
+      std::vector<std::uint8_t> frame_buffer = {},
+      std::uint64_t input_revision = 0
     );
 
     /**
      * Submit the current input surface as the next picture without waiting for it. With a pipeline
-     * depth above 1 the surface is first copied into the picture's own input, so the caller may
-     * convert the next frame while this one encodes. Call from one thread (the encode thread).
+     * depth above 1 each picture has its own input, refreshed from the surface unless its content
+     * already matches input_revision. The caller may convert the next frame while this encodes.
+     * Call from one thread (the encode thread).
+     * @param input_revision Same conversion-owned identity as encode_frame(); zero remains the
+     *        conservative path for direct callers that do not track target writes.
      * @return `false` on failure, or while `pipeline_depth()` pictures are still in flight.
      */
-    bool submit_frame(uint64_t frame_index, bool force_idr);
+    bool submit_frame(uint64_t frame_index, bool force_idr, std::uint64_t input_revision = 0);
 
     /**
      * Wait for the oldest submitted picture (the 250 ms encoder budget, from its input's completion
@@ -242,9 +249,10 @@ namespace nvenc {
     /**
      * @brief Required for a depth above 1, where it alone is called: fill picture `slot`'s
      *        registered input from the outside-facing surface (a GPU copy) before it is mapped.
-     *        Submitting thread only.
+     *        A nonzero conversion revision may reuse that texture's already copied content; zero
+     *        must copy. Submitting thread only, independent of later map/submission acceptance.
      */
-    virtual void prepare_input(unsigned slot) {}
+    virtual void prepare_input(unsigned slot, std::uint64_t input_revision) {}
 
     /**
      * @brief Optional. Completion event of picture slot `slot` (1 and up; slot 0 uses

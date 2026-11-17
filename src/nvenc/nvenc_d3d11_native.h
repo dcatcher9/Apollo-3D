@@ -22,14 +22,26 @@ namespace nvenc {
 
     ID3D11Texture2D *get_input_texture() override;
 
+  #ifdef SUNSHINE_TESTS
+    /** Commands issued at the actual per-picture CopyResource site; submitting thread only. */
+    std::array<std::uint64_t, max_pipeline_depth> input_copy_counts_for_test() const noexcept {
+      return input_copy_counts_;
+    }
+  #endif
+
   private:
     bool create_and_register_input_buffer() override;
-    void prepare_input(unsigned slot) override;
+    void prepare_input(unsigned slot, std::uint64_t input_revision) override;
 
     const ID3D11DevicePtr d3d_device;
     ID3D11Texture2DPtr d3d_input_texture;  ///< Conversion target; registered itself at depth 1.
     std::array<ID3D11Texture2DPtr, max_pipeline_depth> picture_inputs;  ///< Each picture's copy at depth 2.
+    // Proof belongs to each actual picture texture and advances only when its copy is issued.
+    std::array<std::uint64_t, max_pipeline_depth> picture_input_revisions {};
     ID3D11DeviceContextPtr copy_context;
+  #ifdef SUNSHINE_TESTS
+    std::array<std::uint64_t, max_pipeline_depth> input_copy_counts_ {};
+#endif
   };
 
 }  // namespace nvenc
