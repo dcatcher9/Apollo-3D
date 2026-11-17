@@ -12,6 +12,9 @@
 #include "offline_sbs_runner.h"
 #include "offline_sbs_wire_contract.h"
 #include "offline_sbs_worker.h"
+#ifdef SUNSHINE_TESTS
+  #include "offline_sbs_progress_test.h"
+#endif
 #include "sbs_perf.h"
 
 #include <algorithm>
@@ -2482,6 +2485,40 @@ namespace offline_sbs {
       );
     }
 
+    class worker_progress_publisher_t {
+    public:
+      explicit worker_progress_publisher_t(const worker_spec_t &spec):
+          spec_(spec) {
+      }
+
+      worker_progress_publisher_t(const worker_progress_publisher_t &) = delete;
+      worker_progress_publisher_t &operator=(const worker_progress_publisher_t &) = delete;
+
+      bool publish(
+        const std::string_view phase,
+        const std::uint64_t processed_frames,
+        const media_contract_t *media,
+        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()
+      ) {
+        const bool final_source_frame = media && processed_frames == media->frames.size();
+        if (next_publication_ && phase == last_phase_ && !final_source_frame && now < *next_publication_) {
+          return false;
+        }
+        // Allocate the next phase before writing, then commit eligibility only after the
+        // actual publication succeeds. Suppressed updates never construct progress JSON.
+        std::string published_phase {phase};
+        publish_progress(spec_, phase, processed_frames, media);
+        last_phase_ = std::move(published_phase);
+        next_publication_ = now + 200ms;
+        return true;
+      }
+
+    private:
+      const worker_spec_t &spec_;
+      std::string last_phase_;
+      std::optional<std::chrono::steady_clock::time_point> next_publication_;
+    };
+
     void publish_failure(
       const worker_spec_t &spec,
       const std::string &error
@@ -4219,6 +4256,38 @@ namespace offline_sbs {
   }
 
 #ifdef SUNSHINE_TESTS
+  struct worker_progress_test_publisher_t::impl_t {
+    worker_spec_t spec;
+    worker_progress_publisher_t publisher {spec};
+    std::size_t successful_publications = 0;
+  };
+
+  worker_progress_test_publisher_t::worker_progress_test_publisher_t(
+    std::filesystem::path progress_path,
+    std::string job_id
+  ):
+      impl_(std::make_unique<impl_t>()) {
+    impl_->spec.progress_path = std::move(progress_path);
+    impl_->spec.job_id = std::move(job_id);
+  }
+
+  worker_progress_test_publisher_t::~worker_progress_test_publisher_t() = default;
+
+  void worker_progress_test_publisher_t::publish(
+    const std::string_view phase,
+    const std::uint64_t processed_frames,
+    const media_contract_t *media,
+    const std::chrono::steady_clock::time_point now
+  ) {
+    if (impl_->publisher.publish(phase, processed_frames, media, now)) {
+      ++impl_->successful_publications;
+    }
+  }
+
+  std::size_t worker_progress_test_publisher_t::successful_publications() const {
+    return impl_->successful_publications;
+  }
+
   bool native_stdout_pipe_error_is_eof_for_test(
     const std::uint32_t error
   ) noexcept {
@@ -5813,6 +5882,7 @@ namespace offline_sbs {
       const auto spec_path = fs::absolute(path_from_utf8(argv[0])).lexically_normal();
       parsed_spec = read_authenticated_worker_spec(spec_path, argv[1]);
       const auto &spec = *parsed_spec;
+      worker_progress_publisher_t progress {spec};
       std::error_code ec;
       if (!fs::is_regular_file(spec.input_path, ec) || ec || fs::file_size(spec.input_path, ec) == 0 || ec) {
         throw worker_error("offline input is missing or empty");
@@ -5843,7 +5913,7 @@ namespace offline_sbs {
         throw worker_error("cannot create native worker directory");
       }
 
-      publish_progress(spec, "probe", 0, nullptr);
+      progress.publish("probe", 0, nullptr);
       const auto probe_json = work / "source-probe.json";
       const auto media = probe_media(
         spec,
@@ -5967,8 +6037,7 @@ namespace offline_sbs {
              });
 
       try {
-        publish_progress(
-          spec,
+        progress.publish(
           spec.operation == "convert" ? "convert" : "evaluate",
           0,
           &media
@@ -6143,8 +6212,7 @@ namespace offline_sbs {
           live_source_raster_bytes -= current_source_raster_bytes;
           source_queue.pop_front();
           fill_source_window();
-          publish_progress(
-            spec,
+          progress.publish(
             converting ? "convert" : "evaluate",
             timing.sequence,
             &media
@@ -6283,8 +6351,7 @@ namespace offline_sbs {
           throw worker_error("conversion produced no whole-clip encoder");
         }
         conversion_encoder->finish();
-        publish_progress(
-          spec,
+        progress.publish(
           "mux",
           media.frames.size(),
           &media
@@ -6376,8 +6443,7 @@ namespace offline_sbs {
       // The harness snapshot precedes the asynchronous encoder's last write. Snapshot again
       // after the encoder drains so the transport profile covers every source and output frame.
       sbs_perf::dump_json(path_utf8(analysis_output / "sbs_perf.json"));
-      publish_progress(
-        spec,
+      progress.publish(
         "complete",
         media.frames.size(),
         &media

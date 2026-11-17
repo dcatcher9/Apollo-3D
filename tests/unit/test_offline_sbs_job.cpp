@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string>
 #include <thread>
 
@@ -12,8 +13,10 @@
 #include "src/gpu_workload_arbiter.h"
 #include "src/offline_sbs_contract.h"
 #include "src/offline_sbs_job.h"
+#include "src/offline_sbs_progress_test.h"
 #include "src/offline_sbs_wire_contract.h"
 #include "src/platform/common.h"
+#include "src/utility.h"
 
 #ifdef _WIN32
   #include <windows.h>
@@ -3102,5 +3105,80 @@ TEST(OfflineSbsJob, RefusesAdmissionWhileLiveStreamingOwnsTheGpu) {
     wait_for_terminal(service, admitted.job->id).state,
     offline_sbs::job_state_e::complete
   );
+  service.shutdown();
+}
+
+TEST(OfflineSbsJob, ActualWorkerProgressFilesReachTheServiceWithoutRegressingItsSnapshot) {
+  temporary_tree_t tree;
+  const auto input = tree.path / "source.mkv";
+  write_nonempty(input, "source");
+  offline_sbs::media_contract_t media;
+  media.time_base = {1, 1000};
+  media.frames = {{1, 1000, 40}, {2, 1040, 60}, {3, 1100, 50}};
+  auto inconsistent_total = media;
+  inconsistent_total.frames.push_back({4, 1150, 50});
+  std::promise<void> observed_promise, release_promise;
+  auto observed = observed_promise.get_future();
+  const auto release = release_promise.get_future().share();
+  std::atomic_bool released {false};
+  const auto release_worker = [&]() {
+    if (!released.exchange(true)) {
+      release_promise.set_value();
+    }
+  };
+  offline_sbs::job_service_t service {
+    service_config(tree.path),
+    [&](const offline_sbs::worker_context_t &context, const std::stop_token stop, const offline_sbs::progress_callback_t &progress) {
+      offline_sbs::worker_progress_test_publisher_t publisher {context.worker_progress, context.job_id};
+      const auto start = std::chrono::steady_clock::time_point {};
+      publisher.publish("evaluate", 0, &media, start);
+      progress(offline_sbs::read_worker_progress_for_test(context));
+      publisher.publish("evaluate", 2, &media, start + 200ms);
+      progress(offline_sbs::read_worker_progress_for_test(context));
+      // The actual manager rejects both a regressed count and a changed source total.
+      publisher.publish("evaluate", 1, &media, start + 400ms);
+      progress(offline_sbs::read_worker_progress_for_test(context));
+      publisher.publish("evaluate", 2, &inconsistent_total, start + 600ms);
+      progress(offline_sbs::read_worker_progress_for_test(context));
+      observed_promise.set_value();
+      if (release.wait_for(3s) != std::future_status::ready || stop.stop_requested()) {
+        return offline_sbs::worker_outcome_t {.error = "progress fixture was stopped before completion"};
+      }
+      publisher.publish("complete", 3, &media, start + 800ms);
+      progress(offline_sbs::read_worker_progress_for_test(context));
+      return offline_sbs::worker_outcome_t {
+        .completed = true,
+        .result = {{"schema", 1}, {"job_id", context.job_id}, {"status", "complete"}},
+      };
+    }
+  };
+  // This guard runs before the service joins its worker, including after a fatal assertion.
+  auto release_guard = util::fail_guard(release_worker);
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({
+    .input_path = input,
+    .operation = offline_sbs::operation_e::evaluate,
+  });
+  ASSERT_TRUE(created.ok) << created.error;
+  ASSERT_EQ(observed.wait_for(3s), std::future_status::ready);
+  const auto active = service.get(created.job->id);
+  ASSERT_TRUE(active.ok);
+  ASSERT_TRUE(active.job);
+  EXPECT_EQ(active.job->state, offline_sbs::job_state_e::running);
+  EXPECT_EQ(active.job->progress.phase, "evaluate");
+  EXPECT_EQ(active.job->progress.processed_frames, 2u);
+  EXPECT_EQ(active.job->progress.total_frames, 3u);
+  EXPECT_EQ(active.job->progress.source_time_seconds, 0.04);
+  EXPECT_EQ(active.job->progress.source_duration_seconds, 0.15);
+  release_worker();
+  const auto terminal = wait_for_terminal(service, created.job->id);
+  EXPECT_EQ(terminal.state, offline_sbs::job_state_e::complete);
+  EXPECT_EQ(terminal.progress.phase, "complete");
+  EXPECT_EQ(terminal.progress.processed_frames, 3u);
+  EXPECT_EQ(terminal.progress.total_frames, 3u);
+  EXPECT_EQ(terminal.progress.source_time_seconds, 0.1);
+  EXPECT_EQ(terminal.progress.source_duration_seconds, 0.15);
+  expect_persisted_snapshot(tree.path / "state" / "jobs" / terminal.id / "job.json", terminal);
   service.shutdown();
 }

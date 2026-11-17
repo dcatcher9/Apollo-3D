@@ -271,6 +271,9 @@ namespace offline_sbs {
   nlohmann::json capabilities();
 
 #ifdef SUNSHINE_TESTS
+  // Read the actual bounded no-follow progress file and validate its worker identity.
+  progress_t read_worker_progress_for_test(const worker_context_t &context);
+
   struct bounded_worker_log_test_result_t {
     std::string retained;
     bool limit_exceeded = false;

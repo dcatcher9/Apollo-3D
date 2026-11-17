@@ -67,8 +67,11 @@ Analyze Only uses the same barrier without packed output. Header, frame, pixel, 
 waits use condition-variable backpressure and wake on failure or cancellation.
 
 Production's GPU thread and worker exchange neither per-frame progress/state files nor evaluator
-CLI messages. The worker still atomically publishes manager/UI progress; the manager coalesces
-durable job updates. Source, runtime, timeline, result, and publication contracts remain on disk.
+CLI messages. Within a phase, the worker atomically publishes manager/UI progress at most once
+every 200 ms, with immediate first, phase-change, and final-source-frame updates. Only successful
+publication advances the deadline. Suppressed snapshots perform no JSON or file work; filesystem
+errors are reported when publication is due. The manager coalesces durable job updates. Source,
+runtime, timeline, result, and publication contracts remain on disk.
 Evaluator JSONL and file-follow adapters retain their existing atomic snapshots and
 directory-change notifications.
 

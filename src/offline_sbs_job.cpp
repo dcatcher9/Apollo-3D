@@ -6218,6 +6218,19 @@ namespace offline_sbs {
   }
 
 #ifdef SUNSHINE_TESTS
+  progress_t read_worker_progress_for_test(const worker_context_t &context) {
+    std::string error;
+    const auto value = read_json_contract(
+      context.worker_progress,
+      error,
+      max_progress_contract_bytes
+    );
+    if (!value) {
+      throw std::runtime_error(error);
+    }
+    return parse_worker_progress(*value, context.job_id);
+  }
+
   bounded_worker_log_test_result_t bound_worker_log_for_test(
     const std::vector<std::string> &chunks
   ) {
