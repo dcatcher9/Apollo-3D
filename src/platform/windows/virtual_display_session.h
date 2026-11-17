@@ -39,6 +39,23 @@ namespace VDISPLAY {
     std::function<void(const platf::primary_display::retained_display_ptr &)> restore_cursor;
   };
 
+  /** Finite I/O boundary for one temporary encoder-probe display retirement.
+   * Every operation is required by the test invoker; it never falls back to native I/O.
+   */
+  struct probe_retirement_io_t {
+    std::function<desktop_detach_result_t(const creation_result_t &, std::chrono::milliseconds, std::shared_ptr<desktop_detach_context_t> &)> detach;
+    std::function<display_identity_state_e(const creation_result_t &)> query_active;
+    std::function<display_identity_state_e(const creation_result_t &)> query_retirement;
+    std::function<bool(const GUID &)> remove;
+    std::function<std::chrono::steady_clock::time_point()> now;
+    std::function<void(std::chrono::milliseconds)> sleep;
+  };
+
+  bool retire_probe_display(const creation_result_t &binding, const GUID &guid);
+#ifdef SUNSHINE_TESTS
+  bool retire_probe_display_for_test(const creation_result_t &binding, const GUID &guid, probe_retirement_io_t io);
+#endif
+
   class session_t;
 
   struct session_retirement_callbacks_t {
