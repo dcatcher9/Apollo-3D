@@ -443,67 +443,6 @@ namespace stream {
       }
     };
 
-    /**
-     * Transaction gate for live 0x3007 mode requests.
-     *
-     * The control thread may replace a request that is still pending, but once the worker begins
-     * one transaction no later request may begin until the matching encoder completion and any
-     * desktop rollback have finished. Tokens are host-generated because client request ids are
-     * opaque and may repeat.
-     */
-    class live_video_mode_serial_gate_t {
-    public:
-      struct submission_t {
-        std::uint64_t transaction_id;
-        std::optional<std::uint64_t> superseded_transaction_id;
-      };
-
-      [[nodiscard]] submission_t submit() noexcept {
-        ++_last_transaction_id;
-        if (_last_transaction_id == 0) {
-          ++_last_transaction_id;
-        }
-        const auto superseded = std::exchange(_pending_transaction_id, _last_transaction_id);
-        return {_last_transaction_id, superseded};
-      }
-
-      [[nodiscard]] bool can_begin() const noexcept {
-        return !_active_transaction_id && _pending_transaction_id.has_value();
-      }
-
-      [[nodiscard]] std::optional<std::uint64_t> begin_next() noexcept {
-        if (!can_begin()) {
-          return std::nullopt;
-        }
-        _active_transaction_id = std::exchange(_pending_transaction_id, std::nullopt);
-        return _active_transaction_id;
-      }
-
-      [[nodiscard]] bool accepts_completion(std::uint64_t transaction_id) const noexcept {
-        return _active_transaction_id == transaction_id;
-      }
-
-      [[nodiscard]] bool finish(std::uint64_t transaction_id) noexcept {
-        if (!accepts_completion(transaction_id)) {
-          return false;
-        }
-        _active_transaction_id.reset();
-        return true;
-      }
-
-      void cancel_pending() noexcept {
-        _pending_transaction_id.reset();
-      }
-
-      [[nodiscard]] std::optional<std::uint64_t> active() const noexcept {
-        return _active_transaction_id;
-      }
-
-    private:
-      std::uint64_t _last_transaction_id = 0;
-      std::optional<std::uint64_t> _pending_transaction_id;
-      std::optional<std::uint64_t> _active_transaction_id;
-    };
   }  // namespace detail
 
   /**

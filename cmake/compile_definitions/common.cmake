@@ -84,6 +84,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/rtsp.h"
         "${CMAKE_SOURCE_DIR}/src/stream.cpp"
         "${CMAKE_SOURCE_DIR}/src/stream.h"
+        "${CMAKE_SOURCE_DIR}/src/atomic_presentation.cpp"
+        "${CMAKE_SOURCE_DIR}/src/atomic_presentation.h"
         "${CMAKE_SOURCE_DIR}/src/video.cpp"
         "${CMAKE_SOURCE_DIR}/src/video.h"
         "${CMAKE_SOURCE_DIR}/src/capture_display_retirement.cpp"

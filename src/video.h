@@ -30,6 +30,10 @@
 #include "video_encode_pacing.h"
 #include "video_frame_diagnostics.h"
 
+namespace stream::detail {
+  class atomic_presentation_t;
+}
+
 namespace video {
   // The broadcast worker should never be allowed to accumulate hundreds of milliseconds of
   // already encoded video. Three frames absorb ordinary encoder/network scheduling jitter while
@@ -555,6 +559,9 @@ namespace video {
     bool stream_gamma_supported = false;
     // APPEND-ONLY. Shared with the control stream, which wakes the encode loop after each request.
     std::shared_ptr<encode_wake_t> encode_wake;
+    // APPEND-ONLY. Direct plain completion of this session's serialized presentation request.
+    // The endpoint owns neither the session nor its worker thread.
+    std::shared_ptr<stream::detail::atomic_presentation_t> atomic_presentation;
   };
 
   /** Game 3D, and Host SBS fed by the ReShade export, convert an independent provider's frames as

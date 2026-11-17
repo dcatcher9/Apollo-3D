@@ -7228,7 +7228,7 @@ TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitializa
   const auto reject_failed_session = capture.find("if (!encode_session) {", encoder_init);
   const auto hdr_snapshot = capture.find("auto hdr_info = encode_session->hdr_info();", reject_failed_session);
   const auto effective_publish = capture.find("config.effective_mode->publish(effective_mode);", hdr_snapshot);
-  const auto completion_publish = capture.find("video_mode_applied_queue->raise(video_mode_applied_t", effective_publish);
+  const auto completion_publish = capture.find("config.atomic_presentation->complete(video_mode_applied_t", effective_publish);
   const auto hdr_publish = capture.find("hdr_event->raise(std::move(hdr_info));", hdr_snapshot);
   ASSERT_NE(hdr_snapshot, std::string::npos);
   ASSERT_NE(encoder_init, std::string::npos);
@@ -7262,7 +7262,7 @@ TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAf
     reject_failed_session
   );
   const auto completion = video_source.find(
-    "video_mode_applied_queue->raise(video_mode_applied_t",
+    "config.atomic_presentation->complete(video_mode_applied_t",
     state_publish
   );
   ASSERT_NE(request_drain, std::string::npos);
@@ -8424,7 +8424,7 @@ TEST(NvencBitrateReconfigureTest, FailureKeepsRequestOnExistingRebuildPath) {
     restore
   );
   const auto successful_ack = video_source.find(
-    "video_mode_applied_queue->raise(video_mode_applied_t",
+    "config.atomic_presentation->complete(video_mode_applied_t",
     driver_call
   );
   const auto commit = video_source.find("restore_for_rebuild.disable();", successful_ack);

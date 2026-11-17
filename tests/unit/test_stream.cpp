@@ -723,59 +723,6 @@ TEST(AtomicPresentationNegotiationTests, PublishesMatchingHostAndClientFeatureBi
 #endif
 }
 
-TEST(LiveVideoModeSerialGateTests, CoalescesOnlyPendingRequestsAndWaitsThroughCompletion) {
-  stream::detail::live_video_mode_serial_gate_t gate;
-
-  const auto first = gate.submit();
-  ASSERT_NE(first.transaction_id, 0U);
-  EXPECT_FALSE(first.superseded_transaction_id);
-
-  // The first request has not begun, so a newer request can replace it without performing either
-  // display or encoder work.
-  const auto second = gate.submit();
-  EXPECT_EQ(second.superseded_transaction_id, first.transaction_id);
-  ASSERT_TRUE(gate.can_begin());
-  ASSERT_EQ(gate.begin_next(), second.transaction_id);
-  EXPECT_EQ(gate.active(), second.transaction_id);
-
-  // Once B begins, C remains pending. A stale completion (including one correlated by a duplicate
-  // client request id in production) cannot release B or let C overtake it.
-  const auto third = gate.submit();
-  EXPECT_FALSE(third.superseded_transaction_id);
-  EXPECT_FALSE(gate.can_begin());
-  EXPECT_FALSE(gate.finish(first.transaction_id));
-  EXPECT_EQ(gate.active(), second.transaction_id);
-
-  // Merely observing B's encoder completion is not enough: the worker retains the gate while it
-  // restores a rejected desktop. `finish()` is called only after that rollback attempt ends.
-  EXPECT_TRUE(gate.accepts_completion(second.transaction_id));
-  EXPECT_FALSE(gate.can_begin());
-  EXPECT_TRUE(gate.finish(second.transaction_id));
-  ASSERT_TRUE(gate.can_begin());
-  EXPECT_EQ(gate.begin_next(), third.transaction_id);
-  EXPECT_TRUE(gate.finish(third.transaction_id));
-  EXPECT_FALSE(gate.active());
-}
-
-TEST(LiveVideoModeSerialGateTests, CoalescesAQueuedBurstBehindAnActiveTransaction) {
-  stream::detail::live_video_mode_serial_gate_t gate;
-
-  const auto active = gate.submit();
-  ASSERT_EQ(gate.begin_next(), active.transaction_id);
-  const auto pending_a = gate.submit();
-  const auto pending_b = gate.submit();
-  const auto pending_c = gate.submit();
-
-  EXPECT_FALSE(pending_a.superseded_transaction_id);
-  EXPECT_EQ(pending_b.superseded_transaction_id, pending_a.transaction_id);
-  EXPECT_EQ(pending_c.superseded_transaction_id, pending_b.transaction_id);
-  EXPECT_FALSE(gate.can_begin());
-
-  ASSERT_TRUE(gate.finish(active.transaction_id));
-  ASSERT_EQ(gate.begin_next(), pending_c.transaction_id);
-  EXPECT_TRUE(gate.finish(pending_c.transaction_id));
-}
-
 TEST(LiveVideoModeAckTests, MapsEveryDisplayOutcomeToItsWireStatus) {
   // A desktop that already presented the geometry still delivers the mode the client asked for,
   // so it must read as success and not as a reason to reconnect.

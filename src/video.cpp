@@ -11,6 +11,7 @@
 #include <thread>
 
 // local includes
+#include "atomic_presentation.h"
 #include "capture_display_retirement.h"
 #include "config.h"
 #include "depth_coordinate_v2.h"
@@ -1458,8 +1459,6 @@ namespace video {
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
     // Atomic client-requested mode/geometry/cadence/bitrate changes arrive on one queue.
     auto video_mode_event = mail->queue<video_mode_change_t>(mail::video_mode);
-    auto video_mode_applied_queue =
-      mail->queue<video_mode_applied_t>(mail::video_mode_applied);
     auto depth_pipeline_ready_event = config.sbs_depth_pipeline_ready_event;
     auto stream_gamma_requests = mail->queue<stream_gamma_request_t>(mail::stream_gamma, stream_gamma_queue_limit);
     auto stream_gamma_acks = mail->queue<stream_gamma_ack_t>(mail::stream_gamma_ack, 2 * stream_gamma_queue_limit);
@@ -1727,16 +1726,18 @@ namespace video {
       }
       on_bitrate_reconfigured(*requested);
 
-      video_mode_applied_queue->raise(video_mode_applied_t {
-        {{requested->request_id, requested->transaction_id}},
-        true,
-        effective_mode,
-        {
-          requested->width,
-          requested->height,
-          requested->encodingFramerate,
-        },
-      });
+      if (config.atomic_presentation) {
+        (void) config.atomic_presentation->complete(video_mode_applied_t {
+          {{requested->request_id, requested->transaction_id}},
+          true,
+          effective_mode,
+          {
+            requested->width,
+            requested->height,
+            requested->encodingFramerate,
+          },
+        });
+      }
       BOOST_LOG(info) << "Applied live bitrate-only video mode at "sv
                       << requested->bitrate
                       << "kbps without rebuilding NVENC or forcing an IDR."sv;
@@ -2361,7 +2362,6 @@ namespace video {
     // Every live request owes the client exactly one answer, and only this loop knows the geometry
     // that actually gets installed. The host-generated transaction id (unlike the opaque client
     // request id) lets the serialized stream worker match this completion unambiguously.
-    auto video_mode_applied_queue = mail->queue<video_mode_applied_t>(mail::video_mode_applied);
     std::optional<video_mode_request_ref_t> active_ack_request;
     std::vector<video_mode_request_ref_t> superseded_ack_requests;
 
@@ -2691,21 +2691,25 @@ namespace video {
       // Answer the live requests this session resolves. Superseded ones are reported as not
       // applied so the client can drop them and resynchronize on the mode that is really running.
       if (!superseded_ack_requests.empty()) {
-        video_mode_applied_queue->raise(video_mode_applied_t {
-          std::move(superseded_ack_requests),
-          false,
-          effective_mode,
-          desktop_mode,
-        });
+        if (config.atomic_presentation) {
+          (void) config.atomic_presentation->complete(video_mode_applied_t {
+            std::move(superseded_ack_requests),
+            false,
+            effective_mode,
+            desktop_mode,
+          });
+        }
         superseded_ack_requests.clear();
       }
       if (active_ack_request) {
-        video_mode_applied_queue->raise(video_mode_applied_t {
-          {*active_ack_request},
-          true,
-          effective_mode,
-          desktop_mode,
-        });
+        if (config.atomic_presentation) {
+          (void) config.atomic_presentation->complete(video_mode_applied_t {
+            {*active_ack_request},
+            true,
+            effective_mode,
+            desktop_mode,
+          });
+        }
         active_ack_request.reset();
       }
 
