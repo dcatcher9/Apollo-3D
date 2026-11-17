@@ -5,6 +5,11 @@
 
 #include "ar_glasses.h"
 
+#ifdef SUNSHINE_TESTS
+  #include "ar_glasses_discovery_test.h"
+  #include <stdexcept>
+#endif
+
 #include "display.h"
 #include "display_config.h"
 #include "misc.h"
@@ -50,6 +55,28 @@ namespace ar_glasses {
   using namespace std::literals;
 
   namespace {
+#ifdef SUNSHINE_TESTS
+    struct discovery_test_state_t {
+      const testing::discovery_hooks_t &hooks;
+      testing::discovery_costs_t &costs;
+    };
+
+    thread_local discovery_test_state_t *active_discovery_test = nullptr;
+
+    LONG WINAPI discovery_get_info_for_test(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
+      if (!active_discovery_test) {
+        throw std::logic_error("discovery device-info trampoline has no scoped owner");
+      }
+      return active_discovery_test->hooks.get_info(header);
+    }
+
+    platf::display_config::device_info_api_t discovery_info_api_for_test() {
+      if (active_discovery_test) {
+        return {.get = &discovery_get_info_for_test, .set = nullptr};
+      }
+      return {};
+    }
+#endif
     constexpr std::string_view managed_config_key = "ar_glass_devices";
     constexpr wchar_t virtual_display_driver_name[] = L"SudoMaker Virtual Display Adapter";
     constexpr char virtual_display_uuid[] = "F43872A4-9948-45DF-BD84-5B33BD71E4E8";
@@ -273,10 +300,19 @@ namespace ar_glasses {
     };
 
     hdr_state_t query_hdr_state(const LUID &adapter_id, UINT32 target_id) {
+#ifdef SUNSHINE_TESTS
+      if (active_discovery_test) {
+        ++active_discovery_test->costs.hdr_queries;
+      }
+#endif
       const auto state = platf::display_config::query_advanced_color(
         adapter_id,
         target_id,
         platf::display_config::legacy_fallback_e::any_modern_failure
+#ifdef SUNSHINE_TESTS
+        ,
+        discovery_info_api_for_test()
+#endif
       );
       if (!state) {
         return {};
@@ -314,20 +350,24 @@ namespace ar_glasses {
       return (float) white_level.SDRWhiteLevel * 80.0f / 1000.0f;
     }
 
-    struct target_state_t {
+    // Discovery observes every physical output; approval decides which need presentation contracts.
+    struct discovered_target_t {
       std::string device_id;
       std::wstring device_path;
       std::string friendly_name;
       std::string gdi_name;
-      std::string desktop_topology;
       LUID source_adapter_id {};
       UINT32 source_id = 0;
       LUID adapter_id {};
       UINT32 target_id = 0;
-      hdr_state_t hdr;
       RECT rect {};
       int refresh_millihz = 60000;
       presentation_mode_e mode = presentation_mode_e::unsupported;
+    };
+
+    struct target_state_t: discovered_target_t {
+      std::string desktop_topology;
+      hdr_state_t hdr;
       bool is_primary = false;
       bool is_cloned = false;
 
@@ -1018,6 +1058,11 @@ namespace ar_glasses {
     }
 
     bool persist_devices_locked() {
+#ifdef SUNSHINE_TESTS
+      if (active_discovery_test) {
+        ++active_discovery_test->costs.persistence_attempts;
+      }
+#endif
       auto contents = read_config_file_strict();
       if (!contents) {
         BOOST_LOG(error) << "Could not read the complete configuration file; refusing to replace it while persisting the AR display decision list ["sv
@@ -1153,15 +1198,30 @@ namespace ar_glasses {
              });
     }
 
-    std::optional<std::vector<target_state_t>> enumerate_targets() {
+    struct target_discovery_snapshot_t {
+      std::vector<discovered_target_t> targets;
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+      std::wstring primary_gdi_name;
+      std::string primary_device_path;
+    };
+
+    std::optional<target_discovery_snapshot_t> discover_targets() {
       std::vector<DISPLAYCONFIG_PATH_INFO> paths;
       std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+#ifdef SUNSHINE_TESTS
+      if (!(active_discovery_test ? active_discovery_test->hooks.query_active(paths, modes) : VDISPLAY::queryActiveDisplayConfig(paths, modes))) {
+#else
       if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
+#endif
         return std::nullopt;
       }
 
+#ifdef SUNSHINE_TESTS
+      const auto virtual_sources = active_discovery_test ? active_discovery_test->hooks.match_display(virtual_display_driver_name) : VDISPLAY::matchDisplay(virtual_display_driver_name);
+#else
       const auto virtual_sources = VDISPLAY::matchDisplay(virtual_display_driver_name);
-      std::vector<target_state_t> targets;
+#endif
+      std::vector<discovered_target_t> targets;
       std::vector<std::wstring> active_gdi_names;
       active_gdi_names.reserve(paths.size());
       for (const auto &path : paths) {
@@ -1170,7 +1230,11 @@ namespace ar_glasses {
         source_name.header.size = sizeof(source_name);
         source_name.header.adapterId = path.sourceInfo.adapterId;
         source_name.header.id = path.sourceInfo.id;
+#ifdef SUNSHINE_TESTS
+        if ((active_discovery_test ? discovery_get_info_for_test(&source_name.header) : DisplayConfigGetDeviceInfo(&source_name.header)) != ERROR_SUCCESS) {
+#else
         if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS) {
+#endif
           // An active path that cannot be described makes the whole observation indeterminate.
           // Treating a partial snapshot as authoritative can look like a hot-unplug and destroy a
           // healthy presentation session during HDR/topology transitions.
@@ -1190,7 +1254,11 @@ namespace ar_glasses {
         target_name.header.size = sizeof(target_name);
         target_name.header.adapterId = path.targetInfo.adapterId;
         target_name.header.id = path.targetInfo.id;
+#ifdef SUNSHINE_TESTS
+        if ((active_discovery_test ? discovery_get_info_for_test(&target_name.header) : DisplayConfigGetDeviceInfo(&target_name.header)) != ERROR_SUCCESS) {
+#else
         if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS) {
+#endif
           return std::nullopt;
         }
         if (contains_case_insensitive(target_name.monitorDevicePath, L"SUDOVDA")) {
@@ -1219,7 +1287,7 @@ namespace ar_glasses {
           );
         }
 
-        target_state_t state;
+        discovered_target_t state;
         state.device_id = device_id;
         state.device_path = target_name.monitorDevicePath;
         state.friendly_name = friendly_name;
@@ -1231,7 +1299,6 @@ namespace ar_glasses {
         state.source_id = path.sourceInfo.id;
         state.adapter_id = path.targetInfo.adapterId;
         state.target_id = path.targetInfo.id;
-        state.hdr = query_hdr_state(state.adapter_id, state.target_id);
         state.rect.left = source_mode.position.x;
         state.rect.top = source_mode.position.y;
         state.rect.right = source_mode.position.x + (LONG) source_mode.width;
@@ -1245,7 +1312,11 @@ namespace ar_glasses {
       for (DWORD index = 0;; ++index) {
         DISPLAY_DEVICEW device {};
         device.cb = sizeof(device);
+#ifdef SUNSHINE_TESTS
+        if (!(active_discovery_test ? active_discovery_test->hooks.enum_devices(nullptr, index, &device, 0) : EnumDisplayDevicesW(nullptr, index, &device, 0))) {
+#else
         if (!EnumDisplayDevicesW(nullptr, index, &device, 0)) {
+#endif
           break;
         }
         if ((device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0) {
@@ -1266,42 +1337,62 @@ namespace ar_glasses {
           break;
         }
       }
-      for (auto &target : targets) {
-        target.is_primary = platf::from_utf8(target.gdi_name) == primary_gdi_name;
-        // Inspect every active CCD path, including Apollo/Sudo sources excluded from selection.
-        // A physical target cloned with the local virtual source is still unsafe to reconfigure.
-        target.is_cloned = std::ranges::any_of(paths, [&](const auto &candidate) {
-          return same_luid(candidate.sourceInfo.adapterId, target.source_adapter_id) &&
-                 candidate.sourceInfo.id == target.source_id &&
-                 (!same_luid(candidate.targetInfo.adapterId, target.adapter_id) ||
-                  candidate.targetInfo.id != target.target_id);
-        });
-        std::vector<std::string> neighbors;
-        for (const auto &neighbor : targets) {
-          if (neighbor.device_path == target.device_path) {
-            continue;
-          }
-          std::ostringstream description;
-          description << platf::to_utf8(neighbor.device_path) << '@'
-                      << neighbor.rect.left << ',' << neighbor.rect.top << ':'
-                      << (neighbor.rect.right - neighbor.rect.left) << 'x'
-                      << (neighbor.rect.bottom - neighbor.rect.top) << '@'
-                      << neighbor.refresh_millihz;
-          neighbors.emplace_back(description.str());
-        }
-        std::sort(neighbors.begin(), neighbors.end());
-        std::ostringstream fingerprint;
-        fingerprint << "primary=" << primary_device_path;
-        for (const auto &neighbor : neighbors) {
-          fingerprint << ';' << neighbor;
-        }
-        target.desktop_topology = fingerprint.str();
-      }
       std::sort(targets.begin(), targets.end(), [](const auto &left, const auto &right) {
         return std::tie(left.device_id, left.device_path) < std::tie(right.device_id, right.device_path);
       });
 
-      return targets;
+      return target_discovery_snapshot_t {
+        .targets = std::move(targets),
+        .paths = std::move(paths),
+        .primary_gdi_name = std::move(primary_gdi_name),
+        .primary_device_path = std::move(primary_device_path),
+      };
+    }
+
+    // One call-local snapshot supplies identity, geometry, primary evidence and every clone path.
+    target_state_t materialize_target(const target_discovery_snapshot_t &snapshot, std::size_t index) {
+      target_state_t target;
+      static_cast<discovered_target_t &>(target) = snapshot.targets[index];
+      target.hdr = query_hdr_state(target.adapter_id, target.target_id);
+      const auto &paths = snapshot.paths;
+      const auto &targets = snapshot.targets;
+      const auto &primary_gdi_name = snapshot.primary_gdi_name;
+      const auto &primary_device_path = snapshot.primary_device_path;
+      target.is_primary = platf::from_utf8(target.gdi_name) == primary_gdi_name;
+      // Inspect every active CCD path, including Apollo/Sudo sources excluded from selection.
+      // A physical target cloned with the local virtual source is still unsafe to reconfigure.
+      target.is_cloned = std::ranges::any_of(paths, [&](const auto &candidate) {
+        return same_luid(candidate.sourceInfo.adapterId, target.source_adapter_id) &&
+               candidate.sourceInfo.id == target.source_id &&
+               (!same_luid(candidate.targetInfo.adapterId, target.adapter_id) ||
+                candidate.targetInfo.id != target.target_id);
+      });
+      std::vector<std::string> neighbors;
+      for (const auto &neighbor : targets) {
+        if (neighbor.device_path == target.device_path) {
+          continue;
+        }
+        std::ostringstream description;
+        description << platf::to_utf8(neighbor.device_path) << '@'
+                    << neighbor.rect.left << ',' << neighbor.rect.top << ':'
+                    << (neighbor.rect.right - neighbor.rect.left) << 'x'
+                    << (neighbor.rect.bottom - neighbor.rect.top) << '@'
+                    << neighbor.refresh_millihz;
+        neighbors.emplace_back(description.str());
+      }
+      std::sort(neighbors.begin(), neighbors.end());
+      std::ostringstream fingerprint;
+      fingerprint << "primary=" << primary_device_path;
+      for (const auto &neighbor : neighbors) {
+        fingerprint << ';' << neighbor;
+      }
+#ifdef SUNSHINE_TESTS
+      if (active_discovery_test) {
+        ++active_discovery_test->costs.fingerprints;
+      }
+#endif
+      target.desktop_topology = fingerprint.str();
+      return target;
     }
 
     std::optional<target_state_t> find_target(
@@ -1313,30 +1404,34 @@ namespace ar_glasses {
       if (query_succeeded) {
         *query_succeeded = false;
       }
-      auto targets_result = enumerate_targets();
+      auto targets_result = discover_targets();
       if (!targets_result) {
         return std::nullopt;
       }
       if (query_succeeded) {
         *query_succeeded = true;
       }
-      auto &targets = *targets_result;
+      const auto &snapshot = *targets_result;
+      const auto &targets = snapshot.targets;
       if (!required_device_path.empty()) {
         const auto match = std::find_if(targets.begin(), targets.end(), [&](const auto &target) {
           return target.device_path == required_device_path;
         });
-        return match == targets.end() ? std::nullopt : std::optional<target_state_t>(*match);
+        return match == targets.end() ? std::nullopt :
+                                        std::make_optional(materialize_target(snapshot, static_cast<std::size_t>(std::distance(targets.begin(), match))));
       }
 
       std::vector<std::pair<std::string, std::string>> notify_devices;
-      std::optional<target_state_t> selected;
+      std::vector<std::size_t> approved_indices;
+      std::optional<std::size_t> selected_index;
       bool changed = false;
       {
         std::lock_guard lock(device_mutex);
         for (auto &device : known_devices) {
           device.connected = false;
         }
-        for (const auto &target : targets) {
+        for (std::size_t index = 0; index < targets.size(); ++index) {
+          const auto &target = targets[index];
           auto known = std::find_if(known_devices.begin(), known_devices.end(), [&](const auto &device) {
             return device.id == target.device_id;
           });
@@ -1371,11 +1466,10 @@ namespace ar_glasses {
             notify_devices.emplace_back(known->id, known->name);
           }
           if (known->decision == device_decision_e::approved) {
-            if (approved_targets) {
-              approved_targets->push_back(target);
-            }
-            if (!selected || target.device_path == preferred_device_path) {
-              selected = target;
+            // Capture this row's decision now: a later same-model row may promote its policy.
+            approved_indices.push_back(index);
+            if (!selected_index || target.device_path == preferred_device_path) {
+              selected_index = index;
             }
           }
         }
@@ -1391,8 +1485,24 @@ namespace ar_glasses {
         }
       }
 
+      std::optional<target_state_t> selected;
+      for (const auto index : approved_indices) {
+        // Keep native color queries outside the decision lock, before notification callbacks.
+        auto target = materialize_target(snapshot, index);
+        if (selected_index == index) {
+          selected = target;
+        }
+        if (approved_targets) {
+          approved_targets->push_back(std::move(target));
+        }
+      }
+
       for (const auto &[id, name] : notify_devices) {
+#ifdef SUNSHINE_TESTS
+        if (active_discovery_test ? active_discovery_test->hooks.notify(name) : system_tray::update_tray_ar_display_decision(name)) {
+#else
         if (system_tray::update_tray_ar_display_decision(name)) {
+#endif
           std::lock_guard lock(device_mutex);
           const auto device = std::find_if(known_devices.begin(), known_devices.end(), [&](const auto &candidate) {
             return candidate.id == id;
@@ -4459,6 +4569,187 @@ namespace ar_glasses {
     };
   }  // namespace
 
+#ifdef SUNSHINE_TESTS
+  namespace testing {
+    class discovery_session_t::impl_t {
+    public:
+      impl_t(const std::filesystem::path &path, discovery_hooks_t hooks):
+          hooks_(std::move(hooks)),
+          previous_config_(platf::to_utf8(path.native())) {
+        if (!path.is_absolute() || !std::filesystem::is_regular_file(std::filesystem::symlink_status(path)) || !hooks_.query_active || !hooks_.match_display || !hooks_.get_info || !hooks_.enum_devices || !hooks_.notify) {
+          throw std::invalid_argument("discovery fixture requires an owned absolute config file and every finite native hook");
+        }
+        {
+          std::lock_guard lock(device_mutex);
+          previous_devices_ = std::move(known_devices);
+          previous_dirty_ = device_persistence_dirty;
+          previous_retry_ = device_persistence_retry_after;
+          known_devices.clear();
+          device_persistence_dirty = false;
+          device_persistence_retry_after = {};
+          config::sunshine.config_file.swap(previous_config_);
+        }
+        auto restore_on_failure = util::fail_guard([this]() {
+          restore();
+        });
+        reload_decisions();
+        restore_on_failure.disable();
+      }
+
+      ~impl_t() {
+        restore();
+      }
+
+      void reload_decisions() {
+        scoped_call([&]() {
+          load_devices(false);
+        });
+      }
+
+      discovery_result_t find(std::wstring_view required, std::wstring_view preferred, bool collect_approved) {
+        discovery_result_t result;
+        scoped_call([&]() {
+          // Every collecting call supplies an existing prefix to the actual append-only API.
+          target_state_t prefix;
+          prefix.device_id = "TEST_APPROVED_PREFIX";
+          prefix.device_path = L"TEST_APPROVED_PREFIX_PATH";
+          prefix.friendly_name = "Existing caller friendly name";
+          prefix.gdi_name = "Existing caller GDI name";
+          prefix.desktop_topology = "Existing caller topology";
+          prefix.source_adapter_id = {0x12345, -31};
+          prefix.source_id = 901;
+          prefix.adapter_id = {0x6789A, -47};
+          prefix.target_id = 902;
+          prefix.hdr = {true, true, true, true, true, 13};
+          prefix.rect = {-33, 22, 1444, 1199};
+          prefix.refresh_millihz = 59123;
+          prefix.mode = presentation_mode_e::sbs_ai;
+          prefix.is_primary = true;
+          prefix.is_cloned = true;
+          // This owned tuple deliberately includes fields omitted by presentation operator==.
+          const auto all_fields = [](const target_state_t &target) {
+            return std::make_tuple(
+              target.device_id,
+              target.device_path,
+              target.friendly_name,
+              target.gdi_name,
+              target.desktop_topology,
+              target.source_adapter_id.LowPart,
+              target.source_adapter_id.HighPart,
+              target.source_id,
+              target.adapter_id.LowPart,
+              target.adapter_id.HighPart,
+              target.target_id,
+              target.hdr.known,
+              target.hdr.supported,
+              target.hdr.user_enabled,
+              target.hdr.active,
+              target.hdr.limited_by_policy,
+              target.hdr.bits_per_color,
+              target.rect.left,
+              target.rect.top,
+              target.rect.right,
+              target.rect.bottom,
+              target.refresh_millihz,
+              target.mode,
+              target.is_primary,
+              target.is_cloned
+            );
+          };
+          const auto original_prefix = all_fields(prefix);
+          std::vector<target_state_t> approved {prefix};
+          const auto selected = find_target(required, preferred, &result.query_succeeded, collect_approved ? &approved : nullptr);
+          result.approved_prefix_preserved = !approved.empty() && all_fields(approved.front()) == original_prefix;
+          if (selected) {
+            result.selected = summarize(*selected);
+          }
+          for (std::size_t index = result.approved_prefix_preserved ? 1 : 0; index < approved.size(); ++index) {
+            result.approved.push_back(summarize(approved[index]));
+          }
+        });
+        return result;
+      }
+
+      discovery_costs_t costs() const {
+        return costs_;
+      }
+
+    private:
+      template<class Call>
+      void scoped_call(Call &&call) {
+        discovery_test_state_t state {hooks_, costs_};
+        auto *previous = std::exchange(active_discovery_test, &state);
+        auto restore_hooks = util::fail_guard([previous]() {
+          active_discovery_test = previous;
+        });
+        call();
+      }
+
+      static discovery_target_t summarize(const target_state_t &target) {
+        return {
+          .device_id = target.device_id,
+          .device_path = target.device_path,
+          .friendly_name = target.friendly_name,
+          .gdi_name = target.gdi_name,
+          .desktop_topology = target.desktop_topology,
+          .source_adapter_id = target.source_adapter_id,
+          .source_id = target.source_id,
+          .adapter_id = target.adapter_id,
+          .target_id = target.target_id,
+          .hdr = {target.hdr.known, target.hdr.supported, target.hdr.user_enabled, target.hdr.active, target.hdr.limited_by_policy, target.hdr.bits_per_color},
+          .rect = target.rect,
+          .refresh_millihz = target.refresh_millihz,
+          .mode = target.mode,
+          .is_primary = target.is_primary,
+          .is_cloned = target.is_cloned,
+        };
+      }
+
+      void restore() {
+        std::lock_guard lock(device_mutex);
+        known_devices.swap(previous_devices_);
+        device_persistence_dirty = previous_dirty_;
+        device_persistence_retry_after = previous_retry_;
+        config::sunshine.config_file.swap(previous_config_);
+      }
+
+      discovery_hooks_t hooks_;
+      discovery_costs_t costs_;
+      std::string previous_config_;
+      std::vector<stored_device_t> previous_devices_;
+      bool previous_dirty_ = false;
+      std::chrono::steady_clock::time_point previous_retry_ {};
+    };
+
+    discovery_session_t::discovery_session_t(const std::filesystem::path &path, discovery_hooks_t hooks):
+        impl_(std::make_unique<impl_t>(path, std::move(hooks))) {
+    }
+
+    discovery_session_t::~discovery_session_t() = default;
+
+    void discovery_session_t::reload_decisions() {
+      impl_->reload_decisions();
+    }
+
+    discovery_result_t discovery_session_t::find(std::wstring_view required, std::wstring_view preferred, bool collect_approved) {
+      return impl_->find(required, preferred, collect_approved);
+    }
+
+    discovery_costs_t discovery_session_t::costs() const {
+      return impl_->costs();
+    }
+
+    bool discovery_mutex_available_for_test() {
+      bool available = false;
+      std::thread observer([&]() {
+        std::unique_lock lock(device_mutex, std::try_to_lock);
+        available = lock.owns_lock();
+      });
+      observer.join();
+      return available;
+    }
+  }  // namespace testing
+#endif
 #ifdef SUNSHINE_TESTS
   int detail::local_source_refresh_millihz_for_test(std::uint32_t numerator, std::uint32_t denominator) {
     return source_refresh_millihz(numerator, denominator);

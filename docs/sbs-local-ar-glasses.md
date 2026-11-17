@@ -40,6 +40,10 @@ See [ReShade SBS setup](reshade-sbs.md) for the shader, add-on and activation co
 
 ## Lifecycle
 
+Each observation validates one complete active-display snapshot. HDR state and per-target
+neighbor contracts are constructed for approved targets and exact device-path lookups; ordinary
+monitors still supply neighbor and clone evidence. Snapshots are rebuilt for each observation.
+
 The Windows display topology is polled every 250 ms. A mode or connection change stops the old
 presenter immediately, then must remain stable for 750 ms before Sunshine 3D applies it. A supported
 1920x1080/3840x1080 transition on the same physical output keeps the existing SudoVDA desktop and
