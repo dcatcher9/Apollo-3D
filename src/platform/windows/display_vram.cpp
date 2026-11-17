@@ -10126,7 +10126,9 @@ namespace platf::dxgi {
         // The budget is how late an eye command may leave the host and still open its own
         // window in time. An averaging emitter opens on its own rhythm and ignores a late
         // command, so a long window does not shorten the time the host has to confirm an eye.
-        const auto host_age_budget_us = emitter_settings.averaging ? std::max(*feedback_budget, *emitter_eye_period / 4) : *feedback_budget;
+        // Half the eye interval stays well short of the lateness the firmware would mistake
+        // for a dropped frame, which is a whole interval less a millisecond.
+        const auto host_age_budget_us = emitter_settings.averaging ? std::max(*feedback_budget, *emitter_eye_period / 2) : *feedback_budget;
         if (!emitter.connect(emitter_settings, emitter_setup_stop.get_token())) {
           if (!stopped()) {
             fail("could not configure and verify the selected USB emitter");
