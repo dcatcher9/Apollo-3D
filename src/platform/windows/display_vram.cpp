@@ -8613,34 +8613,52 @@ namespace platf::dxgi {
       mutable RECT hook_sink {};
       mutable std::optional<POINT> last_interactive_point;
 
+      mutable std::vector<RECT> hook_monitors;  ///< Every monitor except the sink.
+
       void refresh_hook_sink() const {
         const auto sink = current_target_rect();
+        auto monitors = desktop_monitor_rects().value_or(std::vector<RECT> {});
+        std::erase_if(monitors, [&](const RECT &monitor) {
+          return same_local_presenter_rect(monitor, sink);
+        });
         std::lock_guard lock(hook_mutex);
         hook_sink = sink;
-        if (last_interactive_point && PtInRect(&hook_sink, *last_interactive_point)) {
-          last_interactive_point.reset();
-        }
+        hook_monitors = std::move(monitors);
+        last_interactive_point.reset();
       }
 
-      // Called for every mouse movement with the position the pointer is about to take. Returns
-      // true when the movement must not happen. Windows carries a pointer pushed against an
-      // outer desktop edge over to the nearest other monitor; with the sink parked at a corner
-      // that is the sink. Refusing the movement leaves the pointer at the edge where it was.
+      // Called for every mouse movement with the position the movement asks for, which Windows
+      // has not yet limited to the desktop. Returns true when this has placed the pointer itself.
+      // Windows carries a pointer pushed beyond an outer desktop edge over to another monitor;
+      // with the sink parked at a corner that is the sink, and the pointer would come back at
+      // the corner. So a movement that ends on no monitor in use is finished here instead: the
+      // pointer goes to the nearest point of those monitors, which lets it slide along the edge
+      // as it does on a single monitor.
       bool refuse_pointer_move(POINT destination) const {
         POINT stay {};
         {
           std::lock_guard lock(hook_mutex);
-          if (!valid_local_presenter_rect(hook_sink)) {
+          if (!valid_local_presenter_rect(hook_sink) || hook_monitors.empty()) {
             return false;
           }
-          if (!PtInRect(&hook_sink, destination)) {
-            last_interactive_point = destination;
-            return false;
+          long double nearest = std::numeric_limits<long double>::max();
+          for (const auto &monitor : hook_monitors) {
+            if (PtInRect(&monitor, destination)) {
+              last_interactive_point = destination;
+              return false;
+            }
+            const POINT candidate {
+              std::clamp(destination.x, monitor.left, monitor.right - 1),
+              std::clamp(destination.y, monitor.top, monitor.bottom - 1),
+            };
+            const auto dx = static_cast<long double>(candidate.x) - destination.x;
+            const auto dy = static_cast<long double>(candidate.y) - destination.y;
+            if (dx * dx + dy * dy < nearest) {
+              nearest = dx * dx + dy * dy;
+              stay = candidate;
+            }
           }
-          if (!last_interactive_point) {
-            return false;
-          }
-          stay = *last_interactive_point;
+          last_interactive_point = stay;
         }
         const auto previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         SetCursorPos(stay.x, stay.y);
