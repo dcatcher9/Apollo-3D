@@ -442,6 +442,12 @@ namespace ar_glasses {
   bool local_session_active();
   /** Whether the chosen surface could start now: a configured monitor, or connected approved glasses. */
   bool local_surface_available();
+  /** The 3D source of the chosen surface: false is Host 3D, true is Game 3D. */
+  bool local_source_is_game();
+  bool monitor_source_is_game();
+  bool ar_source_is_game();
+  /** Switch the chosen surface's 3D source now and remember it. A running session continues. */
+  bool set_local_source(bool game);
 
   /** Approve or reject a discovered monitor model. Pending is not accepted from the UI. */
   bool set_device_decision(std::string_view id, device_decision_e decision);

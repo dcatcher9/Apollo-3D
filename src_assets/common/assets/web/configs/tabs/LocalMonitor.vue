@@ -52,14 +52,6 @@ const displayLabel = device => `${device.name || 'Physical monitor'} · ${device
         <p class="form-text">{{ $t('config.local_monitor_display_id_desc') }}</p>
       </div>
       <div>
-        <label for="local_monitor_mode" class="form-label">{{ $t('config.local_monitor_mode') }}</label>
-        <select id="local_monitor_mode" v-model="props.config.local_monitor_mode" class="form-select">
-          <option value="host">Host 3D · AI conversion</option>
-          <option value="game">Game 3D · game stereo source</option>
-        </select>
-        <p class="form-text">{{ $t('config.local_monitor_mode_desc') }}</p>
-      </div>
-      <div>
         <label for="local_monitor_emitter_port" class="form-label">{{ $t('config.local_monitor_emitter_port') }}</label>
         <input id="local_monitor_emitter_port" v-model.trim="props.config.local_monitor_emitter_port" class="form-control" list="local-monitor-ports" placeholder="COM3" autocomplete="off" />
         <datalist id="local-monitor-ports"><option v-for="port in ports" :key="port" :value="port" /></datalist>

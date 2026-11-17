@@ -64,6 +64,29 @@ const schedule = () => {
     schedule()
   }, brisk ? 2000 : 15000)
 }
+// Host 3D converts the desktop; Game 3D shows the game's own stereo. Each local display keeps
+// its own choice, and switching takes effect at once, also while 3D is running.
+const sourceBusy = ref('')
+const chooseSource = async source => {
+  if (status.value?.source === source || sourceBusy.value) return
+  sourceBusy.value = source
+  actionError.value = ''
+  try {
+    const response = await fetch('./api/local-monitor', {
+      credentials: 'include', method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'source', source}),
+    })
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${response.status}`)
+    }
+    await refresh(true)
+  } catch (reason) {
+    actionError.value = `Could not switch the 3D source: ${reason}`
+  } finally {
+    sourceBusy.value = ''
+  }
+}
 const control = async action => {
   busy.value = action
   actionError.value = ''
@@ -108,6 +131,14 @@ defineExpose({refresh})
     <p v-if="status?.error && !actionError" class="text-danger" role="alert">3D stopped: {{ status.error }}</p>
     <p v-if="!error && !status?.error && status?.requested && !status?.active" class="text-body-secondary">{{ status?.surface === 'ar_glasses' ? 'Waiting for the glasses to be connected and worn, or for local presentation ownership.' : 'Waiting for the selected monitor, emitter, or local presentation ownership.' }}</p>
     <p v-if="!props.canStart" class="text-body-secondary">Save and restart Sunshine 3D to apply your local display changes before starting 3D.</p>
+    <div v-if="status?.enabled" class="monitor-session-source" role="group" aria-label="3D source">
+      <span>3D source</span>
+      <div class="btn-group" role="group">
+        <button type="button" class="btn btn-sm" :class="status?.source === 'host' ? 'btn-apollo-primary' : 'btn-outline-secondary'" :aria-pressed="status?.source === 'host'" :disabled="Boolean(sourceBusy) || Boolean(error)" @click="chooseSource('host')">Host 3D</button>
+        <button type="button" class="btn btn-sm" :class="status?.source === 'game' ? 'btn-apollo-primary' : 'btn-outline-secondary'" :aria-pressed="status?.source === 'game'" :disabled="Boolean(sourceBusy) || Boolean(error)" @click="chooseSource('game')">Game 3D</button>
+      </div>
+      <small>{{ status?.source === 'game' ? 'Shows the game\'s own stereo through ReShade with the Sunshine 3D add-on. Without a compatible game the picture is flat.' : 'Converts whatever is on the desktop with Sunshine\'s AI pipeline.' }}</small>
+    </div>
     <div class="monitor-session-actions">
       <button type="button" class="btn btn-apollo-primary" :disabled="Boolean(busy) || !status?.enabled || status?.requested || !props.canStart || Boolean(error)" @click="control('start')">
         {{ busy === 'start' ? 'Starting…' : 'Start 3D' }}
@@ -144,6 +175,18 @@ defineExpose({refresh})
   max-width: 42rem;
 }
 .monitor-session-title .badge {flex-shrink: 0;}
+.monitor-session-source {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .75rem;
+  margin-bottom: 1rem;
+}
+.monitor-session-source > span {font-weight: 650;}
+.monitor-session-source small {
+  color: var(--bs-secondary-color);
+  flex-basis: 100%;
+}
 .monitor-session-actions {
   align-items: center;
   display: flex;

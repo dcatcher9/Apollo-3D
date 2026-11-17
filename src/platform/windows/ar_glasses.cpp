@@ -73,6 +73,22 @@ namespace ar_glasses {
     // Local AR glasses present only after an explicit Start 3D, like every other local surface.
     std::atomic<bool> ar_session_requested {false};
 
+    // The 3D source of each local surface: Host 3D converts the desktop, Game 3D takes the game's
+    // own stereo. It starts from the saved setting and is switched live from the web UI, so it
+    // is not read from the configuration after start-up. -1 means not switched yet.
+    std::atomic<int> ar_source_game {-1};
+    std::atomic<int> monitor_source_game {-1};
+
+    bool ar_uses_game_source() {
+      const int switched = ar_source_game.load();
+      return switched < 0 ? config::video.sbs.reshade : switched != 0;
+    }
+
+    bool monitor_uses_game_source() {
+      const int switched = monitor_source_game.load();
+      return switched < 0 ? config::video.local_monitor.mode == "game" : switched != 0;
+    }
+
     bool ar_session_allowed() {
       return config::video.local_surface == config::video_t::local_surface_e::ar_glasses && ar_session_requested.load();
     }
@@ -429,6 +445,8 @@ namespace ar_glasses {
       RECT rect {};
       int refresh_millihz = 60000;
       presentation_mode_e mode = presentation_mode_e::unsupported;
+      // Glasses only: whether their 3D comes from the game. A monitor carries it in its mode.
+      bool game_source = false;
       bool is_primary = false;
       bool is_cloned = false;
 
@@ -439,6 +457,7 @@ namespace ar_glasses {
                rect.left == other.rect.left && rect.top == other.rect.top &&
                rect.right == other.rect.right && rect.bottom == other.rect.bottom &&
                refresh_millihz == other.refresh_millihz && mode == other.mode &&
+               game_source == other.game_source &&
                is_primary == other.is_primary && is_cloned == other.is_cloned &&
                hdr.known == other.hdr.known &&
                hdr.supported == other.hdr.supported &&
@@ -1358,10 +1377,12 @@ namespace ar_glasses {
         state.rect.bottom = source_mode.position.y + (LONG) source_mode.height;
         state.refresh_millihz = refresh_millihz;
         state.mode = classify_mode(source_mode.width, source_mode.height);
+        state.game_source = ar_uses_game_source();
         if (config::video.local_monitor.enabled && physical_monitor_requested.load() &&
             platf::to_utf8(state.device_path) == config::video.local_monitor.display_id) {
           state.mode = classify_monitor_mode(source_mode.width, source_mode.height, refresh_millihz,
-            config::video.local_monitor.mode == "game");
+            monitor_uses_game_source());
+          state.game_source = false;
         }
         targets.emplace_back(std::move(state));
       }
@@ -4214,9 +4235,7 @@ namespace ar_glasses {
           presenter_config.sbs_mode = presentation_target.mode == presentation_mode_e::monitor_game ? ::video::SBS_GAME_SBS : ::video::SBS_AI;
         }
         presenter_config.sbs_config = config::video.sbs;
-        if (monitor_surface_) {
-          presenter_config.sbs_config.reshade = false;
-        }
+        presenter_config.sbs_config.reshade = !monitor_surface_ && presentation_target.game_source;
         presenter_config.capture_failover = capture_failover_;
         presenter_config.live_target = live_target_;
         presented_frames_ = std::make_shared<std::atomic<std::uint64_t>>(0);
@@ -5690,7 +5709,7 @@ namespace ar_glasses {
       });
       if (target == targets->end() || target->is_cloned ||
           classify_monitor_mode(target->rect.right - target->rect.left, target->rect.bottom - target->rect.top,
-            target->refresh_millihz, settings.mode == "game") == presentation_mode_e::unsupported) {
+            target->refresh_millihz, monitor_uses_game_source()) == presentation_mode_e::unsupported) {
         return fail("The selected monitor is not connected as an extended desktop in a supported mode. A monitor with a separate high-refresh mode is a different display to Windows in each mode; switch it to the mode it was selected in, then start 3D again.");
       }
       if (const auto reason = query_monitor_desktop_block_reason(presentation_desktop, target->rect); !reason.empty()) {
@@ -5747,6 +5766,49 @@ namespace ar_glasses {
     }
     std::lock_guard lock(ownership_mutex);
     return local_session_present;
+  }
+
+  bool local_source_is_game() {
+    switch (config::video.local_surface) {
+      case config::video_t::local_surface_e::shutter_monitor:
+        return monitor_uses_game_source();
+      case config::video_t::local_surface_e::ar_glasses:
+        return ar_uses_game_source();
+      default:
+        return false;
+    }
+  }
+
+  bool monitor_source_is_game() {
+    return monitor_uses_game_source();
+  }
+
+  bool ar_source_is_game() {
+    return ar_uses_game_source();
+  }
+
+  bool set_local_source(bool game) {
+    const auto surface = config::video.local_surface;
+    if (surface == config::video_t::local_surface_e::off) {
+      return false;
+    }
+    const bool monitor = surface == config::video_t::local_surface_e::shutter_monitor;
+    // The controller sees the change at its next look at the displays and rebuilds the
+    // presenter on the desktop it already has; a running session does not return to 2D.
+    (monitor ? monitor_source_game : ar_source_game).store(game ? 1 : 0);
+    // Remember it for the next start. The surface keeps its own saved setting.
+    std::lock_guard lock(device_mutex);
+    auto contents = read_config_file_strict();
+    if (!contents) {
+      BOOST_LOG(warning) << "Could not read the configuration file; the 3D source is switched but not saved."sv;
+      return true;
+    }
+    const auto updated = monitor ? replace_config_value(std::move(*contents), "local_monitor_mode", game ? "game" : "host") :
+                                   replace_config_value(std::move(*contents), "sbs_reshade", game ? "enabled" : "disabled");
+    if (!write_config_atomically(updated)) {
+      BOOST_LOG(warning) << "Could not save the 3D source to the configuration file."sv;
+    }
+    return true;
   }
 
   bool local_surface_available() {

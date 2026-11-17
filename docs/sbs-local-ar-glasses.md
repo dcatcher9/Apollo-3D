@@ -44,6 +44,10 @@ The active physical-monitor resolution selects the presentation mode:
 
 Other resolutions are rejected. Resolution alone never identifies a monitor as AR glasses.
 
+A local surface is only where the picture is shown; each one has its own **3D source**, Host 3D or
+Game 3D, chosen with the switch beside **Start 3D** and changeable while 3D is running. For glasses
+it is saved as `sbs_reshade`.
+
 The default provider is Sunshine's AI renderer. With `sbs_reshade = enabled`, the same presenter
 receives the game's final stereo texture and retains the normal 1920x1080 virtual source.
 See [ReShade SBS setup](reshade-sbs.md) for the shader, add-on and activation contract.

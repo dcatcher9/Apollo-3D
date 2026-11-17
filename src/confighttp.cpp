@@ -1296,6 +1296,7 @@ namespace confighttp {
       {"status", true}, {"surface", config::local_surface_name(config::video.local_surface)},
       {"enabled", config::video.local_surface != config::video_t::local_surface_e::off},
       {"available", ar_glasses::local_surface_available()},
+      {"source", ar_glasses::local_source_is_game() ? "game" : "host"},
       {"requested", ar_glasses::local_session_requested()}, {"active", ar_glasses::local_session_active()},
       {"error", ar_glasses::monitor_error()},
       {"timing_limits", nlohmann::json::array()},
@@ -1317,7 +1318,7 @@ namespace confighttp {
       output["running"] = {
         {"local_display_surface", config::local_surface_name(config::video.local_surface)},
         {"local_monitor_display_id", running.display_id},
-        {"local_monitor_mode", running.mode},
+        {"local_monitor_mode", ar_glasses::monitor_source_is_game() ? "game" : "host"},
         {"local_monitor_emitter_port", running.emitter_port},
         {"local_monitor_ir_protocol", running.ir_protocol},
         {"local_monitor_frame_delay_us", running.frame_delay_us},
@@ -1363,6 +1364,15 @@ namespace confighttp {
       body << request->content.rdbuf();
       const auto input = nlohmann::json::parse(body);
       const auto action = input.at("action").get<std::string>();
+      if (action == "source") {
+        const auto source = input.at("source").get<std::string>();
+        if ((source != "host" && source != "game") || !ar_glasses::set_local_source(source == "game")) {
+          bad_request(response, request, "Choose Host 3D or Game 3D for a local display that is turned on.");
+          return;
+        }
+        send_response(response, nlohmann::json {{"status", true}, {"source", source}});
+        return;
+      }
       if (action != "start" && action != "stop") {
         bad_request(response, request, "Choose start or stop for local 3D.");
         return;
@@ -1552,6 +1562,10 @@ namespace confighttp {
 #ifdef _WIN32
       // The per-application subtitle selection is live-managed by its own API as well. Write the
       // current selection so a general save cannot drop or revive an entry.
+      // The 3D source of each local surface is switched live next to Start 3D. Write the
+      // current choice so a general save cannot bring back the one the form was loaded with.
+      input_tree["local_monitor_mode"] = ar_glasses::monitor_source_is_game() ? "game" : "host";
+      input_tree["sbs_reshade"] = ar_glasses::ar_source_is_game() ? "enabled" : "disabled";
       input_tree.erase(std::string {platf::host3d_subtitle_apps::config_key});
       if (const auto subtitle_apps = nlohmann::json::parse(platf::host3d_subtitle_apps::serialize());
           !subtitle_apps.empty()) {

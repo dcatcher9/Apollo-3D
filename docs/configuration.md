@@ -39,7 +39,10 @@ The game stays at the normal virtual desktop resolution, and Sunshine presents t
 full-resolution eyes on the glasses. While no compatible fullscreen game is publishing, the
 desktop is shown flat in both eyes. This setting controls only the local AR provider.
 
-Default: `disabled`. Set `sbs_reshade = enabled` and restart Sunshine to enable.
+Default: `disabled`. This is the saved **3D source** of the AR-glasses surface: `disabled` is
+Host 3D, `enabled` is Game 3D. Switch it with **Host 3D / Game 3D** beside **Start 3D** in the web
+UI; the switch takes effect at once, also while 3D is running, and writes this option. A value
+edited in the file is read when Sunshine starts.
 For a streamed headset, select **Game 3D** in a compatible Moonlight 3D client; no host provider
 toggle or restart is required. Game 3D starts with normal W × H encoding and transitions to
 exact 2W × H only after a valid export and a confirmed stream change. Streamed **Host AI 3D** and
@@ -1016,7 +1019,7 @@ scanout; other monitors stay usable. See
 
 | Default | Description |
 |---|---|
-| `host` | `host` selects Host AI 3D; `game` selects the existing Game 3D stereo source. |
+| `host` | The saved **3D source** of the shutter-monitor surface: `host` converts the desktop with Host AI 3D, `game` shows the Game 3D stereo source. Switch it with **Host 3D / Game 3D** beside **Start 3D** in the web UI; the switch takes effect at once, also while 3D is running, and writes this option. |
 
 ### local_monitor_emitter_port
 
